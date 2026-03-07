@@ -23,6 +23,7 @@ mod init;
 mod interact;
 mod loop_runner;
 mod loops;
+mod mcp;
 mod memory;
 mod preflight;
 mod presets;
@@ -525,6 +526,9 @@ enum Commands {
     /// Run the web dashboard
     Web(web::WebArgs),
 
+    /// Run Ralph as an MCP server over stdio
+    Mcp(mcp::McpArgs),
+
     /// Manage Telegram bot setup and testing
     Bot(bot::BotArgs),
 
@@ -897,6 +901,7 @@ async fn main() -> Result<()> {
         Some(Commands::Resume(args)) => args.rpc,
         _ => false,
     };
+    let mcp_enabled = matches!(&cli.command, Some(Commands::Mcp(_)));
 
     // Initialize logging - suppress in TUI mode to avoid corrupting the display
     let filter = if cli.verbose { "debug" } else { "info" };
@@ -946,8 +951,8 @@ async fn main() -> Result<()> {
             }
         }
         // If log file creation fails, silently continue without logging
-    } else if rpc_enabled {
-        // RPC mode: logs must go to stderr to keep stdout clean for JSON-lines
+    } else if rpc_enabled || mcp_enabled {
+        // RPC/MCP mode: logs must go to stderr to keep stdout clean for protocol messages
         tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_writer(std::io::stderr)
@@ -1071,6 +1076,7 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Tui(args)) => tui_command(args).await,
         Some(Commands::Web(args)) => web::execute(args).await,
+        Some(Commands::Mcp(args)) => mcp::execute(args).await,
         Some(Commands::Bot(args)) => {
             bot::execute(
                 args,
@@ -2802,6 +2808,12 @@ mod tests {
         let cli = Cli::try_parse_from(["ralph", "tutorial"]).expect("CLI parse failed");
 
         assert!(matches!(cli.command, Some(Commands::Tutorial(_))));
+    }
+
+    #[test]
+    fn test_mcp_serve_parses_command() {
+        let cli = Cli::try_parse_from(["ralph", "mcp", "serve"]).expect("CLI parse failed");
+        assert!(matches!(cli.command, Some(Commands::Mcp(_))));
     }
 
     #[test]

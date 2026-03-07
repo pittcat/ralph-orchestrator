@@ -335,6 +335,20 @@ ralph web [OPTIONS]
 | `--legacy-node-api` | Run deprecated Node tRPC backend instead of Rust RPC API |
 | `--no-open` | Do not open browser |
 
+### ralph mcp
+
+Run Ralph as a Model Context Protocol server over `stdio`.
+
+```bash
+ralph mcp serve
+```
+
+Notes:
+
+- v1 is tools-only and `stdio`-only.
+- Launch it from an MCP client configuration, not an interactive terminal workflow.
+- The server exposes Ralph control-plane methods as MCP tools, including polling stream tools such as `stream_next`.
+
 ### ralph bot
 
 Manage Telegram bot setup and testing.
