@@ -310,7 +310,7 @@ impl ConfigSource {
 pub enum HatsSource {
     /// Local file path
     File(PathBuf),
-    /// Builtin hat collection name (e.g., "builtin:feature")
+    /// Builtin hat collection name (e.g., "builtin:code-assist")
     Builtin(String),
     /// Remote URL (e.g., "http://example.com/hats.yml")
     Remote(String),
@@ -491,7 +491,7 @@ struct Cli {
 
     /// Hat collection source: file path, builtin:name, or URL.
     ///
-    /// Example: `-H builtin:feature` or `-H .ralph/hats/feature.yml`
+    /// Example: `-H builtin:code-assist` or `-H .ralph/hats/my-workflow.yml`
     #[arg(short = 'H', long, global = true)]
     hats: Option<String>,
 
@@ -2114,14 +2114,14 @@ fn init_command(color_mode: ColorMode, args: InitArgs) -> Result<()> {
                         backend
                     );
                     println!(
-                        "\n{}Next steps:{}\n  1. Create PROMPT.md with your task\n  2. Run core-only: ralph run -c ralph.yml\n  3. Or with hats:  ralph run -c ralph.yml -H builtin:feature",
+                        "\n{}Next steps:{}\n  1. Create PROMPT.md with your task\n  2. Run core-only: ralph run -c ralph.yml\n  3. Or with hats:  ralph run -c ralph.yml -H builtin:code-assist",
                         colors::DIM,
                         colors::RESET
                     );
                 } else {
                     println!("Created ralph.yml with {} backend", backend);
                     println!(
-                        "\nNext steps:\n  1. Create PROMPT.md with your task\n  2. Run core-only: ralph run -c ralph.yml\n  3. Or with hats:  ralph run -c ralph.yml -H builtin:feature"
+                        "\nNext steps:\n  1. Create PROMPT.md with your task\n  2. Run core-only: ralph run -c ralph.yml\n  3. Or with hats:  ralph run -c ralph.yml -H builtin:code-assist"
                     );
                 }
                 return Ok(());
@@ -2138,7 +2138,7 @@ fn init_command(color_mode: ColorMode, args: InitArgs) -> Result<()> {
     println!("  ralph init --backend <backend>   Generate core config (ralph.yml)");
     println!("  ralph init --list-presets        Show builtin hat collections\n");
     println!("Backends: {}", backend_support::VALID_BACKENDS_LABEL);
-    println!("\nThen run with hats, e.g.: ralph run -c ralph.yml -H builtin:feature");
+    println!("\nThen run with hats, e.g.: ralph run -c ralph.yml -H builtin:code-assist");
 
     Ok(())
 }
@@ -2409,7 +2409,7 @@ const TUTORIAL_STEPS: &[TutorialStep] = &[
             "Core config and hat collections are split.",
             "List built-in hat collections: ralph init --list-presets",
             "Create core config: ralph init --backend <name>",
-            "Run with hats: ralph run -c ralph.yml -H builtin:feature",
+            "Run with hats: ralph run -c ralph.yml -H builtin:code-assist",
         ],
     },
     TutorialStep {
@@ -2513,13 +2513,13 @@ fn prompt_to_continue(use_colors: bool) -> Result<()> {
 fn print_tutorial_outro(use_colors: bool) {
     if use_colors {
         println!(
-            "{}Tutorial complete. Next: ralph init --backend <name>, then ralph run -c ralph.yml -H builtin:feature.{}",
+            "{}Tutorial complete. Next: ralph init --backend <name>, then ralph run -c ralph.yml -H builtin:code-assist.{}",
             colors::GREEN,
             colors::RESET
         );
     } else {
         println!(
-            "Tutorial complete. Next: ralph init --backend <name>, then ralph run -c ralph.yml -H builtin:feature."
+            "Tutorial complete. Next: ralph init --backend <name>, then ralph run -c ralph.yml -H builtin:code-assist."
         );
     }
 }
@@ -2709,18 +2709,18 @@ mod tests {
 
     #[test]
     fn test_config_source_parse_builtin() {
-        let source = ConfigSource::parse("builtin:feature");
+        let source = ConfigSource::parse("builtin:code-assist");
         match source {
-            ConfigSource::Builtin(name) => assert_eq!(name, "feature"),
+            ConfigSource::Builtin(name) => assert_eq!(name, "code-assist"),
             _ => panic!("Expected Builtin variant"),
         }
     }
 
     #[test]
     fn test_hats_source_parse_builtin() {
-        let source = HatsSource::parse("builtin:feature");
+        let source = HatsSource::parse("builtin:code-assist");
         match source {
-            HatsSource::Builtin(name) => assert_eq!(name, "feature"),
+            HatsSource::Builtin(name) => assert_eq!(name, "code-assist"),
             _ => panic!("Expected Builtin variant"),
         }
     }
@@ -2738,9 +2738,9 @@ mod tests {
 
     #[test]
     fn test_cli_parses_global_hats_flag() {
-        let cli = Cli::try_parse_from(["ralph", "run", "-H", "builtin:feature"])
+        let cli = Cli::try_parse_from(["ralph", "run", "-H", "builtin:code-assist"])
             .expect("CLI parse failed");
-        assert_eq!(cli.hats.as_deref(), Some("builtin:feature"));
+        assert_eq!(cli.hats.as_deref(), Some("builtin:code-assist"));
     }
 
     #[test]
@@ -2801,8 +2801,8 @@ mod tests {
         assert_eq!(source.to_cli_string(), "ralph.yml");
 
         // Builtin (legacy)
-        let source = ConfigSource::Builtin("feature".to_string());
-        assert_eq!(source.to_cli_string(), "builtin:feature");
+        let source = ConfigSource::Builtin("code-assist".to_string());
+        assert_eq!(source.to_cli_string(), "builtin:code-assist");
 
         // Remote URL
         let source = ConfigSource::Remote("https://example.com/ralph.yml".to_string());

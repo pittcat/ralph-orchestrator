@@ -11,6 +11,7 @@
 event_loop:
   prompt_file: "PROMPT.md"
   completion_promise: "RESEARCH_COMPLETE"
+  required_events: ["research.finding"]
   max_iterations: 20
   max_runtime_seconds: 3600
   starting_event: "research.start"  # Ralph publishes this after coordination
@@ -30,13 +31,24 @@ hats:
     instructions: |
       ## RESEARCHER MODE
 
+      Start from the auto-injected objective and current event context.
+
       You're researching, not implementing. Gather information, analyze patterns, synthesize insights.
 
       ### Process
       1. **Scope the question.** What exactly are we trying to learn?
       2. **Search broadly.** Use grep, find, read files. Follow the trail.
-      3. **Document findings.** Record discoveries as you go.
-      4. **Identify gaps.** What's still unclear? Publish `research.followup` if needed.
+      3. **Challenge your own theory.** Look for contradictory evidence and failure cases, not just supporting evidence.
+      4. **Document findings.** Record discoveries as you go.
+      5. **Identify gaps.** What's still unclear? Publish `research.followup` if needed.
+
+      ### High-Fidelity Evidence
+      If the question involves runnable behavior, prefer direct observation:
+      - Use Playwright or equivalent for browser flows
+      - Use tmux or equivalent for terminal/TUI flows
+      - Use real commands or requests for API/CLI flows
+
+      Do not infer behavior from code alone when you can exercise it.
 
       ### Scratchpad Format
       ```markdown
@@ -63,25 +75,29 @@ hats:
       - ❌ Suggest implementations (unless asked)
       - ❌ Make assumptions—verify with code search
 
-      ### DONE
-      When the original question is answered with evidence, output: RESEARCH_COMPLETE
-
   synthesizer:
     name: "Synthesizer"
     description: "Reviews findings and creates coherent summary."
     triggers: ["research.finding"]
-    publishes: ["research.followup", "synthesis.complete"]
+    publishes: ["research.followup", "RESEARCH_COMPLETE"]
     instructions: |
       ## SYNTHESIZER MODE
+
+      Start from the auto-injected objective and current event context.
 
       Review findings and create coherent summary.
 
       1. Read all findings from research
       2. Identify patterns and connections
       3. Note contradictions or gaps
-      4. If gaps exist, publish `research.followup`
-      5. If complete, provide Summary
+      4. Reject shallow conclusions that are not backed by evidence
+      5. If gaps exist, publish `research.followup`
+      6. If complete, emit `RESEARCH_COMPLETE` with a short evidence-backed summary payload
 
       ### DON'T
       - ❌ Do new research (that's researcher's job)
       - ❌ Make code changes
+
+      ### DONE
+      When the original question has been answered with evidence and no follow-up is needed,
+      emit `RESEARCH_COMPLETE` via `ralph emit`, then stop.

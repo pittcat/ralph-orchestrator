@@ -17,95 +17,59 @@ pub struct EmbeddedPreset {
     pub description: &'static str,
     /// Full YAML content of the preset
     pub content: &'static str,
+    /// Whether this preset should be shown in normal user-facing listings.
+    pub public: bool,
 }
 
 /// All embedded presets, compiled into the binary.
 const PRESETS: &[EmbeddedPreset] = &[
     EmbeddedPreset {
-        name: "bugfix",
-        description: "Systematic bug reproduction, fix, and verification",
-        content: include_str!("../presets/bugfix.yml"),
-    },
-    EmbeddedPreset {
         name: "code-assist",
-        description: "TDD implementation from specs, tasks, or descriptions",
+        description: "Default implementation workflow with TDD and adversarial validation",
         content: include_str!("../presets/code-assist.yml"),
+        public: true,
     },
     EmbeddedPreset {
         name: "debug",
-        description: "Bug investigation and root cause analysis",
+        description: "Bug investigation, root-cause analysis, and adversarial fix verification",
         content: include_str!("../presets/debug.yml"),
-    },
-    EmbeddedPreset {
-        name: "deploy",
-        description: "Deployment and Release Workflow",
-        content: include_str!("../presets/deploy.yml"),
-    },
-    EmbeddedPreset {
-        name: "docs",
-        description: "Documentation Generation Workflow",
-        content: include_str!("../presets/docs.yml"),
-    },
-    EmbeddedPreset {
-        name: "feature",
-        description: "Feature Development with integrated code review",
-        content: include_str!("../presets/feature.yml"),
-    },
-    EmbeddedPreset {
-        name: "fresh-eyes",
-        description: "Implementation workflow with enforced repeated fresh-eyes self-review passes",
-        content: include_str!("../presets/fresh-eyes.yml"),
-    },
-    EmbeddedPreset {
-        name: "gap-analysis",
-        description: "Gap Analysis and Planning Workflow",
-        content: include_str!("../presets/gap-analysis.yml"),
+        public: true,
     },
     EmbeddedPreset {
         name: "hatless-baseline",
         description: "Baseline hatless mode for comparison",
         content: include_str!("../presets/hatless-baseline.yml"),
+        public: false,
     },
     EmbeddedPreset {
         name: "merge-loop",
         description: "Merges completed parallel loop from worktree back to main branch",
         content: include_str!("../presets/merge-loop.yml"),
+        public: false,
     },
     EmbeddedPreset {
         name: "pdd-to-code-assist",
-        description: "Full autonomous idea-to-code pipeline",
+        description: "Advanced end-to-end idea-to-code workflow; powerful, slower, and best treated as a fun example",
         content: include_str!("../presets/pdd-to-code-assist.yml"),
-    },
-    EmbeddedPreset {
-        name: "pr-review",
-        description: "Multi-perspective PR code review",
-        content: include_str!("../presets/pr-review.yml"),
-    },
-    EmbeddedPreset {
-        name: "refactor",
-        description: "Code Refactoring Workflow",
-        content: include_str!("../presets/refactor.yml"),
+        public: true,
     },
     EmbeddedPreset {
         name: "research",
-        description: "Deep exploration and analysis tasks",
+        description: "Read-only codebase and architecture exploration with evidence-first synthesis",
         content: include_str!("../presets/research.yml"),
+        public: true,
     },
     EmbeddedPreset {
         name: "review",
-        description: "Code Review Workflow",
+        description: "Adversarial code review without making modifications",
         content: include_str!("../presets/review.yml"),
-    },
-    EmbeddedPreset {
-        name: "spec-driven",
-        description: "Specification-Driven Development",
-        content: include_str!("../presets/spec-driven.yml"),
+        public: true,
     },
 ];
 
 /// Returns all embedded presets.
-pub fn list_presets() -> &'static [EmbeddedPreset] {
-    PRESETS
+pub fn list_presets() -> Vec<&'static EmbeddedPreset> {
+    PRESETS.iter().filter(|preset| preset.public).collect()
 }
 
 /// Looks up a preset by name.
@@ -117,7 +81,11 @@ pub fn get_preset(name: &str) -> Option<&'static EmbeddedPreset> {
 
 /// Returns a formatted list of preset names for error messages.
 pub fn preset_names() -> Vec<&'static str> {
-    PRESETS.iter().map(|p| p.name).collect()
+    PRESETS
+        .iter()
+        .filter(|preset| preset.public)
+        .map(|preset| preset.name)
+        .collect()
 }
 
 #[cfg(test)]
@@ -125,18 +93,50 @@ mod tests {
     use super::*;
     use ralph_core::RalphConfig;
 
+    fn assert_public_preset_has_completion_path(preset: &EmbeddedPreset) {
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("embedded preset YAML should parse");
+        let promise = config.event_loop.completion_promise.trim();
+        assert!(
+            !promise.is_empty(),
+            "Preset '{}' must define a non-empty completion promise",
+            preset.name
+        );
+
+        let has_completion_path = config.hats.values().any(|hat| {
+            hat.publishes.iter().any(|topic| topic == promise)
+                || hat.default_publishes.as_deref() == Some(promise)
+        });
+
+        assert!(
+            has_completion_path,
+            "Preset '{}' must expose its completion promise '{}' via publishes/default_publishes",
+            preset.name, promise
+        );
+    }
+
+    fn assert_public_preset_has_required_events(preset: &EmbeddedPreset) {
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("embedded preset YAML should parse");
+        assert!(
+            !config.event_loop.required_events.is_empty(),
+            "Preset '{}' should define required_events to block premature completion",
+            preset.name
+        );
+    }
+
     #[test]
     fn test_list_presets_returns_all() {
         let presets = list_presets();
-        assert_eq!(presets.len(), 16, "Expected 16 presets");
+        assert_eq!(presets.len(), 5, "Expected 5 public presets");
     }
 
     #[test]
     fn test_get_preset_by_name() {
-        let preset = get_preset("feature");
-        assert!(preset.is_some(), "feature preset should exist");
+        let preset = get_preset("code-assist");
+        assert!(preset.is_some(), "code-assist preset should exist");
         let preset = preset.unwrap();
-        assert_eq!(preset.name, "feature");
+        assert_eq!(preset.name, "code-assist");
         assert!(!preset.description.is_empty());
         assert!(!preset.content.is_empty());
     }
@@ -166,7 +166,7 @@ mod tests {
 
     #[test]
     fn test_all_presets_have_description() {
-        for preset in list_presets() {
+        for preset in PRESETS {
             assert!(
                 !preset.description.is_empty(),
                 "Preset '{}' should have a description",
@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn test_all_presets_have_content() {
-        for preset in list_presets() {
+        for preset in PRESETS {
             assert!(
                 !preset.content.is_empty(),
                 "Preset '{}' should have content",
@@ -188,7 +188,7 @@ mod tests {
 
     #[test]
     fn test_preset_content_is_valid_yaml() {
-        for preset in list_presets() {
+        for preset in PRESETS {
             let result: Result<serde_yaml::Value, _> = serde_yaml::from_str(preset.content);
             assert!(
                 result.is_ok(),
@@ -202,12 +202,104 @@ mod tests {
     #[test]
     fn test_preset_names_returns_all_names() {
         let names = preset_names();
-        assert_eq!(names.len(), 16);
-        assert!(names.contains(&"feature"));
+        assert_eq!(names.len(), 5);
         assert!(names.contains(&"debug"));
-        assert!(names.contains(&"merge-loop"));
         assert!(names.contains(&"code-assist"));
-        assert!(names.contains(&"fresh-eyes"));
+        assert!(names.contains(&"research"));
+        assert!(names.contains(&"review"));
+        assert!(names.contains(&"pdd-to-code-assist"));
+    }
+
+    #[test]
+    fn test_public_presets_have_completion_path() {
+        for preset in PRESETS.iter().filter(|preset| preset.public) {
+            assert_public_preset_has_completion_path(preset);
+        }
+    }
+
+    #[test]
+    fn test_public_presets_have_required_events() {
+        for preset in PRESETS.iter().filter(|preset| preset.public) {
+            assert_public_preset_has_required_events(preset);
+        }
+    }
+
+    #[test]
+    fn test_pdd_to_code_assist_uses_reviewed_increment_loop() {
+        let preset = get_preset("pdd-to-code-assist").expect("pdd-to-code-assist should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("embedded preset YAML should parse");
+
+        assert_eq!(
+            config.event_loop.required_events,
+            vec![
+                "design.approved".to_string(),
+                "plan.ready".to_string(),
+                "tasks.ready".to_string(),
+                "implementation.ready".to_string(),
+                "validation.passed".to_string(),
+            ]
+        );
+
+        let builder = config
+            .hats
+            .get("builder")
+            .expect("builder hat should exist");
+        assert!(builder.triggers.contains(&"tasks.ready".to_string()));
+        assert!(builder.triggers.contains(&"review.rejected".to_string()));
+        assert!(
+            builder
+                .triggers
+                .contains(&"finalization.failed".to_string())
+        );
+        assert!(builder.triggers.contains(&"validation.failed".to_string()));
+        assert_eq!(
+            builder.publishes,
+            vec!["review.ready".to_string(), "build.blocked".to_string()]
+        );
+        assert_eq!(builder.default_publishes.as_deref(), Some("build.blocked"));
+
+        let critic = config.hats.get("critic").expect("critic hat should exist");
+        assert_eq!(critic.triggers, vec!["review.ready".to_string()]);
+        assert_eq!(
+            critic.publishes,
+            vec!["review.passed".to_string(), "review.rejected".to_string()]
+        );
+        assert_eq!(critic.default_publishes.as_deref(), Some("review.rejected"));
+
+        let finalizer = config
+            .hats
+            .get("finalizer")
+            .expect("finalizer hat should exist");
+        assert_eq!(finalizer.triggers, vec!["review.passed".to_string()]);
+        assert_eq!(
+            finalizer.publishes,
+            vec![
+                "tasks.ready".to_string(),
+                "implementation.ready".to_string(),
+                "finalization.failed".to_string(),
+            ]
+        );
+        assert_eq!(
+            finalizer.default_publishes.as_deref(),
+            Some("finalization.failed")
+        );
+
+        let validator = config
+            .hats
+            .get("validator")
+            .expect("validator hat should exist");
+        assert_eq!(
+            validator.default_publishes.as_deref(),
+            Some("validation.failed")
+        );
+
+        let committer = config
+            .hats
+            .get("committer")
+            .expect("committer hat should exist");
+        assert_eq!(committer.default_publishes, None);
+        assert_eq!(committer.publishes, vec!["LOOP_COMPLETE".to_string()]);
     }
 
     #[test]
@@ -218,10 +310,7 @@ mod tests {
 
         assert_eq!(
             config.event_loop.required_events,
-            vec![
-                "review.section".to_string(),
-                "analysis.complete".to_string()
-            ]
+            vec!["review.section".to_string(), "analysis.complete".to_string()]
         );
 
         let reviewer = config
@@ -237,22 +326,12 @@ mod tests {
             vec!["review.section".to_string(), "REVIEW_COMPLETE".to_string()]
         );
         assert!(reviewer.instructions.contains("On `review.start`:"));
-        assert!(
-            reviewer
-                .instructions
-                .contains("Emit exactly one `review.section`")
-        );
+        assert!(reviewer.instructions.contains("Emit exactly one `review.section`"));
         assert!(reviewer.instructions.contains("On `analysis.complete`:"));
-        assert!(
-            reviewer
-                .instructions
-                .contains("Emit exactly one `REVIEW_COMPLETE`")
-        );
-        assert!(
-            reviewer
-                .instructions
-                .contains("❌ Emit `REVIEW_COMPLETE` on the initial `review.start` pass")
-        );
+        assert!(reviewer.instructions.contains("Emit exactly one `REVIEW_COMPLETE`"));
+        assert!(reviewer
+            .instructions
+            .contains("❌ Emit `REVIEW_COMPLETE` on the initial `review.start` pass"));
 
         let analyzer = config
             .hats
@@ -261,16 +340,12 @@ mod tests {
         assert_eq!(analyzer.triggers, vec!["review.section".to_string()]);
         assert_eq!(analyzer.publishes, vec!["analysis.complete".to_string()]);
         assert_eq!(analyzer.default_publishes, None);
-        assert!(
-            analyzer
-                .instructions
-                .contains("Emit exactly one `analysis.complete`")
-        );
-        assert!(
-            analyzer
-                .instructions
-                .contains("adversarial or failure-path case")
-        );
+        assert!(analyzer
+            .instructions
+            .contains("Emit exactly one `analysis.complete`"));
+        assert!(analyzer
+            .instructions
+            .contains("adversarial or failure-path case"));
     }
 
     #[test]
@@ -310,53 +385,37 @@ mod tests {
                 "DEBUG_COMPLETE".to_string(),
             ]
         );
-        assert!(
-            investigator
-                .instructions
-                .contains("On `debug.start` or `hypothesis.rejected`:")
-        );
-        assert!(
-            investigator
-                .instructions
-                .contains("Emit exactly one `hypothesis.test`")
-        );
-        assert!(
-            investigator
-                .instructions
-                .contains("If the bug is already fixed, cannot be reproduced")
-        );
-        assert!(
-            investigator
-                .instructions
-                .contains("Do not end the turn with only prose")
-        );
-        assert!(
-            investigator
-                .instructions
-                .contains("On `hypothesis.confirmed`:")
-        );
-        assert!(investigator.instructions.contains("emit `fix.propose`"));
+        assert!(investigator
+            .instructions
+            .contains("On `debug.start` or `hypothesis.rejected`:"));
+        assert!(investigator
+            .instructions
+            .contains("If the bug is already fixed, cannot be reproduced, or an existing debug note already captures the answer"));
+        assert!(investigator
+            .instructions
+            .contains("Emit exactly one `hypothesis.test`"));
+        assert!(investigator
+            .instructions
+            .contains("On `hypothesis.confirmed`:"));
+        assert!(investigator
+            .instructions
+            .contains("Emit exactly one `fix.propose`"));
         assert!(investigator.instructions.contains("On `fix.verified`:"));
-        assert!(
-            investigator
-                .instructions
-                .contains("Emit exactly one `DEBUG_COMPLETE`")
-        );
-        assert!(
-            investigator
-                .instructions
-                .contains("❌ Emit undeclared topics like `debug.start`")
-        );
-        assert!(
-            investigator
-                .instructions
-                .contains("❌ Skip the event chain by doing fix or verification work inline")
-        );
-        assert!(
-            investigator
-                .instructions
-                .contains("❌ End the turn with only narration")
-        );
+        assert!(investigator
+            .instructions
+            .contains("Emit exactly one `DEBUG_COMPLETE`"));
+        assert!(investigator
+            .instructions
+            .contains("Do not end the turn with only prose"));
+        assert!(investigator
+            .instructions
+            .contains("❌ End the turn with only narration, document updates, or \"already complete\""));
+        assert!(investigator
+            .instructions
+            .contains("❌ Emit undeclared topics like `debug.start`"));
+        assert!(investigator
+            .instructions
+            .contains("❌ Skip the event chain by doing fix or verification work inline"));
 
         let tester = config.hats.get("tester").expect("tester hat should exist");
         assert_eq!(tester.triggers, vec!["hypothesis.test".to_string()]);
@@ -367,16 +426,12 @@ mod tests {
                 "hypothesis.rejected".to_string(),
             ]
         );
-        assert!(
-            tester
-                .instructions
-                .contains("nearby adversarial or neighboring failure-path case")
-        );
-        assert!(
-            tester
-                .instructions
-                .contains("If the hypothesis says the bug is already fixed")
-        );
+        assert!(tester
+            .instructions
+            .contains("If the hypothesis says the bug is already fixed"));
+        assert!(tester
+            .instructions
+            .contains("nearby adversarial or neighboring failure-path case"));
 
         let fixer = config.hats.get("fixer").expect("fixer hat should exist");
         assert_eq!(
@@ -385,11 +440,7 @@ mod tests {
         );
         assert_eq!(fixer.default_publishes.as_deref(), Some("fix.blocked"));
         assert!(!fixer.instructions.contains("Commit"));
-        assert!(
-            fixer
-                .instructions
-                .contains("❌ Make commits in this preset")
-        );
+        assert!(fixer.instructions.contains("❌ Make commits in this preset"));
 
         let verifier = config
             .hats
@@ -400,10 +451,8 @@ mod tests {
             vec!["fix.verified".to_string(), "fix.failed".to_string()]
         );
         assert_eq!(verifier.default_publishes.as_deref(), Some("fix.failed"));
-        assert!(
-            verifier
-                .instructions
-                .contains("Re-run at least one nearby adversarial or failure-path case.")
-        );
+        assert!(verifier
+            .instructions
+            .contains("Re-run at least one nearby adversarial or failure-path case."));
     }
 }

@@ -6,14 +6,15 @@
 
 use anyhow::{Context, Result};
 use ralph_adapters::{
-    AcpExecutor, CliBackend, CliExecutor, ConsoleStreamHandler, JsonRpcStreamHandler,
-    OutputFormat as BackendOutputFormat, PrettyStreamHandler, PtyConfig, PtyExecutor,
+    AcpExecutor, ClaudeStreamEvent, ClaudeStreamParser, CliBackend, CliExecutor,
+    ConsoleStreamHandler, ContentBlock, JsonRpcStreamHandler, OutputFormat as BackendOutputFormat,
+    PiAssistantEvent, PiStreamEvent, PiStreamParser, PrettyStreamHandler, PtyConfig, PtyExecutor,
     QuietStreamHandler, TuiStreamHandler,
 };
 use ralph_core::diagnostics::{HookDisposition, HookRunTelemetryEntry};
 use ralph_core::{
-    CompletionAction, EventLogger, EventLoop, EventParser, EventRecord, HookEngine, HookExecutor,
-    HookExecutorContract, HookMutationConfig, HookOnError, HookPayloadBuilderInput,
+    CompletionAction, EventLogger, EventLoop, EventParser, EventRecord, HatRegistry, HookEngine,
+    HookExecutor, HookExecutorContract, HookMutationConfig, HookOnError, HookPayloadBuilderInput,
     HookPayloadContextInput, HookPhaseEvent, HookRunRequest, HookRunResult, HookSuspendMode,
     LoopCompletionHandler, LoopContext, LoopHistory, LoopRegistry, MergeQueue, RalphConfig, Record,
     SessionRecorder, SummaryWriter, SuspendStateRecord, SuspendStateStore, TerminationReason,
@@ -1706,7 +1707,10 @@ pub async fn run_loop_impl(
                     .execute(&prompt, stdout(), timeout, verbosity == Verbosity::Verbose)
                     .await?;
                 Ok(ExecutionOutcome {
-                    output: result.output,
+                    output: normalize_cli_output_for_parsing(
+                        effective_backend.output_format,
+                        &result.output,
+                    ),
                     success: result.success,
                     termination: None,
                     total_cost_usd: 0.0,
@@ -2363,6 +2367,67 @@ pub async fn run_loop_impl(
         if let Some(reason) = event_loop.check_completion_event() {
             info!(
                 "Completion event {} detected.",
+                config.event_loop.completion_promise
+            );
+
+            let reason = dispatch_pre_loop_termination_hooks(
+                &event_loop,
+                hooks_dispatch_enabled,
+                &loop_id,
+                &hook_engine,
+                &hook_executor,
+                &suspend_state_store,
+                &ctx,
+                config.event_loop.max_iterations,
+                &mut accumulated_hook_metadata,
+                reason,
+            )
+            .await?;
+
+            let terminate_event = event_loop.publish_terminate_event(&reason);
+            log_terminate_event(
+                &mut event_logger,
+                event_loop.state().iteration,
+                &terminate_event,
+            );
+
+            let reason = dispatch_post_loop_termination_hooks(
+                &event_loop,
+                hooks_dispatch_enabled,
+                &loop_id,
+                &hook_engine,
+                &hook_executor,
+                &suspend_state_store,
+                &ctx,
+                config.event_loop.max_iterations,
+                &mut accumulated_hook_metadata,
+                reason,
+            )
+            .await?;
+
+            handle_termination(
+                &reason,
+                event_loop.state(),
+                &config.core.scratchpad,
+                &loop_history,
+                &loop_context,
+                auto_merge,
+                &prompt_content,
+            );
+            if let Some(handle) = tui_handle.take() {
+                let _ = handle.await;
+            }
+            return Ok(reason);
+        }
+
+        if detect_solo_output_completion(
+            event_loop.registry(),
+            &output,
+            &config.event_loop.completion_promise,
+        ) {
+            let reason = TerminationReason::CompletionPromise;
+            info!(
+                "All done! {} detected in solo output.",
                 config.event_loop.completion_promise
             );
 
@@ -3885,6 +3950,74 @@ fn convert_termination_type(
         }
         ralph_adapters::TerminationType::UserInterrupt
         | ralph_adapters::TerminationType::ForceKill => Some(TerminationReason::Interrupted),
+    }
+}
+
+fn detect_solo_output_completion(
+    registry: &HatRegistry,
+    output: &str,
+    completion_promise: &str,
+) -> bool {
+    registry.is_empty() && EventParser::contains_promise(output, completion_promise)
+}
+
+fn normalize_cli_output_for_parsing(
+    output_format: BackendOutputFormat,
+    raw_output: &str,
+) -> String {
+    match output_format {
+        BackendOutputFormat::StreamJson => extract_claude_stream_text(raw_output),
+        BackendOutputFormat::PiStreamJson => extract_pi_stream_text(raw_output),
+        _ => raw_output.to_string(),
+    }
+}
+
+fn extract_claude_stream_text(raw_output: &str) -> String {
+    let mut extracted = String::new();
+
+    for line in raw_output.lines() {
+        let Some(event) = ClaudeStreamParser::parse_line(line) else {
+            continue;
+        };
+
+        if let ClaudeStreamEvent::Assistant { message, .. } = event {
+            for block in message.content {
+                if let ContentBlock::Text { text } = block {
+                    extracted.push_str(&text);
+                    extracted.push('\n');
+                }
+            }
+        }
+    }
+
+    if extracted.is_empty() {
+        raw_output.to_string()
+    } else {
+        extracted
+    }
+}
+
+fn extract_pi_stream_text(raw_output: &str) -> String {
+    let mut extracted = String::new();
+
+    for line in raw_output.lines() {
+        let Some(event) = PiStreamParser::parse_line(line) else {
+            continue;
+        };
+
+        if let PiStreamEvent::MessageUpdate {
+            assistant_message_event,
+        } = event
+            && let PiAssistantEvent::TextDelta { delta } = assistant_message_event
+        {
+            extracted.push_str(&delta);
+        }
+    }
+
+    if extracted.is_empty() {
+        raw_output.to_string()
+    } else {
+        extracted
     }
 }
 
@@ -7994,6 +8127,77 @@ exit 73"#
             convert_termination_type(termination_type, false),
             Some(TerminationReason::Interrupted),
             "ForceKill should terminate in autonomous mode"
+        );
+    }
+
+    #[test]
+    fn test_detect_solo_output_completion_requires_hatless_mode() {
+        let registry = HatRegistry::new();
+        assert!(detect_solo_output_completion(
+            &registry,
+            "done\nLOOP_COMPLETE\n",
+            "LOOP_COMPLETE"
+        ));
+
+        let yaml = r#"
+hats:
+  builder:
+    name: "Builder"
+    triggers: ["build.start"]
+    publishes: ["build.done"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = HatRegistry::from_config(&config);
+        assert!(
+            !detect_solo_output_completion(&registry, "done\nLOOP_COMPLETE\n", "LOOP_COMPLETE"),
+            "text completion should not terminate multi-hat workflows"
+        );
+    }
+
+    #[test]
+    fn test_detect_solo_output_completion_requires_final_non_empty_line() {
+        let registry = HatRegistry::new();
+        assert!(!detect_solo_output_completion(
+            &registry,
+            "LOOP_COMPLETE\nMore text after\n",
+            "LOOP_COMPLETE"
+        ));
+        assert!(!detect_solo_output_completion(
+            &registry,
+            "I think LOOP_COMPLETE but not really",
+            "LOOP_COMPLETE"
+        ));
+    }
+
+    #[test]
+    fn test_normalize_cli_output_for_parsing_extracts_claude_text_blocks() {
+        let raw = concat!(
+            "{\"type\":\"system\",\"session_id\":\"abc\",\"model\":\"claude-opus-4-6\",\"tools\":[]}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"First line\"}]}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"tool_1\",\"name\":\"Bash\",\"input\":{\"command\":\"pytest\"}}]}}\n",
+            "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"tool_1\",\"content\":\"ok\"}]}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"LOOP_COMPLETE\"}]}}\n",
+            "{\"type\":\"result\",\"duration_ms\":1,\"total_cost_usd\":0.0,\"num_turns\":1,\"is_error\":false}\n"
+        );
+
+        assert_eq!(
+            normalize_cli_output_for_parsing(BackendOutputFormat::StreamJson, raw),
+            "First line\nLOOP_COMPLETE\n"
+        );
+    }
+
+    #[test]
+    fn test_normalize_cli_output_for_parsing_extracts_pi_text_deltas() {
+        let raw = concat!(
+            "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"hello \"}}\n",
+            "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"thinking_delta\",\"contentIndex\":0,\"delta\":\"hidden\"}}\n",
+            "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"LOOP_COMPLETE\"}}\n",
+            "{\"type\":\"turn_end\",\"message\":{\"usage\":{\"input\":1,\"output\":1,\"cache_read\":0,\"cache_write\":0,\"cost\":{\"input\":0.0,\"output\":0.0,\"total\":0.0}}}}\n"
+        );
+
+        assert_eq!(
+            normalize_cli_output_for_parsing(BackendOutputFormat::PiStreamJson, raw),
+            "hello LOOP_COMPLETE"
         );
     }
 

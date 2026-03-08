@@ -80,7 +80,7 @@ Ask: "Would you like me to set up Ralph to implement these tasks autonomously?"
 
 If yes, create a concise PROMPT.md with objective, spec directory reference, execution order, and acceptance criteria. Suggest the appropriate command:
 - Full pipeline: `ralph run --config presets/pdd-to-code-assist.yml`
-- Simpler flow: `ralph run --config presets/spec-driven.yml`
+- Simpler flow: `ralph run -c ralph.yml -H builtin:code-assist`
 
 ## Code Task Format Specification
 

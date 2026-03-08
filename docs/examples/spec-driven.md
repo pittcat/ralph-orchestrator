@@ -1,11 +1,15 @@
 # Spec-Driven Development Example
 
-!!! note "Documentation In Progress"
-    This page is under development. Check back soon for a complete spec-driven workflow example.
+!!! note "Example Only"
+    Spec-driven development is now documented as an example pattern, not shipped as a built-in preset.
 
 ## Overview
 
-This example demonstrates using Ralph with specification-first development, where requirements are formalized before implementation begins.
+This example demonstrates a specification-first workflow, where requirements are formalized before implementation begins.
+
+If you want a supported builtin today, start with `builtin:code-assist` for implementation work or `builtin:pdd-to-code-assist` for the longer idea-to-code flow.
+
+If you specifically want an example-only automated design workflow, see [Automated PDD Design](pdd-design.md) and its example preset at `docs/examples/presets/PDD.yml`.
 
 ## Workflow
 

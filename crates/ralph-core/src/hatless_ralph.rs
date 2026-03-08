@@ -66,6 +66,8 @@ impl HatInfo {
         let mut guide = String::from(
             "### Event Publishing Guide\n\n\
              You MUST publish exactly ONE event when your work is complete.\n\
+             You MUST use `ralph emit \"<topic>\" \"<brief summary>\"` to publish it.\n\
+             Plain-language summaries do NOT publish events.\n\
              Publishing hands off to the next hat and starts a fresh iteration with clear context.\n\n\
              When you publish:\n",
         );
@@ -487,12 +489,14 @@ Its content is auto-injected in `<scratchpad>` tags at the top of your context e
             if self.is_fresh_start() {
                 // Fast path: immediate delegation without planning
                 return format!(
-                    r"## WORKFLOW
+                    r#"## WORKFLOW
 
 **FAST PATH**: You MUST publish `{}` immediately to start the hat workflow.
+You MUST use `ralph emit "{}" "<brief handoff>"` and stop immediately.
 You MUST NOT plan or analyze — delegate now.
 
-",
+"#,
+                    self.starting_event.as_ref().unwrap(),
                     self.starting_event.as_ref().unwrap()
                 );
             }
@@ -508,7 +512,8 @@ You MUST update `{scratchpad}` with your understanding and plan.
 You MUST create tasks with `ralph tools task add` for each work item (check `<ready-tasks>` first to avoid duplicates).
 
 ### 2. DELEGATE
-You MUST publish exactly ONE event to hand off to specialized hats.
+You MUST emit exactly ONE next event via `ralph emit` to hand off to specialized hats.
+Plain-language summaries do NOT hand off work.
 You MUST NOT do implementation work — delegation is your only job.
 
 ",
@@ -523,7 +528,8 @@ You MUST NOT do implementation work — delegation is your only job.
 You MUST update `{scratchpad}` with prioritized tasks to complete the objective end-to-end.
 
 ### 2. DELEGATE
-You MUST publish exactly ONE event to hand off to specialized hats.
+You MUST emit exactly ONE next event via `ralph emit` to hand off to specialized hats.
+Plain-language summaries do NOT hand off work.
 You MUST NOT do implementation work — delegation is your only job.
 
 ",
@@ -549,6 +555,8 @@ You MUST pick exactly ONE task from `<ready-tasks>` to implement.
 
 ### 4. VERIFY & COMMIT
 You MUST run tests and verify the implementation works.
+If the target is runnable or user-facing, you MUST exercise it with the strongest available harness (Playwright, tmux, real CLI/API) before committing.
+You SHOULD try at least one realistic failure-path or adversarial input during verification.
 You MUST commit after verification passes - one commit per task.
 You SHOULD run `git diff --cached` to review staged changes before committing.
 You MUST close the task with `ralph tools task close <id>` AFTER commit.
@@ -578,6 +586,8 @@ You MUST pick exactly ONE task to implement.
 You MUST NOT use more than 1 subagent for build/tests.
 
 ### 4. COMMIT
+If the target is runnable or user-facing, you MUST exercise it with the strongest available harness (Playwright, tmux, real CLI/API) before committing.
+You SHOULD try at least one realistic failure-path or adversarial input during verification.
 You MUST commit after completing each atomic unit of work.
 You MUST capture the why, not just the what.
 You SHOULD run `git diff` before committing to review changes.
@@ -849,14 +859,26 @@ You MUST NOT use echo/cat to write events because shell escaping breaks JSON.
     }
 
     fn done_section(&self, objective: Option<&str>) -> String {
-        let mut section = format!(
-            r"## DONE
+        let mut section = if self.hat_topology.is_some() {
+            format!(
+                r"## DONE
 
-You MUST emit a completion event `{}` when the objective is complete and all tasks are done.
-You MUST use `ralph emit` (stdout text does NOT end the loop).
+You MUST emit the completion event `{}` via `ralph emit` when the objective is complete and all tasks are done.
+Stdout text does NOT end the loop in coordinated mode.
 ",
-            self.completion_promise
-        );
+                self.completion_promise
+            )
+        } else {
+            format!(
+                r"## DONE
+
+You MUST output the literal completion promise `{}` as the final non-empty line when the objective is complete and all tasks are done.
+You MUST NOT substitute a prose summary for `{}`.
+You MUST NOT print any text after `{}`.
+",
+                self.completion_promise, self.completion_promise, self.completion_promise
+            )
+        };
 
         // Add task verification when memories/tasks mode is enabled
         if self.memories_enabled {
@@ -865,11 +887,11 @@ You MUST use `ralph emit` (stdout text does NOT end the loop).
 **Before declaring completion:**
 1. Run `ralph tools task ready` to check for open tasks
 2. If any tasks are open, complete them first
-3. Only emit the completion event when YOUR tasks are all closed
+3. Only declare completion when YOUR tasks are all closed
 
 Tasks from other parallel loops are filtered out automatically. You only need to verify tasks YOU created for THIS objective are complete.
 
-You MUST NOT emit the completion event while tasks remain open.
+You MUST NOT declare completion while tasks remain open.
 ",
             );
         }
@@ -1254,6 +1276,10 @@ hats:
         assert!(
             prompt.contains("You MUST publish `tdd.start` immediately"),
             "Prompt should instruct immediate event publishing with MUST"
+        );
+        assert!(
+            prompt.contains("ralph emit \"tdd.start\""),
+            "Fast path should require explicit event emission"
         );
         assert!(
             !prompt.contains("### 1. PLAN"),
@@ -1733,7 +1759,7 @@ hats:
             "Should reference task ready command in DONE section"
         );
         assert!(
-            prompt.contains("MUST NOT emit the completion event while tasks remain open"),
+            prompt.contains("MUST NOT declare completion while tasks remain open"),
             "Should require tasks closed before completion"
         );
     }
@@ -1933,6 +1959,10 @@ hats:
             "DONE should mention completion event"
         );
         assert!(
+            prompt.contains("final non-empty line"),
+            "Solo DONE section should require literal terminal output"
+        );
+        assert!(
             !prompt.contains("Remember your objective"),
             "Should NOT have objective reinforcement without objective"
         );
@@ -2025,6 +2055,10 @@ hats:
             prompt.contains("LOOP_COMPLETE"),
             "Completion promise should appear when coordinating"
         );
+        assert!(
+            prompt.contains("via `ralph emit`"),
+            "Coordinating DONE section should require explicit event emission"
+        );
     }
 
     #[test]
@@ -2085,6 +2119,10 @@ hats:
         assert!(
             prompt.contains("When you publish:"),
             "Guide should explain what happens when publishing"
+        );
+        assert!(
+            prompt.contains("You MUST use `ralph emit"),
+            "Guide should require explicit event emission"
         );
         // build.done has a receiver (Confessor)
         assert!(

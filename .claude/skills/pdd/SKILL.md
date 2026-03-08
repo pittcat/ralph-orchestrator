@@ -144,7 +144,7 @@ If yes, create a concise PROMPT.md (under 100 lines) with:
 
 Suggest the appropriate command:
 - Full pipeline: `ralph run --config presets/pdd-to-code-assist.yml`
-- Simpler flow: `ralph run --config presets/spec-driven.yml`
+- Simpler flow: `ralph run -c ralph.yml -H builtin:code-assist`
 
 If the user declines, acknowledge and conclude the session.
 
