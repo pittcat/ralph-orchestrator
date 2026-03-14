@@ -1507,6 +1507,9 @@ pub async fn run_loop_impl(
         let display_hat =
             resolve_display_hat_for_execution(&event_loop, &hat_id, &preview_display_hat);
 
+        // Log full prompt to diagnostics (RALPH_DIAGNOSTICS=1)
+        event_loop.log_prompt(iteration, display_hat.as_str(), &prompt);
+
         let hat_display = event_loop
             .registry()
             .get(&display_hat)
