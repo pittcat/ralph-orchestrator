@@ -219,7 +219,7 @@ impl EventLoop {
         }
 
         // Build skill registry from config
-        let skill_registry = if config.skills.enabled {
+        let mut skill_registry = if config.skills.enabled {
             SkillRegistry::from_config(
                 &config.skills,
                 context.workspace(),
@@ -235,6 +235,14 @@ impl EventLoop {
         } else {
             SkillRegistry::new(Some(config.cli.backend.as_str()))
         };
+
+        // Remove task/memory skills from the index when their config is disabled
+        if !config.tasks.enabled {
+            skill_registry.remove("ralph-tools-tasks");
+        }
+        if !config.memories.enabled {
+            skill_registry.remove("ralph-tools-memories");
+        }
 
         let skill_index = if config.skills.enabled {
             skill_registry.build_index(None)
@@ -313,7 +321,7 @@ impl EventLoop {
 
         // Build skill registry from config
         let workspace_root = std::path::Path::new(".");
-        let skill_registry = if config.skills.enabled {
+        let mut skill_registry = if config.skills.enabled {
             SkillRegistry::from_config(
                 &config.skills,
                 workspace_root,
@@ -329,6 +337,14 @@ impl EventLoop {
         } else {
             SkillRegistry::new(Some(config.cli.backend.as_str()))
         };
+
+        // Remove task/memory skills from the index when their config is disabled
+        if !config.tasks.enabled {
+            skill_registry.remove("ralph-tools-tasks");
+        }
+        if !config.memories.enabled {
+            skill_registry.remove("ralph-tools-memories");
+        }
 
         let skill_index = if config.skills.enabled {
             skill_registry.build_index(None)
@@ -1160,20 +1176,47 @@ impl EventLoop {
             }
         }
 
-        // Inject the ralph-tools skill when either memories or tasks are enabled
-        if memories_config.enabled || self.config.tasks.enabled {
-            if let Some(skill) = self.skill_registry.get("ralph-tools") {
-                if !prefix.is_empty() {
-                    prefix.push_str("\n\n");
-                }
-                prefix.push_str(&format!(
-                    "<ralph-tools-skill>\n{}\n</ralph-tools-skill>",
-                    skill.content.trim()
-                ));
-                debug!("Injected ralph-tools skill from registry");
-            } else {
-                debug!("ralph-tools skill not found in registry - skill content not injected");
+        // Inject ralph-tools skills conditionally based on config
+        let tasks_enabled = self.config.tasks.enabled;
+
+        // Base skill (shared commands) when either memories or tasks are enabled
+        if (memories_config.enabled || tasks_enabled)
+            && let Some(skill) = self.skill_registry.get("ralph-tools")
+        {
+            if !prefix.is_empty() {
+                prefix.push_str("\n\n");
             }
+            prefix.push_str(&format!(
+                "<ralph-tools-skill>\n{}\n</ralph-tools-skill>",
+                skill.content.trim()
+            ));
+            debug!("Injected ralph-tools skill from registry");
+        }
+
+        // Tasks skill — only when tasks are enabled
+        if tasks_enabled && let Some(skill) = self.skill_registry.get("ralph-tools-tasks") {
+            if !prefix.is_empty() {
+                prefix.push_str("\n\n");
+            }
+            prefix.push_str(&format!(
+                "<ralph-tools-tasks-skill>\n{}\n</ralph-tools-tasks-skill>",
+                skill.content.trim()
+            ));
+            debug!("Injected ralph-tools-tasks skill from registry");
+        }
+
+        // Memories skill — only when memories are enabled
+        if memories_config.enabled
+            && let Some(skill) = self.skill_registry.get("ralph-tools-memories")
+        {
+            if !prefix.is_empty() {
+                prefix.push_str("\n\n");
+            }
+            prefix.push_str(&format!(
+                "<ralph-tools-memories-skill>\n{}\n</ralph-tools-memories-skill>",
+                skill.content.trim()
+            ));
+            debug!("Injected ralph-tools-memories skill from registry");
         }
     }
 
@@ -1198,11 +1241,14 @@ impl EventLoop {
         }
     }
 
-    /// Injects any user-configured auto-inject skills (excluding built-in ralph-tools/robot-interaction).
+    /// Injects any user-configured auto-inject skills (excluding built-in skills handled separately).
     fn inject_custom_auto_skills(&self, prefix: &mut String) {
         for skill in self.skill_registry.auto_inject_skills(None) {
             // Skip built-in skills handled above
-            if skill.name == "ralph-tools" || skill.name == "robot-interaction" {
+            if matches!(
+                skill.name.as_str(),
+                "ralph-tools" | "ralph-tools-tasks" | "ralph-tools-memories" | "robot-interaction"
+            ) {
                 continue;
             }
 

@@ -10,8 +10,14 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
-/// Built-in ralph-tools skill content (tasks + memories).
+/// Built-in ralph-tools skill content (shared: interact, skill, output format commands).
 const RALPH_TOOLS_SKILL_RAW: &str = include_str!("../data/ralph-tools.md");
+
+/// Built-in ralph-tools-tasks skill content (task commands and workflows).
+const RALPH_TOOLS_TASKS_SKILL_RAW: &str = include_str!("../data/ralph-tools-tasks.md");
+
+/// Built-in ralph-tools-memories skill content (memory commands, decision journal, workflows).
+const RALPH_TOOLS_MEMORIES_SKILL_RAW: &str = include_str!("../data/ralph-tools-memories.md");
 
 /// Built-in RObot interaction skill content.
 const ROBOT_INTERACTION_SKILL_RAW: &str = include_str!("../data/robot-interaction-skill.md");
@@ -58,9 +64,11 @@ impl SkillRegistry {
         Ok(())
     }
 
-    /// Register built-in skills (ralph-tools and robot-interaction).
+    /// Register built-in skills (ralph-tools, ralph-tools-tasks, ralph-tools-memories, robot-interaction).
     fn register_builtins(&mut self) -> Result<()> {
         self.register_builtin("ralph-tools", RALPH_TOOLS_SKILL_RAW)?;
+        self.register_builtin("ralph-tools-tasks", RALPH_TOOLS_TASKS_SKILL_RAW)?;
+        self.register_builtin("ralph-tools-memories", RALPH_TOOLS_MEMORIES_SKILL_RAW)?;
         self.register_builtin("robot-interaction", ROBOT_INTERACTION_SKILL_RAW)?;
         Ok(())
     }
@@ -226,6 +234,11 @@ impl SkillRegistry {
         candidate
     }
 
+    /// Remove a skill by name.
+    pub fn remove(&mut self, name: &str) {
+        self.skills.remove(name);
+    }
+
     /// Get a skill by name.
     pub fn get(&self, name: &str) -> Option<&SkillEntry> {
         self.skills.get(name)
@@ -341,6 +354,8 @@ mod tests {
 
         // All built-in skills should be registered
         assert!(registry.get("ralph-tools").is_some());
+        assert!(registry.get("ralph-tools-tasks").is_some());
+        assert!(registry.get("ralph-tools-memories").is_some());
         assert!(registry.get("robot-interaction").is_some());
     }
 

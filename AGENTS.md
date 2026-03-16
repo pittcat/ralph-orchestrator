@@ -237,5 +237,5 @@ ralph clean --diagnostics
 - Run python tests using a .venv
 - You MUST not commit ephemeral files
 - When I ask you to view something that means to use playwright/chrome tools to go view it.
-- When adding or changing `ralph tools` subcommands, update `crates/ralph-core/data/ralph-tools.md` — this is the single source of truth for the ralph-tools skill (`.claude/skills/ralph-tools/SKILL.md` is a symlink to it)
+- When adding or changing `ralph tools` subcommands, update the appropriate file in `crates/ralph-core/data/`: `ralph-tools.md` (shared commands), `ralph-tools-tasks.md` (task commands), or `ralph-tools-memories.md` (memory commands). `.claude/skills/ralph-tools/SKILL.md` is a symlink to the base `ralph-tools.md`
 - Design docs and specs go in `.ralph/specs` and one-off code tasks and bug fixes go in `.ralph/tasks`
