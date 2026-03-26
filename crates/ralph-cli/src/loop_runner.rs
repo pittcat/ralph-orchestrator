@@ -5717,6 +5717,7 @@ async fn run_wave_worker_pty(
     // events only arrive when the process exits. Using a PTY forces the
     // child to see a terminal and flush after each line.
     let (cmd, args, stdin_input, _temp_file_guard) = worker_backend.build_command(prompt, false);
+    let mut stdin_prompt_file = None;
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let output_format = worker_backend.output_format;
@@ -5748,8 +5749,46 @@ async fn run_wave_worker_pty(
         }
     };
 
-    let mut cmd_builder = portable_pty::CommandBuilder::new(&cmd);
-    cmd_builder.args(&args);
+    let (spawn_cmd, spawn_args) = if let Some(input) = stdin_input.as_ref() {
+        let mut prompt_file = match tempfile::NamedTempFile::new() {
+            Ok(file) => file,
+            Err(e) => {
+                let duration = start.elapsed();
+                let _ = fs::remove_file(worker_events_path);
+                let _ = tx.send((index, false, duration));
+                return (
+                    index,
+                    Err((format!("PTY stdin temp file creation failed: {e}"), duration)),
+                );
+            }
+        };
+        if let Err(e) = std::io::Write::write_all(&mut prompt_file, input.as_bytes()) {
+            let duration = start.elapsed();
+            let _ = fs::remove_file(worker_events_path);
+            let _ = tx.send((index, false, duration));
+            return (
+                index,
+                Err((format!("PTY stdin temp file write failed: {e}"), duration)),
+            );
+        }
+
+        let wrapper_args = std::iter::once("-c".to_string())
+            .chain(std::iter::once(
+                r#"prompt_file="$1"; shift; exec "$@" < "$prompt_file""#.to_string(),
+            ))
+            .chain(std::iter::once("sh".to_string()))
+            .chain(std::iter::once(prompt_file.path().display().to_string()))
+            .chain(std::iter::once(cmd.clone()))
+            .chain(args.iter().cloned())
+            .collect::<Vec<_>>();
+        stdin_prompt_file = Some(prompt_file);
+        ("sh".to_string(), wrapper_args)
+    } else {
+        (cmd.clone(), args.clone())
+    };
+
+    let mut cmd_builder = portable_pty::CommandBuilder::new(&spawn_cmd);
+    cmd_builder.args(&spawn_args);
     cmd_builder.cwd(&cwd);
     for (key, value) in &worker_backend.env_vars {
         cmd_builder.env(key, value);
@@ -5769,9 +5808,12 @@ async fn run_wave_worker_pty(
     drop(pty_pair.slave);
 
     if let Some(input) = stdin_input
+        && stdin_prompt_file.is_none()
         && let Ok(mut writer) = pty_pair.master.take_writer()
     {
         let _ = writer.write_all(input.as_bytes());
+        let _ = writer.write_all(b"\n");
+        let _ = writer.flush();
     }
 
     #[cfg(test)]
@@ -10208,10 +10250,11 @@ EOF"#,
     #[cfg(unix)]
     fn invocation_capture_backend_body(payload: &str) -> String {
         format!(
-            r#"python3 - "$@" <<'PY'
+            r#"python3 -c '
 import json
 import os
 import pathlib
+import select
 import sys
 
 args = sys.argv[1:]
@@ -10219,6 +10262,18 @@ prompt = ""
 if "--prompt-file" in args:
     prompt_flag_index = args.index("--prompt-file")
     prompt = pathlib.Path(args[prompt_flag_index + 1]).read_text()
+elif "--print" in args:
+    chunks = []
+    fd = sys.stdin.fileno()
+    while True:
+        ready, _, _ = select.select([fd], [], [], 0.1)
+        if not ready:
+            break
+        chunk = os.read(fd, 4096)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    prompt = b"".join(chunks).decode()
 elif args:
     prompt = args[-1]
     temp_file_prefix = "Please read and execute the task in "
@@ -10237,7 +10292,7 @@ pathlib.Path(os.environ["RALPH_EVENTS_FILE"] + ".capture").write_text(json.dumps
     }},
     "prompt": prompt,
 }}))
-PY
+' "$@"
 cat <<'EOF' > "$RALPH_EVENTS_FILE"
 {{"topic":"review.done","payload":"{payload}","ts":"2026-01-01T00:00:00Z"}}
 EOF"#,
@@ -10248,6 +10303,7 @@ EOF"#,
     enum PromptDeliveryExpectation {
         Flag(&'static str),
         Positional,
+        Stdin,
         TempFileFlag(&'static str),
         TempFilePositional,
         PromptFile,
@@ -10370,6 +10426,18 @@ EOF"#,
                     captured.prompt,
                     args[expected_prefix.len()],
                     "positional prompt should match captured prompt"
+                );
+            }
+            PromptDeliveryExpectation::Stdin => {
+                assert_eq!(
+                    args.len(),
+                    expected_prefix.len(),
+                    "unexpected arg count: {:?}",
+                    captured.args
+                );
+                assert!(
+                    !captured.prompt.is_empty(),
+                    "stdin-delivered prompt should be captured"
                 );
             }
             PromptDeliveryExpectation::TempFileFlag(flag) => {
@@ -10759,9 +10827,10 @@ EOF"#,
                     "--verbose",
                     "--output-format",
                     "stream-json",
+                    "--print",
                     "--disallowedTools=TodoWrite,TaskCreate,TaskUpdate,TaskList,TaskGet",
                 ],
-                prompt_delivery: PromptDeliveryExpectation::Flag("-p"),
+                prompt_delivery: PromptDeliveryExpectation::Stdin,
                 marker_id: "invocation-contract:named:claude",
             },
             NamedBackendInvocationCase {
@@ -10856,9 +10925,10 @@ EOF"#,
                     "--verbose",
                     "--output-format",
                     "stream-json",
+                    "--print",
                     "--disallowedTools=TodoWrite,TaskCreate,TaskUpdate,TaskList,TaskGet",
                 ],
-                prompt_delivery: PromptDeliveryExpectation::TempFileFlag("-p"),
+                prompt_delivery: PromptDeliveryExpectation::Stdin,
                 marker_id: "large-prompt-contract:named:claude",
             },
             NamedBackendLargePromptCase {
@@ -10996,12 +11066,13 @@ EOF"#,
                         "--verbose",
                         "--output-format",
                         "stream-json",
+                        "--print",
                         "--disallowedTools=TodoWrite,TaskCreate,TaskUpdate,TaskList,TaskGet",
                         "--model",
                         "claude-sonnet-4",
                         "--hat-runtime-arg",
                     ],
-                    prompt_delivery: PromptDeliveryExpectation::Flag("-p"),
+                    prompt_delivery: PromptDeliveryExpectation::Stdin,
                     success_payload: "hat claude named-with-args invocation contract ok",
                     marker_id: "invocation-contract:hat:named-with-args:claude",
                 },
@@ -11214,10 +11285,11 @@ EOF"#,
                     "--verbose",
                     "--output-format",
                     "stream-json",
+                    "--print",
                     "--disallowedTools=TodoWrite,TaskCreate,TaskUpdate,TaskList,TaskGet",
                     "--hat-runtime-arg",
                 ],
-                prompt_delivery: PromptDeliveryExpectation::TempFileFlag("-p"),
+                prompt_delivery: PromptDeliveryExpectation::Stdin,
                 success_payload: "hat claude named large prompt contract ok",
                 marker_id: "large-prompt-contract:hat:named:claude",
             },
@@ -11342,12 +11414,13 @@ EOF"#,
                     "--verbose",
                     "--output-format",
                     "stream-json",
+                    "--print",
                     "--disallowedTools=TodoWrite,TaskCreate,TaskUpdate,TaskList,TaskGet",
                     "--model",
                     "claude-sonnet-4",
                     "--hat-runtime-arg",
                 ],
-                prompt_delivery: PromptDeliveryExpectation::TempFileFlag("-p"),
+                prompt_delivery: PromptDeliveryExpectation::Stdin,
                 success_payload: "hat claude named-with-args large prompt contract ok",
                 marker_id: "large-prompt-contract:hat:named-with-args:claude",
             },
