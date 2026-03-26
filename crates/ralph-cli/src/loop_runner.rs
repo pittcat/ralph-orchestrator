@@ -7,9 +7,10 @@
 use anyhow::{Context, Result};
 use ralph_adapters::{
     AcpExecutor, ClaudeStreamEvent, ClaudeStreamParser, CliBackend, CliExecutor,
-    ConsoleStreamHandler, ContentBlock, JsonRpcStreamHandler, OutputFormat as BackendOutputFormat,
-    PiAssistantEvent, PiContentBlock, PiStreamEvent, PiStreamParser, PrettyStreamHandler,
-    PtyConfig, PtyExecutor, QuietStreamHandler, StreamHandler, TuiStreamHandler,
+    ConsoleStreamHandler, ContentBlock, CopilotStreamParser, JsonRpcStreamHandler,
+    OutputFormat as BackendOutputFormat, PiAssistantEvent, PiContentBlock, PiStreamEvent,
+    PiStreamParser, PrettyStreamHandler, PtyConfig, PtyExecutor, QuietStreamHandler, StreamHandler,
+    TuiStreamHandler,
 };
 use ralph_core::diagnostics::{HookDisposition, HookRunTelemetryEntry};
 use ralph_core::{
@@ -4056,6 +4057,7 @@ fn normalize_cli_output_for_parsing(
 ) -> String {
     match output_format {
         BackendOutputFormat::StreamJson => extract_claude_stream_text(raw_output),
+        BackendOutputFormat::CopilotStreamJson => CopilotStreamParser::extract_all_text(raw_output),
         BackendOutputFormat::PiStreamJson => extract_pi_stream_text(raw_output),
         _ => raw_output.to_string(),
     }
@@ -5981,6 +5983,15 @@ fn extract_readable_delta(line: &str, output_format: BackendOutputFormat) -> Opt
                 }
                 _ => None,
             }
+        }
+        BackendOutputFormat::CopilotStreamJson => {
+            CopilotStreamParser::extract_text(line).map(|text| {
+                if text.ends_with('\n') {
+                    text
+                } else {
+                    format!("{text}\n")
+                }
+            })
         }
         BackendOutputFormat::PiStreamJson => match PiStreamParser::parse_line(line) {
             Some(PiStreamEvent::MessageUpdate {
@@ -9644,6 +9655,21 @@ hats:
     }
 
     #[test]
+    fn test_normalize_cli_output_for_parsing_extracts_copilot_stream_text() {
+        let raw = concat!(
+            "{\"type\":\"assistant.turn_start\",\"data\":{\"turnId\":\"0\"}}\n",
+            "{\"type\":\"assistant.message\",\"data\":{\"content\":\"First line\"}}\n",
+            "{\"type\":\"assistant.message\",\"data\":{\"content\":\"LOOP_COMPLETE\"}}\n",
+            "{\"type\":\"result\",\"exitCode\":0}\n"
+        );
+
+        assert_eq!(
+            normalize_cli_output_for_parsing(BackendOutputFormat::CopilotStreamJson, raw),
+            "First line\nLOOP_COMPLETE\n"
+        );
+    }
+
+    #[test]
     fn test_wave_worker_execution_mode_supports_all_backend_formats() {
         assert_eq!(
             wave_worker_execution_mode(BackendOutputFormat::Text),
@@ -9655,6 +9681,10 @@ hats:
         );
         assert_eq!(
             wave_worker_execution_mode(BackendOutputFormat::PiStreamJson),
+            WaveWorkerExecutionMode::Pty
+        );
+        assert_eq!(
+            wave_worker_execution_mode(BackendOutputFormat::CopilotStreamJson),
             WaveWorkerExecutionMode::Pty
         );
         assert_eq!(
@@ -9711,7 +9741,7 @@ hats:
             ),
             (
                 "copilot",
-                BackendOutputFormat::Text,
+                BackendOutputFormat::CopilotStreamJson,
                 WaveWorkerExecutionMode::Pty,
                 "execution-mode:named:copilot",
             ),
@@ -10876,7 +10906,7 @@ EOF"#,
             NamedBackendInvocationCase {
                 name: "copilot",
                 success_payload: "copilot invocation contract ok",
-                expected_prefix: &["--allow-all-tools"],
+                expected_prefix: &["--allow-all-tools", "--output-format", "json"],
                 prompt_delivery: PromptDeliveryExpectation::Flag("-p"),
                 marker_id: "invocation-contract:named:copilot",
             },
@@ -10974,7 +11004,7 @@ EOF"#,
             NamedBackendLargePromptCase {
                 name: "copilot",
                 success_payload: "copilot large prompt contract ok",
-                expected_prefix: &["--allow-all-tools"],
+                expected_prefix: &["--allow-all-tools", "--output-format", "json"],
                 prompt_delivery: PromptDeliveryExpectation::TempFileFlag("-p"),
                 marker_id: "large-prompt-contract:named:copilot",
             },
@@ -11154,6 +11184,8 @@ EOF"#,
                     extra_args: &["--model", "gpt-5"],
                     expected_prefix: &[
                         "--allow-all-tools",
+                        "--output-format",
+                        "json",
                         "--model",
                         "gpt-5",
                         "--hat-runtime-arg",
@@ -11346,7 +11378,12 @@ EOF"#,
             HatNamedLargePromptCase {
                 backend_type: "copilot",
                 executable_name: "copilot",
-                expected_prefix: &["--allow-all-tools", "--hat-runtime-arg"],
+                expected_prefix: &[
+                    "--allow-all-tools",
+                    "--output-format",
+                    "json",
+                    "--hat-runtime-arg",
+                ],
                 prompt_delivery: PromptDeliveryExpectation::TempFileFlag("-p"),
                 success_payload: "hat copilot named large prompt contract ok",
                 marker_id: "large-prompt-contract:hat:named:copilot",
@@ -11500,7 +11537,14 @@ EOF"#,
                 backend_type: "copilot",
                 executable_name: "copilot",
                 extra_args: &["--model", "gpt-5"],
-                expected_prefix: &["--allow-all-tools", "--model", "gpt-5", "--hat-runtime-arg"],
+                expected_prefix: &[
+                    "--allow-all-tools",
+                    "--output-format",
+                    "json",
+                    "--model",
+                    "gpt-5",
+                    "--hat-runtime-arg",
+                ],
                 prompt_delivery: PromptDeliveryExpectation::TempFileFlag("-p"),
                 success_payload: "hat copilot named-with-args large prompt contract ok",
                 marker_id: "large-prompt-contract:hat:named-with-args:copilot",
