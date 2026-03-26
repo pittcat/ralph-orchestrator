@@ -38,6 +38,7 @@ tracing-subscriber.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
+futures.workspace = true
 regex.workspace = true
 keyring.workspace = true
 
@@ -51,15 +52,16 @@ ratatui.workspace = true
 # For progress spinners
 indicatif.workspace = true
 
+# For PTY-based wave worker spawning (forces unbuffered stdout)
+portable-pty.workspace = true
+tempfile.workspace = true
+
 # For opening URLs in the default browser
 open.workspace = true
 
 # For Unix process group and signal handling
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }
-
-[dev-dependencies]
-tempfile.workspace = true
 
 [[example]]
 name = "calculator"

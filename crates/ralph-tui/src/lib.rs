@@ -216,6 +216,15 @@ impl Tui {
         self
     }
 
+    /// Sets the path to the urgent-steer marker file for immediate `!` gating.
+    #[must_use]
+    pub fn with_urgent_steer_path(self, path: std::path::PathBuf) -> Self {
+        if let Ok(mut state) = self.state.lock() {
+            state.urgent_steer_path = Some(path);
+        }
+        self
+    }
+
     /// Returns the shared state for external updates.
     pub fn state(&self) -> Arc<Mutex<TuiState>> {
         Arc::clone(&self.state)

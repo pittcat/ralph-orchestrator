@@ -8,7 +8,9 @@
 //! handlers. It runs as a background tokio task alongside the orchestration
 //! loop, communicating via channels.
 
+use ralph_core::UrgentSteerStore;
 use ralph_proto::{GuidanceTarget, RpcCommand, RpcEvent, RpcState, emit_event_line, parse_command};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::sync::{mpsc, watch};
@@ -33,6 +35,9 @@ where
 
     /// Tracks whether the loop has been started (for prompt validation).
     pub loop_started: Arc<std::sync::atomic::AtomicBool>,
+
+    /// Marker file used to gate `ralph emit` while urgent steer is pending.
+    pub urgent_steer_path: Option<PathBuf>,
 }
 
 /// A guidance message with its target (current iteration or next).
@@ -51,6 +56,7 @@ where
         interrupt_tx: watch::Sender<bool>,
         guidance_tx: mpsc::Sender<GuidanceMessage>,
         response_tx: mpsc::Sender<RpcEvent>,
+        urgent_steer_path: Option<PathBuf>,
         state_fn: F,
     ) -> Self {
         Self {
@@ -59,6 +65,7 @@ where
             response_tx,
             state_fn: Arc::new(state_fn),
             loop_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            urgent_steer_path,
         }
     }
 
@@ -118,7 +125,19 @@ where
             }
 
             RpcCommand::Steer { message, .. } => {
-                // Push to guidance channel with Current target for immediate injection
+                if let Some(path) = &self.urgent_steer_path
+                    && let Err(err) =
+                        UrgentSteerStore::new(path.clone()).append_message(message.clone())
+                {
+                    return RpcEvent::error_response(
+                        cmd_type,
+                        id,
+                        format!("failed to persist urgent steer: {err}"),
+                    );
+                }
+
+                // Persist urgent steer immediately for the active iteration and
+                // also queue it for the next prompt boundary.
                 let msg = GuidanceMessage {
                     message: message.clone(),
                     target: GuidanceTarget::Current,
@@ -303,8 +322,9 @@ mod tests {
         let (guidance_tx, _guidance_rx) = mpsc::channel(10);
         let (response_tx, _response_rx) = mpsc::channel(10);
 
-        let dispatcher =
-            RpcDispatcher::new(interrupt_tx, guidance_tx, response_tx, || default_state());
+        let dispatcher = RpcDispatcher::new(interrupt_tx, guidance_tx, response_tx, None, || {
+            default_state()
+        });
 
         let cmd = RpcCommand::Abort {
             id: Some("abort-1".to_string()),
@@ -334,8 +354,9 @@ mod tests {
         let (guidance_tx, mut guidance_rx) = mpsc::channel(10);
         let (response_tx, _) = mpsc::channel(10);
 
-        let dispatcher =
-            RpcDispatcher::new(interrupt_tx, guidance_tx, response_tx, || default_state());
+        let dispatcher = RpcDispatcher::new(interrupt_tx, guidance_tx, response_tx, None, || {
+            default_state()
+        });
 
         let cmd = RpcCommand::Guidance {
             id: None,
@@ -356,8 +377,9 @@ mod tests {
         let (guidance_tx, _) = mpsc::channel(10);
         let (response_tx, _) = mpsc::channel(10);
 
-        let dispatcher =
-            RpcDispatcher::new(interrupt_tx, guidance_tx, response_tx, || default_state());
+        let dispatcher = RpcDispatcher::new(interrupt_tx, guidance_tx, response_tx, None, || {
+            default_state()
+        });
 
         let cmd = RpcCommand::GetState {
             id: Some("state-1".to_string()),
@@ -390,8 +412,9 @@ mod tests {
         let (guidance_tx, mut guidance_rx) = mpsc::channel(10);
         let (response_tx, _) = mpsc::channel(10);
 
-        let dispatcher =
-            RpcDispatcher::new(interrupt_tx, guidance_tx, response_tx, || default_state());
+        let dispatcher = RpcDispatcher::new(interrupt_tx, guidance_tx, response_tx, None, || {
+            default_state()
+        });
 
         // Steer should have Current target
         let steer_cmd = RpcCommand::Steer {
@@ -413,13 +436,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_steer_persists_urgent_marker() {
+        let (interrupt_tx, _) = watch::channel(false);
+        let (guidance_tx, _guidance_rx) = mpsc::channel(10);
+        let (response_tx, _) = mpsc::channel(10);
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let urgent_path = temp_dir.path().join("urgent-steer.json");
+
+        let dispatcher = RpcDispatcher::new(
+            interrupt_tx,
+            guidance_tx,
+            response_tx,
+            Some(urgent_path.clone()),
+            || default_state(),
+        );
+
+        let steer_cmd = RpcCommand::Steer {
+            id: None,
+            message: "steer now".to_string(),
+        };
+        let _response = dispatcher.dispatch(steer_cmd).await;
+
+        let record = UrgentSteerStore::new(urgent_path)
+            .load()
+            .expect("load marker")
+            .expect("record");
+        assert_eq!(record.messages, vec!["steer now"]);
+    }
+
+    #[tokio::test]
     async fn test_prompt_rejected_after_loop_started() {
         let (interrupt_tx, _) = watch::channel(false);
         let (guidance_tx, _) = mpsc::channel(10);
         let (response_tx, _) = mpsc::channel(10);
 
-        let dispatcher =
-            RpcDispatcher::new(interrupt_tx, guidance_tx, response_tx, || default_state());
+        let dispatcher = RpcDispatcher::new(interrupt_tx, guidance_tx, response_tx, None, || {
+            default_state()
+        });
 
         // Mark loop as started
         dispatcher.mark_loop_started();
@@ -448,8 +501,9 @@ mod tests {
         let (guidance_tx, _) = mpsc::channel(10);
         let (response_tx, mut response_rx) = mpsc::channel(10);
 
-        let dispatcher =
-            RpcDispatcher::new(interrupt_tx, guidance_tx, response_tx, || default_state());
+        let dispatcher = RpcDispatcher::new(interrupt_tx, guidance_tx, response_tx, None, || {
+            default_state()
+        });
 
         // Simulate stdin with a get_state command
         let input = r#"{"type": "get_state", "id": "test-1"}"#;
@@ -487,8 +541,9 @@ mod tests {
         let (guidance_tx, _) = mpsc::channel(10);
         let (response_tx, mut response_rx) = mpsc::channel(10);
 
-        let dispatcher =
-            RpcDispatcher::new(interrupt_tx, guidance_tx, response_tx, || default_state());
+        let dispatcher = RpcDispatcher::new(interrupt_tx, guidance_tx, response_tx, None, || {
+            default_state()
+        });
 
         // Invalid JSON
         let input = r#"{"type": "nonexistent_command"}"#;
@@ -524,8 +579,9 @@ mod tests {
         let (guidance_tx, _) = mpsc::channel(10);
         let (response_tx, _response_rx) = mpsc::channel(10);
 
-        let dispatcher =
-            RpcDispatcher::new(interrupt_tx, guidance_tx, response_tx, || default_state());
+        let dispatcher = RpcDispatcher::new(interrupt_tx, guidance_tx, response_tx, None, || {
+            default_state()
+        });
 
         // Empty input = immediate EOF
         let reader = std::io::Cursor::new(Vec::<u8>::new());

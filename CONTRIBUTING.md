@@ -106,6 +106,7 @@ cargo test -p ralph-core smoke_runner
 # Run with coverage (local only — uses cargo-llvm-cov)
 just coverage          # Full HTML report → coverage/html/index.html
 just coverage-summary  # Quick terminal summary
+just coverage-badge-json  # Generate the Shields payload used by the README badge
 just coverage-open     # Generate and open in browser
 ```
 
@@ -115,6 +116,8 @@ just coverage-open     # Generate and open in browser
 
 Coverage runs locally only — it is intentionally not part of CI to keep PR feedback fast and cheap. We use `cargo-llvm-cov` (included in the devenv shell) which instruments the same compilation that `cargo test` already does, so there's no separate build penalty.
 
+The README badge is published automatically from GitHub Actions on pushes to `main` via GitHub Pages. Locally, you can generate the same Shields payload to inspect it before pushing.
+
 ```bash
 # Install manually if not using devenv
 rustup component add llvm-tools-preview
@@ -122,6 +125,9 @@ cargo install cargo-llvm-cov
 
 # Generate coverage
 just coverage
+
+# Generate the local badge payload that GitHub Pages serves in CI
+just coverage-badge-json
 ```
 
 ### Project Structure

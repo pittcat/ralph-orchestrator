@@ -175,6 +175,14 @@ impl LoopContext {
         self.ralph_dir().join("current-events")
     }
 
+    /// Path to the urgent-steer marker file.
+    ///
+    /// This file is created when `!` arrives during an active iteration so
+    /// `ralph emit` can block handoff until the current model turn has seen it.
+    pub fn urgent_steer_path(&self) -> PathBuf {
+        self.ralph_dir().join("urgent-steer.json")
+    }
+
     /// Path to the tasks JSONL file.
     ///
     /// Each loop has its own isolated tasks file.

@@ -1,58 +1,13 @@
 ---
 name: ralph-tools
-description: Use when managing runtime tasks or memories during Ralph orchestration runs
+description: Shared tool commands for interact, skill, and output format reference during Ralph orchestration
 metadata:
   internal: true
 ---
 
 # Ralph Tools
 
-Quick reference for `ralph tools task` and `ralph tools memory` commands used during orchestration.
-
-## Two Task Systems
-
-| System | Command | Purpose | Storage |
-|--------|---------|---------|---------|
-| **Runtime tasks** | `ralph tools task` | Track work items during runs | `.ralph/agent/tasks.jsonl` |
-| **Code tasks** | `ralph task` | Implementation planning | `tasks/*.code-task.md` |
-
-This skill covers **runtime tasks**. For code tasks, see `/code-task-generator`.
-
-## Task Commands
-
-```bash
-ralph tools task add "Title" -p 2 -d "description" --blocked-by id1,id2
-ralph tools task ensure "Title" --key spec:task-01 -p 2 -d "description" --blocked-by id1,id2
-ralph tools task list [--status open|in_progress|closed] [--format table|json|quiet]
-ralph tools task ready                    # Show unblocked tasks
-ralph tools task start <task-id>
-ralph tools task close <task-id>
-ralph tools task reopen <task-id>
-ralph tools task fail <task-id>
-ralph tools task show <task-id>
-```
-
-**Task ID format:** `task-{timestamp}-{4hex}` (e.g., `task-1737372000-a1b2`)
-
-**Task key:** optional stable key for idempotent orchestrator-managed tasks (for example `spec:task-01`)
-
-**Priority:** 1-5 (1 = highest, default 3)
-
-### Task Rules
-- One task = one testable unit of work (completable in 1-2 iterations)
-- Break large features into smaller tasks BEFORE starting implementation
-- On your first iteration, check `ralph tools task ready` — prior iterations may have created tasks
-- Use `task ensure --key ...` when a task has a stable identity and may be recreated across fresh-context iterations
-- Use `task start` when you begin active work on a task
-- ONLY close tasks after verification (tests pass, build succeeds)
-- Use `task reopen` when more work remains after a failed review/finalization pass
-- Use `task fail` when the task is blocked and cannot be completed in the current iteration
-
-### First thing every iteration
-```bash
-ralph tools task ready    # What's open? Pick one. Don't create duplicates.
-ralph tools memory search "area-name"   # If you're entering an unfamiliar area
-```
+Quick reference for shared `ralph tools` commands used during orchestration.
 
 ## Interact Commands
 
@@ -70,6 +25,24 @@ ralph tools skill load <name>
 ```
 
 List available skills or load a specific skill by name.
+
+## Wave Commands
+
+Dispatch multiple events as a wave for parallel hat execution:
+
+```bash
+ralph wave emit <topic> --payloads "item1" "item2" "item3"
+```
+
+Each payload becomes a separate event tagged with a shared `wave_id`. The loop runner
+detects wave events and spawns parallel backend instances (up to the hat's `concurrency` limit).
+
+**When to use:** When a hat's configuration has `concurrency > 1`, use wave dispatch
+to send N items for parallel processing instead of N sequential iterations.
+
+**Constraints:**
+- Cannot be used inside a wave worker (`RALPH_WAVE_WORKER=1` blocks it)
+- Wave workers emit results via `ralph emit`, not `ralph wave emit`
 
 ## Memory Commands
 
@@ -185,39 +158,4 @@ All commands support `--format`:
 - `quiet` - IDs only (for scripting)
 - `markdown` - Memory prime only
 
-## Common Workflows
-
-### Track dependent work
-```bash
-ralph tools task ensure "Setup auth" --key auth:setup -p 1
-# Returns: task-1737372000-a1b2
-
-ralph tools task ensure "Add user routes" --key auth:routes --blocked-by task-1737372000-a1b2
-ralph tools task ready  # Only shows unblocked tasks
-```
-
-### Store a discovery
-```bash
-ralph tools memory add "Parser requires snake_case keys" -t pattern --tags config,yaml
-```
-
-### Find relevant memories
-```bash
-ralph tools memory search "config" --tags yaml
-ralph tools memory prime --budget 1000 -t pattern  # For injection
-```
-
-### Memory examples
-```bash
-# Pattern: discovered codebase convention
-ralph tools memory add "All API handlers return Result<Json<T>, AppError>" -t pattern --tags api,error-handling
-
-# Decision: learned why something was chosen
-ralph tools memory add "Chose JSONL over SQLite: simpler, git-friendly, append-only" -t decision --tags storage,architecture
-
-# Fix: solved a recurring problem
-ralph tools memory add "cargo test hangs: kill orphan postgres from previous run" -t fix --tags testing,postgres
-
-# Context: project-specific knowledge
-ralph tools memory add "The /legacy folder is deprecated, use /v2 endpoints" -t context --tags api,migration
-```
+**NEVER use echo/cat to write tasks or memories** — always use CLI tools.

@@ -63,6 +63,11 @@ coverage:
 coverage-summary:
     cargo llvm-cov --all-features --workspace --summary-only
 
+# Generate the Shields endpoint payload used by the published README badge
+coverage-badge-json:
+    cargo llvm-cov --all-features --workspace --json --summary-only --output-path coverage/summary.json
+    python3 scripts/update_coverage_badge.py --summary coverage/summary.json --badge-json coverage/badge.json
+
 # Run coverage and open report in browser
 coverage-open: coverage
     open coverage/html/index.html 2>/dev/null || xdg-open coverage/html/index.html 2>/dev/null || echo "Open coverage/html/index.html manually"

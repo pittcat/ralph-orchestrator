@@ -36,10 +36,12 @@ pub enum Action {
     ShowHelp,
     /// Dismiss help overlay or cancel search
     DismissHelp,
-    /// Open guidance input for next iteration
+    /// Open guidance input for the next prompt boundary
     GuidanceNext,
-    /// Open guidance input for current iteration (urgent)
+    /// Open urgent steer input for the active iteration
     GuidanceNow,
+    /// Enter wave worker drill-down view
+    EnterWaveView,
     /// Key not mapped to any action
     None,
 }
@@ -82,6 +84,9 @@ pub fn map_key(key: KeyEvent) -> Action {
         // Guidance
         KeyCode::Char(':') => Action::GuidanceNext,
         KeyCode::Char('!') => Action::GuidanceNow,
+
+        // Wave view
+        KeyCode::Char('w') => Action::EnterWaveView,
 
         // Help
         KeyCode::Char('?') => Action::ShowHelp,

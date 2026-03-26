@@ -4,7 +4,7 @@
 
 use crate::config::CoreConfig;
 use crate::hat_registry::HatRegistry;
-use ralph_proto::Topic;
+use ralph_proto::{HatId, Topic};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -39,6 +39,10 @@ pub struct HatTopology {
 pub struct EventReceiver {
     pub name: String,
     pub description: String,
+    /// Hat ID for looking up config (e.g., concurrency settings).
+    pub hat_id: HatId,
+    /// Maximum concurrent wave instances for this hat (1 = sequential).
+    pub concurrency: u32,
 }
 
 /// Information about a hat for prompt generation.
@@ -96,6 +100,56 @@ impl HatInfo {
 
         Some(guide)
     }
+
+    /// Generates a Wave Dispatch section when downstream hats support parallel execution.
+    ///
+    /// Shows a table of wave-capable topics and usage instructions for `ralph wave emit`.
+    /// Returns empty string if no downstream hats have `concurrency > 1`.
+    pub fn wave_dispatch_section(&self) -> String {
+        // Collect wave-capable downstream topics
+        let mut wave_topics: Vec<(&str, &str, u32)> = Vec::new();
+        for pub_event in &self.publishes {
+            if let Some(receivers) = self.event_receivers.get(pub_event) {
+                for recv in receivers {
+                    if recv.concurrency > 1 {
+                        wave_topics.push((pub_event.as_str(), &recv.name, recv.concurrency));
+                    }
+                }
+            }
+        }
+
+        if wave_topics.is_empty() {
+            return String::new();
+        }
+
+        let mut section = String::from("### Wave Dispatch (Parallel Execution)\n\n");
+        section.push_str(
+            "Some downstream hats support parallel execution via waves. \
+             Use `ralph wave emit` to dispatch multiple items for concurrent processing.\n\n",
+        );
+
+        section.push_str("| Topic | Activates | Max Concurrent |\n");
+        section.push_str("|-------|-----------|----------------|\n");
+        for (topic, hat_name, concurrency) in &wave_topics {
+            section.push_str(&format!(
+                "| `{}` | {} | {} |\n",
+                topic, hat_name, concurrency
+            ));
+        }
+        section.push('\n');
+
+        // Usage example with the first wave topic
+        if let Some((topic, _, _)) = wave_topics.first() {
+            section.push_str("**Usage:**\n```bash\n");
+            section.push_str(&format!(
+                "ralph wave emit {} --payloads \"item1\" \"item2\" \"item3\"\n",
+                topic
+            ));
+            section.push_str("```\n\n");
+        }
+
+        section
+    }
 }
 
 impl HatTopology {
@@ -112,10 +166,17 @@ impl HatTopology {
                         let receivers: Vec<EventReceiver> = registry
                             .subscribers(pub_topic)
                             .into_iter()
-                            .filter(|h| h.id != hat.id) // Exclude self
-                            .map(|h| EventReceiver {
-                                name: h.name.clone(),
-                                description: h.description.clone(),
+                            .map(|h| {
+                                let concurrency = registry
+                                    .get_config(&h.id)
+                                    .map(|c| c.concurrency)
+                                    .unwrap_or(1);
+                                EventReceiver {
+                                    name: h.name.clone(),
+                                    description: h.description.clone(),
+                                    hat_id: h.id.clone(),
+                                    concurrency,
+                                }
                             })
                             .collect();
                         (pub_topic.as_str().to_string(), receivers)
@@ -414,31 +475,17 @@ Its content is auto-injected in `<scratchpad>` tags at the top of your context e
         // (see EventLoop::inject_memories_and_tools_skill)
         // TASK BREAKDOWN guidance moved into ralph-tools.md
 
-        // Add state management guidance
+        // Add state management guidance (tasks/memories descriptions now live in their respective skills)
         prompt.push_str(&format!(
             "### STATE MANAGEMENT\n\n\
-**Tasks** (`ralph tools task`) — What needs to be done:\n\
-- Work items, their status, priorities, and dependencies\n\
-- Source of truth for progress across iterations\n\
-- Auto-injected in `<ready-tasks>` tags at the top of your context\n\
-- Use `ensure` for stable/idempotent work items, `start` when you begin, `close` when verified, and `reopen`/`fail` when work must continue later\n\
-\n\
 **Scratchpad** (`{scratchpad}`) — Your thinking:\n\
 - Current understanding and reasoning\n\
 - Analysis notes, decisions, plan narrative\n\
 - NOT for checklists or status tracking\n\
 \n\
-**Memories** (`.ralph/agent/memories.md`) — Persistent learning:\n\
-- Codebase patterns and conventions\n\
-- Architectural decisions and rationale\n\
-- Recurring problem solutions\n\
-- Search before acting in unfamiliar areas; add durable learnings when they will help future runs\n\
-\n\
 **Context Files** (`.ralph/agent/*.md`) — Research artifacts:\n\
 - Analysis and temporary notes\n\
 - Read when relevant\n\
-\n\
-**Rule:** Work items go in tasks. Thinking goes in scratchpad. Learnings go in memories. Decisions with confidence <= 80 go in `.ralph/agent/decisions.md`.\n\
 \n\
 **Tool reliability rule:** Assume the workflow commands are available when the loop is already running and use the task-specific command you actually need.\n\
 The loop sets `$RALPH_BIN` to the current Ralph executable. Prefer `$RALPH_BIN emit ...` and `$RALPH_BIN tools ...` when you need a direct command form.\n\
@@ -455,8 +502,10 @@ Keep temporary artifacts where later steps can still inspect them, such as a rep
                 .filter_map(|e| e.ok())
                 .filter_map(|e| {
                     let path = e.path();
+                    let fname = path.file_name().and_then(|s| s.to_str());
                     if path.extension().and_then(|s| s.to_str()) == Some("md")
-                        && path.file_name().and_then(|s| s.to_str()) != Some("memories.md")
+                        && fname != Some("memories.md")
+                        && fname != Some("scratchpad.md")
                     {
                         path.file_name()
                             .and_then(|s| s.to_str())
@@ -715,6 +764,14 @@ You MUST continue until all tasks are `[x]` or `[~]`.
                 if let Some(guide) = hat_info.and_then(|info| info.event_publishing_guide()) {
                     section.push_str(&guide);
                     section.push('\n');
+                }
+
+                // Add Wave Dispatch section when downstream hats support concurrency > 1
+                if let Some(info) = hat_info {
+                    let wave_dispatch = info.wave_dispatch_section();
+                    if !wave_dispatch.is_empty() {
+                        section.push_str(&wave_dispatch);
+                    }
                 }
 
                 // Add Tool Restrictions section (prompt-level enforcement)
@@ -2259,8 +2316,8 @@ hats:
     }
 
     #[test]
-    fn test_event_publishing_guide_excludes_self() {
-        // If a hat subscribes to its own event, it should NOT be listed as receiver
+    fn test_event_publishing_guide_includes_self() {
+        // If a hat subscribes to its own event (self-loop), it should be listed as receiver
         let yaml = r#"
 hats:
   looper:
@@ -2279,10 +2336,50 @@ hats:
             prompt.contains("### Event Publishing Guide"),
             "Should include guide"
         );
-        // Self-reference should be excluded, so should fall back to Ralph
+        // Self-loop: looper publishes loop.continue and triggers on it
         assert!(
-            prompt.contains("`loop.continue` → Received by: Ralph (coordinates next steps)"),
-            "Self-subscription should be excluded, falling back to Ralph"
+            prompt.contains("`loop.continue` → Received by: Looper"),
+            "Self-loop event should show the hat itself as receiver"
+        );
+    }
+
+    #[test]
+    fn test_event_publishing_guide_self_loop_shows_self_as_receiver() {
+        // When a hat publishes an event that it also triggers on (self-loop),
+        // the guide should show the hat itself as the receiver, not "Ralph"
+        let yaml = r#"
+hats:
+  processor:
+    name: "Processor"
+    description: "Processes work with retry"
+    triggers: ["start", "process.retry"]
+    publishes: ["process.done", "process.retry"]
+  validator:
+    name: "Validator"
+    triggers: ["process.done"]
+    publishes: ["validate.pass"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = HatRegistry::from_config(&config);
+        let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
+
+        let processor = registry.get(&ralph_proto::HatId::new("processor")).unwrap();
+        let prompt = ralph.build_prompt("[start] Go", &[processor]);
+
+        // process.retry routes back to Processor itself — should say so
+        assert!(
+            prompt.contains("`process.retry` → Received by: Processor"),
+            "Self-loop event should show the hat itself as receiver, not Ralph. Got:\n{}",
+            prompt
+                .lines()
+                .filter(|l| l.contains("process.retry"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        // process.done routes to Validator — should still work
+        assert!(
+            prompt.contains("`process.done` → Received by: Validator"),
+            "Non-self event should still show correct receiver"
         );
     }
 

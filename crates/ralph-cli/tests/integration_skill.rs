@@ -61,7 +61,7 @@ fn test_skill_load_builtin() {
 
     let stdout = ralph_skill_ok(temp_path, &["load", "ralph-tools"]);
     assert!(stdout.contains("Ralph Tools"));
-    assert!(stdout.contains("ralph tools task"));
+    assert!(stdout.contains("ralph tools skill"));
 }
 
 #[test]

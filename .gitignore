@@ -77,6 +77,7 @@ pbcopy
 # Local configs
 .claude/settings.json
 .claude/*.local.md
+.claude/worktrees/
 .kiro/
 .envrc
 

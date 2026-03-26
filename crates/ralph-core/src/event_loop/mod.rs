@@ -40,6 +40,15 @@ pub struct ProcessedEvents {
     pub has_orphans: bool,
 }
 
+/// Result of processing events from JSONL with wave events partitioned out.
+#[derive(Debug)]
+pub struct ProcessedEventsWithWaves {
+    /// Normal event processing results.
+    pub processed: ProcessedEvents,
+    /// Wave events extracted before normal processing (have wave_id set).
+    pub wave_events: Vec<crate::event_reader::Event>,
+}
+
 /// Reason the event loop terminated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TerminationReason {
@@ -219,7 +228,7 @@ impl EventLoop {
         }
 
         // Build skill registry from config
-        let skill_registry = if config.skills.enabled {
+        let mut skill_registry = if config.skills.enabled {
             SkillRegistry::from_config(
                 &config.skills,
                 context.workspace(),
@@ -235,6 +244,14 @@ impl EventLoop {
         } else {
             SkillRegistry::new(Some(config.cli.backend.as_str()))
         };
+
+        // Remove task/memory skills from the index when their config is disabled
+        if !config.tasks.enabled {
+            skill_registry.remove("ralph-tools-tasks");
+        }
+        if !config.memories.enabled {
+            skill_registry.remove("ralph-tools-memories");
+        }
 
         let skill_index = if config.skills.enabled {
             skill_registry.build_index(None)
@@ -313,7 +330,7 @@ impl EventLoop {
 
         // Build skill registry from config
         let workspace_root = std::path::Path::new(".");
-        let skill_registry = if config.skills.enabled {
+        let mut skill_registry = if config.skills.enabled {
             SkillRegistry::from_config(
                 &config.skills,
                 workspace_root,
@@ -329,6 +346,14 @@ impl EventLoop {
         } else {
             SkillRegistry::new(Some(config.cli.backend.as_str()))
         };
+
+        // Remove task/memory skills from the index when their config is disabled
+        if !config.tasks.enabled {
+            skill_registry.remove("ralph-tools-tasks");
+        }
+        if !config.memories.enabled {
+            skill_registry.remove("ralph-tools-memories");
+        }
 
         let skill_index = if config.skills.enabled {
             skill_registry.build_index(None)
@@ -393,8 +418,15 @@ impl EventLoop {
             .unwrap_or_else(|| PathBuf::from(".ralph/agent/tasks.jsonl"))
     }
 
-    /// Returns the scratchpad path based on loop context or config.
+    /// Returns the scratchpad path based on config and loop context.
+    ///
+    /// If the config specifies a custom (non-default) scratchpad path, that
+    /// always wins. Otherwise, the loop context path is used for worktree
+    /// isolation, falling back to the config default.
     fn scratchpad_path(&self) -> PathBuf {
+        if self.config.core.scratchpad != ".ralph/agent/scratchpad.md" {
+            return PathBuf::from(&self.config.core.scratchpad);
+        }
         self.loop_context
             .as_ref()
             .map(|ctx| ctx.scratchpad_path())
@@ -404,6 +436,16 @@ impl EventLoop {
     /// Returns the current loop state.
     pub fn state(&self) -> &LoopState {
         &self.state
+    }
+
+    /// Resets the stale-loop topic counter.
+    ///
+    /// Call after processing wave results — multiple events with the same topic
+    /// (e.g. `review.done` from parallel workers) are expected and should not
+    /// trigger the stale loop detector.
+    pub fn reset_stale_topic_counter(&mut self) {
+        self.state.consecutive_same_signature = 0;
+        self.state.last_emitted_signature = None;
     }
 
     /// Returns the configuration.
@@ -735,6 +777,22 @@ impl EventLoop {
     /// want to artificially delay the response to a human interaction.
     pub fn has_pending_human_events(&self) -> bool {
         self.bus.has_human_pending()
+    }
+
+    /// Injects `human.guidance` events directly into the in-memory bus.
+    ///
+    /// This is used for local TUI/RPC guidance so the next prompt boundary
+    /// sees the message immediately without waiting for a JSONL reread.
+    pub fn inject_human_guidance<I, S>(&mut self, messages: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for message in messages {
+            let event = Event::new("human.guidance", message.into());
+            self.state.record_event(&event);
+            self.bus.publish(event);
+        }
     }
 
     /// Returns whether unread JSONL events include any semantic `plan.*` topics.
@@ -1160,20 +1218,47 @@ impl EventLoop {
             }
         }
 
-        // Inject the ralph-tools skill when either memories or tasks are enabled
-        if memories_config.enabled || self.config.tasks.enabled {
-            if let Some(skill) = self.skill_registry.get("ralph-tools") {
-                if !prefix.is_empty() {
-                    prefix.push_str("\n\n");
-                }
-                prefix.push_str(&format!(
-                    "<ralph-tools-skill>\n{}\n</ralph-tools-skill>",
-                    skill.content.trim()
-                ));
-                debug!("Injected ralph-tools skill from registry");
-            } else {
-                debug!("ralph-tools skill not found in registry - skill content not injected");
+        // Inject ralph-tools skills conditionally based on config
+        let tasks_enabled = self.config.tasks.enabled;
+
+        // Base skill (shared commands) when either memories or tasks are enabled
+        if (memories_config.enabled || tasks_enabled)
+            && let Some(skill) = self.skill_registry.get("ralph-tools")
+        {
+            if !prefix.is_empty() {
+                prefix.push_str("\n\n");
             }
+            prefix.push_str(&format!(
+                "<ralph-tools-skill>\n{}\n</ralph-tools-skill>",
+                skill.content.trim()
+            ));
+            debug!("Injected ralph-tools skill from registry");
+        }
+
+        // Tasks skill — only when tasks are enabled
+        if tasks_enabled && let Some(skill) = self.skill_registry.get("ralph-tools-tasks") {
+            if !prefix.is_empty() {
+                prefix.push_str("\n\n");
+            }
+            prefix.push_str(&format!(
+                "<ralph-tools-tasks-skill>\n{}\n</ralph-tools-tasks-skill>",
+                skill.content.trim()
+            ));
+            debug!("Injected ralph-tools-tasks skill from registry");
+        }
+
+        // Memories skill — only when memories are enabled
+        if memories_config.enabled
+            && let Some(skill) = self.skill_registry.get("ralph-tools-memories")
+        {
+            if !prefix.is_empty() {
+                prefix.push_str("\n\n");
+            }
+            prefix.push_str(&format!(
+                "<ralph-tools-memories-skill>\n{}\n</ralph-tools-memories-skill>",
+                skill.content.trim()
+            ));
+            debug!("Injected ralph-tools-memories skill from registry");
         }
     }
 
@@ -1198,11 +1283,14 @@ impl EventLoop {
         }
     }
 
-    /// Injects any user-configured auto-inject skills (excluding built-in ralph-tools/robot-interaction).
+    /// Injects any user-configured auto-inject skills (excluding built-in skills handled separately).
     fn inject_custom_auto_skills(&self, prefix: &mut String) {
         for skill in self.skill_registry.auto_inject_skills(None) {
             // Skip built-in skills handled above
-            if skill.name == "ralph-tools" || skill.name == "robot-interaction" {
+            if matches!(
+                skill.name.as_str(),
+                "ralph-tools" | "ralph-tools-tasks" | "ralph-tools-memories" | "robot-interaction"
+            ) {
                 continue;
             }
 
@@ -1425,15 +1513,39 @@ impl EventLoop {
     }
 
     fn determine_active_hat_ids(&self, events: &[Event]) -> Vec<HatId> {
-        let mut active_hat_ids = Vec::new();
-        for event in self.effective_regular_events(events) {
-            if let Some(active_hat_id) = self.resolve_active_hat_id_for_event(event)
-                && !active_hat_ids.iter().any(|id| id == &active_hat_id)
+        let mut entrypoint_hat_ids = Vec::new();
+        let mut progressed_hat_ids = Vec::new();
+        for event in events {
+            // Prefer direct event target over topic-based lookup
+            let hat_id = if let Some(target) = &event.target
+                && self.registry.get(target).is_some()
             {
-                active_hat_ids.push(active_hat_id);
+                target.clone()
+            } else if let Some(hat) = self.registry.get_for_topic(event.topic.as_str()) {
+                hat.id.clone()
+            } else {
+                continue;
+            };
+
+            let list = if self.is_entrypoint_topic(event.topic.as_str()) {
+                &mut entrypoint_hat_ids
+            } else {
+                &mut progressed_hat_ids
+            };
+            if !list.iter().any(|id| id == &hat_id) {
+                list.push(hat_id);
             }
         }
-        active_hat_ids
+        // Prefer progressed hats over entrypoint hats. Entrypoint events
+        // (starting_event, task.start, task.resume) linger in the bus after
+        // the first hat runs. Including them would re-activate the first hat
+        // alongside downstream hats, confusing the agent with multiple hat
+        // instructions when only the downstream hat should run.
+        if progressed_hat_ids.is_empty() {
+            entrypoint_hat_ids
+        } else {
+            progressed_hat_ids
+        }
     }
 
     fn effective_regular_events<'a>(&self, events: &'a [Event]) -> Vec<&'a Event> {
@@ -1448,20 +1560,15 @@ impl EventLoop {
             .collect()
     }
 
-    fn resolve_active_hat_id_for_event(&self, event: &Event) -> Option<HatId> {
-        if let Some(target) = &event.target
-            && self.registry.get(target).is_some()
-        {
-            return Some(target.clone());
-        }
-
-        self.registry
-            .get_for_topic(event.topic.as_str())
-            .map(|hat| hat.id.clone())
-    }
-
     fn is_kickoff_or_recovery_event(topic: &str) -> bool {
         topic == "task.start" || topic == "task.resume" || topic.strip_suffix(".start").is_some()
+    }
+
+    fn is_entrypoint_topic(&self, topic: &str) -> bool {
+        topic == "task.start"
+            || topic == "task.resume"
+            || topic.strip_suffix(".start").is_some()
+            || self.config.event_loop.starting_event.as_deref() == Some(topic)
     }
 
     fn peek_pending_regular_events(&self) -> Vec<Event> {
@@ -2019,7 +2126,18 @@ impl EventLoop {
     /// handle.
     pub fn process_events_from_jsonl(&mut self) -> std::io::Result<ProcessedEvents> {
         let result = self.event_reader.read_new_events()?;
+        self.process_parse_result(result)
+    }
 
+    /// Inner event processing that operates on an already-parsed `ParseResult`.
+    ///
+    /// This is the single source of truth for event validation, backpressure,
+    /// scope enforcement, and bus publishing. Both `process_events_from_jsonl`
+    /// and `process_events_from_jsonl_with_waves` delegate to this method.
+    fn process_parse_result(
+        &mut self,
+        result: crate::event_reader::ParseResult,
+    ) -> std::io::Result<ProcessedEvents> {
         // Handle malformed lines with backpressure
         for malformed in &result.malformed {
             let payload = format!(
@@ -2210,8 +2328,10 @@ impl EventLoop {
                         "Missing backpressure evidence. Include 'tests: pass', 'lint: pass', 'typecheck: pass', 'audit: pass', 'coverage: pass', 'complexity: <score>', 'duplication: pass', 'performance: pass' (optional), 'specs: pass' (optional) in build.done payload.",
                     ));
                 }
-            } else if event.topic == "review.done" {
-                // Validate review.done events have verification evidence
+            } else if event.topic == "review.done" && !event.is_wave_event() {
+                // Validate review.done events have verification evidence.
+                // Wave worker events skip this — wave reviews are read-only
+                // and don't run tests/builds.
                 if let Some(evidence) = EventParser::parse_review_evidence(&payload) {
                     if evidence.is_verified() {
                         validated_events.push(Event::new(event.topic.as_str(), &payload));
@@ -2581,6 +2701,55 @@ impl EventLoop {
             had_plan_events,
             human_interact_context,
             has_orphans,
+        })
+    }
+
+    /// Process events from JSONL, partitioning wave events from regular events.
+    ///
+    /// Wave events (those with `wave_id` set and targeting a concurrent hat) are
+    /// extracted and returned separately. Regular events go through the full
+    /// backpressure pipeline via `process_parse_result`.
+    pub fn process_events_from_jsonl_with_waves(
+        &mut self,
+    ) -> std::io::Result<ProcessedEventsWithWaves> {
+        let result = self.event_reader.read_new_events()?;
+
+        // Partition: wave dispatch events vs regular events.
+        // Only events that target a concurrent hat (concurrency > 1) are wave dispatches.
+        // Wave *results* (e.g. review.done) have wave_id set but should be treated as
+        // regular events so they reach the bus and trigger downstream hats (e.g. aggregator).
+        //
+        // Uses find_by_trigger + get_config — the same resolution path as
+        // detect_wave_events — to ensure partition and detection agree.
+        let (wave_events, regular_events): (Vec<_>, Vec<_>) =
+            result.events.into_iter().partition(|e| {
+                e.wave_id.is_some()
+                    && self
+                        .registry
+                        .find_by_trigger(e.topic.as_str())
+                        .and_then(|hat_id| self.registry.get_config(hat_id))
+                        .is_some_and(|hat_config| hat_config.concurrency > 1)
+            });
+
+        if !wave_events.is_empty() {
+            debug!(
+                wave_count = wave_events.len(),
+                regular_count = regular_events.len(),
+                "Partitioned wave events from regular events"
+            );
+        }
+
+        // Delegate regular events to the full pipeline (backpressure, scope
+        // enforcement, human.interact, plan detection, etc.)
+        let regular_result = crate::event_reader::ParseResult {
+            events: regular_events,
+            malformed: result.malformed,
+        };
+        let processed = self.process_parse_result(regular_result)?;
+
+        Ok(ProcessedEventsWithWaves {
+            processed,
+            wave_events,
         })
     }
 

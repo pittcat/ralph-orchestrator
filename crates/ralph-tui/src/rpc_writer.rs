@@ -30,8 +30,8 @@ impl<W: AsyncWrite + Unpin + Send> RpcWriter<W> {
 
     /// Sends a guidance message for the next iteration.
     ///
-    /// The subprocess will queue this guidance and inject it at the start
-    /// of the next iteration.
+    /// The subprocess will queue this guidance and inject it at the next
+    /// prompt boundary.
     pub async fn send_guidance(&self, message: &str) -> std::io::Result<()> {
         let cmd = RpcCommand::Guidance {
             id: None,
@@ -42,8 +42,10 @@ impl<W: AsyncWrite + Unpin + Send> RpcWriter<W> {
 
     /// Sends a steer message for immediate injection.
     ///
-    /// The subprocess will attempt to inject this guidance into the
-    /// currently running iteration.
+    /// The subprocess will persist urgent steer immediately so `ralph emit`
+    /// cannot hand off before the current model turn has seen the feedback.
+    /// The guidance also appears at the next prompt boundary if a new prompt
+    /// must be built.
     pub async fn send_steer(&self, message: &str) -> std::io::Result<()> {
         let cmd = RpcCommand::Steer {
             id: None,

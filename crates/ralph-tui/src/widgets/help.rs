@@ -66,11 +66,28 @@ pub fn render(f: &mut Frame, area: Rect) {
         )),
         Line::from(vec![
             Span::styled("  :", Style::default().fg(Color::Cyan)),
-            Span::raw("      Send guidance (next iteration)"),
+            Span::raw("      Send guidance (next prompt)"),
         ]),
         Line::from(vec![
             Span::styled("  !", Style::default().fg(Color::Cyan)),
-            Span::raw("      Send guidance (now, current iteration)"),
+            Span::raw("      Urgent steer (blocks handoff until seen)"),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Wave Workers:",
+            Style::default().fg(Color::Yellow),
+        )),
+        Line::from(vec![
+            Span::styled("  w", Style::default().fg(Color::Cyan)),
+            Span::raw("      Enter wave worker view"),
+        ]),
+        Line::from(vec![
+            Span::styled("  h/l", Style::default().fg(Color::Cyan)),
+            Span::raw("    Cycle through workers"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Esc", Style::default().fg(Color::Cyan)),
+            Span::raw("    Exit wave view"),
         ]),
         Line::from(""),
         Line::from(Span::styled("Other:", Style::default().fg(Color::Yellow))),

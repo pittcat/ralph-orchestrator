@@ -34,13 +34,44 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install Rust toolchain
+        if: github.event_name != 'pull_request'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache cargo
+        if: github.event_name != 'pull_request'
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install coverage dependencies
+        if: github.event_name != 'pull_request'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
+          cargo install cargo-llvm-cov --locked
+
+      - name: Build ralph binary for e2e coverage tests
+        if: github.event_name != 'pull_request'
+        run: |
+          cargo build -p ralph-cli --bin ralph
+          echo "$GITHUB_WORKSPACE/target/debug" >> "$GITHUB_PATH"
+
       - name: Install dependencies
         run: |
           pip install --upgrade pip
           pip install mkdocs mkdocs-material mkdocs-material-extensions pymdown-extensions mkdocs-minify-plugin mkdocs-llmstxt==0.5.0
 
+      - name: Generate coverage summary
+        if: github.event_name != 'pull_request'
+        run: cargo llvm-cov --all-features --workspace --json --summary-only --output-path coverage/summary.json
+
       - name: Build documentation
         run: mkdocs build --strict --verbose
+
+      - name: Write coverage badge payload
+        if: github.event_name != 'pull_request'
+        run: python3 scripts/update_coverage_badge.py --summary coverage/summary.json --badge-json site/badges/coverage.json
 
       - name: Validate llms.txt structure
         run: python scripts/validate_llms_txt.py site/llms.txt

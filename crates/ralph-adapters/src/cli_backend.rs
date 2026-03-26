@@ -100,12 +100,13 @@ impl CliBackend {
 
     /// Creates the Claude backend.
     ///
-    /// Uses `-p` flag for headless/print mode execution. This runs Claude
-    /// in non-interactive mode where it executes the prompt and exits.
-    /// For interactive mode, stdin is used instead (handled in build_command).
+    /// Uses `--print` for headless execution and sends the prompt over stdin.
+    /// This avoids Claude's large-prompt `-p` behavior, which can stall before
+    /// emitting any stream output when asked to read the real prompt from an
+    /// intermediate temp-file instruction.
     ///
     /// Emits `--output-format stream-json` for NDJSON streaming output.
-    /// Note: `--verbose` is required when using `--output-format stream-json` with `-p`.
+    /// Note: `--verbose` is required when using `--output-format stream-json`.
     pub fn claude() -> Self {
         Self {
             command: "claude".to_string(),
@@ -114,10 +115,11 @@ impl CliBackend {
                 "--verbose".to_string(),
                 "--output-format".to_string(),
                 "stream-json".to_string(),
+                "--print".to_string(),
                 "--disallowedTools=TodoWrite,TaskCreate,TaskUpdate,TaskList,TaskGet".to_string(),
             ],
-            prompt_mode: PromptMode::Arg,
-            prompt_flag: Some("-p".to_string()),
+            prompt_mode: PromptMode::Stdin,
+            prompt_flag: None,
             output_format: OutputFormat::StreamJson,
             env_vars: vec![],
         }
@@ -674,7 +676,7 @@ impl CliBackend {
             args = self.filter_args_for_interactive(args);
         }
 
-        // Handle prompt passing: Roo uses --prompt-file, Claude uses temp file for large prompts
+        // Handle prompt passing: Roo uses --prompt-file, all others use temp file for large prompts
         let (stdin_input, temp_file) = match self.prompt_mode {
             PromptMode::Arg => {
                 // Roo headless: always use --prompt-file for all prompts
@@ -682,11 +684,8 @@ impl CliBackend {
                 if self.command == "roo" && args.contains(&"--print".to_string()) {
                     Self::build_roo_prompt_file(&mut args, prompt)
                 } else {
-                    // Handle large prompts for Claude (>7000 chars)
-                    let (prompt_text, temp_file) = if self.command == "claude"
-                        && prompt.len() > 7000
-                    {
-                        // Write to temp file and instruct Claude to read it
+                    // Use temp file for large prompts (>7000 chars) to avoid shell ARG_MAX limits
+                    let (prompt_text, temp_file) = if prompt.len() > 7000 {
                         match NamedTempFile::new() {
                             Ok(mut file) => {
                                 if let Err(e) = file.write_all(prompt.as_bytes()) {
@@ -751,11 +750,12 @@ impl CliBackend {
                 .into_iter()
                 .filter(|a| a != "--allow-all-tools")
                 .collect(),
+            "claude" => args.into_iter().filter(|a| a != "--print").collect(),
             "roo" => args
                 .into_iter()
                 .filter(|a| a != "--print" && a != "--ephemeral")
                 .collect(),
-            _ => args, // claude, gemini, opencode unchanged
+            _ => args, // gemini, opencode unchanged
         }
     }
 
@@ -805,7 +805,7 @@ mod tests {
     #[test]
     fn test_claude_backend() {
         let backend = CliBackend::claude();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
+        let (cmd, args, stdin, temp) = backend.build_command("test prompt", false);
 
         assert_eq!(cmd, "claude");
         assert_eq!(
@@ -815,12 +815,12 @@ mod tests {
                 "--verbose",
                 "--output-format",
                 "stream-json",
+                "--print",
                 "--disallowedTools=TodoWrite,TaskCreate,TaskUpdate,TaskList,TaskGet",
-                "-p",
-                "test prompt"
             ]
         );
-        assert!(stdin.is_none()); // Uses -p flag, not stdin
+        assert_eq!(stdin, Some("test prompt".to_string()));
+        assert!(temp.is_none());
         assert_eq!(backend.output_format, OutputFormat::StreamJson);
     }
 
@@ -847,29 +847,26 @@ mod tests {
     }
 
     #[test]
-    fn test_claude_large_prompt_uses_temp_file() {
-        // With -p mode, large prompts (>7000 chars) use temp file to avoid CLI issues
+    fn test_claude_large_prompt_uses_stdin_not_temp_file() {
         let backend = CliBackend::claude();
         let large_prompt = "x".repeat(7001);
-        let (cmd, args, _stdin, temp) = backend.build_command(&large_prompt, false);
+        let (cmd, args, stdin, temp) = backend.build_command(&large_prompt, false);
 
         assert_eq!(cmd, "claude");
-        // Should have temp file for large prompts
-        assert!(temp.is_some());
-        // Args should contain instruction to read from temp file
-        assert!(args.iter().any(|a| a.contains("Please read and execute")));
+        assert!(args.contains(&"--print".to_string()));
+        assert_eq!(stdin, Some(large_prompt));
+        assert!(temp.is_none());
     }
 
     #[test]
     fn test_non_claude_large_prompt() {
         let backend = CliBackend::kiro();
         let large_prompt = "x".repeat(7001);
-        let (cmd, args, stdin, temp) = backend.build_command(&large_prompt, false);
+        let (cmd, args, _stdin, temp) = backend.build_command(&large_prompt, false);
 
         assert_eq!(cmd, "kiro-cli");
-        assert_eq!(args[3], large_prompt);
-        assert!(stdin.is_none());
-        assert!(temp.is_none());
+        assert!(temp.is_some());
+        assert!(args.iter().any(|a| a.contains("Please read and execute")));
     }
 
     #[test]
@@ -908,6 +905,17 @@ mod tests {
         assert_eq!(cmd, "codex");
         assert_eq!(args, vec!["exec", "--yolo", "test prompt"]);
         assert!(stdin.is_none());
+    }
+
+    #[test]
+    fn test_codex_large_prompt_uses_temp_file() {
+        let backend = CliBackend::codex();
+        let large_prompt = "x".repeat(7001);
+        let (cmd, args, _stdin, temp) = backend.build_command(&large_prompt, false);
+
+        assert_eq!(cmd, "codex");
+        assert!(temp.is_some());
+        assert!(args.iter().any(|a| a.contains("Please read and execute")));
     }
 
     #[test]
@@ -955,7 +963,6 @@ mod tests {
 
     #[test]
     fn test_from_config() {
-        // Claude backend uses -p arg mode for headless execution
         let config = CliConfig {
             backend: "claude".to_string(),
             command: None,
@@ -965,8 +972,9 @@ mod tests {
         let backend = CliBackend::from_config(&config).unwrap();
 
         assert_eq!(backend.command, "claude");
-        assert_eq!(backend.prompt_mode, PromptMode::Arg);
-        assert_eq!(backend.prompt_flag, Some("-p".to_string()));
+        assert_eq!(backend.prompt_mode, PromptMode::Stdin);
+        assert_eq!(backend.prompt_flag, None);
+        assert!(backend.args.contains(&"--print".to_string()));
     }
 
     #[test]
@@ -980,7 +988,9 @@ mod tests {
         let backend = CliBackend::from_config(&config).unwrap();
 
         assert_eq!(backend.command, "my-custom-claude");
-        assert_eq!(backend.prompt_flag, Some("-p".to_string()));
+        assert_eq!(backend.prompt_flag, None);
+        assert_eq!(backend.prompt_mode, PromptMode::Stdin);
+        assert!(backend.args.contains(&"--print".to_string()));
         assert_eq!(backend.output_format, OutputFormat::StreamJson);
     }
 
@@ -1029,29 +1039,27 @@ mod tests {
     }
 
     #[test]
-    fn test_claude_interactive_mode_unchanged() {
+    fn test_claude_interactive_mode_omits_print() {
         let backend = CliBackend::claude();
         let (cmd, args_auto, stdin_auto, _) = backend.build_command("test prompt", false);
         let (_, args_interactive, stdin_interactive, _) =
             backend.build_command("test prompt", true);
 
         assert_eq!(cmd, "claude");
-        assert_eq!(args_auto, args_interactive);
+        assert!(args_auto.contains(&"--print".to_string()));
+        assert!(!args_interactive.contains(&"--print".to_string()));
         assert_eq!(
-            args_auto,
+            args_interactive,
             vec![
                 "--dangerously-skip-permissions",
                 "--verbose",
                 "--output-format",
                 "stream-json",
                 "--disallowedTools=TodoWrite,TaskCreate,TaskUpdate,TaskList,TaskGet",
-                "-p",
-                "test prompt"
             ]
         );
-        // -p mode is used for both auto and interactive
-        assert!(stdin_auto.is_none());
-        assert!(stdin_interactive.is_none());
+        assert_eq!(stdin_auto, Some("test prompt".to_string()));
+        assert_eq!(stdin_interactive, Some("test prompt".to_string()));
     }
 
     #[test]
@@ -1184,7 +1192,9 @@ mod tests {
     fn test_from_name_claude() {
         let backend = CliBackend::from_name("claude").unwrap();
         assert_eq!(backend.command, "claude");
-        assert_eq!(backend.prompt_flag, Some("-p".to_string()));
+        assert_eq!(backend.prompt_mode, PromptMode::Stdin);
+        assert_eq!(backend.prompt_flag, None);
+        assert!(backend.args.contains(&"--print".to_string()));
     }
 
     #[test]
@@ -1616,16 +1626,14 @@ mod tests {
     }
 
     #[test]
-    fn test_pi_large_prompt_no_temp_file() {
-        // Pi should NOT use temp files (only Claude does)
+    fn test_pi_large_prompt_uses_temp_file() {
         let backend = CliBackend::pi();
         let large_prompt = "x".repeat(7001);
         let (cmd, args, _stdin, temp) = backend.build_command(&large_prompt, false);
 
         assert_eq!(cmd, "pi");
-        assert!(temp.is_none());
-        // Prompt should be passed directly as positional arg
-        assert!(args.last().unwrap().len() > 7000);
+        assert!(temp.is_some());
+        assert!(args.iter().any(|a| a.contains("Please read and execute")));
     }
 
     #[test]
