@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
+use ralph_core::platform::process::{kill_process_tree, process_exists};
 use ralph_core::worktree::{list_ralph_worktrees, remove_worktree};
 use ralph_core::{
     LoopRegistry, MergeButtonState, MergeQueue, MergeState, SuspendStateStore, merge_button_state,
@@ -226,20 +227,7 @@ fn get_merge_button_state(args: MergeButtonStateArgs) -> Result<()> {
 
 /// Check if a process is alive.
 fn is_process_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        use nix::sys::signal::kill;
-        use nix::unistd::Pid;
-
-        // Signal 0 checks if process exists without sending a signal
-        kill(Pid::from_raw(pid as i32), None).is_ok()
-    }
-
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        false
-    }
+    process_exists(pid)
 }
 
 /// Format duration as relative age (e.g., "5m", "2h", "1d").
@@ -759,43 +747,23 @@ fn stop_loop(args: StopArgs) -> Result<()> {
         let registry = LoopRegistry::new(&cwd);
         if let Ok(Some(entry)) = registry.get(&loop_id) {
             if is_process_alive(entry.pid) {
-                #[cfg(unix)]
-                {
-                    use nix::sys::signal::{Signal, kill};
-                    use nix::unistd::Pid;
-
-                    let signal = if args.force {
-                        Signal::SIGKILL
-                    } else {
-                        Signal::SIGTERM
-                    };
-                    println!(
-                        "Worktree gone. Sending {} to orphan loop '{}' (PID {})...",
-                        if args.force { "SIGKILL" } else { "SIGTERM" },
-                        loop_id,
-                        entry.pid
-                    );
-                    kill(Pid::from_raw(entry.pid as i32), signal)
-                        .context("Failed to send signal to orphan loop")?;
-                }
-                #[cfg(not(unix))]
-                {
-                    bail!("Signal sending not supported on this platform");
-                }
+                println!(
+                    "Worktree gone. Killing orphan loop '{}' (PID {})...",
+                    loop_id, entry.pid
+                );
+                kill_process_tree(entry.pid).context("Failed to kill orphan loop")?;
 
                 let wait_timeout = orphan_stop_wait_timeout(args.force);
                 if !wait_for_process_exit(entry.pid, wait_timeout) {
-                    let signal_name = if args.force { "SIGKILL" } else { "SIGTERM" };
                     let force_hint = if args.force {
                         ""
                     } else {
                         " Try `ralph loops stop <id> --force`."
                     };
                     bail!(
-                        "Loop '{}' is still running (PID {}) after {} (waited {}ms). Keeping orphan entry for visibility.{}",
+                        "Loop '{}' is still running (PID {}) after kill (waited {}ms). Keeping orphan entry for visibility.{}",
                         loop_id,
                         entry.pid,
-                        signal_name,
                         wait_timeout.as_millis(),
                         force_hint
                     );
@@ -823,25 +791,10 @@ fn stop_loop(args: StopArgs) -> Result<()> {
     }
 
     if args.force {
-        #[cfg(unix)]
-        {
-            use nix::sys::signal::{Signal, kill};
-            use nix::unistd::Pid;
-
-            println!(
-                "Sending SIGKILL to loop '{}' (PID {})...",
-                loop_id, metadata.pid
-            );
-            kill(Pid::from_raw(metadata.pid as i32), Signal::SIGKILL)
-                .context("Failed to send SIGKILL")?;
-            println!("Signal sent.");
-            return Ok(());
-        }
-
-        #[cfg(not(unix))]
-        {
-            bail!("--force is only supported on Unix systems");
-        }
+        println!("Killing loop '{}' (PID {})...", loop_id, metadata.pid);
+        kill_process_tree(metadata.pid).context("Failed to kill loop")?;
+        println!("Loop killed.");
+        return Ok(());
     }
 
     let stop_path = target_root.join(".ralph/stop-requested");
@@ -1356,7 +1309,6 @@ mod tests {
         assert_eq!(format_age(chrono::Duration::seconds(86400)), "1d");
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_is_process_alive_current_pid() {
         let pid = std::process::id();
@@ -1750,7 +1702,6 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_stop_loop_writes_stop_requested_file() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
@@ -1769,7 +1720,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn test_stop_loop_orphan_keeps_registry_when_term_ignored() {
+    fn test_stop_loop_orphan_kills_and_cleans_up() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let _cwd = CwdGuard::set(temp_dir.path());
 
@@ -1789,19 +1740,25 @@ mod tests {
         entry.pid = child.id();
         registry.register(entry).expect("register loop");
 
-        let err = stop_loop(StopArgs {
+        stop_loop(StopArgs {
             loop_id: Some("loop-orphan-term-ignore".to_string()),
             force: false,
         })
-        .expect_err("stop should fail when orphan ignores SIGTERM");
+        .expect("stop should kill orphan even when it ignores SIGTERM");
 
-        assert!(err.to_string().contains("still running"));
+        // Give kill_process_tree a moment to deliver SIGKILL
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        assert!(
+            !is_process_alive(child.id()),
+            "orphan process should be killed"
+        );
         assert!(
             registry
                 .get("loop-orphan-term-ignore")
                 .expect("registry get")
-                .is_some(),
-            "orphan entry should remain discoverable"
+                .is_none(),
+            "orphan entry should be cleaned up"
         );
 
         let _ = child.kill();
