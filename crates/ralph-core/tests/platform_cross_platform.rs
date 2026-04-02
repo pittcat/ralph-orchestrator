@@ -9,6 +9,9 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 // Import the platform module
+use ralph_core::platform::fs_links::{
+    create_dir_link, create_file_link, create_link, create_symlink_or_hardlink, remove_link,
+};
 use ralph_core::platform::locks::{FileLock, LockType, LockedFile};
 use ralph_core::platform::process::{
     get_process_info, kill_process_tree, list_child_processes, process_exists,
@@ -667,4 +670,248 @@ fn cross_platform_process_info_consistency() {
     // Clean up
     let _ = child.kill();
     let _ = child.wait();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FS Links Tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn cross_platform_fs_links_create_file_link() {
+    let temp_dir = TempDir::new().unwrap();
+    let target = temp_dir.path().join("target.txt");
+    let link = temp_dir.path().join("link.txt");
+
+    // Create target file
+    std::fs::write(&target, "Hello, World!").unwrap();
+
+    // Create link
+    create_file_link(&link, &target).unwrap();
+
+    // Verify link exists and points to same content
+    assert!(link.exists());
+    let content = std::fs::read_to_string(&link).unwrap();
+    assert_eq!(content, "Hello, World!");
+
+    // Verify it's the same file (modifications reflect)
+    std::fs::write(&target, "Modified content").unwrap();
+    let content = std::fs::read_to_string(&link).unwrap();
+    assert_eq!(content, "Modified content");
+}
+
+#[test]
+fn cross_platform_fs_links_create_dir_link() {
+    let temp_dir = TempDir::new().unwrap();
+    let target = temp_dir.path().join("target_dir");
+    let link = temp_dir.path().join("link_dir");
+
+    // Create target directory with a file
+    std::fs::create_dir(&target).unwrap();
+    let target_file = target.join("test.txt");
+    std::fs::write(&target_file, "directory content").unwrap();
+
+    // Create link
+    create_dir_link(&link, &target).unwrap();
+
+    // Verify link exists and accessible
+    assert!(link.exists());
+    let linked_file = link.join("test.txt");
+    assert!(linked_file.exists());
+    let content = std::fs::read_to_string(&linked_file).unwrap();
+    assert_eq!(content, "directory content");
+}
+
+#[test]
+fn cross_platform_fs_links_auto_detect_file() {
+    let temp_dir = TempDir::new().unwrap();
+    let target = temp_dir.path().join("target.txt");
+    let link = temp_dir.path().join("link.txt");
+
+    // Create target file
+    std::fs::write(&target, "file content").unwrap();
+
+    // Create link (auto-detects file)
+    create_link(&link, &target).unwrap();
+
+    // Verify link exists
+    assert!(link.exists());
+    assert!(!link.join("subfile").exists()); // Not a directory
+    let content = std::fs::read_to_string(&link).unwrap();
+    assert_eq!(content, "file content");
+}
+
+#[test]
+fn cross_platform_fs_links_auto_detect_directory() {
+    let temp_dir = TempDir::new().unwrap();
+    let target = temp_dir.path().join("target_dir");
+    let link = temp_dir.path().join("link_dir");
+
+    // Create target directory
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("file.txt"), "dir content").unwrap();
+
+    // Create link (auto-detects directory)
+    create_link(&link, &target).unwrap();
+
+    // Verify link exists and is directory
+    assert!(link.exists());
+    assert!(link.join("file.txt").exists());
+}
+
+#[test]
+fn cross_platform_fs_links_remove_link_preserves_target() {
+    let temp_dir = TempDir::new().unwrap();
+    let target = temp_dir.path().join("target.txt");
+    let link = temp_dir.path().join("link.txt");
+
+    // Create target and link
+    std::fs::write(&target, "preserved content").unwrap();
+    create_file_link(&link, &target).unwrap();
+
+    // Verify both exist
+    assert!(target.exists());
+    assert!(link.exists());
+
+    // Remove link
+    remove_link(&link).unwrap();
+
+    // Link should be gone but target should remain
+    assert!(!link.exists());
+    assert!(target.exists());
+
+    // Target content should be preserved
+    let content = std::fs::read_to_string(&target).unwrap();
+    assert_eq!(content, "preserved content");
+}
+
+#[test]
+fn cross_platform_fs_links_remove_directory_link() {
+    let temp_dir = TempDir::new().unwrap();
+    let target = temp_dir.path().join("target_dir");
+    let link = temp_dir.path().join("link_dir");
+
+    // Create target directory with content
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("file.txt"), "content").unwrap();
+
+    // Create and verify link
+    create_dir_link(&link, &target).unwrap();
+    assert!(link.exists());
+    assert!(target.join("file.txt").exists());
+
+    // Remove link
+    remove_link(&link).unwrap();
+
+    // Link should be gone but target and its content should remain
+    assert!(!link.exists());
+    assert!(target.exists());
+    assert!(target.join("file.txt").exists());
+}
+
+#[test]
+fn cross_platform_fs_links_remove_nonexistent() {
+    let temp_dir = TempDir::new().unwrap();
+    let nonexistent = temp_dir.path().join("nonexistent_link.txt");
+
+    // Removing a non-existent link should succeed (idempotent)
+    let result = remove_link(&nonexistent);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn cross_platform_fs_links_nested_directory() {
+    let temp_dir = TempDir::new().unwrap();
+    let target = temp_dir.path().join("a").join("b").join("target_dir");
+    let link = temp_dir
+        .path()
+        .join("links")
+        .join("nested")
+        .join("link_dir");
+
+    // Create target directory
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("file.txt"), "nested content").unwrap();
+
+    // Create link (should create parent directories)
+    create_link(&link, &target).unwrap();
+
+    // Verify link exists
+    assert!(link.exists());
+    assert!(link.join("file.txt").exists());
+}
+
+#[test]
+fn cross_platform_fs_links_multiple_links_same_target() {
+    let temp_dir = TempDir::new().unwrap();
+    let target = temp_dir.path().join("target.txt");
+    let link1 = temp_dir.path().join("link1.txt");
+    let link2 = temp_dir.path().join("link2.txt");
+    let link3 = temp_dir.path().join("link3.txt");
+
+    // Create target
+    std::fs::write(&target, "shared content").unwrap();
+
+    // Create multiple links
+    create_file_link(&link1, &target).unwrap();
+    create_file_link(&link2, &target).unwrap();
+    create_file_link(&link3, &target).unwrap();
+
+    // All links should have same content
+    assert_eq!(std::fs::read_to_string(&link1).unwrap(), "shared content");
+    assert_eq!(std::fs::read_to_string(&link2).unwrap(), "shared content");
+    assert_eq!(std::fs::read_to_string(&link3).unwrap(), "shared content");
+
+    // Modifying through one link affects all
+    std::fs::write(&link2, "modified through link2").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "modified through link2"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&link1).unwrap(),
+        "modified through link2"
+    );
+
+    // Removing one link doesn't affect others
+    remove_link(&link1).unwrap();
+    assert!(!link1.exists());
+    assert!(link2.exists());
+    assert!(link3.exists());
+    assert!(target.exists());
+}
+
+#[test]
+fn cross_platform_fs_links_symlink_or_hardlink_file() {
+    let temp_dir = TempDir::new().unwrap();
+    let target = temp_dir.path().join("target.txt");
+    let link = temp_dir.path().join("symlink_or_hardlink.txt");
+
+    // Create target file
+    std::fs::write(&target, "test content").unwrap();
+
+    // Try symlink_or_hardlink (tries symlink first, falls back to hard link)
+    create_symlink_or_hardlink(&link, &target).unwrap();
+
+    // Verify link works
+    assert!(link.exists());
+    let content = std::fs::read_to_string(&link).unwrap();
+    assert_eq!(content, "test content");
+}
+
+#[test]
+fn cross_platform_fs_links_modify_through_link() {
+    let temp_dir = TempDir::new().unwrap();
+    let target = temp_dir.path().join("target.txt");
+    let link = temp_dir.path().join("link.txt");
+
+    // Create target and link
+    std::fs::write(&target, "initial").unwrap();
+    create_file_link(&link, &target).unwrap();
+
+    // Modify through link
+    std::fs::write(&link, "modified through link").unwrap();
+
+    // Target should reflect change
+    let content = std::fs::read_to_string(&target).unwrap();
+    assert_eq!(content, "modified through link");
 }
