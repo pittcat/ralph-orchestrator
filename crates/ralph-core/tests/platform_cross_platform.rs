@@ -10,6 +10,9 @@ use tempfile::TempDir;
 
 // Import the platform module
 use ralph_core::platform::locks::{FileLock, LockType, LockedFile};
+use ralph_core::platform::process::{
+    get_process_info, kill_process_tree, list_child_processes, process_exists,
+};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // FileLock Tests
@@ -345,10 +348,7 @@ fn cross_platform_lock_path_nested_directory() {
     let file_path = nested_dir.join("file.txt");
 
     let lock = FileLock::new(&file_path).unwrap();
-    assert!(
-        !lock.lock_path().exists(),
-        "Lock file should not exist yet"
-    );
+    assert!(!lock.lock_path().exists(), "Lock file should not exist yet");
 
     // Acquiring the lock should create parent directories
     let _guard = lock.acquire(LockType::Exclusive).unwrap();
@@ -410,4 +410,261 @@ fn cross_platform_file_lock_stress_many_threads() {
         "Counter should have been incremented exactly {} times",
         NUM_THREADS * INCREMENTS_PER_THREAD
     );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Process Control Tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn cross_platform_process_exists_current() {
+    // Current process should exist
+    let current_pid = std::process::id();
+    assert!(process_exists(current_pid), "Current process should exist");
+}
+
+#[test]
+fn cross_platform_process_exists_invalid() {
+    // PID 0 should not exist on any platform
+    assert!(!process_exists(0), "PID 0 should not exist");
+
+    // Very high PID unlikely to exist
+    assert!(!process_exists(999_999), "Very high PID should not exist");
+}
+
+#[test]
+fn cross_platform_get_process_info_current() {
+    let current_pid = std::process::id();
+    let info = get_process_info(current_pid);
+
+    assert!(info.is_some(), "Should get info for current process");
+    let info = info.unwrap();
+    assert_eq!(info.pid, current_pid, "PID should match");
+    assert!(
+        info.name.is_some(),
+        "Process name should be available for current process"
+    );
+}
+
+#[test]
+fn cross_platform_get_process_info_nonexistent() {
+    let info = get_process_info(999_999);
+    assert!(
+        info.is_none(),
+        "Should return None for non-existent process"
+    );
+}
+
+#[test]
+fn cross_platform_process_spawn_and_check() {
+    // Spawn a child process that will exist long enough for us to check it
+    let mut child = std::process::Command::new("sleep")
+        .arg("10")
+        .spawn()
+        .expect("Failed to spawn child process");
+
+    let child_pid = child.id();
+
+    // Give the process a moment to start
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    // Process should exist
+    assert!(
+        process_exists(child_pid),
+        "Child process should exist after spawning"
+    );
+
+    // Get process info
+    let info = get_process_info(child_pid);
+    assert!(info.is_some(), "Should get info for child process");
+    let info = info.unwrap();
+    assert_eq!(info.pid, child_pid);
+
+    // Clean up
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn cross_platform_list_children_spawned() {
+    // Spawn a child process
+    let mut child = std::process::Command::new("sleep")
+        .arg("10")
+        .spawn()
+        .expect("Failed to spawn child process");
+
+    let child_pid = child.id();
+    let parent_pid = std::process::id();
+
+    // Give the process a moment to start
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    // List children of current process
+    let children = list_child_processes(parent_pid);
+
+    // Should find our spawned child
+    let found = children.iter().any(|c| c.pid == child_pid);
+    assert!(found, "Should find spawned child in children list");
+
+    // Verify parent relationship
+    let child_info = children.iter().find(|c| c.pid == child_pid);
+    if let Some(info) = child_info {
+        assert_eq!(
+            info.parent_pid,
+            Some(parent_pid),
+            "Child should have correct parent PID"
+        );
+    }
+
+    // Clean up
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn cross_platform_kill_process_tree_single() {
+    // Spawn a child process
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("Failed to spawn child process");
+
+    let child_pid = child.id();
+
+    // Give the process a moment to start
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    // Verify process exists
+    assert!(
+        process_exists(child_pid),
+        "Child process should exist before kill"
+    );
+
+    // Kill the process tree
+    let result = kill_process_tree(child_pid);
+    assert!(result.is_ok(), "kill_process_tree should succeed");
+
+    // Give the system a moment to terminate
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Process should no longer exist
+    assert!(
+        !process_exists(child_pid),
+        "Process should not exist after kill_process_tree"
+    );
+
+    // Clean up (in case it survived)
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn cross_platform_kill_process_tree_grandchildren() {
+    // Spawn a shell that spawns another process
+    // This tests that the tree termination works through child processes
+    let mut child = if cfg!(windows) {
+        std::process::Command::new("cmd")
+            .args(["/C", "timeout /t 30"])
+            .spawn()
+            .expect("Failed to spawn cmd process")
+    } else {
+        std::process::Command::new("sh")
+            .args(["-c", "sleep 30"])
+            .spawn()
+            .expect("Failed to spawn shell process")
+    };
+
+    let child_pid = child.id();
+
+    // Give the process a moment to start
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // Verify process exists
+    assert!(
+        process_exists(child_pid),
+        "Parent process should exist before kill"
+    );
+
+    // Kill the process tree
+    let result = kill_process_tree(child_pid);
+    assert!(result.is_ok(), "kill_process_tree should succeed");
+
+    // Give the system a moment to terminate
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Process should no longer exist
+    assert!(
+        !process_exists(child_pid),
+        "Process should not exist after kill_process_tree"
+    );
+
+    // Clean up (in case it survived)
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn cross_platform_kill_already_dead() {
+    // Spawn a short-lived process
+    let mut child = std::process::Command::new("echo")
+        .arg("hello")
+        .spawn()
+        .expect("Failed to spawn child process");
+
+    let child_pid = child.id();
+
+    // Wait for it to complete naturally
+    let _ = child.wait();
+
+    // Give a moment for process state to update
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    // Attempting to kill an already-dead process should not fail
+    let result = kill_process_tree(child_pid);
+    // On most platforms this succeeds (process already gone)
+    // or returns a specific error we can accept
+    if let Err(ref e) = result {
+        // Some platforms may return "process not found" which is acceptable
+        println!("kill_process_tree returned error for dead process: {}", e);
+    }
+    // Test passes if either Ok or Err - we just verify it doesn't panic
+}
+
+#[test]
+fn cross_platform_process_info_consistency() {
+    // Verify that process info from get_process_info matches list_child_processes
+    let parent_pid = std::process::id();
+
+    // Spawn a child
+    let mut child = std::process::Command::new("sleep")
+        .arg("10")
+        .spawn()
+        .expect("Failed to spawn child process");
+
+    let child_pid = child.id();
+
+    // Give a moment for process to start
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    // Get info directly
+    let direct_info = get_process_info(child_pid);
+    assert!(direct_info.is_some());
+    let direct_info = direct_info.unwrap();
+
+    // Get info from children list
+    let children = list_child_processes(parent_pid);
+    let listed_info = children.iter().find(|c| c.pid == child_pid);
+    assert!(
+        listed_info.is_some(),
+        "Child should appear in children list"
+    );
+    let listed_info = listed_info.unwrap();
+
+    // Info should be consistent
+    assert_eq!(direct_info.pid, listed_info.pid);
+    assert_eq!(direct_info.parent_pid, listed_info.parent_pid);
+
+    // Clean up
+    let _ = child.kill();
+    let _ = child.wait();
 }
