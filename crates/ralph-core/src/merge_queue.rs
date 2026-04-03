@@ -37,6 +37,7 @@
 //! ```
 
 use crate::loop_lock::LoopLock;
+use crate::platform::process::process_exists;
 use crate::text::truncate_with_ellipsis;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -479,48 +480,27 @@ impl MergeQueue {
     }
 
     /// Executes an operation with a shared (read) lock on the queue file.
-    #[cfg(unix)]
     fn with_shared_lock<T, F>(&self, f: F) -> Result<T, MergeQueueError>
     where
         F: FnOnce(&File) -> Result<T, MergeQueueError>,
     {
-        use nix::fcntl::{Flock, FlockArg};
-
         let file = File::open(&self.queue_path)?;
 
         // Acquire shared lock (blocking)
-        let flock = Flock::lock(file, FlockArg::LockShared).map_err(|(_, errno)| {
-            MergeQueueError::Io(io::Error::new(
-                io::ErrorKind::Other,
-                format!("flock failed: {}", errno),
-            ))
-        })?;
+        fs4::fs_std::FileExt::lock_shared(&file).map_err(MergeQueueError::Io)?;
 
-        // Get a reference to the inner file
-        use std::os::fd::AsFd;
-        let borrowed_fd = flock.as_fd();
-        let owned_fd = borrowed_fd.try_clone_to_owned()?;
-        let file: File = owned_fd.into();
+        // Clone the file handle for the callback
+        let file_clone = file.try_clone()?;
 
-        f(&file)
-    }
-
-    #[cfg(not(unix))]
-    fn with_shared_lock<T, F>(&self, _f: F) -> Result<T, MergeQueueError>
-    where
-        F: FnOnce(&File) -> Result<T, MergeQueueError>,
-    {
-        Err(MergeQueueError::UnsupportedPlatform)
+        // Lock is released when file is dropped
+        f(&file_clone)
     }
 
     /// Executes an operation with an exclusive (write) lock on the queue file.
-    #[cfg(unix)]
     fn with_exclusive_lock<T, F>(&self, f: F) -> Result<T, MergeQueueError>
     where
         F: FnOnce(File) -> Result<T, MergeQueueError>,
     {
-        use nix::fcntl::{Flock, FlockArg};
-
         // Ensure .ralph directory exists
         if let Some(parent) = self.queue_path.parent() {
             fs::create_dir_all(parent)?;
@@ -535,28 +515,13 @@ impl MergeQueue {
             .open(&self.queue_path)?;
 
         // Acquire exclusive lock (blocking)
-        let flock = Flock::lock(file, FlockArg::LockExclusive).map_err(|(_, errno)| {
-            MergeQueueError::Io(io::Error::new(
-                io::ErrorKind::Other,
-                format!("flock failed: {}", errno),
-            ))
-        })?;
+        fs4::fs_std::FileExt::lock_exclusive(&file).map_err(MergeQueueError::Io)?;
 
-        // Get a clone of the underlying file
-        use std::os::fd::AsFd;
-        let borrowed_fd = flock.as_fd();
-        let owned_fd = borrowed_fd.try_clone_to_owned()?;
-        let file: File = owned_fd.into();
+        // Clone the file handle for the callback
+        let file_clone = file.try_clone()?;
 
-        f(file)
-    }
-
-    #[cfg(not(unix))]
-    fn with_exclusive_lock<T, F>(&self, _f: F) -> Result<T, MergeQueueError>
-    where
-        F: FnOnce(File) -> Result<T, MergeQueueError>,
-    {
-        Err(MergeQueueError::UnsupportedPlatform)
+        // Lock is released when file is dropped
+        f(file_clone)
     }
 }
 
@@ -597,19 +562,7 @@ pub fn merge_button_state(
 
 /// Check if a process with the given PID is still running.
 fn is_pid_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        use nix::sys::signal::kill;
-        use nix::unistd::Pid;
-        // Signal 0 (None) doesn't send any signal but checks if the process exists
-        kill(Pid::from_raw(pid as i32), None).is_ok()
-    }
-
-    #[cfg(not(unix))]
-    {
-        // On non-Unix, assume the process is alive if we can't check
-        true
-    }
+    process_exists(pid)
 }
 
 /// Generate a smart merge summary from worktree commits.

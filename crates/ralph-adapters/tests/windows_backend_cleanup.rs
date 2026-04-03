@@ -128,7 +128,11 @@ async fn acp_kills_child_process_on_completion() {
 
     let backend = CliBackend {
         #[cfg(unix)]
-        command: temp_dir.path().join("mock-kiro-acp.sh").to_string_lossy().to_string(),
+        command: temp_dir
+            .path()
+            .join("mock-kiro-acp.sh")
+            .to_string_lossy()
+            .to_string(),
         #[cfg(windows)]
         command: "powershell".to_string(),
         args: get_mock_script_args(temp_dir.path()),
@@ -171,7 +175,11 @@ async fn acp_kills_grandchild_processes_no_orphans() {
 
     let backend = CliBackend {
         #[cfg(unix)]
-        command: temp_dir.path().join("mock-kiro-acp.sh").to_string_lossy().to_string(),
+        command: temp_dir
+            .path()
+            .join("mock-kiro-acp.sh")
+            .to_string_lossy()
+            .to_string(),
         #[cfg(windows)]
         command: "powershell".to_string(),
         args: get_mock_script_args(temp_dir.path()),
@@ -213,7 +221,11 @@ async fn acp_no_orphans_across_hat_transitions() {
 
     let backend = CliBackend {
         #[cfg(unix)]
-        command: temp_dir.path().join("mock-kiro-acp.sh").to_string_lossy().to_string(),
+        command: temp_dir
+            .path()
+            .join("mock-kiro-acp.sh")
+            .to_string_lossy()
+            .to_string(),
         #[cfg(windows)]
         command: "powershell".to_string(),
         args: get_mock_script_args(temp_dir.path()),

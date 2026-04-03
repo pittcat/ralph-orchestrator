@@ -1669,12 +1669,6 @@ async fn run_command(
                     (context, None)
                 }
             }
-            Err(LockError::UnsupportedPlatform) => {
-                // Non-Unix: just run without locking (single-loop fallback)
-                warn!("Loop locking not supported on this platform, running without lock");
-                let context = LoopContext::primary(workspace_root.clone());
-                (context, None)
-            }
             Err(e) => {
                 return Err(anyhow::Error::new(e).context("Failed to acquire loop lock"));
             }

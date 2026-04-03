@@ -138,6 +138,12 @@ vt100 = "0.15"
 scopeguard = "1"
 strip-ansi-escapes = "0.2"
 
+# Cross-platform file locking (Windows + Unix)
+fs4 = { version = "0.12", features = ["sync"] }
+
+# Cross-platform process information
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
+
 # Internal crates (version required for crates.io publishing)
 ralph-proto = { version = "2.8.1", path = "crates/ralph-proto" }
 ralph-core = { version = "2.8.1", path = "crates/ralph-core", features = ["recording"] }
@@ -157,8 +163,8 @@ teloxide = { version = "0.13", default-features = false, features = ["macros", "
 # CI backends to support
 ci = "github"
 # Target platforms to build apps for (Rust target-triple syntax)
-# Windows excluded: Ralph requires Unix PTY and signal handling
-targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
+# Now includes Windows native support
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 # The installers to generate for each app
 installers = ["shell", "npm"]
 # npm package scope (creates @ralph-orchestrator/ralph)

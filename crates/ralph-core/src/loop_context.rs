@@ -54,6 +54,7 @@
 //!            "/project/.worktrees/loop-1234-abcd/.ralph/events.jsonl");
 //! ```
 
+use crate::platform::fs_links::create_link;
 use crate::text::truncate_with_ellipsis;
 use std::path::{Path, PathBuf};
 
@@ -378,17 +379,16 @@ impl LoopContext {
         Ok(())
     }
 
-    /// Creates the memory symlink in a worktree pointing to main repo.
+    /// Creates the memory link in a worktree pointing to main repo.
     ///
     /// This is only relevant for worktree loops. For primary loops,
     /// this is a no-op.
     ///
     /// # Returns
     ///
-    /// - `Ok(true)` - Symlink was created
+    /// - `Ok(true)` - Link was created
     /// - `Ok(false)` - Already exists or is primary loop
-    /// - `Err(_)` - Symlink creation failed
-    #[cfg(unix)]
+    /// - `Err(_)` - Link creation failed
     pub fn setup_memory_symlink(&self) -> std::io::Result<bool> {
         if self.is_primary {
             return Ok(false);
@@ -397,7 +397,7 @@ impl LoopContext {
         let memories_path = self.memories_path();
         let main_memories = self.main_memories_path();
 
-        // Skip if already exists (symlink or file)
+        // Skip if already exists (link or file)
         if memories_path.exists() || memories_path.is_symlink() {
             return Ok(false);
         }
@@ -405,30 +405,29 @@ impl LoopContext {
         // Ensure parent directory exists
         self.ensure_agent_dir()?;
 
-        // Create symlink
-        std::os::unix::fs::symlink(&main_memories, &memories_path)?;
+        // Ensure target exists so the link can be created on all platforms
+        if !main_memories.exists() {
+            if let Some(parent) = main_memories.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&main_memories, "")?;
+        }
+
+        // Create cross-platform link
+        create_link(&memories_path, &main_memories)?;
         Ok(true)
     }
 
-    /// Creates the memory symlink in a worktree (non-Unix stub).
-    #[cfg(not(unix))]
-    pub fn setup_memory_symlink(&self) -> std::io::Result<bool> {
-        // On non-Unix platforms, we don't create symlinks
-        // (worktree mode not supported)
-        Ok(false)
-    }
-
-    /// Creates the specs symlink in a worktree pointing to main repo.
+    /// Creates the specs link in a worktree pointing to main repo.
     ///
     /// This allows worktree loops to access specs from the main repo,
     /// even when they are untracked (not committed to git).
     ///
     /// # Returns
     ///
-    /// - `Ok(true)` - Symlink was created
+    /// - `Ok(true)` - Link was created
     /// - `Ok(false)` - Already exists or is primary loop
-    /// - `Err(_)` - Symlink creation failed
-    #[cfg(unix)]
+    /// - `Err(_)` - Link creation failed
     pub fn setup_specs_symlink(&self) -> std::io::Result<bool> {
         if self.is_primary {
             return Ok(false);
@@ -437,7 +436,7 @@ impl LoopContext {
         let specs_path = self.specs_dir();
         let main_specs = self.main_specs_dir();
 
-        // Skip if already exists (symlink or directory)
+        // Skip if already exists (link or directory)
         if specs_path.exists() || specs_path.is_symlink() {
             return Ok(false);
         }
@@ -445,28 +444,26 @@ impl LoopContext {
         // Ensure parent directory exists
         self.ensure_ralph_dir()?;
 
-        // Create symlink
-        std::os::unix::fs::symlink(&main_specs, &specs_path)?;
+        // Ensure target exists so the link can be created on all platforms
+        if !main_specs.exists() {
+            std::fs::create_dir_all(&main_specs)?;
+        }
+
+        // Create cross-platform link
+        create_link(&specs_path, &main_specs)?;
         Ok(true)
     }
 
-    /// Creates the specs symlink in a worktree (non-Unix stub).
-    #[cfg(not(unix))]
-    pub fn setup_specs_symlink(&self) -> std::io::Result<bool> {
-        Ok(false)
-    }
-
-    /// Creates the code tasks symlink in a worktree pointing to main repo.
+    /// Creates the code tasks link in a worktree pointing to main repo.
     ///
     /// This allows worktree loops to access code task files from the main repo,
     /// even when they are untracked (not committed to git).
     ///
     /// # Returns
     ///
-    /// - `Ok(true)` - Symlink was created
+    /// - `Ok(true)` - Link was created
     /// - `Ok(false)` - Already exists or is primary loop
-    /// - `Err(_)` - Symlink creation failed
-    #[cfg(unix)]
+    /// - `Err(_)` - Link creation failed
     pub fn setup_code_tasks_symlink(&self) -> std::io::Result<bool> {
         if self.is_primary {
             return Ok(false);
@@ -475,7 +472,7 @@ impl LoopContext {
         let tasks_path = self.code_tasks_dir();
         let main_tasks = self.main_code_tasks_dir();
 
-        // Skip if already exists (symlink or directory)
+        // Skip if already exists (link or directory)
         if tasks_path.exists() || tasks_path.is_symlink() {
             return Ok(false);
         }
@@ -483,15 +480,14 @@ impl LoopContext {
         // Ensure parent directory exists
         self.ensure_ralph_dir()?;
 
-        // Create symlink
-        std::os::unix::fs::symlink(&main_tasks, &tasks_path)?;
-        Ok(true)
-    }
+        // Ensure target exists so the link can be created on all platforms
+        if !main_tasks.exists() {
+            std::fs::create_dir_all(&main_tasks)?;
+        }
 
-    /// Creates the code tasks symlink in a worktree (non-Unix stub).
-    #[cfg(not(unix))]
-    pub fn setup_code_tasks_symlink(&self) -> std::io::Result<bool> {
-        Ok(false)
+        // Create cross-platform link
+        create_link(&tasks_path, &main_tasks)?;
+        Ok(true)
     }
 
     /// Generates a context.md file in the worktree with metadata.
@@ -563,21 +559,14 @@ Local state (scratchpad, runtime tasks, events) is isolated to this worktree.
         Ok(true)
     }
 
-    /// Sets up all worktree symlinks (memories, specs, code tasks).
+    /// Sets up all worktree links (memories, specs, code tasks).
     ///
     /// Convenience method that calls all setup_*_symlink methods.
     /// Only relevant for worktree loops - no-op for primary loops.
-    #[cfg(unix)]
     pub fn setup_worktree_symlinks(&self) -> std::io::Result<()> {
         self.setup_memory_symlink()?;
         self.setup_specs_symlink()?;
         self.setup_code_tasks_symlink()?;
-        Ok(())
-    }
-
-    /// Sets up all worktree symlinks (non-Unix stub).
-    #[cfg(not(unix))]
-    pub fn setup_worktree_symlinks(&self) -> std::io::Result<()> {
         Ok(())
     }
 }
@@ -745,18 +734,16 @@ mod tests {
         assert!(ctx.agent_dir().exists());
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_memory_symlink_primary_noop() {
         let temp = TempDir::new().unwrap();
         let ctx = LoopContext::primary(temp.path().to_path_buf());
 
-        // Primary loop doesn't create symlinks
+        // Primary loop doesn't create links
         let created = ctx.setup_memory_symlink().unwrap();
         assert!(!created);
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_memory_symlink_worktree() {
         let temp = TempDir::new().unwrap();
@@ -769,18 +756,15 @@ mod tests {
 
         let ctx = LoopContext::worktree("loop-1234", worktree_path.clone(), repo_root.clone());
 
-        // Create symlink
+        // Create link
         ctx.ensure_agent_dir().unwrap();
         let created = ctx.setup_memory_symlink().unwrap();
         assert!(created);
 
-        // Verify symlink exists and points to main memories
+        // Verify link exists and shares content with main memories
         let memories = ctx.memories_path();
-        assert!(memories.is_symlink());
-        assert_eq!(
-            std::fs::read_link(&memories).unwrap(),
-            ctx.main_memories_path()
-        );
+        assert!(memories.exists());
+        assert_eq!(std::fs::read_to_string(&memories).unwrap(), "# Memories\n");
 
         // Second call is a no-op
         let created_again = ctx.setup_memory_symlink().unwrap();
@@ -854,7 +838,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_specs_symlink_worktree() {
         let temp = TempDir::new().unwrap();
@@ -870,21 +853,24 @@ mod tests {
         // Ensure .ralph dir exists
         ctx.ensure_ralph_dir().unwrap();
 
-        // Create symlink
+        // Create link
         let created = ctx.setup_specs_symlink().unwrap();
         assert!(created);
 
-        // Verify symlink exists and points to main specs
+        // Verify link exists and shares content with main specs
         let specs = ctx.specs_dir();
-        assert!(specs.is_symlink());
-        assert_eq!(std::fs::read_link(&specs).unwrap(), ctx.main_specs_dir());
+        assert!(specs.exists());
+        assert!(specs.join("test.spec.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(specs.join("test.spec.md")).unwrap(),
+            "# Test Spec\n"
+        );
 
         // Second call is a no-op
         let created_again = ctx.setup_specs_symlink().unwrap();
         assert!(!created_again);
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_code_tasks_symlink_worktree() {
         let temp = TempDir::new().unwrap();
@@ -904,16 +890,17 @@ mod tests {
         // Ensure .ralph dir exists
         ctx.ensure_ralph_dir().unwrap();
 
-        // Create symlink
+        // Create link
         let created = ctx.setup_code_tasks_symlink().unwrap();
         assert!(created);
 
-        // Verify symlink exists and points to main code tasks
+        // Verify link exists and shares content with main code tasks
         let tasks = ctx.code_tasks_dir();
-        assert!(tasks.is_symlink());
+        assert!(tasks.exists());
+        assert!(tasks.join("test.code-task.md").exists());
         assert_eq!(
-            std::fs::read_link(&tasks).unwrap(),
-            ctx.main_code_tasks_dir()
+            std::fs::read_to_string(tasks.join("test.code-task.md")).unwrap(),
+            "# Test Task\n"
         );
 
         // Second call is a no-op
@@ -963,7 +950,6 @@ mod tests {
         assert!(!created_again);
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_setup_worktree_symlinks() {
         let temp = TempDir::new().unwrap();
@@ -978,13 +964,13 @@ mod tests {
 
         let ctx = LoopContext::worktree("loop-1234", worktree_path.clone(), repo_root.clone());
 
-        // Setup all symlinks
+        // Setup all links
         ctx.ensure_directories().unwrap();
         ctx.setup_worktree_symlinks().unwrap();
 
-        // Verify all symlinks exist
-        assert!(ctx.memories_path().is_symlink());
-        assert!(ctx.specs_dir().is_symlink());
-        assert!(ctx.code_tasks_dir().is_symlink());
+        // Verify all links exist
+        assert!(ctx.memories_path().exists());
+        assert!(ctx.specs_dir().exists());
+        assert!(ctx.code_tasks_dir().exists());
     }
 }

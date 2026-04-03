@@ -406,6 +406,15 @@ async fn forward_output(
 
 /// Run both backend and frontend dev servers in parallel
 pub async fn execute(args: WebArgs) -> Result<()> {
+    // Windows is not supported for the web command
+    #[cfg(windows)]
+    {
+        anyhow::bail!(
+            "The 'ralph web' command is not supported on Windows. \
+             Please use WSL or a Unix-like environment to run the web dashboard."
+        );
+    }
+
     println!("Starting Ralph web servers...");
 
     // Determine workspace root: explicit flag or current directory

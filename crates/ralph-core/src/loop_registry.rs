@@ -6,7 +6,7 @@
 //! # Design
 //!
 //! - **JSON persistence**: Single JSON file at `.ralph/loops.json`
-//! - **File locking**: Uses `flock()` for concurrent access safety
+//! - **File locking**: Uses cross-platform fs4 for concurrent access safety
 //! - **PID-based stale detection**: Automatically cleans up entries for dead processes
 //!
 //! # Example
@@ -32,6 +32,7 @@
 //! }
 //! ```
 
+use crate::platform::process::process_exists;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
@@ -129,15 +130,9 @@ impl LoopEntry {
     /// For worktree loops, also verifies the worktree directory still exists.
     /// A process whose worktree has been removed externally is considered dead
     /// (zombie) even if the PID is still alive.
-    #[cfg(unix)]
     pub fn is_alive(&self) -> bool {
-        use nix::sys::signal::kill;
-        use nix::unistd::Pid;
-
-        // Signal 0 (None) checks if process exists without sending a signal
-        let pid_alive = kill(Pid::from_raw(self.pid as i32), None)
-            .map(|_| true)
-            .unwrap_or(false);
+        // Check if the PID exists
+        let pid_alive = process_exists(self.pid);
 
         if !pid_alive {
             return false;
@@ -151,32 +146,12 @@ impl LoopEntry {
         true
     }
 
-    #[cfg(not(unix))]
-    pub fn is_alive(&self) -> bool {
-        // On non-Unix platforms, check worktree existence at minimum
-        if let Some(ref wt_path) = self.worktree_path {
-            return std::path::Path::new(wt_path).is_dir();
-        }
-        true
-    }
-
     /// Checks if the PID is alive (regardless of worktree state).
     ///
     /// Use this when you need to know if the process itself is running,
     /// e.g. to decide whether to send a signal.
-    #[cfg(unix)]
     pub fn is_pid_alive(&self) -> bool {
-        use nix::sys::signal::kill;
-        use nix::unistd::Pid;
-
-        kill(Pid::from_raw(self.pid as i32), None)
-            .map(|_| true)
-            .unwrap_or(false)
-    }
-
-    #[cfg(not(unix))]
-    pub fn is_pid_alive(&self) -> bool {
-        true
+        process_exists(self.pid)
     }
 }
 
@@ -200,10 +175,6 @@ pub enum RegistryError {
     /// Loop entry not found.
     #[error("Loop not found: {0}")]
     NotFound(String),
-
-    /// Platform not supported.
-    #[error("File locking not supported on this platform")]
-    UnsupportedPlatform,
 }
 
 /// Registry for tracking active Ralph loops.
@@ -297,12 +268,11 @@ impl LoopRegistry {
     }
 
     /// Executes an operation with the registry file locked.
-    #[cfg(unix)]
     fn with_lock<F>(&self, f: F) -> Result<(), RegistryError>
     where
         F: FnOnce(&mut RegistryData),
     {
-        use nix::fcntl::{Flock, FlockArg};
+        use fs4::fs_std::FileExt;
 
         // Ensure .ralph directory exists
         if let Some(parent) = self.registry_path.parent() {
@@ -317,16 +287,11 @@ impl LoopRegistry {
             .truncate(false)
             .open(&self.registry_path)?;
 
-        // Acquire exclusive lock (blocking)
-        let flock = Flock::lock(file, FlockArg::LockExclusive).map_err(|(_, errno)| {
-            RegistryError::Io(io::Error::new(
-                io::ErrorKind::Other,
-                format!("flock failed: {}", errno),
-            ))
-        })?;
+        // Acquire exclusive lock (blocking) using fs4
+        file.lock_exclusive().map_err(|e| RegistryError::Io(e))?;
 
         // Read existing data using the locked file
-        let mut data = self.read_data_from_file(&flock)?;
+        let mut data = self.read_data_from_file(&file)?;
 
         // Clean stale entries before any operation (dead PIDs only).
         //
@@ -338,36 +303,19 @@ impl LoopRegistry {
         f(&mut data);
 
         // Write back the data
-        self.write_data_to_file(&flock, &data)?;
+        self.write_data_to_file(&file, &data)?;
 
+        // Lock is released when file is dropped
         Ok(())
     }
 
-    #[cfg(not(unix))]
-    fn with_lock<F>(&self, _f: F) -> Result<(), RegistryError>
-    where
-        F: FnOnce(&mut RegistryData),
-    {
-        Err(RegistryError::UnsupportedPlatform)
-    }
-
     /// Reads registry data from a locked file.
-    #[cfg(unix)]
-    fn read_data_from_file(
-        &self,
-        flock: &nix::fcntl::Flock<File>,
-    ) -> Result<RegistryData, RegistryError> {
-        use std::os::fd::AsFd;
-
-        // Get a clone of the underlying file via BorrowedFd
-        let borrowed_fd = flock.as_fd();
-        let owned_fd = borrowed_fd.try_clone_to_owned()?;
-        let mut file: File = owned_fd.into();
-
-        file.seek(SeekFrom::Start(0))?;
+    fn read_data_from_file(&self, file: &File) -> Result<RegistryData, RegistryError> {
+        let mut file_clone = file.try_clone()?;
+        file_clone.seek(SeekFrom::Start(0))?;
 
         let mut contents = String::new();
-        file.read_to_string(&mut contents)?;
+        file_clone.read_to_string(&mut contents)?;
 
         if contents.trim().is_empty() {
             return Ok(RegistryData::default());
@@ -377,27 +325,17 @@ impl LoopRegistry {
     }
 
     /// Writes registry data to a locked file.
-    #[cfg(unix)]
-    fn write_data_to_file(
-        &self,
-        flock: &nix::fcntl::Flock<File>,
-        data: &RegistryData,
-    ) -> Result<(), RegistryError> {
-        use std::os::fd::AsFd;
+    fn write_data_to_file(&self, file: &File, data: &RegistryData) -> Result<(), RegistryError> {
+        let mut file_clone = file.try_clone()?;
 
-        // Get a clone of the underlying file via BorrowedFd
-        let borrowed_fd = flock.as_fd();
-        let owned_fd = borrowed_fd.try_clone_to_owned()?;
-        let mut file: File = owned_fd.into();
-
-        file.set_len(0)?;
-        file.seek(SeekFrom::Start(0))?;
+        file_clone.set_len(0)?;
+        file_clone.seek(SeekFrom::Start(0))?;
 
         let json = serde_json::to_string_pretty(data)
             .map_err(|e| RegistryError::ParseError(e.to_string()))?;
 
-        file.write_all(json.as_bytes())?;
-        file.sync_all()?;
+        file_clone.write_all(json.as_bytes())?;
+        file_clone.sync_all()?;
 
         Ok(())
     }
@@ -704,14 +642,14 @@ mod tests {
         // Use current PID so is_pid_alive() returns true
         entry.pid = process::id();
 
-        // Worktree exists → alive
+        // Worktree exists -> alive
         assert!(entry.is_alive());
         assert!(entry.is_pid_alive());
 
         // Remove the worktree directory
         fs::remove_dir_all(&wt_dir).unwrap();
 
-        // PID still alive, but worktree gone → zombie → is_alive() returns false
+        // PID still alive, but worktree gone -> zombie -> is_alive() returns false
         assert!(!entry.is_alive());
         assert!(entry.is_pid_alive());
     }

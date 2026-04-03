@@ -6298,7 +6298,7 @@ mod tests {
     fn install_fake_path_backends(backends: &[(&str, &str)]) -> FakePathBackendsGuard {
         let guard = FAKE_PATH_BACKEND_SERIAL
             .lock()
-            .expect("fake PATH backend serial lock");
+            .unwrap_or_else(|p| p.into_inner());
         let bin_dir = fake_path_backend_dir(backends);
 
         let mut installed_paths = Vec::with_capacity(backends.len());

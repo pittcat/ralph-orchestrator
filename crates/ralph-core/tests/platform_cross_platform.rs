@@ -419,6 +419,38 @@ fn cross_platform_file_lock_stress_many_threads() {
 // Process Control Tests
 // ═══════════════════════════════════════════════════════════════════════════════
 
+#[cfg(unix)]
+fn spawn_sleeper(seconds: u64) -> std::process::Child {
+    std::process::Command::new("sleep")
+        .arg(seconds.to_string())
+        .spawn()
+        .expect("Failed to spawn sleep process")
+}
+
+#[cfg(windows)]
+fn spawn_sleeper(seconds: u64) -> std::process::Child {
+    std::process::Command::new("cmd")
+        .args(["/C", &format!("timeout /t {} >nul", seconds)])
+        .spawn()
+        .expect("Failed to spawn timeout process")
+}
+
+#[cfg(unix)]
+fn spawn_echo_hello() -> std::process::Child {
+    std::process::Command::new("echo")
+        .arg("hello")
+        .spawn()
+        .expect("Failed to spawn echo process")
+}
+
+#[cfg(windows)]
+fn spawn_echo_hello() -> std::process::Child {
+    std::process::Command::new("cmd")
+        .args(["/C", "echo hello"])
+        .spawn()
+        .expect("Failed to spawn cmd echo process")
+}
+
 #[test]
 fn cross_platform_process_exists_current() {
     // Current process should exist
@@ -461,10 +493,7 @@ fn cross_platform_get_process_info_nonexistent() {
 #[test]
 fn cross_platform_process_spawn_and_check() {
     // Spawn a child process that will exist long enough for us to check it
-    let mut child = std::process::Command::new("sleep")
-        .arg("10")
-        .spawn()
-        .expect("Failed to spawn child process");
+    let mut child = spawn_sleeper(10);
 
     let child_pid = child.id();
 
@@ -491,10 +520,7 @@ fn cross_platform_process_spawn_and_check() {
 #[test]
 fn cross_platform_list_children_spawned() {
     // Spawn a child process
-    let mut child = std::process::Command::new("sleep")
-        .arg("10")
-        .spawn()
-        .expect("Failed to spawn child process");
+    let mut child = spawn_sleeper(10);
 
     let child_pid = child.id();
     let parent_pid = std::process::id();
@@ -527,10 +553,7 @@ fn cross_platform_list_children_spawned() {
 #[test]
 fn cross_platform_kill_process_tree_single() {
     // Spawn a child process
-    let mut child = std::process::Command::new("sleep")
-        .arg("30")
-        .spawn()
-        .expect("Failed to spawn child process");
+    let mut child = spawn_sleeper(30);
 
     let child_pid = child.id();
 
@@ -609,10 +632,7 @@ fn cross_platform_kill_process_tree_grandchildren() {
 #[test]
 fn cross_platform_kill_already_dead() {
     // Spawn a short-lived process
-    let mut child = std::process::Command::new("echo")
-        .arg("hello")
-        .spawn()
-        .expect("Failed to spawn child process");
+    let mut child = spawn_echo_hello();
 
     let child_pid = child.id();
 
@@ -639,10 +659,7 @@ fn cross_platform_process_info_consistency() {
     let parent_pid = std::process::id();
 
     // Spawn a child
-    let mut child = std::process::Command::new("sleep")
-        .arg("10")
-        .spawn()
-        .expect("Failed to spawn child process");
+    let mut child = spawn_sleeper(10);
 
     let child_pid = child.id();
 

@@ -148,3 +148,47 @@ fn cross_platform_loops_stop_and_orphan_cleanup() {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+#[test]
+fn cross_platform_web_command_unsupported_on_windows() {
+    let temp_dir = setup_workspace();
+    let temp_path = temp_dir.path();
+
+    // Run 'ralph web' command
+    let output = run_ralph(temp_path, &["web", "--no-open"]);
+
+    // On Windows, the command should fail with a clear error message
+    // On Unix, it may succeed or fail depending on environment (no node_modules, etc.)
+    // This test primarily validates the Windows error path exists
+    #[cfg(windows)]
+    {
+        assert!(
+            !output.status.success(),
+            "ralph web should fail on Windows: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("not supported on Windows") || stderr.contains("WSL"),
+            "expected Windows unsupported message, got: {}",
+            stderr
+        );
+    }
+
+    // On Unix, just verify the command runs without panic (may fail due to missing deps)
+    #[cfg(unix)]
+    {
+        // The command should at least start processing (exit code may vary based on environment)
+        // We just verify it doesn't segfault or panic
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let combined = format!("{}{}", stdout, stderr);
+
+        // Should NOT contain the Windows-specific error message on Unix
+        assert!(
+            !combined.contains("not supported on Windows"),
+            "Unix should not show Windows unsupported message: {}",
+            combined
+        );
+    }
+}

@@ -1,6 +1,6 @@
 //! Loop lock mechanism for preventing concurrent Ralph loops in the same workspace.
 //!
-//! Uses `flock()` on `.ralph/loop.lock` to ensure only one primary loop runs at a time.
+//! Uses cross-platform file locking on `.ralph/loop.lock` to ensure only one primary loop runs at a time.
 //! When a second loop attempts to start, it can detect the existing lock and spawn
 //! into a git worktree instead.
 //!
@@ -49,13 +49,9 @@ pub struct LockMetadata {
 /// A guard that holds the loop lock. The lock is released when this is dropped.
 #[derive(Debug)]
 pub struct LockGuard {
-    /// The open file handle (keeps the flock).
-    #[cfg(unix)]
-    _flock: nix::fcntl::Flock<File>,
-
-    /// Placeholder for non-unix (compilation only, never actually used)
-    #[cfg(not(unix))]
-    _file: File,
+    /// The open file handle (keeps the lock alive via fs4).
+    #[allow(dead_code)]
+    file: File,
 
     /// Path to the lock file.
     lock_path: PathBuf,
@@ -70,7 +66,7 @@ impl LockGuard {
 
 impl Drop for LockGuard {
     fn drop(&mut self) {
-        // The Flock is automatically released when dropped.
+        // The file lock is automatically released when the file handle is dropped.
         tracing::debug!("Releasing loop lock at {}", self.lock_path.display());
     }
 }
@@ -89,15 +85,11 @@ pub enum LockError {
     /// Failed to parse lock metadata.
     #[error("Failed to parse lock metadata: {0}")]
     ParseError(String),
-
-    /// Platform not supported (non-Unix).
-    #[error("File locking not supported on this platform")]
-    UnsupportedPlatform,
 }
 
 /// The loop lock mechanism.
 ///
-/// Uses `flock()` to provide advisory locking on `.ralph/loop.lock`.
+/// Uses cross-platform file locking to provide advisory locking on `.ralph/loop.lock`.
 /// The lock is automatically released when the process exits (even on crash).
 pub struct LoopLock;
 
@@ -136,45 +128,24 @@ impl LoopLock {
             .truncate(false)
             .open(&lock_path)?;
 
-        // Try to acquire exclusive lock (non-blocking)
-        #[cfg(unix)]
-        {
-            use nix::fcntl::{Flock, FlockArg};
+        // Try to acquire exclusive lock (non-blocking) using fs4
+        use fs4::fs_std::FileExt;
 
-            match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
-                Ok(flock) => {
-                    // We got the lock - write our metadata
-                    Self::write_metadata(&flock, prompt)?;
+        match file.try_lock_exclusive() {
+            Ok(()) => {
+                // We got the lock - write our metadata
+                Self::write_metadata(&file, prompt)?;
 
-                    tracing::debug!("Acquired loop lock at {}", lock_path.display());
+                tracing::debug!("Acquired loop lock at {}", lock_path.display());
 
-                    Ok(LockGuard {
-                        _flock: flock,
-                        lock_path,
-                    })
-                }
-                Err((file, errno)) => {
-                    use nix::errno::Errno;
-                    // EWOULDBLOCK and EAGAIN are the same on some platforms (macOS)
-                    if errno == Errno::EWOULDBLOCK || errno == Errno::EAGAIN {
-                        // Lock is held by another process - read their metadata
-                        let metadata = Self::read_metadata(&file)?;
-                        Err(LockError::AlreadyLocked(metadata))
-                    } else {
-                        Err(LockError::Io(io::Error::new(
-                            io::ErrorKind::Other,
-                            format!("flock failed: {}", errno),
-                        )))
-                    }
-                }
+                Ok(LockGuard { file, lock_path })
             }
-        }
-
-        #[cfg(not(unix))]
-        {
-            let _ = file;
-            let _ = prompt;
-            Err(LockError::UnsupportedPlatform)
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                // Lock is held by another process - read their metadata
+                let metadata = Self::read_metadata(&file)?;
+                Err(LockError::AlreadyLocked(metadata))
+            }
+            Err(e) => Err(LockError::Io(e)),
         }
     }
 
@@ -210,35 +181,17 @@ impl LoopLock {
             .truncate(false)
             .open(&lock_path)?;
 
-        #[cfg(unix)]
-        {
-            use nix::fcntl::{Flock, FlockArg};
+        // Acquire exclusive lock (blocking) using fs4
+        use fs4::fs_std::FileExt;
 
-            match Flock::lock(file, FlockArg::LockExclusive) {
-                Ok(flock) => {
-                    // We got the lock - write our metadata
-                    Self::write_metadata(&flock, prompt)?;
+        file.lock_exclusive().map_err(LockError::Io)?;
 
-                    tracing::debug!("Acquired loop lock (blocking) at {}", lock_path.display());
+        // We got the lock - write our metadata
+        Self::write_metadata(&file, prompt)?;
 
-                    Ok(LockGuard {
-                        _flock: flock,
-                        lock_path,
-                    })
-                }
-                Err((_, errno)) => Err(LockError::Io(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("flock failed: {}", errno),
-                ))),
-            }
-        }
+        tracing::debug!("Acquired loop lock (blocking) at {}", lock_path.display());
 
-        #[cfg(not(unix))]
-        {
-            let _ = file;
-            let _ = prompt;
-            Err(LockError::UnsupportedPlatform)
-        }
+        Ok(LockGuard { file, lock_path })
     }
 
     /// Read the metadata from an existing lock file.
@@ -276,33 +229,16 @@ impl LoopLock {
             .write(true) // Need write for exclusive lock
             .open(&lock_path)?;
 
-        #[cfg(unix)]
-        {
-            use nix::errno::Errno;
-            use nix::fcntl::{Flock, FlockArg};
+        // Try to acquire exclusive lock (non-blocking) using fs4
+        use fs4::fs_std::FileExt;
 
-            match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
-                Ok(_flock) => {
-                    // We got the lock - it will be released when _flock is dropped
-                    Ok(false)
-                }
-                Err((_, errno)) => {
-                    if errno == Errno::EWOULDBLOCK || errno == Errno::EAGAIN {
-                        Ok(true)
-                    } else {
-                        Err(LockError::Io(io::Error::new(
-                            io::ErrorKind::Other,
-                            format!("flock failed: {}", errno),
-                        )))
-                    }
-                }
+        match file.try_lock_exclusive() {
+            Ok(()) => {
+                // We got the lock - it will be released when file is dropped
+                Ok(false)
             }
-        }
-
-        #[cfg(not(unix))]
-        {
-            let _ = file;
-            Err(LockError::UnsupportedPlatform)
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(true),
+            Err(e) => Err(LockError::Io(e)),
         }
     }
 

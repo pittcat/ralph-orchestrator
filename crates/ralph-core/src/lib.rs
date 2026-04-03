@@ -37,6 +37,8 @@ pub mod memory_parser;
 mod memory_store;
 pub mod merge_queue;
 pub mod planning_session;
+/// Platform abstraction layer for cross-platform compatibility.
+pub mod platform;
 pub mod preflight;
 #[cfg(feature = "recording")]
 mod session_player;

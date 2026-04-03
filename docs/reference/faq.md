@@ -45,11 +45,30 @@ npm install -g @google/gemini-cli
 
 ### What are the system requirements?
 
-- **OS**: Linux, macOS, or Windows (with WSL)
+- **OS**: Linux, macOS, or Windows
 - **Python**: 3.9 or higher
 - **Git**: 2.25 or higher
 - **Memory**: 4GB minimum, 8GB recommended
 - **Storage**: 20GB available space
+
+**Note**: Native Windows is supported for the core CLI (`ralph run`, `ralph loops`, etc.). The `ralph web` command is not supported on Windows.
+
+### What is supported on Windows?
+
+Ralph has native Windows support for the core orchestration features:
+
+**Supported:**
+- `ralph run` - Primary loop execution
+- `ralph loops list/stop` - Loop management
+- `ralph plan` - Interactive planning
+- `ralph task` - Task management
+- `ralph init` - Configuration initialization
+- Parallel worktree loops
+- All AI backends (Claude, Gemini, Codex, etc.)
+
+**Not Supported:**
+- `ralph web` - Web dashboard (use WSL if needed)
+- PTY backend on native Windows (ACP and CLI backends work)
 
 ### Can I run Ralph in Docker?
 

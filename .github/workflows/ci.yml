@@ -63,6 +63,24 @@ jobs:
   # Clippy and Format checks also run in lint.yml on fork PRs
   # (pull_request_target, no secrets needed for fmt-only)
 
+  # Windows native build test - ensures Windows support compiles
+  windows-build:
+    name: Windows Build
+    runs-on: windows-latest
+    needs: check-embedded-files
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Check Windows build
+        run: cargo check --workspace --target x86_64-pc-windows-msvc
+      - name: Run unit tests (Windows)
+        run: cargo test -p ralph-core --lib
+
   web-tests:
     name: Web Tests
     runs-on: ubuntu-latest
