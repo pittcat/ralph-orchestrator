@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [2.9.2] - 2026-04-10
+
+### Changed
+
+- Added a post-publish `cargo install` smoke test to the release workflow for faster detection of broken release artifacts.
+- Expanded `ralph doctor` auth environment variable detection for the Pi and Roo backends.
+- Documented the Pi backend in the backend guide.
+
+### Fixed
+
+- Fixed Claude + TUI blank/stuck output on large prompts by avoiding the PTY stdin deadlock in non-interactive PTY execution.
+
 ## [2.9.1] - 2026-04-04
 
 ### Fixed
