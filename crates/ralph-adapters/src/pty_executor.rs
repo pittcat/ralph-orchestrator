@@ -1908,6 +1908,9 @@ fn dispatch_stream_event<H: StreamHandler>(
                     ContentBlock::ToolUse { name, id, input } => {
                         handler.on_tool_call(&name, &id, &input)
                     }
+                    ContentBlock::Thinking { .. } => {
+                        // Thinking blocks are consumed but not dispatched
+                    }
                 }
             }
         }

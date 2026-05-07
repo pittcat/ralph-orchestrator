@@ -54,6 +54,7 @@ frontend/      → Web dashboard (@ralph-web/dashboard) - React + Vite + Tailwin
 | `.ralph/loops.json` | Registry of all tracked loops |
 | `.ralph/merge-queue.jsonl` | Event-sourced merge queue |
 | `.ralph/telegram-state.json` | Telegram bot state (chat ID, pending questions) |
+| `docs/solutions/` | Documented solutions to past problems (bugs, best practices, workflow patterns), organized by category with YAML frontmatter (`module`, `tags`, `problem_type`). Relevant when implementing or debugging in documented areas. |
 
 ### Code Locations
 

@@ -33,6 +33,8 @@ pub struct ExecutionResult {
     pub exit_code: Option<i32>,
     /// Whether the execution was terminated due to timeout.
     pub timed_out: bool,
+    /// Whether the execution was terminated due to post-event grace timeout.
+    pub post_event_timed_out: bool,
 }
 
 /// Executor for running prompts through CLI backends.
@@ -123,6 +125,7 @@ impl CliExecutor {
         }
 
         let mut timed_out = false;
+        let mut post_event_timed_out = false;
         let mut post_event_deadline: Option<tokio::time::Instant> = None;
         let mut terminated_status = None;
 
@@ -174,6 +177,9 @@ impl CliExecutor {
                             "Execution inactivity timeout reached, sending SIGTERM"
                         );
                         timed_out = true;
+                        if post_event_deadline.is_some() {
+                            post_event_timed_out = true;
+                        }
                         terminated_status = Some(Self::terminate_child_and_wait(&mut child).await?);
                         break;
                     }
@@ -240,9 +246,10 @@ impl CliExecutor {
 
         Ok(ExecutionResult {
             output: accumulated_output,
-            success: status.success() && !timed_out,
+            success: (status.success() && !timed_out) || post_event_timed_out,
             exit_code: status.code(),
             timed_out,
+            post_event_timed_out,
         })
     }
 
@@ -640,6 +647,31 @@ mod tests {
         assert!(!result.timed_out, "Fast command should not time out");
         assert!(result.success);
         assert!(result.output.contains("fast"));
+    }
+
+    #[tokio::test]
+    async fn test_post_event_timeout_is_success() {
+        let backend = CliBackend {
+            command: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "printf 'Event emitted: test\\n'; sleep 30".to_string(),
+            ],
+            prompt_mode: PromptMode::Stdin,
+            prompt_flag: None,
+            output_format: OutputFormat::Text,
+            env_vars: vec![],
+        };
+
+        let executor = CliExecutor::new(backend);
+        let result = executor
+            .execute_capture_with_timeout("", Some(Duration::from_secs(30)))
+            .await
+            .unwrap();
+
+        assert!(result.timed_out, "Should have timed out");
+        assert!(result.post_event_timed_out, "Should be post-event timeout");
+        assert!(result.success, "Post-event timeout should be treated as success");
     }
 
     #[tokio::test]
