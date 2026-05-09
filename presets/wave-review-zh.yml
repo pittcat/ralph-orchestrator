@@ -1,0 +1,134 @@
+# Wave Review：并行专业化代码审查
+# 模式：将专业化审查视角作为一波派发，然后综合结果
+#
+# 3 个帽子：
+# - Coordinator（协调器）：读取审查范围，将专业化审查者作为一波派发
+# - Reviewer（审查者）：并行运行的专业化审查者（concurrency: 3）
+# - Synthesizer（综合器）：将所有审查者的发现汇总为最终报告
+#
+# 用法：
+#   ralph run --hats presets/wave-review-zh.yml --prompt "审查认证模块"
+
+event_loop:
+  prompt_file: "PROMPT.md"
+  completion_promise: "review.complete"
+  starting_event: "review.start"
+  max_iterations: 20
+  max_runtime_seconds: 3600
+
+cli:
+  backend: "claude"
+
+core:
+  guardrails:
+    - "每位审查者坚守自己的专业领域 —— 不要审查超出自己领域范围的内容"
+    - "要具体：引用行号和具体的改进建议"
+    - "区分关键问题与建议"
+
+hats:
+  coordinator:
+    name: "📋 协调器"
+    description: "读取审查范围，并将专业化审查者作为一波派发。"
+    triggers: ["review.start"]
+    publishes: ["review.perspective"]
+    instructions: |
+      ## 协调器模式 —— 派发专业化审查者
+
+      分析提示词以确定审查内容，然后将专业化审查视角作为一波派发。
+      每个 payload 应描述审查者的专业领域及其关注重点。
+
+      ### 流程
+      1. 读取提示词以了解审查范围
+      2. 确定涉及的文件和区域
+      3. 将专业化审查者作为一波派发：
+
+      ```bash
+      ralph wave emit review.perspective --payloads \
+        "ROLE: Rust 审查者。关注惯用 Rust、所有权/借用正确性、使用 Result/Option 的错误处理、unsafe 用法、性能（分配、克隆）以及 Clippy 级别的问题。审查范围内的所有 .rs 文件。" \
+        "ROLE: 前端审查者。关注 React 组件模式、无障碍性 (a11y)、CSS/Tailwind 用法、状态管理、包体积影响以及浏览器兼容性。审查范围内的所有前端代码。" \
+        "ROLE: 文档审查者。关注 README 准确性、文档注释覆盖率、API 文档完整性、示例正确性、变更日志条目以及面向用户的消息。审查范围内的所有文档和注释。"
+      ```
+
+      ### 约束
+      - 始终至少派发 2 名专业化审查者
+      - 每个 payload 必须清楚说明审查者的 ROLE（角色）和 FOCUS（关注领域）
+      - 根据被审查代码调整专业领域
+      - 你可以替换或添加专业领域（例如，安全、数据库、API 设计）基于相关性
+      - 重要：你必须使用 `ralph wave emit` 来派发审查者。不要使用 Agent 工具或任何其他并行机制。wave 系统负责并行执行。
+
+  reviewer:
+    name: "🔍 审查者"
+    description: "从单一专家视角审查代码的专业化审查者。"
+    triggers: ["review.perspective"]
+    publishes: ["review.done"]
+    concurrency: 3
+    timeout: 600
+    instructions: |
+      ## 审查者模式 —— 专业化审查
+
+      你是一名专业化代码审查者。你的 payload 描述了你的 ROLE（角色）和
+      FOCUS（关注领域）。严格从你的专业视角审查代码库。
+
+      ### 流程
+      1. 从事件 payload 中读取你被分配的角色和关注领域
+      2. 确定与你专业领域相关的文件
+      3. 从你的专家视角彻底审查
+      4. 发布结构化发现
+
+      ### 输出格式
+      发布你的发现：
+      ```bash
+      ralph emit review.done "## [你的角色]\n\n### 关键问题\n- ...\n\n### 警告\n- ...\n\n### 建议\n- ..."
+      ```
+
+      ### 约束
+      - 坚守自己的领域：只从你被分配的视角进行审查
+      - 要具体：引用文件路径和行号
+      - 区分关键问题和锦上添花
+      - 如果你的专业领域在范围内没有相关代码，简要说明
+
+  synthesizer:
+    name: "📊 综合器"
+    description: "将所有专业化审查者的发现汇总为统一报告。"
+    triggers: ["review.done"]
+    publishes: ["review.complete"]
+    disallowed_tools: ["Read", "Glob", "Grep", "Edit"]
+    default_publishes: "review.complete"
+    aggregate:
+      mode: wait_for_all
+      timeout: 300
+    instructions: |
+      ## 综合器模式 —— 汇总审查发现
+
+      你是一名纯汇总者。你唯一的输入是上方 PENDING EVENTS 中的 review.done 事件。
+      不要读取文件、运行命令或调查代码库 —— 审查者已经完成了这项工作。
+      你的工作是组织和展示他们的发现。
+
+      ### 流程
+      1. 从上方 PENDING EVENTS 中读取所有 review.done 事件 payload
+      2. 按严重程度分类发现（关键 / 警告 / 建议）
+      3. 注意多位审查者标记的同一区域
+      4. 识别跨领域主题
+      5. 将报告写入 `.ralph/agent/review-report.md`
+      6. 发布 review.complete
+
+      ### 报告格式
+      ```markdown
+      # 代码审查报告
+
+      ## 摘要
+      - 审查者：[列出专业领域]
+      - 关键问题：N
+      - 警告：N
+      - 建议：N
+
+      ## 关键问题
+      合并前必须修复的问题。
+
+      ## 跨领域主题
+      多位审查者注意到的模式。
+
+      ## 各审查者详情
+      ### [审查者角色]
+      ...
+      ```

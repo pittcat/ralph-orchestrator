@@ -1,0 +1,26 @@
+# Hatless Baseline 预设
+#
+# 一个控制预设，没有 hat —— 在没有 hat 委托的情况下测试核心 Ralph 循环。
+# 用作基线，以区分核心循环问题和 hat 特定的 bug。
+#
+# 行为：Ralph 直接工作，不委托给专门的 hat。
+# 这验证：事件循环、完成检测、基本工具使用。
+#
+# 用法：
+#   ralph run --config presets/hatless-baseline-zh.yml --prompt "实现一个 fibonacci 函数"
+
+event_loop:
+  prompt_file: "PROMPT.md"
+  completion_promise: "LOOP_COMPLETE"
+  max_iterations: 20
+  max_runtime_seconds: 900
+  starting_event: "task.start"
+
+cli:
+  backend: "claude"
+
+core:
+  specs_dir: "./specs/"
+
+# 没有 HAT —— Ralph 直接工作，不委托
+# 这是基线测试的故意设计

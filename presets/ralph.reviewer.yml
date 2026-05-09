@@ -1,0 +1,61 @@
+# Ralph Reviewer Preset
+# Hat collection for reviewing pull requests
+
+event_loop:
+  prompt_file: "PROMPT.md"
+  completion_promise: "LOOP_COMPLETE"
+  max_iterations: 15
+  max_runtime_seconds: 900
+  starting_event: "review.start"
+
+cli:
+  backend: "claude"
+
+hats:
+  scoper:
+    name: "Scoper"
+    triggers: ["review.start"]
+    publishes: ["review.scoped"]
+    instructions: |
+      Scope the PR review. Identify:
+      - What files changed and why
+      - The stated purpose vs actual changes
+      - Risk areas to focus on
+      Publish a brief scope summary as review.scoped event.
+
+  verifier:
+    name: "Verifier"
+    triggers: ["review.scoped"]
+    publishes: ["review.verified"]
+    instructions: |
+      Verify the PR: checkout the branch, run tests, check compilation.
+      Record results (pass/fail with details) and publish review.verified event.
+
+  reviewer:
+    name: "Reviewer"
+    triggers: ["review.verified"]
+    publishes: ["review.complete"]
+    instructions: |
+      Conduct a thorough code review focusing on:
+      - Correctness and logic errors
+      - Security issues
+      - Performance concerns
+      - Test coverage gaps
+      - Documentation completeness
+      Publish findings as review.complete event with structured output.
+
+  synthesizer:
+    name: "Synthesizer"
+    triggers: ["review.complete"]
+    publishes: ["review.report"]
+    aggregate:
+      mode: wait_for_all
+      timeout: 300
+    instructions: |
+      Synthesize all review findings into a structured report.
+      Write the report to .ralph/REVIEW-REPORT.md with:
+      - Summary
+      - Findings by category
+      - Recommendations
+      - Verdict (APPROVE / REQUEST_CHANGES / COMMENT)
+      Publish review.report event to signal completion.
