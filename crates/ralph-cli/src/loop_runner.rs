@@ -6038,6 +6038,10 @@ fn extract_readable_delta(line: &str, output_format: BackendOutputFormat) -> Opt
                                 text.push_str(&t);
                                 text.push('\n');
                             }
+                            ContentBlock::Thinking { thinking, .. } => {
+                                text.push_str(&thinking);
+                                text.push('\n');
+                            }
                             ContentBlock::ToolUse { name, input, .. } => {
                                 text.push_str(&format!("⚙ {name}({input})\n"));
                             }

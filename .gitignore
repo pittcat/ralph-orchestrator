@@ -79,6 +79,7 @@ pbcopy
 .claude/*.local.md
 .claude/worktrees/
 .kiro/
+.serena/
 .envrc
 
 # Playwright screenshots

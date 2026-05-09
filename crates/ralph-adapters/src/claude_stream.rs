@@ -64,6 +64,12 @@ pub enum ContentBlock {
         name: String,
         input: serde_json::Value,
     },
+    /// Thinking content from Claude.
+    Thinking {
+        thinking: String,
+        #[serde(default)]
+        signature: Option<String>,
+    },
 }
 
 /// Content blocks in user messages (tool results).
@@ -162,6 +168,7 @@ mod tests {
                 match &message.content[0] {
                     ContentBlock::Text { text } => assert_eq!(text, "Hello world"),
                     ContentBlock::ToolUse { .. } => panic!("Expected Text content"),
+                    ContentBlock::Thinking { .. } => panic!("Expected Text content"),
                 }
             }
             _ => panic!("Expected Assistant event"),
@@ -183,6 +190,25 @@ mod tests {
                         assert_eq!(input["command"], "ls");
                     }
                     ContentBlock::Text { .. } => panic!("Expected ToolUse content"),
+                    ContentBlock::Thinking { .. } => panic!("Expected ToolUse content"),
+                }
+            }
+            _ => panic!("Expected Assistant event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_assistant_thinking() {
+        let json = r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"Let me analyze this...","signature":"abc123"}]}}"#;
+        let event = ClaudeStreamParser::parse_line(json).unwrap();
+        match event {
+            ClaudeStreamEvent::Assistant { message, .. } => {
+                match &message.content[0] {
+                    ContentBlock::Thinking { thinking, signature } => {
+                        assert_eq!(thinking, "Let me analyze this...");
+                        assert_eq!(signature.as_deref(), Some("abc123"));
+                    }
+                    _ => panic!("Expected Thinking content"),
                 }
             }
             _ => panic!("Expected Assistant event"),
