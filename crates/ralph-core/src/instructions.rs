@@ -292,6 +292,9 @@ mod tests {
             },
             specs_dir: "./specifications/".to_string(),
             guardrails: vec!["Custom rule one".to_string(), "Custom rule two".to_string()],
+            event_projection: None,
+            state_files: None,
+            preflight_extensions: None,
             workspace_root: std::path::PathBuf::from("."),
         };
         let builder = InstructionBuilder::new(custom_core);

@@ -967,7 +967,8 @@ impl EventLoop {
                 self.ralph.clear_robot_guidance();
                 let with_skills = self.prepend_auto_inject_skills(base_prompt);
                 let with_scratchpad = self.prepend_scratchpad(with_skills);
-                let final_prompt = self.prepend_ready_tasks(with_scratchpad);
+                let with_state_files = self.prepend_state_files(with_scratchpad);
+                let final_prompt = self.prepend_ready_tasks(with_state_files);
 
                 debug!("build_prompt: routing to HatlessRalph (solo mode)");
                 return Some(final_prompt);
@@ -1044,8 +1045,36 @@ impl EventLoop {
 
                 let active_hats = self.determine_active_hats(&regular_events);
 
+                // FR-1: Hat-level event allowlist filtering.
+                // If every active hat has an enabled allowlist, compute the union
+                // of their configured events plus their triggers. Otherwise,
+                // disable filtering for this iteration.
+                let mut should_filter = true;
+                let mut union_allowlist = std::collections::HashSet::new();
+                for hat in &active_hats {
+                    if let Some(config) = self.registry.get_config(&hat.id)
+                        && let Some(ref filter) = config.event_filter
+                        && filter.enabled
+                    {
+                        union_allowlist.extend(filter.events.iter().cloned());
+                        union_allowlist.extend(config.triggers.iter().cloned());
+                        continue;
+                    }
+                    should_filter = false;
+                    break;
+                }
+
+                let filtered_events: Vec<&Event> = if should_filter && !union_allowlist.is_empty() {
+                    effective_regular_events
+                        .into_iter()
+                        .filter(|e| union_allowlist.contains(e.topic.as_str()))
+                        .collect()
+                } else {
+                    effective_regular_events
+                };
+
                 // Format events for context
-                let events_context = effective_regular_events
+                let events_context = filtered_events
                     .iter()
                     .map(|e| Self::format_event(e))
                     .collect::<Vec<_>>()
@@ -1067,7 +1096,8 @@ impl EventLoop {
                 self.ralph.clear_robot_guidance();
                 let with_skills = self.prepend_auto_inject_skills(base_prompt);
                 let with_scratchpad = self.prepend_scratchpad(with_skills);
-                let final_prompt = self.prepend_ready_tasks(with_scratchpad);
+                let with_state_files = self.prepend_state_files(with_scratchpad);
+                let final_prompt = self.prepend_ready_tasks(with_state_files);
 
                 return Some(final_prompt);
             }
@@ -1573,6 +1603,19 @@ impl EventLoop {
         let mut final_prompt = section;
         final_prompt.push_str(&prompt);
         final_prompt
+    }
+
+    /// Prepends state file contents to the prompt if state files are configured.
+    fn prepend_state_files(&self, prompt: String) -> String {
+        let config = match &self.config.core.state_files {
+            Some(c) if c.enabled => c,
+            _ => return prompt,
+        };
+        crate::state_file_injector::inject_state_files(
+            prompt,
+            config,
+            &self.config.core.workspace_root,
+        )
     }
 
     /// Builds the Ralph prompt (coordination mode).
@@ -2744,13 +2787,10 @@ impl EventLoop {
             .iter()
             .any(|event| event.topic.as_str().starts_with("plan."));
 
-        // Publish validated events to the bus.
-        // Ralph is always registered with subscribe("*"), so every event has at least
-        // one subscriber. Events without a specific hat subscriber are "orphaned" —
-        // Ralph handles them as the universal fallback.
-        for event in validated_events {
+        // Record and diagnose validated events (before consuming them).
+        for event in &validated_events {
             // Record topic for event chain validation
-            self.state.record_event(&event);
+            self.state.record_event(event);
 
             self.diagnostics.log_orchestration(
                 self.state.iteration,
@@ -2768,6 +2808,26 @@ impl EventLoop {
                 topic = %event.topic,
                 "Publishing event from JSONL"
             );
+        }
+
+        // Apply event projections before publishing.
+        for event in &validated_events {
+            if let Some(ref projection_config) = self.config.core.event_projection
+                && projection_config.enabled
+            {
+                crate::event_projection::apply_projection(
+                    event,
+                    &projection_config.rules,
+                    &self.config.core.workspace_root,
+                );
+            }
+        }
+
+        // Publish validated events to the bus.
+        // Ralph is always registered with subscribe("*"), so every event has at least
+        // one subscriber. Events without a specific hat subscriber are "orphaned" —
+        // Ralph handles them as the universal fallback.
+        for event in validated_events {
             self.bus.publish(event);
         }
 
@@ -2778,6 +2838,15 @@ impl EventLoop {
                 topic = %response.topic,
                 "Publishing human.response event from robot service"
             );
+            if let Some(ref projection_config) = self.config.core.event_projection
+                && projection_config.enabled
+            {
+                crate::event_projection::apply_projection(
+                    &response,
+                    &projection_config.rules,
+                    &self.config.core.workspace_root,
+                );
+            }
             self.bus.publish(response);
         }
 

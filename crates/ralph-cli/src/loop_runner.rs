@@ -9978,6 +9978,7 @@ hats:
                 concurrency: 1,
                 aggregate: None,
                 scratchpad: None,
+                event_filter: None,
             },
             events: vec![event],
             total: 1,

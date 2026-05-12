@@ -17,6 +17,7 @@ pub mod diagnostics;
 mod event_logger;
 mod event_loop;
 mod event_parser;
+mod event_projection;
 mod event_reader;
 pub mod file_lock;
 mod git_ops;
@@ -44,6 +45,7 @@ mod session_player;
 mod session_recorder;
 pub mod skill;
 pub mod skill_registry;
+mod state_file_injector;
 mod summary_writer;
 pub mod task;
 pub mod task_definition;
@@ -61,9 +63,11 @@ pub mod worktree;
 #[cfg(feature = "recording")]
 pub use cli_capture::{CliCapture, CliCapturePair};
 pub use config::{
-    CliConfig, ConfigError, CoreConfig, EventLoopConfig, EventMetadata, FeaturesConfig, HatBackend,
-    HatConfig, InjectMode, MemoriesConfig, MemoriesFilter, RalphConfig, ScratchpadConfig,
-    SkillOverride, SkillsConfig,
+    CliConfig, ConfigError, CoreConfig, EventFilterConfig, EventFilterMode, EventLoopConfig,
+    EventMetadata, EventProjectionConfig, FeaturesConfig, HatBackend, HatConfig, HookStage,
+    InjectMode, MemoriesConfig, MemoriesFilter, PreflightExtensionsConfig, PreflightHook,
+    ProjectionMode, ProjectionRule, RalphConfig, ScratchpadConfig, SkillOverride, SkillsConfig,
+    StateFileEntry, StateFileFormat, StateFilesConfig,
 };
 // Re-export loop_name types (also available via FeaturesConfig.loop_naming)
 pub use diagnostics::DiagnosticsCollector;
@@ -72,6 +76,7 @@ pub use event_loop::{
     EventLoop, LoopState, ProcessedEvents, ProcessedEventsWithWaves, TerminationReason, UserPrompt,
 };
 pub use event_parser::EventParser;
+pub use event_projection::apply_projection;
 pub use event_reader::{Event, EventReader, MalformedLine, ParseResult};
 pub use file_lock::{FileLock, LockGuard as FileLockGuard, LockedFile};
 pub use git_ops::{
@@ -121,6 +126,7 @@ pub use session_player::{PlayerConfig, ReplayMode, SessionPlayer, TimestampedRec
 pub use session_recorder::{Record, SessionRecorder};
 pub use skill::{SkillEntry, SkillFrontmatter, SkillSource, parse_frontmatter};
 pub use skill_registry::SkillRegistry;
+pub use state_file_injector::inject_state_files;
 pub use summary_writer::SummaryWriter;
 pub use task::{Task, TaskStatus};
 pub use task_definition::{

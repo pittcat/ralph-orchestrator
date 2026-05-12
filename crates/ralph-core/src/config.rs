@@ -274,6 +274,10 @@ pub struct RalphConfig {
     /// RObot (Ralph-Orchestrator bot) configuration for Telegram-based interaction.
     #[serde(default, rename = "RObot")]
     pub robot: RobotConfig,
+
+    /// Path to the config file that was loaded (not serialized).
+    #[serde(skip)]
+    pub config_path: Option<PathBuf>,
 }
 
 fn default_true() -> bool {
@@ -321,6 +325,8 @@ impl Default for RalphConfig {
             features: FeaturesConfig::default(),
             // RObot (Ralph-Orchestrator bot)
             robot: RobotConfig::default(),
+            // Config file path (set at load time)
+            config_path: None,
         }
     }
 }
@@ -1006,6 +1012,24 @@ pub struct CoreConfig {
     #[serde(default = "default_guardrails")]
     pub guardrails: Vec<String>,
 
+    /// Event projection configuration.
+    ///
+    /// When enabled, matching events are projected to target files.
+    #[serde(default)]
+    pub event_projection: Option<EventProjectionConfig>,
+
+    /// State file injection configuration.
+    ///
+    /// When enabled, specified files are read and injected into the prompt preamble.
+    #[serde(default)]
+    pub state_files: Option<StateFilesConfig>,
+
+    /// Preflight extension hooks configuration.
+    ///
+    /// When enabled, custom hooks run before or after native preflight checks.
+    #[serde(default)]
+    pub preflight_extensions: Option<PreflightExtensionsConfig>,
+
     /// Root directory for workspace-relative paths (.ralph/, specs, etc.).
     ///
     /// All relative paths (scratchpad, specs_dir, memories) are resolved relative
@@ -1037,6 +1061,9 @@ impl Default for CoreConfig {
             scratchpad: ScratchpadConfig::default(),
             specs_dir: default_specs_dir(),
             guardrails: default_guardrails(),
+            event_projection: None,
+            state_files: None,
+            preflight_extensions: None,
             workspace_root: std::env::var("RALPH_WORKSPACE_ROOT")
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|_| {
@@ -1067,6 +1094,189 @@ impl CoreConfig {
             self.workspace_root.join(path)
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FR-1: Hat-level event filter configuration
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Event filter mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum EventFilterMode {
+    /// Only allow events in the allowlist.
+    #[default]
+    Allowlist,
+}
+
+/// Hat-level event filter configuration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EventFilterConfig {
+    /// Whether event filtering is enabled for this hat.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Filter mode (default: allowlist).
+    #[serde(default)]
+    pub mode: EventFilterMode,
+
+    /// Event topics to allow.
+    #[serde(default)]
+    pub events: Vec<String>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FR-2: Event projection configuration
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Event projection mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ProjectionMode {
+    /// Append events to the target file.
+    #[default]
+    Append,
+}
+
+fn default_projection_mode() -> ProjectionMode {
+    ProjectionMode::Append
+}
+
+/// A single event projection rule.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectionRule {
+    /// Human-readable name for this rule.
+    pub name: String,
+
+    /// Event topics that trigger this rule.
+    #[serde(default)]
+    pub trigger_events: Vec<String>,
+
+    /// Fields to extract from matching events.
+    #[serde(default)]
+    pub fields: Vec<String>,
+
+    /// Target file path for the projection output.
+    pub target_file: String,
+
+    /// Projection mode (default: append).
+    #[serde(default = "default_projection_mode")]
+    pub mode: ProjectionMode,
+}
+
+/// Event projection configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventProjectionConfig {
+    /// Whether event projection is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Projection rules.
+    #[serde(default)]
+    pub rules: Vec<ProjectionRule>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FR-3: State file injection configuration
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// State file format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum StateFileFormat {
+    /// JSON format.
+    #[default]
+    Json,
+    /// JSON Lines format.
+    Jsonl,
+}
+
+fn default_state_file_format() -> StateFileFormat {
+    StateFileFormat::Json
+}
+
+/// A single state file entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateFileEntry {
+    /// Path to the state file.
+    pub path: String,
+
+    /// Format of the state file.
+    #[serde(default = "default_state_file_format")]
+    pub format: StateFileFormat,
+
+    /// Optional character budget for truncation.
+    #[serde(default)]
+    pub char_budget: Option<usize>,
+
+    /// Optional number of trailing lines to read.
+    #[serde(default)]
+    pub tail_lines: Option<usize>,
+}
+
+/// State file injection configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateFilesConfig {
+    /// Whether state file injection is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Optional preamble text injected before state file contents.
+    #[serde(default)]
+    pub inject_preamble: Option<String>,
+
+    /// State files to inject.
+    #[serde(default)]
+    pub files: Vec<StateFileEntry>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FR-4: Preflight extension hooks configuration
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Preflight hook stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HookStage {
+    /// Run before native preflight checks.
+    BeforeNative,
+    /// Run after native preflight checks.
+    #[default]
+    AfterNative,
+}
+
+fn default_hook_stage() -> HookStage {
+    HookStage::AfterNative
+}
+
+/// A single preflight extension hook.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreflightHook {
+    /// Human-readable name for this hook.
+    pub name: String,
+
+    /// Shell command to execute.
+    pub command: String,
+
+    /// Stage at which this hook runs.
+    #[serde(default = "default_hook_stage")]
+    pub stage: HookStage,
+
+    /// Whether a failing hook should fail the preflight.
+    #[serde(default)]
+    pub fail_on_error: bool,
+}
+
+/// Preflight extension hooks configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreflightExtensionsConfig {
+    /// Whether preflight extension hooks are enabled.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Hooks to run.
+    #[serde(default)]
+    pub hooks: Vec<PreflightHook>,
 }
 
 /// CLI backend configuration.
@@ -1899,6 +2109,12 @@ pub struct HatConfig {
     /// Cannot be set on a hat with `concurrency > 1`.
     #[serde(default)]
     pub aggregate: Option<AggregateConfig>,
+
+    /// Event filter configuration for this hat.
+    ///
+    /// When enabled, only events matching the filter rules are passed to this hat.
+    #[serde(default)]
+    pub event_filter: Option<EventFilterConfig>,
 }
 
 fn default_concurrency() -> u32 {

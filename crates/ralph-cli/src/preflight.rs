@@ -38,7 +38,7 @@ pub async fn execute(
     let source_label = config_source_label(config_sources, hats_source);
     let config = load_config_for_preflight(config_sources, hats_source).await?;
 
-    let runner = PreflightRunner::default_checks();
+    let runner = PreflightRunner::default_checks(&config);
     let requested = normalize_checks(&args.check);
     validate_checks(&runner, &requested)?;
 
@@ -223,6 +223,15 @@ pub(crate) async fn load_config_for_preflight(
     config.normalize();
     config.core.workspace_root =
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+    // Record the primary config file path for template substitution in hooks.
+    config.config_path = config_sources
+        .iter()
+        .find(|s| matches!(s, ConfigSource::File(_)))
+        .and_then(|s| match s {
+            ConfigSource::File(path) => Some(path.clone()),
+            _ => None,
+        });
 
     crate::apply_config_overrides(&mut config, &overrides)?;
 
@@ -567,14 +576,16 @@ mod tests {
 
     #[test]
     fn validate_checks_accepts_known() {
-        let runner = PreflightRunner::default_checks();
+        let config = RalphConfig::default();
+        let runner = PreflightRunner::default_checks(&config);
         let checks = vec!["config".to_string(), "backend".to_string()];
         assert!(validate_checks(&runner, &checks).is_ok());
     }
 
     #[test]
     fn validate_checks_rejects_unknown() {
-        let runner = PreflightRunner::default_checks();
+        let config = RalphConfig::default();
+        let runner = PreflightRunner::default_checks(&config);
         let checks = vec!["nope".to_string()];
         let err = validate_checks(&runner, &checks).unwrap_err();
         assert!(err.to_string().contains("Unknown check(s)"));

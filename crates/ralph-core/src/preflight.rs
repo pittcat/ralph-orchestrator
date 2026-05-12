@@ -102,19 +102,48 @@ pub struct PreflightRunner {
 }
 
 impl PreflightRunner {
-    pub fn default_checks() -> Self {
-        Self {
-            checks: vec![
-                Box::new(ConfigValidCheck),
-                Box::new(HooksValidationCheck),
-                Box::new(BackendAvailableCheck),
-                Box::new(TelegramTokenCheck),
-                Box::new(GitCleanCheck),
-                Box::new(PathsExistCheck),
-                Box::new(ToolsInPathCheck::default()),
-                Box::new(SpecCompletenessCheck),
-            ],
+    pub fn default_checks(config: &RalphConfig) -> Self {
+        let mut checks: Vec<Box<dyn PreflightCheck>> = Vec::new();
+
+        if let Some(extensions) = config.core.preflight_extensions.as_ref()
+            && extensions.enabled
+        {
+            for hook in &extensions.hooks {
+                if hook.stage == crate::config::HookStage::BeforeNative {
+                    checks.push(Box::new(ExternalCommandCheck::new(
+                        hook.name.clone(),
+                        hook.command.clone(),
+                        hook.fail_on_error,
+                    )));
+                }
+            }
         }
+
+        checks.push(Box::new(ConfigValidCheck));
+        checks.push(Box::new(EventFilterValidCheck));
+        checks.push(Box::new(HooksValidationCheck));
+        checks.push(Box::new(BackendAvailableCheck));
+        checks.push(Box::new(TelegramTokenCheck));
+        checks.push(Box::new(GitCleanCheck));
+        checks.push(Box::new(PathsExistCheck));
+        checks.push(Box::new(ToolsInPathCheck::default()));
+        checks.push(Box::new(SpecCompletenessCheck));
+
+        if let Some(extensions) = config.core.preflight_extensions.as_ref()
+            && extensions.enabled
+        {
+            for hook in &extensions.hooks {
+                if hook.stage == crate::config::HookStage::AfterNative {
+                    checks.push(Box::new(ExternalCommandCheck::new(
+                        hook.name.clone(),
+                        hook.command.clone(),
+                        hook.fail_on_error,
+                    )));
+                }
+            }
+        }
+
+        Self { checks }
     }
 
     pub fn check_names(&self) -> Vec<&str> {
@@ -145,6 +174,136 @@ impl PreflightRunner {
         }
 
         PreflightReport::from_results(results)
+    }
+}
+
+struct ExternalCommandCheck {
+    name: &'static str,
+    command: String,
+    fail_on_error: bool,
+}
+
+impl ExternalCommandCheck {
+    fn new(name: String, command: String, fail_on_error: bool) -> Self {
+        Self {
+            name: Box::leak(name.into_boxed_str()),
+            command,
+            fail_on_error,
+        }
+    }
+}
+
+#[async_trait]
+impl PreflightCheck for ExternalCommandCheck {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    async fn run(&self, config: &RalphConfig) -> CheckResult {
+        let cmd = substitute_hook_vars(&self.command, config);
+        let cwd = &config.core.workspace_root;
+
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(&cmd)
+            .current_dir(cwd)
+            .envs(std::env::vars())
+            .output();
+
+        match output {
+            Ok(output) if output.status.success() => {
+                CheckResult::pass(self.name, format!("Hook '{}' passed", self.name))
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let message = if stderr.trim().is_empty() {
+                    format!("Exit code: {}", output.status.code().unwrap_or(-1))
+                } else {
+                    format!("Exit code: {}\n{}", output.status.code().unwrap_or(-1), stderr.trim())
+                };
+                if self.fail_on_error {
+                    CheckResult::fail(self.name, format!("Hook '{}' failed", self.name), message)
+                } else {
+                    CheckResult::warn(self.name, format!("Hook '{}' warned", self.name), message)
+                }
+            }
+            Err(err) => {
+                let message = format!("Failed to execute hook: {err}");
+                if self.fail_on_error {
+                    CheckResult::fail(self.name, format!("Hook '{}' failed", self.name), message)
+                } else {
+                    CheckResult::warn(self.name, format!("Hook '{}' warned", self.name), message)
+                }
+            }
+        }
+    }
+}
+
+fn substitute_hook_vars(command: &str, config: &RalphConfig) -> String {
+    let (config_path, config_dir) = config.config_path.as_ref().map_or_else(
+        || (std::path::PathBuf::new(), String::new()),
+        |path| {
+            let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+            let dir = canonical
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            (canonical, dir)
+        },
+    );
+    let project_root = config.core.workspace_root
+        .canonicalize()
+        .unwrap_or_else(|_| config.core.workspace_root.clone())
+        .to_string_lossy()
+        .to_string();
+
+    command
+        .replace("{{config_path}}", &config_path.to_string_lossy())
+        .replace("{{config_dir}}", &config_dir)
+        .replace("{{project_root}}", &project_root)
+}
+
+struct EventFilterValidCheck;
+
+#[async_trait]
+impl PreflightCheck for EventFilterValidCheck {
+    fn name(&self) -> &'static str {
+        "event-filters"
+    }
+
+    async fn run(&self, config: &RalphConfig) -> CheckResult {
+        let mut violations = Vec::new();
+
+        for (hat_id, hat) in &config.hats {
+            let Some(ref filter) = hat.event_filter else { continue };
+            if !filter.enabled {
+                continue;
+            }
+
+            for event in &filter.events {
+                if event.trim().is_empty() {
+                    violations.push(format!(
+                        "Hat '{hat_id}': event_filter contains empty event name"
+                    ));
+                    continue;
+                }
+                if event.contains(' ') {
+                    violations.push(format!(
+                        "Hat '{hat_id}': event name '{event}' contains spaces"
+                    ));
+                }
+            }
+        }
+
+        if violations.is_empty() {
+            CheckResult::pass(self.name(), "Event filters valid")
+        } else {
+            CheckResult::fail(
+                self.name(),
+                "Event filter configuration invalid",
+                violations.join("\n"),
+            )
+        }
     }
 }
 
@@ -1143,7 +1302,8 @@ mod tests {
 
     #[test]
     fn default_checks_include_hooks_check_name() {
-        let runner = PreflightRunner::default_checks();
+        let config = RalphConfig::default();
+        let runner = PreflightRunner::default_checks(&config);
         let check_names = runner.check_names();
 
         assert!(check_names.contains(&"hooks"));
@@ -1226,7 +1386,7 @@ mod tests {
             vec![hook_spec("broken-hook", &["./scripts/hooks/missing.sh"])],
         );
 
-        let runner = PreflightRunner::default_checks();
+        let runner = PreflightRunner::default_checks(&config);
         let report = runner.run_selected(&config, &["config".to_string()]).await;
 
         assert!(report.passed);
@@ -1773,5 +1933,296 @@ status: draft
             match_clause("no match here", "No match here", "given"),
             None
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ExternalCommandCheck tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn event_filter_check_passes_when_no_filters() {
+        let config = RalphConfig::default();
+
+        let runner = PreflightRunner::default_checks(&config);
+        let report = runner.run_all(&config).await;
+
+        let result = report
+            .checks
+            .iter()
+            .find(|c| c.name == "event-filters")
+            .expect("expected event-filters result");
+        assert_eq!(result.status, CheckStatus::Pass);
+    }
+
+    #[tokio::test]
+    async fn event_filter_check_fails_on_empty_event_name() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = RalphConfig::default();
+        config.hats.insert(
+            "reviewer".to_string(),
+            crate::config::HatConfig {
+                name: "Reviewer".to_string(),
+                description: Some("Reviews code".to_string()),
+                triggers: vec!["review.trigger".to_string()],
+                publishes: vec!["review.done".to_string()],
+                instructions: String::new(),
+                extra_instructions: vec![],
+                backend: None,
+                backend_args: None,
+                default_publishes: None,
+                max_activations: None,
+                scratchpad: None,
+                disallowed_tools: vec![],
+                timeout: None,
+                concurrency: 1,
+                aggregate: None,
+                event_filter: Some(crate::config::EventFilterConfig {
+                    enabled: true,
+                    mode: crate::config::EventFilterMode::Allowlist,
+                    events: vec!["".to_string(), "review.done".to_string()],
+                }),
+            },
+        );
+
+        let runner = PreflightRunner::default_checks(&config);
+        let report = runner.run_all(&config).await;
+
+        let result = report
+            .checks
+            .iter()
+            .find(|c| c.name == "event-filters")
+            .expect("expected event-filters result");
+        assert_eq!(result.status, CheckStatus::Fail);
+        assert!(
+            result.message.as_deref().unwrap_or("").contains("empty event name")
+        );
+    }
+
+    #[tokio::test]
+    async fn event_filter_check_fails_on_event_with_spaces() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = RalphConfig::default();
+        config.hats.insert(
+            "reviewer".to_string(),
+            crate::config::HatConfig {
+                name: "Reviewer".to_string(),
+                description: Some("Reviews code".to_string()),
+                triggers: vec!["review.trigger".to_string()],
+                publishes: vec!["review.done".to_string()],
+                instructions: String::new(),
+                extra_instructions: vec![],
+                backend: None,
+                backend_args: None,
+                default_publishes: None,
+                max_activations: None,
+                scratchpad: None,
+                disallowed_tools: vec![],
+                timeout: None,
+                concurrency: 1,
+                aggregate: None,
+                event_filter: Some(crate::config::EventFilterConfig {
+                    enabled: true,
+                    mode: crate::config::EventFilterMode::Allowlist,
+                    events: vec!["review file".to_string()],
+                }),
+            },
+        );
+
+        let runner = PreflightRunner::default_checks(&config);
+        let report = runner.run_all(&config).await;
+
+        let result = report
+            .checks
+            .iter()
+            .find(|c| c.name == "event-filters")
+            .expect("expected event-filters result");
+        assert_eq!(result.status, CheckStatus::Fail);
+        assert!(
+            result.message.as_deref().unwrap_or("").contains("contains spaces")
+        );
+    }
+
+    #[tokio::test]
+    async fn external_hooks_disabled_runs_only_native_checks() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = RalphConfig::default();
+        config.core.workspace_root = temp.path().to_path_buf();
+        config.core.preflight_extensions = Some(crate::config::PreflightExtensionsConfig {
+            enabled: false,
+            hooks: vec![crate::config::PreflightHook {
+                name: "should-not-run".to_string(),
+                command: "exit 1".to_string(),
+                stage: crate::config::HookStage::AfterNative,
+                fail_on_error: true,
+            }],
+        });
+
+        let runner = PreflightRunner::default_checks(&config);
+        let names = runner.check_names();
+
+        assert!(!names.contains(&"should-not-run"));
+        assert!(names.contains(&"config"));
+    }
+
+    #[tokio::test]
+    async fn external_hook_passes_on_exit_zero() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = RalphConfig::default();
+        config.core.workspace_root = temp.path().to_path_buf();
+        config.core.preflight_extensions = Some(crate::config::PreflightExtensionsConfig {
+            enabled: true,
+            hooks: vec![crate::config::PreflightHook {
+                name: "success-hook".to_string(),
+                command: "echo hello".to_string(),
+                stage: crate::config::HookStage::AfterNative,
+                fail_on_error: true,
+            }],
+        });
+
+        let runner = PreflightRunner::default_checks(&config);
+        let report = runner.run_all(&config).await;
+
+        let hook_result = report
+            .checks
+            .iter()
+            .find(|c| c.name == "success-hook")
+            .expect("expected hook result");
+        assert_eq!(hook_result.status, CheckStatus::Pass);
+    }
+
+    #[tokio::test]
+    async fn external_hook_warns_on_nonzero_when_fail_on_error_false() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = RalphConfig::default();
+        config.core.workspace_root = temp.path().to_path_buf();
+        config.core.preflight_extensions = Some(crate::config::PreflightExtensionsConfig {
+            enabled: true,
+            hooks: vec![crate::config::PreflightHook {
+                name: "warn-hook".to_string(),
+                command: "echo 'oops' >&2; exit 1".to_string(),
+                stage: crate::config::HookStage::AfterNative,
+                fail_on_error: false,
+            }],
+        });
+
+        let runner = PreflightRunner::default_checks(&config);
+        let report = runner.run_all(&config).await;
+
+        let hook_result = report
+            .checks
+            .iter()
+            .find(|c| c.name == "warn-hook")
+            .expect("expected hook result");
+        assert_eq!(hook_result.status, CheckStatus::Warn);
+        assert!(hook_result.message.as_deref().unwrap_or("").contains("oops"));
+    }
+
+    #[tokio::test]
+    async fn external_hook_fails_on_nonzero_when_fail_on_error_true() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = RalphConfig::default();
+        config.core.workspace_root = temp.path().to_path_buf();
+        config.core.preflight_extensions = Some(crate::config::PreflightExtensionsConfig {
+            enabled: true,
+            hooks: vec![crate::config::PreflightHook {
+                name: "fail-hook".to_string(),
+                command: "echo 'broken' >&2; exit 1".to_string(),
+                stage: crate::config::HookStage::AfterNative,
+                fail_on_error: true,
+            }],
+        });
+
+        let runner = PreflightRunner::default_checks(&config);
+        let report = runner.run_all(&config).await;
+
+        let hook_result = report
+            .checks
+            .iter()
+            .find(|c| c.name == "fail-hook")
+            .expect("expected hook result");
+        assert_eq!(hook_result.status, CheckStatus::Fail);
+        assert!(hook_result.message.as_deref().unwrap_or("").contains("broken"));
+    }
+
+    #[tokio::test]
+    async fn external_hook_substitutes_project_root_var() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = RalphConfig::default();
+        config.core.workspace_root = temp.path().to_path_buf();
+        config.core.preflight_extensions = Some(crate::config::PreflightExtensionsConfig {
+            enabled: true,
+            hooks: vec![crate::config::PreflightHook {
+                name: "vars-hook".to_string(),
+                command: "test -d '{{project_root}}'".to_string(),
+                stage: crate::config::HookStage::AfterNative,
+                fail_on_error: true,
+            }],
+        });
+
+        let runner = PreflightRunner::default_checks(&config);
+        let report = runner.run_all(&config).await;
+
+        let hook_result = report
+            .checks
+            .iter()
+            .find(|c| c.name == "vars-hook")
+            .expect("expected hook result");
+        assert_eq!(hook_result.status, CheckStatus::Pass);
+    }
+
+    #[tokio::test]
+    async fn external_hook_substitutes_config_path_and_dir_vars() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_file = temp.path().join("ralph.yml");
+        std::fs::write(&config_file, "# dummy config").unwrap();
+
+        let mut config = RalphConfig::default();
+        config.config_path = Some(config_file.clone());
+        config.core.workspace_root = temp.path().to_path_buf();
+        config.core.preflight_extensions = Some(crate::config::PreflightExtensionsConfig {
+            enabled: true,
+            hooks: vec![crate::config::PreflightHook {
+                name: "config-path-hook".to_string(),
+                command: "test -f '{{config_path}}' && test -d '{{config_dir}}'".to_string(),
+                stage: crate::config::HookStage::AfterNative,
+                fail_on_error: true,
+            }],
+        });
+
+        let runner = PreflightRunner::default_checks(&config);
+        let report = runner.run_all(&config).await;
+
+        let hook_result = report
+            .checks
+            .iter()
+            .find(|c| c.name == "config-path-hook")
+            .expect("expected hook result");
+        assert_eq!(hook_result.status, CheckStatus::Pass);
+    }
+
+    #[tokio::test]
+    async fn external_hook_handles_missing_command_gracefully() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = RalphConfig::default();
+        config.core.workspace_root = temp.path().to_path_buf();
+        config.core.preflight_extensions = Some(crate::config::PreflightExtensionsConfig {
+            enabled: true,
+            hooks: vec![crate::config::PreflightHook {
+                name: "missing-cmd-hook".to_string(),
+                command: "definitely-not-a-real-command-xyz".to_string(),
+                stage: crate::config::HookStage::AfterNative,
+                fail_on_error: false,
+            }],
+        });
+
+        let runner = PreflightRunner::default_checks(&config);
+        let report = runner.run_all(&config).await;
+
+        let hook_result = report
+            .checks
+            .iter()
+            .find(|c| c.name == "missing-cmd-hook")
+            .expect("expected hook result");
+        assert_eq!(hook_result.status, CheckStatus::Warn);
     }
 }

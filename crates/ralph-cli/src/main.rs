@@ -1300,7 +1300,7 @@ async fn run_auto_preflight(
         return Ok(None);
     }
 
-    let runner = PreflightRunner::default_checks();
+    let runner = PreflightRunner::default_checks(config);
     let mut report = if config.features.preflight.skip.is_empty() {
         runner.run_all(config).await
     } else {

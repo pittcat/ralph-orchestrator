@@ -25,7 +25,7 @@ pub async fn execute(
     let source_label = crate::preflight::config_source_label(config_sources, hats_source);
     let config = crate::preflight::load_config_for_preflight(config_sources, hats_source).await?;
 
-    let runner = ralph_core::PreflightRunner::default_checks();
+    let runner = ralph_core::PreflightRunner::default_checks(&config);
     let preflight_report = runner.run_all(&config).await;
 
     let mut config_check = None;
@@ -631,6 +631,7 @@ mod tests {
             timeout: None,
             concurrency: 1,
             aggregate: None,
+            event_filter: None,
         }
     }
 
