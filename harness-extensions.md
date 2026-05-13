@@ -1,0 +1,359 @@
+# Harness Extensions
+
+Ralph's **Harness Extensions** are four opt-in mechanisms that turn "soft conventions"
+into "hard guarantees" — without changing any existing behavior when disabled.
+
+They are designed for methodology-heavy workflows (such as Universal AutoResearch)
+where consistency across agents and sessions is critical.
+
+---
+
+## Overview
+
+| Extension | Problem Solved | What It Does |
+|-----------|---------------|--------------|
+| **Event Filtering** (FR-1) | Red-team anchoring bias | Each Hat sees only events it explicitly allows |
+| **Event Projection** (FR-2) | Ledger gaps | Matching events are auto-copied to sidecar JSONL files |
+| **State File Injection** (FR-3) | Unreliable scratchpad state | External JSON/JSONL files are injected into prompts as structured XML blocks |
+| **Preflight Hooks** (FR-4) | Skipped validation steps | External commands run as part of `ralph preflight` |
+
+**Design principles:**
+- **Default off** — `enabled: false` (or absent) means zero behavioral change
+- **Zero regression** — `serde(default)` guarantees old configs load unchanged
+- **Fail-soft** — any extension failure prints a `stderr` warning and continues; the main loop is never blocked
+
+---
+
+## Event Filtering (FR-1)
+
+### The Problem
+
+All Hats share the full event history. A red-team Hat that is supposed to review
+decisions independently may be anchored by seeing the evaluator's scores in its
+context window.
+
+### The Solution
+
+Per-Hat **allowlist filtering**. When every active Hat has an enabled filter,
+Ralph computes the **union** of their allowed events (plus their trigger topics)
+and shows only those events in the prompt.
+
+Events are still published to the bus and persisted — filtering affects only
+**what enters the prompt**.
+
+### Configuration
+
+```yaml
+hats:
+  red_team:
+    name: "Red Team"
+    triggers: ["experiment.propose"]
+    publishes: ["redteam.review"]
+    event_filter:
+      enabled: true
+      mode: allowlist          # Only allowlist is supported today
+      events:
+        - "experiment.propose"
+        - "experiment.design"
+        # Scores and evaluations are NOT listed → red team never sees them
+
+  evaluator:
+    name: "Evaluator"
+    triggers: ["experiment.run"]
+    publishes: ["eval.score"]
+    event_filter:
+      enabled: true
+      mode: allowlist
+      events:
+        - "experiment.run"
+        - "experiment.result"
+        - "redteam.review"
+```
+
+**Union semantics:** If `red_team` allows `{experiment.propose, experiment.design}`
+and `evaluator` allows `{experiment.run, experiment.result, redteam.review}`,
+the prompt contains events whose topic is in the union of both sets (plus their
+triggers). Neither Hat sees the other's private scoring events.
+
+**Fallback:** If even one active Hat lacks `event_filter.enabled: true`, filtering
+is disabled for that iteration — Ralph shows the full event history. This prevents
+accidental information starvation.
+
+### Validation
+
+`ralph preflight` checks that:
+- No event name is empty
+- No event name contains spaces
+
+Violations fail the preflight with a descriptive message.
+
+---
+
+## Event Projection (FR-2)
+
+### The Problem
+
+Downstream tools (dashboards, analyzers, audit scripts) must parse the entire
+events JSONL file to find specific event types. If an evaluator Hat forgets to
+append to the experiment ledger, the audit trail has gaps.
+
+### The Solution
+
+**Automatic projection**: When an event matches a configured topic, Ralph extracts
+specified fields and appends a JSON line to a target file.
+
+### Configuration
+
+```yaml
+core:
+  event_projection:
+    enabled: true
+    rules:
+      - name: experiment-ledger
+        trigger_events:
+          - "experiment.run"
+          - "experiment.complete"
+        fields:
+          - "topic"
+          - "payload"
+        target_file: .ralph/experiments.jsonl
+        mode: append
+```
+
+### Field Extraction
+
+| Field | Source |
+|-------|--------|
+| `topic` | Event topic string |
+| `payload` | Raw event payload string |
+| `wave_id` | Wave ID if present |
+| any other | Key lookup in payload JSON (falls back to `null`) |
+
+### Output Format
+
+Each matching event produces one JSONL line:
+
+```jsonl
+{"topic":"experiment.run","payload":"{\"id\":\"exp-42\"}"}
+{"topic":"experiment.complete","payload":"{\"id\":\"exp-42\",\"score\":0.91}"}
+```
+
+The target directory is created automatically. Projection happens **after**
+successful `EventBus::publish()`, so an event that fails to persist is never
+projected.
+
+---
+
+## State File Injection (FR-3)
+
+### The Problem
+
+Bayesian beliefs, UCB scores, and other structured state are often written to
+scratchpad free text. Context truncation and LLM "rot" make these values
+unreliable — you are asking an LLM to do arithmetic on text it may have
+partially forgotten.
+
+### The Solution
+
+Inject external **structured state files** (JSON/JSONL) directly into the prompt,
+wrapped in typed XML blocks. The agent receives the raw data, not a paraphrase.
+
+### Configuration
+
+```yaml
+core:
+  state_files:
+    enabled: true
+    inject_preamble: |
+      ## Strategy State
+      The following files contain the current Bayesian beliefs and UCB scores.
+      Trust these values over any stale scratchpad references.
+    files:
+      - path: .ralph/agent/strategy_state.json
+        format: json
+        char_budget: 4000       # Keep last 4000 chars if file is large
+      - path: .ralph/agent/experiment_log.jsonl
+        format: jsonl
+        tail_lines: 50          # Keep last 50 lines
+```
+
+### Injected Format
+
+```xml
+## Strategy State
+The following files contain the current Bayesian beliefs and UCB scores.
+Trust these values over any stale scratchpad references.
+
+<state-file name=".ralph/agent/strategy_state.json" format="json">
+{
+  "beliefs": { "hypothesis_a": 0.73, "hypothesis_b": 0.27 },
+  "ucb_scores": { "arm_1": 1.42, "arm_2": 0.98 }
+}
+</state-file>
+
+<state-file name=".ralph/agent/experiment_log.jsonl" format="jsonl">
+<!-- earlier content truncated (1247 chars omitted) -->
+{"experiment":"exp-99","score":0.88,"arm":"arm_2"}
+{"experiment":"exp-100","score":0.91,"arm":"arm_1"}
+</state-file>
+```
+
+State files are injected **after scratchpad, before ready tasks**, so they sit
+near the top of the prompt where attention is strongest.
+
+### Truncation Strategies
+
+| Strategy | Behavior |
+|----------|----------|
+| `char_budget` | Keep the tail (most recent chars); prepend truncation notice |
+| `tail_lines` | Keep the last N lines; no truncation notice needed |
+| both | `tail_lines` applied first, then `char_budget` on the result |
+
+If a file is missing or unreadable, an empty `<state-file>` block is injected
+with a `stderr` warning — the loop continues.
+
+---
+
+## Preflight Hooks (FR-4)
+
+### The Problem
+
+Validation and audit steps written in Skill documents can be skipped by different
+Agent platforms or when agents deviate from instructions.
+
+### The Solution
+
+Make external validation commands a **native preflight check**. Hooks run as
+part of `ralph preflight` (and `ralph run` when `features.preflight.enabled: true`),
+producing pass/warn/fail results just like built-in checks.
+
+### Configuration
+
+```yaml
+core:
+  preflight_extensions:
+    enabled: true
+    hooks:
+      - name: validate-specs
+        command: "python scripts/validate_specs.py {{config_dir}}/specs"
+        stage: before_native
+        fail_on_error: true
+
+      - name: audit-budget
+        command: "jq '.total_cost' {{project_root}}/.ralph/budget.json"
+        stage: after_native
+        fail_on_error: false
+```
+
+### Hook Stages
+
+| Stage | When It Runs | Typical Use |
+|-------|--------------|-------------|
+| `before_native` | Before built-in checks (config, git, paths, etc.) | Environment guards, dependency checks |
+| `after_native` | After built-in checks | Audit, reporting, budget checks |
+
+### Template Variables
+
+| Variable | Value |
+|----------|-------|
+| `{{config_path}}` | Absolute path to the loaded config file |
+| `{{config_dir}}` | Directory containing the config file |
+| `{{project_root}}` | Workspace root (`core.workspace_root`) |
+
+Variables are substituted before the shell executes the command.
+
+### Failure Behavior
+
+- `fail_on_error: true` + non-zero exit → preflight **fails** (blocks `ralph run`)
+- `fail_on_error: false` + non-zero exit → preflight **warns** (logs, does not block)
+- Execution failure (spawn error) → treated according to `fail_on_error`
+
+Stdout is ignored; stderr is captured and shown in the check message.
+
+---
+
+## Putting It All Together: AutoResearch Example
+
+```yaml
+# ralph.autoresearch.yml
+core:
+  event_projection:
+    enabled: true
+    rules:
+      - name: experiment-ledger
+        trigger_events: ["experiment.run", "experiment.complete", "eval.score"]
+        fields: ["topic", "payload"]
+        target_file: .ralph/autoresearch.jsonl
+
+  state_files:
+    enabled: true
+    inject_preamble: "## Current Strategy State"
+    files:
+      - path: .ralph/agent/beliefs.json
+        format: json
+        char_budget: 2000
+
+  preflight_extensions:
+    enabled: true
+    hooks:
+      - name: check-ledger-schema
+        command: "jq 'has(\"topic\") and has(\"payload\")' .ralph/autoresearch.jsonl"
+        stage: before_native
+        fail_on_error: false
+
+hats:
+  strategist:
+    name: "Strategist"
+    triggers: ["loop.start", "eval.score"]
+    publishes: ["experiment.propose"]
+    event_filter:
+      enabled: true
+      events:
+        - "loop.start"
+        - "eval.score"
+        - "experiment.result"
+
+  red_team:
+    name: "Red Team"
+    triggers: ["experiment.propose"]
+    publishes: ["redteam.review"]
+    event_filter:
+      enabled: true
+      events:
+        - "experiment.propose"
+        - "experiment.design"
+
+  evaluator:
+    name: "Evaluator"
+    triggers: ["experiment.run"]
+    publishes: ["eval.score"]
+    event_filter:
+      enabled: true
+      events:
+        - "experiment.run"
+        - "experiment.result"
+        - "redteam.review"
+```
+
+---
+
+## Compatibility & Migration
+
+- All extension fields are `Option<T>` with `serde(default)` — adding them to an
+  existing config is safe and does not change behavior unless `enabled: true` is set.
+- Removing an extension section (or setting `enabled: false`) restores pre-existing
+  behavior immediately.
+- Preflight hooks are validated by name uniqueness; duplicate names cause a config
+  validation warning.
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| Events still visible despite filter | Not all active Hats have `event_filter.enabled: true` | Enable filtering on every Hat, or accept full-history fallback |
+| Projection file empty | `trigger_events` mismatch or `event_projection.enabled: false` | Verify event topics match exactly (no wildcards) |
+| State file not in prompt | `state_files.enabled: false` or path resolution failure | Check path is relative to workspace root; look for `stderr` warnings |
+| Preflight hook "Failed to execute" | Shell or command not found | Ensure the command works standalone; hooks run via `sh -c "..."` |
+| `{{config_path}}` resolves to empty string | Config loaded from stdin or memory | Use `{{project_root}}` or absolute paths instead |

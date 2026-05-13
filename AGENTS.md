@@ -32,7 +32,7 @@ npm run test:server                          # Backend tests
 
 ```
 ralph-cli      → CLI entry point, commands (run, plan, task, loops, web)
-ralph-core     → Orchestration logic, event loop, hats, memories, tasks
+ralph-core     → Orchestration logic, event loop, hats, memories, tasks, harness extensions
 ralph-adapters → Backend integrations (Claude, Kiro, Gemini, Codex, Roo, etc.)
 ralph-telegram → Telegram bot for human-in-the-loop communication
 ralph-tui      → Terminal UI (ratatui-based)
@@ -55,6 +55,7 @@ frontend/      → Web dashboard (@ralph-web/dashboard) - React + Vite + Tailwin
 | `.ralph/merge-queue.jsonl` | Event-sourced merge queue |
 | `.ralph/telegram-state.json` | Telegram bot state (chat ID, pending questions) |
 | `docs/solutions/` | Documented solutions to past problems (bugs, best practices, workflow patterns), organized by category with YAML frontmatter (`module`, `tags`, `problem_type`). Relevant when implementing or debugging in documented areas. |
+| `docs/guide/harness-extensions.md` | User guide for Harness 4 extension mechanisms (event filtering, projection, state injection, preflight hooks) |
 
 ### Code Locations
 
@@ -70,6 +71,7 @@ frontend/      → Web dashboard (@ralph-web/dashboard) - React + Vite + Tailwin
 - **RObot config**: `crates/ralph-core/src/config.rs` (`RobotConfig`, `TelegramBotConfig`)
 - **Wave system**: `crates/ralph-core/src/wave_tracker.rs`, `wave_detection.rs`, `wave_prompt.rs`
 - **Wave CLI**: `crates/ralph-cli/src/wave.rs`
+- **Harness extensions**: `crates/ralph-core/src/config.rs` (config schema), `event_loop/mod.rs` (integration), `event_projection.rs`, `state_file_injector.rs`, `preflight.rs` (external command hooks)
 - **Web server**: `backend/ralph-web-server/src/` (tRPC routes in `api/`, runners in `runner/`)
 - **Web dashboard**: `frontend/ralph-web/src/` (React components in `components/`)
 

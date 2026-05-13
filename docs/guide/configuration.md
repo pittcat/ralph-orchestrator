@@ -317,6 +317,67 @@ core:
 
 > **Solo mode safety:** If scratchpad is disabled (`enabled: false`) but no hats are defined, Ralph force-enables it with a warning. Scratchpad is the only continuity mechanism in solo mode.
 
+### core.event_projection
+
+Auto-copy matching events to sidecar JSONL files for downstream consumption.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enable event projection |
+| `rules` | list | `[]` | Projection rules (see below) |
+
+**ProjectionRule fields:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | required | Human-readable rule name |
+| `trigger_events` | list | `[]` | Event topics that trigger this rule |
+| `fields` | list | `[]` | Fields to extract (`topic`, `payload`, `wave_id`, or JSON key) |
+| `target_file` | string | required | Output file path (relative to workspace root) |
+| `mode` | string | `"append"` | Projection mode (`append` only today) |
+
+### core.state_files
+
+Inject external structured files (JSON/JSONL) into prompts as typed XML blocks.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enable state file injection |
+| `inject_preamble` | string | `null` | Optional text injected before state file contents |
+| `files` | list | `[]` | State file entries (see below) |
+
+**StateFileEntry fields:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `path` | string | required | File path (relative to workspace root) |
+| `format` | string | `"json"` | File format (`json` or `jsonl`) |
+| `char_budget` | integer | `null` | Max chars to keep (tail truncation) |
+| `tail_lines` | integer | `null` | Max trailing lines to keep |
+
+### core.preflight_extensions
+
+Run external commands as part of `ralph preflight`.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enable preflight extension hooks |
+| `hooks` | list | `[]` | Hook definitions (see below) |
+
+**PreflightHook fields:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | required | Human-readable hook name (must be unique) |
+| `command` | string | required | Shell command to execute |
+| `stage` | string | `"after_native"` | When to run (`before_native` or `after_native`) |
+| `fail_on_error` | boolean | `false` | Whether non-zero exit fails preflight |
+
+**Template variables** in `command`:
+- `{{config_path}}` — Absolute path to the loaded config file
+- `{{config_dir}}` — Directory containing the config file
+- `{{project_root}}` — Workspace root directory
+
 ### memories
 
 Persistent learning across sessions.
@@ -423,7 +484,16 @@ Specialized personas for hat-based mode.
 | `max_activations` | integer | No | Limit activations |
 | `backend` | string | No | Backend override |
 | `scratchpad` | string or object | No | Per-hat scratchpad override (inherits `core.scratchpad` if omitted) |
+| `event_filter` | object | No | Per-hat event allowlist filter (see below) |
 | `instructions` | string | Yes | Hat-specific prompt |
+
+**Hat event_filter fields:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enable filtering for this hat |
+| `mode` | string | `"allowlist"` | Filter mode (`allowlist` only today) |
+| `events` | list | `[]` | Event topics this hat is allowed to see in its prompt |
 
 Each hat can override the global scratchpad with its own `scratchpad` field. Like the core-level setting, it accepts a plain string or a structured object:
 
