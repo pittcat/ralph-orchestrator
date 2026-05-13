@@ -243,8 +243,9 @@ fn apply_workflow_guard_validation(
             continue;
         }
 
-        // For each matching chain, check if the event is valid for the current instance
+        // Extract instance keys and phases once per chain, then validate and advance
         let mut rejections: Vec<(String, Option<String>, Option<usize>, String, String)> = Vec::new();
+        let mut chain_extractions: Vec<(&crate::config::WorkflowChain, Option<String>, usize)> = Vec::new();
 
         for chain in &matching_chains {
             let instance_key = match extract_correlation_key(&event, chain) {
@@ -269,29 +270,33 @@ fn apply_workflow_guard_validation(
                 .position(|t| *t == event.topic)
                 .unwrap();
 
-            // Check if this phase is valid for the current instance
-            let is_valid = workflow_progress.is_phase_valid(
-                &chain.name,
-                instance_key.as_deref(),
-                phase,
-            );
+            // Strict mode rejects out-of-order events; Advisory mode accepts all
+            if matches!(chain.mode, crate::config::WorkflowChainMode::Strict) {
+                let is_valid = workflow_progress.is_phase_valid(
+                    &chain.name,
+                    instance_key.as_deref(),
+                    phase,
+                );
 
-            if !is_valid {
-                let current_phase = workflow_progress.get_phase(&chain.name, instance_key.as_deref());
-                let current_topic = current_phase
-                    .and_then(|p| chain.topics.get(p).cloned())
-                    .unwrap_or_else(|| "none".to_string());
-                let next_expected = current_phase
-                    .and_then(|p| chain.topics.get(p + 1).cloned())
-                    .unwrap_or_else(|| "terminal".to_string());
-                rejections.push((
-                    chain.name.clone(),
-                    instance_key,
-                    current_phase,
-                    current_topic,
-                    next_expected,
-                ));
+                if !is_valid {
+                    let current_phase = workflow_progress.get_phase(&chain.name, instance_key.as_deref());
+                    let current_topic = current_phase
+                        .and_then(|p| chain.topics.get(p).cloned())
+                        .unwrap_or_else(|| "none".to_string());
+                    let next_expected = current_phase
+                        .and_then(|p| chain.topics.get(p + 1).cloned())
+                        .unwrap_or_else(|| "terminal".to_string());
+                    rejections.push((
+                        chain.name.clone(),
+                        instance_key.clone(),
+                        current_phase,
+                        current_topic,
+                        next_expected,
+                    ));
+                }
             }
+
+            chain_extractions.push((chain, instance_key, phase));
         }
 
         if !rejections.is_empty() {
@@ -336,24 +341,13 @@ fn apply_workflow_guard_validation(
             continue;
         }
 
-        // Event is valid — accept it (but only advance progress if chain mode is strict)
-        validated_events.push(event.clone());
+        // Event is valid — accept it
+        validated_events.push(event);
 
-        // Advance workflow progress for strict-mode chains
-        for chain in &matching_chains {
-            if matches!(chain.mode, crate::config::WorkflowChainMode::Strict) {
-                let instance_key = match extract_correlation_key(&event, chain) {
-                    CorrelationKeyResult::Global => None,
-                    CorrelationKeyResult::Instance(key) => Some(key),
-                    CorrelationKeyResult::ExtractFailed => continue,
-                };
-                let phase = chain
-                    .topics
-                    .iter()
-                    .position(|t| *t == event.topic)
-                    .unwrap();
-                workflow_progress.advance(&chain.name, instance_key.as_deref(), phase);
-            }
+        // Advance workflow progress for all matching chains (both strict and advisory).
+        // Advisory chains track progress for in-order events but never reject.
+        for (chain, instance_key, phase) in chain_extractions {
+            workflow_progress.advance(&chain.name, instance_key.as_deref(), phase);
         }
     }
 
@@ -866,25 +860,24 @@ impl EventLoop {
         }
 
         // Workflow guard completion validation: ensure all started guarded instances are terminal
-        if let Some(guards) = &self.config.event_loop.workflow_guards {
-            if !guards.chains.is_empty() {
-                if let Some(rejection) = self.check_workflow_guard_completion(guards) {
-                    warn!(
-                        reason = %rejection.message,
-                        "Rejecting LOOP_COMPLETE: incomplete workflow guard instances"
-                    );
-                    self.state.completion_requested = false;
+        if let Some(guards) = &self.config.event_loop.workflow_guards
+            && !guards.chains.is_empty()
+            && let Some(rejection) = self.check_workflow_guard_completion(guards)
+        {
+            warn!(
+                reason = %rejection.message,
+                "Rejecting LOOP_COMPLETE: incomplete workflow guard instances"
+            );
+            self.state.completion_requested = false;
 
-                    let resume_payload = format!(
-                        "LOOP_COMPLETE rejected: {}. \
-                         All workflow instances must reach a terminal phase before emitting LOOP_COMPLETE. \
-                         Use loop.cancel to abort the workflow instead.",
-                        rejection.message
-                    );
-                    self.bus.publish(Event::new("task.resume", resume_payload));
-                    return None;
-                }
-            }
+            let resume_payload = format!(
+                "LOOP_COMPLETE rejected: {}. \
+                 All workflow instances must reach a terminal phase before emitting LOOP_COMPLETE. \
+                 Use loop.cancel to abort the workflow instead.",
+                rejection.message
+            );
+            self.bus.publish(Event::new("task.resume", resume_payload));
+            return None;
         }
 
         self.state.completion_requested = false;

@@ -4749,7 +4749,7 @@ fn test_workflow_guard_rejects_evaluated_before_scored() {
     let events_path = temp_dir.path().join("events.jsonl");
 
     // Configure workflow guard for AutoResearch experiment chain
-    let yaml = r#"
+    let yaml = r"
 event_loop:
   max_iterations: 10
   workflow_guards:
@@ -4762,7 +4762,7 @@ event_loop:
           - experiment.scored
           - experiment.evaluated
         mode: strict
-"#;
+";
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");
@@ -4800,7 +4800,7 @@ fn test_workflow_guard_accepts_evaluated_after_scored() {
     let temp_dir = TempDir::new().unwrap();
     let events_path = temp_dir.path().join("events.jsonl");
 
-    let yaml = r#"
+    let yaml = r"
 event_loop:
   max_iterations: 10
   workflow_guards:
@@ -4813,7 +4813,7 @@ event_loop:
           - experiment.scored
           - experiment.evaluated
         mode: strict
-"#;
+";
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");
@@ -4852,7 +4852,7 @@ fn test_workflow_guard_periodic_review_does_not_advance_chain() {
     let temp_dir = TempDir::new().unwrap();
     let events_path = temp_dir.path().join("events.jsonl");
 
-    let yaml = r#"
+    let yaml = r"
 event_loop:
   max_iterations: 10
   workflow_guards:
@@ -4865,7 +4865,7 @@ event_loop:
           - experiment.scored
           - experiment.evaluated
         mode: strict
-"#;
+";
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");
@@ -4908,7 +4908,7 @@ fn test_workflow_guard_completion_rejected_when_chain_incomplete() {
     let temp_dir = TempDir::new().unwrap();
     let events_path = temp_dir.path().join("events.jsonl");
 
-    let yaml = r#"
+    let yaml = r"
 event_loop:
   max_iterations: 10
   workflow_guards:
@@ -4921,7 +4921,7 @@ event_loop:
           - experiment.scored
           - experiment.evaluated
         mode: strict
-"#;
+";
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");
@@ -4955,7 +4955,7 @@ fn test_workflow_guard_completion_accepted_when_chain_complete() {
     let temp_dir = TempDir::new().unwrap();
     let events_path = temp_dir.path().join("events.jsonl");
 
-    let yaml = r#"
+    let yaml = r"
 event_loop:
   max_iterations: 10
   workflow_guards:
@@ -4968,7 +4968,7 @@ event_loop:
           - experiment.scored
           - experiment.evaluated
         mode: strict
-"#;
+";
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");
@@ -5009,7 +5009,7 @@ fn test_workflow_guard_instance_isolation_two_experiments() {
     let temp_dir = TempDir::new().unwrap();
     let events_path = temp_dir.path().join("events.jsonl");
 
-    let yaml = r#"
+    let yaml = r"
 event_loop:
   max_iterations: 10
   workflow_guards:
@@ -5025,7 +5025,7 @@ event_loop:
         correlation:
           from_payload: experiment_id
           from_topic: experiment.planned
-"#;
+";
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");
@@ -5088,7 +5088,7 @@ fn test_workflow_guard_rejection_publishes_task_resume_with_context() {
     let temp_dir = TempDir::new().unwrap();
     let events_path = temp_dir.path().join("events.jsonl");
 
-    let yaml = r#"
+    let yaml = r"
 event_loop:
   max_iterations: 10
   workflow_guards:
@@ -5101,7 +5101,7 @@ event_loop:
           - experiment.scored
           - experiment.evaluated
         mode: strict
-"#;
+";
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");
@@ -5158,5 +5158,272 @@ event_loop:
     assert!(
         last_resume.payload.contains("experiment.scored"),
         "task.resume payload should mention the next expected topic"
+    );
+}
+
+
+#[test]
+fn test_workflow_guard_advisory_mode_accepts_out_of_order() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let yaml = r"
+event_loop:
+  max_iterations: 10
+  workflow_guards:
+    chains:
+      - name: experiment
+        topics:
+          - experiment.planned
+          - experiment.ready
+          - experiment.measured
+          - experiment.scored
+          - experiment.evaluated
+        mode: advisory
+";
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // Skip ahead to evaluated without scoring — advisory should accept it
+    write_event_to_jsonl(&events_path, "experiment.planned", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+
+    write_event_to_jsonl(&events_path, "experiment.evaluated", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+
+    // evaluated should be recorded as seen (in seen_topics)
+    assert!(
+        event_loop.state.seen_topics.contains("experiment.evaluated"),
+        "Advisory mode should accept out-of-order events and record them as seen"
+    );
+
+    // Workflow progress should NOT advance for the skipped phase (advisory only advances valid phases)
+    let phase = event_loop.state.workflow_progress.get_phase("experiment", None);
+    assert_eq!(
+        phase,
+        Some(0),
+        "Advisory mode should not advance progress for out-of-order events"
+    );
+
+    // LOOP_COMPLETE should NOT be blocked by advisory chains
+    write_event_to_jsonl(&events_path, "LOOP_COMPLETE", "Done");
+    let _ = event_loop.process_events_from_jsonl();
+    let reason = event_loop.check_completion_event();
+    assert_eq!(
+        reason,
+        Some(TerminationReason::CompletionPromise),
+        "LOOP_COMPLETE should be accepted when only advisory chains are incomplete"
+    );
+}
+
+#[test]
+fn test_workflow_guard_correlation_extraction_failure_rejects_event() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let yaml = r"
+event_loop:
+  max_iterations: 10
+  workflow_guards:
+    chains:
+      - name: experiment
+        topics:
+          - experiment.planned
+          - experiment.scored
+          - experiment.evaluated
+        mode: strict
+        correlation:
+          from_payload: experiment_id
+";
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // Count task.resume events via lightweight observer
+    let resume_count = Arc::new(AtomicUsize::new(0));
+    let count = resume_count.clone();
+    event_loop.bus.add_observer(move |event: &Event| {
+        if event.topic.as_str() == "task.resume" {
+            count.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+
+    // Valid first event with correlation key
+    write_event_to_jsonl(&events_path, "experiment.planned", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+    assert_eq!(
+        event_loop.state.workflow_progress.get_phase("experiment", Some("exp-1")),
+        Some(0)
+    );
+
+    // Event with malformed JSON payload should be rejected
+    write_event_to_jsonl(&events_path, "experiment.scored", r"not-json-at-all");
+    let _ = event_loop.process_events_from_jsonl();
+    assert_eq!(
+        event_loop.state.workflow_progress.get_phase("experiment", Some("exp-1")),
+        Some(0),
+        "Event with malformed JSON should not advance workflow"
+    );
+
+    // Event with missing correlation key should be rejected
+    write_event_to_jsonl(&events_path, "experiment.scored", r#"{"other_field": "value"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+    assert_eq!(
+        event_loop.state.workflow_progress.get_phase("experiment", Some("exp-1")),
+        Some(0),
+        "Event with missing correlation key should not advance workflow"
+    );
+
+    // Event with non-string correlation value should be rejected
+    write_event_to_jsonl(&events_path, "experiment.scored", r#"{"experiment_id": 123}"#);
+    let _ = event_loop.process_events_from_jsonl();
+    assert_eq!(
+        event_loop.state.workflow_progress.get_phase("experiment", Some("exp-1")),
+        Some(0),
+        "Event with non-string correlation value should not advance workflow"
+    );
+
+    // Verify recovery events were published for each rejection
+    let observed = resume_count.load(Ordering::SeqCst);
+    assert!(
+        observed >= 3,
+        "Should have published task.resume for each correlation extraction failure, got {}",
+        observed
+    );
+
+    // Finally, a valid event should be accepted and allow recovery
+    write_event_to_jsonl(&events_path, "experiment.scored", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+    assert_eq!(
+        event_loop.state.workflow_progress.get_phase("experiment", Some("exp-1")),
+        Some(1),
+        "Valid event after rejections should advance workflow"
+    );
+}
+
+#[test]
+fn test_workflow_guard_recovery_after_rejection() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let yaml = r"
+event_loop:
+  max_iterations: 10
+  workflow_guards:
+    chains:
+      - name: experiment
+        topics:
+          - experiment.planned
+          - experiment.ready
+          - experiment.measured
+          - experiment.scored
+          - experiment.evaluated
+        mode: strict
+";
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // Advance normally to measured
+    write_event_to_jsonl(&events_path, "experiment.planned", r"{}");
+    let _ = event_loop.process_events_from_jsonl();
+    write_event_to_jsonl(&events_path, "experiment.ready", r"{}");
+    let _ = event_loop.process_events_from_jsonl();
+    write_event_to_jsonl(&events_path, "experiment.measured", r"{}");
+    let _ = event_loop.process_events_from_jsonl();
+    assert_eq!(event_loop.state.workflow_progress.get_phase("experiment", None), Some(2));
+
+    // Try to skip scoring — rejected
+    write_event_to_jsonl(&events_path, "experiment.evaluated", r"{}");
+    let _ = event_loop.process_events_from_jsonl();
+    assert_eq!(
+        event_loop.state.workflow_progress.get_phase("experiment", None),
+        Some(2),
+        "Progress should remain at measured after rejected evaluated"
+    );
+    assert!(
+        !event_loop.state.seen_topics.contains("experiment.evaluated"),
+        "Rejected event should not be recorded as seen"
+    );
+
+    // Recovery: emit the correct next event (scored)
+    write_event_to_jsonl(&events_path, "experiment.scored", r"{}");
+    let _ = event_loop.process_events_from_jsonl();
+    assert_eq!(
+        event_loop.state.workflow_progress.get_phase("experiment", None),
+        Some(3),
+        "Scored should advance progress after recovery"
+    );
+
+    // Now evaluated should be accepted
+    write_event_to_jsonl(&events_path, "experiment.evaluated", r"{}");
+    let _ = event_loop.process_events_from_jsonl();
+    assert_eq!(
+        event_loop.state.workflow_progress.get_phase("experiment", None),
+        Some(4),
+        "Evaluated should be accepted after scoring"
+    );
+
+    // LOOP_COMPLETE should now succeed
+    write_event_to_jsonl(&events_path, "LOOP_COMPLETE", "Done");
+    let _ = event_loop.process_events_from_jsonl();
+    let reason = event_loop.check_completion_event();
+    assert_eq!(
+        reason,
+        Some(TerminationReason::CompletionPromise),
+        "LOOP_COMPLETE should succeed after recovery and full chain"
+    );
+}
+
+#[test]
+fn test_workflow_guard_rejects_old_phase_after_advance() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let yaml = r"
+event_loop:
+  max_iterations: 10
+  workflow_guards:
+    chains:
+      - name: experiment
+        topics:
+          - experiment.planned
+          - experiment.ready
+          - experiment.measured
+        mode: strict
+";
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // Advance to ready (phase 1)
+    write_event_to_jsonl(&events_path, "experiment.planned", r"{}");
+    let _ = event_loop.process_events_from_jsonl();
+    write_event_to_jsonl(&events_path, "experiment.ready", r"{}");
+    let _ = event_loop.process_events_from_jsonl();
+    assert_eq!(event_loop.state.workflow_progress.get_phase("experiment", None), Some(1));
+
+    // Re-emit planned (phase 0) — should be accepted idempotently, no regression
+    write_event_to_jsonl(&events_path, "experiment.planned", r"{}");
+    let _ = event_loop.process_events_from_jsonl();
+    assert_eq!(
+        event_loop.state.workflow_progress.get_phase("experiment", None),
+        Some(1),
+        "Re-emitting old phase should not regress progress"
     );
 }

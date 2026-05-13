@@ -1956,7 +1956,7 @@ status: draft
 
     #[tokio::test]
     async fn event_filter_check_fails_on_empty_event_name() {
-        let temp = tempfile::tempdir().expect("tempdir");
+        let _temp = tempfile::tempdir().expect("tempdir");
         let mut config = RalphConfig::default();
         config.hats.insert(
             "reviewer".to_string(),
@@ -1979,7 +1979,7 @@ status: draft
                 event_filter: Some(crate::config::EventFilterConfig {
                     enabled: true,
                     mode: crate::config::EventFilterMode::Allowlist,
-                    events: vec!["".to_string(), "review.done".to_string()],
+                    events: vec![String::new(), "review.done".to_string()],
                 }),
             },
         );
@@ -2000,7 +2000,7 @@ status: draft
 
     #[tokio::test]
     async fn event_filter_check_fails_on_event_with_spaces() {
-        let temp = tempfile::tempdir().expect("tempdir");
+        let _temp = tempfile::tempdir().expect("tempdir");
         let mut config = RalphConfig::default();
         config.hats.insert(
             "reviewer".to_string(),

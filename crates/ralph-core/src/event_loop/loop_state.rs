@@ -193,7 +193,7 @@ impl WorkflowProgress {
         }
 
         let current_highest = self.get_phase(chain_name, instance_key);
-        if current_highest.map_or(false, |h| phase <= h) {
+        if current_highest.is_some_and(|h| phase <= h) {
             // Idempotent: already at or past this phase
             return;
         }

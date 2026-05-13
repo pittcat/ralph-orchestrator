@@ -117,7 +117,7 @@ mod tests {
     #[test]
     fn missing_field_returns_null() {
         let tmp = tempfile::tempdir().unwrap();
-        let event = make_event("build.done", r#"{}"#);
+        let event = make_event("build.done", r"{}");
         let rules = vec![ProjectionRule {
             name: "extract".to_string(),
             trigger_events: vec!["build.done".to_string()],

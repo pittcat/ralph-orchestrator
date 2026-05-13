@@ -641,6 +641,40 @@ impl RalphConfig {
             }
         }
 
+        // Validate workflow guard config
+        if let Some(workflow_guards) = &self.event_loop.workflow_guards {
+            let mut seen_chain_names = std::collections::HashSet::new();
+            for chain in &workflow_guards.chains {
+                if chain.name.trim().is_empty() {
+                    return Err(ConfigError::WorkflowGuardValidation {
+                        field: "event_loop.workflow_guards.chains[].name".to_string(),
+                        message: "Chain name cannot be empty".to_string(),
+                    });
+                }
+                if !seen_chain_names.insert(&chain.name) {
+                    return Err(ConfigError::WorkflowGuardValidation {
+                        field: format!("event_loop.workflow_guards.chains.{}", chain.name),
+                        message: format!("Duplicate workflow chain name '{}'", chain.name),
+                    });
+                }
+                if chain.topics.is_empty() {
+                    return Err(ConfigError::WorkflowGuardValidation {
+                        field: format!("event_loop.workflow_guards.chains.{}.topics", chain.name),
+                        message: "Workflow chain topics cannot be empty".to_string(),
+                    });
+                }
+                let mut seen_topics = std::collections::HashSet::new();
+                for topic in &chain.topics {
+                    if !seen_topics.insert(topic) {
+                        return Err(ConfigError::WorkflowGuardValidation {
+                            field: format!("event_loop.workflow_guards.chains.{}.topics", chain.name),
+                            message: format!("Duplicate topic '{}' in workflow chain '{}'", topic, chain.name),
+                        });
+                    }
+                }
+            }
+        }
+
         // Check for ambiguous routing: each trigger topic must map to exactly one hat
         // Per spec: "Every trigger maps to exactly one hat | No ambiguous routing"
         if !self.hats.is_empty() {
@@ -2422,6 +2456,11 @@ pub enum ConfigError {
         "Hat '{hat}' has both 'aggregate' and 'concurrency > 1'. An aggregator hat cannot also be a concurrent worker.\nFix: remove 'aggregate' or set 'concurrency' to 1."
     )]
     AggregateOnConcurrentHat { hat: String },
+
+    #[error(
+        "Workflow guard validation error at '{field}': {message}\nFix: check your event_loop.workflow_guards configuration."
+    )]
+    WorkflowGuardValidation { field: String, message: String },
 }
 
 #[cfg(test)]
@@ -4356,7 +4395,7 @@ cli:
 
     #[test]
     fn test_workflow_guards_with_single_chain_parses_correctly() {
-        let yaml = r#"
+        let yaml = r"
 event_loop:
   workflow_guards:
     chains:
@@ -4368,7 +4407,7 @@ event_loop:
           - experiment.scored
           - experiment.evaluated
         mode: strict
-"#;
+";
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
         let guards = config.event_loop.workflow_guards.as_ref().unwrap();
         assert_eq!(guards.chains.len(), 1);
@@ -4384,11 +4423,11 @@ event_loop:
     #[test]
     fn test_workflow_guards_empty_chain_list_accepted() {
         // Empty chain list should be accepted as disabled
-        let yaml = r#"
+        let yaml = r"
 event_loop:
   workflow_guards:
     chains: []
-"#;
+";
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
         let guards = config.event_loop.workflow_guards.as_ref().unwrap();
         assert!(guards.chains.is_empty());
@@ -4396,7 +4435,7 @@ event_loop:
 
     #[test]
     fn test_workflow_guards_chain_with_correlation_parses() {
-        let yaml = r#"
+        let yaml = r"
 event_loop:
   workflow_guards:
     chains:
@@ -4408,7 +4447,7 @@ event_loop:
         correlation:
           from_payload: experiment_id
           from_topic: experiment.planned
-"#;
+";
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
         let chain = &config.event_loop.workflow_guards.as_ref().unwrap().chains[0];
         let corr = chain.correlation.as_ref().unwrap();
@@ -4418,7 +4457,7 @@ event_loop:
 
     #[test]
     fn test_workflow_guards_chain_mode_advisory() {
-        let yaml = r#"
+        let yaml = r"
 event_loop:
   workflow_guards:
     chains:
@@ -4427,7 +4466,7 @@ event_loop:
           - build.started
           - build.completed
         mode: advisory
-"#;
+";
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
         let chain = &config.event_loop.workflow_guards.as_ref().unwrap().chains[0];
         assert!(matches!(chain.mode, WorkflowChainMode::Advisory));
@@ -4435,7 +4474,7 @@ event_loop:
 
     #[test]
     fn test_workflow_guards_multiple_chains() {
-        let yaml = r#"
+        let yaml = r"
 event_loop:
   workflow_guards:
     chains:
@@ -4447,11 +4486,83 @@ event_loop:
         topics:
           - build.started
           - build.completed
-"#;
+";
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
         let guards = config.event_loop.workflow_guards.as_ref().unwrap();
         assert_eq!(guards.chains.len(), 2);
         assert_eq!(guards.chains[0].name, "experiment");
         assert_eq!(guards.chains[1].name, "build");
+    }
+
+    #[test]
+    fn test_workflow_guards_validation_rejects_duplicate_topics() {
+        let yaml = r"
+event_loop:
+  workflow_guards:
+    chains:
+      - name: experiment
+        topics:
+          - experiment.planned
+          - experiment.planned
+          - experiment.evaluated
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Duplicate topic"), "Expected duplicate topic error, got: {}", err);
+    }
+
+    #[test]
+    fn test_workflow_guards_validation_rejects_empty_topics() {
+        let yaml = r"
+event_loop:
+  workflow_guards:
+    chains:
+      - name: experiment
+        topics: []
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("topics cannot be empty"), "Expected empty topics error, got: {}", err);
+    }
+
+    #[test]
+    fn test_workflow_guards_validation_rejects_empty_chain_name() {
+        let yaml = r#"
+event_loop:
+  workflow_guards:
+    chains:
+      - name: ""
+        topics:
+          - experiment.planned
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Chain name cannot be empty"), "Expected empty name error, got: {}", err);
+    }
+
+    #[test]
+    fn test_workflow_guards_validation_rejects_duplicate_chain_name() {
+        let yaml = r"
+event_loop:
+  workflow_guards:
+    chains:
+      - name: experiment
+        topics:
+          - experiment.planned
+      - name: experiment
+        topics:
+          - build.started
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Duplicate workflow chain name"), "Expected duplicate chain name error, got: {}", err);
     }
 }
