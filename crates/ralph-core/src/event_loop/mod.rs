@@ -6,11 +6,11 @@ mod loop_state;
 #[cfg(test)]
 mod tests;
 
-pub use loop_state::LoopState;
+pub use loop_state::{LoopState, WorkflowProgress};
 
 use crate::config::{HatBackend, InjectMode, RalphConfig, ScratchpadConfig};
 use crate::event_parser::{EventParser, MutationEvidence, MutationStatus};
-use crate::event_reader::EventReader;
+use crate::event_reader::{EventReader, Event as JsonlEvent};
 use crate::hat_registry::HatRegistry;
 use crate::hatless_ralph::HatlessRalph;
 use crate::instructions::InstructionBuilder;
@@ -136,6 +136,13 @@ impl TerminationReason {
     }
 }
 
+/// Result of workflow guard completion validation.
+#[derive(Debug)]
+struct WorkflowGuardRejection {
+    /// Human-readable message describing the incomplete instance.
+    message: String,
+}
+
 /// The main event loop orchestrator.
 pub struct EventLoop {
     config: RalphConfig,
@@ -157,6 +164,200 @@ pub struct EventLoop {
     /// Robot service for human-in-the-loop communication.
     /// Injected externally when `human.enabled` is true and this is the primary loop.
     robot_service: Option<Box<dyn RobotService>>,
+}
+
+/// Result of extracting a correlation key from an event payload.
+enum CorrelationKeyResult {
+    /// Chain has no correlation config — use global instance tracking.
+    Global,
+    /// Successfully extracted instance key from payload.
+    Instance(String),
+    /// Correlation config exists but extraction failed (missing payload, invalid JSON,
+    /// path not found, or value is not a string). Event should be rejected.
+    ExtractFailed,
+}
+
+/// Extracts the correlation key from an event's payload based on chain config.
+///
+/// Returns [`CorrelationKeyResult::Global`] for chains without correlation config,
+/// [`CorrelationKeyResult::Instance`] when extraction succeeds, and
+/// [`CorrelationKeyResult::ExtractFailed`] when the chain has correlation config
+/// but the payload is missing, malformed, or does not contain the configured path.
+fn extract_correlation_key(
+    event: &JsonlEvent,
+    chain: &crate::config::WorkflowChain,
+) -> CorrelationKeyResult {
+    let Some(correlation) = chain.correlation.as_ref() else {
+        return CorrelationKeyResult::Global;
+    };
+    let Some(payload) = event.payload.as_ref() else {
+        return CorrelationKeyResult::ExtractFailed;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return CorrelationKeyResult::ExtractFailed;
+    };
+
+    // Navigate the JSON path (dot notation)
+    let parts: Vec<&str> = correlation.from_payload.split('.').collect();
+    let mut current = &value;
+    for part in parts {
+        let Some(next) = current.get(part) else {
+            return CorrelationKeyResult::ExtractFailed;
+        };
+        current = next;
+    }
+
+    match current.as_str() {
+        Some(s) => CorrelationKeyResult::Instance(s.to_string()),
+        None => CorrelationKeyResult::ExtractFailed,
+    }
+}
+
+/// Validates events against configured workflow guards.
+///
+/// Events that are out-of-order relative to a configured chain are rejected
+/// and replaced with a recovery signal (task.resume). The event is NOT recorded
+/// as seen and is NOT published to the bus.
+///
+/// Side-channel events (e.g., `periodic.review`) that are not part of any chain
+/// are accepted but do not advance the workflow progress.
+fn apply_workflow_guard_validation(
+    events: Vec<JsonlEvent>,
+    guards: &crate::config::WorkflowGuardsConfig,
+    workflow_progress: &mut WorkflowProgress,
+    bus: &mut EventBus,
+) -> Vec<JsonlEvent> {
+    let mut validated_events = Vec::with_capacity(events.len());
+
+    for event in events {
+        // Find which chain(s) this topic belongs to
+        let matching_chains: Vec<&crate::config::WorkflowChain> = guards
+            .chains
+            .iter()
+            .filter(|chain| chain.topics.contains(&event.topic))
+            .collect();
+
+        if matching_chains.is_empty() {
+            // Topic not in any chain — accept as side-channel (no progress tracking)
+            validated_events.push(event);
+            continue;
+        }
+
+        // For each matching chain, check if the event is valid for the current instance
+        let mut rejections: Vec<(String, Option<String>, Option<usize>, String, String)> = Vec::new();
+
+        for chain in &matching_chains {
+            let instance_key = match extract_correlation_key(&event, chain) {
+                CorrelationKeyResult::Global => None,
+                CorrelationKeyResult::Instance(key) => Some(key),
+                CorrelationKeyResult::ExtractFailed => {
+                    rejections.push((
+                        chain.name.clone(),
+                        None,
+                        None,
+                        "none".to_string(),
+                        "unknown (correlation extraction failed)".to_string(),
+                    ));
+                    continue;
+                }
+            };
+
+            // Find the phase index of this topic in the chain
+            let phase = chain
+                .topics
+                .iter()
+                .position(|t| *t == event.topic)
+                .unwrap();
+
+            // Check if this phase is valid for the current instance
+            let is_valid = workflow_progress.is_phase_valid(
+                &chain.name,
+                instance_key.as_deref(),
+                phase,
+            );
+
+            if !is_valid {
+                let current_phase = workflow_progress.get_phase(&chain.name, instance_key.as_deref());
+                let current_topic = current_phase
+                    .and_then(|p| chain.topics.get(p).cloned())
+                    .unwrap_or_else(|| "none".to_string());
+                let next_expected = current_phase
+                    .and_then(|p| chain.topics.get(p + 1).cloned())
+                    .unwrap_or_else(|| "terminal".to_string());
+                rejections.push((
+                    chain.name.clone(),
+                    instance_key,
+                    current_phase,
+                    current_topic,
+                    next_expected,
+                ));
+            }
+        }
+
+        if !rejections.is_empty() {
+            let rejection_details: Vec<String> = rejections
+                .iter()
+                .map(|(chain_name, instance_key, current_phase, current_topic, next_expected)| {
+                    format!(
+                        "chain '{}' (instance '{}'): current='{}' (phase {}), next expected='{}'",
+                        chain_name,
+                        instance_key.as_deref().unwrap_or("global"),
+                        current_topic,
+                        current_phase.map(|p| p.to_string()).unwrap_or_else(|| "none".to_string()),
+                        next_expected
+                    )
+                })
+                .collect();
+
+            let rejection_reason = format!(
+                "Workflow guard rejected '{}': {}.",
+                event.topic,
+                rejection_details.join("; ")
+            );
+
+            warn!(
+                reason = %rejection_reason,
+                topic = %event.topic,
+                "Out-of-order workflow event rejected by guard"
+            );
+
+            // Publish recovery signal with actionable context
+            let recovery_payload = format!(
+                "WORKFLOW_GUARD_REJECTED: out-of-order event '{}'.\n{}\n\n\
+                 Wait for the correct phase before emitting this event. \
+                 The loop will continue to allow recovery.",
+                event.topic,
+                rejection_details.join("\n")
+            );
+            let recovery_event = Event::new("task.resume", &recovery_payload);
+            bus.publish(recovery_event);
+
+            // Do NOT record the rejected event or advance progress
+            continue;
+        }
+
+        // Event is valid — accept it (but only advance progress if chain mode is strict)
+        validated_events.push(event.clone());
+
+        // Advance workflow progress for strict-mode chains
+        for chain in &matching_chains {
+            if matches!(chain.mode, crate::config::WorkflowChainMode::Strict) {
+                let instance_key = match extract_correlation_key(&event, chain) {
+                    CorrelationKeyResult::Global => None,
+                    CorrelationKeyResult::Instance(key) => Some(key),
+                    CorrelationKeyResult::ExtractFailed => continue,
+                };
+                let phase = chain
+                    .topics
+                    .iter()
+                    .position(|t| *t == event.topic)
+                    .unwrap();
+                workflow_progress.advance(&chain.name, instance_key.as_deref(), phase);
+            }
+        }
+    }
+
+    validated_events
 }
 
 impl EventLoop {
@@ -661,6 +862,28 @@ impl EventLoop {
                 );
                 self.bus.publish(Event::new("task.resume", resume_payload));
                 return None;
+            }
+        }
+
+        // Workflow guard completion validation: ensure all started guarded instances are terminal
+        if let Some(guards) = &self.config.event_loop.workflow_guards {
+            if !guards.chains.is_empty() {
+                if let Some(rejection) = self.check_workflow_guard_completion(guards) {
+                    warn!(
+                        reason = %rejection.message,
+                        "Rejecting LOOP_COMPLETE: incomplete workflow guard instances"
+                    );
+                    self.state.completion_requested = false;
+
+                    let resume_payload = format!(
+                        "LOOP_COMPLETE rejected: {}. \
+                         All workflow instances must reach a terminal phase before emitting LOOP_COMPLETE. \
+                         Use loop.cancel to abort the workflow instead.",
+                        rejection.message
+                    );
+                    self.bus.publish(Event::new("task.resume", resume_payload));
+                    return None;
+                }
             }
         }
 
@@ -2210,6 +2433,67 @@ impl EventLoop {
             && Self::is_restart_request_payload(&event.payload)
     }
 
+    /// Checks if all started guarded workflow instances have reached a terminal phase.
+    ///
+    /// Returns `Some(WorkflowGuardRejection)` if any instance is incomplete, `None` if all are terminal.
+    ///
+    /// Terminal phase is the last topic in the chain. An instance is considered "started"
+    /// if it has any progress recorded (phase > 0, or any event in the chain has been seen).
+    fn check_workflow_guard_completion(
+        &self,
+        guards: &crate::config::WorkflowGuardsConfig,
+    ) -> Option<WorkflowGuardRejection> {
+        for chain in &guards.chains {
+            // Advisory chains are permissive and should not block LOOP_COMPLETE
+            if matches!(chain.mode, crate::config::WorkflowChainMode::Advisory) {
+                continue;
+            }
+
+            let terminal_phase = chain.topics.len().saturating_sub(1);
+
+            // Check all instances for this chain
+            for instance_key in self.state.workflow_progress.instance_keys(&chain.name) {
+                let current_phase = self
+                    .state
+                    .workflow_progress
+                    .get_phase(&chain.name, instance_key.as_deref());
+
+                // Instance has no progress — not started, skip
+                let current_phase = match current_phase {
+                    Some(p) => p,
+                    None => continue,
+                };
+
+                // If the instance hasn't reached terminal phase, it's incomplete
+                if current_phase < terminal_phase {
+                    let current_topic = chain
+                        .topics
+                        .get(current_phase)
+                        .cloned()
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let next_topic = chain
+                        .topics
+                        .get(current_phase + 1)
+                        .cloned()
+                        .unwrap_or_else(|| "terminal".to_string());
+
+                    return Some(WorkflowGuardRejection {
+                        message: format!(
+                            "workflow instance '{}' (chain '{}') is at phase {} ('{}') but not yet at terminal phase {} ('{}')",
+                            instance_key.as_deref().unwrap_or("global"),
+                            chain.name,
+                            current_phase,
+                            current_topic,
+                            terminal_phase,
+                            next_topic
+                        ),
+                    });
+                }
+            }
+        }
+        None
+    }
+
     fn mark_restart_requested(&self, source: &str) {
         let restart_path =
             std::path::Path::new(&self.config.core.workspace_root).join(".ralph/restart-requested");
@@ -2332,6 +2616,22 @@ impl EventLoop {
             result.events
         };
         // --- End scope enforcement ---
+
+        // --- Workflow guard validation: reject out-of-order events ---
+        // Inserted after scope enforcement, before state.record_event() + bus.publish()
+        let workflow_guards = self.config.event_loop.workflow_guards.as_ref();
+        let events: Vec<JsonlEvent> = match workflow_guards {
+            Some(guards) if !guards.chains.is_empty() => {
+                apply_workflow_guard_validation(
+                    events,
+                    guards,
+                    &mut self.state.workflow_progress,
+                    &mut self.bus,
+                )
+            }
+            _ => events,
+        };
+        // --- End workflow guard validation ---
 
         let mut has_orphans = false;
 

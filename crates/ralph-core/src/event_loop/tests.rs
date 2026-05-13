@@ -4738,3 +4738,425 @@ hats:
         "Union allowlist should exclude event.c"
     );
 }
+
+// ── Workflow Guard Integration Tests (Unit 7) ──
+
+#[test]
+fn test_workflow_guard_rejects_evaluated_before_scored() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    // Configure workflow guard for AutoResearch experiment chain
+    let yaml = r#"
+event_loop:
+  max_iterations: 10
+  workflow_guards:
+    chains:
+      - name: experiment
+        topics:
+          - experiment.planned
+          - experiment.ready
+          - experiment.measured
+          - experiment.scored
+          - experiment.evaluated
+        mode: strict
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // Chain: planned -> ready -> measured
+    write_event_to_jsonl(&events_path, "experiment.planned", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+
+    write_event_to_jsonl(&events_path, "experiment.ready", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+
+    write_event_to_jsonl(&events_path, "experiment.measured", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+
+    // Now try to skip scoring and go directly to evaluated - should be rejected
+    write_event_to_jsonl(&events_path, "experiment.evaluated", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+
+    // evaluated should NOT be recorded as seen in workflow progress
+    // Get phase AFTER processing to avoid borrow conflict
+    // No correlation config → global instance (None key)
+    let phase = event_loop.state.workflow_progress.get_phase("experiment", None);
+    assert_eq!(
+        phase,
+        Some(2), // Still at measured (phase 2), not advanced to evaluated (phase 4)
+        "experiment.evaluated before experiment.scored should not advance workflow"
+    );
+}
+
+#[test]
+fn test_workflow_guard_accepts_evaluated_after_scored() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let yaml = r#"
+event_loop:
+  max_iterations: 10
+  workflow_guards:
+    chains:
+      - name: experiment
+        topics:
+          - experiment.planned
+          - experiment.ready
+          - experiment.measured
+          - experiment.scored
+          - experiment.evaluated
+        mode: strict
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // Full chain in order
+    write_event_to_jsonl(&events_path, "experiment.planned", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+
+    write_event_to_jsonl(&events_path, "experiment.ready", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+
+    write_event_to_jsonl(&events_path, "experiment.measured", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+
+    write_event_to_jsonl(&events_path, "experiment.scored", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+
+    write_event_to_jsonl(&events_path, "experiment.evaluated", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+
+    // After scoring, evaluated should advance the workflow
+    // No correlation config → global instance (None key)
+    let progress = &event_loop.state.workflow_progress;
+    assert_eq!(
+        progress.get_phase("experiment", None),
+        Some(4), // Reached evaluated (phase 4)
+        "experiment.evaluated after experiment.scored should advance workflow"
+    );
+}
+
+#[test]
+fn test_workflow_guard_periodic_review_does_not_advance_chain() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let yaml = r#"
+event_loop:
+  max_iterations: 10
+  workflow_guards:
+    chains:
+      - name: experiment
+        topics:
+          - experiment.planned
+          - experiment.ready
+          - experiment.measured
+          - experiment.scored
+          - experiment.evaluated
+        mode: strict
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // Chain: planned -> ready -> measured
+    write_event_to_jsonl(&events_path, "experiment.planned", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+
+    write_event_to_jsonl(&events_path, "experiment.ready", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+
+    write_event_to_jsonl(&events_path, "experiment.measured", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+
+    // Interleave periodic.review - this should NOT advance the experiment chain
+    write_event_to_jsonl(&events_path, "periodic.review", r#"{"status": "progress"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+
+    // Now try to evaluate before scoring - still rejected
+    write_event_to_jsonl(&events_path, "experiment.evaluated", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+
+    // periodic.review is not in the experiment chain, so workflow should still be at measured
+    // evaluated was rejected because scored was never emitted
+    // Get phase AFTER processing to avoid borrow conflict
+    // No correlation config → global instance (None key)
+    let phase = event_loop.state.workflow_progress.get_phase("experiment", None);
+    assert_eq!(
+        phase,
+        Some(2), // Still at measured (phase 2) - evaluated was rejected
+        "evaluated should still be rejected after periodic.review"
+    );
+}
+
+#[test]
+fn test_workflow_guard_completion_rejected_when_chain_incomplete() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let yaml = r#"
+event_loop:
+  max_iterations: 10
+  workflow_guards:
+    chains:
+      - name: experiment
+        topics:
+          - experiment.planned
+          - experiment.ready
+          - experiment.measured
+          - experiment.scored
+          - experiment.evaluated
+        mode: strict
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // Chain: planned -> ready -> measured (missing scored and evaluated)
+    write_event_to_jsonl(&events_path, "experiment.planned", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+
+    write_event_to_jsonl(&events_path, "experiment.ready", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+
+    write_event_to_jsonl(&events_path, "experiment.measured", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+
+    // Try LOOP_COMPLETE before chain is complete
+    write_event_to_jsonl(&events_path, "LOOP_COMPLETE", "Done");
+    let _ = event_loop.process_events_from_jsonl();
+    let reason = event_loop.check_completion_event();
+
+    assert_eq!(
+        reason, None,
+        "LOOP_COMPLETE should be rejected when experiment chain is incomplete"
+    );
+}
+
+#[test]
+fn test_workflow_guard_completion_accepted_when_chain_complete() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let yaml = r#"
+event_loop:
+  max_iterations: 10
+  workflow_guards:
+    chains:
+      - name: experiment
+        topics:
+          - experiment.planned
+          - experiment.ready
+          - experiment.measured
+          - experiment.scored
+          - experiment.evaluated
+        mode: strict
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // Complete chain: planned -> ready -> measured -> scored -> evaluated
+    write_event_to_jsonl(&events_path, "experiment.planned", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+
+    write_event_to_jsonl(&events_path, "experiment.ready", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+
+    write_event_to_jsonl(&events_path, "experiment.measured", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+
+    write_event_to_jsonl(&events_path, "experiment.scored", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+
+    write_event_to_jsonl(&events_path, "experiment.evaluated", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+
+    // LOOP_COMPLETE should now be accepted
+    write_event_to_jsonl(&events_path, "LOOP_COMPLETE", "Done");
+    let _ = event_loop.process_events_from_jsonl();
+    let reason = event_loop.check_completion_event();
+
+    assert_eq!(
+        reason,
+        Some(TerminationReason::CompletionPromise),
+        "LOOP_COMPLETE should be accepted when experiment chain is complete"
+    );
+}
+
+#[test]
+fn test_workflow_guard_instance_isolation_two_experiments() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let yaml = r#"
+event_loop:
+  max_iterations: 10
+  workflow_guards:
+    chains:
+      - name: experiment
+        topics:
+          - experiment.planned
+          - experiment.ready
+          - experiment.measured
+          - experiment.scored
+          - experiment.evaluated
+        mode: strict
+        correlation:
+          from_payload: experiment_id
+          from_topic: experiment.planned
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // Experiment 1: fully complete
+    write_event_to_jsonl(&events_path, "experiment.planned", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+    write_event_to_jsonl(&events_path, "experiment.ready", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+    write_event_to_jsonl(&events_path, "experiment.measured", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+    write_event_to_jsonl(&events_path, "experiment.scored", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+    write_event_to_jsonl(&events_path, "experiment.evaluated", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+
+    // Experiment 2: only at measured
+    write_event_to_jsonl(&events_path, "experiment.planned", r#"{"experiment_id": "exp-2"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+    write_event_to_jsonl(&events_path, "experiment.ready", r#"{"experiment_id": "exp-2"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+    write_event_to_jsonl(&events_path, "experiment.measured", r#"{"experiment_id": "exp-2"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+
+    let progress = &event_loop.state.workflow_progress;
+
+    // exp-1 should be at phase 4 (complete)
+    assert_eq!(
+        progress.get_phase("experiment", Some("exp-1")),
+        Some(4),
+        "exp-1 should be complete"
+    );
+
+    // exp-2 should be at phase 2 (measured)
+    assert_eq!(
+        progress.get_phase("experiment", Some("exp-2")),
+        Some(2),
+        "exp-2 should be at measured"
+    );
+
+    // Cannot evaluate exp-2 yet (needs scored first)
+    write_event_to_jsonl(&events_path, "experiment.evaluated", r#"{"experiment_id": "exp-2"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+
+    // Get phase AFTER processing to verify evaluated was rejected
+    let exp2_phase = event_loop.state.workflow_progress.get_phase("experiment", Some("exp-2"));
+    assert_eq!(
+        exp2_phase,
+        Some(2), // Still at measured - evaluated was rejected until exp-2 is scored
+        "exp-2 evaluated should be rejected until exp-2 is scored"
+    );
+}
+
+#[test]
+fn test_workflow_guard_rejection_publishes_task_resume_with_context() {
+    use std::sync::{Arc, Mutex};
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let yaml = r#"
+event_loop:
+  max_iterations: 10
+  workflow_guards:
+    chains:
+      - name: experiment
+        topics:
+          - experiment.planned
+          - experiment.ready
+          - experiment.measured
+          - experiment.scored
+          - experiment.evaluated
+        mode: strict
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // Capture all published events via observer
+    let captured_events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured = captured_events.clone();
+    event_loop.bus.add_observer(move |event: &Event| {
+        captured.lock().unwrap().push(Event {
+            topic: event.topic.clone(),
+            payload: event.payload.clone(),
+            source: event.source.clone(),
+            target: event.target.clone(),
+            wave_id: event.wave_id.clone(),
+            wave_index: event.wave_index,
+            wave_total: event.wave_total,
+        });
+    });
+
+    // Advance to phase 2 (measured)
+    write_event_to_jsonl(&events_path, "experiment.planned", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+    write_event_to_jsonl(&events_path, "experiment.ready", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+    write_event_to_jsonl(&events_path, "experiment.measured", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+
+    // Now try to skip scoring and go directly to evaluated - should be rejected
+    write_event_to_jsonl(&events_path, "experiment.evaluated", r#"{"experiment_id": "exp-1"}"#);
+    let _ = event_loop.process_events_from_jsonl();
+
+    // Verify that a task.resume event was published with actionable context
+    let events = captured_events.lock().unwrap();
+    let resume_events: Vec<&Event> = events
+        .iter()
+        .filter(|e| e.topic.as_str() == "task.resume")
+        .collect();
+
+    assert!(
+        !resume_events.is_empty(),
+        "A task.resume event should be published when a workflow guard rejects an event"
+    );
+
+    let last_resume = resume_events.last().unwrap();
+    assert!(
+        last_resume.payload.contains("WORKFLOW_GUARD_REJECTED"),
+        "task.resume payload should indicate workflow guard rejection"
+    );
+    assert!(
+        last_resume.payload.contains("next expected="),
+        "task.resume payload should contain actionable next-expected context"
+    );
+    assert!(
+        last_resume.payload.contains("experiment.scored"),
+        "task.resume payload should mention the next expected topic"
+    );
+}

@@ -948,6 +948,78 @@ pub struct EventLoopConfig {
     /// `{hat_id}.scope_violation` diagnostic events. Defaults to false (permissive).
     #[serde(default)]
     pub enforce_hat_scope: bool,
+
+    /// Opt-in workflow state guards for enforcing ordered event chains.
+    ///
+    /// When configured, events must follow the declared topic sequence before
+    /// being published to the event bus. This prevents out-of-order events such
+    /// as `experiment.evaluated` before `experiment.scored` from reaching
+    /// downstream hats.
+    #[serde(default)]
+    pub workflow_guards: Option<WorkflowGuardsConfig>,
+}
+
+/// Opt-in workflow state guards for enforcing ordered event chains.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowGuardsConfig {
+    /// List of workflow chains. An empty list or None means guards are disabled.
+    #[serde(default)]
+    pub chains: Vec<WorkflowChain>,
+}
+
+/// A named workflow chain that enforces ordered topic sequences.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowChain {
+    /// Unique name for this chain (e.g., "experiment", "build").
+    pub name: String,
+
+    /// Ordered list of topics that must appear in sequence.
+    /// The first topic is the chain entry point.
+    pub topics: Vec<String>,
+
+    /// Enforcement mode for this chain.
+    #[serde(default)]
+    pub mode: WorkflowChainMode,
+
+    /// Optional correlation extraction for per-instance tracking.
+    ///
+    /// Specifies how to derive an instance key from the event payload
+    /// so that parallel workflow instances are tracked independently.
+    #[serde(default)]
+    pub correlation: Option<CorrelationConfig>,
+}
+
+/// Enforcement mode for a workflow chain.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowChainMode {
+    /// Strict ordered enforcement: each topic must follow the previous.
+    /// Out-of-order events are rejected.
+    #[default]
+    Strict,
+
+    /// Permissive: topics are recorded when seen but out-of-order events
+    /// are not rejected. Useful for optional workflows or side-channels.
+    Advisory,
+}
+
+/// Configuration for extracting a correlation key from an event payload.
+///
+/// When specified, the guard tracks workflow progress per unique instance key
+/// rather than globally. This allows parallel workflow instances (e.g., multiple
+/// experiments) to be guarded independently.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorrelationConfig {
+    /// The JSON path within the payload to extract the instance key.
+    /// Example: "experiment_id" extracts `payload.experiment_id`.
+    ///
+    /// Supports dot notation for nested fields (e.g., "data.experiment_id").
+    pub from_payload: String,
+
+    /// The event topic whose payload contains the correlation key.
+    /// Typically the chain entry point (first topic in `topics`).
+    #[serde(default)]
+    pub from_topic: Option<String>,
 }
 
 fn default_prompt_file() -> String {
@@ -988,6 +1060,7 @@ impl Default for EventLoopConfig {
             required_events: Vec::new(),
             cancellation_promise: String::new(),
             enforce_hat_scope: false,
+            workflow_guards: None,
         }
     }
 }
@@ -4260,5 +4333,125 @@ hats:
             "Aggregate on non-concurrent hat should be valid: {:?}",
             result.unwrap_err()
         );
+    }
+
+    // ── Workflow Guard Configuration Tests (Unit 1) ──
+
+    #[test]
+    fn test_workflow_guards_absent_parses_as_disabled() {
+        // YAML without workflow_guards section should parse with guard disabled
+        let yaml = r"
+event_loop:
+  max_iterations: 50
+cli:
+  backend: claude
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            config.event_loop.workflow_guards.is_none(),
+            "workflow_guards should be None when absent"
+        );
+        assert_eq!(config.event_loop.max_iterations, 50);
+    }
+
+    #[test]
+    fn test_workflow_guards_with_single_chain_parses_correctly() {
+        let yaml = r#"
+event_loop:
+  workflow_guards:
+    chains:
+      - name: experiment
+        topics:
+          - experiment.planned
+          - experiment.ready
+          - experiment.measured
+          - experiment.scored
+          - experiment.evaluated
+        mode: strict
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let guards = config.event_loop.workflow_guards.as_ref().unwrap();
+        assert_eq!(guards.chains.len(), 1);
+
+        let chain = &guards.chains[0];
+        assert_eq!(chain.name, "experiment");
+        assert_eq!(chain.topics.len(), 5);
+        assert_eq!(chain.topics[0], "experiment.planned");
+        assert_eq!(chain.topics[4], "experiment.evaluated");
+        assert!(matches!(chain.mode, WorkflowChainMode::Strict));
+    }
+
+    #[test]
+    fn test_workflow_guards_empty_chain_list_accepted() {
+        // Empty chain list should be accepted as disabled
+        let yaml = r#"
+event_loop:
+  workflow_guards:
+    chains: []
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let guards = config.event_loop.workflow_guards.as_ref().unwrap();
+        assert!(guards.chains.is_empty());
+    }
+
+    #[test]
+    fn test_workflow_guards_chain_with_correlation_parses() {
+        let yaml = r#"
+event_loop:
+  workflow_guards:
+    chains:
+      - name: experiment
+        topics:
+          - experiment.planned
+          - experiment.scored
+        mode: strict
+        correlation:
+          from_payload: experiment_id
+          from_topic: experiment.planned
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let chain = &config.event_loop.workflow_guards.as_ref().unwrap().chains[0];
+        let corr = chain.correlation.as_ref().unwrap();
+        assert_eq!(corr.from_payload, "experiment_id");
+        assert_eq!(corr.from_topic, Some("experiment.planned".to_string()));
+    }
+
+    #[test]
+    fn test_workflow_guards_chain_mode_advisory() {
+        let yaml = r#"
+event_loop:
+  workflow_guards:
+    chains:
+      - name: build
+        topics:
+          - build.started
+          - build.completed
+        mode: advisory
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let chain = &config.event_loop.workflow_guards.as_ref().unwrap().chains[0];
+        assert!(matches!(chain.mode, WorkflowChainMode::Advisory));
+    }
+
+    #[test]
+    fn test_workflow_guards_multiple_chains() {
+        let yaml = r#"
+event_loop:
+  workflow_guards:
+    chains:
+      - name: experiment
+        topics:
+          - experiment.planned
+          - experiment.evaluated
+      - name: build
+        topics:
+          - build.started
+          - build.completed
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let guards = config.event_loop.workflow_guards.as_ref().unwrap();
+        assert_eq!(guards.chains.len(), 2);
+        assert_eq!(guards.chains[0].name, "experiment");
+        assert_eq!(guards.chains[1].name, "build");
     }
 }

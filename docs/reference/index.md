@@ -9,6 +9,7 @@ Reference documentation and resources.
 | [Changelog](changelog.md) | Version history and changes |
 | [FAQ](faq.md) | Frequently asked questions |
 | [Glossary](glossary.md) | Terminology definitions |
+| [Hatless workflow guards](hatless-workflow-guards.md) | Hatless Ralph prompt injection and ordered workflow guard semantics |
 | [Migration from v1](migration-v1.md) | Upgrading from Python v1 |
 | [Troubleshooting](troubleshooting.md) | Common issues and solutions |
 

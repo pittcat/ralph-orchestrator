@@ -207,6 +207,63 @@ Controls the orchestration loop behavior.
 | `starting_event` | string | `null` | First event (enables hat mode) |
 | `checkpoint_interval` | integer | `5` | Git checkpoint frequency |
 | `prompt_file` | string | `"PROMPT.md"` | Default prompt file |
+| `workflow_guards` | object | `null` | Ordered event chain enforcement (see below) |
+
+### workflow_guards
+
+Workflow guards enforce ordered event chains for sequential multi-hat workflows. Use them when a workflow has mandatory step sequences and bypass events could corrupt state.
+
+**When to use workflow guards:**
+- Sequential workflows where each phase must complete before the next begins
+- AutoResearch-style pipelines where `experiment.scored` must precede `experiment.evaluated`
+- Any hat chain where out-of-order events could leave the workflow in an inconsistent state
+
+**Configuration structure:**
+
+```yaml
+event_loop:
+  workflow_guards:
+    chains:
+      - name: experiment
+        topics:
+          - experiment.planned
+          - experiment.ready
+          - experiment.measured
+          - experiment.scored
+          - experiment.evaluated
+        mode: strict
+        correlation:
+          from_payload: experiment_id
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `chains` | list | `[]` | Named ordered topic chains |
+| `chains[].name` | string | — | Chain identifier |
+| `chains[].topics` | list | — | Ordered event topics (first to last) |
+| `chains[].mode` | string | `strict` | Enforcement mode: `strict` or `advisory` |
+| `chains[].correlation` | object | `null` | Per-instance tracking configuration |
+| `chains[].correlation.from_payload` | string | — | JSON payload field to extract the instance key |
+| `chains[].correlation.from_topic` | string | first topic | Optional: topic whose payload contains the correlation key |
+
+**Key behaviors:**
+
+- When `workflow_guards` is configured, events must follow the declared topic sequence before being published to the event bus
+- Out-of-order events are rejected and replaced with a `task.resume` recovery event
+- Side-channel events (topics not in any chain) are accepted but do not advance chain progress
+- `mode: strict` enforces ordered advancement; `mode: advisory` records topics but does not reject
+- `correlation.from_payload` extracts an instance key from JSON payload for per-instance tracking
+- Per-instance tracking allows parallel workflow instances to be guarded independently
+- Completion (`LOOP_COMPLETE`) is rejected if any started guarded instance has not reached terminal phase
+- Existing configs without `workflow_guards` behave exactly as before
+
+**Comparison with other enforcement mechanisms:**
+
+| Mechanism | Purpose | Scope |
+|-----------|---------|-------|
+| `required_events` | Completion gate: ensures topics have appeared before loop can end | Global topic list |
+| `enforce_hat_scope` | Publisher gate: restricts which hats can emit which topics | Per-hat topic allowlist |
+| `workflow_guards` | Runtime order: rejects out-of-order events before bus publication | Per-chain ordered sequence |
 
 ### cli
 

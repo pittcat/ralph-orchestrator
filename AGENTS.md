@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 cargo build
-cargo test
+cargo test -- --test-threads=1             # Full suite (ralph-cli tests need single thread)
 cargo test -p ralph-core test_name           # Run single test
 cargo test -p ralph-core smoke_runner        # Smoke tests (replay-based)
 cargo run -p ralph-e2e -- --mock             # E2E tests (CI-safe)
@@ -288,6 +288,7 @@ ralph clean --diagnostics
 
 ## IMPORTANT
 
+- 讨论 ralph-orchestrator 的任何功能、架构、行为时，必须先去读源码确认，不允许凭记忆或猜测讨论
 - Run `cargo test` before declaring any task done
 - Backwards compatibility doesn't matter — it adds clutter for no reason
 - Prefer replay-based smoke tests over live API calls for CI

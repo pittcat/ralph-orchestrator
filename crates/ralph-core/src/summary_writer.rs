@@ -327,6 +327,7 @@ mod tests {
             last_emitted_signature: None,
             consecutive_same_signature: 0,
             cancellation_requested: false,
+            workflow_progress: crate::event_loop::WorkflowProgress::new(),
         }
     }
 

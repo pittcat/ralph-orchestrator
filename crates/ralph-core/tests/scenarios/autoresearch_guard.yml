@@ -1,0 +1,112 @@
+# AutoResearch Workflow Guard Regression Test
+# Simulates the original failure: periodic.review interleaved before scoring
+# causing experiment.evaluated to be emitted without experiment.scored.
+#
+# Chain: experiment.planned -> experiment.ready -> experiment.measured -> experiment.scored -> experiment.evaluated
+# Side channel: periodic.review (should not advance the experiment chain)
+#
+# Expected: Invalid evaluation is rejected, loop continues toward scoring
+
+name: autoresearch_guard
+description: AutoResearch workflow guard rejects out-of-order evaluation
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 10
+  hats:
+    experimenter:
+      subscribes_to:
+        - experiment.measured
+      publishes:
+        - experiment.evaluated
+      default_publishes: experiment.evaluated
+    reviewer:
+      subscribes_to:
+        - periodic.review
+      publishes:
+        - periodic.review.done
+  event_loop:
+    workflow_guards:
+      chains:
+        - name: experiment
+          topics:
+            - experiment.planned
+            - experiment.ready
+            - experiment.measured
+            - experiment.scored
+            - experiment.evaluated
+          mode: strict
+
+mock_responses:
+  - |
+    Planning experiment...
+    <event topic="experiment.planned">
+    experiment_id: "exp-1"
+    </event>
+  - |
+    Preparing experiment...
+    <event topic="experiment.ready">
+    experiment_id: "exp-1"
+    </event>
+  - |
+    Running measurement...
+    <event topic="experiment.measured">
+    experiment_id: "exp-1"
+    metrics: collected
+    </event>
+  - |
+    <event topic="periodic.review">
+    Reviewing progress...
+    </event>
+  - |
+    Attempting early evaluation (SHOULD BE REJECTED)...
+    <event topic="experiment.evaluated">
+    experiment_id: "exp-1"
+    verdict: approved
+    </event>
+  - |
+    Attempting LOOP_COMPLETE before scoring (SHOULD BE REJECTED)...
+    <event topic="LOOP_COMPLETE">
+    Chain incomplete.
+    </event>
+  - |
+    Scoring experiment...
+    <event topic="experiment.scored">
+    experiment_id: "exp-1"
+    score: 0.85
+    </event>
+  - |
+    Experiment evaluated after scoring...
+    <event topic="experiment.evaluated">
+    experiment_id: "exp-1"
+    verdict: approved
+    </event>
+  - |
+    <event topic="LOOP_COMPLETE">
+    All experiments complete.
+    </event>
+
+checkpoints:
+  - after_response: 5
+    workflow_progress:
+      - chain: experiment
+        phase: 2
+  - after_response: 6
+    completion_rejected: true
+    workflow_progress:
+      - chain: experiment
+        phase: 2
+
+expected:
+  iterations: 9
+  events:
+    - topic: experiment.planned
+    - topic: experiment.ready
+    - topic: experiment.measured
+    - topic: periodic.review
+    - topic: experiment.scored
+    - topic: experiment.evaluated
+  workflow_progress:
+    - chain: experiment
+      phase: 4
+  completion: true

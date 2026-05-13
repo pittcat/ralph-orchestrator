@@ -189,6 +189,61 @@ flowchart LR
     C -->|rejected| A
 ```
 
+## Ordered Workflows with Guards
+
+Some workflows require strict phase ordering. A hat should not emit a downstream event until its predecessor has completed. Without enforcement, a side-channel signal (like `periodic.review`) could bypass a required phase.
+
+### The Problem
+
+In an AutoResearch-style pipeline:
+
+```
+experiment.planned → experiment.ready → experiment.measured → experiment.scored → experiment.evaluated
+```
+
+If `periodic.review` triggers an evaluator while an experiment is still in the `measured` state, the evaluator could emit `experiment.evaluated` before scoring happens. The loop may then complete with corrupted state.
+
+### The Solution: Workflow Guards
+
+Configure `workflow_guards` in `event_loop` to enforce ordered topic chains:
+
+```yaml
+event_loop:
+  starting_event: "experiment.start"
+  workflow_guards:
+    chains:
+      - name: experiment
+        topics:
+          - experiment.planned
+          - experiment.ready
+          - experiment.measured
+          - experiment.scored
+          - experiment.evaluated
+        mode: strict
+        correlation:
+          from_payload: experiment_id
+```
+
+With this in place, Ralph rejects out-of-order events before they reach the event bus. For example, `experiment.evaluated` is blocked until `experiment.scored` has been recorded for that experiment instance.
+
+### Key Behaviors
+
+- **Side-channel events** (like `periodic.review`) do not advance the guarded chain unless explicitly listed as chain topics
+- **Per-instance tracking** uses `correlation.from_payload` to extract an instance key from JSON payloads, isolating parallel workflow instances
+- **Recovery events** (`task.resume`) are published when an event is rejected, directing the agent to the missing prerequisite
+- **Completion rejection** (`LOOP_COMPLETE`) is blocked if any started guarded instance has not reached its terminal phase
+- **`mode: strict`** rejects out-of-order events; **`mode: advisory`** records topics without rejecting
+
+### Guards vs. Other Mechanisms
+
+| Mechanism | What it checks |
+|-----------|----------------|
+| `required_events` | Global topic list — has this topic appeared at all? |
+| `enforce_hat_scope` | Per-hat publish permissions — can this hat emit this topic? |
+| `workflow_guards` | Topic sequence — can this topic appear now given what came before? |
+
+Guards complement the others: `required_events` gates completion, `enforce_hat_scope` gates publication rights, and `workflow_guards` gates runtime ordering.
+
 ## Viewing Events
 
 ```bash

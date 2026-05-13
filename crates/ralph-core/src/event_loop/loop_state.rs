@@ -70,6 +70,9 @@ pub struct LoopState {
 
     /// Set to true when a loop.cancel event is detected.
     pub cancellation_requested: bool,
+
+    /// Workflow progress tracking for guarded chains (chain name -> instance key -> phase).
+    pub workflow_progress: WorkflowProgress,
 }
 
 impl Default for LoopState {
@@ -95,7 +98,126 @@ impl Default for LoopState {
             last_emitted_signature: None,
             consecutive_same_signature: 0,
             cancellation_requested: false,
+            workflow_progress: WorkflowProgress::new(),
         }
+    }
+}
+
+/// Progress tracking for a single workflow instance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowInstanceProgress {
+    /// The chain this instance belongs to.
+    pub chain_name: String,
+    /// The instance key (e.g., experiment_id) or None for global instances.
+    pub instance_key: Option<String>,
+    /// The highest phase index reached (0-indexed into the chain's topics).
+    pub highest_phase: usize,
+}
+
+/// Tracks workflow progress for guarded chains.
+///
+/// Maps chain_name -> instance_key -> WorkflowInstanceProgress.
+/// When a chain has no correlation key, instance_key is None and a single
+/// global instance is tracked.
+#[derive(Debug, Default)]
+pub struct WorkflowProgress {
+    /// Per-chain, per-instance progress. The outer HashMap key is chain_name.
+    instances: HashMap<String, HashMap<Option<String>, WorkflowInstanceProgress>>,
+}
+
+impl WorkflowProgress {
+    /// Creates a new empty workflow progress tracker.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns the highest phase reached for a given chain and instance.
+    pub fn get_phase(&self, chain_name: &str, instance_key: Option<&str>) -> Option<usize> {
+        self.instances
+            .get(chain_name)?
+            .get(&instance_key.map(String::from))
+            .map(|p| p.highest_phase)
+    }
+
+    /// Returns a reference to the progress for a specific chain/instance.
+    pub fn get(
+        &self,
+        chain_name: &str,
+        instance_key: Option<&str>,
+    ) -> Option<&WorkflowInstanceProgress> {
+        self.instances
+            .get(chain_name)?
+            .get(&instance_key.map(String::from))
+    }
+
+    /// Returns the next valid phase index for a given chain.
+    ///
+    /// Returns 0 if no progress exists yet. Otherwise returns `highest_phase + 1`.
+    pub fn next_phase(&self, chain_name: &str, instance_key: Option<&str>) -> usize {
+        self.get_phase(chain_name, instance_key)
+            .map(|p| p + 1)
+            .unwrap_or(0)
+    }
+
+    /// Returns true if the given phase is the next valid one to advance to.
+    ///
+    /// A phase is valid for advancement if:
+    /// - No progress exists yet and phase is 0 (chain start)
+    /// - phase equals current highest_phase + 1 (sequential advancement)
+    /// - phase equals current highest_phase (idempotent re-emission of same phase)
+    pub fn is_phase_valid(
+        &self,
+        chain_name: &str,
+        instance_key: Option<&str>,
+        phase: usize,
+    ) -> bool {
+        let current_highest = self.get_phase(chain_name, instance_key);
+        match current_highest {
+            None => phase == 0,
+            Some(highest) => phase == highest || phase == highest + 1,
+        }
+    }
+
+    /// Records advancement to a new phase for a chain instance.
+    ///
+    /// If the given phase is not valid (skipping ahead), this is a no-op.
+    /// If the phase is <= current highest, this is idempotent (no update).
+    pub fn advance(
+        &mut self,
+        chain_name: &str,
+        instance_key: Option<&str>,
+        phase: usize,
+    ) {
+        if !self.is_phase_valid(chain_name, instance_key, phase) {
+            return;
+        }
+
+        let current_highest = self.get_phase(chain_name, instance_key);
+        if current_highest.map_or(false, |h| phase <= h) {
+            // Idempotent: already at or past this phase
+            return;
+        }
+
+        let instances = self.instances.entry(chain_name.to_string()).or_default();
+        let progress = WorkflowInstanceProgress {
+            chain_name: chain_name.to_string(),
+            instance_key: instance_key.map(String::from),
+            highest_phase: phase,
+        };
+        instances.insert(instance_key.map(String::from), progress);
+    }
+
+    /// Returns the total number of tracked instances across all chains.
+    pub fn instance_count(&self) -> usize {
+        self.instances.values().map(|m| m.len()).sum()
+    }
+
+    /// Returns all tracked instance keys for a given chain.
+    pub fn instance_keys(&self, chain_name: &str) -> Vec<Option<String>> {
+        self.instances
+            .get(chain_name)
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
     }
 }
 
@@ -162,7 +284,7 @@ fn fingerprint_payload(payload: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::LoopState;
+    use super::{LoopState, WorkflowProgress};
     use ralph_proto::Event;
 
     #[test]
@@ -201,5 +323,177 @@ mod tests {
                 .map(|s| s.topic.as_str()),
             Some("task.resume")
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // WorkflowProgress tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn workflow_progress_single_instance_sequential_phases() {
+        // Test: one experiment progresses through all configured topics in order.
+        let mut progress = WorkflowProgress::new();
+        let chain = "experiment";
+        let instance: Option<&str> = None; // global instance
+
+        // Phase 0: experiment.planned
+        progress.advance(chain, instance, 0);
+        assert_eq!(progress.get_phase(chain, instance), Some(0));
+
+        // Phase 1: experiment.ready
+        progress.advance(chain, instance, 1);
+        assert_eq!(progress.get_phase(chain, instance), Some(1));
+
+        // Phase 2: experiment.measured
+        progress.advance(chain, instance, 2);
+        assert_eq!(progress.get_phase(chain, instance), Some(2));
+
+        // Phase 3: experiment.scored
+        progress.advance(chain, instance, 3);
+        assert_eq!(progress.get_phase(chain, instance), Some(3));
+
+        // Phase 4: experiment.evaluated
+        progress.advance(chain, instance, 4);
+        assert_eq!(progress.get_phase(chain, instance), Some(4));
+
+        assert_eq!(progress.instance_count(), 1);
+    }
+
+    #[test]
+    fn workflow_progress_two_instances_independent() {
+        // Test: two experiment IDs progress independently.
+        let mut progress = WorkflowProgress::new();
+        let chain = "experiment";
+
+        // Experiment 1: scored (phase 3)
+        progress.advance(chain, Some("exp-1"), 0);
+        progress.advance(chain, Some("exp-1"), 1);
+        progress.advance(chain, Some("exp-1"), 2);
+        progress.advance(chain, Some("exp-1"), 3);
+
+        // Experiment 2: only at measured (phase 2)
+        progress.advance(chain, Some("exp-2"), 0);
+        progress.advance(chain, Some("exp-2"), 1);
+        progress.advance(chain, Some("exp-2"), 2);
+
+        assert_eq!(progress.get_phase(chain, Some("exp-1")), Some(3));
+        assert_eq!(progress.get_phase(chain, Some("exp-2")), Some(2));
+
+        // exp-1's scored should NOT advance exp-2
+        progress.advance(chain, Some("exp-2"), 3); // This should work since exp-2 is at phase 2, and 3 == 2+1
+        assert_eq!(progress.get_phase(chain, Some("exp-2")), Some(3));
+    }
+
+    #[test]
+    fn workflow_progress_instance_isolation() {
+        // Test: experiment.scored for experiment 1 does not allow
+        // experiment.evaluated for experiment 2 (instance isolation).
+        let mut progress = WorkflowProgress::new();
+        let chain = "experiment";
+
+        // Experiment 1 is at scored (phase 3)
+        progress.advance(chain, Some("exp-1"), 0);
+        progress.advance(chain, Some("exp-1"), 1);
+        progress.advance(chain, Some("exp-1"), 2);
+        progress.advance(chain, Some("exp-1"), 3);
+        assert_eq!(progress.get_phase(chain, Some("exp-1")), Some(3));
+
+        // Experiment 2 is only at measured (phase 2) - cannot skip to evaluated (phase 4)
+        progress.advance(chain, Some("exp-2"), 0);
+        progress.advance(chain, Some("exp-2"), 1);
+        progress.advance(chain, Some("exp-2"), 2);
+        assert_eq!(progress.get_phase(chain, Some("exp-2")), Some(2));
+
+        // Attempt to advance exp-2 to evaluated (phase 4) should be rejected
+        // because current highest is 2, and 4 > 2 + 1
+        progress.advance(chain, Some("exp-2"), 4);
+        assert_eq!(
+            progress.get_phase(chain, Some("exp-2")),
+            Some(2),
+            "exp-2 should remain at phase 2 - cannot skip to evaluated"
+        );
+
+        // But exp-2 can advance to scored (phase 3)
+        progress.advance(chain, Some("exp-2"), 3);
+        assert_eq!(progress.get_phase(chain, Some("exp-2")), Some(3));
+
+        // Now exp-2 can advance to evaluated (phase 4)
+        progress.advance(chain, Some("exp-2"), 4);
+        assert_eq!(progress.get_phase(chain, Some("exp-2")), Some(4));
+    }
+
+    #[test]
+    fn workflow_progress_idempotent_same_phase() {
+        // Test: repeated same-phase event is handled idempotently.
+        let mut progress = WorkflowProgress::new();
+        let chain = "experiment";
+        let instance = Some("exp-1");
+
+        // Phase 0
+        progress.advance(chain, instance, 0);
+        assert_eq!(progress.get_phase(chain, instance), Some(0));
+
+        // Re-emit same phase 0 - should be idempotent (no change)
+        progress.advance(chain, instance, 0);
+        assert_eq!(progress.get_phase(chain, instance), Some(0));
+
+        // Advance to phase 1
+        progress.advance(chain, instance, 1);
+        assert_eq!(progress.get_phase(chain, instance), Some(1));
+
+        // Re-emit phase 0 again - should still be idempotent
+        progress.advance(chain, instance, 0);
+        assert_eq!(progress.get_phase(chain, instance), Some(1));
+
+        // Re-emit phase 1 - should be idempotent
+        progress.advance(chain, instance, 1);
+        assert_eq!(progress.get_phase(chain, instance), Some(1));
+    }
+
+    #[test]
+    fn workflow_progress_global_vs_per_instance() {
+        // Test: chains with no correlation key share a global instance (None key).
+        let mut progress = WorkflowProgress::new();
+        let chain = "experiment";
+
+        // Global instance advances
+        progress.advance(chain, None, 0);
+        progress.advance(chain, None, 1);
+        assert_eq!(progress.get_phase(chain, None), Some(1));
+
+        // Per-instance tracking is independent
+        progress.advance(chain, Some("exp-1"), 0);
+        assert_eq!(progress.get_phase(chain, Some("exp-1")), Some(0));
+        assert_eq!(progress.get_phase(chain, None), Some(1));
+
+        // Global and per-instance are separate entries
+        assert_eq!(progress.instance_count(), 2);
+        let global_keys = progress.instance_keys(chain);
+        assert!(global_keys.contains(&None));
+        assert!(global_keys.contains(&Some("exp-1".to_string())));
+    }
+
+    #[test]
+    fn workflow_progress_is_phase_valid() {
+        let mut progress = WorkflowProgress::new();
+        let chain = "experiment";
+        let instance = Some("exp-1");
+
+        // No progress yet: only phase 0 is valid
+        assert!(progress.is_phase_valid(chain, instance, 0));
+        assert!(!progress.is_phase_valid(chain, instance, 1)); // skipping
+        assert!(!progress.is_phase_valid(chain, instance, 4)); // way ahead
+
+        // At phase 2: can accept 2 (idempotent re-emit), 3 (next)
+        progress.advance(chain, instance, 0);
+        progress.advance(chain, instance, 1);
+        progress.advance(chain, instance, 2);
+        assert_eq!(progress.get_phase(chain, instance), Some(2));
+
+        assert!(!progress.is_phase_valid(chain, instance, 0)); // old phase — no longer accepted
+        assert!(!progress.is_phase_valid(chain, instance, 1)); // old phase — no longer accepted
+        assert!(progress.is_phase_valid(chain, instance, 2)); // idempotent re-emit
+        assert!(progress.is_phase_valid(chain, instance, 3)); // next
+        assert!(!progress.is_phase_valid(chain, instance, 4)); // skip
     }
 }

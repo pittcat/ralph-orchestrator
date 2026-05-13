@@ -6,8 +6,9 @@
 //! - Orphaned event handling
 //! - Default publishes fallback
 //! - Mixed backends
+//! - AutoResearch workflow guards
 
-use ralph_core::RalphConfig;
+use ralph_core::{EventLoop, EventParser, LoopContext, RalphConfig};
 use ralph_core::testing::{MockBackend, Scenario, ScenarioRunner};
 use serde::Deserialize;
 use std::fs;
@@ -18,6 +19,8 @@ struct ScenarioYaml {
     description: String,
     config: ConfigYaml,
     mock_responses: Vec<String>,
+    #[serde(default)]
+    checkpoints: Vec<CheckpointYaml>,
     expected: ExpectedYaml,
 }
 
@@ -28,6 +31,8 @@ struct ConfigYaml {
     max_iterations: u32,
     #[serde(default)]
     hats: serde_yaml::Value,
+    #[serde(default)]
+    event_loop: serde_yaml::Value,
 }
 
 #[allow(dead_code)] // Test infrastructure - fields used for YAML deserialization
@@ -35,6 +40,8 @@ struct ConfigYaml {
 struct ExpectedYaml {
     iterations: usize,
     events: Vec<EventYaml>,
+    #[serde(default)]
+    workflow_progress: Vec<WorkflowProgressYaml>,
     completion: bool,
 }
 
@@ -42,6 +49,23 @@ struct ExpectedYaml {
 #[derive(Debug, Deserialize)]
 struct EventYaml {
     topic: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct CheckpointYaml {
+    after_response: usize,
+    #[serde(default)]
+    workflow_progress: Vec<WorkflowProgressYaml>,
+    #[serde(default)]
+    completion_rejected: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowProgressYaml {
+    chain: String,
+    phase: usize,
+    #[serde(default)]
+    instance: Option<String>,
 }
 
 fn load_scenario(path: &str) -> ScenarioYaml {
@@ -80,6 +104,143 @@ fn run_scenario(yaml: ScenarioYaml) {
     println!("✓ {} passed", yaml.description);
 }
 
+/// Runs a scenario that validates workflow guard behavior by feeding parsed
+/// events through a real EventLoop and asserting on workflow progress.
+fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
+    use std::io::Write;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ralph_dir = temp_dir.path().join(".ralph");
+    std::fs::create_dir_all(&ralph_dir).unwrap();
+    let events_path = ralph_dir.join("events.jsonl");
+
+    // Build RalphConfig from the YAML config section
+    let mut config = RalphConfig::default();
+    config.max_iterations = Some(yaml.config.max_iterations);
+    config.prompt_file = Some(yaml.config.prompt_file);
+    // Hats are optional for workflow guard tests; skip deserialization
+    // to avoid requiring 'name' fields that real configs use map keys for.
+    if !yaml.config.event_loop.is_null() {
+        config.event_loop = serde_yaml::from_value(yaml.config.event_loop).unwrap();
+    }
+
+    let context = LoopContext::primary(temp_dir.path().to_path_buf());
+
+    let mut event_loop = EventLoop::with_context(config, context);
+    event_loop.initialize("Test");
+
+    let parser = EventParser::new();
+
+    for (idx, response) in yaml.mock_responses.iter().enumerate() {
+        let events = parser.parse(response);
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&events_path)
+                .unwrap();
+            for event in &events {
+                let json = serde_json::json!({
+                    "topic": event.topic,
+                    "payload": event.payload,
+                    "ts": "2024-01-01T00:00:00Z",
+                });
+                writeln!(file, "{}", json).unwrap();
+            }
+        }
+
+        let _ = event_loop.process_events_from_jsonl();
+
+        // Evaluate checkpoints tied to this response index (1-based in YAML)
+        for checkpoint in &yaml.checkpoints {
+            if checkpoint.after_response == idx + 1 {
+                for progress in &checkpoint.workflow_progress {
+                    let instance = progress.instance.as_deref();
+                    let actual_phase =
+                        event_loop.state().workflow_progress.get_phase(&progress.chain, instance);
+                    assert_eq!(
+                        actual_phase,
+                        Some(progress.phase),
+                        "{}: After response {}, expected workflow progress phase {} for chain '{}', got {:?}",
+                        yaml.name,
+                        idx + 1,
+                        progress.phase,
+                        progress.chain,
+                        actual_phase
+                    );
+                }
+
+                if checkpoint.completion_rejected {
+                    let reason = event_loop.check_completion_event();
+                    assert!(
+                        reason.is_none(),
+                        "{}: After response {}, expected LOOP_COMPLETE to be rejected, but got {:?}",
+                        yaml.name,
+                        idx + 1,
+                        reason
+                    );
+                }
+            }
+        }
+    }
+
+    // Verify all expected events were seen (accepted) at least once
+    for expected_event in &yaml.expected.events {
+        assert!(
+            event_loop.state().seen_topics.contains(&expected_event.topic),
+            "{}: Expected event '{}' to be seen (accepted), but it was not recorded",
+            yaml.name,
+            expected_event.topic
+        );
+    }
+
+    // Verify final workflow progress
+    for progress in &yaml.expected.workflow_progress {
+        let instance = progress.instance.as_deref();
+        let actual_phase =
+            event_loop.state().workflow_progress.get_phase(&progress.chain, instance);
+        assert_eq!(
+            actual_phase,
+            Some(progress.phase),
+            "{}: Expected final workflow progress phase {} for chain '{}', got {:?}",
+            yaml.name,
+            progress.phase,
+            progress.chain,
+            actual_phase
+        );
+    }
+
+    // Verify completion behavior
+    if yaml.expected.completion {
+        let reason = event_loop.check_completion_event();
+        assert!(
+            reason.is_some(),
+            "{}: Expected LOOP_COMPLETE to be accepted, but it was rejected or not present",
+            yaml.name
+        );
+    } else {
+        let reason = event_loop.check_completion_event();
+        assert!(
+            reason.is_none(),
+            "{}: Expected LOOP_COMPLETE to be rejected, but got {:?}",
+            yaml.name,
+            reason
+        );
+    }
+
+    // Verify iteration count matches the number of mock responses
+    assert_eq!(
+        yaml.mock_responses.len(),
+        yaml.expected.iterations,
+        "{}: Expected {} iterations, but scenario has {} mock responses",
+        yaml.name,
+        yaml.expected.iterations,
+        yaml.mock_responses.len()
+    );
+
+    println!("✓ {} passed", yaml.description);
+}
+
 #[test]
 fn test_solo_mode() {
     let yaml = load_scenario("tests/scenarios/solo_mode.yml");
@@ -108,4 +269,10 @@ fn test_default_publishes() {
 fn test_mixed_backends() {
     let yaml = load_scenario("tests/scenarios/mixed_backends.yml");
     run_scenario(yaml);
+}
+
+#[test]
+fn test_autoresearch_guard() {
+    let yaml = load_scenario("tests/scenarios/autoresearch_guard.yml");
+    run_workflow_guard_scenario(yaml);
 }

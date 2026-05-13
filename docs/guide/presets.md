@@ -122,6 +122,13 @@ Large multi-stage pipelines from idea through implementation.
 
 Example: `pdd-to-code-assist`
 
+### 6) Guarded Sequential Workflows
+Workflows with mandatory phase ordering where out-of-order events could corrupt state.
+
+Example: `autoresearch` (experiment chain with `workflow_guards`)
+
+When a workflow has strict phase dependencies (e.g., scoring must precede evaluation), configure `workflow_guards` to enforce the order at runtime. Use `mode: strict` to reject out-of-order events, or `mode: advisory` to record progress without blocking. This prevents side-channel signals like `periodic.review` from bypassing required phases. Per-instance tracking via `correlation.from_payload` allows parallel experiments to be guarded independently.
+
 ## Split Config vs Single-File Config
 
 Recommended:

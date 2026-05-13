@@ -162,8 +162,10 @@ if [[ "$RUN_CLIPPY" -eq 1 ]]; then
 fi
 
 if [[ "$RUN_TESTS" -eq 1 ]]; then
+  # Single-threaded: ralph-cli tests spawn PTYs and fake backends that are
+  # not safe under heavy parallel load (mutex poisoning, PTY contention).
   run_check "Tests (cargo test with CI skip list)" \
-    run_cargo test -- --skip acp_executor::tests::test_create_terminal_and_output
+    run_cargo test -- --test-threads=1 --skip acp_executor::tests::test_create_terminal_and_output
 fi
 
 if [[ "$RUN_HOOKS_BDD" -eq 1 ]]; then
