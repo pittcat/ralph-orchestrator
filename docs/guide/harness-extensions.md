@@ -79,6 +79,12 @@ triggers). Neither Hat sees the other's private scoring events.
 is disabled for that iteration — Ralph shows the full event history. This prevents
 accidental information starvation.
 
+**Isolated mode difference:** In `execution_mode: isolated`, each Hat runs in its own
+backend process and sees only its own allowed events. The union semantics above apply
+to `coordinator` mode where multiple Hats share a single prompt. In isolated mode,
+each Hat's filter is applied independently, so a Hat never sees events that another
+Hat's filter would have added to the union.
+
 ### Validation
 
 `ralph preflight` checks that:
@@ -334,6 +340,102 @@ hats:
         - "experiment.result"
         - "redteam.review"
 ```
+
+---
+
+## Isolated Mode with Extensions
+
+When `execution_mode: isolated` is enabled, each Hat runs in its own backend process
+and the four extensions compose as follows:
+
+| Extension | Behavior in isolated mode |
+|-----------|--------------------------|
+| Event Filtering | Applied per-Hat independently (no union). Each Hat sees only its own allowlisted events. |
+| Event Projection | Runs after accepted events are published, accumulating across all Hat turns. |
+| State File Injection | Injected into every isolated Hat prompt at the same prepend position. |
+| Preflight Hooks | Run before each isolated Hat backend execution, not just once per Ralph iteration. |
+
+### AutoResearch Example
+
+A complete configuration combining isolated execution, workflow guards, event filtering,
+and event projection for an AutoResearch pipeline:
+
+```yaml
+event_loop:
+  execution_mode: isolated
+  starting_event: "experiment.start"
+  workflow_guards:
+    chains:
+      - name: experiment
+        topics:
+          - experiment.planned
+          - experiment.ready
+          - experiment.measured
+          - experiment.scored
+          - experiment.evaluated
+        mode: strict
+        correlation:
+          from_payload: experiment_id
+
+core:
+  event_projection:
+    enabled: true
+    rules:
+      - name: experiment-ledger
+        trigger_events:
+          - "experiment.planned"
+          - "experiment.ready"
+          - "experiment.measured"
+          - "experiment.scored"
+          - "experiment.evaluated"
+        fields:
+          - "topic"
+          - "payload"
+        target_file: .ralph/experiments.jsonl
+        mode: append
+
+hats:
+  planner:
+    name: "Planner"
+    triggers: ["experiment.start"]
+    publishes: ["experiment.planned"]
+    event_filter:
+      enabled: true
+      events:
+        - "experiment.start"
+    instructions: |
+      Plan the experiment.
+
+  implementer:
+    name: "Implementer"
+    triggers: ["experiment.planned"]
+    publishes: ["experiment.ready"]
+    event_filter:
+      enabled: true
+      events:
+        - "experiment.planned"
+    instructions: |
+      Implement the plan.
+
+  evaluator:
+    name: "Evaluator"
+    triggers: ["experiment.ready"]
+    publishes: ["experiment.evaluated"]
+    event_filter:
+      enabled: true
+      events:
+        - "experiment.ready"
+        - "experiment.measured"
+        - "experiment.scored"
+    instructions: |
+      Evaluate the experiment results.
+```
+
+In this setup:
+- Each phase runs in isolation — the evaluator never sees the planner's instructions.
+- Workflow guards enforce that `experiment.scored` must precede `experiment.evaluated`.
+- Event projection accumulates every phase into `.ralph/experiments.jsonl` for audit.
+- Event filtering ensures each Hat's prompt contains only the events it needs.
 
 ---
 

@@ -207,6 +207,7 @@ Controls the orchestration loop behavior.
 | `starting_event` | string | `null` | First event (enables hat mode) |
 | `checkpoint_interval` | integer | `5` | Git checkpoint frequency |
 | `prompt_file` | string | `"PROMPT.md"` | Default prompt file |
+| `execution_mode` | string | `"coordinator"` | Hat execution mode: `coordinator` or `isolated` |
 | `workflow_guards` | object | `null` | Ordered event chain enforcement (see below) |
 
 ### workflow_guards

@@ -123,6 +123,63 @@ hats:
     default_publishes: "work.done"  # If no explicit emit
 ```
 
+## Execution Modes
+
+Ralph supports two ways of running hats:
+
+### `coordinator` (default)
+
+All hats share a single backend process. The coordinator prompt includes the instructions of every active hat, and one backend call can advance multiple workflow stages if the model emits several business events. This is fast and efficient, and it is the right choice for most workflows.
+
+### `isolated`
+
+Each hat runs in its own backend process. The prompt contains **only** the current hat's instructions and the events it is allowed to see. One backend call can produce **at most one** business event, so a multi-hat pipeline needs one iteration per hat. This prevents cross-hat prompt contamination and is the right choice when hats must remain truly independent (e.g. red-team vs. target, reviewer vs. author, or evaluator vs. generator).
+
+#### Trade-offs
+
+| Mode | Speed | Cost | Isolation | Use when |
+|---|---|---|---|---|
+| `coordinator` | Fast (1 process) | Low | Hats see each other's instructions | General workflows, small teams |
+| `isolated` | Slower (1 process per hat stage) | Higher | Hats cannot see other hats' instructions | Red-team, reviewer, evaluator independence |
+
+#### Configuring isolated mode
+
+```yaml
+event_loop:
+  execution_mode: isolated
+
+hats:
+  strategist:
+    subscribes_to:
+      - task.start
+    publishes:
+      - experiment.planned
+    instructions: |
+      Plan the experiment approach.
+
+  implementer:
+    subscribes_to:
+      - experiment.planned
+    publishes:
+      - experiment.ready
+    instructions: |
+      Implement the plan.
+
+  reviewer:
+    subscribes_to:
+      - experiment.ready
+    publishes:
+      - review.done
+    instructions: |
+      Review the work independently.
+```
+
+In this example the strategist, implementer, and reviewer each run in a separate backend process. The reviewer never sees the strategist's or implementer's instructions, and the model cannot skip ahead by emitting multiple downstream events in a single call.
+
+> **Note:** Isolation applies to the backend prompt and event boundary, not to the filesystem. All hats can still read the same working-directory files.
+
+> **Note:** The `subscribes_to` field is an alias for `triggers`. Both names are accepted in configuration files. We use `subscribes_to` in examples because it reads more naturally in event-driven documentation, but `triggers` is the canonical field name.
+
 ## Event System Design
 
 ### Starting Event

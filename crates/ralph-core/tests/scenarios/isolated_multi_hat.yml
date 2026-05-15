@@ -1,0 +1,53 @@
+# Isolated Multi-Hat: strategist -> implementer -> reviewer
+# Isolated mode requires a separate backend iteration per hat stage.
+
+name: isolated_multi_hat
+description: Isolated mode with 3 hats requires separate iterations
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 10
+  hats:
+    strategist:
+      subscribes_to:
+        - task.start
+      publishes:
+        - experiment.planned
+    implementer:
+      subscribes_to:
+        - experiment.planned
+      publishes:
+        - experiment.ready
+    reviewer:
+      subscribes_to:
+        - experiment.ready
+      publishes:
+        - review.complete
+  event_loop:
+    execution_mode: isolated
+
+mock_responses:
+  - |
+    <event topic="experiment.planned">
+    plan: "Build the feature"
+    </event>
+  - |
+    <event topic="experiment.ready">
+    status: "implemented"
+    </event>
+  - |
+    <event topic="review.complete">
+    verdict: "approved"
+    </event>
+  - |
+    <event topic="LOOP_COMPLETE">
+    Done.
+    </event>
+
+expected:
+  iterations: 4
+  events:
+    - topic: experiment.planned
+    - topic: experiment.ready
+    - topic: review.complete
+  completion: true

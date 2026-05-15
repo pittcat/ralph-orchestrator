@@ -8,7 +8,7 @@ mod tests;
 
 pub use loop_state::{LoopState, WorkflowProgress};
 
-use crate::config::{HatBackend, InjectMode, RalphConfig, ScratchpadConfig};
+use crate::config::{HatBackend, HatExecutionMode, InjectMode, RalphConfig, ScratchpadConfig};
 use crate::event_parser::{EventParser, MutationEvidence, MutationStatus};
 use crate::event_reader::{EventReader, Event as JsonlEvent};
 use crate::hat_registry::HatRegistry;
@@ -993,15 +993,26 @@ impl EventLoop {
         // If no pending events, return None
         next.as_ref()?;
 
-        // In multi-hat mode, always route to Ralph (custom hats define topology only)
-        // Ralph's prompt includes the ## HATS section for coordination awareness
-        if self.registry.is_empty() {
-            // Solo mode - return the next hat (which is "ralph")
-            next
-        } else {
-            // Return "ralph" - the constant coordinator
-            // Find ralph in the bus's registered hats
-            self.bus.hat_ids().find(|id| id.as_str() == "ralph")
+        match self.config.event_loop.execution_mode {
+            HatExecutionMode::Isolated => {
+                // Isolated mode: return the concrete hat with pending events.
+                // Solo mode (no custom hats) still returns "ralph" since it's the only hat.
+                // In multi-hat mode, return the actual pending hat so each runs independently.
+                next
+            }
+            HatExecutionMode::Coordinator => {
+                // Coordinator mode (default): In multi-hat mode, always route to Ralph
+                // (custom hats define topology only). Ralph's prompt includes the ## HATS
+                // section for coordination awareness.
+                if self.registry.is_empty() {
+                    // Solo mode - return the next hat (which is "ralph")
+                    next
+                } else {
+                    // Return "ralph" - the constant coordinator
+                    // Find ralph in the bus's registered hats
+                    self.bus.hat_ids().find(|id| id.as_str() == "ralph")
+                }
+            }
         }
     }
 
@@ -1319,9 +1330,91 @@ impl EventLoop {
             }
         }
 
-        // Non-ralph hat requested - this shouldn't happen in multi-hat mode since
-        // next_hat() always returns "ralph" when custom hats are defined.
-        // But we keep this code path for backward compatibility and tests.
+        // Non-ralph hat requested
+        if self.config.event_loop.execution_mode == HatExecutionMode::Isolated {
+            // Isolated mode: build focused prompt for this hat only
+            let mut events = self.bus.take_pending(&hat_id.clone());
+            let mut human_events = self.bus.take_human_pending();
+            events.append(&mut human_events);
+
+            let (guidance_events, regular_events): (Vec<_>, Vec<_>) = events
+                .into_iter()
+                .partition(|e| e.topic.as_str() == "human.guidance");
+
+            // Apply per-hat event filter if configured
+            let hat_config = self.registry.get_config(hat_id);
+            let mut allowlist = std::collections::HashSet::new();
+            let should_filter = if let Some(config) = hat_config
+                && let Some(ref filter) = config.event_filter
+                && filter.enabled
+            {
+                allowlist.extend(filter.events.iter().cloned());
+                allowlist.extend(config.triggers.iter().cloned());
+                !allowlist.is_empty()
+            } else {
+                false
+            };
+
+            let filtered_events: Vec<&Event> = if should_filter {
+                regular_events
+                    .iter()
+                    .filter(|e| allowlist.contains(e.topic.as_str()))
+                    .collect()
+            } else {
+                regular_events.iter().collect()
+            };
+
+            let events_context = filtered_events
+                .iter()
+                .map(|e| Self::format_event(e))
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            // Resolve scratchpad for this hat
+            let resolved_scratchpad = self
+                .registry
+                .get_config(hat_id)
+                .and_then(|c| c.scratchpad.as_ref())
+                .map(|s| ScratchpadConfig::resolve(Some(s), &self.config.core.scratchpad))
+                .unwrap_or_else(|| self.config.core.scratchpad.clone());
+            self.ralph.set_active_scratchpad(resolved_scratchpad);
+            self.ralph.set_iteration(self.state.iteration);
+
+            // Handle guidance
+            self.update_robot_guidance(guidance_events);
+            self.apply_robot_guidance();
+
+            // Build base prompt
+            let hat = self.registry.get(hat_id)?;
+
+            // Debug logging to trace hat routing
+            debug!(
+                "build_prompt: hat_id='{}', instructions.is_empty()={}",
+                hat_id.as_str(),
+                hat.instructions.is_empty()
+            );
+
+            debug!(
+                "build_prompt: routing to build_custom_hat() for '{}' (isolated mode)",
+                hat_id.as_str()
+            );
+
+            let base_prompt = self.instruction_builder.build_custom_hat(hat, &events_context);
+
+            // Apply prepend pipeline (SAME order as coordinator path)
+            self.ralph.clear_robot_guidance();
+            let with_skills = self.prepend_auto_inject_skills(base_prompt);
+            let with_scratchpad = self.prepend_scratchpad(with_skills);
+            let with_state_files = self.prepend_state_files(with_scratchpad);
+            let final_prompt = self.prepend_ready_tasks(with_state_files);
+
+            // Set active hat for downstream logic (default_publishes, enforce_hat_scope)
+            self.state.last_active_hat_ids = vec![hat_id.clone()];
+
+            return Some(final_prompt);
+        }
+
+        // Backward compatibility / non-isolated mode: simple custom hat prompt
         let events = self.bus.take_pending(&hat_id.clone());
         let events_context = events
             .iter()
@@ -2070,6 +2163,13 @@ impl EventLoop {
         self.state.iteration += 1;
         self.state.last_hat = Some(hat_id.clone());
 
+        // Track the isolated hat for scope enforcement in process_parse_result
+        if self.config.event_loop.execution_mode == HatExecutionMode::Isolated {
+            self.state.current_isolated_hat = Some(hat_id.clone());
+        } else {
+            self.state.current_isolated_hat = None;
+        }
+
         // Periodic robot check-in
         if let Some(interval_secs) = self.config.robot.checkin_interval_seconds
             && let Some(ref robot_service) = self.robot_service
@@ -2573,9 +2673,66 @@ impl EventLoop {
             });
         }
 
-        // --- Scope enforcement: filter events against active hat's publishes ---
-        // Only active when enforce_hat_scope is true in config (opt-in).
-        let events = if self.config.event_loop.enforce_hat_scope {
+        // --- Scope enforcement ---
+        let events = if self.config.event_loop.execution_mode == HatExecutionMode::Isolated
+            && let Some(ref isolated_hat) = self.state.current_isolated_hat
+        {
+            // Isolated mode: hard-enforce current hat scope + single business event boundary
+            let mut accepted = Vec::new();
+            let mut first_business_event_accepted = false;
+
+            for event in result.events {
+                // System/diagnostic events always pass through
+                let is_system_event = matches!(event.topic.as_str(),
+                    "event.malformed" | "event.scope_violation" | "event.workflow_guard_rejected"
+                    | "human.interact" | "human.response" | "human.guidance" | "human.timeout"
+                    | "loop.cancel" | "task.resume" | "build.task.abandoned"
+                );
+
+                if is_system_event {
+                    accepted.push(event);
+                    continue;
+                }
+
+                // Enforce hat scope: topic must be in isolated_hat's publishes
+                if !self.registry.can_publish(isolated_hat, event.topic.as_str()) {
+                    warn!(
+                        hat = %isolated_hat.as_str(),
+                        topic = %event.topic,
+                        "Isolated mode: event out of hat scope — dropping"
+                    );
+                    let violation_topic = format!("{}.scope_violation", isolated_hat.as_str());
+                    let violation_payload = format!(
+                        "Isolated mode: hat '{}' cannot publish topic '{}'",
+                        isolated_hat.as_str(),
+                        event.topic
+                    );
+                    let violation = Event::new(violation_topic, violation_payload);
+                    self.bus.publish(violation);
+                    continue;
+                }
+
+                if !first_business_event_accepted {
+                    accepted.push(event);
+                    first_business_event_accepted = true;
+                } else {
+                    warn!(
+                        topic = %event.topic,
+                        "Isolated mode: extra business event dropped — only one per turn"
+                    );
+                    let diagnostic = Event::new(
+                        "event.isolation.boundary_violation",
+                        format!(
+                            "Isolated mode: dropped extra event '{}' — only one business event per turn allowed",
+                            event.topic
+                        ),
+                    );
+                    self.bus.publish(diagnostic);
+                }
+            }
+            accepted
+        } else if self.config.event_loop.enforce_hat_scope {
+            // Coordinator mode: existing enforce_hat_scope logic (unchanged)
             let active_hats = self.state.last_active_hat_ids.clone();
             let (in_scope, out_of_scope): (Vec<_>, Vec<_>) =
                 result.events.into_iter().partition(|event| {

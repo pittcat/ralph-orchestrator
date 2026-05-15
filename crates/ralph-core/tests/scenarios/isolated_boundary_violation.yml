@@ -1,0 +1,37 @@
+# Isolated Boundary Violation: extra business events beyond the first are dropped
+# In isolated mode a single backend call may only advance one hat stage.
+
+name: isolated_boundary_violation
+description: Isolated mode drops extra business events beyond the first
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 10
+  hats:
+    strategist:
+      subscribes_to:
+        - task.start
+      publishes:
+        - experiment.planned
+        - experiment.ready
+  event_loop:
+    execution_mode: isolated
+
+mock_responses:
+  - |
+    <event topic="experiment.planned">
+    plan: "Build the feature"
+    </event>
+    <event topic="experiment.ready">
+    status: "premature"
+    </event>
+  - |
+    <event topic="LOOP_COMPLETE">
+    Done.
+    </event>
+
+expected:
+  iterations: 2
+  events:
+    - topic: experiment.planned
+  completion: true

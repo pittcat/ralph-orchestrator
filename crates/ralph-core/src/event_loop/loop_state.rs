@@ -71,6 +71,10 @@ pub struct LoopState {
     /// Set to true when a loop.cancel event is detected.
     pub cancellation_requested: bool,
 
+    /// The hat currently selected for isolated execution.
+    /// Set in isolated mode so `process_parse_result` knows which hat's scope to enforce.
+    pub current_isolated_hat: Option<HatId>,
+
     /// Workflow progress tracking for guarded chains (chain name -> instance key -> phase).
     pub workflow_progress: WorkflowProgress,
 }
@@ -98,6 +102,7 @@ impl Default for LoopState {
             last_emitted_signature: None,
             consecutive_same_signature: 0,
             cancellation_requested: false,
+            current_isolated_hat: None,
             workflow_progress: WorkflowProgress::new(),
         }
     }

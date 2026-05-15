@@ -991,6 +991,13 @@ pub struct EventLoopConfig {
     /// downstream hats.
     #[serde(default)]
     pub workflow_guards: Option<WorkflowGuardsConfig>,
+
+    /// Hat execution mode.
+    ///
+    /// Controls whether Ralph runs as a central coordinator (default) or
+    /// dispatches each hat in an isolated backend process.
+    #[serde(default)]
+    pub execution_mode: HatExecutionMode,
 }
 
 /// Opt-in workflow state guards for enforcing ordered event chains.
@@ -1035,6 +1042,20 @@ pub enum WorkflowChainMode {
     /// Permissive: topics are recorded when seen but out-of-order events
     /// are not rejected. Useful for optional workflows or side-channels.
     Advisory,
+}
+
+/// Hat execution mode.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum HatExecutionMode {
+    /// Default coordinator behavior: Ralph acts as a central coordinator,
+    /// all active hats' instructions are injected into a single prompt.
+    #[default]
+    Coordinator,
+
+    /// Isolated execution: each hat runs in a separate backend process
+    /// with only its own instructions and allowed events visible.
+    Isolated,
 }
 
 /// Configuration for extracting a correlation key from an event payload.
@@ -1095,6 +1116,7 @@ impl Default for EventLoopConfig {
             cancellation_promise: String::new(),
             enforce_hat_scope: false,
             workflow_guards: None,
+            execution_mode: HatExecutionMode::default(),
         }
     }
 }
@@ -2132,7 +2154,7 @@ pub struct HatConfig {
 
     /// Events that trigger this hat to be worn.
     /// Per spec: "Hats define triggers — which events cause Ralph to wear this hat."
-    #[serde(default)]
+    #[serde(default, alias = "subscribes_to")]
     pub triggers: Vec<String>,
 
     /// Topics this hat publishes.
@@ -4564,5 +4586,126 @@ event_loop:
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("Duplicate workflow chain name"), "Expected duplicate chain name error, got: {}", err);
+    }
+
+    // ── HatExecutionMode config tests ──
+
+    #[test]
+    fn test_hat_execution_mode_defaults_to_coordinator() {
+        let config = RalphConfig::default();
+        assert_eq!(
+            config.event_loop.execution_mode,
+            HatExecutionMode::Coordinator,
+            "Default execution_mode must be Coordinator"
+        );
+    }
+
+    #[test]
+    fn test_hat_execution_mode_explicit_isolated() {
+        let yaml = r"
+event_loop:
+  execution_mode: isolated
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.event_loop.execution_mode,
+            HatExecutionMode::Isolated
+        );
+    }
+
+    #[test]
+    fn test_hat_execution_mode_explicit_coordinator() {
+        let yaml = r"
+event_loop:
+  execution_mode: coordinator
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.event_loop.execution_mode,
+            HatExecutionMode::Coordinator
+        );
+    }
+
+    #[test]
+    fn test_hat_execution_mode_missing_field_defaults_to_coordinator() {
+        // Existing configs without execution_mode should parse successfully
+        let yaml = r"
+event_loop:
+  max_iterations: 50
+cli:
+  backend: claude
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.event_loop.execution_mode,
+            HatExecutionMode::Coordinator,
+            "Missing execution_mode must default to Coordinator"
+        );
+    }
+
+    #[test]
+    fn test_hat_execution_mode_invalid_value_fails_parsing() {
+        let yaml = r"
+event_loop:
+  execution_mode: sandbox
+";
+        let result: Result<RalphConfig, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err(), "Invalid execution_mode value must fail parsing");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unknown variant `sandbox`"),
+            "Error should mention unknown variant, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_hat_execution_mode_case_sensitive_rejected() {
+        // Pascal-case 'Isolated' should be rejected (serde rename_all = snake_case)
+        let yaml = r"
+event_loop:
+  execution_mode: Isolated
+";
+        let result: Result<RalphConfig, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err(), "Case-sensitive mode value 'Isolated' must be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unknown variant `Isolated`"),
+            "Error should mention unknown variant `Isolated`, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_hat_execution_mode_uppercase_rejected() {
+        // ALL CAPS 'ISOLATED' should be rejected
+        let yaml = r"
+event_loop:
+  execution_mode: ISOLATED
+";
+        let result: Result<RalphConfig, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err(), "Uppercase mode value 'ISOLATED' must be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unknown variant `ISOLATED`"),
+            "Error should mention unknown variant `ISOLATED`, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_hat_execution_mode_empty_string_fails() {
+        let yaml = r#"
+event_loop:
+  execution_mode: ""
+"#;
+        let result: Result<RalphConfig, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err(), "Empty string execution_mode must fail parsing");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unknown variant `"),
+            "Error should mention unknown variant for empty string, got: {}",
+            err
+        );
     }
 }

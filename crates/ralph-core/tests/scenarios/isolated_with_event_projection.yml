@@ -1,0 +1,55 @@
+# Isolated mode with event_projection extension
+# Verifies that matching events are projected to a JSONL file.
+
+name: isolated_with_event_projection
+description: Isolated mode composes with event_projection extension
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 10
+  hats:
+    planner:
+      subscribes_to:
+        - task.start
+      publishes:
+        - experiment.planned
+    implementer:
+      subscribes_to:
+        - experiment.planned
+      publishes:
+        - experiment.ready
+  event_loop:
+    execution_mode: isolated
+  core:
+    event_projection:
+      enabled: true
+      rules:
+        - name: "experiment-log"
+          trigger_events:
+            - "experiment.planned"
+            - "experiment.ready"
+          fields:
+            - "topic"
+            - "payload"
+          target_file: ".ralph/projected-events.jsonl"
+
+mock_responses:
+  - |
+    <event topic="experiment.planned">
+    plan: "Build feature"
+    </event>
+  - |
+    <event topic="experiment.ready">
+    status: "done"
+    </event>
+  - |
+    <event topic="LOOP_COMPLETE">
+    Done.
+    </event>
+
+expected:
+  iterations: 3
+  events:
+    - topic: experiment.planned
+    - topic: experiment.ready
+  completion: true
