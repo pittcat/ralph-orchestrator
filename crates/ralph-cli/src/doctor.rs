@@ -384,6 +384,12 @@ fn auth_env_vars(backend: &str) -> Option<Vec<&'static str>> {
             "OPENAI_API_KEY",
             "GEMINI_API_KEY",
         ]),
+        "traecli" => Some(vec![
+            "TRAECLI_PERSONAL_ACCESS_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "GEMINI_API_KEY",
+        ]),
         _ => None,
     }
 }
@@ -445,6 +451,7 @@ fn canonical_backend_name(backend: &str, command: Option<&str>) -> String {
         "opencode" => "opencode".to_string(),
         "pi" => "pi".to_string(),
         "roo" => "roo".to_string(),
+        "traecli" => "traecli".to_string(),
         _ => normalized,
     }
 }

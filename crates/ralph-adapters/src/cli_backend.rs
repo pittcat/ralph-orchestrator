@@ -79,6 +79,7 @@ impl CliBackend {
             "opencode" => Self::opencode(),
             "pi" => Self::pi(),
             "roo" => Self::roo(),
+            "traecli" => Self::traecli(),
             "custom" => return Self::custom(config),
             _ => Self::claude(), // Default to claude
         };
@@ -253,6 +254,7 @@ impl CliBackend {
             "opencode" => Ok(Self::opencode()),
             "pi" => Ok(Self::pi()),
             "roo" => Ok(Self::roo()),
+            "traecli" => Ok(Self::traecli()),
             _ => Err(CustomBackendError),
         }
     }
@@ -415,6 +417,7 @@ impl CliBackend {
             "opencode" => Ok(Self::opencode_interactive()),
             "pi" => Ok(Self::pi_interactive()),
             "roo" => Ok(Self::roo_interactive()),
+            "traecli" => Ok(Self::traecli_interactive()),
             _ => Err(CustomBackendError),
         }
     }
@@ -619,6 +622,40 @@ impl CliBackend {
         }
     }
 
+    /// Creates the Trae CLI backend for headless execution.
+    ///
+    /// Uses `--yolo` to auto-approve tools and `--print` for non-interactive
+    /// output. Trae CLI supports `--json` with `--print` for structured output,
+    /// but we default to plain text for maximum compatibility.
+    pub fn traecli() -> Self {
+        Self {
+            command: "trae-cli".to_string(),
+            args: vec![
+                "--yolo".to_string(),
+                "--print".to_string(),
+            ],
+            prompt_mode: PromptMode::Arg,
+            prompt_flag: None,
+            output_format: OutputFormat::Text,
+            env_vars: vec![],
+        }
+    }
+
+    /// Creates the Trae CLI backend for interactive mode with initial prompt.
+    ///
+    /// Runs trae-cli TUI without `--yolo` or `--print`, passing the prompt
+    /// as a positional argument. Used by `ralph plan` for interactive sessions.
+    pub fn traecli_interactive() -> Self {
+        Self {
+            command: "trae-cli".to_string(),
+            args: vec![],
+            prompt_mode: PromptMode::Arg,
+            prompt_flag: None,
+            output_format: OutputFormat::Text,
+            env_vars: vec![],
+        }
+    }
+
     /// Creates a custom backend from configuration.
     ///
     /// # Errors
@@ -787,6 +824,10 @@ impl CliBackend {
             "roo" => args
                 .into_iter()
                 .filter(|a| a != "--print" && a != "--ephemeral")
+                .collect(),
+            "trae-cli" => args
+                .into_iter()
+                .filter(|a| a != "--yolo" && a != "--print")
                 .collect(),
             _ => args, // gemini, opencode unchanged
         }
@@ -2008,5 +2049,92 @@ mod tests {
             .read_to_string(&mut content)
             .unwrap();
         assert_eq!(content, prompt);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Tests for Trae CLI backend
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_traecli_backend() {
+        let backend = CliBackend::traecli();
+        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
+
+        assert_eq!(cmd, "trae-cli");
+        assert_eq!(args, vec!["--yolo", "--print", "test prompt"]);
+        assert!(stdin.is_none());
+        assert_eq!(backend.output_format, OutputFormat::Text);
+        assert_eq!(backend.prompt_flag, None);
+    }
+
+    #[test]
+    fn test_traecli_interactive() {
+        let backend = CliBackend::traecli_interactive();
+        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
+
+        assert_eq!(cmd, "trae-cli");
+        assert_eq!(args, vec!["test prompt"]);
+        assert!(stdin.is_none());
+        assert_eq!(backend.output_format, OutputFormat::Text);
+        assert_eq!(backend.prompt_flag, None);
+    }
+
+    #[test]
+    fn test_from_name_traecli() {
+        let backend = CliBackend::from_name("traecli").unwrap();
+        assert_eq!(backend.command, "trae-cli");
+        assert_eq!(backend.prompt_flag, None);
+        assert_eq!(backend.output_format, OutputFormat::Text);
+    }
+
+    #[test]
+    fn test_from_config_traecli() {
+        let config = CliConfig {
+            backend: "traecli".to_string(),
+            command: None,
+            prompt_mode: "arg".to_string(),
+            ..Default::default()
+        };
+        let backend = CliBackend::from_config(&config).unwrap();
+
+        assert_eq!(backend.command, "trae-cli");
+        assert_eq!(backend.output_format, OutputFormat::Text);
+        assert!(backend.args.contains(&"--yolo".to_string()));
+        assert!(backend.args.contains(&"--print".to_string()));
+    }
+
+    #[test]
+    fn test_for_interactive_prompt_traecli() {
+        let backend = CliBackend::for_interactive_prompt("traecli").unwrap();
+        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
+
+        assert_eq!(cmd, "trae-cli");
+        assert_eq!(args, vec!["test prompt"]);
+        assert!(stdin.is_none());
+        assert_eq!(backend.output_format, OutputFormat::Text);
+    }
+
+    #[test]
+    fn test_traecli_interactive_mode_removes_yolo_print() {
+        let backend = CliBackend::traecli();
+        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", true);
+
+        assert_eq!(cmd, "trae-cli");
+        // In interactive mode, --yolo and --print should be removed
+        assert!(
+            !args.contains(&"--yolo".to_string()),
+            "interactive mode should remove --yolo"
+        );
+        assert!(
+            !args.contains(&"--print".to_string()),
+            "interactive mode should remove --print"
+        );
+        assert!(stdin.is_none());
+    }
+
+    #[test]
+    fn test_traecli_env_vars_default_empty() {
+        assert!(CliBackend::traecli().env_vars.is_empty());
+        assert!(CliBackend::traecli_interactive().env_vars.is_empty());
     }
 }
