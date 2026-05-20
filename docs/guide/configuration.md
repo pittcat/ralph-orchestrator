@@ -209,6 +209,95 @@ Controls the orchestration loop behavior.
 | `prompt_file` | string | `"PROMPT.md"` | Default prompt file |
 | `execution_mode` | string | `"coordinator"` | Hat execution mode: `coordinator` or `isolated` |
 | `workflow_guards` | object | `null` | Ordered event chain enforcement (see below) |
+| `event_policy` | object | `null` | Typed event payload validation and lifecycle enforcement (see below) |
+
+### event_policy
+
+Event policy provides typed payload validation and lifecycle enforcement for events entering the event bus. It complements `workflow_guards` by checking *what* an event contains, not just *when* it arrives.
+
+**Use event policy when:**
+- Events must carry JSON payloads with specific required fields
+- Field values must be restricted to an allowed set (e.g. `status` must be `keep`, `discard`, or `blocked`)
+- Business events must not appear after a terminal topic like `LOOP_COMPLETE`
+- You want to observe policy violations before enforcing them
+
+**Configuration structure:**
+
+```yaml
+event_loop:
+  event_policy:
+    enabled: true
+    mode: observe              # observe | enforce
+    on_violation: warn         # warn | reject_with_resume | hold | block
+    schemas:
+      experiment.planned:
+        payload: json_object
+        required_fields:
+          - task_key
+        field_types:
+          task_key: string
+      experiment.evaluated:
+        payload: json_object
+        required_fields:
+          - task_key
+          - evaluation.decision
+        allowed_values:
+          evaluation.decision: [keep, discard, blocked]
+    terminal_topics:
+      - LOOP_COMPLETE
+    business_topics:
+      - experiment.planned
+      - experiment.ready
+      - experiment.measured
+      - experiment.scored
+      - experiment.evaluated
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | boolean | `false` | Whether event policy is active |
+| `mode` | string | `observe` | `observe` — log violations only; `enforce` — act on violations |
+| `on_violation` | string | `warn` | Action when `mode: enforce` and a violation is found |
+| `schemas` | map | `{}` | Per-topic schema definitions (see below) |
+| `terminal_topics` | list | `[]` | Topics that mark the end of a business session |
+| `business_topics` | list | `[]` | Topics that should not appear after a terminal topic |
+
+**Schema fields (`schemas.<topic>`):**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `payload` | string | `null` | Expected payload type: `json_object`, `string`, `number`, `bool`, `array` |
+| `required_fields` | list | `[]` | Dot-notation paths that must exist in a JSON object payload |
+| `allowed_values` | map | `{}` | Dot-notation path → list of allowed JSON values |
+
+**Violation actions (`on_violation`):**
+
+| Action | Behavior |
+|--------|----------|
+| `warn` | Log the violation; the event still enters the bus |
+| `reject_with_resume` | Drop the event and publish `task.resume` with the violation reason |
+| `hold` | Write a hold artifact and pause the loop (requires manual resume) |
+| `block` | Silently drop the event without recovery signaling |
+
+**Key behaviors:**
+
+- Event policy is **opt-in** and defaults to `enabled: false`. Existing configs without `event_policy` behave exactly as before.
+- `mode: observe` is the recommended starting point. It collects diagnostics without changing dispatch behavior.
+- `mode: enforce` activates `on_violation`. Violations are processed in order; only the first finding drives the action.
+- Schema validation runs only for topics declared in `schemas`. Unlisted topics are accepted without payload checks.
+- `terminal_topics` and `business_topics` together enforce **terminal monotonicity**: once a terminal topic is observed, any subsequent business topic produces a violation.
+- Policy validation happens **after** scope enforcement and **before** workflow guard validation and bus publication.
+- `required_fields` uses dot notation for nested paths: `evaluation.decision` matches `{"evaluation": {"decision": "keep"}}`.
+- `allowed_values` compares exact JSON values, including type. `"1"` and `1` are different values.
+
+**Comparison with other enforcement mechanisms:**
+
+| Mechanism | Purpose | Scope |
+|-----------|---------|-------|
+| `required_events` | Completion gate — has this topic appeared? | Global topic list |
+| `enforce_hat_scope` | Publisher gate — can this hat emit this topic? | Per-hat topic allowlist |
+| `workflow_guards` | Runtime order — can this topic appear now? | Per-chain ordered sequence |
+| `event_policy` | Payload & lifecycle — does this event satisfy schema and state rules? | Per-topic schema + global terminal/business rules |
 
 ### workflow_guards
 

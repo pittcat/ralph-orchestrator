@@ -11,6 +11,7 @@ pub use loop_state::{LoopState, WorkflowProgress};
 use crate::config::{HatBackend, HatExecutionMode, InjectMode, RalphConfig, ScratchpadConfig};
 use crate::event_parser::{EventParser, MutationEvidence, MutationStatus};
 use crate::event_reader::{EventReader, Event as JsonlEvent};
+use crate::event_policy::{PolicyDecision, PolicyRuntimeState, validate_event};
 use crate::hat_registry::HatRegistry;
 use crate::hatless_ralph::HatlessRalph;
 use crate::instructions::InstructionBuilder;
@@ -352,6 +353,88 @@ fn apply_workflow_guard_validation(
     }
 
     validated_events
+}
+
+/// Validates events against configured event policy.
+///
+/// Events that violate the policy are handled according to the configured
+/// `on_violation` action. In `observe` mode, violations are logged as diagnostics
+/// but events still pass through. In `enforce` mode, violations may reject or
+/// hold events.
+/// Result of event policy validation including events and hold status.
+#[derive(Debug)]
+struct PolicyValidationResult {
+    events: Vec<JsonlEvent>,
+    hold_triggered: bool,
+    hold_reason: Option<String>,
+}
+
+fn apply_event_policy_validation(
+    events: Vec<JsonlEvent>,
+    policy_config: &crate::config::EventPolicyConfig,
+    policy_state: &mut PolicyRuntimeState,
+    bus: &mut EventBus,
+) -> PolicyValidationResult {
+    let mut validated_events = Vec::with_capacity(events.len());
+    let mut hold_triggered = false;
+    let mut hold_reason = None;
+
+    for event in events {
+        let decision = validate_event(
+            &event.topic,
+            event.payload.as_deref(),
+            policy_config,
+            policy_state,
+        );
+
+        match decision {
+            PolicyDecision::Accept => {
+                validated_events.push(event);
+            }
+            PolicyDecision::Warn(findings) => {
+                // In observe mode: log diagnostics but still pass the event through
+                for finding in findings {
+                    let diagnostic = Event::new(
+                        "event.policy_warning",
+                        format!("Policy warning for '{}': {}", event.topic, finding.message),
+                    );
+                    bus.publish(diagnostic);
+                }
+                validated_events.push(event);
+            }
+            PolicyDecision::RejectWithResume(finding) => {
+                let recovery_payload = format!(
+                    "EVENT_POLICY_REJECTED: event '{}' violates policy.\n{}\n\n\
+                     Wait for the correct event schema before emitting this event. \
+                     The loop will continue to allow recovery.",
+                    event.topic, finding.message
+                );
+                let recovery_event = Event::new("task.resume", &recovery_payload);
+                bus.publish(recovery_event);
+                // Do NOT record the rejected event
+            }
+            PolicyDecision::Hold(finding) => {
+                hold_triggered = true;
+                hold_reason = Some(finding.message.clone());
+                let recovery_payload = format!(
+                    "EVENT_POLICY_HOLD: event '{}' violates policy.\n{}\n\n\
+                     Loop held due to policy violation. Use resume to continue.",
+                    event.topic, finding.message
+                );
+                let recovery_event = Event::new("task.resume", &recovery_payload);
+                bus.publish(recovery_event);
+            }
+            PolicyDecision::Block(_finding) => {
+                // Silently drop the event without publishing recovery or hold artifacts
+            }
+        }
+    }
+
+    PolicyValidationResult {
+        events: validated_events,
+        hold_triggered,
+        hold_reason,
+    }
 }
 
 impl EventLoop {
@@ -972,6 +1055,38 @@ impl EventLoop {
         let start_event = Event::new(topic, prompt_content);
         self.bus.publish(start_event);
         debug!(topic = topic, "Published {} event", topic);
+    }
+
+    /// Write a hold artifact when event policy triggers a hold.
+    fn write_hold_artifact(&self, reason: Option<&str>) -> std::io::Result<()> {
+        let workspace = self.loop_context.as_ref()
+            .map(|ctx| ctx.workspace().to_path_buf())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let ralph_dir = workspace.join(".ralph");
+        std::fs::create_dir_all(&ralph_dir)?;
+
+        let hold_path = ralph_dir.join("hold-state.json");
+        let hold_record = serde_json::json!({
+            "schema_version": 1,
+            "source": "event_policy",
+            "reason": reason.unwrap_or("Policy violation"),
+            "held_at": chrono::Utc::now().to_rfc3339(),
+        });
+        let bytes = serde_json::to_vec_pretty(&hold_record)?;
+
+        // Atomic write
+        let temp_path = ralph_dir.join(format!(".hold-state.tmp-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::write(&temp_path, &bytes)?;
+        std::fs::rename(&temp_path, &hold_path)?;
+
+        info!(path = ?hold_path, "Wrote hold-state artifact");
+        Ok(())
     }
 
     /// Gets the next hat to execute (if any have pending events).
@@ -2674,7 +2789,7 @@ impl EventLoop {
         }
 
         // --- Scope enforcement ---
-        let events = if self.config.event_loop.execution_mode == HatExecutionMode::Isolated
+        let mut events = if self.config.event_loop.execution_mode == HatExecutionMode::Isolated
             && let Some(ref isolated_hat) = self.state.current_isolated_hat
         {
             // Isolated mode: hard-enforce current hat scope + single business event boundary
@@ -2712,10 +2827,7 @@ impl EventLoop {
                     continue;
                 }
 
-                if !first_business_event_accepted {
-                    accepted.push(event);
-                    first_business_event_accepted = true;
-                } else {
+                if first_business_event_accepted {
                     warn!(
                         topic = %event.topic,
                         "Isolated mode: extra business event dropped — only one per turn"
@@ -2728,6 +2840,9 @@ impl EventLoop {
                         ),
                     );
                     self.bus.publish(diagnostic);
+                } else {
+                    accepted.push(event);
+                    first_business_event_accepted = true;
                 }
             }
             accepted
@@ -2767,6 +2882,29 @@ impl EventLoop {
         };
         // --- End scope enforcement ---
 
+        // --- Event policy validation: check typed payload schema ---
+        // Inserted after scope enforcement, before workflow guard validation
+        if let Some(ref policy_config) = self.config.event_loop.event_policy
+            && policy_config.enabled
+        {
+            let policy_state = self.state.policy_runtime_state.get_or_insert_with(PolicyRuntimeState::default);
+            let policy_result = apply_event_policy_validation(
+                events,
+                policy_config,
+                policy_state,
+                &mut self.bus,
+            );
+            events = policy_result.events;
+
+            // Write hold artifact if policy hold was triggered
+            if policy_result.hold_triggered
+                && let Err(e) = self.write_hold_artifact(policy_result.hold_reason.as_deref())
+            {
+                warn!(error = %e, "Failed to write hold artifact");
+            }
+        }
+        // --- End event policy validation ---
+
         // --- Workflow guard validation: reject out-of-order events ---
         // Inserted after scope enforcement, before state.record_event() + bus.publish()
         let workflow_guards = self.config.event_loop.workflow_guards.as_ref();
@@ -2782,6 +2920,19 @@ impl EventLoop {
             _ => events,
         };
         // --- End workflow guard validation ---
+
+        // Update policy runtime state for events that survived all validation layers
+        if let Some(ref policy_config) = self.config.event_loop.event_policy
+            && policy_config.enabled
+        {
+            let policy_state = self.state.policy_runtime_state.get_or_insert_with(PolicyRuntimeState::default);
+            for event in &events {
+                if policy_config.terminal_topics.contains(&event.topic) {
+                    policy_state.terminal_observed = true;
+                }
+                policy_state.observed_topics.insert(event.topic.clone());
+            }
+        }
 
         let mut has_orphans = false;
 
@@ -3334,6 +3485,45 @@ impl EventLoop {
                         .and_then(|hat_id| self.registry.get_config(hat_id))
                         .is_some_and(|hat_config| hat_config.concurrency > 1)
             });
+
+        // --- Event policy validation for wave events ---
+        // Wave dispatch events are partitioned before process_parse_result, so they
+        // must undergo policy validation here to avoid bypassing schema checks.
+        let wave_events = if let Some(ref policy_config) = self.config.event_loop.event_policy
+            && policy_config.enabled
+        {
+            let policy_state = self.state.policy_runtime_state.get_or_insert_with(PolicyRuntimeState::default);
+            let policy_result = apply_event_policy_validation(
+                wave_events,
+                policy_config,
+                policy_state,
+                &mut self.bus,
+            );
+
+            // Write hold artifact if policy hold was triggered
+            if policy_result.hold_triggered
+                && let Err(e) = self.write_hold_artifact(policy_result.hold_reason.as_deref())
+            {
+                warn!(error = %e, "Failed to write hold artifact");
+            }
+
+            policy_result.events
+        } else {
+            wave_events
+        };
+
+        // Update policy runtime state for wave events that passed validation
+        if let Some(ref policy_config) = self.config.event_loop.event_policy
+            && policy_config.enabled
+        {
+            let policy_state = self.state.policy_runtime_state.get_or_insert_with(PolicyRuntimeState::default);
+            for event in &wave_events {
+                if policy_config.terminal_topics.contains(&event.topic) {
+                    policy_state.terminal_observed = true;
+                }
+                policy_state.observed_topics.insert(event.topic.clone());
+            }
+        }
 
         if !wave_events.is_empty() {
             debug!(

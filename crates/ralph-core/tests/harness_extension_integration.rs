@@ -274,7 +274,7 @@ event_loop:
     let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
     config.core.workspace_root = temp_dir.path().to_path_buf();
 
-    let runner = ralph_core::PreflightRunner::default_checks(&config);
+    let runner = ralph_core::PreflightRunner::default_checks_with_config(&config);
     let report = runner.run_all(&config).await;
 
     let hook_result = report

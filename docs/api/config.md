@@ -73,6 +73,54 @@ fn main() {
 }
 ```
 
+## Event Policy in YAML
+
+Event policy configuration is nested under `event_loop.event_policy`.
+
+```yaml
+event_loop:
+  event_policy:
+    enabled: true
+    mode: observe
+    on_violation: warn
+    schemas:
+      experiment.planned:
+        payload: json_object
+        required_fields:
+          - task_key
+      experiment.evaluated:
+        payload: json_object
+        required_fields:
+          - task_key
+          - evaluation.decision
+        allowed_values:
+          evaluation.decision: [keep, discard, blocked]
+    terminal_topics:
+      - LOOP_COMPLETE
+    business_topics:
+      - experiment.planned
+      - experiment.evaluated
+```
+
+**Programmatic access:**
+
+```rust
+use ralph_core::{RalphConfig, EventPolicyMode, ViolationAction};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = RalphConfig::from_file("ralph.yml")?;
+    config.normalize();
+
+    if let Some(policy) = &config.event_loop.event_policy {
+        println!("Policy enabled: {}", policy.enabled);
+        println!("Mode: {:?}", policy.mode);
+        println!("Schemas defined: {}", policy.schemas.len());
+    }
+
+    Ok(())
+}
+```
+
 ## Hat Backends in YAML
 
 Backend selection is controlled via `HatBackend` inside `hats`.

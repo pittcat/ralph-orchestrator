@@ -38,7 +38,7 @@ pub async fn execute(
     let source_label = config_source_label(config_sources, hats_source);
     let config = load_config_for_preflight(config_sources, hats_source).await?;
 
-    let runner = PreflightRunner::default_checks(&config);
+    let runner = PreflightRunner::default_checks_with_config(&config);
     let requested = normalize_checks(&args.check);
     validate_checks(&runner, &requested)?;
 
@@ -577,7 +577,7 @@ mod tests {
     #[test]
     fn validate_checks_accepts_known() {
         let config = RalphConfig::default();
-        let runner = PreflightRunner::default_checks(&config);
+        let runner = PreflightRunner::default_checks_with_config(&config);
         let checks = vec!["config".to_string(), "backend".to_string()];
         assert!(validate_checks(&runner, &checks).is_ok());
     }
@@ -585,7 +585,7 @@ mod tests {
     #[test]
     fn validate_checks_rejects_unknown() {
         let config = RalphConfig::default();
-        let runner = PreflightRunner::default_checks(&config);
+        let runner = PreflightRunner::default_checks_with_config(&config);
         let checks = vec!["nope".to_string()];
         let err = validate_checks(&runner, &checks).unwrap_err();
         assert!(err.to_string().contains("Unknown check(s)"));

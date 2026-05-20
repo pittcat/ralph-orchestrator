@@ -376,6 +376,66 @@ fn test_ralph_emit_fallback_without_marker() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn test_ralph_emit_json_writes_object_payload() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let temp_path = temp_dir.path();
+
+    create_test_config(temp_path)?;
+
+    // Run ralph to create marker file
+    let _output = Command::new(ralph_bin())
+        .arg("run")
+        .arg("--config")
+        .arg(temp_path.join("ralph.yml"))
+        .current_dir(temp_path)
+        .output()?;
+
+    // Read the marker to find the events file path
+    let marker_content = fs::read_to_string(temp_path.join(".ralph/current-events"))?;
+    let events_path = marker_content.trim();
+
+    // Use ralph emit --json to write an event with object payload
+    let output = Command::new(ralph_bin())
+        .arg("emit")
+        .arg("test.topic")
+        .arg(r#"{"key":"value","num":42}"#)
+        .arg("--json")
+        .current_dir(temp_path)
+        .env_remove("RALPH_WORKSPACE_ROOT")
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "ralph emit --json should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify event was written with object payload (not string)
+    let events_file = temp_path.join(events_path);
+    let events_content = fs::read_to_string(&events_file)?;
+
+    assert!(
+        events_content.contains("\"topic\":\"test.topic\""),
+        "Events file should contain the emitted topic"
+    );
+    assert!(
+        events_content.contains("\"key\":\"value\""),
+        "Events file should contain object payload key"
+    );
+    assert!(
+        events_content.contains("\"num\":42"),
+        "Events file should contain object payload number"
+    );
+    // Ensure payload is NOT wrapped in a string
+    assert!(
+        !events_content.contains(r#""payload":"{"key":"value","num":42}""#),
+        "Payload should be an object, not a serialized string"
+    );
+
+    Ok(())
+}
+
 // =============================================================================
 // Continue Mode Tests
 // =============================================================================

@@ -291,6 +291,48 @@ With this in place, Ralph rejects out-of-order events before they reach the even
 - **Completion rejection** (`LOOP_COMPLETE`) is blocked if any started guarded instance has not reached its terminal phase
 - **`mode: strict`** rejects out-of-order events; **`mode: advisory`** records topics without rejecting
 
+### Event Policy
+
+Event policy validates event payloads and enforces lifecycle rules before events reach the bus. It is opt-in and complements workflow guards: guards check *when* a topic may appear; policy checks *what* the event contains and whether it violates terminal-state rules.
+
+**Use cases:**
+- Require JSON payloads with specific fields (e.g. `experiment.planned` must contain `task_key`)
+- Restrict field values to an allowed set (e.g. `evaluation.decision` must be `keep`, `discard`, or `blocked`)
+- Prevent business events after terminal topics like `LOOP_COMPLETE`
+
+**Configuration:**
+
+```yaml
+event_loop:
+  event_policy:
+    enabled: true
+    mode: observe              # observe | enforce
+    on_violation: warn         # warn | reject_with_resume | hold | block
+    schemas:
+      experiment.planned:
+        payload: json_object
+        required_fields:
+          - task_key
+      experiment.evaluated:
+        payload: json_object
+        required_fields:
+          - task_key
+          - evaluation.decision
+        allowed_values:
+          evaluation.decision: [keep, discard, blocked]
+    terminal_topics:
+      - LOOP_COMPLETE
+    business_topics:
+      - experiment.planned
+      - experiment.evaluated
+```
+
+**Modes:**
+- `observe` — violations are logged but events still pass through (recommended for initial rollout)
+- `enforce` — violations trigger `on_violation`
+
+See [Configuration](../guide/configuration.md#event_policy) for the complete reference.
+
 ### Guards vs. Other Mechanisms
 
 | Mechanism | What it checks |
@@ -298,8 +340,9 @@ With this in place, Ralph rejects out-of-order events before they reach the even
 | `required_events` | Global topic list — has this topic appeared at all? |
 | `enforce_hat_scope` | Per-hat publish permissions — can this hat emit this topic? |
 | `workflow_guards` | Topic sequence — can this topic appear now given what came before? |
+| `event_policy` | Payload shape, field values, and terminal-state lifecycle |
 
-Guards complement the others: `required_events` gates completion, `enforce_hat_scope` gates publication rights, and `workflow_guards` gates runtime ordering.
+Guards and policy complement the others: `required_events` gates completion, `enforce_hat_scope` gates publication rights, `workflow_guards` gates runtime ordering, and `event_policy` gates payload validity and lifecycle correctness.
 
 ## Viewing Events
 

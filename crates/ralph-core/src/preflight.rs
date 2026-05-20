@@ -102,7 +102,25 @@ pub struct PreflightRunner {
 }
 
 impl PreflightRunner {
-    pub fn default_checks(config: &RalphConfig) -> Self {
+    /// Backwards-compatible parameterless constructor.
+    /// Does NOT include preflight extension hooks or event-filter checks.
+    pub fn default_checks() -> Self {
+        Self {
+            checks: vec![
+                Box::new(ConfigValidCheck),
+                Box::new(HooksValidationCheck),
+                Box::new(BackendAvailableCheck),
+                Box::new(TelegramTokenCheck),
+                Box::new(GitCleanCheck),
+                Box::new(PathsExistCheck),
+                Box::new(ToolsInPathCheck::default()),
+                Box::new(SpecCompletenessCheck),
+            ],
+        }
+    }
+
+    /// Config-aware constructor that includes preflight extension hooks and event-filter checks.
+    pub fn default_checks_with_config(config: &RalphConfig) -> Self {
         let mut checks: Vec<Box<dyn PreflightCheck>> = Vec::new();
 
         if let Some(extensions) = config.core.preflight_extensions.as_ref()
@@ -1303,7 +1321,7 @@ mod tests {
     #[test]
     fn default_checks_include_hooks_check_name() {
         let config = RalphConfig::default();
-        let runner = PreflightRunner::default_checks(&config);
+        let runner = PreflightRunner::default_checks_with_config(&config);
         let check_names = runner.check_names();
 
         assert!(check_names.contains(&"hooks"));
@@ -1386,7 +1404,7 @@ mod tests {
             vec![hook_spec("broken-hook", &["./scripts/hooks/missing.sh"])],
         );
 
-        let runner = PreflightRunner::default_checks(&config);
+        let runner = PreflightRunner::default_checks_with_config(&config);
         let report = runner.run_selected(&config, &["config".to_string()]).await;
 
         assert!(report.passed);
@@ -1943,7 +1961,7 @@ status: draft
     async fn event_filter_check_passes_when_no_filters() {
         let config = RalphConfig::default();
 
-        let runner = PreflightRunner::default_checks(&config);
+        let runner = PreflightRunner::default_checks_with_config(&config);
         let report = runner.run_all(&config).await;
 
         let result = report
@@ -1984,7 +2002,7 @@ status: draft
             },
         );
 
-        let runner = PreflightRunner::default_checks(&config);
+        let runner = PreflightRunner::default_checks_with_config(&config);
         let report = runner.run_all(&config).await;
 
         let result = report
@@ -2028,7 +2046,7 @@ status: draft
             },
         );
 
-        let runner = PreflightRunner::default_checks(&config);
+        let runner = PreflightRunner::default_checks_with_config(&config);
         let report = runner.run_all(&config).await;
 
         let result = report
@@ -2057,7 +2075,7 @@ status: draft
             }],
         });
 
-        let runner = PreflightRunner::default_checks(&config);
+        let runner = PreflightRunner::default_checks_with_config(&config);
         let names = runner.check_names();
 
         assert!(!names.contains(&"should-not-run"));
@@ -2079,7 +2097,7 @@ status: draft
             }],
         });
 
-        let runner = PreflightRunner::default_checks(&config);
+        let runner = PreflightRunner::default_checks_with_config(&config);
         let report = runner.run_all(&config).await;
 
         let hook_result = report
@@ -2105,7 +2123,7 @@ status: draft
             }],
         });
 
-        let runner = PreflightRunner::default_checks(&config);
+        let runner = PreflightRunner::default_checks_with_config(&config);
         let report = runner.run_all(&config).await;
 
         let hook_result = report
@@ -2132,7 +2150,7 @@ status: draft
             }],
         });
 
-        let runner = PreflightRunner::default_checks(&config);
+        let runner = PreflightRunner::default_checks_with_config(&config);
         let report = runner.run_all(&config).await;
 
         let hook_result = report
@@ -2159,7 +2177,7 @@ status: draft
             }],
         });
 
-        let runner = PreflightRunner::default_checks(&config);
+        let runner = PreflightRunner::default_checks_with_config(&config);
         let report = runner.run_all(&config).await;
 
         let hook_result = report
@@ -2189,7 +2207,7 @@ status: draft
             }],
         });
 
-        let runner = PreflightRunner::default_checks(&config);
+        let runner = PreflightRunner::default_checks_with_config(&config);
         let report = runner.run_all(&config).await;
 
         let hook_result = report
@@ -2215,7 +2233,7 @@ status: draft
             }],
         });
 
-        let runner = PreflightRunner::default_checks(&config);
+        let runner = PreflightRunner::default_checks_with_config(&config);
         let report = runner.run_all(&config).await;
 
         let hook_result = report

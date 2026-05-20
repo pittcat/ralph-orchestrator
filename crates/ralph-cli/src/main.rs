@@ -516,6 +516,15 @@ pub(crate) fn load_config_with_overrides(
     config.core.workspace_root =
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
+    // Record the primary config file path for template substitution in hooks.
+    config.config_path = primary_sources
+        .iter()
+        .find(|s| matches!(s, ConfigSource::File(_)))
+        .and_then(|s| match s {
+            ConfigSource::File(path) => Some(path.clone()),
+            _ => None,
+        });
+
     // Apply CLI config overrides
     apply_config_overrides(&mut config, &overrides)?;
 
@@ -859,6 +868,10 @@ struct EmitArgs {
     /// Path to events file (defaults to .ralph/events.jsonl)
     #[arg(long, default_value = ".ralph/events.jsonl")]
     pub file: PathBuf,
+
+    /// Validate event against current event policy before emitting
+    #[arg(long)]
+    pub policy_check: bool,
 }
 
 /// Arguments for the tutorial subcommand.
@@ -1300,7 +1313,7 @@ async fn run_auto_preflight(
         return Ok(None);
     }
 
-    let runner = PreflightRunner::default_checks(config);
+    let runner = PreflightRunner::default_checks_with_config(config);
     let mut report = if config.features.preflight.skip.is_empty() {
         runner.run_all(config).await
     } else {
@@ -2451,6 +2464,68 @@ fn emit_command_with_root(
         }
     }
 
+    // Policy-aware emit: validate against event policy if --policy-check is set
+    if args.policy_check {
+        let config_path = config_resolution::find_workspace_config_path(&workspace_root)
+            .unwrap_or_else(|| workspace_root.join("ralph.yml"));
+        let config_sources = vec![ConfigSource::File(config_path)];
+        let config = match load_config_with_overrides(&config_sources) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                anyhow::bail!(
+                    "Policy check requested but config could not be loaded: {}. \
+                     Fix the config or omit --policy-check.",
+                    e
+                );
+            }
+        };
+        let policy = match config.event_loop.event_policy.as_ref() {
+            Some(p) if p.enabled => Some(p),
+            _ => {
+                eprintln!(
+                    "Warning: --policy-check was requested but no event policy is configured or enabled."
+                );
+                None
+            }
+        };
+        if let Some(policy) = policy {
+            use ralph_core::{PolicyRuntimeState, validate_event};
+            let mut state = PolicyRuntimeState::default();
+            let decision = validate_event(
+                &args.topic,
+                Some(&args.payload),
+                policy,
+                &mut state,
+            );
+            match decision {
+                ralph_core::PolicyDecision::Accept => {}
+                ralph_core::PolicyDecision::Warn(findings) => {
+                    for finding in findings {
+                        eprintln!("Policy warning: {}", finding.message);
+                    }
+                }
+                ralph_core::PolicyDecision::RejectWithResume(finding) => {
+                    anyhow::bail!(
+                        "Event rejected by policy: {}. Fix the issue before emitting.",
+                        finding.message
+                    );
+                }
+                ralph_core::PolicyDecision::Hold(finding) => {
+                    anyhow::bail!(
+                        "Event held by policy: {}. Fix the issue before emitting.",
+                        finding.message
+                    );
+                }
+                ralph_core::PolicyDecision::Block(finding) => {
+                    anyhow::bail!(
+                        "Event blocked by policy: {}. Fix the issue before emitting.",
+                        finding.message
+                    );
+                }
+            }
+        }
+    }
+
     // Generate timestamp if not provided
     let ts = args.ts.unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
 
@@ -3083,6 +3158,7 @@ mod tests {
                 json: false,
                 ts: Some("2026-03-09T00:00:00Z".to_string()),
                 file: PathBuf::from(".ralph/events.jsonl"),
+                policy_check: false,
             },
             Some(&workspace),
         )
@@ -3111,6 +3187,7 @@ mod tests {
                 json: false,
                 ts: Some("2026-03-09T00:00:00Z".to_string()),
                 file: PathBuf::from(".ralph/events.jsonl"),
+                policy_check: false,
             },
             Some(&workspace),
         )
@@ -3798,6 +3875,7 @@ hats:
             json: false,
             ts: None,
             file: PathBuf::from(".ralph/events.jsonl"),
+            policy_check: false,
         }));
         assert!(!is_diagnostics_eligible_command(command.as_ref()));
     }

@@ -77,6 +77,9 @@ pub struct LoopState {
 
     /// Workflow progress tracking for guarded chains (chain name -> instance key -> phase).
     pub workflow_progress: WorkflowProgress,
+
+    /// Event policy runtime state (opt-in, None when policy is disabled).
+    pub policy_runtime_state: Option<crate::event_policy::PolicyRuntimeState>,
 }
 
 impl Default for LoopState {
@@ -104,6 +107,7 @@ impl Default for LoopState {
             cancellation_requested: false,
             current_isolated_hat: None,
             workflow_progress: WorkflowProgress::new(),
+            policy_runtime_state: None,
         }
     }
 }

@@ -675,6 +675,46 @@ impl RalphConfig {
             }
         }
 
+        // Validate event policy config
+        if let Some(event_policy) = &self.event_loop.event_policy
+            && event_policy.enabled
+        {
+            for (topic, schema) in &event_policy.schemas {
+                if topic.trim().is_empty() {
+                    return Err(ConfigError::EventPolicyValidation {
+                        field: "event_loop.event_policy.schemas".to_string(),
+                        message: "Schema topic cannot be empty".to_string(),
+                    });
+                }
+                for path in schema.allowed_values.keys() {
+                    if path.trim().is_empty() {
+                        return Err(ConfigError::EventPolicyValidation {
+                            field: format!("event_loop.event_policy.schemas.{}.allowed_values", topic),
+                            message: "Field path cannot be empty".to_string(),
+                        });
+                    }
+                    if path.contains("..") {
+                        return Err(ConfigError::EventPolicyValidation {
+                            field: format!("event_loop.event_policy.schemas.{}.allowed_values", topic),
+                            message: format!("Field path '{}' contains consecutive dots", path),
+                        });
+                    }
+                    if path.starts_with('.') || path.ends_with('.') {
+                        return Err(ConfigError::EventPolicyValidation {
+                            field: format!("event_loop.event_policy.schemas.{}.allowed_values", topic),
+                            message: format!("Field path '{}' starts or ends with a dot", path),
+                        });
+                    }
+                    if path.split('.').any(|s| s.is_empty()) {
+                        return Err(ConfigError::EventPolicyValidation {
+                            field: format!("event_loop.event_policy.schemas.{}.allowed_values", topic),
+                            message: format!("Field path '{}' contains empty segment", path),
+                        });
+                    }
+                }
+            }
+        }
+
         // Check for ambiguous routing: each trigger topic must map to exactly one hat
         // Per spec: "Every trigger maps to exactly one hat | No ambiguous routing"
         if !self.hats.is_empty() {
@@ -998,6 +1038,10 @@ pub struct EventLoopConfig {
     /// dispatches each hat in an isolated backend process.
     #[serde(default)]
     pub execution_mode: HatExecutionMode,
+
+    /// Opt-in event policy for typed payload validation.
+    #[serde(default)]
+    pub event_policy: Option<EventPolicyConfig>,
 }
 
 /// Opt-in workflow state guards for enforcing ordered event chains.
@@ -1077,6 +1121,71 @@ pub struct CorrelationConfig {
     pub from_topic: Option<String>,
 }
 
+/// Opt-in event policy for typed payload validation and lifecycle enforcement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventPolicyConfig {
+    pub enabled: bool,
+    pub mode: EventPolicyMode,
+    #[serde(default)]
+    pub on_violation: ViolationAction,
+    #[serde(default)]
+    pub schemas: HashMap<String, EventSchema>,
+    #[serde(default)]
+    pub terminal_topics: Vec<String>,
+    #[serde(default)]
+    pub business_topics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum EventPolicyMode {
+    /// Observe mode: violations are logged but events still pass through.
+    #[default]
+    Observe,
+    /// Enforce mode: violations may reject or hold events based on on_violation.
+    Enforce,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ViolationAction {
+    /// Log warning only.
+    #[default]
+    Warn,
+    /// Reject event and publish task.resume with reason.
+    RejectWithResume,
+    /// Hold the loop (write hold artifact).
+    Hold,
+    /// Block the event silently (drop it).
+    Block,
+}
+
+/// Schema for validating events of a specific topic.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventSchema {
+    /// Expected payload type.
+    #[serde(default)]
+    pub payload: Option<PayloadType>,
+    /// Required fields in the JSON object payload.
+    #[serde(default)]
+    pub required_fields: Vec<String>,
+    /// Allowed values for specific fields (dot-notation path -> allowed values).
+    #[serde(default)]
+    pub allowed_values: HashMap<String, Vec<serde_json::Value>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PayloadType {
+    JsonObject,
+    String,
+    Number,
+    Bool,
+    Array,
+}
+
+
+
 fn default_prompt_file() -> String {
     "PROMPT.md".to_string()
 }
@@ -1117,6 +1226,7 @@ impl Default for EventLoopConfig {
             enforce_hat_scope: false,
             workflow_guards: None,
             execution_mode: HatExecutionMode::default(),
+            event_policy: None,
         }
     }
 }
@@ -2483,6 +2593,11 @@ pub enum ConfigError {
         "Workflow guard validation error at '{field}': {message}\nFix: check your event_loop.workflow_guards configuration."
     )]
     WorkflowGuardValidation { field: String, message: String },
+
+    #[error(
+        "Event policy validation error at '{field}': {message}\nFix: check your event_loop.event_policy configuration."
+    )]
+    EventPolicyValidation { field: String, message: String },
 }
 
 #[cfg(test)]
@@ -4586,6 +4701,130 @@ event_loop:
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("Duplicate workflow chain name"), "Expected duplicate chain name error, got: {}", err);
+    }
+
+    // ── EventPolicyConfig tests ──
+
+    #[test]
+    fn test_event_policy_absent_parses_as_none() {
+        let yaml = r"
+event_loop:
+  max_iterations: 50
+cli:
+  backend: claude
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            config.event_loop.event_policy.is_none(),
+            "event_policy should be None when absent"
+        );
+        assert_eq!(config.event_loop.max_iterations, 50);
+    }
+
+    #[test]
+    fn test_event_policy_observe_mode_parses() {
+        let yaml = r"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: observe
+    on_violation: warn
+    schemas:
+      experiment.planned:
+        payload: json_object
+        required_fields:
+          - task_key
+    terminal_topics:
+      - LOOP_COMPLETE
+    business_topics:
+      - experiment.planned
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let policy = config.event_loop.event_policy.as_ref().unwrap();
+        assert!(policy.enabled);
+        assert!(matches!(policy.mode, EventPolicyMode::Observe));
+        assert!(matches!(policy.on_violation, ViolationAction::Warn));
+        assert_eq!(policy.schemas.len(), 1);
+        assert_eq!(policy.terminal_topics, vec!["LOOP_COMPLETE"]);
+        assert_eq!(policy.business_topics, vec!["experiment.planned"]);
+
+        let schema = policy.schemas.get("experiment.planned").unwrap();
+        assert!(matches!(schema.payload, Some(PayloadType::JsonObject)));
+        assert_eq!(schema.required_fields, vec!["task_key"]);
+    }
+
+    #[test]
+    fn test_event_policy_enforce_mode_parses() {
+        let yaml = r"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let policy = config.event_loop.event_policy.as_ref().unwrap();
+        assert!(policy.enabled);
+        assert!(matches!(policy.mode, EventPolicyMode::Enforce));
+        assert!(matches!(policy.on_violation, ViolationAction::RejectWithResume));
+    }
+
+    #[test]
+    fn test_event_policy_invalid_mode_fails_parsing() {
+        let yaml = r"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: invalid_mode
+";
+        let result: Result<RalphConfig, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err(), "Invalid event_policy mode must fail parsing");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unknown variant `invalid_mode`"),
+            "Error should mention unknown variant, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_event_policy_empty_schema_topic_rejected() {
+        let yaml = r"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+    schemas:
+      '':
+        payload: json_object
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Schema topic cannot be empty"), "Expected empty schema topic error, got: {}", err);
+    }
+
+    #[test]
+    fn test_event_policy_invalid_field_path_rejected() {
+        let yaml = r"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+    schemas:
+      experiment.planned:
+        payload: json_object
+        allowed_values:
+          data..field:
+            - keep
+            - discard
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("consecutive dots"), "Expected consecutive dots error, got: {}", err);
     }
 
     // ── HatExecutionMode config tests ──

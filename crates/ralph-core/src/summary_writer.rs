@@ -329,6 +329,7 @@ mod tests {
             cancellation_requested: false,
             current_isolated_hat: None,
             workflow_progress: crate::event_loop::WorkflowProgress::new(),
+            policy_runtime_state: None,
         }
     }
 
