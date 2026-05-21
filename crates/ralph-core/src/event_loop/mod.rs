@@ -10,8 +10,8 @@ pub use loop_state::{LoopState, WorkflowProgress};
 
 use crate::config::{HatBackend, HatExecutionMode, InjectMode, RalphConfig, ScratchpadConfig};
 use crate::event_parser::{EventParser, MutationEvidence, MutationStatus};
-use crate::event_reader::{EventReader, Event as JsonlEvent};
 use crate::event_policy::{PolicyDecision, PolicyRuntimeState, validate_event};
+use crate::event_reader::{Event as JsonlEvent, EventReader};
 use crate::hat_registry::HatRegistry;
 use crate::hatless_ralph::HatlessRalph;
 use crate::instructions::InstructionBuilder;
@@ -245,8 +245,10 @@ fn apply_workflow_guard_validation(
         }
 
         // Extract instance keys and phases once per chain, then validate and advance
-        let mut rejections: Vec<(String, Option<String>, Option<usize>, String, String)> = Vec::new();
-        let mut chain_extractions: Vec<(&crate::config::WorkflowChain, Option<String>, usize)> = Vec::new();
+        let mut rejections: Vec<(String, Option<String>, Option<usize>, String, String)> =
+            Vec::new();
+        let mut chain_extractions: Vec<(&crate::config::WorkflowChain, Option<String>, usize)> =
+            Vec::new();
 
         for chain in &matching_chains {
             let instance_key = match extract_correlation_key(&event, chain) {
@@ -265,22 +267,16 @@ fn apply_workflow_guard_validation(
             };
 
             // Find the phase index of this topic in the chain
-            let phase = chain
-                .topics
-                .iter()
-                .position(|t| *t == event.topic)
-                .unwrap();
+            let phase = chain.topics.iter().position(|t| *t == event.topic).unwrap();
 
             // Strict mode rejects out-of-order events; Advisory mode accepts all
             if matches!(chain.mode, crate::config::WorkflowChainMode::Strict) {
-                let is_valid = workflow_progress.is_phase_valid(
-                    &chain.name,
-                    instance_key.as_deref(),
-                    phase,
-                );
+                let is_valid =
+                    workflow_progress.is_phase_valid(&chain.name, instance_key.as_deref(), phase);
 
                 if !is_valid {
-                    let current_phase = workflow_progress.get_phase(&chain.name, instance_key.as_deref());
+                    let current_phase =
+                        workflow_progress.get_phase(&chain.name, instance_key.as_deref());
                     let current_topic = current_phase
                         .and_then(|p| chain.topics.get(p).cloned())
                         .unwrap_or_else(|| "none".to_string());
@@ -906,6 +902,10 @@ impl EventLoop {
     /// `check_completion_event()` can apply all safety checks (persistent mode,
     /// required events, runtime tasks) before terminating.
     pub fn request_completion_from_text_fallback(&mut self) {
+        if self.state.completion_handled {
+            debug!("Completion already handled, ignoring text fallback request");
+            return;
+        }
         self.state.completion_requested = true;
         info!("Completion requested via text fallback (output contained completion promise)");
     }
@@ -915,6 +915,11 @@ impl EventLoop {
     /// Completion is accepted via JSONL events (e.g., `ralph emit`) or via
     /// [`request_completion_from_text_fallback`].
     pub fn check_completion_event(&mut self) -> Option<TerminationReason> {
+        // Idempotency: if we already handled completion, return the same conclusion
+        if self.state.completion_handled {
+            return Some(TerminationReason::CompletionPromise);
+        }
+
         if !self.state.completion_requested {
             return None;
         }
@@ -1021,6 +1026,7 @@ impl EventLoop {
             },
         );
 
+        self.state.completion_handled = true;
         Some(TerminationReason::CompletionPromise)
     }
 
@@ -1059,7 +1065,9 @@ impl EventLoop {
 
     /// Write a hold artifact when event policy triggers a hold.
     fn write_hold_artifact(&self, reason: Option<&str>) -> std::io::Result<()> {
-        let workspace = self.loop_context.as_ref()
+        let workspace = self
+            .loop_context
+            .as_ref()
             .map(|ctx| ctx.workspace().to_path_buf())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         let ralph_dir = workspace.join(".ralph");
@@ -1075,7 +1083,8 @@ impl EventLoop {
         let bytes = serde_json::to_vec_pretty(&hold_record)?;
 
         // Atomic write
-        let temp_path = ralph_dir.join(format!(".hold-state.tmp-{}-{}",
+        let temp_path = ralph_dir.join(format!(
+            ".hold-state.tmp-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1514,7 +1523,9 @@ impl EventLoop {
                 hat_id.as_str()
             );
 
-            let base_prompt = self.instruction_builder.build_custom_hat(hat, &events_context);
+            let base_prompt = self
+                .instruction_builder
+                .build_custom_hat(hat, &events_context);
 
             // Apply prepend pipeline (SAME order as coordinator path)
             self.ralph.clear_robot_guidance();
@@ -2245,7 +2256,9 @@ impl EventLoop {
             // If the default topic is the completion promise, set the flag directly.
             // The normal path (process_events_from_jsonl) sets this when reading from
             // JSONL, but default_publishes bypasses JSONL entirely.
-            if default_topic.as_str() == self.config.event_loop.completion_promise {
+            if default_topic.as_str() == self.config.event_loop.completion_promise
+                && !self.state.completion_handled
+            {
                 info!(
                     hat = %hat_id.as_str(),
                     topic = %default_topic,
@@ -2798,10 +2811,18 @@ impl EventLoop {
 
             for event in result.events {
                 // System/diagnostic events always pass through
-                let is_system_event = matches!(event.topic.as_str(),
-                    "event.malformed" | "event.scope_violation" | "event.workflow_guard_rejected"
-                    | "human.interact" | "human.response" | "human.guidance" | "human.timeout"
-                    | "loop.cancel" | "task.resume" | "build.task.abandoned"
+                let is_system_event = matches!(
+                    event.topic.as_str(),
+                    "event.malformed"
+                        | "event.scope_violation"
+                        | "event.workflow_guard_rejected"
+                        | "human.interact"
+                        | "human.response"
+                        | "human.guidance"
+                        | "human.timeout"
+                        | "loop.cancel"
+                        | "task.resume"
+                        | "build.task.abandoned"
                 );
 
                 if is_system_event {
@@ -2810,7 +2831,10 @@ impl EventLoop {
                 }
 
                 // Enforce hat scope: topic must be in isolated_hat's publishes
-                if !self.registry.can_publish(isolated_hat, event.topic.as_str()) {
+                if !self
+                    .registry
+                    .can_publish(isolated_hat, event.topic.as_str())
+                {
                     warn!(
                         hat = %isolated_hat.as_str(),
                         topic = %event.topic,
@@ -2887,13 +2911,12 @@ impl EventLoop {
         if let Some(ref policy_config) = self.config.event_loop.event_policy
             && policy_config.enabled
         {
-            let policy_state = self.state.policy_runtime_state.get_or_insert_with(PolicyRuntimeState::default);
-            let policy_result = apply_event_policy_validation(
-                events,
-                policy_config,
-                policy_state,
-                &mut self.bus,
-            );
+            let policy_state = self
+                .state
+                .policy_runtime_state
+                .get_or_insert_with(PolicyRuntimeState::default);
+            let policy_result =
+                apply_event_policy_validation(events, policy_config, policy_state, &mut self.bus);
             events = policy_result.events;
 
             // Write hold artifact if policy hold was triggered
@@ -2909,14 +2932,12 @@ impl EventLoop {
         // Inserted after scope enforcement, before state.record_event() + bus.publish()
         let workflow_guards = self.config.event_loop.workflow_guards.as_ref();
         let events: Vec<JsonlEvent> = match workflow_guards {
-            Some(guards) if !guards.chains.is_empty() => {
-                apply_workflow_guard_validation(
-                    events,
-                    guards,
-                    &mut self.state.workflow_progress,
-                    &mut self.bus,
-                )
-            }
+            Some(guards) if !guards.chains.is_empty() => apply_workflow_guard_validation(
+                events,
+                guards,
+                &mut self.state.workflow_progress,
+                &mut self.bus,
+            ),
             _ => events,
         };
         // --- End workflow guard validation ---
@@ -2925,12 +2946,14 @@ impl EventLoop {
         if let Some(ref policy_config) = self.config.event_loop.event_policy
             && policy_config.enabled
         {
-            let policy_state = self.state.policy_runtime_state.get_or_insert_with(PolicyRuntimeState::default);
+            let policy_state = self
+                .state
+                .policy_runtime_state
+                .get_or_insert_with(PolicyRuntimeState::default);
             for event in &events {
                 if policy_config.terminal_topics.contains(&event.topic) {
                     policy_state.terminal_observed = true;
                 }
-                policy_state.observed_topics.insert(event.topic.clone());
             }
         }
 
@@ -2956,6 +2979,10 @@ impl EventLoop {
             }
 
             if event.topic == completion_topic {
+                if self.state.completion_handled {
+                    debug!("Completion event already handled, ignoring duplicate");
+                    continue;
+                }
                 if index + 1 == total_events {
                     self.state.completion_requested = true;
                     self.diagnostics.log_orchestration(
@@ -3492,7 +3519,10 @@ impl EventLoop {
         let wave_events = if let Some(ref policy_config) = self.config.event_loop.event_policy
             && policy_config.enabled
         {
-            let policy_state = self.state.policy_runtime_state.get_or_insert_with(PolicyRuntimeState::default);
+            let policy_state = self
+                .state
+                .policy_runtime_state
+                .get_or_insert_with(PolicyRuntimeState::default);
             let policy_result = apply_event_policy_validation(
                 wave_events,
                 policy_config,
@@ -3516,12 +3546,14 @@ impl EventLoop {
         if let Some(ref policy_config) = self.config.event_loop.event_policy
             && policy_config.enabled
         {
-            let policy_state = self.state.policy_runtime_state.get_or_insert_with(PolicyRuntimeState::default);
+            let policy_state = self
+                .state
+                .policy_runtime_state
+                .get_or_insert_with(PolicyRuntimeState::default);
             for event in &wave_events {
                 if policy_config.terminal_topics.contains(&event.topic) {
                     policy_state.terminal_observed = true;
                 }
-                policy_state.observed_topics.insert(event.topic.clone());
             }
         }
 

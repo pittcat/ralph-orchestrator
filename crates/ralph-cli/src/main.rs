@@ -42,9 +42,9 @@ use anyhow::{Context, Result};
 use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 use ralph_adapters::detect_backend;
 use ralph_core::{
-    CheckStatus, EventHistory, LockError, LoopContext, LoopEntry, LoopLock, LoopRegistry,
-    PreflightReport, PreflightRunner, RalphConfig, TerminationReason, UrgentSteerStore,
-    truncate_with_ellipsis,
+    CheckStatus, EventHistory, LockError, LockGuard, LockMetadata, LockStatus, LoopContext,
+    LoopEntry, LoopLock, LoopRegistry, PreflightReport, PreflightRunner, RalphConfig,
+    TerminationReason, UrgentSteerStore, truncate_with_ellipsis,
     worktree::{WorktreeConfig, create_worktree, ensure_gitignore, remove_worktree},
 };
 use std::fs;
@@ -1396,6 +1396,100 @@ fn print_preflight_summary(
     }
 }
 
+/// Handle the case where another process holds the active loop lock.
+///
+/// Implements the existing behavior for active locks: --exclusive waits,
+/// parallel disabled errors out, otherwise spawn into a worktree.
+fn handle_active_lock(
+    existing: LockMetadata,
+    workspace_root: &Path,
+    prompt_summary: &str,
+    exclusive: bool,
+    parallel: bool,
+    loop_naming: &ralph_core::LoopNamingConfig,
+    pending_worktree_registration: &mut Option<LoopEntry>,
+) -> Result<(LoopContext, Option<LockGuard>), anyhow::Error> {
+    if exclusive {
+        // --exclusive: wait for the lock instead of spawning worktree
+        info!(
+            "Loop lock held by PID {} (started {}), waiting for lock (--exclusive mode)...",
+            existing.pid, existing.started
+        );
+        let guard = LoopLock::acquire_blocking(workspace_root, prompt_summary)
+            .context("Failed to acquire loop lock in exclusive mode")?;
+        debug!("Acquired loop lock after waiting");
+        let context = LoopContext::primary(workspace_root.to_path_buf());
+        Ok((context, Some(guard)))
+    } else if !parallel {
+        // Parallel loops disabled via config - error out
+        anyhow::bail!(
+            "Another loop is already running (PID {}, prompt: \"{}\"). \
+            Parallel loops are disabled in config (features.parallel: false). \
+            Use --exclusive to wait for the lock, or enable parallel loops.",
+            existing.pid,
+            existing.prompt.chars().take(50).collect::<String>()
+        )
+    } else {
+        // Auto-spawn into worktree
+        info!(
+            "Loop lock held by PID {} ({}), spawning parallel loop in worktree",
+            existing.pid,
+            existing.prompt.chars().take(50).collect::<String>()
+        );
+
+        let worktree_config = WorktreeConfig::default();
+
+        // Generate memorable loop ID (adjective-noun only, no prompt keywords)
+        let name_generator = ralph_core::LoopNameGenerator::from_config(loop_naming);
+        let loop_id = name_generator.generate_memorable_unique(|name| {
+            ralph_core::worktree_exists(workspace_root, name, &worktree_config)
+        });
+
+        // Ensure worktree directory is in .gitignore
+        ensure_gitignore(workspace_root, ".worktrees")
+            .context("Failed to update .gitignore for worktrees")?;
+
+        // Create the worktree
+        let worktree = create_worktree(workspace_root, &loop_id, &worktree_config)
+            .context("Failed to create worktree for parallel loop")?;
+
+        info!(
+            "Created worktree at {} on branch {}",
+            worktree.path.display(),
+            worktree.branch
+        );
+
+        // Create loop context for the worktree
+        let context = LoopContext::worktree(
+            loop_id.clone(),
+            worktree.path.clone(),
+            workspace_root.to_path_buf(),
+        );
+
+        // Set up all worktree symlinks (memories, specs, code tasks)
+        context
+            .setup_worktree_symlinks()
+            .context("Failed to create symlinks in worktree")?;
+
+        // Generate context file with worktree metadata
+        context
+            .generate_context_file(&worktree.branch, prompt_summary)
+            .context("Failed to generate context file in worktree")?;
+
+        // Register this loop after preflight succeeds so failed runs
+        // don't leave stale registry entries behind.
+        let entry = LoopEntry::with_id(
+            &loop_id,
+            prompt_summary,
+            Some(worktree.path.to_string_lossy().to_string()),
+            worktree.path.to_string_lossy().to_string(),
+        );
+        *pending_worktree_registration = Some(entry);
+
+        Ok((context, None))
+    }
+}
+
 async fn run_command(
     config_sources: &[ConfigSource],
     hats_source: Option<&HatsSource>,
@@ -1590,109 +1684,115 @@ async fn run_command(
         let context = LoopContext::primary(workspace_root.clone());
         (context, None)
     } else {
-        match LoopLock::try_acquire(workspace_root, &prompt_summary) {
-            Ok(guard) => {
-                // We're the primary loop - run in place
-                debug!("Acquired loop lock, running as primary loop");
-                let context = LoopContext::primary(workspace_root.clone());
-                (context, Some(guard))
-            }
-            Err(LockError::AlreadyLocked(existing)) => {
-                // Another loop is running
-                if args.exclusive {
-                    // --exclusive: wait for the lock instead of spawning worktree
-                    info!(
-                        "Loop lock held by PID {} (started {}), waiting for lock (--exclusive mode)...",
-                        existing.pid, existing.started
-                    );
-                    let guard = LoopLock::acquire_blocking(workspace_root, &prompt_summary)
-                        .context("Failed to acquire loop lock in exclusive mode")?;
-                    debug!("Acquired loop lock after waiting");
-                    let context = LoopContext::primary(workspace_root.clone());
-                    (context, Some(guard))
-                } else if !config.features.parallel {
-                    // Parallel loops disabled via config - error out
-                    anyhow::bail!(
-                        "Another loop is already running (PID {}, prompt: \"{}\"). \
-                    Parallel loops are disabled in config (features.parallel: false). \
-                    Use --exclusive to wait for the lock, or enable parallel loops.",
-                        existing.pid,
-                        existing.prompt.chars().take(50).collect::<String>()
-                    );
-                } else {
-                    // Auto-spawn into worktree
-                    info!(
-                        "Loop lock held by PID {} ({}), spawning parallel loop in worktree",
-                        existing.pid,
-                        existing.prompt.chars().take(50).collect::<String>()
-                    );
-
-                    let worktree_config = WorktreeConfig::default();
-
-                    // Generate memorable loop ID (adjective-noun only, no prompt keywords)
-                    // This ID will be used consistently for: registry ID, worktree path, and branch name
-                    let name_generator =
-                        ralph_core::LoopNameGenerator::from_config(&config.features.loop_naming);
-                    let loop_id = name_generator.generate_memorable_unique(|name| {
-                        ralph_core::worktree_exists(workspace_root, name, &worktree_config)
-                    });
-
-                    // Ensure worktree directory is in .gitignore
-                    ensure_gitignore(workspace_root, ".worktrees")
-                        .context("Failed to update .gitignore for worktrees")?;
-
-                    // Create the worktree
-                    let worktree = create_worktree(workspace_root, &loop_id, &worktree_config)
-                        .context("Failed to create worktree for parallel loop")?;
-
-                    info!(
-                        "Created worktree at {} on branch {}",
-                        worktree.path.display(),
-                        worktree.branch
-                    );
-
-                    // Create loop context for the worktree
-                    let context = LoopContext::worktree(
-                        loop_id.clone(),
-                        worktree.path.clone(),
-                        workspace_root.clone(),
-                    );
-
-                    // Set up all worktree symlinks (memories, specs, code tasks)
-                    context
-                        .setup_worktree_symlinks()
-                        .context("Failed to create symlinks in worktree")?;
-
-                    // Generate context file with worktree metadata
-                    context
-                        .generate_context_file(&worktree.branch, &prompt_summary)
-                        .context("Failed to generate context file in worktree")?;
-
-                    // Register this loop after preflight succeeds so failed runs
-                    // don't leave stale registry entries behind.
-                    let entry = LoopEntry::with_id(
-                        &loop_id,
-                        &prompt_summary,
-                        Some(worktree.path.to_string_lossy().to_string()),
-                        worktree.path.to_string_lossy().to_string(),
-                    );
-                    pending_worktree_registration = Some(entry);
-
-                    // Update config to use worktree paths
-                    // The scratchpad and other paths should resolve to the worktree
-                    // Note: We keep the lock guard as None since worktree loops don't hold the primary lock
-
-                    (context, None)
+        match LoopLock::inspect(workspace_root) {
+            Ok(LockStatus::None) => {
+                // No lock file - try to acquire normally
+                match LoopLock::try_acquire(workspace_root, &prompt_summary) {
+                    Ok(guard) => {
+                        debug!("Acquired loop lock, running as primary loop");
+                        let context = LoopContext::primary(workspace_root.clone());
+                        (context, Some(guard))
+                    }
+                    Err(LockError::AlreadyLocked(existing)) => {
+                        // Race: lock became active between inspect and try_acquire
+                        handle_active_lock(
+                            existing,
+                            workspace_root,
+                            &prompt_summary,
+                            args.exclusive,
+                            config.features.parallel,
+                            &config.features.loop_naming,
+                            &mut pending_worktree_registration,
+                        )?
+                    }
+                    Err(LockError::UnsupportedPlatform) => {
+                        warn!("Loop locking not supported on this platform, running without lock");
+                        let context = LoopContext::primary(workspace_root.clone());
+                        (context, None)
+                    }
+                    Err(e) => {
+                        return Err(anyhow::Error::new(e).context("Failed to acquire loop lock"));
+                    }
                 }
             }
-            Err(LockError::UnsupportedPlatform) => {
-                // Non-Unix: just run without locking (single-loop fallback)
-                warn!("Loop locking not supported on this platform, running without lock");
-                let context = LoopContext::primary(workspace_root.clone());
-                (context, None)
+            Ok(LockStatus::Stale(metadata)) => {
+                // Stale lock from a previous crash or abnormal termination
+                info!(
+                    "Detected stale lock from PID {} (started {}). Cleaning up and continuing...",
+                    metadata.pid, metadata.started
+                );
+                let lock_path = workspace_root.join(LoopLock::LOCK_FILE);
+                let _ = std::fs::remove_file(&lock_path);
+                match LoopLock::try_acquire(workspace_root, &prompt_summary) {
+                    Ok(guard) => {
+                        debug!("Acquired loop lock after stale cleanup");
+                        let context = LoopContext::primary(workspace_root.clone());
+                        (context, Some(guard))
+                    }
+                    Err(LockError::AlreadyLocked(existing)) => {
+                        // Race: another process acquired it while we were cleaning up
+                        handle_active_lock(
+                            existing,
+                            workspace_root,
+                            &prompt_summary,
+                            args.exclusive,
+                            config.features.parallel,
+                            &config.features.loop_naming,
+                            &mut pending_worktree_registration,
+                        )?
+                    }
+                    Err(LockError::UnsupportedPlatform) => {
+                        warn!("Loop locking not supported on this platform, running without lock");
+                        let context = LoopContext::primary(workspace_root.clone());
+                        (context, None)
+                    }
+                    Err(e) => {
+                        return Err(anyhow::Error::new(e)
+                            .context("Failed to acquire loop lock after stale cleanup"));
+                    }
+                }
+            }
+            Ok(LockStatus::Active(metadata)) => {
+                // Active lock held by another process
+                handle_active_lock(
+                    metadata,
+                    workspace_root,
+                    &prompt_summary,
+                    args.exclusive,
+                    config.features.parallel,
+                    &config.features.loop_naming,
+                    &mut pending_worktree_registration,
+                )?
             }
             Err(e) => {
-                return Err(anyhow::Error::new(e).context("Failed to acquire loop lock"));
+                warn!(
+                    "Lock inspection failed: {}. Falling back to direct acquisition.",
+                    e
+                );
+                match LoopLock::try_acquire(workspace_root, &prompt_summary) {
+                    Ok(guard) => {
+                        debug!("Acquired loop lock, running as primary loop");
+                        let context = LoopContext::primary(workspace_root.clone());
+                        (context, Some(guard))
+                    }
+                    Err(LockError::AlreadyLocked(existing)) => handle_active_lock(
+                        existing,
+                        workspace_root,
+                        &prompt_summary,
+                        args.exclusive,
+                        config.features.parallel,
+                        &config.features.loop_naming,
+                        &mut pending_worktree_registration,
+                    )?,
+                    Err(LockError::UnsupportedPlatform) => {
+                        warn!("Loop locking not supported on this platform, running without lock");
+                        let context = LoopContext::primary(workspace_root.clone());
+                        (context, None)
+                    }
+                    Err(e) => {
+                        return Err(anyhow::Error::new(e).context("Failed to acquire loop lock"));
+                    }
+                }
             }
         }
     };
@@ -2490,13 +2590,18 @@ fn emit_command_with_root(
         };
         if let Some(policy) = policy {
             use ralph_core::{PolicyRuntimeState, validate_event};
-            let mut state = PolicyRuntimeState::default();
-            let decision = validate_event(
-                &args.topic,
-                Some(&args.payload),
-                policy,
-                &mut state,
-            );
+            let events_path = fs::read_to_string(&current_events_marker)
+                .map(|s| resolve_marker_target(&workspace_root, &s))
+                .unwrap_or_else(|_| args.file.clone());
+            let mut state =
+                PolicyRuntimeState::from_events(&events_path, policy).unwrap_or_else(|e| {
+                    eprintln!(
+                        "Warning: Failed to replay events for policy check: {}. Using empty state.",
+                        e
+                    );
+                    PolicyRuntimeState::default()
+                });
+            let decision = validate_event(&args.topic, Some(&args.payload), policy, &mut state);
             match decision {
                 ralph_core::PolicyDecision::Accept => {}
                 ralph_core::PolicyDecision::Warn(findings) => {
@@ -3891,5 +3996,176 @@ hats:
             clear: false,
         }));
         assert!(!is_diagnostics_eligible_command(command.as_ref()));
+    }
+
+    #[test]
+    fn test_emit_policy_check_rejects_business_after_terminal_with_marker() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let workspace = temp_dir.path().to_path_buf();
+        std::fs::create_dir_all(workspace.join(".ralph")).expect("ralph dir");
+
+        // Write config with event policy
+        std::fs::write(
+            workspace.join("ralph.yml"),
+            r#"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    terminal_topics:
+      - LOOP_COMPLETE
+    business_topics:
+      - experiment.planned
+"#,
+        )
+        .unwrap();
+
+        // Write existing events file with a terminal event
+        let events_file = workspace.join(".ralph/events.jsonl");
+        std::fs::write(
+            &events_file,
+            r#"{"topic":"LOOP_COMPLETE","ts":"2024-01-01T00:00:00Z"}
+"#,
+        )
+        .unwrap();
+
+        // Write marker file pointing to events file
+        std::fs::write(
+            workspace.join(".ralph/current-events"),
+            ".ralph/events.jsonl\n",
+        )
+        .unwrap();
+
+        let err = emit_command_with_root(
+            ColorMode::Never,
+            EmitArgs {
+                topic: "experiment.planned".to_string(),
+                payload: "{}".to_string(),
+                json: true,
+                ts: Some("2024-01-01T00:00:01Z".to_string()),
+                file: PathBuf::from(".ralph/events.jsonl"),
+                policy_check: true,
+            },
+            Some(&workspace),
+        )
+        .expect_err("should reject business event after terminal");
+
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("Event rejected by policy"),
+            "Expected policy rejection, got: {}",
+            message
+        );
+        assert!(
+            message.contains("monotonicity"),
+            "Expected monotonicity violation, got: {}",
+            message
+        );
+
+        // Verify the rejected event was NOT appended
+        let events = std::fs::read_to_string(&events_file).expect("read events");
+        assert!(!events.contains("experiment.planned"));
+    }
+
+    #[test]
+    fn test_emit_policy_check_without_existing_events_succeeds() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let workspace = temp_dir.path().to_path_buf();
+        std::fs::create_dir_all(workspace.join(".ralph")).expect("ralph dir");
+
+        // Write config with event policy
+        std::fs::write(
+            workspace.join("ralph.yml"),
+            r#"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    terminal_topics:
+      - LOOP_COMPLETE
+    business_topics:
+      - experiment.planned
+"#,
+        )
+        .unwrap();
+
+        let events_file = workspace.join(".ralph/events.jsonl");
+
+        emit_command_with_root(
+            ColorMode::Never,
+            EmitArgs {
+                topic: "experiment.planned".to_string(),
+                payload: "{}".to_string(),
+                json: true,
+                ts: Some("2024-01-01T00:00:00Z".to_string()),
+                file: events_file.clone(),
+                policy_check: true,
+            },
+            Some(&workspace),
+        )
+        .expect("should accept business event when no terminal exists");
+
+        let events = std::fs::read_to_string(&events_file).expect("read events");
+        assert!(events.contains("experiment.planned"));
+    }
+
+    #[test]
+    fn test_emit_policy_check_fallback_to_args_file_when_marker_missing() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let workspace = temp_dir.path().to_path_buf();
+        std::fs::create_dir_all(workspace.join(".ralph")).expect("ralph dir");
+
+        // Write config with event policy
+        std::fs::write(
+            workspace.join("ralph.yml"),
+            r#"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    terminal_topics:
+      - LOOP_COMPLETE
+    business_topics:
+      - experiment.planned
+"#,
+        )
+        .unwrap();
+
+        // Write existing events file WITHOUT marker
+        let events_file = workspace.join(".ralph/events.jsonl");
+        std::fs::write(
+            &events_file,
+            r#"{"topic":"LOOP_COMPLETE","ts":"2024-01-01T00:00:00Z"}
+"#,
+        )
+        .unwrap();
+
+        let err = emit_command_with_root(
+            ColorMode::Never,
+            EmitArgs {
+                topic: "experiment.planned".to_string(),
+                payload: "{}".to_string(),
+                json: true,
+                ts: Some("2024-01-01T00:00:01Z".to_string()),
+                file: events_file.clone(),
+                policy_check: true,
+            },
+            Some(&workspace),
+        )
+        .expect_err("should reject business event after terminal");
+
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("Event rejected by policy"),
+            "Expected policy rejection, got: {}",
+            message
+        );
+
+        // Verify the rejected event was NOT appended
+        let events = std::fs::read_to_string(&events_file).expect("read events");
+        assert!(!events.contains("experiment.planned"));
     }
 }

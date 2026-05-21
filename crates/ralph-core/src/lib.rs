@@ -16,11 +16,10 @@ mod config;
 pub mod diagnostics;
 mod event_logger;
 mod event_loop;
-mod event_policy;
 mod event_parser;
+mod event_policy;
 mod event_projection;
 mod event_reader;
-mod loop_state_snapshot;
 pub mod file_lock;
 mod git_ops;
 mod handoff;
@@ -35,6 +34,7 @@ pub mod loop_history;
 pub mod loop_lock;
 mod loop_name;
 pub mod loop_registry;
+mod loop_state_snapshot;
 mod memory;
 pub mod memory_parser;
 mod memory_store;
@@ -67,10 +67,10 @@ pub use cli_capture::{CliCapture, CliCapturePair};
 pub use config::{
     CliConfig, ConfigError, CoreConfig, EventFilterConfig, EventFilterMode, EventLoopConfig,
     EventMetadata, EventPolicyConfig, EventPolicyMode, EventProjectionConfig, EventSchema,
-    FeaturesConfig, HatBackend, HatConfig, HookStage, InjectMode, MemoriesConfig,
-    MemoriesFilter, PayloadType, PreflightExtensionsConfig, PreflightHook, ProjectionMode,
-    ProjectionRule, RalphConfig, ScratchpadConfig, SkillOverride, SkillsConfig, StateFileEntry,
-    StateFileFormat, StateFilesConfig, ViolationAction,
+    FeaturesConfig, HatBackend, HatConfig, HookStage, InjectMode, MemoriesConfig, MemoriesFilter,
+    PayloadType, PreflightExtensionsConfig, PreflightHook, ProjectionMode, ProjectionRule,
+    RalphConfig, ScratchpadConfig, SkillOverride, SkillsConfig, StateFileEntry, StateFileFormat,
+    StateFilesConfig, ViolationAction,
 };
 // Re-export loop_name types (also available via FeaturesConfig.loop_naming)
 pub use diagnostics::DiagnosticsCollector;
@@ -79,6 +79,9 @@ pub use event_loop::{
     EventLoop, LoopState, ProcessedEvents, ProcessedEventsWithWaves, TerminationReason, UserPrompt,
 };
 pub use event_parser::EventParser;
+pub use event_policy::{
+    PolicyDecision, PolicyFinding, PolicyRuntimeState, ViolationType, validate_event,
+};
 pub use event_projection::apply_projection;
 pub use event_reader::{Event, EventReader, MalformedLine, ParseResult};
 pub use file_lock::{FileLock, LockGuard as FileLockGuard, LockedFile};
@@ -103,10 +106,12 @@ pub use landing::{LandingConfig, LandingError, LandingHandler, LandingResult};
 pub use loop_completion::{CompletionAction, CompletionError, LoopCompletionHandler};
 pub use loop_context::LoopContext;
 pub use loop_history::{HistoryError, HistoryEvent, HistoryEventType, HistorySummary, LoopHistory};
-pub use loop_lock::{LockError, LockGuard, LockMetadata, LoopLock};
+pub use loop_lock::{LockError, LockGuard, LockMetadata, LockStatus, LoopLock};
 pub use loop_name::{LoopNameGenerator, LoopNamingConfig};
 pub use loop_registry::{LoopEntry, LoopRegistry, RegistryError};
-pub use loop_state_snapshot::{LoopStateSnapshot, PolicyFindingSnapshot, WorkflowInstanceSnapshot, replay_events_to_snapshot};
+pub use loop_state_snapshot::{
+    LoopStateSnapshot, PolicyFindingSnapshot, WorkflowInstanceSnapshot, replay_events_to_snapshot,
+};
 pub use memory::{Memory, MemoryType};
 pub use memory_store::{
     DEFAULT_MEMORIES_PATH, MarkdownMemoryStore, format_memories_as_markdown, truncate_to_budget,
@@ -142,9 +147,6 @@ pub use urgent_steer::{UrgentSteerRecord, UrgentSteerStore};
 pub use wave_detection::{DetectedWave, detect_wave_events};
 pub use wave_prompt::{WaveWorkerContext, build_wave_worker_prompt};
 pub use wave_tracker::{CompletedWave, WaveFailure, WaveProgress, WaveResult, WaveTracker};
-pub use event_policy::{
-    PolicyDecision, PolicyFinding, PolicyRuntimeState, ViolationType, validate_event,
-};
 pub use workspace::{
     CleanupPolicy, TaskWorkspace, VerificationResult, WorkspaceError, WorkspaceInfo,
     WorkspaceManager,

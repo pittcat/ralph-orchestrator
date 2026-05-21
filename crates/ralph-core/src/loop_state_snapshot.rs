@@ -241,10 +241,14 @@ mod tests {
             on_violation: crate::config::ViolationAction::Warn,
             schemas: std::collections::HashMap::new(),
             terminal_topics: vec!["LOOP_COMPLETE".to_string()],
-            business_topics: vec!["experiment.planned".to_string(), "experiment.evaluated".to_string()],
+            business_topics: vec![
+                "experiment.planned".to_string(),
+                "experiment.evaluated".to_string(),
+            ],
         };
 
-        let snapshot = replay_events_to_snapshot(&events_path, "test-loop", None, Some(&policy)).unwrap();
+        let snapshot =
+            replay_events_to_snapshot(&events_path, "test-loop", None, Some(&policy)).unwrap();
         assert!(snapshot.terminal);
         assert_eq!(snapshot.findings.len(), 1);
         assert!(snapshot.findings[0].message.contains("monotonicity"));
@@ -260,7 +264,11 @@ mod tests {
             .truncate(true)
             .open(&events_path)
             .unwrap();
-        writeln!(file, r#"{{"topic": "ok", "payload": "x", "ts": "2024-01-01T00:00:00Z"}}"#).unwrap();
+        writeln!(
+            file,
+            r#"{{"topic": "ok", "payload": "x", "ts": "2024-01-01T00:00:00Z"}}"#
+        )
+        .unwrap();
         writeln!(file, "not valid json").unwrap();
 
         let snapshot = replay_events_to_snapshot(&events_path, "test-loop", None, None).unwrap();
@@ -300,16 +308,19 @@ mod tests {
             }],
         };
 
-        let snapshot = replay_events_to_snapshot(
-            &events_path,
-            "test-loop",
-            Some(&guards),
-            None,
-        )
-        .unwrap();
+        let snapshot =
+            replay_events_to_snapshot(&events_path, "test-loop", Some(&guards), None).unwrap();
 
-        assert_eq!(snapshot.closed_instances.len(), 1, "Complete chain should be closed");
-        assert_eq!(snapshot.open_instances.len(), 1, "Partial chain should be open");
+        assert_eq!(
+            snapshot.closed_instances.len(),
+            1,
+            "Complete chain should be closed"
+        );
+        assert_eq!(
+            snapshot.open_instances.len(),
+            1,
+            "Partial chain should be open"
+        );
         assert_eq!(snapshot.closed_instances[0].chain_name, "build");
         assert_eq!(snapshot.closed_instances[0].seen_topics.len(), 3);
         assert_eq!(snapshot.open_instances[0].chain_name, "build");

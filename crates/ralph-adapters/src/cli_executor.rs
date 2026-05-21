@@ -671,7 +671,10 @@ mod tests {
 
         assert!(result.timed_out, "Should have timed out");
         assert!(result.post_event_timed_out, "Should be post-event timeout");
-        assert!(result.success, "Post-event timeout should be treated as success");
+        assert!(
+            result.success,
+            "Post-event timeout should be treated as success"
+        );
     }
 
     #[tokio::test]

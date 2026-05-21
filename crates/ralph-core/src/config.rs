@@ -667,8 +667,14 @@ impl RalphConfig {
                 for topic in &chain.topics {
                     if !seen_topics.insert(topic) {
                         return Err(ConfigError::WorkflowGuardValidation {
-                            field: format!("event_loop.workflow_guards.chains.{}.topics", chain.name),
-                            message: format!("Duplicate topic '{}' in workflow chain '{}'", topic, chain.name),
+                            field: format!(
+                                "event_loop.workflow_guards.chains.{}.topics",
+                                chain.name
+                            ),
+                            message: format!(
+                                "Duplicate topic '{}' in workflow chain '{}'",
+                                topic, chain.name
+                            ),
                         });
                     }
                 }
@@ -689,25 +695,37 @@ impl RalphConfig {
                 for path in schema.allowed_values.keys() {
                     if path.trim().is_empty() {
                         return Err(ConfigError::EventPolicyValidation {
-                            field: format!("event_loop.event_policy.schemas.{}.allowed_values", topic),
+                            field: format!(
+                                "event_loop.event_policy.schemas.{}.allowed_values",
+                                topic
+                            ),
                             message: "Field path cannot be empty".to_string(),
                         });
                     }
                     if path.contains("..") {
                         return Err(ConfigError::EventPolicyValidation {
-                            field: format!("event_loop.event_policy.schemas.{}.allowed_values", topic),
+                            field: format!(
+                                "event_loop.event_policy.schemas.{}.allowed_values",
+                                topic
+                            ),
                             message: format!("Field path '{}' contains consecutive dots", path),
                         });
                     }
                     if path.starts_with('.') || path.ends_with('.') {
                         return Err(ConfigError::EventPolicyValidation {
-                            field: format!("event_loop.event_policy.schemas.{}.allowed_values", topic),
+                            field: format!(
+                                "event_loop.event_policy.schemas.{}.allowed_values",
+                                topic
+                            ),
                             message: format!("Field path '{}' starts or ends with a dot", path),
                         });
                     }
                     if path.split('.').any(|s| s.is_empty()) {
                         return Err(ConfigError::EventPolicyValidation {
-                            field: format!("event_loop.event_policy.schemas.{}.allowed_values", topic),
+                            field: format!(
+                                "event_loop.event_policy.schemas.{}.allowed_values",
+                                topic
+                            ),
                             message: format!("Field path '{}' contains empty segment", path),
                         });
                     }
@@ -1183,8 +1201,6 @@ pub enum PayloadType {
     Bool,
     Array,
 }
-
-
 
 fn default_prompt_file() -> String {
     "PROMPT.md".to_string()
@@ -4647,7 +4663,11 @@ event_loop:
         let result = config.validate();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Duplicate topic"), "Expected duplicate topic error, got: {}", err);
+        assert!(
+            err.contains("Duplicate topic"),
+            "Expected duplicate topic error, got: {}",
+            err
+        );
     }
 
     #[test]
@@ -4663,7 +4683,11 @@ event_loop:
         let result = config.validate();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("topics cannot be empty"), "Expected empty topics error, got: {}", err);
+        assert!(
+            err.contains("topics cannot be empty"),
+            "Expected empty topics error, got: {}",
+            err
+        );
     }
 
     #[test]
@@ -4680,7 +4704,11 @@ event_loop:
         let result = config.validate();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Chain name cannot be empty"), "Expected empty name error, got: {}", err);
+        assert!(
+            err.contains("Chain name cannot be empty"),
+            "Expected empty name error, got: {}",
+            err
+        );
     }
 
     #[test]
@@ -4700,7 +4728,11 @@ event_loop:
         let result = config.validate();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Duplicate workflow chain name"), "Expected duplicate chain name error, got: {}", err);
+        assert!(
+            err.contains("Duplicate workflow chain name"),
+            "Expected duplicate chain name error, got: {}",
+            err
+        );
     }
 
     // ── EventPolicyConfig tests ──
@@ -4766,7 +4798,10 @@ event_loop:
         let policy = config.event_loop.event_policy.as_ref().unwrap();
         assert!(policy.enabled);
         assert!(matches!(policy.mode, EventPolicyMode::Enforce));
-        assert!(matches!(policy.on_violation, ViolationAction::RejectWithResume));
+        assert!(matches!(
+            policy.on_violation,
+            ViolationAction::RejectWithResume
+        ));
     }
 
     #[test]
@@ -4778,7 +4813,10 @@ event_loop:
     mode: invalid_mode
 ";
         let result: Result<RalphConfig, _> = serde_yaml::from_str(yaml);
-        assert!(result.is_err(), "Invalid event_policy mode must fail parsing");
+        assert!(
+            result.is_err(),
+            "Invalid event_policy mode must fail parsing"
+        );
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("unknown variant `invalid_mode`"),
@@ -4802,7 +4840,11 @@ event_loop:
         let result = config.validate();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Schema topic cannot be empty"), "Expected empty schema topic error, got: {}", err);
+        assert!(
+            err.contains("Schema topic cannot be empty"),
+            "Expected empty schema topic error, got: {}",
+            err
+        );
     }
 
     #[test]
@@ -4824,7 +4866,11 @@ event_loop:
         let result = config.validate();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("consecutive dots"), "Expected consecutive dots error, got: {}", err);
+        assert!(
+            err.contains("consecutive dots"),
+            "Expected consecutive dots error, got: {}",
+            err
+        );
     }
 
     // ── HatExecutionMode config tests ──
@@ -4846,10 +4892,7 @@ event_loop:
   execution_mode: isolated
 ";
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(
-            config.event_loop.execution_mode,
-            HatExecutionMode::Isolated
-        );
+        assert_eq!(config.event_loop.execution_mode, HatExecutionMode::Isolated);
     }
 
     #[test]
@@ -4889,7 +4932,10 @@ event_loop:
   execution_mode: sandbox
 ";
         let result: Result<RalphConfig, _> = serde_yaml::from_str(yaml);
-        assert!(result.is_err(), "Invalid execution_mode value must fail parsing");
+        assert!(
+            result.is_err(),
+            "Invalid execution_mode value must fail parsing"
+        );
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("unknown variant `sandbox`"),
@@ -4906,7 +4952,10 @@ event_loop:
   execution_mode: Isolated
 ";
         let result: Result<RalphConfig, _> = serde_yaml::from_str(yaml);
-        assert!(result.is_err(), "Case-sensitive mode value 'Isolated' must be rejected");
+        assert!(
+            result.is_err(),
+            "Case-sensitive mode value 'Isolated' must be rejected"
+        );
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("unknown variant `Isolated`"),
@@ -4923,7 +4972,10 @@ event_loop:
   execution_mode: ISOLATED
 ";
         let result: Result<RalphConfig, _> = serde_yaml::from_str(yaml);
-        assert!(result.is_err(), "Uppercase mode value 'ISOLATED' must be rejected");
+        assert!(
+            result.is_err(),
+            "Uppercase mode value 'ISOLATED' must be rejected"
+        );
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("unknown variant `ISOLATED`"),
@@ -4939,7 +4991,10 @@ event_loop:
   execution_mode: ""
 "#;
         let result: Result<RalphConfig, _> = serde_yaml::from_str(yaml);
-        assert!(result.is_err(), "Empty string execution_mode must fail parsing");
+        assert!(
+            result.is_err(),
+            "Empty string execution_mode must fail parsing"
+        );
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("unknown variant `"),

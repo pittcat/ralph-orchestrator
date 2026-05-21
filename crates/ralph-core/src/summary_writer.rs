@@ -319,6 +319,7 @@ mod tests {
             abandoned_task_redispatches: 0,
             consecutive_malformed_events: 0,
             completion_requested: false,
+            completion_handled: false,
             hat_activation_counts: std::collections::HashMap::new(),
             exhausted_hats: std::collections::HashSet::new(),
             last_checkin_at: None,

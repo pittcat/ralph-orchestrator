@@ -3,21 +3,34 @@
 //! Provides pure-function validation that can be used by the event loop,
 //! CLI emit commands, and API layers.
 
-use std::collections::HashSet;
+use crate::event_reader::EventReader;
 use serde_json::Value;
+use std::collections::HashSet;
 
 // Re-export config types for convenience
-pub use crate::config::{
-    EventPolicyConfig, EventPolicyMode, PayloadType, ViolationAction,
-};
+pub use crate::config::{EventPolicyConfig, EventPolicyMode, PayloadType, ViolationAction};
 
 /// Types of policy violations.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ViolationType {
-    PayloadTypeMismatch { expected: String, actual: String },
-    MissingRequiredField { field: String },
-    InvalidFieldValue { field: String, value: Value },
-    TerminalMonotonicityViolation { terminal_topic: String, business_topic: String },
+    PayloadTypeMismatch {
+        expected: String,
+        actual: String,
+    },
+    MissingRequiredField {
+        field: String,
+    },
+    InvalidFieldValue {
+        field: String,
+        value: Value,
+    },
+    TerminalMonotonicityViolation {
+        terminal_topic: String,
+        business_topic: String,
+    },
+    DuplicateTerminalEvent {
+        topic: String,
+    },
 }
 
 /// A single policy finding.
@@ -44,6 +57,35 @@ pub enum PolicyDecision {
 pub struct PolicyRuntimeState {
     pub terminal_observed: bool,
     pub observed_topics: HashSet<String>,
+}
+
+impl PolicyRuntimeState {
+    /// Replays events from a JSONL file to build up the policy runtime state.
+    ///
+    /// Reads all events from the file, tracking which terminal topics have been
+    /// observed and which business topics have been seen. Malformed lines are
+    /// skipped. String, object, and null payloads are all handled with the same
+    /// compatibility semantics as `EventReader`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be opened or read.
+    pub fn from_events(
+        events_path: impl AsRef<std::path::Path>,
+        policy: &EventPolicyConfig,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut reader = EventReader::new(events_path.as_ref());
+        let result = reader.read_new_events()?;
+
+        let mut state = Self::default();
+        for event in result.events {
+            state.observed_topics.insert(event.topic.clone());
+            if policy.terminal_topics.contains(&event.topic) {
+                state.terminal_observed = true;
+            }
+        }
+        Ok(state)
+    }
 }
 
 /// Validates an event against the event policy.
@@ -73,6 +115,20 @@ pub fn validate_event(
             message: format!(
                 "Business event '{}' after terminal topic '{}' violates monotonicity",
                 topic, terminal_topic
+            ),
+        });
+    }
+
+    // Duplicate terminal check (read-only on state; caller applies terminal_observed)
+    if state.terminal_observed && config.terminal_topics.contains(&topic.to_string()) {
+        findings.push(PolicyFinding {
+            topic: topic.to_string(),
+            violation_type: ViolationType::DuplicateTerminalEvent {
+                topic: topic.to_string(),
+            },
+            message: format!(
+                "Duplicate terminal event '{}' after terminal topic was already observed",
+                topic
             ),
         });
     }
@@ -113,8 +169,7 @@ pub fn validate_event(
                             expected: "json_object".to_string(),
                             actual: "null".to_string(),
                         },
-                        message: "Payload is required to be JSON object but is missing"
-                            .to_string(),
+                        message: "Payload is required to be JSON object but is missing".to_string(),
                     });
                 }
             }
@@ -144,10 +199,7 @@ pub fn validate_event(
                         violation_type: ViolationType::MissingRequiredField {
                             field: field.clone(),
                         },
-                        message: format!(
-                            "Missing required field '{}' (payload is missing)",
-                            field
-                        ),
+                        message: format!("Missing required field '{}' (payload is missing)", field),
                     });
                 }
             }
@@ -186,12 +238,8 @@ pub fn validate_event(
             ViolationAction::RejectWithResume => {
                 PolicyDecision::RejectWithResume(findings.into_iter().next().unwrap())
             }
-            ViolationAction::Hold => {
-                PolicyDecision::Hold(findings.into_iter().next().unwrap())
-            }
-            ViolationAction::Block => {
-                PolicyDecision::Block(findings.into_iter().next().unwrap())
-            }
+            ViolationAction::Hold => PolicyDecision::Hold(findings.into_iter().next().unwrap()),
+            ViolationAction::Block => PolicyDecision::Block(findings.into_iter().next().unwrap()),
         },
     }
 }
@@ -425,5 +473,148 @@ mod tests {
             &mut state,
         );
         assert!(matches!(decision, PolicyDecision::RejectWithResume(_)));
+    }
+
+    #[test]
+    fn test_duplicate_terminal_event_violation() {
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        // Caller sets terminal_observed after the first terminal event passes validation
+        state.terminal_observed = true;
+        let decision = validate_event("LOOP_COMPLETE", None, &config, &mut state);
+        assert!(
+            matches!(
+                decision,
+                PolicyDecision::RejectWithResume(PolicyFinding {
+                    violation_type: ViolationType::DuplicateTerminalEvent { ref topic },
+                    ..
+                }) if topic == "LOOP_COMPLETE"
+            ),
+            "Expected DuplicateTerminalEvent violation, got {:?}",
+            decision
+        );
+    }
+
+    #[test]
+    fn test_duplicate_terminal_accepted_when_disabled() {
+        let mut config = test_config();
+        config.enabled = false;
+        let mut state = PolicyRuntimeState::default();
+        state.terminal_observed = true;
+        let decision = validate_event("LOOP_COMPLETE", None, &config, &mut state);
+        assert_eq!(decision, PolicyDecision::Accept);
+    }
+
+    #[test]
+    fn test_duplicate_terminal_observe_mode_warns() {
+        let mut config = test_config();
+        config.mode = EventPolicyMode::Observe;
+        let mut state = PolicyRuntimeState::default();
+        state.terminal_observed = true;
+        let decision = validate_event("LOOP_COMPLETE", None, &config, &mut state);
+        assert!(
+            matches!(decision, PolicyDecision::Warn(ref findings) if findings.iter().any(|f| matches!(f.violation_type, ViolationType::DuplicateTerminalEvent { .. }))),
+            "Expected Warn with DuplicateTerminalEvent, got {:?}",
+            decision
+        );
+    }
+
+    #[test]
+    fn test_from_events_replays_terminal_and_business() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"{{"topic":"experiment.planned","payload":"{{}}","ts":"2024-01-01T00:00:00Z"}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"topic":"LOOP_COMPLETE","ts":"2024-01-01T00:00:01Z"}}"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let config = test_config();
+        let state = PolicyRuntimeState::from_events(file.path(), &config).unwrap();
+
+        assert!(state.terminal_observed);
+        assert!(state.observed_topics.contains("experiment.planned"));
+        assert!(state.observed_topics.contains("LOOP_COMPLETE"));
+    }
+
+    #[test]
+    fn test_from_events_payload_compatibility() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        // String payload
+        writeln!(
+            file,
+            r#"{{"topic":"task.start","payload":"Start work","ts":"2024-01-01T00:00:00Z"}}"#
+        )
+        .unwrap();
+        // Object payload
+        writeln!(
+            file,
+            r#"{{"topic":"task.done","payload":{{"result":"success"}},"ts":"2024-01-01T00:00:01Z"}}"#
+        )
+        .unwrap();
+        // Null payload
+        writeln!(
+            file,
+            r#"{{"topic":"heartbeat","payload":null,"ts":"2024-01-01T00:00:02Z"}}"#
+        )
+        .unwrap();
+        // Missing payload
+        writeln!(file, r#"{{"topic":"noop","ts":"2024-01-01T00:00:03Z"}}"#).unwrap();
+        file.flush().unwrap();
+
+        let config = test_config();
+        let state = PolicyRuntimeState::from_events(file.path(), &config).unwrap();
+
+        assert_eq!(state.observed_topics.len(), 4);
+        assert!(state.observed_topics.contains("task.start"));
+        assert!(state.observed_topics.contains("task.done"));
+        assert!(state.observed_topics.contains("heartbeat"));
+        assert!(state.observed_topics.contains("noop"));
+    }
+
+    #[test]
+    fn test_from_events_missing_file() {
+        let config = test_config();
+        let state = PolicyRuntimeState::from_events("/nonexistent/events.jsonl", &config).unwrap();
+        assert!(!state.terminal_observed);
+        assert!(state.observed_topics.is_empty());
+    }
+
+    #[test]
+    fn test_from_events_skips_malformed_lines() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"{{"topic":"experiment.planned","ts":"2024-01-01T00:00:00Z"}}"#
+        )
+        .unwrap();
+        writeln!(file, "this is not json").unwrap();
+        writeln!(
+            file,
+            r#"{{"topic":"LOOP_COMPLETE","ts":"2024-01-01T00:00:01Z"}}"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let config = test_config();
+        let state = PolicyRuntimeState::from_events(file.path(), &config).unwrap();
+
+        assert!(state.terminal_observed);
+        assert!(state.observed_topics.contains("experiment.planned"));
+        assert!(state.observed_topics.contains("LOOP_COMPLETE"));
     }
 }

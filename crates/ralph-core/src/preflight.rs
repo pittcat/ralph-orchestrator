@@ -237,7 +237,11 @@ impl PreflightCheck for ExternalCommandCheck {
                 let message = if stderr.trim().is_empty() {
                     format!("Exit code: {}", output.status.code().unwrap_or(-1))
                 } else {
-                    format!("Exit code: {}\n{}", output.status.code().unwrap_or(-1), stderr.trim())
+                    format!(
+                        "Exit code: {}\n{}",
+                        output.status.code().unwrap_or(-1),
+                        stderr.trim()
+                    )
                 };
                 if self.fail_on_error {
                     CheckResult::fail(self.name, format!("Hook '{}' failed", self.name), message)
@@ -269,7 +273,9 @@ fn substitute_hook_vars(command: &str, config: &RalphConfig) -> String {
             (canonical, dir)
         },
     );
-    let project_root = config.core.workspace_root
+    let project_root = config
+        .core
+        .workspace_root
         .canonicalize()
         .unwrap_or_else(|_| config.core.workspace_root.clone())
         .to_string_lossy()
@@ -293,7 +299,9 @@ impl PreflightCheck for EventFilterValidCheck {
         let mut violations = Vec::new();
 
         for (hat_id, hat) in &config.hats {
-            let Some(ref filter) = hat.event_filter else { continue };
+            let Some(ref filter) = hat.event_filter else {
+                continue;
+            };
             if !filter.enabled {
                 continue;
             }
@@ -2012,7 +2020,11 @@ status: draft
             .expect("expected event-filters result");
         assert_eq!(result.status, CheckStatus::Fail);
         assert!(
-            result.message.as_deref().unwrap_or("").contains("empty event name")
+            result
+                .message
+                .as_deref()
+                .unwrap_or("")
+                .contains("empty event name")
         );
     }
 
@@ -2056,7 +2068,11 @@ status: draft
             .expect("expected event-filters result");
         assert_eq!(result.status, CheckStatus::Fail);
         assert!(
-            result.message.as_deref().unwrap_or("").contains("contains spaces")
+            result
+                .message
+                .as_deref()
+                .unwrap_or("")
+                .contains("contains spaces")
         );
     }
 
@@ -2132,7 +2148,13 @@ status: draft
             .find(|c| c.name == "warn-hook")
             .expect("expected hook result");
         assert_eq!(hook_result.status, CheckStatus::Warn);
-        assert!(hook_result.message.as_deref().unwrap_or("").contains("oops"));
+        assert!(
+            hook_result
+                .message
+                .as_deref()
+                .unwrap_or("")
+                .contains("oops")
+        );
     }
 
     #[tokio::test]
@@ -2159,7 +2181,13 @@ status: draft
             .find(|c| c.name == "fail-hook")
             .expect("expected hook result");
         assert_eq!(hook_result.status, CheckStatus::Fail);
-        assert!(hook_result.message.as_deref().unwrap_or("").contains("broken"));
+        assert!(
+            hook_result
+                .message
+                .as_deref()
+                .unwrap_or("")
+                .contains("broken")
+        );
     }
 
     #[tokio::test]

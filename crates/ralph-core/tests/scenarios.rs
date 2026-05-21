@@ -8,8 +8,8 @@
 //! - Mixed backends
 //! - AutoResearch workflow guards
 
-use ralph_core::{EventLoop, EventParser, HatConfig, LoopContext, RalphConfig};
 use ralph_core::testing::{MockBackend, Scenario, ScenarioRunner};
+use ralph_core::{EventLoop, EventParser, HatConfig, LoopContext, RalphConfig};
 use serde::Deserialize;
 use std::fs;
 
@@ -122,7 +122,10 @@ fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
     config.prompt_file = Some(yaml.config.prompt_file);
     // Parse hats if present (inject map key as name if missing)
     if !yaml.config.hats.is_null() {
-        if let Ok(hat_map) = serde_yaml::from_value::<std::collections::HashMap<String, serde_yaml::Value>>(yaml.config.hats.clone()) {
+        if let Ok(hat_map) = serde_yaml::from_value::<
+            std::collections::HashMap<String, serde_yaml::Value>,
+        >(yaml.config.hats.clone())
+        {
             let mut hats = std::collections::HashMap::new();
             for (hat_id, mut hat_value) in hat_map {
                 if let Some(map) = hat_value.as_mapping_mut() {
@@ -133,8 +136,9 @@ fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
                         );
                     }
                 }
-                let hat_config: HatConfig = serde_yaml::from_value(hat_value)
-                    .unwrap_or_else(|e| panic!("Failed to parse hat config for '{}': {}", hat_id, e));
+                let hat_config: HatConfig = serde_yaml::from_value(hat_value).unwrap_or_else(|e| {
+                    panic!("Failed to parse hat config for '{}': {}", hat_id, e)
+                });
                 hats.insert(hat_id, hat_config);
             }
             config.hats = hats;
@@ -184,8 +188,10 @@ fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
             if checkpoint.after_response == idx + 1 {
                 for progress in &checkpoint.workflow_progress {
                     let instance = progress.instance.as_deref();
-                    let actual_phase =
-                        event_loop.state().workflow_progress.get_phase(&progress.chain, instance);
+                    let actual_phase = event_loop
+                        .state()
+                        .workflow_progress
+                        .get_phase(&progress.chain, instance);
                     assert_eq!(
                         actual_phase,
                         Some(progress.phase),
@@ -215,7 +221,10 @@ fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
     // Verify all expected events were seen (accepted) at least once
     for expected_event in &yaml.expected.events {
         assert!(
-            event_loop.state().seen_topics.contains(&expected_event.topic),
+            event_loop
+                .state()
+                .seen_topics
+                .contains(&expected_event.topic),
             "{}: Expected event '{}' to be seen (accepted), but it was not recorded",
             yaml.name,
             expected_event.topic
@@ -225,8 +234,10 @@ fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
     // Verify final workflow progress
     for progress in &yaml.expected.workflow_progress {
         let instance = progress.instance.as_deref();
-        let actual_phase =
-            event_loop.state().workflow_progress.get_phase(&progress.chain, instance);
+        let actual_phase = event_loop
+            .state()
+            .workflow_progress
+            .get_phase(&progress.chain, instance);
         assert_eq!(
             actual_phase,
             Some(progress.phase),
@@ -334,7 +345,10 @@ fn test_isolated_with_event_projection() {
     config.prompt_file = Some(yaml.config.prompt_file);
     // Parse hats if present (inject map key as name if missing)
     if !yaml.config.hats.is_null() {
-        if let Ok(hat_map) = serde_yaml::from_value::<std::collections::HashMap<String, serde_yaml::Value>>(yaml.config.hats.clone()) {
+        if let Ok(hat_map) = serde_yaml::from_value::<
+            std::collections::HashMap<String, serde_yaml::Value>,
+        >(yaml.config.hats.clone())
+        {
             let mut hats = std::collections::HashMap::new();
             for (hat_id, mut hat_value) in hat_map {
                 if let Some(map) = hat_value.as_mapping_mut() {
@@ -345,8 +359,9 @@ fn test_isolated_with_event_projection() {
                         );
                     }
                 }
-                let hat_config: HatConfig = serde_yaml::from_value(hat_value)
-                    .unwrap_or_else(|e| panic!("Failed to parse hat config for '{}': {}", hat_id, e));
+                let hat_config: HatConfig = serde_yaml::from_value(hat_value).unwrap_or_else(|e| {
+                    panic!("Failed to parse hat config for '{}': {}", hat_id, e)
+                });
                 hats.insert(hat_id, hat_config);
             }
             config.hats = hats;
@@ -400,8 +415,10 @@ fn test_isolated_with_event_projection() {
             if checkpoint.after_response == idx + 1 {
                 for progress in &checkpoint.workflow_progress {
                     let instance = progress.instance.as_deref();
-                    let actual_phase =
-                        event_loop.state().workflow_progress.get_phase(&progress.chain, instance);
+                    let actual_phase = event_loop
+                        .state()
+                        .workflow_progress
+                        .get_phase(&progress.chain, instance);
                     assert_eq!(
                         actual_phase,
                         Some(progress.phase),
@@ -431,7 +448,10 @@ fn test_isolated_with_event_projection() {
     // Verify all expected events were seen (accepted) at least once
     for expected_event in &yaml.expected.events {
         assert!(
-            event_loop.state().seen_topics.contains(&expected_event.topic),
+            event_loop
+                .state()
+                .seen_topics
+                .contains(&expected_event.topic),
             "{}: Expected event '{}' to be seen (accepted), but it was not recorded",
             yaml.name,
             expected_event.topic
@@ -441,8 +461,10 @@ fn test_isolated_with_event_projection() {
     // Verify final workflow progress
     for progress in &yaml.expected.workflow_progress {
         let instance = progress.instance.as_deref();
-        let actual_phase =
-            event_loop.state().workflow_progress.get_phase(&progress.chain, instance);
+        let actual_phase = event_loop
+            .state()
+            .workflow_progress
+            .get_phase(&progress.chain, instance);
         assert_eq!(
             actual_phase,
             Some(progress.phase),

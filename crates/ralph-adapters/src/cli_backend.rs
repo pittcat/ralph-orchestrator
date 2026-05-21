@@ -630,10 +630,7 @@ impl CliBackend {
     pub fn traecli() -> Self {
         Self {
             command: "trae-cli".to_string(),
-            args: vec![
-                "--yolo".to_string(),
-                "--print".to_string(),
-            ],
+            args: vec!["--yolo".to_string(), "--print".to_string()],
             prompt_mode: PromptMode::Arg,
             prompt_flag: None,
             output_format: OutputFormat::Text,

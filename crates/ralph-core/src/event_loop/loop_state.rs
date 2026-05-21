@@ -44,6 +44,8 @@ pub struct LoopState {
     pub consecutive_malformed_events: u32,
     /// Whether a completion event has been observed in JSONL.
     pub completion_requested: bool,
+    /// Whether the completion event has already been handled (prevents duplicate side effects).
+    pub completion_handled: bool,
 
     /// Per-hat activation counts (used for max_activations).
     pub hat_activation_counts: HashMap<HatId, u32>,
@@ -97,6 +99,7 @@ impl Default for LoopState {
             abandoned_task_redispatches: 0,
             consecutive_malformed_events: 0,
             completion_requested: false,
+            completion_handled: false,
             hat_activation_counts: HashMap::new(),
             exhausted_hats: HashSet::new(),
             last_checkin_at: None,
@@ -191,12 +194,7 @@ impl WorkflowProgress {
     ///
     /// If the given phase is not valid (skipping ahead), this is a no-op.
     /// If the phase is <= current highest, this is idempotent (no update).
-    pub fn advance(
-        &mut self,
-        chain_name: &str,
-        instance_key: Option<&str>,
-        phase: usize,
-    ) {
+    pub fn advance(&mut self, chain_name: &str, instance_key: Option<&str>, phase: usize) {
         if !self.is_phase_valid(chain_name, instance_key, phase) {
             return;
         }

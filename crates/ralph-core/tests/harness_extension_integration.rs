@@ -69,9 +69,14 @@ event_loop:
     let mut event_loop = EventLoop::new(config);
 
     event_loop.initialize("test objective");
-    let prompt = event_loop.build_prompt(&ralph_proto::HatId::new("ralph")).unwrap();
+    let prompt = event_loop
+        .build_prompt(&ralph_proto::HatId::new("ralph"))
+        .unwrap();
 
-    assert!(prompt.contains("You are Ralph"), "Prompt should identify Ralph");
+    assert!(
+        prompt.contains("You are Ralph"),
+        "Prompt should identify Ralph"
+    );
     assert!(
         prompt.contains("LOOP_COMPLETE"),
         "Prompt should contain completion promise"

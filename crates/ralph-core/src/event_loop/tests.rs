@@ -4610,8 +4610,12 @@ hats:
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
     let mut event_loop = EventLoop::new(config);
 
-    event_loop.bus.publish(Event::new("review.trigger", "trigger payload"));
-    event_loop.bus.publish(Event::new("other.event", "other payload"));
+    event_loop
+        .bus
+        .publish(Event::new("review.trigger", "trigger payload"));
+    event_loop
+        .bus
+        .publish(Event::new("other.event", "other payload"));
 
     let ralph_id = HatId::new("ralph");
     let prompt = event_loop.build_prompt(&ralph_id).unwrap();
@@ -4642,8 +4646,12 @@ hats:
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
     let mut event_loop = EventLoop::new(config);
 
-    event_loop.bus.publish(Event::new("review.trigger", "trigger payload"));
-    event_loop.bus.publish(Event::new("other.event", "other payload"));
+    event_loop
+        .bus
+        .publish(Event::new("review.trigger", "trigger payload"));
+    event_loop
+        .bus
+        .publish(Event::new("other.event", "other payload"));
 
     let ralph_id = HatId::new("ralph");
     let prompt = event_loop.build_prompt(&ralph_id).unwrap();
@@ -4674,9 +4682,15 @@ hats:
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
     let mut event_loop = EventLoop::new(config);
 
-    event_loop.bus.publish(Event::new("review.trigger", "trigger payload"));
-    event_loop.bus.publish(Event::new("review.file", "file payload"));
-    event_loop.bus.publish(Event::new("other.event", "other payload"));
+    event_loop
+        .bus
+        .publish(Event::new("review.trigger", "trigger payload"));
+    event_loop
+        .bus
+        .publish(Event::new("review.file", "file payload"));
+    event_loop
+        .bus
+        .publish(Event::new("other.event", "other payload"));
 
     let ralph_id = HatId::new("ralph");
     let prompt = event_loop.build_prompt(&ralph_id).unwrap();
@@ -4769,23 +4783,42 @@ event_loop:
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
 
     // Chain: planned -> ready -> measured
-    write_event_to_jsonl(&events_path, "experiment.planned", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.planned",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
 
-    write_event_to_jsonl(&events_path, "experiment.ready", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.ready",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
 
-    write_event_to_jsonl(&events_path, "experiment.measured", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.measured",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
 
     // Now try to skip scoring and go directly to evaluated - should be rejected
-    write_event_to_jsonl(&events_path, "experiment.evaluated", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.evaluated",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
 
     // evaluated should NOT be recorded as seen in workflow progress
     // Get phase AFTER processing to avoid borrow conflict
     // No correlation config → global instance (None key)
-    let phase = event_loop.state.workflow_progress.get_phase("experiment", None);
+    let phase = event_loop
+        .state
+        .workflow_progress
+        .get_phase("experiment", None);
     assert_eq!(
         phase,
         Some(2), // Still at measured (phase 2), not advanced to evaluated (phase 4)
@@ -4820,19 +4853,39 @@ event_loop:
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
 
     // Full chain in order
-    write_event_to_jsonl(&events_path, "experiment.planned", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.planned",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
 
-    write_event_to_jsonl(&events_path, "experiment.ready", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.ready",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
 
-    write_event_to_jsonl(&events_path, "experiment.measured", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.measured",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
 
-    write_event_to_jsonl(&events_path, "experiment.scored", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.scored",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
 
-    write_event_to_jsonl(&events_path, "experiment.evaluated", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.evaluated",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
 
     // After scoring, evaluated should advance the workflow
@@ -4872,13 +4925,25 @@ event_loop:
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
 
     // Chain: planned -> ready -> measured
-    write_event_to_jsonl(&events_path, "experiment.planned", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.planned",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
 
-    write_event_to_jsonl(&events_path, "experiment.ready", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.ready",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
 
-    write_event_to_jsonl(&events_path, "experiment.measured", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.measured",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
 
     // Interleave periodic.review - this should NOT advance the experiment chain
@@ -4886,14 +4951,21 @@ event_loop:
     let _ = event_loop.process_events_from_jsonl();
 
     // Now try to evaluate before scoring - still rejected
-    write_event_to_jsonl(&events_path, "experiment.evaluated", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.evaluated",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
 
     // periodic.review is not in the experiment chain, so workflow should still be at measured
     // evaluated was rejected because scored was never emitted
     // Get phase AFTER processing to avoid borrow conflict
     // No correlation config → global instance (None key)
-    let phase = event_loop.state.workflow_progress.get_phase("experiment", None);
+    let phase = event_loop
+        .state
+        .workflow_progress
+        .get_phase("experiment", None);
     assert_eq!(
         phase,
         Some(2), // Still at measured (phase 2) - evaluated was rejected
@@ -4928,13 +5000,25 @@ event_loop:
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
 
     // Chain: planned -> ready -> measured (missing scored and evaluated)
-    write_event_to_jsonl(&events_path, "experiment.planned", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.planned",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
 
-    write_event_to_jsonl(&events_path, "experiment.ready", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.ready",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
 
-    write_event_to_jsonl(&events_path, "experiment.measured", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.measured",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
 
     // Try LOOP_COMPLETE before chain is complete
@@ -4975,19 +5059,39 @@ event_loop:
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
 
     // Complete chain: planned -> ready -> measured -> scored -> evaluated
-    write_event_to_jsonl(&events_path, "experiment.planned", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.planned",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
 
-    write_event_to_jsonl(&events_path, "experiment.ready", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.ready",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
 
-    write_event_to_jsonl(&events_path, "experiment.measured", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.measured",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
 
-    write_event_to_jsonl(&events_path, "experiment.scored", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.scored",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
 
-    write_event_to_jsonl(&events_path, "experiment.evaluated", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.evaluated",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
 
     // LOOP_COMPLETE should now be accepted
@@ -5032,23 +5136,55 @@ event_loop:
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
 
     // Experiment 1: fully complete
-    write_event_to_jsonl(&events_path, "experiment.planned", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.planned",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
-    write_event_to_jsonl(&events_path, "experiment.ready", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.ready",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
-    write_event_to_jsonl(&events_path, "experiment.measured", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.measured",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
-    write_event_to_jsonl(&events_path, "experiment.scored", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.scored",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
-    write_event_to_jsonl(&events_path, "experiment.evaluated", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.evaluated",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
 
     // Experiment 2: only at measured
-    write_event_to_jsonl(&events_path, "experiment.planned", r#"{"experiment_id": "exp-2"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.planned",
+        r#"{"experiment_id": "exp-2"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
-    write_event_to_jsonl(&events_path, "experiment.ready", r#"{"experiment_id": "exp-2"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.ready",
+        r#"{"experiment_id": "exp-2"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
-    write_event_to_jsonl(&events_path, "experiment.measured", r#"{"experiment_id": "exp-2"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.measured",
+        r#"{"experiment_id": "exp-2"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
 
     let progress = &event_loop.state.workflow_progress;
@@ -5068,11 +5204,18 @@ event_loop:
     );
 
     // Cannot evaluate exp-2 yet (needs scored first)
-    write_event_to_jsonl(&events_path, "experiment.evaluated", r#"{"experiment_id": "exp-2"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.evaluated",
+        r#"{"experiment_id": "exp-2"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
 
     // Get phase AFTER processing to verify evaluated was rejected
-    let exp2_phase = event_loop.state.workflow_progress.get_phase("experiment", Some("exp-2"));
+    let exp2_phase = event_loop
+        .state
+        .workflow_progress
+        .get_phase("experiment", Some("exp-2"));
     assert_eq!(
         exp2_phase,
         Some(2), // Still at measured - evaluated was rejected until exp-2 is scored
@@ -5123,15 +5266,31 @@ event_loop:
     });
 
     // Advance to phase 2 (measured)
-    write_event_to_jsonl(&events_path, "experiment.planned", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.planned",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
-    write_event_to_jsonl(&events_path, "experiment.ready", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.ready",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
-    write_event_to_jsonl(&events_path, "experiment.measured", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.measured",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
 
     // Now try to skip scoring and go directly to evaluated - should be rejected
-    write_event_to_jsonl(&events_path, "experiment.evaluated", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.evaluated",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
 
     // Verify that a task.resume event was published with actionable context
@@ -5161,7 +5320,6 @@ event_loop:
     );
 }
 
-
 #[test]
 fn test_workflow_guard_advisory_mode_accepts_out_of_order() {
     use tempfile::TempDir;
@@ -5189,20 +5347,34 @@ event_loop:
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
 
     // Skip ahead to evaluated without scoring — advisory should accept it
-    write_event_to_jsonl(&events_path, "experiment.planned", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.planned",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
 
-    write_event_to_jsonl(&events_path, "experiment.evaluated", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.evaluated",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
 
     // evaluated should be recorded as seen (in seen_topics)
     assert!(
-        event_loop.state.seen_topics.contains("experiment.evaluated"),
+        event_loop
+            .state
+            .seen_topics
+            .contains("experiment.evaluated"),
         "Advisory mode should accept out-of-order events and record them as seen"
     );
 
     // Workflow progress should NOT advance for the skipped phase (advisory only advances valid phases)
-    let phase = event_loop.state.workflow_progress.get_phase("experiment", None);
+    let phase = event_loop
+        .state
+        .workflow_progress
+        .get_phase("experiment", None);
     assert_eq!(
         phase,
         Some(0),
@@ -5222,8 +5394,8 @@ event_loop:
 
 #[test]
 fn test_workflow_guard_correlation_extraction_failure_rejects_event() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
     let temp_dir = TempDir::new().unwrap();
@@ -5258,10 +5430,17 @@ event_loop:
     });
 
     // Valid first event with correlation key
-    write_event_to_jsonl(&events_path, "experiment.planned", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.planned",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
     assert_eq!(
-        event_loop.state.workflow_progress.get_phase("experiment", Some("exp-1")),
+        event_loop
+            .state
+            .workflow_progress
+            .get_phase("experiment", Some("exp-1")),
         Some(0)
     );
 
@@ -5269,25 +5448,42 @@ event_loop:
     write_event_to_jsonl(&events_path, "experiment.scored", r"not-json-at-all");
     let _ = event_loop.process_events_from_jsonl();
     assert_eq!(
-        event_loop.state.workflow_progress.get_phase("experiment", Some("exp-1")),
+        event_loop
+            .state
+            .workflow_progress
+            .get_phase("experiment", Some("exp-1")),
         Some(0),
         "Event with malformed JSON should not advance workflow"
     );
 
     // Event with missing correlation key should be rejected
-    write_event_to_jsonl(&events_path, "experiment.scored", r#"{"other_field": "value"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.scored",
+        r#"{"other_field": "value"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
     assert_eq!(
-        event_loop.state.workflow_progress.get_phase("experiment", Some("exp-1")),
+        event_loop
+            .state
+            .workflow_progress
+            .get_phase("experiment", Some("exp-1")),
         Some(0),
         "Event with missing correlation key should not advance workflow"
     );
 
     // Event with non-string correlation value should be rejected
-    write_event_to_jsonl(&events_path, "experiment.scored", r#"{"experiment_id": 123}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.scored",
+        r#"{"experiment_id": 123}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
     assert_eq!(
-        event_loop.state.workflow_progress.get_phase("experiment", Some("exp-1")),
+        event_loop
+            .state
+            .workflow_progress
+            .get_phase("experiment", Some("exp-1")),
         Some(0),
         "Event with non-string correlation value should not advance workflow"
     );
@@ -5301,10 +5497,17 @@ event_loop:
     );
 
     // Finally, a valid event should be accepted and allow recovery
-    write_event_to_jsonl(&events_path, "experiment.scored", r#"{"experiment_id": "exp-1"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.scored",
+        r#"{"experiment_id": "exp-1"}"#,
+    );
     let _ = event_loop.process_events_from_jsonl();
     assert_eq!(
-        event_loop.state.workflow_progress.get_phase("experiment", Some("exp-1")),
+        event_loop
+            .state
+            .workflow_progress
+            .get_phase("experiment", Some("exp-1")),
         Some(1),
         "Valid event after rejections should advance workflow"
     );
@@ -5343,18 +5546,30 @@ event_loop:
     let _ = event_loop.process_events_from_jsonl();
     write_event_to_jsonl(&events_path, "experiment.measured", r"{}");
     let _ = event_loop.process_events_from_jsonl();
-    assert_eq!(event_loop.state.workflow_progress.get_phase("experiment", None), Some(2));
+    assert_eq!(
+        event_loop
+            .state
+            .workflow_progress
+            .get_phase("experiment", None),
+        Some(2)
+    );
 
     // Try to skip scoring — rejected
     write_event_to_jsonl(&events_path, "experiment.evaluated", r"{}");
     let _ = event_loop.process_events_from_jsonl();
     assert_eq!(
-        event_loop.state.workflow_progress.get_phase("experiment", None),
+        event_loop
+            .state
+            .workflow_progress
+            .get_phase("experiment", None),
         Some(2),
         "Progress should remain at measured after rejected evaluated"
     );
     assert!(
-        !event_loop.state.seen_topics.contains("experiment.evaluated"),
+        !event_loop
+            .state
+            .seen_topics
+            .contains("experiment.evaluated"),
         "Rejected event should not be recorded as seen"
     );
 
@@ -5362,7 +5577,10 @@ event_loop:
     write_event_to_jsonl(&events_path, "experiment.scored", r"{}");
     let _ = event_loop.process_events_from_jsonl();
     assert_eq!(
-        event_loop.state.workflow_progress.get_phase("experiment", None),
+        event_loop
+            .state
+            .workflow_progress
+            .get_phase("experiment", None),
         Some(3),
         "Scored should advance progress after recovery"
     );
@@ -5371,7 +5589,10 @@ event_loop:
     write_event_to_jsonl(&events_path, "experiment.evaluated", r"{}");
     let _ = event_loop.process_events_from_jsonl();
     assert_eq!(
-        event_loop.state.workflow_progress.get_phase("experiment", None),
+        event_loop
+            .state
+            .workflow_progress
+            .get_phase("experiment", None),
         Some(4),
         "Evaluated should be accepted after scoring"
     );
@@ -5416,18 +5637,26 @@ event_loop:
     let _ = event_loop.process_events_from_jsonl();
     write_event_to_jsonl(&events_path, "experiment.ready", r"{}");
     let _ = event_loop.process_events_from_jsonl();
-    assert_eq!(event_loop.state.workflow_progress.get_phase("experiment", None), Some(1));
+    assert_eq!(
+        event_loop
+            .state
+            .workflow_progress
+            .get_phase("experiment", None),
+        Some(1)
+    );
 
     // Re-emit planned (phase 0) — should be accepted idempotently, no regression
     write_event_to_jsonl(&events_path, "experiment.planned", r"{}");
     let _ = event_loop.process_events_from_jsonl();
     assert_eq!(
-        event_loop.state.workflow_progress.get_phase("experiment", None),
+        event_loop
+            .state
+            .workflow_progress
+            .get_phase("experiment", None),
         Some(1),
         "Re-emitting old phase should not regress progress"
     );
 }
-
 
 // ---------------------------------------------------------------------------
 // Isolated mode tests (U7)
@@ -5493,7 +5722,9 @@ hats:
 "#;
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
     let mut event_loop = EventLoop::new(config);
-    event_loop.bus.publish(Event::new("experiment.planned", "Plan ready"));
+    event_loop
+        .bus
+        .publish(Event::new("experiment.planned", "Plan ready"));
 
     let next = event_loop.next_hat().unwrap().clone();
     assert_eq!(next.as_str(), "implementer");
@@ -5546,7 +5777,10 @@ hats:
     assert!(result.had_events);
     // Only experiment.planned should be in seen_topics
     assert!(
-        event_loop.state().seen_topics.contains("experiment.planned"),
+        event_loop
+            .state()
+            .seen_topics
+            .contains("experiment.planned"),
         "First business event should be accepted"
     );
     // experiment.ready should NOT be accepted
@@ -5653,11 +5887,17 @@ event_loop:
 
     assert!(result.had_events);
     assert!(
-        event_loop.state().seen_topics.contains("experiment.evaluated"),
+        event_loop
+            .state()
+            .seen_topics
+            .contains("experiment.evaluated"),
         "Events should pass through when workflow_guards has empty chains"
     );
     assert!(
-        event_loop.state().seen_topics.contains("experiment.planned"),
+        event_loop
+            .state()
+            .seen_topics
+            .contains("experiment.planned"),
         "Events should pass through when workflow_guards has empty chains"
     );
 }
@@ -5673,11 +5913,7 @@ fn test_empty_required_events_allows_completion() {
     let agent_dir = temp_dir.path().join(".agent");
     fs::create_dir_all(&agent_dir).unwrap();
     let scratchpad_path = agent_dir.join("scratchpad.md");
-    fs::write(
-        &scratchpad_path,
-        "## Tasks\n- [x] Task 1 done\n",
-    )
-    .unwrap();
+    fs::write(&scratchpad_path, "## Tasks\n- [x] Task 1 done\n").unwrap();
 
     let mut config = RalphConfig::default();
     config.core.scratchpad.path = scratchpad_path.to_string_lossy().to_string();
@@ -5791,7 +6027,10 @@ event_loop:
 
     // When event is rejected, validated_events is empty, so had_events is false
     // But task.resume is published directly to bus during policy validation
-    assert!(!result.had_events, "Rejected events should not count as had_events");
+    assert!(
+        !result.had_events,
+        "Rejected events should not count as had_events"
+    );
     // Bad event should NOT be on bus, but task.resume should be
     let ralph_id = HatId::new("ralph");
     let pending = event_loop.bus.peek_pending(&ralph_id);
@@ -5825,7 +6064,6 @@ fn test_no_event_policy_skips_validation() {
     // Without event_policy, behavior should be unchanged
     assert!(event_loop.state().seen_topics.contains("test.event"));
 }
-
 
 #[test]
 fn test_wave_events_update_terminal_observed_for_policy() {
@@ -5867,14 +6105,23 @@ hats:
             "wave_total": 1,
         });
         writeln!(
-            std::fs::OpenOptions::new().create(true).append(true).open(&events_path).unwrap(),
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&events_path)
+                .unwrap(),
             "{}",
             event
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     let result = event_loop.process_events_from_jsonl_with_waves().unwrap();
-    assert_eq!(result.wave_events.len(), 1, "Wave event should be partitioned");
+    assert_eq!(
+        result.wave_events.len(),
+        1,
+        "Wave event should be partitioned"
+    );
     assert_eq!(result.wave_events[0].topic, "review.file");
 
     // Write a business event after the terminal topic
@@ -5882,7 +6129,10 @@ hats:
 
     let result = event_loop.process_events_from_jsonl().unwrap();
     // Business event after terminal should be rejected, so had_events is false
-    assert!(!result.had_events, "Business event after terminal should be rejected");
+    assert!(
+        !result.had_events,
+        "Business event after terminal should be rejected"
+    );
 
     // task.resume should be on the bus due to monotonicity violation
     let ralph_id = HatId::new("ralph");
@@ -5896,5 +6146,89 @@ hats:
     assert!(
         events.iter().any(|e| e.payload.contains("monotonicity")),
         "Violation message should mention monotonicity"
+    );
+}
+
+#[test]
+fn test_check_completion_event_is_idempotent() {
+    let config = RalphConfig::default();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+
+    let ralph_id = HatId::new("ralph");
+
+    // Set up completion request
+    event_loop.state.completion_requested = true;
+
+    // First call should succeed and set completion_handled
+    let result1 = event_loop.check_completion_event();
+    assert_eq!(result1, Some(TerminationReason::CompletionPromise));
+    assert!(event_loop.state.completion_handled);
+
+    // Capture bus state after first call
+    let pending_after_first = event_loop
+        .bus
+        .peek_pending(&ralph_id)
+        .map(|v| v.len())
+        .unwrap_or(0);
+
+    // Second call should return the same conclusion without side effects
+    let result2 = event_loop.check_completion_event();
+    assert_eq!(result2, Some(TerminationReason::CompletionPromise));
+
+    // Bus event count should not have increased
+    let pending_after_second = event_loop
+        .bus
+        .peek_pending(&ralph_id)
+        .map(|v| v.len())
+        .unwrap_or(0);
+    assert_eq!(
+        pending_after_second, pending_after_first,
+        "Second check_completion_event call should not publish extra bus events"
+    );
+}
+
+#[test]
+fn test_request_completion_fallback_ignored_when_already_handled() {
+    let config = RalphConfig::default();
+    let mut event_loop = EventLoop::new(config);
+
+    // Simulate that completion was already handled
+    event_loop.state.completion_handled = true;
+    event_loop.state.completion_requested = false;
+
+    // Text fallback request should be ignored
+    event_loop.request_completion_from_text_fallback();
+    assert!(
+        !event_loop.state.completion_requested,
+        "completion_requested should remain false when completion is already handled"
+    );
+}
+
+#[test]
+fn test_parsed_completion_event_ignored_when_already_handled() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.core.workspace_root = temp_dir.path().to_path_buf();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // Simulate that completion was already handled
+    event_loop.state.completion_handled = true;
+    event_loop.state.completion_requested = false;
+
+    // Write a completion event to JSONL
+    write_event_to_jsonl(&events_path, "LOOP_COMPLETE", "Done");
+
+    // Process events — the parsed completion event should be ignored
+    let _ = event_loop.process_events_from_jsonl();
+    assert!(
+        !event_loop.state.completion_requested,
+        "Parsed completion event should be ignored when completion_handled is true"
     );
 }

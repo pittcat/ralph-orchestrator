@@ -202,15 +202,16 @@ mod tests {
         let json = r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"Let me analyze this...","signature":"abc123"}]}}"#;
         let event = ClaudeStreamParser::parse_line(json).unwrap();
         match event {
-            ClaudeStreamEvent::Assistant { message, .. } => {
-                match &message.content[0] {
-                    ContentBlock::Thinking { thinking, signature } => {
-                        assert_eq!(thinking, "Let me analyze this...");
-                        assert_eq!(signature.as_deref(), Some("abc123"));
-                    }
-                    _ => panic!("Expected Thinking content"),
+            ClaudeStreamEvent::Assistant { message, .. } => match &message.content[0] {
+                ContentBlock::Thinking {
+                    thinking,
+                    signature,
+                } => {
+                    assert_eq!(thinking, "Let me analyze this...");
+                    assert_eq!(signature.as_deref(), Some("abc123"));
                 }
-            }
+                _ => panic!("Expected Thinking content"),
+            },
             _ => panic!("Expected Assistant event"),
         }
     }

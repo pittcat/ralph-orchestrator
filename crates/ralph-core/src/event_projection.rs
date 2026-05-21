@@ -15,7 +15,11 @@ use std::path::Path;
 /// the requested fields and appends a JSON object as a single JSONL line.
 pub fn apply_projection(event: &Event, rules: &[ProjectionRule], workspace_root: &Path) {
     for rule in rules {
-        if rule.trigger_events.iter().any(|t| t == event.topic.as_str()) {
+        if rule
+            .trigger_events
+            .iter()
+            .any(|t| t == event.topic.as_str())
+        {
             let projected = extract_fields(event, &rule.fields);
             let target_path = workspace_root.join(&rule.target_file);
             if let Err(e) = append_jsonl(&target_path, &projected) {
@@ -180,7 +184,11 @@ mod tests {
         let rules = vec![ProjectionRule {
             name: "nested".to_string(),
             trigger_events: vec!["build.done".to_string()],
-            fields: vec!["status".to_string(), "count".to_string(), "missing".to_string()],
+            fields: vec![
+                "status".to_string(),
+                "count".to_string(),
+                "missing".to_string(),
+            ],
             target_file: "nested.jsonl".to_string(),
             mode: crate::config::ProjectionMode::Append,
         }];
