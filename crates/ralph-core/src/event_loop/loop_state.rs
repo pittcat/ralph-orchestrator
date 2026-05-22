@@ -44,8 +44,8 @@ pub struct LoopState {
     pub consecutive_malformed_events: u32,
     /// Whether a completion event has been observed in JSONL.
     pub completion_requested: bool,
-    /// Whether the completion event has already been handled (prevents duplicate side effects).
-    pub completion_handled: bool,
+    /// Whether the completion event has already been honored (prevents duplicate side effects).
+    pub completion_honored: bool,
 
     /// Per-hat activation counts (used for max_activations).
     pub hat_activation_counts: HashMap<HatId, u32>,
@@ -99,7 +99,7 @@ impl Default for LoopState {
             abandoned_task_redispatches: 0,
             consecutive_malformed_events: 0,
             completion_requested: false,
-            completion_handled: false,
+            completion_honored: false,
             hat_activation_counts: HashMap::new(),
             exhausted_hats: HashSet::new(),
             last_checkin_at: None,

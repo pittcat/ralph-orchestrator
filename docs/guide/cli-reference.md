@@ -259,6 +259,11 @@ ralph emit <TOPIC> [PAYLOAD] [OPTIONS]
 | `-j, --json` | Parse payload as JSON object |
 | `--ts <TIMESTAMP>` | Override event timestamp |
 | `--file <PATH>` | Events file path (`.ralph/events.jsonl`) |
+| `--policy-check` | Validate event against current event policy before emitting |
+| `--unsafe-no-policy-check` | Bypass mandatory policy check (only when config permits) |
+| `--hat <HAT>` | Hat that published this event (falls back to `$RALPH_CURRENT_HAT`) |
+| `--triggered <HAT>` | Target hat triggered by this event (falls back to `$RALPH_TRIGGERED_HAT`) |
+| `--source <SOURCE>` | Source identifier for this event (falls back to `$RALPH_EVENT_SOURCE`) |
 
 ### ralph clean
 
@@ -466,6 +471,10 @@ Supported shells: `bash`, `elvish`, `fish`, `powershell`, `zsh`.
 | `RALPH_WAVE_ID` | Wave correlation ID (set on wave workers) |
 | `RALPH_WAVE_INDEX` | 0-based worker index within the wave |
 | `RALPH_EVENTS_FILE` | Per-worker events file path (set on wave workers) |
+| `RALPH_CURRENT_HAT` | Current hat ID injected by the loop runner |
+| `RALPH_CURRENT_LOOP_ID` | Current loop ID injected by the loop runner |
+| `RALPH_TRIGGERED_HAT` | Target hat triggered by the current event |
+| `RALPH_EVENT_SOURCE` | Override source identifier for CLI emits |
 
 ## Shell Completion
 

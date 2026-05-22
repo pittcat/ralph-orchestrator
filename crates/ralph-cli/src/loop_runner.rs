@@ -1735,6 +1735,17 @@ pub async fn run_loop_impl(
             effective_backend.args.extend(args);
         }
 
+        // Inject hat execution context into backend environment
+        let events_path = resolve_current_events_path(&ctx);
+        let triggered_hat = event_loop.triggered_hat().map(|h| h.as_str().to_string());
+        inject_hat_execution_env(
+            &mut effective_backend,
+            display_hat.as_str(),
+            &loop_id,
+            &events_path,
+            triggered_hat.as_deref(),
+        );
+
         // Step 3: Get timeout from config based on actual backend being used
         let timeout_secs = config.adapter_settings(&backend_name_for_timeout).timeout;
         let timeout = Some(Duration::from_secs(timeout_secs));
@@ -2454,6 +2465,7 @@ pub async fn run_loop_impl(
                 enable_rpc,
                 rpc_event_tx.as_ref(),
                 tui_state.as_ref(),
+                &loop_id,
             )
             .await;
         }
@@ -4194,6 +4206,38 @@ fn resolve_current_events_path(ctx: &LoopContext) -> PathBuf {
         .unwrap_or_else(|| ctx.events_path())
 }
 
+/// Injects Ralph hat execution context environment variables into a backend.
+/// Overwrites any existing Ralph reserved variables.
+fn inject_hat_execution_env(
+    backend: &mut CliBackend,
+    current_hat: &str,
+    loop_id: &str,
+    events_file: &std::path::Path,
+    triggered_hat: Option<&str>,
+) {
+    backend.env_vars.retain(|(k, _)| {
+        !matches!(
+            k.as_str(),
+            "RALPH_CURRENT_HAT" | "RALPH_CURRENT_LOOP_ID" | "RALPH_EVENTS_FILE" | "RALPH_TRIGGERED_HAT"
+        )
+    });
+    backend
+        .env_vars
+        .push(("RALPH_CURRENT_HAT".into(), current_hat.into()));
+    backend
+        .env_vars
+        .push(("RALPH_CURRENT_LOOP_ID".into(), loop_id.into()));
+    backend.env_vars.push((
+        "RALPH_EVENTS_FILE".into(),
+        events_file.display().to_string(),
+    ));
+    if let Some(triggered) = triggered_hat {
+        backend
+            .env_vars
+            .push(("RALPH_TRIGGERED_HAT".into(), triggered.into()));
+    }
+}
+
 fn prepare_tui_iteration(
     tui_state: &Arc<std::sync::Mutex<ralph_tui::TuiState>>,
     hat_display: String,
@@ -5040,6 +5084,7 @@ async fn handle_wave_events(
     enable_rpc: bool,
     rpc_event_tx: Option<&tokio::sync::mpsc::Sender<RpcEvent>>,
     tui_state: Option<&Arc<std::sync::Mutex<ralph_tui::TuiState>>>,
+    loop_id: &str,
 ) {
     let Some(detected) = ralph_core::detect_wave_events(wave_events, event_loop.registry()) else {
         return;
@@ -5127,6 +5172,7 @@ async fn handle_wave_events(
         out.use_colors,
         out.rpc_tx.cloned(),
         out.tui.map(Arc::clone),
+        &loop_id,
     )
     .await;
 
@@ -5228,6 +5274,7 @@ async fn execute_wave(
     use_colors: bool,
     rpc_event_tx: Option<tokio::sync::mpsc::Sender<RpcEvent>>,
     tui_state: Option<Arc<std::sync::Mutex<ralph_tui::TuiState>>>,
+    loop_id: &str,
 ) -> Result<ralph_core::CompletedWave> {
     use ralph_core::{WaveTracker, WaveWorkerContext, build_wave_worker_prompt};
 
@@ -5310,6 +5357,15 @@ async fn execute_wave(
                 worker_events_file.display().to_string(),
             ),
         ]);
+
+        // Inject hat execution context for wave worker
+        inject_hat_execution_env(
+            &mut worker_backend,
+            wave.target_hat.as_str(),
+            loop_id,
+            &worker_events_file,
+            None,
+        );
 
         // Apply hat backend args
         if let Some(ref args) = hat_config.backend_args {
@@ -9954,6 +10010,9 @@ hats:
             topic: "review.perspective".to_string(),
             payload: Some(payload),
             ts: "2026-01-01T00:00:00Z".to_string(),
+            hat: None,
+            triggered: None,
+            source: None,
             wave_id: Some("w-test".to_string()),
             wave_index: Some(0),
             wave_total: Some(1),
@@ -10028,7 +10087,7 @@ hats:
 
         let events_file = temp_dir.path().join("events.jsonl");
         let wave = make_test_wave_with_timeout(vec!["review.done".to_string()], timeout_secs);
-        execute_wave(&wave, &backend, &events_file, false, false, None, None)
+        execute_wave(&wave, &backend, &events_file, false, false, None, None, "test-loop")
             .await
             .expect("wave execution")
     }
@@ -10057,7 +10116,7 @@ hats:
 
         let events_file = temp_dir.path().join("events.jsonl");
         let wave = make_test_wave(vec!["review.done".to_string()]);
-        execute_wave(&wave, &backend, &events_file, false, false, None, None)
+        execute_wave(&wave, &backend, &events_file, false, false, None, None, "test-loop")
             .await
             .expect("wave execution")
     }
@@ -10120,7 +10179,7 @@ hats:
             30,
             task_payload.to_string(),
         );
-        let completed = execute_wave(&wave, &backend, &events_file, false, false, None, None)
+        let completed = execute_wave(&wave, &backend, &events_file, false, false, None, None, "test-loop")
             .await
             .expect("wave execution");
         let captured: CapturedWaveInvocation = serde_json::from_str(
@@ -10178,6 +10237,7 @@ hats:
             false,
             None,
             None,
+            "test-loop",
         )
         .await
         .expect("wave execution")
@@ -10221,6 +10281,7 @@ hats:
             false,
             None,
             None,
+            "test-loop",
         )
         .await
         .expect("wave execution");
@@ -10256,7 +10317,7 @@ hats:
         wave.hat_config.backend_args = backend_args;
         let backend = CliBackend::from_name("kiro-acp").expect("named ACP backend");
 
-        let completed = execute_wave(&wave, &backend, &events_file, false, false, None, None)
+        let completed = execute_wave(&wave, &backend, &events_file, false, false, None, None, "test-loop")
             .await
             .expect("wave execution");
         let captured: CapturedAcpWaveInvocation = serde_json::from_str(
@@ -10311,6 +10372,7 @@ hats:
             false,
             None,
             None,
+            "test-loop",
         )
         .await
         .expect("wave execution");
@@ -10327,6 +10389,9 @@ hats:
             topic: topic.to_string(),
             payload: Some(payload.to_string()),
             ts: "2026-01-01T00:00:00Z".to_string(),
+            hat: None,
+            triggered: None,
+            source: None,
             wave_id: None,
             wave_index: None,
             wave_total: None,
@@ -12103,6 +12168,7 @@ EOF"#,
             false,
             None,
             None,
+            "test-loop",
         )
         .await
         .expect("wave execution");
@@ -13130,5 +13196,57 @@ hats:
             r#"[Tool] Bash: ralph emit "hypothesis.test" "payload""#
         ));
         assert!(!output_mentions_ralph_emit("[Tool] Bash: cargo test"));
+    }
+
+    #[test]
+    fn test_inject_hat_execution_env_sets_reserved_and_preserves_user_vars() {
+        let mut backend = CliBackend {
+            command: "echo".into(),
+            args: vec![],
+            prompt_mode: ralph_adapters::PromptMode::Arg,
+            prompt_flag: None,
+            output_format: BackendOutputFormat::Text,
+            env_vars: vec![
+                ("USER_VAR".into(), "keep".into()),
+                ("RALPH_CURRENT_HAT".into(), "old-hat".into()),
+            ],
+        };
+        inject_hat_execution_env(
+            &mut backend,
+            "reviewer",
+            "loop-42",
+            std::path::Path::new("/tmp/events.jsonl"),
+            Some("synthesizer"),
+        );
+        let map: std::collections::HashMap<_, _> = backend.env_vars.into_iter().collect();
+        assert_eq!(map.get("USER_VAR").unwrap(), "keep");
+        assert_eq!(map.get("RALPH_CURRENT_HAT").unwrap(), "reviewer");
+        assert_eq!(map.get("RALPH_CURRENT_LOOP_ID").unwrap(), "loop-42");
+        assert_eq!(map.get("RALPH_EVENTS_FILE").unwrap(), "/tmp/events.jsonl");
+        assert_eq!(map.get("RALPH_TRIGGERED_HAT").unwrap(), "synthesizer");
+    }
+
+    #[test]
+    fn test_inject_hat_execution_env_omits_triggered_when_none() {
+        let mut backend = CliBackend {
+            command: "echo".into(),
+            args: vec![],
+            prompt_mode: ralph_adapters::PromptMode::Arg,
+            prompt_flag: None,
+            output_format: BackendOutputFormat::Text,
+            env_vars: vec![],
+        };
+        inject_hat_execution_env(
+            &mut backend,
+            "ralph",
+            "loop-1",
+            std::path::Path::new(".ralph/events.jsonl"),
+            None,
+        );
+        let keys: Vec<_> = backend.env_vars.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(keys.contains(&"RALPH_CURRENT_HAT"));
+        assert!(keys.contains(&"RALPH_CURRENT_LOOP_ID"));
+        assert!(keys.contains(&"RALPH_EVENTS_FILE"));
+        assert!(!keys.contains(&"RALPH_TRIGGERED_HAT"));
     }
 }

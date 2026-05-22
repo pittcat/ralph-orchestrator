@@ -705,4 +705,43 @@ mod tests {
         assert!(result.output.contains("\"assistant.message\""));
         assert_eq!(String::from_utf8(output).unwrap(), "hello from copilot\n");
     }
+
+    #[tokio::test]
+    async fn test_execute_passes_ralph_reserved_env_vars() {
+        let backend = CliBackend {
+            command: "env".to_string(),
+            args: vec![],
+            prompt_mode: PromptMode::Stdin,
+            prompt_flag: None,
+            output_format: OutputFormat::Text,
+            env_vars: vec![
+                ("RALPH_CURRENT_HAT".into(), "reviewer".into()),
+                ("RALPH_CURRENT_LOOP_ID".into(), "loop-123".into()),
+                ("RALPH_EVENTS_FILE".into(), "/tmp/events.jsonl".into()),
+                ("RALPH_TRIGGERED_HAT".into(), "synthesizer".into()),
+            ],
+        };
+
+        let executor = CliExecutor::new(backend);
+        let mut output = Vec::new();
+        let result = executor.execute("", &mut output, None, false).await.unwrap();
+        assert!(result.success);
+        let stdout = String::from_utf8(output).unwrap();
+        assert!(
+            stdout.contains("RALPH_CURRENT_HAT=reviewer"),
+            "missing CURRENT_HAT: {stdout}"
+        );
+        assert!(
+            stdout.contains("RALPH_CURRENT_LOOP_ID=loop-123"),
+            "missing LOOP_ID: {stdout}"
+        );
+        assert!(
+            stdout.contains("RALPH_EVENTS_FILE=/tmp/events.jsonl"),
+            "missing EVENTS_FILE: {stdout}"
+        );
+        assert!(
+            stdout.contains("RALPH_TRIGGERED_HAT=synthesizer"),
+            "missing TRIGGERED_HAT: {stdout}"
+        );
+    }
 }

@@ -1152,6 +1152,35 @@ pub struct EventPolicyConfig {
     pub terminal_topics: Vec<String>,
     #[serde(default)]
     pub business_topics: Vec<String>,
+    /// When true, CLI emit commands must pass policy checks even without `--policy-check`.
+    #[serde(default)]
+    pub require_policy_check_for_cli_emit: bool,
+    /// When true, allow unsafe CLI emit bypasses. Defaults to true for backward compatibility.
+    #[serde(default = "default_true")]
+    pub allow_unsafe_cli_emit: bool,
+    /// When true, CLI emit must include provenance (`hat` / `triggered`).
+    #[serde(default)]
+    pub require_emit_provenance: bool,
+    /// Behavior after a terminal event has been observed.
+    #[serde(default)]
+    pub completion_after_terminal: CompletionAfterTerminalConfig,
+}
+
+impl Default for EventPolicyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: EventPolicyMode::default(),
+            on_violation: ViolationAction::default(),
+            schemas: HashMap::new(),
+            terminal_topics: Vec::new(),
+            business_topics: Vec::new(),
+            require_policy_check_for_cli_emit: false,
+            allow_unsafe_cli_emit: true,
+            require_emit_provenance: false,
+            completion_after_terminal: CompletionAfterTerminalConfig::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -1176,6 +1205,43 @@ pub enum ViolationAction {
     Hold,
     /// Block the event silently (drop it).
     Block,
+}
+
+/// Action to take for events that arrive after a terminal/completion event.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionAfterTerminalAction {
+    /// Log a warning but allow the event.
+    #[default]
+    Warn,
+    /// Reject the event and publish a recovery event.
+    Reject,
+    /// Silently ignore the event.
+    Ignore,
+}
+
+/// Configuration for behavior after a terminal event has been observed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompletionAfterTerminalConfig {
+    /// Action for duplicate terminal events after completion.
+    #[serde(default)]
+    pub duplicate_terminal: CompletionAfterTerminalAction,
+    /// Action for business events after completion.
+    #[serde(default)]
+    pub business_after_completion: CompletionAfterTerminalAction,
+    /// Whether to write diagnostic events for blocked/ignored events.
+    #[serde(default)]
+    pub write_diagnostic_event: bool,
+}
+
+impl Default for CompletionAfterTerminalConfig {
+    fn default() -> Self {
+        Self {
+            duplicate_terminal: CompletionAfterTerminalAction::Warn,
+            business_after_completion: CompletionAfterTerminalAction::Warn,
+            write_diagnostic_event: false,
+        }
+    }
 }
 
 /// Schema for validating events of a specific topic.
@@ -4999,6 +5065,103 @@ event_loop:
         assert!(
             err.contains("unknown variant `"),
             "Error should mention unknown variant for empty string, got: {}",
+            err
+        );
+    }
+
+    // ── EventPolicyConfig new fields tests ──
+
+    #[test]
+    fn test_event_policy_old_config_without_new_fields_parses() {
+        let yaml = r"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    schemas:
+      experiment.planned:
+        payload: json_object
+        required_fields:
+          - task_key
+    terminal_topics:
+      - LOOP_COMPLETE
+    business_topics:
+      - experiment.planned
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let policy = config.event_loop.event_policy.as_ref().unwrap();
+        assert!(!policy.require_policy_check_for_cli_emit);
+        assert!(policy.allow_unsafe_cli_emit);
+        assert!(!policy.require_emit_provenance);
+        assert_eq!(
+            policy.completion_after_terminal.duplicate_terminal,
+            CompletionAfterTerminalAction::Warn
+        );
+        assert_eq!(
+            policy.completion_after_terminal.business_after_completion,
+            CompletionAfterTerminalAction::Warn
+        );
+        assert!(!policy.completion_after_terminal.write_diagnostic_event);
+    }
+
+    #[test]
+    fn test_event_policy_strict_config_parses() {
+        let yaml = r"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    require_policy_check_for_cli_emit: true
+    allow_unsafe_cli_emit: false
+    require_emit_provenance: true
+    completion_after_terminal:
+      duplicate_terminal: reject
+      business_after_completion: ignore
+      write_diagnostic_event: true
+    schemas:
+      experiment.planned:
+        payload: json_object
+    terminal_topics:
+      - LOOP_COMPLETE
+    business_topics:
+      - experiment.planned
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let policy = config.event_loop.event_policy.as_ref().unwrap();
+        assert!(policy.require_policy_check_for_cli_emit);
+        assert!(!policy.allow_unsafe_cli_emit);
+        assert!(policy.require_emit_provenance);
+        assert_eq!(
+            policy.completion_after_terminal.duplicate_terminal,
+            CompletionAfterTerminalAction::Reject
+        );
+        assert_eq!(
+            policy.completion_after_terminal.business_after_completion,
+            CompletionAfterTerminalAction::Ignore
+        );
+        assert!(policy.completion_after_terminal.write_diagnostic_event);
+    }
+
+    #[test]
+    fn test_event_policy_invalid_completion_action_fails_parsing() {
+        let yaml = r"
+event_loop:
+  event_policy:
+    enabled: true
+    completion_after_terminal:
+      duplicate_terminal: invalid_action
+";
+        let result: Result<RalphConfig, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_err(),
+            "Invalid completion_after_terminal action must fail parsing"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unknown variant `invalid_action`"),
+            "Error should mention unknown variant, got: {}",
             err
         );
     }

@@ -10,7 +10,7 @@ pub use loop_state::{LoopState, WorkflowProgress};
 
 use crate::config::{HatBackend, HatExecutionMode, InjectMode, RalphConfig, ScratchpadConfig};
 use crate::event_parser::{EventParser, MutationEvidence, MutationStatus};
-use crate::event_policy::{PolicyDecision, PolicyRuntimeState, validate_event};
+use crate::event_policy::{PolicyDecision, PolicyRuntimeState, check_completion_guard, check_completion_honored, validate_event};
 use crate::event_reader::{Event as JsonlEvent, EventReader};
 use crate::hat_registry::HatRegistry;
 use crate::hatless_ralph::HatlessRalph;
@@ -370,12 +370,83 @@ fn apply_event_policy_validation(
     policy_config: &crate::config::EventPolicyConfig,
     policy_state: &mut PolicyRuntimeState,
     bus: &mut EventBus,
+    write_diagnostic: bool,
 ) -> PolicyValidationResult {
     let mut validated_events = Vec::with_capacity(events.len());
     let mut hold_triggered = false;
     let mut hold_reason = None;
 
     for event in events {
+        // Completion-honored guard takes precedence: after a completion promise
+        // has been accepted, subsequent terminal/business events are filtered
+        // according to completion_after_terminal config.
+        if let Some(decision) = check_completion_honored(&event.topic, policy_config, policy_state) {
+            match decision {
+                PolicyDecision::Accept => {
+                    validated_events.push(event);
+                }
+                PolicyDecision::Warn(findings) => {
+                    for finding in findings {
+                        let diagnostic = Event::new(
+                            "event.policy_warning",
+                            format!(
+                                "Completion-guard warning for '{}': {}",
+                                event.topic, finding.message
+                            ),
+                        );
+                        bus.publish(diagnostic);
+                    }
+                    validated_events.push(event);
+                }
+                PolicyDecision::RejectWithResume(finding) => {
+                    let recovery_payload = format!(
+                        "EVENT_POLICY_REJECTED: event '{}' violates completion guard.\n{}\n\n\
+                         Wait for the correct event schema before emitting this event. \
+                         The loop will continue to allow recovery.",
+                        event.topic, finding.message
+                    );
+                    let recovery_event = Event::new("task.resume", &recovery_payload);
+                    bus.publish(recovery_event);
+                }
+                PolicyDecision::Hold(finding) => {
+                    hold_triggered = true;
+                    hold_reason = Some(finding.message.clone());
+                    let recovery_payload = format!(
+                        "EVENT_POLICY_HOLD: event '{}' violates completion guard.\n{}\n\n\
+                         Loop held due to completion guard violation. Use resume to continue.",
+                        event.topic, finding.message
+                    );
+                    let recovery_event = Event::new("task.resume", &recovery_payload);
+                    bus.publish(recovery_event);
+                }
+                PolicyDecision::Block(finding) => {
+                    if write_diagnostic {
+                        let diagnostic = Event::new(
+                            "event.completion.blocked",
+                            format!(
+                                "Completion guard blocked '{}': {}",
+                                event.topic, finding.message
+                            ),
+                        );
+                        bus.publish(diagnostic);
+                    }
+                }
+                PolicyDecision::Ignore(finding) => {
+                    if write_diagnostic {
+                        let diagnostic = Event::new(
+                            "event.completion.ignored",
+                            format!(
+                                "Completion guard ignored '{}': {}",
+                                event.topic, finding.message
+                            ),
+                        );
+                        bus.publish(diagnostic);
+                    }
+                }
+            }
+            continue;
+        }
+
         let decision = validate_event(
             &event.topic,
             event.payload.as_deref(),
@@ -422,6 +493,9 @@ fn apply_event_policy_validation(
             }
             PolicyDecision::Block(_finding) => {
                 // Silently drop the event without publishing recovery or hold artifacts
+            }
+            PolicyDecision::Ignore(_finding) => {
+                // Silently ignore the event without publishing recovery or hold artifacts
             }
         }
     }
@@ -902,7 +976,7 @@ impl EventLoop {
     /// `check_completion_event()` can apply all safety checks (persistent mode,
     /// required events, runtime tasks) before terminating.
     pub fn request_completion_from_text_fallback(&mut self) {
-        if self.state.completion_handled {
+        if self.state.completion_honored {
             debug!("Completion already handled, ignoring text fallback request");
             return;
         }
@@ -916,7 +990,7 @@ impl EventLoop {
     /// [`request_completion_from_text_fallback`].
     pub fn check_completion_event(&mut self) -> Option<TerminationReason> {
         // Idempotency: if we already handled completion, return the same conclusion
-        if self.state.completion_handled {
+        if self.state.completion_honored {
             return Some(TerminationReason::CompletionPromise);
         }
 
@@ -1026,7 +1100,20 @@ impl EventLoop {
             },
         );
 
-        self.state.completion_handled = true;
+        self.state.completion_honored = true;
+
+        // Record completion honored in policy runtime state for downstream guarding
+        if let Some(ref policy_config) = self.config.event_loop.event_policy
+            && policy_config.enabled
+        {
+            if let Some(ref mut policy_state) = self.state.policy_runtime_state {
+                policy_state.completion_honored = true;
+                policy_state.completion_topic =
+                    Some(self.config.event_loop.completion_promise.clone());
+                policy_state.completion_iteration = Some(self.state.iteration);
+            }
+        }
+
         Some(TerminationReason::CompletionPromise)
     }
 
@@ -1138,6 +1225,11 @@ impl EventLoop {
                 }
             }
         }
+    }
+
+    /// Returns the hat that will be triggered by the next pending event, if any.
+    pub fn triggered_hat(&self) -> Option<HatId> {
+        self.next_hat().cloned()
     }
 
     /// Advances the event reader to the current end of the events file.
@@ -2257,7 +2349,7 @@ impl EventLoop {
             // The normal path (process_events_from_jsonl) sets this when reading from
             // JSONL, but default_publishes bypasses JSONL entirely.
             if default_topic.as_str() == self.config.event_loop.completion_promise
-                && !self.state.completion_handled
+                && !self.state.completion_honored
             {
                 info!(
                     hat = %hat_id.as_str(),
@@ -2915,8 +3007,13 @@ impl EventLoop {
                 .state
                 .policy_runtime_state
                 .get_or_insert_with(PolicyRuntimeState::default);
-            let policy_result =
-                apply_event_policy_validation(events, policy_config, policy_state, &mut self.bus);
+            let policy_result = apply_event_policy_validation(
+                events,
+                policy_config,
+                policy_state,
+                &mut self.bus,
+                policy_config.completion_after_terminal.write_diagnostic_event,
+            );
             events = policy_result.events;
 
             // Write hold artifact if policy hold was triggered
@@ -2964,6 +3061,12 @@ impl EventLoop {
         let completion_topic = self.config.event_loop.completion_promise.as_str();
         let cancellation_topic = self.config.event_loop.cancellation_promise.clone();
         let total_events = events.len();
+        let mut completion_seen_in_batch = false;
+        let policy_config_ref = self.config.event_loop.event_policy.as_ref();
+        let write_diagnostic = policy_config_ref
+            .map(|c| c.completion_after_terminal.write_diagnostic_event)
+            .unwrap_or(false);
+
         for (index, event) in events.into_iter().enumerate() {
             let payload = event.payload.clone().unwrap_or_default();
 
@@ -2979,32 +3082,82 @@ impl EventLoop {
             }
 
             if event.topic == completion_topic {
-                if self.state.completion_handled {
+                if self.state.completion_honored {
                     debug!("Completion event already handled, ignoring duplicate");
                     continue;
                 }
-                if index + 1 == total_events {
-                    self.state.completion_requested = true;
-                    self.diagnostics.log_orchestration(
-                        self.state.iteration,
-                        "jsonl",
-                        crate::diagnostics::OrchestrationEvent::EventPublished {
-                            topic: event.topic.clone(),
-                        },
-                    );
-                    info!(
-                        topic = %event.topic,
-                        "Completion event detected in JSONL"
-                    );
-                } else {
-                    warn!(
-                        topic = %event.topic,
-                        index = index,
-                        total_events = total_events,
-                        "Completion event ignored because it was not the last event"
-                    );
-                }
+                // Completion event is accepted regardless of position in batch.
+                // Events AFTER it in the same batch are protected by the completion guard.
+                self.state.completion_requested = true;
+                completion_seen_in_batch = true;
+                self.diagnostics.log_orchestration(
+                    self.state.iteration,
+                    "jsonl",
+                    crate::diagnostics::OrchestrationEvent::EventPublished {
+                        topic: event.topic.clone(),
+                    },
+                );
+                info!(
+                    topic = %event.topic,
+                    position = index,
+                    batch_size = total_events,
+                    "Completion event detected in JSONL"
+                );
                 continue;
+            }
+
+            // Same-batch completion guard: events after a completion topic in the
+            // same batch are subject to completion_after_terminal filtering.
+            if completion_seen_in_batch {
+                if let Some(ref policy_config) = policy_config_ref
+                    && policy_config.enabled
+                {
+                    if let Some(decision) =
+                        check_completion_guard(&event.topic, policy_config, true)
+                    {
+                        match &decision {
+                            PolicyDecision::Block(finding) => {
+                                if write_diagnostic {
+                                    self.bus.publish(Event::new(
+                                        "event.completion.blocked",
+                                        format!(
+                                            "Same-batch completion guard blocked '{}': {}",
+                                            event.topic, finding.message
+                                        ),
+                                    ));
+                                }
+                            }
+                            PolicyDecision::Ignore(finding) => {
+                                if write_diagnostic {
+                                    self.bus.publish(Event::new(
+                                        "event.completion.ignored",
+                                        format!(
+                                            "Same-batch completion guard ignored '{}': {}",
+                                            event.topic, finding.message
+                                        ),
+                                    ));
+                                }
+                            }
+                            PolicyDecision::Warn(findings) => {
+                                for finding in findings {
+                                    self.bus.publish(Event::new(
+                                        "event.policy_warning",
+                                        format!(
+                                            "Same-batch completion guard warning for '{}': {}",
+                                            event.topic, finding.message
+                                        ),
+                                    ));
+                                }
+                                validated_events.push(Event::new(
+                                    event.topic.as_str(),
+                                    &payload,
+                                ));
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+                }
             }
 
             if event.topic == "build.done" {
@@ -3528,6 +3681,7 @@ impl EventLoop {
                 policy_config,
                 policy_state,
                 &mut self.bus,
+                policy_config.completion_after_terminal.write_diagnostic_event,
             );
 
             // Write hold artifact if policy hold was triggered

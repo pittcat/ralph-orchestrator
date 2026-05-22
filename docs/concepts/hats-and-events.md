@@ -54,6 +54,14 @@ Or with JSON payloads:
 ralph emit "review.done" --json '{"status": "approved", "issues": 0}'
 ```
 
+When Ralph runs a Hat backend, it automatically injects provenance environment variables (`RALPH_CURRENT_HAT`, `RALPH_CURRENT_LOOP_ID`, `RALPH_EVENTS_FILE`, and `RALPH_TRIGGERED_HAT`). This means Hats can usually emit without explicit `--hat` flags — the event log will carry the correct attribution automatically.
+
+For strict policy configs that require provenance, you can still pass flags explicitly:
+
+```bash
+ralph emit "experiment.planned" --json '{"task_key":"x"}' --hat strategist --triggered implementer
+```
+
 ## Event Routing
 
 Events are routed to hats based on subscription patterns:

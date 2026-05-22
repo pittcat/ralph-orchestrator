@@ -229,6 +229,13 @@ event_loop:
     enabled: true
     mode: observe              # observe | enforce
     on_violation: warn         # warn | reject_with_resume | hold | block
+    require_policy_check_for_cli_emit: false
+    allow_unsafe_cli_emit: true
+    require_emit_provenance: false
+    completion_after_terminal:
+      duplicate_terminal: warn
+      business_after_completion: warn
+      write_diagnostic_event: false
     schemas:
       experiment.planned:
         payload: json_object
@@ -258,9 +265,21 @@ event_loop:
 | `enabled` | boolean | `false` | Whether event policy is active |
 | `mode` | string | `observe` | `observe` — log violations only; `enforce` — act on violations |
 | `on_violation` | string | `warn` | Action when `mode: enforce` and a violation is found |
+| `require_policy_check_for_cli_emit` | boolean | `false` | When true, `ralph event emit` always runs policy checks |
+| `allow_unsafe_cli_emit` | boolean | `true` | When false, unsafe bypasses of CLI policy checks are disallowed |
+| `require_emit_provenance` | boolean | `false` | When true, CLI emit must include `hat` / `triggered` provenance |
+| `completion_after_terminal` | object | see below | Behavior after a terminal event has been observed |
 | `schemas` | map | `{}` | Per-topic schema definitions (see below) |
 | `terminal_topics` | list | `[]` | Topics that mark the end of a business session |
 | `business_topics` | list | `[]` | Topics that should not appear after a terminal topic |
+
+**`completion_after_terminal` fields:**
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `duplicate_terminal` | string | `warn` | Action when a duplicate terminal event arrives: `warn`, `reject`, `ignore` |
+| `business_after_completion` | string | `warn` | Action when a business event arrives after completion: `warn`, `reject`, `ignore` |
+| `write_diagnostic_event` | boolean | `false` | Write a diagnostic event when an event is blocked/ignored due to completion guards |
 
 **Schema fields (`schemas.<topic>`):**
 
@@ -705,6 +724,48 @@ hats:
       Review the implementation. No scratchpad needed.
 ```
 
+### Strict Event Policy
+
+Use this when you want Ralph to enforce typed payloads, prevent naked `ralph emit` bypass, and protect completion semantics.
+
+```yaml
+cli:
+  backend: "claude"
+
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    require_policy_check_for_cli_emit: true
+    allow_unsafe_cli_emit: false
+    require_emit_provenance: true
+    completion_after_terminal:
+      duplicate_terminal: reject
+      business_after_completion: ignore
+      write_diagnostic_event: true
+    schemas:
+      experiment.planned:
+        payload: json_object
+        required_fields:
+          - task_key
+          - hypothesis
+          - falsification_condition
+    terminal_topics:
+      - LOOP_COMPLETE
+    business_topics:
+      - experiment.planned
+```
+
+With this configuration:
+
+- `ralph emit` always validates against policy, even without `--policy-check`.
+- `--unsafe-no-policy-check` is disallowed.
+- Every CLI emit must include `--hat` or have `$RALPH_CURRENT_HAT` set.
+- After `LOOP_COMPLETE` is accepted, duplicate terminal events are rejected and subsequent business events are ignored.
+- Diagnostic events are written when the completion guard blocks an event.
+
 ### With Custom Guardrails
 
 ```yaml
@@ -728,6 +789,58 @@ core:
 | `RALPH_CONFIG` | Default config file path |
 | `RALPH_DIAGNOSTICS` | Enable diagnostics (`1`) |
 | `NO_COLOR` | Disable color output |
+
+## Migration Guidance for Downstream Skills
+
+If you maintain a Skill or wrapper that calls `ralph emit`, here is what changes with the new native capabilities.
+
+### What You Should Stop Doing
+
+- **Stop relying on `echo >> .ralph/events.jsonl`**. It bypasses policy, schema, and provenance. Use `ralph emit` exclusively.
+- **Stop writing provenance only to sidecar guard logs**. Pass `--hat` or rely on env injection so the main event log carries attribution.
+- **Stop assuming `LOOP_COMPLETE` is just another event**. After the first accepted completion, Ralph treats the loop as complete. Emitting more business events afterward is blocked or ignored depending on config.
+
+### What You Should Start Doing
+
+- **Pass `--hat <id>` on every `ralph emit`** (or rely on `$RALPH_CURRENT_HAT`).
+- **Pass `--triggered <id>`** when you know the downstream hat.
+- **Use `--policy-check`** during development, and rely on config-level `require_policy_check_for_cli_emit: true` in production.
+- **Use `--unsafe-no-policy-check` only for emergency manual bypass**, and only when the config allows it.
+
+### Environment Injection
+
+When Ralph runs a Hat backend, it automatically sets:
+
+| Variable | Value |
+|----------|-------|
+| `RALPH_CURRENT_HAT` | The hat currently executing |
+| `RALPH_CURRENT_LOOP_ID` | The active loop ID |
+| `RALPH_EVENTS_FILE` | Resolved path to the current events file |
+| `RALPH_TRIGGERED_HAT` | The hat triggered by the current event (if known) |
+
+This means a Hat running under Ralph can usually emit without any extra flags:
+
+```bash
+ralph emit experiment.planned --json '{"task_key":"x","hypothesis":"h","falsification_condition":"f"}'
+```
+
+The `hat` field is populated automatically from `$RALPH_CURRENT_HAT`.
+
+### Completion Monotonicity
+
+Ralph treats completion as a **loop-level monotonic state**:
+
+1. The first accepted `LOOP_COMPLETE` (or configured `completion_promise`) sets the loop as complete.
+2. The termination reason becomes `CompletionPromise` and stays that way.
+3. Any duplicate terminal event (e.g., a second `LOOP_COMPLETE`) is rejected or ignored.
+4. Any business event arriving after completion is rejected or ignored.
+5. Events in the same batch after the completion topic are also guarded.
+
+This protects downstream Skills from race conditions where a late event could corrupt state after the loop has already decided to finish.
+
+### About `.ralph/loops.json`
+
+`.ralph/loops.json` is a **registry of tracked loops** (metadata like IDs, branches, and status). It is **not** an event history. For the full event stream, read the events JSONL file referenced by `.ralph/current-events`.
 
 ## Next Steps
 

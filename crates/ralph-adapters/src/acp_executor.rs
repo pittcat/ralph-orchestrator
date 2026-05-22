@@ -561,6 +561,22 @@ async fn run_acp_lifecycle_inner(
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
 
+    // Propagate Ralph runtime environment
+    if let Ok(current_exe) = std::env::current_exe() {
+        cmd.env("RALPH_BIN", &current_exe);
+    }
+    cmd.env("RALPH_WORKSPACE_ROOT", workspace_root);
+    let marker = workspace_root.join(".ralph/current-events");
+    if let Ok(relative) = std::fs::read_to_string(&marker) {
+        let abs = workspace_root.join(relative.trim());
+        cmd.env("RALPH_EVENTS_FILE", abs);
+    }
+
+    // Apply backend-specific environment variables (e.g., hat execution context)
+    for (key, value) in &backend.env_vars {
+        cmd.env(key, value);
+    }
+
     #[cfg(unix)]
     cmd.process_group(0);
 

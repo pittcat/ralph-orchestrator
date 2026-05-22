@@ -96,6 +96,18 @@ pub struct Event {
     pub payload: Option<String>,
     pub ts: String,
 
+    /// Hat that published this event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hat: Option<String>,
+
+    /// Target hat triggered by this event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triggered: Option<String>,
+
+    /// Source identifier for this event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+
     /// Wave correlation ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wave_id: Option<String>,
@@ -120,6 +132,12 @@ impl From<Event> for ralph_proto::Event {
     fn from(e: Event) -> Self {
         // ts is a JSONL serialization concern, not carried to bus events.
         let mut pe = ralph_proto::Event::new(e.topic.as_str(), e.payload.unwrap_or_default());
+        if let Some(hat) = e.hat {
+            pe = pe.with_source(hat);
+        }
+        if let Some(triggered) = e.triggered {
+            pe = pe.with_target(triggered);
+        }
         if let Some(wave_id) = e.wave_id {
             // wave_index is required when wave_id is present; default to 0
             // only as a last resort (should not happen with well-formed events).
@@ -569,6 +587,9 @@ mod tests {
             topic: "build.done".to_string(),
             payload: Some("success".to_string()),
             ts: "2024-01-01T00:00:00Z".to_string(),
+            hat: None,
+            triggered: None,
+            source: None,
             wave_id: None,
             wave_index: None,
             wave_total: None,
@@ -585,6 +606,9 @@ mod tests {
             topic: "review.file".to_string(),
             payload: Some("src/main.rs".to_string()),
             ts: "2024-01-01T00:00:00Z".to_string(),
+            hat: None,
+            triggered: None,
+            source: None,
             wave_id: Some("w-abc".to_string()),
             wave_index: Some(2),
             wave_total: Some(5),
@@ -604,6 +628,9 @@ mod tests {
             topic: "empty.event".to_string(),
             payload: None,
             ts: "2024-01-01T00:00:00Z".to_string(),
+            hat: None,
+            triggered: None,
+            source: None,
             wave_id: None,
             wave_index: None,
             wave_total: None,
@@ -628,5 +655,64 @@ mod tests {
         assert_eq!(result.malformed.len(), 1);
         assert_eq!(result.events[0].topic, "valid1");
         assert_eq!(result.events[1].topic, "valid2");
+    }
+
+    #[test]
+    fn test_event_reader_backwards_compat_no_provenance_fields() {
+        // Events written before provenance support should still parse
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"{{"topic":"build.done","payload":"ok","ts":"2024-01-01T00:00:00Z"}}"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let mut reader = EventReader::new(file.path());
+        let result = reader.read_new_events().unwrap();
+
+        assert_eq!(result.events.len(), 1);
+        assert!(result.events[0].hat.is_none());
+        assert!(result.events[0].triggered.is_none());
+        assert!(result.events[0].source.is_none());
+    }
+
+    #[test]
+    fn test_event_reader_parses_provenance_fields() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"{{"topic":"experiment.planned","payload":"{{\"task_key\":\"x\"}}","ts":"2024-01-01T00:00:00Z","hat":"strategist","triggered":"implementer","source":"cli"}}"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let mut reader = EventReader::new(file.path());
+        let result = reader.read_new_events().unwrap();
+
+        assert_eq!(result.events.len(), 1);
+        assert_eq!(result.events[0].hat.as_deref(), Some("strategist"));
+        assert_eq!(result.events[0].triggered.as_deref(), Some("implementer"));
+        assert_eq!(result.events[0].source.as_deref(), Some("cli"));
+    }
+
+    #[test]
+    fn test_from_event_reader_to_proto_with_provenance() {
+        let event = Event {
+            topic: "review.file".to_string(),
+            payload: Some("src/main.rs".to_string()),
+            ts: "2024-01-01T00:00:00Z".to_string(),
+            hat: Some("dispatcher".to_string()),
+            triggered: Some("reviewer".to_string()),
+            source: Some("cli".to_string()),
+            wave_id: None,
+            wave_index: None,
+            wave_total: None,
+        };
+        let proto: ralph_proto::Event = event.into();
+        assert_eq!(proto.topic.as_str(), "review.file");
+        assert_eq!(proto.payload, "src/main.rs");
+        assert_eq!(proto.source.as_ref().map(|s| s.as_str()), Some("dispatcher"));
+        assert_eq!(proto.target.as_ref().map(|s| s.as_str()), Some("reviewer"));
     }
 }

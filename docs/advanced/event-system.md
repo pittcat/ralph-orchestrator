@@ -36,7 +36,41 @@ ralph emit plan:complete
 
 # JSON payload (validated when event_policy is configured)
 ralph emit review.done --json '{"status": "approved", "issues": 0}'
+
+# With provenance (recommended for hat-based workflows)
+ralph emit experiment.planned --json '{"task_key":"x"}' --hat strategist --triggered implementer
 ```
+
+### Provenance Flags
+
+`ralph emit` supports three provenance flags. When a flag is omitted, Ralph falls back to an environment variable:
+
+| CLI Flag | Env Fallback | Purpose |
+|----------|--------------|---------|
+| `--hat <HAT>` | `RALPH_CURRENT_HAT` | Hat that published this event |
+| `--triggered <HAT>` | `RALPH_TRIGGERED_HAT` | Hat triggered by this event |
+| `--source <SOURCE>` | `RALPH_EVENT_SOURCE` | Source identifier (e.g., `agent`, `cli`, `system`) |
+
+Priority is always **CLI flag > environment variable > empty**.
+
+When `event_policy.require_emit_provenance: true` is configured, emitting without `--hat` or `$RALPH_CURRENT_HAT` returns a non-zero exit code and writes nothing.
+
+### Environment Provenance Injection
+
+Ralph automatically injects provenance environment variables when spawning a Hat backend:
+
+- `RALPH_CURRENT_HAT` — the hat currently executing
+- `RALPH_CURRENT_LOOP_ID` — the active loop ID
+- `RALPH_EVENTS_FILE` — resolved path to the current events file
+- `RALPH_TRIGGERED_HAT` — the hat triggered by the current event (if known)
+
+This means Hats can usually emit events without passing explicit provenance flags:
+
+```bash
+ralph emit build.done "tests: pass, lint: pass"
+```
+
+The event record in the JSONL will include `"hat": "<current-hat>"` automatically.
 
 ## Event Policy
 
@@ -115,6 +149,45 @@ With this configuration:
 
 They work together: policy validates *what* an event contains; guards validate *when* it may appear.
 
+## Strict CLI Policy Enforcement
+
+When `event_policy.require_policy_check_for_cli_emit: true` is configured, `ralph emit` validates the event against policy **by default**, even if the user does not pass `--policy-check`.
+
+| Config | User Action | Result |
+|--------|-------------|--------|
+| `require_policy_check_for_cli_emit: false` (default) | No flags | Old behavior: emit directly |
+| `require_policy_check_for_cli_emit: false` | `--policy-check` | Validate once, explicit opt-in |
+| `require_policy_check_for_cli_emit: true` | No flags | Validate automatically |
+| `require_policy_check_for_cli_emit: true` | `--unsafe-no-policy-check` | Skip only if `allow_unsafe_cli_emit: true` |
+| `require_policy_check_for_cli_emit: true` | `--unsafe-no-policy-check` with `allow_unsafe_cli_emit: false` | Rejected |
+
+This closes the bypass path where an agent or user could emit malformed events by omitting `--policy-check`.
+
+## Completion Monotonicity
+
+Ralph treats completion as a **loop-level monotonic state**. Once the first `LOOP_COMPLETE` (or configured `completion_promise`) is accepted, the loop enters a protected state:
+
+- **Duplicate terminal events** are rejected or ignored (configurable via `completion_after_terminal.duplicate_terminal`).
+- **Business events after completion** are rejected or ignored (configurable via `completion_after_terminal.business_after_completion`).
+- **Same-batch protection** applies: if a batch contains `LOOP_COMPLETE` followed by other events, those later events are also guarded.
+- **Termination reason** remains `CompletionPromise` and is not overwritten by later noise.
+
+This prevents race conditions where a late event could re-trigger hat routing or corrupt state after the loop has decided to finish.
+
+### Configuration
+
+```yaml
+event_loop:
+  event_policy:
+    enabled: true
+    completion_after_terminal:
+      duplicate_terminal: reject      # warn | reject | ignore
+      business_after_completion: ignore
+      write_diagnostic_event: true    # emit diagnostic events when blocking
+```
+
+When `write_diagnostic_event: true`, Ralph writes events like `event.policy_warning` so downstream audit tools can see what was blocked and why.
+
 ## Loop State Snapshot
 
 Ralph can derive a read-only snapshot from the events JSONL:
@@ -136,6 +209,6 @@ This is useful for debugging, API queries, and TUI status display without modify
 ## See Also
 
 - [Hats & Events](../concepts/hats-and-events.md) — Core concepts
-- [Configuration](../guide/configuration.md) — Full config reference including `event_policy`
+- [Configuration](../guide/configuration.md) — Full config reference including `event_policy` and migration guidance
 - [Backpressure](../concepts/backpressure.md) — Backpressure mechanisms
 - [Creating Custom Hats](custom-hats.md) — Custom hat development

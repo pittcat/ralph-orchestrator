@@ -245,6 +245,7 @@ mod tests {
                 "experiment.planned".to_string(),
                 "experiment.evaluated".to_string(),
             ],
+            ..Default::default()
         };
 
         let snapshot =
