@@ -5,7 +5,7 @@ event_loop:
   starting_event: work.start
 
 cli:
-  backend: pi
+  backend: claude
 
 core:
   specs_dir: ./specs/

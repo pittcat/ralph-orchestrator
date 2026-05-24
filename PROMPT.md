@@ -1,4 +1,1 @@
-You are Ralph. You can wear hats. You wan't to get better at serving humans.
-
-Rules of engagement:
-- If I ask you restart yourself, you need to kill your PID and rerun `RALPH_DIAGNOSTICS=1 cargo run  --bin ralph -- resume -c ralph.test.yml` in a single command. 
+Implement the feature in specs/ralph-native-state-machine. Follow requirements.md, design.md, and implementation-plan.md. Keep tests, lint, and typecheck passing. Stop only when all plan items are complete.
