@@ -681,6 +681,51 @@ impl RalphConfig {
             }
         }
 
+        // Validate state machine config
+        if let Some(state_machine) = &self.event_loop.state_machine
+            && state_machine.enabled
+        {
+            let mut seen_transition_topics = std::collections::HashSet::new();
+            for transition in &state_machine.transitions {
+                if transition.topic.trim().is_empty() {
+                    return Err(ConfigError::StateMachineValidation {
+                        field: "event_loop.state_machine.transitions[].topic".to_string(),
+                        message: "Transition topic cannot be empty".to_string(),
+                    });
+                }
+                if !seen_transition_topics.insert(&transition.topic) {
+                    return Err(ConfigError::StateMachineValidation {
+                        field: format!("event_loop.state_machine.transitions.{}", transition.topic),
+                        message: format!("Duplicate transition topic '{}'", transition.topic),
+                    });
+                }
+                if transition.from.is_empty() {
+                    return Err(ConfigError::StateMachineValidation {
+                        field: format!(
+                            "event_loop.state_machine.transitions.{}.from",
+                            transition.topic
+                        ),
+                        message: "Transition from states cannot be empty".to_string(),
+                    });
+                }
+                if transition.to.trim().is_empty() {
+                    return Err(ConfigError::StateMachineValidation {
+                        field: format!(
+                            "event_loop.state_machine.transitions.{}.to",
+                            transition.topic
+                        ),
+                        message: "Transition target state cannot be empty".to_string(),
+                    });
+                }
+                if transition.opens_instance && transition.closes_instance {
+                    return Err(ConfigError::StateMachineValidation {
+                        field: format!("event_loop.state_machine.transitions.{}", transition.topic),
+                        message: "Transition cannot both open and close an instance".to_string(),
+                    });
+                }
+            }
+        }
+
         // Validate event policy config
         if let Some(event_policy) = &self.event_loop.event_policy
             && event_policy.enabled
@@ -1060,6 +1105,10 @@ pub struct EventLoopConfig {
     /// Opt-in event policy for typed payload validation.
     #[serde(default)]
     pub event_policy: Option<EventPolicyConfig>,
+
+    /// Opt-in state machine for instance lifecycle validation.
+    #[serde(default)]
+    pub state_machine: Option<StateMachineConfig>,
 }
 
 /// Opt-in workflow state guards for enforcing ordered event chains.
@@ -1244,6 +1293,146 @@ impl Default for CompletionAfterTerminalConfig {
     }
 }
 
+/// State machine configuration for instance lifecycle validation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateMachineConfig {
+    /// When true, enable state machine validation.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Configuration for extracting instance keys from event payloads.
+    #[serde(default)]
+    pub instance_key: InstanceKeyConfig,
+
+    /// Event topics that represent terminal/completion states.
+    #[serde(default)]
+    pub terminal_topics: Vec<String>,
+
+    /// Event topics that represent business progress events.
+    #[serde(default)]
+    pub business_topics: Vec<String>,
+
+    /// Guards for terminal event behavior.
+    #[serde(default)]
+    pub terminal_guard: TerminalGuardConfig,
+
+    /// Ordered list of state transitions defining the valid lifecycle paths.
+    #[serde(default)]
+    pub transitions: Vec<TransitionConfig>,
+}
+
+impl Default for StateMachineConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            instance_key: InstanceKeyConfig::default(),
+            terminal_topics: Vec::new(),
+            business_topics: Vec::new(),
+            terminal_guard: TerminalGuardConfig::default(),
+            transitions: Vec::new(),
+        }
+    }
+}
+
+/// Configuration for extracting an instance key from an event payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstanceKeyConfig {
+    /// The JSON field name within the payload to extract as the instance key.
+    /// Example: "task_key" extracts `payload.task_key`.
+    pub from_payload: String,
+
+    /// Event topics whose payloads must contain a valid instance key.
+    #[serde(default)]
+    pub required_for: Vec<String>,
+}
+
+impl Default for InstanceKeyConfig {
+    fn default() -> Self {
+        Self {
+            from_payload: String::new(),
+            required_for: Vec::new(),
+        }
+    }
+}
+
+/// A single state transition in the state machine.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransitionConfig {
+    /// The event topic that triggers this transition.
+    pub topic: String,
+
+    /// The source states this transition can fire from.
+    /// "idle" is a special state representing "no prior state".
+    pub from: Vec<String>,
+
+    /// The target state after this transition completes.
+    pub to: String,
+
+    /// When true, this transition opens a new instance (inserts into open map).
+    #[serde(default)]
+    pub opens_instance: bool,
+
+    /// When true, this transition closes the instance (removes from open map).
+    #[serde(default)]
+    pub closes_instance: bool,
+}
+
+/// Guards for terminal event behavior.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalGuardConfig {
+    /// When true, terminal events are rejected if any instances are still open.
+    #[serde(default)]
+    pub require_no_open_instances: bool,
+
+    /// Action for duplicate terminal events after terminal has been honored.
+    #[serde(default = "default_duplicate_terminal_action")]
+    pub duplicate_terminal: DuplicateTerminalAction,
+
+    /// Action for business events that arrive after a terminal event.
+    #[serde(default = "default_business_after_terminal_action")]
+    pub business_after_terminal: BusinessAfterTerminalAction,
+}
+
+fn default_duplicate_terminal_action() -> DuplicateTerminalAction {
+    DuplicateTerminalAction::Reject
+}
+
+fn default_business_after_terminal_action() -> BusinessAfterTerminalAction {
+    BusinessAfterTerminalAction::Reject
+}
+
+impl Default for TerminalGuardConfig {
+    fn default() -> Self {
+        Self {
+            require_no_open_instances: true,
+            duplicate_terminal: default_duplicate_terminal_action(),
+            business_after_terminal: default_business_after_terminal_action(),
+        }
+    }
+}
+
+/// Action for duplicate terminal events.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum DuplicateTerminalAction {
+    /// Reject duplicate terminal events (publish diagnostic, no task.resume).
+    #[default]
+    Reject,
+    /// Silently ignore duplicate terminal events.
+    Ignore,
+}
+
+/// Action for business events arriving after terminal.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum BusinessAfterTerminalAction {
+    /// Reject business events after terminal.
+    #[default]
+    Reject,
+    /// Silently ignore business events after terminal.
+    Ignore,
+}
+
 /// Schema for validating events of a specific topic.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventSchema {
@@ -1309,6 +1498,7 @@ impl Default for EventLoopConfig {
             workflow_guards: None,
             execution_mode: HatExecutionMode::default(),
             event_policy: None,
+            state_machine: None,
         }
     }
 }
@@ -2680,6 +2870,11 @@ pub enum ConfigError {
         "Event policy validation error at '{field}': {message}\nFix: check your event_loop.event_policy configuration."
     )]
     EventPolicyValidation { field: String, message: String },
+
+    #[error(
+        "State machine validation error at '{field}': {message}\nFix: check your event_loop.state_machine configuration."
+    )]
+    StateMachineValidation { field: String, message: String },
 }
 
 #[cfg(test)]
@@ -4797,6 +4992,77 @@ event_loop:
         assert!(
             err.contains("Duplicate workflow chain name"),
             "Expected duplicate chain name error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_state_machine_validation_rejects_duplicate_transition_topic() {
+        let yaml = r#"
+event_loop:
+  state_machine:
+    enabled: true
+    transitions:
+      - topic: experiment.planned
+        from: [idle]
+        to: planned
+      - topic: experiment.planned
+        from: [planned]
+        to: planned_again
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Duplicate transition topic"),
+            "Expected duplicate transition topic error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_state_machine_validation_rejects_empty_from_state() {
+        let yaml = r#"
+event_loop:
+  state_machine:
+    enabled: true
+    transitions:
+      - topic: experiment.planned
+        from: []
+        to: planned
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("from states cannot be empty"),
+            "Expected empty from state error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_state_machine_validation_rejects_open_and_close_transition() {
+        let yaml = r#"
+event_loop:
+  state_machine:
+    enabled: true
+    transitions:
+      - topic: experiment.planned
+        from: [idle]
+        to: planned
+        opens_instance: true
+        closes_instance: true
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("cannot both open and close"),
+            "Expected open/close conflict error, got: {}",
             err
         );
     }

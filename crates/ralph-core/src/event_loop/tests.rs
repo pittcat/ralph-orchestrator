@@ -443,7 +443,10 @@ fn test_completion_promise_accepted_even_when_not_last_event() {
     );
     // task.resume after LOOP_COMPLETE in same batch should still be published
     // (task.resume is not a business/terminal topic, so completion guard lets it through)
-    assert!(result.had_events, "Non-business events after completion should still be published");
+    assert!(
+        result.had_events,
+        "Non-business events after completion should still be published"
+    );
 }
 
 #[test]
@@ -6357,9 +6360,7 @@ hats:
     );
 
     // Strategist should not have pending events from experiment.planned
-    let strategist_pending = event_loop
-        .bus
-        .peek_pending(&HatId::new("strategist"));
+    let strategist_pending = event_loop.bus.peek_pending(&HatId::new("strategist"));
     assert!(
         strategist_pending.map(|v| v.is_empty()).unwrap_or(true),
         "Business event after completion should not trigger strategist"
@@ -6418,9 +6419,7 @@ hats:
         "Business event after completion honored should not be published"
     );
 
-    let strategist_pending = event_loop
-        .bus
-        .peek_pending(&HatId::new("strategist"));
+    let strategist_pending = event_loop.bus.peek_pending(&HatId::new("strategist"));
     assert!(
         strategist_pending.map(|v| v.is_empty()).unwrap_or(true),
         "Business event after completion honored should not trigger strategist"
@@ -6482,9 +6481,7 @@ hats:
         "Duplicate terminal after completion honored should not trigger plan events"
     );
 
-    let strategist_pending = event_loop
-        .bus
-        .peek_pending(&HatId::new("strategist"));
+    let strategist_pending = event_loop.bus.peek_pending(&HatId::new("strategist"));
     assert!(
         strategist_pending.map(|v| v.is_empty()).unwrap_or(true),
         "Duplicate terminal after completion honored should not trigger strategist"
@@ -6582,19 +6579,27 @@ hats:
     // Old config default is Warn: business events after completion should still route
     let events_path2 = temp_dir.path().join("events2.jsonl");
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path2);
-    write_event_to_jsonl(&events_path2, "experiment.planned", "{\"task_key\":\"post-completion\"}");
+    write_event_to_jsonl(
+        &events_path2,
+        "experiment.planned",
+        "{\"task_key\":\"post-completion\"}",
+    );
 
     let result = event_loop.process_events_from_jsonl().unwrap();
-    eprintln!("DEBUG: had_events={}, had_plan_events={}, completion_honored={}", result.had_events, result.had_plan_events, event_loop.state.completion_honored);
-    eprintln!("DEBUG: bus hats: {:?}", event_loop.bus.hat_ids().collect::<Vec<_>>());
+    eprintln!(
+        "DEBUG: had_events={}, had_plan_events={}, completion_honored={}",
+        result.had_events, result.had_plan_events, event_loop.state.completion_honored
+    );
+    eprintln!(
+        "DEBUG: bus hats: {:?}",
+        event_loop.bus.hat_ids().collect::<Vec<_>>()
+    );
     assert!(
         result.had_events,
         "Old config with Warn default should allow business events after completion"
     );
 
-    let strategist_pending = event_loop
-        .bus
-        .peek_pending(&HatId::new("strategist"));
+    let strategist_pending = event_loop.bus.peek_pending(&HatId::new("strategist"));
     eprintln!("DEBUG: strategist_pending={:?}", strategist_pending);
     assert!(
         strategist_pending.map(|v| !v.is_empty()).unwrap_or(false),
@@ -6668,7 +6673,11 @@ hats:
     );
 
     // Diagnostic event should be published when write_diagnostic_event is true
-    let has_diagnostic = captured_events.lock().unwrap().iter().any(|e| e.topic.as_str() == "event.completion.blocked");
+    let has_diagnostic = captured_events
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|e| e.topic.as_str() == "event.completion.blocked");
     assert!(
         has_diagnostic,
         "Reject action with write_diagnostic_event=true should publish event.completion.blocked"
@@ -6723,5 +6732,180 @@ hats:
     assert!(
         result.had_events,
         "Warn action should allow business event after completion"
+    );
+}
+
+#[test]
+fn test_state_machine_terminal_rejected_by_open_tasks_does_not_honor_terminal() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let yaml = r#"
+event_loop:
+  required_events: [never.seen]
+  state_machine:
+    enabled: true
+    instance_key:
+      from_payload: task_key
+      required_for: [experiment.planned]
+    terminal_topics: [LOOP_COMPLETE]
+    business_topics: [experiment.planned]
+    terminal_guard:
+      require_no_open_instances: false
+    transitions:
+      - topic: experiment.planned
+        from: [idle]
+        to: planned
+        opens_instance: true
+hats:
+  strategist:
+    name: "Strategist"
+    triggers: ["experiment.planned"]
+    publishes: ["experiment.planned"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    write_event_to_jsonl(&events_path, "LOOP_COMPLETE", "Done");
+    let _ = event_loop.process_events_from_jsonl();
+    let reason = event_loop.check_completion_event();
+
+    assert_eq!(reason, None);
+    assert!(
+        !event_loop
+            .state
+            .state_machine_runtime_state
+            .as_ref()
+            .unwrap()
+            .is_terminal_honored(),
+        "state machine terminal should not be honored until loop completion is honored"
+    );
+
+    let events_path2 = temp_dir.path().join("events2.jsonl");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path2);
+    write_event_to_jsonl(&events_path2, "experiment.planned", r#"{"task_key":"t1"}"#);
+    let result = event_loop.process_events_from_jsonl().unwrap();
+    assert!(
+        result.had_events,
+        "business event should still be accepted after completion was rejected by open runtime tasks"
+    );
+}
+
+#[test]
+fn test_state_machine_branch_close_runs_before_workflow_guard() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let yaml = r#"
+event_loop:
+  workflow_guards:
+    chains:
+      - name: experiment
+        topics:
+          - experiment.planned
+          - experiment.ready
+          - experiment.evaluated
+        correlation:
+          from_payload: task_key
+  state_machine:
+    enabled: true
+    instance_key:
+      from_payload: task_key
+      required_for: [experiment.planned, experiment.blocked]
+    terminal_topics: [LOOP_COMPLETE]
+    business_topics: [experiment.planned, experiment.blocked]
+    transitions:
+      - topic: experiment.planned
+        from: [idle]
+        to: planned
+        opens_instance: true
+      - topic: experiment.blocked
+        from: [planned]
+        to: blocked
+        closes_instance: true
+hats:
+  observer:
+    name: "Observer"
+    triggers: ["experiment.blocked"]
+    publishes: ["LOOP_COMPLETE"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    write_event_to_jsonl(&events_path, "experiment.planned", r#"{"task_key":"t1"}"#);
+    write_event_to_jsonl(&events_path, "experiment.blocked", r#"{"task_key":"t1"}"#);
+    let result = event_loop.process_events_from_jsonl().unwrap();
+
+    assert!(
+        result.had_events,
+        "state machine branch-close event should be accepted instead of rejected by linear workflow guards"
+    );
+    assert!(
+        event_loop
+            .state
+            .state_machine_runtime_state
+            .as_ref()
+            .unwrap()
+            .closed_instances_snapshot()
+            .contains_key("t1"),
+        "blocked should close the instance"
+    );
+}
+
+#[test]
+fn test_state_machine_processed_events_reports_only_accepted_events() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let yaml = r#"
+event_loop:
+  state_machine:
+    enabled: true
+    instance_key:
+      from_payload: task_key
+      required_for: [experiment.planned, experiment.ready, experiment.blocked]
+    terminal_topics: [LOOP_COMPLETE]
+    business_topics: [experiment.planned, experiment.ready, experiment.blocked]
+    transitions:
+      - topic: experiment.planned
+        from: [idle]
+        to: planned
+        opens_instance: true
+      - topic: experiment.blocked
+        from: [planned]
+        to: blocked
+        closes_instance: true
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    write_event_to_jsonl(&events_path, "experiment.ready", r#"{"task_key":"bad"}"#);
+    write_event_to_jsonl(&events_path, "experiment.planned", r#"{"task_key":"t1"}"#);
+    write_event_to_jsonl(&events_path, "experiment.blocked", r#"{"task_key":"t1"}"#);
+    write_event_to_jsonl(&events_path, "LOOP_COMPLETE", "Done");
+
+    let result = event_loop.process_events_from_jsonl().unwrap();
+    let topics: Vec<_> = result
+        .accepted_events
+        .iter()
+        .map(|event| event.topic.as_str())
+        .collect();
+
+    assert_eq!(
+        topics,
+        vec!["experiment.planned", "experiment.blocked", "LOOP_COMPLETE"],
+        "accepted event summary should omit rejected candidates and include accepted terminal"
     );
 }

@@ -48,6 +48,7 @@ mod session_recorder;
 pub mod skill;
 pub mod skill_registry;
 mod state_file_injector;
+mod state_machine;
 mod summary_writer;
 pub mod task;
 pub mod task_definition;
@@ -136,6 +137,10 @@ pub use session_recorder::{Record, SessionRecorder};
 pub use skill::{SkillEntry, SkillFrontmatter, SkillSource, parse_frontmatter};
 pub use skill_registry::SkillRegistry;
 pub use state_file_injector::inject_state_files;
+pub use state_machine::{
+    InstanceState, StateMachineDecision, StateMachineFinding, StateMachineRuntimeState,
+    StateMachineStateSummary,
+};
 pub use summary_writer::SummaryWriter;
 pub use task::{Task, TaskStatus};
 pub use task_definition::{

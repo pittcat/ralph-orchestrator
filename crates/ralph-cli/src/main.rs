@@ -2684,12 +2684,10 @@ fn emit_command_with_root(
     let check_mode = should_policy_check_emit(&args, config.as_ref());
 
     // Resolve provenance values: CLI flag > env var > empty
-    let (hat, triggered, source) = resolve_provenance(
-        args.hat,
-        args.triggered,
-        args.source,
-        |key| std::env::var(key).ok(),
-    );
+    let (hat, triggered, source) =
+        resolve_provenance(args.hat, args.triggered, args.source, |key| {
+            std::env::var(key).ok()
+        });
 
     // Enforce provenance requirements when hat is missing.
     if hat.is_none() {
@@ -2706,7 +2704,10 @@ fn emit_command_with_root(
     }
 
     if check_mode != PolicyCheckMode::Skip {
-        let policy = match config.as_ref().and_then(|c| c.event_loop.event_policy.as_ref()) {
+        let policy = match config
+            .as_ref()
+            .and_then(|c| c.event_loop.event_policy.as_ref())
+        {
             Some(p) if p.enabled => Some(p),
             _ => {
                 if check_mode == PolicyCheckMode::ExplicitCheck {
@@ -2816,14 +2817,19 @@ fn emit_command_with_root(
         record["wave_index"] = serde_json::Value::Number(wave_index.into());
     }
 
-    // Resolve events file: RALPH_EVENTS_FILE env > marker file > CLI arg
+    // Resolve events file: RALPH_EVENTS_FILE env > state-machine candidate marker
+    // > accepted-events marker > CLI arg.
     // This ensures `ralph emit` writes to the same events file as the active run
     let events_file = std::env::var("RALPH_EVENTS_FILE")
         .ok()
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            fs::read_to_string(&current_events_marker)
+            let current_candidate_events_marker = workspace_root
+                .join(".ralph")
+                .join("current-candidate-events");
+            fs::read_to_string(&current_candidate_events_marker)
+                .or_else(|_| fs::read_to_string(&current_events_marker))
                 .map(|s| resolve_marker_target(&workspace_root, &s))
                 .unwrap_or_else(|_| args.file.clone())
         });
@@ -4380,12 +4386,8 @@ event_loop:
             "RALPH_EVENT_SOURCE" => Some("env-source".to_string()),
             _ => None,
         };
-        let (hat, triggered, source) = resolve_provenance(
-            Some("cli-hat".to_string()),
-            None,
-            None,
-            env,
-        );
+        let (hat, triggered, source) =
+            resolve_provenance(Some("cli-hat".to_string()), None, None, env);
         assert_eq!(hat, Some("cli-hat".to_string()));
         assert_eq!(triggered, Some("env-triggered".to_string()));
         assert_eq!(source, Some("env-source".to_string()));
@@ -4434,11 +4436,17 @@ event_loop:
 
         // Verify config loads and parses correctly in isolation
         let config_sources = vec![ConfigSource::File(workspace.join("ralph.yml"))];
-        let config = load_config_with_overrides(&config_sources)
-            .expect("config should load for this test");
-        let policy = config.event_loop.event_policy.as_ref()
+        let config =
+            load_config_with_overrides(&config_sources).expect("config should load for this test");
+        let policy = config
+            .event_loop
+            .event_policy
+            .as_ref()
             .expect("event_policy should be present");
-        assert!(policy.require_emit_provenance, "require_emit_provenance should be true");
+        assert!(
+            policy.require_emit_provenance,
+            "require_emit_provenance should be true"
+        );
 
         let events_file = workspace.join(".ralph/events.jsonl");
 
@@ -4559,7 +4567,9 @@ event_loop:
             },
             Some(&workspace),
         )
-        .expect_err("strict config should reject missing required field even without --policy-check");
+        .expect_err(
+            "strict config should reject missing required field even without --policy-check",
+        );
 
         let message = format!("{err:#}");
         assert!(
@@ -4863,7 +4873,8 @@ event_loop:
     const FIXTURE_BUSINESS_AFTER_TERMINAL: &str = r#"{"topic":"LOOP_COMPLETE","payload":{"reason":"done"},"ts":"2026-05-22T00:00:00Z"}
 {"topic":"experiment.planned","payload":{"task_key":"b","hypothesis":"h","falsification_condition":"f"},"ts":"2026-05-22T00:00:01Z"}"#;
 
-    const FIXTURE_MISSING_REQUIRED_FIELDS: &str = r#"{"topic":"experiment.planned","payload":{"task_key":"a"},"ts":"2026-05-22T00:00:00Z"}"#;
+    const FIXTURE_MISSING_REQUIRED_FIELDS: &str =
+        r#"{"topic":"experiment.planned","payload":{"task_key":"a"},"ts":"2026-05-22T00:00:00Z"}"#;
 
     fn fixture_config_yaml() -> &'static str {
         r#"
@@ -4903,7 +4914,11 @@ event_loop:
         std::fs::write(workspace.join("ralph.yml"), fixture_config_yaml()).unwrap();
         let events_file = workspace.join(".ralph/events.jsonl");
         std::fs::write(&events_file, prior_events).unwrap();
-        std::fs::write(workspace.join(".ralph/current-events"), ".ralph/events.jsonl\n").unwrap();
+        std::fs::write(
+            workspace.join(".ralph/current-events"),
+            ".ralph/events.jsonl\n",
+        )
+        .unwrap();
         workspace
     }
 
@@ -4925,7 +4940,12 @@ event_loop:
     #[test]
     fn test_fixture_cli_valid_chain_accepted() {
         let temp_dir = TempDir::new().expect("temp dir");
-        let prior: String = FIXTURE_VALID_CHAIN.lines().take(1).collect::<Vec<_>>().join("\n") + "\n";
+        let prior: String = FIXTURE_VALID_CHAIN
+            .lines()
+            .take(1)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
         let workspace = setup_fixture_workspace(&temp_dir, &prior);
         let (topic, payload, json) = parse_last_fixture_event(FIXTURE_VALID_CHAIN);
         let events_file = workspace.join(".ralph/events.jsonl");
@@ -4957,7 +4977,12 @@ event_loop:
     #[test]
     fn test_fixture_cli_duplicate_terminal_rejected() {
         let temp_dir = TempDir::new().expect("temp dir");
-        let prior: String = FIXTURE_DUPLICATE_TERMINAL.lines().take(1).collect::<Vec<_>>().join("\n") + "\n";
+        let prior: String = FIXTURE_DUPLICATE_TERMINAL
+            .lines()
+            .take(1)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
         let workspace = setup_fixture_workspace(&temp_dir, &prior);
         let (topic, payload, json) = parse_last_fixture_event(FIXTURE_DUPLICATE_TERMINAL);
         let events_file = workspace.join(".ralph/events.jsonl");
@@ -4982,7 +5007,9 @@ event_loop:
 
         let message = format!("{err:#}");
         assert!(
-            message.contains("Event rejected by policy") || message.contains("Event blocked by policy") || message.contains("Event ignored by policy"),
+            message.contains("Event rejected by policy")
+                || message.contains("Event blocked by policy")
+                || message.contains("Event ignored by policy"),
             "Expected policy rejection, got: {}",
             message
         );
@@ -4994,7 +5021,12 @@ event_loop:
     #[test]
     fn test_fixture_cli_business_after_terminal_rejected() {
         let temp_dir = TempDir::new().expect("temp dir");
-        let prior: String = FIXTURE_BUSINESS_AFTER_TERMINAL.lines().take(1).collect::<Vec<_>>().join("\n") + "\n";
+        let prior: String = FIXTURE_BUSINESS_AFTER_TERMINAL
+            .lines()
+            .take(1)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
         let workspace = setup_fixture_workspace(&temp_dir, &prior);
         let (topic, payload, json) = parse_last_fixture_event(FIXTURE_BUSINESS_AFTER_TERMINAL);
         let events_file = workspace.join(".ralph/events.jsonl");
@@ -5019,7 +5051,9 @@ event_loop:
 
         let message = format!("{err:#}");
         assert!(
-            message.contains("Event rejected by policy") || message.contains("Event blocked by policy") || message.contains("Event ignored by policy"),
+            message.contains("Event rejected by policy")
+                || message.contains("Event blocked by policy")
+                || message.contains("Event ignored by policy"),
             "Expected policy rejection, got: {}",
             message
         );
@@ -5089,8 +5123,8 @@ event_loop:
             let events_file = workspace.join(".ralph/events.jsonl");
 
             // -- Event loop path --
-            let mut state = PolicyRuntimeState::from_events(&events_file, &policy_config)
-                .unwrap_or_default();
+            let mut state =
+                PolicyRuntimeState::from_events(&events_file, &policy_config).unwrap_or_default();
 
             let line = lines.last().unwrap();
             let value: serde_json::Value = serde_json::from_str(line).unwrap();
@@ -5100,8 +5134,12 @@ event_loop:
                 _ => None,
             };
 
-            let loop_decision = validate_event(topic, payload.as_deref(), &policy_config, &mut state);
-            let loop_accept = matches!(loop_decision, PolicyDecision::Accept | PolicyDecision::Warn(_));
+            let loop_decision =
+                validate_event(topic, payload.as_deref(), &policy_config, &mut state);
+            let loop_accept = matches!(
+                loop_decision,
+                PolicyDecision::Accept | PolicyDecision::Warn(_)
+            );
 
             // -- CLI path --
             let (cli_topic, cli_payload, cli_json) = parse_last_fixture_event(fixture);

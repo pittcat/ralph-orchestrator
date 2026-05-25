@@ -765,9 +765,7 @@ mod tests {
     #[test]
     fn test_check_completion_honored_ignore_action() {
         let mut config = test_config();
-        config
-            .completion_after_terminal
-            .duplicate_terminal = CompletionAfterTerminalAction::Ignore;
+        config.completion_after_terminal.duplicate_terminal = CompletionAfterTerminalAction::Ignore;
         let mut state = PolicyRuntimeState::default();
         state.completion_honored = true;
         let decision = check_completion_honored("LOOP_COMPLETE", &config, &state);
@@ -781,9 +779,8 @@ mod tests {
     #[test]
     fn test_check_completion_honored_warn_action() {
         let mut config = test_config();
-        config
-            .completion_after_terminal
-            .business_after_completion = CompletionAfterTerminalAction::Warn;
+        config.completion_after_terminal.business_after_completion =
+            CompletionAfterTerminalAction::Warn;
         let mut state = PolicyRuntimeState::default();
         state.completion_honored = true;
         let decision = check_completion_honored("experiment.planned", &config, &state);
@@ -801,12 +798,10 @@ mod tests {
             check_completion_guard("LOOP_COMPLETE", &config, false),
             None
         );
-        assert!(
-            matches!(
-                check_completion_guard("LOOP_COMPLETE", &config, true),
-                Some(PolicyDecision::Warn(_))
-            )
-        );
+        assert!(matches!(
+            check_completion_guard("LOOP_COMPLETE", &config, true),
+            Some(PolicyDecision::Warn(_))
+        ));
     }
 
     // -------------------------------------------------------------------------
@@ -822,7 +817,8 @@ mod tests {
     const FIXTURE_BUSINESS_AFTER_TERMINAL: &str = r#"{"topic":"LOOP_COMPLETE","payload":{"reason":"done"},"ts":"2026-05-22T00:00:00Z"}
 {"topic":"experiment.planned","payload":{"task_key":"b","hypothesis":"h","falsification_condition":"f"},"ts":"2026-05-22T00:00:01Z"}"#;
 
-    const FIXTURE_MISSING_REQUIRED_FIELDS: &str = r#"{"topic":"experiment.planned","payload":{"task_key":"a"},"ts":"2026-05-22T00:00:00Z"}"#;
+    const FIXTURE_MISSING_REQUIRED_FIELDS: &str =
+        r#"{"topic":"experiment.planned","payload":{"task_key":"a"},"ts":"2026-05-22T00:00:00Z"}"#;
 
     fn fixture_config() -> EventPolicyConfig {
         let mut config = test_config();
@@ -835,14 +831,18 @@ mod tests {
             ],
             allowed_values: HashMap::new(),
         };
-        config.schemas.insert("experiment.planned".to_string(), schema);
+        config
+            .schemas
+            .insert("experiment.planned".to_string(), schema);
         config.completion_after_terminal.duplicate_terminal = CompletionAfterTerminalAction::Reject;
-        config.completion_after_terminal.business_after_completion = CompletionAfterTerminalAction::Reject;
+        config.completion_after_terminal.business_after_completion =
+            CompletionAfterTerminalAction::Reject;
         config
     }
 
     fn parse_fixture_line(line: &str) -> (String, Option<String>) {
-        let event: crate::event_reader::Event = serde_json::from_str(line).expect("valid fixture line");
+        let event: crate::event_reader::Event =
+            serde_json::from_str(line).expect("valid fixture line");
         (event.topic, event.payload)
     }
 
@@ -903,7 +903,8 @@ mod tests {
     #[test]
     fn test_fixture_missing_required_fields_rejected_when_strict() {
         let config = fixture_config();
-        let mut state = PolicyRuntimeState::from_events("/nonexistent/events.jsonl", &config).unwrap();
+        let mut state =
+            PolicyRuntimeState::from_events("/nonexistent/events.jsonl", &config).unwrap();
         let (topic, payload) = parse_fixture_line(FIXTURE_MISSING_REQUIRED_FIELDS);
         let decision = validate_event(&topic, payload.as_deref(), &config, &mut state);
         assert!(
@@ -934,8 +935,16 @@ mod tests {
     #[test]
     fn test_old_simple_event_fixtures_still_parse() {
         let mut file = NamedTempFile::new().unwrap();
-        writeln!(file, r#"{{"topic":"task.start","payload":"Start work","ts":"2024-01-01T00:00:00Z"}}"#).unwrap();
-        writeln!(file, r#"{{"topic":"task.done","payload":null,"ts":"2024-01-01T00:00:01Z"}}"#).unwrap();
+        writeln!(
+            file,
+            r#"{{"topic":"task.start","payload":"Start work","ts":"2024-01-01T00:00:00Z"}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"topic":"task.done","payload":null,"ts":"2024-01-01T00:00:01Z"}}"#
+        )
+        .unwrap();
         writeln!(file, r#"{{"topic":"noop","ts":"2024-01-01T00:00:02Z"}}"#).unwrap();
         file.flush().unwrap();
 

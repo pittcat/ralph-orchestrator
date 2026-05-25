@@ -10,7 +10,10 @@ pub use loop_state::{LoopState, WorkflowProgress};
 
 use crate::config::{HatBackend, HatExecutionMode, InjectMode, RalphConfig, ScratchpadConfig};
 use crate::event_parser::{EventParser, MutationEvidence, MutationStatus};
-use crate::event_policy::{PolicyDecision, PolicyRuntimeState, check_completion_guard, check_completion_honored, validate_event};
+use crate::event_policy::{
+    PolicyDecision, PolicyRuntimeState, check_completion_guard, check_completion_honored,
+    validate_event,
+};
 use crate::event_reader::{Event as JsonlEvent, EventReader};
 use crate::hat_registry::HatRegistry;
 use crate::hatless_ralph::HatlessRalph;
@@ -18,6 +21,7 @@ use crate::instructions::InstructionBuilder;
 use crate::loop_context::LoopContext;
 use crate::memory_store::{MarkdownMemoryStore, format_memories_as_markdown, truncate_to_budget};
 use crate::skill_registry::SkillRegistry;
+use crate::state_machine::{StateMachineDecision, StateMachineRuntimeState};
 use crate::text::floor_char_boundary;
 use ralph_proto::{CheckinContext, Event, EventBus, Hat, HatId, RobotService};
 use serde_json::{Map, Value};
@@ -39,6 +43,8 @@ pub struct ProcessedEvents {
     pub human_interact_context: Option<Value>,
     /// Whether any events lacked specific hat subscribers (orphans handled by Ralph).
     pub has_orphans: bool,
+    /// Events accepted by runtime validation and published to the bus.
+    pub accepted_events: Vec<Event>,
 }
 
 /// Result of processing events from JSONL with wave events partitioned out.
@@ -380,7 +386,8 @@ fn apply_event_policy_validation(
         // Completion-honored guard takes precedence: after a completion promise
         // has been accepted, subsequent terminal/business events are filtered
         // according to completion_after_terminal config.
-        if let Some(decision) = check_completion_honored(&event.topic, policy_config, policy_state) {
+        if let Some(decision) = check_completion_honored(&event.topic, policy_config, policy_state)
+        {
             match decision {
                 PolicyDecision::Accept => {
                     validated_events.push(event);
@@ -1021,8 +1028,17 @@ impl EventLoop {
             }
         }
 
-        // Workflow guard completion validation: ensure all started guarded instances are terminal
-        if let Some(guards) = &self.config.event_loop.workflow_guards
+        let state_machine_enabled = self
+            .config
+            .event_loop
+            .state_machine
+            .as_ref()
+            .is_some_and(|sm| sm.enabled);
+
+        // Workflow guard completion validation: ensure all started guarded instances are terminal.
+        // State-machine configs use their instance lifecycle as the completion source of truth.
+        if !state_machine_enabled
+            && let Some(guards) = &self.config.event_loop.workflow_guards
             && !guards.chains.is_empty()
             && let Some(rejection) = self.check_workflow_guard_completion(guards)
         {
@@ -1101,6 +1117,12 @@ impl EventLoop {
         );
 
         self.state.completion_honored = true;
+
+        if state_machine_enabled
+            && let Some(ref mut sm_state) = self.state.state_machine_runtime_state
+        {
+            sm_state.mark_terminal_honored();
+        }
 
         // Record completion honored in policy runtime state for downstream guarding
         if let Some(ref policy_config) = self.config.event_loop.event_policy
@@ -1243,6 +1265,13 @@ impl EventLoop {
         if let Ok(metadata) = std::fs::metadata(path) {
             self.event_reader.set_position(metadata.len());
         }
+    }
+
+    /// Points the JSONL candidate reader at a different file and resets its
+    /// offset. State-machine runs use this to keep raw candidate events
+    /// separate from the accepted event history.
+    pub fn set_event_reader_path(&mut self, path: impl Into<PathBuf>) {
+        self.event_reader = EventReader::new(path);
     }
 
     /// Checks if any hats have pending events.
@@ -2890,6 +2919,7 @@ impl EventLoop {
                 had_plan_events: false,
                 human_interact_context: None,
                 has_orphans: false,
+                accepted_events: Vec::new(),
             });
         }
 
@@ -3012,7 +3042,9 @@ impl EventLoop {
                 policy_config,
                 policy_state,
                 &mut self.bus,
-                policy_config.completion_after_terminal.write_diagnostic_event,
+                policy_config
+                    .completion_after_terminal
+                    .write_diagnostic_event,
             );
             events = policy_result.events;
 
@@ -3025,11 +3057,81 @@ impl EventLoop {
         }
         // --- End event policy validation ---
 
+        // --- State machine validation: enforce instance lifecycle rules ---
+        // Inserted after policy validation, before workflow guards and record_event() + bus.publish()
+        if let Some(ref sm_config) = self.config.event_loop.state_machine
+            && sm_config.enabled
+        {
+            let sm_state = self
+                .state
+                .state_machine_runtime_state
+                .get_or_insert_with(StateMachineRuntimeState::default);
+
+            let (accepted, rejected): (Vec<_>, Vec<_>) = events.into_iter().partition(|event| {
+                let topic = event.topic.as_str();
+                let payload = event.payload.as_deref();
+                let decision = sm_state.validate_event(topic, payload, sm_config);
+
+                match decision {
+                    StateMachineDecision::Accept { .. } => true,
+                    StateMachineDecision::Reject { finding } => {
+                        // Publish diagnostic event for rejection
+                        let diagnostic = Event::new(
+                            "event.state_machine.rejected",
+                            serde_json::to_string(&finding)
+                                .unwrap_or_else(|_| finding.reason.clone()),
+                        );
+                        self.bus.publish(diagnostic);
+                        false
+                    }
+                    StateMachineDecision::Ignore { finding } => {
+                        // Silently ignore (no bus publish, no record)
+                        let diagnostic = Event::new(
+                            "event.state_machine.ignored",
+                            serde_json::to_string(&finding)
+                                .unwrap_or_else(|_| finding.reason.clone()),
+                        );
+                        self.bus.publish(diagnostic);
+                        false
+                    }
+                    StateMachineDecision::DiagnosticOnly { finding } => {
+                        // Just log, event still passes through
+                        let diagnostic = Event::new(
+                            "event.state_machine.diagnostic",
+                            serde_json::to_string(&finding)
+                                .unwrap_or_else(|_| finding.reason.clone()),
+                        );
+                        self.bus.publish(diagnostic);
+                        true
+                    }
+                }
+            });
+
+            // Log rejected count for metrics
+            if !rejected.is_empty() {
+                debug!(
+                    rejected_count = rejected.len(),
+                    "State machine rejected events"
+                );
+            }
+
+            events = accepted;
+        }
+        // --- End state machine validation ---
+
         // --- Workflow guard validation: reject out-of-order events ---
-        // Inserted after scope enforcement, before state.record_event() + bus.publish()
+        // Legacy linear guards run after the state machine. When the state machine
+        // is enabled, branch-close topics that it accepts are lifecycle-complete
+        // even if they are not part of a linear guard chain.
         let workflow_guards = self.config.event_loop.workflow_guards.as_ref();
-        let events: Vec<JsonlEvent> = match workflow_guards {
-            Some(guards) if !guards.chains.is_empty() => apply_workflow_guard_validation(
+        let state_machine_enabled = self
+            .config
+            .event_loop
+            .state_machine
+            .as_ref()
+            .is_some_and(|sm| sm.enabled);
+        let events: Vec<JsonlEvent> = match (workflow_guards, state_machine_enabled) {
+            (Some(guards), false) if !guards.chains.is_empty() => apply_workflow_guard_validation(
                 events,
                 guards,
                 &mut self.state.workflow_progress,
@@ -3066,6 +3168,14 @@ impl EventLoop {
         let write_diagnostic = policy_config_ref
             .map(|c| c.completion_after_terminal.write_diagnostic_event)
             .unwrap_or(false);
+        let mut accepted_log_events = Vec::new();
+        macro_rules! accept_event {
+            ($accepted:expr) => {{
+                let accepted = $accepted;
+                accepted_log_events.push(accepted.clone());
+                validated_events.push(accepted);
+            }};
+        }
 
         for (index, event) in events.into_iter().enumerate() {
             let payload = event.payload.clone().unwrap_or_default();
@@ -3077,6 +3187,7 @@ impl EventLoop {
                     "loop.cancel event detected — scheduling graceful termination"
                 );
                 self.state.cancellation_requested = true;
+                accepted_log_events.push(Event::new(event.topic.as_str(), &payload));
                 // Continue processing remaining events (they may contain cleanup info)
                 continue;
             }
@@ -3090,6 +3201,7 @@ impl EventLoop {
                 // Events AFTER it in the same batch are protected by the completion guard.
                 self.state.completion_requested = true;
                 completion_seen_in_batch = true;
+                accepted_log_events.push(Event::new(event.topic.as_str(), &payload));
                 self.diagnostics.log_orchestration(
                     self.state.iteration,
                     "jsonl",
@@ -3148,10 +3260,7 @@ impl EventLoop {
                                         ),
                                     ));
                                 }
-                                validated_events.push(Event::new(
-                                    event.topic.as_str(),
-                                    &payload,
-                                ));
+                                accept_event!(Event::new(event.topic.as_str(), &payload));
                             }
                             _ => {}
                         }
@@ -3165,7 +3274,7 @@ impl EventLoop {
                 if let Some(evidence) = EventParser::parse_backpressure_evidence(&payload) {
                     if evidence.all_passed() {
                         self.warn_on_mutation_evidence(&evidence);
-                        validated_events.push(Event::new(event.topic.as_str(), &payload));
+                        accept_event!(Event::new(event.topic.as_str(), &payload));
                     } else {
                         // Evidence present but checks failed - synthesize build.blocked
                         warn!(
@@ -3215,7 +3324,7 @@ impl EventLoop {
                             },
                         );
 
-                        validated_events.push(Event::new(
+                        accept_event!(Event::new(
                             "build.blocked",
                             "Backpressure checks failed. Fix tests/lint/typecheck/audit/coverage/complexity/duplication/specs before emitting build.done.",
                         ));
@@ -3232,7 +3341,7 @@ impl EventLoop {
                         },
                     );
 
-                    validated_events.push(Event::new(
+                    accept_event!(Event::new(
                         "build.blocked",
                         "Missing backpressure evidence. Include 'tests: pass', 'lint: pass', 'typecheck: pass', 'audit: pass', 'coverage: pass', 'complexity: <score>', 'duplication: pass', 'performance: pass' (optional), 'specs: pass' (optional) in build.done payload.",
                     ));
@@ -3243,7 +3352,7 @@ impl EventLoop {
                 // and don't run tests/builds.
                 if let Some(evidence) = EventParser::parse_review_evidence(&payload) {
                     if evidence.is_verified() {
-                        validated_events.push(Event::new(event.topic.as_str(), &payload));
+                        accept_event!(Event::new(event.topic.as_str(), &payload));
                     } else {
                         // Evidence present but checks failed - synthesize review.blocked
                         warn!(
@@ -3263,7 +3372,7 @@ impl EventLoop {
                             },
                         );
 
-                        validated_events.push(Event::new(
+                        accept_event!(Event::new(
                             "review.blocked",
                             "Review verification failed. Run tests and build before emitting review.done.",
                         ));
@@ -3280,7 +3389,7 @@ impl EventLoop {
                         },
                     );
 
-                    validated_events.push(Event::new(
+                    accept_event!(Event::new(
                         "review.blocked",
                         "Missing verification evidence. Include 'tests: pass' and 'build: pass' in review.done payload.",
                     ));
@@ -3288,7 +3397,7 @@ impl EventLoop {
             } else if event.topic == "verify.passed" {
                 if let Some(report) = EventParser::parse_quality_report(&payload) {
                     if report.meets_thresholds() {
-                        validated_events.push(Event::new(event.topic.as_str(), &payload));
+                        accept_event!(Event::new(event.topic.as_str(), &payload));
                     } else {
                         let failed = report.failed_dimensions();
                         let reason = if failed.is_empty() {
@@ -3310,7 +3419,7 @@ impl EventLoop {
                             },
                         );
 
-                        validated_events.push(Event::new(
+                        accept_event!(Event::new(
                             "verify.failed",
                             "Quality thresholds failed. Include quality.tests, quality.coverage, quality.lint, quality.audit, quality.mutation, quality.complexity with thresholds in verify.passed payload.",
                         ));
@@ -3327,7 +3436,7 @@ impl EventLoop {
                         },
                     );
 
-                    validated_events.push(Event::new(
+                    accept_event!(Event::new(
                         "verify.failed",
                         "Missing quality report. Include quality.tests, quality.coverage, quality.lint, quality.audit, quality.mutation, quality.complexity in verify.passed payload.",
                     ));
@@ -3336,10 +3445,10 @@ impl EventLoop {
                 if EventParser::parse_quality_report(&payload).is_none() {
                     warn!("verify.failed missing quality report");
                 }
-                validated_events.push(Event::new(event.topic.as_str(), &payload));
+                accept_event!(Event::new(event.topic.as_str(), &payload));
             } else {
                 // Non-backpressure events pass through unchanged
-                validated_events.push(Event::new(event.topic.as_str(), &payload));
+                accept_event!(Event::new(event.topic.as_str(), &payload));
             }
         }
 
@@ -3567,7 +3676,6 @@ impl EventLoop {
         let had_plan_events = validated_events
             .iter()
             .any(|event| event.topic.as_str().starts_with("plan."));
-
         // Record and diagnose validated events (before consuming them).
         for event in &validated_events {
             // Record topic for event chain validation
@@ -3636,6 +3744,7 @@ impl EventLoop {
             had_plan_events,
             human_interact_context,
             has_orphans,
+            accepted_events: accepted_log_events,
         })
     }
 
@@ -3681,7 +3790,9 @@ impl EventLoop {
                 policy_config,
                 policy_state,
                 &mut self.bus,
-                policy_config.completion_after_terminal.write_diagnostic_event,
+                policy_config
+                    .completion_after_terminal
+                    .write_diagnostic_event,
             );
 
             // Write hold artifact if policy hold was triggered
