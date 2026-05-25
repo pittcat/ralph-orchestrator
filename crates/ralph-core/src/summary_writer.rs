@@ -331,6 +331,7 @@ mod tests {
             current_isolated_hat: None,
             workflow_progress: crate::event_loop::WorkflowProgress::new(),
             policy_runtime_state: None,
+            state_machine_runtime_state: None,
         }
     }
 

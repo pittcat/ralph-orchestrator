@@ -186,6 +186,12 @@ pub async fn run_loop_impl(
     fs::write(&loop_id_marker, &loop_id).context("Failed to write current-loop-id marker")?;
     debug!(loop_id = %loop_id, marker = ?loop_id_marker, "Wrote loop ID marker file");
 
+    let state_machine_enabled = config
+        .event_loop
+        .state_machine
+        .as_ref()
+        .is_some_and(|sm| sm.enabled);
+
     // For fresh runs (not resume), generate a unique timestamped events file
     // This prevents stale events from previous runs polluting new runs (issue #82)
     // The marker file `.ralph/current-events` coordinates path between Ralph and agents
@@ -200,6 +206,22 @@ pub async fn run_loop_impl(
             .context("Failed to write current-events marker file")?;
 
         debug!("Created events file for this run: {}", relative_events_path);
+
+        if state_machine_enabled {
+            let relative_candidate_events_path =
+                format!(".ralph/event-candidates-{}.jsonl", run_id);
+            fs::write(
+                current_candidate_events_marker(&ctx),
+                &relative_candidate_events_path,
+            )
+            .context("Failed to write current-candidate-events marker file")?;
+            debug!(
+                "Created candidate events file for this run: {}",
+                relative_candidate_events_path
+            );
+        } else {
+            let _ = fs::remove_file(current_candidate_events_marker(&ctx));
+        }
 
         // Clear scratchpads for fresh objective start
         // Stale content from previous runs can confuse the agent about current task state
@@ -231,6 +253,9 @@ pub async fn run_loop_impl(
 
     // Initialize event loop with context for proper path resolution
     let mut event_loop = EventLoop::with_context(config.clone(), ctx.clone());
+    if state_machine_enabled {
+        event_loop.set_event_reader_path(resolve_candidate_events_path(&ctx));
+    }
 
     // Inject robot service (Telegram) for human-in-the-loop communication
     if config.robot.enabled
@@ -1736,7 +1761,7 @@ pub async fn run_loop_impl(
         }
 
         // Inject hat execution context into backend environment
-        let events_path = resolve_current_events_path(&ctx);
+        let events_path = resolve_emit_events_path(&ctx, state_machine_enabled);
         let triggered_hat = event_loop.triggered_hat().map(|h| h.as_str().to_string());
         inject_hat_execution_env(
             &mut effective_backend,
@@ -1979,13 +2004,20 @@ pub async fn run_loop_impl(
             );
         }
 
-        // Log events from output before processing
+        // Legacy configs log candidate events from backend output. State-machine
+        // configs use accepted-only logging after runtime validation.
+        let raw_output_logging_enabled = !config
+            .event_loop
+            .state_machine
+            .as_ref()
+            .is_some_and(|sm| sm.enabled);
         log_events_from_output(
             &mut event_logger,
             iteration,
             &hat_id,
             &output,
             event_loop.registry(),
+            raw_output_logging_enabled,
         );
 
         // Process output
@@ -2252,6 +2284,18 @@ pub async fn run_loop_impl(
                     (None, Vec::new())
                 }
             };
+
+        if let Some(processed) = processed_events.as_ref()
+            && !raw_output_logging_enabled
+        {
+            log_accepted_events(
+                &mut event_logger,
+                event_loop.state().iteration,
+                &hat_id,
+                &processed.accepted_events,
+                event_loop.registry(),
+            );
+        }
 
         if let Some(human_interact_context) = processed_events
             .as_ref()
@@ -4206,6 +4250,40 @@ fn resolve_current_events_path(ctx: &LoopContext) -> PathBuf {
         .unwrap_or_else(|| ctx.events_path())
 }
 
+fn current_candidate_events_marker(ctx: &LoopContext) -> PathBuf {
+    ctx.ralph_dir().join("current-candidate-events")
+}
+
+fn resolve_candidate_events_path(ctx: &LoopContext) -> PathBuf {
+    fs::read_to_string(current_candidate_events_marker(ctx))
+        .ok()
+        .map(|relative| {
+            let relative = relative.trim().to_string();
+            if std::path::Path::new(&relative).is_relative() {
+                ctx.workspace().join(relative)
+            } else {
+                PathBuf::from(relative)
+            }
+        })
+        .unwrap_or_else(|| ctx.ralph_dir().join("event-candidates.jsonl"))
+}
+
+fn resolve_emit_events_path(ctx: &LoopContext, state_machine_enabled: bool) -> PathBuf {
+    if state_machine_enabled {
+        resolve_candidate_events_path(ctx)
+    } else {
+        resolve_current_events_path(ctx)
+    }
+}
+
+fn config_state_machine_enabled(config: &RalphConfig) -> bool {
+    config
+        .event_loop
+        .state_machine
+        .as_ref()
+        .is_some_and(|sm| sm.enabled)
+}
+
 /// Injects Ralph hat execution context environment variables into a backend.
 /// Overwrites any existing Ralph reserved variables.
 fn inject_hat_execution_env(
@@ -4218,7 +4296,10 @@ fn inject_hat_execution_env(
     backend.env_vars.retain(|(k, _)| {
         !matches!(
             k.as_str(),
-            "RALPH_CURRENT_HAT" | "RALPH_CURRENT_LOOP_ID" | "RALPH_EVENTS_FILE" | "RALPH_TRIGGERED_HAT"
+            "RALPH_CURRENT_HAT"
+                | "RALPH_CURRENT_LOOP_ID"
+                | "RALPH_EVENTS_FILE"
+                | "RALPH_TRIGGERED_HAT"
         )
     });
     backend
@@ -4476,7 +4557,12 @@ fn log_events_from_output(
     hat_id: &HatId,
     output: &str,
     registry: &ralph_core::HatRegistry,
+    enabled: bool,
 ) {
+    if !enabled {
+        return;
+    }
+
     let parser = EventParser::new();
     let events = parser.parse(output);
 
@@ -4530,6 +4616,46 @@ fn log_events_from_output(
 
         if let Err(e) = logger.log(&record) {
             warn!("Failed to log event {}: {}", event.topic, e);
+        }
+    }
+}
+
+fn log_accepted_events(
+    logger: &mut EventLogger,
+    iteration: u32,
+    hat_id: &HatId,
+    events: &[Event],
+    registry: &ralph_core::HatRegistry,
+) {
+    for event in events {
+        let triggered = registry.find_by_trigger(event.topic.as_str());
+        if triggered.is_none() && !registry.has_subscriber(event.topic.as_str()) {
+            let mut valid_events: Vec<_> = registry
+                .all()
+                .flat_map(|hat| hat.subscriptions.iter())
+                .filter(|topic| topic.as_str() != "*")
+                .map(|topic| topic.to_string())
+                .collect();
+            valid_events.sort();
+            valid_events.dedup();
+
+            let orphan_event = Event::new(
+                "event.orphaned",
+                format!(
+                    "Event '{}' has no subscriber hat. Valid events to publish: {:?}",
+                    event.topic, valid_events
+                ),
+            )
+            .with_source(hat_id.clone());
+            let orphan_record = EventRecord::new(iteration, "loop", &orphan_event, None::<&HatId>);
+            if let Err(e) = logger.log(&orphan_record) {
+                warn!("Failed to log event.orphaned: {}", e);
+            }
+        }
+
+        let record = EventRecord::new(iteration, hat_id.to_string(), event, triggered);
+        if let Err(e) = logger.log(&record) {
+            warn!("Failed to log accepted event {}: {}", event.topic, e);
         }
     }
 }
@@ -5163,7 +5289,8 @@ async fn handle_wave_events(
         push_to_tui_iteration(state, header_line);
     }
 
-    let main_events_file = resolve_current_events_path(ctx);
+    let main_events_file =
+        resolve_emit_events_path(ctx, config_state_machine_enabled(event_loop.config()));
     let wave_result = execute_wave(
         &detected,
         backend,
@@ -10087,9 +10214,18 @@ hats:
 
         let events_file = temp_dir.path().join("events.jsonl");
         let wave = make_test_wave_with_timeout(vec!["review.done".to_string()], timeout_secs);
-        execute_wave(&wave, &backend, &events_file, false, false, None, None, "test-loop")
-            .await
-            .expect("wave execution")
+        execute_wave(
+            &wave,
+            &backend,
+            &events_file,
+            false,
+            false,
+            None,
+            None,
+            "test-loop",
+        )
+        .await
+        .expect("wave execution")
     }
 
     #[cfg(unix)]
@@ -10116,9 +10252,18 @@ hats:
 
         let events_file = temp_dir.path().join("events.jsonl");
         let wave = make_test_wave(vec!["review.done".to_string()]);
-        execute_wave(&wave, &backend, &events_file, false, false, None, None, "test-loop")
-            .await
-            .expect("wave execution")
+        execute_wave(
+            &wave,
+            &backend,
+            &events_file,
+            false,
+            false,
+            None,
+            None,
+            "test-loop",
+        )
+        .await
+        .expect("wave execution")
     }
 
     #[cfg(unix)]
@@ -10179,9 +10324,18 @@ hats:
             30,
             task_payload.to_string(),
         );
-        let completed = execute_wave(&wave, &backend, &events_file, false, false, None, None, "test-loop")
-            .await
-            .expect("wave execution");
+        let completed = execute_wave(
+            &wave,
+            &backend,
+            &events_file,
+            false,
+            false,
+            None,
+            None,
+            "test-loop",
+        )
+        .await
+        .expect("wave execution");
         let captured: CapturedWaveInvocation = serde_json::from_str(
             &std::fs::read_to_string(&worker_capture_path).expect("read captured invocation"),
         )
@@ -10317,9 +10471,18 @@ hats:
         wave.hat_config.backend_args = backend_args;
         let backend = CliBackend::from_name("kiro-acp").expect("named ACP backend");
 
-        let completed = execute_wave(&wave, &backend, &events_file, false, false, None, None, "test-loop")
-            .await
-            .expect("wave execution");
+        let completed = execute_wave(
+            &wave,
+            &backend,
+            &events_file,
+            false,
+            false,
+            None,
+            None,
+            "test-loop",
+        )
+        .await
+        .expect("wave execution");
         let captured: CapturedAcpWaveInvocation = serde_json::from_str(
             &std::fs::read_to_string(&worker_capture_path).expect("read captured ACP invocation"),
         )
@@ -12763,7 +12926,7 @@ EOF"#,
 <event topic=\"unknown.event\">oops</event>";
         let hat_id = HatId::new("tester");
 
-        log_events_from_output(&mut logger, 1, &hat_id, output, &registry);
+        log_events_from_output(&mut logger, 1, &hat_id, output, &registry, true);
 
         let content = std::fs::read_to_string(&log_path).expect("read events");
         let records: Vec<EventRecord> = content
@@ -12782,6 +12945,50 @@ EOF"#,
             .find(|record| record.topic == "task.start")
             .and_then(|record| record.triggered.clone());
         assert_eq!(triggered.as_deref(), Some("planner"));
+    }
+
+    #[test]
+    fn test_log_events_from_output_can_skip_raw_candidates_for_state_machine() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let log_path = temp_dir.path().join("events.jsonl");
+        let mut logger = EventLogger::new(&log_path);
+
+        let registry = HatRegistry::new();
+        let output = "<event topic=\"experiment.ready\">{\"task_key\":\"t1\"}</event>";
+        let hat_id = HatId::new("tester");
+
+        log_events_from_output(&mut logger, 1, &hat_id, output, &registry, false);
+
+        assert!(
+            !log_path.exists(),
+            "raw candidate events should not be written when accepted-only logging is enabled"
+        );
+    }
+
+    #[test]
+    fn test_log_accepted_events_records_orphan_event() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let log_path = temp_dir.path().join("events.jsonl");
+        let mut logger = EventLogger::new(&log_path);
+
+        let mut registry = HatRegistry::new();
+        let mut hat = Hat::new("planner", "Planner");
+        hat.subscriptions.push(Topic::new("task.start"));
+        registry.register(hat);
+
+        let hat_id = HatId::new("tester");
+        let events = vec![Event::new("unknown.event", "accepted")];
+        log_accepted_events(&mut logger, 1, &hat_id, &events, &registry);
+
+        let content = std::fs::read_to_string(&log_path).expect("read events");
+        let records: Vec<EventRecord> = content
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("record"))
+            .collect();
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].topic, "event.orphaned");
+        assert_eq!(records[1].topic, "unknown.event");
     }
 
     #[test]
@@ -13248,5 +13455,28 @@ hats:
         assert!(keys.contains(&"RALPH_CURRENT_LOOP_ID"));
         assert!(keys.contains(&"RALPH_EVENTS_FILE"));
         assert!(!keys.contains(&"RALPH_TRIGGERED_HAT"));
+    }
+
+    #[test]
+    fn test_state_machine_emit_path_uses_candidate_events_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ctx = LoopContext::primary(temp.path().to_path_buf());
+        std::fs::create_dir_all(ctx.ralph_dir()).expect("create .ralph");
+        std::fs::write(ctx.current_events_marker(), ".ralph/events-accepted.jsonl")
+            .expect("write current events marker");
+        std::fs::write(
+            current_candidate_events_marker(&ctx),
+            ".ralph/event-candidates.jsonl",
+        )
+        .expect("write candidate marker");
+
+        assert_eq!(
+            resolve_emit_events_path(&ctx, true),
+            temp.path().join(".ralph/event-candidates.jsonl")
+        );
+        assert_eq!(
+            resolve_emit_events_path(&ctx, false),
+            temp.path().join(".ralph/events-accepted.jsonl")
+        );
     }
 }

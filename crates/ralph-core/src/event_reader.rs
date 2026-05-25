@@ -712,7 +712,10 @@ mod tests {
         let proto: ralph_proto::Event = event.into();
         assert_eq!(proto.topic.as_str(), "review.file");
         assert_eq!(proto.payload, "src/main.rs");
-        assert_eq!(proto.source.as_ref().map(|s| s.as_str()), Some("dispatcher"));
+        assert_eq!(
+            proto.source.as_ref().map(|s| s.as_str()),
+            Some("dispatcher")
+        );
         assert_eq!(proto.target.as_ref().map(|s| s.as_str()), Some("reviewer"));
     }
 }

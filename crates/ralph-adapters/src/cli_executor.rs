@@ -724,7 +724,10 @@ mod tests {
 
         let executor = CliExecutor::new(backend);
         let mut output = Vec::new();
-        let result = executor.execute("", &mut output, None, false).await.unwrap();
+        let result = executor
+            .execute("", &mut output, None, false)
+            .await
+            .unwrap();
         assert!(result.success);
         let stdout = String::from_utf8(output).unwrap();
         assert!(
