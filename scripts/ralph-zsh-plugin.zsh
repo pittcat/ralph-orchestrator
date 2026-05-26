@@ -6,18 +6,69 @@
 # For auto-completion to work, ensure compinit is loaded before sourcing this plugin.
 # Add 'autoload -U compinit; compinit' to ~/.zshrc if not already present.
 
+# Drop old definitions when the plugin is re-sourced so completion fixes take
+# effect without requiring a fresh shell.
+for _ralph_fn in \
+  _ralph \
+  _ralph_subcmd_args \
+  _ralph_builtin_hats \
+  _ralph_hat_source \
+  _ralph_run_args \
+  _ralph_preflight_args \
+  _ralph_hooks_args \
+  _ralph_doctor_args \
+  _ralph_init_args \
+  _ralph_events_args \
+  _ralph_clean_args \
+  _ralph_emit_args \
+  _ralph_plan_args \
+  _ralph_code_task_args \
+  _ralph_tui_args \
+  _ralph_web_args \
+  _ralph_completions_args \
+  _ralph_tools_subcmd \
+  _ralph_wave_subcmd \
+  _ralph_wave_emit_args \
+  _ralph_loops_subcmd \
+  _ralph_hats_subcmd \
+  _ralph_bot_subcmd \
+  _ralph_memory_subcmd \
+  _ralph_memory_args \
+  _ralph_task_subcmd \
+  _ralph_task_args \
+  _ralph_skill_subcmd \
+  _ralph_skill_args \
+  _ralph_interact_subcmd \
+  _ralph_interact_args; do
+  unfunction "$_ralph_fn" 2>/dev/null || true
+done
+unset _ralph_fn
+
 # =============================================================================
 # Builtin Hat Collections
 # =============================================================================
-_RALPH_BUILTIN_HATS=(
-  "builtin:code-assist:Default implementation workflow with TDD and adversarial validation"
-  "builtin:debug:Bug investigation, root-cause analysis, and adversarial fix verification"
-  "builtin:research:Read-only codebase and architecture exploration with evidence-first synthesis"
-  "builtin:review:Adversarial code review without making modifications"
-  "builtin:pdd-to-code-assist:Advanced end-to-end idea-to-code workflow"
-  "builtin:autoresearch:Autonomous experiment loop: try ideas, measure, keep what works"
-  "builtin:hatless-baseline:Minimal bare hat collection for baseline comparison"
-  "builtin:merge-loop:Internal preset for loop merge operations"
+# Keep this list in sync with `crates/ralph-cli/src/presets.rs` and install
+# updates to `~/.oh-my-zsh/plugins/ralph/ralph.plugin.zsh`.
+_RALPH_BUILTIN_HAT_VALUES=(
+  "builtin:code-assist"
+  "builtin:debug"
+  "builtin:research"
+  "builtin:review"
+  "builtin:pdd-to-code-assist"
+  "builtin:autoresearch"
+  "builtin:hatless-baseline"
+  "builtin:merge-loop"
+)
+
+_RALPH_BUILTIN_HAT_DESCRIPTIONS=(
+  "Default implementation workflow with TDD and adversarial validation"
+  "Bug investigation, root-cause analysis, and adversarial fix verification"
+  "Read-only codebase and architecture exploration with evidence-first synthesis"
+  "Adversarial code review without making modifications"
+  "Advanced end-to-end idea-to-code workflow"
+  "Autonomous experiment loop: try ideas, measure, keep what works"
+  "Minimal bare hat collection for baseline comparison"
+  "Internal preset for loop merge operations"
 )
 
 # =============================================================================
@@ -181,11 +232,27 @@ _RALPH_HOOKS_CMDS=(
 # =============================================================================
 # Main Completion Function
 # =============================================================================
+_ralph_builtin_hats() {
+  compadd \
+    -X 'builtin hat collection' \
+    -d _RALPH_BUILTIN_HAT_DESCRIPTIONS \
+    -a _RALPH_BUILTIN_HAT_VALUES
+}
+
+_ralph_hat_source() {
+  local ret=1
+
+  _ralph_builtin_hats && ret=0
+  _files && ret=0
+
+  return ret
+}
+
 _ralph() {
   local -a _ralph_main_opts
   _ralph_main_opts=(
     '-c+[Core config source]:config source:_default'
-    '-H+[Hat collection source]:hat source:->hat_collection'
+    '-H+[Hat collection source]:hat source:_ralph_hat_source'
     '-v[Verbose output]'
     '--color[Color output mode]:mode:(auto always never)'
     '-h[Print help]'
@@ -202,17 +269,8 @@ _ralph() {
 
   _arguments -C $_ralph_main_opts
 
-  case $state in
-    hat_collection)
-      _describe 'hat source' _RALPH_BUILTIN_HATS
-      _files -/
-      ;;
-    *)
-      ;;
-  esac
-
   # Only return early for options when not in a special state
-  if [[ $state != hat_collection ]] && [[ ${words[CURRENT]} == -* ]]; then
+  if [[ ${words[CURRENT]} == -* ]]; then
     return
   fi
 
@@ -326,7 +384,7 @@ _ralph_run_args() {
     '-p+[Inline prompt text]:prompt text:_default'
     '-P+[Prompt file path]:prompt file:_files'
     '-b+[Backend to use]:backend:->backend_list'
-    '-H+[Hat collection source]:hat source:->hat_collection'
+    '-H+[Hat collection source]:hat source:_ralph_hat_source'
     '--max-iterations+[Override max iterations]:iterations:_default'
     '--completion-promise+[Override completion promise]:promise:_default'
     '--dry-run[Show what would be executed]'
@@ -355,10 +413,6 @@ _ralph_run_args() {
   case $state in
     backend_list)
       _describe 'backend' _RALPH_BACKENDS
-      ;;
-    hat_collection)
-      _describe 'hat source' _RALPH_BUILTIN_HATS
-      _files -/
       ;;
   esac
 }
