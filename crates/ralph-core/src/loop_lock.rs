@@ -387,20 +387,6 @@ impl LoopLock {
         }
     }
 
-    /// Check if a process with the given PID exists.
-    #[cfg(unix)]
-    fn is_pid_alive(pid: u32) -> bool {
-        use nix::sys::signal::kill;
-        use nix::unistd::Pid;
-        // Signal 0 (None) doesn't send any signal but checks if the process exists
-        kill(Pid::from_raw(pid as i32), None).is_ok()
-    }
-
-    #[cfg(not(unix))]
-    fn is_pid_alive(_pid: u32) -> bool {
-        true
-    }
-
     /// Write lock metadata to the file.
     fn write_metadata(file: &File, prompt: &str) -> Result<(), LockError> {
         let metadata = LockMetadata {
