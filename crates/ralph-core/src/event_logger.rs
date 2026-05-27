@@ -96,7 +96,9 @@ pub struct EventRecord {
 
 impl EventRecord {
     /// Maximum payload length before truncation.
-    const MAX_PAYLOAD_LEN: usize = 500;
+    /// Raised from 500 to 50000 to accommodate structured AutoResearch event
+    /// payloads (typically 1–5 KB) without breaking JSON validity.
+    const MAX_PAYLOAD_LEN: usize = 50000;
 
     /// Creates a new event record.
     pub fn new(
