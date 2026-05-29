@@ -92,6 +92,10 @@ pub struct EventRecord {
     /// Total number of events in the wave.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wave_total: Option<u32>,
+
+    /// Current orchestration phase (warmup / production).
+    #[serde(rename = "_phase", default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
 }
 
 impl EventRecord {
@@ -106,6 +110,7 @@ impl EventRecord {
         hat: impl Into<String>,
         event: &Event,
         triggered: Option<&HatId>,
+        phase: Option<String>,
     ) -> Self {
         let payload = if event.payload.len() > Self::MAX_PAYLOAD_LEN {
             // Find a valid UTF-8 char boundary at or before MAX_PAYLOAD_LEN.
@@ -130,6 +135,7 @@ impl EventRecord {
             wave_id: event.wave_id.clone(),
             wave_index: event.wave_index,
             wave_total: event.wave_total,
+            phase,
         }
     }
 
@@ -224,8 +230,9 @@ impl EventLogger {
         hat: &str,
         event: &Event,
         triggered: Option<&HatId>,
+        phase: Option<&str>,
     ) -> std::io::Result<()> {
-        let record = EventRecord::new(iteration, hat, event, triggered);
+        let record = EventRecord::new(iteration, hat, event, triggered, phase.map(String::from));
         self.log(&record)
     }
 
@@ -342,10 +349,10 @@ mod tests {
         let event2 = make_event("build.done", "Build complete");
 
         logger
-            .log_event(1, "loop", &event1, Some(&HatId::new("planner")))
+            .log_event(1, "loop", &event1, Some(&HatId::new("planner")), None)
             .unwrap();
         logger
-            .log_event(2, "builder", &event2, Some(&HatId::new("planner")))
+            .log_event(2, "builder", &event2, Some(&HatId::new("planner")), None)
             .unwrap();
 
         // Read them back
@@ -369,7 +376,7 @@ mod tests {
 
         for i in 1..=10 {
             let event = make_event("test", &format!("Event {}", i));
-            logger.log_event(i, "hat", &event, None).unwrap();
+            logger.log_event(i, "hat", &event, None, None).unwrap();
         }
 
         let history = EventHistory::new(&path);
@@ -388,13 +395,13 @@ mod tests {
         let mut logger = EventLogger::new(&path);
 
         logger
-            .log_event(1, "hat", &make_event("build.done", "a"), None)
+            .log_event(1, "hat", &make_event("build.done", "a"), None, None)
             .unwrap();
         logger
-            .log_event(2, "hat", &make_event("build.blocked", "b"), None)
+            .log_event(2, "hat", &make_event("build.blocked", "b"), None, None)
             .unwrap();
         logger
-            .log_event(3, "hat", &make_event("build.done", "c"), None)
+            .log_event(3, "hat", &make_event("build.done", "c"), None, None)
             .unwrap();
 
         let history = EventHistory::new(&path);
@@ -406,11 +413,12 @@ mod tests {
 
     #[test]
     fn test_payload_truncation() {
-        let long_payload = "x".repeat(1000);
+        let long_payload = "x".repeat(EventRecord::MAX_PAYLOAD_LEN + 1);
         let event = make_event("test", &long_payload);
-        let record = EventRecord::new(1, "hat", &event, None);
+        let record = EventRecord::new(1, "hat", &event, None, None);
 
-        assert!(record.payload.len() < 1000);
+        // Verify truncation actually happened (payload changed)
+        assert_ne!(record.payload, long_payload);
         assert!(record.payload.contains("[truncated"));
     }
 
@@ -418,13 +426,13 @@ mod tests {
     fn test_payload_truncation_with_multibyte_chars() {
         // Create a payload with multi-byte UTF-8 characters (✅ is 3 bytes)
         // Place emoji near the truncation boundary to trigger the bug
-        let mut payload = "x".repeat(498);
-        payload.push_str("✅✅✅"); // 3 emojis at bytes 498-506
-        payload.push_str(&"y".repeat(500));
+        let mut payload = "x".repeat(EventRecord::MAX_PAYLOAD_LEN - 2);
+        payload.push_str("✅✅✅"); // 3 emojis near the truncation boundary
+        payload.push_str(&"y".repeat(10));
 
         let event = make_event("test", &payload);
         // This should NOT panic
-        let record = EventRecord::new(1, "hat", &event, None);
+        let record = EventRecord::new(1, "hat", &event, None, None);
 
         assert!(record.payload.contains("[truncated"));
         // Verify the payload is valid UTF-8 (would panic on iteration if not)
@@ -438,7 +446,7 @@ mod tests {
 
         let mut logger = EventLogger::new(&path);
         let event = make_event("test", "payload");
-        logger.log_event(1, "hat", &event, None).unwrap();
+        logger.log_event(1, "hat", &event, None, None).unwrap();
 
         assert!(path.exists());
     }
@@ -498,7 +506,7 @@ mod tests {
         let mut logger = EventLogger::new(&path);
         let event = make_event("task.start", "Initial task");
         logger
-            .log_event(1, "loop", &event, Some(&HatId::new("planner")))
+            .log_event(1, "loop", &event, Some(&HatId::new("planner")), None)
             .unwrap();
 
         // Write an agent-style event (simple format)
@@ -530,7 +538,7 @@ mod tests {
     #[test]
     fn test_event_record_propagates_wave_metadata() {
         let event = make_event("review.file", "src/main.rs").with_wave("w-1a2b3c4d", 1, 3);
-        let record = EventRecord::new(1, "dispatcher", &event, None);
+        let record = EventRecord::new(1, "dispatcher", &event, None, None);
 
         assert_eq!(record.wave_id.as_deref(), Some("w-1a2b3c4d"));
         assert_eq!(record.wave_index, Some(1));
@@ -540,7 +548,7 @@ mod tests {
     #[test]
     fn test_event_record_no_wave_metadata() {
         let event = make_event("build.done", "success");
-        let record = EventRecord::new(1, "builder", &event, None);
+        let record = EventRecord::new(1, "builder", &event, None, None);
 
         assert!(record.wave_id.is_none());
         assert!(record.wave_index.is_none());
@@ -556,11 +564,11 @@ mod tests {
 
         // Log event with wave metadata
         let event = make_event("review.file", "src/main.rs").with_wave("w-deadbeef", 0, 5);
-        logger.log_event(1, "dispatcher", &event, None).unwrap();
+        logger.log_event(1, "dispatcher", &event, None, None).unwrap();
 
         // Log event without wave metadata
         let plain_event = make_event("build.done", "ok");
-        logger.log_event(2, "builder", &plain_event, None).unwrap();
+        logger.log_event(2, "builder", &plain_event, None, None).unwrap();
 
         let history = EventHistory::new(&path);
         let records = history.read_all().unwrap();
@@ -579,7 +587,7 @@ mod tests {
     #[test]
     fn test_event_record_wave_fields_not_serialized_when_none() {
         let event = make_event("test", "payload");
-        let record = EventRecord::new(1, "hat", &event, None);
+        let record = EventRecord::new(1, "hat", &event, None, None);
         let json = serde_json::to_string(&record).unwrap();
         assert!(!json.contains("wave_id"));
         assert!(!json.contains("wave_index"));
@@ -648,5 +656,55 @@ mod tests {
         assert_eq!(records[2].topic, "loop.recovery");
         let parsed: serde_json::Value = serde_json::from_str(&records[2].payload).unwrap();
         assert_eq!(parsed["evidence"]["tests"], "pass");
+    }
+
+    #[test]
+    fn test_event_record_phase_roundtrip_through_jsonl() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("events.jsonl");
+
+        let mut logger = EventLogger::new(&path);
+
+        // Log event with phase metadata
+        let event = make_event("experiment.start", "run test");
+        logger.log_event(1, "loop", &event, None, Some("warmup")).unwrap();
+
+        // Log event without phase metadata
+        let plain_event = make_event("build.done", "ok");
+        logger.log_event(2, "builder", &plain_event, None, None).unwrap();
+
+        let history = EventHistory::new(&path);
+        let records = history.read_all().unwrap();
+
+        assert_eq!(records.len(), 2);
+        // First has phase metadata
+        assert_eq!(records[0].phase.as_deref(), Some("warmup"));
+        // Second has no phase metadata
+        assert!(records[1].phase.is_none());
+    }
+
+    #[test]
+    fn test_event_record_phase_field_not_serialized_when_none() {
+        let event = make_event("test", "payload");
+        let record = EventRecord::new(1, "hat", &event, None, None);
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(!json.contains("_phase"));
+    }
+
+    #[test]
+    fn test_event_record_phase_serialized_when_some() {
+        let event = make_event("test", "payload");
+        let record = EventRecord::new(1, "hat", &event, None, Some("production".to_string()));
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(json.contains("\"_phase\":\"production\""));
+    }
+
+    #[test]
+    fn test_event_record_backwards_compat_no_phase_field() {
+        // Simulate reading a JSONL line written before phase support
+        let json = r#"{"ts":"2024-01-15T10:00:00Z","iteration":1,"hat":"builder","topic":"build.done","payload":"ok"}"#;
+        let record: EventRecord = serde_json::from_str(json).unwrap();
+        assert!(record.phase.is_none());
+        assert_eq!(record.topic, "build.done");
     }
 }

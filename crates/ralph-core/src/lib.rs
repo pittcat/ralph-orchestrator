@@ -69,9 +69,9 @@ pub use config::{
     CliConfig, ConfigError, CoreConfig, EventFilterConfig, EventFilterMode, EventLoopConfig,
     EventMetadata, EventPolicyConfig, EventPolicyMode, EventProjectionConfig, EventSchema,
     FeaturesConfig, HatBackend, HatConfig, HookStage, InjectMode, MemoriesConfig, MemoriesFilter,
-    PayloadType, PreflightExtensionsConfig, PreflightHook, ProjectionMode, ProjectionRule,
-    RalphConfig, ScratchpadConfig, SkillOverride, SkillsConfig, StateFileEntry, StateFileFormat,
-    StateFilesConfig, ViolationAction,
+    PayloadType, Phase, PhaseConfig, PreflightExtensionsConfig, PreflightHook, ProjectionMode,
+    ProjectionRule, RalphConfig, ScratchpadConfig, SkillOverride, SkillsConfig, StateFileEntry,
+    StateFileFormat, StateFilesConfig, ViolationAction, WarmupConfig,
 };
 // Re-export loop_name types (also available via FeaturesConfig.loop_naming)
 pub use diagnostics::DiagnosticsCollector;

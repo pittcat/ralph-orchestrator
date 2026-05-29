@@ -787,6 +787,7 @@ mod tests {
             wave_id: None,
             wave_index: None,
             wave_total: None,
+            phase: None,
         };
 
         print_events_table(&[record], false);
@@ -807,6 +808,7 @@ mod tests {
             wave_id: None,
             wave_index: None,
             wave_total: None,
+            phase: None,
         };
 
         print_events_table(&[record], false);

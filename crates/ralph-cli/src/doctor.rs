@@ -639,6 +639,7 @@ mod tests {
             concurrency: 1,
             aggregate: None,
             event_filter: None,
+            phase_triggers: None,
         }
     }
 

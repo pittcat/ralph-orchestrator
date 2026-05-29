@@ -17,9 +17,9 @@ use ralph_core::{
     CompletionAction, EventLogger, EventLoop, EventParser, EventRecord, HookEngine, HookExecutor,
     HookExecutorContract, HookMutationConfig, HookOnError, HookPayloadBuilderInput,
     HookPayloadContextInput, HookPhaseEvent, HookRunRequest, HookRunResult, HookSuspendMode,
-    LoopCompletionHandler, LoopContext, LoopHistory, LoopRegistry, MergeQueue, RalphConfig, Record,
-    SessionRecorder, SummaryWriter, SuspendStateRecord, SuspendStateStore, TerminationReason,
-    UrgentSteerStore,
+    LoopCompletionHandler, LoopContext, LoopHistory, LoopRegistry, MergeQueue, Phase, PhaseConfig,
+    RalphConfig, Record, SessionRecorder, SummaryWriter, SuspendStateRecord, SuspendStateStore,
+    TerminationReason, UrgentSteerStore, WarmupConfig,
 };
 use ralph_proto::{Event, GuidanceTarget, HatId, RpcEvent, RpcState, RpcTaskCounts};
 use ralph_tui::Tui;
@@ -105,7 +105,7 @@ fn resolve_loop_id(
 /// * `resume_loop_id` - Explicit loop ID to use when resuming (`--loop-id`).
 ///   If `None` and `resume` is true, reuses the existing `current-loop-id` marker.
 pub async fn run_loop_impl(
-    config: RalphConfig,
+    mut config: RalphConfig,
     color_mode: ColorMode,
     resume: bool,
     enable_tui: bool,
@@ -116,6 +116,8 @@ pub async fn run_loop_impl(
     custom_args: Vec<String>,
     auto_merge_override: Option<bool>,
     resume_loop_id: Option<String>,
+    warmup_only: bool,
+    force_warmup: bool,
 ) -> Result<TerminationReason> {
     // Set up process group leadership per spec
     // "The orchestrator must run as a process group leader"
@@ -360,6 +362,75 @@ pub async fn run_loop_impl(
             None
         };
 
+    // ── Phase Initialization (Warmup/Production Two-Phase Loop) ───────────────
+    // Determine starting phase based on CLI flags and phase.json state
+    let phase_json_path = ctx.ralph_dir().join("agent").join("phase.json");
+    let current_phase = if force_warmup {
+        info!("Force warmup enabled — starting in warmup phase");
+        Phase::Warmup
+    } else if phase_json_path.exists() {
+        // Read existing phase.json to check warmup_completed marker
+        match fs::read_to_string(&phase_json_path) {
+            Ok(content) => {
+                // Parse phase.json to check warmup_completed field
+                if let Ok(phase_data) = serde_json::from_str::<serde_json::Value>(&content) {
+                    let warmup_completed = phase_data
+                        .get("warmup_completed")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    if warmup_completed && !warmup_only {
+                        info!(
+                            "Warmup previously completed — skipping to production phase"
+                        );
+                        Phase::Production
+                    } else {
+                        Phase::Warmup
+                    }
+                } else {
+                    Phase::Warmup
+                }
+            }
+            Err(_) => Phase::Warmup,
+        }
+    } else {
+        // No phase.json exists — start in warmup phase
+        Phase::Warmup
+    };
+
+    // Set phase on registry for phase-aware hat triggering
+    event_loop.registry_mut().set_phase(current_phase.clone());
+
+    // Apply warmup_only / stop_on_exit from CLI flag to config
+    // WarmupConfig is nested under phase_config, not directly on EventLoopConfig
+    let stop_on_exit = if warmup_only {
+        info!("Warmup-only mode enabled — loop will exit after warmup completes");
+        // Ensure phase_config exists with warmup_config
+        if config.event_loop.phase_config.is_none() {
+            config.event_loop.phase_config = Some(PhaseConfig {
+                initial: Phase::Warmup,
+                transition_event: "phase.transition".to_string(),
+                warmup_config: None,
+            });
+        }
+        if let Some(ref mut phase_config) = config.event_loop.phase_config {
+            if phase_config.warmup_config.is_none() {
+                phase_config.warmup_config = Some(WarmupConfig::default());
+            }
+            if let Some(ref mut warmup) = phase_config.warmup_config {
+                warmup.stop_on_exit = true;
+            }
+        }
+        true
+    } else {
+        config
+            .event_loop
+            .phase_config
+            .as_ref()
+            .and_then(|p| p.warmup_config.as_ref())
+            .map(|w| w.stop_on_exit)
+            .unwrap_or(false)
+    };
+
     // Initialize event logger for debugging (uses context for path resolution)
     let mut event_logger = EventLogger::from_context(&ctx);
 
@@ -373,7 +444,7 @@ pub async fn run_loop_impl(
     let start_triggered = "planner"; // Default triggered hat for backward compat
     let start_event = Event::new(start_topic, &prompt_content);
     let start_record =
-        EventRecord::new(0, "loop", &start_event, Some(&HatId::new(start_triggered)));
+        EventRecord::new(0, "loop", &start_event, Some(&HatId::new(start_triggered)), Some(current_phase.to_string()));
     if let Err(e) = event_logger.log(&start_record) {
         warn!("Failed to log start event: {}", e);
     }
@@ -964,7 +1035,8 @@ pub async fn run_loop_impl(
             &mut event_logger,
             event_loop.state().iteration,
             &terminate_event,
-        );
+            Some(event_loop.registry().current_phase().to_string()),
+            );
 
         let reason = dispatch_post_loop_termination_hooks(
             &event_loop,
@@ -1053,7 +1125,8 @@ pub async fn run_loop_impl(
                 &mut event_logger,
                 event_loop.state().iteration,
                 &terminate_event,
-            );
+                Some(event_loop.registry().current_phase().to_string()),
+                );
 
             let reason = dispatch_post_loop_termination_hooks(
                 &event_loop,
@@ -1176,7 +1249,8 @@ pub async fn run_loop_impl(
                 &mut event_logger,
                 event_loop.state().iteration,
                 &terminate_event,
-            );
+                Some(event_loop.registry().current_phase().to_string()),
+                );
 
             let reason = dispatch_post_loop_termination_hooks(
                 &event_loop,
@@ -1261,7 +1335,8 @@ pub async fn run_loop_impl(
                     &mut event_logger,
                     event_loop.state().iteration,
                     &terminate_event,
-                );
+                    Some(event_loop.registry().current_phase().to_string()),
+                    );
 
                 let reason = dispatch_post_loop_termination_hooks(
                     &event_loop,
@@ -1335,7 +1410,8 @@ pub async fn run_loop_impl(
                             &mut event_logger,
                             event_loop.state().iteration,
                             &terminate_event,
-                        );
+                            Some(event_loop.registry().current_phase().to_string()),
+                            );
 
                         let reason = dispatch_post_loop_termination_hooks(
                             &event_loop,
@@ -1397,7 +1473,8 @@ pub async fn run_loop_impl(
                         &mut event_logger,
                         event_loop.state().iteration,
                         &terminate_event,
-                    );
+                        Some(event_loop.registry().current_phase().to_string()),
+                        );
 
                     let reason = dispatch_post_loop_termination_hooks(
                         &event_loop,
@@ -1460,7 +1537,8 @@ pub async fn run_loop_impl(
                     &mut event_logger,
                     event_loop.state().iteration,
                     &terminate_event,
-                );
+                    Some(event_loop.registry().current_phase().to_string()),
+                    );
 
                 let reason = dispatch_post_loop_termination_hooks(
                     &event_loop,
@@ -1558,7 +1636,8 @@ pub async fn run_loop_impl(
                 &mut event_logger,
                 event_loop.state().iteration,
                 &terminate_event,
-            );
+                Some(event_loop.registry().current_phase().to_string()),
+                );
 
             let reason = dispatch_post_loop_termination_hooks(
                 &event_loop,
@@ -1881,7 +1960,7 @@ pub async fn run_loop_impl(
                 .await?;
 
                 let terminate_event = event_loop.publish_terminate_event(&reason);
-                log_terminate_event(&mut event_logger, event_loop.state().iteration, &terminate_event);
+                log_terminate_event(&mut event_logger, event_loop.state().iteration, &terminate_event, Some(event_loop.registry().current_phase().to_string()));
 
                 let reason = dispatch_post_loop_termination_hooks(
                     &event_loop,
@@ -1924,7 +2003,8 @@ pub async fn run_loop_impl(
                 &mut event_logger,
                 event_loop.state().iteration,
                 &terminate_event,
-            );
+                Some(event_loop.registry().current_phase().to_string()),
+                );
 
             let reason = dispatch_post_loop_termination_hooks(
                 &event_loop,
@@ -2050,7 +2130,8 @@ pub async fn run_loop_impl(
                 &mut event_logger,
                 event_loop.state().iteration,
                 &terminate_event,
-            );
+                Some(event_loop.registry().current_phase().to_string()),
+                );
 
             let reason = dispatch_post_loop_termination_hooks(
                 &event_loop,
@@ -2148,7 +2229,8 @@ pub async fn run_loop_impl(
                     &mut event_logger,
                     event_loop.state().iteration,
                     &terminate_event,
-                );
+                    Some(event_loop.registry().current_phase().to_string()),
+                    );
 
                 let reason = dispatch_post_loop_termination_hooks(
                     &event_loop,
@@ -2243,7 +2325,8 @@ pub async fn run_loop_impl(
                     &mut event_logger,
                     event_loop.state().iteration,
                     &terminate_event,
-                );
+                    Some(event_loop.registry().current_phase().to_string()),
+                    );
 
                 let reason = dispatch_post_loop_termination_hooks(
                     &event_loop,
@@ -2295,6 +2378,112 @@ pub async fn run_loop_impl(
                 &processed.accepted_events,
                 event_loop.registry(),
             );
+        }
+
+        // ── PhaseWatcher: Check for experiment.evaluated during warmup ───────
+        // PhaseWatcher monitors accepted events and triggers phase transitions
+        // when the configured exit condition is met (e.g., experiment.evaluated)
+        let phase_transition_reason = if current_phase == Phase::Warmup {
+            // Check if any accepted event is experiment.evaluated
+            let has_experiment_evaluated = processed_events
+                .as_ref()
+                .map(|events| {
+                    events.accepted_events.iter().any(|e| e.topic.as_str() == "experiment.evaluated")
+                })
+                .unwrap_or(false);
+
+            if has_experiment_evaluated {
+                info!("experiment.evaluated detected in warmup phase — checking exit conditions");
+                // Run the check exit conditions script
+                match run_check_exit_conditions(&ctx).await {
+                    Ok(CheckExitResult::Ready) => {
+                        info!("Exit conditions satisfied — initiating phase transition");
+                        if stop_on_exit {
+                            Some("warmup_complete")
+                        } else {
+                            Some("phase_transition")
+                        }
+                    }
+                    Ok(CheckExitResult::NotReady { .. }) => {
+                        debug!("Exit conditions not yet satisfied — continuing warmup");
+                        None
+                    }
+                    Ok(CheckExitResult::DrainRequired { .. }) => {
+                        info!("Drain required — waiting for in-flight experiments to complete");
+                        None
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Check exit conditions failed — continuing warmup");
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(phase_reason) = phase_transition_reason {
+            // Phase transition triggered by PhaseWatcher
+            info!(
+                "Phase transition triggered: {} (stop_on_exit: {})",
+                phase_reason,
+                stop_on_exit
+            );
+
+            // Run transition script and update phase
+            match run_transition_script(&ctx, stop_on_exit).await {
+                Ok(_) => {
+                    // Update phase to production
+                    let new_phase = Phase::Production;
+                    event_loop.registry_mut().set_phase(new_phase.clone());
+
+                    // Update phase.json
+                    let phase_json = serde_json::json!({
+                        "phase": new_phase.to_string(),
+                        "warmup_completed": stop_on_exit,
+                        "timestamp": chrono::Utc::now().to_rfc3339(),
+                    });
+                    let agent_dir = ctx.ralph_dir().join("agent");
+                    fs::create_dir_all(&agent_dir).ok();
+                    let phase_path = agent_dir.join("phase.json");
+                    if let Err(e) = fs::write(&phase_path, serde_json::to_string_pretty(&phase_json).unwrap()) {
+                        warn!(error = %e, "Failed to write phase.json");
+                    }
+
+                    // Publish phase transition event
+                    let transition_topic = if stop_on_exit { "warmup.complete" } else { "phase.transition" };
+                    let transition_payload = serde_json::json!({
+                        "phase": new_phase.to_string(),
+                        "reason": phase_reason,
+                        "warmup_completed": stop_on_exit,
+                    });
+                    let transition_event = Event::new(transition_topic, &transition_payload.to_string());
+                    event_loop.publish_event(transition_event);
+
+                    // If warmup_only mode, terminate the loop
+                    if stop_on_exit {
+                        let reason = TerminationReason::CompletionPromise;
+                        handle_termination(
+                            &reason,
+                            event_loop.state(),
+                            &config.core.scratchpad.path,
+                            &loop_history,
+                            &loop_context,
+                            auto_merge,
+                            &prompt_content,
+                        );
+                        if let Some(handle) = tui_handle.take() {
+                            let _ = handle.await;
+                        }
+                        return Ok(reason);
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "Phase transition script failed — continuing in warmup");
+                }
+            }
         }
 
         if let Some(human_interact_context) = processed_events
@@ -2352,7 +2541,8 @@ pub async fn run_loop_impl(
                     &mut event_logger,
                     event_loop.state().iteration,
                     &terminate_event,
-                );
+                    Some(event_loop.registry().current_phase().to_string()),
+                    );
 
                 let reason = dispatch_post_loop_termination_hooks(
                     &event_loop,
@@ -2439,7 +2629,8 @@ pub async fn run_loop_impl(
                     &mut event_logger,
                     event_loop.state().iteration,
                     &terminate_event,
-                );
+                    Some(event_loop.registry().current_phase().to_string()),
+                    );
 
                 let reason = dispatch_post_loop_termination_hooks(
                     &event_loop,
@@ -2545,7 +2736,8 @@ pub async fn run_loop_impl(
                 &mut event_logger,
                 event_loop.state().iteration,
                 &terminate_event,
-            );
+                Some(event_loop.registry().current_phase().to_string()),
+                );
             handle_termination(
                 &reason,
                 event_loop.state(),
@@ -2588,7 +2780,8 @@ pub async fn run_loop_impl(
                 &mut event_logger,
                 event_loop.state().iteration,
                 &terminate_event,
-            );
+                Some(event_loop.registry().current_phase().to_string()),
+                );
 
             let reason = dispatch_post_loop_termination_hooks(
                 &event_loop,
@@ -2655,7 +2848,8 @@ pub async fn run_loop_impl(
                     &mut event_logger,
                     event_loop.state().iteration,
                     &terminate_event,
-                );
+                    Some(event_loop.registry().current_phase().to_string()),
+                    );
 
                 let reason = dispatch_post_loop_termination_hooks(
                     &event_loop,
@@ -4606,13 +4800,14 @@ fn log_events_from_output(
             )
             .with_source(hat_id.clone());
 
-            let orphan_record = EventRecord::new(iteration, "loop", &orphan_event, None::<&HatId>);
+            let orphan_record = EventRecord::new(iteration, "loop", &orphan_event, None::<&HatId>, None);
             if let Err(e) = logger.log(&orphan_record) {
                 warn!("Failed to log event.orphaned: {}", e);
             }
         }
 
-        let record = EventRecord::new(iteration, hat_id.to_string(), &event, triggered);
+        let phase = Some(registry.current_phase().to_string());
+        let record = EventRecord::new(iteration, hat_id.to_string(), &event, triggered, phase);
 
         if let Err(e) = logger.log(&record) {
             warn!("Failed to log event {}: {}", event.topic, e);
@@ -4647,13 +4842,14 @@ fn log_accepted_events(
                 ),
             )
             .with_source(hat_id.clone());
-            let orphan_record = EventRecord::new(iteration, "loop", &orphan_event, None::<&HatId>);
+            let orphan_record = EventRecord::new(iteration, "loop", &orphan_event, None::<&HatId>, None);
             if let Err(e) = logger.log(&orphan_record) {
                 warn!("Failed to log event.orphaned: {}", e);
             }
         }
 
-        let record = EventRecord::new(iteration, hat_id.to_string(), event, triggered);
+        let phase = Some(registry.current_phase().to_string());
+        let record = EventRecord::new(iteration, hat_id.to_string(), event, triggered, phase);
         if let Err(e) = logger.log(&record) {
             warn!("Failed to log accepted event {}: {}", event.topic, e);
         }
@@ -4663,10 +4859,10 @@ fn log_accepted_events(
 /// Logs the loop.terminate system event to the event history.
 ///
 /// Per spec: loop.terminate is an observer-only event published on loop exit.
-fn log_terminate_event(logger: &mut EventLogger, iteration: u32, event: &Event) {
+fn log_terminate_event(logger: &mut EventLogger, iteration: u32, event: &Event, phase: Option<String>) {
     // loop.terminate is published by the orchestrator, not a hat
     // No hat can trigger on it (it's observer-only)
-    let record = EventRecord::new(iteration, "loop", event, None::<&HatId>);
+    let record = EventRecord::new(iteration, "loop", event, None::<&HatId>, phase);
 
     if let Err(e) = logger.log(&record) {
         warn!("Failed to log loop.terminate event: {}", e);
@@ -5108,6 +5304,8 @@ pub async fn start_loop(
         Vec::new(),         // no custom args
         None,               // default auto-merge
         None,               // no explicit loop ID
+        false,              // warmup_only (daemon mode uses normal flow)
+        false,              // force_warmup (daemon mode uses normal flow)
     )
     .await
 }
@@ -5153,6 +5351,132 @@ fn create_robot_service(
             None
         }
     }
+}
+
+// ── PhaseWatcher: Warmup/Production Two-Phase Transition ────────────────────
+
+/// Result of checking exit conditions for warmup phase transition.
+#[derive(Debug)]
+enum CheckExitResult {
+    /// All conditions satisfied — ready to transition
+    Ready,
+    /// Conditions not yet met — continue warmup
+    NotReady { unmet_conditions: Vec<String> },
+    /// Drain required — waiting for in-flight experiments
+    DrainRequired { pending_count: usize },
+}
+
+/// Run the check_exit_conditions.py script to determine if warmup can transition.
+async fn run_check_exit_conditions(ctx: &LoopContext) -> Result<CheckExitResult> {
+    let script_path = find_skills_script("check_exit_conditions.py")
+        .context("check_exit_conditions.py not found in skills directory")?;
+
+    let project_root = ctx.workspace().to_string_lossy();
+    let output_json = ctx.ralph_dir().join("check_exit_result.json");
+
+    let mut cmd = Command::new("python3");
+    cmd.arg(&script_path)
+        .arg("--project-root")
+        .arg(project_root.as_ref())
+        .arg("--output-json")
+        .arg(&output_json)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    info!("Running check_exit_conditions.py: {:?}", cmd);
+    let output = cmd.output().context("Failed to run check_exit_conditions.py")?;
+
+    // Read JSON result if file was created
+    if output_json.exists() {
+        let content = fs::read_to_string(&output_json)
+            .context("Failed to read check_exit result")?;
+        let result: serde_json::Value = serde_json::from_str(&content)
+            .context("Failed to parse check_exit result JSON")?;
+
+        let exit_code = result.get("exit_code")
+            .and_then(|v| v.as_str())
+            .unwrap_or("1");
+
+        return match exit_code {
+            "0" => Ok(CheckExitResult::Ready),
+            "42" => {
+                let pending = result.get("pending_experiments")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
+                Ok(CheckExitResult::DrainRequired { pending_count: pending })
+            }
+            _ => {
+                let unmet = result.get("unmet_conditions")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                Ok(CheckExitResult::NotReady { unmet_conditions: unmet })
+            }
+        };
+    }
+
+    // Fallback: interpret exit code from process
+    if output.status.success() {
+        Ok(CheckExitResult::Ready)
+    } else {
+        Ok(CheckExitResult::NotReady { unmet_conditions: vec![] })
+    }
+}
+
+/// Run the transition_warmup_to_production.py script to perform phase transition.
+async fn run_transition_script(ctx: &LoopContext, stop: bool) -> Result<()> {
+    let script_path = find_skills_script("transition_warmup_to_production.py")
+        .context("transition_warmup_to_production.py not found in skills directory")?;
+
+    let project_root = ctx.workspace().to_string_lossy();
+
+    let mut cmd = Command::new("python3");
+    cmd.arg(&script_path)
+        .arg("--project-root")
+        .arg(project_root.as_ref());
+
+    if stop {
+        cmd.arg("--stop");
+    }
+
+    info!("Running transition_warmup_to_production.py: {:?}", cmd);
+    let output = cmd.output()
+        .context("Failed to run transition_warmup_to_production.py")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("transition_warmup_to_production.py failed: {}", stderr);
+    }
+
+    info!("Phase transition script completed successfully");
+    Ok(())
+}
+
+/// Find a script in the skills directory.
+fn find_skills_script(name: &str) -> Result<PathBuf> {
+    // Search common skills locations
+    let search_paths = vec![
+        PathBuf::from("."),
+        PathBuf::from(".."),
+        PathBuf::from("../.."),
+        PathBuf::from("skills"),
+        PathBuf::from("../skills"),
+        PathBuf::from("../../skills"),
+    ];
+
+    for base in search_paths {
+        let path = base.join(name);
+        if path.exists() {
+            return Ok(path);
+        }
+        // Also check in universal-autoresearch/scripts
+        let alt_path = base.join("universal-autoresearch").join("scripts").join(name);
+        if alt_path.exists() {
+            return Ok(alt_path);
+        }
+    }
+
+    anyhow::bail!("Script not found: {}", name)
 }
 
 // ── Wave Execution ──────────────────────────────────────────────────────────
@@ -10165,6 +10489,7 @@ hats:
                 aggregate: None,
                 scratchpad: None,
                 event_filter: None,
+                phase_triggers: None,
             },
             events: vec![event],
             total: 1,
@@ -12998,7 +13323,7 @@ EOF"#,
         let mut logger = EventLogger::new(&log_path);
 
         let event = Event::new("loop.terminate", "done");
-        log_terminate_event(&mut logger, 7, &event);
+        log_terminate_event(&mut logger, 7, &event, None);
 
         let content = std::fs::read_to_string(&log_path).expect("read events");
         let records: Vec<EventRecord> = content

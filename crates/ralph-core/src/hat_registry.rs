@@ -1,11 +1,11 @@
 //! Hat registry for managing agent personas.
 
-use crate::config::{HatConfig, RalphConfig};
+use crate::config::{HatConfig, Phase, RalphConfig};
 use ralph_proto::{Hat, HatId, Topic};
 use std::collections::{BTreeMap, HashSet};
 
 /// Registry for managing and creating hats from configuration.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct HatRegistry {
     hats: BTreeMap<HatId, Hat>,
     configs: BTreeMap<HatId, HatConfig>,
@@ -13,6 +13,19 @@ pub struct HatRegistry {
     /// Contains all first segments of subscription patterns (e.g., "task" from "task.*").
     /// Also contains "*" if any global wildcard exists.
     prefix_index: HashSet<String>,
+    /// Current orchestration phase for phase-aware trigger routing.
+    current_phase: Phase,
+}
+
+impl Default for HatRegistry {
+    fn default() -> Self {
+        Self {
+            hats: BTreeMap::new(),
+            configs: BTreeMap::new(),
+            prefix_index: HashSet::new(),
+            current_phase: Phase::default(),
+        }
+    }
 }
 
 impl HatRegistry {
@@ -39,7 +52,8 @@ impl HatRegistry {
     fn hat_from_config(id: &str, config: &HatConfig) -> Hat {
         let mut hat = Hat::new(id, &config.name);
         hat.description = config.description.clone().unwrap_or_default();
-        hat.subscriptions = config.trigger_topics();
+        // Use all_trigger_topics to index all phase triggers for registration
+        hat.subscriptions = config.all_trigger_topics();
         hat.publishes = config.publish_topics();
         hat.instructions = config.instructions.clone();
         hat
@@ -57,6 +71,16 @@ impl HatRegistry {
         self.index_hat_subscriptions(&hat);
         self.hats.insert(id.clone(), hat);
         self.configs.insert(id, config);
+    }
+
+    /// Sets the current orchestration phase for phase-aware routing.
+    pub fn set_phase(&mut self, phase: Phase) {
+        self.current_phase = phase;
+    }
+
+    /// Returns the current orchestration phase.
+    pub fn current_phase(&self) -> &Phase {
+        &self.current_phase
     }
 
     /// Indexes a hat's subscriptions for O(1) prefix lookup.
@@ -105,12 +129,13 @@ impl HatRegistry {
         self.hats.is_empty()
     }
 
-    /// Finds all hats subscribed to a topic.
+    /// Finds all hats subscribed to a topic in the current phase.
     /// BTreeMap iteration is already sorted by key.
+    /// Uses phase-aware matching when hats have phase_triggers configured.
     pub fn subscribers(&self, topic: &Topic) -> Vec<&Hat> {
         self.hats
             .values()
-            .filter(|hat| hat.is_subscribed(topic))
+            .filter(|hat| self.hat_is_subscribed_in_phase(&hat.id, topic.as_str()))
             .collect()
     }
 
@@ -144,10 +169,46 @@ impl HatRegistry {
             .any(|pub_topic| pub_topic.matches_str(topic))
     }
 
+    /// Returns true if a hat is subscribed to the given topic in the current phase.
+    /// When the hat has phase_triggers, uses phase-aware matching; otherwise uses
+    /// the hat's static subscription list.
+    pub fn hat_is_subscribed_in_phase(&self, hat_id: &HatId, topic: &str) -> bool {
+        let Some(config) = self.configs.get(hat_id) else {
+            // No config means no phase_triggers, use hat's subscriptions directly
+            if let Some(hat) = self.hats.get(hat_id) {
+                return hat.is_subscribed_str(topic);
+            }
+            return false;
+        };
+
+        // If hat has phase_triggers, use them for the current phase
+        if let Some(ref phase_triggers) = config.phase_triggers {
+            let phase_name = match self.current_phase {
+                Phase::Warmup => "warmup",
+                Phase::Production => "production",
+            };
+            if let Some(triggers) = phase_triggers.get(phase_name) {
+                let topic_obj = Topic::new(topic);
+                return triggers.iter().any(|t| {
+                    let trigger_topic = Topic::new(t);
+                    trigger_topic.matches(&topic_obj)
+                });
+            }
+            // Phase not found in phase_triggers, fall back to static subscriptions
+        }
+
+        // No phase_triggers or phase not configured, use hat's subscriptions
+        if let Some(hat) = self.hats.get(hat_id) {
+            hat.is_subscribed_str(topic)
+        } else {
+            false
+        }
+    }
+
     /// Returns the first hat subscribed to the given topic.
     ///
     /// Uses prefix index for O(1) early-exit when the topic prefix doesn't match
-    /// any subscription pattern.
+    /// any subscription pattern. Respects phase-aware triggers when configured.
     pub fn get_for_topic(&self, topic: &str) -> Option<&Hat> {
         // Fast path: Check if any subscription could possibly match this topic
         // If we have a global wildcard "*", we must do the full scan
@@ -160,8 +221,9 @@ impl HatRegistry {
             }
         }
 
-        // Fall back to full linear scan (BTreeMap is already sorted by key)
-        self.hats.values().find(|hat| hat.is_subscribed_str(topic))
+        // Fall back to full linear scan with phase-aware matching
+        self.hats.values()
+            .find(|hat| self.hat_is_subscribed_in_phase(&hat.id, topic))
     }
 }
 

@@ -840,6 +840,11 @@ impl EventLoop {
         &self.registry
     }
 
+    /// Returns a mutable reference to the hat registry.
+    pub fn registry_mut(&mut self) -> &mut HatRegistry {
+        &mut self.registry
+    }
+
     /// Records hook telemetry for diagnostics.
     pub fn log_hook_run_telemetry(&self, entry: crate::diagnostics::HookRunTelemetryEntry) {
         self.diagnostics.log_hook_run(entry);
@@ -1437,6 +1442,7 @@ impl EventLoop {
                 // Build base prompt and prepend memories + scratchpad + ready tasks
                 let base_prompt = self.ralph.build_prompt(&events_context, &[]);
                 self.ralph.clear_robot_guidance();
+                let base_prompt = self.inject_phase_into_prompt(base_prompt);
                 let with_skills = self.prepend_auto_inject_skills(base_prompt);
                 let with_scratchpad = self.prepend_scratchpad(with_skills);
                 let with_state_files = self.prepend_state_files(with_scratchpad);
@@ -1566,6 +1572,7 @@ impl EventLoop {
 
                 // Clear guidance after active_hats references are no longer needed
                 self.ralph.clear_robot_guidance();
+                let base_prompt = self.inject_phase_into_prompt(base_prompt);
                 let with_skills = self.prepend_auto_inject_skills(base_prompt);
                 let with_scratchpad = self.prepend_scratchpad(with_skills);
                 let with_state_files = self.prepend_state_files(with_scratchpad);
@@ -1650,6 +1657,7 @@ impl EventLoop {
 
             // Apply prepend pipeline (SAME order as coordinator path)
             self.ralph.clear_robot_guidance();
+            let base_prompt = self.inject_phase_into_prompt(base_prompt);
             let with_skills = self.prepend_auto_inject_skills(base_prompt);
             let with_scratchpad = self.prepend_scratchpad(with_skills);
             let with_state_files = self.prepend_state_files(with_scratchpad);
@@ -1684,8 +1692,10 @@ impl EventLoop {
             hat_id.as_str()
         );
         Some(
-            self.instruction_builder
-                .build_custom_hat(hat, &events_context),
+            self.inject_phase_into_prompt(
+                self.instruction_builder
+                    .build_custom_hat(hat, &events_context),
+            ),
         )
     }
 
@@ -1782,6 +1792,18 @@ impl EventLoop {
 
     /// Prepends auto-injected skill content to the prompt.
     ///
+    /// Injects current phase information into the prompt if phase support is enabled.
+    ///
+    /// When `event_loop.phase_config` is configured, this appends a "## Current Phase"
+    /// section so the agent knows which phase (warmup / production) the loop is in.
+    fn inject_phase_into_prompt(&self, prompt: String) -> String {
+        if self.config.event_loop.phase_config.is_none() {
+            return prompt;
+        }
+        let phase = self.registry.current_phase();
+        format!("{}\n## Current Phase\n\n{}\n", prompt, phase)
+    }
+
     /// This generalizes the former `prepend_memories()` into a skill auto-injection
     /// pipeline that handles memories, tools, and any other auto-inject skills.
     ///
@@ -3892,6 +3914,11 @@ impl EventLoop {
         );
 
         event
+    }
+
+    /// Publish an event to the event bus.
+    pub fn publish_event(&mut self, event: Event) {
+        self.bus.publish(event);
     }
 
     /// Returns the robot service's shutdown flag, if active.

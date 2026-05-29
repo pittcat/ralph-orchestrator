@@ -1109,6 +1109,80 @@ pub struct EventLoopConfig {
     /// Opt-in state machine for instance lifecycle validation.
     #[serde(default)]
     pub state_machine: Option<StateMachineConfig>,
+
+    /// Phase configuration for two-phase loop (warmup + production).
+    #[serde(default)]
+    pub phase_config: Option<PhaseConfig>,
+}
+
+/// Orchestration phase enum.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Phase {
+    /// Warmup/calibration phase for harness tuning.
+    #[default]
+    Warmup,
+    /// Production phase for正式 experiments.
+    Production,
+}
+
+impl std::fmt::Display for Phase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Phase::Warmup => write!(f, "warmup"),
+            Phase::Production => write!(f, "production"),
+        }
+    }
+}
+
+/// Phase configuration for two-phase orchestration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhaseConfig {
+    /// Initial phase when loop starts.
+    pub initial: Phase,
+
+    /// Event topic that triggers phase transition.
+    #[serde(default = "default_transition_event")]
+    pub transition_event: String,
+
+    /// Warmup-specific configuration for two-phase loops.
+    #[serde(default)]
+    pub warmup_config: Option<WarmupConfig>,
+}
+
+fn default_transition_event() -> String {
+    "phase.transition".to_string()
+}
+
+/// Warmup configuration for two-phase loops.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WarmupConfig {
+    /// Minimum iterations before warmup can exit.
+    #[serde(default)]
+    pub min_iterations: u32,
+
+    /// Maximum iterations before forcing transition.
+    #[serde(default)]
+    pub max_iterations: u32,
+
+    /// Number of quiet rounds (no new findings) before exiting warmup.
+    #[serde(default)]
+    pub exit_quiet_rounds: u32,
+
+    /// If true, loop stops after warmup completes (instead of transitioning to production).
+    #[serde(default)]
+    pub stop_on_exit: bool,
+}
+
+impl Default for WarmupConfig {
+    fn default() -> Self {
+        Self {
+            min_iterations: 10,
+            max_iterations: 30,
+            exit_quiet_rounds: 3,
+            stop_on_exit: false,
+        }
+    }
 }
 
 /// Opt-in workflow state guards for enforcing ordered event chains.
@@ -1499,6 +1573,7 @@ impl Default for EventLoopConfig {
             execution_mode: HatExecutionMode::default(),
             event_policy: None,
             state_machine: None,
+            phase_config: None,
         }
     }
 }
@@ -2626,6 +2701,14 @@ pub struct HatConfig {
     /// When enabled, only events matching the filter rules are passed to this hat.
     #[serde(default)]
     pub event_filter: Option<EventFilterConfig>,
+
+    /// Phase-aware triggers: map from phase name to list of trigger topics.
+    ///
+    /// When present, the hat subscribes to the triggers of the current phase
+    /// instead of the global `triggers` field. Useful for hats that should
+    /// behave differently in warmup vs production (e.g., harness hat).
+    #[serde(default)]
+    pub phase_triggers: Option<HashMap<String, Vec<String>>>,
 }
 
 fn default_concurrency() -> u32 {
@@ -2660,6 +2743,37 @@ impl HatConfig {
     /// Converts publish strings to Topic objects.
     pub fn publish_topics(&self) -> Vec<Topic> {
         self.publishes.iter().map(|s| Topic::new(s)).collect()
+    }
+
+    /// Returns triggers for a specific phase, or fall back to global triggers.
+    pub fn triggers_for_phase(&self, phase: &Phase) -> Vec<Topic> {
+        if let Some(ref phase_triggers) = self.phase_triggers {
+            let phase_name = match phase {
+                Phase::Warmup => "warmup",
+                Phase::Production => "production",
+            };
+            if let Some(triggers) = phase_triggers.get(phase_name) {
+                return triggers.iter().map(|s| Topic::new(s)).collect();
+            }
+        }
+        // Fall back to global triggers
+        self.trigger_topics()
+    }
+
+    /// Returns all trigger topics for registration purposes.
+    /// When phase_triggers is set, returns the union of all phase triggers.
+    pub fn all_trigger_topics(&self) -> Vec<Topic> {
+        if let Some(ref phase_triggers) = self.phase_triggers {
+            let mut topics: Vec<Topic> = phase_triggers
+                .values()
+                .flat_map(|triggers| triggers.iter().map(|s| Topic::new(s)))
+                .collect();
+            topics.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+            topics.dedup();
+            topics
+        } else {
+            self.trigger_topics()
+        }
     }
 }
 

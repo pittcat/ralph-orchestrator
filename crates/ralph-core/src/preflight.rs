@@ -2007,6 +2007,7 @@ status: draft
                     mode: crate::config::EventFilterMode::Allowlist,
                     events: vec![String::new(), "review.done".to_string()],
                 }),
+                phase_triggers: None,
             },
         );
 
@@ -2055,6 +2056,7 @@ status: draft
                     mode: crate::config::EventFilterMode::Allowlist,
                     events: vec!["review file".to_string()],
                 }),
+                phase_triggers: None,
             },
         );
 

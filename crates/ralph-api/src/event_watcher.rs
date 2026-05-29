@@ -204,6 +204,7 @@ mod tests {
             wave_id: None,
             wave_index: None,
             wave_total: None,
+            phase: None,
         }
     }
 

@@ -741,6 +741,19 @@ struct RunArgs {
     no_auto_merge: bool,
 
     // ─────────────────────────────────────────────────────────────────────────
+    // Phase Options (Warmup/Production Two-Phase Loop)
+    // ─────────────────────────────────────────────────────────────────────────
+    /// Exit loop after warmup completes (do not transition to production phase).
+    /// Sets warmup_config.stop_on_exit: true in the configuration.
+    #[arg(long)]
+    warmup_only: bool,
+
+    /// Force warmup phase even if phase.json indicates warmup was previously completed.
+    /// Use this to re-run harness calibration.
+    #[arg(long)]
+    force_warmup: bool,
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Preflight Options
     // ─────────────────────────────────────────────────────────────────────────
     /// Skip preflight checks before loop start.
@@ -1244,6 +1257,8 @@ async fn main() -> Result<()> {
                 quiet: false,
                 record_session: None,
                 custom_args: Vec::new(),
+                warmup_only: false,
+                force_warmup: false,
             };
             run_command(
                 &config_sources,
@@ -1897,6 +1912,8 @@ async fn run_command(
             custom_args,
             auto_merge_override,
             args.loop_id,
+            args.warmup_only,
+            args.force_warmup,
         )
         .await?
     };
@@ -2300,6 +2317,8 @@ async fn resume_command(
         Vec::new(), // Resume command doesn't support custom args
         None,       // Use config.features.auto_merge (deprecated command)
         None,       // Deprecated resume command doesn't support --loop-id
+        false,      // warmup_only (resume uses normal flow)
+        false,      // force_warmup (resume uses normal flow)
     )
     .await?;
     let exit_code = reason.exit_code();
@@ -4055,6 +4074,8 @@ core:
             quiet: false,
             record_session: None,
             custom_args: Vec::new(),
+            warmup_only: false,
+            force_warmup: false,
         }
     }
 
