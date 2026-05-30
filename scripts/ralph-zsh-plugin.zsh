@@ -50,6 +50,7 @@ unset _ralph_fn
 # Keep this list in sync with `crates/ralph-cli/src/presets.rs` and install
 # updates to `~/.oh-my-zsh/plugins/ralph/ralph.plugin.zsh`.
 _RALPH_BUILTIN_HAT_VALUES=(
+  "builtin:ce-executor"
   "builtin:code-assist"
   "builtin:debug"
   "builtin:research"
@@ -61,6 +62,7 @@ _RALPH_BUILTIN_HAT_VALUES=(
 )
 
 _RALPH_BUILTIN_HAT_DESCRIPTIONS=(
+  "Plan-driven work execution with wave code review, auto-fix, shipping, and manager report"
   "Default implementation workflow with TDD and adversarial validation"
   "Bug investigation, root-cause analysis, and adversarial fix verification"
   "Read-only codebase and architecture exploration with evidence-first synthesis"

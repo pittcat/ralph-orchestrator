@@ -9,6 +9,7 @@ Built-ins are embedded into the CLI from these files and exposed through `ralph 
 | Collection | Source | Best for |
 |---|---|---|
 | `autoresearch` | `presets/autoresearch.yml` | Autonomous experiment loop for any measurable improvement |
+| `ce-executor` | `presets/ce-executor.yml` | Plan-driven work execution with wave code review, auto-fix, and manager report |
 | `code-assist` | `presets/code-assist.yml` | Default implementation workflow |
 | `debug` | `presets/debug.yml` | Investigation and fix verification |
 | `research` | `presets/research.yml` | Read-only exploration and synthesis |

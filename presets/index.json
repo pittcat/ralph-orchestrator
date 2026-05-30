@@ -5,6 +5,11 @@
     "category": "optimization"
   },
   {
+    "name": "ce-executor",
+    "description": "Plan-driven work execution with adversarial code review, auto-fix loop, shipping workflow, and manager report",
+    "category": "development"
+  },
+  {
     "name": "code-assist",
     "description": "Default implementation workflow with TDD and adversarial validation",
     "category": "development"

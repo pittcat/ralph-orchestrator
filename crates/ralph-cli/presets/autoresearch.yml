@@ -34,6 +34,19 @@ event_loop:
   checkpoint_interval: 5
   max_consecutive_failures: 5  # Stop after 5 consecutive crashes
   idle_timeout_secs: 300       # 5 min timeout per hat turn
+  workflow_guards:
+    chains:
+      - name: experiment
+        topics:
+          - experiment.planned
+          - experiment.ready
+          - experiment.measured
+          - experiment.scored
+          - experiment.evaluated
+        mode: strict
+        correlation:
+          from_payload: task_key
+          from_topic: experiment.planned
 
 cli:
   backend: "claude"

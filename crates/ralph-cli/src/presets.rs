@@ -30,6 +30,12 @@ const PRESETS: &[EmbeddedPreset] = &[
         public: true,
     },
     EmbeddedPreset {
+        name: "ce-executor",
+        description: "Plan-driven work execution with adversarial wave code review, auto-fix loop, shipping workflow, and manager report",
+        content: include_str!("../presets/ce-executor.yml"),
+        public: true,
+    },
+    EmbeddedPreset {
         name: "code-assist",
         description: "Default implementation workflow with TDD and adversarial validation",
         content: include_str!("../presets/code-assist.yml"),
@@ -134,7 +140,7 @@ mod tests {
     #[test]
     fn test_list_presets_returns_all() {
         let presets = list_presets();
-        assert_eq!(presets.len(), 6, "Expected 6 public presets");
+        assert_eq!(presets.len(), 7, "Expected 7 public presets");
     }
 
     #[test]
@@ -208,8 +214,9 @@ mod tests {
     #[test]
     fn test_preset_names_returns_all_names() {
         let names = preset_names();
-        assert_eq!(names.len(), 6);
+        assert_eq!(names.len(), 7);
         assert!(names.contains(&"autoresearch"));
+        assert!(names.contains(&"ce-executor"));
         assert!(names.contains(&"debug"));
         assert!(names.contains(&"code-assist"));
         assert!(names.contains(&"research"));

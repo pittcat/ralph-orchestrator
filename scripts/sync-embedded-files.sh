@@ -27,6 +27,7 @@ MIRRORED_FILES=(
 
     # Presets (canonical -> mirror for cargo install)
     "presets/autoresearch.yml:crates/ralph-cli/presets/autoresearch.yml"
+    "presets/ce-executor.yml:crates/ralph-cli/presets/ce-executor.yml"
     "presets/code-assist.yml:crates/ralph-cli/presets/code-assist.yml"
     "presets/debug.yml:crates/ralph-cli/presets/debug.yml"
     "presets/hatless-baseline.yml:crates/ralph-cli/presets/hatless-baseline.yml"
