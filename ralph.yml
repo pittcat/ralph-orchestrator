@@ -1,14 +1,12 @@
+cli:
+  backend: claude
 event_loop:
   completion_promise: LOOP_COMPLETE
   max_iterations: 500
-  max_runtime_seconds: 28800
-  starting_event: work.start
-
-cli:
-  backend: claude
+  required_events: ["review.passed", "review.complete"]
+  prompt_file: PROMPT.md
 
 core:
-  specs_dir: ./specs/
   guardrails:
     - "Fresh context each iteration — re-read scratchpad and plan."
     - "Commit after each completed step. Never commit Ralph files."
