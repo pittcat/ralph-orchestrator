@@ -41,6 +41,7 @@ core:
     - "严格遵循 YAGNI — 不做投机性功能"
     - "始终 KISS — 选择最简单的可行方案"
     - "置信度协议：决策评分 0-100。>80 自主执行；50-80 执行并记录到 .ralph/agent/decisions.md；<50 选择安全默认值并记录。"
+    - "绝对禁令：严禁 push 到 origin 或任何 remote 仓库。仅限本地 commit。用户手动处理所有 push/PR 操作。这是不可逾越的 scope 边界。"
 
 hats:
   coordinator:
@@ -576,7 +577,7 @@ hats:
 
       你是交付前的最后门禁。
       你验证完整的代码树、更新 plan 状态、准备最终提交。
-      不要创建 PR — 用户手动创建 PR。
+      **严禁创建 PR — 用户手动创建 PR。**
 
       ### 读取状态
       - 从事件 payload：`verdict`、`final_findings_count`、`fix_round`
@@ -612,7 +613,7 @@ hats:
       - `git status --porcelain` 检查未提交改动
       - `git add <相关文件>`（不要 `git add .`）
       - `git commit -m "feat(scope): <plan summary>"`
-      - 不 push 到 origin
+      - **绝对禁止 push 到 origin 或任何 remote — 这是硬性边界**
       - 记录最终 commit hash 到 `shipping.md`
 
       ### 事件发布
@@ -627,7 +628,7 @@ hats:
       - final validation 失败时不得静默通过
       - 必须将所有 residual findings 记录到 shipping.md
       - 必须更新 plan status（如存在）
-      - 不得 push 到 origin 或创建 PR
+      - 严禁 push 到 origin 或创建 PR — 这是不可违反的红线
 
   reporter:
     name: "📊 报告器"

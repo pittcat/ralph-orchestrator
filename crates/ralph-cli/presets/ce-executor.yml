@@ -41,6 +41,7 @@ core:
     - "YAGNI ruthlessly — no speculative features"
     - "KISS always — simplest solution that works"
     - "Confidence protocol: score decisions 0-100. >80 proceed autonomously; 50-80 proceed + document in .ralph/agent/decisions.md; <50 choose safe default + document."
+    - "ABSOLUTE PROHIBITION: NEVER push to origin or any remote repository. Commit locally only. User handles all push/PR operations manually. This is a non-negotiable scope boundary."
 
 hats:
   coordinator:
@@ -756,7 +757,7 @@ hats:
       - `git status --porcelain` to check for uncommitted changes
       - `git add <relevant files>` (not `git add .`)
       - `git commit -m "feat(scope): <plan summary>"`
-      - Do NOT push to origin
+      - **UNDER NO CIRCUMSTANCES push to origin or any remote — this is a hard boundary**
       - Record final commit hash in `shipping.md`
 
       ### Event Publishing

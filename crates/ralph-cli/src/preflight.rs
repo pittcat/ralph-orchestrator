@@ -468,6 +468,7 @@ const ALLOWED_HATS_EVENT_LOOP_OVERLAY_KEYS: &[&str] = &[
     "completion_promise",
     "starting_event",
     "cancellation_promise",
+    "required_events",
 ];
 
 fn hats_disallowed_keys(mapping: &Mapping) -> Vec<String> {
@@ -780,6 +781,44 @@ hats:
         assert_eq!(
             config.event_loop.starting_event.as_deref(),
             Some("build.start")
+        );
+    }
+
+    #[test]
+    fn merge_hats_overlay_preserves_required_events_from_hats() {
+        let core: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  completion_promise: LOOP_COMPLETE
+  max_iterations: 100
+",
+        )
+        .unwrap();
+
+        let hats: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  required_events:
+    - review.passed
+    - review.complete
+  starting_event: work.start
+hats:
+  reviewer:
+    name: Reviewer
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        assert_eq!(
+            config.event_loop.required_events,
+            vec!["review.passed".to_string(), "review.complete".to_string()]
+        );
+        assert_eq!(
+            config.event_loop.starting_event.as_deref(),
+            Some("work.start")
         );
     }
 
