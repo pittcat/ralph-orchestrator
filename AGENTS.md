@@ -11,7 +11,11 @@ cargo build
 cargo test -- --test-threads=1             # Full suite (ralph-cli tests need single thread)
 cargo test -p ralph-core test_name           # Run single test
 cargo test -p ralph-core smoke_runner        # Smoke tests (replay-based)
+cargo test -p ralph-core scenarios           # BDD scenario integration tests
 cargo run -p ralph-e2e -- --mock             # E2E tests (CI-safe)
+cargo clippy                                 # Lint (pedantic configured in workspace)
+cargo fmt                                    # Format
+cargo doc --no-deps                          # Documentation
 ./scripts/setup-hooks.sh                     # Install pre-commit hooks (once)
 ```
 
@@ -26,23 +30,115 @@ npm run dev                                  # Dev mode (both)
 npm run dev:server                           # Backend only
 npm run dev:web                              # Frontend only
 npm run test:server                          # Backend tests
+npm run test                                 # All npm workspace tests
 ```
+
+### BDD / Cucumber Tests
+
+```bash
+cargo test -p ralph-core scenarios            # BDD scenario tests
+```
+
+BDD scenarios live in `crates/ralph-core/tests/scenarios/` (YAML files). They exercise real runtime code paths via integration tests.
 
 ## Architecture
 
+### Crate Map
+
 ```
-ralph-cli      → CLI entry point, commands (run, plan, task, loops, web)
-ralph-core     → Orchestration logic, event loop, hats, memories, tasks, harness extensions
-ralph-adapters → Backend integrations (Claude, Kiro, Gemini, Codex, Roo, etc.)
+ralph-proto    → Foundation types: Event, Hat, HatId, Topic, EventBus, RobotService
+ralph-core     → Orchestration logic, event loop, state machine, hats, memories, tasks, hooks, skills
+ralph-adapters → Backend adapters (Claude, Kiro, Gemini, Codex, Amp, Copilot CLI, OpenCode)
+ralph-cli      → CLI entry point, commands (run, plan, task, loops, web, mcp, wave, bot)
 ralph-telegram → Telegram bot for human-in-the-loop communication
 ralph-tui      → Terminal UI (ratatui-based)
-ralph-e2e      → End-to-end test framework
-ralph-proto    → Protocol definitions
+ralph-e2e      → End-to-end test framework (scenarios, mock CLI, reporters)
+ralph-api      → Rust RPC API server for web dashboard backend
 ralph-bench    → Benchmarking
 
-backend/       → Web server (@ralph-web/server) - Fastify + tRPC + SQLite
+backend/       → Web server (@ralph-web/server) - Fastify + tRPC + SQLite (legacy, deprecated)
 frontend/      → Web dashboard (@ralph-web/dashboard) - React + Vite + TailwindCSS
 ```
+
+### Event System Architecture
+
+```
+JSONL (agent output) → EventReader → EventParser → EventOriginGuard → EventPolicy → StateMachine → EventBus → Hats
+```
+
+- **EventReader**: Reads JSONL lines from agent output files, handles malformed lines
+- **EventParser**: Parses JSONL into structured events, detects event mutations
+- **EventOriginGuard** (`event_origin.rs`): Validates event provenance — rejects events from unregistered hats or out-of-scope topics. Implements fail-closed security model.
+- **EventPolicy** (`event_policy.rs`): Enforces typed payload schema, terminal monotonicity, duplicate terminal detection, business-after-completion guards
+- **StateMachine** (`state_machine.rs`): Pure-Rust instance lifecycle enforcement (open → active → terminal), no filesystem dependencies
+- **EventBus** (`ralph-proto/src/event_bus.rs`): Pub/sub hub routing events to subscribed hats with observer pattern for recording/TUI
+- **EventProjection** (`event_projection.rs`): Transforms/redacts events before forwarding
+
+### Backend Adapter Architecture
+
+```
+CLI Config → HaBackend → auto_detect → CliExecutor / PtyExecutor → StreamHandler
+```
+
+- **CliBackend**: Defines backend CLI path, args, prompt mode, output format
+- **CliExecutor**: Spawns backend process, streams output, handles termination
+- **PtyExecutor**: PTY-based execution for Claude CLI (preserves rich TUI output), supports interactive and observe modes
+- **auto_detect**: Scans PATH for available backends (`claude`, `code`/`codex`, `gemini`, `kiro`, `amp`, `copilot`, `opencode`)
+- **StreamHandler**: Console/pretty/quiet/TUI output handlers for displaying agent output
+- **Backend-specific stream parsers**: `claude_stream.rs`, `copilot_stream.rs`, `pi_stream.rs`, `json_rpc_handler.rs`
+
+### Configuration System
+
+Config supports both v1.x flat format and v2.0 nested format for zero-config migration. Resolution chain:
+
+```
+User YAML → RalphConfig → EventLoopConfig → HatConfig overrides → effective runtime config
+```
+
+Key config modules in `crates/ralph-core/src/config.rs`:
+- `RalphConfig`: Top-level config
+- `CoreConfig`: Event loop, scratchpad, memories, tasks
+- `HatConfig`: Per-hat backend, triggers, publishes, instructions, concurrency
+- `EventPolicyConfig`: Schema validation, payload types, terminal event handling
+- `EventFilterConfig`: Filter events by topic patterns
+- `StateMachineConfig`: Instance lifecycle rules
+- `PreflightExtensionsConfig`: External command hooks
+- `EventProjectionConfig`: Event transformation/redaction rules
+- `FeaturesConfig`: Feature flags (memories, tasks, loop naming, urgent steer)
+
+### Hook System
+
+Hooks run external commands at lifecycle points. Located in `crates/ralph-core/src/hooks/`:
+
+- **HookEngine**: Manages hook lifecycle (discovery, resolution, execution)
+- **HookExecutor**: Runs external commands as hooks with timeout and output capture
+- **SuspendStateStore**: Persists suspend state across loop restarts
+
+Hook stages: `pre_agent` → `post_agent` → `pre_event_processing` → `post_event_processing` → `completion`
+
+### Skill System
+
+Skills are markdown documents with YAML frontmatter providing knowledge and tool instructions to agents. Located in `crates/ralph-core/src/skill.rs` and `skill_registry.rs`:
+
+- Support auto-injection, hat-scoping, backend-scoping, tags
+- Both built-in (compiled via `include_str!`) and filesystem sources
+- Registry discovers and indexes skills from multiple sources
+
+### Session Recording & Playback
+
+- **SessionRecorder** (`session_recorder.rs`): Records all events to JSONL files (behind `recording` feature flag)
+- **SessionPlayer** (`session_player.rs`): Replays recorded sessions for smoke tests, supports step-through and replay modes
+- Fixtures stored in `crates/ralph-core/tests/fixtures/`
+
+### Presets & Hats System
+
+Presets define collections of hats. Located in `presets/` directory and `crates/ralph-cli/src/presets.rs` (~1100 lines):
+
+- **HatlessRalph** (`hatless_ralph.rs`): Hat topology, event subscription matching, hat selection algorithm
+- **HatRegistry**: Manages hat discovery, registration, subscription
+- Presets support Chinese (`*-zh.yml`) variants and chainable configurations
+- Builtin presets: `code-assist`, `debug`, `research`, `review`, `pdd-to-code-assist`, `ce-executor`, `autoresearch`, `harness-demo`, `hatless-baseline`
+- `index.json` is the preset manifest
 
 ### Key Files
 
@@ -56,24 +152,40 @@ frontend/      → Web dashboard (@ralph-web/dashboard) - React + Vite + Tailwin
 | `.ralph/telegram-state.json` | Telegram bot state (chat ID, pending questions) |
 | `docs/solutions/` | Documented solutions to past problems (bugs, best practices, workflow patterns), organized by category with YAML frontmatter (`module`, `tags`, `problem_type`). Relevant when implementing or debugging in documented areas. |
 | `docs/guide/harness-extensions.md` | User guide for Harness 4 extension mechanisms (event filtering, projection, state injection, preflight hooks) |
+| `presets/COLLECTION.md` | Preset metadata and authorship docs |
+| `presets/index.json` | Preset manifest index |
+| `crates/ralph-core/data/` | Embedded tool definitions (`ralph-tools.md`, `ralph-tools-tasks.md`, `ralph-tools-memories.md`) |
 
 ### Code Locations
 
-- **Event loop**: `crates/ralph-core/src/event_loop/mod.rs`
-- **Hat system**: `crates/ralph-core/src/hatless_ralph.rs`
+- **Event loop**: `crates/ralph-core/src/event_loop/` — main orchestration loop (`mod.rs`), loop state (`loop_state.rs`)
+- **Hat system**: `crates/ralph-core/src/hatless_ralph.rs`, `hat_registry.rs`
+- **State machine**: `crates/ralph-core/src/state_machine.rs` — instance lifecycle enforcement
+- **Event policy**: `crates/ralph-core/src/event_policy.rs` — schema validation, terminal monotonicity
+- **Event origin**: `crates/ralph-core/src/event_origin.rs` — JSONL provenance guard
+- **Event projection**: `crates/ralph-core/src/event_projection.rs` — event transformation/redaction
 - **Memory system**: `crates/ralph-core/src/memory.rs`, `memory_store.rs`
-- **Task system**: `crates/ralph-core/src/task.rs`, `task_store.rs`
-- **Lock coordination**: `crates/ralph-core/src/worktree.rs`
+- **Task system**: `crates/ralph-core/src/task.rs`, `task_store.rs`, `task_definition.rs`
+- **Hook system**: `crates/ralph-core/src/hooks/` — engine, executor, suspend state
+- **Skill system**: `crates/ralph-core/src/skill.rs`, `skill_registry.rs`
+- **Lock coordination**: `crates/ralph-core/src/worktree.rs`, `loop_lock.rs`, `file_lock.rs`
 - **Loop registry**: `crates/ralph-core/src/loop_registry.rs`
 - **Merge queue**: `crates/ralph-core/src/merge_queue.rs`
-- **CLI commands**: `crates/ralph-cli/src/loops.rs`, `task_cli.rs`
+- **Config**: `crates/ralph-core/src/config.rs` — all config types, v1/v2 format compatibility
+- **CLI commands**: `crates/ralph-cli/src/` — `loop_runner.rs`, `loops.rs`, `task_cli.rs`, `wave.rs`, `bot.rs`, `web.rs`, `mcp.rs`, `init.rs`, `hats.rs`, `presets.rs`, `hooks.rs`, `tools.rs`, `doctor.rs`
 - **Telegram integration**: `crates/ralph-telegram/src/` (bot, service, state, handler)
 - **RObot config**: `crates/ralph-core/src/config.rs` (`RobotConfig`, `TelegramBotConfig`)
 - **Wave system**: `crates/ralph-core/src/wave_tracker.rs`, `wave_detection.rs`, `wave_prompt.rs`
 - **Wave CLI**: `crates/ralph-cli/src/wave.rs`
+- **Adapters**: `crates/ralph-adapters/src/` — `cli_backend.rs`, `cli_executor.rs`, `pty_executor.rs`, `auto_detect.rs`, stream parsers
+- **Preflight checks**: `crates/ralph-core/src/preflight.rs` — acceptance criteria extraction and validation
 - **Harness extensions**: `crates/ralph-core/src/config.rs` (config schema), `event_loop/mod.rs` (integration), `event_projection.rs`, `state_file_injector.rs`, `preflight.rs` (external command hooks)
 - **Web server**: `backend/ralph-web-server/src/` (tRPC routes in `api/`, runners in `runner/`)
 - **Web dashboard**: `frontend/ralph-web/src/` (React components in `components/`)
+- **E2E tests**: `crates/ralph-e2e/src/` — scenarios in `scenarios/`, mock CLI, reporter
+- **BDD scenarios**: `crates/ralph-core/tests/scenarios/` — YAML-based integration test scenarios
+- **Smoke fixtures**: `crates/ralph-core/tests/fixtures/` — recorded JSONL for replay tests
+- **Ralph proto types**: `crates/ralph-proto/src/` — Event, Hat, HatId, Topic, EventBus, RobotService, CheckinContext
 
 ## The Ralph Tenets
 
@@ -301,4 +413,5 @@ ralph clean --diagnostics
 - When adding or changing `ralph tools` subcommands, update the appropriate file in `crates/ralph-core/data/`: `ralph-tools.md` (shared commands), `ralph-tools-tasks.md` (task commands), or `ralph-tools-memories.md` (memory commands). `.claude/skills/ralph-tools/SKILL.md` is a symlink to the base `ralph-tools.md`
 - When adding, removing, renaming, or changing builtin hat collections/presets in `crates/ralph-cli/src/presets.rs` or mirrored preset files, update `scripts/ralph-zsh-plugin.zsh` so `ralph run -H builtin:<TAB>` stays accurate. Preserve the current `compadd`-based completion style for values containing `:`; do not use `_describe` for `builtin:*` values. After updating the script, install it for the current user with `cp scripts/ralph-zsh-plugin.zsh ~/.oh-my-zsh/plugins/ralph/ralph.plugin.zsh` and verify zsh completion loads.
 - Design docs and specs go in `.ralph/specs` and one-off code tasks and bug fixes go in `.ralph/tasks`
-- 写计划和报告时，必须使用中文撰写（文件名和代码注释除外）
+- **所有中文输出规则**：无论使用哪个 skill 进行操作，所有面向人类的输出——包括但不限于计划文档、设计文档、需求文档、实施计划、任务文件、报告、总结、注释说明、代码 review 意见、PR 描述等——都必须使用中文撰写。不影响：文件名、代码中的字符串字面量、代码注释中的技术标识符（如变量名、函数名、crate 名）、命令行输出块。这条规则优先于任何 skill 内置的语言默认值。
+- **CLAUDE.md 与 AGENTS.md 同步规则**：这两个文件必须保持内容完全一致。修改其中一个时，必须同步更新另一个，确保不会出现差异。
