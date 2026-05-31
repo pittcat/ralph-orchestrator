@@ -19,6 +19,7 @@ mod event_loop;
 mod event_parser;
 mod event_policy;
 mod event_projection;
+mod event_origin;
 mod event_reader;
 pub mod file_lock;
 mod git_ops;

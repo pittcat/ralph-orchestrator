@@ -158,11 +158,14 @@ impl HatRegistry {
 
     /// Check if a hat is allowed to publish the given topic.
     ///
-    /// Returns `true` for unregistered hats (Ralph can publish anything).
+    /// Returns `true` only for registered hats whose `publishes` list includes
+    /// the topic (or a matching wildcard pattern). Unknown/unregistered hats
+    /// are rejected — they cannot publish arbitrary topics.
+    ///
     /// Uses the same pattern matching as subscription routing.
     pub fn can_publish(&self, hat_id: &HatId, topic: &str) -> bool {
         let Some(hat) = self.hats.get(hat_id) else {
-            return true; // Unregistered hat (ralph), no restriction
+            return false; // Unknown hat — fail closed
         };
         hat.publishes
             .iter()
@@ -512,7 +515,7 @@ hats:
     }
 
     #[test]
-    fn test_can_publish_unknown_hat_allows_all() {
+    fn test_can_publish_unknown_hat_rejects() {
         let yaml = r#"
 hats:
   builder:
@@ -523,8 +526,9 @@ hats:
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
         let registry = HatRegistry::from_config(&config);
 
-        // Unregistered hat (e.g. "ralph") should be able to publish anything
-        assert!(registry.can_publish(&HatId::new("ralph"), "anything"));
-        assert!(registry.can_publish(&HatId::new("ralph"), "LOOP_COMPLETE"));
+        // Unknown/unregistered hats should be rejected — fail closed
+        assert!(!registry.can_publish(&HatId::new("ralph"), "anything"));
+        assert!(!registry.can_publish(&HatId::new("ralph"), "LOOP_COMPLETE"));
+        assert!(!registry.can_publish(&HatId::new("strategist"), "experiment.planned"));
     }
 }
