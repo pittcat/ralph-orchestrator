@@ -1,1 +1,1 @@
-Implement the feature in specs/ralph-native-state-machine. Follow requirements.md, design.md, and implementation-plan.md. Keep tests, lint, and typecheck passing. Stop only when all plan items are complete.
+Implement dev plan:@docs/plans/2026-05-31-002-feat-ce-executor-worktree-mode-plan.md

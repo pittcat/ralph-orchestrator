@@ -96,7 +96,8 @@ ralph run [OPTIONS]
 | `--no-tui` | Disable TUI mode |
 | `-a, --autonomous` | Force headless mode |
 | `--idle-timeout <SECS>` | TUI idle timeout |
-| `--exclusive` | Wait for primary loop slot |
+| `--exclusive` | Wait for primary loop slot (conflicts with `--worktree`) |
+| `--worktree` | Create isolated git worktree for this run (conflicts with `--exclusive`) |
 | `--no-auto-merge` | Skip automatic merge after worktree loops complete |
 | `--skip-preflight` | Skip auto preflight checks (even when `features.preflight.enabled: true`) |
 | `--record-session <FILE>` | Record session JSONL |

@@ -53,6 +53,7 @@ Ralph also keeps a few internal/testing presets available without advertising th
 | `review` | `presets/review.yml` | `reviewer`, `analyzer` | `review.start` | `REVIEW_COMPLETE` | Review-only workflow |
 | `spec-driven` | `presets/spec-driven.yml` | `spec_writer`, `spec_reviewer`, `implementer`, `verifier` | `spec.start` | `LOOP_COMPLETE` (default) | Specification-driven implementation |
 | `wave-review` | `presets/wave-review.yml` | `coordinator`, `reviewer` (x3), `synthesizer` | `review.start` | `LOOP_COMPLETE` | Specialized parallel code review (wave-enabled) |
+| `ce-executor` | `presets/ce-executor.yml` | `coordinator`, `executor`, `review-coordinator`, `dimension-reviewer` (wave), `review-synthesizer` (aggregate), `fixer`, `shipper`, `reporter` | `work.start` | `LOOP_COMPLETE` | Plan-driven execution with wave review, auto-fix, and manager report |
 
 ## Why The Builtin Set Is Small
 
@@ -89,6 +90,38 @@ ralph run -c ralph.yml -H builtin:review -p "Review the changes in src/api/"
 
 # Advanced/fun workflow
 ralph run -c ralph.yml -H builtin:pdd-to-code-assist -p "Build a rate limiter"
+
+# ce-executor plan-driven execution
+ralph run -c ralph.yml -H builtin:ce-executor -p "docs/plans/my-plan.md"
+
+# ce-executor with worktree isolation (recommended for parallel runs)
+ralph run -c ralph.yml -H builtin:ce-executor --worktree -p "docs/plans/my-plan.md"
+```
+
+### ce-executor Workflow
+
+`ce-executor` is a plan-driven execution preset with wave-based code review, auto-fix, and manager reporting.
+
+**Key characteristics:**
+- Does not auto-create feature branches (runs on current checkout)
+- Records `start_sha` at startup to anchor review scope
+- Uses wave parallelism for multi-dimensional code review
+- Blocks all push operations (local commit only)
+
+**When to use `--worktree`:**
+- Multiple parallel ce-executor runs
+- When you want isolation from main workspace changes
+- When the plan might involve significant refactoring
+
+```bash
+# Single run (in-place execution)
+ralph run -H builtin:ce-executor -p "docs/plans/my-plan.md"
+
+# Isolated run (worktree, no branch creation)
+ralph run -H builtin:ce-executor --worktree -p "docs/plans/my-plan.md"
+
+# Isolated run with higher concurrency for review
+ralph run -H builtin:ce-executor --worktree -c ralph.yml -p "docs/plans/my-plan.md"
 ```
 
 ## Common Workflow Patterns
