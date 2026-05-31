@@ -1,9 +1,10 @@
 ---
 title: ce-executor Worktree 隔离模式
 type: feat
-status: active
+status: completed
 date: 2026-05-31
 origin: docs/brainstorms/ce-executor-worktree-mode-requirements.md
+commit: 52f3311
 ---
 
 # ce-executor Worktree 隔离模式
