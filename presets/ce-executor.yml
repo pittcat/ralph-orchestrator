@@ -193,7 +193,7 @@ hats:
       - All tasks in current step done → update `progress.md` (move step to Completed Steps)
       - If more steps remain in plan.md → create next step's runtime tasks, publish `queue.advance`
       - If all steps complete → run full test suite + build/lint/typecheck
-      - All pass → calculate total changed lines: `git diff --stat $(git branch --show-current) | tail -1`
+      - All pass → calculate total changed lines: `git diff --stat HEAD | tail -1`
       - Publish `work.done` with `plan_name`, `task_id`, `task_key`, `commit_count`, `changed_lines`
 
       ### Failure Handling

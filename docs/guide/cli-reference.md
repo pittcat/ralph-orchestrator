@@ -97,7 +97,7 @@ ralph run [OPTIONS]
 | `-a, --autonomous` | Force headless mode |
 | `--idle-timeout <SECS>` | TUI idle timeout |
 | `--exclusive` | Wait for primary loop slot (conflicts with `--worktree`) |
-| `--worktree` | Create isolated git worktree for this run (conflicts with `--exclusive`) |
+| `--worktree` | Create isolated git worktree for this run at `.worktrees/<loop-id>/`. The worktree and branch are preserved after completion for manual merge or cleanup. Conflicts with `--exclusive` |
 | `--no-auto-merge` | Skip automatic merge after worktree loops complete |
 | `--skip-preflight` | Skip auto preflight checks (even when `features.preflight.enabled: true`) |
 | `--record-session <FILE>` | Record session JSONL |

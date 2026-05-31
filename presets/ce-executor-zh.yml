@@ -195,7 +195,7 @@ hats:
       - 当前步骤所有 tasks 完成 → 更新 `progress.md`（移动步骤到 Completed Steps）
       - 还有后续步骤 → 创建下一步的 runtime tasks，发布 `queue.advance`
       - 所有步骤完成 → 运行完整测试套件 + build/lint/typecheck
-      - 全部通过 → 计算总改动行数：`git diff --stat $(git branch --show-current) | tail -1`
+      - 全部通过 → 计算总改动行数：`git diff --stat HEAD | tail -1`
       - 发布 `work.done`，payload 携带 `task_id`、`task_key`、`commit_count`、`changed_lines`
 
       ### 失败处理

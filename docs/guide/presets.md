@@ -113,6 +113,11 @@ ralph run -c ralph.yml -H builtin:ce-executor --worktree -p "docs/plans/my-plan.
 - When you want isolation from main workspace changes
 - When the plan might involve significant refactoring
 
+**After a `--worktree` run:**
+- The worktree directory (`.worktrees/<loop-id>/`) and branch (`ralph/<loop-id>`) are **preserved**.
+- No automatic merge or cleanup happens. Use `git worktree remove` or `ralph loops diff/discard/merge` to handle it manually.
+- `ralph loops list` may show it as `orphan` after the loop exits — this is expected.
+
 ```bash
 # Single run (in-place execution)
 ralph run -H builtin:ce-executor -p "docs/plans/my-plan.md"
