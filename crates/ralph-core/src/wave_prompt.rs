@@ -53,10 +53,23 @@ pub fn build_wave_worker_prompt(hat: &HatConfig, event: &Event, ctx: &WaveWorker
 
     // 3. Task payload
     prompt.push_str("# Your Task\n\n");
-    if let Some(ref payload) = event.payload {
-        prompt.push_str(payload);
+    match event.payload.as_ref().map(|p| p.trim()) {
+        Some(payload) if !payload.is_empty() => {
+            prompt.push_str(payload);
+        }
+        _ => {
+            prompt.push_str(
+                "⚠️ **WARNING: No specific task payload provided.**\n\n\
+                 This is an error condition — the wave was created without the required\n\
+                 task data (e.g., dimension, focus, files to review).\n\n\
+                 Do NOT attempt to guess or proceed with an unspecified task.\n\
+                 Instead, publish a single diagnostic event indicating the wave\n\
+                 worker received an empty task payload. Do NOT produce code reviews,\n\
+                 findings, or any substantive work.\n",
+            );
+        }
     }
-    prompt.push_str("\n\n");
+    prompt.push_str("\n");
 
     // 4. Publishing results
     if !ctx.result_topics.is_empty() {
@@ -184,5 +197,67 @@ mod tests {
 
         let prompt = build_wave_worker_prompt(&hat, &event, &ctx);
         assert!(!prompt.contains("# Publishing Results"));
+    }
+
+    #[test]
+    fn test_empty_payload_shows_warning() {
+        let hat = make_hat_config();
+        let event = make_event(""); // empty payload
+        let ctx = WaveWorkerContext {
+            wave_id: "w-abc".to_string(),
+            wave_index: 0,
+            wave_total: 1,
+            result_topics: vec!["review.done".to_string()],
+        };
+
+        let prompt = build_wave_worker_prompt(&hat, &event, &ctx);
+
+        assert!(prompt.contains("No specific task payload provided"));
+        assert!(prompt.contains("WARNING"));
+        assert!(prompt.contains("Do NOT attempt to guess"));
+    }
+
+    #[test]
+    fn test_whitespace_only_payload_shows_warning() {
+        let hat = make_hat_config();
+        let event = make_event("   \n  \t  "); // whitespace-only payload
+        let ctx = WaveWorkerContext {
+            wave_id: "w-abc".to_string(),
+            wave_index: 0,
+            wave_total: 1,
+            result_topics: vec!["review.done".to_string()],
+        };
+
+        let prompt = build_wave_worker_prompt(&hat, &event, &ctx);
+
+        assert!(prompt.contains("No specific task payload provided"));
+        assert!(prompt.contains("WARNING"));
+    }
+
+    #[test]
+    fn test_missing_payload_shows_warning() {
+        let hat = make_hat_config();
+        let event = Event {
+            topic: "review.file".to_string(),
+            payload: None, // no payload at all
+            ts: "2025-01-01T00:00:00Z".to_string(),
+            hat: None,
+            triggered: None,
+            source: None,
+            wave_id: Some("w-abc".to_string()),
+            wave_index: Some(0),
+            wave_total: Some(1),
+        };
+        let ctx = WaveWorkerContext {
+            wave_id: "w-abc".to_string(),
+            wave_index: 0,
+            wave_total: 1,
+            result_topics: vec!["review.done".to_string()],
+        };
+
+        let prompt = build_wave_worker_prompt(&hat, &event, &ctx);
+
+        assert!(prompt.contains("No specific task payload provided"));
+        assert!(prompt.contains("WARNING"));
     }
 }

@@ -103,7 +103,8 @@ pub fn preset_names() -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ralph_core::RalphConfig;
+    use ralph_core::event_origin::{validate_event_origin, OriginCheck};
+    use ralph_core::{HatRegistry, RalphConfig};
 
     fn assert_public_preset_has_completion_path(preset: &EmbeddedPreset) {
         let config =
@@ -1023,5 +1024,90 @@ mod tests {
                 .instructions
                 .contains("The turn is incomplete until the `ralph emit` command succeeds.")
         );
+    }
+
+    #[test]
+    fn test_preset_origin_guard_rejects_unknown_hats() {
+        // Verify that public presets reject events from unknown hats via origin guard
+        for preset in PRESETS.iter().filter(|p| p.public) {
+            let config = RalphConfig::parse_yaml(preset.content)
+                .expect("embedded preset YAML should parse");
+            let registry = HatRegistry::from_config(&config);
+            let cancellation = &config.event_loop.cancellation_promise;
+
+            // Events from unknown hat "strategist" should be rejected in all presets
+            let unknown_event = ralph_core::Event {
+                topic: "test.topic".to_string(),
+                payload: None,
+                ts: "2025-01-01T00:00:00Z".to_string(),
+                hat: Some("strategist".to_string()),
+                triggered: None,
+                source: None,
+                wave_id: None,
+                wave_index: None,
+                wave_total: None,
+            };
+
+            match validate_event_origin(&unknown_event, &registry, cancellation) {
+                OriginCheck::Accepted => {
+                    // Only acceptable when registry is empty (solo mode)
+                    if !registry.is_empty() {
+                        panic!(
+                            "Preset '{}': unknown hat 'strategist' should be rejected",
+                            preset.name
+                        );
+                    }
+                }
+                OriginCheck::Rejected { .. } => {} // Expected
+            }
+        }
+    }
+
+    #[test]
+    fn test_ce_executor_publish_chain_origin_compatible() {
+        // Verify ce-executor's normal publish chain survives origin guard
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let config = RalphConfig::parse_yaml(preset.content)
+            .expect("ce-executor YAML should parse");
+        let registry = HatRegistry::from_config(&config);
+        let cancellation = &config.event_loop.cancellation_promise;
+
+        // ce-executor's expected publish chain (using actual hat_keys from YAML):
+        // coordinator(work.ready) -> executor(work.done) -> review-coordinator(review.wave.ready)
+        //   -> dimension-reviewer(review.dimension.done) -> review-synthesizer(review.passed)
+        //   -> shipper(REVIEW_COMPLETE) -> reporter(LOOP_COMPLETE)
+        let chain_publishes: Vec<(&str, &str)> = vec![
+            ("coordinator", "work.ready"),
+            ("executor", "work.done"),
+            ("review-coordinator", "review.wave.ready"),
+            ("dimension-reviewer", "review.dimension.done"),
+            ("review-synthesizer", "review.passed"),
+            ("shipper", "REVIEW_COMPLETE"),
+            ("reporter", "LOOP_COMPLETE"),
+        ];
+
+        for (hat_name, expected_topic) in &chain_publishes {
+            let event = ralph_core::Event {
+                topic: expected_topic.to_string(),
+                payload: None,
+                ts: "2025-01-01T00:00:00Z".to_string(),
+                hat: Some(hat_name.to_string()),
+                triggered: None,
+                source: None,
+                wave_id: None,
+                wave_index: None,
+                wave_total: None,
+            };
+
+            let result = validate_event_origin(&event, &registry, cancellation);
+            assert_eq!(
+                result,
+                OriginCheck::Accepted,
+                "ce-executor: hat '{}' should be able to publish '{}', got: {:?}",
+                hat_name,
+                expected_topic,
+                result
+            );
+        }
     }
 }

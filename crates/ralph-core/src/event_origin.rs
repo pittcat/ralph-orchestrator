@@ -50,11 +50,13 @@ pub enum OriginCheck {
 /// processing. It implements the following rules:
 ///
 /// - **Registry empty (solo mode)**: All events are accepted (permissive for hatless baseline).
-/// - **Control topics**: No-hat events matching known control topics are accepted.
-/// - **Registered hat + can_publish**: Events with a registered hat that can publish
-///   the topic are accepted.
-/// - **Unknown hat**: Always rejected (fail-closed).
-/// - **No-hat business event in hat-based run**: Rejected.
+/// - **No-hat events**: Accepted (scope enforcement in the caller already validates
+///   against active hats; no-hat events from the orchestrator or test infrastructure
+///   must continue to work).
+/// - **Unknown hat**: Always rejected (fail-closed — primary protection against
+///   LLM-generated fake events from unregistered hat names).
+/// - **Registered hat + out-of-scope**: Rejected when the hat cannot publish the topic.
+/// - **Control topics**: Registered hats can emit control topics even if not in publishes.
 ///
 /// # Arguments
 ///
@@ -78,13 +80,11 @@ pub fn validate_event_origin(
         return OriginCheck::Accepted;
     }
 
-    // No-hat business event in a hat-based registry: reject
+    // No-hat events: accept. Scope enforcement in the caller already validates
+    // against active hats. This preserves backward compatibility for events
+    // written by the orchestrator or test infrastructure without provenance.
     if event.hat.is_none() {
-        return OriginCheck::Rejected {
-            topic: topic_str.to_string(),
-            hat: None,
-            reason: "no-hat business event rejected in hat-based mode",
-        };
+        return OriginCheck::Accepted;
     }
 
     let hat_id = HatId::new(event.hat.as_ref().unwrap());
@@ -209,7 +209,10 @@ hats:
     }
 
     #[test]
-    fn test_no_hat_business_event_rejected_in_hated_mode() {
+    fn test_no_hat_business_event_accepted_in_hated_mode() {
+        // Backward compatibility: no-hat business events are accepted in hat-based
+        // mode because scope enforcement in the caller already validates against
+        // active hats.
         let registry = registry_with_hats(
             r#"
 hats:
@@ -222,11 +225,7 @@ hats:
         let event = make_event("debug.step", None);
         assert_eq!(
             validate_event_origin(&event, &registry, ""),
-            OriginCheck::Rejected {
-                topic: "debug.step".to_string(),
-                hat: None,
-                reason: "no-hat business event rejected in hat-based mode"
-            }
+            OriginCheck::Accepted
         );
     }
 
@@ -361,11 +360,12 @@ hats:
         );
         let events = vec![
             make_event("work.done", Some("executor")), // accepted
-            make_event("debug.step", None), // rejected no-hat
+            make_event("debug.step", None), // accepted (no-hat events pass through)
             make_event("work.done", Some("strategist")), // rejected unknown hat
         ];
         let filtered = filter_events_by_origin(events, &registry, "");
-        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered.len(), 2);
         assert_eq!(filtered[0].topic, "work.done");
+        assert_eq!(filtered[1].topic, "debug.step");
     }
 }

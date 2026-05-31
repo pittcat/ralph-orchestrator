@@ -77,6 +77,17 @@ impl EventBus {
     /// If an observer is set, it receives the event before routing.
     #[allow(clippy::needless_pass_by_value)] // Event is cloned to multiple recipients
     pub fn publish(&mut self, event: Event) -> Vec<HatId> {
+        // --- EventBus source guard: reject events with impossible source ---
+        // If event.source is set, it must correspond to a registered hat.
+        // Events with unknown sources are dropped before observers see them.
+        if let Some(ref source) = event.source {
+            if !self.hats.contains_key(source) {
+                // Unknown source — fail closed, return no recipients
+                return Vec::new();
+            }
+        }
+        // --- End EventBus source guard ---
+
         // Notify all observers before routing
         for observer in &self.observers {
             observer(&event);

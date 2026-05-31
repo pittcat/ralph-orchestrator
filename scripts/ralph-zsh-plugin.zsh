@@ -516,7 +516,6 @@ _ralph_emit_args() {
     '1:Topic (e.g. build.done):_default'
     '2:Payload (optional):_default'
     '-j[Parse payload as JSON]'
-    '--ts+[Custom ISO 8601 timestamp]:timestamp:_default'
     '--file+[Path to events file]:file:_files'
     '--policy-check[Validate against event policy]'
     '--hat+[Hat that published this event]:hat:_default'

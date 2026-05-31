@@ -14,6 +14,7 @@ use crate::event_policy::{
     PolicyDecision, PolicyRuntimeState, check_completion_guard, check_completion_honored,
     validate_event,
 };
+use crate::event_origin::filter_events_by_origin;
 use crate::event_reader::{Event as JsonlEvent, EventReader};
 use crate::hat_registry::HatRegistry;
 use crate::hatless_ralph::HatlessRalph;
@@ -3075,6 +3076,16 @@ impl EventLoop {
         };
         // --- End scope enforcement ---
 
+        // --- Origin guard: validate JSONL event provenance before bus publication ---
+        // Events from JSONL are untrusted until provenance and scope checks accept them.
+        // This rejects no-hat business events, unknown-hat events, and out-of-scope topics.
+        let mut events = filter_events_by_origin(
+            events,
+            &self.registry,
+            &self.config.event_loop.cancellation_promise,
+        );
+        // --- End origin guard ---
+
         // --- Event policy validation: check typed payload schema ---
         // Inserted after scope enforcement, before workflow guard validation
         if let Some(ref policy_config) = self.config.event_loop.event_policy
@@ -3821,6 +3832,15 @@ impl EventLoop {
                         .and_then(|hat_id| self.registry.get_config(hat_id))
                         .is_some_and(|hat_config| hat_config.concurrency > 1)
             });
+
+        // --- Origin guard: validate wave event provenance before policy validation ---
+        // Wave dispatch events bypass process_parse_result, so origin validation must
+        // run here to prevent forged wave events from reaching wave execution.
+        let wave_events = filter_events_by_origin(
+            wave_events,
+            &self.registry,
+            &self.config.event_loop.cancellation_promise,
+        );
 
         // --- Event policy validation for wave events ---
         // Wave dispatch events are partitioned before process_parse_result, so they

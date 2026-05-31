@@ -80,6 +80,18 @@ fn execute_emit(args: WaveEmitArgs, use_colors: bool) -> Result<()> {
 ///
 /// This is the core logic, separated from CLI concerns for testability.
 pub fn write_wave_events(topic: &str, payloads: &[String], events_file: &Path) -> Result<String> {
+    // Read hat from runtime environment if available
+    let hat = std::env::var("RALPH_CURRENT_HAT").ok().filter(|s| !s.is_empty());
+    write_wave_events_with_provenance(topic, payloads, events_file, hat.as_deref())
+}
+
+/// Like [`write_wave_events`] but with explicit provenance fields.
+pub fn write_wave_events_with_provenance(
+    topic: &str,
+    payloads: &[String],
+    events_file: &Path,
+    hat: Option<&str>,
+) -> Result<String> {
     if payloads.is_empty() {
         bail!("At least one payload is required");
     }
@@ -100,7 +112,7 @@ pub fn write_wave_events(topic: &str, payloads: &[String], events_file: &Path) -
     // Build all event records
     let mut lines = String::new();
     for (index, payload) in payloads.iter().enumerate() {
-        let record = serde_json::json!({
+        let mut record = serde_json::json!({
             "topic": topic,
             "payload": payload,
             "ts": ts,
@@ -108,6 +120,14 @@ pub fn write_wave_events(topic: &str, payloads: &[String], events_file: &Path) -
             "wave_index": index as u32,
             "wave_total": total,
         });
+
+        // Add hat provenance if available
+        if let Some(hat_val) = hat {
+            if let Some(obj) = record.as_object_mut() {
+                obj.insert("hat".to_string(), serde_json::json!(hat_val));
+            }
+        }
+
         let json_line = serde_json::to_string(&record)?;
         lines.push_str(&json_line);
         lines.push('\n');

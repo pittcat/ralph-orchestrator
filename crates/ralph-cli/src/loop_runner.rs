@@ -2404,12 +2404,12 @@ pub async fn run_loop_impl(
                             Some("phase_transition")
                         }
                     }
-                    Ok(CheckExitResult::NotReady { .. }) => {
-                        debug!("Exit conditions not yet satisfied — continuing warmup");
+                    Ok(CheckExitResult::NotReady { unmet_conditions }) => {
+                        debug!(?unmet_conditions, "Exit conditions not yet satisfied — continuing warmup");
                         None
                     }
-                    Ok(CheckExitResult::DrainRequired { .. }) => {
-                        info!("Drain required — waiting for in-flight experiments to complete");
+                    Ok(CheckExitResult::DrainRequired { pending_count }) => {
+                        info!(pending_count, "Drain required — waiting for in-flight experiments to complete");
                         None
                     }
                     Err(e) => {

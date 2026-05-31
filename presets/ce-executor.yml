@@ -231,7 +231,6 @@ hats:
     description: "Diff analysis, intent discovery, conditional dimension selection, wave emission."
     triggers: ["work.done", "fix.applied"]
     publishes: ["review.wave.ready", "review.passed"]
-    default_publishes: "review.wave.ready"
     instructions: |
       ## REVIEW COORDINATOR MODE — Scope Analysis, Intent Discovery, and Wave Scheduling
 
