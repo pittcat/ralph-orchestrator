@@ -400,6 +400,7 @@ _ralph_run_args() {
     '--idle-timeout+[Idle timeout in seconds]:seconds:_default'
     '--exclusive[Wait for primary loop slot]'
     '--no-auto-merge[Skip automatic merge]'
+    '--worktree[Create isolated worktree for run]'
     '--skip-preflight[Skip preflight checks]'
     '-v[Enable verbose output]'
     '-q[Suppress streaming output]'

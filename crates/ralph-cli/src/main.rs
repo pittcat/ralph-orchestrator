@@ -740,6 +740,13 @@ struct RunArgs {
     #[arg(long)]
     no_auto_merge: bool,
 
+    /// Create an isolated git worktree for this run. The worktree is created
+    /// at `.worktrees/<loop-id>/` and the loop runs inside it. Use this for
+    /// fully isolated execution that does not affect the main working directory.
+    /// Cannot be used with --exclusive.
+    #[arg(long, conflicts_with = "exclusive")]
+    worktree: bool,
+
     // ─────────────────────────────────────────────────────────────────────────
     // Phase Options (Warmup/Production Two-Phase Loop)
     // ─────────────────────────────────────────────────────────────────────────
@@ -1252,6 +1259,7 @@ async fn main() -> Result<()> {
                 idle_timeout: None,
                 exclusive: false,
                 no_auto_merge: false,
+                worktree: false,
                 skip_preflight: false,
                 verbose: false,
                 quiet: false,
@@ -1983,6 +1991,7 @@ struct SubprocessTuiArgs {
     exclusive: bool,
     no_auto_merge: bool,
     skip_preflight: bool,
+    worktree: bool,
     /// Config sources to forward to child process (-c args)
     config_sources: Vec<String>,
     /// Hats source to forward to child process (-H arg)
@@ -2011,6 +2020,7 @@ impl SubprocessTuiArgs {
             exclusive: args.exclusive,
             no_auto_merge: args.no_auto_merge,
             skip_preflight: args.skip_preflight,
+            worktree: args.worktree,
             config_sources: config_sources.iter().map(|s| s.to_cli_string()).collect(),
             hats_source: hats_source.map(|h| h.label()),
         }
@@ -4069,6 +4079,7 @@ core:
             idle_timeout: None,
             exclusive: false,
             no_auto_merge: false,
+            worktree: false,
             skip_preflight: true,
             verbose: false,
             quiet: false,
