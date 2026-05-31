@@ -1064,6 +1064,22 @@ mod tests {
     }
 
     #[test]
+    fn test_ce_executor_required_events_is_report_done() {
+        // Verify ce-executor uses report.done as completion gate (not mutually exclusive
+        // branch events review.passed + review.complete which caused infinite loops)
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let config = RalphConfig::parse_yaml(preset.content)
+            .expect("ce-executor YAML should parse");
+        assert_eq!(
+            config.event_loop.required_events,
+            &["report.done"],
+            "ce-executor should require 'report.done' as its only completion gate event; \
+             the old 'review.passed' + 'review.complete' gate causes infinite loops \
+             because they are mutually exclusive branch events"
+        );
+    }
+
+    #[test]
     fn test_ce_executor_publish_chain_origin_compatible() {
         // Verify ce-executor's normal publish chain survives origin guard
         let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
