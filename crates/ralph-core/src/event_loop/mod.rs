@@ -830,6 +830,19 @@ impl EventLoop {
         self.state.last_emitted_signature = None;
     }
 
+    /// Increment the hard-gate counter when an agent claims emit but writes no event.
+    pub fn increment_hard_gate_count(&mut self) {
+        self.state.consecutive_hard_gates += 1;
+    }
+
+    /// Reset the hard-gate counter when an agent successfully emits an event.
+    pub fn reset_hard_gate_count(&mut self) {
+        self.state.consecutive_hard_gates = 0;
+    }
+
+    /// Maximum consecutive hard-gate triggers before the loop terminates.
+    pub const HARD_GATE_MAX: u32 = 3;
+
     /// Returns the configuration.
     pub fn config(&self) -> &RalphConfig {
         &self.config
@@ -918,6 +931,15 @@ impl EventLoop {
         // Check for validation failures: too many consecutive malformed JSONL lines
         if self.state.consecutive_malformed_events >= 3 {
             return Some(TerminationReason::ValidationFailure);
+        }
+
+        // Check for hard-gate exhaustion: agent repeatedly claims emit but never writes
+        if self.state.consecutive_hard_gates >= Self::HARD_GATE_MAX {
+            warn!(
+                count = self.state.consecutive_hard_gates,
+                "Hard gate exhausted: agent repeatedly claimed to emit events but never wrote them"
+            );
+            return Some(TerminationReason::Stopped);
         }
 
         // Check for stale loop: same event signature emitted 3+ times in a row
@@ -1370,7 +1392,10 @@ impl EventLoop {
                         "RECOVERY: Previous iteration by hat `{}` did not publish an event. \
                          This failed because no event was emitted. Emit exactly ONE valid next \
                          event via `ralph emit`. Allowed topics: `{}`. Do not only write prose \
-                         or update files. Stop immediately after emitting.",
+                         or update files. Stop immediately after emitting.\n\n\
+                         If you attempted to emit an event in the previous turn but it was not \
+                         recorded, you must use the bash tool to execute `ralph emit` — \
+                         prose mentions are not sufficient.",
                         hat_id.as_str(),
                         publishes.join("`, `")
                     )

@@ -42,6 +42,8 @@ pub struct LoopState {
     pub abandoned_task_redispatches: u32,
     /// Consecutive malformed JSONL lines encountered (for validation backpressure).
     pub consecutive_malformed_events: u32,
+    /// Consecutive hard-gate triggers when agent claims emit but writes no event.
+    pub consecutive_hard_gates: u32,
     /// Whether a completion event has been observed in JSONL.
     pub completion_requested: bool,
     /// Whether the completion event has already been honored (prevents duplicate side effects).
@@ -101,6 +103,7 @@ impl Default for LoopState {
             abandoned_tasks: Vec::new(),
             abandoned_task_redispatches: 0,
             consecutive_malformed_events: 0,
+            consecutive_hard_gates: 0,
             completion_requested: false,
             completion_honored: false,
             hat_activation_counts: HashMap::new(),

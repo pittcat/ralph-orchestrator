@@ -318,6 +318,7 @@ mod tests {
             abandoned_tasks: Vec::new(),
             abandoned_task_redispatches: 0,
             consecutive_malformed_events: 0,
+            consecutive_hard_gates: 0,
             completion_requested: false,
             completion_honored: false,
             hat_activation_counts: std::collections::HashMap::new(),

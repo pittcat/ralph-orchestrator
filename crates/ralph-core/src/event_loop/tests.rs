@@ -298,6 +298,40 @@ event_loop:
 }
 
 #[test]
+fn test_hard_gate_terminates_after_max() {
+    let config = RalphConfig::default();
+    let mut event_loop = EventLoop::new(config);
+
+    // Below threshold — should not terminate
+    event_loop.state.consecutive_hard_gates = 2;
+    assert_eq!(event_loop.check_termination(), None);
+
+    // At threshold — should terminate with Stopped
+    event_loop.state.consecutive_hard_gates = 3;
+    assert_eq!(
+        event_loop.check_termination(),
+        Some(TerminationReason::Stopped)
+    );
+}
+
+#[test]
+fn test_hard_gate_count_methods() {
+    let config = RalphConfig::default();
+    let mut event_loop = EventLoop::new(config);
+
+    assert_eq!(event_loop.state().consecutive_hard_gates, 0);
+
+    event_loop.increment_hard_gate_count();
+    assert_eq!(event_loop.state().consecutive_hard_gates, 1);
+
+    event_loop.increment_hard_gate_count();
+    assert_eq!(event_loop.state().consecutive_hard_gates, 2);
+
+    event_loop.reset_hard_gate_count();
+    assert_eq!(event_loop.state().consecutive_hard_gates, 0);
+}
+
+#[test]
 fn test_completion_promise_detection() {
     use std::fs;
     use tempfile::TempDir;

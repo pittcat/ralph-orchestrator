@@ -333,8 +333,10 @@ hats:
       写入 findings 到 `.agents/scratchpad/ce-executor/{plan_name}/findings-{dimension}.json`
 
       ### 事件发布
-      发布 `review.dimension.done`，payload 包含：
-      - `dimension`、`findings_count`、`findings_file`、`p0_count`、`p1_count`、`p2_count`、`p3_count`、`safe_auto_count`、`gated_auto_count`、`manual_count`、`advisory_count`
+      - 必须使用 bash 工具执行：`ralph emit review.dimension.done --json '<payload>'`
+      - 不要只在文字里写"我 emit 了 review.dimension.done"——命令必须真正运行，事件必须出现在 events 文件中
+      - Payload 必须包含：
+        - `dimension`、`findings_count`、`findings_file`、`p0_count`、`p1_count`、`p2_count`、`p3_count`、`safe_auto_count`、`gated_auto_count`、`manual_count`、`advisory_count`
 
       ---
 

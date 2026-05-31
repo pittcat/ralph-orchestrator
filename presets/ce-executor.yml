@@ -362,13 +362,15 @@ hats:
       ```
 
       ### Event Publishing
-      Publish `review.dimension.done` with payload:
-      - `dimension`: string
-      - `findings_count`: int
-      - `findings_file`: string (path to findings-{dimension}.json)
-      - `plan_name`: string (needed by review-synthesizer)
-      - `p0_count`, `p1_count`, `p2_count`, `p3_count`: int
-      - `safe_auto_count`, `gated_auto_count`, `manual_count`, `advisory_count`: int
+      - Use the bash tool to execute: `ralph emit review.dimension.done --json '<payload>'`
+      - Do NOT just write "I emit review.dimension.done" in prose — the command must actually run and the event must appear in the events file
+      - Payload must include:
+        - `dimension`: string
+        - `findings_count`: int
+        - `findings_file`: string (path to findings-{dimension}.json)
+        - `plan_name`: string (needed by review-synthesizer)
+        - `p0_count`, `p1_count`, `p2_count`, `p3_count`: int
+        - `safe_auto_count`, `gated_auto_count`, `manual_count`, `advisory_count`: int
 
       ---
 

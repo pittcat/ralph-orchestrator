@@ -2668,6 +2668,7 @@ pub async fn run_loop_impl(
             .unwrap_or(false);
 
         let mut late_termination_reason: Option<TerminationReason> = None;
+        let mut hard_gate_triggered_this_iteration = false;
         if !agent_wrote_events && output_mentions_ralph_emit(&output) {
             match recover_expected_emit_after_output(&mut event_loop)
                 .inspect_err(|e| warn!(error = %e, "Failed to recover expected emit events"))
@@ -2675,16 +2676,34 @@ pub async fn run_loop_impl(
             {
                 Some(LateEventRecovery::PendingWork) => {
                     agent_wrote_events = true;
+                    event_loop.reset_hard_gate_count();
                 }
                 Some(LateEventRecovery::Terminate(reason)) => {
                     agent_wrote_events = true;
+                    event_loop.reset_hard_gate_count();
                     late_termination_reason = Some(reason);
                 }
                 Some(LateEventRecovery::NoLateEvents) | None => {
-                    warn!(
-                        hat = %hat_id.as_str(),
-                        "Output indicated `ralph emit`, but no event became readable before fallback logic"
-                    );
+                    if should_hard_gate(&display_hat, &event_loop) {
+                        hard_gate_triggered_this_iteration = true;
+                        event_loop.increment_hard_gate_count();
+                        inject_hard_gate_guidance(
+                            &ctx,
+                            &display_hat,
+                            &event_loop.get_hat_publishes(&display_hat),
+                        );
+                        info!(
+                            hat = %display_hat.as_str(),
+                            consecutive = event_loop.state().consecutive_hard_gates,
+                            "Hard gate triggered: agent claimed emit but no event written"
+                        );
+                    } else {
+                        event_loop.reset_hard_gate_count();
+                        warn!(
+                            hat = %hat_id.as_str(),
+                            "Output indicated `ralph emit`, but no event became readable before fallback logic"
+                        );
+                    }
                 }
             }
         }
@@ -2706,9 +2725,11 @@ pub async fn run_loop_impl(
         }
 
         // Inject default_publishes for active hats only when agent wrote no events.
+        // Skip default_publishes when hard gate triggered — the agent explicitly
+        // claimed to emit and we want it to learn to do so, not be bailed out.
         // Prefer the displayed execution hat first so a non-emitting turn still
         // falls back to the hat the user actually saw in the banner.
-        if !agent_wrote_events && wave_events.is_empty() {
+        if !agent_wrote_events && wave_events.is_empty() && !hard_gate_triggered_this_iteration {
             let mut fallback_hats = Vec::new();
             if display_hat.as_str() != "ralph" {
                 fallback_hats.push(display_hat.clone());
@@ -2987,6 +3008,70 @@ fn recover_expected_emit_after_output(
 
 fn output_mentions_ralph_emit(output: &str) -> bool {
     output.contains("ralph emit")
+}
+
+/// Determine whether the active hat requires an explicit emit and has no
+/// default_publishes fallback. Only hats that *should* publish but have no
+/// automatic兜底 are hard-gated.
+fn should_hard_gate(hat_id: &HatId, event_loop: &EventLoop) -> bool {
+    let Some(config) = event_loop.registry().get_config(hat_id) else {
+        return false;
+    };
+    !config.publishes.is_empty() && config.default_publishes.is_none()
+}
+
+/// Inject a human.guidance event directly into the events file so the agent
+/// sees it on the next iteration. Used when the agent claimed to emit but no
+/// event was actually written.
+fn inject_hard_gate_guidance(ctx: &LoopContext, hat_id: &HatId, expected_topics: &[String]) {
+    let events_path = resolve_current_events_path(ctx);
+    let topics_str = if expected_topics.is_empty() {
+        "(check hat configuration)".to_string()
+    } else {
+        expected_topics.join("`, `")
+    };
+
+    let payload = format!(
+        "⚠️ HARD GATE TRIGGERED: Previous iteration by hat `{hat}` claimed to emit an event, \
+         but NO EVENT WAS WRITTEN to the events file.\n\n\
+         You MUST use the bash tool to execute: ralph emit <topic>\n\
+         Allowed topics: `{topics}`\n\n\
+         Writing `ralph emit` in prose or comments is NOT sufficient. \
+         The turn is incomplete until the command succeeds and the event appears in the events file.",
+        hat = hat_id.as_str(),
+        topics = topics_str
+    );
+
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let event = serde_json::json!({
+        "topic": "human.guidance",
+        "payload": payload,
+        "ts": timestamp,
+    });
+
+    match serde_json::to_string(&event) {
+        Ok(line) => {
+            use std::io::Write;
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&events_path);
+            match file {
+                Ok(f) => {
+                    let mut writer = std::io::BufWriter::new(f);
+                    if writeln!(writer, "{}", line).is_err() {
+                        warn!(path = ?events_path, "Failed writing hard-gate guidance event");
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, path = ?events_path, "Failed opening events file for hard-gate guidance");
+                }
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "Failed serializing hard-gate guidance event");
+        }
+    }
 }
 
 fn resolve_display_hat_for_execution(
@@ -13728,6 +13813,41 @@ hats:
             r#"[Tool] Bash: ralph emit "hypothesis.test" "payload""#
         ));
         assert!(!output_mentions_ralph_emit("[Tool] Bash: cargo test"));
+    }
+
+    #[test]
+    fn test_should_hard_gate() {
+        let yaml = r#"
+hats:
+  reviewer:
+    name: "Reviewer"
+    publishes: ["review.passed"]
+  coordinator:
+    name: "Coordinator"
+    publishes: ["work.ready"]
+    default_publishes: "work.failed"
+  silent:
+    name: "Silent"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let event_loop = EventLoop::new(config);
+
+        assert!(
+            should_hard_gate(&HatId::new("reviewer"), &event_loop),
+            "hat with publishes and no default_publishes should hard gate"
+        );
+        assert!(
+            !should_hard_gate(&HatId::new("coordinator"), &event_loop),
+            "hat with default_publishes should NOT hard gate"
+        );
+        assert!(
+            !should_hard_gate(&HatId::new("silent"), &event_loop),
+            "hat with no publishes should NOT hard gate"
+        );
+        assert!(
+            !should_hard_gate(&HatId::new("nonexistent"), &event_loop),
+            "unknown hat should NOT hard gate"
+        );
     }
 
     #[test]
