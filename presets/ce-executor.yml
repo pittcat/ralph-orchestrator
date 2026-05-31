@@ -786,8 +786,7 @@ hats:
     instructions: |
       ## REPORTER MODE — Manager-Facing Completion Report
 
-      Generate a concise, human-readable report for a Manager audience.
-      Speak plainly. Lead with conclusions. Support with evidence.
+      Generate a manager-facing report that a non-technical stakeholder can read in 3 minutes and understand what was done, whether it succeeded, and what decisions are needed.
 
       ### Read State
       - From `REVIEW_COMPLETE` payload: `plan_name`, `verdict`, `final_findings_count`, `pass_or_fail`, `residual_findings_summary`
@@ -799,71 +798,139 @@ hats:
       - **Path conflict**: append HHMM timestamp: `YYYY-MM-DD-ce-executor-{plan_name}-HHMM-report.md`
       - Auto-create `docs/report/` directory
 
-      ### Report Structure (10 sections)
+      ### Report Structure (6 sections + appendices)
+
+      Write the report in THIS order — do not reorder sections:
+
       ```markdown
-      # CE-Executor Report — YYYY-MM-DD
+      # {Plan Title} — 成果汇报
 
-      ## 1. 一句话结论
-      <verdict summary>
-
-      ## 2. 本次目标
-      <goal from plan>
-
-      ## 3. 本次执行内容
-      - Plan: <plan_name>
-      - Implementation Units executed: N
-      - Code review findings: N
-      - Auto-fix rounds: N (Round 1/2/3)
-      - Final Validation: pass/fail
-      - Commit hash: <hash>
-
-      ## 4. 当前结果
-      - Work complete: yes/no
-      - Review passed: yes/no
-      - Final validation passed: yes/no
-      - Remaining issues: N (P0: x, P1: y, P2: z, P3: w)
-
-      ## 5. 关键证据
-      <top 1-3 findings with file:line>
-
-      ## 6. 问题影响
-      <whether residual issues block merge, risk level>
-
-      ## 7. 当前判断
-      - Facts confirmed: ...
-      - Assessment: ...
-      - Assumptions to verify: ...
-
-      ## 8. 下一步计划
-      <actionable next steps for residual issues>
-
-      ## 9. 需要 Manager 关注/决策的点
-      <what requires human input>
-
-      ## 10. Operational Validation Plan
-      <from shipping.md>
+      > 📅 YYYY-MM-DD | 🔖 {branch/commit}
 
       ---
 
-      ## Appendix: Full Findings
-      <details><summary>Click to expand</summary>... full findings list ...</details>
+      ## 1. 总体结论
 
-      ## Appendix: Fix Log
-      <details><summary>Click to expand</summary>... fix log ...</details>
+      | 维度 | 状态 | 说明 |
+      |------|------|------|
+      | 任务完成 | 🟢/🟡/🔴 | 一句话 |
+      | 质量验收 | 🟢/🟡/🔴 | 一句话 |
+      | 风险等级 | 🟢/🟡/🔴 | 一句话 |
 
-      ## Appendix: Shipping Record
-      <details><summary>Click to expand</summary>... shipping.md content ...</details>
+      **一句话总结**：{用大白话说明这件事做成了什么。例如："已建立配置漂移自动检测机制，
+      可在开发阶段拦截 6 类参数不一致问题，全部 98 个回归测试通过，但仍有 2 项功能
+      需等待外部标准确定后补全。"}
+
+      ---
+
+      ## 2. 为什么要做这件事
+
+      {从 plan.md / context.md 中提取背景和目的，用业务语言解释。避免技术术语。
+      如果 plan.md 中写了"解决什么问题"或"目标是什么"，直接引用并翻译成通俗语言。}
+
+      > 例如："在运行实验时，经常出现配置参数不一致导致结果不可靠的问题。
+      > 本工作建立了自动检测机制，在问题发生前就发现并提示修复。"
+
+      ---
+
+      ## 3. 达成了什么
+
+      {分条目列出成果。每个条目：做了什么 + 带来的效果。用通俗语言，不要用内部代号。}
+
+      - **{成果1}**：{通俗描述} → {带来的效果}
+        - 验证：{怎么证明有效，用数字或事实}
+      - **{成果2}**：...
+        - 验证：...
+
+      ---
+
+      ## 4. 还有什么没做完 / 有什么风险
+
+      {坦诚列出未完成项和已知风险。不要藏着。}
+
+      | 事项 | 状态 | 影响 | 是否需要决策 |
+      |------|------|------|--------------|
+      | {事项1} | 🟡 待完成 | {对项目的影响} | 是/否 |
+      | {风险1} | 🟡 低风险 | {影响描述} | 是/否 |
+
+      ---
+
+      ## 5. 需要您拍板的事
+
+      {这是管理者最关心的部分。明确提出需要决策的问题，给出选项和建议。}
+
+      1. **{决策问题1}**
+         - 选项 A：{...} → {后果}
+         - 选项 B：{...} → {后果}
+         - **建议**：{推荐哪个及理由}
+
+      2. ...
+
+      ---
+
+      ## 6. 下一步计划
+
+      1. {下一步1}
+      2. {下一步2}
+      3. ...
+
+      ---
+
+      ## 附录：技术详情（供需要时查阅）
+
+      <details>
+      <summary>展开查看技术细节</summary>
+
+      ### 执行摘要
+      - Plan: <plan_name>
+      - Implementation Units: N
+      - Code review findings: N total (P0: x, P1: y, P2: z, P3: w)
+      - Auto-fix rounds: N
+      - Final Validation: pass/fail
+      - Commit hash: <hash>
+
+      ### 改了哪些文件
+      {文件列表}
+
+      ### 完整发现清单
+      {findings.md 内容}
+
+      ### Fix Log
+      {fix-log.md 内容}
+
+      ### Shipping Record
+      {shipping.md 内容}
+      </details>
       ```
 
-      ### Writing Rules
-      - Plain language, no jargon
-      - Conclusions first, evidence second
-      - Distinguish facts, judgments, and assumptions
-      - One to two screens of content, logs in appendix
-      - Tone by verdict:
-        - `pass`: concise confirmation, list completed work
-        - `pass_with_residuals`: describe fixes applied, list residuals
-        - `fail`: clear failure reasons, impact, suggested actions
+      ### Writing Rules — Mandatory
+
+      1. **No jargon without explanation**
+         - ❌ Bad: "Phase 1 参数对账完成：AR1-AR6 + instruction drift 检测已实现，17 个 fixtures 全部通过"
+         - ✅ Good: "新增配置一致性自动检查，覆盖 6 类常见参数错误，全部验证通过"
+         - ❌ Bad: "Review Regression 98/98 通过"
+         - ✅ Good: "98 项回归测试全部通过，无引入新缺陷"
+         - ❌ Bad: "Phase 3 程序化 semantic advisory 检测器未实现"
+         - ✅ Good: "语义连续性自动检查尚未实现，需等待 AI 发现格式标准确定"
+
+      2. **Business language, not execution logs**
+         - ❌ Bad: "本次执行了 Phase 0–4，drift gate metadata 已注入"
+         - ✅ Good: "已建立 3 层检测机制，可在配置生成、执行和审查阶段分别发现问题"
+
+      3. **Conclusions before details**
+         - The executive summary (section 1) must stand alone. A manager should stop reading there and still know the outcome.
+
+      4. **Decision points are front and center**
+         - Section 5 must be explicit, with options and recommendations. Do not bury decisions in appendices.
+
+      5. **Appendix for developers, body for managers**
+         - Everything a manager needs must be in sections 1–6.
+         - File lists, commit hashes, test commands go to the appendix.
+
+      6. **Tone by verdict**
+         - `pass`: Confident, concise confirmation. Celebrate completion.
+         - `pass_with_residuals`: Acknowledge what was fixed, clearly separate residuals.
+         - `fail`: Clear failure reasons, business impact, suggested recovery actions.
 
       ### Event Publishing
       - Write report, then publish `report.done` with `report_path`
@@ -871,6 +938,7 @@ hats:
 
       ### Constraints
       - MUST NOT modify any code
-      - MUST NOT include time estimates
+      - MUST NOT include time estimates or effort metrics
       - MUST distinguish facts and assumptions
       - MUST handle same-day path conflicts (append HHMM)
+      - MUST write sections 1–6 before any appendix content

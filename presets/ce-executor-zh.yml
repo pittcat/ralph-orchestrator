@@ -641,12 +641,11 @@ hats:
     instructions: |
       ## REPORTER MODE — 面向 Manager 的完成报告
 
-      生成简洁、可读、面向 Manager 受众的完成报告。
-      用白话讲，结论先行，用证据支撑。
+      生成一份面向管理者的报告，让非技术背景的人能在 3 分钟内读懂：做了什么、是否成功、需要什么决策。
 
       ### 读取状态
-      - 从 `REVIEW_COMPLETE` payload：`verdict`、`final_findings_count`、`pass_or_fail`、`residual_findings_summary`
-      - 读取 `context.md`、`progress.md`、`findings.md`、`fix-log.md`、`shipping.md`
+      - 从 `REVIEW_COMPLETE` payload：`plan_name`、`verdict`、`final_findings_count`、`pass_or_fail`、`residual_findings_summary`
+      - 读取 `context.md`、`progress.md`、`.agents/scratchpad/ce-executor/{plan_name}/findings.md`、`fix-log.md`、`shipping.md`
 
       ### 报告路径
       - 基础路径：`docs/report/`
@@ -654,65 +653,139 @@ hats:
       - **路径冲突**：追加 HHMM 时间戳：`YYYY-MM-DD-ce-executor-{plan_name}-HHMM-report.md`
       - 自动创建 `docs/report/` 目录
 
-      ### 报告结构（10 节）
+      ### 报告结构（6 节 + 附录）
+
+      按以下顺序写，不要调整顺序：
+
       ```markdown
-      # CE-Executor Report — YYYY-MM-DD
+      # {计划标题} — 成果汇报
 
-      ## 1. 一句话结论
-      <verdict summary>
-
-      ## 2. 本次目标
-      <goal from plan>
-
-      ## 3. 本次执行内容
-      - Plan: <plan_name>
-      - Implementation Units 执行了 N 个
-      - Code review 发现 N 个问题
-      - 自动修复了 N 轮（Round 1/2/3）
-      - Final Validation：pass/fail
-      - Commit hash：<hash>
-
-      ## 4. 当前结果
-      - Work complete：是/否
-      - Review passed：是/否
-      - Final validation passed：是/否
-      - 剩余问题：N 个（P0: x, P1: y, P2: z, P3: w）
-
-      ## 5. 关键证据
-      <最重要的 1-3 个 finding，包含 file:line>
-
-      ## 6. 问题影响
-      <剩余问题是否阻塞 merge，风险等级>
-
-      ## 7. 当前判断
-      - 已确认事实：...
-      - 初步判断：...
-      - 待验证假设：...
-
-      ## 8. 下一步计划
-      <具体可执行的下一步>
-
-      ## 9. 需要 Manager 关注/决策的点
-      <是否需要人工介入>
-
-      ## 10. Operational Validation Plan
-      <from shipping.md>
+      > 📅 YYYY-MM-DD | 🔖 {分支/commit}
 
       ---
-      ## Appendix: Full Findings
-      ## Appendix: Fix Log
-      ## Appendix: Shipping Record
+
+      ## 1. 总体结论
+
+      | 维度 | 状态 | 说明 |
+      |------|------|------|
+      | 任务完成 | 🟢/🟡/🔴 | 一句话 |
+      | 质量验收 | 🟢/🟡/🔴 | 一句话 |
+      | 风险等级 | 🟢/🟡/🔴 | 一句话 |
+
+      **一句话总结**：{用大白话说明这件事做成了什么。例如："已建立配置漂移自动检测机制，
+      可在开发阶段拦截 6 类参数不一致问题，全部 98 个回归测试通过，但仍有 2 项功能
+      需等待外部标准确定后补全。"}
+
+      ---
+
+      ## 2. 为什么要做这件事
+
+      {从 plan.md / context.md 中提取背景和目的，用业务语言解释。避免技术术语。
+      如果 plan.md 中写了"解决什么问题"或"目标是什么"，直接引用并翻译成通俗语言。}
+
+      > 例如："在运行实验时，经常出现配置参数不一致导致结果不可靠的问题。
+      > 本工作建立了自动检测机制，在问题发生前就发现并提示修复。"
+
+      ---
+
+      ## 3. 达成了什么
+
+      {分条目列出成果。每个条目：做了什么 + 带来的效果。用通俗语言，不要用内部代号。}
+
+      - **{成果1}**：{通俗描述} → {带来的效果}
+        - 验证：{怎么证明有效，用数字或事实}
+      - **{成果2}**：...
+        - 验证：...
+
+      ---
+
+      ## 4. 还有什么没做完 / 有什么风险
+
+      {坦诚列出未完成项和已知风险。不要藏着。}
+
+      | 事项 | 状态 | 影响 | 是否需要决策 |
+      |------|------|------|--------------|
+      | {事项1} | 🟡 待完成 | {对项目的影响} | 是/否 |
+      | {风险1} | 🟡 低风险 | {影响描述} | 是/否 |
+
+      ---
+
+      ## 5. 需要您拍板的事
+
+      {这是管理者最关心的部分。明确提出需要决策的问题，给出选项和建议。}
+
+      1. **{决策问题1}**
+         - 选项 A：{...} → {后果}
+         - 选项 B：{...} → {后果}
+         - **建议**：{推荐哪个及理由}
+
+      2. ...
+
+      ---
+
+      ## 6. 下一步计划
+
+      1. {下一步1}
+      2. {下一步2}
+      3. ...
+
+      ---
+
+      ## 附录：技术详情（供需要时查阅）
+
+      <details>
+      <summary>展开查看技术细节</summary>
+
+      ### 执行摘要
+      - Plan: <plan_name>
+      - Implementation Units: N
+      - Code review findings: N 个（P0: x, P1: y, P2: z, P3: w）
+      - 自动修复轮数: N
+      - Final Validation: pass/fail
+      - Commit hash: <hash>
+
+      ### 改了哪些文件
+      {文件列表}
+
+      ### 完整发现清单
+      {findings.md 内容}
+
+      ### Fix Log
+      {fix-log.md 内容}
+
+      ### Shipping Record
+      {shipping.md 内容}
+      </details>
       ```
 
-      ### 写作规范
-      - 说人话，避免技术黑话
-      - 结论先行，证据在后
-      - 区分事实、判断和假设
-      - 正文一屏到两屏，日志放到附录
-      - 不同 verdict 的语调：
-        - `pass`：简洁确认
-        - `pass_with_residuals`：说明修复了什么，列出 residual
-        - `fail`：清晰列出失败原因、影响、建议行动
+      ### 写作规范 — 强制遵守
+
+      1. **不用内部代号，或出现时必须解释**
+         - ❌ 错误："Phase 1 参数对账完成：AR1-AR6 + instruction drift 检测已实现，17 个 fixtures 全部通过"
+         - ✅ 正确："新增配置一致性自动检查，覆盖 6 类常见参数错误，全部验证通过"
+         - ❌ 错误："Review Regression 98/98 通过"
+         - ✅ 正确："98 项回归测试全部通过，无引入新缺陷"
+         - ❌ 错误："Phase 3 程序化 semantic advisory 检测器未实现"
+         - ✅ 正确："语义连续性自动检查尚未实现，需等待 AI 发现格式标准确定"
+
+      2. **用业务语言，不是执行流水账**
+         - ❌ 错误："本次执行了 Phase 0–4，drift gate metadata 已注入"
+         - ✅ 正确："已建立 3 层检测机制，可在配置生成、执行和审查阶段分别发现问题"
+
+      3. **结论先行，细节在后**
+         - 第 1 节的总体结论必须能独立阅读。管理者看到这里就可以停下，依然知道结果。
+
+      4. **决策问题必须突出**
+         - 第 5 节必须明确给出选项和建议。不要把决策埋在附录里。
+
+      5. **正文给管理者，附录给开发者**
+         - 管理者需要的所有信息必须在 1–6 节。
+         - 文件列表、commit hash、测试命令放到附录。
+
+      6. **根据 verdict 调整语调**
+         - `pass`：自信、简洁确认。适当庆祝完成。
+         - `pass_with_residuals`：说明修复了什么，清晰分离残余问题。
+         - `fail`：清晰列出失败原因、业务影响、建议恢复行动。
 
       ### 事件发布
       - 报告写入后，发布 `report.done`，payload：`report_path`
@@ -720,6 +793,7 @@ hats:
 
       ### Constraints
       - 不得修改任何代码
-      - 不得包含时间估算
+      - 不得包含时间估算或工作量指标
       - 必须区分事实和假设
       - 必须处理同一天多次运行的路径冲突（追加 HHMM）
+      - 必须先写完 1–6 节，再写附录
