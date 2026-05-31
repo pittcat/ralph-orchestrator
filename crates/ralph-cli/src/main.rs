@@ -1435,6 +1435,68 @@ fn print_preflight_summary(
     }
 }
 
+/// Spawn a new loop in a git worktree.
+///
+/// This extracts the worktree creation logic from `handle_active_lock` so it can
+/// also be used by the explicit `--worktree` flag path in `run_command`.
+fn spawn_worktree_loop(
+    workspace_root: &Path,
+    prompt_summary: &str,
+    loop_naming: &ralph_core::LoopNamingConfig,
+    pending_worktree_registration: &mut Option<LoopEntry>,
+) -> Result<(LoopContext, Option<LockGuard>), anyhow::Error> {
+    let worktree_config = WorktreeConfig::default();
+
+    // Generate memorable loop ID (adjective-noun only, no prompt keywords)
+    let name_generator = ralph_core::LoopNameGenerator::from_config(loop_naming);
+    let loop_id = name_generator.generate_memorable_unique(|name| {
+        ralph_core::worktree_exists(workspace_root, name, &worktree_config)
+    });
+
+    // Ensure worktree directory is in .gitignore
+    ensure_gitignore(workspace_root, ".worktrees")
+        .context("Failed to update .gitignore for worktrees")?;
+
+    // Create the worktree
+    let worktree = create_worktree(workspace_root, &loop_id, &worktree_config)
+        .context("Failed to create worktree for loop")?;
+
+    info!(
+        "Created worktree at {} on branch {}",
+        worktree.path.display(),
+        worktree.branch
+    );
+
+    // Create loop context for the worktree
+    let context = LoopContext::worktree(
+        loop_id.clone(),
+        worktree.path.clone(),
+        workspace_root.to_path_buf(),
+    );
+
+    // Set up all worktree symlinks (memories, specs, code tasks)
+    context
+        .setup_worktree_symlinks()
+        .context("Failed to create symlinks in worktree")?;
+
+    // Generate context file with worktree metadata
+    context
+        .generate_context_file(&worktree.branch, prompt_summary)
+        .context("Failed to generate context file in worktree")?;
+
+    // Register this loop after preflight succeeds so failed runs
+    // don't leave stale registry entries behind.
+    let entry = LoopEntry::with_id(
+        &loop_id,
+        prompt_summary,
+        Some(worktree.path.to_string_lossy().to_string()),
+        worktree.path.to_string_lossy().to_string(),
+    );
+    *pending_worktree_registration = Some(entry);
+
+    Ok((context, None))
+}
+
 /// Handle the case where another process holds the active loop lock.
 ///
 /// Implements the existing behavior for active locks: --exclusive waits,
@@ -1475,57 +1537,7 @@ fn handle_active_lock(
             existing.pid,
             existing.prompt.chars().take(50).collect::<String>()
         );
-
-        let worktree_config = WorktreeConfig::default();
-
-        // Generate memorable loop ID (adjective-noun only, no prompt keywords)
-        let name_generator = ralph_core::LoopNameGenerator::from_config(loop_naming);
-        let loop_id = name_generator.generate_memorable_unique(|name| {
-            ralph_core::worktree_exists(workspace_root, name, &worktree_config)
-        });
-
-        // Ensure worktree directory is in .gitignore
-        ensure_gitignore(workspace_root, ".worktrees")
-            .context("Failed to update .gitignore for worktrees")?;
-
-        // Create the worktree
-        let worktree = create_worktree(workspace_root, &loop_id, &worktree_config)
-            .context("Failed to create worktree for parallel loop")?;
-
-        info!(
-            "Created worktree at {} on branch {}",
-            worktree.path.display(),
-            worktree.branch
-        );
-
-        // Create loop context for the worktree
-        let context = LoopContext::worktree(
-            loop_id.clone(),
-            worktree.path.clone(),
-            workspace_root.to_path_buf(),
-        );
-
-        // Set up all worktree symlinks (memories, specs, code tasks)
-        context
-            .setup_worktree_symlinks()
-            .context("Failed to create symlinks in worktree")?;
-
-        // Generate context file with worktree metadata
-        context
-            .generate_context_file(&worktree.branch, prompt_summary)
-            .context("Failed to generate context file in worktree")?;
-
-        // Register this loop after preflight succeeds so failed runs
-        // don't leave stale registry entries behind.
-        let entry = LoopEntry::with_id(
-            &loop_id,
-            prompt_summary,
-            Some(worktree.path.to_string_lossy().to_string()),
-            worktree.path.to_string_lossy().to_string(),
-        );
-        *pending_worktree_registration = Some(entry);
-
-        Ok((context, None))
+        spawn_worktree_loop(workspace_root, prompt_summary, loop_naming, pending_worktree_registration)
     }
 }
 
@@ -1714,6 +1726,7 @@ async fn run_command(
     // Try to acquire the loop lock for multi-loop concurrency support
     // This implements the lock detection flow from the multi-loop spec
     // Skip lock acquisition in subprocess TUI mode - let the child acquire it
+    // Skip lock acquisition in --worktree mode - create worktree directly without needing the lock
     let workspace_root = &config.core.workspace_root;
     let (loop_context, _lock_guard) = if use_subprocess_tui {
         // In subprocess TUI mode, don't acquire lock here - the child RPC process will do it
@@ -1722,6 +1735,16 @@ async fn run_command(
         debug!("Skipping lock acquisition in subprocess TUI mode (child will acquire)");
         let context = LoopContext::primary(workspace_root.clone());
         (context, None)
+    } else if args.worktree {
+        // Explicit --worktree flag: create worktree directly without acquiring lock
+        // Worktree mode does not hold .ralph/loop.lock - it's fully isolated
+        debug!("Creating worktree for explicit --worktree mode");
+        spawn_worktree_loop(
+            workspace_root,
+            &prompt_summary,
+            &config.features.loop_naming,
+            &mut pending_worktree_registration,
+        )?
     } else {
         match LoopLock::inspect(workspace_root) {
             Ok(LockStatus::None) => {
@@ -1888,8 +1911,8 @@ async fn run_command(
     let enable_rpc = args.rpc;
     let verbosity = Verbosity::resolve(verbose || args.verbose, args.quiet);
     let custom_args = args.custom_args.clone();
-    // --no-auto-merge CLI flag overrides config.features.auto_merge
-    let auto_merge_override = if args.no_auto_merge {
+    // --no-auto-merge and --worktree both disable auto-merge
+    let auto_merge_override = if args.no_auto_merge || args.worktree {
         Some(false)
     } else {
         None
@@ -2123,6 +2146,9 @@ async fn run_subprocess_tui(
     }
     if args.no_auto_merge {
         child_args.push("--no-auto-merge".to_string());
+    }
+    if args.worktree {
+        child_args.push("--worktree".to_string());
     }
 
     // Forward preflight options

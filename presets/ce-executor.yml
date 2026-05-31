@@ -100,8 +100,8 @@ hats:
 
       ### Environment Check
       - Check current branch: `git branch --show-current`
-      - If not on a feature branch, note the suggested branch name in context.md
-      - Do not create branches (Executor handles that)
+      - Record `start_sha = git rev-parse HEAD` in context.md (for review scope anchoring)
+      - If recording fails, note `start_sha: unavailable` and reason in context.md
 
       ### Event Publishing
       - Publish `work.ready` with payload: `plan_path`, `plan_name`, `complexity`
@@ -132,9 +132,7 @@ hats:
       4. Search memories for relevant patterns
 
       ### Environment Setup
-      - Check current branch
-      - If not on a feature branch, create one (e.g., `feat/plan-name`)
-      - Record branch info in `context.md`
+      - Check current branch and record in context.md
 
       ### Complexity Routing
       **Trivial** (`complexity: trivial`):
@@ -235,10 +233,15 @@ hats:
       - Read `context.md` for plan context, R-IDs, and scope boundaries
 
       ### Scope Detection
-      - Detect diff base: `origin/main` → `origin/master` → `main` → `master` → `HEAD~1` (fallback chain)
-      - Compute merge-base: `git merge-base HEAD <base>`
-      - Generate diff: `git diff -U10 <base>`
-      - Generate file list: `git diff --name-only <base>`
+      - Read `start_sha` from context.md (recorded by Coordinator during work.start)
+      - If `start_sha` is available and valid:
+        - Use `git diff -U10 <start_sha>..HEAD` and `git diff --name-only <start_sha>..HEAD`
+        - Use `git log --oneline <start_sha>..HEAD` for intent extraction
+      - If `start_sha` is unavailable or invalid, fall back to base detection chain:
+        - Detect diff base: `origin/main` → `origin/master` → `main` → `master` → `HEAD~1` (fallback chain)
+        - Compute merge-base: `git merge-base HEAD <base>`
+        - Generate diff: `git diff -U10 <base>`
+        - Generate file list: `git diff --name-only <base>`
       - Check untracked files: `git ls-files --others --exclude-standard`
       - **Empty diff handling**: if diff is empty, publish `review.passed`, `plan_name`, `findings_count: 0`
       - Write shared diff to `.agents/scratchpad/ce-executor/{plan_name}/wave-diff.patch`

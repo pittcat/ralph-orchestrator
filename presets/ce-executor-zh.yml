@@ -100,8 +100,8 @@ hats:
 
       ### 环境检查
       - 检查当前分支：`git branch --show-current`
-      - 如果不在 feature branch 上，在 context.md 中记录建议的分支名
-      - 不主动创建分支（Executor 负责）
+      - 记录 `start_sha = git rev-parse HEAD` 到 context.md（用于 review 范围锚定）
+      - 如果记录失败，在 context.md 中注明 `start_sha: unavailable` 及原因
 
       ### 事件发布
       - 发布 `work.ready`，payload 包含 `plan_path`、`plan_name`、`complexity`
@@ -132,9 +132,7 @@ hats:
       4. 搜索 memories 获取相关模式
 
       ### 环境设置
-      - 检查当前分支
-      - 如果不在 feature branch 上，创建一个（如 `feat/plan-name`）
-      - 将分支信息记录到 `context.md`
+      - 检查当前分支并记录到 context.md
 
       ### 复杂度路由
       **Trivial** (`complexity: trivial`)：
@@ -232,10 +230,15 @@ hats:
       不要自己审查代码。不要实现修复。
 
       ### Scope 检测
-      - diff base：`origin/main` → `origin/master` → `main` → `master` → `HEAD~1`（fallback 链）
-      - 计算 merge-base：`git merge-base HEAD <base>`
-      - 生成 diff：`git diff -U10 <base>`
-      - 生成文件列表：`git diff --name-only <base>`
+      - 从 context.md 读取 `start_sha`（由 Coordinator 在 work.start 时记录）
+      - 如果 `start_sha` 可用且有效：
+        - 使用 `git diff -U10 <start_sha>..HEAD` 和 `git diff --name-only <start_sha>..HEAD`
+        - 使用 `git log --oneline <start_sha>..HEAD` 提取 intent
+      - 如果 `start_sha` 不可用或无效，回退到 base 检测链：
+        - diff base：`origin/main` → `origin/master` → `main` → `master` → `HEAD~1`（fallback 链）
+        - 计算 merge-base：`git merge-base HEAD <base>`
+        - 生成 diff：`git diff -U10 <base>`
+        - 生成文件列表：`git diff --name-only <base>`
       - 检查 untracked 文件：`git ls-files --others --exclude-standard`
       - **Empty diff**：diff 为空 → 发布 `review.passed`，`findings_count: 0`
       - 将共享 diff 写入 `.agents/scratchpad/ce-executor/{plan_name}/wave-diff.patch`
