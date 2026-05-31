@@ -1447,9 +1447,10 @@ fn spawn_worktree_loop(
 ) -> Result<(LoopContext, Option<LockGuard>), anyhow::Error> {
     let worktree_config = WorktreeConfig::default();
 
-    // Generate memorable loop ID (adjective-noun only, no prompt keywords)
+    // Generate loop ID from prompt keywords + unique suffix
+    // Produces short names like "feat-ce-integration-swift-peacock"
     let name_generator = ralph_core::LoopNameGenerator::from_config(loop_naming);
-    let loop_id = name_generator.generate_memorable_unique(|name| {
+    let loop_id = name_generator.generate_unique(prompt_summary, |name| {
         ralph_core::worktree_exists(workspace_root, name, &worktree_config)
     });
 

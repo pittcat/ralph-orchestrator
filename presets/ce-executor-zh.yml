@@ -28,6 +28,7 @@ event_loop:
   max_iterations: 50
   max_runtime_seconds: 14400  # 4 hours
   checkpoint_interval: 5
+  enforce_hat_scope: true
 
 cli:
   backend: "kiro"
@@ -103,15 +104,25 @@ hats:
       - 记录 `start_sha = git rev-parse HEAD` 到 context.md（用于 review 范围锚定）
       - 如果记录失败，在 context.md 中注明 `start_sha: unavailable` 及原因
 
+      ### 前置验证（Pre-Publish Validation）
+      - **必选检查**：执行 `ralph tools task list` 验证步骤 1 的 runtime tasks 已创建
+      - 如果 task list 为空或命令失败（说明 `ralph tools task ensure` 未被正确执行）：
+        - 返回 Runtime Task Creation 步骤，确保 tasks 被创建
+        - 重试最多 2 次
+        - 2 次都失败 → 发布 `work.failed`, payload: `{"reason": "task creation failed after 2 attempts"}`
+      - 只有验证通过后才能执行事件发布
+
       ### 事件发布
       - 发布 `work.ready`，payload 包含 `plan_path`、`plan_name`、`complexity`
       - 停止，不继续执行其他工作
+      - **发布 work.ready 后立即停止**——不得继续执行任何其他工作，包括模拟其他 hat 的行为或发其他事件
 
       ### Constraints
       - 必须 NOT 实现代码
       - 必须 NOT 创建未来步骤的 tasks（trivial 模式除外）
       - 必须 NOT 修改 plan 文件
-      - 必须在发布 `work.ready` 前完成所有文件创建
+      - 必须在发布 `work.ready` 前完成所有文件创建和 task 创建
+      - **必须 NOT 以 coordinator 以外的任何 hat 名义发布事件**（只能发 work.ready 或 work.failed）
 
   executor:
     name: "⚙️ 执行器"

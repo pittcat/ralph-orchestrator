@@ -27,7 +27,7 @@ fn default_format() -> String {
 }
 
 fn default_max_length() -> usize {
-    50
+    80
 }
 
 impl Default for LoopNamingConfig {
@@ -146,7 +146,7 @@ impl LoopNameGenerator {
         // Prioritize action verbs
         for word in &words {
             let lower = word.to_lowercase();
-            if ACTION_VERBS.contains(&lower.as_str()) && keywords.len() < 3 {
+            if ACTION_VERBS.contains(&lower.as_str()) && keywords.len() < 5 {
                 keywords.push(lower);
             }
         }
@@ -156,7 +156,7 @@ impl LoopNameGenerator {
             let lower = word.to_lowercase();
             if !STOP_WORDS.contains(&lower.as_str())
                 && !keywords.contains(&lower)
-                && keywords.len() < 3
+                && keywords.len() < 5
                 && lower.len() >= 2
             {
                 keywords.push(lower);
@@ -168,7 +168,7 @@ impl LoopNameGenerator {
             .into_iter()
             .map(|w| sanitize_for_git(&w))
             .filter(|w| !w.is_empty())
-            .take(3)
+            .take(5)
             .collect()
     }
 
@@ -372,12 +372,13 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_keywords_limits_to_three() {
+    fn test_extract_keywords_limits_to_five() {
         let generator = LoopNameGenerator::new(LoopNamingConfig::default());
 
         let keywords =
             generator.extract_keywords("Fix header footer sidebar navigation menu content layout");
-        assert!(keywords.len() <= 3);
+        assert!(keywords.len() <= 5);
+        assert_eq!(keywords.len(), 5, "Expected 5 keywords with 8 significant words in prompt");
     }
 
     #[test]
@@ -465,7 +466,7 @@ mod tests {
     fn test_default_config() {
         let config = LoopNamingConfig::default();
         assert_eq!(config.format, "human-readable");
-        assert_eq!(config.max_length, 50);
+        assert_eq!(config.max_length, 80);
     }
 
     #[test]

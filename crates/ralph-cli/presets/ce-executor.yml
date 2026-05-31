@@ -28,6 +28,7 @@ event_loop:
   max_iterations: 50
   max_runtime_seconds: 14400  # 4 hours
   checkpoint_interval: 5
+  enforce_hat_scope: true
 
 cli:
   backend: "kiro"
@@ -103,15 +104,25 @@ hats:
       - If not on a feature branch, note the suggested branch name in context.md
       - Do not create branches (Executor handles that)
 
+      ### Pre-Publish Validation
+      - **Mandatory check**: run `ralph tools task list` to verify Step 1 runtime tasks exist
+      - If task list is empty or command fails (meaning `ralph tools task ensure` was not executed properly):
+        - Return to Runtime Task Creation step, ensure tasks are created
+        - Retry up to 2 times
+        - Both fail → publish `work.failed`, payload: `{"reason": "task creation failed after 2 attempts"}`
+      - Only proceed to Event Publishing after validation passes
+
       ### Event Publishing
       - Publish `work.ready` with payload: `plan_path`, `plan_name`, `complexity`
       - Stop — do not continue to other work
+      - **Publish work.ready and stop immediately** — do not simulate other hats or emit other events
 
       ### Constraints
       - MUST NOT implement code
       - MUST NOT create future-step tasks (trivial mode excepted)
       - MUST NOT modify the plan file
-      - MUST complete all file creation before publishing `work.ready`
+      - MUST complete all file creation and task creation before publishing `work.ready`
+      - **MUST NOT publish events for any hat other than coordinator** (work.ready or work.failed only)
 
   executor:
     name: "⚙️ Executor"
