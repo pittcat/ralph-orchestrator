@@ -7,8 +7,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build & Test
 
 ```bash
+# Recommended parallel path (requires cargo-nextest; install once via `just nextest-install`).
+# ralph-cli tests run serially via the cli-serial test group in .config/nextest.toml;
+# every other package runs in parallel. Doctest is covered by a separate cargo test --doc step.
+./scripts/run-tests.sh                                # nextest run + cargo test --doc, with fallback to cargo test
+just test-parallel                                    # alias for scripts/run-tests.sh
+cargo nextest run --workspace --exclude ralph-e2e     # non-doctest tests, parallel (requires nextest)
+cargo test --workspace --exclude ralph-e2e --doc      # doctest coverage (nextest does not run doctest)
+
+# Fallback path (no nextest required; same semantics as the historical CI gate).
+cargo test --workspace --exclude ralph-e2e -- --test-threads=1 --skip acp_executor::tests::test_create_terminal_and_output
+just test-serial                                      # alias for the single-threaded slow path
+
+# Other build, lint and test commands.
 cargo build
-cargo test -- --test-threads=1             # Full suite (ralph-cli tests need single thread)
 cargo test -p ralph-core test_name           # Run single test
 cargo test -p ralph-core smoke_runner        # Smoke tests (replay-based)
 cargo test -p ralph-core scenarios           # BDD scenario integration tests
@@ -19,7 +31,7 @@ cargo doc --no-deps                          # Documentation
 ./scripts/setup-hooks.sh                     # Install pre-commit hooks (once)
 ```
 
-**IMPORTANT**: Run `cargo test` before declaring any task done. Smoke test after code changes.
+**IMPORTANT**: Run `cargo test` (or `./scripts/run-tests.sh` if nextest is installed) before declaring any task done. Smoke test after code changes.
 
 ### Web Dashboard
 

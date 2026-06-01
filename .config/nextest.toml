@@ -1,0 +1,22 @@
+# cargo-nextest configuration for ralph-orchestrator workspace
+#
+# Goals:
+#   - Run ralph-cli tests serially (max-threads=1) because loop_runner tests
+#     touch four process-global Mutexes (MOCK_ACP_EXECUTIONS,
+#     MOCK_ACP_EXECUTION_SERIAL, FAKE_PATH_BACKEND_SERIAL, FAKE_PATH_BACKEND_BIN)
+#     that are not safe to share across nextest's per-test processes.
+#   - Run every other workspace package in parallel (nextest's default
+#     behavior: test-threads = num-cpus).
+#   - Preserve the historical skip rule for
+#     ralph-adapters::acp_executor::tests::test_create_terminal_and_output
+#     that the legacy `cargo test -- --skip ...` invocation used.
+
+[profile.default]
+default-filter = 'not (package(ralph-adapters) and test(=acp_executor::tests::test_create_terminal_and_output))'
+
+[test-groups]
+cli-serial = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'package(ralph-cli)'
+test-group = 'cli-serial'

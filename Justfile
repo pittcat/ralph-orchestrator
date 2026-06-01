@@ -21,9 +21,24 @@ fmt-check:
 lint:
     cargo clippy --all-targets --all-features -- -D warnings
 
-# Run tests
+# Run tests via the legacy single-threaded cargo test path (no nextest needed).
+# This is the historical CI gate; most local development should use test-parallel.
 test:
     cargo test --all
+
+# Run tests in parallel via cargo-nextest (falls back to single-threaded cargo
+# test if nextest is not installed; see scripts/run-tests.sh for details).
+test-parallel:
+    ./scripts/run-tests.sh
+
+# Run tests on the single-threaded slow path explicitly. Mirrors the fallback
+# behavior of scripts/run-tests.sh when nextest is unavailable.
+test-serial:
+    cargo test --workspace --exclude ralph-e2e -- --test-threads=1 --skip acp_executor::tests::test_create_terminal_and_output
+
+# Install cargo-nextest (required for the test-parallel recipe).
+nextest-install:
+    cargo install cargo-nextest --locked
 
 # Sync embedded assets (crate-local mirrors + generated SOPs)
 embedded-sync:
@@ -49,8 +64,9 @@ build:
 clean:
     cargo clean
 
-# Full CI-like check (what CI will run)
-ci: fmt-check lint embedded-check test
+# Full CI-like check (what CI will run). Uses test-parallel to mirror the
+# shared Rust CI gate; install cargo-nextest once via `just nextest-install`.
+ci: fmt-check lint embedded-check test-parallel
     @echo "✅ CI checks passed"
 
 # Run tests with coverage report (local only, never in CI)

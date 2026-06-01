@@ -162,10 +162,27 @@ if [[ "$RUN_CLIPPY" -eq 1 ]]; then
 fi
 
 if [[ "$RUN_TESTS" -eq 1 ]]; then
-  # Single-threaded: ralph-cli tests spawn PTYs and fake backends that are
-  # not safe under heavy parallel load (mutex poisoning, PTY contention).
-  run_check "Tests (cargo test with CI skip list)" \
-    run_cargo test -- --test-threads=1 --skip acp_executor::tests::test_create_terminal_and_output
+  # Run tests via scripts/run-tests.sh. The script prefers cargo-nextest for
+  # parallel execution: ralph-cli tests are routed to the `cli-serial` test
+  # group (max-threads=1) by .config/nextest.toml to avoid Mutex poisoning
+  # and PTY contention from loop_runner's four process-global Mutexes
+  # (MOCK_ACP_EXECUTIONS, MOCK_ACP_EXECUTION_SERIAL, FAKE_PATH_BACKEND_SERIAL,
+  # FAKE_PATH_BACKEND_BIN), while every other package runs in parallel. When
+  # nextest is unavailable, the script falls back to the legacy single-
+  # threaded cargo test invocation. Doctest coverage is preserved by an extra
+  # `cargo test --workspace --exclude ralph-e2e --doc` step inside the script.
+  #
+  # When the stable toolchain was installed by this script (TOOLCHAIN_MODE=rustup),
+  # forward RALPH_CARGO_TOOLCHAIN=stable so run-tests.sh routes cargo through
+  # the freshly installed toolchain instead of whichever cargo happens to be
+  # first on PATH.
+  if [[ "$TOOLCHAIN_MODE" == "rustup" ]]; then
+    RALPH_CARGO_TOOLCHAIN=stable run_check "Tests (nextest + doctest, via run-tests.sh)" \
+      ./scripts/run-tests.sh
+  else
+    run_check "Tests (nextest + doctest, via run-tests.sh)" \
+      ./scripts/run-tests.sh
+  fi
 fi
 
 if [[ "$RUN_HOOKS_BDD" -eq 1 ]]; then

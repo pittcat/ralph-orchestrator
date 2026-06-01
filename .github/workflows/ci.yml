@@ -47,6 +47,14 @@ jobs:
           components: clippy
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+      # Install cargo-nextest via the official pre-built binary action. The
+      # step uses `continue-on-error: true` so a download/install failure does
+      # not abort the job; scripts/run-tests.sh and scripts/ci-rust-gate.sh
+      # automatically fall back to the legacy single-threaded `cargo test`
+      # path when nextest is unavailable, preserving the historical CI gate.
+      - name: Install cargo-nextest
+        continue-on-error: true
+        uses: taiki-e/install-action@nextest
       - name: Run shared Rust CI gate
         run: ./scripts/ci-rust-gate.sh --skip-embedded-files --skip-format
       - name: Upload test artifacts
