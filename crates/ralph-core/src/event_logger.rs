@@ -253,6 +253,11 @@ impl EventHistory {
         Self { path: path.into() }
     }
 
+    /// Returns the path to the history file.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// Creates a reader for the default path.
     pub fn default_path() -> Self {
         Self::new(EventLogger::DEFAULT_PATH)

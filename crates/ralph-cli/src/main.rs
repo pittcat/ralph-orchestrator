@@ -983,9 +983,15 @@ struct EventsArgs {
     #[arg(long)]
     file: Option<PathBuf>,
 
-    /// Clear the event history
+    /// Clear the event history. Requires --confirm <loop_id> to match the
+    /// active loop, so accidental or agent-triggered clears are blocked.
     #[arg(long)]
     clear: bool,
+
+    /// Confirmation token: must equal the active loop id (or "current"
+    /// / "default" when no loop marker exists) to authorize --clear.
+    #[arg(long, value_name = "LOOP_ID")]
+    confirm: Option<String>,
 }
 
 /// Arguments for the clean subcommand.
@@ -2553,6 +2559,38 @@ fn init_command(color_mode: ColorMode, args: InitArgs) -> Result<()> {
     Ok(())
 }
 
+/// P8: validate the `--confirm` token for `ralph events --clear`.
+/// Returns `Ok(())` when the token matches the active loop, or an
+/// `anyhow::Error` describing the rejection otherwise. The token "current"
+/// or "default" is accepted when no loop marker exists.
+pub(crate) fn check_events_clear_confirm(
+    confirm: Option<&str>,
+    active_loop_id: Option<&str>,
+) -> Result<()> {
+    match confirm {
+        None => bail!(
+            "Refusing to clear event history without --confirm <loop_id>. \
+             Pass `--confirm {id}` (where {id} is the active loop id) to authorize the clear.",
+            id = active_loop_id.unwrap_or("current")
+        ),
+        Some("") => bail!("Refusing to clear event history with an empty --confirm value."),
+        Some(provided) => {
+            let matches = match active_loop_id {
+                Some(active) => provided == active,
+                None => provided == "current" || provided == "default",
+            };
+            if !matches {
+                bail!(
+                    "Refusing to clear event history: --confirm {provided:?} does not match \
+                     the active loop ({}). Re-run with the correct loop id to authorize the clear.",
+                    active_loop_id.unwrap_or("current")
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
 fn events_command(color_mode: ColorMode, args: EventsArgs) -> Result<()> {
     let use_colors = color_mode.should_use_colors();
     let workspace_root = resolve_workspace_root(None);
@@ -2567,8 +2605,20 @@ fn events_command(color_mode: ColorMode, args: EventsArgs) -> Result<()> {
             .unwrap_or_else(|_| EventHistory::new(workspace_root.join(".ralph/events.jsonl"))),
     };
 
-    // Handle clear command
+    // Handle clear command. P8: require --confirm <loop_id> matching the
+    // active loop (or "current" / "default" when no loop marker exists).
     if args.clear {
+        let active_loop_id = fs::read_to_string(workspace_root.join(".ralph/current-loop-id"))
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        check_events_clear_confirm(args.confirm.as_deref(), active_loop_id.as_deref())?;
+        tracing::warn!(
+            events_path = %history.path().display(),
+            confirm = ?args.confirm,
+            active_loop_id = ?active_loop_id,
+            "Clearing event history after explicit confirmation"
+        );
         history.clear()?;
         if use_colors {
             println!("{}✓{} Event history cleared", colors::GREEN, colors::RESET);
@@ -4333,6 +4383,7 @@ hats:
             format: OutputFormat::Table,
             file: None,
             clear: false,
+            confirm: None,
         }));
         assert!(!is_diagnostics_eligible_command(command.as_ref()));
     }
@@ -5516,6 +5567,41 @@ event_loop:
             result.is_err(),
             "path traversal with no marker must be rejected"
         );
+    }
+
+    #[test]
+    fn test_events_clear_without_confirm_rejected() {
+        let result = check_events_clear_confirm(None, Some("loop-1"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("--confirm"));
+    }
+
+    #[test]
+    fn test_events_clear_empty_confirm_rejected() {
+        let result = check_events_clear_confirm(Some(""), Some("loop-1"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_events_clear_wrong_loop_confirm_rejected() {
+        let result = check_events_clear_confirm(Some("loop-other"), Some("loop-1"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_events_clear_matching_loop_confirm_succeeds() {
+        let result = check_events_clear_confirm(Some("loop-1"), Some("loop-1"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_events_clear_no_loop_marker_requires_literal_confirm_current_or_default() {
+        let result = check_events_clear_confirm(Some("current"), None);
+        assert!(result.is_ok());
+        let result = check_events_clear_confirm(Some("default"), None);
+        assert!(result.is_ok());
+        let result = check_events_clear_confirm(Some("loop-1"), None);
+        assert!(result.is_err());
     }
 
     #[test]

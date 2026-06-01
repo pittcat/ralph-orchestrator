@@ -488,7 +488,8 @@ _ralph_events_args() {
     '--iteration+[Filter by iteration number]:number:_default'
     '--format+[Output format]:format:(table json)'
     '--file+[Path to events file]:file:_files'
-    '--clear[Clear the event history]'
+    '--clear[Clear the event history. Requires --confirm <loop_id> to authorize.]'
+    '--confirm+[Confirmation token: must equal the active loop id (or "current"/"default" when no marker exists)]:loop_id:_default'
   )
   _arguments $events_opts
 }
