@@ -5,6 +5,12 @@ event_loop:
   max_iterations: 500
   prompt_file: PROMPT.md
 
+tasks:
+  enabled: true
+  coordinator_hats:
+    - ralph
+    - coordinator
+
 core:
   guardrails:
     - "Fresh context each iteration — re-read scratchpad and plan."
