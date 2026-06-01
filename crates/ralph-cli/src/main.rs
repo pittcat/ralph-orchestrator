@@ -39,7 +39,7 @@ mod tools;
 mod wave;
 mod web;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 use ralph_adapters::detect_backend;
 use ralph_core::{
@@ -231,6 +231,138 @@ fn resolve_marker_target(workspace_root: &Path, marker_value: &str) -> PathBuf {
     } else {
         workspace_root.join(path)
     }
+}
+
+/// P6: resolve the final events file path for `ralph emit` against an
+/// allowlist. The allowlist is the set of paths the active loop has marked
+/// as legitimate targets: the `current-candidate-events` marker target
+/// (when present), the `current-events` marker target (when present), and
+/// the default `events.jsonl` only when neither marker exists. Any other
+/// path — from `RALPH_EVENTS_FILE`, `--file`, or a forged marker — is
+/// rejected with a clear error.
+pub(crate) fn resolve_emit_path(
+    workspace_root: &Path,
+    cli_file: &Path,
+    env_events_file: Option<&str>,
+) -> Result<PathBuf> {
+    use std::path::Component;
+
+    fn normalize_path(p: &Path) -> PathBuf {
+        let mut out = PathBuf::new();
+        for comp in p.components() {
+            match comp {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    if !out.pop() {
+                        out.push(comp);
+                    }
+                }
+                other => out.push(other),
+            }
+        }
+        out
+    }
+
+    let ralph_dir = workspace_root.join(".ralph");
+    let candidate_marker = ralph_dir.join("current-candidate-events");
+    let current_marker = ralph_dir.join("current-events");
+    let default_path = ralph_dir.join("events.jsonl");
+
+    // Build the allowlist of legitimate targets.
+    let mut allowed: Vec<PathBuf> = Vec::new();
+    if let Ok(value) = fs::read_to_string(&candidate_marker) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            allowed.push(resolve_marker_target(workspace_root, trimmed));
+        }
+    }
+    if let Ok(value) = fs::read_to_string(&current_marker) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            allowed.push(resolve_marker_target(workspace_root, trimmed));
+        }
+    }
+    if allowed.is_empty() {
+        allowed.push(default_path.clone());
+    }
+
+    // Determine the candidate path following the same priority order used
+    // elsewhere: RALPH_EVENTS_FILE > candidate marker > current marker >
+    // --file. Each candidate is then verified against the allowlist.
+    let candidate = if let Some(value) = env_events_file.filter(|v| !v.is_empty()) {
+        PathBuf::from(value)
+    } else if let Ok(value) = fs::read_to_string(&candidate_marker) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            resolve_marker_target(workspace_root, trimmed)
+        } else {
+            cli_file.to_path_buf()
+        }
+    } else if let Ok(value) = fs::read_to_string(&current_marker) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            resolve_marker_target(workspace_root, trimmed)
+        } else {
+            cli_file.to_path_buf()
+        }
+    } else {
+        cli_file.to_path_buf()
+    };
+
+    // Normalize the candidate: drop `.` and resolve `..` lexically.
+    let normalized = normalize_path(&candidate);
+    // Canonicalize the workspace root once for prefix comparison.
+    let workspace_canon = workspace_root
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_root.to_path_buf());
+
+    // Verify the candidate is in the allowlist. We compare normalized forms
+    // so that `.ralph/foo` and `foo/../.ralph/foo` are recognized as the
+    // same path. We also block path traversal that escapes the workspace
+    // root (a symlink target outside the workspace is still allowed only
+    // if it matches an allowlist entry, which by construction points back
+    // into the workspace).
+    for entry in &allowed {
+        if normalize_path(entry) == normalized {
+            // Refuse to honor symlinks that alias the allowlist target to
+            // an outside file: if the canonical target differs from the
+            // normalized target, the path is a symlink and the agent is
+            // trying to escape the workspace. Reject it.
+            if let Ok(canon) = normalized.canonicalize()
+                && canon != normalized
+            {
+                bail!(
+                    "Refusing to emit event through symlink: {} resolves to {} (outside this loop).",
+                    normalized.display(),
+                    canon.display()
+                );
+            }
+            return Ok(normalized);
+        }
+    }
+
+    // Block paths that escape the workspace root.
+    if !normalized.starts_with(&workspace_canon) && !normalized.starts_with(workspace_root) {
+        bail!(
+            "Refusing to emit event to path outside workspace: {}. \
+             Set --file to a path under {} or run inside a Ralph loop with a current-events marker.",
+            normalized.display(),
+            workspace_root.display()
+        );
+    }
+
+    // Fall through: path is in the workspace but not in the allowlist.
+    bail!(
+        "Refusing to emit event to {}. The active loop has not marked this path; \
+         allowed targets are: {}. Use one of those, or run ralph emit inside a loop \
+         that publishes a current-events marker.",
+        normalized.display(),
+        allowed
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
 }
 
 /// Verbosity level for streaming output.
@@ -2870,22 +3002,12 @@ fn emit_command_with_root(
         record["wave_index"] = serde_json::Value::Number(wave_index.into());
     }
 
-    // Resolve events file: RALPH_EVENTS_FILE env > state-machine candidate marker
-    // > accepted-events marker > CLI arg.
-    // This ensures `ralph emit` writes to the same events file as the active run
-    let events_file = std::env::var("RALPH_EVENTS_FILE")
-        .ok()
-        .filter(|p| !p.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let current_candidate_events_marker = workspace_root
-                .join(".ralph")
-                .join("current-candidate-events");
-            fs::read_to_string(&current_candidate_events_marker)
-                .or_else(|_| fs::read_to_string(&current_events_marker))
-                .map(|s| resolve_marker_target(&workspace_root, &s))
-                .unwrap_or_else(|_| args.file.clone())
-        });
+    // Resolve events file via the P6 allowlist guard. The guard verifies
+    // the candidate path is either the active `current-candidate-events`
+    // target, the `current-events` target, or the default `events.jsonl`
+    // when no marker exists.
+    let env_events_file = std::env::var("RALPH_EVENTS_FILE").ok();
+    let events_file = resolve_emit_path(&workspace_root, &args.file, env_events_file.as_deref())?;
 
     // Ensure parent directory exists
     if let Some(parent) = events_file.parent()
@@ -5260,5 +5382,163 @@ event_loop:
         assert_eq!(result.events[0].payload, Some("Start work".to_string()));
         assert!(result.events[1].payload.is_none());
         assert!(result.events[2].payload.is_none());
+    }
+
+    // ---- P6 emit path allowlist tests ----
+
+    fn make_workspace(tmp: &TempDir) -> PathBuf {
+        let root = tmp.path().to_path_buf();
+        std::fs::create_dir_all(root.join(".ralph")).unwrap();
+        root
+    }
+
+    #[test]
+    fn test_emit_default_uses_current_candidate_marker() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = make_workspace(&tmp);
+        std::fs::write(
+            workspace.join(".ralph/current-candidate-events"),
+            ".ralph/events-20260101-000000.jsonl",
+        )
+        .unwrap();
+        let resolved = resolve_emit_path(
+            &workspace,
+            &workspace.join(".ralph/events.jsonl"),
+            None,
+        )
+        .unwrap();
+        assert!(resolved.ends_with(".ralph/events-20260101-000000.jsonl"));
+    }
+
+    #[test]
+    fn test_emit_default_uses_current_events_marker() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = make_workspace(&tmp);
+        std::fs::write(
+            workspace.join(".ralph/current-events"),
+            ".ralph/events-20260101-000000.jsonl",
+        )
+        .unwrap();
+        let resolved = resolve_emit_path(
+            &workspace,
+            &workspace.join(".ralph/events.jsonl"),
+            None,
+        )
+        .unwrap();
+        assert!(resolved.ends_with(".ralph/events-20260101-000000.jsonl"));
+    }
+
+    #[test]
+    fn test_emit_no_marker_allows_default_events_jsonl() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = make_workspace(&tmp);
+        let cli_file = workspace.join(".ralph/events.jsonl");
+        let resolved = resolve_emit_path(&workspace, &cli_file, None).unwrap();
+        assert_eq!(resolved, cli_file);
+    }
+
+    #[test]
+    fn test_emit_file_explicit_current_marker_allowed() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = make_workspace(&tmp);
+        std::fs::write(
+            workspace.join(".ralph/current-events"),
+            ".ralph/events-20260101-000000.jsonl",
+        )
+        .unwrap();
+        // The explicit --file target equals the marker target, so it is
+        // accepted (matches the allowlist entry).
+        let cli_file = workspace.join(".ralph/events-20260101-000000.jsonl");
+        let resolved = resolve_emit_path(&workspace, &cli_file, None).unwrap();
+        assert_eq!(resolved, cli_file);
+    }
+
+    #[test]
+    fn test_emit_file_other_loop_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = make_workspace(&tmp);
+        std::fs::write(
+            workspace.join(".ralph/current-events"),
+            ".ralph/events-20260101-000000.jsonl",
+        )
+        .unwrap();
+        // The marker wins over an explicit --file pointing at a different
+        // file. The resolved path is the marker target.
+        let cli_file = workspace.join(".ralph/events-other.jsonl");
+        let resolved = resolve_emit_path(&workspace, &cli_file, None).unwrap();
+        assert!(resolved.ends_with(".ralph/events-20260101-000000.jsonl"));
+    }
+
+    #[test]
+    fn test_emit_env_events_file_other_loop_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = make_workspace(&tmp);
+        std::fs::write(
+            workspace.join(".ralph/current-events"),
+            ".ralph/events-20260101-000000.jsonl",
+        )
+        .unwrap();
+        // RALPH_EVENTS_FILE pointing at a different file is rejected.
+        let env_value = workspace
+            .join(".ralph/events-other.jsonl")
+            .display()
+            .to_string();
+        let result = resolve_emit_path(
+            &workspace,
+            &workspace.join(".ralph/events.jsonl"),
+            Some(&env_value),
+        );
+        assert!(
+            result.is_err(),
+            "non-allowlisted RALPH_EVENTS_FILE must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_emit_path_traversal_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = make_workspace(&tmp);
+        std::fs::write(
+            workspace.join(".ralph/current-events"),
+            ".ralph/events-20260101-000000.jsonl",
+        )
+        .unwrap();
+        // A direct path traversal is rejected: the resolved path is the
+        // marker target (not the parent escape), and any attempt to write
+        // outside the workspace is blocked.
+        let cli_file = workspace.join("../escape.jsonl");
+        let resolved = resolve_emit_path(&workspace, &cli_file, None).unwrap();
+        assert!(resolved.starts_with(&workspace));
+        // A direct attempt with no marker and a traversal --file is blocked.
+        std::fs::remove_file(workspace.join(".ralph/current-events")).unwrap();
+        let result = resolve_emit_path(&workspace, &cli_file, None);
+        assert!(
+            result.is_err(),
+            "path traversal with no marker must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_emit_symlink_to_other_loop_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = make_workspace(&tmp);
+        // No markers; the allowlist is just the default events.jsonl.
+        let outside = tmp.path().parent().unwrap().join("outside.jsonl");
+        std::fs::write(&outside, "{}").unwrap();
+        // A symlink that aliases the default target to an outside file is
+        // detected via canonicalize and rejected.
+        let link = workspace.join(".ralph/events.jsonl");
+        if std::os::unix::fs::symlink(&outside, &link).is_err() {
+            return;
+        }
+        let result = resolve_emit_path(
+            &workspace,
+            &workspace.join(".ralph/events.jsonl"),
+            None,
+        );
+        assert!(
+            result.is_err(),
+            "symlink to outside loop must be rejected"
+        );
     }
 }
