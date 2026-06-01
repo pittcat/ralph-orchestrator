@@ -11154,10 +11154,10 @@ elif "--print" in args:
     chunks = []
     fd = sys.stdin.fileno()
     while True:
-        ready, _, _ = select.select([fd], [], [], 0.1)
+        ready, _, _ = select.select([fd], [], [], 2.0)
         if not ready:
             break
-        chunk = os.read(fd, 4096)
+        chunk = os.read(fd, 65536)
         if not chunk:
             break
         chunks.append(chunk)
@@ -11886,7 +11886,7 @@ EOF"#,
                 case.prompt_delivery,
             );
             assert!(
-                captured.prompt.contains(&task_payload),
+                captured.prompt.contains(task_payload.trim()),
                 "captured prompt should include full large task payload for {}",
                 case.name
             );
@@ -12281,8 +12281,9 @@ EOF"#,
                 case.expected_prefix,
                 case.prompt_delivery,
             );
+            // build_wave_worker_prompt trims the payload, so compare against the trimmed form
             assert!(
-                captured.prompt.contains(&task_payload),
+                captured.prompt.contains(task_payload.trim()),
                 "captured prompt should include full large task payload for {}",
                 case.backend_type
             );
@@ -12300,8 +12301,9 @@ EOF"#,
 
             assert_single_success(&completed, "hat kiro-acp named large prompt contract ok");
             assert_acp_invocation_contract(&captured, &["acp", "--hat-runtime-arg"]);
+            // build_wave_worker_prompt trims the payload, so compare against the trimmed form
             assert!(
-                captured.prompt.contains(&task_payload),
+                captured.prompt.contains(task_payload.trim()),
                 "captured prompt should include full large task payload for kiro-acp named hat"
             );
             emit_wave_validation_marker("large-prompt-contract:hat:named:kiro-acp", &["backend"]);
@@ -12451,7 +12453,7 @@ EOF"#,
                 case.prompt_delivery,
             );
             assert!(
-                captured.prompt.contains(&task_payload),
+                captured.prompt.contains(task_payload.trim()),
                 "captured prompt should include full large task payload for {}",
                 case.backend_type
             );
@@ -12487,7 +12489,7 @@ EOF"#,
                 PromptDeliveryExpectation::TempFilePositional,
             );
             assert!(
-                captured.prompt.contains(&task_payload),
+                captured.prompt.contains(task_payload.trim()),
                 "captured prompt should include full large task payload for kiro agent hat"
             );
             emit_wave_validation_marker("large-prompt-contract:hat:kiro-agent:kiro", &["backend"]);
@@ -12512,7 +12514,7 @@ EOF"#,
                 &["acp", "--agent", "reviewer-agent", "--hat-runtime-arg"],
             );
             assert!(
-                captured.prompt.contains(&task_payload),
+                captured.prompt.contains(task_payload.trim()),
                 "captured prompt should include full large task payload for kiro-acp agent hat"
             );
             emit_wave_validation_marker(
@@ -12542,7 +12544,7 @@ EOF"#,
                 PromptDeliveryExpectation::TempFilePositional,
             );
             assert!(
-                captured.prompt.contains(&task_payload),
+                captured.prompt.contains(task_payload.trim()),
                 "captured prompt should include full large task payload for custom backend"
             );
             emit_wave_validation_marker("large-prompt-contract:hat:custom", &["backend"]);

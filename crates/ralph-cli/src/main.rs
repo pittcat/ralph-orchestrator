@@ -363,10 +363,14 @@ pub(crate) fn resolve_emit_path(
         if normalize_path(entry) == normalized {
             // Refuse to honor symlinks that alias the allowlist target to
             // an outside file: if the canonical target differs from the
-            // normalized target, the path is a symlink and the agent is
-            // trying to escape the workspace. Reject it.
+            // normalized target, check whether the real path is still
+            // inside the workspace. OS-level symlinks (e.g. macOS
+            // /tmp → /private/tmp) are harmless and must be allowed;
+            // only reject paths that actually escape the workspace.
             if let Ok(canon) = normalized.canonicalize()
                 && canon != normalized
+                && !canon.starts_with(&workspace_canon)
+                && !canon.starts_with(workspace_root)
             {
                 bail!(
                     "Refusing to emit event through symlink: {} resolves to {} (outside this loop).",

@@ -3111,7 +3111,7 @@ impl EventLoop {
                         | "loop.cancel"
                         | "task.resume"
                         | "build.task.abandoned"
-                );
+                ) || event.topic.as_str() == self.config.event_loop.completion_promise.as_str();
 
                 if is_system_event {
                     accepted.push(event);
