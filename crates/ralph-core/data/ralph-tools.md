@@ -17,6 +17,17 @@ ralph tools interact progress "message"
 
 Send a non-blocking progress update via the configured RObot (Telegram).
 
+**Guards (P9 operation-guard):**
+
+- Empty or whitespace-only messages are rejected (exit 2).
+- Messages longer than 2000 characters are rejected (exit 2).
+- Every accepted message is suffixed with `[via Ralph agent]` so humans can
+  tell agent-driven notifications apart from human messages.
+- Rate-limited to one send per 5 seconds, enforced both in-process (mutex)
+  and cross-process (marker file at `.ralph/agent/progress-marker`). A
+  rate-limited call exits 75.
+- Rejected and accepted attempts are recorded via `tracing`.
+
 ## Skill Commands
 
 ```bash
@@ -25,6 +36,18 @@ ralph tools skill load <name>
 ```
 
 List available skills or load a specific skill by name.
+
+**Hat visibility (P10 operation-guard):**
+
+- When invoked from an Agent context, `list` and `load` only see skills whose
+  `hats:` whitelist includes the current hat. Hidden skills are not listed
+  and not loadable. If the requested skill is hidden, the "Available skills"
+  hint in the error message lists only visible skills (hidden names are not
+  revealed).
+- When invoked from a Human CLI context (no `current_hat` resolved), all
+  discovered skills are visible so operators can audit and debug.
+- Backend filtering (`backends:` whitelist) still applies on top of hat
+  visibility. Auto-inject filtering is unchanged.
 
 ## Wave Commands
 

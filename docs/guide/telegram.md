@@ -100,6 +100,30 @@ This lets you steer the agent without waiting for it to ask.
 | `human.response` | Human to Agent | Your reply to a `human.interact` question |
 | `human.guidance` | Human to Agent | Proactive message injected into agent's next prompt |
 
+### Progress Notifications (`ralph tools interact progress`)
+
+Agents can also send a non-blocking one-shot progress message — the prompt
+asks you to glance at the loop without blocking on a reply. This path applies
+the **P9 operation-guard**:
+
+- Empty or whitespace-only messages are rejected (exit 2).
+- Messages longer than 2000 characters are rejected (exit 2).
+- Every accepted message is suffixed with `[via Ralph agent]` so you can tell
+  it apart from a human message.
+- Rate-limited to one send per 5 seconds. The limit is enforced in two layers:
+  - **In-process** — a process-local mutex blocks rapid-fire calls from the
+    same `ralph` invocation.
+  - **Cross-process** — a marker file at `.ralph/agent/progress-marker` records
+    the unix timestamp of the last accepted send. Another invocation (or a
+    long-lived loop spawning a child) reads the marker to coordinate the same
+    5-second window across processes.
+- Rejected and accepted attempts are recorded via `tracing`, so any guardrail
+  trigger shows up in `.ralph/diagnostics/logs/ralph-*.log`.
+
+These guards make the message identifiable and the channel abuse-resistant.
+They make **no claim** about the truth of the message: an agent can still lie
+about its progress. Treat the message as a notification, not a report.
+
 ## Parallel Loop Routing
 
 When running multiple loops in parallel (via worktrees), messages are routed by priority:
