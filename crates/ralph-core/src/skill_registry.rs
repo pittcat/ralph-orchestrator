@@ -22,6 +22,15 @@ const RALPH_TOOLS_MEMORIES_SKILL_RAW: &str = include_str!("../data/ralph-tools-m
 /// Built-in RObot interaction skill content.
 const ROBOT_INTERACTION_SKILL_RAW: &str = include_str!("../data/robot-interaction-skill.md");
 
+/// Built-in ralph-tools-emit skill content (ralph emit command reference).
+const RALPH_TOOLS_EMIT_SKILL_RAW: &str = include_str!("../data/ralph-tools-emit.md");
+
+/// Built-in ralph-tools-wave skill content (ralph wave command reference).
+const RALPH_TOOLS_WAVE_SKILL_RAW: &str = include_str!("../data/ralph-tools-wave.md");
+
+/// Built-in ralph-tools-cmdref skill content (skill/interact/run/other-commands reference).
+const RALPH_TOOLS_CMDREF_SKILL_RAW: &str = include_str!("../data/ralph-tools-cmdref.md");
+
 /// Registry of all available skills for the current loop.
 pub struct SkillRegistry {
     /// All skills indexed by name.
@@ -64,12 +73,17 @@ impl SkillRegistry {
         Ok(())
     }
 
-    /// Register built-in skills (ralph-tools, ralph-tools-tasks, ralph-tools-memories, robot-interaction).
+    /// Register built-in skills (ralph-tools, ralph-tools-tasks, ralph-tools-memories, robot-interaction,
+    /// ralph-tools-emit, ralph-tools-wave, ralph-tools-cmdref).
     fn register_builtins(&mut self) -> Result<()> {
         self.register_builtin("ralph-tools", RALPH_TOOLS_SKILL_RAW)?;
         self.register_builtin("ralph-tools-tasks", RALPH_TOOLS_TASKS_SKILL_RAW)?;
         self.register_builtin("ralph-tools-memories", RALPH_TOOLS_MEMORIES_SKILL_RAW)?;
         self.register_builtin("robot-interaction", ROBOT_INTERACTION_SKILL_RAW)?;
+        // 按需加载: emit / wave / cmdref 由 ralph-tools.md 速查表链接引导加载 (plan U5)
+        self.register_builtin("ralph-tools-emit", RALPH_TOOLS_EMIT_SKILL_RAW)?;
+        self.register_builtin("ralph-tools-wave", RALPH_TOOLS_WAVE_SKILL_RAW)?;
+        self.register_builtin("ralph-tools-cmdref", RALPH_TOOLS_CMDREF_SKILL_RAW)?;
         Ok(())
     }
 

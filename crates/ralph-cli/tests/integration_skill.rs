@@ -62,7 +62,9 @@ fn test_skill_load_builtin() {
 
     let stdout = ralph_skill_ok(temp_path, &["load", "ralph-tools"]);
     assert!(stdout.contains("Ralph CLI"));
-    assert!(stdout.contains("ralph tools skill"));
+    // T5b (plan U5): 入口文件 U1b 重写后, "ralph tools skill" 已迁出到 ralph-tools-cmdref,
+    // 改用 "ralph emit" 字符串作为入口文件核心标识 (按需加载速查表引用).
+    assert!(stdout.contains("ralph emit"));
 }
 
 #[test]
@@ -85,6 +87,20 @@ fn test_skill_list_includes_builtins() {
     let lines: Vec<&str> = stdout.lines().collect();
     assert!(lines.contains(&"ralph-tools"));
     assert!(lines.contains(&"robot-interaction"));
+    // T5c (plan U5): 3 个新 builtin skill 也必须出现在 list 中
+    assert!(lines.contains(&"ralph-tools-emit"));
+    assert!(lines.contains(&"ralph-tools-wave"));
+    assert!(lines.contains(&"ralph-tools-cmdref"));
+}
+
+#[test]
+fn test_skill_load_emit_returns_error_recovery_table() {
+    // T5d (plan U5): ralph-tools-emit 加载输出含 "Invalid JSON payload" 字符串
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+
+    let stdout = ralph_skill_ok(temp_path, &["load", "ralph-tools-emit"]);
+    assert!(stdout.contains("Invalid JSON payload"));
 }
 
 #[test]
