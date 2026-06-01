@@ -1,7 +1,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -134,9 +134,7 @@ impl TelegramService {
         let handler_state_manager = StateManager::new(&state_path);
         let response_channel = Arc::new(Mutex::new(None::<UnboundedSender<String>>));
         let response_nonce = Arc::new(Mutex::new(None::<String>));
-        let mock_mode = Arc::new(Mutex::new(
-            std::env::var("RALPH_TELEGRAM_MOCK").is_ok(),
-        ));
+        let mock_mode = Arc::new(Mutex::new(std::env::var("RALPH_TELEGRAM_MOCK").is_ok()));
         let handler = MessageHandler::new(
             handler_state_manager,
             &workspace_root,
@@ -862,10 +860,7 @@ impl TelegramService {
                 && event.get("topic").and_then(|t| t.as_str()) == Some("human.response")
             {
                 if !expected_nonce.is_empty() {
-                    let source = event
-                        .get("source")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("");
+                    let source = event.get("source").and_then(|s| s.as_str()).unwrap_or("");
                     let event_nonce = event.get("nonce").and_then(|s| s.as_str()).unwrap_or("");
                     if source != TRUSTED_HUMAN_RESPONSE_SOURCE || event_nonce != expected_nonce {
                         debug!(
@@ -1106,7 +1101,8 @@ mod tests {
         file.flush().unwrap();
 
         let mut pos = 0;
-        let result = TelegramService::check_for_response_with_nonce(&events_path, &mut pos, "").unwrap();
+        let result =
+            TelegramService::check_for_response_with_nonce(&events_path, &mut pos, "").unwrap();
         assert_eq!(result, Some("Use async".to_string()));
     }
 
@@ -1124,7 +1120,8 @@ mod tests {
         file.flush().unwrap();
 
         let mut pos = 0;
-        let result = TelegramService::check_for_response_with_nonce(&events_path, &mut pos, "").unwrap();
+        let result =
+            TelegramService::check_for_response_with_nonce(&events_path, &mut pos, "").unwrap();
         assert_eq!(result, Some("Use sync".to_string()));
     }
 
@@ -1147,7 +1144,8 @@ mod tests {
         file.flush().unwrap();
 
         let mut pos = 0;
-        let result = TelegramService::check_for_response_with_nonce(&events_path, &mut pos, "").unwrap();
+        let result =
+            TelegramService::check_for_response_with_nonce(&events_path, &mut pos, "").unwrap();
         assert_eq!(result, None);
     }
 
@@ -1157,7 +1155,8 @@ mod tests {
         let events_path = dir.path().join("does-not-exist.jsonl");
 
         let mut pos = 0;
-        let result = TelegramService::check_for_response_with_nonce(&events_path, &mut pos, "").unwrap();
+        let result =
+            TelegramService::check_for_response_with_nonce(&events_path, &mut pos, "").unwrap();
         assert_eq!(result, None);
     }
 
@@ -1181,7 +1180,8 @@ mod tests {
         file.flush().unwrap();
 
         let mut pos = 0;
-        let result = TelegramService::check_for_response_with_nonce(&events_path, &mut pos, "").unwrap();
+        let result =
+            TelegramService::check_for_response_with_nonce(&events_path, &mut pos, "").unwrap();
         assert_eq!(result, None);
         assert!(pos > 0, "position should advance after reading");
 
@@ -1200,7 +1200,8 @@ mod tests {
         file.flush().unwrap();
 
         // Should find the response starting from where we left off
-        let result = TelegramService::check_for_response_with_nonce(&events_path, &mut pos, "").unwrap();
+        let result =
+            TelegramService::check_for_response_with_nonce(&events_path, &mut pos, "").unwrap();
         assert_eq!(result, Some("yes".to_string()));
         assert!(pos > pos_after_first, "position should advance further");
     }
@@ -1234,20 +1235,14 @@ mod tests {
         // append a response with the current nonce once it appears.
         let path_for_wait = events_path.clone();
         let wait_service = std::sync::Arc::clone(&service);
-        let waiter = std::thread::spawn(move || {
-            wait_service.wait_for_response(&path_for_wait).unwrap()
-        });
+        let waiter =
+            std::thread::spawn(move || wait_service.wait_for_response(&path_for_wait).unwrap());
 
         // Wait until wait_for_response has installed its nonce.
         let nonce = {
             let mut attempts = 0;
             loop {
-                if let Some(n) = writer_service
-                    .response_nonce
-                    .lock()
-                    .unwrap()
-                    .clone()
-                {
+                if let Some(n) = writer_service.response_nonce.lock().unwrap().clone() {
                     break n;
                 }
                 attempts += 1;
@@ -1596,7 +1591,9 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         };
 
-        sender.send("Approved via trusted channel".to_string()).unwrap();
+        sender
+            .send("Approved via trusted channel".to_string())
+            .unwrap();
         let result = waiter.join().unwrap();
         assert_eq!(result, Some("Approved via trusted channel".to_string()));
     }

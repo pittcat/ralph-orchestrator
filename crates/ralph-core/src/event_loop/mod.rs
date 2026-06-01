@@ -9,12 +9,12 @@ mod tests;
 pub use loop_state::{LoopState, WorkflowProgress};
 
 use crate::config::{HatBackend, HatExecutionMode, InjectMode, RalphConfig, ScratchpadConfig};
+use crate::event_origin::filter_events_by_origin;
 use crate::event_parser::{EventParser, MutationEvidence, MutationStatus};
 use crate::event_policy::{
     PolicyDecision, PolicyRuntimeState, check_completion_guard, check_completion_honored,
     validate_event,
 };
-use crate::event_origin::filter_events_by_origin;
 use crate::event_reader::{Event as JsonlEvent, EventReader};
 use crate::hat_registry::HatRegistry;
 use crate::hatless_ralph::HatlessRalph;
@@ -1044,7 +1044,11 @@ impl EventLoop {
                 );
                 let sig = format!(
                     "missing_required:{}",
-                    missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(",")
+                    missing
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
                 );
                 if let Some(reason) = self.handle_completion_rejection(sig) {
                     return Some(reason);
@@ -3740,132 +3744,135 @@ impl EventLoop {
                 };
 
                 if let Some(ref robot_service) = self.robot_service {
-                info!(
-                    payload = %payload,
-                    "human.interact event detected — sending question via robot service"
-                );
+                    info!(
+                        payload = %payload,
+                        "human.interact event detected — sending question via robot service"
+                    );
 
-                // Send the question (includes retry with exponential backoff)
-                let send_ok = match robot_service.send_question(&payload) {
-                    Ok(_message_id) => true,
-                    Err(e) => {
-                        warn!(
-                            error = %e,
-                            "Failed to send human.interact question after retries — treating as timeout"
-                        );
-                        // Log to diagnostics
-                        self.diagnostics.log_error(
-                            self.state.iteration,
-                            "telegram",
-                            crate::diagnostics::DiagnosticError::TelegramSendError {
-                                operation: "send_question".to_string(),
-                                error: e.to_string(),
-                                retry_count: 3,
-                            },
-                        );
-                        context.insert(
-                            "outcome".to_string(),
-                            Value::String("send_failure".to_string()),
-                        );
-                        context.insert("error".to_string(), Value::String(e.to_string()));
-                        false
-                    }
-                };
-
-                // Block: poll events file for human.response
-                // Per spec, even on send failure we treat as timeout (continue without blocking)
-                if send_ok {
-                    // Read the active events path from the current-events marker,
-                    // falling back to the default events.jsonl if not available.
-                    let events_path = self
-                        .loop_context
-                        .as_ref()
-                        .and_then(|ctx| {
-                            std::fs::read_to_string(ctx.current_events_marker())
-                                .ok()
-                                .map(|s| ctx.workspace().join(s.trim()))
-                        })
-                        .or_else(|| {
-                            std::fs::read_to_string(".ralph/current-events")
-                                .ok()
-                                .map(|s| PathBuf::from(s.trim()))
-                        })
-                        .unwrap_or_else(|| {
-                            self.loop_context
-                                .as_ref()
-                                .map(|ctx| ctx.events_path())
-                                .unwrap_or_else(|| PathBuf::from(".ralph/events.jsonl"))
-                        });
-
-                    match robot_service.wait_for_response(&events_path) {
-                        Ok(Some(response)) => {
-                            info!(
-                                response = %response,
-                                "Received human.response — continuing loop"
-                            );
-                            context.insert(
-                                "outcome".to_string(),
-                                Value::String("response".to_string()),
-                            );
-                            context.insert("response".to_string(), Value::String(response.clone()));
-                            // Create a human.response event to inject into the bus
-                            response_event = Some(Event::new("human.response", &response));
-                        }
-                        Ok(None) => {
-                            warn!(
-                                timeout_secs = robot_service.timeout_secs(),
-                                "Human response timeout — injecting human.timeout event"
-                            );
-                            context.insert(
-                                "outcome".to_string(),
-                                Value::String("timeout".to_string()),
-                            );
-                            context.insert(
-                                "timeout_seconds".to_string(),
-                                Value::from(robot_service.timeout_secs()),
-                            );
-                            let timeout_event = Event::new(
-                                "human.timeout",
-                                format!(
-                                    "No response after {}s. Original question: {}",
-                                    robot_service.timeout_secs(),
-                                    payload
-                                ),
-                            );
-                            response_event = Some(timeout_event);
-                        }
+                    // Send the question (includes retry with exponential backoff)
+                    let send_ok = match robot_service.send_question(&payload) {
+                        Ok(_message_id) => true,
                         Err(e) => {
                             warn!(
                                 error = %e,
-                                "Error waiting for human response — injecting human.timeout event"
+                                "Failed to send human.interact question after retries — treating as timeout"
+                            );
+                            // Log to diagnostics
+                            self.diagnostics.log_error(
+                                self.state.iteration,
+                                "telegram",
+                                crate::diagnostics::DiagnosticError::TelegramSendError {
+                                    operation: "send_question".to_string(),
+                                    error: e.to_string(),
+                                    retry_count: 3,
+                                },
                             );
                             context.insert(
                                 "outcome".to_string(),
-                                Value::String("wait_error".to_string()),
+                                Value::String("send_failure".to_string()),
                             );
                             context.insert("error".to_string(), Value::String(e.to_string()));
-                            let timeout_event = Event::new(
-                                "human.timeout",
-                                format!(
-                                    "Error waiting for response: {}. Original question: {}",
-                                    e, payload
-                                ),
-                            );
-                            response_event = Some(timeout_event);
+                            false
+                        }
+                    };
+
+                    // Block: poll events file for human.response
+                    // Per spec, even on send failure we treat as timeout (continue without blocking)
+                    if send_ok {
+                        // Read the active events path from the current-events marker,
+                        // falling back to the default events.jsonl if not available.
+                        let events_path = self
+                            .loop_context
+                            .as_ref()
+                            .and_then(|ctx| {
+                                std::fs::read_to_string(ctx.current_events_marker())
+                                    .ok()
+                                    .map(|s| ctx.workspace().join(s.trim()))
+                            })
+                            .or_else(|| {
+                                std::fs::read_to_string(".ralph/current-events")
+                                    .ok()
+                                    .map(|s| PathBuf::from(s.trim()))
+                            })
+                            .unwrap_or_else(|| {
+                                self.loop_context
+                                    .as_ref()
+                                    .map(|ctx| ctx.events_path())
+                                    .unwrap_or_else(|| PathBuf::from(".ralph/events.jsonl"))
+                            });
+
+                        match robot_service.wait_for_response(&events_path) {
+                            Ok(Some(response)) => {
+                                info!(
+                                    response = %response,
+                                    "Received human.response — continuing loop"
+                                );
+                                context.insert(
+                                    "outcome".to_string(),
+                                    Value::String("response".to_string()),
+                                );
+                                context.insert(
+                                    "response".to_string(),
+                                    Value::String(response.clone()),
+                                );
+                                // Create a human.response event to inject into the bus
+                                response_event = Some(Event::new("human.response", &response));
+                            }
+                            Ok(None) => {
+                                warn!(
+                                    timeout_secs = robot_service.timeout_secs(),
+                                    "Human response timeout — injecting human.timeout event"
+                                );
+                                context.insert(
+                                    "outcome".to_string(),
+                                    Value::String("timeout".to_string()),
+                                );
+                                context.insert(
+                                    "timeout_seconds".to_string(),
+                                    Value::from(robot_service.timeout_secs()),
+                                );
+                                let timeout_event = Event::new(
+                                    "human.timeout",
+                                    format!(
+                                        "No response after {}s. Original question: {}",
+                                        robot_service.timeout_secs(),
+                                        payload
+                                    ),
+                                );
+                                response_event = Some(timeout_event);
+                            }
+                            Err(e) => {
+                                warn!(
+                                    error = %e,
+                                    "Error waiting for human response — injecting human.timeout event"
+                                );
+                                context.insert(
+                                    "outcome".to_string(),
+                                    Value::String("wait_error".to_string()),
+                                );
+                                context.insert("error".to_string(), Value::String(e.to_string()));
+                                let timeout_event = Event::new(
+                                    "human.timeout",
+                                    format!(
+                                        "Error waiting for response: {}. Original question: {}",
+                                        e, payload
+                                    ),
+                                );
+                                response_event = Some(timeout_event);
+                            }
                         }
                     }
+                } else {
+                    debug!(
+                        "human.interact event detected but no robot service active — passing through"
+                    );
+                    context.insert(
+                        "outcome".to_string(),
+                        Value::String("no_robot_service".to_string()),
+                    );
                 }
-            } else {
-                debug!(
-                    "human.interact event detected but no robot service active — passing through"
-                );
-                context.insert(
-                    "outcome".to_string(),
-                    Value::String("no_robot_service".to_string()),
-                );
-            }
 
-            human_interact_context = Some(Value::Object(context));
+                human_interact_context = Some(Value::Object(context));
             }
         }
 
@@ -3942,8 +3949,7 @@ impl EventLoop {
                 .as_ref()
                 .map(|v| v.topic.as_str());
             self.state.record_event(&response);
-            self.state
-                .record_verdict_if_match(&response, verdict_topic);
+            self.state.record_verdict_if_match(&response, verdict_topic);
             info!(
                 topic = %response.topic,
                 "Publishing human.response event from robot service"

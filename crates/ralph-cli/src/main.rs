@@ -1673,7 +1673,12 @@ fn handle_active_lock(
             existing.pid,
             existing.prompt.chars().take(50).collect::<String>()
         );
-        spawn_worktree_loop(workspace_root, prompt_summary, loop_naming, pending_worktree_registration)
+        spawn_worktree_loop(
+            workspace_root,
+            prompt_summary,
+            loop_naming,
+            pending_worktree_registration,
+        )
     }
 }
 
@@ -4433,7 +4438,7 @@ event_loop:
                 topic: "experiment.planned".to_string(),
                 payload: "{}".to_string(),
                 json: true,
-                                file: PathBuf::from(".ralph/events.jsonl"),
+                file: PathBuf::from(".ralph/events.jsonl"),
                 policy_check: true,
                 no_policy_check: false,
                 hat: None,
@@ -4492,7 +4497,7 @@ event_loop:
                 topic: "experiment.planned".to_string(),
                 payload: "{}".to_string(),
                 json: true,
-                                file: events_file.clone(),
+                file: events_file.clone(),
                 policy_check: true,
                 no_policy_check: false,
                 hat: None,
@@ -4545,7 +4550,7 @@ event_loop:
                 topic: "experiment.planned".to_string(),
                 payload: "{}".to_string(),
                 json: true,
-                                file: events_file.clone(),
+                file: events_file.clone(),
                 policy_check: true,
                 no_policy_check: false,
                 hat: None,
@@ -4582,7 +4587,7 @@ event_loop:
                 topic: "experiment.planned".to_string(),
                 payload: r#"{"task_key":"x"}"#.to_string(),
                 json: true,
-                                file: events_file.clone(),
+                file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: false,
                 hat: Some("strategist".to_string()),
@@ -4678,7 +4683,7 @@ event_loop:
                 topic: "build.done".to_string(),
                 payload: String::new(),
                 json: false,
-                                file: events_file.clone(),
+                file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: false,
                 hat: None,
@@ -4727,7 +4732,7 @@ event_loop:
                 topic: "build.done".to_string(),
                 payload: String::new(),
                 json: false,
-                                file: events_file.clone(),
+                file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: false,
                 hat: Some("strategist".to_string()),
@@ -4777,7 +4782,7 @@ event_loop:
                 topic: "experiment.planned".to_string(),
                 payload: r#"{"task_key":"x"}"#.to_string(),
                 json: true,
-                                file: events_file.clone(),
+                file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: false,
                 hat: None,
@@ -4839,7 +4844,7 @@ event_loop:
                 topic: "LOOP_COMPLETE".to_string(),
                 payload: r#"{"reason":"done"}"#.to_string(),
                 json: true,
-                                file: events_file.clone(),
+                file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: false,
                 hat: None,
@@ -4892,7 +4897,7 @@ event_loop:
                 topic: "build.done".to_string(),
                 payload: String::new(),
                 json: false,
-                                file: events_file.clone(),
+                file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: false,
                 hat: None,
@@ -4947,7 +4952,7 @@ event_loop:
                 topic: "experiment.planned".to_string(),
                 payload: "{}".to_string(),
                 json: true,
-                                file: events_file.clone(),
+                file: events_file.clone(),
                 policy_check: true,
                 no_policy_check: false,
                 hat: None,
@@ -5001,7 +5006,7 @@ event_loop:
                 topic: "LOOP_COMPLETE".to_string(),
                 payload: r#"{"reason":"retry"}"#.to_string(),
                 json: true,
-                                file: events_file.clone(),
+                file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: true,
                 hat: None,
@@ -5055,7 +5060,7 @@ event_loop:
                 topic: "LOOP_COMPLETE".to_string(),
                 payload: r#"{"reason":"retry"}"#.to_string(),
                 json: true,
-                                file: events_file.clone(),
+                file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: true,
                 hat: None,
@@ -5170,7 +5175,7 @@ event_loop:
                 topic,
                 payload,
                 json,
-                                file: events_file.clone(),
+                file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: false,
                 hat: Some("strategist".to_string()),
@@ -5206,7 +5211,7 @@ event_loop:
                 topic,
                 payload,
                 json,
-                                file: events_file.clone(),
+                file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: false,
                 hat: Some("strategist".to_string()),
@@ -5249,7 +5254,7 @@ event_loop:
                 topic,
                 payload,
                 json,
-                                file: events_file.clone(),
+                file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: false,
                 hat: Some("strategist".to_string()),
@@ -5286,7 +5291,7 @@ event_loop:
                 topic,
                 payload,
                 json,
-                                file: events_file.clone(),
+                file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: false,
                 hat: None, // missing provenance
@@ -5359,7 +5364,7 @@ event_loop:
                     topic: cli_topic,
                     payload: cli_payload,
                     json: cli_json,
-                                        file: events_file.clone(),
+                    file: events_file.clone(),
                     policy_check: false,
                     no_policy_check: false,
                     hat: Some("strategist".to_string()),
@@ -5391,7 +5396,7 @@ event_loop:
                 topic: "experiment.planned".to_string(),
                 payload: r#"{"task_key":"x"}"#.to_string(),
                 json: true,
-                                file: events_file.clone(),
+                file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: false,
                 hat: Some("strategist".to_string()),
@@ -5452,12 +5457,8 @@ event_loop:
             ".ralph/events-20260101-000000.jsonl",
         )
         .unwrap();
-        let resolved = resolve_emit_path(
-            &workspace,
-            &workspace.join(".ralph/events.jsonl"),
-            None,
-        )
-        .unwrap();
+        let resolved =
+            resolve_emit_path(&workspace, &workspace.join(".ralph/events.jsonl"), None).unwrap();
         assert!(resolved.ends_with(".ralph/events-20260101-000000.jsonl"));
     }
 
@@ -5470,12 +5471,8 @@ event_loop:
             ".ralph/events-20260101-000000.jsonl",
         )
         .unwrap();
-        let resolved = resolve_emit_path(
-            &workspace,
-            &workspace.join(".ralph/events.jsonl"),
-            None,
-        )
-        .unwrap();
+        let resolved =
+            resolve_emit_path(&workspace, &workspace.join(".ralph/events.jsonl"), None).unwrap();
         assert!(resolved.ends_with(".ralph/events-20260101-000000.jsonl"));
     }
 
@@ -5617,14 +5614,7 @@ event_loop:
         if std::os::unix::fs::symlink(&outside, &link).is_err() {
             return;
         }
-        let result = resolve_emit_path(
-            &workspace,
-            &workspace.join(".ralph/events.jsonl"),
-            None,
-        );
-        assert!(
-            result.is_err(),
-            "symlink to outside loop must be rejected"
-        );
+        let result = resolve_emit_path(&workspace, &workspace.join(".ralph/events.jsonl"), None);
+        assert!(result.is_err(), "symlink to outside loop must be rejected");
     }
 }

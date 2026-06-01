@@ -103,7 +103,7 @@ pub fn preset_names() -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ralph_core::event_origin::{validate_event_origin, OriginCheck};
+    use ralph_core::event_origin::{OriginCheck, validate_event_origin};
     use ralph_core::{HatRegistry, RalphConfig};
 
     fn assert_public_preset_has_completion_path(preset: &EmbeddedPreset) {
@@ -1030,8 +1030,8 @@ mod tests {
     fn test_preset_origin_guard_rejects_unknown_hats() {
         // Verify that public presets reject events from unknown hats via origin guard
         for preset in PRESETS.iter().filter(|p| p.public) {
-            let config = RalphConfig::parse_yaml(preset.content)
-                .expect("embedded preset YAML should parse");
+            let config =
+                RalphConfig::parse_yaml(preset.content).expect("embedded preset YAML should parse");
             let registry = HatRegistry::from_config(&config);
             let cancellation = &config.event_loop.cancellation_promise;
 
@@ -1068,8 +1068,8 @@ mod tests {
         // Verify ce-executor uses report.done as completion gate (not mutually exclusive
         // branch events review.passed + review.complete which caused infinite loops)
         let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
-        let config = RalphConfig::parse_yaml(preset.content)
-            .expect("ce-executor YAML should parse");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         assert_eq!(
             config.event_loop.required_events,
             &["report.done"],
@@ -1102,8 +1102,8 @@ mod tests {
                 e
             )
         });
-        let config = RalphConfig::parse_yaml(&root_content)
-            .expect("root ce-executor YAML should parse");
+        let config =
+            RalphConfig::parse_yaml(&root_content).expect("root ce-executor YAML should parse");
         assert_eq!(
             config.event_loop.required_events,
             &["report.done"],
@@ -1117,8 +1117,8 @@ mod tests {
     fn test_ce_executor_publish_chain_origin_compatible() {
         // Verify ce-executor's normal publish chain survives origin guard
         let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
-        let config = RalphConfig::parse_yaml(preset.content)
-            .expect("ce-executor YAML should parse");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         let registry = HatRegistry::from_config(&config);
         let cancellation = &config.event_loop.cancellation_promise;
 
@@ -1176,8 +1176,8 @@ mod tests {
         // infinite-loop bug would return even with `required_events: ["report.done"]`.
         // Reading the static config catches that case at unit-test time.
         let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
-        let config = RalphConfig::parse_yaml(preset.content)
-            .expect("ce-executor YAML should parse");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         let reporter = config
             .hats
             .get("reporter")

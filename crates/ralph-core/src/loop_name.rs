@@ -378,7 +378,11 @@ mod tests {
         let keywords =
             generator.extract_keywords("Fix header footer sidebar navigation menu content layout");
         assert!(keywords.len() <= 5);
-        assert_eq!(keywords.len(), 5, "Expected 5 keywords with 8 significant words in prompt");
+        assert_eq!(
+            keywords.len(),
+            5,
+            "Expected 5 keywords with 8 significant words in prompt"
+        );
     }
 
     #[test]

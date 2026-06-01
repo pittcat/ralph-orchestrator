@@ -280,7 +280,10 @@ mod tests {
 
     fn fresh_marker_path() -> (TempDir, PathBuf) {
         let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join(".ralph/agent").join(PROGRESS_MARKER_FILENAME);
+        let path = tmp
+            .path()
+            .join(".ralph/agent")
+            .join(PROGRESS_MARKER_FILENAME);
         (tmp, path)
     }
 
@@ -359,14 +362,12 @@ mod tests {
         let (_tmp, marker) = fresh_marker_path();
         let first = Instant::now();
         // First call writes the in-process lock + marker file.
-        let first_outcome =
-            evaluate_progress_guard("first", first, &marker, now_unix());
+        let first_outcome = evaluate_progress_guard("first", first, &marker, now_unix());
         assert!(matches!(first_outcome, GuardOutcome::Accept(_)));
 
         // Second call 1s later is still within the 5s window.
         let second = first + StdDuration::from_secs(1);
-        let second_outcome =
-            evaluate_progress_guard("second", second, &marker, now_unix());
+        let second_outcome = evaluate_progress_guard("second", second, &marker, now_unix());
         match second_outcome {
             GuardOutcome::Reject(err) => {
                 assert!(err.contains("rate-limited"), "unexpected error: {err}");
@@ -391,7 +392,10 @@ mod tests {
         }
         std::fs::write(
             &marker,
-            prev.duration_since(UNIX_EPOCH).unwrap().as_secs().to_string(),
+            prev.duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                .to_string(),
         )
         .unwrap();
 

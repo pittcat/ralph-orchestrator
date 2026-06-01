@@ -344,9 +344,10 @@ impl TaskStore {
         task.blocked_by
             .iter()
             .filter(|bid| {
-                !self.tasks.iter().any(|t| {
-                    t.id == **bid && t.loop_id.as_deref() == task.loop_id.as_deref()
-                })
+                !self
+                    .tasks
+                    .iter()
+                    .any(|t| t.id == **bid && t.loop_id.as_deref() == task.loop_id.as_deref())
             })
             .cloned()
             .collect()
@@ -692,7 +693,11 @@ mod tests {
         assert_ne!(a_view.id, b_view.id);
 
         // loop-c does not exist
-        assert!(store.get_by_key_in_loop("shared:task", Some("loop-c")).is_none());
+        assert!(
+            store
+                .get_by_key_in_loop("shared:task", Some("loop-c"))
+                .is_none()
+        );
     }
 
     #[test]
@@ -747,7 +752,8 @@ mod tests {
         store.add(same_loop);
         store.add(other_loop);
 
-        let mut candidate = Task::new("Candidate".to_string(), 1).with_loop_id(Some("loop-a".into()));
+        let mut candidate =
+            Task::new("Candidate".to_string(), 1).with_loop_id(Some("loop-a".into()));
         candidate.blocked_by = vec![same_id.clone(), "missing-id".into(), other_id.clone()];
 
         let invalid = store.invalid_blockers(&candidate);
@@ -764,7 +770,8 @@ mod tests {
         let blocker_id = blocker.id.clone();
         store.add(blocker);
 
-        let mut candidate = Task::new("Candidate".to_string(), 1).with_loop_id(Some("loop-a".into()));
+        let mut candidate =
+            Task::new("Candidate".to_string(), 1).with_loop_id(Some("loop-a".into()));
         candidate.blocked_by = vec![blocker_id];
 
         assert!(store.invalid_blockers(&candidate).is_empty());

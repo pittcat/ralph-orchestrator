@@ -16,10 +16,10 @@ mod config;
 pub mod diagnostics;
 mod event_logger;
 mod event_loop;
+pub mod event_origin;
 mod event_parser;
 mod event_policy;
 mod event_projection;
-pub mod event_origin;
 mod event_reader;
 pub mod file_lock;
 mod git_ops;
@@ -40,10 +40,10 @@ mod loop_state_snapshot;
 mod memory;
 pub mod memory_parser;
 mod memory_store;
-pub mod preset_validator;
 pub mod merge_queue;
 pub mod planning_session;
 pub mod preflight;
+pub mod preset_validator;
 #[cfg(feature = "recording")]
 mod session_player;
 #[cfg(feature = "recording")]
@@ -82,13 +82,13 @@ pub use event_logger::{EventHistory, EventLogger, EventRecord};
 pub use event_loop::{
     EventLoop, LoopState, ProcessedEvents, ProcessedEventsWithWaves, TerminationReason, UserPrompt,
 };
-pub use event_parser::EventParser;
-pub use event_policy::{
-    PolicyDecision, PolicyFinding, PolicyRuntimeState, ViolationType, validate_event,
-};
 pub use event_origin::{
     HumanInteractValidation, TRUSTED_HUMAN_RESPONSE_SOURCE, is_trusted_human_response,
     validate_human_interact_payload,
+};
+pub use event_parser::EventParser;
+pub use event_policy::{
+    PolicyDecision, PolicyFinding, PolicyRuntimeState, ViolationType, validate_event,
 };
 pub use event_projection::apply_projection;
 pub use event_reader::{Event, EventReader, MalformedLine, ParseResult};
@@ -133,12 +133,12 @@ pub use planning_session::{
     ConversationEntry, ConversationType, PlanningSession, PlanningSessionError, SessionMetadata,
     SessionStatus,
 };
-pub use preset_validator::{
-    TopologyError, TopologyErrorKind, TopologyValidationResult, validate_preset_topology,
-};
 pub use preflight::{
     AcceptanceCriterion, CheckResult, CheckStatus, PreflightCheck, PreflightReport,
     PreflightRunner, extract_acceptance_criteria, extract_all_criteria, extract_criteria_from_file,
+};
+pub use preset_validator::{
+    TopologyError, TopologyErrorKind, TopologyValidationResult, validate_preset_topology,
 };
 #[cfg(feature = "recording")]
 pub use session_player::{PlayerConfig, ReplayMode, SessionPlayer, TimestampedRecord};

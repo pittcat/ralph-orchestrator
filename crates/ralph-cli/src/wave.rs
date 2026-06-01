@@ -81,7 +81,9 @@ fn execute_emit(args: WaveEmitArgs, use_colors: bool) -> Result<()> {
 /// This is the core logic, separated from CLI concerns for testability.
 pub fn write_wave_events(topic: &str, payloads: &[String], events_file: &Path) -> Result<String> {
     // Read hat from runtime environment if available
-    let hat = std::env::var("RALPH_CURRENT_HAT").ok().filter(|s| !s.is_empty());
+    let hat = std::env::var("RALPH_CURRENT_HAT")
+        .ok()
+        .filter(|s| !s.is_empty());
     write_wave_events_with_provenance(topic, payloads, events_file, hat.as_deref())
 }
 

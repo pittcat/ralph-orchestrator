@@ -40,7 +40,8 @@ pub const TRUSTED_HUMAN_RESPONSE_SOURCE: &str = "robot-trusted";
 /// in-process source marker. Events without this marker are treated as forged
 /// and ignored by the trusted waiter path.
 pub fn is_trusted_human_response(event: &JsonlEvent) -> bool {
-    event.topic == "human.response" && event.source.as_deref() == Some(TRUSTED_HUMAN_RESPONSE_SOURCE)
+    event.topic == "human.response"
+        && event.source.as_deref() == Some(TRUSTED_HUMAN_RESPONSE_SOURCE)
 }
 
 /// Result of validating a `human.interact` payload before it is sent.

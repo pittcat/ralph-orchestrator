@@ -225,7 +225,8 @@ impl HatRegistry {
         }
 
         // Fall back to full linear scan with phase-aware matching
-        self.hats.values()
+        self.hats
+            .values()
             .find(|hat| self.hat_is_subscribed_in_phase(&hat.id, topic))
     }
 }

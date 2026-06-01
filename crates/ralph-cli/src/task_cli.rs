@@ -14,7 +14,7 @@ use crate::{
     display::colors, operation_guard::OperationContext, resolve_path_from_workspace,
     resolve_workspace_root,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 use ralph_core::{Task, TaskStatus, TaskStore};
@@ -225,8 +225,7 @@ fn authorize_lifecycle(
     operation: &str,
 ) -> Result<()> {
     if !ctx.is_agent_context {
-        if let (Some(current), Some(target)) =
-            (ctx.current_loop_id.as_ref(), task.loop_id.as_ref())
+        if let (Some(current), Some(target)) = (ctx.current_loop_id.as_ref(), task.loop_id.as_ref())
             && current != target
         {
             eprintln!(
@@ -237,7 +236,9 @@ fn authorize_lifecycle(
     }
 
     if ctx.current_loop_id.is_none() {
-        bail!("{operation}: agent context requires a current loop marker (set .ralph/current-loop-id)");
+        bail!(
+            "{operation}: agent context requires a current loop marker (set .ralph/current-loop-id)"
+        );
     }
     if let (Some(current), Some(target)) = (ctx.current_loop_id.as_ref(), task.loop_id.as_ref()) {
         if current != target {
@@ -448,7 +449,9 @@ fn load_coordinator_hats(root: Option<&PathBuf>) -> Vec<String> {
         let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&raw) else {
             continue;
         };
-        let Some(tasks) = value.get("tasks") else { continue };
+        let Some(tasks) = value.get("tasks") else {
+            continue;
+        };
         let Some(arr) = tasks.get("coordinator_hats").and_then(|v| v.as_sequence()) else {
             continue;
         };
@@ -1486,8 +1489,8 @@ mod tests {
         write_marker(root, "current-loop-id", "loop-a");
         let mut store = open_store(root);
         // Blocker exists but belongs to a different loop.
-        let other_blocker = Task::new("Other loop blocker".to_string(), 1)
-            .with_loop_id(Some("loop-b".to_string()));
+        let other_blocker =
+            Task::new("Other loop blocker".to_string(), 1).with_loop_id(Some("loop-b".to_string()));
         let blocker_id = other_blocker.id.clone();
         store.add(other_blocker);
 

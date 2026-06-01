@@ -379,9 +379,7 @@ pub async fn run_loop_impl(
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
                     if warmup_completed && !warmup_only {
-                        info!(
-                            "Warmup previously completed — skipping to production phase"
-                        );
+                        info!("Warmup previously completed — skipping to production phase");
                         Phase::Production
                     } else {
                         Phase::Warmup
@@ -443,8 +441,13 @@ pub async fn run_loop_impl(
         .unwrap_or(default_start_topic);
     let start_triggered = "planner"; // Default triggered hat for backward compat
     let start_event = Event::new(start_topic, &prompt_content);
-    let start_record =
-        EventRecord::new(0, "loop", &start_event, Some(&HatId::new(start_triggered)), Some(current_phase.to_string()));
+    let start_record = EventRecord::new(
+        0,
+        "loop",
+        &start_event,
+        Some(&HatId::new(start_triggered)),
+        Some(current_phase.to_string()),
+    );
     if let Err(e) = event_logger.log(&start_record) {
         warn!("Failed to log start event: {}", e);
     }
@@ -1036,7 +1039,7 @@ pub async fn run_loop_impl(
             event_loop.state().iteration,
             &terminate_event,
             Some(event_loop.registry().current_phase().to_string()),
-            );
+        );
 
         let reason = dispatch_post_loop_termination_hooks(
             &event_loop,
@@ -1126,7 +1129,7 @@ pub async fn run_loop_impl(
                 event_loop.state().iteration,
                 &terminate_event,
                 Some(event_loop.registry().current_phase().to_string()),
-                );
+            );
 
             let reason = dispatch_post_loop_termination_hooks(
                 &event_loop,
@@ -1250,7 +1253,7 @@ pub async fn run_loop_impl(
                 event_loop.state().iteration,
                 &terminate_event,
                 Some(event_loop.registry().current_phase().to_string()),
-                );
+            );
 
             let reason = dispatch_post_loop_termination_hooks(
                 &event_loop,
@@ -1336,7 +1339,7 @@ pub async fn run_loop_impl(
                     event_loop.state().iteration,
                     &terminate_event,
                     Some(event_loop.registry().current_phase().to_string()),
-                    );
+                );
 
                 let reason = dispatch_post_loop_termination_hooks(
                     &event_loop,
@@ -1411,7 +1414,7 @@ pub async fn run_loop_impl(
                             event_loop.state().iteration,
                             &terminate_event,
                             Some(event_loop.registry().current_phase().to_string()),
-                            );
+                        );
 
                         let reason = dispatch_post_loop_termination_hooks(
                             &event_loop,
@@ -1474,7 +1477,7 @@ pub async fn run_loop_impl(
                         event_loop.state().iteration,
                         &terminate_event,
                         Some(event_loop.registry().current_phase().to_string()),
-                        );
+                    );
 
                     let reason = dispatch_post_loop_termination_hooks(
                         &event_loop,
@@ -1538,7 +1541,7 @@ pub async fn run_loop_impl(
                     event_loop.state().iteration,
                     &terminate_event,
                     Some(event_loop.registry().current_phase().to_string()),
-                    );
+                );
 
                 let reason = dispatch_post_loop_termination_hooks(
                     &event_loop,
@@ -1637,7 +1640,7 @@ pub async fn run_loop_impl(
                 event_loop.state().iteration,
                 &terminate_event,
                 Some(event_loop.registry().current_phase().to_string()),
-                );
+            );
 
             let reason = dispatch_post_loop_termination_hooks(
                 &event_loop,
@@ -2004,7 +2007,7 @@ pub async fn run_loop_impl(
                 event_loop.state().iteration,
                 &terminate_event,
                 Some(event_loop.registry().current_phase().to_string()),
-                );
+            );
 
             let reason = dispatch_post_loop_termination_hooks(
                 &event_loop,
@@ -2131,7 +2134,7 @@ pub async fn run_loop_impl(
                 event_loop.state().iteration,
                 &terminate_event,
                 Some(event_loop.registry().current_phase().to_string()),
-                );
+            );
 
             let reason = dispatch_post_loop_termination_hooks(
                 &event_loop,
@@ -2230,7 +2233,7 @@ pub async fn run_loop_impl(
                     event_loop.state().iteration,
                     &terminate_event,
                     Some(event_loop.registry().current_phase().to_string()),
-                    );
+                );
 
                 let reason = dispatch_post_loop_termination_hooks(
                     &event_loop,
@@ -2326,7 +2329,7 @@ pub async fn run_loop_impl(
                     event_loop.state().iteration,
                     &terminate_event,
                     Some(event_loop.registry().current_phase().to_string()),
-                    );
+                );
 
                 let reason = dispatch_post_loop_termination_hooks(
                     &event_loop,
@@ -2388,7 +2391,10 @@ pub async fn run_loop_impl(
             let has_experiment_evaluated = processed_events
                 .as_ref()
                 .map(|events| {
-                    events.accepted_events.iter().any(|e| e.topic.as_str() == "experiment.evaluated")
+                    events
+                        .accepted_events
+                        .iter()
+                        .any(|e| e.topic.as_str() == "experiment.evaluated")
                 })
                 .unwrap_or(false);
 
@@ -2405,11 +2411,17 @@ pub async fn run_loop_impl(
                         }
                     }
                     Ok(CheckExitResult::NotReady { unmet_conditions }) => {
-                        debug!(?unmet_conditions, "Exit conditions not yet satisfied — continuing warmup");
+                        debug!(
+                            ?unmet_conditions,
+                            "Exit conditions not yet satisfied — continuing warmup"
+                        );
                         None
                     }
                     Ok(CheckExitResult::DrainRequired { pending_count }) => {
-                        info!(pending_count, "Drain required — waiting for in-flight experiments to complete");
+                        info!(
+                            pending_count,
+                            "Drain required — waiting for in-flight experiments to complete"
+                        );
                         None
                     }
                     Err(e) => {
@@ -2428,8 +2440,7 @@ pub async fn run_loop_impl(
             // Phase transition triggered by PhaseWatcher
             info!(
                 "Phase transition triggered: {} (stop_on_exit: {})",
-                phase_reason,
-                stop_on_exit
+                phase_reason, stop_on_exit
             );
 
             // Run transition script and update phase
@@ -2448,18 +2459,26 @@ pub async fn run_loop_impl(
                     let agent_dir = ctx.ralph_dir().join("agent");
                     fs::create_dir_all(&agent_dir).ok();
                     let phase_path = agent_dir.join("phase.json");
-                    if let Err(e) = fs::write(&phase_path, serde_json::to_string_pretty(&phase_json).unwrap()) {
+                    if let Err(e) = fs::write(
+                        &phase_path,
+                        serde_json::to_string_pretty(&phase_json).unwrap(),
+                    ) {
                         warn!(error = %e, "Failed to write phase.json");
                     }
 
                     // Publish phase transition event
-                    let transition_topic = if stop_on_exit { "warmup.complete" } else { "phase.transition" };
+                    let transition_topic = if stop_on_exit {
+                        "warmup.complete"
+                    } else {
+                        "phase.transition"
+                    };
                     let transition_payload = serde_json::json!({
                         "phase": new_phase.to_string(),
                         "reason": phase_reason,
                         "warmup_completed": stop_on_exit,
                     });
-                    let transition_event = Event::new(transition_topic, &transition_payload.to_string());
+                    let transition_event =
+                        Event::new(transition_topic, &transition_payload.to_string());
                     event_loop.publish_event(transition_event);
 
                     // If warmup_only mode, terminate the loop
@@ -2542,7 +2561,7 @@ pub async fn run_loop_impl(
                     event_loop.state().iteration,
                     &terminate_event,
                     Some(event_loop.registry().current_phase().to_string()),
-                    );
+                );
 
                 let reason = dispatch_post_loop_termination_hooks(
                     &event_loop,
@@ -2630,7 +2649,7 @@ pub async fn run_loop_impl(
                     event_loop.state().iteration,
                     &terminate_event,
                     Some(event_loop.registry().current_phase().to_string()),
-                    );
+                );
 
                 let reason = dispatch_post_loop_termination_hooks(
                     &event_loop,
@@ -2758,7 +2777,7 @@ pub async fn run_loop_impl(
                 event_loop.state().iteration,
                 &terminate_event,
                 Some(event_loop.registry().current_phase().to_string()),
-                );
+            );
             handle_termination(
                 &reason,
                 event_loop.state(),
@@ -2802,7 +2821,7 @@ pub async fn run_loop_impl(
                 event_loop.state().iteration,
                 &terminate_event,
                 Some(event_loop.registry().current_phase().to_string()),
-                );
+            );
 
             let reason = dispatch_post_loop_termination_hooks(
                 &event_loop,
@@ -2870,7 +2889,7 @@ pub async fn run_loop_impl(
                     event_loop.state().iteration,
                     &terminate_event,
                     Some(event_loop.registry().current_phase().to_string()),
-                    );
+                );
 
                 let reason = dispatch_post_loop_termination_hooks(
                     &event_loop,
@@ -4885,7 +4904,8 @@ fn log_events_from_output(
             )
             .with_source(hat_id.clone());
 
-            let orphan_record = EventRecord::new(iteration, "loop", &orphan_event, None::<&HatId>, None);
+            let orphan_record =
+                EventRecord::new(iteration, "loop", &orphan_event, None::<&HatId>, None);
             if let Err(e) = logger.log(&orphan_record) {
                 warn!("Failed to log event.orphaned: {}", e);
             }
@@ -4927,7 +4947,8 @@ fn log_accepted_events(
                 ),
             )
             .with_source(hat_id.clone());
-            let orphan_record = EventRecord::new(iteration, "loop", &orphan_event, None::<&HatId>, None);
+            let orphan_record =
+                EventRecord::new(iteration, "loop", &orphan_event, None::<&HatId>, None);
             if let Err(e) = logger.log(&orphan_record) {
                 warn!("Failed to log event.orphaned: {}", e);
             }
@@ -4944,7 +4965,12 @@ fn log_accepted_events(
 /// Logs the loop.terminate system event to the event history.
 ///
 /// Per spec: loop.terminate is an observer-only event published on loop exit.
-fn log_terminate_event(logger: &mut EventLogger, iteration: u32, event: &Event, phase: Option<String>) {
+fn log_terminate_event(
+    logger: &mut EventLogger,
+    iteration: u32,
+    event: &Event,
+    phase: Option<String>,
+) {
     // loop.terminate is published by the orchestrator, not a hat
     // No hat can trigger on it (it's observer-only)
     let record = EventRecord::new(iteration, "loop", event, None::<&HatId>, phase);
@@ -5469,33 +5495,46 @@ async fn run_check_exit_conditions(ctx: &LoopContext) -> Result<CheckExitResult>
         .stderr(Stdio::piped());
 
     info!("Running check_exit_conditions.py: {:?}", cmd);
-    let output = cmd.output().context("Failed to run check_exit_conditions.py")?;
+    let output = cmd
+        .output()
+        .context("Failed to run check_exit_conditions.py")?;
 
     // Read JSON result if file was created
     if output_json.exists() {
-        let content = fs::read_to_string(&output_json)
-            .context("Failed to read check_exit result")?;
-        let result: serde_json::Value = serde_json::from_str(&content)
-            .context("Failed to parse check_exit result JSON")?;
+        let content =
+            fs::read_to_string(&output_json).context("Failed to read check_exit result")?;
+        let result: serde_json::Value =
+            serde_json::from_str(&content).context("Failed to parse check_exit result JSON")?;
 
-        let exit_code = result.get("exit_code")
+        let exit_code = result
+            .get("exit_code")
             .and_then(|v| v.as_str())
             .unwrap_or("1");
 
         return match exit_code {
             "0" => Ok(CheckExitResult::Ready),
             "42" => {
-                let pending = result.get("pending_experiments")
+                let pending = result
+                    .get("pending_experiments")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as usize;
-                Ok(CheckExitResult::DrainRequired { pending_count: pending })
+                Ok(CheckExitResult::DrainRequired {
+                    pending_count: pending,
+                })
             }
             _ => {
-                let unmet = result.get("unmet_conditions")
+                let unmet = result
+                    .get("unmet_conditions")
                     .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
                     .unwrap_or_default();
-                Ok(CheckExitResult::NotReady { unmet_conditions: unmet })
+                Ok(CheckExitResult::NotReady {
+                    unmet_conditions: unmet,
+                })
             }
         };
     }
@@ -5504,7 +5543,9 @@ async fn run_check_exit_conditions(ctx: &LoopContext) -> Result<CheckExitResult>
     if output.status.success() {
         Ok(CheckExitResult::Ready)
     } else {
-        Ok(CheckExitResult::NotReady { unmet_conditions: vec![] })
+        Ok(CheckExitResult::NotReady {
+            unmet_conditions: vec![],
+        })
     }
 }
 
@@ -5525,7 +5566,8 @@ async fn run_transition_script(ctx: &LoopContext, stop: bool) -> Result<()> {
     }
 
     info!("Running transition_warmup_to_production.py: {:?}", cmd);
-    let output = cmd.output()
+    let output = cmd
+        .output()
         .context("Failed to run transition_warmup_to_production.py")?;
 
     if !output.status.success() {
@@ -5555,7 +5597,10 @@ fn find_skills_script(name: &str) -> Result<PathBuf> {
             return Ok(path);
         }
         // Also check in universal-autoresearch/scripts
-        let alt_path = base.join("universal-autoresearch").join("scripts").join(name);
+        let alt_path = base
+            .join("universal-autoresearch")
+            .join("scripts")
+            .join(name);
         if alt_path.exists() {
             return Ok(alt_path);
         }

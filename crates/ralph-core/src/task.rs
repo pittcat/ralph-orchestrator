@@ -256,8 +256,7 @@ mod tests {
 
     #[test]
     fn test_with_owner_hat_stamps_owner() {
-        let task =
-            Task::new("Test".to_string(), 1).with_owner_hat(Some("executor".to_string()));
+        let task = Task::new("Test".to_string(), 1).with_owner_hat(Some("executor".to_string()));
         assert_eq!(task.owner_hat_id.as_deref(), Some("executor"));
     }
 

@@ -569,11 +569,15 @@ mod tests {
 
         // Log event with wave metadata
         let event = make_event("review.file", "src/main.rs").with_wave("w-deadbeef", 0, 5);
-        logger.log_event(1, "dispatcher", &event, None, None).unwrap();
+        logger
+            .log_event(1, "dispatcher", &event, None, None)
+            .unwrap();
 
         // Log event without wave metadata
         let plain_event = make_event("build.done", "ok");
-        logger.log_event(2, "builder", &plain_event, None, None).unwrap();
+        logger
+            .log_event(2, "builder", &plain_event, None, None)
+            .unwrap();
 
         let history = EventHistory::new(&path);
         let records = history.read_all().unwrap();
@@ -672,11 +676,15 @@ mod tests {
 
         // Log event with phase metadata
         let event = make_event("experiment.start", "run test");
-        logger.log_event(1, "loop", &event, None, Some("warmup")).unwrap();
+        logger
+            .log_event(1, "loop", &event, None, Some("warmup"))
+            .unwrap();
 
         // Log event without phase metadata
         let plain_event = make_event("build.done", "ok");
-        logger.log_event(2, "builder", &plain_event, None, None).unwrap();
+        logger
+            .log_event(2, "builder", &plain_event, None, None)
+            .unwrap();
 
         let history = EventHistory::new(&path);
         let records = history.read_all().unwrap();

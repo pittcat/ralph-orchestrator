@@ -5951,7 +5951,10 @@ hats:
 
     write_event_with_hat_to_jsonl(&events_path, "build.done", "done", "builder");
     let result = event_loop.process_events_from_jsonl().unwrap();
-    assert!(result.had_events, "Valid hat + scope event should be accepted");
+    assert!(
+        result.had_events,
+        "Valid hat + scope event should be accepted"
+    );
 }
 
 #[test]
@@ -5974,7 +5977,10 @@ hats:
     // Event from an unknown hat (strategist is not registered)
     write_event_with_hat_to_jsonl(&events_path, "experiment.planned", "plan1", "strategist");
     let result = event_loop.process_events_from_jsonl().unwrap();
-    assert!(!result.had_events, "Unknown hat event should be rejected by origin guard");
+    assert!(
+        !result.had_events,
+        "Unknown hat event should be rejected by origin guard"
+    );
 }
 
 #[test]
@@ -5997,7 +6003,10 @@ hats:
     // builder does not publish plan.approved
     write_event_with_hat_to_jsonl(&events_path, "plan.approved", "approved", "builder");
     let result = event_loop.process_events_from_jsonl().unwrap();
-    assert!(!result.had_events, "Out-of-scope event from registered hat should be rejected");
+    assert!(
+        !result.had_events,
+        "Out-of-scope event from registered hat should be rejected"
+    );
 }
 
 #[test]
@@ -6041,10 +6050,15 @@ hats:
             "wave_total": 1,
         });
         writeln!(
-            std::fs::OpenOptions::new().create(true).append(true).open(&events_path).unwrap(),
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&events_path)
+                .unwrap(),
             "{}",
             event
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     let result = event_loop.process_events_from_jsonl_with_waves().unwrap();
@@ -6101,10 +6115,15 @@ hats:
             "wave_total": 1,
         });
         writeln!(
-            std::fs::OpenOptions::new().create(true).append(true).open(&events_path).unwrap(),
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&events_path)
+                .unwrap(),
             "{}",
             event
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     let result = event_loop.process_events_from_jsonl_with_waves().unwrap();
@@ -6136,7 +6155,10 @@ hats:
     write_event_to_jsonl(&events_path, "human.interact", "What now?");
     let result = event_loop.process_events_from_jsonl().unwrap();
 
-    assert!(result.had_events, "Control topic without hat should be accepted");
+    assert!(
+        result.had_events,
+        "Control topic without hat should be accepted"
+    );
     assert!(
         result.human_interact_context.is_some(),
         "human.interact should produce interaction context"
@@ -6166,7 +6188,10 @@ hats:
     write_event_with_hat_to_jsonl(&events_path, "build.done", "second", "builder");
 
     let result = event_loop.process_events_from_jsonl().unwrap();
-    assert!(result.had_events, "Batch with at least one valid event should have had_events");
+    assert!(
+        result.had_events,
+        "Batch with at least one valid event should have had_events"
+    );
 }
 
 // ── End origin guard integration tests ──

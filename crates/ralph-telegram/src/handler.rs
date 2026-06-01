@@ -86,7 +86,8 @@ impl MessageHandler {
                 .ok()
                 .and_then(|g| g.clone())
                 .unwrap_or_default();
-            event_json["source"] = serde_json::Value::String(ralph_core::TRUSTED_HUMAN_RESPONSE_SOURCE.to_string());
+            event_json["source"] =
+                serde_json::Value::String(ralph_core::TRUSTED_HUMAN_RESPONSE_SOURCE.to_string());
             event_json["nonce"] = serde_json::Value::String(nonce);
         }
         let event_line = serde_json::to_string(&event_json)?;
@@ -233,12 +234,8 @@ mod tests {
         let state_manager = StateManager::new(state_path);
         let response_channel = Arc::new(std::sync::Mutex::new(None::<UnboundedSender<String>>));
         let response_nonce = Arc::new(std::sync::Mutex::new(None::<String>));
-        let handler = MessageHandler::new(
-            state_manager,
-            dir.path(),
-            response_channel,
-            response_nonce,
-        );
+        let handler =
+            MessageHandler::new(state_manager, dir.path(), response_channel, response_nonce);
         let state = TelegramState {
             chat_id: None,
             last_seen: None,
