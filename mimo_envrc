@@ -1,0 +1,11 @@
+export ANTHROPIC_AUTH_TOKEN="tp-cgb1drbor4toca4t56tfywp5s3awfbrdv0hz1ka34cvkvxnu"
+export ANTHROPIC_BASE_URL="https://token-plan-cn.xiaomimimo.com/anthropic"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="mimo-v2.5"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME="mimo-v2.5"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="mimo-v2.5[1M]"
+export ANTHROPIC_DEFAULT_OPUS_MODEL_NAME="mimo-v2.5"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="mimo-v2.5[1M]"
+export ANTHROPIC_DEFAULT_SONNET_MODEL_NAME="mimo-v2.5"
+export ANTHROPIC_MODEL="mimo-v2.5"
+export DISABLE_AUTO_COMPACT=0
+export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=60
