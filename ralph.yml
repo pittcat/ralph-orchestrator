@@ -3,7 +3,6 @@ cli:
 event_loop:
   completion_promise: LOOP_COMPLETE
   max_iterations: 500
-  required_events: ["review.passed", "review.complete"]
   prompt_file: PROMPT.md
 
 core:

@@ -121,3 +121,4 @@ PROMPT.md
 .codex/
 .agents/
 .playwright-cli/
+.ralph/

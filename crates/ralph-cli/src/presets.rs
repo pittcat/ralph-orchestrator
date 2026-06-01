@@ -1080,6 +1080,40 @@ mod tests {
     }
 
     #[test]
+    fn test_ce_executor_required_events_is_report_done_for_root_preset() {
+        // Mirror-drift guard: the embedded preset is loaded via `include_str!` from
+        // `crates/ralph-cli/presets/ce-executor.yml` (a mirror). If a future change
+        // reverts the canonical `presets/ce-executor.yml` at the repo root while
+        // leaving the mirror untouched, the `get_preset` test above would still
+        // pass and the original infinite-loop bug would silently return. Read the
+        // root file at test runtime so cargo test fails whenever the two diverge
+        // on the completion gate — even if `sync-embedded-files.sh check` is not
+        // part of the local dev loop.
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let root_preset_path = std::path::Path::new(manifest_dir)
+            .join("..")
+            .join("..")
+            .join("presets")
+            .join("ce-executor.yml");
+        let root_content = std::fs::read_to_string(&root_preset_path).unwrap_or_else(|e| {
+            panic!(
+                "failed to read root ce-executor preset at {}: {}",
+                root_preset_path.display(),
+                e
+            )
+        });
+        let config = RalphConfig::parse_yaml(&root_content)
+            .expect("root ce-executor YAML should parse");
+        assert_eq!(
+            config.event_loop.required_events,
+            &["report.done"],
+            "root ce-executor should require 'report.done' as its only completion gate; \
+             mirror drift would let the old 'review.passed' + 'review.complete' gate \
+             return without any embedded test noticing"
+        );
+    }
+
+    #[test]
     fn test_ce_executor_publish_chain_origin_compatible() {
         // Verify ce-executor's normal publish chain survives origin guard
         let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
@@ -1091,7 +1125,11 @@ mod tests {
         // ce-executor's expected publish chain (using actual hat_keys from YAML):
         // coordinator(work.ready) -> executor(work.done) -> review-coordinator(review.wave.ready)
         //   -> dimension-reviewer(review.dimension.done) -> review-synthesizer(review.passed)
-        //   -> shipper(REVIEW_COMPLETE) -> reporter(LOOP_COMPLETE)
+        //   -> shipper(REVIEW_COMPLETE) -> reporter(report.done, LOOP_COMPLETE)
+        //
+        // `report.done` is the required_events completion gate, so it must appear in
+        // the chain — otherwise the gate event would never fire and the original
+        // infinite-loop bug returns even with `required_events: ["report.done"]`.
         let chain_publishes: Vec<(&str, &str)> = vec![
             ("coordinator", "work.ready"),
             ("executor", "work.done"),
@@ -1099,6 +1137,7 @@ mod tests {
             ("dimension-reviewer", "review.dimension.done"),
             ("review-synthesizer", "review.passed"),
             ("shipper", "REVIEW_COMPLETE"),
+            ("reporter", "report.done"),
             ("reporter", "LOOP_COMPLETE"),
         ];
 
@@ -1125,5 +1164,29 @@ mod tests {
                 result
             );
         }
+    }
+
+    #[test]
+    fn test_ce_executor_reporter_publishes_report_done() {
+        // Static-config guard for the completion-gate event. The chain test above
+        // proves the event is origin-compatible at runtime, but `required_events`
+        // and `hat.publishes` are independent YAML fields. If a future refactor
+        // narrows `reporter.publishes` to just `["LOOP_COMPLETE"]` (or anything
+        // that drops `report.done`), the gate event would never fire and the
+        // infinite-loop bug would return even with `required_events: ["report.done"]`.
+        // Reading the static config catches that case at unit-test time.
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let config = RalphConfig::parse_yaml(preset.content)
+            .expect("ce-executor YAML should parse");
+        let reporter = config
+            .hats
+            .get("reporter")
+            .expect("ce-executor must define a 'reporter' hat");
+        assert!(
+            reporter.publishes.iter().any(|p| p == "report.done"),
+            "ce-executor 'reporter' hat must declare 'report.done' in `publishes` to \
+             satisfy the required_events completion gate. current publishes: {:?}",
+            reporter.publishes
+        );
     }
 }
