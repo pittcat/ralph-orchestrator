@@ -3698,12 +3698,48 @@ impl EventLoop {
             let ask_event = &validated_events[idx];
             let payload = ask_event.payload.clone();
 
-            let mut context = match Self::parse_human_interact_context(&payload) {
-                Value::Object(map) => map,
-                _ => Map::new(),
-            };
+            // P5: validate the human.interact payload before blocking. An
+            // empty/whitespace or malformed JSON payload is rejected up front
+            // so the loop does not block on a question that would never
+            // resolve. Inject a `human.timeout` so the agent sees a clear
+            // error and continues.
+            if let Err(reason) =
+                crate::event_origin::validate_human_interact_payload(Some(&payload))
+            {
+                warn!(
+                    payload = %payload,
+                    reason = %reason,
+                    "Rejecting human.interact with invalid payload before blocking"
+                );
+                self.diagnostics.log_error(
+                    self.state.iteration,
+                    "human.interact",
+                    crate::diagnostics::DiagnosticError::ValidationFailure {
+                        rule: "human_interact_payload".to_string(),
+                        message: format!("invalid human.interact payload: {reason}"),
+                        evidence: payload.clone(),
+                    },
+                );
+                let mut err_context = Map::new();
+                err_context.insert(
+                    "outcome".to_string(),
+                    Value::String("invalid_payload".to_string()),
+                );
+                err_context.insert("error".to_string(), Value::String(reason.clone()));
+                human_interact_context = Some(Value::Object(err_context));
+                response_event = Some(Event::new(
+                    "human.timeout",
+                    format!(
+                        "Invalid human.interact payload: {reason}. Original payload: {payload}"
+                    ),
+                ));
+            } else {
+                let mut context = match Self::parse_human_interact_context(&payload) {
+                    Value::Object(map) => map,
+                    _ => Map::new(),
+                };
 
-            if let Some(ref robot_service) = self.robot_service {
+                if let Some(ref robot_service) = self.robot_service {
                 info!(
                     payload = %payload,
                     "human.interact event detected — sending question via robot service"
@@ -3830,6 +3866,7 @@ impl EventLoop {
             }
 
             human_interact_context = Some(Value::Object(context));
+            }
         }
 
         let restart_requested = validated_events.iter().any(Self::is_restart_request_event)

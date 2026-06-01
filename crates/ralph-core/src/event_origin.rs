@@ -31,6 +31,72 @@ fn is_jsonl_control_topic(topic: &str, cancellation_topic: &str) -> bool {
     ) || (cancellation_topic == topic && !cancellation_topic.is_empty())
 }
 
+/// Source identifier stamped on `human.response` events produced by the trusted
+/// in-process channel of an active Robot service (e.g., Telegram). The waiter
+/// rejects JSONL events without this marker when a Robot service is active.
+pub const TRUSTED_HUMAN_RESPONSE_SOURCE: &str = "robot-trusted";
+
+/// Returns `true` when the event is a `human.response` carrying the trusted
+/// in-process source marker. Events without this marker are treated as forged
+/// and ignored by the trusted waiter path.
+pub fn is_trusted_human_response(event: &JsonlEvent) -> bool {
+    event.topic == "human.response" && event.source.as_deref() == Some(TRUSTED_HUMAN_RESPONSE_SOURCE)
+}
+
+/// Result of validating a `human.interact` payload before it is sent.
+///
+/// The waiter path is required to send a non-empty question; if the agent
+/// produced an empty or malformed payload, the question is rejected before
+/// any blocking wait happens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HumanInteractValidation {
+    /// Payload is a plain string and the trimmed question is non-empty.
+    Plain { question: String },
+    /// Payload is a JSON object with a non-empty `question` string field.
+    Json { question: String },
+}
+
+/// Validates a `human.interact` payload.
+///
+/// - Plain strings: trimmed value must be non-empty.
+/// - JSON objects: must contain a `question` string field whose trimmed value
+///   is non-empty.
+///
+/// Returns `Ok(validation)` describing the shape, or `Err(reason)` explaining
+/// why the payload was rejected. Used by the event loop to refuse to block
+/// on an empty question.
+pub fn validate_human_interact_payload(
+    payload: Option<&str>,
+) -> Result<HumanInteractValidation, String> {
+    let raw = payload.unwrap_or("");
+    let trimmed = raw.trim();
+
+    if trimmed.starts_with('{') {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if let Some(question) = value.get("question").and_then(|q| q.as_str()) {
+                let q = question.trim();
+                if !q.is_empty() {
+                    return Ok(HumanInteractValidation::Json {
+                        question: q.to_string(),
+                    });
+                }
+                return Err(
+                    "human.interact JSON payload missing non-empty `question` field".to_string(),
+                );
+            }
+            return Err("human.interact JSON payload missing `question` field".to_string());
+        }
+    }
+
+    if trimmed.is_empty() {
+        return Err("human.interact payload is empty or whitespace".to_string());
+    }
+
+    Ok(HumanInteractValidation::Plain {
+        question: trimmed.to_string(),
+    })
+}
+
 /// Result of origin validation for a JSONL event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OriginCheck {

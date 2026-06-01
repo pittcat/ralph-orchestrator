@@ -85,6 +85,10 @@ pub use event_parser::EventParser;
 pub use event_policy::{
     PolicyDecision, PolicyFinding, PolicyRuntimeState, ViolationType, validate_event,
 };
+pub use event_origin::{
+    HumanInteractValidation, TRUSTED_HUMAN_RESPONSE_SOURCE, is_trusted_human_response,
+    validate_human_interact_payload,
+};
 pub use event_projection::apply_projection;
 pub use event_reader::{Event, EventReader, MalformedLine, ParseResult};
 pub use file_lock::{FileLock, LockGuard as FileLockGuard, LockedFile};

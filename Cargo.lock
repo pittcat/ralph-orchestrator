@@ -2894,6 +2894,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "nix 0.29.0",
+ "ralph-core",
  "ralph-proto",
  "serde",
  "serde_json",

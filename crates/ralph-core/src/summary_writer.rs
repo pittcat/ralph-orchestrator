@@ -334,6 +334,9 @@ mod tests {
             policy_runtime_state: None,
             state_machine_runtime_state: None,
             last_verdict_payload: None,
+            completion_rejection_signature: None,
+            consecutive_completion_rejections: 0,
+            last_rejection_seen_topics_count: 0,
         }
     }
 

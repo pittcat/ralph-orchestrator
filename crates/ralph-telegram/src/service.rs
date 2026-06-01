@@ -1,10 +1,11 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
 
 use crate::bot::TelegramBot;
@@ -92,6 +93,23 @@ pub struct TelegramService {
     handler: MessageHandler,
     bot: TelegramBot,
     shutdown: Arc<AtomicBool>,
+    /// Trusted response channel: when the message handler receives a
+    /// `human.response` from Telegram, it forwards the response text through
+    /// this sender. `wait_for_response` installs a matching receiver and
+    /// prefers it over the JSONL poll loop. This is the production source of
+    /// trust: agent-written JSONL `human.response` events cannot satisfy
+    /// this path because they never touch the channel.
+    response_channel: Arc<Mutex<Option<UnboundedSender<String>>>>,
+    /// Process-private nonce stamped on `human.response` events written by
+    /// the handler. `wait_for_response` rotates the nonce per call; the
+    /// handler reads it and embeds it in the event so the JSONL fallback
+    /// path can verify ownership even when the channel is unavailable.
+    response_nonce: Arc<Mutex<Option<String>>>,
+    /// When `true`, `wait_for_response` uses the degraded JSONL polling
+    /// path (forgeable) instead of the trusted in-process channel. Tests
+    /// toggle this via `set_mock_mode`; the `RALPH_TELEGRAM_MOCK` env var
+    /// is the production opt-in.
+    mock_mode: Arc<Mutex<bool>>,
 }
 
 impl TelegramService {
@@ -114,7 +132,17 @@ impl TelegramService {
         let state_path = workspace_root.join(".ralph/telegram-state.json");
         let state_manager = StateManager::new(&state_path);
         let handler_state_manager = StateManager::new(&state_path);
-        let handler = MessageHandler::new(handler_state_manager, &workspace_root);
+        let response_channel = Arc::new(Mutex::new(None::<UnboundedSender<String>>));
+        let response_nonce = Arc::new(Mutex::new(None::<String>));
+        let mock_mode = Arc::new(Mutex::new(
+            std::env::var("RALPH_TELEGRAM_MOCK").is_ok(),
+        ));
+        let handler = MessageHandler::new(
+            handler_state_manager,
+            &workspace_root,
+            Arc::clone(&response_channel),
+            Arc::clone(&response_nonce),
+        );
         let bot = TelegramBot::new(&resolved_token, api_url.as_deref());
         let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -128,6 +156,9 @@ impl TelegramService {
             handler,
             bot,
             shutdown,
+            response_channel,
+            response_nonce,
+            mock_mode,
         })
     }
 
@@ -177,6 +208,17 @@ impl TelegramService {
         self.shutdown.clone()
     }
 
+    /// Toggle the mock mode that selects between the trusted in-process
+    /// channel and the degraded JSONL polling path. Tests use this to
+    /// simulate an external writer without the trusted channel running.
+    /// Production callers should not invoke this; set the
+    /// `RALPH_TELEGRAM_MOCK` env var instead.
+    pub fn set_mock_mode(&self, mock: bool) {
+        if let Ok(mut guard) = self.mock_mode.lock() {
+            *guard = mock;
+        }
+    }
+
     /// Start the Telegram service.
     ///
     /// Spawns a background polling task on the host tokio runtime to receive
@@ -200,9 +242,20 @@ impl TelegramService {
         let state_path = self.workspace_root.join(".ralph/telegram-state.json");
         let shutdown = self.shutdown.clone();
         let loop_id = self.loop_id.clone();
+        let response_channel = Arc::clone(&self.response_channel);
+        let response_nonce = Arc::clone(&self.response_nonce);
 
         handle.spawn(async move {
-            Self::poll_updates(raw_bot, workspace_root, state_path, shutdown, loop_id).await;
+            Self::poll_updates(
+                raw_bot,
+                workspace_root,
+                state_path,
+                shutdown,
+                loop_id,
+                response_channel,
+                response_nonce,
+            )
+            .await;
         });
 
         // Send greeting if we already know the chat ID
@@ -230,13 +283,20 @@ impl TelegramService {
         state_path: PathBuf,
         shutdown: Arc<AtomicBool>,
         loop_id: String,
+        response_channel: Arc<Mutex<Option<UnboundedSender<String>>>>,
+        response_nonce: Arc<Mutex<Option<String>>>,
     ) {
         use teloxide::payloads::{GetUpdatesSetters, SetMessageReactionSetters};
         use teloxide::requests::Requester;
 
         let state_manager = StateManager::new(&state_path);
         let handler_state_manager = StateManager::new(&state_path);
-        let handler = MessageHandler::new(handler_state_manager, &workspace_root);
+        let handler = MessageHandler::new(
+            handler_state_manager,
+            &workspace_root,
+            response_channel,
+            response_nonce,
+        );
         let mut offset: i32 = 0;
 
         if let Ok(state) = state_manager.load_or_default()
@@ -621,14 +681,30 @@ impl TelegramService {
     /// Poll the events file for a `human.response` event, blocking until one
     /// arrives or the configured timeout expires.
     ///
-    /// Polls the given `events_path` every second for new lines containing
-    /// `"human.response"`. On response, removes the pending question and
-    /// returns the response message. On timeout, removes the pending question
-    /// and returns `None`.
+    /// Production path: install a trusted channel receiver and prefer it over
+    /// the JSONL poll loop. The handler in `poll_updates` forwards real
+    /// Telegram messages through the channel; agent-written JSONL
+    /// `human.response` events never touch the channel and are ignored.
+    ///
+    /// Degraded path: if the channel is unavailable (e.g. test/mock mode that
+    /// bypasses `start()`), fall back to JSONL polling. A warning is logged
+    /// because this mode is forgeable by an agent that can write to the
+    /// events file.
     pub fn wait_for_response(&self, events_path: &Path) -> TelegramResult<Option<String>> {
         let timeout = Duration::from_secs(self.timeout_secs);
-        let poll_interval = Duration::from_millis(250);
         let deadline = Instant::now() + timeout;
+        let nonce = generate_response_nonce();
+
+        // Install the trusted receiver and publish the current nonce. When
+        // the handler stamps the matching nonce on a `human.response` event
+        // written to JSONL, the degraded fallback path can verify ownership.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        if let Ok(mut guard) = self.response_channel.lock() {
+            *guard = Some(tx);
+        }
+        if let Ok(mut guard) = self.response_nonce.lock() {
+            *guard = Some(nonce.clone());
+        }
 
         // Track file position to only read new lines
         let initial_pos = if events_path.exists() {
@@ -637,71 +713,131 @@ impl TelegramService {
             0
         };
         let mut file_pos = initial_pos;
+        // Production: use the trusted channel. Mock mode (tests or
+        // RALPH_TELEGRAM_MOCK) opts into the degraded JSONL path.
+        let use_channel = !*self.mock_mode.lock().unwrap_or_else(|p| p.into_inner());
 
         info!(
             loop_id = %self.loop_id,
             timeout_secs = self.timeout_secs,
             events_path = %events_path.display(),
+            mode = if use_channel { "trusted-channel" } else { "degraded-jsonl" },
             "Waiting for human.response"
         );
 
-        loop {
-            if Instant::now() >= deadline {
-                warn!(
-                    loop_id = %self.loop_id,
-                    timeout_secs = self.timeout_secs,
-                    "Timed out waiting for human.response"
-                );
+        if !use_channel {
+            warn!(
+                loop_id = %self.loop_id,
+                "Degraded JSONL polling enabled; responses on this path are forgeable by agents that can write to the events file"
+            );
+        }
 
-                // Remove pending question on timeout
-                if let Ok(mut state) = self.state_manager.load_or_default() {
-                    let _ = self
-                        .state_manager
-                        .remove_pending_question(&mut state, &self.loop_id);
+        if use_channel {
+            // Trusted channel path: prefer the in-process delivery. If the
+            // channel sender is dropped (handler shut down) before the
+            // deadline, fall through to the JSONL fallback so any
+            // already-recorded response can still resolve the wait.
+            let mut channel_closed = false;
+            while !channel_closed {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    self.finish_wait();
+                    self.clear_trusted_paths();
+                    return Ok(None);
                 }
-
-                return Ok(None);
+                if self.shutdown.load(Ordering::Relaxed) {
+                    self.finish_wait();
+                    self.clear_trusted_paths();
+                    return Ok(None);
+                }
+                match self.try_recv_channel(&mut rx, remaining.min(Duration::from_millis(50))) {
+                    Ok(Some(text)) => {
+                        self.finish_wait();
+                        self.clear_trusted_paths();
+                        return Ok(Some(text));
+                    }
+                    Ok(None) => continue,
+                    Err(()) => channel_closed = true,
+                }
             }
+            warn!(
+                loop_id = %self.loop_id,
+                "Trusted response channel closed before timeout; falling back to degraded JSONL polling"
+            );
+        }
 
-            // Check if we've been interrupted (Ctrl+C / SIGTERM / SIGHUP)
+        // Degraded JSONL path (mock mode or channel-closed fallback):
+        // require the trusted source marker and matching nonce.
+        while Instant::now() < deadline {
             if self.shutdown.load(Ordering::Relaxed) {
-                info!(loop_id = %self.loop_id, "Interrupted while waiting for human.response");
-                if let Ok(mut state) = self.state_manager.load_or_default() {
-                    let _ = self
-                        .state_manager
-                        .remove_pending_question(&mut state, &self.loop_id);
-                }
+                self.finish_wait();
+                self.clear_trusted_paths();
                 return Ok(None);
             }
-
-            // Read new lines from the events file
-            if let Some(response) = Self::check_for_response(events_path, &mut file_pos)? {
-                info!(
-                    loop_id = %self.loop_id,
-                    "Received human.response: {}",
-                    response
-                );
-
-                // Remove pending question on response
-                if let Ok(mut state) = self.state_manager.load_or_default() {
-                    let _ = self
-                        .state_manager
-                        .remove_pending_question(&mut state, &self.loop_id);
-                }
-
+            if let Some(response) =
+                Self::check_for_response_with_nonce(events_path, &mut file_pos, &nonce)?
+            {
+                self.finish_wait();
+                self.clear_trusted_paths();
                 return Ok(Some(response));
             }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        self.finish_wait();
+        self.clear_trusted_paths();
+        Ok(None)
+    }
 
-            std::thread::sleep(poll_interval);
+    fn finish_wait(&self) {
+        if let Ok(mut state) = self.state_manager.load_or_default() {
+            let _ = self
+                .state_manager
+                .remove_pending_question(&mut state, &self.loop_id);
         }
     }
 
-    /// Check the events file for a `human.response` event starting from
-    /// `file_pos`. Updates `file_pos` to the new end of file.
-    fn check_for_response(
+    fn clear_trusted_paths(&self) {
+        if let Ok(mut guard) = self.response_channel.lock() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = self.response_nonce.lock() {
+            *guard = None;
+        }
+    }
+
+    /// Try to receive a response from the trusted channel within `timeout`.
+    /// Returns `Ok(Some(text))` on a delivered message, `Ok(None)` on
+    /// timeout, and `Err(())` if the sender was dropped.
+    fn try_recv_channel(
+        &self,
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+        timeout: Duration,
+    ) -> Result<Option<String>, ()> {
+        match rx.try_recv() {
+            Ok(text) => Ok(Some(text)),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                std::thread::sleep(timeout);
+                match rx.try_recv() {
+                    Ok(text) => Ok(Some(text)),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => Ok(None),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => Err(()),
+                }
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => Err(()),
+        }
+    }
+
+    /// Check the events file for a `human.response` event with an expected
+    /// nonce. When `expected_nonce` is non-empty, only events whose `source`
+    /// marker matches `TRUSTED_HUMAN_RESPONSE_SOURCE` and whose `nonce` field
+    /// equals `expected_nonce` are accepted. When the expected nonce is
+    /// empty, the legacy behavior is used (any `human.response` is accepted).
+    fn check_for_response_with_nonce(
         events_path: &Path,
         file_pos: &mut u64,
+        expected_nonce: &str,
     ) -> TelegramResult<Option<String>> {
+        use ralph_core::TRUSTED_HUMAN_RESPONSE_SOURCE;
         use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
         if !events_path.exists() {
@@ -725,6 +861,22 @@ impl TelegramService {
             if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line)
                 && event.get("topic").and_then(|t| t.as_str()) == Some("human.response")
             {
+                if !expected_nonce.is_empty() {
+                    let source = event
+                        .get("source")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("");
+                    let event_nonce = event.get("nonce").and_then(|s| s.as_str()).unwrap_or("");
+                    if source != TRUSTED_HUMAN_RESPONSE_SOURCE || event_nonce != expected_nonce {
+                        debug!(
+                            expected = %expected_nonce,
+                            event_nonce = %event_nonce,
+                            source = %source,
+                            "Skipping human.response without matching trusted source/nonce"
+                        );
+                        continue;
+                    }
+                }
                 let message = event
                     .get("payload")
                     .and_then(|p| p.as_str())
@@ -735,6 +887,11 @@ impl TelegramService {
 
             // Also check pipe-separated format (written by MessageHandler)
             if line.contains("EVENT: human.response") {
+                // Pipe format is only used by legacy untrusted callers; when
+                // the trusted nonce is required, ignore these.
+                if !expected_nonce.is_empty() {
+                    continue;
+                }
                 // Extract message from pipe-separated format:
                 // EVENT: human.response | message: "..." | timestamp: "..."
                 let message = line
@@ -752,6 +909,20 @@ impl TelegramService {
 
         Ok(None)
     }
+}
+
+/// Generate a fresh, process-private nonce for a `wait_for_response` call.
+/// The nonce is random per call so agent-written JSONL events cannot satisfy
+/// the waiter even if they guess a single value.
+fn generate_response_nonce() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id();
+    format!("n{}-{}", pid, nanos)
 }
 
 impl ralph_proto::RobotService for TelegramService {
@@ -935,7 +1106,7 @@ mod tests {
         file.flush().unwrap();
 
         let mut pos = 0;
-        let result = TelegramService::check_for_response(&events_path, &mut pos).unwrap();
+        let result = TelegramService::check_for_response_with_nonce(&events_path, &mut pos, "").unwrap();
         assert_eq!(result, Some("Use async".to_string()));
     }
 
@@ -953,7 +1124,7 @@ mod tests {
         file.flush().unwrap();
 
         let mut pos = 0;
-        let result = TelegramService::check_for_response(&events_path, &mut pos).unwrap();
+        let result = TelegramService::check_for_response_with_nonce(&events_path, &mut pos, "").unwrap();
         assert_eq!(result, Some("Use sync".to_string()));
     }
 
@@ -976,7 +1147,7 @@ mod tests {
         file.flush().unwrap();
 
         let mut pos = 0;
-        let result = TelegramService::check_for_response(&events_path, &mut pos).unwrap();
+        let result = TelegramService::check_for_response_with_nonce(&events_path, &mut pos, "").unwrap();
         assert_eq!(result, None);
     }
 
@@ -986,7 +1157,7 @@ mod tests {
         let events_path = dir.path().join("does-not-exist.jsonl");
 
         let mut pos = 0;
-        let result = TelegramService::check_for_response(&events_path, &mut pos).unwrap();
+        let result = TelegramService::check_for_response_with_nonce(&events_path, &mut pos, "").unwrap();
         assert_eq!(result, None);
     }
 
@@ -1010,7 +1181,7 @@ mod tests {
         file.flush().unwrap();
 
         let mut pos = 0;
-        let result = TelegramService::check_for_response(&events_path, &mut pos).unwrap();
+        let result = TelegramService::check_for_response_with_nonce(&events_path, &mut pos, "").unwrap();
         assert_eq!(result, None);
         assert!(pos > 0, "position should advance after reading");
 
@@ -1029,13 +1200,15 @@ mod tests {
         file.flush().unwrap();
 
         // Should find the response starting from where we left off
-        let result = TelegramService::check_for_response(&events_path, &mut pos).unwrap();
+        let result = TelegramService::check_for_response_with_nonce(&events_path, &mut pos, "").unwrap();
         assert_eq!(result, Some("yes".to_string()));
         assert!(pos > pos_after_first, "position should advance further");
     }
 
     #[test]
     fn wait_for_response_returns_on_response() {
+        // Opt into the degraded JSONL polling path: this test simulates
+        // an external writer (not the trusted channel).
         let dir = TempDir::new().unwrap();
         let service = TelegramService::new(
             dir.path().to_path_buf(),
@@ -1045,6 +1218,7 @@ mod tests {
             "main".to_string(),
         )
         .unwrap();
+        service.set_mock_mode(true);
 
         let events_path = dir.path().join("events.jsonl");
         // Create an empty events file so wait_for_response records position 0
@@ -1053,24 +1227,53 @@ mod tests {
         // Store a pending question first
         service.send_question("Which plan?").unwrap();
 
-        // Spawn a thread to write the response after a brief delay
-        let writer_path = events_path.clone();
-        let writer = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(200));
+        let service = std::sync::Arc::new(service);
+        let writer_service = std::sync::Arc::clone(&service);
+
+        // Spawn a thread to call wait_for_response; the writer thread will
+        // append a response with the current nonce once it appears.
+        let path_for_wait = events_path.clone();
+        let wait_service = std::sync::Arc::clone(&service);
+        let waiter = std::thread::spawn(move || {
+            wait_service.wait_for_response(&path_for_wait).unwrap()
+        });
+
+        // Wait until wait_for_response has installed its nonce.
+        let nonce = {
+            let mut attempts = 0;
+            loop {
+                if let Some(n) = writer_service
+                    .response_nonce
+                    .lock()
+                    .unwrap()
+                    .clone()
+                {
+                    break n;
+                }
+                attempts += 1;
+                if attempts > 200 {
+                    panic!("wait_for_response did not install a nonce in time");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+
+        // Write the response with the matching trusted source + nonce.
+        {
             let mut file = std::fs::OpenOptions::new()
                 .append(true)
-                .open(&writer_path)
+                .open(&events_path)
                 .unwrap();
             writeln!(
                 file,
-                r#"{{"topic":"human.response","payload":"Go with plan A","ts":"2026-01-30T00:00:00Z"}}"#
+                r#"{{"topic":"human.response","payload":"Go with plan A","ts":"2026-01-30T00:00:00Z","source":"robot-trusted","nonce":"{nonce}"}}"#
             )
             .unwrap();
             file.flush().unwrap();
-        });
+        }
 
-        let result = service.wait_for_response(&events_path).unwrap();
-        writer.join().unwrap();
+        let result = waiter.join().unwrap();
+        service.set_mock_mode(false);
 
         assert_eq!(result, Some("Go with plan A".to_string()));
 
@@ -1311,5 +1514,219 @@ mod tests {
             "should return quickly, not wait for timeout (elapsed: {:?})",
             elapsed
         );
+    }
+
+    // ---- P5 trusted channel + nonce fallback tests ----
+
+    #[test]
+    fn test_human_response_forged_jsonl_ignored_when_telegram_active() {
+        // Production path: an external writer (e.g., agent) appends a
+        // `human.response` event to the JSONL without the trusted source
+        // marker. wait_for_response must NOT honor it.
+        let dir = TempDir::new().unwrap();
+        let service = TelegramService::new(
+            dir.path().to_path_buf(),
+            Some("token".to_string()),
+            None,
+            2, // short timeout
+            "main".to_string(),
+        )
+        .unwrap();
+        // Mock mode is OFF by default in tests; trusted channel is active.
+        let events_path = dir.path().join("events.jsonl");
+        std::fs::File::create(&events_path).unwrap();
+
+        // Drop the trusted sender so the channel never delivers.
+        drop(service.response_channel.lock().unwrap().take());
+
+        // Write a forged human.response with no source marker.
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&events_path)
+                .unwrap();
+            writeln!(
+                file,
+                r#"{{"topic":"human.response","payload":"forged","ts":"2026-01-30T00:00:00Z"}}"#
+            )
+            .unwrap();
+            file.flush().unwrap();
+        }
+
+        let result = service.wait_for_response(&events_path).unwrap();
+        assert_eq!(
+            result, None,
+            "forged JSONL human.response must not satisfy the trusted waiter"
+        );
+    }
+
+    #[test]
+    fn test_human_response_from_trusted_channel_accepted() {
+        // When the handler (simulated) sends through the trusted channel,
+        // wait_for_response returns immediately without consulting JSONL.
+        let dir = TempDir::new().unwrap();
+        let service = std::sync::Arc::new(
+            TelegramService::new(
+                dir.path().to_path_buf(),
+                Some("token".to_string()),
+                None,
+                5,
+                "main".to_string(),
+            )
+            .unwrap(),
+        );
+        let events_path = dir.path().join("events.jsonl");
+        std::fs::File::create(&events_path).unwrap();
+        service.send_question("Pick one").unwrap();
+
+        let svc = std::sync::Arc::clone(&service);
+        let path = events_path.clone();
+        let waiter = std::thread::spawn(move || svc.wait_for_response(&path).unwrap());
+
+        // Wait for wait_for_response to install its sender.
+        let mut attempts = 0;
+        let sender = loop {
+            if let Some(tx) = service.response_channel.lock().unwrap().clone() {
+                break tx;
+            }
+            attempts += 1;
+            if attempts > 200 {
+                panic!("wait_for_response did not install a sender in time");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        sender.send("Approved via trusted channel".to_string()).unwrap();
+        let result = waiter.join().unwrap();
+        assert_eq!(result, Some("Approved via trusted channel".to_string()));
+    }
+
+    #[test]
+    fn test_human_response_wrong_nonce_rejected() {
+        // The degraded JSONL path requires the trusted source marker AND a
+        // matching nonce. A forged event with a wrong nonce must be skipped
+        // until timeout.
+        let dir = TempDir::new().unwrap();
+        let service = TelegramService::new(
+            dir.path().to_path_buf(),
+            Some("token".to_string()),
+            None,
+            1, // short timeout
+            "main".to_string(),
+        )
+        .unwrap();
+        service.set_mock_mode(true);
+        let events_path = dir.path().join("events.jsonl");
+        std::fs::File::create(&events_path).unwrap();
+
+        // Pre-install a wrong nonce in the service.
+        *service.response_nonce.lock().unwrap() = Some("expected-nonce".to_string());
+
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&events_path)
+                .unwrap();
+            writeln!(
+                file,
+                r#"{{"topic":"human.response","payload":"forged","ts":"x","source":"robot-trusted","nonce":"WRONG"}}"#
+            )
+            .unwrap();
+            file.flush().unwrap();
+        }
+
+        let result = service.wait_for_response(&events_path).unwrap();
+        assert_eq!(
+            result, None,
+            "response with the wrong nonce must not satisfy the degraded waiter"
+        );
+    }
+
+    #[test]
+    fn test_human_response_timeout_still_injects_timeout() {
+        // The trusted waiter path must still respect the configured timeout.
+        let dir = TempDir::new().unwrap();
+        let service = TelegramService::new(
+            dir.path().to_path_buf(),
+            Some("token".to_string()),
+            None,
+            1,
+            "main".to_string(),
+        )
+        .unwrap();
+        let events_path = dir.path().join("events.jsonl");
+        std::fs::File::create(&events_path).unwrap();
+        service.send_question("any?").unwrap();
+
+        let start = Instant::now();
+        let result = service.wait_for_response(&events_path).unwrap();
+        let elapsed = start.elapsed();
+
+        assert_eq!(result, None);
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "timeout should fire within the configured window (elapsed: {:?})",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn test_degraded_jsonl_polling_only_enabled_in_mock_mode() {
+        // When mock_mode is false (the default in tests), an unmatched JSONL
+        // event must not satisfy wait_for_response; the trusted path is
+        // active and no channel sender delivers.
+        let dir = TempDir::new().unwrap();
+        let service = TelegramService::new(
+            dir.path().to_path_buf(),
+            Some("token".to_string()),
+            None,
+            1,
+            "main".to_string(),
+        )
+        .unwrap();
+        // mock_mode default = false (production trusted channel active).
+        let events_path = dir.path().join("events.jsonl");
+        std::fs::File::create(&events_path).unwrap();
+
+        // Drop the trusted sender so the channel closes immediately.
+        drop(service.response_channel.lock().unwrap().take());
+
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&events_path)
+                .unwrap();
+            writeln!(
+                file,
+                r#"{{"topic":"human.response","payload":"untrusted","ts":"x"}}"#
+            )
+            .unwrap();
+            file.flush().unwrap();
+        }
+
+        let result = service.wait_for_response(&events_path).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_degraded_jsonl_polling_logs_warning() {
+        // Enable mock mode and verify wait_for_response completes (this also
+        // exercises the warning log path; the log itself is not asserted to
+        // keep the test hermetic).
+        let dir = TempDir::new().unwrap();
+        let service = TelegramService::new(
+            dir.path().to_path_buf(),
+            Some("token".to_string()),
+            None,
+            1,
+            "main".to_string(),
+        )
+        .unwrap();
+        service.set_mock_mode(true);
+        let events_path = dir.path().join("events.jsonl");
+        std::fs::File::create(&events_path).unwrap();
+        service.send_question("any?").unwrap();
+        let result = service.wait_for_response(&events_path).unwrap();
+        assert_eq!(result, None);
     }
 }

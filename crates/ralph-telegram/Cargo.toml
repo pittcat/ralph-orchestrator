@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 ralph-proto.workspace = true
+ralph-core.workspace = true
 
 tokio.workspace = true
 async-trait.workspace = true

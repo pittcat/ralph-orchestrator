@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::error::TelegramResult;
 use crate::state::{StateManager, TelegramState};
@@ -9,14 +11,30 @@ use crate::state::{StateManager, TelegramState};
 pub struct MessageHandler {
     state_manager: StateManager,
     workspace_root: PathBuf,
+    /// Trusted response channel: when a `human.response` arrives, the text is
+    /// also forwarded through this sender. `TelegramService::wait_for_response`
+    /// owns the matching receiver and prefers this in-process path over the
+    /// JSONL poll loop. This is the production source of trust.
+    response_channel: Arc<Mutex<Option<UnboundedSender<String>>>>,
+    /// Process-private nonce stamped on `human.response` events so the
+    /// JSONL fallback path can verify ownership. Rotated per
+    /// `wait_for_response` call by the service.
+    response_nonce: Arc<Mutex<Option<String>>>,
 }
 
 impl MessageHandler {
     /// Create a new message handler rooted at the given workspace.
-    pub fn new(state_manager: StateManager, workspace_root: impl Into<PathBuf>) -> Self {
+    pub fn new(
+        state_manager: StateManager,
+        workspace_root: impl Into<PathBuf>,
+        response_channel: Arc<Mutex<Option<UnboundedSender<String>>>>,
+        response_nonce: Arc<Mutex<Option<String>>>,
+    ) -> Self {
         Self {
             state_manager,
             workspace_root: workspace_root.into(),
+            response_channel,
+            response_nonce,
         }
     }
 
@@ -51,11 +69,26 @@ impl MessageHandler {
         };
 
         let timestamp = Utc::now().to_rfc3339();
-        let event_json = serde_json::json!({
+
+        // For `human.response`, stamp the trusted source marker and the
+        // current nonce so the JSONL fallback path can verify that this event
+        // originated from the active Telegram session, not from a forged
+        // JSONL write by an agent.
+        let mut event_json = serde_json::json!({
             "topic": topic,
             "payload": text,
             "ts": timestamp,
         });
+        if is_response {
+            let nonce = self
+                .response_nonce
+                .lock()
+                .ok()
+                .and_then(|g| g.clone())
+                .unwrap_or_default();
+            event_json["source"] = serde_json::Value::String(ralph_core::TRUSTED_HUMAN_RESPONSE_SOURCE.to_string());
+            event_json["nonce"] = serde_json::Value::String(nonce);
+        }
         let event_line = serde_json::to_string(&event_json)?;
 
         self.append_event(&events_path, &event_line)?;
@@ -63,6 +96,13 @@ impl MessageHandler {
         if is_response {
             self.state_manager
                 .remove_pending_question(state, &target_loop)?;
+            // Forward through the trusted channel so the blocking waiter wakes
+            // immediately, without re-reading the events file.
+            if let Ok(guard) = self.response_channel.lock()
+                && let Some(tx) = guard.as_ref()
+            {
+                let _ = tx.send(text.to_string());
+            }
         }
 
         tracing::info!(
@@ -191,7 +231,14 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let state_path = dir.path().join(".ralph/telegram-state.json");
         let state_manager = StateManager::new(state_path);
-        let handler = MessageHandler::new(state_manager, dir.path());
+        let response_channel = Arc::new(std::sync::Mutex::new(None::<UnboundedSender<String>>));
+        let response_nonce = Arc::new(std::sync::Mutex::new(None::<String>));
+        let handler = MessageHandler::new(
+            state_manager,
+            dir.path(),
+            response_channel,
+            response_nonce,
+        );
         let state = TelegramState {
             chat_id: None,
             last_seen: None,
