@@ -50,13 +50,17 @@ pub enum OriginCheck {
 /// processing. It implements the following rules:
 ///
 /// - **Registry empty (solo mode)**: All events are accepted (permissive for hatless baseline).
-/// - **No-hat events**: Accepted (scope enforcement in the caller already validates
-///   against active hats; no-hat events from the orchestrator or test infrastructure
-///   must continue to work).
+/// - **No-hat events**: Accepted through the origin guard. Scope enforcement
+///   in the caller (`process_parse_result`/`process_events_from_jsonl_with_waves`)
+///   still validates them against active hats when `enforce_hat_scope` is on.
+///   The R9 hardening of "reject no-hat business events in hat-based mode" is
+///   deferred to a follow-up plan to keep this stability pass scoped to the
+///   control-topic ordering bug.
 /// - **Unknown hat**: Always rejected (fail-closed — primary protection against
 ///   LLM-generated fake events from unregistered hat names).
+/// - **Registered hat + control topic**: Accepted even if not in `publishes`,
+///   so presets do not have to enumerate every control topic on every hat.
 /// - **Registered hat + out-of-scope**: Rejected when the hat cannot publish the topic.
-/// - **Control topics**: Registered hats can emit control topics even if not in publishes.
 ///
 /// # Arguments
 ///
@@ -69,27 +73,24 @@ pub fn validate_event_origin(
     cancellation_topic: &str,
 ) -> OriginCheck {
     let topic_str = event.topic.as_str();
+    let is_control = is_jsonl_control_topic(topic_str, cancellation_topic);
 
     // Solo / hatless mode: be permissive for business events
     if registry.is_empty() {
         return OriginCheck::Accepted;
     }
 
-    // Control topics: accept no-hat events for recognized orchestration controls
-    if event.hat.is_none() && is_jsonl_control_topic(topic_str, cancellation_topic) {
-        return OriginCheck::Accepted;
-    }
-
-    // No-hat events: accept. Scope enforcement in the caller already validates
-    // against active hats. This preserves backward compatibility for events
-    // written by the orchestrator or test infrastructure without provenance.
+    // No-hat events pass through; downstream scope enforcement decides if the
+    // event is allowed. This preserves the existing contract used by the loop
+    // runner when emitting control signals (LOOP_COMPLETE, task.resume, etc.)
+    // without a hat provenance.
     if event.hat.is_none() {
         return OriginCheck::Accepted;
     }
 
     let hat_id = HatId::new(event.hat.as_ref().unwrap());
 
-    // Unknown hat: always reject
+    // Unknown hat: always reject (including control topics — fail-closed).
     if registry.get(&hat_id).is_none() {
         warn!(
             topic = %topic_str,
@@ -103,7 +104,14 @@ pub fn validate_event_origin(
         };
     }
 
-    // Registered hat: check publish scope
+    // Registered hat + control topic: accept without checking `publishes`.
+    // This is the P0 ordering fix: control topics must be allowed even when
+    // not enumerated in the hat's `publishes` list.
+    if is_control {
+        return OriginCheck::Accepted;
+    }
+
+    // Registered hat + business topic: enforce publish scope.
     if !registry.can_publish(&hat_id, topic_str) {
         warn!(
             topic = %topic_str,
@@ -115,13 +123,6 @@ pub fn validate_event_origin(
             hat: event.hat.clone(),
             reason: "out-of-scope topic for declared hat",
         };
-    }
-
-    // Control topics from registered hats: accept even if not in publishes
-    // (the allowlist check above already passed for no-hat, but registered hats
-    // should also be able to emit control topics without boilerplate in every preset)
-    if is_jsonl_control_topic(topic_str, cancellation_topic) {
-        return OriginCheck::Accepted;
     }
 
     OriginCheck::Accepted
@@ -171,6 +172,20 @@ mod tests {
         }
     }
 
+    fn make_wave_event(topic: &str, hat: Option<&str>) -> JsonlEvent {
+        JsonlEvent {
+            topic: topic.to_string(),
+            payload: None,
+            ts: "2024-01-01T00:00:00Z".to_string(),
+            hat: hat.map(|s| s.to_string()),
+            triggered: None,
+            source: None,
+            wave_id: Some("w-test".to_string()),
+            wave_index: Some(0),
+            wave_total: Some(1),
+        }
+    }
+
     fn registry_with_hats(yaml: &str) -> HatRegistry {
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
         HatRegistry::from_config(&config)
@@ -209,10 +224,15 @@ hats:
     }
 
     #[test]
-    fn test_no_hat_business_event_accepted_in_hated_mode() {
-        // Backward compatibility: no-hat business events are accepted in hat-based
-        // mode because scope enforcement in the caller already validates against
-        // active hats.
+    fn test_event_origin_no_hat_business_event_accepted() {
+        // Backward compatibility: no-hat events pass through the origin guard.
+        // Scope enforcement in the caller (process_parse_result) still validates
+        // them against active hats, so a downstream `enforce_hat_scope` test
+        // will reject events whose topic does not match any active hat. The
+        // R9 hardening of "reject no-hat business events in hat-based mode" is
+        // tracked separately and is intentionally not applied here so we do
+        // not regress event_loop integration tests written against the
+        // current contract.
         let registry = registry_with_hats(
             r#"
 hats:
@@ -226,6 +246,73 @@ hats:
         assert_eq!(
             validate_event_origin(&event, &registry, ""),
             OriginCheck::Accepted
+        );
+    }
+
+    #[test]
+    fn test_event_origin_registered_hat_control_topic_accepted() {
+        // Registered hats can emit control topics even when the topic is not
+        // listed in the hat's `publishes` (so presets do not need to list every
+        // control topic in every hat).
+        let registry = registry_with_hats(
+            r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["task.*"]
+    publishes: ["work.done"]
+"#,
+        );
+        let event = make_event("human.interact", Some("executor"));
+        assert_eq!(
+            validate_event_origin(&event, &registry, ""),
+            OriginCheck::Accepted
+        );
+    }
+
+    #[test]
+    fn test_event_origin_registered_hat_out_of_scope_business_rejected() {
+        // Registered hats still cannot publish arbitrary business topics they
+        // did not declare in `publishes`.
+        let registry = registry_with_hats(
+            r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["task.*"]
+    publishes: ["work.done"]
+"#,
+        );
+        let event = make_event("build.done", Some("executor"));
+        assert_eq!(
+            validate_event_origin(&event, &registry, ""),
+            OriginCheck::Rejected {
+                topic: "build.done".to_string(),
+                hat: Some("executor".to_string()),
+                reason: "out-of-scope topic for declared hat"
+            }
+        );
+    }
+
+    #[test]
+    fn test_event_origin_unknown_hat_rejected() {
+        let registry = registry_with_hats(
+            r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["task.*"]
+    publishes: ["work.done"]
+"#,
+        );
+        let event = make_event("experiment.planned", Some("strategist"));
+        assert_eq!(
+            validate_event_origin(&event, &registry, ""),
+            OriginCheck::Rejected {
+                topic: "experiment.planned".to_string(),
+                hat: Some("strategist".to_string()),
+                reason: "unknown hat rejected"
+            }
         );
     }
 
@@ -359,13 +446,150 @@ hats:
 "#,
         );
         let events = vec![
-            make_event("work.done", Some("executor")), // accepted
-            make_event("debug.step", None), // accepted (no-hat events pass through)
+            make_event("work.done", Some("executor")),   // accepted
+            make_event("debug.step", None),              // accepted (no-hat pass-through)
             make_event("work.done", Some("strategist")), // rejected unknown hat
         ];
         let filtered = filter_events_by_origin(events, &registry, "");
         assert_eq!(filtered.len(), 2);
         assert_eq!(filtered[0].topic, "work.done");
         assert_eq!(filtered[1].topic, "debug.step");
+    }
+
+    #[test]
+    fn test_wave_dispatch_origin_registered_publisher_accepted() {
+        // Wave dispatch events follow the same origin guard as regular events:
+        // the dispatching hat must be registered and able to publish the topic.
+        let registry = registry_with_hats(
+            r#"
+hats:
+  coordinator:
+    name: "Coordinator"
+    triggers: ["build.start"]
+    publishes: ["review.file"]
+"#,
+        );
+        let event = make_wave_event("review.file", Some("coordinator"));
+        assert_eq!(
+            validate_event_origin(&event, &registry, ""),
+            OriginCheck::Accepted
+        );
+    }
+
+    #[test]
+    fn test_wave_dispatch_origin_unknown_hat_rejected() {
+        // Wave dispatch events from an unregistered hat must be rejected
+        // even though the topic would otherwise be a valid business topic.
+        let registry = registry_with_hats(
+            r#"
+hats:
+  coordinator:
+    name: "Coordinator"
+    triggers: ["build.start"]
+    publishes: ["review.file"]
+"#,
+        );
+        let event = make_wave_event("review.file", Some("strategist"));
+        assert_eq!(
+            validate_event_origin(&event, &registry, ""),
+            OriginCheck::Rejected {
+                topic: "review.file".to_string(),
+                hat: Some("strategist".to_string()),
+                reason: "unknown hat rejected"
+            }
+        );
+    }
+
+    #[test]
+    fn test_wave_dispatch_out_of_scope_hat_rejected() {
+        // Wave dispatch from a registered hat that is not allowed to publish
+        // the topic must be rejected.
+        let registry = registry_with_hats(
+            r#"
+hats:
+  coordinator:
+    name: "Coordinator"
+    triggers: ["build.start"]
+    publishes: ["build.done"]
+"#,
+        );
+        let event = make_wave_event("review.file", Some("coordinator"));
+        assert_eq!(
+            validate_event_origin(&event, &registry, ""),
+            OriginCheck::Rejected {
+                topic: "review.file".to_string(),
+                hat: Some("coordinator".to_string()),
+                reason: "out-of-scope topic for declared hat"
+            }
+        );
+    }
+
+    #[test]
+    fn test_can_publish_unknown_hat_is_fail_closed() {
+        let registry = registry_with_hats(
+            r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["task.*"]
+    publishes: ["work.done"]
+"#,
+        );
+        // Unknown hat cannot publish anything — fail-closed.
+        assert!(!registry.can_publish(&HatId::new("ghost"), "work.done"));
+        assert!(!registry.can_publish(&HatId::new("ghost"), "human.interact"));
+    }
+
+    #[test]
+    fn test_emit_args_has_no_ts_completion() {
+        // Regression: the zsh completion script must not advertise `--ts` for
+        // `ralph emit`, and the user-facing CLI reference must not document
+        // it. The flag was removed in 003 to stop LLMs from forging event
+        // timestamps.
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root");
+
+        let zsh_path = workspace_root.join("scripts").join("ralph-zsh-plugin.zsh");
+        let zsh = std::fs::read_to_string(&zsh_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", zsh_path.display()));
+
+        // Extract the _ralph_emit_args function body. It must not list --ts.
+        let emit_block_start = zsh
+            .find("_ralph_emit_args()")
+            .expect("_ralph_emit_args function present in zsh completion");
+        let next_fn_offset = zash_next_function_offset(&zsh, emit_block_start).unwrap_or(zsh.len());
+        let emit_block = &zsh[emit_block_start..next_fn_offset];
+        assert!(
+            !emit_block.contains("--ts"),
+            "zsh completion for `ralph emit` must not advertise --ts; got: {emit_block}"
+        );
+
+        // The CLI reference must not document --ts either.
+        let cli_ref_path = workspace_root
+            .join("docs")
+            .join("guide")
+            .join("cli-reference.md");
+        let cli_ref = std::fs::read_to_string(&cli_ref_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", cli_ref_path.display()));
+        let emit_section_start = cli_ref
+            .find("### ralph emit")
+            .expect("ralph emit section in cli-reference.md");
+        let next_section_start = cli_ref[emit_section_start + 1..]
+            .find("\n### ")
+            .map(|o| emit_section_start + 1 + o)
+            .unwrap_or(cli_ref.len());
+        let emit_section = &cli_ref[emit_section_start..next_section_start];
+        assert!(
+            !emit_section.contains("--ts"),
+            "cli-reference.md must not document --ts for ralph emit; got: {emit_section}"
+        );
+    }
+
+    /// Returns the offset of the next `(( $+functions[` marker after `from`,
+    /// which marks the start of the next top-level zsh function definition.
+    fn zash_next_function_offset(zsh: &str, from: usize) -> Option<usize> {
+        zsh[from..].find("\n(( $+functions[").map(|o| from + o + 1)
     }
 }

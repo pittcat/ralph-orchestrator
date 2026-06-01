@@ -258,7 +258,6 @@ ralph emit <TOPIC> [PAYLOAD] [OPTIONS]
 | `<TOPIC>` | Event topic (e.g., `build.done`) |
 | `[PAYLOAD]` | Optional payload (string or JSON when `--json` is set) |
 | `-j, --json` | Parse payload as JSON object |
-| `--ts <TIMESTAMP>` | Override event timestamp |
 | `--file <PATH>` | Events file path (`.ralph/events.jsonl`) |
 | `--policy-check` | Validate event against current event policy before emitting |
 | `--unsafe-no-policy-check` | Bypass mandatory policy check (only when config permits) |
