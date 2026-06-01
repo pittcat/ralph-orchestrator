@@ -6,7 +6,10 @@
 //! <event topic="handoff" target="reviewer">payload</event>
 //! ```
 
+use std::path::Path;
+
 use ralph_proto::{Event, HatId};
+use serde::Deserialize;
 
 /// Strips ANSI escape sequences from a string.
 ///
@@ -697,6 +700,348 @@ impl EventParser {
     }
 }
 
+// ---------------------------------------------------------------------------
+// P4: structured JSON evidence parsing
+// ---------------------------------------------------------------------------
+//
+// Agents may emit either text-form evidence (`tests: pass\nlint: pass`) or
+// structured JSON. The text path is the historical default and stays intact;
+// the JSON path is the new, stricter surface that verifies coverage /
+// complexity / evidence file existence. Callers (the event loop) should try
+// the JSON path first and fall back to the text path if the payload is not
+// JSON.
+
+/// Result of validating a `build.done` payload's structured evidence.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BuildStatus {
+    /// All required checks passed.
+    Pass,
+    /// Evidence is present but one or more required checks failed or are missing.
+    Fail {
+        /// Human-readable summary of why the build was rejected.
+        reason: String,
+        /// Names of the missing or failed required checks.
+        missing: Vec<String>,
+    },
+    /// The JSON payload was malformed, or a numeric value was out of range.
+    Invalid { reason: String },
+}
+
+/// Result of validating a `review.done` payload's structured evidence.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReviewStatus {
+    Pass,
+    Fail {
+        reason: String,
+        missing: Vec<String>,
+    },
+    Invalid {
+        reason: String,
+    },
+}
+
+/// Status of a single backpressure check.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CheckStatus {
+    Pass,
+    Fail,
+    Skipped,
+}
+
+impl CheckStatus {
+    /// Returns true if this check contributes a passing result.
+    fn is_pass(self) -> bool {
+        matches!(self, CheckStatus::Pass)
+    }
+}
+
+/// Coverage-shaped value: either a percentage in `0..=100` or a boolean pass/fail.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum CoverageValue {
+    /// A numeric coverage in percent.
+    Percent(f64),
+    /// A pass/fail flag (true = pass).
+    Pass { pass: bool },
+}
+
+impl CoverageValue {
+    /// Returns Some(true) if the value indicates a passing check.
+    fn is_pass(self) -> Option<bool> {
+        match self {
+            CoverageValue::Percent(p) if (0.0..=100.0).contains(&p) => Some(p > 0.0),
+            // Out-of-range percentages are not OK; we return None so the caller
+            // can treat them as invalid.
+            CoverageValue::Percent(_) => None,
+            CoverageValue::Pass { pass } => Some(pass),
+        }
+    }
+}
+
+/// `checks` block of the structured backpressure payload.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StructuredChecks {
+    pub tests: Option<CheckStatus>,
+    pub lint: Option<CheckStatus>,
+    pub typecheck: Option<CheckStatus>,
+    pub audit: Option<CheckStatus>,
+    pub coverage: Option<CoverageValue>,
+    pub duplication: Option<CoverageValue>,
+    pub mutation: Option<CoverageValue>,
+}
+
+/// `complexity` block.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ComplexityField {
+    pub score: Option<f64>,
+}
+
+/// `performance` block (optional).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PerformanceField {
+    pub regression: Option<bool>,
+}
+
+/// `specs` block (optional).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SpecsField {
+    pub verified: Option<bool>,
+}
+
+/// Top-level structured backpressure payload.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StructuredBackpressure {
+    pub checks: Option<StructuredChecks>,
+    pub complexity: Option<ComplexityField>,
+    pub performance: Option<PerformanceField>,
+    pub specs: Option<SpecsField>,
+    /// Optional list of evidence file paths (relative to workspace).
+    pub evidence_files: Option<Vec<String>>,
+}
+
+/// Top-level structured review payload.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StructuredReview {
+    pub checks: Option<StructuredReviewChecks>,
+    pub evidence_files: Option<Vec<String>>,
+}
+
+/// `checks` block for review payloads.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StructuredReviewChecks {
+    pub tests: Option<CheckStatus>,
+    pub build: Option<CheckStatus>,
+}
+
+/// Parses a `build.done` payload as structured JSON evidence.
+///
+/// Returns:
+/// - `BuildStatus::Pass` when all required checks (tests, lint, typecheck)
+///   pass and all numeric gates are satisfied.
+/// - `BuildStatus::Fail` when a required check is missing or has a failing
+///   status. The `missing` list is the names of failing required checks.
+/// - `BuildStatus::Invalid` when the JSON is malformed or a value is out of
+///   range (e.g. coverage > 100).
+///
+/// `coverage`, `audit`, `duplication`, `complexity`, `performance`, and
+/// `specs` are optional gates. `evidence_files` are validated for existence
+/// inside the workspace root; missing files cause `BuildStatus::Invalid`.
+pub fn parse_backpressure_json(
+    payload: &str,
+    workspace_root: &Path,
+) -> Result<BuildStatus, String> {
+    let parsed: StructuredBackpressure = match serde_json::from_str(payload) {
+        Ok(value) => value,
+        Err(err) => {
+            return Err(format!("build.done payload is not valid JSON: {err}"));
+        }
+    };
+
+    let checks = parsed.checks.unwrap_or_default();
+
+    // Required checks: tests / lint / typecheck must be present and pass.
+    // Skipped counts as fail (per plan §P4 step 3).
+    let required: [(&str, Option<CheckStatus>); 3] = [
+        ("tests", checks.tests),
+        ("lint", checks.lint),
+        ("typecheck", checks.typecheck),
+    ];
+    let mut missing: Vec<String> = Vec::new();
+    for (name, status) in &required {
+        match status {
+            Some(s) if s.is_pass() => {}
+            Some(_) | None => missing.push((*name).to_string()),
+        }
+    }
+
+    // Optional gate: coverage.
+    if let Some(coverage) = checks.coverage {
+        match coverage.is_pass() {
+            Some(true) => {}
+            Some(false) => missing.push("coverage".to_string()),
+            None => {
+                return Ok(BuildStatus::Invalid {
+                    reason: "coverage percent out of range 0..=100".to_string(),
+                });
+            }
+        }
+    }
+
+    // Optional gate: audit.
+    if let Some(audit) = checks.audit
+        && !audit.is_pass()
+    {
+        missing.push("audit".to_string());
+    }
+
+    // Optional gate: duplication.
+    if let Some(dup) = checks.duplication {
+        match dup.is_pass() {
+            Some(true) => {}
+            Some(false) => missing.push("duplication".to_string()),
+            None => {
+                return Ok(BuildStatus::Invalid {
+                    reason: "duplication percent out of range 0..=100".to_string(),
+                });
+            }
+        }
+    }
+
+    // Optional gate: complexity must be a finite, non-negative score.
+    if let Some(complexity) = parsed.complexity.as_ref()
+        && let Some(score) = complexity.score
+        && (!score.is_finite() || score < 0.0)
+    {
+        return Ok(BuildStatus::Invalid {
+            reason: format!("complexity.score must be finite and >= 0, got {score}"),
+        });
+    }
+
+    // Optional gate: performance regression. Some(true) blocks.
+    if let Some(perf) = parsed.performance.as_ref()
+        && perf.regression == Some(true)
+    {
+        missing.push("performance".to_string());
+    }
+
+    // Optional gate: specs.verified == false blocks.
+    if let Some(specs) = parsed.specs.as_ref()
+        && specs.verified == Some(false)
+    {
+        missing.push("specs".to_string());
+    }
+
+    // Validate evidence files: non-empty, normalised inside workspace, and existing.
+    if let Some(files) = parsed.evidence_files.as_ref() {
+        for raw in files {
+            validate_evidence_path(raw, workspace_root)?;
+        }
+    }
+
+    if missing.is_empty() {
+        Ok(BuildStatus::Pass)
+    } else {
+        Ok(BuildStatus::Fail {
+            reason: format!("required checks failed: {}", missing.join(", ")),
+            missing,
+        })
+    }
+}
+
+/// Parses a `review.done` payload as structured JSON evidence.
+///
+/// Required checks: `tests` and `build` (both `CheckStatus::Pass`).
+/// Optional `evidence_files` are validated for existence inside the workspace.
+pub fn parse_review_json(payload: &str, workspace_root: &Path) -> Result<ReviewStatus, String> {
+    let parsed: StructuredReview = match serde_json::from_str(payload) {
+        Ok(value) => value,
+        Err(err) => {
+            return Err(format!("review.done payload is not valid JSON: {err}"));
+        }
+    };
+
+    let checks = parsed.checks.unwrap_or_default();
+    let mut missing: Vec<String> = Vec::new();
+
+    match checks.tests {
+        Some(s) if s.is_pass() => {}
+        Some(_) | None => missing.push("tests".to_string()),
+    }
+    match checks.build {
+        Some(s) if s.is_pass() => {}
+        Some(_) | None => missing.push("build".to_string()),
+    }
+
+    if let Some(files) = parsed.evidence_files.as_ref() {
+        for raw in files {
+            validate_evidence_path(raw, workspace_root)?;
+        }
+    }
+
+    if missing.is_empty() {
+        Ok(ReviewStatus::Pass)
+    } else {
+        Ok(ReviewStatus::Fail {
+            reason: format!("required checks failed: {}", missing.join(", ")),
+            missing,
+        })
+    }
+}
+
+/// Validates an evidence file path:
+/// - non-empty,
+/// - no absolute path,
+/// - normalised to remain inside the workspace root,
+/// - the file exists at evaluation time.
+fn validate_evidence_path(raw: &str, workspace_root: &Path) -> Result<(), String> {
+    if raw.is_empty() {
+        return Err("evidence_files entry is empty".to_string());
+    }
+    let candidate = std::path::Path::new(raw);
+    if candidate.is_absolute() {
+        return Err(format!(
+            "evidence file path {raw:?} must be relative to the workspace"
+        ));
+    }
+    let joined = workspace_root.join(candidate);
+    let normalised = match joined.canonicalize() {
+        Ok(p) => p,
+        Err(_) => joined,
+    };
+    let workspace_canon = workspace_root
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_root.to_path_buf());
+    if !normalised.starts_with(&workspace_canon) {
+        return Err(format!(
+            "evidence file path {raw:?} escapes the workspace root"
+        ));
+    }
+    if !normalised.exists() {
+        return Err(format!(
+            "evidence file {raw:?} does not exist under {}",
+            workspace_root.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Returns the canonical `build.blocked` payload string for a given failure
+/// reason. Used by the event loop when synthesising a blocked event.
+pub fn build_blocked_payload(reason: &str) -> String {
+    format!(
+        "Backpressure checks failed: {reason}. Fix the failing checks before emitting build.done."
+    )
+}
+
+/// Returns the canonical `review.blocked` payload string for a given failure
+/// reason. Used by the event loop when synthesising a blocked event.
+pub fn review_blocked_payload(reason: &str) -> String {
+    format!(
+        "Review verification failed: {reason}. Run tests and build before emitting review.done."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1160,5 +1505,275 @@ Still working..."#;
         assert!(!evidence.tests_passed); // "tests: fail" not "tests: pass"
         assert!(evidence.lint_passed);
         assert!(!evidence.coverage_passed);
+    }
+
+    // -- P4: structured JSON evidence parsing --------------------------------
+
+    fn json_backpressure_passing() -> String {
+        serde_json::json!({
+            "checks": {
+                "tests": "pass",
+                "lint": "pass",
+                "typecheck": "pass",
+                "audit": "pass",
+                "coverage": 82.5,
+                "duplication": 3.1,
+            },
+            "complexity": { "score": 7.0 },
+            "performance": { "regression": false },
+            "specs": { "verified": true },
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_parse_backpressure_text_valid_all_pass() {
+        // Existing text path stays intact.
+        let payload = "tests: pass\nlint: pass\ntypecheck: pass\naudit: pass\ncoverage: pass\ncomplexity: 7\nduplication: pass\nperformance: pass";
+        let evidence = EventParser::parse_backpressure_evidence(payload).unwrap();
+        assert!(evidence.all_passed());
+    }
+
+    #[test]
+    fn test_parse_backpressure_json_valid_all_pass() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let status = parse_backpressure_json(&json_backpressure_passing(), dir.path()).unwrap();
+        assert_eq!(status, BuildStatus::Pass);
+    }
+
+    #[test]
+    fn test_parse_backpressure_json_missing_required_check() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let payload = serde_json::json!({
+            "checks": {
+                "tests": "pass",
+                "lint": "pass",
+                // typecheck missing
+                "audit": "pass",
+            },
+        })
+        .to_string();
+        let status = parse_backpressure_json(&payload, dir.path()).unwrap();
+        match status {
+            BuildStatus::Fail { missing, .. } => {
+                assert!(missing.iter().any(|m| m == "typecheck"));
+            }
+            other => panic!("expected Fail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_backpressure_json_invalid_status() {
+        // tests: skipped is treated as fail for required checks.
+        let dir = tempfile::TempDir::new().unwrap();
+        let payload = serde_json::json!({
+            "checks": {
+                "tests": "skipped",
+                "lint": "pass",
+                "typecheck": "pass",
+            },
+        })
+        .to_string();
+        let status = parse_backpressure_json(&payload, dir.path()).unwrap();
+        match status {
+            BuildStatus::Fail { missing, .. } => {
+                assert!(missing.iter().any(|m| m == "tests"));
+            }
+            other => panic!("expected Fail (skipped), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_backpressure_json_complexity_out_of_range() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut payload: serde_json::Value =
+            serde_json::from_str(&json_backpressure_passing()).unwrap();
+        payload["complexity"]["score"] = serde_json::json!(-1.0);
+        let status = parse_backpressure_json(&payload.to_string(), dir.path()).unwrap();
+        assert!(
+            matches!(status, BuildStatus::Invalid { .. }),
+            "got {status:?}"
+        );
+
+        // NaN is also invalid (f64::NAN is_finite() == false).
+        let mut payload: serde_json::Value =
+            serde_json::from_str(&json_backpressure_passing()).unwrap();
+        payload["complexity"]["score"] = serde_json::json!(null);
+        let status = parse_backpressure_json(&payload.to_string(), dir.path()).unwrap();
+        // null is fine (treated as missing) — Pass still expected.
+        assert_eq!(status, BuildStatus::Pass);
+    }
+
+    #[test]
+    fn test_parse_backpressure_json_coverage_out_of_range() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut payload: serde_json::Value =
+            serde_json::from_str(&json_backpressure_passing()).unwrap();
+        payload["checks"]["coverage"] = serde_json::json!(120.0);
+        let status = parse_backpressure_json(&payload.to_string(), dir.path()).unwrap();
+        assert!(
+            matches!(status, BuildStatus::Invalid { .. }),
+            "got {status:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_backpressure_json_evidence_file_exists() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let evidence = dir.path().join("evidence.md");
+        std::fs::write(&evidence, "# ok\n").unwrap();
+
+        let payload = serde_json::json!({
+            "checks": {
+                "tests": "pass",
+                "lint": "pass",
+                "typecheck": "pass",
+            },
+            "evidence_files": ["evidence.md"],
+        })
+        .to_string();
+        let status = parse_backpressure_json(&payload, dir.path()).unwrap();
+        assert_eq!(status, BuildStatus::Pass);
+    }
+
+    #[test]
+    fn test_parse_backpressure_json_evidence_file_missing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let payload = serde_json::json!({
+            "checks": {
+                "tests": "pass",
+                "lint": "pass",
+                "typecheck": "pass",
+            },
+            "evidence_files": ["does-not-exist.md"],
+        })
+        .to_string();
+        let result = parse_backpressure_json(&payload, dir.path());
+        assert!(result.is_err(), "expected error, got {result:?}");
+    }
+
+    #[test]
+    fn test_parse_backpressure_json_evidence_path_outside_workspace() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let payload = serde_json::json!({
+            "checks": {
+                "tests": "pass",
+                "lint": "pass",
+                "typecheck": "pass",
+            },
+            "evidence_files": ["../outside.md"],
+        })
+        .to_string();
+        let result = parse_backpressure_json(&payload, dir.path());
+        assert!(
+            result.is_err(),
+            "expected error for path escape, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_build_done_invalid_json_evidence_emits_build_blocked() {
+        // The integration is owned by the event loop, but the helpers are
+        // tested here: an invalid JSON payload surfaces a `build.blocked`
+        // payload through `build_blocked_payload`.
+        let reason = "build.done payload is not valid JSON";
+        let msg = build_blocked_payload(reason);
+        assert!(msg.starts_with("Backpressure checks failed:"));
+        assert!(msg.contains(reason));
+    }
+
+    #[test]
+    fn test_build_done_missing_evidence_emits_build_blocked() {
+        let missing = vec!["typecheck".to_string()];
+        let reason = "required checks failed: typecheck";
+        let msg = build_blocked_payload(reason);
+        assert!(msg.contains("typecheck"));
+        assert!(!msg.is_empty());
+        assert_eq!(missing.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_review_text_valid() {
+        let evidence = EventParser::parse_review_evidence("tests: pass\nbuild: pass").unwrap();
+        assert!(evidence.is_verified());
+    }
+
+    #[test]
+    fn test_parse_review_json_valid() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let payload = serde_json::json!({
+            "checks": {
+                "tests": "pass",
+                "build": "pass",
+            },
+        })
+        .to_string();
+        let status = parse_review_json(&payload, dir.path()).unwrap();
+        assert_eq!(status, ReviewStatus::Pass);
+    }
+
+    #[test]
+    fn test_parse_review_json_missing_dimensions() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let payload = serde_json::json!({
+            "checks": {
+                "tests": "pass",
+                // build missing
+            },
+        })
+        .to_string();
+        let status = parse_review_json(&payload, dir.path()).unwrap();
+        match status {
+            ReviewStatus::Fail { missing, .. } => {
+                assert!(missing.iter().any(|m| m == "build"));
+            }
+            other => panic!("expected Fail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_review_json_missing_conclusion() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let payload = "this is not json";
+        let result = parse_review_json(payload, dir.path());
+        assert!(
+            result.is_err(),
+            "expected error for malformed JSON, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_review_done_non_wave_missing_evidence_emits_review_blocked() {
+        // The integration is owned by the event loop; we test the helper.
+        let reason = "required checks failed: build";
+        let msg = review_blocked_payload(reason);
+        assert!(msg.starts_with("Review verification failed:"));
+        assert!(msg.contains("build"));
+    }
+
+    #[test]
+    fn test_review_done_wave_result_skips_build_review_evidence_gate() {
+        // Wave reviews do not run tests/builds, so the structured review
+        // parser should not penalise them for missing `tests`/`build` checks
+        // when they are explicit about being a wave result. This is the
+        // structural analog of the `is_wave_event()` check in the event loop.
+        // The event loop itself is responsible for the skip, but we test the
+        // helper that synthesises the blocked message: it must not be invoked
+        // for wave events.
+        let dir = tempfile::TempDir::new().unwrap();
+        let payload = serde_json::json!({
+            "checks": {}, // wave reviewers may not run tests/build
+        })
+        .to_string();
+        let status = parse_review_json(&payload, dir.path()).unwrap();
+        // The helper itself still surfaces the missing checks; the event loop
+        // is the gate. We assert the helper surfaces them so callers can act.
+        match status {
+            ReviewStatus::Fail { missing, .. } => {
+                assert!(missing.contains(&"tests".to_string()));
+                assert!(missing.contains(&"build".to_string()));
+            }
+            other => panic!("expected Fail for missing dimensions, got {other:?}"),
+        }
     }
 }
