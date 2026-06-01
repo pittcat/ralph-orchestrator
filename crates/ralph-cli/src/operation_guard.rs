@@ -334,4 +334,234 @@ mod tests {
             tmp.path().join(".ralph/events.jsonl")
         );
     }
+
+    // ---- P1 residual gap tests (shippings.md 5.1 #2/#3/#5/#6/#7/#9/#10/#11/#13/#14) ----
+
+    #[test]
+    fn test_operation_context_workspace_root_matches_caller() {
+        let tmp = TempDir::new().expect("temp dir");
+        let ctx = OperationContext::detect_with_env(tmp.path().to_path_buf(), empty_env());
+        assert_eq!(ctx.workspace_root, tmp.path());
+    }
+
+    #[test]
+    fn test_is_agent_mirrors_is_agent_context() {
+        let tmp = TempDir::new().expect("temp dir");
+        let agent = OperationContext::detect_with_env(
+            tmp.path().to_path_buf(),
+            env_with("RALPH_CURRENT_HAT", "executor"),
+        );
+        assert!(agent.is_agent());
+        let human = OperationContext::detect_with_env(tmp.path().to_path_buf(), empty_env());
+        assert!(!human.is_agent());
+    }
+
+    #[test]
+    fn test_should_fail_closed_in_agent_context() {
+        let tmp = TempDir::new().expect("temp dir");
+        let ctx = OperationContext::detect_with_env(
+            tmp.path().to_path_buf(),
+            env_with("RALPH_CURRENT_HAT", "executor"),
+        );
+        assert!(should_fail_closed(&ctx));
+    }
+
+    #[test]
+    fn test_should_fail_closed_false_in_human_context() {
+        let tmp = TempDir::new().expect("temp dir");
+        let ctx = OperationContext::detect_with_env(tmp.path().to_path_buf(), empty_env());
+        assert!(!should_fail_closed(&ctx));
+    }
+
+    #[test]
+    fn test_requires_human_confirmation_in_human_context() {
+        let tmp = TempDir::new().expect("temp dir");
+        let ctx = OperationContext::detect_with_env(tmp.path().to_path_buf(), empty_env());
+        assert!(requires_human_confirmation(&ctx));
+    }
+
+    #[test]
+    fn test_requires_human_confirmation_false_in_agent_context() {
+        let tmp = TempDir::new().expect("temp dir");
+        let ctx = OperationContext::detect_with_env(
+            tmp.path().to_path_buf(),
+            env_with("RALPH_CURRENT_HAT", "executor"),
+        );
+        assert!(!requires_human_confirmation(&ctx));
+    }
+
+    #[test]
+    fn test_operation_guard_error_cross_loop_denied_display() {
+        let err = OperationGuardError::CrossLoopDenied {
+            operation: "close".to_string(),
+            target: Some("loop-b".to_string()),
+            current: Some("loop-a".to_string()),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("close"));
+        assert!(msg.contains("loop-b"));
+        assert!(msg.contains("loop-a"));
+        // Equality works
+        let same = OperationGuardError::CrossLoopDenied {
+            operation: "close".to_string(),
+            target: Some("loop-b".to_string()),
+            current: Some("loop-a".to_string()),
+        };
+        assert_eq!(err, same);
+    }
+
+    #[test]
+    fn test_operation_guard_error_cross_hat_denied_display() {
+        let err = OperationGuardError::CrossHatDenied {
+            operation: "start".to_string(),
+            target: Some("reviewer".to_string()),
+            current: Some("executor".to_string()),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("start"));
+        assert!(msg.contains("reviewer"));
+        assert!(msg.contains("executor"));
+    }
+
+    #[test]
+    fn test_operation_guard_error_agent_context_missing_hat_display() {
+        let err = OperationGuardError::AgentContextMissingHat;
+        assert!(err.to_string().contains("RALPH_CURRENT_HAT"));
+        assert_eq!(err, OperationGuardError::AgentContextMissingHat);
+    }
+
+    #[test]
+    fn test_operation_guard_error_path_outside_current_loop_display() {
+        let err = OperationGuardError::PathOutsideCurrentLoop {
+            path: "/tmp/other.jsonl".to_string(),
+            allowed: "/tmp/main/.ralph/events.jsonl".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("/tmp/other.jsonl"));
+        assert!(msg.contains("/tmp/main/.ralph/events.jsonl"));
+    }
+
+    #[test]
+    fn test_read_loop_id_marker_direct() {
+        let tmp = TempDir::new().expect("temp dir");
+        let ralph_dir = tmp.path().join(".ralph");
+        fs::create_dir_all(&ralph_dir).expect("ralph dir");
+        fs::write(ralph_dir.join("current-loop-id"), "loop-direct").expect("write marker");
+        assert_eq!(
+            read_loop_id_marker(tmp.path()).as_deref(),
+            Some("loop-direct")
+        );
+    }
+
+    #[test]
+    fn test_read_loop_id_marker_missing_returns_none() {
+        let tmp = TempDir::new().expect("temp dir");
+        assert!(read_loop_id_marker(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn test_read_current_hat_direct() {
+        let got = read_current_hat(&env_with("RALPH_CURRENT_HAT", "executor"));
+        assert_eq!(got.as_deref(), Some("executor"));
+    }
+
+    #[test]
+    fn test_read_current_hat_blank_value_is_none() {
+        let got = read_current_hat(&env_with("RALPH_CURRENT_HAT", "   "));
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn test_read_current_hat_unset_is_none() {
+        let got = read_current_hat(&empty_env());
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn test_agent_detection_via_loop_id_env() {
+        let tmp = TempDir::new().expect("temp dir");
+        let ctx = OperationContext::detect_with_env(
+            tmp.path().to_path_buf(),
+            env_with("RALPH_CURRENT_LOOP_ID", "loop-a"),
+        );
+        assert!(ctx.is_agent_context);
+        assert_eq!(ctx.current_loop_id, None); // not from marker
+    }
+
+    #[test]
+    fn test_agent_detection_via_events_file_env() {
+        let tmp = TempDir::new().expect("temp dir");
+        let ctx = OperationContext::detect_with_env(
+            tmp.path().to_path_buf(),
+            env_with("RALPH_EVENTS_FILE", "/tmp/anything.jsonl"),
+        );
+        assert!(ctx.is_agent_context);
+    }
+
+    #[test]
+    fn test_agent_detection_ignores_blank_env_value() {
+        let tmp = TempDir::new().expect("temp dir");
+        let ctx = OperationContext::detect_with_env(
+            tmp.path().to_path_buf(),
+            env_with("RALPH_CURRENT_HAT", "  \n"),
+        );
+        assert!(!ctx.is_agent_context);
+    }
+
+    #[test]
+    fn test_resolve_candidate_with_absolute_path() {
+        let tmp = TempDir::new().expect("temp dir");
+        let ralph_dir = tmp.path().join(".ralph");
+        fs::create_dir_all(&ralph_dir).expect("ralph dir");
+        let abs = tmp.path().join("abs-events.jsonl");
+        fs::write(
+            ralph_dir.join("current-candidate-events"),
+            abs.to_string_lossy().as_bytes(),
+        )
+        .expect("write marker");
+        let ctx = OperationContext::detect_with_env(tmp.path().to_path_buf(), empty_env());
+        let resolved = ctx.resolve_candidate_events_path().expect("marker present");
+        assert_eq!(resolved, abs);
+    }
+
+    #[test]
+    fn test_resolve_emit_candidate_wins_over_accepted() {
+        let tmp = TempDir::new().expect("temp dir");
+        let ralph_dir = tmp.path().join(".ralph");
+        fs::create_dir_all(&ralph_dir).expect("ralph dir");
+        fs::write(
+            ralph_dir.join("current-candidate-events"),
+            ".ralph/candidate.jsonl",
+        )
+        .expect("candidate");
+        fs::write(ralph_dir.join("current-events"), ".ralph/accepted.jsonl").expect("accepted");
+        let ctx = OperationContext::detect_with_env(tmp.path().to_path_buf(), empty_env());
+        assert_eq!(
+            ctx.resolve_emit_events_path(),
+            tmp.path().join(".ralph/candidate.jsonl")
+        );
+    }
+
+    #[test]
+    fn test_resolve_emit_falls_back_to_accepted_when_no_candidate() {
+        let tmp = TempDir::new().expect("temp dir");
+        let ralph_dir = tmp.path().join(".ralph");
+        fs::create_dir_all(&ralph_dir).expect("ralph dir");
+        fs::write(ralph_dir.join("current-events"), ".ralph/accepted.jsonl").expect("accepted");
+        let ctx = OperationContext::detect_with_env(tmp.path().to_path_buf(), empty_env());
+        assert_eq!(
+            ctx.resolve_emit_events_path(),
+            tmp.path().join(".ralph/accepted.jsonl")
+        );
+    }
+
+    #[test]
+    fn test_resolve_candidate_with_blank_marker_is_none() {
+        let tmp = TempDir::new().expect("temp dir");
+        let ralph_dir = tmp.path().join(".ralph");
+        fs::create_dir_all(&ralph_dir).expect("ralph dir");
+        fs::write(ralph_dir.join("current-candidate-events"), "   \n").expect("blank marker");
+        let ctx = OperationContext::detect_with_env(tmp.path().to_path_buf(), empty_env());
+        assert!(ctx.resolve_candidate_events_path().is_none());
+    }
 }

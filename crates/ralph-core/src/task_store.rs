@@ -205,6 +205,18 @@ impl TaskStore {
         self.tasks.iter().find(|t| t.key.as_deref() == Some(key))
     }
 
+    /// Gets a task by `(loop_id, key)`. Used by P2 to scope `ensure()`
+    /// dedup to a single loop, preventing cross-loop collisions when
+    /// two loops share a tasks.jsonl.
+    ///
+    /// A `loop_id == None` here matches only tasks whose own `loop_id`
+    /// is also `None` (legacy / human-CLI entries).
+    pub fn get_by_key_in_loop(&self, key: &str, loop_id: Option<&str>) -> Option<&Task> {
+        self.tasks
+            .iter()
+            .find(|t| t.key.as_deref() == Some(key) && t.loop_id.as_deref() == loop_id)
+    }
+
     /// Gets a task by ID (mutable reference).
     pub fn get_mut(&mut self, id: &str) -> Option<&mut Task> {
         self.tasks.iter_mut().find(|t| t.id == id)
@@ -259,23 +271,28 @@ impl TaskStore {
     ///
     /// If a task with the same key already exists, its non-lifecycle metadata is refreshed and
     /// the existing task is returned.
+    ///
+    /// When the candidate task has a `loop_id`, dedup is scoped to
+    /// `(loop_id, key)` so that two loops sharing a tasks.jsonl do not
+    /// collapse into a single row. When `loop_id` is `None` (human CLI
+    /// / legacy), dedup falls back to the previous global-by-key rule.
     pub fn ensure(&mut self, task: Task) -> &Task {
-        if let Some(key) = task.key.as_deref()
-            && let Some(existing_idx) = self
-                .tasks
-                .iter()
-                .position(|existing| existing.key.as_deref() == Some(key))
-        {
-            let existing = &mut self.tasks[existing_idx];
-            existing.title = task.title;
-            existing.priority = task.priority;
-            if task.description.is_some() {
-                existing.description = task.description;
+        if let Some(key) = task.key.as_deref() {
+            let new_loop = task.loop_id.as_deref();
+            if let Some(existing_idx) = self.tasks.iter().position(|existing| {
+                existing.key.as_deref() == Some(key) && existing.loop_id.as_deref() == new_loop
+            }) {
+                let existing = &mut self.tasks[existing_idx];
+                existing.title = task.title;
+                existing.priority = task.priority;
+                if task.description.is_some() {
+                    existing.description = task.description;
+                }
+                if !task.blocked_by.is_empty() {
+                    existing.blocked_by = task.blocked_by;
+                }
+                return &self.tasks[existing_idx];
             }
-            if !task.blocked_by.is_empty() {
-                existing.blocked_by = task.blocked_by;
-            }
-            return &self.tasks[existing_idx];
         }
 
         self.tasks.push(task);
@@ -316,6 +333,23 @@ impl TaskStore {
     /// Use this when you need to check if there's active work remaining.
     pub fn has_pending_tasks(&self) -> bool {
         self.tasks.iter().any(|t| !t.status.is_terminal())
+    }
+
+    /// Verifies that every blocker ID refers to a known task in the same loop.
+    ///
+    /// Returns the list of missing or out-of-loop blocker IDs, in the
+    /// order they appear in `task.blocked_by`. An empty return means
+    /// all blockers are valid.
+    pub fn invalid_blockers(&self, task: &Task) -> Vec<String> {
+        task.blocked_by
+            .iter()
+            .filter(|bid| {
+                !self.tasks.iter().any(|t| {
+                    t.id == **bid && t.loop_id.as_deref() == task.loop_id.as_deref()
+                })
+            })
+            .cloned()
+            .collect()
     }
 }
 
@@ -629,5 +663,110 @@ mod tests {
         let loaded = TaskStore::load(&path).unwrap();
         assert_eq!(loaded.all().len(), 1);
         assert_eq!(loaded.all()[0].title, "Valid task");
+    }
+
+    #[test]
+    fn test_get_by_key_in_loop_scopes_to_loop() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("tasks.jsonl");
+        let mut store = TaskStore::load(&path).unwrap();
+
+        let a = Task::new("A".to_string(), 1)
+            .with_key(Some("shared:task".to_string()))
+            .with_loop_id(Some("loop-a".to_string()));
+        let b = Task::new("B".to_string(), 1)
+            .with_key(Some("shared:task".to_string()))
+            .with_loop_id(Some("loop-b".to_string()));
+        let id_a = a.id.clone();
+        store.add(a);
+        store.add(b);
+
+        let a_view = store
+            .get_by_key_in_loop("shared:task", Some("loop-a"))
+            .expect("loop-a entry exists");
+        assert_eq!(a_view.id, id_a);
+
+        let b_view = store
+            .get_by_key_in_loop("shared:task", Some("loop-b"))
+            .expect("loop-b entry exists");
+        assert_ne!(a_view.id, b_view.id);
+
+        // loop-c does not exist
+        assert!(store.get_by_key_in_loop("shared:task", Some("loop-c")).is_none());
+    }
+
+    #[test]
+    fn test_ensure_key_scoped_by_loop() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("tasks.jsonl");
+        let mut store = TaskStore::load(&path).unwrap();
+
+        let a_first = Task::new("A first".to_string(), 1)
+            .with_key(Some("shared:task".to_string()))
+            .with_loop_id(Some("loop-a".to_string()));
+        let a_second = Task::new("A second".to_string(), 2)
+            .with_key(Some("shared:task".to_string()))
+            .with_loop_id(Some("loop-a".to_string()));
+        let b = Task::new("B".to_string(), 1)
+            .with_key(Some("shared:task".to_string()))
+            .with_loop_id(Some("loop-b".to_string()));
+
+        let a_id = store.ensure(a_first).id.clone();
+        let deduped_id = store.ensure(a_second).id.clone();
+        let b_id = store.ensure(b).id.clone();
+
+        assert_eq!(a_id, deduped_id, "same loop dedup");
+        assert_ne!(a_id, b_id, "different loop creates new task");
+        assert_eq!(store.all().len(), 2);
+    }
+
+    #[test]
+    fn test_ensure_same_key_no_loop_falls_back_to_global() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("tasks.jsonl");
+        let mut store = TaskStore::load(&path).unwrap();
+
+        let first = Task::new("First".to_string(), 1).with_key(Some("shared".to_string()));
+        let second = Task::new("Second".to_string(), 2).with_key(Some("shared".to_string()));
+        let id = store.ensure(first).id.clone();
+        let dedup_id = store.ensure(second).id.clone();
+        assert_eq!(id, dedup_id);
+        assert_eq!(store.all().len(), 1);
+    }
+
+    #[test]
+    fn test_invalid_blockers_detects_missing_and_cross_loop() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("tasks.jsonl");
+        let mut store = TaskStore::load(&path).unwrap();
+
+        let same_loop = Task::new("Same loop".to_string(), 1).with_loop_id(Some("loop-a".into()));
+        let other_loop = Task::new("Other loop".to_string(), 1).with_loop_id(Some("loop-b".into()));
+        let same_id = same_loop.id.clone();
+        let other_id = other_loop.id.clone();
+        store.add(same_loop);
+        store.add(other_loop);
+
+        let mut candidate = Task::new("Candidate".to_string(), 1).with_loop_id(Some("loop-a".into()));
+        candidate.blocked_by = vec![same_id.clone(), "missing-id".into(), other_id.clone()];
+
+        let invalid = store.invalid_blockers(&candidate);
+        assert_eq!(invalid, vec!["missing-id".to_string(), other_id]);
+    }
+
+    #[test]
+    fn test_invalid_blockers_empty_when_all_resolve() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("tasks.jsonl");
+        let mut store = TaskStore::load(&path).unwrap();
+
+        let blocker = Task::new("Blocker".to_string(), 1).with_loop_id(Some("loop-a".into()));
+        let blocker_id = blocker.id.clone();
+        store.add(blocker);
+
+        let mut candidate = Task::new("Candidate".to_string(), 1).with_loop_id(Some("loop-a".into()));
+        candidate.blocked_by = vec![blocker_id];
+
+        assert!(store.invalid_blockers(&candidate).is_empty());
     }
 }

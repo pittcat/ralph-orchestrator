@@ -150,6 +150,10 @@ memories:
 # Tasks — runtime work tracking
 tasks:
   enabled: true                         # Enable task system
+  # Hats allowed to mutate any task in the loop, regardless of owner_hat_id.
+  # When unset (default), only the owner hat may start/close/fail/reopen a
+  # task. Used by the P2 cross-hat authorization guard.
+  coordinator_hats: []                 # e.g. ["coordinator", "executor"]
 
 # Optional features
 features:

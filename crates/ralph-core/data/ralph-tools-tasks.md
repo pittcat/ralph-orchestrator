@@ -46,6 +46,39 @@ ralph tools task show <task-id>
 - Use `task reopen` when more work remains after a failed review/finalization pass
 - Use `task fail` when the task is blocked and cannot be completed in the current iteration
 
+### Cross-Loop and Cross-Hat Authorization
+
+When `ralph tools task` is invoked from inside a loop (`RALPH_CURRENT_HAT`
+or `RALPH_CURRENT_LOOP_ID` is set in the env, and `.ralph/current-loop-id`
+points to a real loop), the following rules apply:
+
+- New tasks are stamped with the **current loop id** and the **current
+  hat id** (`owner_hat_id`). They are not visible across loops without
+  `task ready --all`.
+- `start` / `close` / `fail` / `reopen` on a task in another loop is
+  rejected outright.
+- Within the same loop, only the task's owner hat (or any hat listed in
+  `tasks.coordinator_hats` in `ralph.yml`) may mutate it. An executor
+  hat cannot start a reviewer hat's task.
+- Legacy tasks with no `loop_id` and no `owner_hat_id` are **not
+  mutable** from an agent context. Recreate them via `task add` or
+  `task ensure` so they pick up the current loop/owner.
+- `blocker` IDs must exist in the current loop's task list. Cross-loop
+  blockers and missing blockers are rejected at `add` / `ensure` time.
+- A human CLI invocation (no runtime env) may still mutate any task
+  for diagnostics; a warning is printed when the target task's
+  `loop_id` differs from the current marker.
+
+Configure coordinator hats globally:
+
+```yaml
+tasks:
+  enabled: true
+  coordinator_hats:
+    - coordinator
+    - executor
+```
+
 ### First thing every iteration
 ```bash
 ralph tools task ready    # What's open? Pick one. Don't create duplicates.

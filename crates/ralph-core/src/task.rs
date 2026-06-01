@@ -55,10 +55,16 @@ pub struct Task {
     #[serde(default)]
     pub blocked_by: Vec<String>,
 
-    /// Loop ID that created this task (from RALPH_LOOP_ID env var).
+    /// Loop ID that created this task (from `.ralph/current-loop-id` marker).
     /// Used to filter tasks by ownership when multiple loops share a task list.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub loop_id: Option<String>,
+
+    /// Hat ID that created this task, when the task was emitted from an
+    /// agent context. Used to authorize lifecycle operations and prevent
+    /// cross-hat tampering. None for human-CLI tasks or legacy entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_hat_id: Option<String>,
 
     /// Creation timestamp (ISO 8601)
     pub created: String,
@@ -84,6 +90,7 @@ impl Task {
             priority: priority.clamp(1, 5),
             blocked_by: Vec::new(),
             loop_id: None,
+            owner_hat_id: None,
             created: chrono::Utc::now().to_rfc3339(),
             started: None,
             closed: None,
@@ -93,6 +100,12 @@ impl Task {
     /// Sets the loop ID for this task.
     pub fn with_loop_id(mut self, loop_id: Option<String>) -> Self {
         self.loop_id = loop_id;
+        self
+    }
+
+    /// Sets the owning hat ID for this task.
+    pub fn with_owner_hat(mut self, owner_hat_id: Option<String>) -> Self {
+        self.owner_hat_id = owner_hat_id;
         self
     }
 
@@ -167,6 +180,8 @@ mod tests {
         assert!(task.blocked_by.is_empty());
         assert!(task.key.is_none());
         assert!(task.started.is_none());
+        assert!(task.loop_id.is_none());
+        assert!(task.owner_hat_id.is_none());
     }
 
     #[test]
@@ -237,6 +252,33 @@ mod tests {
     fn test_with_key_sets_stable_key() {
         let task = Task::new("Test".to_string(), 1).with_key(Some("spec:build".to_string()));
         assert_eq!(task.key.as_deref(), Some("spec:build"));
+    }
+
+    #[test]
+    fn test_with_owner_hat_stamps_owner() {
+        let task =
+            Task::new("Test".to_string(), 1).with_owner_hat(Some("executor".to_string()));
+        assert_eq!(task.owner_hat_id.as_deref(), Some("executor"));
+    }
+
+    #[test]
+    fn test_with_loop_id_stamps_loop() {
+        let task = Task::new("Test".to_string(), 1).with_loop_id(Some("loop-x".to_string()));
+        assert_eq!(task.loop_id.as_deref(), Some("loop-x"));
+    }
+
+    #[test]
+    fn test_legacy_task_without_owner_hat_deserializes() {
+        let json = r#"{
+            "id": "task-1234-abcd",
+            "title": "Legacy",
+            "status": "open",
+            "priority": 3,
+            "created": "2026-01-01T00:00:00Z"
+        }"#;
+        let task: Task = serde_json::from_str(json).expect("legacy task should parse");
+        assert!(task.loop_id.is_none());
+        assert!(task.owner_hat_id.is_none());
     }
 
     #[test]

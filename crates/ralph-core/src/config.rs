@@ -2043,6 +2043,9 @@ pub struct MemoriesFilter {
 /// ```yaml
 /// tasks:
 ///   enabled: true
+///   coordinator_hats:
+///     - coordinator
+///     - executor
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TasksConfig {
@@ -2051,12 +2054,21 @@ pub struct TasksConfig {
     /// When true, tasks are used for loop completion verification.
     #[serde(default = "default_true")]
     pub enabled: bool,
+
+    /// Hats allowed to perform cross-hat task lifecycle operations.
+    ///
+    /// When a task is owned by hat A, only hat A or one of the
+    /// `coordinator_hats` may `start` / `close` / `fail` / `reopen` it.
+    /// Empty list means only the owner hat can mutate its own tasks.
+    #[serde(default)]
+    pub coordinator_hats: Vec<String>,
 }
 
 impl Default for TasksConfig {
     fn default() -> Self {
         Self {
             enabled: true, // Tasks enabled by default
+            coordinator_hats: Vec::new(),
         }
     }
 }
