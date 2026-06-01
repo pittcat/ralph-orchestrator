@@ -1063,6 +1063,30 @@ impl EventLoop {
             .as_ref()
             .is_some_and(|sm| sm.enabled);
 
+        // Verdict gate: when configured, the most recent event matching the gate
+        // topic must NOT carry fail_field == fail_value. This prevents a hat from
+        // declaring success in its final review while bypassing the backstop check.
+        if let Some(gate) = &self.config.event_loop.verdict_gate
+            && let Some(payload) = self.state.last_verdict_payload.as_deref()
+            && Self::verdict_payload_is_fail(payload, gate)
+        {
+            warn!(
+                topic = %gate.topic,
+                field = %gate.fail_field,
+                value = %gate.fail_value,
+                "Rejecting LOOP_COMPLETE: verdict gate observed a failing verdict"
+            );
+            self.state.completion_requested = false;
+
+            let resume_payload = format!(
+                "LOOP_COMPLETE rejected: most recent {} event has {}={}. \
+                 The workflow has not passed final review. Use loop.cancel to abort instead.",
+                gate.topic, gate.fail_field, gate.fail_value
+            );
+            self.bus.publish(Event::new("task.resume", resume_payload));
+            return None;
+        }
+
         // Workflow guard completion validation: ensure all started guarded instances are terminal.
         // State-machine configs use their instance lifecycle as the completion source of truth.
         if !state_machine_enabled
@@ -1165,6 +1189,23 @@ impl EventLoop {
         }
 
         Some(TerminationReason::CompletionPromise)
+    }
+
+    /// Returns true if the verdict event payload contains `gate.fail_field == gate.fail_value`.
+    ///
+    /// Used by `check_completion_event` to enforce a verdict gate: the most recent
+    /// event matching the configured verdict topic must not carry a failing verdict.
+    /// Returns false when the payload is not valid JSON or the field is absent —
+    /// absence is treated as "not failing" because the gate is opt-in and only
+    /// trips on an explicit `fail` value.
+    fn verdict_payload_is_fail(payload: &str, gate: &crate::config::VerdictGateConfig) -> bool {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+            return false;
+        };
+        value
+            .get(&gate.fail_field)
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s == gate.fail_value)
     }
 
     /// Initializes the loop by publishing the start event.
@@ -1327,9 +1368,16 @@ impl EventLoop {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
+        let verdict_topic = self
+            .config
+            .event_loop
+            .verdict_gate
+            .as_ref()
+            .map(|v| v.topic.as_str());
         for message in messages {
             let event = Event::new("human.guidance", message.into());
             self.state.record_event(&event);
+            self.state.record_verdict_if_match(&event, verdict_topic);
             self.bus.publish(event);
         }
     }
@@ -2413,6 +2461,14 @@ impl EventLoop {
             && let Some(default_topic) = &config.default_publishes
         {
             let default_event = Event::new(default_topic.as_str(), "").with_source(hat_id.clone());
+            let verdict_topic = self
+                .config
+                .event_loop
+                .verdict_gate
+                .as_ref()
+                .map(|v| v.topic.as_str());
+            self.state
+                .record_verdict_if_match(&default_event, verdict_topic);
 
             debug!(
                 hat = %hat_id.as_str(),
@@ -3735,9 +3791,16 @@ impl EventLoop {
             .iter()
             .any(|event| event.topic.as_str().starts_with("plan."));
         // Record and diagnose validated events (before consuming them).
+        let verdict_topic = self
+            .config
+            .event_loop
+            .verdict_gate
+            .as_ref()
+            .map(|v| v.topic.as_str());
         for event in &validated_events {
             // Record topic for event chain validation
             self.state.record_event(event);
+            self.state.record_verdict_if_match(event, verdict_topic);
 
             self.diagnostics.log_orchestration(
                 self.state.iteration,
@@ -3780,7 +3843,15 @@ impl EventLoop {
 
         // Publish human.response event if one was received during blocking
         if let Some(response) = response_event {
+            let verdict_topic = self
+                .config
+                .event_loop
+                .verdict_gate
+                .as_ref()
+                .map(|v| v.topic.as_str());
             self.state.record_event(&response);
+            self.state
+                .record_verdict_if_match(&response, verdict_topic);
             info!(
                 topic = %response.topic,
                 "Publishing human.response event from robot service"

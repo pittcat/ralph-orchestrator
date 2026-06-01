@@ -87,6 +87,12 @@ pub struct LoopState {
 
     /// State machine runtime state (opt-in, None when state machine is disabled).
     pub state_machine_runtime_state: Option<crate::state_machine::StateMachineRuntimeState>,
+
+    /// Payload of the most recent event whose topic matches the configured
+    /// verdict gate topic. Used to enforce that the latest review verdict was
+    /// a pass before the loop can terminate. `None` when no such event has
+    /// been observed (or no verdict gate is configured).
+    pub last_verdict_payload: Option<String>,
 }
 
 impl Default for LoopState {
@@ -118,6 +124,7 @@ impl Default for LoopState {
             workflow_progress: WorkflowProgress::new(),
             policy_runtime_state: None,
             state_machine_runtime_state: None,
+            last_verdict_payload: None,
         }
     }
 }
@@ -277,6 +284,20 @@ impl LoopState {
             .iter()
             .filter(|topic| !self.seen_topics.contains(topic.as_str()))
             .collect()
+    }
+
+    /// Records the payload of an event if its topic matches the configured verdict gate.
+    ///
+    /// Called alongside `record_event` at every site. The most recent matching
+    /// event's payload is retained so `check_completion_event` can read the
+    /// verdict without re-scanning event history. No-op when `verdict_topic`
+    /// is `None` or the event topic does not match.
+    pub fn record_verdict_if_match(&mut self, event: &Event, verdict_topic: Option<&str>) {
+        if let Some(topic) = verdict_topic
+            && event.topic.as_str() == topic
+        {
+            self.last_verdict_payload = Some(event.payload.clone());
+        }
     }
 }
 

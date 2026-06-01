@@ -29,6 +29,12 @@ event_loop:
   max_runtime_seconds: 14400  # 4 hours
   checkpoint_interval: 5
   enforce_hat_scope: true
+  verdict_gate:
+    # 如果最近一次 review.complete 事件携带 pass_or_fail == "fail"，则拒绝 LOOP_COMPLETE。
+    # 作为 shipper+reporter 链的兜底，防止任一 hat 将 P0 残留误判为通过。
+    topic: "review.complete"
+    fail_field: "pass_or_fail"
+    fail_value: "fail"
 
 cli:
   backend: "kiro"
@@ -608,6 +614,14 @@ hats:
       6. Real harness pass（如适用）
       任何验证失败 → publish `REVIEW_COMPLETE`，`pass_or_fail: "fail"`，`reason: "final validation failed: <detail>"`
 
+      ### Verdict Gate（P0 残留检查）
+      发布 `REVIEW_COMPLETE` 之前，shipper 必须读取 `.agents/scratchpad/ce-executor/{plan_name}/findings.md`
+      并统计剩余 P0 findings。如果存在任何 P0 finding，shipper 必须发布 `REVIEW_COMPLETE`
+      with `pass_or_fail: "fail"`, `verdict: "fail"`，并在 `residual_findings_summary`
+      中列出每个 P0 finding（id, file, issue）。Build/test/lint 通过**不能**覆盖 P0
+      残留——P0 finding 是正确性阻塞，不论 CI 是否绿。pass_or_fail 反映的是
+      完成正确性，不是工具成功。
+
       ### Simplify Check
       - 如 `changed_lines >= 30` 且非纯机械改动：检查简化机会 → 重新验证
       - 如 < 30 行或纯机械改动：跳过
@@ -803,7 +817,8 @@ hats:
 
       ### 事件发布
       - 报告写入后，发布 `report.done`，payload：`report_path`
-      - 然后发布 `LOOP_COMPLETE`
+      - 如果 `REVIEW_COMPLETE` payload 的 `pass_or_fail` 为 `"fail"`，reporter **不得**发布 `LOOP_COMPLETE`。报告应改写为带「Awaiting decision」章节，reporter 发布 `report.done` with `awaiting_decision: true` 后停止。这让 verdict gate（配置在 `event_loop.verdict_gate`）能够拒绝任何冒出的 `LOOP_COMPLETE`。
+      - 否则（pass / pass_with_residuals），在 `report.done` 之后发布 `LOOP_COMPLETE`
 
       ### Constraints
       - 不得修改任何代码

@@ -7208,3 +7208,105 @@ event_loop:
         "accepted event summary should omit rejected candidates and include accepted terminal"
     );
 }
+
+#[test]
+fn test_verdict_gate_rejects_loop_complete_when_payload_is_fail() {
+    use crate::config::VerdictGateConfig;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let mut config = RalphConfig::default();
+    config.event_loop.verdict_gate = Some(VerdictGateConfig {
+        topic: "review.complete".to_string(),
+        fail_field: "pass_or_fail".to_string(),
+        fail_value: "fail".to_string(),
+    });
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+
+    let events_path = temp_dir.path().join("events.jsonl");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    write_event_to_jsonl(
+        &events_path,
+        "review.complete",
+        r#"{"pass_or_fail":"fail","verdict":"fail","final_findings_count":2}"#,
+    );
+    write_event_to_jsonl(&events_path, "LOOP_COMPLETE", "Done");
+    let _ = event_loop.process_events_from_jsonl();
+    let reason = event_loop.check_completion_event();
+    assert_eq!(
+        reason, None,
+        "verdict gate should reject LOOP_COMPLETE when review.complete carries pass_or_fail=fail"
+    );
+    assert!(
+        event_loop.has_pending_events(),
+        "Rejecting completion should inject task.resume so the loop continues"
+    );
+}
+
+#[test]
+fn test_verdict_gate_accepts_loop_complete_when_payload_is_pass() {
+    use crate::config::VerdictGateConfig;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let mut config = RalphConfig::default();
+    config.event_loop.verdict_gate = Some(VerdictGateConfig {
+        topic: "review.complete".to_string(),
+        fail_field: "pass_or_fail".to_string(),
+        fail_value: "fail".to_string(),
+    });
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+
+    let events_path = temp_dir.path().join("events.jsonl");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    write_event_to_jsonl(
+        &events_path,
+        "review.complete",
+        r#"{"pass_or_fail":"pass","verdict":"pass_with_residuals","final_findings_count":2}"#,
+    );
+    write_event_to_jsonl(&events_path, "LOOP_COMPLETE", "Done");
+    let _ = event_loop.process_events_from_jsonl();
+    let reason = event_loop.check_completion_event();
+    assert_eq!(
+        reason,
+        Some(TerminationReason::CompletionPromise),
+        "verdict gate should accept LOOP_COMPLETE when review.complete carries pass_or_fail=pass"
+    );
+}
+
+#[test]
+fn test_no_verdict_gate_config_preserves_completion_behavior() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let mut config = RalphConfig::default();
+    assert!(
+        config.event_loop.verdict_gate.is_none(),
+        "verdict_gate must default to None for backward compatibility"
+    );
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+
+    let events_path = temp_dir.path().join("events.jsonl");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // Even if a review.complete event with pass_or_fail=fail is published, no verdict_gate
+    // means the loop ignores it and accepts LOOP_COMPLETE (backward-compatible default).
+    write_event_to_jsonl(
+        &events_path,
+        "review.complete",
+        r#"{"pass_or_fail":"fail"}"#,
+    );
+    write_event_to_jsonl(&events_path, "LOOP_COMPLETE", "Done");
+    let _ = event_loop.process_events_from_jsonl();
+    let reason = event_loop.check_completion_event();
+    assert_eq!(
+        reason,
+        Some(TerminationReason::CompletionPromise),
+        "without verdict_gate configured, LOOP_COMPLETE should be honored as before"
+    );
+}

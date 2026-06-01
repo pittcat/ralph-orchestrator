@@ -1113,6 +1113,30 @@ pub struct EventLoopConfig {
     /// Phase configuration for two-phase loop (warmup + production).
     #[serde(default)]
     pub phase_config: Option<PhaseConfig>,
+
+    /// Opt-in verdict gate: rejects LOOP_COMPLETE when the most recent event
+    /// matching `topic` carries `fail_field == fail_value` in its payload.
+    ///
+    /// Use to enforce that a final-review verdict event (e.g. `REVIEW_COMPLETE`
+    /// / `review.complete` published by a shipper/reporter hat) must indicate
+    /// success before the loop can terminate. When `None` (default), no verdict
+    /// check is performed — preserves backward compatibility.
+    #[serde(default)]
+    pub verdict_gate: Option<VerdictGateConfig>,
+}
+
+/// Verdict gate: when the most recent event matching `topic` carries
+/// `fail_field == fail_value` in its payload, LOOP_COMPLETE is rejected.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VerdictGateConfig {
+    /// Event topic carrying the verdict payload (e.g. "review.complete").
+    pub topic: String,
+
+    /// JSON field name within the event payload (e.g. "pass_or_fail").
+    pub fail_field: String,
+
+    /// Value that triggers rejection of LOOP_COMPLETE (e.g. "fail").
+    pub fail_value: String,
 }
 
 /// Orchestration phase enum.
@@ -1574,6 +1598,7 @@ impl Default for EventLoopConfig {
             event_policy: None,
             state_machine: None,
             phase_config: None,
+            verdict_gate: None,
         }
     }
 }

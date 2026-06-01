@@ -29,6 +29,13 @@ event_loop:
   max_runtime_seconds: 14400  # 4 hours
   checkpoint_interval: 5
   enforce_hat_scope: true
+  verdict_gate:
+    # Reject LOOP_COMPLETE if the most recent review.complete event has
+    # pass_or_fail == "fail". Backstops the shipper+reporter chain when
+    # either hat misclassifies a P0 residual as a pass.
+    topic: "review.complete"
+    fail_field: "pass_or_fail"
+    fail_value: "fail"
 
 cli:
   backend: "kiro"
@@ -746,6 +753,15 @@ hats:
       6. Real harness pass if applicable (Playwright / tmux / CLI)
       Any verification fails → publish `REVIEW_COMPLETE` with `pass_or_fail: "fail"`, `reason: "final validation failed: <detail>"`
 
+      ### Verdict Gate (P0 residual check)
+      Before publishing `REVIEW_COMPLETE`, the shipper MUST read `.agents/scratchpad/ce-executor/{plan_name}/findings.md`
+      and count remaining P0 findings. If any P0 finding is present, the shipper MUST
+      publish `REVIEW_COMPLETE` with `pass_or_fail: "fail"`, `verdict: "fail"`, and a
+      `residual_findings_summary` that names each P0 finding (id, file, issue).
+      Build/test/lint passing does NOT override a P0 residual — a P0 finding is a
+      correctness blocker regardless of green CI. Pass-or-fail here reflects
+      completion correctness, not tool success.
+
       ### Simplify Check
       - If `changed_lines >= 30` and not purely mechanical changes (formatting, dependency bumps, lint fixes, generated artifacts):
         - **Only on Claude Code** — review recent files for simplification: merge duplicates, extract helpers, remove dead code
@@ -945,7 +961,8 @@ hats:
 
       ### Event Publishing
       - Write report, then publish `report.done` with `report_path`
-      - Then publish `LOOP_COMPLETE`
+      - If `pass_or_fail` from the `REVIEW_COMPLETE` payload is `"fail"`, the reporter MUST NOT publish `LOOP_COMPLETE`. Instead, the report should end with an explicit "Awaiting decision" section and the reporter publishes `report.done` with `awaiting_decision: true` and stops. This lets the verdict gate (configured in `event_loop.verdict_gate`) reject any rogue `LOOP_COMPLETE`.
+      - Otherwise (pass / pass_with_residuals), publish `LOOP_COMPLETE` after `report.done`
 
       ### Constraints
       - MUST NOT modify any code

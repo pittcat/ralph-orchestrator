@@ -333,6 +333,7 @@ mod tests {
             workflow_progress: crate::event_loop::WorkflowProgress::new(),
             policy_runtime_state: None,
             state_machine_runtime_state: None,
+            last_verdict_payload: None,
         }
     }
 
