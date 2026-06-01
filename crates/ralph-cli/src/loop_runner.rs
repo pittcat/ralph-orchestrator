@@ -188,6 +188,12 @@ pub async fn run_loop_impl(
     fs::write(&loop_id_marker, &loop_id).context("Failed to write current-loop-id marker")?;
     debug!(loop_id = %loop_id, marker = ?loop_id_marker, "Wrote loop ID marker file");
 
+    // R3: stamp an owner hat on the registry entry so loop authorization
+    // helpers can gate cross-loop operations. Agent-owned loops get the
+    // current hat; human CLI invocations stay `None` so any operator can
+    // still interact with them.
+    register_loop_owner(&loop_id, &config, resume);
+
     let state_machine_enabled = config
         .event_loop
         .state_machine
@@ -4580,6 +4586,84 @@ fn config_state_machine_enabled(config: &RalphConfig) -> bool {
         .state_machine
         .as_ref()
         .is_some_and(|sm| sm.enabled)
+}
+
+/// R3: Register the current loop in the [`LoopRegistry`] with the
+/// appropriate `owner_hat_id`. In `--resume` mode the existing entry is
+/// left in place — re-registering would clobber the worktree path and
+/// PID the merge queue still references.
+///
+/// Agent-owned loops (env has `RALPH_CURRENT_HAT`) stamp the hat id on
+/// the entry so the P7 authorization helpers can gate cross-loop
+/// operations. Human CLI invocations stay `None` so any operator can
+/// still attach, view logs, or merge.
+pub(crate) fn register_loop_owner(loop_id: &str, config: &RalphConfig, resume: bool) {
+    let owner = std::env::var("RALPH_CURRENT_HAT")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    register_loop_owner_with_hat(loop_id, config, resume, owner);
+}
+
+/// R3 (testable core): the same registration logic as
+/// [`register_loop_owner`], but the owner hat id is passed explicitly
+/// instead of read from process env. Tests use this variant to avoid
+/// mutating process state.
+pub(crate) fn register_loop_owner_with_hat(
+    loop_id: &str,
+    config: &RalphConfig,
+    resume: bool,
+    owner: Option<String>,
+) {
+    use ralph_core::loop_registry::LoopEntry;
+
+    if resume {
+        // Existing entry remains authoritative during resume.
+        return;
+    }
+
+    let workspace = &config.core.workspace_root;
+    let registry = LoopRegistry::new(workspace);
+    // If a stale entry with our PID exists (crash recovery), reuse its
+    // owner rather than overwriting it. This keeps ownership consistent
+    // across crashes of an agent-owned loop.
+    if let Ok(Some(existing)) = registry.get(loop_id) {
+        if existing.pid == std::process::id() {
+            debug!(
+                loop_id = %loop_id,
+                "Loop entry already registered for current PID; leaving owner untouched"
+            );
+            return;
+        }
+    }
+
+    let prompt = config
+        .event_loop
+        .prompt
+        .clone()
+        .or_else(|| {
+            if config.event_loop.prompt_file.is_empty() {
+                None
+            } else {
+                Some(config.event_loop.prompt_file.clone())
+            }
+        })
+        .unwrap_or_else(|| "[loop]".to_string());
+    let worktree_path = std::env::current_dir()
+        .ok()
+        .map(|p| p.display().to_string());
+
+    let entry = LoopEntry::with_id(
+        loop_id,
+        prompt,
+        worktree_path,
+        workspace.display().to_string(),
+    )
+    .with_owner_hat(owner.as_deref());
+
+    if let Err(err) = registry.register(entry) {
+        warn!(loop_id = %loop_id, error = %err, "Failed to register loop owner metadata");
+    }
 }
 
 /// Injects Ralph hat execution context environment variables into a backend.

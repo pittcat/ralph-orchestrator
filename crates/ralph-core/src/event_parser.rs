@@ -908,6 +908,19 @@ pub fn parse_backpressure_json(
         }
     }
 
+    // Optional gate: mutation testing.
+    if let Some(mutation) = checks.mutation {
+        match mutation.is_pass() {
+            Some(true) => {}
+            Some(false) => missing.push("mutation".to_string()),
+            None => {
+                return Ok(BuildStatus::Invalid {
+                    reason: "mutation percent out of range 0..=100".to_string(),
+                });
+            }
+        }
+    }
+
     // Optional gate: complexity must be a finite, non-negative score.
     if let Some(complexity) = parsed.complexity.as_ref()
         && let Some(score) = complexity.score

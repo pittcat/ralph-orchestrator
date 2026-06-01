@@ -717,6 +717,30 @@ ralph emit build.done "tests: pass, lint: pass, typecheck: pass, audit: pass, co
 ralph emit review.done --json '{"status":"approved","files":3}'
 ```
 
+### Structured Evidence Payloads (P4)
+
+`build.done` and `review.done` accept a JSON object payload for strict
+backpressure verification. The structured path is preferred because
+it supports numeric gates (`coverage`, `complexity`, `duplication`),
+`performance.regression`, `specs.verified`, and `evidence_files`
+existence checks; failures produce a `build.blocked` /
+`review.blocked` event with a specific reason. Plain text evidence
+like `tests: pass\nlint: pass\ntypecheck: pass` continues to work.
+
+```bash
+# Structured build.done with required checks
+ralph emit build.done '{"checks":{"tests":"pass","lint":"pass","typecheck":"pass"}}'
+
+# Structured review.done with required checks
+ralph emit review.done '{"checks":{"tests":"pass","build":"pass"}}'
+
+# Coverage as a percent
+ralph emit build.done '{"checks":{"tests":"pass","lint":"pass","typecheck":"pass","coverage":85}}'
+
+# Evidence files must exist; missing files block the build
+ralph emit build.done '{"checks":{"tests":"pass","lint":"pass","typecheck":"pass"},"evidence_files":["logs/test-run.log"]}'
+```
+
 ### Reading Events
 
 Ralph reads new events from the run's events file after each agent execution. Events trigger hat transitions based on configured triggers.

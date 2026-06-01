@@ -10,7 +10,10 @@ pub use loop_state::{LoopState, WorkflowProgress};
 
 use crate::config::{HatBackend, HatExecutionMode, InjectMode, RalphConfig, ScratchpadConfig};
 use crate::event_origin::filter_events_by_origin;
-use crate::event_parser::{EventParser, MutationEvidence, MutationStatus};
+use crate::event_parser::{
+    BuildStatus, EventParser, MutationEvidence, MutationStatus, ReviewStatus,
+    parse_backpressure_json, parse_review_json,
+};
 use crate::event_policy::{
     PolicyDecision, PolicyRuntimeState, check_completion_guard, check_completion_honored,
     validate_event,
@@ -3443,8 +3446,71 @@ impl EventLoop {
             }
 
             if event.topic == "build.done" {
-                // Validate build.done events have backpressure evidence
-                if let Some(evidence) = EventParser::parse_backpressure_evidence(&payload) {
+                // P4: structured JSON evidence is the preferred path. If
+                // the payload parses as a JSON object we run the strict
+                // schema check first; otherwise we fall back to the
+                // legacy text "tests: pass" parsing.
+                let trimmed = payload.trim();
+                let json_status: Option<Result<BuildStatus, String>> = if trimmed.starts_with('{') {
+                    Some(parse_backpressure_json(
+                        trimmed,
+                        &self.config.core.workspace_root,
+                    ))
+                } else {
+                    None
+                };
+                if let Some(result) = json_status {
+                    match result {
+                        Ok(BuildStatus::Pass) => {
+                            accept_event!(Event::new(event.topic.as_str(), &payload));
+                        }
+                        Ok(BuildStatus::Fail { reason, missing }) => {
+                            warn!(
+                                missing = ?missing,
+                                "build.done rejected: structured backpressure failed"
+                            );
+                            self.diagnostics.log_orchestration(
+                                self.state.iteration,
+                                "jsonl",
+                                crate::diagnostics::OrchestrationEvent::BackpressureTriggered {
+                                    reason: format!("structured build evidence failed: {reason}"),
+                                },
+                            );
+                            accept_event!(Event::new(
+                                "build.blocked",
+                                crate::event_parser::build_blocked_payload(&reason),
+                            ));
+                        }
+                        Ok(BuildStatus::Invalid { reason }) => {
+                            warn!(reason = %reason, "build.done rejected: invalid JSON evidence");
+                            self.diagnostics.log_orchestration(
+                                self.state.iteration,
+                                "jsonl",
+                                crate::diagnostics::OrchestrationEvent::BackpressureTriggered {
+                                    reason: format!("invalid build evidence: {reason}"),
+                                },
+                            );
+                            accept_event!(Event::new(
+                                "build.blocked",
+                                crate::event_parser::build_blocked_payload(&reason),
+                            ));
+                        }
+                        Err(err) => {
+                            warn!(error = %err, "build.done rejected: JSON parse error");
+                            self.diagnostics.log_orchestration(
+                                self.state.iteration,
+                                "jsonl",
+                                crate::diagnostics::OrchestrationEvent::BackpressureTriggered {
+                                    reason: format!("build evidence parse error: {err}"),
+                                },
+                            );
+                            accept_event!(Event::new(
+                                "build.blocked",
+                                crate::event_parser::build_blocked_payload(&err),
+                            ));
+                        }
+                    }
+                } else if let Some(evidence) = EventParser::parse_backpressure_evidence(&payload) {
                     if evidence.all_passed() {
                         self.warn_on_mutation_evidence(&evidence);
                         accept_event!(Event::new(event.topic.as_str(), &payload));
@@ -3523,7 +3589,62 @@ impl EventLoop {
                 // Validate review.done events have verification evidence.
                 // Wave worker events skip this — wave reviews are read-only
                 // and don't run tests/builds.
-                if let Some(evidence) = EventParser::parse_review_evidence(&payload) {
+                let trimmed = payload.trim();
+                let json_status: Option<Result<ReviewStatus, String>> = if trimmed.starts_with('{')
+                {
+                    Some(parse_review_json(trimmed, &self.config.core.workspace_root))
+                } else {
+                    None
+                };
+                if let Some(result) = json_status {
+                    match result {
+                        Ok(ReviewStatus::Pass) => {
+                            accept_event!(Event::new(event.topic.as_str(), &payload));
+                        }
+                        Ok(ReviewStatus::Fail { reason, .. }) => {
+                            warn!(reason = %reason, "review.done rejected: structured verification failed");
+                            self.diagnostics.log_orchestration(
+                                self.state.iteration,
+                                "jsonl",
+                                crate::diagnostics::OrchestrationEvent::BackpressureTriggered {
+                                    reason: format!("structured review evidence failed: {reason}"),
+                                },
+                            );
+                            accept_event!(Event::new(
+                                "review.blocked",
+                                crate::event_parser::review_blocked_payload(&reason),
+                            ));
+                        }
+                        Ok(ReviewStatus::Invalid { reason }) => {
+                            warn!(reason = %reason, "review.done rejected: invalid JSON evidence");
+                            self.diagnostics.log_orchestration(
+                                self.state.iteration,
+                                "jsonl",
+                                crate::diagnostics::OrchestrationEvent::BackpressureTriggered {
+                                    reason: format!("invalid review evidence: {reason}"),
+                                },
+                            );
+                            accept_event!(Event::new(
+                                "review.blocked",
+                                crate::event_parser::review_blocked_payload(&reason),
+                            ));
+                        }
+                        Err(err) => {
+                            warn!(error = %err, "review.done rejected: JSON parse error");
+                            self.diagnostics.log_orchestration(
+                                self.state.iteration,
+                                "jsonl",
+                                crate::diagnostics::OrchestrationEvent::BackpressureTriggered {
+                                    reason: format!("review evidence parse error: {err}"),
+                                },
+                            );
+                            accept_event!(Event::new(
+                                "review.blocked",
+                                crate::event_parser::review_blocked_payload(&err),
+                            ));
+                        }
+                    }
+                } else if let Some(evidence) = EventParser::parse_review_evidence(&payload) {
                     if evidence.is_verified() {
                         accept_event!(Event::new(event.topic.as_str(), &payload));
                     } else {

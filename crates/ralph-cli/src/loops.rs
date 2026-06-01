@@ -21,11 +21,17 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
+use ralph_core::loop_authorization::{
+    AuthzDecision, LoopCaller, can_attach, can_discard, can_merge, can_stop, can_view,
+};
+use ralph_core::loop_registry::LoopEntry;
 use ralph_core::worktree::{list_ralph_worktrees, remove_worktree};
 use ralph_core::{
     LoopRegistry, MergeButtonState, MergeQueue, MergeState, SuspendStateStore, merge_button_state,
     truncate_with_ellipsis,
 };
+
+use crate::operation_guard::OperationContext;
 
 /// Manage parallel loops.
 #[derive(Parser, Debug)]
@@ -239,6 +245,74 @@ fn is_process_alive(pid: u32) -> bool {
     {
         let _ = pid;
         false
+    }
+}
+
+/// Build a [`LoopCaller`] from a detected [`OperationContext`].
+///
+/// Human CLI (no agent env) becomes [`LoopCaller::Human`]; Agent contexts
+/// that expose a `RALPH_CURRENT_HAT` become `LoopCaller::Agent`. Agent
+/// contexts without a current hat are surfaced as an error so the
+/// authorization decision is fail-closed (we never grant the request just
+/// because the agent env was incomplete).
+fn build_loop_caller(ctx: &OperationContext) -> Result<LoopCaller> {
+    if !ctx.is_agent_context {
+        return Ok(LoopCaller::Human);
+    }
+    let hat_id = ctx.current_hat_id.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "agent context requires RALPH_CURRENT_HAT for loop operations; set it before invoking `ralph loops ...`"
+        )
+    })?;
+    Ok(LoopCaller::agent(hat_id))
+}
+
+/// Apply a P7 authorization check to a loop, returning the resolved
+/// `(entry, worktree_path)` on success. The caller is detected from the
+/// current process environment; agents without `RALPH_CURRENT_HAT` are
+/// rejected before the registry is consulted so we never silently fall
+/// back to human-level access.
+///
+/// When the loop is no longer in the registry but is still tracked in the
+/// merge queue (terminal phase), authorization is evaluated against a
+/// fallback entry with `owner_hat_id = None` so humans retain diagnostic
+/// access and agents are denied by default.
+fn authorize_loop<F>(
+    ctx: &OperationContext,
+    loop_id: &str,
+    operation: &str,
+    check: F,
+) -> Result<(LoopEntry, Option<String>)>
+where
+    F: Fn(&LoopCaller, &LoopEntry) -> AuthzDecision,
+{
+    let caller = build_loop_caller(ctx)?;
+    let (resolved_id, worktree_path) = resolve_loop(&ctx.workspace_root, loop_id)?;
+    let registry = LoopRegistry::new(&ctx.workspace_root);
+    let entry = match registry.get(&resolved_id)? {
+        Some(entry) => entry,
+        None => {
+            // Fall back to a merge-queue-aware stub: owner is None so
+            // agents can never act on a loop they did not register.
+            // Humans still pass via `LoopCaller::Human`.
+            let merge_queue = MergeQueue::new(&ctx.workspace_root);
+            let _ = merge_queue.get_entry(&resolved_id).context(format!(
+                "Loop '{}' is not registered and not in the merge queue",
+                loop_id
+            ))?;
+            LoopEntry::with_id(
+                &resolved_id,
+                "",
+                worktree_path.clone(),
+                ctx.workspace_root.display().to_string(),
+            )
+        }
+    };
+    match check(&caller, &entry) {
+        AuthzDecision::Allow => Ok((entry, worktree_path)),
+        AuthzDecision::Deny { reason } => {
+            bail!("{} denied for loop '{}': {}", operation, loop_id, reason)
+        }
     }
 }
 
@@ -533,7 +607,9 @@ fn shorten_path(path: &str) -> String {
 /// Show logs for a loop.
 fn show_logs(args: LogsArgs) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    let (loop_id, worktree_path) = resolve_loop(&cwd, &args.loop_id)?;
+    let ctx = OperationContext::detect(cwd.clone());
+    let (entry, worktree_path) = authorize_loop(&ctx, &args.loop_id, "logs", can_view)?;
+    let loop_id = entry.id;
 
     let base_path = if let Some(ref wt_path) = worktree_path {
         PathBuf::from(wt_path)
@@ -589,7 +665,9 @@ fn show_logs(args: LogsArgs) -> Result<()> {
 /// Show history for a loop.
 fn show_history(args: HistoryArgs) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    let (loop_id, worktree_path) = resolve_loop(&cwd, &args.loop_id)?;
+    let ctx = OperationContext::detect(cwd.clone());
+    let (entry, worktree_path) = authorize_loop(&ctx, &args.loop_id, "history", can_view)?;
+    let loop_id = entry.id;
 
     let history_path = if let Some(wt_path) = worktree_path {
         PathBuf::from(wt_path).join(".ralph/history.jsonl")
@@ -648,13 +726,20 @@ fn retry_merge(args: RetryArgs) -> Result<()> {
         );
     }
 
+    // Authorization: re-running a merge is a merge operation, so reuse
+    // `can_merge` against the registry entry.
+    let ctx = OperationContext::detect(cwd.clone());
+    let (_entry, _worktree) = authorize_loop(&ctx, &args.loop_id, "retry merge", can_merge)?;
+
     spawn_merge_ralph(&cwd, &args.loop_id)
 }
 
 /// Discard a loop and clean up.
 fn discard_loop(args: DiscardArgs) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    let (loop_id, worktree_path) = resolve_loop(&cwd, &args.loop_id)?;
+    let ctx = OperationContext::detect(cwd.clone());
+    let (entry, worktree_path) = authorize_loop(&ctx, &args.loop_id, "discard", can_discard)?;
+    let loop_id = entry.id;
 
     // Confirmation unless -y
     if !args.yes {
@@ -739,8 +824,16 @@ fn stop_loop(args: StopArgs) -> Result<()> {
     use ralph_core::LoopLock;
 
     let cwd = std::env::current_dir()?;
+    let ctx = OperationContext::detect(cwd.clone());
+    // Authorization must run before any signal is sent or the worktree
+    // is touched. `None` (default primary loop) bypasses authorization
+    // because the primary loop is a single-process sentinel rather than
+    // a worktree-owned entity.
     let (loop_id, worktree_path) = match args.loop_id.as_deref() {
-        Some(id) => resolve_loop(&cwd, id)?,
+        Some(id) => {
+            let (entry, wt) = authorize_loop(&ctx, id, "stop", can_stop)?;
+            (entry.id, wt)
+        }
         None => ("(primary)".to_string(), None),
     };
 
@@ -953,7 +1046,12 @@ fn prune_stale() -> Result<()> {
 /// Attach to a loop's worktree.
 fn attach_to_loop(args: AttachArgs) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    let (loop_id, worktree_path) = resolve_loop(&cwd, &args.loop_id)?;
+    // Attach is human-only; agents are always denied. We use `can_attach`
+    // for the gate, not `can_view`, because the attach shell needs write
+    // access to the worktree and only humans should get that.
+    let ctx = OperationContext::detect(cwd.clone());
+    let (entry, worktree_path) = authorize_loop(&ctx, &args.loop_id, "attach", can_attach)?;
+    let loop_id = entry.id;
 
     let wt_path = worktree_path.context(format!(
         "Loop '{}' is not a worktree-based loop (it runs in-place)",
@@ -980,7 +1078,9 @@ fn attach_to_loop(args: AttachArgs) -> Result<()> {
 /// Show diff for a loop.
 fn show_diff(args: DiffArgs) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    let (loop_id, _worktree_path) = resolve_loop(&cwd, &args.loop_id)?;
+    let ctx = OperationContext::detect(cwd.clone());
+    let (entry, _worktree_path) = authorize_loop(&ctx, &args.loop_id, "diff", can_view)?;
+    let loop_id = entry.id;
 
     let branch = format!("ralph/{}", loop_id);
 
@@ -1092,11 +1192,15 @@ fn orphan_stop_wait_timeout(force: bool) -> Duration {
 /// Merge a completed loop (or force retry).
 fn merge_loop(args: MergeArgs) -> Result<()> {
     let cwd = std::env::current_dir()?;
+    let ctx = OperationContext::detect(cwd.clone());
     let registry = LoopRegistry::new(&cwd);
     let merge_queue = MergeQueue::new(&cwd);
 
-    // Try to find the loop in various places
-    let (loop_id, worktree_path) = resolve_loop(&cwd, &args.loop_id)?;
+    // Authorization happens first; an Agent must own the loop before we
+    // even look at queue state. The state machine guard remains the
+    // outer gate for both humans and agents.
+    let (entry, worktree_path) = authorize_loop(&ctx, &args.loop_id, "merge", can_merge)?;
+    let loop_id = entry.id;
 
     // 1. Check if it's running
     if let Ok(Some(entry)) = registry.get(&loop_id)
@@ -2134,5 +2238,302 @@ mod tests {
         .expect_err("merge should fail for merging loop without force");
 
         assert!(err.to_string().contains("currently merging"));
+    }
+
+    // ---- P7: Loop authorization wiring tests ----
+
+    use crate::loop_runner::register_loop_owner_with_hat;
+
+    fn make_loop_entry(id: &str, owner: Option<&str>) -> LoopEntry {
+        let mut entry = LoopEntry::with_id(id, "test prompt", None::<String>, "/tmp".to_string());
+        if let Some(o) = owner {
+            entry = entry.with_owner_hat(Some(o));
+        }
+        entry
+    }
+
+    fn human_ctx(workspace: &std::path::Path) -> OperationContext {
+        OperationContext {
+            workspace_root: workspace.to_path_buf(),
+            current_loop_id: None,
+            current_hat_id: None,
+            is_agent_context: false,
+        }
+    }
+
+    fn agent_ctx(workspace: &std::path::Path, hat: &str) -> OperationContext {
+        OperationContext {
+            workspace_root: workspace.to_path_buf(),
+            current_loop_id: None,
+            current_hat_id: Some(hat.to_string()),
+            is_agent_context: true,
+        }
+    }
+
+    #[test]
+    fn test_authorize_loop_view_agent_owner_allows() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _cwd = CwdGuard::set(temp_dir.path());
+
+        let registry = LoopRegistry::new(temp_dir.path());
+        registry
+            .register(make_loop_entry("loop-a-0001", Some("executor")))
+            .expect("register");
+
+        let ctx = agent_ctx(temp_dir.path(), "executor");
+        let (entry, _) = authorize_loop(&ctx, "loop-a-0001", "logs", can_view)
+            .expect("owner agent should view its loop");
+        assert_eq!(entry.id, "loop-a-0001");
+        assert_eq!(entry.owner_hat_id.as_deref(), Some("executor"));
+    }
+
+    #[test]
+    fn test_authorize_loop_view_agent_other_denies() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _cwd = CwdGuard::set(temp_dir.path());
+
+        let registry = LoopRegistry::new(temp_dir.path());
+        registry
+            .register(make_loop_entry("loop-b-0002", Some("reviewer")))
+            .expect("register");
+
+        let ctx = agent_ctx(temp_dir.path(), "executor");
+        let err = authorize_loop(&ctx, "loop-b-0002", "logs", can_view)
+            .expect_err("non-owner agent should be denied");
+        let msg = err.to_string();
+        assert!(msg.contains("logs denied"), "msg: {msg}");
+        assert!(msg.contains("loop-b-0002"), "msg: {msg}");
+        assert!(msg.contains("reviewer"), "msg: {msg}");
+    }
+
+    #[test]
+    fn test_authorize_loop_view_human_allows_any() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _cwd = CwdGuard::set(temp_dir.path());
+
+        let registry = LoopRegistry::new(temp_dir.path());
+        registry
+            .register(make_loop_entry("loop-c-0003", Some("reviewer")))
+            .expect("register");
+
+        let ctx = human_ctx(temp_dir.path());
+        let (entry, _) = authorize_loop(&ctx, "loop-c-0003", "logs", can_view)
+            .expect("human should view any loop");
+        assert_eq!(entry.id, "loop-c-0003");
+    }
+
+    #[test]
+    fn test_authorize_loop_history_diff_share_view_gate() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _cwd = CwdGuard::set(temp_dir.path());
+
+        let registry = LoopRegistry::new(temp_dir.path());
+        registry
+            .register(make_loop_entry("loop-d-0004", Some("executor")))
+            .expect("register");
+
+        // Non-owner agent fails for history and diff as well
+        let foreign = agent_ctx(temp_dir.path(), "reviewer");
+        for op in ["history", "diff"] {
+            let res = authorize_loop(&foreign, "loop-d-0004", op, can_view);
+            assert!(
+                res.is_err(),
+                "non-owner agent must be denied for {op}, got: {:?}",
+                res.map(|_| "ok")
+            );
+            let msg = res.unwrap_err().to_string();
+            assert!(msg.contains(&format!("{op} denied")), "msg: {msg}");
+        }
+    }
+
+    #[test]
+    fn test_authorize_loop_stop_agent_other_denies_and_does_not_signal() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _cwd = CwdGuard::set(temp_dir.path());
+
+        let registry = LoopRegistry::new(temp_dir.path());
+        registry
+            .register(make_loop_entry("loop-e-0005", Some("executor")))
+            .expect("register");
+
+        let ctx = agent_ctx(temp_dir.path(), "reviewer");
+        let err = authorize_loop(&ctx, "loop-e-0005", "stop", can_stop)
+            .expect_err("non-owner agent must be denied stop");
+        assert!(err.to_string().contains("stop denied"));
+
+        // The stop-requested marker must not exist — authorization failed
+        // before the marker was written.
+        let stop_marker = temp_dir.path().join(".ralph/stop-requested");
+        assert!(
+            !stop_marker.exists(),
+            "stop-requested marker should not be written when authorization fails"
+        );
+    }
+
+    #[test]
+    fn test_authorize_loop_discard_agent_other_denies_and_preserves_registry() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _cwd = CwdGuard::set(temp_dir.path());
+
+        let registry = LoopRegistry::new(temp_dir.path());
+        registry
+            .register(make_loop_entry("loop-f-0006", Some("executor")))
+            .expect("register");
+
+        let ctx = agent_ctx(temp_dir.path(), "reviewer");
+        let err = authorize_loop(&ctx, "loop-f-0006", "discard", can_discard)
+            .expect_err("non-owner agent must be denied discard");
+        assert!(err.to_string().contains("discard denied"));
+
+        // Registry entry must remain untouched after a denied discard
+        let still = registry.get("loop-f-0006").expect("registry get");
+        assert!(
+            still.is_some(),
+            "denied discard must not deregister the loop"
+        );
+    }
+
+    #[test]
+    fn test_authorize_loop_attach_agent_always_denied() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _cwd = CwdGuard::set(temp_dir.path());
+
+        let registry = LoopRegistry::new(temp_dir.path());
+        // Even an agent that owns the loop is denied attach.
+        registry
+            .register(make_loop_entry("loop-g-0007", Some("executor")))
+            .expect("register");
+
+        let ctx = agent_ctx(temp_dir.path(), "executor");
+        let err = authorize_loop(&ctx, "loop-g-0007", "attach", can_attach)
+            .expect_err("agent attach must be denied even for owner");
+        assert!(err.to_string().contains("attach denied"));
+    }
+
+    #[test]
+    fn test_authorize_loop_attach_human_allowed() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _cwd = CwdGuard::set(temp_dir.path());
+
+        let registry = LoopRegistry::new(temp_dir.path());
+        registry
+            .register(make_loop_entry("loop-h-0008", Some("executor")))
+            .expect("register");
+
+        let ctx = human_ctx(temp_dir.path());
+        let (entry, _) = authorize_loop(&ctx, "loop-h-0008", "attach", can_attach)
+            .expect("human attach must be allowed");
+        assert_eq!(entry.id, "loop-h-0008");
+    }
+
+    #[test]
+    fn test_authorize_loop_merge_agent_other_denies() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _cwd = CwdGuard::set(temp_dir.path());
+
+        let registry = LoopRegistry::new(temp_dir.path());
+        registry
+            .register(make_loop_entry("loop-i-0009", Some("executor")))
+            .expect("register");
+
+        let ctx = agent_ctx(temp_dir.path(), "reviewer");
+        let err = authorize_loop(&ctx, "loop-i-0009", "merge", can_merge)
+            .expect_err("non-owner agent must be denied merge");
+        assert!(err.to_string().contains("merge denied"));
+    }
+
+    #[test]
+    fn test_authorize_loop_agent_without_hat_fails_closed() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _cwd = CwdGuard::set(temp_dir.path());
+
+        let registry = LoopRegistry::new(temp_dir.path());
+        registry
+            .register(make_loop_entry("loop-j-0010", Some("executor")))
+            .expect("register");
+
+        let ctx = OperationContext {
+            workspace_root: temp_dir.path().to_path_buf(),
+            current_loop_id: None,
+            current_hat_id: None,
+            is_agent_context: true, // agent env without hat
+        };
+        let err = authorize_loop(&ctx, "loop-j-0010", "logs", can_view)
+            .expect_err("agent without hat must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("RALPH_CURRENT_HAT"),
+            "msg should mention RALPH_CURRENT_HAT: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_register_loop_owner_stamps_owner_hat_when_provided() {
+        use ralph_core::RalphConfig;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _cwd = CwdGuard::set(temp_dir.path());
+
+        let config = RalphConfig {
+            core: ralph_core::CoreConfig {
+                workspace_root: temp_dir.path().to_path_buf(),
+                ..Default::default()
+            },
+            event_loop: ralph_core::EventLoopConfig {
+                prompt: Some("test prompt".to_string()),
+                prompt_file: String::new(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        register_loop_owner_with_hat(
+            "loop-envtest-0001",
+            &config,
+            false,
+            Some("executor".to_string()),
+        );
+
+        let registry = LoopRegistry::new(temp_dir.path());
+        let entry = registry
+            .get("loop-envtest-0001")
+            .expect("registry get")
+            .expect("entry present");
+        assert_eq!(
+            entry.owner_hat_id.as_deref(),
+            Some("executor"),
+            "register_loop_owner_with_hat must stamp owner when provided"
+        );
+    }
+
+    #[test]
+    fn test_register_loop_owner_no_owner_when_none() {
+        use ralph_core::RalphConfig;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _cwd = CwdGuard::set(temp_dir.path());
+
+        let config = RalphConfig {
+            core: ralph_core::CoreConfig {
+                workspace_root: temp_dir.path().to_path_buf(),
+                ..Default::default()
+            },
+            event_loop: ralph_core::EventLoopConfig {
+                prompt: Some("human prompt".to_string()),
+                prompt_file: String::new(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        register_loop_owner_with_hat("loop-envtest-0002", &config, false, None);
+
+        let registry = LoopRegistry::new(temp_dir.path());
+        let entry = registry
+            .get("loop-envtest-0002")
+            .expect("registry get")
+            .expect("entry present");
+        assert!(
+            entry.owner_hat_id.is_none(),
+            "register_loop_owner_with_hat must leave owner None when no hat given"
+        );
     }
 }

@@ -4,13 +4,14 @@
 //! - `load`: Load a skill by name and output its content
 //! - `list`: List available skills
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use ralph_core::{RalphConfig, SkillRegistry};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 use crate::config_resolution;
+use crate::operation_guard::OperationContext;
 
 /// Output format for skill list command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
@@ -61,48 +62,88 @@ pub struct ListArgs {
 /// Execute a skill command.
 pub fn execute(args: SkillArgs) -> Result<()> {
     let root = resolve_root(args.root)?;
+    let ctx = OperationContext::detect(root.clone());
 
     match args.command {
-        SkillCommands::Load(load_args) => execute_load(&root, &load_args.name),
-        SkillCommands::List(list_args) => execute_list(&root, list_args),
+        SkillCommands::Load(load_args) => execute_load(&root, &ctx, &load_args.name),
+        SkillCommands::List(list_args) => execute_list(&root, &ctx, list_args),
     }
 }
 
-fn execute_load(root: &Path, name: &str) -> Result<()> {
-    let registry = build_registry(root)?;
-
-    match registry.load_skill(name) {
-        Some(content) => {
-            print!("{content}");
-            Ok(())
-        }
-        None => {
-            eprintln!("Error: skill '{}' not found", name);
-            let mut names: Vec<String> = registry
-                .skills_for_hat(None)
-                .into_iter()
-                .map(|skill| skill.name.clone())
-                .collect();
-            names.sort();
-            if names.is_empty() {
-                eprintln!("No skills discovered. Check skills.dirs in ralph.yml or use --root.");
-            } else {
-                eprintln!("Available skills: {}", names.join(", "));
-            }
-            std::process::exit(1);
-        }
+/// Resolve the hat id used for skill visibility. Returns `None` only
+/// when the caller is a human CLI (no agent env). Agent contexts without
+/// `RALPH_CURRENT_HAT` fail closed — we never silently fall back to the
+/// human-visible skill set.
+fn resolve_skill_hat_filter(ctx: &OperationContext) -> Result<Option<String>> {
+    if !ctx.is_agent_context {
+        return Ok(None);
     }
+    let hat = ctx.current_hat_id.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "agent context requires RALPH_CURRENT_HAT for `ralph tools skill`; set it before invoking"
+        )
+    })?;
+    Ok(Some(hat.to_string()))
 }
 
-fn execute_list(root: &Path, args: ListArgs) -> Result<()> {
+fn execute_load(root: &Path, ctx: &OperationContext, name: &str) -> Result<()> {
     let registry = build_registry(root)?;
-    let mut skills = registry.skills_for_hat(None);
+    let hat_filter = resolve_skill_hat_filter(ctx)?;
+
+    // Agent load: only allow skills visible to the current hat, and
+    // never reveal names of hidden skills in the "available" list.
+    let visible = registry.skills_for_hat(hat_filter.as_deref());
+    if let Some(skill) = visible.into_iter().find(|s| s.name == name) {
+        let wrapped = format!(
+            "<{name}-skill>\n{content}\n</{name}-skill>",
+            name = skill.name,
+            content = skill.content
+        );
+        print!("{wrapped}");
+        return Ok(());
+    }
+
+    // Skill is not in the visible set. If it exists in the registry but
+    // is hidden by hat filter, fail closed without leaking its name.
+    if registry.get(name).is_some() && hat_filter.is_some() {
+        bail!(
+            "requested skill is not visible to the current hat; check `hats:` and `backends:` frontmatter"
+        );
+    }
+
+    // Genuinely missing. Show only the visible (not hidden) skill list.
+    eprintln!("Error: skill '{}' not found", name);
+    let mut names: Vec<String> = registry
+        .skills_for_hat(hat_filter.as_deref())
+        .into_iter()
+        .map(|skill| skill.name.clone())
+        .collect();
+    names.sort();
+    if names.is_empty() {
+        eprintln!("No skills available to the current caller.");
+    } else {
+        eprintln!("Available skills: {}", names.join(", "));
+    }
+    std::process::exit(1);
+}
+
+fn execute_list(root: &Path, ctx: &OperationContext, args: ListArgs) -> Result<()> {
+    let registry = build_registry(root)?;
+    let hat_filter = resolve_skill_hat_filter(ctx)?;
+    let mut skills = registry.skills_for_hat(hat_filter.as_deref());
     skills.sort_by_key(|skill| skill.name.clone());
 
     match args.format {
         OutputFormat::Table => {
             if skills.is_empty() {
-                println!("No skills found");
+                if ctx.is_agent_context {
+                    println!(
+                        "No skills visible to the current hat ({}).",
+                        ctx.current_hat_id.as_deref().unwrap_or("?")
+                    );
+                } else {
+                    println!("No skills found");
+                }
                 return Ok(());
             }
 

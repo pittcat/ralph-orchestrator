@@ -286,27 +286,64 @@ pub(crate) fn resolve_emit_path(
         allowed.push(default_path.clone());
     }
 
-    // Determine the candidate path following the same priority order used
-    // elsewhere: RALPH_EVENTS_FILE > candidate marker > current marker >
-    // --file. Each candidate is then verified against the allowlist.
-    let candidate = if let Some(value) = env_events_file.filter(|v| !v.is_empty()) {
-        PathBuf::from(value)
+    // Determine the candidate path. Explicit env / --file targets are
+    // honoured only when they match an allowlist entry — we never
+    // silently rewrite to a marker. Without an explicit target, fall
+    // through to candidate marker → current marker → default.
+    //
+    // The clap default for `--file` is `.ralph/events.jsonl` (relative)
+    // and tests sometimes pass the absolute form, so we treat both as
+    // the "no explicit file" case.
+    let cli_file_is_default = {
+        let rel_default = Path::new(".ralph/events.jsonl");
+        cli_file == default_path || cli_file == rel_default
+    };
+    let explicit = env_events_file
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            if cli_file.as_os_str().is_empty() || cli_file_is_default {
+                None
+            } else {
+                Some(cli_file.to_path_buf())
+            }
+        });
+
+    let candidate = if let Some(explicit_target) = explicit {
+        let normalized_explicit = normalize_path(&explicit_target);
+        if allowed
+            .iter()
+            .any(|entry| normalize_path(entry) == normalized_explicit)
+        {
+            explicit_target
+        } else {
+            bail!(
+                "refusing to emit event to {}: not in this loop's events allowlist. \
+                 Allowed targets: {}",
+                explicit_target.display(),
+                allowed
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
     } else if let Ok(value) = fs::read_to_string(&candidate_marker) {
         let trimmed = value.trim();
         if !trimmed.is_empty() {
             resolve_marker_target(workspace_root, trimmed)
         } else {
-            cli_file.to_path_buf()
+            default_path.clone()
         }
     } else if let Ok(value) = fs::read_to_string(&current_marker) {
         let trimmed = value.trim();
         if !trimmed.is_empty() {
             resolve_marker_target(workspace_root, trimmed)
         } else {
-            cli_file.to_path_buf()
+            default_path.clone()
         }
     } else {
-        cli_file.to_path_buf()
+        default_path.clone()
     };
 
     // Normalize the candidate: drop `.` and resolve `..` lexically.
@@ -5510,11 +5547,22 @@ event_loop:
             ".ralph/events-20260101-000000.jsonl",
         )
         .unwrap();
-        // The marker wins over an explicit --file pointing at a different
-        // file. The resolved path is the marker target.
+        // An explicit --file that points outside the allowlist must be
+        // rejected. We do NOT silently rewrite to the marker target —
+        // that would let an agent redirect events to a different
+        // worktree's file.
         let cli_file = workspace.join(".ralph/events-other.jsonl");
-        let resolved = resolve_emit_path(&workspace, &cli_file, None).unwrap();
-        assert!(resolved.ends_with(".ralph/events-20260101-000000.jsonl"));
+        let result = resolve_emit_path(&workspace, &cli_file, None);
+        assert!(
+            result.is_err(),
+            "non-allowlisted --file must be rejected, got: {:?}",
+            result.map(|p| p.display().to_string())
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("allowlist") || msg.contains("not in"),
+            "error should mention allowlist, got: {msg}"
+        );
     }
 
     #[test]
@@ -5551,13 +5599,25 @@ event_loop:
             ".ralph/events-20260101-000000.jsonl",
         )
         .unwrap();
-        // A direct path traversal is rejected: the resolved path is the
-        // marker target (not the parent escape), and any attempt to write
-        // outside the workspace is blocked.
+        // An explicit `--file ../escape.jsonl` is rejected because it
+        // is not in the events allowlist. The new guard treats the file
+        // as a request to escape the workspace and refuses outright
+        // (no silent rewrite to the marker).
         let cli_file = workspace.join("../escape.jsonl");
-        let resolved = resolve_emit_path(&workspace, &cli_file, None).unwrap();
-        assert!(resolved.starts_with(&workspace));
-        // A direct attempt with no marker and a traversal --file is blocked.
+        let result = resolve_emit_path(&workspace, &cli_file, None);
+        assert!(
+            result.is_err(),
+            "path traversal with explicit --file must be rejected"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("allowlist") || msg.contains("not in"),
+            "error should mention allowlist, got: {msg}"
+        );
+
+        // Without a marker and an explicit traversal, the explicit file
+        // is also rejected (the default events.jsonl is not in scope of
+        // the traversal).
         std::fs::remove_file(workspace.join(".ralph/current-events")).unwrap();
         let result = resolve_emit_path(&workspace, &cli_file, None);
         assert!(

@@ -46,14 +46,16 @@ ralph emit [OPTIONS] <TOPIC> [PAYLOAD]
 | `RALPH_EVENT_SOURCE` | 回退到 `--source` |
 
 **事件文件解析优先级：**
-1. `RALPH_EVENTS_FILE` 环境变量（非空时）
+1. 显式 `RALPH_EVENTS_FILE` 或非默认 `--file`（必须命中本 loop 的 events allowlist，否则 `ralph emit` 拒绝写入并报错；不静默回退到 marker）
 2. `.ralph/current-candidate-events` marker 文件
-3. `--file` CLI 参数（默认 `.ralph/events.jsonl`）
+3. `.ralph/current-events` marker 文件
+4. `.ralph/events.jsonl` 默认路径
 
 **反模式 / 注意事项：**
 - 🔴 **不要**在 wave worker 内部使用 `ralph emit` 发射 wave 事件；worker 应直接通过标准输出或 `ralph emit` 返回结果，而不是触发新 wave。
 - 🔴 `--unsafe-no-policy-check` 仅在配置显式允许时可用，否则会导致校验失败。
 - 🔴 `ralph emit` **没有** `--format` 选项。
+- 🔴 试图通过 `RALPH_EVENTS_FILE` 或 `--file` 写入其他 worktree 的 events 文件会被 `ralph emit` 拒绝；错误信息会列出当前 allowlist。
 
 **校验：**
 ```bash
@@ -61,8 +63,10 @@ ralph emit [OPTIONS] <TOPIC> [PAYLOAD]
 events_file="${RALPH_EVENTS_FILE:-}"
 if [ -z "$events_file" ] && [ -f .ralph/current-candidate-events ]; then
   events_file="$(cat .ralph/current-candidate-events)"
+elif [ -z "$events_file" ] && [ -f .ralph/current-events ]; then
+  events_file="$(cat .ralph/current-events)"
 fi
-events_file="${events_file:-${FILE_ARG:-.ralph/events.jsonl}}"
+events_file="${events_file:-.ralph/events.jsonl}"
 
 # 2. 确认事件已追加到文件末尾
 tail -n 1 "$events_file" | jq -e ".topic == \"YOUR_TOPIC\""

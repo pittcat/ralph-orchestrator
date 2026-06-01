@@ -73,10 +73,19 @@ pub fn detect_wave_events(events: &[Event], registry: &HatRegistry) -> Option<De
     }
     let wave_events = wave_groups.remove(wave_id)?;
 
-    // Validate: all events must have the same topic and wave_total
+    // Validate: all events must have the same topic and wave_total,
+    // and the batch must be a complete, well-formed wave (every event
+    // has wave_total, total > 0, indices < total, batch size matches
+    // total). These checks live here so the dispatch path can rely on
+    // `DetectedWave` invariants without re-validating.
     let first = wave_events.first()?;
     let topic = &first.topic;
     let wave_total = first.wave_total?;
+
+    if wave_total == 0 {
+        tracing::warn!(wave_id, "wave_total must be > 0; skipping wave");
+        return None;
+    }
 
     for event in &wave_events {
         if event.topic != *topic {
@@ -95,6 +104,32 @@ pub fn detect_wave_events(events: &[Event], registry: &HatRegistry) -> Option<De
             );
             return None;
         }
+        match event.wave_index {
+            Some(idx) if idx < wave_total => {}
+            Some(idx) => {
+                tracing::warn!(
+                    wave_id,
+                    wave_index = idx,
+                    wave_total,
+                    "wave_index out of range; skipping wave"
+                );
+                return None;
+            }
+            None => {
+                tracing::warn!(wave_id, "wave event missing wave_index; skipping wave");
+                return None;
+            }
+        }
+    }
+
+    if wave_events.len() as u32 != wave_total {
+        tracing::warn!(
+            wave_id,
+            expected = wave_total,
+            actual = wave_events.len() as u32,
+            "wave batch size does not match wave_total; skipping wave"
+        );
+        return None;
     }
 
     // Resolve target hat from the event topic
@@ -251,5 +286,107 @@ mod tests {
         let events = vec![make_wave_event("unknown.topic", "payload", "w-abc", 0, 1)];
 
         assert!(detect_wave_events(&events, &registry).is_none());
+    }
+
+    // ---- P6: stricter wave shape validation tests ----
+
+    fn wave_event_with_index_total(
+        topic: &str,
+        wave_id: &str,
+        index: Option<u32>,
+        total: Option<u32>,
+    ) -> Event {
+        Event {
+            topic: topic.to_string(),
+            payload: Some("p".to_string()),
+            ts: "2025-01-01T00:00:00Z".to_string(),
+            hat: None,
+            triggered: None,
+            source: None,
+            wave_id: Some(wave_id.to_string()),
+            wave_index: index,
+            wave_total: total,
+        }
+    }
+
+    #[test]
+    fn test_detect_rejects_wave_total_zero() {
+        let registry = make_registry_with_concurrent_hat();
+        let events = vec![wave_event_with_index_total(
+            "review.file",
+            "w-zero",
+            Some(0),
+            Some(0),
+        )];
+        assert!(detect_wave_events(&events, &registry).is_none());
+    }
+
+    #[test]
+    fn test_detect_rejects_wave_index_equal_total() {
+        let registry = make_registry_with_concurrent_hat();
+        let events = vec![wave_event_with_index_total(
+            "review.file",
+            "w-eq",
+            Some(2),
+            Some(2),
+        )];
+        assert!(detect_wave_events(&events, &registry).is_none());
+    }
+
+    #[test]
+    fn test_detect_rejects_wave_index_above_total() {
+        let registry = make_registry_with_concurrent_hat();
+        let events = vec![wave_event_with_index_total(
+            "review.file",
+            "w-above",
+            Some(5),
+            Some(2),
+        )];
+        assert!(detect_wave_events(&events, &registry).is_none());
+    }
+
+    #[test]
+    fn test_detect_rejects_wave_missing_index() {
+        let registry = make_registry_with_concurrent_hat();
+        let events = vec![wave_event_with_index_total(
+            "review.file",
+            "w-no-idx",
+            None,
+            Some(1),
+        )];
+        assert!(detect_wave_events(&events, &registry).is_none());
+    }
+
+    #[test]
+    fn test_detect_rejects_batch_size_mismatch() {
+        let registry = make_registry_with_concurrent_hat();
+        // 2 events but total=3
+        let events = vec![
+            make_wave_event("review.file", "p1", "w-mm", 0, 3),
+            make_wave_event("review.file", "p2", "w-mm", 1, 3),
+        ];
+        assert!(detect_wave_events(&events, &registry).is_none());
+    }
+
+    #[test]
+    fn test_detect_rejects_inconsistent_wave_total() {
+        let registry = make_registry_with_concurrent_hat();
+        let events = vec![
+            wave_event_with_index_total("review.file", "w-it", Some(0), Some(2)),
+            wave_event_with_index_total("review.file", "w-it", Some(1), Some(3)),
+        ];
+        assert!(detect_wave_events(&events, &registry).is_none());
+    }
+
+    #[test]
+    fn test_detect_accepts_complete_well_formed_wave() {
+        let registry = make_registry_with_concurrent_hat();
+        let events = vec![
+            make_wave_event("review.file", "a", "w-good", 0, 2),
+            make_wave_event("review.file", "b", "w-good", 1, 2),
+        ];
+        let wave = detect_wave_events(&events, &registry).expect("valid wave must be detected");
+        assert_eq!(wave.total, 2);
+        assert_eq!(wave.events.len(), 2);
     }
 }
