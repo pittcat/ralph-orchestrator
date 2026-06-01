@@ -37,7 +37,7 @@ event_loop:
     fail_value: "fail"
 
 cli:
-  backend: "kiro"
+  backend: "claude"
   prompt_mode: "arg"
 
 core:
@@ -303,7 +303,7 @@ hats:
     description: "基于 wave 的单维度专注代码审查。"
     triggers: ["review.wave.ready"]
     publishes: ["review.dimension.done"]
-    concurrency: 9
+    concurrency: 4
     instructions: |
       ## DIMENSION REVIEWER MODE — 专注的 {dimension} 审查
 
