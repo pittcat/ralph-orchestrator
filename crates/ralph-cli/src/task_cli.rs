@@ -201,11 +201,7 @@ fn get_tasks_path(root: Option<&PathBuf>) -> PathBuf {
 }
 
 fn read_current_loop_id(root: Option<&PathBuf>) -> Option<String> {
-    let loop_id_marker = resolve_workspace_root(root).join(".ralph/current-loop-id");
-
-    let loop_id = std::fs::read_to_string(loop_id_marker).ok()?;
-    let loop_id = loop_id.trim().to_string();
-    (!loop_id.is_empty()).then_some(loop_id)
+    crate::operation_guard::OperationContext::detect(resolve_workspace_root(root)).current_loop_id
 }
 
 fn add_common_task_fields(
@@ -321,16 +317,12 @@ fn filter_tasks_for_ready(
 ) -> Vec<Task> {
     let mut ready: Vec<Task> = store.ready().into_iter().cloned().collect();
 
-    if !args.all {
-        let loop_id_marker = Some(resolve_workspace_root(root).join(".ralph/current-loop-id"));
-        if let Some(marker_path) = loop_id_marker
-            && let Ok(current_loop_id) = std::fs::read_to_string(&marker_path)
-        {
-            let current_loop_id = current_loop_id.trim().to_string();
-            if !current_loop_id.is_empty() {
-                ready.retain(|t| t.loop_id.as_ref() == Some(&current_loop_id));
-            }
-        }
+    if !args.all
+        && let Some(current_loop_id) =
+            crate::operation_guard::OperationContext::detect(resolve_workspace_root(root))
+                .current_loop_id
+    {
+        ready.retain(|t| t.loop_id.as_ref() == Some(&current_loop_id));
     }
 
     ready

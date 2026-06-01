@@ -26,6 +26,7 @@ mod loop_runner;
 mod loops;
 mod mcp;
 mod memory;
+mod operation_guard;
 mod preflight;
 mod presets;
 mod rpc_stdin;
