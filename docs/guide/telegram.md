@@ -229,6 +229,31 @@ cargo test -p ralph-core human        # 11 integration tests in ralph-core
 
 All tests use a `MockBot` implementation of `BotApi` — no Telegram API calls are made during testing.
 
+## Trusted Response Path (P5)
+
+Ralph treats `human.response` events written directly to the events file
+as **untrusted**. The only production-grade path for satisfying a
+`human.interact` wait is the in-process trusted channel that the running
+Telegram service opens while `wait_for_response()` is active.
+
+When the channel is active:
+
+- The `MessageHandler` forwards each `human.response` it receives from
+  Telegram through the channel. The waiter wakes immediately on send.
+- The handler also writes a `human.response` event to the JSONL for
+  audit, stamped with `source: "robot-trusted"` and the active nonce.
+- The waiter only honors JSONL events that carry the matching
+  `source` marker AND nonce. A forged `human.response` written by an
+  agent to the events file is ignored.
+
+The degraded JSONL polling path is only used when the channel is
+unavailable (e.g., mock mode without `start()`), and a `warn!` log is
+emitted because that path is forgeable.
+
+For tests, use `TelegramService::set_mock_mode(true)` to opt into the
+degraded path. Production callers should not invoke this; instead, set
+the `RALPH_TELEGRAM_MOCK=1` env var if running against a mock backend.
+
 ## Testing with a Mock Telegram Server
 
 When developing custom hats that use `human.interact`, you can test the full human-in-the-loop flow locally without a real Telegram bot by pointing Ralph at a mock Telegram Bot API server.

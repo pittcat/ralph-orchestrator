@@ -241,7 +241,18 @@ ralph events [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--file <PATH>` | Use a specific events file |
-| `--clear` | Clear event history |
+| `--clear` | Clear event history. **Requires `--confirm <loop_id>`** to authorize (P8). |
+| `--confirm <LOOP_ID>` | Confirmation token: must equal the active loop id (from `.ralph/current-loop-id`), or `current` / `default` when no loop marker exists. |
+
+**Example (safe):**
+
+```bash
+# Discover the active loop id, then authorize the clear.
+cat .ralph/current-loop-id
+ralph events --clear --confirm loop-1735731234-abcd
+```
+
+Without `--confirm`, the clear is refused. A wrong confirm is also refused.
 
 ### ralph emit
 
@@ -264,6 +275,14 @@ ralph emit <TOPIC> [PAYLOAD] [OPTIONS]
 | `--hat <HAT>` | Hat that published this event (falls back to `$RALPH_CURRENT_HAT`) |
 | `--triggered <HAT>` | Target hat triggered by this event (falls back to `$RALPH_TRIGGERED_HAT`) |
 | `--source <SOURCE>` | Source identifier for this event (falls back to `$RALPH_EVENT_SOURCE`) |
+
+**P6 path restriction:** the resolved events file is validated against an
+allowlist. Allowed targets are the `current-candidate-events` marker
+target, the `current-events` marker target, and the default
+`events.jsonl` (only when no marker exists). Any other path — from
+`--file`, `RALPH_EVENTS_FILE`, or path traversal — is rejected. Symlinks
+that alias an allowlist entry to a path outside the workspace are also
+rejected.
 
 ### ralph clean
 
