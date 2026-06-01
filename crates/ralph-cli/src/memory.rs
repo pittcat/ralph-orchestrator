@@ -9,10 +9,13 @@
 //! - `prime`: Output memories for context injection
 //! - `init`: Initialize memories file
 
+use crate::operation_guard::OperationContext;
 use crate::resolve_workspace_root;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use ralph_core::{MarkdownMemoryStore, Memory, MemoryType, truncate_with_ellipsis};
+use ralph_core::{
+    MarkdownMemoryStore, Memory, MemoryType, MemoryVisibility, truncate_with_ellipsis,
+};
 use std::path::PathBuf;
 
 /// ANSI color codes for terminal output.
@@ -22,6 +25,7 @@ mod colors {
     pub const DIM: &str = "\x1b[2m";
     pub const GREEN: &str = "\x1b[32m";
     pub const CYAN: &str = "\x1b[36m";
+    pub const MAGENTA: &str = "\x1b[35m";
 }
 
 /// Format a date string as a human-readable relative time.
@@ -119,6 +123,10 @@ pub struct AddArgs {
     #[arg(long)]
     pub tags: Option<String>,
 
+    /// Mark this memory as private to the current hat (agent context only)
+    #[arg(long)]
+    pub private: bool,
+
     /// Output format
     #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
     pub format: OutputFormat,
@@ -213,31 +221,138 @@ pub struct InitArgs {
     pub force: bool,
 }
 
+/// Maximum characters per memory content (rejected on add).
+const MAX_MEMORY_CONTENT_CHARS: usize = 10_000;
+
+/// Maximum private memories per hat id (rejected on add).
+const MAX_PRIVATE_MEMORIES_PER_HAT: usize = 1_000;
+
+/// Build an `OperationContext` for the current invocation.
+fn operation_context_for(root: Option<&PathBuf>) -> OperationContext {
+    OperationContext::detect(resolve_workspace_root(root))
+}
+
+/// Authorize a mutation against a memory, taking visibility rules
+/// into account.
+///
+/// In agent context:
+/// - **Shared** memories are immutable; only the human CLI may mutate them.
+/// - **Private** memories may be mutated only by their `owner_hat_id`.
+///
+/// In human context this is a no-op (humans have full diagnostic access).
+fn authorize_memory_action(
+    memory: Option<&Memory>,
+    ctx: &OperationContext,
+    operation: &str,
+) -> Result<()> {
+    let Some(memory) = memory else {
+        return Ok(());
+    };
+    if !ctx.is_agent_context {
+        return Ok(());
+    }
+    match memory.visibility {
+        MemoryVisibility::Shared => bail!(
+            "{operation}: agent context cannot mutate shared memory '{id}' (human CLI required)",
+            id = memory.id
+        ),
+        MemoryVisibility::Private => {
+            let caller = ctx.current_hat_id.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{operation}: agent context requires a current hat (set RALPH_CURRENT_HAT)"
+                )
+            })?;
+            if memory.owner_hat_id.as_deref() != Some(caller) {
+                bail!(
+                    "{operation}: private memory '{id}' is owned by '{owner}' but caller is '{caller}'",
+                    id = memory.id,
+                    owner = memory.owner_hat_id.as_deref().unwrap_or("?"),
+                    caller = caller
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Execute a memory command.
 pub fn execute(args: MemoryArgs, use_colors: bool) -> Result<()> {
     let root = resolve_workspace_root(args.root.as_ref());
     let store = MarkdownMemoryStore::with_default_path(&root);
+    let ctx = operation_context_for(args.root.as_ref());
 
     match args.command {
-        MemoryCommands::Add(add_args) => add_command(&store, add_args, use_colors),
-        MemoryCommands::List(list_args) => list_command(&store, list_args, use_colors),
-        MemoryCommands::Show(show_args) => show_command(&store, show_args, use_colors),
-        MemoryCommands::Delete(delete_args) => delete_command(&store, delete_args, use_colors),
-        MemoryCommands::Search(search_args) => search_command(&store, search_args, use_colors),
-        MemoryCommands::Prime(prime_args) => prime_command(&store, prime_args),
+        MemoryCommands::Add(add_args) => add_command(&store, &ctx, add_args, use_colors),
+        MemoryCommands::List(list_args) => list_command(&store, &ctx, list_args, use_colors),
+        MemoryCommands::Show(show_args) => show_command(&store, &ctx, show_args, use_colors),
+        MemoryCommands::Delete(delete_args) => {
+            delete_command(&store, &ctx, delete_args, use_colors)
+        }
+        MemoryCommands::Search(search_args) => {
+            search_command(&store, &ctx, search_args, use_colors)
+        }
+        MemoryCommands::Prime(prime_args) => prime_command(&store, &ctx, prime_args),
         MemoryCommands::Init(init_args) => init_command(&store, init_args, use_colors),
     }
 }
 
-fn add_command(store: &MarkdownMemoryStore, args: AddArgs, use_colors: bool) -> Result<()> {
+fn add_command(
+    store: &MarkdownMemoryStore,
+    ctx: &OperationContext,
+    args: AddArgs,
+    use_colors: bool,
+) -> Result<()> {
+    // P3 guard: reject empty content up front
+    if args.content.trim().is_empty() {
+        bail!("memory add: content must not be empty");
+    }
+    // P3 guard: reject oversized content
+    if args.content.chars().count() > MAX_MEMORY_CONTENT_CHARS {
+        bail!(
+            "memory add: content exceeds {} characters",
+            MAX_MEMORY_CONTENT_CHARS
+        );
+    }
+
     // Parse tags
     let tags: Vec<String> = args
         .tags
         .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
         .unwrap_or_default();
 
-    // Create and store the memory
-    let memory = Memory::new(args.r#type, args.content, tags);
+    // Decide visibility / owner before constructing the memory
+    let (owner_hat_id, visibility) = if args.private {
+        // --private is only meaningful in agent context, where the
+        // owning hat is the active hat. Humans invoking --private
+        // would create an owner-less private entry (a fail-closed
+        // state), so we reject the request up front.
+        if !ctx.is_agent_context {
+            bail!(
+                "memory add: --private requires agent context (set RALPH_CURRENT_HAT to scope the memory)"
+            );
+        }
+        let hat_id = ctx.current_hat_id.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "memory add: --private requires RALPH_CURRENT_HAT to identify the owning hat"
+            )
+        })?;
+        // P3 guard: per-hat private threshold
+        let n = store
+            .count_private_for_owner(&hat_id)
+            .context("Failed to count private memories")?;
+        if n >= MAX_PRIVATE_MEMORIES_PER_HAT {
+            bail!(
+                "memory add: hat '{hat_id}' already owns {n} private memories (limit: {limit})",
+                hat_id = hat_id,
+                limit = MAX_PRIVATE_MEMORIES_PER_HAT
+            );
+        }
+        (Some(hat_id), MemoryVisibility::Private)
+    } else {
+        (None, MemoryVisibility::Shared)
+    };
+
+    let memory = Memory::new_with_owner(args.r#type, args.content, tags, owner_hat_id, visibility);
     let id = memory.id.clone();
 
     store.append(&memory).context("Failed to store memory")?;
@@ -252,12 +367,19 @@ fn add_command(store: &MarkdownMemoryStore, args: AddArgs, use_colors: bool) -> 
             println!("{}", json);
         }
         OutputFormat::Markdown => {
+            let owner_meta = memory
+                .owner_hat_id
+                .as_deref()
+                .map(|o| format!(" | owner: {}", o))
+                .unwrap_or_default();
             println!(
-                "### {}\n> {}\n<!-- tags: {} | created: {} -->",
+                "### {}\n> {}\n<!-- tags: {} | created: {} | visibility: {}{} -->",
                 memory.id,
                 memory.content.replace('\n', "\n> "),
                 memory.tags.join(", "),
-                memory.created
+                memory.created,
+                memory.visibility.as_str(),
+                owner_meta,
             );
         }
         OutputFormat::Table => {
@@ -272,8 +394,20 @@ fn add_command(store: &MarkdownMemoryStore, args: AddArgs, use_colors: bool) -> 
     Ok(())
 }
 
-fn list_command(store: &MarkdownMemoryStore, args: ListArgs, use_colors: bool) -> Result<()> {
-    let mut memories = store.load().context("Failed to load memories")?;
+fn list_command(
+    store: &MarkdownMemoryStore,
+    ctx: &OperationContext,
+    args: ListArgs,
+    use_colors: bool,
+) -> Result<()> {
+    // P3: agent context filters by visibility; human context sees everything.
+    let mut memories = if ctx.is_agent_context {
+        store
+            .load_visible(ctx.current_hat_id.as_deref())
+            .context("Failed to load memories")?
+    } else {
+        store.load().context("Failed to load memories")?
+    };
 
     // Filter by type if specified
     if let Some(memory_type) = args.r#type {
@@ -312,17 +446,54 @@ fn list_command(store: &MarkdownMemoryStore, args: ListArgs, use_colors: bool) -
     Ok(())
 }
 
-fn show_command(store: &MarkdownMemoryStore, args: ShowArgs, use_colors: bool) -> Result<()> {
-    let memory = store
-        .get(&args.id)
-        .context("Failed to read memories")?
-        .ok_or_else(|| anyhow::anyhow!("Memory not found: {}", args.id))?;
+fn show_command(
+    store: &MarkdownMemoryStore,
+    ctx: &OperationContext,
+    args: ShowArgs,
+    use_colors: bool,
+) -> Result<()> {
+    // P3: in agent context use visibility-aware lookup; in human
+    // context use the raw store.
+    let memory = if ctx.is_agent_context {
+        store
+            .get_visible(&args.id, ctx.current_hat_id.as_deref())
+            .context("Failed to read memories")?
+    } else {
+        store.get(&args.id).context("Failed to read memories")?
+    };
+
+    let Some(memory) = memory else {
+        // In agent context, distinguish "does not exist" from
+        // "hidden by visibility rules" so the agent doesn't learn
+        // about hidden entries by guessing.
+        if ctx.is_agent_context
+            && store
+                .get(&args.id)
+                .context("Failed to read memories")?
+                .is_some()
+        {
+            bail!(
+                "Memory not found or hidden by visibility rules: {}",
+                args.id
+            );
+        }
+        bail!("Memory not found: {}", args.id);
+    };
 
     output_memory(&memory, args.format, use_colors);
     Ok(())
 }
 
-fn delete_command(store: &MarkdownMemoryStore, args: DeleteArgs, use_colors: bool) -> Result<()> {
+fn delete_command(
+    store: &MarkdownMemoryStore,
+    ctx: &OperationContext,
+    args: DeleteArgs,
+    use_colors: bool,
+) -> Result<()> {
+    // P3: enforce visibility-aware authorization before mutating.
+    let memory = store.get(&args.id).context("Failed to read memories")?;
+    authorize_memory_action(memory.as_ref(), ctx, "memory delete")?;
+
     let deleted = store.delete(&args.id).context("Failed to delete memory")?;
 
     if deleted {
@@ -338,12 +509,24 @@ fn delete_command(store: &MarkdownMemoryStore, args: DeleteArgs, use_colors: boo
         }
         Ok(())
     } else {
-        anyhow::bail!("Memory not found: {}", args.id)
+        bail!("Memory not found: {}", args.id)
     }
 }
 
-fn search_command(store: &MarkdownMemoryStore, args: SearchArgs, use_colors: bool) -> Result<()> {
-    let all_memories = store.load().context("Failed to load memories")?;
+fn search_command(
+    store: &MarkdownMemoryStore,
+    ctx: &OperationContext,
+    args: SearchArgs,
+    use_colors: bool,
+) -> Result<()> {
+    // P3: agent context filters by visibility; human context sees everything.
+    let all_memories = if ctx.is_agent_context {
+        store
+            .load_visible(ctx.current_hat_id.as_deref())
+            .context("Failed to load memories")?
+    } else {
+        store.load().context("Failed to load memories")?
+    };
     let total_count = all_memories.len();
     let mut memories = all_memories;
 
@@ -437,8 +620,19 @@ fn search_command(store: &MarkdownMemoryStore, args: SearchArgs, use_colors: boo
     Ok(())
 }
 
-fn prime_command(store: &MarkdownMemoryStore, args: PrimeArgs) -> Result<()> {
-    let mut memories = store.load().context("Failed to load memories")?;
+fn prime_command(
+    store: &MarkdownMemoryStore,
+    ctx: &OperationContext,
+    args: PrimeArgs,
+) -> Result<()> {
+    // P3: agent context filters by visibility; human context sees everything.
+    let mut memories = if ctx.is_agent_context {
+        store
+            .load_visible(ctx.current_hat_id.as_deref())
+            .context("Failed to load memories")?
+    } else {
+        store.load().context("Failed to load memories")?
+    };
 
     // Filter by types if specified
     if let Some(ref types_str) = args.r#type {
@@ -555,12 +749,19 @@ fn output_memory(memory: &Memory, format: OutputFormat, use_colors: bool) {
             println!("{}", json);
         }
         OutputFormat::Markdown => {
+            let owner_meta = memory
+                .owner_hat_id
+                .as_deref()
+                .map(|o| format!(" | owner: {}", o))
+                .unwrap_or_default();
             println!(
-                "### {}\n> {}\n<!-- tags: {} | created: {} -->",
+                "### {}\n> {}\n<!-- tags: {} | created: {} | visibility: {}{} -->",
                 memory.id,
                 memory.content.replace('\n', "\n> "),
                 memory.tags.join(", "),
-                memory.created
+                memory.created,
+                memory.visibility.as_str(),
+                owner_meta,
             );
         }
         OutputFormat::Quiet => {
@@ -646,6 +847,8 @@ fn print_memory_detail(memory: &Memory, use_colors: bool) {
     } else {
         memory.tags.join(", ")
     };
+    let owner_display = memory.owner_hat_id.as_deref().unwrap_or("-");
+    let visibility_display = memory.visibility.as_str();
 
     if use_colors {
         println!();
@@ -657,12 +860,19 @@ fn print_memory_detail(memory: &Memory, use_colors: bool) {
         );
         println!("{DIM}╰────────────────────────────────────────────────────────────────╯{RESET}");
         println!();
-        println!("  {BOLD}ID:{RESET}      {DIM}{}{RESET}", memory.id);
+        println!("  {BOLD}ID:{RESET}         {DIM}{}{RESET}", memory.id);
         println!(
-            "  {BOLD}Created:{RESET} {} {DIM}({}){RESET}",
+            "  {BOLD}Created:{RESET}    {} {DIM}({}){RESET}",
             relative_date, memory.created
         );
-        println!("  {BOLD}Tags:{RESET}    {CYAN}{}{RESET}", tags_display);
+        println!("  {BOLD}Tags:{RESET}       {CYAN}{}{RESET}", tags_display);
+        println!(
+            "  {BOLD}Visibility:{RESET} {MAGENTA}{}{RESET}",
+            visibility_display
+        );
+        if memory.owner_hat_id.is_some() {
+            println!("  {BOLD}Owner:{RESET}      {CYAN}{}{RESET}", owner_display);
+        }
         println!();
         println!("  {BOLD}Content:{RESET}");
         println!("{DIM}  ─────────────────────────────────────────────────────────────{RESET}");
@@ -680,9 +890,13 @@ fn print_memory_detail(memory: &Memory, use_colors: bool) {
         );
         println!("└────────────────────────────────────────────────────────────────┘");
         println!();
-        println!("  ID:      {}", memory.id);
-        println!("  Created: {} ({})", relative_date, memory.created);
-        println!("  Tags:    {}", tags_display);
+        println!("  ID:         {}", memory.id);
+        println!("  Created:    {} ({})", relative_date, memory.created);
+        println!("  Tags:       {}", tags_display);
+        println!("  Visibility: {}", visibility_display);
+        if memory.owner_hat_id.is_some() {
+            println!("  Owner:      {}", owner_display);
+        }
         println!();
         println!("  Content:");
         println!("  ─────────────────────────────────────────────────────────────");
@@ -710,12 +924,19 @@ fn format_memories_as_markdown(memories: &[Memory]) -> String {
         output.push_str(&format!("\n## {}\n", memory_type.section_name()));
 
         for memory in type_memories {
+            let owner_meta = memory
+                .owner_hat_id
+                .as_deref()
+                .map(|o| format!(" | owner: {}", o))
+                .unwrap_or_default();
             output.push_str(&format!(
-                "\n### {}\n> {}\n<!-- tags: {} | created: {} -->\n",
+                "\n### {}\n> {}\n<!-- tags: {} | created: {} | visibility: {}{} -->\n",
                 memory.id,
                 memory.content.replace('\n', "\n> "),
                 memory.tags.join(", "),
-                memory.created
+                memory.created,
+                memory.visibility.as_str(),
+                owner_meta,
             ));
         }
     }
@@ -875,6 +1096,7 @@ mod tests {
                 content: "alpha".to_string(),
                 tags: vec!["tag1".to_string()],
                 created: "2026-01-31".to_string(),
+                ..Default::default()
             },
             Memory {
                 id: "mem-2".to_string(),
@@ -882,6 +1104,7 @@ mod tests {
                 content: "beta".to_string(),
                 tags: vec![],
                 created: "2026-01-31".to_string(),
+                ..Default::default()
             },
         ];
 
@@ -902,6 +1125,7 @@ mod tests {
             content: "beta".to_string(),
             tags: vec!["tag1".to_string()],
             created: "2026-01-31".to_string(),
+            ..Default::default()
         }];
 
         let output = format_memories_as_text(&memories);
@@ -909,5 +1133,394 @@ mod tests {
         assert!(output.contains("beta"));
         assert!(output.contains("Tags: tag1"));
         assert!(output.contains("Created: 2026-01-31"));
+    }
+
+    // ---- P3 CLI visibility / owner / authorization tests ----
+
+    /// Build an `OperationContext` for tests with an injected env resolver.
+    fn ctx_for(workspace: &std::path::Path, hat: Option<&str>) -> OperationContext {
+        OperationContext::detect_with_env(workspace.to_path_buf(), move |key| {
+            if key == "RALPH_CURRENT_HAT" {
+                hat.map(String::from)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Build a `MarkdownMemoryStore` rooted at a fresh temp dir.
+    fn temp_store() -> (tempfile::TempDir, MarkdownMemoryStore) {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let store = MarkdownMemoryStore::with_default_path(tmp.path());
+        (tmp, store)
+    }
+
+    /// Append a memory directly to the store (bypassing CLI guards) so
+    /// tests can set up fixtures for visibility / owner scenarios.
+    fn seed(
+        store: &MarkdownMemoryStore,
+        content: &str,
+        owner: Option<&str>,
+        visibility: MemoryVisibility,
+    ) -> String {
+        let m = Memory::new_with_owner(
+            MemoryType::Pattern,
+            content.to_string(),
+            vec![],
+            owner.map(String::from),
+            visibility,
+        );
+        let id = m.id.clone();
+        store.append(&m).expect("seed");
+        id
+    }
+
+    #[test]
+    fn test_add_command_stamps_owner_hat_when_private() {
+        let (tmp, store) = temp_store();
+        let args = AddArgs {
+            content: "private note".to_string(),
+            r#type: MemoryType::Pattern,
+            tags: None,
+            private: true,
+            format: OutputFormat::Quiet,
+        };
+        let ctx = ctx_for(tmp.path(), Some("executor"));
+
+        add_command(&store, &ctx, args, false).expect("add should succeed");
+
+        let raw = std::fs::read_to_string(store.path()).expect("read file");
+        assert!(
+            raw.contains("owner: executor"),
+            "metadata missing owner: {raw}"
+        );
+        assert!(
+            raw.contains("visibility: private"),
+            "metadata missing visibility: {raw}"
+        );
+    }
+
+    #[test]
+    fn test_add_command_default_visibility_shared() {
+        let (tmp, store) = temp_store();
+        let args = AddArgs {
+            content: "shared note".to_string(),
+            r#type: MemoryType::Pattern,
+            tags: None,
+            private: false,
+            format: OutputFormat::Quiet,
+        };
+        let ctx = ctx_for(tmp.path(), Some("executor"));
+
+        add_command(&store, &ctx, args, false).expect("add should succeed");
+
+        let raw = std::fs::read_to_string(store.path()).expect("read file");
+        assert!(
+            raw.contains("visibility: shared"),
+            "shared visibility missing: {raw}"
+        );
+        assert!(
+            !raw.contains("owner: "),
+            "shared memory should not carry owner: {raw}"
+        );
+    }
+
+    #[test]
+    fn test_add_command_rejects_empty_content() {
+        let (tmp, store) = temp_store();
+        let args = AddArgs {
+            content: "   \n  ".to_string(),
+            r#type: MemoryType::Pattern,
+            tags: None,
+            private: false,
+            format: OutputFormat::Quiet,
+        };
+        let ctx = ctx_for(tmp.path(), Some("executor"));
+
+        let err = add_command(&store, &ctx, args, false).expect_err("empty must fail");
+        assert!(err.to_string().contains("must not be empty"));
+        assert!(!store.exists());
+    }
+
+    #[test]
+    fn test_add_command_rejects_oversized() {
+        let (tmp, store) = temp_store();
+        let oversized = "a".repeat(MAX_MEMORY_CONTENT_CHARS + 1);
+        let args = AddArgs {
+            content: oversized,
+            r#type: MemoryType::Pattern,
+            tags: None,
+            private: false,
+            format: OutputFormat::Quiet,
+        };
+        let ctx = ctx_for(tmp.path(), Some("executor"));
+
+        let err = add_command(&store, &ctx, args, false).expect_err("oversized must fail");
+        assert!(err.to_string().contains("exceeds"));
+        assert!(!store.exists());
+    }
+
+    #[test]
+    fn test_add_command_private_threshold_per_hat() {
+        let (tmp, store) = temp_store();
+        let ctx = ctx_for(tmp.path(), Some("executor"));
+
+        // Seed `MAX_PRIVATE_MEMORIES_PER_HAT` private memories directly.
+        for i in 0..MAX_PRIVATE_MEMORIES_PER_HAT {
+            seed(
+                &store,
+                &format!("seed {i}"),
+                Some("executor"),
+                MemoryVisibility::Private,
+            );
+        }
+
+        let args = AddArgs {
+            content: "one too many".to_string(),
+            r#type: MemoryType::Pattern,
+            tags: None,
+            private: true,
+            format: OutputFormat::Quiet,
+        };
+        let err = add_command(&store, &ctx, args, false).expect_err("private threshold must fail");
+        assert!(err.to_string().contains("limit"));
+    }
+
+    #[test]
+    fn test_add_command_rejects_private_in_human_context() {
+        let (tmp, store) = temp_store();
+        let args = AddArgs {
+            content: "human private".to_string(),
+            r#type: MemoryType::Pattern,
+            tags: None,
+            private: true,
+            format: OutputFormat::Quiet,
+        };
+        let ctx = ctx_for(tmp.path(), None); // human context
+
+        let err = add_command(&store, &ctx, args, false).expect_err("human --private must fail");
+        assert!(err.to_string().contains("agent context"));
+    }
+
+    #[test]
+    fn test_list_command_agent_sees_shared_and_own_private() {
+        let (tmp, store) = temp_store();
+        // seed: one shared, one executor private, one reviewer private
+        seed(&store, "shared", None, MemoryVisibility::Shared);
+        seed(&store, "mine", Some("executor"), MemoryVisibility::Private);
+        seed(
+            &store,
+            "theirs",
+            Some("reviewer"),
+            MemoryVisibility::Private,
+        );
+
+        let ctx = ctx_for(tmp.path(), Some("executor"));
+        let memories = store
+            .load_visible(ctx.current_hat_id.as_deref())
+            .expect("load");
+        let contents: Vec<_> = memories.iter().map(|m| m.content.as_str()).collect();
+        assert!(contents.contains(&"shared"));
+        assert!(contents.contains(&"mine"));
+        assert!(!contents.contains(&"theirs"));
+    }
+
+    #[test]
+    fn test_show_command_rejects_other_hat_private() {
+        let (tmp, store) = temp_store();
+        let id = seed(
+            &store,
+            "executor-only",
+            Some("executor"),
+            MemoryVisibility::Private,
+        );
+
+        let ctx = ctx_for(tmp.path(), Some("reviewer"));
+        let memory = store
+            .get_visible(&id, ctx.current_hat_id.as_deref())
+            .expect("visible lookup");
+        assert!(memory.is_none(), "reviewer should not see executor private");
+    }
+
+    #[test]
+    fn test_show_command_distinguishes_not_found_from_hidden() {
+        let (tmp, store) = temp_store();
+        let id = seed(
+            &store,
+            "executor-only",
+            Some("executor"),
+            MemoryVisibility::Private,
+        );
+
+        let ctx = ctx_for(tmp.path(), Some("reviewer"));
+        let visible = store
+            .get_visible(&id, ctx.current_hat_id.as_deref())
+            .expect("visible lookup");
+        let raw = store.get(&id).expect("raw lookup");
+        assert!(visible.is_none());
+        assert!(raw.is_some(), "raw store should still see the hidden entry");
+
+        // show_command via CLI path
+        let args = ShowArgs {
+            id: id.clone(),
+            format: OutputFormat::Quiet,
+        };
+        let err =
+            show_command(&store, &ctx, args, false).expect_err("show should reject hidden entry");
+        assert!(err.to_string().contains("not found or hidden"));
+    }
+
+    #[test]
+    fn test_prime_command_hides_other_hat_private() {
+        let (tmp, store) = temp_store();
+        seed(&store, "shared note", None, MemoryVisibility::Shared);
+        seed(
+            &store,
+            "exec note",
+            Some("executor"),
+            MemoryVisibility::Private,
+        );
+        seed(
+            &store,
+            "rev note",
+            Some("reviewer"),
+            MemoryVisibility::Private,
+        );
+
+        let ctx = ctx_for(tmp.path(), Some("executor"));
+        let visible = store
+            .load_visible(ctx.current_hat_id.as_deref())
+            .expect("load");
+        let contents: Vec<_> = visible.iter().map(|m| m.content.as_str()).collect();
+        assert!(contents.contains(&"shared note"));
+        assert!(contents.contains(&"exec note"));
+        assert!(!contents.contains(&"rev note"));
+    }
+
+    #[test]
+    fn test_delete_command_rejects_other_hat_private() {
+        let (tmp, store) = temp_store();
+        let id = seed(
+            &store,
+            "executor-only",
+            Some("executor"),
+            MemoryVisibility::Private,
+        );
+
+        let ctx = ctx_for(tmp.path(), Some("reviewer"));
+        let memory = store.get(&id).expect("get");
+        let err = authorize_memory_action(memory.as_ref(), &ctx, "memory delete")
+            .expect_err("reviewer cannot delete executor private");
+        assert!(err.to_string().contains("private memory"));
+    }
+
+    #[test]
+    fn test_delete_command_rejects_shared_from_agent_context() {
+        let (tmp, store) = temp_store();
+        let id = seed(&store, "shared", None, MemoryVisibility::Shared);
+
+        let ctx = ctx_for(tmp.path(), Some("executor"));
+        let memory = store.get(&id).expect("get");
+        let err = authorize_memory_action(memory.as_ref(), &ctx, "memory delete")
+            .expect_err("agent cannot delete shared");
+        assert!(
+            err.to_string()
+                .contains("agent context cannot mutate shared")
+        );
+    }
+
+    #[test]
+    fn test_delete_command_allows_human_cli_shared() {
+        let (tmp, store) = temp_store();
+        let id = seed(&store, "shared", None, MemoryVisibility::Shared);
+
+        let ctx = ctx_for(tmp.path(), None); // human
+        let memory = store.get(&id).expect("get");
+        authorize_memory_action(memory.as_ref(), &ctx, "memory delete")
+            .expect("human may delete shared");
+    }
+
+    #[test]
+    fn test_delete_command_allows_human_cli_private() {
+        let (tmp, store) = temp_store();
+        let id = seed(
+            &store,
+            "executor-only",
+            Some("executor"),
+            MemoryVisibility::Private,
+        );
+
+        let ctx = ctx_for(tmp.path(), None); // human
+        let memory = store.get(&id).expect("get");
+        authorize_memory_action(memory.as_ref(), &ctx, "memory delete")
+            .expect("human may delete any private");
+    }
+
+    #[test]
+    fn test_list_command_human_sees_all() {
+        let (tmp, store) = temp_store();
+        seed(&store, "shared", None, MemoryVisibility::Shared);
+        seed(&store, "exec", Some("executor"), MemoryVisibility::Private);
+        seed(&store, "rev", Some("reviewer"), MemoryVisibility::Private);
+
+        // Human context (no RALPH_CURRENT_HAT) — raw load, no visibility filter.
+        let ctx = ctx_for(tmp.path(), None);
+        assert!(!ctx.is_agent_context);
+        let all = store.load().expect("load");
+        let contents: Vec<_> = all.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(contents.len(), 3);
+        assert!(contents.contains(&"shared"));
+        assert!(contents.contains(&"exec"));
+        assert!(contents.contains(&"rev"));
+    }
+
+    #[test]
+    fn test_search_command_agent_filters_by_visibility() {
+        let (tmp, store) = temp_store();
+        seed(&store, "alpha shared", None, MemoryVisibility::Shared);
+        seed(
+            &store,
+            "alpha exec",
+            Some("executor"),
+            MemoryVisibility::Private,
+        );
+        seed(
+            &store,
+            "alpha rev",
+            Some("reviewer"),
+            MemoryVisibility::Private,
+        );
+
+        let ctx = ctx_for(tmp.path(), Some("executor"));
+        let visible = store
+            .load_visible(ctx.current_hat_id.as_deref())
+            .expect("load");
+        let alpha: Vec<_> = visible
+            .iter()
+            .filter(|m| m.content.contains("alpha"))
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(alpha.len(), 2);
+        assert!(alpha.contains(&"alpha shared"));
+        assert!(alpha.contains(&"alpha exec"));
+        assert!(!alpha.contains(&"alpha rev"));
+    }
+
+    #[test]
+    fn test_markdown_output_includes_owner_when_present() {
+        let memory = Memory::new_with_owner(
+            MemoryType::Pattern,
+            "x".to_string(),
+            vec![],
+            Some("executor".to_string()),
+            MemoryVisibility::Private,
+        );
+        // format_memories_as_markdown should embed both owner and visibility
+        let md = format_memories_as_markdown(&[memory.clone()]);
+        assert!(md.contains("owner: executor"), "owner missing in md: {md}");
+        assert!(
+            md.contains("visibility: private"),
+            "visibility missing in md: {md}"
+        );
     }
 }

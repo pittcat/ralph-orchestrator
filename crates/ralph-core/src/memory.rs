@@ -9,6 +9,49 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Visibility scope of a memory.
+///
+/// Shared memories are visible to every caller. Private memories
+/// are scoped to a single hat (the `owner_hat_id`) and are only
+/// visible in agent contexts that resolve to that hat. Legacy
+/// memories without an explicit visibility parse as `Shared` so
+/// pre-existing data continues to work.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemoryVisibility {
+    /// Visible to every caller (default; matches legacy behavior).
+    #[default]
+    Shared,
+    /// Visible only to the owning hat.
+    Private,
+}
+
+impl MemoryVisibility {
+    /// Stable lowercase label used in markdown metadata and CLI flags.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Shared => "shared",
+            Self::Private => "private",
+        }
+    }
+}
+
+impl std::str::FromStr for MemoryVisibility {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "shared" => Ok(Self::Shared),
+            "private" => Ok(Self::Private),
+            _ => Err(format!(
+                "Invalid memory visibility: '{}'. Valid values: shared, private",
+                s
+            )),
+        }
+    }
+}
+
 /// Classification of a memory.
 ///
 /// Memories are grouped by type in the markdown storage file,
@@ -112,6 +155,20 @@ impl std::str::FromStr for MemoryType {
 /// > Can span multiple lines
 /// <!-- tags: tag1, tag2 | created: 2025-01-20 -->
 /// ```
+impl Default for Memory {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            memory_type: MemoryType::default(),
+            content: String::new(),
+            tags: Vec::new(),
+            created: String::new(),
+            owner_hat_id: None,
+            visibility: MemoryVisibility::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Memory {
     /// Unique identifier (format: `mem-{unix_timestamp}-{4_hex_chars}`)
@@ -128,6 +185,18 @@ pub struct Memory {
 
     /// Creation date (format: YYYY-MM-DD)
     pub created: String,
+
+    /// Owning hat id, if the memory is private.
+    ///
+    /// `None` for shared memories; for private memories, this is the
+    /// hat id that may read or delete the entry. Legacy memories
+    /// without this field parse back as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_hat_id: Option<String>,
+
+    /// Visibility scope. Defaults to `Shared` for legacy entries.
+    #[serde(default)]
+    pub visibility: MemoryVisibility,
 }
 
 impl Memory {
@@ -142,6 +211,48 @@ impl Memory {
             content,
             tags,
             created: chrono::Utc::now().format("%Y-%m-%d").to_string(),
+            owner_hat_id: None,
+            visibility: MemoryVisibility::Shared,
+        }
+    }
+
+    /// Creates a new memory stamped with an owner hat and visibility.
+    ///
+    /// Used by the CLI / `MemoryStore` to record private memories with
+    /// the hat id taken from the active `OperationContext`.
+    #[must_use]
+    pub fn new_with_owner(
+        memory_type: MemoryType,
+        content: String,
+        tags: Vec<String>,
+        owner_hat_id: Option<String>,
+        visibility: MemoryVisibility,
+    ) -> Self {
+        Self {
+            id: Self::generate_id(),
+            memory_type,
+            content,
+            tags,
+            created: chrono::Utc::now().format("%Y-%m-%d").to_string(),
+            owner_hat_id,
+            visibility,
+        }
+    }
+
+    /// Returns true if this memory is visible to the given hat.
+    ///
+    /// Shared memories are visible to every caller. Private memories
+    /// are visible only when the caller hat matches `owner_hat_id`.
+    /// `None` caller is treated as a "no specific hat" view (only
+    /// sees shared memories).
+    #[must_use]
+    pub fn is_visible_to(&self, caller_hat_id: Option<&str>) -> bool {
+        match self.visibility {
+            MemoryVisibility::Shared => true,
+            MemoryVisibility::Private => match (self.owner_hat_id.as_deref(), caller_hat_id) {
+                (Some(owner), Some(caller)) => owner == caller,
+                _ => false,
+            },
         }
     }
 
@@ -293,6 +404,7 @@ mod tests {
             content: "Uses barrel exports for modules".to_string(),
             tags: vec!["imports".to_string(), "structure".to_string()],
             created: "2025-01-20".to_string(),
+            ..Default::default()
         };
 
         // Match in content
@@ -315,6 +427,7 @@ mod tests {
             content: "Docker fix".to_string(),
             tags: vec!["docker".to_string(), "debugging".to_string()],
             created: "2025-01-20".to_string(),
+            ..Default::default()
         };
 
         assert!(memory.has_any_tag(&["docker".to_string()]));
@@ -346,6 +459,7 @@ mod tests {
             content: "Chose Postgres".to_string(),
             tags: vec!["database".to_string()],
             created: "2025-01-20".to_string(),
+            ..Default::default()
         };
 
         let json = serde_json::to_string(&memory).unwrap();
@@ -368,5 +482,109 @@ mod tests {
         // Test deserialization
         let deserialized: MemoryType = serde_json::from_str("\"fix\"").unwrap();
         assert_eq!(deserialized, MemoryType::Fix);
+    }
+
+    // ---- P3 owner / visibility tests ----
+
+    #[test]
+    fn test_memory_visibility_default_is_shared() {
+        assert_eq!(MemoryVisibility::default(), MemoryVisibility::Shared);
+    }
+
+    #[test]
+    fn test_memory_visibility_as_str_round_trip() {
+        for v in [MemoryVisibility::Shared, MemoryVisibility::Private] {
+            assert_eq!(v.as_str().parse::<MemoryVisibility>().unwrap(), v);
+        }
+        assert!("invalid".parse::<MemoryVisibility>().is_err());
+    }
+
+    #[test]
+    fn test_memory_new_defaults_to_shared_no_owner() {
+        let m = Memory::new(MemoryType::Pattern, "x".into(), vec![]);
+        assert_eq!(m.visibility, MemoryVisibility::Shared);
+        assert_eq!(m.owner_hat_id, None);
+    }
+
+    #[test]
+    fn test_memory_new_with_owner_stamps_fields() {
+        let m = Memory::new_with_owner(
+            MemoryType::Pattern,
+            "x".into(),
+            vec!["t".into()],
+            Some("executor".into()),
+            MemoryVisibility::Private,
+        );
+        assert_eq!(m.owner_hat_id.as_deref(), Some("executor"));
+        assert_eq!(m.visibility, MemoryVisibility::Private);
+    }
+
+    #[test]
+    fn test_memory_is_visible_to_shared_always() {
+        let m = Memory::new_with_owner(
+            MemoryType::Pattern,
+            "x".into(),
+            vec![],
+            None,
+            MemoryVisibility::Shared,
+        );
+        assert!(m.is_visible_to(None));
+        assert!(m.is_visible_to(Some("anybody")));
+    }
+
+    #[test]
+    fn test_memory_is_visible_to_private_owner_match() {
+        let m = Memory::new_with_owner(
+            MemoryType::Pattern,
+            "x".into(),
+            vec![],
+            Some("executor".into()),
+            MemoryVisibility::Private,
+        );
+        assert!(m.is_visible_to(Some("executor")));
+        assert!(!m.is_visible_to(Some("reviewer")));
+        // No hat context: should not see private
+        assert!(!m.is_visible_to(None));
+    }
+
+    #[test]
+    fn test_memory_serde_owner_omitted_when_none() {
+        let m = Memory::new(MemoryType::Pattern, "x".into(), vec![]);
+        let json = serde_json::to_string(&m).unwrap();
+        // skip_serializing_if = "Option::is_none" — `owner_hat_id` key absent
+        assert!(
+            !json.contains("owner_hat_id"),
+            "owner_hat_id leaked: {json}"
+        );
+        assert!(json.contains("\"visibility\":\"shared\""));
+    }
+
+    #[test]
+    fn test_memory_serde_owner_present_when_set() {
+        let m = Memory::new_with_owner(
+            MemoryType::Pattern,
+            "x".into(),
+            vec![],
+            Some("executor".into()),
+            MemoryVisibility::Private,
+        );
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains("\"owner_hat_id\":\"executor\""));
+        assert!(json.contains("\"visibility\":\"private\""));
+    }
+
+    #[test]
+    fn test_memory_legacy_jsonl_deserializes_with_defaults() {
+        // Pre-P3 markdown entries serialized without owner/visibility.
+        let legacy = r#"{
+            "id": "mem-1-aaaa",
+            "memory_type": "pattern",
+            "content": "x",
+            "tags": [],
+            "created": "2025-01-20"
+        }"#;
+        let m: Memory = serde_json::from_str(legacy).unwrap();
+        assert_eq!(m.owner_hat_id, None);
+        assert_eq!(m.visibility, MemoryVisibility::Shared);
     }
 }

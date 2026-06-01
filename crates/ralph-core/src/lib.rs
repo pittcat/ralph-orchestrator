@@ -111,10 +111,14 @@ pub use loop_history::{HistoryError, HistoryEvent, HistoryEventType, HistorySumm
 pub use loop_lock::{LockError, LockGuard, LockMetadata, LockStatus, LoopLock};
 pub use loop_name::{LoopNameGenerator, LoopNamingConfig};
 pub use loop_registry::{LoopEntry, LoopRegistry, RegistryError};
+<<<<<<< HEAD
 pub use loop_state_snapshot::{
     LoopStateSnapshot, PolicyFindingSnapshot, WorkflowInstanceSnapshot, replay_events_to_snapshot,
 };
-pub use memory::{Memory, MemoryType};
+pub use memory::{Memory, MemoryType, MemoryVisibility};
+=======
+pub use memory::{Memory, MemoryType, MemoryVisibility};
+>>>>>>> f33f6f8 (feat(operation-guard): P3 记忆操作防护)
 pub use memory_store::{
     DEFAULT_MEMORIES_PATH, MarkdownMemoryStore, format_memories_as_markdown, truncate_to_budget,
 };

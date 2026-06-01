@@ -10,7 +10,7 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-use crate::memory::{Memory, MemoryType};
+use crate::memory::{Memory, MemoryType, MemoryVisibility};
 
 /// Regex to match section headers like `## Patterns`
 static SECTION_RE: LazyLock<Regex> =
@@ -23,9 +23,19 @@ static MEMORY_ID_RE: LazyLock<Regex> =
 /// Regex to match blockquote content lines like `> content`
 static CONTENT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^> (.+)$").unwrap());
 
-/// Regex to match metadata HTML comments like `<!-- tags: a, b | created: 2025-01-20 -->`
+/// Regex to match metadata HTML comments.
+///
+/// Required fields: `tags` and `created`. Optional fields: `owner` and
+/// `visibility`. Captures:
+///   1. tags
+///   2. created date
+///   3. optional owner hat id (or empty)
+///   4. optional visibility ("shared" or "private") or empty
 static METADATA_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"<!-- tags: ([^|]*) \| created: (\d{4}-\d{2}-\d{2}) -->").unwrap()
+    Regex::new(
+        r"<!-- tags: ([^|]*) \| created: (\d{4}-\d{2}-\d{2})(?: \| owner: ([^|]*))?(?: \| visibility: ([a-z]+))? -->",
+    )
+    .unwrap()
 });
 
 /// Parse a memories markdown file into a vector of Memory structs.
@@ -35,6 +45,8 @@ static METADATA_RE: LazyLock<Regex> = LazyLock::new(|| {
 ///
 /// # Returns
 /// A vector of parsed memories. Malformed memory blocks are skipped.
+/// Memories missing `owner` / `visibility` parse with the legacy
+/// defaults (`None` owner, `Shared` visibility).
 ///
 /// # Example
 /// ```
@@ -53,6 +65,8 @@ pub fn parse_memories(markdown: &str) -> Vec<Memory> {
     let mut current_content: Vec<String> = Vec::new();
     let mut current_tags: Vec<String> = Vec::new();
     let mut current_created: Option<String> = None;
+    let mut current_owner: Option<String> = None;
+    let mut current_visibility: Option<MemoryVisibility> = None;
 
     for line in markdown.lines() {
         if let Some(caps) = SECTION_RE.captures(line) {
@@ -64,6 +78,8 @@ pub fn parse_memories(markdown: &str) -> Vec<Memory> {
                 &mut current_content,
                 &mut current_tags,
                 &mut current_created,
+                &mut current_owner,
+                &mut current_visibility,
             );
             current_type = MemoryType::from_section(&caps[1]).unwrap_or(MemoryType::Pattern);
         } else if let Some(caps) = MEMORY_ID_RE.captures(line) {
@@ -75,6 +91,8 @@ pub fn parse_memories(markdown: &str) -> Vec<Memory> {
                 &mut current_content,
                 &mut current_tags,
                 &mut current_created,
+                &mut current_owner,
+                &mut current_visibility,
             );
             current_id = Some(caps[1].to_string());
         } else if let Some(caps) = CONTENT_RE.captures(line) {
@@ -86,6 +104,15 @@ pub fn parse_memories(markdown: &str) -> Vec<Memory> {
                 .filter(|s| !s.is_empty())
                 .collect();
             current_created = Some(caps[2].to_string());
+            current_owner = caps
+                .get(3)
+                .map(|m| m.as_str().trim().to_string())
+                .filter(|s| !s.is_empty());
+            current_visibility = caps
+                .get(4)
+                .map(|m| m.as_str().trim())
+                .filter(|s| !s.is_empty())
+                .and_then(|s| s.parse::<MemoryVisibility>().ok());
         }
     }
 
@@ -97,6 +124,8 @@ pub fn parse_memories(markdown: &str) -> Vec<Memory> {
         &mut current_content,
         &mut current_tags,
         &mut current_created,
+        &mut current_owner,
+        &mut current_visibility,
     );
 
     memories
@@ -110,10 +139,20 @@ fn flush_memory(
     current_content: &mut Vec<String>,
     current_tags: &mut Vec<String>,
     current_created: &mut Option<String>,
+    current_owner: &mut Option<String>,
+    current_visibility: &mut Option<MemoryVisibility>,
 ) {
     if let Some(id) = current_id.take()
         && !current_content.is_empty()
     {
+        let visibility = current_visibility.take().unwrap_or_default();
+        // Defensive: a private memory must always carry an owner. If a
+        // legacy writer marked visibility=private but left owner blank,
+        // we treat the entry as shared to avoid dangling-private states.
+        let owner = match (current_owner.take(), visibility) {
+            (owner, MemoryVisibility::Private) => owner,
+            (owner, MemoryVisibility::Shared) => owner,
+        };
         memories.push(Memory {
             id,
             memory_type: current_type,
@@ -122,6 +161,8 @@ fn flush_memory(
             created: current_created
                 .take()
                 .unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d").to_string()),
+            owner_hat_id: owner,
+            visibility,
         });
     }
     current_content.clear();
@@ -300,5 +341,69 @@ mod tests {
         // Memory without content should be skipped
         assert_eq!(memories.len(), 1);
         assert_eq!(memories[0].id, "mem-1737372100-c3d4");
+    }
+
+    // ---- P3 owner / visibility parser tests ----
+
+    #[test]
+    fn test_parse_legacy_metadata_parses_as_shared() {
+        let md = r"# Memories
+
+## Patterns
+
+### mem-1-aaaa
+> legacy
+<!-- tags: t | created: 2025-01-20 -->
+";
+        let m = parse_memories(md);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].owner_hat_id, None);
+        assert_eq!(m[0].visibility, MemoryVisibility::Shared);
+    }
+
+    #[test]
+    fn test_parse_private_with_owner() {
+        let md = r"# Memories
+
+## Patterns
+
+### mem-1-aaaa
+> secret
+<!-- tags: t | created: 2025-01-20 | owner: executor | visibility: private -->
+";
+        let m = parse_memories(md);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].owner_hat_id.as_deref(), Some("executor"));
+        assert_eq!(m[0].visibility, MemoryVisibility::Private);
+    }
+
+    #[test]
+    fn test_parse_owner_without_visibility_defaults_shared() {
+        let md = r"# Memories
+
+## Patterns
+
+### mem-1-aaaa
+> annotated
+<!-- tags: t | created: 2025-01-20 | owner: executor -->
+";
+        let m = parse_memories(md);
+        assert_eq!(m[0].visibility, MemoryVisibility::Shared);
+        assert_eq!(m[0].owner_hat_id.as_deref(), Some("executor"));
+    }
+
+    #[test]
+    fn test_parse_visibility_shared_no_owner() {
+        let md = r"# Memories
+
+## Patterns
+
+### mem-1-aaaa
+> shared
+<!-- tags: t | created: 2025-01-20 | visibility: shared -->
+";
+        let m = parse_memories(md);
+        assert_eq!(m[0].visibility, MemoryVisibility::Shared);
+        assert_eq!(m[0].owner_hat_id, None);
     }
 }

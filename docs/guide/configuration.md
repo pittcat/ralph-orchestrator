@@ -147,6 +147,15 @@ memories:
     tags: []                            # Filter by memory tags
     recent: 0                           # Days limit (0 = no limit)
 
+  # P3 visibility / owner semantics
+  # New memories default to `shared` visibility. In agent context,
+  # `ralph tools memory add --private` records a private memory stamped
+  # with the current hat id (from RALPH_CURRENT_HAT). Private memories
+  # are visible only to their owner; shared memories are visible to
+  # every caller. Agents cannot delete or mutate shared memories — only
+  # the human CLI may. See `ralph tools memory --help` for the full
+  # authorization table.
+
 # Tasks — runtime work tracking
 tasks:
   enabled: true                         # Enable task system

@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use crate::text::floor_char_boundary;
 
 use crate::file_lock::FileLock;
-use crate::memory::{Memory, MemoryType};
+use crate::memory::{Memory, MemoryType, MemoryVisibility};
 use crate::memory_parser::parse_memories;
 
 /// Default path for the memories file relative to the workspace root.
@@ -70,6 +70,49 @@ impl MarkdownMemoryStore {
     #[must_use]
     pub fn exists(&self) -> bool {
         self.path.exists()
+    }
+
+    /// Loads memories visible to a given hat.
+    ///
+    /// Shared memories are always included. Private memories are
+    /// included only when their `owner_hat_id` matches `caller_hat_id`.
+    /// When `caller_hat_id` is `None`, only shared memories are returned.
+    pub fn load_visible(&self, caller_hat_id: Option<&str>) -> io::Result<Vec<Memory>> {
+        let memories = self.load()?;
+        Ok(memories
+            .into_iter()
+            .filter(|m| m.is_visible_to(caller_hat_id))
+            .collect())
+    }
+
+    /// Fetches a single memory visible to the given hat, or `None` if
+    /// not found or hidden by visibility rules.
+    pub fn get_visible(&self, id: &str, caller_hat_id: Option<&str>) -> io::Result<Option<Memory>> {
+        let memories = self.load()?;
+        Ok(memories
+            .into_iter()
+            .find(|m| m.id == id && m.is_visible_to(caller_hat_id)))
+    }
+
+    /// Counts private memories owned by the given hat id.
+    pub fn count_private_for_owner(&self, hat_id: &str) -> io::Result<usize> {
+        let memories = self.load()?;
+        Ok(memories
+            .iter()
+            .filter(|m| {
+                m.visibility == MemoryVisibility::Private
+                    && m.owner_hat_id.as_deref() == Some(hat_id)
+            })
+            .count())
+    }
+
+    /// Counts shared memories in the store.
+    pub fn count_shared(&self) -> io::Result<usize> {
+        let memories = self.load()?;
+        Ok(memories
+            .iter()
+            .filter(|m| m.visibility == MemoryVisibility::Shared)
+            .count())
     }
 
     /// Initializes the memories file with an empty template.
@@ -243,12 +286,24 @@ impl MarkdownMemoryStore {
             .map(|line| format!("> {}", line))
             .collect();
 
-        format!(
-            "\n### {}\n{}\n<!-- tags: {} | created: {} -->\n",
-            memory.id,
-            content_lines.join("\n"),
+        // Always write visibility; write owner only when the memory
+        // actually has one (avoids polluting shared memories with an
+        // empty owner field).
+        let mut meta = format!(
+            "tags: {} | created: {}",
             memory.tags.join(", "),
             memory.created,
+        );
+        if let Some(owner) = memory.owner_hat_id.as_deref() {
+            meta.push_str(&format!(" | owner: {}", owner));
+        }
+        meta.push_str(&format!(" | visibility: {}", memory.visibility.as_str()));
+
+        format!(
+            "\n### {}\n{}\n<!-- {} -->\n",
+            memory.id,
+            content_lines.join("\n"),
+            meta,
         )
     }
 
@@ -691,6 +746,7 @@ mod tests {
             content: "Use barrel exports".to_string(),
             tags: vec!["imports".to_string()],
             created: "2025-01-20".to_string(),
+            ..Default::default()
         };
 
         let output = format_memories_as_markdown(&[memory]);
@@ -710,6 +766,7 @@ mod tests {
             content: "A pattern".to_string(),
             tags: vec![],
             created: "2025-01-20".to_string(),
+            ..Default::default()
         };
         let decision = Memory {
             id: "mem-2-d".to_string(),
@@ -717,6 +774,7 @@ mod tests {
             content: "A decision".to_string(),
             tags: vec![],
             created: "2025-01-20".to_string(),
+            ..Default::default()
         };
 
         let output = format_memories_as_markdown(&[pattern, decision]);

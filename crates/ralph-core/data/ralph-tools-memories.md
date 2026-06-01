@@ -11,6 +11,7 @@ metadata:
 
 ```bash
 ralph tools memory add "content" -t pattern --tags tag1,tag2
+ralph tools memory add "content" --private   # Hat-scoped (agent context only)
 ralph tools memory list [-t type] [--tags tags]
 ralph tools memory search "query" [-t type] [--tags tags]
 ralph tools memory prime --budget 2000    # Output for context injection
@@ -28,6 +29,35 @@ ralph tools memory delete <mem-id>
 | context | `-t context` | "ralph-core is shared lib, ralph-cli is binary" |
 
 **Memory ID format:** `mem-{timestamp}-{4hex}` (e.g., `mem-1737372000-a1b2`)
+
+## Visibility & Owner
+
+Every memory has a `visibility` (`shared` or `private`) and an optional
+`owner_hat_id`:
+
+- **shared** (default): visible to every caller — human CLI and every hat.
+  New memories created without `--private` are shared. **Agents cannot
+  delete or mutate shared memories** — only the human CLI may.
+- **private** (set with `--private` in agent context): visible only to the
+  owning hat. The owning hat is taken from `RALPH_CURRENT_HAT`. The CLI
+  fails closed if `--private` is used without an agent context.
+
+| Operation | Human CLI | Agent (owner) | Agent (other) |
+|-----------|-----------|---------------|---------------|
+| `add` (default) | shared | shared | shared |
+| `add --private` | **rejected** (no agent ctx) | private, owned by current hat | private, owned by current hat |
+| `list/show/search/prime` | sees all | sees shared + own private | sees shared + own private |
+| `delete shared` | allowed | **rejected** | **rejected** |
+| `delete private` (any) | allowed | allowed (own) | **rejected** |
+
+The human CLI is the only path that can prune or correct shared knowledge
+— this prevents a hat from poisoning or wiping institutional memory.
+
+**Limits enforced by the CLI:**
+
+- `add` rejects empty content.
+- `add` rejects content longer than 10 000 characters.
+- `add --private` rejects after a hat already owns 1 000 private memories.
 
 ### First thing every iteration
 ```bash
