@@ -129,3 +129,32 @@ jobs:
         run: |
           export PATH="$PWD/target/debug:$PATH"
           bash scripts/check-cli-doc-drift.sh
+
+  # Prompt size guard (plan U8 F3 修订): 防止 ralph-tools.md 重新膨胀到 500+ 行
+  prompt-size-guard:
+    name: Prompt size guard
+    runs-on: ubuntu-latest
+    needs: [cli-doc-drift]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify ralph-tools.md size ≤ 200 lines
+        run: bash scripts/guard-prompt-size.sh
+
+  # BDD 场景 (plan U8 F4 修订): 覆盖 ralph-tools-emit/wave/cmdref 按需加载端到端流程
+  bdd-agent-reference:
+    name: BDD agent reference split
+    runs-on: ubuntu-latest
+    needs: [prompt-size-guard]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Run BDD scenarios
+        run: |
+          cargo test -p ralph-core --test scenarios -- feat-ralph-cli-agent-reference-split

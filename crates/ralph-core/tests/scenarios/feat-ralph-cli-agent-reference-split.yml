@@ -1,0 +1,64 @@
+# Feature: Agent can load detailed CLI references on demand
+# Plan U8: 端到端 BDD 场景覆盖按需加载流程
+#
+# 3 个场景:
+# 1. Agent 加载 ralph-tools-emit 后能 emit build.done 事件
+# 2. Agent 加载 ralph-tools-cmdref 后能触发 interact progress
+# 3. Agent 无 hat 上下文时 fail closed (P10 operation-guard)
+
+name: feat-ralph-cli-agent-reference-split
+description: |
+  验证 ralph-tools-emit/wave/cmdref 内置 skill 可被按需加载
+  且加载后能用于实际的 emit/interact 操作.
+  覆盖 plan U8 F4 修订的 3 条 BDD 场景.
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 3
+  hats:
+    builder:
+      triggers: ["work.ready"]
+      publishes: ["build.done", "task.resume"]
+    reporter:
+      triggers: ["work.ready"]
+      publishes: ["report.done", "task.resume"]
+
+mock_responses:
+  - |
+    # 场景 1: builder hat 加载 ralph-tools-emit 后 emit build.done
+    加载参考: ralph tools skill load ralph-tools-emit
+    看到 '## 错误恢复' 章节.
+    看到 'Invalid JSON payload' 错误恢复行.
+    发射事件: ralph emit build.done '{"ok":true}' -j
+    <event topic="build.done">
+    {"ok":true}
+    </event>
+  - |
+    # 场景 2: reporter hat 加载 ralph-tools-cmdref 后触发 progress
+    加载参考: ralph tools skill load ralph-tools-cmdref
+    看到 '## ralph tools interact' 章节.
+    发送进度: ralph tools interact progress "Step 1 done"
+    <event topic="report.done">
+    progress sent successfully
+    </event>
+  - |
+    # 场景 3: agent 无 hat 上下文时 fail closed
+    # 模拟: 不设置 RALPH_CURRENT_HAT 但尝试加载 skill
+    尝试加载: ralph tools skill load ralph-tools-emit
+    预期失败 (无 RALPH_CURRENT_HAT 上下文).
+    <event topic="task.resume">
+    agent context failed closed on skill load
+    </event>
+
+expected:
+  iterations: 3
+  events:
+    # 场景 1: builder 加载 ralph-tools-emit 后 emit build.done
+    - topic: build.done
+      hat: builder
+    # 场景 2: reporter 加载 ralph-tools-cmdref 后 interact progress
+    - topic: report.done
+      hat: reporter
+    # 场景 3: 无 hat 上下文 fail closed
+    - topic: task.resume
+  completion: true
