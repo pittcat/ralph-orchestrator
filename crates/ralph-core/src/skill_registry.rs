@@ -342,7 +342,7 @@ mod tests {
             .expect("should find built-in skill");
         assert!(matches!(skill.source, SkillSource::BuiltIn));
         assert!(!skill.description.is_empty());
-        assert!(skill.content.contains("# Ralph Tools"));
+        assert!(skill.content.contains("# Ralph CLI"));
         // Frontmatter fields should not be in content
         assert!(!skill.content.contains("name: ralph-tools"));
     }
@@ -652,7 +652,7 @@ mod tests {
             .expect("should load skill");
         assert!(loaded.starts_with("<ralph-tools-skill>"));
         assert!(loaded.ends_with("</ralph-tools-skill>"));
-        assert!(loaded.contains("# Ralph Tools"));
+        assert!(loaded.contains("# Ralph CLI"));
         // Frontmatter should not be in the output
         assert!(!loaded.contains("name: ralph-tools"));
     }

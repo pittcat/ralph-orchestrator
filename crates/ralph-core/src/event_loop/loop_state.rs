@@ -93,6 +93,15 @@ pub struct LoopState {
     /// a pass before the loop can terminate. `None` when no such event has
     /// been observed (or no verdict gate is configured).
     pub last_verdict_payload: Option<String>,
+
+    /// Signature of the most recent completion rejection (for stale-breaker).
+    pub completion_rejection_signature: Option<String>,
+
+    /// Count of consecutive completion rejections with the same signature.
+    pub consecutive_completion_rejections: u32,
+
+    /// Number of seen_topics at the time of the last completion rejection.
+    pub last_rejection_seen_topics_count: usize,
 }
 
 impl Default for LoopState {
@@ -125,6 +134,9 @@ impl Default for LoopState {
             policy_runtime_state: None,
             state_machine_runtime_state: None,
             last_verdict_payload: None,
+            completion_rejection_signature: None,
+            consecutive_completion_rejections: 0,
+            last_rejection_seen_topics_count: 0,
         }
     }
 }

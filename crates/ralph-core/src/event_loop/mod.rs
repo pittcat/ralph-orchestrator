@@ -1034,14 +1034,21 @@ impl EventLoop {
         }
 
         // Event chain validation: check required events were seen
-        let required = &self.config.event_loop.required_events;
+        let required = self.config.event_loop.required_events.clone();
         if !required.is_empty() {
-            let missing = self.state.missing_required_events(required);
+            let missing = self.state.missing_required_events(&required);
             if !missing.is_empty() {
                 warn!(
                     missing = ?missing,
                     "Rejecting LOOP_COMPLETE: required events not seen during loop lifetime"
                 );
+                let sig = format!(
+                    "missing_required:{}",
+                    missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(",")
+                );
+                if let Some(reason) = self.handle_completion_rejection(sig) {
+                    return Some(reason);
+                }
                 self.state.completion_requested = false;
 
                 // Inject task.resume so the loop continues
@@ -1066,25 +1073,30 @@ impl EventLoop {
         // Verdict gate: when configured, the most recent event matching the gate
         // topic must NOT carry fail_field == fail_value. This prevents a hat from
         // declaring success in its final review while bypassing the backstop check.
-        if let Some(gate) = &self.config.event_loop.verdict_gate
-            && let Some(payload) = self.state.last_verdict_payload.as_deref()
-            && Self::verdict_payload_is_fail(payload, gate)
-        {
-            warn!(
-                topic = %gate.topic,
-                field = %gate.fail_field,
-                value = %gate.fail_value,
-                "Rejecting LOOP_COMPLETE: verdict gate observed a failing verdict"
-            );
-            self.state.completion_requested = false;
+        if let Some(gate) = self.config.event_loop.verdict_gate.clone() {
+            if let Some(payload) = self.state.last_verdict_payload.as_deref()
+                && Self::verdict_payload_is_fail(payload, &gate)
+            {
+                warn!(
+                    topic = %gate.topic,
+                    field = %gate.fail_field,
+                    value = %gate.fail_value,
+                    "Rejecting LOOP_COMPLETE: verdict gate observed a failing verdict"
+                );
+                let sig = format!("verdict_fail:{}", gate.topic);
+                if let Some(reason) = self.handle_completion_rejection(sig) {
+                    return Some(reason);
+                }
+                self.state.completion_requested = false;
 
-            let resume_payload = format!(
-                "LOOP_COMPLETE rejected: most recent {} event has {}={}. \
-                 The workflow has not passed final review. Use loop.cancel to abort instead.",
-                gate.topic, gate.fail_field, gate.fail_value
-            );
-            self.bus.publish(Event::new("task.resume", resume_payload));
-            return None;
+                let resume_payload = format!(
+                    "LOOP_COMPLETE rejected: most recent {} event has {}={}. \
+                     The workflow has not passed final review. Use loop.cancel to abort instead.",
+                    gate.topic, gate.fail_field, gate.fail_value
+                );
+                self.bus.publish(Event::new("task.resume", resume_payload));
+                return None;
+            }
         }
 
         // Workflow guard completion validation: ensure all started guarded instances are terminal.
@@ -1098,6 +1110,10 @@ impl EventLoop {
                 reason = %rejection.message,
                 "Rejecting LOOP_COMPLETE: incomplete workflow guard instances"
             );
+            let sig = "workflow_guard".to_string();
+            if let Some(reason) = self.handle_completion_rejection(sig) {
+                return Some(reason);
+            }
             self.state.completion_requested = false;
 
             let resume_payload = format!(
@@ -1144,6 +1160,11 @@ impl EventLoop {
                     "Rejecting completion event with {} open task(s)",
                     open_tasks.len()
                 );
+                let sig = format!("open_tasks:{}", open_tasks.len());
+                if let Some(reason) = self.handle_completion_rejection(sig) {
+                    return Some(reason);
+                }
+                self.state.completion_requested = false;
                 self.bus.publish(Event::new(
                     "task.resume",
                     format!(
@@ -1156,6 +1177,11 @@ impl EventLoop {
         } else if let Ok(false) = self.verify_scratchpad_complete() {
             warn!("Completion event with pending scratchpad tasks - trusting agent decision");
         }
+
+        // Completion accepted — reset stale-breaker state.
+        self.state.completion_rejection_signature = None;
+        self.state.consecutive_completion_rejections = 0;
+        self.state.last_rejection_seen_topics_count = 0;
 
         info!("Completion event detected - terminating");
 
@@ -1189,6 +1215,35 @@ impl EventLoop {
         }
 
         Some(TerminationReason::CompletionPromise)
+    }
+
+    /// Tracks completion rejections for the stale-breaker mechanism.
+    ///
+    /// If the same rejection signature repeats 3+ times with no new accepted
+    /// business events between rejections, returns `TerminationReason::LoopStale`
+    /// to prevent infinite API-burning loops.
+    fn handle_completion_rejection(&mut self, signature: String) -> Option<TerminationReason> {
+        let current_seen = self.state.seen_topics.len();
+        let is_same = self.state.completion_rejection_signature.as_ref() == Some(&signature);
+        let has_progress = current_seen > self.state.last_rejection_seen_topics_count;
+
+        if is_same && !has_progress {
+            self.state.consecutive_completion_rejections += 1;
+            if self.state.consecutive_completion_rejections >= 3 {
+                warn!(
+                    signature = %signature,
+                    count = self.state.consecutive_completion_rejections,
+                    "Stale-breaker: same completion rejection repeated 3+ times with no progress"
+                );
+                return Some(TerminationReason::LoopStale);
+            }
+        } else {
+            self.state.consecutive_completion_rejections = 1;
+        }
+
+        self.state.completion_rejection_signature = Some(signature);
+        self.state.last_rejection_seen_topics_count = current_seen;
+        None
     }
 
     /// Returns true if the verdict event payload contains `gate.fail_field == gate.fail_value`.

@@ -60,7 +60,7 @@ fn test_skill_load_builtin() {
     let temp_path = temp_dir.path();
 
     let stdout = ralph_skill_ok(temp_path, &["load", "ralph-tools"]);
-    assert!(stdout.contains("Ralph Tools"));
+    assert!(stdout.contains("Ralph CLI"));
     assert!(stdout.contains("ralph tools skill"));
 }
 
