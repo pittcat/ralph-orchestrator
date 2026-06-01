@@ -1,0 +1,292 @@
+DRIFT: 'ralph tools memory prime' has --color in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory prime' has --config in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory prime' has --format in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory prime' has --hats in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory prime' has --help in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory prime' has --recent in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory prime' has --root in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory prime' has --type in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory prime' has --verbose in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: ralph-tools-memories.md (section: Memory Commands) mentions --private, but 'ralph tools memory prime --help' no longer has it
+DRIFT: 'ralph tools task add' has --color in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task add' has --config in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task add' has --description in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task add' has --hats in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task add' has --help in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task add' has --priority in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task add' has --root in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task add' has --verbose in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --all, but 'ralph tools task add --help' no longer has it
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --key, but 'ralph tools task add --help' no longer has it
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --status, but 'ralph tools task add --help' no longer has it
+DRIFT: 'ralph tools task close' has --color in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task close' has --config in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task close' has --hats in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task close' has --help in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task close' has --root in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task close' has --verbose in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --all, but 'ralph tools task close --help' no longer has it
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --blocked-by, but 'ralph tools task close --help' no longer has it
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --format, but 'ralph tools task close --help' no longer has it
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --key, but 'ralph tools task close --help' no longer has it
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --status, but 'ralph tools task close --help' no longer has it
+DRIFT: 'ralph clean' has --color in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph clean' has --config in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph clean' has --diagnostics in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph clean' has --dry-run in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph clean' has --hats in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph clean' has --help in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph clean' has --verbose in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph tools memory search' has --all in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory search' has --color in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory search' has --config in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory search' has --format in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory search' has --hats in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory search' has --help in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory search' has --root in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory search' has --type in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory search' has --verbose in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: ralph-tools-memories.md (section: Memory Commands) mentions --budget, but 'ralph tools memory search --help' no longer has it
+DRIFT: ralph-tools-memories.md (section: Memory Commands) mentions --private, but 'ralph tools memory search --help' no longer has it
+DRIFT: 'ralph tools memory add' has --color in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory add' has --config in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory add' has --format in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory add' has --hats in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory add' has --help in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory add' has --root in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory add' has --type in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory add' has --verbose in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: ralph-tools-memories.md (section: Memory Commands) mentions --budget, but 'ralph tools memory add --help' no longer has it
+DRIFT: 'ralph loops' has --color in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph loops' has --config in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph loops' has --hats in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph loops' has --help in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph loops' has --verbose in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph tools task fail' has --color in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task fail' has --config in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task fail' has --hats in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task fail' has --help in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task fail' has --root in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task fail' has --verbose in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --all, but 'ralph tools task fail --help' no longer has it
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --blocked-by, but 'ralph tools task fail --help' no longer has it
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --format, but 'ralph tools task fail --help' no longer has it
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --key, but 'ralph tools task fail --help' no longer has it
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --status, but 'ralph tools task fail --help' no longer has it
+DRIFT: 'ralph hats' has --color in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph hats' has --config in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph hats' has --hats in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph hats' has --help in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph hats' has --verbose in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph bot' has --color in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph bot' has --config in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph bot' has --hats in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph bot' has --help in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph bot' has --verbose in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph hooks' has --color in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph hooks' has --config in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph hooks' has --hats in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph hooks' has --help in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph hooks' has --verbose in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph tools memory list' has --color in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory list' has --config in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory list' has --format in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory list' has --hats in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory list' has --help in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory list' has --last in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory list' has --root in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory list' has --type in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory list' has --verbose in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: ralph-tools-memories.md (section: Memory Commands) mentions --budget, but 'ralph tools memory list --help' no longer has it
+DRIFT: ralph-tools-memories.md (section: Memory Commands) mentions --private, but 'ralph tools memory list --help' no longer has it
+DRIFT: ralph-tools-memories.md (section: Memory Commands) mentions --tags, but 'ralph tools memory list --help' no longer has it
+DRIFT: 'ralph emit' has --color in --help, but not documented in ralph-tools-emit.md (section: ralph emit)
+DRIFT: 'ralph emit' has --config in --help, but not documented in ralph-tools-emit.md (section: ralph emit)
+DRIFT: 'ralph emit' has --hats in --help, but not documented in ralph-tools-emit.md (section: ralph emit)
+DRIFT: 'ralph emit' has --help in --help, but not documented in ralph-tools-emit.md (section: ralph emit)
+DRIFT: 'ralph emit' has --verbose in --help, but not documented in ralph-tools-emit.md (section: ralph emit)
+DRIFT: ralph-tools-emit.md (section: ralph emit) mentions --format, but 'ralph emit --help' no longer has it
+DRIFT: 'ralph tools memory show' has --color in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory show' has --config in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory show' has --format in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory show' has --hats in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory show' has --help in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory show' has --root in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory show' has --verbose in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: ralph-tools-memories.md (section: Memory Commands) mentions --budget, but 'ralph tools memory show --help' no longer has it
+DRIFT: ralph-tools-memories.md (section: Memory Commands) mentions --private, but 'ralph tools memory show --help' no longer has it
+DRIFT: ralph-tools-memories.md (section: Memory Commands) mentions --tags, but 'ralph tools memory show --help' no longer has it
+DRIFT: 'ralph web' has --backend-port in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph web' has --color in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph web' has --config in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph web' has --frontend-port in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph web' has --hats in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph web' has --help in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph web' has --legacy-node-api in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph web' has --no-open in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph web' has --verbose in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph web' has --workspace in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph tools interact progress' has --color in --help, but not documented in ralph-tools-cmdref.md (section: ralph tools interact)
+DRIFT: 'ralph tools interact progress' has --config in --help, but not documented in ralph-tools-cmdref.md (section: ralph tools interact)
+DRIFT: 'ralph tools interact progress' has --hats in --help, but not documented in ralph-tools-cmdref.md (section: ralph tools interact)
+DRIFT: 'ralph tools interact progress' has --help in --help, but not documented in ralph-tools-cmdref.md (section: ralph tools interact)
+DRIFT: 'ralph tools interact progress' has --verbose in --help, but not documented in ralph-tools-cmdref.md (section: ralph tools interact)
+DRIFT: ralph-tools-cmdref.md (section: ralph tools interact) mentions --format, but 'ralph tools interact progress --help' no longer has it
+DRIFT: ralph-tools-cmdref.md (section: ralph tools interact) mentions --root, but 'ralph tools interact progress --help' no longer has it
+DRIFT: 'ralph preflight' has --check in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph preflight' has --color in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph preflight' has --config in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph preflight' has --format in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph preflight' has --hats in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph preflight' has --help in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph preflight' has --strict in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph preflight' has --verbose in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph run' has --color in --help, but not documented in ralph-tools-cmdref.md (section: ralph run)
+DRIFT: 'ralph run' has --completion-promise in --help, but not documented in ralph-tools-cmdref.md (section: ralph run)
+DRIFT: 'ralph run' has --config in --help, but not documented in ralph-tools-cmdref.md (section: ralph run)
+DRIFT: 'ralph run' has --exclusive in --help, but not documented in ralph-tools-cmdref.md (section: ralph run)
+DRIFT: 'ralph run' has --force-warmup in --help, but not documented in ralph-tools-cmdref.md (section: ralph run)
+DRIFT: 'ralph run' has --hats in --help, but not documented in ralph-tools-cmdref.md (section: ralph run)
+DRIFT: 'ralph run' has --help in --help, but not documented in ralph-tools-cmdref.md (section: ralph run)
+DRIFT: 'ralph run' has --idle-timeout in --help, but not documented in ralph-tools-cmdref.md (section: ralph run)
+DRIFT: 'ralph run' has --rpc in --help, but not documented in ralph-tools-cmdref.md (section: ralph run)
+DRIFT: 'ralph run' has --skip-preflight in --help, but not documented in ralph-tools-cmdref.md (section: ralph run)
+DRIFT: 'ralph run' has --warmup-only in --help, but not documented in ralph-tools-cmdref.md (section: ralph run)
+DRIFT: 'ralph tools task list' has --color in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task list' has --config in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task list' has --days in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task list' has --hats in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task list' has --help in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task list' has --limit in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task list' has --root in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task list' has --verbose in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --blocked-by, but 'ralph tools task list --help' no longer has it
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --key, but 'ralph tools task list --help' no longer has it
+DRIFT: 'ralph tools task ready' has --color in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task ready' has --config in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task ready' has --hats in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task ready' has --help in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task ready' has --root in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task ready' has --verbose in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --blocked-by, but 'ralph tools task ready --help' no longer has it
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --key, but 'ralph tools task ready --help' no longer has it
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --status, but 'ralph tools task ready --help' no longer has it
+DRIFT: 'ralph init' has --backend in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph init' has --color in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph init' has --config in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph init' has --force in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph init' has --hats in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph init' has --help in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph init' has --list-presets in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph init' has --preset in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph init' has --verbose in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph plan' has --backend in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph plan' has --color in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph plan' has --config in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph plan' has --hats in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph plan' has --help in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph plan' has --teams in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph plan' has --verbose in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph doctor' has --color in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph doctor' has --config in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph doctor' has --hats in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph doctor' has --help in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph doctor' has --verbose in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph tools memory delete' has --color in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory delete' has --config in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory delete' has --hats in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory delete' has --help in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory delete' has --root in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory delete' has --verbose in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: ralph-tools-memories.md (section: Memory Commands) mentions --budget, but 'ralph tools memory delete --help' no longer has it
+DRIFT: ralph-tools-memories.md (section: Memory Commands) mentions --private, but 'ralph tools memory delete --help' no longer has it
+DRIFT: ralph-tools-memories.md (section: Memory Commands) mentions --tags, but 'ralph tools memory delete --help' no longer has it
+DRIFT: 'ralph code-task' has --backend in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph code-task' has --color in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph code-task' has --config in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph code-task' has --hats in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph code-task' has --help in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph code-task' has --teams in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph code-task' has --verbose in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph completions' has --color in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph completions' has --config in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph completions' has --hats in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph completions' has --help in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph completions' has --verbose in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph tools task reopen' has --color in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task reopen' has --config in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task reopen' has --hats in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task reopen' has --help in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task reopen' has --root in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task reopen' has --verbose in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --all, but 'ralph tools task reopen --help' no longer has it
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --blocked-by, but 'ralph tools task reopen --help' no longer has it
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --format, but 'ralph tools task reopen --help' no longer has it
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --key, but 'ralph tools task reopen --help' no longer has it
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --status, but 'ralph tools task reopen --help' no longer has it
+DRIFT: 'ralph tools task show' has --color in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task show' has --config in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task show' has --hats in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task show' has --help in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task show' has --root in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task show' has --verbose in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --all, but 'ralph tools task show --help' no longer has it
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --blocked-by, but 'ralph tools task show --help' no longer has it
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --key, but 'ralph tools task show --help' no longer has it
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --status, but 'ralph tools task show --help' no longer has it
+DRIFT: 'ralph tui' has --color in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph tui' has --config in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph tui' has --hats in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph tui' has --help in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph tui' has --url in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph tui' has --verbose in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph tools task start' has --color in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task start' has --config in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task start' has --hats in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task start' has --help in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task start' has --root in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task start' has --verbose in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --all, but 'ralph tools task start --help' no longer has it
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --blocked-by, but 'ralph tools task start --help' no longer has it
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --format, but 'ralph tools task start --help' no longer has it
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --key, but 'ralph tools task start --help' no longer has it
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --status, but 'ralph tools task start --help' no longer has it
+DRIFT: 'ralph tools task ensure' has --color in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task ensure' has --config in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task ensure' has --description in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task ensure' has --hats in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task ensure' has --help in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task ensure' has --priority in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task ensure' has --root in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: 'ralph tools task ensure' has --verbose in --help, but not documented in ralph-tools-tasks.md (section: Task Commands)
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --all, but 'ralph tools task ensure --help' no longer has it
+DRIFT: ralph-tools-tasks.md (section: Task Commands) mentions --status, but 'ralph tools task ensure --help' no longer has it
+DRIFT: 'ralph tools skill load' has --help in --help, but not documented in ralph-tools-cmdref.md (section: ralph tools skill)
+DRIFT: ralph-tools-cmdref.md (section: ralph tools skill) mentions --format, but 'ralph tools skill load --help' no longer has it
+DRIFT: 'ralph wave emit' has --color in --help, but not documented in ralph-tools-wave.md (section: ralph wave emit)
+DRIFT: 'ralph wave emit' has --config in --help, but not documented in ralph-tools-wave.md (section: ralph wave emit)
+DRIFT: 'ralph wave emit' has --hats in --help, but not documented in ralph-tools-wave.md (section: ralph wave emit)
+DRIFT: 'ralph wave emit' has --verbose in --help, but not documented in ralph-tools-wave.md (section: ralph wave emit)
+DRIFT: ralph-tools-wave.md (section: ralph wave emit) mentions --root, but 'ralph wave emit --help' no longer has it
+DRIFT: ralph-tools-wave.md (section: ralph wave emit) mentions --format, but 'ralph wave emit --help' no longer has it
+DRIFT: ralph-tools-wave.md (section: ralph wave emit) mentions --payloads, but 'ralph wave emit --help' no longer has it
+DRIFT: ralph-tools-wave.md (section: ralph wave emit) mentions --format, but 'ralph wave emit --help' no longer has it
+DRIFT: ralph-tools-wave.md (section: ralph wave emit) mentions --payloads, but 'ralph wave emit --help' no longer has it
+DRIFT: ralph-tools-wave.md (section: ralph wave emit) mentions --payloads, but 'ralph wave emit --help' no longer has it
+DRIFT: ralph-tools-wave.md (section: ralph wave emit) mentions --payloads, but 'ralph wave emit --help' no longer has it
+DRIFT: 'ralph mcp' has --color in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph mcp' has --config in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph mcp' has --hats in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph mcp' has --help in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph mcp' has --verbose in --help, but not documented in ralph-tools-cmdref.md (section: 其他命令)
+DRIFT: 'ralph tools memory init' has --color in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory init' has --config in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory init' has --force in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory init' has --hats in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory init' has --help in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory init' has --root in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: 'ralph tools memory init' has --verbose in --help, but not documented in ralph-tools-memories.md (section: Memory Commands)
+DRIFT: ralph-tools-memories.md (section: Memory Commands) mentions --budget, but 'ralph tools memory init --help' no longer has it
+DRIFT: ralph-tools-memories.md (section: Memory Commands) mentions --private, but 'ralph tools memory init --help' no longer has it
+DRIFT: ralph-tools-memories.md (section: Memory Commands) mentions --tags, but 'ralph tools memory init --help' no longer has it
+DRIFT: 'ralph tools skill list' has --help in --help, but not documented in ralph-tools-cmdref.md (section: ralph tools skill)
