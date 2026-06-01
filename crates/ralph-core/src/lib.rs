@@ -29,6 +29,7 @@ mod hatless_ralph;
 pub mod hooks;
 mod instructions;
 mod landing;
+pub mod loop_authorization;
 pub mod loop_completion;
 pub mod loop_context;
 pub mod loop_history;

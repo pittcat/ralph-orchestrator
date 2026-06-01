@@ -60,6 +60,13 @@ pub struct LoopEntry {
 
     /// The workspace root where the loop is running.
     pub workspace: String,
+
+    /// Hat that registered the loop, when started from an Agent context.
+    /// `None` for human-initiated loops. Authorization helpers use this
+    /// to gate destructive commands: an agent-owned loop can only act on
+    /// its own entry, while a human operator can act on any entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_hat_id: Option<String>,
 }
 
 impl LoopEntry {
@@ -74,6 +81,7 @@ impl LoopEntry {
             workspace: std::env::current_dir()
                 .map(|p| p.display().to_string())
                 .unwrap_or_default(),
+            owner_hat_id: None,
         }
     }
 
@@ -90,6 +98,7 @@ impl LoopEntry {
             prompt: prompt.into(),
             worktree_path: worktree_path.map(Into::into),
             workspace: workspace.into(),
+            owner_hat_id: None,
         }
     }
 
@@ -110,7 +119,15 @@ impl LoopEntry {
             prompt: prompt.into(),
             worktree_path: worktree_path.map(Into::into),
             workspace: workspace.into(),
+            owner_hat_id: None,
         }
+    }
+
+    /// P7: stamp an owner hat id on this entry. Pass `None` to clear
+    /// the owner (for tests or human-initiated registrations).
+    pub fn with_owner_hat(mut self, owner: Option<impl Into<String>>) -> Self {
+        self.owner_hat_id = owner.map(Into::into);
+        self
     }
 
     /// Generates a unique loop ID: loop-{timestamp}-{hex_suffix}
