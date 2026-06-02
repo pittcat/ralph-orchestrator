@@ -1127,7 +1127,8 @@ mod tests {
         // ce-executor's expected publish chain (using actual hat_keys from YAML):
         // coordinator(work.ready) -> executor(work.done) -> review-coordinator(review.wave.ready)
         //   -> dimension-reviewer(review.dimension.done) -> review-synthesizer(review.passed)
-        //   -> shipper(REVIEW_COMPLETE) -> reporter(report.done, LOOP_COMPLETE)
+        //   -> plan-gate(queue.advance OR plan.complete) -> shipper(REVIEW_COMPLETE)
+        //   -> reporter(report.done, LOOP_COMPLETE)
         //
         // `report.done` is the required_events completion gate, so it must appear in
         // the chain — otherwise the gate event would never fire and the original
@@ -1138,6 +1139,9 @@ mod tests {
             ("review-coordinator", "review.wave.ready"),
             ("dimension-reviewer", "review.dimension.done"),
             ("review-synthesizer", "review.passed"),
+            ("plan-gate", "queue.advance"),
+            ("plan-gate", "plan.complete"),
+            ("plan-gate", "plan.blocked"),
             ("shipper", "REVIEW_COMPLETE"),
             ("reporter", "report.done"),
             ("reporter", "LOOP_COMPLETE"),
@@ -1478,6 +1482,417 @@ mod tests {
         assert!(
             content.contains("preflight check failed"),
             "ce-executor-zh must reference preflight check failure"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_plan_gate_exists_and_routes_correctly() {
+        // R1-R4: plan-gate must exist, must subscribe to review.passed + review.complete,
+        // must publish queue.advance / plan.complete / plan.blocked, and must NOT
+        // listen to fix.applied.
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
+
+        let plan_gate = config
+            .hats
+            .get("plan-gate")
+            .expect("ce-executor must define a 'plan-gate' hat");
+        assert_eq!(
+            plan_gate.triggers,
+            vec!["review.passed".to_string(), "review.complete".to_string()],
+            "plan-gate must trigger on review.passed and review.complete"
+        );
+        assert!(
+            plan_gate.publishes.contains(&"queue.advance".to_string()),
+            "plan-gate must publish queue.advance"
+        );
+        assert!(
+            plan_gate.publishes.contains(&"plan.complete".to_string()),
+            "plan-gate must publish plan.complete"
+        );
+        assert!(
+            plan_gate.publishes.contains(&"plan.blocked".to_string()),
+            "plan-gate must publish plan.blocked"
+        );
+        assert_eq!(
+            plan_gate.default_publishes.as_deref(),
+            Some("plan.blocked"),
+            "plan-gate default_publishes should be plan.blocked"
+        );
+        assert!(
+            !plan_gate.triggers.contains(&"fix.applied".to_string()),
+            "plan-gate must NOT listen to fix.applied"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_shipper_triggers_finalization_only() {
+        // R6: Shipper must only trigger on finalization inputs, not directly on review.
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
+
+        let shipper = config
+            .hats
+            .get("shipper")
+            .expect("ce-executor must define a 'shipper' hat");
+        assert!(
+            !shipper.triggers.contains(&"review.passed".to_string()),
+            "shipper must NOT trigger on review.passed"
+        );
+        assert!(
+            !shipper.triggers.contains(&"review.complete".to_string()),
+            "shipper must NOT trigger on review.complete"
+        );
+        assert!(
+            shipper.triggers.contains(&"plan.complete".to_string()),
+            "shipper must trigger on plan.complete"
+        );
+        assert!(
+            shipper.triggers.contains(&"plan.blocked".to_string()),
+            "shipper must trigger on plan.blocked"
+        );
+        assert!(
+            shipper.triggers.contains(&"fix.exhausted".to_string()),
+            "shipper must trigger on fix.exhausted"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_executor_publishes_excludes_queue_advance() {
+        // KTD4: executor no longer publishes queue.advance; plan-gate owns advancement.
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
+
+        let executor = config
+            .hats
+            .get("executor")
+            .expect("ce-executor must define an 'executor' hat");
+        assert!(
+            !executor.publishes.contains(&"queue.advance".to_string()),
+            "executor must NOT publish queue.advance; plan-gate owns queue advancement"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_zh_plan_gate_matches_en() {
+        // R9: Chinese preset plan-gate must have identical triggers/publishes/default_publishes.
+        let en = read_root_preset("ce-executor.yml");
+        let zh = read_root_preset("ce-executor-zh.yml");
+
+        let en_config = RalphConfig::parse_yaml(&en).expect("English preset should parse");
+        let zh_config = RalphConfig::parse_yaml(&zh).expect("Chinese preset should parse");
+
+        let en_gate = en_config
+            .hats
+            .get("plan-gate")
+            .expect("English preset must have plan-gate");
+        let zh_gate = zh_config
+            .hats
+            .get("plan-gate")
+            .expect("Chinese preset must have plan-gate");
+
+        assert_eq!(
+            en_gate.triggers, zh_gate.triggers,
+            "plan-gate triggers must match between EN and ZH"
+        );
+        assert_eq!(
+            en_gate.publishes, zh_gate.publishes,
+            "plan-gate publishes must match between EN and ZH"
+        );
+        assert_eq!(
+            en_gate.default_publishes, zh_gate.default_publishes,
+            "plan-gate default_publishes must match between EN and ZH"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_reporter_defensive_plan_check() {
+        // R8: Reporter instructions must contain a defensive plan completion check.
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let content = preset.content;
+        assert!(
+            content.contains("Defensive plan completion check")
+                || content.contains("defensive plan completion check"),
+            "reporter instructions must contain a defensive plan completion check"
+        );
+        assert!(
+            content.contains("plan.md") && content.contains("progress.md"),
+            "reporter must reference plan.md and progress.md for the defensive check"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_verdict_gate_targets_review_complete() {
+        // R10: verdict_gate must check REVIEW_COMPLETE (not review.complete) because
+        // REVIEW_COMPLETE carries pass_or_fail; review.complete carries verdict.
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
+        let gate = config
+            .event_loop
+            .verdict_gate
+            .as_ref()
+            .expect("ce-executor must have a verdict_gate");
+        assert_eq!(
+            gate.topic, "REVIEW_COMPLETE",
+            "verdict_gate topic must be REVIEW_COMPLETE (uppercase) to match shipper output"
+        );
+        assert_eq!(
+            gate.fail_field, "pass_or_fail",
+            "verdict_gate fail_field must be pass_or_fail"
+        );
+        assert_eq!(gate.fail_value, "fail", "verdict_gate fail_value must be fail");
+    }
+
+    #[test]
+    fn test_ce_executor_dimension_reviewer_passes_through_task_correlation() {
+        // R13: dimension-reviewer must read and publish task_id/task_key/step so
+        // plan-gate can correlate wave results with the original task.
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let content = preset.content;
+        let dim_section = content
+            .split("dimension-reviewer:")
+            .nth(1)
+            .expect("ce-executor must have dimension-reviewer section");
+        assert!(
+            dim_section.contains("task_id") && dim_section.contains("task_key") && dim_section.contains("step"),
+            "dimension-reviewer instructions must reference task_id, task_key, and step"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_shipper_commit_only_on_plan_complete() {
+        // R14: shipper must NOT commit or mark plan completed on plan.blocked or fix.exhausted.
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let content = preset.content;
+        let shipper_section = content
+            .split("shipper:")
+            .nth(1)
+            .expect("ce-executor must have shipper section");
+        assert!(
+            shipper_section.contains("plan.complete ONLY") || shipper_section.contains("Only execute this section when triggered by `plan.complete`"),
+            "shipper must gate commit and plan-status update to plan.complete only"
+        );
+        assert!(
+            shipper_section.contains("plan.blocked") && shipper_section.contains("fix.exhausted"),
+            "shipper must reference plan.blocked and fix.exhausted in its guarded sections"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_executor_reads_reviewed_task_id_on_queue_advance() {
+        // R15: executor must read reviewed_task_id/reviewed_task_key on queue.advance,
+        // NOT task_id/task_key, to avoid confusing the reviewed step's tasks with the
+        // next step's tasks.
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let content = preset.content;
+        let exec_section = content
+            .split("  executor:\n")
+            .nth(1)
+            .expect("ce-executor must have executor section");
+        assert!(
+            exec_section.contains("reviewed_task_id") && exec_section.contains("reviewed_task_key"),
+            "executor queue.advance instructions must reference reviewed_task_id and reviewed_task_key"
+        );
+        assert!(
+            !exec_section.contains("payload may omit `task_id`"),
+            "executor must NOT say payload may omit task_id on queue.advance"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_shipper_simplify_check_gated_to_plan_complete() {
+        // R16: shipper's simplify check must be gated to plan.complete only.
+        // On plan.blocked or fix.exhausted, the state is not shippable — simplify is inappropriate.
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let content = preset.content;
+        let shipper_section = content
+            .split("shipper:")
+            .nth(1)
+            .expect("ce-executor must have shipper section");
+        assert!(
+            shipper_section.contains("Simplify Check (plan.complete ONLY)")
+                || shipper_section.contains("Only execute on `plan.complete`"),
+            "shipper must gate simplify check to plan.complete only"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_zh_verdict_gate_targets_review_complete() {
+        let content = read_root_preset("ce-executor-zh.yml");
+        let config =
+            RalphConfig::parse_yaml(&content).expect("ce-executor-zh YAML should parse");
+        let gate = config
+            .event_loop
+            .verdict_gate
+            .as_ref()
+            .expect("ce-executor-zh must have a verdict_gate");
+        assert_eq!(
+            gate.topic, "REVIEW_COMPLETE",
+            "ce-executor-zh verdict_gate topic must be REVIEW_COMPLETE"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_zh_dimension_reviewer_passes_through_task_correlation() {
+        let content = read_root_preset("ce-executor-zh.yml");
+        let dim_section = content
+            .split("dimension-reviewer:")
+            .nth(1)
+            .expect("ce-executor-zh must have dimension-reviewer section");
+        assert!(
+            dim_section.contains("task_id") && dim_section.contains("task_key") && dim_section.contains("step"),
+            "ce-executor-zh dimension-reviewer must reference task_id, task_key, step"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_zh_shipper_commit_only_on_plan_complete() {
+        let content = read_root_preset("ce-executor-zh.yml");
+        let shipper_section = content
+            .split("shipper:")
+            .nth(1)
+            .expect("ce-executor-zh must have shipper section");
+        assert!(
+            shipper_section.contains("仅限 plan.complete") || shipper_section.contains("plan.complete 时"),
+            "ce-executor-zh shipper must gate commit to plan.complete only"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_fixer_reads_task_correlation_fields() {
+        // R17: fixer must read task_id/task_key/step from review.failed payload
+        // so that fix.applied / fix.exhausted can carry them downstream.
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let content = preset.content;
+        let fixer_section = content
+            .split("fixer:")
+            .nth(1)
+            .expect("ce-executor must have fixer section");
+        assert!(
+            fixer_section.contains("task_id") && fixer_section.contains("task_key") && fixer_section.contains("step"),
+            "fixer Read State must reference task_id, task_key, step from review.failed payload"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_coordinator_work_ready_includes_task_correlation() {
+        // R18: coordinator must publish task_id/task_key/step in work.ready payload
+        // so that executor (including trivial path) can forward them to work.done.
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let content = preset.content;
+        let coord_section = content
+            .split("\n  coordinator:\n")
+            .nth(1)
+            .expect("ce-executor must have coordinator section");
+        assert!(
+            coord_section.contains("task_id") && coord_section.contains("task_key") && coord_section.contains("step"),
+            "coordinator Event Publishing must include task_id, task_key, step in work.ready payload"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_trivial_path_includes_task_correlation() {
+        // R19: executor trivial path must publish task_id/task_key/step in work.done
+        // so review-coordinator can correlate the review with the right task.
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let content = preset.content;
+        let exec_section = content
+            .split("  executor:\n")
+            .nth(1)
+            .expect("ce-executor must have executor section");
+        let trivial_start = exec_section
+            .find("Trivial")
+            .expect("executor must have Trivial section");
+        let trivial_section = &exec_section[trivial_start..];
+        assert!(
+            trivial_section.contains("task_id") && trivial_section.contains("task_key") && trivial_section.contains("step"),
+            "executor trivial path must include task_id, task_key, step in work.done payload"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_zh_fixer_reads_task_correlation_fields() {
+        let content = read_root_preset("ce-executor-zh.yml");
+        let fixer_section = content
+            .split("fixer:")
+            .nth(1)
+            .expect("ce-executor-zh must have fixer section");
+        assert!(
+            fixer_section.contains("task_id") && fixer_section.contains("task_key") && fixer_section.contains("step"),
+            "ce-executor-zh fixer Read State must reference task_id, task_key, step from review.failed payload"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_zh_coordinator_work_ready_includes_task_correlation() {
+        let content = read_root_preset("ce-executor-zh.yml");
+        let coord_section = content
+            .split("\n  coordinator:\n")
+            .nth(1)
+            .expect("ce-executor-zh must have coordinator section");
+        assert!(
+            coord_section.contains("task_id") && coord_section.contains("task_key") && coord_section.contains("step"),
+            "ce-executor-zh coordinator Event Publishing must include task_id, task_key, step in work.ready payload"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_zh_trivial_path_includes_task_correlation() {
+        let content = read_root_preset("ce-executor-zh.yml");
+        let exec_section = content
+            .split("\n  executor:\n")
+            .nth(1)
+            .expect("ce-executor-zh must have executor section");
+        let trivial_start = exec_section
+            .find("Trivial")
+            .expect("ce-executor-zh executor must have Trivial section");
+        let trivial_section = &exec_section[trivial_start..];
+        assert!(
+            trivial_section.contains("task_id") && trivial_section.contains("task_key") && trivial_section.contains("step"),
+            "ce-executor-zh executor trivial path must include task_id, task_key, step in work.done payload"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_fixer_exhausted_early_exit_keeps_task_correlation() {
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let content = preset.content;
+        let fixer_section = content
+            .split("fixer:")
+            .nth(1)
+            .expect("ce-executor must have fixer section");
+        let exhausted_start = fixer_section
+            .find("fix_round + 1 > 3")
+            .expect("fixer must describe exhausted early exit");
+        let exhausted_section = &fixer_section[exhausted_start..];
+        assert!(
+            exhausted_section.contains("task_id")
+                && exhausted_section.contains("task_key")
+                && exhausted_section.contains("step"),
+            "fixer early fix.exhausted path must carry task_id, task_key, step"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_zh_fixer_exhausted_early_exit_keeps_task_correlation() {
+        let content = read_root_preset("ce-executor-zh.yml");
+        let fixer_section = content
+            .split("fixer:")
+            .nth(1)
+            .expect("ce-executor-zh must have fixer section");
+        let exhausted_start = fixer_section
+            .find("fix_round + 1 > 3")
+            .expect("ce-executor-zh fixer must describe exhausted early exit");
+        let exhausted_section = &fixer_section[exhausted_start..];
+        assert!(
+            exhausted_section.contains("task_id")
+                && exhausted_section.contains("task_key")
+                && exhausted_section.contains("step"),
+            "ce-executor-zh fixer early fix.exhausted path must carry task_id, task_key, step"
         );
     }
 }

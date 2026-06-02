@@ -713,7 +713,7 @@ hats:
   executor:
     name: "Executor"
     triggers: ["work.ready", "queue.advance", "work.retry"]
-    publishes: ["work.done", "work.failed", "queue.advance"]
+    publishes: ["work.done", "work.failed"]
     default_publishes: "work.done"
   review-coordinator:
     name: "Review Coordinator"
@@ -733,9 +733,14 @@ hats:
     triggers: ["review.failed"]
     publishes: ["fix.applied", "fix.exhausted"]
     default_publishes: "fix.exhausted"
+  plan-gate:
+    name: "Plan Gate"
+    triggers: ["review.passed", "review.complete"]
+    publishes: ["queue.advance", "plan.complete", "plan.blocked"]
+    default_publishes: "plan.blocked"
   shipper:
     name: "Shipper"
-    triggers: ["review.passed", "review.complete", "fix.exhausted"]
+    triggers: ["plan.complete", "plan.blocked", "fix.exhausted"]
     publishes: ["REVIEW_COMPLETE"]
     default_publishes: "REVIEW_COMPLETE"
   reporter:
@@ -747,6 +752,10 @@ event_loop:
   starting_event: "work.start"
   completion_promise: "LOOP_COMPLETE"
   required_events: ["report.done"]
+  verdict_gate:
+    topic: "REVIEW_COMPLETE"
+    fail_field: "pass_or_fail"
+    fail_value: "fail"
 "#;
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
         let registry = runtime_registry(yaml);
@@ -754,6 +763,41 @@ event_loop:
         assert!(
             result.is_valid(),
             "ce-executor topology should be valid: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn ce_executor_verdict_gate_rejects_fail_review_complete() {
+        // R10: The verdict gate must reject LOOP_COMPLETE when REVIEW_COMPLETE
+        // carries pass_or_fail == "fail". This is a backstop for plan.blocked
+        // and fix.exhausted paths that still emit REVIEW_COMPLETE.
+        let yaml = r#"
+hats:
+  shipper:
+    name: "Shipper"
+    triggers: ["plan.complete", "plan.blocked"]
+    publishes: ["REVIEW_COMPLETE"]
+  reporter:
+    name: "Reporter"
+    triggers: ["REVIEW_COMPLETE"]
+    publishes: ["report.done", "LOOP_COMPLETE"]
+    default_publishes: "report.done"
+event_loop:
+  starting_event: "plan.complete"
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["report.done"]
+  verdict_gate:
+    topic: "REVIEW_COMPLETE"
+    fail_field: "pass_or_fail"
+    fail_value: "fail"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset_topology(&config, &registry);
+        assert!(
+            result.is_valid(),
+            "verdict_gate on REVIEW_COMPLETE should be valid: {:?}",
             result.errors
         );
     }
@@ -1060,6 +1104,139 @@ event_loop:
                     && error.message.contains("review.passed")
             }),
             "required event on disconnected branch should fail: {:?}",
+            result.errors
+        );
+    }
+
+    // -- ce-executor multi-step advancement regression tests ---------------
+
+    #[test]
+    fn ce_executor_queue_advance_is_reachable_from_start() {
+        // R11: After a step passes review, plan-gate must be able to emit
+        // queue.advance so the executor can run the next step.
+        let yaml = r#"
+hats:
+  coordinator:
+    name: "Coordinator"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+  executor:
+    name: "Executor"
+    triggers: ["work.ready", "queue.advance"]
+    publishes: ["work.done"]
+  review-coordinator:
+    name: "Review Coordinator"
+    triggers: ["work.done"]
+    publishes: ["review.wave.ready"]
+  dimension-reviewer:
+    name: "Dimension Reviewer"
+    triggers: ["review.wave.ready"]
+    publishes: ["review.dimension.done"]
+  review-synthesizer:
+    name: "Review Synthesizer"
+    triggers: ["review.dimension.done"]
+    publishes: ["review.passed"]
+  plan-gate:
+    name: "Plan Gate"
+    triggers: ["review.passed"]
+    publishes: ["queue.advance", "plan.complete"]
+    default_publishes: "plan.complete"
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let graph = TopologyGraph::build(&config, &registry);
+        assert!(
+            graph.is_topic_reachable_from("work.start", "queue.advance"),
+            "queue.advance must be reachable from work.start through plan-gate"
+        );
+    }
+
+    #[test]
+    fn ce_executor_plan_complete_path_is_reachable() {
+        // R11: The final completion path via plan.complete -> REVIEW_COMPLETE
+        // -> report.done -> LOOP_COMPLETE must be reachable.
+        let yaml = r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.ready"]
+    publishes: ["work.done"]
+  review-synthesizer:
+    name: "Review Synthesizer"
+    triggers: ["work.done"]
+    publishes: ["review.passed"]
+  plan-gate:
+    name: "Plan Gate"
+    triggers: ["review.passed"]
+    publishes: ["plan.complete"]
+  shipper:
+    name: "Shipper"
+    triggers: ["plan.complete"]
+    publishes: ["REVIEW_COMPLETE"]
+  reporter:
+    name: "Reporter"
+    triggers: ["REVIEW_COMPLETE"]
+    publishes: ["report.done", "LOOP_COMPLETE"]
+event_loop:
+  starting_event: "work.ready"
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["report.done"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset_topology(&config, &registry);
+        assert!(
+            result.is_valid(),
+            "plan.complete completion path should be valid: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn ce_executor_report_done_still_on_all_paths_with_plan_gate() {
+        // R12: Adding plan-gate must not break the existing completion gate.
+        // report.done must still be on all paths to LOOP_COMPLETE.
+        let yaml = r#"
+hats:
+  coordinator:
+    name: "Coordinator"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+  executor:
+    name: "Executor"
+    triggers: ["work.ready", "queue.advance"]
+    publishes: ["work.done"]
+  review-synthesizer:
+    name: "Review Synthesizer"
+    triggers: ["work.done"]
+    publishes: ["review.passed", "review.complete"]
+  plan-gate:
+    name: "Plan Gate"
+    triggers: ["review.passed", "review.complete"]
+    publishes: ["queue.advance", "plan.complete", "plan.blocked"]
+  shipper:
+    name: "Shipper"
+    triggers: ["plan.complete", "plan.blocked"]
+    publishes: ["REVIEW_COMPLETE"]
+  reporter:
+    name: "Reporter"
+    triggers: ["REVIEW_COMPLETE"]
+    publishes: ["report.done", "LOOP_COMPLETE"]
+    default_publishes: "report.done"
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["report.done"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset_topology(&config, &registry);
+        assert!(
+            result.is_valid(),
+            "report.done must remain on all paths after adding plan-gate: {:?}",
             result.errors
         );
     }

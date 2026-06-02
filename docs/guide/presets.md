@@ -53,7 +53,7 @@ Ralph also keeps a few internal/testing presets available without advertising th
 | `review` | `presets/review.yml` | `reviewer`, `analyzer` | `review.start` | `REVIEW_COMPLETE` | Review-only workflow |
 | `spec-driven` | `presets/spec-driven.yml` | `spec_writer`, `spec_reviewer`, `implementer`, `verifier` | `spec.start` | `LOOP_COMPLETE` (default) | Specification-driven implementation |
 | `wave-review` | `presets/wave-review.yml` | `coordinator`, `reviewer` (x3), `synthesizer` | `review.start` | `LOOP_COMPLETE` | Specialized parallel code review (wave-enabled) |
-| `ce-executor` | `presets/ce-executor.yml` | `coordinator`, `executor`, `review-coordinator`, `dimension-reviewer` (wave), `review-synthesizer` (aggregate), `fixer`, `shipper`, `reporter` | `work.start` | `LOOP_COMPLETE` | Plan-driven execution with wave review, auto-fix, and manager report |
+| `ce-executor` | `presets/ce-executor.yml` | `coordinator`, `executor`, `review-coordinator`, `dimension-reviewer` (wave), `review-synthesizer` (aggregate), `fixer`, `plan-gate`, `shipper`, `reporter` | `work.start` | `LOOP_COMPLETE` | Plan-driven execution with wave review, auto-fix, and manager report |
 
 ## Why The Builtin Set Is Small
 
@@ -107,6 +107,7 @@ ralph run -c ralph.yml -H builtin:ce-executor --worktree -p "docs/plans/my-plan.
 - Records `start_sha` at startup to anchor review scope
 - Uses wave parallelism for multi-dimensional code review
 - Blocks all push operations (local commit only)
+- Includes a `plan-gate` hat that reconciles review verdict against `plan.md` / `progress.md` and decides whether to advance to the next step or complete the plan
 
 **When to use `--worktree`:**
 - Multiple parallel ce-executor runs
