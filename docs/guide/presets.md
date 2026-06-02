@@ -188,6 +188,7 @@ Create a hats file with hats-related sections:
 event_loop:
   starting_event: "build.start"
   completion_promise: "LOOP_COMPLETE"
+  required_events: ["report.done"]   # <-- all-of gate, see below
 
 hats:
   builder:
@@ -200,7 +201,7 @@ hats:
   reviewer:
     name: "Reviewer"
     triggers: ["build.done"]
-    publishes: ["LOOP_COMPLETE"]
+    publishes: ["report.done"]
     instructions: |
       Review the change, request fixes if needed, and close when done.
 ```
@@ -210,6 +211,73 @@ Run it:
 ```bash
 ralph run -c ralph.yml -H .ralph/hats/my-workflow.yml
 ```
+
+### `required_events` -- All-of Completion Gate
+
+`required_events` is an **all-of** gate: **every** listed topic must have appeared at least once during the loop's lifetime before `LOOP_COMPLETE` is accepted. If even one required event is missing, the completion promise is rejected and a `task.resume` event is injected so the agent can continue working.
+
+```yaml
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["report.done"]   # all-of: report.done must have been seen
+```
+
+**Key behaviors:**
+
+- All listed topics must have been emitted at some point -- they do not need to appear in the same iteration or in a specific order.
+- The check is a lifetime check, not a per-iteration check. If `report.done` was emitted on iteration 3, it satisfies the gate on iteration 10.
+- When completion is rejected, the agent receives a `task.resume` event explaining which required events are missing.
+
+**Choosing convergence topics:**
+
+Pick topics that sit at the **convergence point** of all successful completion paths. A convergence topic is one that every successful workflow branch eventually emits before reaching `LOOP_COMPLETE`.
+
+```
+                  ┌─ builder.done ── fixer ── fix.done ──┐
+task.start → ... │                                        ├→ report.done → LOOP_COMPLETE
+                  └─ builder.done ── tester ── test.passed┘
+```
+
+In this example, both the fix path and the test path converge on `report.done`. Using `report.done` as the required event is safe because it blocks both paths. Using `test.passed` would be wrong because the fix path skips it.
+
+> **Important**: `required_events` uses **all-of** semantics. Every listed event must appear on the event bus before `LOOP_COMPLETE` is accepted. This is not an any-of list. If you need multiple completion paths to converge, choose a single convergence topic that all paths emit.
+
+**Anti-patterns:**
+
+- Using a topic that only one path emits (creates a false gate for alternative paths).
+- Using a leaf topic before a convergence point (satisfies the gate too early).
+- Listing too many required events (fragile; prefer one or two convergence topics).
+- Using mutually exclusive branch events (e.g., `review.passed` and `review.complete` together) -- the validator will reject these since no single path emits both.
+
+### Validating Your Preset Topology
+
+Use `ralph hats validate` to check your preset for topology issues before running:
+
+```bash
+ralph hats validate -H .ralph/hats/my-workflow.yml
+```
+
+This checks:
+
+1. **Starting event reachability** -- the configured `starting_event` has at least one subscriber.
+2. **Completion promise reachability** -- `LOOP_COMPLETE` (or your custom promise) is reachable from at least one hat.
+3. **Required event reachability** -- every topic in `required_events` is reachable from the starting event.
+4. **All-paths coverage** -- every required event lies on **all** completion paths (not just some). If a required event can be bypassed, the validator emits an error.
+5. **Orphan detection** -- events published by no hat subscriber (warnings).
+6. **Dead-end detection** -- hats that emit events nobody listens to (warnings).
+
+If any required event is not on all completion paths, adjust your hat topology so that the convergence topic is emitted by the last hat in every branch.
+
+### Preflight Topology Check
+
+The same topology validator also runs automatically during `ralph preflight` and `ralph run` (as the `preset-topology` preflight check). This catches bad preset configurations before any backend API call is made:
+
+```bash
+ralph preflight -c ralph.yml -H builtin:ce-executor
+# Checks: starting event reachability, completion path, required events all-of coverage
+```
+
+The `preset-topology` check is included in `PreflightRunner::default_checks_with_config` and runs as part of the standard preflight sequence. Use `features.preflight.skip` in your config to opt out if needed.
 
 ## Source of Truth and Sync
 

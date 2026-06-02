@@ -4,11 +4,20 @@
 //! - The starting event can reach at least one hat.
 //! - The completion promise can be reached from the starting event.
 //! - Required events are reachable and appear on all completion paths.
+//!
+//! The validator builds a topic-hat bipartite graph from the configured hats
+//! (excluding the builtin `ralph` fallback) and performs BFS-based reachability
+//! analysis. Wildcard subscriptions (e.g. `review.*`) are resolved using
+//! `Topic::matches` semantics. Cycles are handled via a visited set to prevent
+//! path explosion.
 
 use crate::config::RalphConfig;
 use crate::hat_registry::HatRegistry;
-use ralph_proto::Hat;
+use ralph_proto::{Hat, Topic};
 use std::collections::{HashMap, HashSet, VecDeque};
+
+/// Maximum number of BFS iterations to prevent infinite loops on cyclic graphs.
+const MAX_BFS_ITERATIONS: usize = 1000;
 
 /// Kind of topology error.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,24 +55,22 @@ impl TopologyValidationResult {
 /// Validates that the preset topology is sound.
 ///
 /// Builds a topic-hat bipartite graph and checks:
-/// 1. Starting event reaches at least one hat (or falls back to Ralph).
+/// 1. Starting event reaches at least one configured hat.
 /// 2. Completion promise is reachable from the start.
 /// 3. Every required event is reachable.
 /// 4. Every required event appears on ALL completion paths.
 ///
-/// The registry should be created with `HatRegistry::from_runtime_config` so that
-/// the builtin `ralph` fallback hat is included in the topology analysis.
+/// Runtime-only fallback hats such as builtin `ralph` are ignored for path
+/// analysis. Their wildcard subscription is useful at runtime, but treating it
+/// as a normal graph edge would connect disconnected preset branches and hide
+/// topology errors.
 pub fn validate_preset_topology(
     config: &RalphConfig,
     registry: &HatRegistry,
 ) -> TopologyValidationResult {
     let mut result = TopologyValidationResult::default();
 
-    // Check for custom hats (non-fallback-only). The builtin "ralph" hat with
-    // `*` subscription is always present in a runtime registry but does not
-    // constitute a custom topology to validate.
-    let has_custom_hats = registry.all().any(|h| !h.is_fallback_only());
-    if !has_custom_hats {
+    if config.hats.is_empty() {
         return result;
     }
 
@@ -76,54 +83,52 @@ pub fn validate_preset_topology(
         .clone()
         .unwrap_or_else(|| "task.start".to_string());
 
-    if !graph.is_topic_reachable(&start) && !graph.has_fallback_path(&start) {
+    if !graph.has_subscriber(&start) {
         result.errors.push(TopologyError {
             kind: TopologyErrorKind::UnreachableStart,
             message: format!(
-                "Starting event '{}' has no reachable hats and no Ralph fallback path",
+                "Starting event '{}' has no configured hat subscribers",
                 start
             ),
         });
     }
 
-    // 2. Check completion promise reachability
+    // 2. Check completion promise reachability from start
     let completion = &config.event_loop.completion_promise;
-    if !graph.is_topic_reachable(completion) {
+    if !graph.is_topic_reachable_from(&start, completion) {
         result.errors.push(TopologyError {
             kind: TopologyErrorKind::UnreachableCompletion,
             message: format!(
-                "Completion promise '{}' is not reachable from any hat",
-                completion
+                "Completion promise '{}' is not reachable from starting event '{}'",
+                completion, start
             ),
         });
     }
 
     // 3. & 4. Check required events
     for required in &config.event_loop.required_events {
-        if !graph.is_topic_reachable(required) {
+        if !graph.is_topic_reachable_from(&start, required) {
             result.errors.push(TopologyError {
                 kind: TopologyErrorKind::UnreachableRequired,
                 message: format!(
-                    "Required event '{}' is not reachable from the starting event",
-                    required
+                    "Required event '{}' is not reachable from the starting event '{}'",
+                    required, start
                 ),
             });
             continue;
         }
 
-        // Check that the required event is on all completion paths.
+        // Check that the required event is on all completion paths from start.
         // A required event is NOT on all completion paths if there exists
-        // a completion path that avoids it. We approximate this by checking
-        // if the required event blocks ALL paths to completion.
-        // If we can reach completion while blocking this topic AND all hats
-        // that publish it, then it's not on all paths.
-        if !graph.is_required_on_all_paths(required) {
+        // a completion path that avoids it. We check by blocking this topic
+        // and all hats that publish it, then seeing if completion is still reachable.
+        if !graph.is_required_on_all_paths(&start, completion, required) {
             result.errors.push(TopologyError {
                 kind: TopologyErrorKind::RequiredEventNotOnAllPaths,
                 message: format!(
-                    "Required event '{}' is not on all completion paths. \
+                    "Required event '{}' is not on all completion paths from '{}'. \
                      Choose a topic that every successful path emits, or adjust hat topology.",
-                    required
+                    required, start
                 ),
             });
         }
@@ -132,28 +137,31 @@ pub fn validate_preset_topology(
     result
 }
 
+/// Check if a topic matches a pattern using the same topic glob semantics as runtime routing.
+fn topic_matches(topic: &str, pattern: &str) -> bool {
+    Topic::new(pattern).matches_str(topic)
+}
+
 /// Bipartite graph of topics <-> hats.
 struct TopologyGraph<'a> {
     /// topic -> hats that subscribe to it
     topic_to_hats: HashMap<String, Vec<&'a Hat>>,
     /// hat -> topics it can publish (including default_publishes)
     hat_to_topics: HashMap<String, Vec<String>>,
-    /// All topic names known in the graph
-    all_topics: HashSet<String>,
 }
 
 impl<'a> TopologyGraph<'a> {
     fn build(config: &RalphConfig, registry: &'a HatRegistry) -> Self {
         let mut topic_to_hats: HashMap<String, Vec<&'a Hat>> = HashMap::new();
         let mut hat_to_topics: HashMap<String, Vec<String>> = HashMap::new();
-        let mut all_topics: HashSet<String> = HashSet::new();
 
-        // Index hats from registry
-        for hat in registry.all() {
+        // Index configured hats from the registry. Runtime-only fallback hats
+        // such as builtin `ralph` subscribe to `*`; including them here would
+        // make disconnected branches appear reachable.
+        for hat in registry.all().filter(|hat| !hat.is_fallback_only()) {
             // subscriptions (triggers)
             for sub in &hat.subscriptions {
                 let topic_str = sub.as_str().to_string();
-                all_topics.insert(topic_str.clone());
                 topic_to_hats.entry(topic_str).or_default().push(hat);
             }
 
@@ -161,15 +169,13 @@ impl<'a> TopologyGraph<'a> {
             let mut publishes = Vec::new();
             for pub_topic in &hat.publishes {
                 let topic_str = pub_topic.as_str().to_string();
-                all_topics.insert(topic_str.clone());
                 publishes.push(topic_str);
             }
 
             // default_publishes from config
-            if let Some(hat_config) = config.hats.get(&hat.id.as_str().to_string().to_string()) {
+            if let Some(hat_config) = config.hats.get(hat.id.as_str()) {
                 if let Some(default) = &hat_config.default_publishes {
                     let topic_str = default.clone();
-                    all_topics.insert(topic_str.clone());
                     if !publishes.contains(&topic_str) {
                         publishes.push(topic_str);
                     }
@@ -177,7 +183,6 @@ impl<'a> TopologyGraph<'a> {
                 // Also include config.publishes (which may differ from hat.publishes)
                 for pub_topic in &hat_config.publishes {
                     let topic_str = pub_topic.clone();
-                    all_topics.insert(topic_str.clone());
                     if !publishes.contains(&topic_str) {
                         publishes.push(topic_str);
                     }
@@ -195,19 +200,16 @@ impl<'a> TopologyGraph<'a> {
             let mut publishes = Vec::new();
             for pub_topic in &hat_config.publishes {
                 let topic_str = pub_topic.clone();
-                all_topics.insert(topic_str.clone());
                 publishes.push(topic_str);
             }
             if let Some(default) = &hat_config.default_publishes {
                 let topic_str = default.clone();
-                all_topics.insert(topic_str.clone());
                 if !publishes.contains(&topic_str) {
                     publishes.push(topic_str);
                 }
             }
             for trigger in &hat_config.triggers {
                 let topic_str = trigger.clone();
-                all_topics.insert(topic_str.clone());
                 topic_to_hats.entry(topic_str).or_default();
             }
             hat_to_topics.insert(hat_name.clone(), publishes);
@@ -216,85 +218,126 @@ impl<'a> TopologyGraph<'a> {
         Self {
             topic_to_hats,
             hat_to_topics,
-            all_topics,
         }
     }
 
     /// Check if a topic is reachable from the starting event through the graph.
-    fn is_topic_reachable(&self, target: &str) -> bool {
-        // BFS from all topics, following topic -> hat -> topic edges
+    /// Uses BFS starting from `start_topic`, following topic -> hat -> topic edges.
+    fn is_topic_reachable_from(&self, start_topic: &str, target: &str) -> bool {
         let mut visited_topics: HashSet<String> = HashSet::new();
         let mut queue: VecDeque<String> = VecDeque::new();
 
-        // Seed with topics that have subscribers (any topic in the graph)
-        // Actually we need to start from the configured starting event
-        // But we don't know the starting event here. We'll just check if
-        // the target topic has any publisher or subscriber in the graph.
-        // For proper reachability we need to know the start topic.
+        // Seed with the concrete starting event even when the matching trigger
+        // is a wildcard pattern like `work.*`.
+        visited_topics.insert(start_topic.to_string());
+        queue.push_back(start_topic.to_string());
 
-        // For simplicity: a topic is "reachable" if it appears in the graph
-        // and either it has subscribers, or it's published by some hat.
-        self.all_topics.contains(target)
-    }
+        let mut iterations = 0;
 
-    /// Check if the starting event would fall back to Ralph (no hat subscribes).
-    fn has_fallback_path(&self, start: &str) -> bool {
-        !self.topic_to_hats.contains_key(start)
-            || self
+        while let Some(topic) = queue.pop_front() {
+            iterations += 1;
+            if iterations > MAX_BFS_ITERATIONS {
+                break; // Cycle protection
+            }
+
+            if topic == target {
+                return true;
+            }
+
+            // Find hats that subscribe to this topic (exact match or wildcard)
+            let subscribing_hats: Vec<&Hat> = self
                 .topic_to_hats
-                .get(start)
-                .map(|v| v.is_empty())
-                .unwrap_or(true)
-    }
+                .iter()
+                .filter(|(t, _)| topic_matches(&topic, t))
+                .flat_map(|(_, hats)| hats.iter().copied())
+                .collect();
 
-    /// Check if a required event appears on ALL completion paths.
-    ///
-    /// Approximation: block the required topic and all hats that publish it.
-    /// If completion is still reachable, the required event is NOT on all paths.
-    fn is_required_on_all_paths(&self, required: &str) -> bool {
-        let completion = "LOOP_COMPLETE"; // Default completion promise
-        // Actually we should use the configured completion promise, but this
-        // is a simplification. We'll refine in future iterations.
-
-        // Find hats that publish the required topic
-        let blocking_hats: HashSet<String> = self
-            .hat_to_topics
-            .iter()
-            .filter(|(_, topics)| topics.contains(&required.to_string()))
-            .map(|(hat_id, _)| hat_id.clone())
-            .collect();
-
-        // BFS: can we reach completion without going through required topic
-        // or any hat that publishes it?
-        let mut visited_topics: HashSet<String> = HashSet::new();
-        let mut queue: VecDeque<String> = VecDeque::new();
-
-        // Seed with all topics that are not the required topic
-        for topic in &self.all_topics {
-            if topic != required {
-                visited_topics.insert(topic.clone());
-                queue.push_back(topic.clone());
+            for hat in subscribing_hats {
+                // Get topics this hat can publish
+                if let Some(publishes) = self.hat_to_topics.get(hat.id.as_str()) {
+                    for pub_topic in publishes {
+                        if visited_topics.insert(pub_topic.clone()) {
+                            queue.push_back(pub_topic.clone());
+                        }
+                    }
+                }
             }
         }
 
+        false
+    }
+
+    fn has_subscriber(&self, topic: &str) -> bool {
+        self.topic_to_hats
+            .iter()
+            .any(|(trigger, hats)| topic_matches(topic, trigger) && !hats.is_empty())
+    }
+
+    /// Check if a required event appears on ALL completion paths from the starting event.
+    ///
+    /// Strategy: block the required topic from BFS traversal. If the completion
+    /// promise is still reachable without visiting the required topic, then there
+    /// exists a path that avoids it — meaning it is NOT on all paths.
+    ///
+    /// This correctly handles:
+    /// - Linear chains: blocking the required topic breaks the only path
+    /// - Branching paths: an alternative branch can bypass the required topic
+    /// - Hats publishing both required and completion topics: the direct
+    ///   completion edge is blocked while checking for bypass paths
+    /// - Wildcard triggers: resolved via topic_matches
+    /// - Cycles: bounded by MAX_BFS_ITERATIONS and visited set
+    fn is_required_on_all_paths(
+        &self,
+        start_topic: &str,
+        completion: &str,
+        required: &str,
+    ) -> bool {
+        // BFS from start, blocking the required topic from being visited
+        let mut visited_topics: HashSet<String> = HashSet::new();
+        let mut queue: VecDeque<String> = VecDeque::new();
+
+        // Seed with the concrete starting event even when the matching trigger
+        // is represented by a wildcard pattern in the graph.
+        if start_topic != required {
+            visited_topics.insert(start_topic.to_string());
+            queue.push_back(start_topic.to_string());
+        }
+
+        let mut iterations = 0;
+
         while let Some(topic) = queue.pop_front() {
+            iterations += 1;
+            if iterations > MAX_BFS_ITERATIONS {
+                break; // Cycle protection
+            }
+
             if topic == completion {
                 // Completion is reachable without the required event
                 return false;
             }
 
-            let hats = self.topic_to_hats.get(&topic).cloned().unwrap_or_default();
-            for hat in hats {
-                if blocking_hats.contains(&hat.id.as_str().to_string().to_string()) {
-                    continue;
-                }
-                if let Some(publishes) = self
-                    .hat_to_topics
-                    .get(&hat.id.as_str().to_string().to_string())
-                {
+            // Find hats that subscribe to this topic (exact or wildcard match)
+            let subscribing_hats: Vec<&Hat> = self
+                .topic_to_hats
+                .iter()
+                .filter(|(t, _)| topic_matches(&topic, t))
+                .flat_map(|(_, hats)| hats.iter().copied())
+                .collect();
+
+            for hat in subscribing_hats {
+                // Get topics this hat can publish (excluding the required topic)
+                if let Some(publishes) = self.hat_to_topics.get(hat.id.as_str()) {
+                    let hat_publishes_required = publishes.iter().any(|topic| topic == required);
                     for pub_topic in publishes {
                         if pub_topic == required {
+                            continue; // Block the required topic from being visited
+                        }
+                        if hat_publishes_required && pub_topic == completion {
                             continue;
+                        }
+                        if pub_topic == completion {
+                            // Completion reachable without visiting required topic
+                            return false;
                         }
                         if visited_topics.insert(pub_topic.clone()) {
                             queue.push_back(pub_topic.clone());
@@ -304,7 +347,7 @@ impl<'a> TopologyGraph<'a> {
             }
         }
 
-        // Completion not reachable without required event -> it's on all paths
+        // Completion not reachable without required topic -> it's on all paths
         true
     }
 }
@@ -341,29 +384,506 @@ mod tests {
         assert!(result.is_valid(), "Solo mode should be valid");
     }
 
+    // -- Reachability tests ------------------------------------------------
+
     #[test]
-    fn ce_executor_topology_is_valid() {
-        // ce-executor preset should pass validation with runtime registry.
-        // Hat=ralph events like work.start and LOOP_COMPLETE are in scope.
+    fn linear_chain_start_to_completion() {
+        // start -> A(mid) -> B(done) -> LOOP_COMPLETE
+        // Required: "done" -> passes (on all paths)
         let yaml = r#"
 hats:
-  executor:
-    name: "Executor"
-    triggers: ["work.start"]
-    publishes: ["work.done", "build.blocked", "task.complete"]
+  a:
+    name: "A"
+    triggers: ["start"]
+    publishes: ["mid"]
+  b:
+    name: "B"
+    triggers: ["mid"]
+    publishes: ["done"]
+  c:
+    name: "C"
+    triggers: ["done"]
+    publishes: ["LOOP_COMPLETE"]
 event_loop:
+  starting_event: "start"
   completion_promise: "LOOP_COMPLETE"
-  cancellation_promise: "loop.cancel"
+  required_events: ["done"]
 "#;
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
         let registry = runtime_registry(yaml);
         let result = validate_preset_topology(&config, &registry);
-        assert!(result.is_valid(), "ce-executor topology should be valid: {:?}", result.errors);
+        assert!(
+            result.is_valid(),
+            "Linear chain with 'done' required should pass: {:?}",
+            result.errors
+        );
     }
 
     #[test]
-    fn test_off_graph_topic_detected() {
-        // Verify the validator can detect completion topic not reachable.
+    fn branching_path_required_not_on_all() {
+        // start -> A(mid) -> B(done) -> LOOP_COMPLETE
+        // start -> A2(mid2) -> LOOP_COMPLETE (bypass)
+        // Required: "done" -> fails (bypass exists)
+        let yaml = r#"
+hats:
+  a:
+    name: "A"
+    triggers: ["start"]
+    publishes: ["mid"]
+  b:
+    name: "B"
+    triggers: ["mid"]
+    publishes: ["done"]
+  a2:
+    name: "A2"
+    triggers: ["start"]
+    publishes: ["mid2"]
+  c:
+    name: "C"
+    triggers: ["done", "mid2"]
+    publishes: ["LOOP_COMPLETE"]
+event_loop:
+  starting_event: "start"
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["done"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset_topology(&config, &registry);
+        assert!(
+            !result.is_valid(),
+            "Branching path: 'done' should NOT be on all paths"
+        );
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.kind == TopologyErrorKind::RequiredEventNotOnAllPaths)
+        );
+    }
+
+    #[test]
+    fn unreachable_required_event() {
+        let yaml = r#"
+hats:
+  a:
+    name: "A"
+    triggers: ["start"]
+    publishes: ["LOOP_COMPLETE"]
+event_loop:
+  starting_event: "start"
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["nonexistent"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset_topology(&config, &registry);
+        assert!(!result.is_valid());
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.kind == TopologyErrorKind::UnreachableRequired)
+        );
+    }
+
+    #[test]
+    fn unreachable_completion_promise() {
+        let yaml = r#"
+hats:
+  a:
+    name: "A"
+    triggers: ["start"]
+    publishes: ["done"]
+event_loop:
+  starting_event: "start"
+  completion_promise: "FAR_AWAY"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset_topology(&config, &registry);
+        assert!(!result.is_valid());
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.kind == TopologyErrorKind::UnreachableCompletion)
+        );
+    }
+
+    // -- Wildcard trigger tests --------------------------------------------
+
+    #[test]
+    fn wildcard_trigger_resolves_correctly() {
+        // Hat subscribes to "review.*" which should match "review.done"
+        // The starting event "review.start" is consumed by the reviewer via wildcard
+        let yaml = r#"
+hats:
+  reviewer:
+    name: "Reviewer"
+    triggers: ["review.*"]
+    publishes: ["review.done"]
+  c:
+    name: "C"
+    triggers: ["review.done"]
+    publishes: ["LOOP_COMPLETE"]
+event_loop:
+  starting_event: "review.start"
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["review.done"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset_topology(&config, &registry);
+        assert!(
+            result.is_valid(),
+            "Wildcard trigger 'review.*' should match 'review.done': {:?}",
+            result.errors
+        );
+    }
+
+    // -- default_publishes tests -------------------------------------------
+
+    #[test]
+    fn default_publishes_to_completion() {
+        let yaml = r#"
+hats:
+  a:
+    name: "A"
+    triggers: ["start"]
+    publishes: []
+    default_publishes: "LOOP_COMPLETE"
+event_loop:
+  starting_event: "start"
+  completion_promise: "LOOP_COMPLETE"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset_topology(&config, &registry);
+        assert!(
+            result.is_valid(),
+            "default_publishes to completion should be recognized: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn default_publishes_is_reachable_topic() {
+        let yaml = r#"
+hats:
+  a:
+    name: "A"
+    triggers: ["start"]
+    default_publishes: "work.done"
+  b:
+    name: "B"
+    triggers: ["work.done"]
+    publishes: ["LOOP_COMPLETE"]
+event_loop:
+  starting_event: "start"
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["work.done"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset_topology(&config, &registry);
+        assert!(
+            result.is_valid(),
+            "default_publishes 'work.done' should be reachable and required: {:?}",
+            result.errors
+        );
+    }
+
+    // -- Cycle detection tests ---------------------------------------------
+
+    #[test]
+    fn cyclic_topology_does_not_stack_overflow() {
+        let yaml = r#"
+hats:
+  a:
+    name: "A"
+    triggers: ["start", "b.done"]
+    publishes: ["a.done"]
+  b:
+    name: "B"
+    triggers: ["a.done"]
+    publishes: ["b.done"]
+  c:
+    name: "C"
+    triggers: ["b.done"]
+    publishes: ["LOOP_COMPLETE"]
+event_loop:
+  starting_event: "start"
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["C"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset_topology(&config, &registry);
+        assert!(!result.is_valid());
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.kind == TopologyErrorKind::UnreachableRequired)
+        );
+    }
+
+    #[test]
+    fn graph_cycle_does_not_cause_infinite_loop() {
+        let yaml = r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start", "work.retry"]
+    publishes: ["work.done", "work.retry"]
+  reporter:
+    name: "Reporter"
+    triggers: ["work.done"]
+    publishes: ["LOOP_COMPLETE"]
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["work.done"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset_topology(&config, &registry);
+        assert!(
+            result.is_valid(),
+            "graph with cycle should still validate correctly: {:?}",
+            result.errors
+        );
+    }
+
+    // -- Mutually exclusive branch events ----------------------------------
+
+    #[test]
+    fn mutually_exclusive_branch_events_fail() {
+        let yaml = r#"
+hats:
+  review-synthesizer:
+    name: "Synthesizer"
+    triggers: ["review.dimension.done"]
+    publishes: ["review.passed", "review.complete"]
+  shipper:
+    name: "Shipper"
+    triggers: ["review.passed"]
+    publishes: ["REVIEW_COMPLETE"]
+  reporter:
+    name: "Reporter"
+    triggers: ["REVIEW_COMPLETE", "review.complete"]
+    publishes: ["report.done", "LOOP_COMPLETE"]
+event_loop:
+  starting_event: "review.dimension.done"
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["review.passed", "review.complete"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset_topology(&config, &registry);
+        // review.passed is NOT on all paths because:
+        // review.dimension.done -> review-synthesizer -> review.complete -> reporter -> LOOP_COMPLETE
+        // This path avoids review.passed entirely.
+        assert!(
+            !result.is_valid(),
+            "Mutually exclusive branch events should fail validation: {:?}",
+            result.errors
+        );
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.kind == TopologyErrorKind::RequiredEventNotOnAllPaths),
+            "Should report RequiredEventNotOnAllPaths"
+        );
+    }
+
+    // -- ce-executor topology tests ----------------------------------------
+
+    #[test]
+    fn ce_executor_topology_is_valid() {
+        let yaml = r#"
+hats:
+  coordinator:
+    name: "Coordinator"
+    triggers: ["work.start"]
+    publishes: ["work.ready", "work.failed"]
+    default_publishes: "work.failed"
+  executor:
+    name: "Executor"
+    triggers: ["work.ready", "queue.advance", "work.retry"]
+    publishes: ["work.done", "work.failed", "queue.advance"]
+    default_publishes: "work.done"
+  review-coordinator:
+    name: "Review Coordinator"
+    triggers: ["work.done", "fix.applied"]
+    publishes: ["review.wave.ready", "review.passed"]
+  dimension-reviewer:
+    name: "Dimension Reviewer"
+    triggers: ["review.wave.ready"]
+    publishes: ["review.dimension.done"]
+  review-synthesizer:
+    name: "Review Synthesizer"
+    triggers: ["review.dimension.done"]
+    publishes: ["review.passed", "review.failed", "review.complete"]
+    default_publishes: "review.complete"
+  fixer:
+    name: "Fixer"
+    triggers: ["review.failed"]
+    publishes: ["fix.applied", "fix.exhausted"]
+    default_publishes: "fix.exhausted"
+  shipper:
+    name: "Shipper"
+    triggers: ["review.passed", "review.complete", "fix.exhausted"]
+    publishes: ["REVIEW_COMPLETE"]
+    default_publishes: "REVIEW_COMPLETE"
+  reporter:
+    name: "Reporter"
+    triggers: ["REVIEW_COMPLETE"]
+    publishes: ["report.done", "LOOP_COMPLETE"]
+    default_publishes: "report.done"
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["report.done"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset_topology(&config, &registry);
+        assert!(
+            result.is_valid(),
+            "ce-executor topology should be valid: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn ce_executor_report_done_is_on_all_paths() {
+        let yaml = r#"
+hats:
+  reporter:
+    name: "Reporter"
+    triggers: ["REVIEW_COMPLETE"]
+    publishes: ["report.done", "LOOP_COMPLETE"]
+    default_publishes: "report.done"
+event_loop:
+  starting_event: "REVIEW_COMPLETE"
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["report.done"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset_topology(&config, &registry);
+        assert!(
+            result.is_valid(),
+            "report.done should be on all paths to LOOP_COMPLETE: {:?}",
+            result.errors
+        );
+    }
+
+    // -- Fallback path detection -------------------------------------------
+
+    #[test]
+    fn starting_event_with_no_subscriber_fails_static_topology_validation() {
+        let yaml = r#"
+hats:
+  a:
+    name: "A"
+    triggers: ["other.topic"]
+    publishes: ["LOOP_COMPLETE"]
+event_loop:
+  starting_event: "start"
+  completion_promise: "LOOP_COMPLETE"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset_topology(&config, &registry);
+        assert!(
+            result.errors.iter().any(|error| {
+                error.kind == TopologyErrorKind::UnreachableStart && error.message.contains("start")
+            }),
+            "Static topology validation should not use fallback ralph to connect start: {:?}",
+            result.errors
+        );
+    }
+
+    // -- Config-only hats (not in registry) --------------------------------
+
+    #[test]
+    fn config_hats_not_in_registry_are_indexed() {
+        let yaml = r#"
+hats:
+  a:
+    name: "A"
+    triggers: ["start"]
+    publishes: ["mid"]
+  b:
+    name: "B"
+    triggers: ["mid"]
+    publishes: ["LOOP_COMPLETE"]
+event_loop:
+  starting_event: "start"
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["mid"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset_topology(&config, &registry);
+        assert!(
+            result.is_valid(),
+            "Config hats should be indexed for topology analysis: {:?}",
+            result.errors
+        );
+    }
+
+    // -- Error message quality ---------------------------------------------
+
+    #[test]
+    fn error_messages_are_descriptive() {
+        let yaml = r#"
+hats:
+  a:
+    name: "A"
+    triggers: ["start"]
+    publishes: ["done"]
+  b:
+    name: "B"
+    triggers: ["done"]
+    publishes: ["LOOP_COMPLETE"]
+event_loop:
+  starting_event: "start"
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["nonexistent"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset_topology(&config, &registry);
+        assert!(!result.is_valid());
+        let err = result
+            .errors
+            .iter()
+            .find(|error| error.message.contains("nonexistent"))
+            .expect("expected required-event error for nonexistent topic");
+        assert!(
+            err.message.contains("nonexistent"),
+            "Error should mention the topic: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("start"),
+            "Error should mention starting event: {}",
+            err.message
+        );
+    }
+
+    // -- Regression: old off-graph topic test updated ----------------------
+
+    #[test]
+    fn off_graph_completion_topic_fails() {
+        // FAR_AWAY_COMPLETE is not published by any non-fallback hat.
+        // The builtin ralph is excluded from graph analysis, so this
+        // should now correctly fail.
         let yaml = r#"
 hats:
   executor:
@@ -371,15 +891,175 @@ hats:
     triggers: ["work.start"]
     publishes: ["work.done"]
 event_loop:
+  starting_event: "work.start"
   completion_promise: "FAR_AWAY_COMPLETE"
 "#;
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
         let registry = runtime_registry(yaml);
         let result = validate_preset_topology(&config, &registry);
-        // FAR_AWAY_COMPLETE is not in any hat's publishes or triggers
+        assert!(
+            !result.is_valid(),
+            "FAR_AWAY_COMPLETE should fail: not reachable from start"
+        );
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.kind == TopologyErrorKind::UnreachableCompletion),
+            "Should report UnreachableCompletion"
+        );
+    }
+
+    // -- Required event on one branch only (regression) --------------------
+
+    #[test]
+    fn required_event_only_on_one_completion_branch_fails() {
+        let yaml = r#"
+hats:
+  coordinator:
+    name: "Coordinator"
+    triggers: ["work.start"]
+    publishes: ["needs.review", "skip.review"]
+  reviewer:
+    name: "Reviewer"
+    triggers: ["needs.review"]
+    publishes: ["review.passed"]
+  reviewed_reporter:
+    name: "Reviewed Reporter"
+    triggers: ["review.passed"]
+    publishes: ["LOOP_COMPLETE"]
+  direct_reporter:
+    name: "Direct Reporter"
+    triggers: ["skip.review"]
+    publishes: ["LOOP_COMPLETE"]
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["review.passed"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset_topology(&config, &registry);
+
+        assert!(
+            result.errors.iter().any(|error| {
+                error.kind == TopologyErrorKind::RequiredEventNotOnAllPaths
+                    && error.message.contains("review.passed")
+            }),
+            "required event missing from one completion branch should fail: {:?}",
+            result.errors
+        );
+    }
+
+    // -- Configured completion promise (not LOOP_COMPLETE) -----------------
+
+    #[test]
+    fn validator_uses_configured_completion_promise() {
+        let yaml = r#"
+hats:
+  analyzer:
+    name: "Analyzer"
+    triggers: ["review.start"]
+    publishes: ["analysis.complete"]
+  finalizer:
+    name: "Finalizer"
+    triggers: ["analysis.complete"]
+    publishes: ["REVIEW_COMPLETE"]
+event_loop:
+  starting_event: "review.start"
+  completion_promise: "REVIEW_COMPLETE"
+  required_events: ["analysis.complete"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset_topology(&config, &registry);
+
         assert!(
             result.is_valid(),
-            "FAR_AWAY_COMPLETE should still reach Ralph (fallback publishes scope includes completion_promise): {:?}",
+            "configured non-LOOP completion promise should validate: {:?}",
+            result.errors
+        );
+    }
+
+    // -- Completion unreachable from start (disconnected branch) -----------
+
+    #[test]
+    fn completion_unreachable_from_start_fails_even_if_topic_exists() {
+        let yaml = r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+  orphan_reporter:
+    name: "Orphan Reporter"
+    triggers: ["orphan.done"]
+    publishes: ["LOOP_COMPLETE"]
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset_topology(&config, &registry);
+
+        assert!(
+            result.errors.iter().any(|error| {
+                error.kind == TopologyErrorKind::UnreachableCompletion
+                    && error.message.contains("LOOP_COMPLETE")
+            }),
+            "completion topic that exists only on disconnected branch should fail: {:?}",
+            result.errors
+        );
+    }
+
+    // -- topic_matches helper tests ----------------------------------------
+
+    #[test]
+    fn topic_matches_wildcard() {
+        assert!(topic_matches("review.passed", "review.*"));
+        assert!(topic_matches("review.failed", "review.*"));
+        assert!(topic_matches("review.complete", "review.*"));
+        assert!(!topic_matches("review", "review.*")); // missing dot
+        assert!(!topic_matches("review.passed.extra", "review.*")); // extra segment
+        assert!(!topic_matches("work.done", "review.*"));
+        assert!(topic_matches("exact", "exact")); // exact match
+        assert!(!topic_matches("exact.match", "exact")); // no wildcard
+    }
+
+    // -- Required event unreachable (disconnected branch) ------------------
+
+    #[test]
+    fn required_event_on_disconnected_branch_fails() {
+        let yaml = r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+  reporter:
+    name: "Reporter"
+    triggers: ["work.done"]
+    publishes: ["LOOP_COMPLETE"]
+  reviewer:
+    name: "Reviewer"
+    triggers: ["orphan.start"]
+    publishes: ["review.passed"]
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["review.passed"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset_topology(&config, &registry);
+
+        assert!(
+            result.errors.iter().any(|error| {
+                error.kind == TopologyErrorKind::UnreachableRequired
+                    && error.message.contains("review.passed")
+            }),
+            "required event on disconnected branch should fail: {:?}",
             result.errors
         );
     }

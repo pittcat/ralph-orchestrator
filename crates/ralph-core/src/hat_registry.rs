@@ -346,10 +346,8 @@ impl HatRegistry {
         if let Some(hat) = self
             .hats
             .values()
-            .find(|hat| {
-                !hat.is_fallback_only()
-                    && self.hat_is_subscribed_in_phase(&hat.id, topic)
-            }) {
+            .find(|hat| !hat.is_fallback_only() && self.hat_is_subscribed_in_phase(&hat.id, topic))
+        {
             return Some(hat);
         }
 
@@ -702,7 +700,10 @@ event_loop:
             "ralph should publish starting_event (work.start)"
         );
         assert!(
-            ralph.publishes.iter().any(|t| t.as_str() == "LOOP_COMPLETE"),
+            ralph
+                .publishes
+                .iter()
+                .any(|t| t.as_str() == "LOOP_COMPLETE"),
             "ralph should publish completion_promise (LOOP_COMPLETE)"
         );
         assert!(
@@ -714,7 +715,10 @@ event_loop:
             "ralph should publish executor's publishes (work.done)"
         );
         assert!(
-            ralph.publishes.iter().any(|t| t.as_str() == "build.blocked"),
+            ralph
+                .publishes
+                .iter()
+                .any(|t| t.as_str() == "build.blocked"),
             "ralph should publish executor's publishes (build.blocked)"
         );
     }
@@ -792,7 +796,11 @@ event_loop:
         let config = RalphConfig::default();
         let registry = HatRegistry::from_runtime_config(&config);
 
-        assert_eq!(registry.len(), 1, "Solo runtime registry should have 1 hat (ralph)");
+        assert_eq!(
+            registry.len(),
+            1,
+            "Solo runtime registry should have 1 hat (ralph)"
+        );
         assert!(
             registry.get(&HatId::new("ralph")).is_some(),
             "The one hat should be ralph"

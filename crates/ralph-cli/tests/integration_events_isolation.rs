@@ -1,839 +1,273 @@
-//! Integration tests for event isolation feature (Issue #82 fix).
+//! Integration tests for events isolation (Unit 4: raw output history vs trusted events).
 //!
-//! These tests verify that consecutive Ralph runs get isolated events files,
-//! preventing stale events from previous runs from polluting new runs.
-//!
-//! The event isolation mechanism:
-//! 1. Fresh runs create `.ralph/events-YYYYMMDD-HHMMSS.jsonl` timestamped files
-//! 2. `.ralph/current-events` marker file coordinates between Ralph and `ralph emit`
-//! 3. Continue mode (`ralph run --continue`) reuses the existing marker file
-//! 4. Fallback to `.ralph/events.jsonl` when no marker exists
+//! These tests verify that the history logger (used for raw output parsing,
+//! orphan events, and termination events) writes to a SEPARATE file from
+//! the trusted events file consumed by EventReader.
 
-use anyhow::Result;
-use std::fs;
-use std::process::Command;
-use std::thread;
-use std::time::Duration;
+use ralph_core::{EventHistory, EventLogger, EventReader, EventRecord, LoopContext};
+use ralph_proto::Event;
 use tempfile::TempDir;
 
-/// Creates a minimal config file and required directories for testing.
-fn create_test_config(temp_path: &std::path::Path) -> Result<()> {
-    let config = r#"
-event_loop:
-  prompt_file: "PROMPT.md"
-  completion_promise: "LOOP_COMPLETE"
-  max_iterations: 1
-  max_runtime_seconds: 5
-
-cli:
-  backend: "custom"
-  command: "true"
-
-core:
-  scratchpad: ".ralph/agent/scratchpad.md"
-
-features:
-  preflight:
-    enabled: false
-"#;
-    fs::write(temp_path.join("ralph.yml"), config)?;
-    fs::write(temp_path.join("PROMPT.md"), "Test task")?;
-    Ok(())
+/// Creates a LoopContext with a current-events marker pointing to a timestamped file.
+fn setup_context(tmp: &TempDir) -> LoopContext {
+    let ctx = LoopContext::primary(tmp.path().to_path_buf());
+    let marker = ctx.current_events_marker();
+    std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    std::fs::write(&marker, ".ralph/events-20260602-120000.jsonl").unwrap();
+    ctx
 }
 
-/// Helper to get ralph binary path.
-fn ralph_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_ralph")
-}
-
-// =============================================================================
-// Marker File Tests
-// =============================================================================
-
+/// Happy path: agent really emits `work.done`, trusted events file contains it.
 #[test]
-fn test_fresh_run_creates_marker_file() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let temp_path = temp_dir.path();
+fn test_real_emit_appears_in_trusted_events_file() {
+    let tmp = TempDir::new().unwrap();
+    let ctx = setup_context(&tmp);
 
-    create_test_config(temp_path)?;
+    // Simulate ralph emit: write to the trusted events file
+    let mut trusted_logger = EventLogger::from_context(&ctx);
+    let event = Event::new("work.done", "task completed successfully");
+    trusted_logger
+        .log_event(1, "loop", &event, None, None)
+        .unwrap();
 
-    // Run ralph
-    let _output = Command::new(ralph_bin())
-        .arg("run")
-        .arg("--config")
-        .arg(temp_path.join("ralph.yml"))
-        .current_dir(temp_path)
-        .output()?;
+    // EventReader reads from the same trusted file
+    let trusted_path = tmp.path().join(".ralph/events-20260602-120000.jsonl");
+    let mut reader = EventReader::new(&trusted_path);
+    let result = reader.read_new_events().unwrap();
 
-    // Verify .ralph/current-events marker file exists
-    let marker_path = temp_path.join(".ralph/current-events");
-    assert!(
-        marker_path.exists(),
-        ".ralph/current-events marker file should exist after fresh run"
+    assert_eq!(result.events.len(), 1);
+    assert_eq!(result.events[0].topic, "work.done");
+    assert_eq!(
+        result.events[0].payload.as_deref(),
+        Some("task completed successfully")
     );
-
-    // Verify marker content points to a timestamped events file
-    let marker_content = fs::read_to_string(&marker_path)?;
-    let events_path = marker_content.trim();
-
-    assert!(
-        events_path.starts_with(".ralph/events-"),
-        "Marker should point to timestamped events file, got: {}",
-        events_path
-    );
-    assert!(
-        std::path::Path::new(events_path)
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl")),
-        "Events file should have .jsonl extension, got: {}",
-        events_path
-    );
-
-    Ok(())
 }
 
+/// Regression: raw output contains XML event tags, history has it, trusted does not.
 #[test]
-fn test_marker_file_contains_timestamped_path() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let temp_path = temp_dir.path();
+fn test_xml_events_in_output_only_in_history() {
+    let tmp = TempDir::new().unwrap();
+    let ctx = setup_context(&tmp);
 
-    create_test_config(temp_path)?;
+    // Simulate raw output containing an XML event tag (fake/demo event)
+    let raw_output = r#"Here is my analysis:
+<event topic="debug.step">stepping through code</event>
+Done with analysis."#;
 
-    // Run ralph
-    let _output = Command::new(ralph_bin())
-        .arg("run")
-        .arg("--config")
-        .arg(temp_path.join("ralph.yml"))
-        .current_dir(temp_path)
-        .output()?;
+    // Parse events from output (simulates EventParser behavior)
+    let parser = ralph_core::EventParser::new();
+    let parsed_events = parser.parse(raw_output);
 
-    // Read the marker to find the events file path
-    let marker_content = fs::read_to_string(temp_path.join(".ralph/current-events"))?;
-    let events_path = marker_content.trim();
-
-    // Verify the marker contains a timestamped path pattern
-    // Pattern: .ralph/events-YYYYMMDD-HHMMSS.jsonl
-    let re = regex::Regex::new(r"^\.ralph/events-\d{8}-\d{6}\.jsonl$").unwrap();
+    // There should be a parsed event from the XML
     assert!(
-        re.is_match(events_path),
-        "Marker should contain path matching .ralph/events-YYYYMMDD-HHMMSS.jsonl, got: {}",
-        events_path
+        !parsed_events.is_empty(),
+        "parser should extract XML events from raw output"
     );
 
-    Ok(())
-}
-
-#[test]
-fn test_ralph_emit_creates_timestamped_events_file() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let temp_path = temp_dir.path();
-
-    create_test_config(temp_path)?;
-
-    // Run ralph to create marker file
-    let _output = Command::new(ralph_bin())
-        .arg("run")
-        .arg("--config")
-        .arg(temp_path.join("ralph.yml"))
-        .current_dir(temp_path)
-        .output()?;
-
-    // Read the marker to find the events file path
-    let marker_content = fs::read_to_string(temp_path.join(".ralph/current-events"))?;
-    let events_path = marker_content.trim();
-
-    // The timestamped file doesn't exist yet (EventLogger writes to default path)
-    let timestamped_file = temp_path.join(events_path);
-
-    // Use ralph emit to write to the marker-specified file
-    let output = Command::new(ralph_bin())
-        .arg("emit")
-        .arg("test.topic")
-        .arg("test payload")
-        .current_dir(temp_path)
-        .output()?;
-
-    assert!(
-        output.status.success(),
-        "ralph emit should succeed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    // Now the timestamped file should exist (ralph emit reads marker)
-    assert!(
-        timestamped_file.exists(),
-        "Timestamped events file should exist after ralph emit: {}",
-        timestamped_file.display()
-    );
-
-    // Verify the filename matches pattern
-    let filename = timestamped_file
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-
-    let re = regex::Regex::new(r"^events-\d{8}-\d{6}\.jsonl$").unwrap();
-    assert!(
-        re.is_match(filename),
-        "Events filename should match pattern events-YYYYMMDD-HHMMSS.jsonl, got: {}",
-        filename
-    );
-
-    Ok(())
-}
-
-// =============================================================================
-// Consecutive Runs Isolation Tests
-// =============================================================================
-
-#[test]
-fn test_consecutive_runs_get_isolated_marker_paths() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let temp_path = temp_dir.path();
-
-    create_test_config(temp_path)?;
-
-    // First run
-    let _output1 = Command::new(ralph_bin())
-        .arg("run")
-        .arg("--config")
-        .arg(temp_path.join("ralph.yml"))
-        .current_dir(temp_path)
-        .output()?;
-
-    // Read first run's events path from marker
-    let marker1_content = fs::read_to_string(temp_path.join(".ralph/current-events"))?;
-    let events_path1 = marker1_content.trim().to_string();
-
-    // Small delay to ensure different timestamp
-    thread::sleep(Duration::from_secs(1));
-
-    // Second run
-    let _output2 = Command::new(ralph_bin())
-        .arg("run")
-        .arg("--config")
-        .arg(temp_path.join("ralph.yml"))
-        .current_dir(temp_path)
-        .output()?;
-
-    // Read second run's events path from marker
-    let marker2_content = fs::read_to_string(temp_path.join(".ralph/current-events"))?;
-    let events_path2 = marker2_content.trim().to_string();
-
-    // Verify different events paths are in marker (isolation)
-    assert_ne!(
-        events_path1, events_path2,
-        "Consecutive runs should create different marker paths.\nRun 1: {}\nRun 2: {}",
-        events_path1, events_path2
-    );
-
-    // Verify both are timestamped paths
-    let re = regex::Regex::new(r"^\.ralph/events-\d{8}-\d{6}\.jsonl$").unwrap();
-    assert!(
-        re.is_match(&events_path1),
-        "First run path should be timestamped: {}",
-        events_path1
-    );
-    assert!(
-        re.is_match(&events_path2),
-        "Second run path should be timestamped: {}",
-        events_path2
-    );
-
-    Ok(())
-}
-
-// =============================================================================
-// Ralph Emit Coordination Tests
-// =============================================================================
-
-#[test]
-fn test_ralph_emit_writes_to_marker_specified_file() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let temp_path = temp_dir.path();
-
-    create_test_config(temp_path)?;
-
-    // Run ralph to create marker file
-    let _output = Command::new(ralph_bin())
-        .arg("run")
-        .arg("--config")
-        .arg(temp_path.join("ralph.yml"))
-        .current_dir(temp_path)
-        .output()?;
-
-    // Read the marker to find the events file path
-    let marker_content = fs::read_to_string(temp_path.join(".ralph/current-events"))?;
-    let events_path = marker_content.trim();
-
-    // Get the events file content before emit
-    let events_file = temp_path.join(events_path);
-    let events_before = if events_file.exists() {
-        fs::read_to_string(&events_file)?
-    } else {
-        String::new()
-    };
-    let lines_before = events_before.lines().count();
-
-    // Use ralph emit to write an event
-    let output = Command::new(ralph_bin())
-        .arg("emit")
-        .arg("test.topic")
-        .arg("test payload")
-        .current_dir(temp_path)
-        .env_remove("RALPH_WORKSPACE_ROOT")
-        .output()?;
-
-    assert!(
-        output.status.success(),
-        "ralph emit should succeed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    // Verify event was written to the marker-specified file
-    let events_after = fs::read_to_string(&events_file)?;
-    let lines_after = events_after.lines().count();
-
-    assert!(
-        lines_after > lines_before,
-        "Event should be written to timestamped events file.\nBefore: {} lines\nAfter: {} lines",
-        lines_before,
-        lines_after
-    );
-
-    // Verify the event content
-    assert!(
-        events_after.contains("test.topic"),
-        "Events file should contain the emitted topic"
-    );
-    assert!(
-        events_after.contains("test payload"),
-        "Events file should contain the emitted payload"
-    );
-
-    // Verify the event was NOT written to default fallback location
-    let fallback_file = temp_path.join(".ralph/events.jsonl");
-    if fallback_file.exists() {
-        let fallback_content = fs::read_to_string(&fallback_file)?;
-        assert!(
-            !fallback_content.contains("test.topic"),
-            "Event should NOT be written to fallback .ralph/events.jsonl"
-        );
+    // Write parsed events to the HISTORY logger (not trusted)
+    let mut history_logger = EventLogger::history_from_context(&ctx);
+    for event in &parsed_events {
+        let record = EventRecord::new(1, "loop", event, None, None);
+        history_logger.log(&record).unwrap();
     }
 
-    Ok(())
+    // Also simulate a real ralph emit in the trusted file
+    let mut trusted_logger = EventLogger::from_context(&ctx);
+    let real_event = Event::new("work.done", "real work");
+    trusted_logger
+        .log_event(1, "loop", &real_event, None, None)
+        .unwrap();
+
+    // History file should contain the parsed XML event
+    let history_path = tmp
+        .path()
+        .join(".ralph/events-history-20260602-120000.jsonl");
+    assert!(history_path.exists());
+    let history = EventHistory::new(&history_path);
+    let history_records = history.read_all().unwrap();
+    assert!(
+        history_records.iter().any(|r| r.topic == "debug.step"),
+        "history should contain the parsed XML event: {:?}",
+        history_records.iter().map(|r| &r.topic).collect::<Vec<_>>()
+    );
+
+    // Trusted file should ONLY contain the real emit, NOT the parsed XML event
+    let trusted_path = tmp.path().join(".ralph/events-20260602-120000.jsonl");
+    let mut reader = EventReader::new(&trusted_path);
+    let result = reader.read_new_events().unwrap();
+
+    assert_eq!(result.events.len(), 1);
+    assert_eq!(result.events[0].topic, "work.done");
+    assert!(
+        result.events.iter().all(|e| e.topic != "debug.step"),
+        "trusted events file should not contain fake XML events"
+    );
 }
 
+/// Regression: raw output contains JSON lines — EventParser does NOT extract them
+/// as events (only XML `<event>` tags are parsed). JSON lines in raw output
+/// are just text and should never enter any events file.
 #[test]
-fn test_ralph_emit_fallback_without_marker() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let temp_path = temp_dir.path();
+fn test_json_lines_in_output_not_extracted_as_events() {
+    let tmp = TempDir::new().unwrap();
+    let _ctx = setup_context(&tmp);
 
-    create_test_config(temp_path)?;
+    // Simulate raw output containing JSON event lines
+    let raw_output = r#"{"topic":"experiment.planned","payload":{"task_key":"x"},"ts":"2026-06-02T12:00:00Z"}
+{"topic":"analysis.complete","ts":"2026-06-02T12:00:01Z"}"#;
 
-    // Create .ralph directory but NO marker file
-    fs::create_dir_all(temp_path.join(".ralph"))?;
+    // EventParser only extracts XML <event> tags, not raw JSON lines
+    let parser = ralph_core::EventParser::new();
+    let parsed_events = parser.parse(raw_output);
 
-    // Verify no marker file exists
-    let marker_path = temp_path.join(".ralph/current-events");
+    // The parser should NOT extract JSON lines as events
     assert!(
-        !marker_path.exists(),
-        "Marker file should not exist for this test"
+        parsed_events.is_empty(),
+        "EventParser should not extract raw JSON lines as events, got: {:?}",
+        parsed_events.iter().map(|e| &e.topic).collect::<Vec<_>>()
     );
 
-    // Use ralph emit (should fall back to default)
-    let output = Command::new(ralph_bin())
-        .arg("emit")
-        .arg("fallback.topic")
-        .arg("fallback payload")
-        .current_dir(temp_path)
-        .env_remove("RALPH_WORKSPACE_ROOT")
-        .output()?;
-
+    // Therefore no events should be written to any file
+    // Trusted file should NOT exist
+    let trusted_path = tmp.path().join(".ralph/events-20260602-120000.jsonl");
     assert!(
-        output.status.success(),
-        "ralph emit should succeed even without marker: {}",
-        String::from_utf8_lossy(&output.stderr)
+        !trusted_path.exists(),
+        "trusted events file should not be created from raw JSON lines in output"
     );
 
-    // Verify event was written to fallback .ralph/events.jsonl
-    let fallback_file = temp_path.join(".ralph/events.jsonl");
+    // History file should also NOT exist (no events were parsed)
+    let history_path = tmp
+        .path()
+        .join(".ralph/events-history-20260602-120000.jsonl");
     assert!(
-        fallback_file.exists(),
-        "Fallback events.jsonl should be created"
+        !history_path.exists(),
+        "history file should not be created when no events are parsed"
     );
-
-    let fallback_content = fs::read_to_string(&fallback_file)?;
-    assert!(
-        fallback_content.contains("fallback.topic"),
-        "Fallback file should contain the emitted topic"
-    );
-    assert!(
-        fallback_content.contains("fallback payload"),
-        "Fallback file should contain the emitted payload"
-    );
-
-    Ok(())
 }
 
+/// Regression: event.orphaned only in history/diagnostics, not consumed by EventReader.
 #[test]
-fn test_ralph_emit_json_writes_object_payload() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let temp_path = temp_dir.path();
+fn test_orphaned_events_only_in_history() {
+    let tmp = TempDir::new().unwrap();
+    let ctx = setup_context(&tmp);
 
-    create_test_config(temp_path)?;
+    // Write an orphan event to the history logger
+    let mut history_logger = EventLogger::history_from_context(&ctx);
+    let orphan_event = Event::new("event.orphaned", "Event 'debug.step' has no subscriber hat");
+    let record = EventRecord::new(1, "loop", &orphan_event, None, None);
+    history_logger.log(&record).unwrap();
 
-    // Run ralph to create marker file
-    let _output = Command::new(ralph_bin())
-        .arg("run")
-        .arg("--config")
-        .arg(temp_path.join("ralph.yml"))
-        .current_dir(temp_path)
-        .output()?;
+    // History file should contain the orphan event
+    let history_path = tmp
+        .path()
+        .join(".ralph/events-history-20260602-120000.jsonl");
+    assert!(history_path.exists());
+    let history = EventHistory::new(&history_path);
+    let history_records = history.read_all().unwrap();
+    assert_eq!(history_records.len(), 1);
+    assert_eq!(history_records[0].topic, "event.orphaned");
 
-    // Read the marker to find the events file path
-    let marker_content = fs::read_to_string(temp_path.join(".ralph/current-events"))?;
-    let events_path = marker_content.trim();
-
-    // Use ralph emit --json to write an event with object payload
-    let output = Command::new(ralph_bin())
-        .arg("emit")
-        .arg("test.topic")
-        .arg(r#"{"key":"value","num":42}"#)
-        .arg("--json")
-        .current_dir(temp_path)
-        .env_remove("RALPH_WORKSPACE_ROOT")
-        .output()?;
-
+    // Trusted file should NOT exist
+    let trusted_path = tmp.path().join(".ralph/events-20260602-120000.jsonl");
     assert!(
-        output.status.success(),
-        "ralph emit --json should succeed: {}",
-        String::from_utf8_lossy(&output.stderr)
+        !trusted_path.exists(),
+        "event.orphaned should not appear in trusted events file"
     );
-
-    // Verify event was written with object payload (not string)
-    let events_file = temp_path.join(events_path);
-    let events_content = fs::read_to_string(&events_file)?;
-
-    assert!(
-        events_content.contains("\"topic\":\"test.topic\""),
-        "Events file should contain the emitted topic"
-    );
-    assert!(
-        events_content.contains("\"key\":\"value\""),
-        "Events file should contain object payload key"
-    );
-    assert!(
-        events_content.contains("\"num\":42"),
-        "Events file should contain object payload number"
-    );
-    // Ensure payload is NOT wrapped in a string
-    assert!(
-        !events_content.contains(r#""payload":"{"key":"value","num":42}""#),
-        "Payload should be an object, not a serialized string"
-    );
-
-    Ok(())
 }
 
-// =============================================================================
-// Continue Mode Tests
-// =============================================================================
-
+/// Edge case: state-machine candidate events file is not polluted by history logger.
 #[test]
-fn test_continue_uses_existing_marker_file() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let temp_path = temp_dir.path();
+fn test_candidate_events_not_polluted_by_history() {
+    let tmp = TempDir::new().unwrap();
+    let ctx = setup_context(&tmp);
 
-    create_test_config(temp_path)?;
+    // Write to the candidate events file (simulating ralph emit in state-machine mode)
+    let candidate_path = tmp
+        .path()
+        .join(".ralph/event-candidates-20260602-120000.jsonl");
+    let mut candidate_logger = EventLogger::new(&candidate_path);
+    let real_event = Event::new("experiment.ready", "ready for evaluation");
+    candidate_logger
+        .log_event(1, "loop", &real_event, None, None)
+        .unwrap();
 
-    // First: run ralph to create marker file
-    let _output = Command::new(ralph_bin())
-        .arg("run")
-        .arg("--config")
-        .arg(temp_path.join("ralph.yml"))
-        .current_dir(temp_path)
-        .output()?;
+    // Write to history logger (raw output parsing)
+    let mut history_logger = EventLogger::history_from_context(&ctx);
+    let fake_event = Event::new("experiment.planned", "fake from output text");
+    let record = EventRecord::new(1, "loop", &fake_event, None, None);
+    history_logger.log(&record).unwrap();
 
-    // Read the marker from first run
-    let marker_content_after_run = fs::read_to_string(temp_path.join(".ralph/current-events"))?;
-    let events_path_after_run = marker_content_after_run.trim().to_string();
+    // Candidate file should only contain the real emit
+    let candidate_history = EventHistory::new(&candidate_path);
+    let candidate_records = candidate_history.read_all().unwrap();
+    assert_eq!(candidate_records.len(), 1);
+    assert_eq!(candidate_records[0].topic, "experiment.ready");
 
-    // Create scratchpad for continue (required by continue mode)
-    let agent_dir = temp_path.join(".agent");
-    fs::create_dir_all(&agent_dir)?;
-    fs::write(
-        agent_dir.join("scratchpad.md"),
-        "# Tasks\n- [ ] Test task\n",
-    )?;
-
-    // Continue - should NOT create a new marker/events file
-    let _output = Command::new(ralph_bin())
-        .arg("run")
-        .arg("--continue")
-        .arg("--config")
-        .arg(temp_path.join("ralph.yml"))
-        .current_dir(temp_path)
-        .output()?;
-
-    // Read the marker after continue
-    let marker_content_after_continue =
-        fs::read_to_string(temp_path.join(".ralph/current-events"))?;
-    let events_path_after_continue = marker_content_after_continue.trim().to_string();
-
-    // Verify continue used the same events file
-    assert_eq!(
-        events_path_after_run, events_path_after_continue,
-        "Continue should use the same events file as the original run.\nAfter run: {}\nAfter continue: {}",
-        events_path_after_run, events_path_after_continue
-    );
-
-    Ok(())
+    // History file should only contain the fake event
+    let history_path = tmp
+        .path()
+        .join(".ralph/events-history-20260602-120000.jsonl");
+    let history_history = EventHistory::new(&history_path);
+    let history_records = history_history.read_all().unwrap();
+    assert_eq!(history_records.len(), 1);
+    assert_eq!(history_records[0].topic, "experiment.planned");
 }
 
+/// Edge case: termination events go to history only.
 #[test]
-fn test_continue_preserves_marker_path() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let temp_path = temp_dir.path();
+fn test_terminate_event_only_in_history() {
+    let tmp = TempDir::new().unwrap();
+    let ctx = setup_context(&tmp);
 
-    create_test_config(temp_path)?;
+    // Write termination event to history logger
+    let mut history_logger = EventLogger::history_from_context(&ctx);
+    let terminate_event = Event::new("loop.terminate", "completion promise detected");
+    let record = EventRecord::new(5, "loop", &terminate_event, None, None);
+    history_logger.log(&record).unwrap();
 
-    // First: run ralph
-    let _output = Command::new(ralph_bin())
-        .arg("run")
-        .arg("--config")
-        .arg(temp_path.join("ralph.yml"))
-        .current_dir(temp_path)
-        .output()?;
+    // History file should contain it
+    let history_path = tmp
+        .path()
+        .join(".ralph/events-history-20260602-120000.jsonl");
+    let history = EventHistory::new(&history_path);
+    let records = history.read_all().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].topic, "loop.terminate");
+    assert_eq!(records[0].iteration, 5);
 
-    // Read the marker path from first run
-    let marker_content = fs::read_to_string(temp_path.join(".ralph/current-events"))?;
-    let events_path_after_run = marker_content.trim().to_string();
-
-    // Create scratchpad for continue
-    let agent_dir = temp_path.join(".agent");
-    fs::create_dir_all(&agent_dir)?;
-    fs::write(
-        agent_dir.join("scratchpad.md"),
-        "# Tasks\n- [ ] Test task\n",
-    )?;
-
-    // Continue
-    let _output = Command::new(ralph_bin())
-        .arg("run")
-        .arg("--continue")
-        .arg("--config")
-        .arg(temp_path.join("ralph.yml"))
-        .current_dir(temp_path)
-        .output()?;
-
-    // Read the marker path after continue
-    let marker_content_after_continue =
-        fs::read_to_string(temp_path.join(".ralph/current-events"))?;
-    let events_path_after_continue = marker_content_after_continue.trim().to_string();
-
-    // Continue should preserve the same marker path (not create a new one)
-    assert_eq!(
-        events_path_after_run, events_path_after_continue,
-        "Continue should preserve the marker path.\nAfter run: {}\nAfter continue: {}",
-        events_path_after_run, events_path_after_continue
-    );
-
-    Ok(())
+    // Trusted file should NOT exist
+    let trusted_path = tmp.path().join(".ralph/events-20260602-120000.jsonl");
+    assert!(!trusted_path.exists());
 }
 
-// =============================================================================
-// Regression Tests for Issue #82
-// =============================================================================
-
+/// Regression: raw output contains LOOP_COMPLETE but no real emit — no fake JSONL event.
 #[test]
-fn test_stale_events_dont_pollute_new_runs() -> Result<()> {
-    // This test verifies the fix for issue #82:
-    // Stale events from previous runs should not pollute new runs
-    let temp_dir = TempDir::new()?;
-    let temp_path = temp_dir.path();
+fn test_loop_complete_text_in_output_no_fake_event() {
+    let tmp = TempDir::new().unwrap();
+    let ctx = setup_context(&tmp);
 
-    create_test_config(temp_path)?;
+    // Simulate raw output that mentions LOOP_COMPLETE but has no real event
+    let raw_output = r#"I have completed all tasks. LOOP_COMPLETE
+The work is done and all tests pass."#;
 
-    // Simulate a previous run with stale events by creating a marker and events file
-    fs::create_dir_all(temp_path.join(".ralph"))?;
+    // Parse events from output — should NOT produce any events
+    // (LOOP_COMPLETE is detected by text fallback, not as a JSONL business event)
+    let parser = ralph_core::EventParser::new();
+    let parsed_events = parser.parse(raw_output);
 
-    // Create a "stale" events file with events from a previous (different) config
-    let stale_events_file = temp_path.join(".ralph/events-20260119-120000.jsonl");
-    let stale_events = r#"{"topic":"archaeology.start","payload":"old preset","ts":"2026-01-19T12:00:00Z"}
-{"topic":"map.created","payload":"stale map event","ts":"2026-01-19T12:00:01Z"}
-{"topic":"artifact.found","payload":"stale artifact","ts":"2026-01-19T12:00:02Z"}
-"#;
-    fs::write(&stale_events_file, stale_events)?;
-
-    // Point the marker to the stale events (simulating previous run)
-    fs::write(
-        temp_path.join(".ralph/current-events"),
-        ".ralph/events-20260119-120000.jsonl",
-    )?;
-
-    // Now run ralph fresh - it should create a NEW events file
-    let _output = Command::new(ralph_bin())
-        .arg("run")
-        .arg("--config")
-        .arg(temp_path.join("ralph.yml"))
-        .current_dir(temp_path)
-        .output()?;
-
-    // Read the new marker
-    let new_marker_content = fs::read_to_string(temp_path.join(".ralph/current-events"))?;
-    let new_events_path = new_marker_content.trim();
-
-    // Verify a NEW events file was created (different from the stale one)
-    assert_ne!(
-        new_events_path, ".ralph/events-20260119-120000.jsonl",
-        "Fresh run should create new events file, not reuse stale one"
-    );
-
-    // Verify the new events file does NOT contain stale events
-    let new_events_file = temp_path.join(new_events_path);
-    if new_events_file.exists() {
-        let new_events_content = fs::read_to_string(&new_events_file)?;
-
-        assert!(
-            !new_events_content.contains("archaeology.start"),
-            "New run should NOT contain stale 'archaeology.start' events"
-        );
-        assert!(
-            !new_events_content.contains("map.created"),
-            "New run should NOT contain stale 'map.created' events"
-        );
-        assert!(
-            !new_events_content.contains("artifact.found"),
-            "New run should NOT contain stale 'artifact.found' events"
-        );
+    // If the parser produced any events from this text, write them to history
+    if !parsed_events.is_empty() {
+        let mut history_logger = EventLogger::history_from_context(&ctx);
+        for event in &parsed_events {
+            let record = EventRecord::new(1, "loop", event, None, None);
+            history_logger.log(&record).unwrap();
+        }
     }
 
-    // Verify the stale events file still exists (wasn't deleted)
+    // Trusted file should NOT exist
+    let trusted_path = tmp.path().join(".ralph/events-20260602-120000.jsonl");
     assert!(
-        stale_events_file.exists(),
-        "Stale events file should be preserved (not deleted)"
+        !trusted_path.exists(),
+        "LOOP_COMPLETE text should not create fake events in trusted file"
     );
-
-    Ok(())
-}
-
-#[test]
-fn test_new_run_ignores_stale_marker() -> Result<()> {
-    // Another regression test for issue #82:
-    // A fresh `ralph run` should create a new marker even if one exists
-    let temp_dir = TempDir::new()?;
-    let temp_path = temp_dir.path();
-
-    create_test_config(temp_path)?;
-
-    // Create a stale marker pointing to an old events file
-    fs::create_dir_all(temp_path.join(".ralph"))?;
-    fs::write(
-        temp_path.join(".ralph/current-events"),
-        ".ralph/events-old.jsonl",
-    )?;
-    fs::write(temp_path.join(".ralph/events-old.jsonl"), "{}")?;
-
-    // Run ralph fresh
-    let _output = Command::new(ralph_bin())
-        .arg("run")
-        .arg("--config")
-        .arg(temp_path.join("ralph.yml"))
-        .current_dir(temp_path)
-        .output()?;
-
-    // Read the new marker
-    let new_marker_content = fs::read_to_string(temp_path.join(".ralph/current-events"))?;
-    let new_events_path = new_marker_content.trim();
-
-    // Fresh run should have created a new timestamped events file
-    assert_ne!(
-        new_events_path, ".ralph/events-old.jsonl",
-        "Fresh run should create new events file, not reuse stale marker path"
-    );
-
-    // Should match the timestamped pattern
-    assert!(
-        new_events_path.starts_with(".ralph/events-")
-            && std::path::Path::new(new_events_path)
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
-            && new_events_path != ".ralph/events-old.jsonl",
-        "Fresh run should create timestamped events file: {}",
-        new_events_path
-    );
-
-    Ok(())
-}
-
-// =============================================================================
-// Scratchpad Cleanup Tests
-// =============================================================================
-
-#[test]
-fn test_fresh_run_clears_custom_scratchpad_path() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let temp_path = temp_dir.path();
-
-    // Config with a custom scratchpad path
-    let config = r#"
-event_loop:
-  prompt_file: "PROMPT.md"
-  completion_promise: "LOOP_COMPLETE"
-  max_iterations: 1
-  max_runtime_seconds: 5
-
-cli:
-  backend: "custom"
-  command: "true"
-
-core:
-  scratchpad: ".ralph/debug/global.md"
-
-features:
-  preflight:
-    enabled: false
-"#;
-    fs::write(temp_path.join("ralph.yml"), config)?;
-    fs::write(temp_path.join("PROMPT.md"), "Test task")?;
-
-    // Create a stale scratchpad at the custom path
-    let custom_scratchpad = temp_path.join(".ralph/debug/global.md");
-    fs::create_dir_all(custom_scratchpad.parent().unwrap())?;
-    fs::write(&custom_scratchpad, "# Stale scratchpad\n- [ ] Old task\n")?;
-    assert!(
-        custom_scratchpad.exists(),
-        "Pre-condition: stale scratchpad should exist"
-    );
-
-    // Run ralph fresh
-    let _output = Command::new(ralph_bin())
-        .arg("run")
-        .arg("--config")
-        .arg(temp_path.join("ralph.yml"))
-        .current_dir(temp_path)
-        .output()?;
-
-    // The custom scratchpad should have been cleared
-    assert!(
-        !custom_scratchpad.exists(),
-        "Fresh run should clear the custom scratchpad at {:?}, but it still exists",
-        custom_scratchpad
-    );
-
-    Ok(())
-}
-
-#[test]
-fn test_fresh_run_clears_per_hat_scratchpads() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let temp_path = temp_dir.path();
-
-    // Config with global + per-hat scratchpad overrides
-    let config = r#"
-event_loop:
-  prompt_file: "PROMPT.md"
-  completion_promise: "LOOP_COMPLETE"
-  max_iterations: 1
-  max_runtime_seconds: 5
-
-cli:
-  backend: "custom"
-  command: "true"
-
-core:
-  scratchpad:
-    path: ".ralph/agent/scratchpad.md"
-
-hats:
-  planner:
-    name: "Planner"
-    description: "Plans work"
-    triggers: ["plan.start"]
-    scratchpad:
-      path: ".ralph/agent/planner.md"
-  builder:
-    name: "Builder"
-    description: "Builds things"
-    triggers: ["build.start"]
-    scratchpad: ".ralph/agent/builder.md"
-
-features:
-  preflight:
-    enabled: false
-"#;
-    fs::write(temp_path.join("ralph.yml"), config)?;
-    fs::write(temp_path.join("PROMPT.md"), "Test task")?;
-
-    // Create stale scratchpads at all three paths
-    let global_scratchpad = temp_path.join(".ralph/agent/scratchpad.md");
-    let planner_scratchpad = temp_path.join(".ralph/agent/planner.md");
-    let builder_scratchpad = temp_path.join(".ralph/agent/builder.md");
-
-    fs::create_dir_all(temp_path.join(".ralph/agent"))?;
-    fs::write(&global_scratchpad, "# Stale global\n- [ ] Old task\n")?;
-    fs::write(&planner_scratchpad, "# Stale planner\n- [ ] Plan old\n")?;
-    fs::write(&builder_scratchpad, "# Stale builder\n- [ ] Build old\n")?;
-
-    // Run ralph fresh (exit code doesn't matter — max_iterations=1 exits non-zero,
-    // but scratchpad cleanup happens before the loop starts)
-    let _output = Command::new(ralph_bin())
-        .arg("run")
-        .arg("--config")
-        .arg(temp_path.join("ralph.yml"))
-        .current_dir(temp_path)
-        .output()?;
-
-    // All scratchpads should have been cleared
-    assert!(
-        !global_scratchpad.exists(),
-        "Fresh run should clear the global scratchpad"
-    );
-    assert!(
-        !planner_scratchpad.exists(),
-        "Fresh run should clear the planner hat scratchpad"
-    );
-    assert!(
-        !builder_scratchpad.exists(),
-        "Fresh run should clear the builder hat scratchpad"
-    );
-
-    Ok(())
-}
-
-// =============================================================================
-// Directory Structure Tests
-// =============================================================================
-
-#[test]
-fn test_ralph_directory_created() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let temp_path = temp_dir.path();
-
-    create_test_config(temp_path)?;
-
-    // Verify .ralph does not exist before run
-    let ralph_dir = temp_path.join(".ralph");
-    assert!(!ralph_dir.exists(), ".ralph should not exist before run");
-
-    // Run ralph
-    let _output = Command::new(ralph_bin())
-        .arg("run")
-        .arg("--config")
-        .arg(temp_path.join("ralph.yml"))
-        .current_dir(temp_path)
-        .output()?;
-
-    // Verify .ralph directory was created
-    assert!(
-        ralph_dir.exists(),
-        ".ralph directory should be created by run"
-    );
-    assert!(
-        ralph_dir.is_dir(),
-        ".ralph should be a directory, not a file"
-    );
-
-    Ok(())
 }

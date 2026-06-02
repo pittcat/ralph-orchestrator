@@ -146,6 +146,7 @@ impl PreflightRunner {
         checks.push(Box::new(PathsExistCheck));
         checks.push(Box::new(ToolsInPathCheck::default()));
         checks.push(Box::new(SpecCompletenessCheck));
+        checks.push(Box::new(PresetTopologyCheck));
 
         if let Some(extensions) = config.core.preflight_extensions.as_ref()
             && extensions.enabled
@@ -2272,5 +2273,110 @@ status: draft
             .find(|c| c.name == "missing-cmd-hook")
             .expect("expected hook result");
         assert_eq!(hook_result.status, CheckStatus::Warn);
+    }
+
+    #[tokio::test]
+    async fn topology_check_passes_for_valid_preset() {
+        let config = RalphConfig::parse_yaml(
+            r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+  reporter:
+    name: "Reporter"
+    triggers: ["work.done"]
+    publishes: ["LOOP_COMPLETE"]
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["work.done"]
+"#,
+        )
+        .unwrap();
+
+        let check = PresetTopologyCheck;
+        let result = check.run(&config).await;
+        assert_eq!(
+            result.status,
+            CheckStatus::Pass,
+            "valid preset should pass: {:?}",
+            result.message
+        );
+    }
+
+    #[tokio::test]
+    async fn topology_check_fails_for_unreachable_required() {
+        let config = RalphConfig::parse_yaml(
+            r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+  reporter:
+    name: "Reporter"
+    triggers: ["work.done"]
+    publishes: ["LOOP_COMPLETE"]
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["missing.event"]
+"#,
+        )
+        .unwrap();
+
+        let check = PresetTopologyCheck;
+        let result = check.run(&config).await;
+        assert_eq!(
+            result.status,
+            CheckStatus::Fail,
+            "unreachable required event should fail"
+        );
+        assert!(result.message.unwrap().contains("missing.event"));
+    }
+}
+
+/// Preset topology validation check.
+///
+/// Validates that the preset's hat configuration forms a valid topology where:
+/// - The starting event can reach at least one hat.
+/// - The completion promise is reachable from the starting event.
+/// - Required events are reachable and appear on all completion paths.
+struct PresetTopologyCheck;
+
+#[async_trait]
+impl PreflightCheck for PresetTopologyCheck {
+    fn name(&self) -> &'static str {
+        "preset-topology"
+    }
+
+    async fn run(&self, config: &RalphConfig) -> CheckResult {
+        use crate::hat_registry::HatRegistry;
+        use crate::preset_validator::validate_preset_topology;
+
+        let registry = HatRegistry::from_runtime_config(config);
+        let result = validate_preset_topology(config, &registry);
+
+        if result.is_valid() {
+            if result.warnings.is_empty() {
+                CheckResult::pass(self.name(), "Preset topology is valid")
+            } else {
+                CheckResult::warn(
+                    self.name(),
+                    "Preset topology has warnings",
+                    result.warnings.join("; "),
+                )
+            }
+        } else {
+            let error_messages: Vec<String> =
+                result.errors.iter().map(|e| e.message.clone()).collect();
+            CheckResult::fail(
+                self.name(),
+                "Preset topology validation failed",
+                error_messages.join("; "),
+            )
+        }
     }
 }

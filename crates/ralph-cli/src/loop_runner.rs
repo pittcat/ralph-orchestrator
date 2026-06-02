@@ -435,8 +435,10 @@ pub async fn run_loop_impl(
             .unwrap_or(false)
     };
 
-    // Initialize event logger for debugging (uses context for path resolution)
-    let mut event_logger = EventLogger::from_context(&ctx);
+    // Initialize event logger for history/observability (uses context for path resolution).
+    // This writes to the history file, NOT the trusted events file consumed by EventReader.
+    // Raw output parsing, orphan events, and terminate events all go here.
+    let mut event_logger = EventLogger::history_from_context(&ctx);
 
     // Log initial event (use configured starting_event or default to task.start/task.resume)
     let default_start_topic = if resume { "task.resume" } else { "task.start" };
@@ -457,10 +459,10 @@ pub async fn run_loop_impl(
     if let Err(e) = event_logger.log(&start_record) {
         warn!("Failed to log start event: {}", e);
     }
-    // Advance the event reader past the logged start event so it won't be
-    // re-read by process_events_from_jsonl() — the start event is already
-    // in the bus from initialize().
-    event_loop.sync_event_reader_to_file_end();
+    // NOTE: No sync_event_reader_to_file_end() needed here because the history
+    // logger writes to a separate file from the trusted events file consumed
+    // by EventReader. The start event only appears in history, not in the
+    // trusted event stream.
 
     // Create backend from config - TUI mode uses the same backend as non-TUI
     // The TUI is an observation layer that displays output, not a different mode

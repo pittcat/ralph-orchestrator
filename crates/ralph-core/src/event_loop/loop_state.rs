@@ -17,6 +17,39 @@ pub struct EventSignature {
     pub payload_fingerprint: u64,
 }
 
+/// Composite progress marker for the stale-breaker mechanism.
+///
+/// Captures all forms of meaningful progress: accepted business events,
+/// task state changes, workflow advancement, and state machine transitions.
+/// Compared between consecutive completion rejections to determine whether
+/// real work has occurred.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgressFingerprint {
+    /// Count of distinct business topics accepted (excludes system/diagnostic topics).
+    pub accepted_business_count: usize,
+    /// Task store snapshot: (open_count, closed_count) at fingerprint time.
+    pub task_snapshot: (usize, usize),
+    /// Total workflow instances tracked across all chains.
+    pub workflow_instances: usize,
+    /// Sum of highest phases across all workflow instances.
+    pub workflow_phase_sum: usize,
+    /// State machine accepted transition count (0 when SM disabled).
+    pub sm_transition_count: u32,
+}
+
+impl ProgressFingerprint {
+    /// Computes a stable u64 hash from this fingerprint for quick comparison.
+    pub fn hash(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.accepted_business_count.hash(&mut hasher);
+        self.task_snapshot.hash(&mut hasher);
+        self.workflow_instances.hash(&mut hasher);
+        self.workflow_phase_sum.hash(&mut hasher);
+        self.sm_transition_count.hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
 /// Current state of the event loop.
 #[derive(Debug)]
 pub struct LoopState {
@@ -100,8 +133,9 @@ pub struct LoopState {
     /// Count of consecutive completion rejections with the same signature.
     pub consecutive_completion_rejections: u32,
 
-    /// Number of seen_topics at the time of the last completion rejection.
-    pub last_rejection_seen_topics_count: usize,
+    /// Progress fingerprint hash at the time of the last completion rejection.
+    /// Used to detect whether real progress has occurred between rejections.
+    pub last_rejection_fingerprint: u64,
 }
 
 impl Default for LoopState {
@@ -136,7 +170,7 @@ impl Default for LoopState {
             last_verdict_payload: None,
             completion_rejection_signature: None,
             consecutive_completion_rejections: 0,
-            last_rejection_seen_topics_count: 0,
+            last_rejection_fingerprint: 0,
         }
     }
 }
@@ -245,6 +279,18 @@ impl WorkflowProgress {
         self.instances.values().map(|m| m.len()).sum()
     }
 
+    /// Returns the sum of highest phases across all tracked instances.
+    ///
+    /// Used as part of the progress fingerprint to detect workflow advancement.
+    /// A phase advancement increases this sum, indicating real progress.
+    pub fn phase_sum(&self) -> usize {
+        self.instances
+            .values()
+            .flat_map(|m| m.values())
+            .map(|p| p.highest_phase)
+            .sum()
+    }
+
     /// Returns all tracked instance keys for a given chain.
     pub fn instance_keys(&self, chain_name: &str) -> Vec<Option<String>> {
         self.instances
@@ -310,6 +356,71 @@ impl LoopState {
         {
             self.last_verdict_payload = Some(event.payload.clone());
         }
+    }
+
+    /// Computes a composite progress fingerprint capturing all meaningful progress signals.
+    ///
+    /// The fingerprint includes:
+    /// - Count of accepted business topics (excludes system/diagnostic topics)
+    /// - Task store snapshot (open/closed counts)
+    /// - Workflow instance count and phase sum
+    /// - State machine transition count
+    ///
+    /// This replaces the naive `seen_topics.len()` check which could be fooled by
+    /// irrelevant topics (e.g., `event.malformed`, `human.guidance`).
+    pub fn compute_progress_fingerprint(&self) -> ProgressFingerprint {
+        // Count only business topics (exclude system/diagnostic/recovery topics)
+        let accepted_business_count = self
+            .seen_topics
+            .iter()
+            .filter(|t| !Self::is_system_topic(t))
+            .count();
+
+        // Workflow progress: instance count and sum of all highest phases
+        let workflow_instances = self.workflow_progress.instance_count();
+        let workflow_phase_sum = self.workflow_progress.phase_sum();
+
+        // SM transition count (0 when disabled)
+        let sm_transition_count = self
+            .state_machine_runtime_state
+            .as_ref()
+            .map(|sm| sm.accepted_transition_count())
+            .unwrap_or(0);
+
+        ProgressFingerprint {
+            accepted_business_count,
+            task_snapshot: (0, 0), // Caller must fill in task counts
+            workflow_instances,
+            workflow_phase_sum,
+            sm_transition_count,
+        }
+    }
+
+    /// Returns true if the given topic is a system/diagnostic topic that should
+    /// not count as business progress.
+    fn is_system_topic(topic: &str) -> bool {
+        matches!(
+            topic,
+            "task.resume"
+                | "task.start"
+                | "event.malformed"
+                | "event.scope_violation"
+                | "event.workflow_guard_rejected"
+                | "event.state_machine.rejected"
+                | "event.state_machine.ignored"
+                | "event.state_machine.diagnostic"
+                | "event.policy_warning"
+                | "event.completion.blocked"
+                | "event.completion.ignored"
+                | "event.isolation.boundary_violation"
+                | "human.interact"
+                | "human.response"
+                | "human.guidance"
+                | "human.timeout"
+                | "loop.cancel"
+                | "build.task.abandoned"
+        ) || topic.ends_with(".exhausted")
+            || topic.ends_with(".scope_violation")
     }
 }
 

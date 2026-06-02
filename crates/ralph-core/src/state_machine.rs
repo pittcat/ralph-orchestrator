@@ -68,6 +68,8 @@ pub struct StateMachineRuntimeState {
     terminal_honored: bool,
     /// Fingerprint of the last terminal rejection to prevent repeat injections.
     last_terminal_rejection: Option<TerminalRejectionFingerprint>,
+    /// Count of accepted state machine transitions (business events that advanced state).
+    accepted_transition_count: u32,
 }
 
 /// Fingerprint of a terminal rejection to detect repeated rejections.
@@ -112,6 +114,14 @@ impl StateMachineRuntimeState {
     /// Returns whether a terminal event has been honored.
     pub fn is_terminal_honored(&self) -> bool {
         self.terminal_honored
+    }
+
+    /// Returns the count of accepted state machine transitions.
+    ///
+    /// Used by the progress fingerprint to detect state machine progress
+    /// between completion rejections.
+    pub fn accepted_transition_count(&self) -> u32 {
+        self.accepted_transition_count
     }
 
     /// Marks an accepted terminal event as honored after the event loop's
@@ -447,6 +457,8 @@ impl StateMachineRuntimeState {
             new_state = %new_state,
             "State machine transition applied"
         );
+
+        self.accepted_transition_count += 1;
 
         StateMachineDecision::Accept {
             instance_key: key,

@@ -179,6 +179,11 @@ impl EventLogger {
     /// This reads the timestamped events path from the marker file if it exists,
     /// falling back to the default events path. This ensures the logger writes
     /// to the correct location when running in a worktree or other isolated workspace.
+    ///
+    /// **WARNING**: This writes to the **trusted events file** consumed by
+    /// `EventReader`. Only call this for paths that must be read by the
+    /// orchestration loop. For raw output logging, orphan diagnostics, and
+    /// termination events, use [`history_from_context`] instead.
     pub fn from_context(context: &LoopContext) -> Self {
         // Read timestamped events path from marker file, fall back to default
         // The marker file contains a relative path like ".ralph/events-20260127-123456.jsonl"
@@ -190,6 +195,47 @@ impl EventLogger {
             })
             .unwrap_or_else(|_| context.events_path());
         Self::new(events_path)
+    }
+
+    /// Creates a logger for the **history/observability** file, separate from
+    /// the trusted events file consumed by `EventReader`.
+    ///
+    /// This is the correct logger for:
+    /// - Raw output parsing (via `log_events_from_output`)
+    /// - Orphan event diagnostics (`event.orphaned`)
+    /// - Accepted event history (`log_accepted_events`)
+    /// - Termination events (`log_terminate_event`)
+    ///
+    /// The history file is derived from the `current-events` marker by
+    /// inserting `-history` before the `.jsonl` extension. For example,
+    /// if the marker points to `.ralph/events-20260127-123456.jsonl`, the
+    /// history file will be `.ralph/events-history-20260127-123456.jsonl`.
+    ///
+    /// This ensures that fake/demo events embedded in agent text output
+    /// cannot leak into the trusted event stream consumed by the orchestrator.
+    pub fn history_from_context(context: &LoopContext) -> Self {
+        let history_path = std::fs::read_to_string(context.current_events_marker())
+            .map(|s| {
+                let relative = s.trim().to_string();
+                // Derive history path: ".ralph/events-{id}.jsonl" → ".ralph/events-history-{id}.jsonl"
+                let history_relative = if let Some(stripped) = relative.strip_suffix(".jsonl") {
+                    // Insert "-history" after "events" prefix: "events-{id}" → "events-history-{id}"
+                    if let Some(pos) = stripped.rfind("events") {
+                        let (before, after) = stripped.split_at(pos + 6); // "events".len() == 6
+                        format!("{}-history{}.jsonl", before, after)
+                    } else {
+                        format!("{}.history.jsonl", stripped)
+                    }
+                } else {
+                    format!("{}.history", relative)
+                };
+                context.workspace().join(history_relative)
+            })
+            .unwrap_or_else(|_| {
+                // Fallback: use a default history file name
+                context.ralph_dir().join("events-history.jsonl")
+            });
+        Self::new(history_path)
     }
 
     /// Ensures the parent directory exists and opens the file.
@@ -719,5 +765,142 @@ mod tests {
         let record: EventRecord = serde_json::from_str(json).unwrap();
         assert!(record.phase.is_none());
         assert_eq!(record.topic, "build.done");
+    }
+
+    #[test]
+    fn test_history_from_context_resolves_separate_path() {
+        let tmp = TempDir::new().unwrap();
+        let ctx = crate::LoopContext::primary(tmp.path().to_path_buf());
+
+        // Write a marker file pointing to the trusted events file
+        let marker = ctx.current_events_marker();
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, ".ralph/events-20260602-120000.jsonl").unwrap();
+
+        let logger = EventLogger::history_from_context(&ctx);
+
+        let path_str = logger.path().to_string_lossy();
+        // Should contain "events-history" to distinguish from trusted file
+        assert!(
+            path_str.contains("events-history"),
+            "history logger path should contain 'events-history', got: {}",
+            path_str
+        );
+        // Should contain the full expected filename
+        assert!(
+            path_str.contains("events-history-20260602-120000.jsonl"),
+            "history logger path should contain 'events-history-20260602-120000.jsonl', got: {}",
+            path_str
+        );
+    }
+
+    #[test]
+    fn test_history_from_context_fallback_when_no_marker() {
+        let tmp = TempDir::new().unwrap();
+        let ctx = crate::LoopContext::primary(tmp.path().to_path_buf());
+        // No marker file written
+
+        let logger = EventLogger::history_from_context(&ctx);
+
+        // Should fall back to ralph_dir()/events-history.jsonl
+        assert!(
+            logger
+                .path()
+                .to_string_lossy()
+                .contains("events-history.jsonl")
+        );
+    }
+
+    #[test]
+    fn test_history_from_context_writes_to_separate_file() {
+        let tmp = TempDir::new().unwrap();
+        let ctx = crate::LoopContext::primary(tmp.path().to_path_buf());
+
+        let marker = ctx.current_events_marker();
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, ".ralph/events-20260602-120000.jsonl").unwrap();
+
+        // Write via history logger
+        let mut history_logger = EventLogger::history_from_context(&ctx);
+        let event = make_event("test.history", "from output parsing");
+        history_logger
+            .log_event(1, "loop", &event, None, None)
+            .unwrap();
+
+        // History file should exist at the logger's path
+        assert!(
+            history_logger.path().exists(),
+            "history file should exist at {:?}",
+            history_logger.path()
+        );
+        // Verify the path matches expectations
+        let history_path = history_logger.path().to_path_buf();
+
+        // Trusted events file should NOT exist
+        let trusted_path = tmp.path().join(".ralph/events-20260602-120000.jsonl");
+        assert!(
+            !trusted_path.exists(),
+            "history logger should not write to the trusted events file"
+        );
+
+        // Verify content is readable
+        let history = EventHistory::new(&history_path);
+        let records = history.read_all().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].topic, "test.history");
+    }
+
+    #[test]
+    fn test_history_and_trusted_loggers_are_independent() {
+        let tmp = TempDir::new().unwrap();
+        let ctx = crate::LoopContext::primary(tmp.path().to_path_buf());
+
+        let marker = ctx.current_events_marker();
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, ".ralph/events-20260602-120000.jsonl").unwrap();
+
+        // Write to trusted file
+        let mut trusted_logger = EventLogger::from_context(&ctx);
+        let trusted_event = make_event("ralph.emit.work.done", "real emit");
+        trusted_logger
+            .log_event(1, "loop", &trusted_event, None, None)
+            .unwrap();
+
+        // Write to history file
+        let mut history_logger = EventLogger::history_from_context(&ctx);
+        let history_event = make_event("test.parsed", "from output text");
+        history_logger
+            .log_event(1, "loop", &history_event, None, None)
+            .unwrap();
+
+        // Both files should exist and be separate
+        let trusted_path = trusted_logger.path().to_path_buf();
+        let history_path = history_logger.path().to_path_buf();
+        assert!(
+            trusted_path.exists(),
+            "trusted file should exist at {:?}",
+            trusted_path
+        );
+        assert!(
+            history_path.exists(),
+            "history file should exist at {:?}",
+            history_path
+        );
+        assert_ne!(
+            trusted_path, history_path,
+            "trusted and history paths must be different"
+        );
+
+        // Trusted file only has the real emit
+        let trusted_history = EventHistory::new(&trusted_path);
+        let trusted_records = trusted_history.read_all().unwrap();
+        assert_eq!(trusted_records.len(), 1);
+        assert_eq!(trusted_records[0].topic, "ralph.emit.work.done");
+
+        // History file only has the parsed output event
+        let history_history = EventHistory::new(&history_path);
+        let history_records = history_history.read_all().unwrap();
+        assert_eq!(history_records.len(), 1);
+        assert_eq!(history_records[0].topic, "test.parsed");
     }
 }

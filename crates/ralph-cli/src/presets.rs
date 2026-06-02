@@ -1034,6 +1034,7 @@ mod tests {
                 RalphConfig::parse_yaml(preset.content).expect("embedded preset YAML should parse");
             let registry = HatRegistry::from_config(&config);
             let cancellation = &config.event_loop.cancellation_promise;
+            let completion = &config.event_loop.completion_promise;
 
             // Events from unknown hat "strategist" should be rejected in all presets
             let unknown_event = ralph_core::Event {
@@ -1048,7 +1049,7 @@ mod tests {
                 wave_total: None,
             };
 
-            match validate_event_origin(&unknown_event, &registry, cancellation) {
+            match validate_event_origin(&unknown_event, &registry, cancellation, completion) {
                 OriginCheck::Accepted => {
                     // Only acceptable when registry is empty (solo mode)
                     if !registry.is_empty() {
@@ -1121,6 +1122,7 @@ mod tests {
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         let registry = HatRegistry::from_config(&config);
         let cancellation = &config.event_loop.cancellation_promise;
+        let completion = &config.event_loop.completion_promise;
 
         // ce-executor's expected publish chain (using actual hat_keys from YAML):
         // coordinator(work.ready) -> executor(work.done) -> review-coordinator(review.wave.ready)
@@ -1154,7 +1156,7 @@ mod tests {
                 wave_total: None,
             };
 
-            let result = validate_event_origin(&event, &registry, cancellation);
+            let result = validate_event_origin(&event, &registry, cancellation, completion);
             assert_eq!(
                 result,
                 OriginCheck::Accepted,
@@ -1164,6 +1166,83 @@ mod tests {
                 result
             );
         }
+    }
+
+    /// Helper: read a non-embedded root preset YAML by relative path.
+    fn read_root_preset(filename: &str) -> String {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let path = std::path::Path::new(manifest_dir)
+            .join("..")
+            .join("..")
+            .join("presets")
+            .join(filename);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read root preset at {}: {}", path.display(), e))
+    }
+
+    #[test]
+    fn test_ce_executor_zh_required_events_is_report_done() {
+        // Happy-path: the Chinese ce-executor-zh preset must use "report.done"
+        // as its sole completion gate, matching the English root preset.
+        let content = read_root_preset("ce-executor-zh.yml");
+        let config = RalphConfig::parse_yaml(&content).expect("ce-executor-zh YAML should parse");
+        assert_eq!(
+            config.event_loop.required_events,
+            &["report.done"],
+            "ce-executor-zh should require 'report.done' as its only completion gate"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_zh_reporter_publishes_report_done_and_loop_complete() {
+        // Regression: the Chinese preset's reporter hat must declare both
+        // "report.done" (completion gate) and "LOOP_COMPLETE" (terminal promise).
+        let content = read_root_preset("ce-executor-zh.yml");
+        let config = RalphConfig::parse_yaml(&content).expect("ce-executor-zh YAML should parse");
+        let reporter = config
+            .hats
+            .get("reporter")
+            .expect("ce-executor-zh must define a 'reporter' hat");
+        assert!(
+            reporter.publishes.iter().any(|p| p == "report.done"),
+            "ce-executor-zh 'reporter' hat must declare 'report.done' in publishes. \
+             current publishes: {:?}",
+            reporter.publishes
+        );
+        assert!(
+            reporter.publishes.iter().any(|p| p == "LOOP_COMPLETE"),
+            "ce-executor-zh 'reporter' hat must declare 'LOOP_COMPLETE' in publishes. \
+             current publishes: {:?}",
+            reporter.publishes
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_en_and_zh_completion_gate_consistent() {
+        // Regression: English root preset, embedded mirror, and Chinese root preset
+        // must all agree on the completion gate. If any diverges, the test fails.
+        let en_root = read_root_preset("ce-executor.yml");
+        let zh_root = read_root_preset("ce-executor-zh.yml");
+
+        let en_config =
+            RalphConfig::parse_yaml(&en_root).expect("English ce-executor YAML should parse");
+        let zh_config =
+            RalphConfig::parse_yaml(&zh_root).expect("Chinese ce-executor-zh YAML should parse");
+
+        // Embedded mirror must match English root (sync-embedded-files.sh contract)
+        let embedded_preset =
+            get_preset("ce-executor").expect("ce-executor embedded preset should exist");
+        let embedded_config = RalphConfig::parse_yaml(embedded_preset.content)
+            .expect("embedded ce-executor YAML should parse");
+
+        assert_eq!(
+            embedded_config.event_loop.required_events, en_config.event_loop.required_events,
+            "Embedded mirror must match English root preset required_events"
+        );
+        assert_eq!(
+            zh_config.event_loop.required_events, en_config.event_loop.required_events,
+            "Chinese ce-executor-zh must match English ce-executor required_events"
+        );
     }
 
     #[test]

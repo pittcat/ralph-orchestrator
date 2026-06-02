@@ -24,7 +24,7 @@ use tracing::{debug, warn};
 /// Note: `event.malformed`, `event.scope_violation`, and similar diagnostics are
 /// created by Ralph code and published directly to the bus — they should not need
 /// to pass as trusted JSONL events.
-fn is_jsonl_control_topic(topic: &str, cancellation_topic: &str) -> bool {
+pub(crate) fn is_jsonl_control_topic(topic: &str, cancellation_topic: &str) -> bool {
     matches!(
         topic,
         "human.interact" | "human.guidance" | "task.resume" | "build.task.abandoned"
@@ -118,11 +118,8 @@ pub enum OriginCheck {
 ///
 /// - **Registry empty (solo mode)**: All events are accepted (permissive for hatless baseline).
 /// - **No-hat events**: Accepted through the origin guard. Scope enforcement
-///   in the caller (`process_parse_result`/`process_events_from_jsonl_with_waves`)
-///   still validates them against active hats when `enforce_hat_scope` is on.
-///   The R9 hardening of "reject no-hat business events in hat-based mode" is
-///   deferred to a follow-up plan to keep this stability pass scoped to the
-///   control-topic ordering bug.
+///   in the caller (`process_parse_result`) still validates them against
+///   active hats when `enforce_hat_scope` is on.
 /// - **Unknown hat**: Always rejected (fail-closed — primary protection against
 ///   LLM-generated fake events from unregistered hat names).
 /// - **Registered hat + control topic**: Accepted even if not in `publishes`,
@@ -134,10 +131,12 @@ pub enum OriginCheck {
 /// * `event` — parsed JSONL event
 /// * `registry` — hat registry (empty for solo mode)
 /// * `cancellation_topic` — configured cancellation topic (e.g. "loop.cancel")
+/// * `completion_promise` — configured completion promise (e.g. "LOOP_COMPLETE")
 pub fn validate_event_origin(
     event: &JsonlEvent,
     registry: &HatRegistry,
     cancellation_topic: &str,
+    _completion_promise: &str,
 ) -> OriginCheck {
     let topic_str = event.topic.as_str();
     let is_control = is_jsonl_control_topic(topic_str, cancellation_topic);
@@ -147,10 +146,11 @@ pub fn validate_event_origin(
         return OriginCheck::Accepted;
     }
 
-    // No-hat events pass through; downstream scope enforcement decides if the
-    // event is allowed. This preserves the existing contract used by the loop
-    // runner when emitting control signals (LOOP_COMPLETE, task.resume, etc.)
-    // without a hat provenance.
+    // No-hat events pass through the origin guard; downstream scope enforcement
+    // in `process_parse_result` validates them against active hats when
+    // `enforce_hat_scope` is on. Events parsed from agent output are inherently
+    // no-hat (they come from text parsing), so rejecting them here would break
+    // the primary event ingestion path.
     if event.hat.is_none() {
         return OriginCheck::Accepted;
     }
@@ -202,10 +202,11 @@ pub fn filter_events_by_origin(
     events: Vec<JsonlEvent>,
     registry: &HatRegistry,
     cancellation_topic: &str,
+    completion_promise: &str,
 ) -> Vec<JsonlEvent> {
     let mut accepted = Vec::with_capacity(events.len());
     for event in events {
-        match validate_event_origin(&event, registry, cancellation_topic) {
+        match validate_event_origin(&event, registry, cancellation_topic, completion_promise) {
             OriginCheck::Accepted => accepted.push(event),
             OriginCheck::Rejected { topic, hat, reason } => {
                 debug!(
@@ -263,7 +264,7 @@ mod tests {
         let registry = registry_with_hats("");
         let event = make_event("LOOP_COMPLETE", None);
         assert_eq!(
-            validate_event_origin(&event, &registry, ""),
+            validate_event_origin(&event, &registry, "", ""),
             OriginCheck::Accepted
         );
     }
@@ -281,7 +282,7 @@ hats:
         );
         let event = make_event("experiment.planned", Some("strategist"));
         assert_eq!(
-            validate_event_origin(&event, &registry, ""),
+            validate_event_origin(&event, &registry, "", ""),
             OriginCheck::Rejected {
                 topic: "experiment.planned".to_string(),
                 hat: Some("strategist".to_string()),
@@ -292,14 +293,11 @@ hats:
 
     #[test]
     fn test_event_origin_no_hat_business_event_accepted() {
-        // Backward compatibility: no-hat events pass through the origin guard.
-        // Scope enforcement in the caller (process_parse_result) still validates
-        // them against active hats, so a downstream `enforce_hat_scope` test
-        // will reject events whose topic does not match any active hat. The
-        // R9 hardening of "reject no-hat business events in hat-based mode" is
-        // tracked separately and is intentionally not applied here so we do
-        // not regress event_loop integration tests written against the
-        // current contract.
+        // No-hat business events pass through the origin guard in hat-based mode.
+        // Scope enforcement in the caller (process_parse_result) validates them
+        // against active hats when enforce_hat_scope is on. The origin guard
+        // itself does not reject no-hat events because events parsed from agent
+        // output are inherently no-hat.
         let registry = registry_with_hats(
             r#"
 hats:
@@ -311,7 +309,7 @@ hats:
         );
         let event = make_event("debug.step", None);
         assert_eq!(
-            validate_event_origin(&event, &registry, ""),
+            validate_event_origin(&event, &registry, "", ""),
             OriginCheck::Accepted
         );
     }
@@ -332,7 +330,7 @@ hats:
         );
         let event = make_event("human.interact", Some("executor"));
         assert_eq!(
-            validate_event_origin(&event, &registry, ""),
+            validate_event_origin(&event, &registry, "", ""),
             OriginCheck::Accepted
         );
     }
@@ -352,7 +350,7 @@ hats:
         );
         let event = make_event("build.done", Some("executor"));
         assert_eq!(
-            validate_event_origin(&event, &registry, ""),
+            validate_event_origin(&event, &registry, "", ""),
             OriginCheck::Rejected {
                 topic: "build.done".to_string(),
                 hat: Some("executor".to_string()),
@@ -374,7 +372,7 @@ hats:
         );
         let event = make_event("experiment.planned", Some("strategist"));
         assert_eq!(
-            validate_event_origin(&event, &registry, ""),
+            validate_event_origin(&event, &registry, "", ""),
             OriginCheck::Rejected {
                 topic: "experiment.planned".to_string(),
                 hat: Some("strategist".to_string()),
@@ -396,7 +394,7 @@ hats:
         );
         let event = make_event("work.done", Some("executor"));
         assert_eq!(
-            validate_event_origin(&event, &registry, ""),
+            validate_event_origin(&event, &registry, "", ""),
             OriginCheck::Accepted
         );
     }
@@ -414,7 +412,7 @@ hats:
         );
         let event = make_event("build.done", Some("executor"));
         assert_eq!(
-            validate_event_origin(&event, &registry, ""),
+            validate_event_origin(&event, &registry, "", ""),
             OriginCheck::Rejected {
                 topic: "build.done".to_string(),
                 hat: Some("executor".to_string()),
@@ -436,7 +434,7 @@ hats:
         );
         let event = make_event("human.interact", None);
         assert_eq!(
-            validate_event_origin(&event, &registry, ""),
+            validate_event_origin(&event, &registry, "", ""),
             OriginCheck::Accepted
         );
     }
@@ -454,7 +452,7 @@ hats:
         );
         let event = make_event("task.resume", None);
         assert_eq!(
-            validate_event_origin(&event, &registry, ""),
+            validate_event_origin(&event, &registry, "", ""),
             OriginCheck::Accepted
         );
     }
@@ -474,7 +472,7 @@ hats:
         // trying to emit it should be rejected.
         let event = make_event("human.interact", Some("strategist"));
         assert_eq!(
-            validate_event_origin(&event, &registry, ""),
+            validate_event_origin(&event, &registry, "", ""),
             OriginCheck::Rejected {
                 topic: "human.interact".to_string(),
                 hat: Some("strategist".to_string()),
@@ -496,7 +494,7 @@ hats:
         );
         let event = make_event("loop.cancel", None);
         assert_eq!(
-            validate_event_origin(&event, &registry, "loop.cancel"),
+            validate_event_origin(&event, &registry, "loop.cancel", ""),
             OriginCheck::Accepted
         );
     }
@@ -517,7 +515,7 @@ hats:
             make_event("debug.step", None),              // accepted (no-hat pass-through)
             make_event("work.done", Some("strategist")), // rejected unknown hat
         ];
-        let filtered = filter_events_by_origin(events, &registry, "");
+        let filtered = filter_events_by_origin(events, &registry, "", "");
         assert_eq!(filtered.len(), 2);
         assert_eq!(filtered[0].topic, "work.done");
         assert_eq!(filtered[1].topic, "debug.step");
@@ -538,7 +536,7 @@ hats:
         );
         let event = make_wave_event("review.file", Some("coordinator"));
         assert_eq!(
-            validate_event_origin(&event, &registry, ""),
+            validate_event_origin(&event, &registry, "", ""),
             OriginCheck::Accepted
         );
     }
@@ -558,7 +556,7 @@ hats:
         );
         let event = make_wave_event("review.file", Some("strategist"));
         assert_eq!(
-            validate_event_origin(&event, &registry, ""),
+            validate_event_origin(&event, &registry, "", ""),
             OriginCheck::Rejected {
                 topic: "review.file".to_string(),
                 hat: Some("strategist".to_string()),
@@ -582,7 +580,7 @@ hats:
         );
         let event = make_wave_event("review.file", Some("coordinator"));
         assert_eq!(
-            validate_event_origin(&event, &registry, ""),
+            validate_event_origin(&event, &registry, "", ""),
             OriginCheck::Rejected {
                 topic: "review.file".to_string(),
                 hat: Some("coordinator".to_string()),
@@ -693,7 +691,7 @@ hats:
         // hat=ralph topic=work.start: starting event is in ralph's publish scope
         let event = make_event("work.start", Some("ralph"));
         assert_eq!(
-            validate_event_origin(&event, &registry, "loop.cancel"),
+            validate_event_origin(&event, &registry, "loop.cancel", ""),
             OriginCheck::Accepted,
             "hat=ralph should pass origin guard for work.start (in scope)"
         );
@@ -701,7 +699,7 @@ hats:
         // hat=ralph topic=LOOP_COMPLETE: completion promise is in scope
         let event = make_event("LOOP_COMPLETE", Some("ralph"));
         assert_eq!(
-            validate_event_origin(&event, &registry, "loop.cancel"),
+            validate_event_origin(&event, &registry, "loop.cancel", ""),
             OriginCheck::Accepted,
             "hat=ralph should pass origin guard for LOOP_COMPLETE (in scope)"
         );
@@ -709,7 +707,7 @@ hats:
         // hat=ralph topic=loop.cancel: cancellation promise is in scope
         let event = make_event("loop.cancel", Some("ralph"));
         assert_eq!(
-            validate_event_origin(&event, &registry, "loop.cancel"),
+            validate_event_origin(&event, &registry, "loop.cancel", ""),
             OriginCheck::Accepted,
             "hat=ralph should pass origin guard for loop.cancel (cancellation topic)"
         );
@@ -717,7 +715,7 @@ hats:
         // hat=ralph topic=totally.fake: NOT in scope — should be rejected
         let event = make_event("totally.fake", Some("ralph"));
         assert_eq!(
-            validate_event_origin(&event, &registry, "loop.cancel"),
+            validate_event_origin(&event, &registry, "loop.cancel", ""),
             OriginCheck::Rejected {
                 topic: "totally.fake".to_string(),
                 hat: Some("ralph".to_string()),
@@ -729,7 +727,7 @@ hats:
         // hat=fake topic=work.start: unknown hat — should be rejected
         let event = make_event("work.start", Some("fake"));
         assert_eq!(
-            validate_event_origin(&event, &registry, "loop.cancel"),
+            validate_event_origin(&event, &registry, "loop.cancel", ""),
             OriginCheck::Rejected {
                 topic: "work.start".to_string(),
                 hat: Some("fake".to_string()),
@@ -754,13 +752,13 @@ hats:
 
         let event = make_event("work.start", Some("ralph"));
         assert_eq!(
-            validate_event_origin(&event, &registry, ""),
+            validate_event_origin(&event, &registry, "", ""),
             OriginCheck::Accepted
         );
 
         let event = make_event("review.ready", Some("ralph"));
         assert_eq!(
-            validate_event_origin(&event, &registry, ""),
+            validate_event_origin(&event, &registry, "", ""),
             OriginCheck::Accepted
         );
     }
@@ -780,13 +778,13 @@ hats:
 
         let event = make_event("work.done", Some("ralph"));
         assert_eq!(
-            validate_event_origin(&event, &registry, ""),
+            validate_event_origin(&event, &registry, "", ""),
             OriginCheck::Accepted
         );
 
         let event = make_event("review.result", Some("ralph"));
         assert_eq!(
-            validate_event_origin(&event, &registry, ""),
+            validate_event_origin(&event, &registry, "", ""),
             OriginCheck::Accepted
         );
     }

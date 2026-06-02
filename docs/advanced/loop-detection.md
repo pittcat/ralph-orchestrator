@@ -258,6 +258,65 @@ The loop detection history is automatically cleared when:
 - `SafetyGuard.reset()` is called
 - The orchestrator completes (success or failure)
 
+## Completion Rejection Stale-Breaker
+
+In addition to output-similarity loop detection, Ralph has a **stale-breaker** that prevents infinite loops caused by repeated completion rejection.
+
+### How It Works
+
+When the agent emits `LOOP_COMPLETE` but a completion gate rejects it (missing required events, incomplete workflow guards, verdict gate failure, or open runtime tasks), the orchestrator records a **rejection signature** -- a string that encodes the reason, e.g., `missing_required:report.done` or `workflow_guard`.
+
+On each subsequent rejection:
+
+1. The orchestrator compares the new signature to the previous one.
+2. If the signature is **identical** and **no new business events** have been observed since the last rejection, a consecutive rejection counter increments.
+3. If the signature **differs** or **new topics have appeared**, the counter resets to 1 (progress was made).
+4. When the counter reaches **3**, the loop terminates with `TerminationReason::LoopStale`.
+
+### Trigger Conditions
+
+The stale-breaker triggers when **all three** conditions are true:
+
+| Condition | Description |
+|-----------|-------------|
+| Same rejection signature | The same gate is rejecting completion (e.g., `report.done` still missing) |
+| No change in progress fingerprint | The composite progress marker is identical to the last rejection |
+| 3+ consecutive rejections | The identical no-progress rejection has occurred three or more times in a row |
+
+### What Counts as "Progress"
+
+The stale-breaker uses a composite `ProgressFingerprint` that captures all forms of meaningful work:
+
+| Component | Description |
+|-----------|-------------|
+| Accepted business topics | Count of business events accepted (excludes system/diagnostic topics) |
+| Task store snapshot | `(open_count, closed_count)` from runtime tasks |
+| Workflow instances | Number of tracked guarded-chain instances |
+| Workflow phase sum | Sum of highest phases across all workflow instances |
+| State machine transitions | State machine accepted transition count |
+
+System/diagnostic topics (`event.malformed`, `human.guidance`, `task.resume`, etc.) do **not** count as progress. Only accepted business events, task state changes, workflow advancement, and state machine transitions reset the stale-breaker counter.
+
+### Stale-Breaker vs. Output-Similarity Detection
+
+| Mechanism | What it detects | Trigger |
+|-----------|----------------|---------|
+| Output-similarity | Agent producing near-identical text | 90%+ similarity to any of last 5 outputs |
+| Stale-breaker | Agent repeatedly failing the same completion gate | Same rejection signature + same progress fingerprint 3+ times |
+
+Both mechanisms work independently and can trigger in the same session. The stale-breaker is specifically designed for the case where the agent is "stuck" on a completion gate -- it keeps trying to emit `LOOP_COMPLETE` without addressing the underlying rejection reason.
+
+### Configuration
+
+The stale-breaker uses fixed parameters:
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| Threshold | 3 | Consecutive identical rejections before termination |
+| Progress metric | Composite fingerprint | Business topics + task state + workflow progress + SM transitions |
+
+The stale-breaker is always active and cannot be disabled. It is a safety valve to prevent runaway API costs when the agent cannot resolve a completion gate.
+
 ## Dependencies
 
 Loop detection requires the `rapidfuzz` package:

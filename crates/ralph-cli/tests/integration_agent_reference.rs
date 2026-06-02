@@ -8,9 +8,9 @@
 //! These tests use CARGO_BIN_EXE_ralph, which requires building the binary first.
 //! They're in the cli-serial group (see .config/nextest.toml).
 
-use std::process::{Command, Output};
-use std::path::Path;
 use std::fs;
+use std::path::Path;
+use std::process::{Command, Output};
 use tempfile::TempDir;
 
 /// Run `ralph tools skill` with an explicit --root for isolation.
@@ -117,8 +117,7 @@ fn test_agent_reference_skill_load_emit_shows_error_recovery() {
     );
     // Must mention event file resolution priority
     assert!(
-        stdout.contains("事件文件解析优先级")
-            || stdout.contains("events file not in allowlist"),
+        stdout.contains("事件文件解析优先级") || stdout.contains("events file not in allowlist"),
         "ralph-tools-emit must mention event file resolution; got: {stdout}"
     );
 }
@@ -131,8 +130,7 @@ fn test_agent_reference_skill_load_cmdref_shows_interact_ref() {
     let stdout = ralph_skill_ok(temp_path, &["load", "ralph-tools-cmdref"]);
     // Must mention ralph tools interact progress reference
     assert!(
-        stdout.contains("ralph tools interact progress")
-            || stdout.contains("ralph tools interact"),
+        stdout.contains("ralph tools interact progress") || stdout.contains("ralph tools interact"),
         "ralph-tools-cmdref must mention interact command; got: {stdout}"
     );
 }
@@ -190,8 +188,7 @@ fn test_agent_reference_emit_writes_event_file() {
     );
 
     // Verify the event was written to the events file
-    let content = fs::read_to_string(&events_path)
-        .expect("read events file");
+    let content = fs::read_to_string(&events_path).expect("read events file");
     assert!(
         content.contains("build.done"),
         "events file must contain 'build.done'; got: {content}"

@@ -139,6 +139,22 @@ impl SummaryWriter {
             content.push_str(&format!("**Est. cost:** ${:.2}\n", state.cumulative_cost));
         }
 
+        // Rejection info (when stale-breaker triggered)
+        if matches!(reason, TerminationReason::LoopStale) {
+            if let Some(ref sig) = state.completion_rejection_signature {
+                content.push_str(&format!(
+                    "**Last rejection:** {} (repeated {} times)\n",
+                    sig, state.consecutive_completion_rejections
+                ));
+            }
+            content.push_str(
+                "**Suggestion:** Review the rejection reason above. The loop was \
+                stuck because the same completion rejection repeated without any meaningful \
+                progress. Ensure the agent is making real progress (new business events, \
+                task state changes, or workflow advancement) before emitting LOOP_COMPLETE.\n",
+            );
+        }
+
         // Tasks section (read from scratchpad if available)
         content.push('\n');
         content.push_str("## Tasks\n\n");
@@ -336,7 +352,7 @@ mod tests {
             last_verdict_payload: None,
             completion_rejection_signature: None,
             consecutive_completion_rejections: 0,
-            last_rejection_seen_topics_count: 0,
+            last_rejection_fingerprint: 0,
         }
     }
 

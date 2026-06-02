@@ -421,6 +421,62 @@ Ralph's loop detection triggers when agent output is ≥90% similar to any of th
    # Should show: UTF-8 Unicode text
    ```
 
+#### LOOP_COMPLETE Rejected / Post-Completion Retry Loop
+
+**Problem**: After emitting `LOOP_COMPLETE`, the loop continues with `task.resume` messages and never terminates.
+
+**Possible Causes**:
+
+1. **Missing required events** -- The preset defines `required_events` and not all have been emitted yet. The completion gate is all-of: every listed topic must have appeared at least once.
+2. **Workflow guard incomplete** -- A `workflow_guards` chain has started instances that have not reached their terminal phase.
+3. **Verdict gate failure** -- A `verdict_gate` is configured and the most recent verdict event carries a failing value.
+4. **Runtime tasks still open** -- In memories/tasks mode, uncompleted tasks block completion.
+5. **Persistent mode** -- `persistent: true` suppresses completion and keeps the loop alive for new work.
+
+**Diagnosis**:
+
+1. **Check the task.resume payload** -- The rejected completion injects a `task.resume` event with a message explaining why. Look for patterns like:
+   - `missing required events: ["report.done"]` -- see cause 1
+   - `incomplete workflow guard instances` -- see cause 2
+   - `verdict gate observed a failing verdict` -- see cause 3
+   - `open task(s)` -- see cause 4
+
+2. **Check which required events have been seen**:
+
+   ```bash
+   # Review the events file for emitted topics
+   cat .ralph/events.jsonl | jq -r '.topic' | sort -u
+   ```
+
+3. **Check the topology**:
+
+   ```bash
+   ralph hats validate -H presets/my-workflow.yml
+   ```
+
+4. **Check the logs for stale-breaker termination**:
+
+   ```bash
+   # Look for stale-breaker messages
+   grep "Stale-breaker" .ralph/diagnostics/logs/*.log
+   ```
+
+**Solutions**:
+
+1. **Emit the missing required events** -- Ensure every hat in the workflow emits its required convergence topic. If the reporter hat is not emitting `report.done`, add the emit to its instructions.
+2. **Complete all workflow guard instances** -- Emit the terminal event for each started instance.
+3. **Fix the verdict** -- Re-run the review and emit a passing verdict.
+4. **Close open tasks** -- Mark tasks as done before emitting completion.
+5. **Disable persistent mode** -- Remove `persistent: true` from config if not needed.
+
+**Stale-breaker safety valve**:
+
+If the same completion rejection repeats **3 or more times with no new business events** between rejections, the loop terminates with `TerminationReason::LoopStale` to prevent infinite API-burning loops. The stale-breaker tracks a rejection signature (e.g., `missing_required:report.done`) and counts consecutive rejections with identical signatures and no new topics observed.
+
+To avoid stale-breaker termination, either:
+- Emit the missing required event (root cause fix), or
+- Use `loop.cancel` to abort the workflow intentionally.
+
 ### Git Issues
 
 #### Checkpoint Failed
@@ -796,6 +852,49 @@ Include in bug reports:
 4. PROMPT.md content
 5. Diagnostic output
 6. Steps to reproduce
+
+### Loop Stale Detection
+
+**Problem**: Loop terminates with `Failed: stale loop detected` or `LoopStale` in diagnostics.
+
+**Explanation**: Ralph's stale-breaker mechanism automatically terminates a loop when the same completion rejection repeats 3 times without meaningful progress. This prevents infinite API-burning loops when the loop can't reach its completion gate.
+
+**Common causes:**
+
+1. **Missing required events** -- `required_events` lists topics that no completion path emits. Run `ralph hats validate` to check topology.
+2. **Open runtime tasks** -- Tasks from `ralph tools task ensure` are still open. Close them with `ralph tools task close <id>` or complete the work.
+3. **Incomplete workflow guards** -- A guarded chain (e.g., experiment phases) is stuck at an intermediate phase. Advance the chain by emitting the next expected event.
+4. **Verdict gate rejection** -- The configured `verdict_gate` observed a failing verdict (e.g., `review.complete` with `pass_or_fail: fail`).
+
+**Diagnostics:**
+
+Check diagnostics for the rejection reason:
+
+```bash
+jq 'select(.reason == "LoopStale")' .ralph/diagnostics/*/orchestration.jsonl
+```
+
+Look for `completion_rejection_signature` in the output to see what was blocking completion:
+
+- `missing_required:<topics>` -- Required events not seen
+- `open_tasks:<count>:<hash>` -- Open tasks blocking completion
+- `workflow_guard:<message>` -- Incomplete workflow chain
+- `verdict_fail:<topic>` -- Verdict gate rejection
+
+**Fixes:**
+
+```bash
+# Check topology
+ralph hats validate -H builtin:ce-executor
+
+# Check open tasks
+ralph tools task list
+
+# Check preflight
+ralph preflight -c ralph.yml -H builtin:ce-executor
+```
+
+See [Loop Detection](../advanced/loop-detection.md) for the technical details of backlog detection and [Presets](../guide/presets.md) for completion gate configuration.
 
 ## Prevention Tips
 

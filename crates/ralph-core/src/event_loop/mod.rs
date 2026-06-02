@@ -1045,7 +1045,7 @@ impl EventLoop {
                         .collect::<Vec<_>>()
                         .join(",")
                 );
-                if let Some(reason) = self.handle_completion_rejection(sig) {
+                if let Some(reason) = self.handle_completion_rejection(sig, self.count_tasks()) {
                     return Some(reason);
                 }
                 self.state.completion_requested = false;
@@ -1083,7 +1083,7 @@ impl EventLoop {
                     "Rejecting LOOP_COMPLETE: verdict gate observed a failing verdict"
                 );
                 let sig = format!("verdict_fail:{}", gate.topic);
-                if let Some(reason) = self.handle_completion_rejection(sig) {
+                if let Some(reason) = self.handle_completion_rejection(sig, self.count_tasks()) {
                     return Some(reason);
                 }
                 self.state.completion_requested = false;
@@ -1109,8 +1109,9 @@ impl EventLoop {
                 reason = %rejection.message,
                 "Rejecting LOOP_COMPLETE: incomplete workflow guard instances"
             );
-            let sig = "workflow_guard".to_string();
-            if let Some(reason) = self.handle_completion_rejection(sig) {
+            // Build a stable signature from the rejection message to detect same-guard rejections
+            let sig = format!("workflow_guard:{}", rejection.message);
+            if let Some(reason) = self.handle_completion_rejection(sig, self.count_tasks()) {
                 return Some(reason);
             }
             self.state.completion_requested = false;
@@ -1159,8 +1160,22 @@ impl EventLoop {
                     "Rejecting completion event with {} open task(s)",
                     open_tasks.len()
                 );
-                let sig = format!("open_tasks:{}", open_tasks.len());
-                if let Some(reason) = self.handle_completion_rejection(sig) {
+                // Build a stable signature from sorted task IDs to detect same-set rejections
+                let mut task_ids: Vec<&str> = open_tasks
+                    .iter()
+                    .filter_map(|t| t.split(':').next())
+                    .collect();
+                task_ids.sort();
+                let task_ids_hash = {
+                    use std::hash::{DefaultHasher, Hash, Hasher};
+                    let mut h = DefaultHasher::new();
+                    for id in &task_ids {
+                        id.hash(&mut h);
+                    }
+                    h.finish()
+                };
+                let sig = format!("open_tasks:{}:{}", open_tasks.len(), task_ids_hash);
+                if let Some(reason) = self.handle_completion_rejection(sig, self.count_tasks()) {
                     return Some(reason);
                 }
                 self.state.completion_requested = false;
@@ -1180,7 +1195,7 @@ impl EventLoop {
         // Completion accepted — reset stale-breaker state.
         self.state.completion_rejection_signature = None;
         self.state.consecutive_completion_rejections = 0;
-        self.state.last_rejection_seen_topics_count = 0;
+        self.state.last_rejection_fingerprint = 0;
 
         info!("Completion event detected - terminating");
 
@@ -1218,13 +1233,23 @@ impl EventLoop {
 
     /// Tracks completion rejections for the stale-breaker mechanism.
     ///
-    /// If the same rejection signature repeats 3+ times with no new accepted
-    /// business events between rejections, returns `TerminationReason::LoopStale`
-    /// to prevent infinite API-burning loops.
-    fn handle_completion_rejection(&mut self, signature: String) -> Option<TerminationReason> {
-        let current_seen = self.state.seen_topics.len();
+    /// If the same rejection signature repeats 3+ times with no meaningful
+    /// progress between rejections (business events, task state changes,
+    /// workflow advancement, or state machine transitions), returns
+    /// `TerminationReason::LoopStale` to prevent infinite API-burning loops.
+    ///
+    /// `task_snapshot` is `(open_count, closed_count)` from the task store.
+    fn handle_completion_rejection(
+        &mut self,
+        signature: String,
+        task_snapshot: (usize, usize),
+    ) -> Option<TerminationReason> {
+        let mut fingerprint = self.state.compute_progress_fingerprint();
+        fingerprint.task_snapshot = task_snapshot;
+        let current_fp = fingerprint.hash();
+
         let is_same = self.state.completion_rejection_signature.as_ref() == Some(&signature);
-        let has_progress = current_seen > self.state.last_rejection_seen_topics_count;
+        let has_progress = current_fp != self.state.last_rejection_fingerprint;
 
         if is_same && !has_progress {
             self.state.consecutive_completion_rejections += 1;
@@ -1236,12 +1261,16 @@ impl EventLoop {
                 );
                 return Some(TerminationReason::LoopStale);
             }
+        } else if is_same && has_progress {
+            // Same rejection reason but progress was made — reset counter
+            self.state.consecutive_completion_rejections = 1;
         } else {
+            // Different rejection reason — reset counter
             self.state.consecutive_completion_rejections = 1;
         }
 
         self.state.completion_rejection_signature = Some(signature);
-        self.state.last_rejection_seen_topics_count = current_seen;
+        self.state.last_rejection_fingerprint = current_fp;
         None
     }
 
@@ -3087,7 +3116,7 @@ impl EventLoop {
         }
 
         // --- Scope enforcement ---
-        let mut events = if self.config.event_loop.execution_mode == HatExecutionMode::Isolated
+        let events = if self.config.event_loop.execution_mode == HatExecutionMode::Isolated
             && let Some(ref isolated_hat) = self.state.current_isolated_hat
         {
             // Isolated mode: hard-enforce current hat scope + single business event boundary
@@ -3108,7 +3137,8 @@ impl EventLoop {
                         | "loop.cancel"
                         | "task.resume"
                         | "build.task.abandoned"
-                ) || event.topic.as_str() == self.config.event_loop.completion_promise.as_str();
+                ) || event.topic.as_str()
+                    == self.config.event_loop.completion_promise.as_str();
 
                 if is_system_event {
                     accepted.push(event);
@@ -3156,16 +3186,25 @@ impl EventLoop {
             }
             accepted
         } else if self.config.event_loop.enforce_hat_scope {
-            // Coordinator mode: existing enforce_hat_scope logic (unchanged)
+            // Coordinator mode: scope enforcement with active_hats
             let active_hats = self.state.last_active_hat_ids.clone();
+            let completion = &self.config.event_loop.completion_promise;
+            let cancellation = &self.config.event_loop.cancellation_promise;
             let (in_scope, out_of_scope): (Vec<_>, Vec<_>) =
                 result.events.into_iter().partition(|event| {
                     if active_hats.is_empty() {
-                        return true; // Ralph coordinating — no scope restriction
+                        // No active hat: only allow control topics and completion promise.
+                        // This prevents arbitrary business events from entering the pipeline
+                        // without hat provenance between orchestration cycles.
+                        crate::event_origin::is_jsonl_control_topic(
+                            event.topic.as_str(),
+                            cancellation,
+                        ) || event.topic.as_str() == completion.as_str()
+                    } else {
+                        active_hats
+                            .iter()
+                            .any(|hat_id| self.registry.can_publish(hat_id, event.topic.as_str()))
                     }
-                    active_hats
-                        .iter()
-                        .any(|hat_id| self.registry.can_publish(hat_id, event.topic.as_str()))
                 });
 
             for event in &out_of_scope {
@@ -3198,6 +3237,7 @@ impl EventLoop {
             events,
             &self.registry,
             &self.config.event_loop.cancellation_promise,
+            &self.config.event_loop.completion_promise,
         );
         // --- End origin guard ---
 
@@ -4130,6 +4170,7 @@ impl EventLoop {
             wave_events,
             &self.registry,
             &self.config.event_loop.cancellation_promise,
+            &self.config.event_loop.completion_promise,
         );
 
         // --- Event policy validation for wave events ---

@@ -14,8 +14,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use indicatif::{ProgressBar, ProgressStyle};
 use ralph_adapters::{CliBackend, detect_backend_default};
-use ralph_core::{HatRegistry, RalphConfig, truncate_with_ellipsis};
 use ralph_core::preset_validator;
+use ralph_core::{HatRegistry, RalphConfig, truncate_with_ellipsis};
 use std::collections::HashSet;
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -103,12 +103,20 @@ pub async fn execute(
         Some(HatsCommands::Show(show_args)) => {
             show_hat(&mut stdout, &config_registry, &show_args.name, use_colors)
         }
-        Some(HatsCommands::Validate) => {
-            validate_hats(&mut stdout, &config, &runtime_registry, &config_registry, use_colors)
-        }
-        Some(HatsCommands::Graph { format, backend }) => {
-            graph_hats(&mut stdout, &config, &runtime_registry, format, backend.as_deref())
-        }
+        Some(HatsCommands::Validate) => validate_hats(
+            &mut stdout,
+            &config,
+            &runtime_registry,
+            &config_registry,
+            use_colors,
+        ),
+        Some(HatsCommands::Graph { format, backend }) => graph_hats(
+            &mut stdout,
+            &config,
+            &runtime_registry,
+            format,
+            backend.as_deref(),
+        ),
     }
 }
 
@@ -119,7 +127,11 @@ fn list_hats_json<W: Write>(writer: &mut W, config_registry: &HatRegistry) -> Re
     Ok(())
 }
 
-fn list_hats<W: Write>(writer: &mut W, config_registry: &HatRegistry, _use_colors: bool) -> Result<()> {
+fn list_hats<W: Write>(
+    writer: &mut W,
+    config_registry: &HatRegistry,
+    _use_colors: bool,
+) -> Result<()> {
     if config_registry.is_empty() {
         writeln!(
             writer,
@@ -776,7 +788,14 @@ mod tests {
         let config = RalphConfig::default();
         let mut buf = Vec::new();
 
-        graph_hats(&mut buf, &config, &config_registry, GraphFormat::Compact, None).unwrap();
+        graph_hats(
+            &mut buf,
+            &config,
+            &config_registry,
+            GraphFormat::Compact,
+            None,
+        )
+        .unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         assert!(output.contains("Graph:"));
@@ -796,7 +815,14 @@ mod tests {
         let config = RalphConfig::default();
         let mut buf = Vec::new();
 
-        graph_hats(&mut buf, &config, &config_registry, GraphFormat::Ascii, None).unwrap();
+        graph_hats(
+            &mut buf,
+            &config,
+            &config_registry,
+            GraphFormat::Ascii,
+            None,
+        )
+        .unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         // AI-generated output should contain the node names
@@ -812,7 +838,14 @@ mod tests {
         let config = RalphConfig::default();
         let mut buf = Vec::new();
 
-        graph_hats(&mut buf, &config, &config_registry, GraphFormat::Unicode, None).unwrap();
+        graph_hats(
+            &mut buf,
+            &config,
+            &config_registry,
+            GraphFormat::Unicode,
+            None,
+        )
+        .unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         // AI-generated output should contain node names

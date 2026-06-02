@@ -218,6 +218,50 @@ hats:
       All work complete. Output: LOOP_COMPLETE
 ```
 
+### Required Events (All-of Gate)
+
+`required_events` defines a list of topics that **all** must have appeared at least once before `LOOP_COMPLETE` is accepted. This is an **all-of** gate, not any-of: every listed topic must be satisfied.
+
+```yaml
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["report.done"]
+```
+
+When the agent emits `LOOP_COMPLETE` and any required event has not been seen, the orchestrator rejects the completion and injects a `task.resume` event with a message like:
+
+```
+LOOP_COMPLETE rejected: missing required events: ["report.done"].
+The agent must complete all workflow phases before emitting LOOP_COMPLETE.
+Use loop.cancel to abort the workflow instead.
+```
+
+**How to choose required events:**
+
+Select a convergence topic -- one that lies on every successful completion path. Avoid leaf topics that only one path emits.
+
+```mermaid
+flowchart LR
+    task.start --> A[builder]
+    A -->|build.done| B{pass?}
+    B -->|yes| C[reporter]
+    B -->|no| D[fixer]
+    D -->|fix.applied| C
+    C -->|report.done| E[LOOP_COMPLETE]
+```
+
+In this graph, `report.done` is the convergence topic. Both the pass path and the fix path converge on the reporter, which emits `report.done`. Using `fix.applied` as a required event would be incorrect because the pass path never emits it.
+
+**Validation:**
+
+Use `ralph hats validate` to verify that each required event is on all completion paths. The validator builds a topology graph of topics and hats, then checks that blocking any required topic (and all hats that publish it) makes completion unreachable. If a required event can be bypassed, the validator reports an error.
+
+```bash
+ralph hats validate -H presets/my-workflow.yml
+```
+
+See [Presets](../guide/presets.md) for detailed guidance on creating presets with `required_events`.
+
 ## Common Patterns
 
 ### Pipeline
@@ -414,6 +458,47 @@ hats:
     triggers: ["*"]
     instructions: "Test, lint, deploy, document..."
 ```
+
+## Completion Gate
+
+The `completion_promise` (default: `LOOP_COMPLETE`) defines the event that terminates the loop. You can configure additional gates using `required_events`:
+
+```yaml
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  required_events:
+    - "report.done"
+```
+
+### All-Of Semantics
+
+`required_events` uses **all-of** semantics — the loop only terminates when every listed event has appeared on the event bus. This prevents premature completion before critical workflow stages finish.
+
+Choose a **convergence topic** that every successful completion path emits. For example, `report.done` is a good convergence topic because the reporter hat is the last hat in the chain before `LOOP_COMPLETE`.
+
+### Mutually Exclusive Events
+
+Do not use mutually exclusive branch events (e.g., `review.passed` + `review.complete`) as required events. If two events come from different execution branches, no single path emits both. The topology validator (`ralph hats validate`) detects this and rejects such configurations.
+
+### Validating Your Topology
+
+Use `ralph hats validate` to verify your event topology before running:
+
+```bash
+# Validate a hat collection file
+ralph hats validate -H .ralph/hats/my-workflow.yml
+
+# Validate a builtin preset
+ralph hats validate -H builtin:ce-executor
+```
+
+The validator checks:
+1. The starting event reaches at least one hat
+2. The completion promise is reachable from the starting event
+3. All required events are on every completion path
+4. No orphan or dead-end topics
+
+The same check also runs during `ralph preflight` and `ralph run` (as `preset-topology`), so bad configurations fail before any backend API call.
 
 ## Next Steps
 
