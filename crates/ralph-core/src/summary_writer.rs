@@ -68,7 +68,7 @@ impl SummaryWriter {
     pub fn from_context(context: &LoopContext) -> Self {
         Self {
             path: context.summary_path(),
-            events_path: Some(context.events_path()),
+            events_path: Some(context.resolve_events_path()),
         }
     }
 
@@ -158,8 +158,12 @@ impl SummaryWriter {
         // Tasks section (read from scratchpad if available)
         content.push('\n');
         content.push_str("## Tasks\n\n");
-        if let Some(tasks) = scratchpad_path.and_then(|p| self.extract_tasks(p)) {
-            content.push_str(&tasks);
+        if let Some(path) = scratchpad_path {
+            if let Some(tasks) = self.extract_tasks(path) {
+                content.push_str(&tasks);
+            } else {
+                content.push_str("_Scratchpad found, but no task section extracted._\n");
+            }
         } else {
             content.push_str("_No scratchpad found._\n");
         }
@@ -270,13 +274,17 @@ impl SummaryWriter {
             None => EventHistory::default_path(),
         };
 
+        if !history.path().exists() {
+            return "_No event history file found._\n".to_string();
+        }
+
         let records = match history.read_all() {
             Ok(r) => r,
-            Err(_) => return "_No event history found._\n".to_string(),
+            Err(_) => return "_Event history file exists but could not be read._\n".to_string(),
         };
 
         if records.is_empty() {
-            return "_No events recorded._\n".to_string();
+            return "_Event history file is empty._\n".to_string();
         }
 
         // Count events by topic
@@ -486,5 +494,136 @@ More text here.
         assert!(content.contains("**Open tasks:** 2"));
         assert!(content.contains("**Stashes cleared:** 2"));
         assert!(content.contains("**Working tree clean:** Yes"));
+    }
+
+    #[test]
+    fn test_scratchpad_exists_but_no_tasks() {
+        let tmp = TempDir::new().unwrap();
+        let scratchpad = tmp.path().join("scratchpad.md");
+        fs::write(&scratchpad, "# Notes\n\nSome notes without task list.\n").unwrap();
+
+        let writer = SummaryWriter::default();
+        let state = test_state();
+
+        let content = writer.generate_content_with_landing(
+            &TerminationReason::CompletionPromise,
+            &state,
+            Some(&scratchpad),
+            None,
+            None,
+        );
+
+        assert!(content.contains("_Scratchpad found, but no task section extracted._"));
+        assert!(!content.contains("_No scratchpad found._"));
+    }
+
+    #[test]
+    fn test_events_file_missing() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("summary.md");
+
+        // Point to a non-existent events file
+        let writer = SummaryWriter::new(&path);
+        let state = test_state();
+
+        let content = writer.generate_content_with_landing(
+            &TerminationReason::CompletionPromise,
+            &state,
+            None,
+            None,
+            None,
+        );
+
+        assert!(content.contains("_No event history file found._"));
+    }
+
+    #[test]
+    fn test_events_file_empty() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("summary.md");
+        let events_path = tmp.path().join("events.jsonl");
+        fs::write(&events_path, "").unwrap();
+
+        let mut writer = SummaryWriter::new(&path);
+        writer.events_path = Some(events_path);
+        let state = test_state();
+
+        let content = writer.generate_content_with_landing(
+            &TerminationReason::CompletionPromise,
+            &state,
+            None,
+            None,
+            None,
+        );
+
+        assert!(content.contains("_Event history file is empty._"));
+    }
+
+    #[test]
+    fn test_from_context_resolves_timestamped_events_via_marker() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = tmp.path().to_path_buf();
+
+        // Create a LoopContext (primary)
+        let ctx = LoopContext::primary(workspace.clone());
+
+        // Create .ralph directory and write the current-events marker
+        fs::create_dir_all(ctx.ralph_dir()).unwrap();
+        let timestamped_events = workspace.join(".ralph/events-20250101-120000.jsonl");
+        fs::write(
+            &timestamped_events,
+            r#"{"ts":"2025-01-01T12:00:00Z","topic":"build.task","payload":{}}"#,
+        )
+        .unwrap();
+        fs::write(
+            ctx.current_events_marker(),
+            ".ralph/events-20250101-120000.jsonl\n",
+        )
+        .unwrap();
+
+        let writer = SummaryWriter::from_context(&ctx);
+        let state = test_state();
+
+        let content = writer.generate_content_with_landing(
+            &TerminationReason::CompletionPromise,
+            &state,
+            None,
+            None,
+            None,
+        );
+
+        // Should find the event via the marker, not report "No event history file found"
+        assert!(
+            content.contains("1 total events"),
+            "Expected to find 1 event from timestamped file, but got:\n{}",
+            content
+        );
+        assert!(
+            !content.contains("_No event history file found._"),
+            "Should not report missing file when marker points to existing events"
+        );
+    }
+
+    #[test]
+    fn test_from_context_falls_back_when_marker_missing() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = tmp.path().to_path_buf();
+
+        let ctx = LoopContext::primary(workspace.clone());
+        fs::create_dir_all(ctx.ralph_dir()).unwrap();
+
+        // No marker, no default events.jsonl → should report missing
+        let writer = SummaryWriter::from_context(&ctx);
+        let state = test_state();
+
+        let content = writer.generate_content_with_landing(
+            &TerminationReason::CompletionPromise,
+            &state,
+            None,
+            None,
+            None,
+        );
+
+        assert!(content.contains("_No event history file found._"));
     }
 }

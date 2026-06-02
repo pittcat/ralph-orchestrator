@@ -20,7 +20,7 @@
 //! // Primary loop - no special action
 //! let primary = LoopContext::primary(PathBuf::from("/project"));
 //! let handler = LoopCompletionHandler::new(true); // auto_merge enabled
-//! let action = handler.handle_completion(&primary, "implement auth").unwrap();
+//! let action = handler.handle_completion(&primary, "implement auth", None).unwrap();
 //! assert!(matches!(action, CompletionAction::None));
 //!
 //! // Worktree loop with auto-merge - enqueues to merge queue
@@ -29,7 +29,7 @@
 //!     PathBuf::from("/project/.worktrees/ralph-20250124-a3f2"),
 //!     PathBuf::from("/project"),
 //! );
-//! let action = handler.handle_completion(&worktree, "implement auth").unwrap();
+//! let action = handler.handle_completion(&worktree, "implement auth", None).unwrap();
 //! assert!(matches!(action, CompletionAction::Enqueued { .. }));
 //! ```
 
@@ -134,6 +134,7 @@ impl LoopCompletionHandler {
     ///
     /// * `context` - The loop context (primary or worktree)
     /// * `prompt` - The prompt that was executed (for merge queue metadata)
+    /// * `base_commit` - Optional base commit for scoped handoff file listing
     ///
     /// # Returns
     ///
@@ -142,9 +143,10 @@ impl LoopCompletionHandler {
         &self,
         context: &LoopContext,
         prompt: &str,
+        base_commit: Option<&str>,
     ) -> Result<CompletionAction, CompletionError> {
         // Execute landing sequence first (for all loops)
-        let landing_result = self.execute_landing(context, prompt);
+        let landing_result = self.execute_landing(context, prompt, base_commit);
 
         // Primary loops complete with landing only
         if context.is_primary() {
@@ -228,10 +230,10 @@ impl LoopCompletionHandler {
     /// Executes the landing sequence.
     ///
     /// Returns the landing result if successful, or None if landing failed.
-    fn execute_landing(&self, context: &LoopContext, prompt: &str) -> Option<LandingResult> {
+    fn execute_landing(&self, context: &LoopContext, prompt: &str, base_commit: Option<&str>) -> Option<LandingResult> {
         let handler = LandingHandler::new(context.clone());
 
-        match handler.land(prompt) {
+        match handler.land(prompt, base_commit) {
             Ok(result) => {
                 if result.committed {
                     info!(
@@ -305,7 +307,7 @@ mod tests {
         context.ensure_directories().unwrap();
         let handler = LoopCompletionHandler::new(true);
 
-        let action = handler.handle_completion(&context, "test prompt").unwrap();
+        let action = handler.handle_completion(&context, "test prompt", None).unwrap();
         // Primary loops now return Landed instead of None
         assert!(
             matches!(action, CompletionAction::Landed { .. }),
@@ -332,7 +334,7 @@ mod tests {
         let handler = LoopCompletionHandler::new(true); // auto_merge enabled
 
         let action = handler
-            .handle_completion(&context, "implement feature X")
+            .handle_completion(&context, "implement feature X", None)
             .unwrap();
 
         match action {
@@ -365,7 +367,7 @@ mod tests {
 
         let handler = LoopCompletionHandler::new(false); // auto_merge disabled
 
-        let action = handler.handle_completion(&context, "test prompt").unwrap();
+        let action = handler.handle_completion(&context, "test prompt", None).unwrap();
 
         match action {
             CompletionAction::ManualMerge {
@@ -423,7 +425,7 @@ mod tests {
 
         let handler = LoopCompletionHandler::new(true);
 
-        let action = handler.handle_completion(&context, "add feature").unwrap();
+        let action = handler.handle_completion(&context, "add feature", None).unwrap();
 
         // Should enqueue successfully
         assert!(matches!(action, CompletionAction::Enqueued { .. }));
@@ -488,7 +490,7 @@ mod tests {
 
         let handler = LoopCompletionHandler::new(true);
 
-        let action = handler.handle_completion(&context, "no changes").unwrap();
+        let action = handler.handle_completion(&context, "no changes", None).unwrap();
 
         assert!(matches!(action, CompletionAction::Enqueued { .. }));
 

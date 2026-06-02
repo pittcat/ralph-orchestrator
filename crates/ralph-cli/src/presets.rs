@@ -1380,4 +1380,104 @@ mod tests {
              autoresearch/<goal-slug>` instruction either."
         );
     }
+
+    #[test]
+    fn test_ce_executor_dimension_reviewer_timeout_is_900() {
+        // R1: dimension-reviewer must have explicit timeout to avoid default 300s.
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
+        let reviewer = config
+            .hats
+            .get("dimension-reviewer")
+            .expect("ce-executor must define a 'dimension-reviewer' hat");
+        assert_eq!(
+            reviewer.timeout,
+            Some(900),
+            "dimension-reviewer timeout must be explicitly set to 900 seconds"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_root_preset_matches_embedded() {
+        // Mirror-drift guard: the root preset and embedded mirror must stay in sync.
+        let root_content = read_root_preset("ce-executor.yml");
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        assert_eq!(
+            root_content, preset.content,
+            "Root presets/ce-executor.yml must match crates/ralph-cli/presets/ce-executor.yml. \
+             Run ./scripts/sync-embedded-files.sh to sync."
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_zh_dimension_reviewer_timeout_is_900() {
+        let content = read_root_preset("ce-executor-zh.yml");
+        let config = RalphConfig::parse_yaml(&content).expect("ce-executor-zh YAML should parse");
+        let reviewer = config
+            .hats
+            .get("dimension-reviewer")
+            .expect("ce-executor-zh must define a 'dimension-reviewer' hat");
+        assert_eq!(
+            reviewer.timeout,
+            Some(900),
+            "ce-executor-zh dimension-reviewer timeout must be explicitly set to 900 seconds"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_has_hard_commit_cadence() {
+        // R3: executor must have hard commit cadence rule.
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let content = preset.content;
+        assert!(
+            content.contains("Commit Cadence (HARD RULE)"),
+            "ce-executor must contain 'Commit Cadence (HARD RULE)'"
+        );
+        assert!(
+            content.contains("Do NOT batch multiple U-IDs"),
+            "ce-executor must forbid batching multiple U-IDs"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_has_preflight_contract() {
+        // R4: executor must validate hard prerequisites before implementation.
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let content = preset.content;
+        assert!(
+            content.contains("Preflight Contract (HARD RULE)"),
+            "ce-executor must contain 'Preflight Contract (HARD RULE)'"
+        );
+        assert!(
+            content.contains("preflight check failed"),
+            "ce-executor must reference preflight check failure"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_zh_has_hard_commit_cadence() {
+        let content = read_root_preset("ce-executor-zh.yml");
+        assert!(
+            content.contains("提交节奏（硬性规则）"),
+            "ce-executor-zh must contain hard commit cadence rule"
+        );
+        assert!(
+            content.contains("禁止将多个 U-ID 合并为一个 commit"),
+            "ce-executor-zh must forbid batching multiple U-IDs"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_zh_has_preflight_contract() {
+        let content = read_root_preset("ce-executor-zh.yml");
+        assert!(
+            content.contains("前置检查契约（硬性规则）"),
+            "ce-executor-zh must contain preflight contract"
+        );
+        assert!(
+            content.contains("preflight check failed"),
+            "ce-executor-zh must reference preflight check failure"
+        );
+    }
 }

@@ -9,7 +9,7 @@
 //! This enables clean session boundaries and seamless handoffs between
 //! Ralph loops, supporting the "land the plane" pattern.
 
-use crate::git_ops::{get_commit_summary, get_current_branch, get_head_sha, get_recent_files};
+use crate::git_ops::{get_changed_files_between, get_commit_summary, get_current_branch, get_head_sha, get_recent_files};
 use crate::loop_context::LoopContext;
 use crate::task::{Task, TaskStatus};
 use crate::task_store::TaskStore;
@@ -44,12 +44,28 @@ pub enum HandoffError {
 /// Generates handoff files for session continuity.
 pub struct HandoffWriter {
     context: LoopContext,
+    base_commit: Option<String>,
 }
 
 impl HandoffWriter {
     /// Creates a new handoff writer for the given loop context.
     pub fn new(context: LoopContext) -> Self {
-        Self { context }
+        Self {
+            context,
+            base_commit: None,
+        }
+    }
+
+    /// Creates a handoff writer with an explicit base commit.
+    ///
+    /// When a base commit is set, the "Recently modified" section uses
+    /// `git diff --name-only <base>..HEAD` instead of the recent-files fallback,
+    /// ensuring only files changed during this loop are listed.
+    pub fn with_base_commit(context: LoopContext, base_commit: impl Into<String>) -> Self {
+        Self {
+            context,
+            base_commit: Some(base_commit.into()),
+        }
     }
 
     /// Generates the handoff file with session context.
@@ -199,7 +215,13 @@ impl HandoffWriter {
 
     /// Writes key files that were modified.
     fn write_key_files(&self, content: &mut String) {
-        match get_recent_files(self.context.workspace(), 10) {
+        let files_result = if let Some(ref base) = self.base_commit {
+            get_changed_files_between(self.context.workspace(), base, "HEAD", 10)
+        } else {
+            get_recent_files(self.context.workspace(), 10)
+        };
+
+        match files_result {
             Ok(files) if !files.is_empty() => {
                 content.push_str("Recently modified:\n\n");
                 for file in files {
@@ -403,5 +425,72 @@ mod tests {
         assert_eq!(truncate_prompt(prompt, 3), "x...");
         // truncate at 4 bytes should keep "x✅"
         assert_eq!(truncate_prompt(prompt, 4), "x✅...");
+    }
+
+    #[test]
+    fn test_handoff_with_base_commit_shows_only_loop_changes() {
+        use std::process::Command;
+
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+
+        // Init git repo
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.local"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+
+        // Create base commit (before loop)
+        fs::write(dir.join("base.txt"), "base").unwrap();
+        Command::new("git")
+            .args(["add", "base.txt"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "Base commit"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+
+        let base = crate::git_ops::get_head_sha(dir).unwrap();
+
+        // Create a change during the loop
+        fs::write(dir.join("loop_change.txt"), "changed").unwrap();
+        Command::new("git")
+            .args(["add", "loop_change.txt"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "Loop change"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+
+        // Also create a dirty file (not committed)
+        fs::write(dir.join("dirty.txt"), "dirty").unwrap();
+
+        let ctx = LoopContext::primary(dir.to_path_buf());
+        ctx.ensure_directories().unwrap();
+
+        let writer = HandoffWriter::with_base_commit(ctx.clone(), &base);
+        writer.write("Test prompt").unwrap();
+
+        let content = fs::read_to_string(ctx.handoff_path()).unwrap();
+        assert!(content.contains("loop_change.txt"), "Should list loop change: {}", content);
+        assert!(!content.contains("base.txt"), "Should NOT list base commit file: {}", content);
+        assert!(!content.contains("dirty.txt"), "Should NOT list dirty file: {}", content);
     }
 }

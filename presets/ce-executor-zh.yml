@@ -119,7 +119,9 @@ hats:
       - 只有验证通过后才能执行事件发布
 
       ### 事件发布
-      - 发布 `work.ready`，payload 包含 `plan_path`、`plan_name`、`complexity`
+      - 发布 `work.ready`，payload 包含：
+        - `plan_path`、`plan_name`、`complexity`
+        - `preflight_checks`：执行器在实现前必须验证的硬性前置条件列表
       - 停止，不继续执行其他工作
       - **发布 work.ready 后立即停止**——不得继续执行任何其他工作，包括模拟其他 hat 的行为或发其他事件
 
@@ -147,6 +149,16 @@ hats:
       2. 读取 runtime task：`ralph tools task show <task_id> --format json`
       3. 读取 `context.md`、`plan.md`、`progress.md`
       4. 搜索 memories 获取相关模式
+
+      ### 前置检查契约（硬性规则）
+      如果 `work.ready` 或 `queue.advance` 的 payload 包含 `preflight_checks`：
+      1. 执行每项检查，并将结果记录到 `context.md` 或 `decisions.md`
+      2. 如有检查失败且本次迭代无法解决：
+         - 发布 `work.failed`，`reason: "preflight check failed: <detail>"`
+         - 停止，不再继续实现
+      3. 如某项前置条件只能由用户验证：
+         - 停止并发布 `work.failed`，`reason: "hard prerequisite requires user verification: <detail>"`
+         - 不得静默假设已满足
 
       ### 环境设置
       - 检查当前分支并记录到 context.md
@@ -186,22 +198,28 @@ hats:
       - 其他接口是否暴露相同功能（Mixin、DSL、替代入口点）
       - 错误策略在各层是否一致
 
-      ### 增量提交策略
-      在以下时机提交：
-      - 逻辑单元完成（model、service、component）
-      - 测试通过 + 有意义的进展
+      ### 提交节奏（硬性规则）
+      每个通过测试的 Implementation Unit（U-ID）必须独立提交。
+      禁止将多个 U-ID 合并为一个 commit。
+
+      提交时机：
+      - 某个 U-ID 完成且测试通过
       - 即将切换上下文（backend → frontend）
       - 即将尝试风险/不确定的改动
 
       不提交：
-      - 大单元的小部分完成
+      - 当前 U-ID 的部分完成
       - 测试失败
       - 纯脚手架，无行为变更
 
       提交流程：
       1. 验证测试通过
       2. `git add <相关文件>`（不要 `git add .`）
-      3. `git commit -m "feat(scope): description"`
+      3. `git commit -m "feat(scope): U-ID 描述"`
+      4. 在 `progress.md` 的已完成 U-ID 下记录 commit hash
+
+      例外：如果当前 runtime task 明确表示一个跨迭代的未完成逻辑单元，
+      可以推迟到逻辑单元完成后再提交。将推迟原因记录到 `decisions.md`。
 
       ### Simplify As You Go
       - 每 2-3 个相关的 Implementation Units（或 phase boundary），检查最近改动的文件
@@ -304,6 +322,7 @@ hats:
     triggers: ["review.wave.ready"]
     publishes: ["review.dimension.done"]
     concurrency: 4
+    timeout: 900
     instructions: |
       ## DIMENSION REVIEWER MODE — 专注的 {dimension} 审查
 
@@ -463,6 +482,8 @@ hats:
     default_publishes: "review.complete"
     aggregate:
       mode: wait_for_all
+      # 注意：此 timeout 仅控制 synthesizer 等待所有维度结果到达的时间，
+      # 不控制 wave worker 的单次超时。worker 超时由 dimension-reviewer.timeout 控制。
       timeout: 300
     instructions: |
       ## REVIEW SYNTHESIZER MODE — 合并、去重和路由

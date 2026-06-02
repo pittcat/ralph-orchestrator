@@ -127,7 +127,9 @@ hats:
       - 只有验证通过后才能执行 Event Publishing
 
       ### Event Publishing
-      - Publish `work.ready` with payload: `plan_path`, `plan_name`, `complexity`
+      - Publish `work.ready` with payload:
+        - `plan_path`, `plan_name`, `complexity`
+        - `preflight_checks`: list of hard prerequisites the executor must verify before implementation
       - Stop — do not continue to other work
       - **发布 work.ready 后立即停止**——不得继续执行任何其他工作，包括模拟其他 hat 的行为或发其他事件
 
@@ -156,6 +158,16 @@ hats:
       2. Read runtime task: `ralph tools task show <task_id> --format json`
       3. Read `context.md` and `plan.md` and `progress.md`
       4. Search memories for relevant patterns
+
+      ### Preflight Contract (HARD RULE)
+      If the `work.ready` or `queue.advance` payload contains `preflight_checks`:
+      1. Execute each check and record results in `context.md` or `decisions.md`
+      2. If any check fails and cannot be resolved this iteration:
+         - Publish `work.failed` with `reason: "preflight check failed: <detail>"`
+         - Stop — do not proceed to implementation
+      3. If a prerequisite can only be verified by the user:
+         - Stop and publish `work.failed` with `reason: "hard prerequisite requires user verification: <detail>"`
+         - Do NOT silently assume it is satisfied
 
       ### Environment Setup
       - Check current branch: `git branch --show-current`
@@ -200,22 +212,29 @@ hats:
       - What other interfaces expose this? Mixins, DSLs, alternative entry points
       - Do error strategies align across layers? Retry middleware + app fallback + framework error handling
 
-      ### Incremental Commit Strategy
+      ### Commit Cadence (HARD RULE)
+      Each Implementation Unit (U-ID) that passes its tests MUST be committed independently.
+      Do NOT batch multiple U-IDs into a single commit.
+
       Commit when:
-      - Logical unit complete (model, service, component)
-      - Tests pass + meaningful progress
+      - A U-ID is complete and its tests pass
       - About to switch context (backend → frontend)
       - About to attempt risky/uncertain changes
 
       Do NOT commit when:
-      - Partial progress on a large unit
+      - Partial progress on the current U-ID
       - Tests failing
       - Pure scaffolding with no behavior
 
       Commit flow:
       1. Verify tests pass
       2. `git add <relevant files>` (not `git add .`)
-      3. `git commit -m "feat(scope): description"`
+      3. `git commit -m "feat(scope): U-ID description"`
+      4. Record the commit hash in `progress.md` under the completed U-ID
+
+      Exception: If the current runtime task explicitly represents an incomplete logical
+      unit that spans multiple iterations, you may defer the commit until the logical
+      unit is complete. Document the deferral reason in `decisions.md`.
 
       ### Simplify As You Go
       - Every 2-3 related Implementation Units (or phase boundary), review recent files for simplification
@@ -343,6 +362,7 @@ hats:
     triggers: ["review.wave.ready"]
     publishes: ["review.dimension.done"]
     concurrency: 4
+    timeout: 900
     instructions: |
       ## DIMENSION REVIEWER MODE — Focused {dimension} Review
 
@@ -530,6 +550,9 @@ hats:
     default_publishes: "review.complete"
     aggregate:
       mode: wait_for_all
+      # NOTE: This timeout controls how long the synthesizer waits for ALL dimension
+      # results to arrive. It does NOT control individual wave worker timeout.
+      # Worker timeout is governed by dimension-reviewer.timeout (above).
       timeout: 300
     instructions: |
       ## REVIEW SYNTHESIZER MODE — Merge, Deduplicate, Calibrate, Validate, and Route

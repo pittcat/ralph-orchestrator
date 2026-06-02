@@ -787,6 +787,9 @@ pub async fn run_loop_impl(
         }
     }
 
+    // Record base commit at loop start for accurate handoff scope (base..HEAD)
+    let base_commit = ralph_core::get_head_sha(&ctx.workspace()).ok();
+
     // Helper closure to handle termination (writes summary, prints status, records history)
     let handle_termination = |reason: &TerminationReason,
                               state: &ralph_core::LoopState,
@@ -796,10 +799,18 @@ pub async fn run_loop_impl(
                               auto_merge: bool,
                               prompt: &str| {
         // Per spec: Write summary file on termination
-        let summary_writer = SummaryWriter::default();
-        let scratchpad_path = std::path::Path::new(scratchpad);
+        let summary_writer = if let Some(ctx) = context {
+            SummaryWriter::from_context(ctx)
+        } else {
+            SummaryWriter::default()
+        };
+        let scratchpad_path = if let Some(ctx) = context {
+            ctx.scratchpad_path()
+        } else {
+            PathBuf::from(scratchpad)
+        };
         let scratchpad_opt = if scratchpad_path.exists() {
-            Some(scratchpad_path)
+            Some(scratchpad_path.as_path())
         } else {
             None
         };
@@ -913,7 +924,7 @@ pub async fn run_loop_impl(
         if let Some(ctx) = context {
             if merge_loop_id.is_none() && matches!(reason, TerminationReason::CompletionPromise) {
                 let handler = LoopCompletionHandler::new(auto_merge);
-                match handler.handle_completion(ctx, prompt) {
+                match handler.handle_completion(ctx, prompt, base_commit.as_deref()) {
                     Ok(CompletionAction::None) => {
                         debug!("Loop completed, no action needed");
                     }
@@ -4543,17 +4554,7 @@ fn extract_pi_stream_text(raw_output: &str) -> String {
 ///
 /// Falls back to `ctx.events_path()` if the marker is missing/unreadable.
 fn resolve_current_events_path(ctx: &LoopContext) -> PathBuf {
-    fs::read_to_string(ctx.current_events_marker())
-        .ok()
-        .map(|relative| {
-            let relative = relative.trim().to_string();
-            if std::path::Path::new(&relative).is_relative() {
-                ctx.workspace().join(relative)
-            } else {
-                PathBuf::from(relative)
-            }
-        })
-        .unwrap_or_else(|| ctx.events_path())
+    ctx.resolve_events_path()
 }
 
 fn current_candidate_events_marker(ctx: &LoopContext) -> PathBuf {

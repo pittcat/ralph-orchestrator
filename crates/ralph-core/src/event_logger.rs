@@ -312,9 +312,10 @@ impl EventHistory {
     /// Creates a history reader using the events path from a LoopContext.
     ///
     /// This ensures the reader looks in the correct location when running
-    /// in a worktree or other isolated workspace.
+    /// in a worktree or other isolated workspace. Respects the
+    /// `current-events` marker if present.
     pub fn from_context(context: &LoopContext) -> Self {
-        Self::new(context.events_path())
+        Self::new(context.resolve_events_path())
     }
 
     /// Returns true if the history file exists.

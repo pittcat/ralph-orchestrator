@@ -175,6 +175,30 @@ impl LoopContext {
         self.ralph_dir().join("current-events")
     }
 
+    /// Resolves the active events JSONL file path for this run.
+    ///
+    /// The authoritative source is `.ralph/current-events`, which contains a
+    /// relative path like `.ralph/events-YYYYMMDD-HHMMSS.jsonl`.
+    ///
+    /// Falls back to `self.events_path()` if the marker is missing or unreadable.
+    pub fn resolve_events_path(&self) -> PathBuf {
+        std::fs::read_to_string(self.current_events_marker())
+            .ok()
+            .and_then(|relative| {
+                let relative = relative.trim();
+                if relative.is_empty() {
+                    return None;
+                }
+                let path = std::path::Path::new(relative);
+                Some(if path.is_relative() {
+                    self.workspace().join(path)
+                } else {
+                    path.to_path_buf()
+                })
+            })
+            .unwrap_or_else(|| self.events_path())
+    }
+
     /// Path to the urgent-steer marker file.
     ///
     /// This file is created when `!` arrives during an active iteration so
@@ -794,6 +818,69 @@ mod tests {
             ctx.current_events_marker(),
             PathBuf::from("/project/.ralph/current-events")
         );
+    }
+
+    #[test]
+    fn test_resolve_events_path_fallback_when_marker_missing() {
+        let temp = TempDir::new().unwrap();
+        let ctx = LoopContext::primary(temp.path().to_path_buf());
+
+        // No marker file → falls back to events_path()
+        assert_eq!(ctx.resolve_events_path(), ctx.events_path());
+    }
+
+    #[test]
+    fn test_resolve_events_path_from_marker() {
+        let temp = TempDir::new().unwrap();
+        let ctx = LoopContext::primary(temp.path().to_path_buf());
+
+        // Create marker with relative path
+        std::fs::create_dir_all(ctx.ralph_dir()).unwrap();
+        let marker_path = ctx.current_events_marker();
+        std::fs::write(&marker_path, ".ralph/events-20250101-120000.jsonl\n").unwrap();
+
+        let resolved = ctx.resolve_events_path();
+        assert_eq!(
+            resolved,
+            temp.path().join(".ralph/events-20250101-120000.jsonl")
+        );
+    }
+
+    #[test]
+    fn test_resolve_events_path_from_marker_empty_content() {
+        let temp = TempDir::new().unwrap();
+        let ctx = LoopContext::primary(temp.path().to_path_buf());
+
+        // Empty marker → falls back
+        std::fs::create_dir_all(ctx.ralph_dir()).unwrap();
+        std::fs::write(ctx.current_events_marker(), "").unwrap();
+
+        assert_eq!(ctx.resolve_events_path(), ctx.events_path());
+    }
+
+    #[test]
+    fn test_resolve_events_path_from_marker_whitespace_only() {
+        let temp = TempDir::new().unwrap();
+        let ctx = LoopContext::primary(temp.path().to_path_buf());
+
+        // Whitespace-only marker → falls back
+        std::fs::create_dir_all(ctx.ralph_dir()).unwrap();
+        std::fs::write(ctx.current_events_marker(), "   \n  ").unwrap();
+
+        assert_eq!(ctx.resolve_events_path(), ctx.events_path());
+    }
+
+    #[test]
+    fn test_resolve_events_path_from_marker_absolute_path() {
+        let temp = TempDir::new().unwrap();
+        let ctx = LoopContext::primary(temp.path().to_path_buf());
+
+        // Absolute path in marker
+        std::fs::create_dir_all(ctx.ralph_dir()).unwrap();
+        let abs_path = temp.path().join("custom/events.jsonl");
+        std::fs::write(ctx.current_events_marker(), abs_path.to_str().unwrap()).unwrap();
+
+        assert_eq!(ctx.resolve_events_path(), abs_path);
     }
 
     #[test]

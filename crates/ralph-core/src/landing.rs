@@ -110,12 +110,14 @@ impl LandingHandler {
     /// # Arguments
     ///
     /// * `prompt` - The original prompt that started this loop
+    /// * `base_commit` - Optional base commit for scoped handoff file listing
+    ///   (`base..HEAD` instead of recent-files fallback)
     ///
     /// # Returns
     ///
     /// A `LandingResult` with details about what was done, or an error if
     /// a critical step failed.
-    pub fn land(&self, prompt: &str) -> Result<LandingResult, LandingError> {
+    pub fn land(&self, prompt: &str, base_commit: Option<&str>) -> Result<LandingResult, LandingError> {
         let workspace = self.context.workspace();
         let loop_id = self.context.loop_id().unwrap_or("primary").to_string();
 
@@ -181,7 +183,10 @@ impl LandingHandler {
 
         // Step 4: Generate handoff prompt
         let handoff_path = if self.config.generate_handoff {
-            let writer = HandoffWriter::new(self.context.clone());
+            let writer = match base_commit {
+                Some(base) => HandoffWriter::with_base_commit(self.context.clone(), base),
+                None => HandoffWriter::new(self.context.clone()),
+            };
             match writer.write(prompt) {
                 Ok(result) => {
                     info!(
@@ -296,7 +301,7 @@ mod tests {
         let (_temp, ctx) = setup_test_context();
         let handler = LandingHandler::new(ctx.clone());
 
-        let result = handler.land("Test prompt").unwrap();
+        let result = handler.land("Test prompt", None).unwrap();
 
         assert!(!result.committed); // No changes to commit (.ralph/ is gitignored)
         assert!(result.commit_sha.is_none());
@@ -313,7 +318,7 @@ mod tests {
         fs::write(temp.path().join("new_file.txt"), "content").unwrap();
 
         let handler = LandingHandler::new(ctx.clone());
-        let result = handler.land("Test prompt").unwrap();
+        let result = handler.land("Test prompt", None).unwrap();
 
         assert!(result.committed);
         assert!(result.commit_sha.is_some());
@@ -331,7 +336,7 @@ mod tests {
         store.save().unwrap();
 
         let handler = LandingHandler::new(ctx.clone());
-        let result = handler.land("Test prompt").unwrap();
+        let result = handler.land("Test prompt", None).unwrap();
 
         assert_eq!(result.open_tasks.len(), 1);
     }
@@ -349,7 +354,7 @@ mod tests {
             .unwrap();
 
         let handler = LandingHandler::new(ctx.clone());
-        let result = handler.land("Test prompt").unwrap();
+        let result = handler.land("Test prompt", None).unwrap();
 
         assert_eq!(result.stashes_cleared, 1);
     }
@@ -369,7 +374,7 @@ mod tests {
         };
 
         let handler = LandingHandler::with_config(ctx.clone(), config);
-        let result = handler.land("Test prompt").unwrap();
+        let result = handler.land("Test prompt", None).unwrap();
 
         assert!(!result.committed); // Auto-commit disabled
         assert!(!result.working_tree_clean); // Changes still there
@@ -391,7 +396,7 @@ mod tests {
         store.save().unwrap();
 
         let handler = LandingHandler::new(ctx.clone());
-        let result = handler.land("Original prompt here").unwrap();
+        let result = handler.land("Original prompt here", None).unwrap();
 
         let content = fs::read_to_string(&result.handoff_path).unwrap();
 
@@ -421,7 +426,7 @@ mod tests {
         ctx.ensure_directories().unwrap();
 
         let handler = LandingHandler::new(ctx.clone());
-        let result = handler.land("Worktree prompt").unwrap();
+        let result = handler.land("Worktree prompt", None).unwrap();
 
         // Handoff should be in the worktree's agent dir
         assert!(result.handoff_path.to_string_lossy().contains(".worktrees"));

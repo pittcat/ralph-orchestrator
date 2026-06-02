@@ -352,6 +352,44 @@ pub fn get_commit_summary(path: impl AsRef<Path>) -> Result<String, GitOpsError>
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Get a list of files that were modified between two commits.
+///
+/// Returns up to `limit` files changed in the range `base..head`.
+///
+/// # Arguments
+///
+/// * `path` - Path to the git repository (or worktree)
+/// * `base` - Base commit/ref
+/// * `head` - Head commit/ref
+/// * `limit` - Maximum number of files to return
+pub fn get_changed_files_between(
+    path: impl AsRef<Path>,
+    base: &str,
+    head: &str,
+    limit: usize,
+) -> Result<Vec<String>, GitOpsError> {
+    let path = path.as_ref();
+
+    let output = Command::new("git")
+        .args(["diff", "--name-only", &format!("{}..{}", base, head), "--"])
+        .current_dir(path)
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(GitOpsError::Git(stderr.to_string()));
+    }
+
+    let files: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| !line.is_empty())
+        .take(limit)
+        .map(String::from)
+        .collect();
+
+    Ok(files)
+}
+
 /// Get a list of files that were modified in the most recent commits.
 ///
 /// Returns up to `limit` most recently modified files.
@@ -765,5 +803,42 @@ mod tests {
             "Got: {:?}",
             files
         );
+    }
+
+    #[test]
+    fn test_get_changed_files_between() {
+        let temp = TempDir::new().unwrap();
+        init_git_repo(temp.path());
+
+        // Get base commit (initial commit)
+        let base = get_head_sha(temp.path()).unwrap();
+
+        // Create and commit a new file
+        fs::write(temp.path().join("feature.txt"), "content").unwrap();
+        Command::new("git")
+            .args(["add", "feature.txt"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "Add feature"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        let files = get_changed_files_between(temp.path(), &base, "HEAD", 10).unwrap();
+        assert_eq!(files, vec!["feature.txt"]);
+    }
+
+    #[test]
+    fn test_get_changed_files_between_empty_range() {
+        let temp = TempDir::new().unwrap();
+        init_git_repo(temp.path());
+
+        let base = get_head_sha(temp.path()).unwrap();
+
+        // No new commits — range should be empty
+        let files = get_changed_files_between(temp.path(), &base, "HEAD", 10).unwrap();
+        assert!(files.is_empty());
     }
 }
