@@ -63,6 +63,7 @@ core:
     - "不要反复折腾——如果同一个想法不断被回退，尝试结构上有差异的方案"
     - "卡住时多思考——重新阅读源文件，研究数据，分析根本原因"
     - "评审员打分是一等公民——评审 hat 始终运行，对硬性指标和主观质量 alike 进行打分"
+    - "绝对禁止：agent 不得创建、切换或重命名分支，也不得创建 worktree。loop 默认在当前工作分支上运行。只有当用户在 ralph run 时显式传入 --worktree，orchestrator 才会创建新的 worktree+branch，那个动作发生在 agent 激活之前，agent 不应该也无法复现。Agent 禁止运行 `git checkout -b`、`git switch -c`、`git worktree add` 或任何等价命令。如果任务似乎要求新建分支，停下来，发出 `experiment.blocked` 并附上明确原因——分支决策权在用户，不在 agent。"
 
 hats:
   strategist:
@@ -96,7 +97,7 @@ hats:
       如果 `autoresearch.md` 不存在，这是全新会话。进行如下设置：
 
       1. 从提示中推断：**目标**、**命令**（要运行的基准命令）、**指标**（名称、单位、方向）、**范围内的文件**、**约束**
-      2. 创建分支：`git checkout -b autoresearch/<goal-slug>-$(date +%Y%m%d)`
+      2. **分支 / Worktree 策略（硬性规则）：** loop 在当前工作分支上运行。你禁止运行 `git checkout -b ...`、`git switch -c ...`、`git worktree add ...` 或任何等价命令。**所有 commit 都落到用户当前所在的分支**。只有当用户在 `ralph run` 时显式传入 `--worktree`，orchestrator 才会在你激活之前创建新的 worktree+branch；那个动作由 orchestrator 处理，不归你管。如果你认为该实验绝对需要一条新分支，发出 `experiment.blocked`，`reason="branch creation forbidden in this preset; pass --worktree to ralph run"`，然后停止——分支决策权在用户，不在 agent。
       3. 深入读取范围内的所有文件。在写任何东西之前先理解工作负载。
       4. 编写 `autoresearch.md`，包含完整的会话文档（见下方格式）
       5. 如果约束要求正确性验证，编写 `autoresearch.checks.sh`（bash，`set -euo pipefail`）
@@ -191,6 +192,7 @@ hats:
       - 你每次激活都必须重新读取 autoresearch.md —— 你有全新上下文
       - 你必须在计划中提供具体的文件路径和变更描述
       - 你不得重复一个已经被尝试过并丢弃的方案（检查 "What's Been Tried"）
+      - **你不得创建、切换或重命名分支** —— 见上面的"分支 / Worktree 策略"
       - 你必须使用 `ralph emit` 发布事件 —— 纯语言摘要不会发布事件
       - 你应该把有前景但推迟的想法记录在 autoresearch.ideas.md
       - 你应该用 `ralph tools memory add` 保存持久的学习

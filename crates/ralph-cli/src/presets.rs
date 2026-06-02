@@ -1315,4 +1315,69 @@ mod tests {
              executor also does not create branches in this preset."
         );
     }
+
+    #[test]
+    fn test_autoresearch_forbids_agent_branch_creation() {
+        // Guard: autoresearch must NOT tell the strategist hat to run
+        // `git checkout -b autoresearch/...` during fresh-session setup.
+        // Branching is reserved for the user via `ralph run --worktree`.
+        // Regression: the original preset had step 2 of "Fresh Session" read
+        // "Create a branch: `git checkout -b autoresearch/<goal-slug>-$(date +%Y%m%d)`"
+        // which the agent dutifully executed, polluting the user's branch.
+        let preset = get_preset("autoresearch").expect("autoresearch preset should exist");
+        let content = preset.content;
+
+        // Top-level guardrail carries the prohibition
+        assert!(
+            content.contains("NEVER create, switch, or rename branches")
+                && content.contains("`git checkout -b`")
+                && content.contains("`git worktree add`"),
+            "autoresearch guardrails must explicitly forbid branch creation by the \
+             agent. Run ./scripts/sync-embedded-files.sh if the canonical file has \
+             the policy but the embedded mirror does not."
+        );
+
+        // Strategist's Fresh Session section must contain a Branch / Worktree
+        // Policy block instead of the old "Create a branch" instruction.
+        assert!(
+            content.contains("Branch / Worktree Policy (HARD RULE)"),
+            "autoresearch strategist must carry a Branch / Worktree Policy block in \
+             the Fresh Session section."
+        );
+
+        // The exact regression line must be absent.
+        assert!(
+            !content.contains("git checkout -b autoresearch/<goal-slug>"),
+            "autoresearch must NOT tell the strategist to run \
+             `git checkout -b autoresearch/<goal-slug>-...`. Branching is reserved \
+             for `ralph run --worktree`."
+        );
+
+        // The Chinese translation preset must stay in parity with English
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let zh_path = std::path::Path::new(manifest_dir)
+            .join("..")
+            .join("..")
+            .join("presets")
+            .join("autoresearch-zh.yml");
+        let zh_content = std::fs::read_to_string(&zh_path).unwrap_or_else(|e| {
+            panic!(
+                "failed to read autoresearch-zh preset at {}: {}",
+                zh_path.display(),
+                e
+            )
+        });
+        assert!(
+            zh_content.contains("绝对禁止")
+                && zh_content.contains("git checkout -b")
+                && zh_content.contains("git worktree add"),
+            "autoresearch-zh must translate the Branch / Worktree Policy so docs \
+             stay in sync with the English preset."
+        );
+        assert!(
+            !zh_content.contains("git checkout -b autoresearch/<goal-slug>"),
+            "autoresearch-zh must NOT contain the old `git checkout -b \
+             autoresearch/<goal-slug>` instruction either."
+        );
+    }
 }

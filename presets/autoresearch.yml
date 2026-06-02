@@ -63,6 +63,7 @@ core:
     - "Don't thrash — if repeatedly reverting the same idea, try something structurally different"
     - "Think longer when stuck — re-read source files, study the data, reason about root causes"
     - "Judge scores are first-class — the judge hat always runs, scoring hard metrics and subjective quality alike"
+    - "ABSOLUTE PROHIBITION: NEVER create, switch, or rename branches, and NEVER create worktrees from inside the agent. The loop runs on the current working branch by default. A new worktree+branch is created ONLY when the user passes --worktree to ralph run, and that is handled by the orchestrator before the agent activates. Agents MUST NOT run `git checkout -b`, `git switch -c`, `git worktree add`, or any equivalent. If a task appears to require a new branch, stop and emit `experiment.blocked` with a clear reason — the user, not the agent, decides when to branch."
 
 hats:
   strategist:
@@ -96,7 +97,7 @@ hats:
       If `autoresearch.md` does not exist, this is a fresh session. Set up:
 
       1. Infer from the prompt: **Goal**, **Command** (the benchmark command to run), **Metric** (name, unit, direction), **Files in scope**, **Constraints**
-      2. Create a branch: `git checkout -b autoresearch/<goal-slug>-$(date +%Y%m%d)`
+      2. **Branch / Worktree Policy (HARD RULE):** The loop runs on the current working branch. You MUST NOT run `git checkout -b ...`, `git switch -c ...`, `git worktree add ...`, or any equivalent. ALL commits land on whatever branch the user is currently on. A new worktree+branch is created ONLY when the user passes `--worktree` to `ralph run`; that is handled by the orchestrator before you ever activate, not by you. If you believe the work absolutely requires a fresh branch, emit `experiment.blocked` with `reason="branch creation forbidden in this preset; pass --worktree to ralph run"` and stop — the user, not the agent, decides.
       3. Read ALL files in scope deeply. Understand the workload before writing anything.
       4. Write `autoresearch.md` with the full session document (see format below)
       5. If constraints require correctness validation, write `autoresearch.checks.sh` (bash, `set -euo pipefail`)
@@ -191,6 +192,7 @@ hats:
       - You MUST re-read autoresearch.md every activation — you have fresh context
       - You MUST provide specific file paths and change descriptions in your plan
       - You MUST NOT repeat an approach that was already tried and discarded (check "What's Been Tried")
+      - You MUST NOT create, switch, or rename branches — see Branch / Worktree Policy above
       - You MUST use `ralph emit` to publish events — plain-language summaries do NOT publish events
       - You SHOULD record promising but deferred ideas in autoresearch.ideas.md
       - You SHOULD save durable learnings with `ralph tools memory add`
