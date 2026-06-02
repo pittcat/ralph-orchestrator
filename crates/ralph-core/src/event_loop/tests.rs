@@ -3903,7 +3903,7 @@ hats:
 }
 
 #[test]
-fn test_scope_enforcement_skipped_when_no_active_hats() {
+fn test_scope_enforcement_allows_only_control_when_no_active_hats() {
     use tempfile::TempDir;
 
     let temp_dir = TempDir::new().unwrap();
@@ -3933,6 +3933,16 @@ hats:
     assert!(
         event_loop.state.completion_requested,
         "LOOP_COMPLETE should be accepted when no active hats (Ralph coordinating)"
+    );
+
+    write_event_to_jsonl(&events_path, "build.done", "fake business event");
+    let processed = event_loop.process_events_from_jsonl().unwrap();
+    assert!(
+        !processed
+            .accepted_events
+            .iter()
+            .any(|event| event.topic.as_str() == "build.done"),
+        "business events without an active hat should be rejected in hat-based mode"
     );
 }
 

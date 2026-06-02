@@ -345,10 +345,22 @@ impl CollectionDomain {
 
         let pid = child.id();
 
-        // Wait briefly to check if the process died immediately.
+        // Wait briefly to check if the process died immediately. A single
+        // sleep can miss fast wrapper processes on busy CI machines, so poll
+        // for a short bounded window before treating the child as a live loop.
         let mut child = child;
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        match child.try_wait() {
+        let startup_status = {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break Ok(Some(status)),
+                    Ok(None) if std::time::Instant::now() >= deadline => break Ok(None),
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(25)),
+                    Err(error) => break Err(error),
+                }
+            }
+        };
+        match startup_status {
             Ok(Some(status)) if !status.success() => {
                 let mut stderr_output = String::new();
                 if let Some(mut stderr) = child.stderr.take() {
@@ -374,13 +386,18 @@ impl CollectionDomain {
                 };
                 return Err(ApiError::internal(message));
             }
-            _ => {
+            Ok(_) => {
                 // Still running or exited successfully. Detach a reaper so
                 // the eventual exit doesn't leave a zombie process — the
                 // API may outlive many loop runs.
                 std::thread::spawn(move || {
                     let _ = child.wait();
                 });
+            }
+            Err(error) => {
+                return Err(ApiError::internal(format!(
+                    "failed checking ralph run startup status: {error}"
+                )));
             }
         }
 
