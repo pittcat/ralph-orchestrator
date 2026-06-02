@@ -1268,4 +1268,51 @@ mod tests {
             reporter.publishes
         );
     }
+
+    #[test]
+    fn test_ce_executor_forbids_agent_branch_creation() {
+        // Guard: ce-executor must explicitly tell the agent NOT to create, switch,
+        // or rename branches, and NOT to create worktrees. Branching is reserved
+        // for the user via `ralph run --worktree`; the orchestrator handles it
+        // before the agent activates. The agent improvising a "git checkout -b
+        // feat/plan-name" or "git worktree add ..." was the original bug — see
+        // git history for "fix: ce-executor 禁建分支".
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let content = preset.content;
+
+        // Top-level guardrail must carry the prohibition
+        assert!(
+            content.contains("NEVER create, switch, or rename branches")
+                && content.contains("`git checkout -b`")
+                && content.contains("`git worktree add`"),
+            "ce-executor guardrails must explicitly forbid branch creation by the \
+             agent. Run ./scripts/sync-embedded-files.sh if the canonical file has \
+             the policy but the embedded mirror does not."
+        );
+
+        // Per-hat 'Environment Setup' / 'Environment Check' sections must each
+        // carry the Branch / Worktree Policy block. Coordinator must not delegate
+        // branch creation to executor; executor must not run git checkout -b.
+        for hat in ["coordinator", "executor"] {
+            assert!(
+                content.contains(&format!("{}:\n", hat))
+                    || content.contains(&format!("  {}:\n", hat)),
+                "ce-executor must define a '{}' hat section",
+                hat
+            );
+        }
+
+        // The "If not on a feature branch, create one (e.g., `feat/plan-name`)"
+        // line is the exact regression that caused the bug. It must be absent.
+        assert!(
+            !content.contains("create one (e.g., `feat/plan-name`)"),
+            "ce-executor must NOT instruct the executor to auto-create a feature \
+             branch. Branching is reserved for `ralph run --worktree`."
+        );
+        assert!(
+            !content.contains("Do not create branches (Executor handles that)"),
+            "ce-executor must NOT defer branch creation to the executor. The \
+             executor also does not create branches in this preset."
+        );
+    }
 }

@@ -50,6 +50,7 @@ core:
     - "KISS always — simplest solution that works"
     - "Confidence protocol: score decisions 0-100. >80 proceed autonomously; 50-80 proceed + document in .ralph/agent/decisions.md; <50 choose safe default + document."
     - "ABSOLUTE PROHIBITION: NEVER push to origin or any remote repository. Commit locally only. User handles all push/PR operations manually. This is a non-negotiable scope boundary."
+    - "ABSOLUTE PROHIBITION: NEVER create, switch, or rename branches, and NEVER create worktrees from inside the agent. The loop runs on the current working branch by default. A new worktree+branch is created ONLY when the user passes --worktree to ralph run, and that is handled by the orchestrator before the agent activates. Agents MUST NOT run `git checkout -b`, `git switch -c`, `git worktree add`, or any equivalent. If a task appears to require a new branch, stop and surface a work.failed with a clear reason — the user, not the agent, decides when to branch."
 
 hats:
   coordinator:
@@ -111,6 +112,12 @@ hats:
       - Record `start_sha = git rev-parse HEAD` in context.md (for review scope anchoring)
       - If recording fails, note `start_sha: unavailable` and reason in context.md
 
+      ### Branch / Worktree Policy (HARD RULE)
+      - **MUST NOT create, switch, or rename any branch.** Coordinator 阶段只做记录，不做 git checkout / git switch / git branch 任何动作。
+      - The loop runs in the current working branch by default. ALL commits land here.
+      - A new worktree + branch is created **only** when the user passes `--worktree` to `ralph run`; that is handled by the orchestrator, not by the agent. You cannot and must not replicate it.
+      - Do NOT run `git checkout -b ...`, `git switch -c ...`, `git worktree add ...`, or any equivalent. If a task seems to require a new branch, stop and publish `work.failed` with `reason: "branch creation forbidden in this preset; pass --worktree to ralph run"`.
+
       ### Pre-Publish Validation
       - **必选检查**: 执行 `ralph tools task list` 验证步骤 1 的 runtime tasks 已创建
       - 如果 task list 为空或命令失败（说明 `ralph tools task ensure` 未被正确执行）：
@@ -130,6 +137,7 @@ hats:
       - MUST NOT modify the plan file
       - MUST complete all file creation and task creation before publishing `work.ready`
       - **MUST NOT publish events for any hat other than coordinator** (work.ready or work.failed only)
+      - **MUST NOT create, switch, or rename branches** — see Branch / Worktree Policy above
 
   executor:
     name: "⚙️ Executor"
@@ -150,7 +158,14 @@ hats:
       4. Search memories for relevant patterns
 
       ### Environment Setup
-      - Check current branch and record in context.md
+      - Check current branch: `git branch --show-current`
+      - Record branch name in `context.md` (read-only — do NOT modify it)
+
+      ### Branch / Worktree Policy (HARD RULE)
+      - **MUST NOT create, switch, or rename any branch.** All commits go to the current working branch.
+      - The loop runs in the current working branch by default. A new worktree + branch is created **only** when the user passes `--worktree` to `ralph run`; that is handled by the orchestrator before you ever activate, not by you.
+      - Do NOT run `git checkout -b ...`, `git switch -c ...`, `git worktree add ...`, or any equivalent — even if the current branch name "looks wrong" or the work feels large. "Looks like a feature branch would be cleaner" is **not** a justification.
+      - If a task seems to require a new branch, stop, record the reason in `decisions.md`, and publish `work.failed` with `reason: "branch creation forbidden in this preset; pass --worktree to ralph run"`. Let the user decide.
 
       ### Complexity Routing
       **Trivial** (`complexity: trivial`):
@@ -225,6 +240,7 @@ hats:
       - Tests before implementation (test-first mode)
       - No features outside task description
       - Code in repo, docs in shared directory
+      - **MUST NOT create, switch, or rename branches** — see Branch / Worktree Policy above
 
       ### Confidence-Based Decision Protocol
       - Score decisions 0-100
