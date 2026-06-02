@@ -714,7 +714,7 @@ hats:
     name: "Executor"
     triggers: ["work.ready", "queue.advance", "work.retry"]
     publishes: ["work.done", "work.failed"]
-    default_publishes: "work.done"
+    default_publishes: "work.failed"
   review-coordinator:
     name: "Review Coordinator"
     triggers: ["work.done", "fix.applied"]

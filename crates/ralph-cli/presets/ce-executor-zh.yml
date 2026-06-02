@@ -142,7 +142,7 @@ hats:
     description: "遵循 plan 内容进行 TDD 实现，每次迭代一个 runtime task。"
     triggers: ["work.ready", "queue.advance", "work.retry"]
     publishes: ["work.done", "work.failed"]
-    default_publishes: "work.done"
+    default_publishes: "work.failed"
     instructions: |
       ## EXECUTOR MODE — 基于 Plan 驱动的任务执行
 

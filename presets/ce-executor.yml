@@ -151,7 +151,7 @@ hats:
     description: "TDD implementer following plan content, one runtime task per iteration."
     triggers: ["work.ready", "queue.advance", "work.retry"]
     publishes: ["work.done", "work.failed"]
-    default_publishes: "work.done"
+    default_publishes: "work.failed"
     instructions: |
       ## EXECUTOR MODE — Plan-Driven Task Execution
 

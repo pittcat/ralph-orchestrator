@@ -1115,6 +1115,40 @@ mod tests {
     }
 
     #[test]
+    fn test_ce_executor_executor_default_publishes_failure_not_success() {
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
+        let executor = config
+            .hats
+            .get("executor")
+            .expect("ce-executor should define executor hat");
+
+        assert_eq!(
+            executor.default_publishes.as_deref(),
+            Some("work.failed"),
+            "executor must not default to work.done; a missing emit means implementation did not complete"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_executor_default_publishes_failure_not_success_for_root_preset() {
+        let root_content = read_root_preset("ce-executor.yml");
+        let config =
+            RalphConfig::parse_yaml(&root_content).expect("root ce-executor YAML should parse");
+        let executor = config
+            .hats
+            .get("executor")
+            .expect("root ce-executor should define executor hat");
+
+        assert_eq!(
+            executor.default_publishes.as_deref(),
+            Some("work.failed"),
+            "root ce-executor must match the embedded preset and fail closed when executor emits nothing"
+        );
+    }
+
+    #[test]
     fn test_ce_executor_publish_chain_origin_compatible() {
         // Verify ce-executor's normal publish chain survives origin guard
         let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
