@@ -714,7 +714,7 @@ hats:
     name: "Executor"
     triggers: ["work.ready", "queue.advance", "work.retry"]
     publishes: ["work.done", "work.failed"]
-    default_publishes: "work.failed"
+    # U2: default_publishes removed — executor MUST explicitly emit
   review-coordinator:
     name: "Review Coordinator"
     triggers: ["work.done", "fix.applied"]

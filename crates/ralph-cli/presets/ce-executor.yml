@@ -151,7 +151,8 @@ hats:
     description: "TDD implementer following plan content, one runtime task per iteration."
     triggers: ["work.ready", "queue.advance", "work.retry"]
     publishes: ["work.done", "work.failed"]
-    default_publishes: "work.failed"
+    # U2: default_publishes removed — executor MUST explicitly emit work.done or work.failed.
+    # No-event gate (U1) will trigger if agent forgets to emit.
     instructions: |
       ## EXECUTOR MODE — Plan-Driven Task Execution
 

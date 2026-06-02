@@ -142,7 +142,8 @@ hats:
     description: "遵循 plan 内容进行 TDD 实现，每次迭代一个 runtime task。"
     triggers: ["work.ready", "queue.advance", "work.retry"]
     publishes: ["work.done", "work.failed"]
-    default_publishes: "work.failed"
+    # U2: default_publishes 已移除 — 执行器必须显式 emit work.done 或 work.failed。
+    # 无事件 gate (U1) 会在 agent 忘记 emit 时触发。
     instructions: |
       ## EXECUTOR MODE — 基于 Plan 驱动的任务执行
 

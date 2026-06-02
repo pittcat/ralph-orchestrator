@@ -1123,6 +1123,201 @@ pub struct EventLoopConfig {
     /// check is performed — preserves backward compatibility.
     #[serde(default)]
     pub verdict_gate: Option<VerdictGateConfig>,
+
+    /// Opt-in execution contracts for validating agent completion obligations.
+    ///
+    /// When configured, Ralph validates that `work.done` events carry the required
+    /// payload fields, the referenced task is closed, and git state is consistent
+    /// before the event can trigger downstream hats.
+    #[serde(default)]
+    pub execution_contracts: Option<ExecutionContractsConfig>,
+}
+
+/// Execution contract configuration for validating agent completion obligations.
+///
+/// Each rule in `rules` maps an event topic (e.g. "work.done") to its validation
+/// requirements. Rules are only applied when the matching topic is published.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutionContractsConfig {
+    /// When true, execution contracts are enforced. When false (default), contracts
+    /// are parsed but not applied, preserving backward compatibility.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Topic-level contract rules. Key is the event topic (e.g. "work.done").
+    #[serde(default)]
+    pub rules: std::collections::HashMap<String, ExecutionContractRule>,
+}
+
+/// A single execution contract rule for one topic.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutionContractRule {
+    /// Fields that must be present in the event payload.
+    #[serde(default)]
+    pub require_payload_fields: Vec<String>,
+
+    /// Task completion requirements.
+    #[serde(default)]
+    pub require_task: TaskCompletionRequirement,
+
+    /// Git change requirements.
+    #[serde(default)]
+    pub require_git_change: GitChangeRequirement,
+
+    /// Test evidence requirements.
+    #[serde(default)]
+    pub require_test_evidence: TestEvidenceRequirement,
+
+    /// What to publish when the contract is rejected.
+    #[serde(default)]
+    pub reject: ContractRejectConfig,
+}
+
+impl Default for ExecutionContractRule {
+    fn default() -> Self {
+        Self {
+            require_payload_fields: Vec::new(),
+            require_task: TaskCompletionRequirement::default(),
+            require_git_change: GitChangeRequirement::default(),
+            require_test_evidence: TestEvidenceRequirement::default(),
+            reject: ContractRejectConfig::default(),
+        }
+    }
+}
+
+impl Default for ExecutionContractsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            rules: std::collections::HashMap::new(),
+        }
+    }
+}
+
+/// Task completion requirement for execution contract validation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskCompletionRequirement {
+    /// JSON field name containing the task ID.
+    #[serde(default = "default_task_id_field")]
+    pub id_field: String,
+
+    /// JSON field name containing the task key.
+    #[serde(default = "default_task_key_field")]
+    pub key_field: String,
+
+    /// When true, the task must belong to the current loop.
+    #[serde(default = "default_loop_scoped")]
+    pub loop_scoped: bool,
+
+    /// Terminal task statuses that satisfy the contract.
+    #[serde(default = "default_allowed_terminal_statuses")]
+    pub allowed_terminal_statuses: Vec<String>,
+
+    /// When true, automatically close the task if contract is satisfied.
+    #[serde(default)]
+    pub auto_close_on_valid: bool,
+}
+
+impl Default for TaskCompletionRequirement {
+    fn default() -> Self {
+        Self {
+            id_field: default_task_id_field(),
+            key_field: default_task_key_field(),
+            loop_scoped: default_loop_scoped(),
+            allowed_terminal_statuses: default_allowed_terminal_statuses(),
+            auto_close_on_valid: false,
+        }
+    }
+}
+
+fn default_task_id_field() -> String {
+    "task_id".to_string()
+}
+
+fn default_task_key_field() -> String {
+    "task_key".to_string()
+}
+
+fn default_loop_scoped() -> bool {
+    true
+}
+
+fn default_allowed_terminal_statuses() -> Vec<String> {
+    vec!["closed".to_string()]
+}
+
+/// Git change requirement for execution contract validation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitChangeRequirement {
+    /// Mode of git evidence acceptance.
+    #[serde(default = "default_git_change_mode")]
+    pub mode: String,
+
+    /// Steps that are allowed to have empty diff or commit.
+    #[serde(default)]
+    pub allow_empty_for_steps: Vec<String>,
+}
+
+impl Default for GitChangeRequirement {
+    fn default() -> Self {
+        Self {
+            mode: default_git_change_mode(),
+            allow_empty_for_steps: Vec::new(),
+        }
+    }
+}
+
+fn default_git_change_mode() -> String {
+    "diff_or_commit".to_string()
+}
+
+/// Test evidence requirement for execution contract validation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TestEvidenceRequirement {
+    /// Mode: "optional" or "required_payload_field".
+    #[serde(default = "default_test_evidence_mode")]
+    pub mode: String,
+}
+
+impl Default for TestEvidenceRequirement {
+    fn default() -> Self {
+        Self {
+            mode: default_test_evidence_mode(),
+        }
+    }
+}
+
+fn default_test_evidence_mode() -> String {
+    "optional".to_string()
+}
+
+/// What to publish when an execution contract is rejected.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContractRejectConfig {
+    /// Topic for the structured rejection diagnostic event.
+    #[serde(default = "default_reject_diagnostic_topic")]
+    pub diagnostic_topic: String,
+
+    /// Topic for the human-readable guidance event.
+    #[serde(default = "default_reject_guidance_topic")]
+    pub guidance_topic: String,
+}
+
+impl Default for ContractRejectConfig {
+    fn default() -> Self {
+        Self {
+            diagnostic_topic: default_reject_diagnostic_topic(),
+            guidance_topic: default_reject_guidance_topic(),
+        }
+    }
+}
+
+fn default_reject_diagnostic_topic() -> String {
+    "event.execution_contract.rejected".to_string()
+}
+
+fn default_reject_guidance_topic() -> String {
+    "human.guidance".to_string()
 }
 
 /// Verdict gate: when the most recent event matching `topic` carries
@@ -1603,6 +1798,7 @@ impl Default for EventLoopConfig {
             state_machine: None,
             phase_config: None,
             verdict_gate: None,
+            execution_contracts: None,
         }
     }
 }
@@ -3659,6 +3855,92 @@ tui:
         let result = tui_config.parse_prefix();
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Invalid prefix_key format"));
+    }
+
+    #[test]
+    fn test_execution_contract_config_disabled_by_default() {
+        // U3: execution_contracts is disabled when not configured
+        let yaml = r#"
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            config.event_loop.execution_contracts.is_none(),
+            "execution_contracts should be None when not configured"
+        );
+    }
+
+    #[test]
+    fn test_execution_contract_config_full_rule() {
+        // U3: full work.done contract config parses correctly
+        let yaml = r#"
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  execution_contracts:
+    enabled: true
+    rules:
+      work.done:
+        require_payload_fields: ["plan_name", "plan_path", "task_id", "task_key", "step"]
+        require_task:
+          id_field: "task_id"
+          key_field: "task_key"
+          loop_scoped: true
+          allowed_terminal_statuses: ["closed"]
+          auto_close_on_valid: false
+        require_git_change:
+          mode: diff_or_commit
+          allow_empty_for_steps: ["trivial"]
+        require_test_evidence:
+          mode: optional
+        reject:
+          diagnostic_topic: "event.execution_contract.rejected"
+          guidance_topic: "human.guidance"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let contracts = config.event_loop.execution_contracts.expect("should have contracts");
+        assert!(contracts.enabled, "contracts should be enabled");
+
+        let rule = contracts.rules.get("work.done").expect("work.done rule should exist");
+        assert_eq!(
+            rule.require_payload_fields,
+            vec!["plan_name", "plan_path", "task_id", "task_key", "step"],
+            "payload fields should match"
+        );
+        assert!(rule.require_task.loop_scoped, "task should be loop-scoped");
+        assert_eq!(
+            rule.require_task.allowed_terminal_statuses,
+            vec!["closed"],
+            "allowed terminal statuses should be [closed]"
+        );
+        assert_eq!(
+            rule.require_git_change.mode, "diff_or_commit",
+            "git change mode should be diff_or_commit"
+        );
+    }
+
+    #[test]
+    fn test_execution_contract_config_minimal() {
+        // U3: minimal execution contract with defaults
+        let yaml = r#"
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  execution_contracts:
+    rules:
+      work.done:
+        require_payload_fields: ["task_id"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let contracts = config.event_loop.execution_contracts.expect("should have contracts");
+        assert!(!contracts.enabled, "contracts should default to disabled");
+
+        let rule = contracts.rules.get("work.done").expect("work.done rule should exist");
+        assert_eq!(rule.require_payload_fields, vec!["task_id"]);
+        // Check defaults
+        assert_eq!(rule.require_task.id_field, "task_id");
+        assert_eq!(rule.require_task.loop_scoped, true);
+        assert_eq!(rule.require_git_change.mode, "diff_or_commit");
+        assert_eq!(rule.reject.diagnostic_topic, "event.execution_contract.rejected");
     }
 
     #[test]

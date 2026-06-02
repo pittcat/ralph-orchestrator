@@ -1115,7 +1115,9 @@ mod tests {
     }
 
     #[test]
-    fn test_ce_executor_executor_default_publishes_failure_not_success() {
+    fn test_ce_executor_executor_has_no_default_publishes() {
+        // U2: executor must NOT have default_publishes — it must explicitly emit.
+        // The no-event gate (U1) handles the "forgot to emit" case instead.
         let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
@@ -1124,15 +1126,15 @@ mod tests {
             .get("executor")
             .expect("ce-executor should define executor hat");
 
-        assert_eq!(
-            executor.default_publishes.as_deref(),
-            Some("work.failed"),
-            "executor must not default to work.done; a missing emit means implementation did not complete"
+        assert!(
+            executor.default_publishes.is_none(),
+            "executor must NOT have default_publishes; explicit emit is required"
         );
     }
 
     #[test]
-    fn test_ce_executor_executor_default_publishes_failure_not_success_for_root_preset() {
+    fn test_ce_executor_executor_has_no_default_publishes_for_root_preset() {
+        // U2: root preset must match embedded preset
         let root_content = read_root_preset("ce-executor.yml");
         let config =
             RalphConfig::parse_yaml(&root_content).expect("root ce-executor YAML should parse");
@@ -1141,10 +1143,9 @@ mod tests {
             .get("executor")
             .expect("root ce-executor should define executor hat");
 
-        assert_eq!(
-            executor.default_publishes.as_deref(),
-            Some("work.failed"),
-            "root ce-executor must match the embedded preset and fail closed when executor emits nothing"
+        assert!(
+            executor.default_publishes.is_none(),
+            "root ce-executor executor must have no default_publishes"
         );
     }
 

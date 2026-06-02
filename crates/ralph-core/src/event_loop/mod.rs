@@ -18,6 +18,9 @@ use crate::event_policy::{
     PolicyDecision, PolicyRuntimeState, check_completion_guard, check_completion_honored,
     validate_event,
 };
+use crate::execution_contract::{
+    validate_execution_contract, ExecutionContractDecision, ExecutionContractFinding,
+};
 use crate::event_reader::{Event as JsonlEvent, EventReader};
 use crate::hat_registry::HatRegistry;
 use crate::hatless_ralph::HatlessRalph;
@@ -49,6 +52,8 @@ pub struct ProcessedEvents {
     pub has_orphans: bool,
     /// Events accepted by runtime validation and published to the bus.
     pub accepted_events: Vec<Event>,
+    /// Findings from execution contract rejections (U5).
+    pub contract_rejections: Vec<ExecutionContractFinding>,
 }
 
 /// Result of processing events from JSONL with wave events partitioned out.
@@ -3112,6 +3117,7 @@ impl EventLoop {
                 human_interact_context: None,
                 has_orphans: false,
                 accepted_events: Vec::new(),
+                contract_rejections: Vec::new(),
             });
         }
 
@@ -3368,6 +3374,90 @@ impl EventLoop {
                 }
             }
         }
+
+        // --- Execution contract validation (U5): validate work.done before publishing ---
+        // This runs after all other validation layers, before record/publish.
+        // Contract rejection publishes diagnostic + guidance but does NOT record/publish the original.
+        let execution_contracts = self.config.event_loop.execution_contracts.as_ref();
+        let contracts_enabled = execution_contracts
+            .as_ref()
+            .is_some_and(|c| c.enabled);
+        let mut contract_rejections: Vec<ExecutionContractFinding> = Vec::new();
+        let events = if contracts_enabled {
+            let contracts = execution_contracts.unwrap();
+            let current_loop_id = self
+                .loop_context
+                .as_ref()
+                .and_then(|ctx| ctx.loop_id().map(String::from))
+                .unwrap_or_else(|| "default".to_string());
+            let workspace_root = std::path::Path::new(&self.config.core.workspace_root);
+            let tasks_path = self.tasks_path();
+
+            let mut accepted: Vec<JsonlEvent> = Vec::with_capacity(events.len());
+            for event in events {
+                // Check if this topic has a contract rule
+                if let Some(rule) = contracts.rules.get(event.topic.as_str()) {
+                    let proto_event = Event::new(event.topic.as_str(), event.payload.as_deref().unwrap_or(""));
+                    let decision = validate_execution_contract(
+                        &proto_event,
+                        rule,
+                        workspace_root,
+                        current_loop_id.as_str(),
+                        &tasks_path,
+                        self.state.last_active_hat_ids.first().map(|h| h.as_str()),
+                    );
+                    match decision {
+                        ExecutionContractDecision::Accept => {
+                            accepted.push(event);
+                        }
+                        ExecutionContractDecision::Reject(findings) => {
+                            // Publish rejection diagnostic and guidance, do NOT accept the event
+                            let finding = &findings[0];
+                            warn!(
+                                topic = %event.topic,
+                                violation = ?finding.kind,
+                                "Execution contract rejected event"
+                            );
+
+                            // Publish structured diagnostic
+                            let diagnostic_topic = rule.reject.diagnostic_topic.clone();
+                            let diagnostic_payload = serde_json::json!({
+                                "topic": event.topic.as_str(),
+                                "finding": findings,
+                                "rejected_at": chrono::Utc::now().to_rfc3339(),
+                            });
+                            let diagnostic_event = Event::new(
+                                diagnostic_topic.as_str(),
+                                diagnostic_payload.to_string(),
+                            );
+                            self.bus.publish(diagnostic_event);
+
+                            // Publish human-readable guidance
+                            let guidance_payload = format!(
+                                "Execution contract rejection for '{}': {}\n\n\
+                                 To proceed, either:\n\
+                                 1. Fix the issue and emit '{}' again with correct payload, OR\n\
+                                 2. Emit 'work.failed' if the work cannot be completed.",
+                                event.topic.as_str(),
+                                finding.message,
+                                event.topic.as_str(),
+                            );
+                            let guidance_event = Event::new(rule.reject.guidance_topic.as_str(), guidance_payload);
+                            self.bus.publish(guidance_event);
+
+                            contract_rejections.push(finding.clone());
+                        }
+                    }
+                } else {
+                    // No contract rule for this topic — pass through
+                    accepted.push(event);
+                }
+            }
+            accepted
+        } else {
+            events
+        };
+        // --- End execution contract validation ---
 
         let mut has_orphans = false;
 
@@ -4119,6 +4209,7 @@ impl EventLoop {
             human_interact_context,
             has_orphans,
             accepted_events: accepted_log_events,
+            contract_rejections,
         })
     }
 

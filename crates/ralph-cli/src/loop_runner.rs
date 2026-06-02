@@ -2767,7 +2767,30 @@ pub async fn run_loop_impl(
         // claimed to emit and we want it to learn to do so, not be bailed out.
         // Prefer the displayed execution hat first so a non-emitting turn still
         // falls back to the hat the user actually saw in the banner.
-        if !agent_wrote_events && wave_events.is_empty() && !hard_gate_triggered_this_iteration {
+        //
+        // MISSING-EVENT GATE (U1): Regardless of whether output mentioned `ralph emit`,
+        // if the hat has a publish obligation but no default_publishes fallback,
+        // hard gate on missing events. This catches the "completely forgot" case.
+        if !agent_wrote_events
+            && wave_events.is_empty()
+            && !hard_gate_triggered_this_iteration
+            && should_gate_missing_events(&display_hat, &event_loop)
+        {
+            event_loop.increment_hard_gate_count();
+            inject_missing_event_hard_gate_guidance(
+                &ctx,
+                &display_hat,
+                &event_loop.get_hat_publishes(&display_hat),
+            );
+            info!(
+                hat = %display_hat.as_str(),
+                consecutive = event_loop.state().consecutive_hard_gates,
+                "Hard gate triggered: hat has publish obligation but emitted no event"
+            );
+        } else if !agent_wrote_events
+            && wave_events.is_empty()
+            && !hard_gate_triggered_this_iteration
+        {
             let mut fallback_hats = Vec::new();
             if display_hat.as_str() != "ralph" {
                 fallback_hats.push(display_hat.clone());
@@ -3058,6 +3081,19 @@ fn should_hard_gate(hat_id: &HatId, event_loop: &EventLoop) -> bool {
     !config.publishes.is_empty() && config.default_publishes.is_none()
 }
 
+/// Determine whether the active hat has an emit obligation but produced no events.
+///
+/// This catches the "completely forgot to emit" case where the agent output
+/// does not even mention `ralph emit`. Contrast with `should_hard_gate` which
+/// only triggers when the agent claims to emit but writes no event.
+fn should_gate_missing_events(hat_id: &HatId, event_loop: &EventLoop) -> bool {
+    let Some(config) = event_loop.registry().get_config(hat_id) else {
+        return false;
+    };
+    // Hat has an obligation to publish but no automatic fallback
+    !config.publishes.is_empty() && config.default_publishes.is_none()
+}
+
 /// Inject a human.guidance event directly into the events file so the agent
 /// sees it on the next iteration. Used when the agent claimed to emit but no
 /// event was actually written.
@@ -3108,6 +3144,67 @@ fn inject_hard_gate_guidance(ctx: &LoopContext, hat_id: &HatId, expected_topics:
         }
         Err(e) => {
             warn!(error = %e, "Failed serializing hard-gate guidance event");
+        }
+    }
+}
+
+/// Inject a human.guidance event when the agent completely forgot to emit.
+///
+/// This is distinct from `inject_hard_gate_guidance` which handles the case
+/// where the agent claimed to emit but no event was written. This function
+/// handles the case where the agent simply did not emit any event at all.
+fn inject_missing_event_hard_gate_guidance(
+    ctx: &LoopContext,
+    hat_id: &HatId,
+    expected_topics: &[String],
+) {
+    let events_path = resolve_current_events_path(ctx);
+    let topics_str = if expected_topics.is_empty() {
+        "(check hat configuration)".to_string()
+    } else {
+        expected_topics.join("`, `")
+    };
+
+    let payload = format!(
+        "⚠️ HARD GATE TRIGGERED: Previous iteration by hat `{hat}` did NOT emit any event.\n\n\
+         This hat is configured to publish events but emitted nothing. Ralph cannot \
+         proceed without observable completion signals.\n\n\
+         You MUST use the bash tool to execute: ralph emit <topic>\n\
+         Allowed topics: `{topics}`\n\n\
+         If the work is complete, emit `work.done`. If the work failed, emit `work.failed`. \
+         Do not update files or write prose without emitting an event.",
+        hat = hat_id.as_str(),
+        topics = topics_str
+    );
+
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let event = serde_json::json!({
+        "topic": "human.guidance",
+        "payload": payload,
+        "ts": timestamp,
+    });
+
+    match serde_json::to_string(&event) {
+        Ok(line) => {
+            use std::io::Write;
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&events_path);
+            match file {
+                Ok(f) => {
+                    let mut writer = std::io::BufWriter::new(f);
+                    if writeln!(writer, "{}", line).is_err() {
+                        warn!(path = ?events_path, "Failed writing missing-event hard-gate guidance");
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, path = ?events_path, "Failed opening events file for missing-event hard-gate guidance");
+                }
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "Failed serializing missing-event hard-gate guidance event");
         }
     }
 }
@@ -13981,6 +14078,55 @@ hats:
         assert!(
             !should_hard_gate(&HatId::new("nonexistent"), &event_loop),
             "unknown hat should NOT hard gate"
+        );
+    }
+
+    #[test]
+    fn test_missing_event_hard_gate() {
+        // U1: Tests for should_gate_missing_events which catches the "completely forgot to emit" case
+        let yaml = r#"
+hats:
+  executor:
+    name: "Executor"
+    publishes: ["work.done", "work.failed"]
+  reviewer:
+    name: "Reviewer"
+    publishes: ["review.passed"]
+    default_publishes: "review.done"
+  gate:
+    name: "Gate"
+    publishes: ["plan.blocked"]
+    default_publishes: "plan.blocked"
+  silent:
+    name: "Silent"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let event_loop = EventLoop::new(config);
+
+        // Executor with publishes but no default_publishes -> should gate on missing events
+        assert!(
+            should_gate_missing_events(&HatId::new("executor"), &event_loop),
+            "executor with publishes and no default_publishes should gate missing events"
+        );
+        // Reviewer with default_publishes -> should NOT gate (has fallback)
+        assert!(
+            !should_gate_missing_events(&HatId::new("reviewer"), &event_loop),
+            "hat with default_publishes should NOT gate missing events"
+        );
+        // Gate with default_publishes (fail-closed) -> should NOT gate
+        assert!(
+            !should_gate_missing_events(&HatId::new("gate"), &event_loop),
+            "gate with default_publishes should NOT gate missing events"
+        );
+        // Silent hat with no publishes -> should NOT gate
+        assert!(
+            !should_gate_missing_events(&HatId::new("silent"), &event_loop),
+            "hat with no publishes should NOT gate missing events"
+        );
+        // Unknown hat -> should NOT gate
+        assert!(
+            !should_gate_missing_events(&HatId::new("nonexistent"), &event_loop),
+            "unknown hat should NOT gate missing events"
         );
     }
 

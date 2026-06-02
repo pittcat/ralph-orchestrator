@@ -17,6 +17,7 @@ pub mod diagnostics;
 mod event_logger;
 mod event_loop;
 pub mod event_origin;
+pub mod execution_contract;
 mod event_parser;
 mod event_policy;
 mod event_projection;
