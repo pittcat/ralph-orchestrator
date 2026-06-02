@@ -735,9 +735,6 @@ pub enum ReviewStatus {
         reason: String,
         missing: Vec<String>,
     },
-    Invalid {
-        reason: String,
-    },
 }
 
 /// Status of a single backpressure check.

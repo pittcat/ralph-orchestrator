@@ -3652,20 +3652,6 @@ impl EventLoop {
                                 crate::event_parser::review_blocked_payload(&reason),
                             ));
                         }
-                        Ok(ReviewStatus::Invalid { reason }) => {
-                            warn!(reason = %reason, "review.done rejected: invalid JSON evidence");
-                            self.diagnostics.log_orchestration(
-                                self.state.iteration,
-                                "jsonl",
-                                crate::diagnostics::OrchestrationEvent::BackpressureTriggered {
-                                    reason: format!("invalid review evidence: {reason}"),
-                                },
-                            );
-                            accept_event!(Event::new(
-                                "review.blocked",
-                                crate::event_parser::review_blocked_payload(&reason),
-                            ));
-                        }
                         Err(err) => {
                             warn!(error = %err, "review.done rejected: JSON parse error");
                             self.diagnostics.log_orchestration(
