@@ -316,14 +316,9 @@ fn test_autoresearch_guard() {
     run_workflow_guard_scenario(yaml);
 }
 
-#[test]
-fn test_feat_ralph_cli_agent_reference_split() {
-    // Plan U8 F4 修订: 验证 ralph-tools-emit/wave/cmdref 内置 skill 可被按需加载
-    // 覆盖 3 个场景: 1) emit 后能 emit build.done, 2) cmdref 后能 interact progress,
-    // 3) 无 hat 上下文 fail closed
-    let yaml = load_scenario("tests/scenarios/feat-ralph-cli-agent-reference-split.yml");
-    run_scenario(yaml);
-}
+// BDD scenario for feat-ralph-cli-agent-reference-split has been removed.
+// Real CLI acceptance is covered by integration tests in
+// crates/ralph-cli/tests/integration_agent_reference.rs.
 
 #[test]
 fn test_isolated_multi_hat() {

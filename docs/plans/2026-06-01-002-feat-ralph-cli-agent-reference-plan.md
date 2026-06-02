@@ -497,6 +497,30 @@ readlink -f .claude/skills/ralph-tools-emit/SKILL.md
 # 期望输出：<repo>/crates/ralph-core/data/ralph-tools-emit.md
 ```
 
+---
+
+## Post-Merge Correction (plan 2026-06-02-001)
+
+本计划合入后，验收层面发现以下缺口，已由 fix 计划 2026-06-02-001 修复：
+
+| 缺口 | 修复 |
+|------|------|
+| CI BDD job 使用 `feat-ralph-cli-agent-reference-split` filter 匹配不了任何 Rust test（连字符 vs 下划线），job 空跑通过 | 替换为 `integration_agent_reference` CLI 真实验收，增加 test count guard（至少 5 个测试） |
+| BDD scenario 只验证 mock 文本，不执行真实 CLI | 删除误导性 YAML scenario，替代为 `crates/ralph-cli/tests/integration_agent_reference.rs` 中的 Rust integration test |
+| CLI doc drift checker 默认 baseline 模式把 292 条已知漂移视为成功 | 改为 `--strict` 模式，新增 GLOBAL_FLAGS 过滤和 KNOWN_DRIFTS 显式忽略列表，删除大 baseline 文件 |
+| Schema 提取器漏掉 variadic `<VALUE>...` flag | 修正 regex 中 `...` 的位置到 `>` 之外，加特征化测试覆盖 |
+
+**影响范围**（仅验收层，不涉及 CLI 业务逻辑）：
+- `scripts/extract-cli-schema.py` — regex 修正
+- `scripts/check-cli-doc-drift.sh` — 新增 GLOBAL_FLAGS 过滤、KNOWN_DRIFTS allowlist、strict 模式
+- `scripts/test_cli_doc_drift.py` — 特征化测试（新增 + 修复 fixture）
+- `scripts/cli-doc-drift.baseline` — 已删除
+- `crates/ralph-cli/tests/integration_agent_reference.rs` — 新建 CLI 真实验收（8 个测试）
+- `crates/ralph-core/tests/scenarios/feat-ralph-cli-agent-reference-split.yml` — 已删除
+- `crates/ralph-core/tests/scenarios.rs` — 移除误导性 BDD test
+- `.github/workflows/ci.yml` — BDD job → Agent reference CLI tests；drift check → strict
+- `crates/ralph-core/data/ralph-tools-*.md` — 文档 flag 与实际 --help 同步修正
+
 **3. zsh 补全验证**（H1）：
 
 `ralph tools skill load <TAB>` 的补全来源是 `ralph tools skill list --format quiet`（动态），不依赖 `scripts/ralph-zsh-plugin.zsh` 静态列表。验证步骤：

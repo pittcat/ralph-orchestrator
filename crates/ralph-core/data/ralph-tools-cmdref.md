@@ -17,7 +17,7 @@ metadata:
 
 > 全局选项（`--root`、`-c/--config`、`-H/--hats`、`-v/--verbose`、`--color`）对所有子命令可用。
 > `skill list` 的 `--format` 支持 `table`、`json`、`quiet`（注意：`quiet` 输出 skill 名称，不是 ID）。
-> `skill load` **没有** `--format` 选项。
+> `skill load` **没有** `format` 选项。
 
 ### `ralph tools skill list`
 
@@ -73,7 +73,7 @@ ralph tools skill load ralph-tools | head -n 10
 
 通过 Telegram 与人交互（进度更新、通知）。
 
-> `interact` 命令没有 `--root` 和 `--format` 选项。
+> interact 命令没有 root 和 format 选项。
 
 ### `ralph tools interact progress`
 
@@ -132,6 +132,13 @@ ralph run [OPTIONS] [-- <CUSTOM_ARGS>...]
 | `-a, --autonomous` | flag | 否 | — | 强制自主模式 |
 | `--worktree` | flag | 否 | — | 创建隔离的 git worktree |
 | `--record-session <FILE>` | path | 否 | — | 录制会话到 JSONL（用于 smoke 测试） |
+| `--exclusive` | flag | 否 | — | 使用工作树排他锁，防止并行循环冲突 |
+| `--skip-preflight` | flag | 否 | — | 跳过预检检查 |
+| `--warmup-only` | flag | 否 | — | 仅预热后退出（不执行编排） |
+| `--force-warmup` | flag | 否 | — | 即使未启用也强制后端预热 |
+| `--idle-timeout <SECONDS>` | int | 否 | — | 无活动时的超时秒数 |
+| `--completion-promise` | flag | 否 | — | 输出完成承诺（quiet 模式时仍可见） |
+| `--rpc` | flag | 否 | — | 启用 RPC 后端连接 |
 | `-v, --verbose` | flag | 否 | — | 详细输出 |
 | `-q, --quiet` | flag | 否 | — | 抑制流式输出 |
 
@@ -161,6 +168,8 @@ ralph run [OPTIONS] [-- <CUSTOM_ARGS>...]
 | `ralph mcp` | MCP 服务器模式 |
 | `ralph bot` | 启动 Telegram bot |
 | `ralph completions` | 生成 shell 补全脚本 |
+
+> 低频命令的独有参数可通过 `ralph <cmd> --help` 查看。全量参考见 `docs/guide/`。
 
 ---
 

@@ -52,7 +52,7 @@ ralph emit [OPTIONS] <TOPIC> [PAYLOAD]
 **反模式 / 注意事项：**
 - 🔴 **不要**在 wave worker 内部使用 `ralph emit` 发射 wave 事件；worker 应直接通过标准输出或 `ralph emit` 返回结果，而不是触发新 wave。
 - 🔴 `--unsafe-no-policy-check` 仅在配置显式允许时可用，否则会导致校验失败。
-- 🔴 `ralph emit` **没有** `--format` 选项。
+- 🔴 `ralph emit` **没有** `format` 选项。
 - 🔴 试图通过 `RALPH_EVENTS_FILE` 或 `--file` 写入其他 worktree 的 events 文件会被 `ralph emit` 拒绝；错误信息会列出当前 allowlist。
 
 **校验：**

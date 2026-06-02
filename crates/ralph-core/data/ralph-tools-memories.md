@@ -10,14 +10,19 @@ metadata:
 ## Memory Commands
 
 ```bash
-ralph tools memory add "content" -t pattern --tags tag1,tag2
-ralph tools memory add "content" --private   # Hat-scoped (agent context only)
-ralph tools memory list [-t type] [--tags tags]
-ralph tools memory search "query" [-t type] [--tags tags]
-ralph tools memory prime --budget 2000    # Output for context injection
+ralph tools memory add "content" -t pattern -t tag1 -t tag2
+ralph tools memory add "content" -t private    # Hat-scoped (agent context only)
+ralph tools memory list [-t type] [--format FORMAT]
+ralph tools memory search "query" [-t type] [--format FORMAT]
+ralph tools memory prime -t pattern       # Output for context injection
 ralph tools memory show <mem-id>
 ralph tools memory delete <mem-id>
+ralph tools memory init                   # Initialize memories store
 ```
+
+Note: All memory commands accept `--type <TYPE>`, `--format <FORMAT>`, `--root <ROOT>`,
+and global options. Additional flags per command: `memory list` accepts `--last <N>`,
+`memory search` accepts `--all`, `memory prime` accepts `--recent`, `memory init` accepts `--force`.
 
 **Memory types:**
 
@@ -36,16 +41,16 @@ Every memory has a `visibility` (`shared` or `private`) and an optional
 `owner_hat_id`:
 
 - **shared** (default): visible to every caller — human CLI and every hat.
-  New memories created without `--private` are shared. **Agents cannot
+  New memories created without `private` flag are shared. **Agents cannot
   delete or mutate shared memories** — only the human CLI may.
-- **private** (set with `--private` in agent context): visible only to the
+- **private** (set with `-t private` in agent context): visible only to the
   owning hat. The owning hat is taken from `RALPH_CURRENT_HAT`. The CLI
-  fails closed if `--private` is used without an agent context.
+  fails closed if `private` flag is used without an agent context.
 
 | Operation | Human CLI | Agent (owner) | Agent (other) |
 |-----------|-----------|---------------|---------------|
 | `add` (default) | shared | shared | shared |
-| `add --private` | **rejected** (no agent ctx) | private, owned by current hat | private, owned by current hat |
+| `add -t private` | **rejected** (no agent ctx) | private, owned by current hat | private, owned by current hat |
 | `list/show/search/prime` | sees all | sees shared + own private | sees shared + own private |
 | `delete shared` | allowed | **rejected** | **rejected** |
 | `delete private` (any) | allowed | allowed (own) | **rejected** |
@@ -57,7 +62,7 @@ The human CLI is the only path that can prune or correct shared knowledge
 
 - `add` rejects empty content.
 - `add` rejects content longer than 10 000 characters.
-- `add --private` rejects after a hat already owns 1 000 private memories.
+- `add` with `private` visibility rejects after a hat already owns 1 000 private memories.
 
 ### First thing every iteration
 ```bash
@@ -73,7 +78,7 @@ ralph tools memory search "area-name"   # If you're entering an unfamiliar area
 - Something feels familiar → there might be a memory about it
 
 **Search strategies:**
-- Start broad, narrow with filters: `search "api"` → `search -t pattern --tags api`
+- Start broad, narrow with filters: `search "api"` → `search -t pattern -t api`
 - Check fixes first for errors: `search -t fix "ECONNREFUSED"`
 - Review decisions before changing architecture: `search -t decision`
 
@@ -99,7 +104,7 @@ If any command fails (non-zero exit), or you hit a missing dependency/skill, or 
 ```bash
 ralph tools memory add \
   "failure: cmd=<command>, exit=<code>, error=<message>, next=<intended fix>" \
-  -t fix --tags tooling,error-handling
+  -t fix # tag with tooling,error-handling
 ```
 
 ### Discover Available Tags
@@ -147,26 +152,26 @@ Template fields:
 
 ### Store a discovery
 ```bash
-ralph tools memory add "Parser requires snake_case keys" -t pattern --tags config,yaml
+ralph tools memory add -t pattern "Parser requires snake_case keys"
 ```
 
 ### Find relevant memories
 ```bash
-ralph tools memory search "config" --tags yaml
-ralph tools memory prime --budget 1000 -t pattern  # For injection
+ralph tools memory search -t yaml "config"
+ralph tools memory prime -t pattern  # For context injection
 ```
 
 ### Memory examples
 ```bash
 # Pattern: discovered codebase convention
-ralph tools memory add "All API handlers return Result<Json<T>, AppError>" -t pattern --tags api,error-handling
+ralph tools memory add -t pattern "All API handlers return Result<Json<T>, AppError>"
 
 # Decision: learned why something was chosen
-ralph tools memory add "Chose JSONL over SQLite: simpler, git-friendly, append-only" -t decision --tags storage,architecture
+ralph tools memory add -t decision "Chose JSONL over SQLite: simpler, git-friendly, append-only"
 
 # Fix: solved a recurring problem
-ralph tools memory add "cargo test hangs: kill orphan postgres from previous run" -t fix --tags testing,postgres
+ralph tools memory add -t fix "cargo test hangs: kill orphan postgres from previous run"
 
 # Context: project-specific knowledge
-ralph tools memory add "The /legacy folder is deprecated, use /v2 endpoints" -t context --tags api,migration
+ralph tools memory add -t context "The /legacy folder is deprecated, use /v2 endpoints"
 ```

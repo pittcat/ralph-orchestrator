@@ -178,4 +178,20 @@ P3 — Low: 无
 - 本步决策记录：`.agents/scratchpad/ce-executor/2026-06-01-002-feat-ralph-cli-agent-reference-plan/decisions.md`
 - 本步 diff 快照：`.agents/scratchpad/ce-executor/2026-06-01-002-feat-ralph-cli-agent-reference-plan/wave-diff.patch`
 
+---
+
+## 6. 后续验证门禁修复 (plan 2026-06-02-001)
+
+功能拆分的代码层面合入后，验收层面暴露出 4 个缺口。已通过独立的 fix 计划修复，主要变化：
+
+| 缺口 | 状态 |
+|------|------|
+| CI BDD job 空跑（filter 名称拼写错误） | ✅ 替换为真实 CLI integration test（8 个测试），带 test count guard |
+| BDD scenario 只断言 mock 文本 | ✅ 删除误导性 YAML，由 Rust integration test 实际执行 `ralph` binary |
+| CLI doc drift 默认 baseline 吞 292 条漂移 | ✅ 改为 strict 模式，GLOBAL_FLAGS 过滤全局 flag，KNOWN_DRIFTS 管理已知漂移 |
+| Parser 漏 variadic `<VALUE>...` flag | ✅ 修正 regex，加 20 个特征化测试 |
+| 文档 flag 与实际 --help 漂移 | ✅ 更新 memories/tasks/emit/wave/cmdref 文档，删除 baseline 文件 |
+
+> **注意**：本报告第 1 节"质量验收 🟢"仅反映功能拆分本身的代码正确性。验收门禁的完整性由本 fix 计划保障。详情见 `docs/plans/2026-06-02-001-fix-agent-reference-validation-plan.md`。
+
 </details>

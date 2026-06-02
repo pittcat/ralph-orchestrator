@@ -20,14 +20,14 @@ This skill covers **runtime tasks**. For code tasks, see `/code-task-generator`.
 
 ```bash
 ralph tools task add "Title" -p 2 -d "description" --blocked-by id1,id2
-ralph tools task ensure "Title" --key spec:task-01 -p 2 -d "description" --blocked-by id1,id2
-ralph tools task list [--status open|in_progress|closed] [--format table|json|quiet]
-ralph tools task ready                    # Show unblocked tasks
+ralph tools task ensure --key spec:task-01 "Title" -p 2 -d "description" --blocked-by id1,id2
+ralph tools task list [-s STATUS] [-d DAYS] [-l LIMIT] [-a] [--format table|json|quiet]
+ralph tools task ready [-a]               # Show unblocked tasks
 ralph tools task start <task-id>
 ralph tools task close <task-id>
 ralph tools task reopen <task-id>
 ralph tools task fail <task-id>
-ralph tools task show <task-id>
+ralph tools task show <task-id> [--format table|json|quiet]
 ```
 
 **Task ID format:** `task-{timestamp}-{4hex}` (e.g., `task-1737372000-a1b2`)
@@ -40,7 +40,7 @@ ralph tools task show <task-id>
 - One task = one testable unit of work (completable in 1-2 iterations)
 - Break large features into smaller tasks BEFORE starting implementation
 - On your first iteration, check `ralph tools task ready` — prior iterations may have created tasks
-- Use `task ensure --key ...` when a task has a stable identity and may be recreated across fresh-context iterations
+- Use `task ensure` with a stable task `key` (concept) when a task has a stable identity and may be recreated across fresh-context iterations
 - Use `task start` when you begin active work on a task
 - ONLY close tasks after verification (tests pass, build succeeds)
 - Use `task reopen` when more work remains after a failed review/finalization pass
@@ -90,16 +90,16 @@ If any command fails (non-zero exit), or you hit a missing dependency/skill, or 
 - **Open or reopen a task** if it won't be resolved in the same iteration.
 
 ```bash
-ralph tools task ensure "Fix: <short description>" --key fix:<short-key> -p 2
+ralph tools task ensure --key fix:short-key "Fix: <short description>" -p 2
 ```
 
 ## Common Workflows
 
 ### Track dependent work
 ```bash
-ralph tools task ensure "Setup auth" --key auth:setup -p 1
+ralph tools task ensure --key auth:setup "Setup auth" -p 1
 # Returns: task-1737372000-a1b2
 
-ralph tools task ensure "Add user routes" --key auth:routes --blocked-by task-1737372000-a1b2
+ralph tools task ensure --key auth:routes "Add user routes" --blocked-by task-1737372000-a1b2
 ralph tools task ready  # Only shows unblocked tasks
 ```

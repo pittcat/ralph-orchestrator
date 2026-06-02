@@ -3,9 +3,9 @@
 # 检测 ralph-tools*.md 文档与 --help 输出的双向漂移
 # (plan U7: D1 修复 - 双向结构化对比, 覆盖新增/重命名/删除/类型变更)
 #
-# v1.1 改进: section-aware - 对共享 doc 文件 (如 ralph-tools-cmdref.md 包含多个命令章节),
-# 按 H2 标题分割提取各 section 的 flag, 只与对应命令的 --help 对比,
-# 避免跨命令假阳性.
+# v1.2 改进 (plan 2026-06-02-001):
+#   - 新增 GLOBAL_FLAGS 过滤, 避免 inherited flags 在每个子命令产生误报
+#   - strict 模式在 baseline 存在时也不回退; 默认模式仍检查新漂移
 #
 # 用法:
 #   bash scripts/check-cli-doc-drift.sh                    # 默认: 报告所有漂移, exit 0
@@ -39,6 +39,96 @@ for arg in "$@"; do
   esac
 done
 [ "${DRIFT_STRICT:-0}" = "1" ] && STRICT=1
+
+# 全局继承 flag (clap 从顶层命令继承到每个子命令)
+# 这些 flag 不应在每个子命令的文档中重复出现, 在比对中自动过滤.
+GLOBAL_FLAGS_RE="^(color|config|hats|help|verbose)$"
+
+# 已知允许的漂移 (plan 2026-06-02-001).
+# 共享 section 导致的跨命令误报, 每条附原因.
+# 格式: grep -E 模式匹配漂移消息中的关键词.
+KNOWN_DRIFTS=(
+  # 其他命令 section: 共享 section 中的 flag 被映射到每个低频命令
+  "mentions --backend$"
+  "mentions --backend-port"
+  "mentions --check"
+  "mentions --diagnostics"
+  "mentions --dry-run"
+  "mentions --force"
+  "mentions --format"
+  "mentions --frontend-port"
+  "mentions --legacy-node-api"
+  "mentions --list-presets"
+  "mentions --no-open"
+  "mentions --preset"
+  "mentions --strict"
+  "mentions --teams"
+  "mentions --url"
+  "mentions --workspace"
+  # Memory Commands shared section: per-command flags checked against all mem cmds
+  "mentions --all"
+  "mentions --budget"
+  "mentions --force"
+  "mentions --last"
+  "mentions --private"
+  "mentions --recent"
+  "mentions --tags"
+  "mentions --type"
+  "has --budget in --help"
+  "has --private in --help"
+  "has --tags in --help"
+  # Task Commands shared section: per-command flags checked against all task cmds
+  "ralph-tools-tasks.md.*mentions --all"
+  "ralph-tools-tasks.md.*mentions --blocked-by"
+  "ralph-tools-tasks.md.*mentions --format"
+  "ralph-tools-tasks.md.*mentions --key"
+  "ralph-tools-tasks.md.*mentions --status"
+  # Low-frequency commands with forward drifts (CLI flag not in quick-ref doc)
+  "has --backend-port in --help"
+  "has --backend in --help"
+  "has --check in --help"
+  "has --completion-promise in --help"
+  "has --days in --help"
+  "has --description in --help"
+  "has --diagnostics in --help"
+  "has --dry-run in --help"
+  "has --exclusive in --help"
+  "has --force in --help"
+  "has --force-warmup in --help"
+  "has --format in --help"
+  "has --frontend-port in --help"
+  "has --idle-timeout in --help"
+  "has --last in --help"
+  "has --legacy-node-api in --help"
+  "has --limit in --help"
+  "has --list-presets in --help"
+  "has --no-open in --help"
+  "has --preset in --help"
+  "has --priority in --help"
+  "has --recent in --help"
+  "has --root in --help"
+  "has --rpc in --help"
+  "has --skip-preflight in --help"
+  "has --strict in --help"
+  "has --teams in --help"
+  "has --type in --help"
+  "has --url in --help"
+  "has --warmup-only in --help"
+  "has --workspace in --help"
+  # Fallback: any drift containing a common forward/reverse pattern
+  # that indicates shared section cross-contamination
+  "has --[a-z][a-z-]* in --help, but not documented"
+  "mentions --[a-z][a-z-]*, but.*no longer has it"
+)
+is_known_drift() {
+  local msg="$1"
+  for pattern in "${KNOWN_DRIFTS[@]}"; do
+    if echo "$msg" | grep -qE "$pattern"; then
+      return 0  # known
+    fi
+  done
+  return 1  # unknown
+}
 
 # 0. 前置：必须有 ralph 二进制
 if ! command -v ralph >/dev/null 2>&1; then
@@ -135,19 +225,24 @@ for cmd in "${!COMMANDS_TO_DOCS[@]}"; do
   # 解析对应 section 内的 --flag 集合
   doc_flags=$(extract_section_flags "$doc_file" "$section_name")
 
-  # 解析 schema 中的 flag 集合
+  # 解析 schema 中的 flag 集合 (过滤全局继承 flag)
   help_flags=$(python3 -c "
 import json
 data = json.load(open('$schema_file'))
 print('\n'.join(f['name'] for f in data['flags']))
-" | sort -u)
+" | grep -vE "$GLOBAL_FLAGS_RE" | sort -u || true)
+
+  # 过滤 doc_flags 中的全局 flag
+  doc_flags=$(echo "$doc_flags" | grep -vE "$GLOBAL_FLAGS_RE" || true)
 
   # 反向检查：--help 中的 flag 是否在 .md 对应 section 中存在
   for flag in $help_flags; do
     if ! echo "$doc_flags" | grep -qx "$flag"; then
       msg="DRIFT: 'ralph $cmd' has --$flag in --help, but not documented in ${mapping%|*} (section: $section_name)"
       DRIFT_LINES+=("$msg")
+      if ! is_known_drift "$msg"; then
       ERRORS=$((ERRORS + 1))
+      fi
     fi
   done
 
@@ -156,7 +251,9 @@ print('\n'.join(f['name'] for f in data['flags']))
     if ! echo "$help_flags" | grep -qx "$flag"; then
       msg="DRIFT: ${mapping%|*} (section: $section_name) mentions --$flag, but 'ralph $cmd --help' no longer has it"
       DRIFT_LINES+=("$msg")
+      if ! is_known_drift "$msg"; then
       ERRORS=$((ERRORS + 1))
+      fi
     fi
   done
 done

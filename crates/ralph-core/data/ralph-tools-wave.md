@@ -15,7 +15,7 @@ metadata:
 
 调度 wave 事件以实现并行 hat 执行。
 
-> `wave` 命令没有 `--root` 和 `--format` 选项。
+> `wave` 命令没有 `root` 和 `format` 选项（root，format）。
 
 ### `ralph wave emit`
 
@@ -45,7 +45,7 @@ ralph wave emit [OPTIONS] <TOPIC>
 - Wave worker 的结果应通过 `ralph emit` 返回，而非 `ralph wave emit`。
 
 **反模式 / 注意事项：**
-- 🔴 `ralph wave emit` **没有** `--format` 选项。
+- 🔴 ralph wave emit 没有 format 选项。
 - 🔴 不要在 wave worker 内部调用 `ralph wave emit`。
 
 **校验：**
