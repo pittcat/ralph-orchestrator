@@ -856,7 +856,7 @@ hats:
       - From event payload, read fields based on trigger:
         - `plan.complete`: `plan_name`, `verdict`, `final_findings_count`, `fix_round`
         - `plan.blocked`: `plan_name`, `reason`, `task_id`, `task_key`
-        - `fix.exhausted`: `plan_name`, `fix_round`, `residual_findings`
+        - `fix.exhausted`: `plan_name`, `fix_round`, `residual_findings`, `task_id`, `task_key`, `step`
       - For `plan.complete`: read `context.md`, `progress.md`, `.agents/scratchpad/ce-executor/{plan_name}/findings.md`, `fix-log.md`
       - For `plan.blocked`: read `context.md`, `progress.md`, `findings.md` to understand why the plan was blocked
       - For `fix.exhausted`: read `fix-log.md` and `findings.md` for residual findings
@@ -929,6 +929,7 @@ hats:
       On `plan.blocked` or `fix.exhausted`:
       - Publish `REVIEW_COMPLETE` with `pass_or_fail: "fail"` and `verdict: "fail"`.
       - Include the reason in `residual_findings_summary` (e.g., "plan blocked: state mismatch" or "fix exhausted after 3 rounds").
+      - Include `task_id`, `task_key`, and `step` when present so the failure report preserves task correlation.
       - Do NOT伪装为 pass.
 
       ### Constraints

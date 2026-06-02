@@ -699,7 +699,7 @@ hats:
       - 从事件 payload，按触发源读取不同字段：
         - `plan.complete`：`plan_name`、`verdict`、`final_findings_count`、`fix_round`
         - `plan.blocked`：`plan_name`、`reason`、`task_id`、`task_key`
-        - `fix.exhausted`：`plan_name`、`fix_round`、`residual_findings`
+        - `fix.exhausted`：`plan_name`、`fix_round`、`residual_findings`、`task_id`、`task_key`、`step`
       - `plan.complete`：读取 `context.md`、`progress.md`、`findings.md`、`fix-log.md`
       - `plan.blocked`：读取 `context.md`、`progress.md`、`findings.md` 了解 plan 被阻塞的原因
       - `fix.exhausted`：读取 `fix-log.md` 和 `findings.md` 获取残留 findings
@@ -767,6 +767,7 @@ hats:
       `plan.blocked` 或 `fix.exhausted` 时：
       - 发布 `REVIEW_COMPLETE`，`pass_or_fail: "fail"`、`verdict: "fail"`。
       - 在 `residual_findings_summary` 中说明原因（如 "plan blocked: state mismatch" 或 "fix exhausted after 3 rounds"）。
+      - 如 payload 中存在 `task_id`、`task_key`、`step`，必须一并带入 `REVIEW_COMPLETE`，保留 task 对账上下文。
       - 不得伪装为通过。
 
       ### Constraints

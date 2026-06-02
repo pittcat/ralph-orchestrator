@@ -1895,4 +1895,43 @@ mod tests {
             "ce-executor-zh fixer early fix.exhausted path must carry task_id, task_key, step"
         );
     }
+
+    #[test]
+    fn test_ce_executor_shipper_fix_exhausted_preserves_task_correlation() {
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let content = preset.content;
+        let shipper_section = content
+            .split("shipper:")
+            .nth(1)
+            .expect("ce-executor must have shipper section");
+        let exhausted_start = shipper_section
+            .find("`fix.exhausted`")
+            .expect("shipper must describe fix.exhausted handling");
+        let exhausted_section = &shipper_section[exhausted_start..];
+        assert!(
+            exhausted_section.contains("task_id")
+                && exhausted_section.contains("task_key")
+                && exhausted_section.contains("step"),
+            "shipper fix.exhausted handling must read and publish task_id, task_key, step"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_zh_shipper_fix_exhausted_preserves_task_correlation() {
+        let content = read_root_preset("ce-executor-zh.yml");
+        let shipper_section = content
+            .split("shipper:")
+            .nth(1)
+            .expect("ce-executor-zh must have shipper section");
+        let exhausted_start = shipper_section
+            .find("`fix.exhausted`")
+            .expect("ce-executor-zh shipper must describe fix.exhausted handling");
+        let exhausted_section = &shipper_section[exhausted_start..];
+        assert!(
+            exhausted_section.contains("task_id")
+                && exhausted_section.contains("task_key")
+                && exhausted_section.contains("step"),
+            "ce-executor-zh shipper fix.exhausted handling must read and publish task_id, task_key, step"
+        );
+    }
 }
