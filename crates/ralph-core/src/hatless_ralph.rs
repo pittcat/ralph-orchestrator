@@ -232,10 +232,14 @@ impl HatlessRalph {
         registry: &HatRegistry,
         starting_event: Option<String>,
     ) -> Self {
-        let hat_topology = if registry.is_empty() {
-            None
-        } else {
+        // Build topology only when there are custom hats with specific subscriptions.
+        // The builtin runtime "ralph" hat (subscribed to `*`) is a fallback-only hat
+        // and should not trigger topology construction.
+        let has_custom_hats = registry.all().any(|h| !h.is_fallback_only());
+        let hat_topology = if has_custom_hats {
             Some(HatTopology::from_registry(registry))
+        } else {
+            None
         };
 
         let active_scratchpad = core.scratchpad.clone();

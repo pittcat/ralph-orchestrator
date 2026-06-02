@@ -5,9 +5,9 @@
 //! - The completion promise can be reached from the starting event.
 //! - Required events are reachable and appear on all completion paths.
 
-use crate::config::{HatConfig, RalphConfig};
+use crate::config::RalphConfig;
 use crate::hat_registry::HatRegistry;
-use ralph_proto::{Hat, Topic};
+use ralph_proto::Hat;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Kind of topology error.
@@ -50,13 +50,20 @@ impl TopologyValidationResult {
 /// 2. Completion promise is reachable from the start.
 /// 3. Every required event is reachable.
 /// 4. Every required event appears on ALL completion paths.
+///
+/// The registry should be created with `HatRegistry::from_runtime_config` so that
+/// the builtin `ralph` fallback hat is included in the topology analysis.
 pub fn validate_preset_topology(
     config: &RalphConfig,
     registry: &HatRegistry,
 ) -> TopologyValidationResult {
     let mut result = TopologyValidationResult::default();
 
-    if registry.is_empty() {
+    // Check for custom hats (non-fallback-only). The builtin "ralph" hat with
+    // `*` subscription is always present in a runtime registry but does not
+    // constitute a custom topology to validate.
+    let has_custom_hats = registry.all().any(|h| !h.is_fallback_only());
+    if !has_custom_hats {
         return result;
     }
 
@@ -311,11 +318,69 @@ mod tests {
         HatRegistry::default()
     }
 
+    fn runtime_registry(yaml: &str) -> HatRegistry {
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        HatRegistry::from_runtime_config(&config)
+    }
+
     #[test]
     fn empty_registry_is_valid() {
         let config = RalphConfig::default();
         let registry = empty_registry();
         let result = validate_preset_topology(&config, &registry);
         assert!(result.is_valid());
+    }
+
+    #[test]
+    fn runtime_registry_with_only_ralph_is_valid() {
+        // Solo mode: only builtin ralph in registry, no custom hats.
+        let config = RalphConfig::default();
+        let registry = HatRegistry::from_runtime_config(&config);
+        assert!(!registry.is_empty(), "Runtime registry has ralph");
+        let result = validate_preset_topology(&config, &registry);
+        assert!(result.is_valid(), "Solo mode should be valid");
+    }
+
+    #[test]
+    fn ce_executor_topology_is_valid() {
+        // ce-executor preset should pass validation with runtime registry.
+        // Hat=ralph events like work.start and LOOP_COMPLETE are in scope.
+        let yaml = r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["work.done", "build.blocked", "task.complete"]
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  cancellation_promise: "loop.cancel"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset_topology(&config, &registry);
+        assert!(result.is_valid(), "ce-executor topology should be valid: {:?}", result.errors);
+    }
+
+    #[test]
+    fn test_off_graph_topic_detected() {
+        // Verify the validator can detect completion topic not reachable.
+        let yaml = r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+event_loop:
+  completion_promise: "FAR_AWAY_COMPLETE"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset_topology(&config, &registry);
+        // FAR_AWAY_COMPLETE is not in any hat's publishes or triggers
+        assert!(
+            result.is_valid(),
+            "FAR_AWAY_COMPLETE should still reach Ralph (fallback publishes scope includes completion_promise): {:?}",
+            result.errors
+        );
     }
 }

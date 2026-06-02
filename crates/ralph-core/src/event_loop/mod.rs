@@ -568,7 +568,7 @@ impl EventLoop {
             config.core.scratchpad.enabled = true;
         }
 
-        let registry = HatRegistry::from_config(&config);
+        let registry = HatRegistry::from_runtime_config(&config);
         let instruction_builder =
             InstructionBuilder::with_events(config.core.clone(), config.events.clone());
 
@@ -577,21 +577,17 @@ impl EventLoop {
         // Per spec: "Hatless Ralph is constant — Cannot be replaced, overwritten, or configured away"
         // Ralph is ALWAYS registered as the universal fallback for orphaned events.
         // Custom hats are registered first (higher priority), Ralph catches everything else.
+        // The builtin "ralph" hat is already registered in the registry via `from_runtime_config`.
         for hat in registry.all() {
             bus.register(hat.clone());
         }
 
-        // Always register Ralph as catch-all coordinator
-        // Per spec: "Ralph runs when no hat triggered — Universal fallback for orphaned events"
-        let ralph_hat = ralph_proto::Hat::new("ralph", "Ralph").subscribe("*"); // Subscribe to all events
-        bus.register(ralph_hat);
-
-        if registry.is_empty() {
+        if config.hats.is_empty() {
             debug!("Solo mode: Ralph is the only coordinator");
         } else {
             debug!(
                 "Multi-hat mode: {} custom hats + Ralph as fallback",
-                registry.len()
+                config.hats.len()
             );
         }
 
@@ -678,7 +674,7 @@ impl EventLoop {
             config.core.scratchpad.enabled = true;
         }
 
-        let registry = HatRegistry::from_config(&config);
+        let registry = HatRegistry::from_runtime_config(&config);
         let instruction_builder =
             InstructionBuilder::with_events(config.core.clone(), config.events.clone());
 
@@ -687,21 +683,17 @@ impl EventLoop {
         // Per spec: "Hatless Ralph is constant — Cannot be replaced, overwritten, or configured away"
         // Ralph is ALWAYS registered as the universal fallback for orphaned events.
         // Custom hats are registered first (higher priority), Ralph catches everything else.
+        // The builtin "ralph" hat is already registered in the registry via `from_runtime_config`.
         for hat in registry.all() {
             bus.register(hat.clone());
         }
 
-        // Always register Ralph as catch-all coordinator
-        // Per spec: "Ralph runs when no hat triggered — Universal fallback for orphaned events"
-        let ralph_hat = ralph_proto::Hat::new("ralph", "Ralph").subscribe("*"); // Subscribe to all events
-        bus.register(ralph_hat);
-
-        if registry.is_empty() {
+        if config.hats.is_empty() {
             debug!("Solo mode: Ralph is the only coordinator");
         } else {
             debug!(
                 "Multi-hat mode: {} custom hats + Ralph as fallback",
-                registry.len()
+                config.hats.len()
             );
         }
 
@@ -1368,7 +1360,7 @@ impl EventLoop {
                 // Coordinator mode (default): In multi-hat mode, always route to Ralph
                 // (custom hats define topology only). Ralph's prompt includes the ## HATS
                 // section for coordination awareness.
-                if self.registry.is_empty() {
+                if self.config.hats.is_empty() {
                     // Solo mode - return the next hat (which is "ralph")
                     next
                 } else {
@@ -1549,7 +1541,7 @@ impl EventLoop {
         // Handle "ralph" hat - the constant coordinator
         // Per spec: "Hatless Ralph is constant — Cannot be replaced, overwritten, or configured away"
         if hat_id.as_str() == "ralph" {
-            if self.registry.is_empty() {
+            if self.config.hats.is_empty() {
                 // Solo mode - just Ralph's events, no hats to filter
                 let mut events = self.bus.take_pending(&hat_id.clone());
                 let mut human_events = self.bus.take_human_pending();
@@ -1672,6 +1664,11 @@ impl EventLoop {
                     {
                         union_allowlist.extend(filter.events.iter().cloned());
                         union_allowlist.extend(config.triggers.iter().cloned());
+                        continue;
+                    }
+                    // Fallback-only hats (e.g., builtin ralph with `*` subscription)
+                    // have no config and should not disable filtering.
+                    if hat.is_fallback_only() {
                         continue;
                     }
                     should_filter = false;
@@ -4030,7 +4027,10 @@ impl EventLoop {
                 },
             );
 
-            if !self.registry.has_subscriber(event.topic.as_str()) {
+            // Check for orphaned events: no specific hat (non-fallback-only) subscribes.
+            // The builtin "ralph" fallback hat with `*` subscription is excluded so that
+            // events only matching the universal fallback are still marked as orphans.
+            if !self.registry.has_specific_subscriber(event.topic.as_str()) {
                 has_orphans = true;
             }
 

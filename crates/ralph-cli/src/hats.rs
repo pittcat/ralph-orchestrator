@@ -15,6 +15,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use indicatif::{ProgressBar, ProgressStyle};
 use ralph_adapters::{CliBackend, detect_backend_default};
 use ralph_core::{HatRegistry, RalphConfig, truncate_with_ellipsis};
+use ralph_core::preset_validator;
 use std::collections::HashSet;
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -87,36 +88,39 @@ pub async fn execute(
         .await
         .context("Failed to load config for hats")?;
 
-    let registry = HatRegistry::from_config(&config);
+    let config_registry = HatRegistry::from_config(&config);
+    let runtime_registry = HatRegistry::from_runtime_config(&config);
     let mut stdout = std::io::stdout();
 
     match args.command {
         None
         | Some(HatsCommands::List {
             format: ListFormat::Table,
-        }) => list_hats(&mut stdout, &registry, use_colors),
+        }) => list_hats(&mut stdout, &config_registry, use_colors),
         Some(HatsCommands::List {
             format: ListFormat::Json,
-        }) => list_hats_json(&mut stdout, &registry),
+        }) => list_hats_json(&mut stdout, &config_registry),
         Some(HatsCommands::Show(show_args)) => {
-            show_hat(&mut stdout, &registry, &show_args.name, use_colors)
+            show_hat(&mut stdout, &config_registry, &show_args.name, use_colors)
         }
-        Some(HatsCommands::Validate) => validate_hats(&mut stdout, &config, &registry, use_colors),
+        Some(HatsCommands::Validate) => {
+            validate_hats(&mut stdout, &config, &runtime_registry, &config_registry, use_colors)
+        }
         Some(HatsCommands::Graph { format, backend }) => {
-            graph_hats(&mut stdout, &config, &registry, format, backend.as_deref())
+            graph_hats(&mut stdout, &config, &runtime_registry, format, backend.as_deref())
         }
     }
 }
 
-fn list_hats_json<W: Write>(writer: &mut W, registry: &HatRegistry) -> Result<()> {
-    let hats: Vec<_> = registry.all().collect();
+fn list_hats_json<W: Write>(writer: &mut W, config_registry: &HatRegistry) -> Result<()> {
+    let hats: Vec<_> = config_registry.all().collect();
     serde_json::to_writer_pretty(&mut *writer, &hats)?;
     writeln!(writer)?;
     Ok(())
 }
 
-fn list_hats<W: Write>(writer: &mut W, registry: &HatRegistry, _use_colors: bool) -> Result<()> {
-    if registry.is_empty() {
+fn list_hats<W: Write>(writer: &mut W, config_registry: &HatRegistry, _use_colors: bool) -> Result<()> {
+    if config_registry.is_empty() {
         writeln!(
             writer,
             "No custom hats configured (using default HatlessRalph coordination)."
@@ -128,7 +132,7 @@ fn list_hats<W: Write>(writer: &mut W, registry: &HatRegistry, _use_colors: bool
     writeln!(writer, "{}", "-".repeat(80))?;
 
     // Sort by name for consistent output
-    let mut hats: Vec<_> = registry.all().collect();
+    let mut hats: Vec<_> = config_registry.all().collect();
     hats.sort_by(|a, b| a.name.cmp(&b.name));
 
     for hat in hats {
@@ -149,19 +153,34 @@ fn list_hats<W: Write>(writer: &mut W, registry: &HatRegistry, _use_colors: bool
 fn validate_hats<W: Write>(
     writer: &mut W,
     config: &RalphConfig,
-    registry: &HatRegistry,
+    runtime_registry: &HatRegistry,
+    config_registry: &HatRegistry,
     use_colors: bool,
 ) -> Result<()> {
     writeln!(writer, "Hat Topology Validation")?;
     writeln!(writer, "=======================")?;
     writeln!(writer)?;
 
-    if registry.is_empty() {
+    if config_registry.is_empty() {
         writeln!(writer, "No hats configured (solo mode).")?;
         return Ok(());
     }
 
-    writeln!(writer, "Hats: {} configured", registry.len())?;
+    // Shared preset topology validator (uses runtime-aware registry for
+    // realistic reachability analysis including fallback Ralph).
+    let topology_result = preset_validator::validate_preset_topology(config, runtime_registry);
+    if !topology_result.is_valid() {
+        for err in &topology_result.errors {
+            print_check(
+                writer,
+                CheckResult::Error,
+                &format!("Topology: {}", err.message),
+                use_colors,
+            )?;
+        }
+    }
+
+    writeln!(writer, "Hats: {} configured", config_registry.len())?;
     if let Some(start) = &config.event_loop.starting_event {
         writeln!(writer, "Entry: task.start -> {}", start)?;
     } else {
@@ -176,8 +195,8 @@ fn validate_hats<W: Write>(
 
     // 1. Starting event validation
     if let Some(start) = &config.event_loop.starting_event {
-        if registry.has_subscriber(start) {
-            let hat = registry.get_for_topic(start).unwrap();
+        if config_registry.has_subscriber(start) {
+            let hat = config_registry.get_for_topic(start).unwrap();
             print_check(
                 writer,
                 CheckResult::Ok,
@@ -196,7 +215,7 @@ fn validate_hats<W: Write>(
     }
 
     // 2. Orphan event detection (published but no subscribers)
-    for hat in registry.all() {
+    for hat in config_registry.all() {
         for pub_event in &hat.publishes {
             let topic = pub_event.as_str();
             // Ignore loop completion promise
@@ -205,7 +224,7 @@ fn validate_hats<W: Write>(
             }
             // Ignore if Ralph subscribes (task.start, etc - though Ralph usually PUBLISHES task.start)
             // Ralph conceptually subscribes to everything as fallback, but we want to warn if no SPECIFIC hat handles it.
-            if !registry.has_subscriber(topic) {
+            if !config_registry.has_subscriber(topic) {
                 print_check(
                     writer,
                     CheckResult::Warn,
@@ -222,7 +241,7 @@ fn validate_hats<W: Write>(
 
     // 3. Dead end detection
     let mut dead_ends = 0;
-    for hat in registry.all() {
+    for hat in config_registry.all() {
         if hat.publishes.is_empty() {
             // It's okay to be a dead end if it's the Summarizer (which outputs completion promise via stdout/file, not event)
             // But usually they publish something.
@@ -293,22 +312,22 @@ fn print_check<W: Write>(
 fn graph_hats<W: Write>(
     writer: &mut W,
     config: &RalphConfig,
-    registry: &HatRegistry,
+    config_registry: &HatRegistry,
     format: GraphFormat,
     backend_override: Option<&str>,
 ) -> Result<()> {
     match format {
         GraphFormat::Mermaid => {
             writeln!(writer, "```mermaid")?;
-            write!(writer, "{}", generate_mermaid_string(registry))?;
+            write!(writer, "{}", generate_mermaid_string(config_registry))?;
             writeln!(writer, "```")?;
         }
         GraphFormat::Compact => {
-            write!(writer, "{}", generate_compact_graph(registry))?;
+            write!(writer, "{}", generate_compact_graph(config_registry))?;
         }
         GraphFormat::Unicode | GraphFormat::Ascii => {
             // Generate diagram via AI backend
-            let rendered = render_hat_dag_via_ai(config, registry, backend_override)?;
+            let rendered = render_hat_dag_via_ai(config, config_registry, backend_override)?;
             write!(writer, "{}", rendered)?;
         }
     }
@@ -321,10 +340,10 @@ fn graph_hats<W: Write>(
 /// Uses the configured backend (or auto-detects) to generate the diagram.
 fn render_hat_dag_via_ai(
     config: &RalphConfig,
-    registry: &HatRegistry,
+    config_registry: &HatRegistry,
     backend_override: Option<&str>,
 ) -> Result<String> {
-    if registry.is_empty() {
+    if config_registry.is_empty() {
         return Ok("No hats configured.\n".to_string());
     }
 
@@ -332,7 +351,7 @@ fn render_hat_dag_via_ai(
     let backend_name = resolve_backend(backend_override, config)?;
 
     // Build the prompt describing the graph
-    let prompt = build_diagram_prompt(registry);
+    let prompt = build_diagram_prompt(config_registry);
 
     // Create backend and generate diagram
     let backend = CliBackend::from_name(&backend_name)
@@ -436,7 +455,7 @@ fn validate_backend_name(name: &str) -> Result<()> {
 }
 
 /// Builds the prompt for diagram generation.
-fn build_diagram_prompt(registry: &HatRegistry) -> String {
+fn build_diagram_prompt(config_registry: &HatRegistry) -> String {
     let mut prompt = String::from(
         "Generate an ASCII diagram showing this directed acyclic graph.\n\
          Use simple box-drawing characters that work in any terminal.\n\
@@ -447,7 +466,7 @@ fn build_diagram_prompt(registry: &HatRegistry) -> String {
     prompt.push_str("- task.start → Ralph\n");
 
     // Collect all hats sorted for deterministic output
-    let mut hats: Vec<_> = registry.all().collect();
+    let mut hats: Vec<_> = config_registry.all().collect();
     hats.sort_by(|a, b| a.name.cmp(&b.name));
 
     // Ralph -> Hats (based on subscriptions)
@@ -528,8 +547,8 @@ fn extract_diagram(response: &str) -> String {
     }
 }
 
-fn generate_compact_graph(registry: &HatRegistry) -> String {
-    if registry.is_empty() {
+fn generate_compact_graph(config_registry: &HatRegistry) -> String {
+    if config_registry.is_empty() {
         return "No hats configured.\n".to_string();
     }
 
@@ -538,7 +557,7 @@ fn generate_compact_graph(registry: &HatRegistry) -> String {
     output.push_str("  task.start -> Ralph\n");
 
     // Sort hats for deterministic output
-    let mut hats: Vec<_> = registry.all().collect();
+    let mut hats: Vec<_> = config_registry.all().collect();
     hats.sort_by(|a, b| a.name.cmp(&b.name));
 
     for hat in &hats {
@@ -561,21 +580,21 @@ fn generate_compact_graph(registry: &HatRegistry) -> String {
 }
 
 /// Generate Mermaid flowchart syntax for the hat topology.
-fn generate_mermaid_string(registry: &HatRegistry) -> String {
+fn generate_mermaid_string(config_registry: &HatRegistry) -> String {
     let mut output = String::new();
     output.push_str("flowchart LR\n");
     output.push_str("    Start[task.start] --> Ralph\n");
 
     // Reconstruct Ralph's publishes (what hats subscribe to)
     let mut ralph_publishes: HashSet<String> = HashSet::new();
-    for hat in registry.all() {
+    for hat in config_registry.all() {
         for sub in &hat.subscriptions {
             ralph_publishes.insert(sub.as_str().to_string());
         }
     }
 
     // Ralph -> Hats
-    for hat in registry.all() {
+    for hat in config_registry.all() {
         let node_id = sanitize_id(&hat.name);
         for sub in &hat.subscriptions {
             output.push_str(&format!("    Ralph -->|{}| {}\n", sub.as_str(), node_id));
@@ -583,7 +602,7 @@ fn generate_mermaid_string(registry: &HatRegistry) -> String {
     }
 
     // Hats -> Ralph
-    for hat in registry.all() {
+    for hat in config_registry.all() {
         let node_id = sanitize_id(&hat.name);
         for pub_event in &hat.publishes {
             output.push_str(&format!(
@@ -596,11 +615,11 @@ fn generate_mermaid_string(registry: &HatRegistry) -> String {
 
     // Hat -> Hat (direct flow visualization)
     // Even though everything goes through Ralph, it's useful to see A -> B
-    for source in registry.all() {
+    for source in config_registry.all() {
         let source_id = sanitize_id(&source.name);
         for pub_event in &source.publishes {
             // Find hats that subscribe to this
-            for target in registry.all() {
+            for target in config_registry.all() {
                 if target.id == source.id {
                     continue;
                 }
@@ -630,12 +649,12 @@ fn sanitize_id(name: &str) -> String {
 
 fn show_hat<W: Write>(
     writer: &mut W,
-    registry: &HatRegistry,
+    config_registry: &HatRegistry,
     name: &str,
     use_colors: bool,
 ) -> Result<()> {
     // Try to find by ID first, then by display name
-    let hat = registry
+    let hat = config_registry
         .all()
         .find(|h| h.id.as_str() == name || h.name == name);
 
@@ -705,21 +724,21 @@ mod tests {
 
     #[test]
     fn test_list_hats_empty() {
-        let registry = HatRegistry::new();
+        let config_registry = HatRegistry::new();
         let mut buf = Vec::new();
-        list_hats(&mut buf, &registry, false).unwrap();
+        list_hats(&mut buf, &config_registry, false).unwrap();
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("No custom hats configured"));
     }
 
     #[test]
     fn test_list_hats_with_entries() {
-        let mut registry = HatRegistry::new();
-        registry.register(mock_hat("Builder", &["build.task"], &["build.done"]));
-        registry.register(mock_hat("Planner", &["plan.start"], &["build.task"]));
+        let mut config_registry = HatRegistry::new();
+        config_registry.register(mock_hat("Builder", &["build.task"], &["build.done"]));
+        config_registry.register(mock_hat("Planner", &["plan.start"], &["build.task"]));
 
         let mut buf = Vec::new();
-        list_hats(&mut buf, &registry, false).unwrap();
+        list_hats(&mut buf, &config_registry, false).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         assert!(output.contains("HAT                  DESCRIPTION"));
@@ -729,15 +748,16 @@ mod tests {
 
     #[test]
     fn test_validate_hats_orphan() {
-        let mut registry = HatRegistry::new();
+        let mut config_registry = HatRegistry::new();
         // Builder publishes build.done, but no one listens
-        registry.register(mock_hat("Builder", &["build.task"], &["build.done"]));
+        config_registry.register(mock_hat("Builder", &["build.task"], &["build.done"]));
 
         let config = RalphConfig::default();
         let mut buf = Vec::new();
 
         // Validation might exit process on error, so we test warning scenario
-        validate_hats(&mut buf, &config, &registry, false).unwrap();
+        // Test registries have no builtin ralph, so pass the same as both params
+        validate_hats(&mut buf, &config, &config_registry, &config_registry, false).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         // Should warn about build.done having no subscribers
@@ -749,14 +769,14 @@ mod tests {
 
     #[test]
     fn test_graph_hats_compact() {
-        let mut registry = HatRegistry::new();
-        registry.register(mock_hat("Builder", &["build.task"], &["build.done"]));
-        registry.register(mock_hat("Planner", &["planner.start"], &["planner.done"]));
+        let mut config_registry = HatRegistry::new();
+        config_registry.register(mock_hat("Builder", &["build.task"], &["build.done"]));
+        config_registry.register(mock_hat("Planner", &["planner.start"], &["planner.done"]));
 
         let config = RalphConfig::default();
         let mut buf = Vec::new();
 
-        graph_hats(&mut buf, &config, &registry, GraphFormat::Compact, None).unwrap();
+        graph_hats(&mut buf, &config, &config_registry, GraphFormat::Compact, None).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         assert!(output.contains("Graph:"));
@@ -770,13 +790,13 @@ mod tests {
     #[test]
     #[ignore = "requires live AI backend"]
     fn test_graph_hats_ascii() {
-        let mut registry = HatRegistry::new();
-        registry.register(mock_hat("Builder", &["build.task"], &["build.done"]));
+        let mut config_registry = HatRegistry::new();
+        config_registry.register(mock_hat("Builder", &["build.task"], &["build.done"]));
 
         let config = RalphConfig::default();
         let mut buf = Vec::new();
 
-        graph_hats(&mut buf, &config, &registry, GraphFormat::Ascii, None).unwrap();
+        graph_hats(&mut buf, &config, &config_registry, GraphFormat::Ascii, None).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         // AI-generated output should contain the node names
@@ -786,13 +806,13 @@ mod tests {
     #[test]
     #[ignore = "requires live AI backend"]
     fn test_graph_hats_unicode() {
-        let mut registry = HatRegistry::new();
-        registry.register(mock_hat("Coder", &["code.task"], &["code.done"]));
+        let mut config_registry = HatRegistry::new();
+        config_registry.register(mock_hat("Coder", &["code.task"], &["code.done"]));
 
         let config = RalphConfig::default();
         let mut buf = Vec::new();
 
-        graph_hats(&mut buf, &config, &registry, GraphFormat::Unicode, None).unwrap();
+        graph_hats(&mut buf, &config, &config_registry, GraphFormat::Unicode, None).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         // AI-generated output should contain node names
@@ -801,11 +821,11 @@ mod tests {
 
     #[test]
     fn test_generate_mermaid_string() {
-        let mut registry = HatRegistry::new();
-        registry.register(mock_hat("A", &["start"], &["mid"]));
-        registry.register(mock_hat("B", &["mid"], &["end"]));
+        let mut config_registry = HatRegistry::new();
+        config_registry.register(mock_hat("A", &["start"], &["mid"]));
+        config_registry.register(mock_hat("B", &["mid"], &["end"]));
 
-        let output = generate_mermaid_string(&registry);
+        let output = generate_mermaid_string(&config_registry);
 
         assert!(output.contains("flowchart LR"));
         assert!(output.contains("Ralph -->|start| A"));
@@ -817,11 +837,11 @@ mod tests {
 
     #[test]
     fn test_show_hat_found() {
-        let mut registry = HatRegistry::new();
-        registry.register(mock_hat("Builder", &["build.task"], &["build.done"]));
+        let mut config_registry = HatRegistry::new();
+        config_registry.register(mock_hat("Builder", &["build.task"], &["build.done"]));
 
         let mut buf = Vec::new();
-        show_hat(&mut buf, &registry, "Builder", false).unwrap();
+        show_hat(&mut buf, &config_registry, "Builder", false).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         assert!(output.contains("Builder"));
@@ -833,21 +853,22 @@ mod tests {
 
     #[test]
     fn test_show_hat_not_found() {
-        let registry = HatRegistry::new();
+        let config_registry = HatRegistry::new();
         let mut buf = Vec::new();
-        let result = show_hat(&mut buf, &registry, "Nonexistent", false);
+        let result = show_hat(&mut buf, &config_registry, "Nonexistent", false);
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
 
     #[test]
-    fn test_validate_hats_empty_registry() {
-        let registry = HatRegistry::new();
+    fn test_validate_hats_empty_config_registry() {
+        let config_registry = HatRegistry::new();
         let config = RalphConfig::default();
         let mut buf = Vec::new();
 
-        validate_hats(&mut buf, &config, &registry, false).unwrap();
+        // Test registries have no builtin ralph, so pass the same as both params
+        validate_hats(&mut buf, &config, &config_registry, &config_registry, false).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         assert!(output.contains("No hats configured"));
@@ -855,15 +876,16 @@ mod tests {
 
     #[test]
     fn test_validate_hats_valid_topology() {
-        let mut registry = HatRegistry::new();
+        let mut config_registry = HatRegistry::new();
         // Create a closed loop: A subscribes to start, publishes mid; B subscribes to mid
-        registry.register(mock_hat("A", &["start"], &["mid"]));
-        registry.register(mock_hat("B", &["mid"], &[]));
+        config_registry.register(mock_hat("A", &["start"], &["mid"]));
+        config_registry.register(mock_hat("B", &["mid"], &[]));
 
         let config = RalphConfig::default();
         let mut buf = Vec::new();
 
-        validate_hats(&mut buf, &config, &registry, false).unwrap();
+        // Test registries have no builtin ralph, so pass the same as both params
+        validate_hats(&mut buf, &config, &config_registry, &config_registry, false).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         assert!(output.contains("No dead-end hats") || output.contains("Result: Valid"));
@@ -871,11 +893,11 @@ mod tests {
 
     #[test]
     fn test_list_hats_json() {
-        let mut registry = HatRegistry::new();
-        registry.register(mock_hat("Builder", &["build.task"], &["build.done"]));
+        let mut config_registry = HatRegistry::new();
+        config_registry.register(mock_hat("Builder", &["build.task"], &["build.done"]));
 
         let mut buf = Vec::new();
-        list_hats_json(&mut buf, &registry).unwrap();
+        list_hats_json(&mut buf, &config_registry).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         // Should be valid JSON
@@ -922,13 +944,13 @@ mod tests {
 
     #[test]
     fn test_list_hats_truncates_long_description() {
-        let mut registry = HatRegistry::new();
+        let mut config_registry = HatRegistry::new();
         let mut hat = mock_hat("LongDesc", &["start"], &["end"]);
         hat.description = "A".repeat(100); // Very long description
-        registry.register(hat);
+        config_registry.register(hat);
 
         let mut buf = Vec::new();
-        list_hats(&mut buf, &registry, false).unwrap();
+        list_hats(&mut buf, &config_registry, false).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         // Description should be truncated with "..."
@@ -937,11 +959,11 @@ mod tests {
 
     #[test]
     fn test_build_diagram_prompt() {
-        let mut registry = HatRegistry::new();
-        registry.register(mock_hat("Builder", &["build.task"], &["build.done"]));
-        registry.register(mock_hat("Tester", &["test.task"], &["test.done"]));
+        let mut config_registry = HatRegistry::new();
+        config_registry.register(mock_hat("Builder", &["build.task"], &["build.done"]));
+        config_registry.register(mock_hat("Tester", &["test.task"], &["test.done"]));
 
-        let prompt = build_diagram_prompt(&registry);
+        let prompt = build_diagram_prompt(&config_registry);
 
         // Should contain the key elements
         assert!(prompt.contains("task.start → Ralph"));

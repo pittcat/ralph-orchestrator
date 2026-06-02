@@ -1548,10 +1548,21 @@ fn test_hatless_mode_registers_ralph_catch_all() {
     let config = RalphConfig::default();
     let mut event_loop = EventLoop::new(config);
 
-    // Registry should be empty (no user-defined hats)
-    assert!(event_loop.registry().is_empty());
+    // Registry should contain the builtin "ralph" hat (from_runtime_config)
+    assert!(!event_loop.registry().is_empty(), "Registry should contain builtin ralph");
+    assert!(
+        event_loop.registry().get(&HatId::new("ralph")).is_some(),
+        "Registry should have ralph registered"
+    );
 
-    // But when we initialize, task.start should route to "ralph"
+    // No user-defined hats (EventLoop::default creates RalphConfig with empty hats)
+    assert_eq!(
+        event_loop.config().hats.len(),
+        0,
+        "No custom hats configured"
+    );
+
+    // When we initialize, task.start should route to "ralph"
     event_loop.initialize("Test prompt");
 
     // "ralph" should have pending events
@@ -1724,9 +1735,15 @@ fn test_always_hatless_solo_mode_unchanged() {
     let config = RalphConfig::default();
     let mut event_loop = EventLoop::new(config);
 
+    // Registry should contain builtin ralph, but no custom hats
+    assert!(!event_loop.registry().is_empty(), "Registry should contain builtin ralph");
     assert!(
-        event_loop.registry().is_empty(),
-        "Solo mode has no custom hats"
+        event_loop.registry().get(&HatId::new("ralph")).is_some(),
+        "Registry should have ralph registered"
+    );
+    assert!(
+        event_loop.config().hats.is_empty(),
+        "No custom hats in config"
     );
 
     event_loop.initialize("Do something");

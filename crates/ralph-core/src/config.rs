@@ -1076,8 +1076,8 @@ pub struct EventLoopConfig {
 
     /// Event topic that triggers graceful early termination WITHOUT chain validation.
     /// Use this for human rejection, timeout escalation, or other abort paths.
-    /// Defaults to "" (disabled). Set to "loop.cancel" to enable.
-    #[serde(default)]
+    /// Defaults to "loop.cancel" (enabled). Set to "" (empty string) to disable.
+    #[serde(default = "default_cancellation_promise")]
     pub cancellation_promise: String,
 
     /// When true, events emitted by a hat are validated against its declared
@@ -1575,6 +1575,10 @@ fn default_max_failures() -> u32 {
     5
 }
 
+fn default_cancellation_promise() -> String {
+    "loop.cancel".to_string()
+}
+
 impl Default for EventLoopConfig {
     fn default() -> Self {
         Self {
@@ -1591,7 +1595,7 @@ impl Default for EventLoopConfig {
             mutation_score_warn_threshold: None,
             persistent: false,
             required_events: Vec::new(),
-            cancellation_promise: String::new(),
+            cancellation_promise: default_cancellation_promise(),
             enforce_hat_scope: false,
             workflow_guards: None,
             execution_mode: HatExecutionMode::default(),

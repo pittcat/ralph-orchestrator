@@ -450,6 +450,40 @@ In this setup:
 
 ---
 
+## Runtime Ralph Hat
+
+Ralph registers a **builtin** `ralph` hat in the runtime hat registry for every run.
+This hat:
+
+- **Does NOT require manual declaration** in preset YAML. It is automatically present
+  as the universal fallback coordinator.
+- **Has a derived publish scope** based on the configured topology (starting event,
+  completion promise, cancellation promise, and all configured hats' triggers and
+  publishes). This means `hat=ralph` can emit `work.start`, `LOOP_COMPLETE`, and
+  `loop.cancel` without additional configuration.
+- **Cannot publish off-graph topics.** A `hat=ralph topic=totally.fake` event is
+  still rejected by the event origin guard.
+- **Is registered via `HatRegistry::from_runtime_config()`**, which combines user-
+  configured hats with the builtin runtime hat. The event loop and all origin guard
+  checks use this unified registry.
+
+### Cancellation Default
+
+`loop.cancel` is now **enabled by default** as the cancellation promise topic.
+To disable:
+
+```yaml
+event_loop:
+  cancellation_promise: ""    # empty string disables loop.cancel
+```
+
+With the default enabled, agents can emit `loop.cancel` to trigger graceful early
+termination without chain validation. The loop exits with code 0 (success) and
+`TerminationReason::Cancelled`. This is intended for human rejection paths, timeout
+escalation, or any scenario requiring an abort while keeping the workspace intact.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |

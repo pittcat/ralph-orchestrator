@@ -659,4 +659,135 @@ hats:
     fn zash_next_function_offset(zsh: &str, from: usize) -> Option<usize> {
         zsh[from..].find("\n(( $+functions[").map(|o| from + o + 1)
     }
+
+    /// Creates a runtime-aware registry with builtin "ralph" hat for origin guard tests.
+    fn runtime_registry_with_hats(yaml_with_config: &str) -> HatRegistry {
+        // We need the full yaml including event_loop config for from_runtime_config.
+        // If the input doesn't start with "hats:", wrap it in a minimal config.
+        let full_yaml = if yaml_with_config.trim().starts_with("hats:") {
+            format!(
+                "{}\nevent_loop:\n  completion_promise: LOOP_COMPLETE\n  cancellation_promise: loop.cancel",
+                yaml_with_config
+            )
+        } else {
+            yaml_with_config.to_string()
+        };
+        let config: RalphConfig = serde_yaml::from_str(&full_yaml).unwrap();
+        HatRegistry::from_runtime_config(&config)
+    }
+
+    #[test]
+    fn test_ralph_as_builtin_hat_passes_origin_guard() {
+        // R1/R2: With runtime-aware registry, hat=ralph is a known hat that
+        // can publish topics within the derived scope.
+        let registry = runtime_registry_with_hats(
+            r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+"#,
+        );
+
+        // hat=ralph topic=work.start: starting event is in ralph's publish scope
+        let event = make_event("work.start", Some("ralph"));
+        assert_eq!(
+            validate_event_origin(&event, &registry, "loop.cancel"),
+            OriginCheck::Accepted,
+            "hat=ralph should pass origin guard for work.start (in scope)"
+        );
+
+        // hat=ralph topic=LOOP_COMPLETE: completion promise is in scope
+        let event = make_event("LOOP_COMPLETE", Some("ralph"));
+        assert_eq!(
+            validate_event_origin(&event, &registry, "loop.cancel"),
+            OriginCheck::Accepted,
+            "hat=ralph should pass origin guard for LOOP_COMPLETE (in scope)"
+        );
+
+        // hat=ralph topic=loop.cancel: cancellation promise is in scope
+        let event = make_event("loop.cancel", Some("ralph"));
+        assert_eq!(
+            validate_event_origin(&event, &registry, "loop.cancel"),
+            OriginCheck::Accepted,
+            "hat=ralph should pass origin guard for loop.cancel (cancellation topic)"
+        );
+
+        // hat=ralph topic=totally.fake: NOT in scope — should be rejected
+        let event = make_event("totally.fake", Some("ralph"));
+        assert_eq!(
+            validate_event_origin(&event, &registry, "loop.cancel"),
+            OriginCheck::Rejected {
+                topic: "totally.fake".to_string(),
+                hat: Some("ralph".to_string()),
+                reason: "out-of-scope topic for declared hat"
+            },
+            "hat=ralph with off-graph topic should be rejected"
+        );
+
+        // hat=fake topic=work.start: unknown hat — should be rejected
+        let event = make_event("work.start", Some("fake"));
+        assert_eq!(
+            validate_event_origin(&event, &registry, "loop.cancel"),
+            OriginCheck::Rejected {
+                topic: "work.start".to_string(),
+                hat: Some("fake".to_string()),
+                reason: "unknown hat rejected"
+            },
+            "unknown hat should be rejected even for valid topic"
+        );
+    }
+
+    #[test]
+    fn test_ralph_as_builtin_hat_can_publish_executor_trigger_topics() {
+        // hat=ralph can publish executor's trigger topics (they're in ralph's scope).
+        let registry = runtime_registry_with_hats(
+            r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start", "review.ready"]
+    publishes: ["work.done"]
+"#,
+        );
+
+        let event = make_event("work.start", Some("ralph"));
+        assert_eq!(
+            validate_event_origin(&event, &registry, ""),
+            OriginCheck::Accepted
+        );
+
+        let event = make_event("review.ready", Some("ralph"));
+        assert_eq!(
+            validate_event_origin(&event, &registry, ""),
+            OriginCheck::Accepted
+        );
+    }
+
+    #[test]
+    fn test_ralph_as_builtin_hat_can_publish_executor_publish_topics() {
+        // hat=ralph can publish executor's publish topics (they're in ralph's scope).
+        let registry = runtime_registry_with_hats(
+            r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["work.done", "review.result"]
+"#,
+        );
+
+        let event = make_event("work.done", Some("ralph"));
+        assert_eq!(
+            validate_event_origin(&event, &registry, ""),
+            OriginCheck::Accepted
+        );
+
+        let event = make_event("review.result", Some("ralph"));
+        assert_eq!(
+            validate_event_origin(&event, &registry, ""),
+            OriginCheck::Accepted
+        );
+    }
 }

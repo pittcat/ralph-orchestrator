@@ -48,6 +48,93 @@ impl HatRegistry {
         registry
     }
 
+    /// Creates a registry from configuration, including the builtin runtime `ralph` hat.
+    ///
+    /// The builtin `ralph` hat is registered as a runtime-internal actor with a derived
+    /// publish scope based on the current topology. This ensures the event origin guard
+    /// and event bus have a consistent view of `ralph` as a known hat, without requiring
+    /// preset authors to manually declare a `ralph` hat.
+    ///
+    /// Empty config → registry with only the builtin `ralph` hat (solo mode).
+    pub fn from_runtime_config(config: &RalphConfig) -> Self {
+        let mut registry = Self::from_config(config);
+        registry.add_builtin_ralph(config);
+        registry
+    }
+
+    /// Adds the builtin runtime `ralph` hat with a derived publish scope.
+    ///
+    /// The publish scope is derived from the configured topology:
+    /// - `event_loop.starting_event` (or `"task.start"` default)
+    /// - `event_loop.completion_promise`
+    /// - Non-empty `event_loop.cancellation_promise`
+    /// - All configured hats' `triggers` and `publishes`
+    ///
+    /// This gives `ralph` just enough authority to coordinate the topology
+    /// (dispatch, complete, cancel) without granting unrestricted publish access.
+    fn add_builtin_ralph(&mut self, config: &RalphConfig) {
+        let publishes = self.derive_builtin_ralph_publishes(config);
+        let ralph_hat = Hat::new("ralph", "Ralph")
+            .subscribe("*")
+            .with_publishes(publishes);
+        // Register without a HatConfig — builtin ralph has no hat-specific config
+        // (no phase_triggers, no per-hat scratchpad, etc.).
+        self.register(ralph_hat);
+    }
+
+    /// Derives the publish scope for the builtin runtime `ralph` hat.
+    ///
+    /// Collects all topics that Ralph needs to emit as coordinator:
+    /// starting event, completion promise, cancellation promise (when non-empty),
+    /// and every trigger/publish of every registered hat.
+    fn derive_builtin_ralph_publishes(&self, config: &RalphConfig) -> Vec<Topic> {
+        let mut topics: Vec<String> = Vec::new();
+
+        // 1. Starting event (or "task.start" default)
+        let start = config
+            .event_loop
+            .starting_event
+            .clone()
+            .unwrap_or_else(|| "task.start".to_string());
+        if !topics.contains(&start) {
+            topics.push(start);
+        }
+
+        // 2. Completion promise
+        let completion = config.event_loop.completion_promise.clone();
+        if !completion.is_empty() && !topics.contains(&completion) {
+            topics.push(completion);
+        }
+
+        // 3. Cancellation promise (when non-empty)
+        let cancellation = config.event_loop.cancellation_promise.clone();
+        if !cancellation.is_empty() && !topics.contains(&cancellation) {
+            topics.push(cancellation);
+        }
+
+        // 4. All hats' subscriptions (triggers)
+        for hat in self.hats.values() {
+            for sub in &hat.subscriptions {
+                let s = sub.as_str().to_string();
+                if !topics.contains(&s) {
+                    topics.push(s);
+                }
+            }
+        }
+
+        // 5. All hats' publishes
+        for hat in self.hats.values() {
+            for pub_topic in &hat.publishes {
+                let s = pub_topic.as_str().to_string();
+                if !topics.contains(&s) {
+                    topics.push(s);
+                }
+            }
+        }
+
+        topics.into_iter().map(Topic::new).collect()
+    }
+
     /// Creates a Hat from HatConfig.
     fn hat_from_config(id: &str, config: &HatConfig) -> Hat {
         let mut hat = Hat::new(id, &config.name);
@@ -142,8 +229,23 @@ impl HatRegistry {
     /// Finds the first hat that would be triggered by a topic.
     /// Returns the hat ID if found, used for event logging.
     /// BTreeMap iteration is already sorted by key.
+    ///
+    /// Prefers hats with specific (non-global-wildcard) subscriptions over
+    /// fallback-only hats (those subscribed only to `*`). This ensures that
+    /// the builtin `ralph` fallback hat does not shadow custom hats.
     pub fn find_by_trigger(&self, topic: &str) -> Option<&HatId> {
         let topic = Topic::new(topic);
+
+        // First pass: prefer hats with specific (non-wildcard) subscriptions
+        if let Some(hat) = self
+            .hats
+            .values()
+            .find(|hat| !hat.is_fallback_only() && hat.is_subscribed(&topic))
+        {
+            return Some(&hat.id);
+        }
+
+        // Second pass: any matching hat (including fallback-only)
         self.hats
             .values()
             .find(|hat| hat.is_subscribed(&topic))
@@ -154,6 +256,18 @@ impl HatRegistry {
     pub fn has_subscriber(&self, topic: &str) -> bool {
         let topic = Topic::new(topic);
         self.hats.values().any(|hat| hat.is_subscribed(&topic))
+    }
+
+    /// Returns true if any non-fallback-only hat is subscribed to the given topic.
+    ///
+    /// Fallback-only hats (those subscribed only to `*`) are excluded from this check.
+    /// This is used to detect truly orphaned events that no specific hat can handle,
+    /// as opposed to events that only match the universal fallback.
+    pub fn has_specific_subscriber(&self, topic: &str) -> bool {
+        let topic = Topic::new(topic);
+        self.hats
+            .values()
+            .any(|hat| !hat.is_fallback_only() && hat.is_subscribed(&topic))
     }
 
     /// Check if a hat is allowed to publish the given topic.
@@ -212,6 +326,10 @@ impl HatRegistry {
     ///
     /// Uses prefix index for O(1) early-exit when the topic prefix doesn't match
     /// any subscription pattern. Respects phase-aware triggers when configured.
+    ///
+    /// Prefers hats with specific (non-global-wildcard) subscriptions over
+    /// fallback-only hats (those subscribed only to `*`). This ensures that
+    /// the builtin `ralph` fallback hat does not shadow custom hats.
     pub fn get_for_topic(&self, topic: &str) -> Option<&Hat> {
         // Fast path: Check if any subscription could possibly match this topic
         // If we have a global wildcard "*", we must do the full scan
@@ -224,7 +342,18 @@ impl HatRegistry {
             }
         }
 
-        // Fall back to full linear scan with phase-aware matching
+        // First pass: prefer hats with specific (non-wildcard) subscriptions
+        if let Some(hat) = self
+            .hats
+            .values()
+            .find(|hat| {
+                !hat.is_fallback_only()
+                    && self.hat_is_subscribed_in_phase(&hat.id, topic)
+            }) {
+            return Some(hat);
+        }
+
+        // Second pass: any matching hat (including fallback-only)
         self.hats
             .values()
             .find(|hat| self.hat_is_subscribed_in_phase(&hat.id, topic))
@@ -531,5 +660,142 @@ hats:
         assert!(!registry.can_publish(&HatId::new("ralph"), "anything"));
         assert!(!registry.can_publish(&HatId::new("ralph"), "LOOP_COMPLETE"));
         assert!(!registry.can_publish(&HatId::new("strategist"), "experiment.planned"));
+    }
+
+    // ── Runtime-aware registry tests ──────────────────────────────────────
+
+    #[test]
+    fn test_runtime_registry_includes_ralph() {
+        // R1: Runtime registry should include builtin ralph even without config hats.
+        let config = RalphConfig::default();
+        let registry = HatRegistry::from_runtime_config(&config);
+        assert!(!registry.is_empty(), "Runtime registry should not be empty");
+        assert!(
+            registry.get(&HatId::new("ralph")).is_some(),
+            "Runtime registry should have ralph"
+        );
+    }
+
+    #[test]
+    fn test_runtime_registry_ralph_has_derived_publishes() {
+        // R2: Builtin ralph's publish scope is derived from topology.
+        let yaml = r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["work.done", "build.blocked"]
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  cancellation_promise: "loop.cancel"
+  starting_event: "work.start"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = HatRegistry::from_runtime_config(&config);
+
+        let ralph = registry.get(&HatId::new("ralph")).unwrap();
+
+        // Should be able to publish: starting_event, completion_promise, cancellation_promise,
+        // all hat triggers, and all hat publishes.
+        assert!(
+            ralph.publishes.iter().any(|t| t.as_str() == "work.start"),
+            "ralph should publish starting_event (work.start)"
+        );
+        assert!(
+            ralph.publishes.iter().any(|t| t.as_str() == "LOOP_COMPLETE"),
+            "ralph should publish completion_promise (LOOP_COMPLETE)"
+        );
+        assert!(
+            ralph.publishes.iter().any(|t| t.as_str() == "loop.cancel"),
+            "ralph should publish cancellation_promise (loop.cancel)"
+        );
+        assert!(
+            ralph.publishes.iter().any(|t| t.as_str() == "work.done"),
+            "ralph should publish executor's publishes (work.done)"
+        );
+        assert!(
+            ralph.publishes.iter().any(|t| t.as_str() == "build.blocked"),
+            "ralph should publish executor's publishes (build.blocked)"
+        );
+    }
+
+    #[test]
+    fn test_runtime_registry_ralph_cannot_publish_off_graph() {
+        // R2: Builtin ralph cannot publish topics outside the derived scope.
+        let yaml = r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+event_loop:
+  completion_promise: "DONE"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = HatRegistry::from_runtime_config(&config);
+
+        assert!(
+            !registry.can_publish(&HatId::new("ralph"), "totally.fake"),
+            "off-graph topic should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_config_registry_does_not_include_ralph() {
+        // from_config (non-runtime) should NOT include ralph.
+        let config = RalphConfig::default();
+        let registry = HatRegistry::from_config(&config);
+        assert!(
+            registry.get(&HatId::new("ralph")).is_none(),
+            "from_config should NOT have ralph"
+        );
+    }
+
+    #[test]
+    fn test_runtime_registry_get_for_topic_prefers_specific_hat() {
+        // get_for_topic should prefer custom hats with specific subscriptions
+        // over ralph's global wildcard.
+        let yaml = r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+event_loop:
+  completion_promise: "DONE"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = HatRegistry::from_runtime_config(&config);
+
+        // get_for_topic should return executor (specific subscription), not ralph
+        let hat = registry.get_for_topic("work.start");
+        assert!(hat.is_some());
+        assert_eq!(
+            hat.unwrap().id.as_str(),
+            "executor",
+            "Should prefer executor over ralph for work.start"
+        );
+
+        // For topics no one specifically subscribes to, should fall back to ralph
+        let hat = registry.get_for_topic("unknown.topic");
+        assert!(hat.is_some());
+        assert_eq!(
+            hat.unwrap().id.as_str(),
+            "ralph",
+            "Should fall back to ralph for unknown topics"
+        );
+    }
+
+    #[test]
+    fn test_runtime_registry_empty_config_only_has_ralph() {
+        // Solo mode: no custom hats, registry should have only ralph.
+        let config = RalphConfig::default();
+        let registry = HatRegistry::from_runtime_config(&config);
+
+        assert_eq!(registry.len(), 1, "Solo runtime registry should have 1 hat (ralph)");
+        assert!(
+            registry.get(&HatId::new("ralph")).is_some(),
+            "The one hat should be ralph"
+        );
     }
 }
