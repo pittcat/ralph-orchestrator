@@ -15,7 +15,8 @@ metadata:
 
 加载和管理 skill。
 
-> 全局选项（`--root`、`-c/--config`、`-H/--hats`、`-v/--verbose`、`--color`）对所有子命令可用。
+> **命名空间选项**：`--root <ROOT>` 只在 `ralph tools` 命名空间下（`memory` / `task` / `skill`）可用，不适用于顶层 `ralph run` / `ralph emit` / `ralph wave emit`。
+> **真·全局选项**（所有子命令可用）：`-c/--config`、`-H/--hats`、`-v/--verbose`、`-q/--quiet`、`--color`。
 > `skill list` 的 `--format` 支持 `table`、`json`、`quiet`（注意：`quiet` 输出 skill 名称，不是 ID）。
 > `skill load` **没有** `format` 选项。
 
@@ -130,14 +131,15 @@ ralph run [OPTIONS] [-- <CUSTOM_ARGS>...]
 | `--loop-id <LOOP_ID>` | string | 否 | — | 与 `--continue` 配合使用的显式循环 ID |
 | `--no-tui` | flag | 否 | — | 禁用 TUI 观测模式 |
 | `-a, --autonomous` | flag | 否 | — | 强制自主模式 |
-| `--worktree` | flag | 否 | — | 创建隔离的 git worktree |
+| `--worktree` | flag | 否 | — | 创建隔离的 git worktree（强制关闭 auto-merge） |
+| `--no-auto-merge` | flag | 否 | — | 跳过循环结束后的自动合并（worktree 模式下也适用） |
 | `--record-session <FILE>` | path | 否 | — | 录制会话到 JSONL（用于 smoke 测试） |
 | `--exclusive` | flag | 否 | — | 使用工作树排他锁，防止并行循环冲突 |
 | `--skip-preflight` | flag | 否 | — | 跳过预检检查 |
 | `--warmup-only` | flag | 否 | — | 仅预热后退出（不执行编排） |
 | `--force-warmup` | flag | 否 | — | 即使未启用也强制后端预热 |
 | `--idle-timeout <SECONDS>` | int | 否 | — | 无活动时的超时秒数 |
-| `--completion-promise` | flag | 否 | — | 输出完成承诺（quiet 模式时仍可见） |
+| `--completion-promise <TEXT>` | string | 否 | — | 输出完成承诺文本（quiet 模式时仍可见） |
 | `--rpc` | flag | 否 | — | 启用 RPC 后端连接 |
 | `-v, --verbose` | flag | 否 | — | 详细输出 |
 | `-q, --quiet` | flag | 否 | — | 抑制流式输出 |

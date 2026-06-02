@@ -7,7 +7,7 @@ metadata:
 
 # Ralph CLI 核心参考
 
-> **前提**：本 skill 仅在 `memories.enabled` 或 `tasks.enabled` 至少一个启用时被注入（`crates/ralph-core/src/event_loop/mod.rs:2040-2054`）。速查表中的"已注入"列均受此条件约束。
+> **前提**：本 skill 仅在 `memories.enabled` 或 `tasks.enabled` 至少一个启用时被注入（`crates/ralph-core/src/event_loop/mod.rs:2062-2075`）。速查表中的"已注入"列均受此条件约束。
 
 > **遇到不确定的命令语法时，先 `ralph <cmd> --help` 再执行。**
 
@@ -20,13 +20,20 @@ metadata:
 
 ## 命令速查表
 
+### `ralph tools` 命名空间（已注入，按需读取对应子 skill）
+
 | 命令 | 用途 | 详细参考 |
 |------|------|---------|
-| `ralph emit` | 发射事件（最常用） | `ralph tools skill load ralph-tools-emit` |
 | `ralph tools task` | 任务管理 | 已注入（`ralph-tools-tasks` skill，仅当 `tasks.enabled`） |
 | `ralph tools memory` | 记忆管理 | 已注入（`ralph-tools-memories` skill，仅当 `memories.enabled`） |
 | `ralph tools skill` | 加载 skill | `ralph tools skill load ralph-tools-cmdref` |
 | `ralph tools interact` | Telegram 通知 | `ralph tools skill load ralph-tools-cmdref` |
+
+### 顶层命令（按需加载对应 skill）
+
+| 命令 | 用途 | 详细参考 |
+|------|------|---------|
+| `ralph emit` | 发射事件（最常用） | `ralph tools skill load ralph-tools-emit` |
 | `ralph wave emit` | 并行 wave 调度 | `ralph tools skill load ralph-tools-wave` |
 | `ralph run` | 启动编排循环 | `ralph tools skill load ralph-tools-cmdref` |
 

@@ -31,7 +31,7 @@ ralph wave emit [OPTIONS] <TOPIC>
 | 参数 | 类型 | 必需 | 默认值 | 说明 |
 |------|------|------|--------|------|
 | `<TOPIC>` | string | 是 | — | 所有 wave 事件的主题（如 `review.file`） |
-| `--payloads <PAYLOADS>...` | string… | 否 | — | 每个 wave worker 一个 payload |
+| `--payloads <PAYLOADS>...` | string… | **是** | — | 每个 wave worker 一个 payload（`num_args = 1..`，至少 1 个） |
 
 **事件文件解析优先级：**
 1. `RALPH_EVENTS_FILE` 环境变量（非空时）

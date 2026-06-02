@@ -10,8 +10,8 @@ metadata:
 ## Memory Commands
 
 ```bash
-ralph tools memory add "content" -t pattern -t tag1 -t tag2
-ralph tools memory add "content" -t private    # Hat-scoped (agent context only)
+ralph tools memory add "content" -t pattern --tags tag1,tag2
+ralph tools memory add "content" --private    # Hat-scoped (agent context only)
 ralph tools memory list [-t type] [--format FORMAT]
 ralph tools memory search "query" [-t type] [--format FORMAT]
 ralph tools memory prime -t pattern       # Output for context injection
