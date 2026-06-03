@@ -120,9 +120,10 @@ event_loop:
 
 契约拒绝会被记录并可见于：
 
-1. **警告**：以 `warn!` 级别记录，包含 topic、hat 和违反原因
-2. **诊断文件**：当 `RALPH_DIAGNOSTICS=1` 时，写入 `.ralph/diagnostics/*/execution-contract.jsonl`
-3. **人工指导**：发布到 `human.guidance` 供下一次迭代参考
+1. **控制台警告**：以 `warn!` 级别记录，包含 topic、hat 和违反原因
+2. **结构化诊断事件**：当 `RALPH_DIAGNOSTICS=1` 时，通过 `DiagnosticsCollector::log_execution_contract_rejections` 写入 `.ralph/diagnostics/<session>/orchestration.jsonl`（事件类型为 `ExecutionContractRejected`）
+3. **TUI / RPC 可见性**：TUI 通过 EventBus observer 消费上述 `event.execution_contract.rejected` 和 `human.guidance` 事件
+4. **人工指导**：发布到 `human.guidance` 供下一次迭代参考
 
 ## 测试
 

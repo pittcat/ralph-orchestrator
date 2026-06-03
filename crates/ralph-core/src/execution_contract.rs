@@ -130,9 +130,17 @@ pub enum ExecutionContractViolationKind {
     /// Referenced task does not exist.
     TaskNotFound { task_id: String },
     /// Task belongs to a different loop (loop_scoped: true).
-    TaskWrongLoop { task_id: String, expected_loop: String, actual_loop: Option<String> },
+    TaskWrongLoop {
+        task_id: String,
+        expected_loop: String,
+        actual_loop: Option<String>,
+    },
     /// Task is not in a valid terminal state.
-    TaskNotTerminal { task_id: String, status: String, allowed: Vec<String> },
+    TaskNotTerminal {
+        task_id: String,
+        status: String,
+        allowed: Vec<String>,
+    },
     /// Git evidence check failed (no diff and no commit).
     NoGitEvidence { step: Option<String> },
     /// Test evidence check failed (required field missing or falsy).
@@ -162,12 +170,7 @@ pub fn validate_execution_contract(
 
     // 2. Task validation (if payload has required fields)
     if findings.is_empty() {
-        if let Some(rejection) = validate_task(
-            event,
-            rule,
-            current_loop_id,
-            tasks_path,
-        ) {
+        if let Some(rejection) = validate_task(event, rule, current_loop_id, tasks_path) {
             findings.push(rejection);
         }
     }
@@ -244,10 +247,7 @@ fn validate_payload(
                 kind: ExecutionContractViolationKind::MissingPayloadField {
                     field: field.clone(),
                 },
-                message: format!(
-                    "work.done payload is missing required field: '{}'",
-                    field
-                ),
+                message: format!("work.done payload is missing required field: '{}'", field),
                 topic: event.topic.to_string(),
             });
         }
@@ -474,7 +474,11 @@ fn validate_git_change(
         if let Ok(payload) = serde_json::from_str::<Value>(payload_str) {
             if let Value::Object(map) = &payload {
                 if let Some(step) = map.get("step").and_then(|v| v.as_str()) {
-                    if rule.require_git_change.allow_empty_for_steps.contains(&step.to_string()) {
+                    if rule
+                        .require_git_change
+                        .allow_empty_for_steps
+                        .contains(&step.to_string())
+                    {
                         return None;
                     }
                 }
@@ -601,8 +605,8 @@ fn validate_test_evidence(
 mod tests {
     use super::*;
     use crate::config::{
-        ContractRejectConfig, ExecutionContractRule,
-        GitChangeRequirement, TaskCompletionRequirement, TestEvidenceRequirement,
+        ContractRejectConfig, ExecutionContractRule, GitChangeRequirement,
+        TaskCompletionRequirement, TestEvidenceRequirement,
     };
 
     fn make_work_done_rule() -> ExecutionContractRule {
@@ -737,10 +741,11 @@ mod tests {
 
         // With trivial step, git validation should pass even without git
         // We can't easily test this without mocking, but the structure is correct
-        assert!(rule
-            .require_git_change
-            .allow_empty_for_steps
-            .contains(&"trivial".to_string()));
+        assert!(
+            rule.require_git_change
+                .allow_empty_for_steps
+                .contains(&"trivial".to_string())
+        );
     }
 
     #[test]
@@ -750,7 +755,7 @@ mod tests {
         let rule = ExecutionContractRule {
             require_payload_fields: vec![],
             require_task: TaskCompletionRequirement {
-                id_field: "".to_string(),  // Empty = task validation skipped
+                id_field: "".to_string(), // Empty = task validation skipped
                 key_field: "".to_string(),
                 loop_scoped: false,
                 allowed_terminal_statuses: vec![],
@@ -834,11 +839,15 @@ mod tests {
         match &decision {
             ExecutionContractDecision::Reject(findings) => {
                 assert!(
-                    findings.iter().any(|f| matches!(f.kind, ExecutionContractViolationKind::InvalidPayload)),
+                    findings
+                        .iter()
+                        .any(|f| matches!(f.kind, ExecutionContractViolationKind::InvalidPayload)),
                     "Should have InvalidPayload for non-string task_id"
                 );
             }
-            ExecutionContractDecision::Accept => panic!("Expected rejection for non-string task_id"),
+            ExecutionContractDecision::Accept => {
+                panic!("Expected rejection for non-string task_id")
+            }
         }
     }
 
@@ -865,11 +874,15 @@ mod tests {
         match &decision {
             ExecutionContractDecision::Reject(findings) => {
                 assert!(
-                    findings.iter().any(|f| matches!(f.kind, ExecutionContractViolationKind::InvalidPayload)),
+                    findings
+                        .iter()
+                        .any(|f| matches!(f.kind, ExecutionContractViolationKind::InvalidPayload)),
                     "Should have InvalidPayload for empty string task_id"
                 );
             }
-            ExecutionContractDecision::Accept => panic!("Expected rejection for empty string task_id"),
+            ExecutionContractDecision::Accept => {
+                panic!("Expected rejection for empty string task_id")
+            }
         }
     }
 
@@ -896,7 +909,10 @@ mod tests {
         match &decision {
             ExecutionContractDecision::Reject(findings) => {
                 assert!(
-                    findings.iter().any(|f| matches!(f.kind, ExecutionContractViolationKind::TaskNotFound { .. })),
+                    findings.iter().any(|f| matches!(
+                        f.kind,
+                        ExecutionContractViolationKind::TaskNotFound { .. }
+                    )),
                     "Should have TaskNotFound rejection"
                 );
             }
@@ -967,11 +983,15 @@ mod tests {
         match &decision {
             ExecutionContractDecision::Reject(findings) => {
                 assert!(
-                    findings.iter().any(|f| matches!(f.kind, ExecutionContractViolationKind::InvalidPayload)),
+                    findings
+                        .iter()
+                        .any(|f| matches!(f.kind, ExecutionContractViolationKind::InvalidPayload)),
                     "Should have InvalidPayload for invalid JSON"
                 );
             }
-            ExecutionContractDecision::Accept => panic!("Expected rejection for invalid JSON payload"),
+            ExecutionContractDecision::Accept => {
+                panic!("Expected rejection for invalid JSON payload")
+            }
         }
     }
 }

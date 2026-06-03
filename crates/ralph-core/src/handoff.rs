@@ -9,7 +9,10 @@
 //! This enables clean session boundaries and seamless handoffs between
 //! Ralph loops, supporting the "land the plane" pattern.
 
-use crate::git_ops::{get_changed_files_between, get_commit_summary, get_current_branch, get_head_sha, get_recent_files};
+use crate::git_ops::{
+    get_changed_files_between, get_commit_summary, get_current_branch, get_head_sha,
+    get_recent_files,
+};
 use crate::loop_context::LoopContext;
 use crate::task::{Task, TaskStatus};
 use crate::task_store::TaskStore;
@@ -489,8 +492,20 @@ mod tests {
         writer.write("Test prompt").unwrap();
 
         let content = fs::read_to_string(ctx.handoff_path()).unwrap();
-        assert!(content.contains("loop_change.txt"), "Should list loop change: {}", content);
-        assert!(!content.contains("base.txt"), "Should NOT list base commit file: {}", content);
-        assert!(!content.contains("dirty.txt"), "Should NOT list dirty file: {}", content);
+        assert!(
+            content.contains("loop_change.txt"),
+            "Should list loop change: {}",
+            content
+        );
+        assert!(
+            !content.contains("base.txt"),
+            "Should NOT list base commit file: {}",
+            content
+        );
+        assert!(
+            !content.contains("dirty.txt"),
+            "Should NOT list dirty file: {}",
+            content
+        );
     }
 }

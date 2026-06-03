@@ -38,7 +38,7 @@ problem_type: missing-event-detection
 
 ### U8-U9: 测试与文档
 
-- **Replay-Light 测试**: 已覆盖 contract disabled pass-through 和 payload missing field rejection；尚未覆盖 open/closed task 的完整 runtime 路径、git evidence 拒绝路径、以及 contract rejection 与 missing-event gate 的交互。计划在后续修复中补全。
+- **轻量回放测试（Replay-Light）**: 已覆盖 contract disabled pass-through 和 payload missing field rejection；尚未覆盖 open/closed task 的完整 runtime 路径、git evidence 拒绝路径、以及 contract rejection 与 missing-event gate 的交互。计划在后续修复中补全。
 - **文档**: 明确 `default_publishes` 适用边界
 
 ## 配置变更
@@ -86,7 +86,7 @@ event_loop:
 - 下游 hat 的触发依赖于完成声明的真实性
 - 需要防止"假成功"进入后续流程
 
-## Checklist for Preset Authors
+## Preset 作者检查清单
 
 - [ ] 这个 hat 忘 emit 时，默认事件是否会造成假成功？
 - [ ] 这个 topic 进入下游前，有没有 Ralph-owned 验收？

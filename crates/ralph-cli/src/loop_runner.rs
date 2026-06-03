@@ -790,6 +790,12 @@ pub async fn run_loop_impl(
     // Record base commit at loop start for accurate handoff scope (base..HEAD)
     let base_commit = ralph_core::get_head_sha(&ctx.workspace()).ok();
 
+    // Record the same baseline in the event loop state so execution-contract
+    // validation can detect commits produced during this loop. Without this,
+    // `diff_or_commit` cannot distinguish "loop produced a new commit" from
+    // "the repository merely has commits from prior history".
+    event_loop.set_loop_start_sha(base_commit.clone());
+
     // Helper closure to handle termination (writes summary, prints status, records history)
     let handle_termination = |reason: &TerminationReason,
                               state: &ralph_core::LoopState,
@@ -3110,16 +3116,19 @@ fn should_gate_missing_events(hat_id: &HatId, event_loop: &EventLoop) -> bool {
 
 /// U6: Handle execution contract rejections for operator visibility.
 ///
-/// Logs warnings with topic, hat, reason, task_id for each rejection.
-/// Writes to diagnostics file if RALPH_DIAGNOSTICS=1.
-/// Does NOT terminate the loop — guidance drives the next iteration.
+/// Logs warnings with topic, hat, reason, task_id for each rejection so
+/// operators see the rejection in the console. Delegates structured
+/// diagnostics to `DiagnosticsCollector::log_execution_contract_rejections`,
+/// which writes an `OrchestrationEvent::ExecutionContractRejected` entry to
+/// `orchestration.jsonl` — the standard path that TUI/RPC observers
+/// already subscribe to via the EventBus. No-op when diagnostics are
+/// disabled. Does NOT terminate the loop — guidance drives the next
+/// iteration.
 fn handle_execution_contract_rejections(
     processed: &ralph_core::ProcessedEvents,
     event_loop: &EventLoop,
     hat_id: &HatId,
 ) {
-    use std::io::Write;
-
     let rejections = &processed.contract_rejections;
     if rejections.is_empty() {
         return;
@@ -3128,7 +3137,7 @@ fn handle_execution_contract_rejections(
     let iteration = event_loop.state().iteration;
     let hat_name = hat_id.as_str();
 
-    // Log warning for each rejection
+    // Console-visible warning for each rejection.
     for finding in rejections {
         warn!(
             topic = %finding.topic,
@@ -3139,37 +3148,12 @@ fn handle_execution_contract_rejections(
         );
     }
 
-    // Log to diagnostics file if RALPH_DIAGNOSTICS=1
-    if std::env::var("RALPH_DIAGNOSTICS").as_deref() == Ok("1") {
-        // Write to execution-contract.jsonl in diagnostics directory
-        let diag_path = std::path::Path::new(".ralph/diagnostics");
-        if diag_path.exists() {
-            // Find the most recent diagnostics session directory
-            if let Ok(entries) = std::fs::read_dir(diag_path) {
-                let mut dirs: Vec<_> = entries
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.path().is_dir())
-                    .collect();
-                dirs.sort_by_key(|e| e.path());
-                if let Some(last_dir) = dirs.last() {
-                    let contract_file = last_dir.path().join("execution-contract.jsonl");
-                    if let Ok(mut file) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&contract_file)
-                    {
-                        let entry = serde_json::json!({
-                            "timestamp": chrono::Utc::now().to_rfc3339(),
-                            "iteration": iteration,
-                            "hat": hat_name,
-                            "findings": rejections,
-                        });
-                        let _ = writeln!(file, "{}", entry);
-                    }
-                }
-            }
-        }
-    }
+    // Structured diagnostics: writes to orchestration.jsonl under
+    // .ralph/diagnostics/<session>/. The TUI/RPC observer chain consumes
+    // these via the standard EventBus path, so no separate file is needed.
+    event_loop
+        .diagnostics()
+        .log_execution_contract_rejections(iteration, hat_name, rejections);
 }
 
 /// Inject a human.guidance event directly into the events file so the agent
@@ -14258,6 +14242,125 @@ hats:
         assert!(keys.contains(&"RALPH_CURRENT_LOOP_ID"));
         assert!(keys.contains(&"RALPH_EVENTS_FILE"));
         assert!(!keys.contains(&"RALPH_TRIGGERED_HAT"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // U3 supplement: contract-rejection interaction with missing-event gate
+    // ─────────────────────────────────────────────────────────────────────────
+    //
+    // The loop runner gates missing-event hard-failures on the flag
+    // `agent_wrote_any_valid_or_rejected = had_raw_events || had_rejected_events`.
+    // When the contract rejects a `work.done` event, `had_rejected_events` is
+    // true and `had_events` is false. The loop runner MUST treat this as
+    // "agent tried but failed contract" and NOT fire the missing-event gate
+    // (which is reserved for the "agent completely forgot to emit" case).
+    //
+    // Likewise, the default_publishes fallback must NOT trigger because the
+    // agent did write a valid `work.done` event — the contract rejection
+    // should drive the next iteration through the published guidance event.
+
+    #[test]
+    fn test_contract_rejection_satisfies_any_valid_or_rejected() {
+        // Simulate the loop runner's gating decision: a contract-rejected
+        // event must be treated as "the agent wrote something" so the
+        // missing-event gate does not fire.
+        let processed = ralph_core::ProcessedEvents {
+            had_events: false,
+            had_raw_events: true,
+            had_rejected_events: true,
+            had_plan_events: false,
+            human_interact_context: None,
+            has_orphans: false,
+            accepted_events: vec![],
+            contract_rejections: vec![ralph_core::execution_contract::ExecutionContractFinding {
+                kind:
+                    ralph_core::execution_contract::ExecutionContractViolationKind::NoGitEvidence {
+                        step: None,
+                    },
+                message: "test rejection".to_string(),
+                topic: "work.done".to_string(),
+            }],
+        };
+
+        let agent_wrote_any_valid_or_rejected =
+            processed.had_raw_events || processed.had_rejected_events;
+
+        assert!(
+            agent_wrote_any_valid_or_rejected,
+            "Contract rejection must satisfy any_valid_or_rejected so the missing-event gate does not fire"
+        );
+        assert!(
+            !processed.had_events,
+            "had_events should be false (rejection does not count as accepted)"
+        );
+        assert!(
+            processed.had_rejected_events,
+            "had_rejected_events should be true"
+        );
+        assert!(
+            processed.had_raw_events,
+            "had_raw_events should be true (events that reached the contract layer count)"
+        );
+    }
+
+    #[test]
+    fn test_missing_event_gate_fires_only_when_no_raw_events() {
+        // Mirror the loop runner's gate decision: missing-event gate fires
+        // ONLY when the agent wrote absolutely nothing. A contract rejection
+        // (had_rejected_events=true) must be enough to skip the gate.
+        let yaml = r#"
+hats:
+  executor:
+    name: "Executor"
+    publishes: ["work.done"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let event_loop = EventLoop::new(config);
+
+        // Sanity: executor (publishes but no default_publishes) WOULD gate if
+        // the agent emitted nothing.
+        assert!(
+            should_gate_missing_events(&HatId::new("executor"), &event_loop),
+            "executor should normally trigger missing-event gate"
+        );
+
+        // Simulate the agent's output: no events at all.
+        let empty = ralph_core::ProcessedEvents {
+            had_events: false,
+            had_raw_events: false,
+            had_rejected_events: false,
+            had_plan_events: false,
+            human_interact_context: None,
+            has_orphans: false,
+            accepted_events: vec![],
+            contract_rejections: vec![],
+        };
+        let gate_would_fire = !empty.had_raw_events
+            && !empty.had_rejected_events
+            && should_gate_missing_events(&HatId::new("executor"), &event_loop);
+        assert!(
+            gate_would_fire,
+            "Missing-event gate MUST fire when agent wrote nothing"
+        );
+
+        // Now simulate contract rejection: had_raw_events=true, had_rejected_events=true.
+        let rejected = ralph_core::ProcessedEvents {
+            had_events: false,
+            had_raw_events: true,
+            had_rejected_events: true,
+            had_plan_events: false,
+            human_interact_context: None,
+            has_orphans: false,
+            accepted_events: vec![],
+            contract_rejections: vec![],
+        };
+        let gate_would_fire = !rejected.had_raw_events
+            && !rejected.had_rejected_events
+            && should_gate_missing_events(&HatId::new("executor"), &event_loop);
+        assert!(
+            !gate_would_fire,
+            "Missing-event gate MUST NOT fire when contract rejected an event"
+        );
     }
 
     #[test]

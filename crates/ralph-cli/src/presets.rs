@@ -1679,7 +1679,10 @@ mod tests {
             gate.fail_field, "pass_or_fail",
             "verdict_gate fail_field must be pass_or_fail"
         );
-        assert_eq!(gate.fail_value, "fail", "verdict_gate fail_value must be fail");
+        assert_eq!(
+            gate.fail_value, "fail",
+            "verdict_gate fail_value must be fail"
+        );
     }
 
     #[test]
@@ -1693,7 +1696,9 @@ mod tests {
             .nth(1)
             .expect("ce-executor must have dimension-reviewer section");
         assert!(
-            dim_section.contains("task_id") && dim_section.contains("task_key") && dim_section.contains("step"),
+            dim_section.contains("task_id")
+                && dim_section.contains("task_key")
+                && dim_section.contains("step"),
             "dimension-reviewer instructions must reference task_id, task_key, and step"
         );
     }
@@ -1708,7 +1713,9 @@ mod tests {
             .nth(1)
             .expect("ce-executor must have shipper section");
         assert!(
-            shipper_section.contains("plan.complete ONLY") || shipper_section.contains("Only execute this section when triggered by `plan.complete`"),
+            shipper_section.contains("plan.complete ONLY")
+                || shipper_section
+                    .contains("Only execute this section when triggered by `plan.complete`"),
             "shipper must gate commit and plan-status update to plan.complete only"
         );
         assert!(
@@ -1758,8 +1765,7 @@ mod tests {
     #[test]
     fn test_ce_executor_zh_verdict_gate_targets_review_complete() {
         let content = read_root_preset("ce-executor-zh.yml");
-        let config =
-            RalphConfig::parse_yaml(&content).expect("ce-executor-zh YAML should parse");
+        let config = RalphConfig::parse_yaml(&content).expect("ce-executor-zh YAML should parse");
         let gate = config
             .event_loop
             .verdict_gate
@@ -1779,7 +1785,9 @@ mod tests {
             .nth(1)
             .expect("ce-executor-zh must have dimension-reviewer section");
         assert!(
-            dim_section.contains("task_id") && dim_section.contains("task_key") && dim_section.contains("step"),
+            dim_section.contains("task_id")
+                && dim_section.contains("task_key")
+                && dim_section.contains("step"),
             "ce-executor-zh dimension-reviewer must reference task_id, task_key, step"
         );
     }
@@ -1792,7 +1800,8 @@ mod tests {
             .nth(1)
             .expect("ce-executor-zh must have shipper section");
         assert!(
-            shipper_section.contains("仅限 plan.complete") || shipper_section.contains("plan.complete 时"),
+            shipper_section.contains("仅限 plan.complete")
+                || shipper_section.contains("plan.complete 时"),
             "ce-executor-zh shipper must gate commit to plan.complete only"
         );
     }
@@ -1808,7 +1817,9 @@ mod tests {
             .nth(1)
             .expect("ce-executor must have fixer section");
         assert!(
-            fixer_section.contains("task_id") && fixer_section.contains("task_key") && fixer_section.contains("step"),
+            fixer_section.contains("task_id")
+                && fixer_section.contains("task_key")
+                && fixer_section.contains("step"),
             "fixer Read State must reference task_id, task_key, step from review.failed payload"
         );
     }
@@ -1824,7 +1835,9 @@ mod tests {
             .nth(1)
             .expect("ce-executor must have coordinator section");
         assert!(
-            coord_section.contains("task_id") && coord_section.contains("task_key") && coord_section.contains("step"),
+            coord_section.contains("task_id")
+                && coord_section.contains("task_key")
+                && coord_section.contains("step"),
             "coordinator Event Publishing must include task_id, task_key, step in work.ready payload"
         );
     }
@@ -1844,7 +1857,9 @@ mod tests {
             .expect("executor must have Trivial section");
         let trivial_section = &exec_section[trivial_start..];
         assert!(
-            trivial_section.contains("task_id") && trivial_section.contains("task_key") && trivial_section.contains("step"),
+            trivial_section.contains("task_id")
+                && trivial_section.contains("task_key")
+                && trivial_section.contains("step"),
             "executor trivial path must include task_id, task_key, step in work.done payload"
         );
     }
@@ -1857,7 +1872,9 @@ mod tests {
             .nth(1)
             .expect("ce-executor-zh must have fixer section");
         assert!(
-            fixer_section.contains("task_id") && fixer_section.contains("task_key") && fixer_section.contains("step"),
+            fixer_section.contains("task_id")
+                && fixer_section.contains("task_key")
+                && fixer_section.contains("step"),
             "ce-executor-zh fixer Read State must reference task_id, task_key, step from review.failed payload"
         );
     }
@@ -1870,7 +1887,9 @@ mod tests {
             .nth(1)
             .expect("ce-executor-zh must have coordinator section");
         assert!(
-            coord_section.contains("task_id") && coord_section.contains("task_key") && coord_section.contains("step"),
+            coord_section.contains("task_id")
+                && coord_section.contains("task_key")
+                && coord_section.contains("step"),
             "ce-executor-zh coordinator Event Publishing must include task_id, task_key, step in work.ready payload"
         );
     }
@@ -1887,7 +1906,9 @@ mod tests {
             .expect("ce-executor-zh executor must have Trivial section");
         let trivial_section = &exec_section[trivial_start..];
         assert!(
-            trivial_section.contains("task_id") && trivial_section.contains("task_key") && trivial_section.contains("step"),
+            trivial_section.contains("task_id")
+                && trivial_section.contains("task_key")
+                && trivial_section.contains("step"),
             "ce-executor-zh executor trivial path must include task_id, task_key, step in work.done payload"
         );
     }

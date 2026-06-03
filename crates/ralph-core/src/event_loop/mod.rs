@@ -18,11 +18,11 @@ use crate::event_policy::{
     PolicyDecision, PolicyRuntimeState, check_completion_guard, check_completion_honored,
     validate_event,
 };
-use crate::execution_contract::{
-    validate_execution_contract, DefaultGitEvidenceProvider, ExecutionContractDecision,
-    ExecutionContractFinding,
-};
 use crate::event_reader::{Event as JsonlEvent, EventReader};
+use crate::execution_contract::{
+    DefaultGitEvidenceProvider, ExecutionContractDecision, ExecutionContractFinding,
+    validate_execution_contract,
+};
 use crate::hat_registry::HatRegistry;
 use crate::hatless_ralph::HatlessRalph;
 use crate::instructions::InstructionBuilder;
@@ -826,6 +826,15 @@ impl EventLoop {
         &self.state
     }
 
+    /// Returns the diagnostics collector used by this event loop.
+    ///
+    /// Callers outside the event loop (e.g. the CLI loop runner) can use
+    /// this to log structured diagnostics events through the standard
+    /// `DiagnosticsCollector` API rather than hand-rolling file writes.
+    pub fn diagnostics(&self) -> &crate::diagnostics::DiagnosticsCollector {
+        &self.diagnostics
+    }
+
     /// Resets the stale-loop topic counter.
     ///
     /// Call after processing wave results — multiple events with the same topic
@@ -844,6 +853,17 @@ impl EventLoop {
     /// Reset the hard-gate counter when an agent successfully emits an event.
     pub fn reset_hard_gate_count(&mut self) {
         self.state.consecutive_hard_gates = 0;
+    }
+
+    /// Records the git HEAD SHA at loop start so execution-contract validation
+    /// can detect commits produced during this loop.
+    ///
+    /// `None` clears the recorded SHA and falls back to diff-only evidence.
+    /// Pass the value returned by `ralph_core::get_head_sha` from the loop
+    /// runner at startup; pass `None` when the workspace is not a git repo
+    /// or the SHA could not be resolved.
+    pub fn set_loop_start_sha(&mut self, sha: Option<String>) {
+        self.state.loop_start_sha = sha;
     }
 
     /// Maximum consecutive hard-gate triggers before the loop terminates.
@@ -3389,9 +3409,7 @@ impl EventLoop {
         // Track raw event counts before contract filtering for missing-event gate logic
         let contract_validation_input_count = events.len();
         let mut contract_rejections: Vec<ExecutionContractFinding> = Vec::new();
-        let contracts_enabled = execution_contracts
-            .as_ref()
-            .is_some_and(|c| c.enabled);
+        let contracts_enabled = execution_contracts.as_ref().is_some_and(|c| c.enabled);
         let events = if contracts_enabled {
             let contracts = execution_contracts.unwrap();
             let current_loop_id = self
@@ -3406,7 +3424,8 @@ impl EventLoop {
             for event in events {
                 // Check if this topic has a contract rule
                 if let Some(rule) = contracts.rules.get(event.topic.as_str()) {
-                    let proto_event = Event::new(event.topic.as_str(), event.payload.as_deref().unwrap_or(""));
+                    let proto_event =
+                        Event::new(event.topic.as_str(), event.payload.as_deref().unwrap_or(""));
                     let decision = validate_execution_contract(
                         &proto_event,
                         rule,
@@ -3415,7 +3434,7 @@ impl EventLoop {
                         &tasks_path,
                         self.state.last_active_hat_ids.first().map(|h| h.as_str()),
                         &DefaultGitEvidenceProvider,
-                        None,
+                        self.state.loop_start_sha.as_deref(),
                     );
                     match decision {
                         ExecutionContractDecision::Accept => {
@@ -3453,7 +3472,8 @@ impl EventLoop {
                                 finding.message,
                                 event.topic.as_str(),
                             );
-                            let guidance_event = Event::new(rule.reject.guidance_topic.as_str(), guidance_payload);
+                            let guidance_event =
+                                Event::new(rule.reject.guidance_topic.as_str(), guidance_payload);
                             self.bus.publish(guidance_event);
 
                             contract_rejections.extend(findings.iter().cloned());

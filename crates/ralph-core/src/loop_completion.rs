@@ -230,7 +230,12 @@ impl LoopCompletionHandler {
     /// Executes the landing sequence.
     ///
     /// Returns the landing result if successful, or None if landing failed.
-    fn execute_landing(&self, context: &LoopContext, prompt: &str, base_commit: Option<&str>) -> Option<LandingResult> {
+    fn execute_landing(
+        &self,
+        context: &LoopContext,
+        prompt: &str,
+        base_commit: Option<&str>,
+    ) -> Option<LandingResult> {
         let handler = LandingHandler::new(context.clone());
 
         match handler.land(prompt, base_commit) {
@@ -307,7 +312,9 @@ mod tests {
         context.ensure_directories().unwrap();
         let handler = LoopCompletionHandler::new(true);
 
-        let action = handler.handle_completion(&context, "test prompt", None).unwrap();
+        let action = handler
+            .handle_completion(&context, "test prompt", None)
+            .unwrap();
         // Primary loops now return Landed instead of None
         assert!(
             matches!(action, CompletionAction::Landed { .. }),
@@ -367,7 +374,9 @@ mod tests {
 
         let handler = LoopCompletionHandler::new(false); // auto_merge disabled
 
-        let action = handler.handle_completion(&context, "test prompt", None).unwrap();
+        let action = handler
+            .handle_completion(&context, "test prompt", None)
+            .unwrap();
 
         match action {
             CompletionAction::ManualMerge {
@@ -425,7 +434,9 @@ mod tests {
 
         let handler = LoopCompletionHandler::new(true);
 
-        let action = handler.handle_completion(&context, "add feature", None).unwrap();
+        let action = handler
+            .handle_completion(&context, "add feature", None)
+            .unwrap();
 
         // Should enqueue successfully
         assert!(matches!(action, CompletionAction::Enqueued { .. }));
@@ -490,7 +501,9 @@ mod tests {
 
         let handler = LoopCompletionHandler::new(true);
 
-        let action = handler.handle_completion(&context, "no changes", None).unwrap();
+        let action = handler
+            .handle_completion(&context, "no changes", None)
+            .unwrap();
 
         assert!(matches!(action, CompletionAction::Enqueued { .. }));
 

@@ -136,6 +136,15 @@ pub struct LoopState {
     /// Progress fingerprint hash at the time of the last completion rejection.
     /// Used to detect whether real progress has occurred between rejections.
     pub last_rejection_fingerprint: u64,
+
+    /// The git HEAD SHA at the moment the loop was started.
+    ///
+    /// Used by execution contract git-evidence validation to distinguish
+    /// "this loop iteration produced new commits" from "the repository
+    /// merely has commits from prior history". `None` when the SHA was
+    /// not recorded (e.g., the workspace is not a git repository, or the
+    /// loop runner could not resolve HEAD at startup).
+    pub loop_start_sha: Option<String>,
 }
 
 impl Default for LoopState {
@@ -171,6 +180,7 @@ impl Default for LoopState {
             completion_rejection_signature: None,
             consecutive_completion_rejections: 0,
             last_rejection_fingerprint: 0,
+            loop_start_sha: None,
         }
     }
 }

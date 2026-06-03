@@ -361,6 +361,7 @@ mod tests {
             completion_rejection_signature: None,
             consecutive_completion_rejections: 0,
             last_rejection_fingerprint: 0,
+            loop_start_sha: None,
         }
     }
 

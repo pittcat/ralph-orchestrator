@@ -3904,10 +3904,16 @@ event_loop:
           guidance_topic: "human.guidance"
 "#;
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-        let contracts = config.event_loop.execution_contracts.expect("should have contracts");
+        let contracts = config
+            .event_loop
+            .execution_contracts
+            .expect("should have contracts");
         assert!(contracts.enabled, "contracts should be enabled");
 
-        let rule = contracts.rules.get("work.done").expect("work.done rule should exist");
+        let rule = contracts
+            .rules
+            .get("work.done")
+            .expect("work.done rule should exist");
         assert_eq!(
             rule.require_payload_fields,
             vec!["plan_name", "plan_path", "task_id", "task_key", "step"],
@@ -3937,16 +3943,25 @@ event_loop:
         require_payload_fields: ["task_id"]
 "#;
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-        let contracts = config.event_loop.execution_contracts.expect("should have contracts");
+        let contracts = config
+            .event_loop
+            .execution_contracts
+            .expect("should have contracts");
         assert!(!contracts.enabled, "contracts should default to disabled");
 
-        let rule = contracts.rules.get("work.done").expect("work.done rule should exist");
+        let rule = contracts
+            .rules
+            .get("work.done")
+            .expect("work.done rule should exist");
         assert_eq!(rule.require_payload_fields, vec!["task_id"]);
         // Check defaults
         assert_eq!(rule.require_task.id_field, "task_id");
         assert_eq!(rule.require_task.loop_scoped, true);
         assert_eq!(rule.require_git_change.mode, "diff_or_commit");
-        assert_eq!(rule.reject.diagnostic_topic, "event.execution_contract.rejected");
+        assert_eq!(
+            rule.reject.diagnostic_topic,
+            "event.execution_contract.rejected"
+        );
     }
 
     #[test]

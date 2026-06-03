@@ -117,7 +117,11 @@ impl LandingHandler {
     ///
     /// A `LandingResult` with details about what was done, or an error if
     /// a critical step failed.
-    pub fn land(&self, prompt: &str, base_commit: Option<&str>) -> Result<LandingResult, LandingError> {
+    pub fn land(
+        &self,
+        prompt: &str,
+        base_commit: Option<&str>,
+    ) -> Result<LandingResult, LandingError> {
         let workspace = self.context.workspace();
         let loop_id = self.context.loop_id().unwrap_or("primary").to_string();
 

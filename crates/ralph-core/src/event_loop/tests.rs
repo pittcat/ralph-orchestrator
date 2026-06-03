@@ -8362,11 +8362,21 @@ event_loop:
 fn test_execution_contract_rejects_work_done_with_missing_payload() {
     // Test that work.done without required payload fields is rejected
     // This tests the execution contract validator directly
-    use crate::execution_contract::{validate_execution_contract, DefaultGitEvidenceProvider, ExecutionContractDecision, ExecutionContractViolationKind};
-    use crate::config::{ExecutionContractRule, TaskCompletionRequirement, GitChangeRequirement, TestEvidenceRequirement, ContractRejectConfig};
+    use crate::config::{
+        ContractRejectConfig, ExecutionContractRule, GitChangeRequirement,
+        TaskCompletionRequirement, TestEvidenceRequirement,
+    };
+    use crate::execution_contract::{
+        DefaultGitEvidenceProvider, ExecutionContractDecision, ExecutionContractViolationKind,
+        validate_execution_contract,
+    };
 
     let rule = ExecutionContractRule {
-        require_payload_fields: vec!["task_id".to_string(), "task_key".to_string(), "step".to_string()],
+        require_payload_fields: vec![
+            "task_id".to_string(),
+            "task_key".to_string(),
+            "step".to_string(),
+        ],
         require_task: TaskCompletionRequirement::default(),
         require_git_change: GitChangeRequirement::default(),
         require_test_evidence: TestEvidenceRequirement::default(),
@@ -8389,7 +8399,10 @@ fn test_execution_contract_rejects_work_done_with_missing_payload() {
     match &decision {
         ExecutionContractDecision::Reject(findings) => {
             assert!(
-                findings.iter().any(|f| matches!(f.kind, ExecutionContractViolationKind::MissingPayloadField { .. })),
+                findings.iter().any(|f| matches!(
+                    f.kind,
+                    ExecutionContractViolationKind::MissingPayloadField { .. }
+                )),
                 "Should have MissingPayloadField rejection"
             );
         }
@@ -8410,20 +8423,22 @@ event_loop:
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
     let mut event_loop = EventLoop::new(config);
 
-    let result = event_loop.process_parse_result(crate::event_reader::ParseResult {
-        events: vec![crate::event_reader::Event {
-            topic: "work.done".to_string(),
-            payload: Some(r#"{"task_id":"t1","task_key":"k1","step":"s1"}"#.to_string()),
-            ts: "2024-01-01T00:00:00Z".to_string(),
-            wave_id: None,
-            hat: Some("executor".to_string()),
-            triggered: None,
-            source: None,
-            wave_index: None,
-            wave_total: None,
-        }],
-        malformed: vec![],
-    }).expect("process_parse_result should succeed");
+    let result = event_loop
+        .process_parse_result(crate::event_reader::ParseResult {
+            events: vec![crate::event_reader::Event {
+                topic: "work.done".to_string(),
+                payload: Some(r#"{"task_id":"t1","task_key":"k1","step":"s1"}"#.to_string()),
+                ts: "2024-01-01T00:00:00Z".to_string(),
+                wave_id: None,
+                hat: Some("executor".to_string()),
+                triggered: None,
+                source: None,
+                wave_index: None,
+                wave_total: None,
+            }],
+            malformed: vec![],
+        })
+        .expect("process_parse_result should succeed");
 
     // Without execution contract enabled, the event should be processed
     // (not rejected at contract validation stage since contract is disabled)
@@ -8468,4 +8483,664 @@ event_loop:
         contracts.rules.contains_key("work.done"),
         "work.done rule should exist"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// U5: Contract Rejection Interactions (supplement to U8 plan)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// These tests verify that when an agent emits a `work.done` event but the
+// execution contract rejects it, the event loop:
+//   1. Does NOT publish the original `work.done` to subscribers (so downstream
+//      hats like `review` are not triggered).
+//   2. DOES publish the structured `event.execution_contract.rejected` diagnostic
+//      and a `human.guidance` event.
+//   3. Reports `had_rejected_events = true` and `had_raw_events = true` so the
+//      loop runner's missing-event gate does not fire for "tried but invalid"
+//      attempts (only for "did not try at all").
+
+fn contract_enabled_config() -> RalphConfig {
+    let yaml = r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["task.*"]
+    publishes: ["work.done", "work.failed"]
+  reviewer:
+    name: "Reviewer"
+    triggers: ["work.done"]
+    publishes: ["review.done"]
+event_loop:
+  execution_contracts:
+    enabled: true
+    rules:
+      work.done:
+        require_payload_fields:
+          - plan_name
+          - plan_path
+          - task_id
+          - task_key
+          - step
+        require_task:
+          id_field: "task_id"
+          key_field: "task_key"
+          loop_scoped: false
+          allowed_terminal_statuses: ["closed"]
+          auto_close_on_valid: false
+        require_git_change:
+          mode: "diff_or_commit"
+          allow_empty_for_steps: ["trivial"]
+        require_test_evidence:
+          mode: "optional"
+"#;
+    serde_yaml::from_str(yaml).unwrap()
+}
+
+fn make_work_done_event() -> crate::event_reader::Event {
+    crate::event_reader::Event {
+        topic: "work.done".to_string(),
+        payload: Some(
+            r#"{"plan_name":"p","plan_path":"/p","task_id":"t1","task_key":"k1","step":"step-01"}"#
+                .to_string(),
+        ),
+        ts: "2024-01-01T00:00:00Z".to_string(),
+        wave_id: None,
+        hat: Some("executor".to_string()),
+        triggered: None,
+        source: None,
+        wave_index: None,
+        wave_total: None,
+    }
+}
+
+#[test]
+fn test_contract_rejection_does_not_publish_original_event() {
+    // When the contract rejects work.done, the original event must NOT be
+    // published to bus subscribers. Reviewer hat must remain untriggered.
+    use ralph_proto::Event;
+    let config = contract_enabled_config();
+    let mut event_loop = EventLoop::new(config);
+
+    // Use an observer to record all events published to the bus.
+    let observed: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed_clone = std::sync::Arc::clone(&observed);
+    event_loop.bus().add_observer(move |event: &Event| {
+        observed_clone
+            .lock()
+            .unwrap()
+            .push(event.topic.as_str().to_string());
+    });
+
+    let result = event_loop
+        .process_parse_result(crate::event_reader::ParseResult {
+            events: vec![make_work_done_event()],
+            malformed: vec![],
+        })
+        .expect("process_parse_result should succeed");
+
+    // The contract was rejected (no task in store, so task validation fails)
+    assert!(
+        !result.contract_rejections.is_empty(),
+        "Expected contract rejections for missing task"
+    );
+
+    // The original work.done is NOT in accepted_events.
+    assert!(
+        !result
+            .accepted_events
+            .iter()
+            .any(|e| e.topic.as_str() == "work.done"),
+        "Original work.done must not be accepted when contract rejects it"
+    );
+
+    // had_rejected_events is true and had_raw_events is true.
+    assert!(
+        result.had_rejected_events,
+        "had_rejected_events should be true"
+    );
+    assert!(
+        result.had_raw_events,
+        "had_raw_events should be true (rejected events count as observed)"
+    );
+
+    // had_events is false because the original event was rejected, not accepted.
+    assert!(
+        !result.had_events,
+        "had_events should be false (no accepted events)"
+    );
+
+    // The bus observer saw the diagnostic and guidance events.
+    let observed_topics = observed.lock().unwrap().clone();
+    assert!(
+        observed_topics
+            .iter()
+            .any(|t| t == "event.execution_contract.rejected"),
+        "Diagnostic event should be published. observed: {:?}",
+        observed_topics
+    );
+    assert!(
+        observed_topics.iter().any(|t| t == "human.guidance"),
+        "Guidance event should be published. observed: {:?}",
+        observed_topics
+    );
+    // The original work.done event was NOT published to the bus.
+    assert!(
+        !observed_topics.iter().any(|t| t == "work.done"),
+        "Original work.done must not be published. observed: {:?}",
+        observed_topics
+    );
+}
+
+#[test]
+fn test_contract_rejection_with_trivial_step_passes() {
+    // A `trivial` step is in `allow_empty_for_steps` so the git evidence
+    // check is skipped. With no git repo and trivial step, the contract
+    // should still fail on task validation (no task in store) — confirming
+    // that `allow_empty_for_steps` only relaxes the git check, not task
+    // validation.
+    use ralph_proto::Event;
+    let config = contract_enabled_config();
+    let mut event_loop = EventLoop::new(config);
+
+    let observed: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed_clone = std::sync::Arc::clone(&observed);
+    event_loop.bus().add_observer(move |event: &Event| {
+        observed_clone
+            .lock()
+            .unwrap()
+            .push(event.topic.as_str().to_string());
+    });
+
+    let mut event = make_work_done_event();
+    event.payload = Some(
+        r#"{"plan_name":"p","plan_path":"/p","task_id":"t1","task_key":"k1","step":"trivial"}"#
+            .to_string(),
+    );
+
+    let result = event_loop
+        .process_parse_result(crate::event_reader::ParseResult {
+            events: vec![event],
+            malformed: vec![],
+        })
+        .expect("process_parse_result should succeed");
+
+    // Task validation still rejects (no task in store), so work.done rejected.
+    assert!(
+        !result.contract_rejections.is_empty(),
+        "Task validation must still reject even with trivial step"
+    );
+    assert!(
+        result.had_rejected_events,
+        "had_rejected_events should be true"
+    );
+    let observed_topics = observed.lock().unwrap().clone();
+    assert!(
+        observed_topics
+            .iter()
+            .any(|t| t == "event.execution_contract.rejected"),
+        "Diagnostic event should fire"
+    );
+}
+
+#[test]
+fn test_contract_disabled_does_not_set_had_rejected_events() {
+    // When execution contracts are disabled, no rejections occur and the
+    // flags should reflect the default. This is a regression guard for the
+    // flag semantics: `had_rejected_events` is exclusively about contract
+    // rejections, not about malformed events or other failures.
+    let yaml = r#"
+event_loop:
+  execution_contracts:
+    enabled: false
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+
+    let result = event_loop
+        .process_parse_result(crate::event_reader::ParseResult {
+            events: vec![make_work_done_event()],
+            malformed: vec![],
+        })
+        .expect("process_parse_result should succeed");
+
+    assert!(
+        result.contract_rejections.is_empty(),
+        "No rejections when contract disabled"
+    );
+    assert!(
+        !result.had_rejected_events,
+        "had_rejected_events should be false when contract disabled"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// U8: Replay-light integration tests (deterministic event loop paths)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// These tests construct a real git repository and task store in a tempdir,
+// then drive the event loop's `process_parse_result` to verify the
+// execution-contract gate behaves correctly across the full pipeline:
+//   - No events at all → hard gate (no `work.done` synthesized from defaults)
+//   - Open task + work.done → rejected (TaskNotTerminal)
+//   - Closed task + diff → accepted
+//   - Closed task + clean + new commit (vs. loop start SHA) → accepted
+//   - Closed task + clean + no new commits → rejected (NoGitEvidence)
+//
+// They run the real `DefaultGitEvidenceProvider` against a real git repo so
+// the integration path is exercised end-to-end. The previous
+// `test_execution_contract_validates_task_status` only covered config
+// parsing; these tests cover the real event loop pipeline.
+
+mod replay_light_integration {
+    use crate::config::RalphConfig;
+    use crate::event_loop::EventLoop;
+    use crate::event_reader::ParseResult;
+    use crate::task::{Task, TaskStatus};
+    use crate::task_store::TaskStore;
+    use ralph_proto::Event;
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    fn init_git_repo(dir: &std::path::Path) {
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap_or_else(|e| {
+                    panic!("git {:?} failed: {}", args, e);
+                })
+        };
+        run(&["init", "--initial-branch=main"]);
+        run(&["config", "user.email", "test@test.local"]);
+        run(&["config", "user.name", "Test User"]);
+        // Ignore the .ralph state directory so it does not show up as
+        // untracked changes when we later assert the worktree is clean.
+        std::fs::write(dir.join(".gitignore"), ".ralph/\n").unwrap();
+        std::fs::write(dir.join("README.md"), "# Test\n").unwrap();
+        run(&["add", ".gitignore", "README.md"]);
+        run(&["commit", "-m", "Initial commit"]);
+    }
+
+    fn git_head_sha(dir: &std::path::Path) -> String {
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git rev-parse HEAD failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    fn build_test_config(workspace_root: &std::path::Path) -> RalphConfig {
+        let yaml = r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["task.*"]
+    publishes: ["work.done", "work.failed"]
+  reviewer:
+    name: "Reviewer"
+    triggers: ["work.done"]
+    publishes: ["review.done"]
+event_loop:
+  execution_contracts:
+    enabled: true
+    rules:
+      work.done:
+        require_payload_fields:
+          - plan_name
+          - plan_path
+          - task_id
+          - task_key
+          - step
+        require_task:
+          id_field: "task_id"
+          key_field: "task_key"
+          loop_scoped: false
+          allowed_terminal_statuses: ["closed"]
+          auto_close_on_valid: false
+        require_git_change:
+          mode: "diff_or_commit"
+          allow_empty_for_steps: ["trivial"]
+        require_test_evidence:
+          mode: "optional"
+"#;
+        let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        config.core.workspace_root = workspace_root.to_path_buf();
+        config
+    }
+
+    fn write_task(tasks_path: &std::path::Path, task_id: &str, status: TaskStatus) {
+        let parent = tasks_path.parent().unwrap();
+        std::fs::create_dir_all(parent).unwrap();
+        let mut store = TaskStore::load(tasks_path).unwrap();
+        let mut task = Task::new("Test task".to_string(), 1);
+        task.id = task_id.to_string();
+        task.key = Some("k1".to_string());
+        task.status = status;
+        store.add(task);
+        store.save().unwrap();
+    }
+
+    fn work_done_event(task_id: &str) -> crate::event_reader::Event {
+        crate::event_reader::Event {
+            topic: "work.done".to_string(),
+            payload: Some(format!(
+                r#"{{"plan_name":"p","plan_path":"/p","task_id":"{}","task_key":"k1","step":"step-01"}}"#,
+                task_id
+            )),
+            ts: "2024-01-01T00:00:00Z".to_string(),
+            wave_id: None,
+            hat: Some("executor".to_string()),
+            triggered: None,
+            source: None,
+            wave_index: None,
+            wave_total: None,
+        }
+    }
+
+    fn make_event_loop(config: RalphConfig) -> EventLoop {
+        // Use `with_context` so `tasks_path()` resolves to the test
+        // workspace's `.ralph/agent/tasks.jsonl`. `EventLoop::new` falls
+        // back to a path relative to the current working directory, which
+        // would point at the repo's own task store and never see the test
+        // task that `write_task` just saved.
+        let workspace = config.core.workspace_root.clone();
+        let ctx = crate::loop_context::LoopContext::primary(workspace);
+        EventLoop::with_context(config, ctx)
+    }
+
+    fn contract_disabled_config(workspace_root: &std::path::Path) -> RalphConfig {
+        let mut config = build_test_config(workspace_root);
+        if let Some(ref mut contracts) = config.event_loop.execution_contracts {
+            contracts.enabled = false;
+        }
+        config
+    }
+
+    fn process_events(
+        events: Vec<crate::event_reader::Event>,
+        event_loop: &mut EventLoop,
+    ) -> crate::ProcessedEvents {
+        event_loop
+            .process_parse_result(ParseResult {
+                events,
+                malformed: vec![],
+            })
+            .expect("process_parse_result should succeed")
+    }
+
+    #[test]
+    fn test_no_events_triggers_hard_gate_at_event_loop_layer() {
+        // The event loop layer must NOT synthesize a default `work.done`.
+        // When the agent writes no events at all, the bus sees nothing and
+        // the loop runner's missing-event gate is what should fire later.
+        let temp = TempDir::new().unwrap();
+        let workspace = temp.path();
+        init_git_repo(workspace);
+
+        let config = contract_disabled_config(workspace);
+        let mut event_loop = make_event_loop(config);
+
+        let result = process_events(vec![], &mut event_loop);
+
+        // No events at the event loop layer.
+        assert!(!result.had_events);
+        assert!(!result.had_raw_events);
+        assert!(!result.had_rejected_events);
+        assert!(result.accepted_events.is_empty());
+        assert!(result.contract_rejections.is_empty());
+    }
+
+    #[test]
+    fn test_open_task_work_done_rejected() {
+        // task status = open, payload complete → contract rejects with
+        // TaskNotTerminal. The work.done must NOT be published.
+        let temp = TempDir::new().unwrap();
+        let workspace = temp.path();
+        init_git_repo(workspace);
+        let tasks_path = workspace.join(".ralph/agent/tasks.jsonl");
+        write_task(&tasks_path, "test-id-1", TaskStatus::Open);
+
+        let config = build_test_config(workspace);
+        let mut event_loop = make_event_loop(config);
+
+        let result = process_events(vec![work_done_event("test-id-1")], &mut event_loop);
+
+        // The contract rejected the event.
+        assert!(
+            !result.contract_rejections.is_empty(),
+            "Contract should reject open task"
+        );
+        assert!(result.had_rejected_events);
+        assert!(
+            !result.had_events,
+            "Original work.done must not be accepted"
+        );
+        // No `work.done` in accepted events.
+        assert!(
+            !result
+                .accepted_events
+                .iter()
+                .any(|e| e.topic.as_str() == "work.done")
+        );
+    }
+
+    #[test]
+    fn test_closed_task_work_done_with_diff_accepted() {
+        // task status = closed + git has uncommitted diff → contract accepts.
+        let temp = TempDir::new().unwrap();
+        let workspace = temp.path();
+        init_git_repo(workspace);
+        let tasks_path = workspace.join(".ralph/agent/tasks.jsonl");
+        write_task(&tasks_path, "test-id-1", TaskStatus::Closed);
+
+        // Modify a tracked file so `git diff --quiet` exits 1 (has diff).
+        // Modifying a tracked file produces an unstaged change, which is
+        // what `DefaultGitEvidenceProvider::has_uncommitted_changes` checks.
+        std::fs::write(
+            workspace.join("README.md"),
+            "# Test\nagent change for diff\n",
+        )
+        .unwrap();
+
+        let config = build_test_config(workspace);
+        let mut event_loop = make_event_loop(config);
+
+        let result = process_events(vec![work_done_event("test-id-1")], &mut event_loop);
+
+        // Contract accepts the work.done.
+        assert!(
+            result.contract_rejections.is_empty(),
+            "Contract should accept closed task with diff, got: {:?}",
+            result.contract_rejections
+        );
+        assert!(!result.had_rejected_events);
+        assert!(result.had_events);
+        // The original work.done is in accepted events.
+        assert!(
+            result
+                .accepted_events
+                .iter()
+                .any(|e| e.topic.as_str() == "work.done")
+        );
+    }
+
+    #[test]
+    fn test_git_evidence_rejection_no_diff_no_commit() {
+        // task status = closed + git has no uncommitted changes AND no new
+        // commits since the loop start → contract rejects with NoGitEvidence.
+        let temp = TempDir::new().unwrap();
+        let workspace = temp.path();
+        init_git_repo(workspace);
+        let tasks_path = workspace.join(".ralph/agent/tasks.jsonl");
+        write_task(&tasks_path, "test-id-1", TaskStatus::Closed);
+
+        // Record the loop start SHA (no commits after this).
+        let start_sha = git_head_sha(workspace);
+
+        let config = build_test_config(workspace);
+        let mut event_loop = make_event_loop(config);
+        event_loop.set_loop_start_sha(Some(start_sha));
+
+        let result = process_events(vec![work_done_event("test-id-1")], &mut event_loop);
+
+        // No git evidence → contract rejected.
+        assert!(
+            !result.contract_rejections.is_empty(),
+            "Contract should reject when no diff and no new commits"
+        );
+        let has_no_git_evidence = result.contract_rejections.iter().any(|f| {
+            matches!(
+                f.kind,
+                crate::execution_contract::ExecutionContractViolationKind::NoGitEvidence { .. }
+            )
+        });
+        assert!(
+            has_no_git_evidence,
+            "Expected NoGitEvidence finding, got: {:?}",
+            result.contract_rejections
+        );
+        assert!(result.had_rejected_events);
+        assert!(!result.had_events);
+    }
+
+    #[test]
+    fn test_git_evidence_accepted_with_new_commit_after_loop_start() {
+        // U4 regression: previously the validator passed `None` as the
+        // baseline SHA, so `has_new_commits_since` always returned `false`.
+        // After a commit lands and the worktree is clean, the agent should
+        // still be able to declare `work.done`. This test pins that the
+        // `set_loop_start_sha(Some(baseline))` path is what makes
+        // commit-only evidence work.
+        let temp = TempDir::new().unwrap();
+        let workspace = temp.path();
+        init_git_repo(workspace);
+        let tasks_path = workspace.join(".ralph/agent/tasks.jsonl");
+        write_task(&tasks_path, "test-id-1", TaskStatus::Closed);
+
+        // Record the loop start SHA BEFORE making the agent's commit.
+        let start_sha = git_head_sha(workspace);
+
+        // Simulate the agent making a commit and leaving a clean worktree.
+        std::fs::write(workspace.join("agent-change.txt"), "agent commit\n").unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(workspace)
+                .output()
+                .unwrap()
+        };
+        git(&["add", "agent-change.txt"]);
+        git(&["commit", "-m", "Agent work"]);
+
+        // Worktree should be clean.
+        let status_out = git(&["status", "--porcelain"]);
+        assert!(
+            status_out.stdout.is_empty(),
+            "Worktree should be clean after commit, got: {}",
+            String::from_utf8_lossy(&status_out.stdout)
+        );
+
+        let config = build_test_config(workspace);
+        let mut event_loop = make_event_loop(config);
+        event_loop.set_loop_start_sha(Some(start_sha));
+
+        let result = process_events(vec![work_done_event("test-id-1")], &mut event_loop);
+
+        // The agent's commit counts as git evidence → contract accepts.
+        assert!(
+            result.contract_rejections.is_empty(),
+            "Contract should accept closed task with new commit, got: {:?}",
+            result.contract_rejections
+        );
+        assert!(result.had_events);
+        assert!(
+            result
+                .accepted_events
+                .iter()
+                .any(|e| e.topic.as_str() == "work.done")
+        );
+    }
+
+    #[test]
+    fn test_trivial_step_accepted_without_git_evidence() {
+        // The `trivial` step is in `allow_empty_for_steps` so the git
+        // evidence check is skipped. With no diff and no new commits, but
+        // a closed task and a trivial step, the contract should accept.
+        let temp = TempDir::new().unwrap();
+        let workspace = temp.path();
+        init_git_repo(workspace);
+        let tasks_path = workspace.join(".ralph/agent/tasks.jsonl");
+        write_task(&tasks_path, "test-id-1", TaskStatus::Closed);
+
+        let start_sha = git_head_sha(workspace);
+
+        let config = build_test_config(workspace);
+        let mut event_loop = make_event_loop(config);
+        event_loop.set_loop_start_sha(Some(start_sha));
+
+        let mut event = work_done_event("test-id-1");
+        event.payload = Some(
+            r#"{"plan_name":"p","plan_path":"/p","task_id":"test-id-1","task_key":"k1","step":"trivial"}"#
+                .to_string(),
+        );
+
+        let result = process_events(vec![event], &mut event_loop);
+
+        assert!(
+            result.contract_rejections.is_empty(),
+            "Trivial step should skip git evidence check, got: {:?}",
+            result.contract_rejections
+        );
+        assert!(result.had_events);
+    }
+
+    /// Regression guard: the EventLoop's bus observer sees the structured
+    /// diagnostic and human.guidance when contract rejection happens.
+    #[test]
+    fn test_rejection_publishes_diagnostic_and_guidance_to_bus() {
+        let temp = TempDir::new().unwrap();
+        let workspace = temp.path();
+        init_git_repo(workspace);
+        let tasks_path = workspace.join(".ralph/agent/tasks.jsonl");
+        write_task(&tasks_path, "test-id-1", TaskStatus::Open); // open → will be rejected
+
+        let config = build_test_config(workspace);
+        let mut event_loop = make_event_loop(config);
+
+        let observed: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed_clone = std::sync::Arc::clone(&observed);
+        event_loop.bus().add_observer(move |event: &Event| {
+            observed_clone
+                .lock()
+                .unwrap()
+                .push(event.topic.as_str().to_string());
+        });
+
+        let result = process_events(vec![work_done_event("test-id-1")], &mut event_loop);
+        assert!(!result.contract_rejections.is_empty());
+
+        let observed_topics = observed.lock().unwrap().clone();
+        assert!(
+            observed_topics
+                .iter()
+                .any(|t| t == "event.execution_contract.rejected"),
+            "Diagnostic event should be published, observed: {:?}",
+            observed_topics
+        );
+        assert!(
+            observed_topics.iter().any(|t| t == "human.guidance"),
+            "Guidance event should be published, observed: {:?}",
+            observed_topics
+        );
+    }
 }
