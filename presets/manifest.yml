@@ -16,8 +16,15 @@
 #     are NEVER embedded. `build.rs` does not read this directory.
 #   * Files under `presets/extras/` are kept for reference but are not
 #     embedded and not listed in `index.json`.
-#   * Files under `presets/minimal/` and `presets/schemas/` are not
-#     embedded either; see comments at the top of each subdirectory.
+#   * Files under `presets/minimal/` are not embedded either; see
+#     comments at the top of that subdirectory.
+#   * Files under `presets/schemas/` are reference copies of payload
+#     schemas. Schemas used to be loaded at runtime via
+#     `event_policy.schema_file: "../schemas/<name>.yml"`, but that
+#     path was broken for builtin presets (no on-disk anchor for
+#     `resolve_schema_files`) and is now inlined into the matching
+#     `presets/en/<name>.yml` as `event_policy.schemas`. Do NOT
+#     reintroduce `schema_file` in a preset; keep the schemas inline.
 
 embedded:
   - autoresearch

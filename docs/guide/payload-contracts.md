@@ -185,23 +185,42 @@ informational, not the source of truth for the violation.
 
 ## Builtin Schema Library
 
-The following schemas are shipped in `presets/schemas/` and mirrored
-into `crates/ralph-cli/presets/schemas/` for embedded presets:
+As of 2026-06-03 the builtin presets inline their payload schemas
+directly under `event_policy.schemas` in `presets/en/<name>.yml`. The
+previous `event_policy.schema_file: "../schemas/<name>.yml"` form
+was broken for builtin presets — `resolve_schema_files` has no
+on-disk anchor to resolve the relative path against, so the schemas
+silently went unloaded and the payload contract hard gate failed
+with `SchemaMissingForRequiredTopic` for every topic the preset
+declared. (Symptom: `ralph -H builtin:ce-executor run` reports
+"Subprocess exited before starting the orchestration loop" with the
+real cause buried in `.ralph/diagnostics/logs/`.)
 
-| Schema file | Presets that reference it |
-|---|---|
-| `ce-executor.yml`         | `ce-executor`, `ce-executor-zh` |
-| `code-assist.yml`         | `code-assist`, `code-assist-zh` |
-| `pdd-to-code-assist.yml`  | `pdd-to-code-assist` |
+For file-based hat collections (e.g. `ralph run -H .ralph/hats/my.yml`)
+the relative `schema_file` form still works, but the inline form is
+preferred for consistency and for portability across install
+locations.
 
-When adding a new schema:
+The `presets/schemas/` directory is kept as a deprecated reference
+copy of the inlined schemas:
 
-1. Add a new file under both `presets/schemas/` and
-   `crates/ralph-cli/presets/schemas/`.
-2. Add a `MIRRORED_FILES` entry in `scripts/sync-embedded-files.sh`.
-3. Reference the file from the preset yml with
-   `schema_file: "schemas/<name>.yml"`.
-4. Run `./scripts/sync-embedded-files.sh check` to confirm CI parity.
+| Schema file | Preset that owns the schemas | Status |
+|---|---|---|
+| `ce-executor.yml`         | `ce-executor`        | Deprecated reference copy (inlined into `presets/en/ce-executor.yml`) |
+| `code-assist.yml`         | `code-assist`        | Deprecated reference copy (inlined into `presets/en/code-assist.yml`) |
+| `pdd-to-code-assist.yml`  | `pdd-to-code-assist` | Deprecated reference copy (inlined into `presets/en/pdd-to-code-assist.yml`) |
+
+When adding a new schema to a builtin preset:
+
+1. Add the `event_policy.schemas.<topic>` entry directly in
+   `presets/en/<name>.yml`. Do NOT use `event_policy.schema_file`.
+2. If you also want a sibling reference copy in `presets/schemas/`,
+   add it there too (deprecated, for diff review only). The mirror
+   `crates/ralph-cli/presets/schemas/` and `MIRRORED_FILES` /
+   `scripts/sync-embedded-files.sh` no longer apply — that whole
+   mirroring pipeline was tied to the broken `schema_file` approach.
+3. Run `ralph hats validate --strict -H builtin:<name>` to confirm
+   no schema warnings or errors.
 
 ---
 

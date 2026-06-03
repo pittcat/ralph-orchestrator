@@ -81,6 +81,30 @@ pub struct ShowArgs {
     pub name: String,
 }
 
+/// Topics consumed by the event loop runner itself (not by any hat).
+///
+/// These are hat-publishable topics whose consumers live in
+/// `crates/ralph-core/src/event_loop/`, not in the hat graph. The
+/// orphan-event check in `validate_hats` must skip them, otherwise it
+/// produces false-positive warnings like "Event 'build.blocked' has no
+/// hat subscribers" when in reality the loop runner is tracking the
+/// event for thrashing detection.
+///
+/// **Adding to this list**: only add a topic if you have verified (by
+/// reading the consuming code in `event_loop/mod.rs`) that the loop
+/// runner subscribes to it without any hat subscription. This list is
+/// intentionally narrow — every other orphan warning is real and
+/// indicates a typo, a missing hat, or a stale `publishes` list.
+const LOOP_RUNNER_INTERNAL_TOPICS: &[&str] = &[
+    // `build.blocked` triggers thrashing detection in
+    // `event_loop::EventLoop::process_events` (around the comment
+    // "Track build.blocked events for thrashing detection"). After 3
+    // consecutive blocked events on the same task, the loop runner
+    // synthesizes `build.task.abandoned` and abandons the task. The
+    // Builder hat is the typical publisher; no hat needs to subscribe.
+    "build.blocked",
+];
+
 /// Execute a hats command.
 pub async fn execute(
     config_sources: &[ConfigSource],
@@ -265,12 +289,31 @@ fn validate_hats<W: Write>(
     for hat in config_registry.all() {
         for pub_event in &hat.publishes {
             let topic = pub_event.as_str();
-            // Ignore loop completion promise
+            // Exemption 1: loop completion promise is consumed by the loop
+            // runner itself (it sets `completion_requested` and exits).
             if topic == config.event_loop.completion_promise {
                 continue;
             }
-            // Ignore if Ralph subscribes (task.start, etc - though Ralph usually PUBLISHES task.start)
-            // Ralph conceptually subscribes to everything as fallback, but we want to warn if no SPECIFIC hat handles it.
+            // Exemption 2: required_events topics are loop-level gates
+            // consumed by the loop runner via `missing_required_events`
+            // (event_loop/mod.rs around "Event chain validation"). They
+            // are not hat-to-hat signals, so flagging them as orphans
+            // would be a false positive. Example: ce-executor's
+            // `report.done` in `required_events: ["report.done"]`.
+            if config.event_loop.required_events.iter().any(|r| r == topic) {
+                continue;
+            }
+            // Exemption 3: topics the loop runner consumes directly,
+            // not via any hat subscription. See LOOP_RUNNER_INTERNAL_TOPICS
+            // for the rationale and audit checklist before adding new
+            // entries.
+            if LOOP_RUNNER_INTERNAL_TOPICS.contains(&topic) {
+                continue;
+            }
+            // If we get here, the topic is published by a hat but has
+            // no hat subscriber AND is not a known loop-level signal.
+            // That is the bug the orphan check is designed to catch:
+            // a typo, a missing hat, or a stale `publishes` entry.
             if !config_registry.has_subscriber(topic) {
                 print_check(
                     writer,
@@ -817,6 +860,107 @@ mod tests {
             output.contains("Event 'build.done' published by 'Builder' has no hat subscribers")
         );
         assert!(output.contains("Result: Valid (1 warnings)"));
+    }
+
+    /// `required_events` topics are loop-level gates (consumed by the
+    /// loop runner via `missing_required_events`), not hat-to-hat
+    /// signals. They must NOT trigger an orphan warning.
+    ///
+    /// Regression case: ce-executor's `report.done` is in
+    /// `required_events` and the loop runner checks it before accepting
+    /// `LOOP_COMPLETE`. Pre-fix this was a false positive.
+    #[test]
+    fn test_validate_hats_orphan_required_event_is_exempt() {
+        let mut config_registry = HatRegistry::new();
+        config_registry.register(mock_hat(
+            "Reporter",
+            &["REVIEW_COMPLETE"],
+            &["report.done", "LOOP_COMPLETE"],
+        ));
+
+        let yaml = r#"
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["report.done"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let mut buf = Vec::new();
+
+        validate_hats(&mut buf, &config, &config_registry, &config_registry, false, false).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        // `report.done` must NOT be flagged — it's a required_events gate.
+        assert!(
+            !output.contains("'report.done' published by 'Reporter' has no hat subscribers"),
+            "`report.done` is a required_events gate, must not be flagged as orphan. Output: {}",
+            output
+        );
+        // `LOOP_COMPLETE` must not be flagged either (it's the completion_promise).
+        assert!(
+            !output.contains("'LOOP_COMPLETE' published by 'Reporter' has no hat subscribers"),
+            "completion_promise must not be flagged. Output: {}",
+            output
+        );
+    }
+
+    /// Topics the loop runner consumes directly (currently just
+    /// `build.blocked` for thrashing detection) must NOT trigger an
+    /// orphan warning. See `LOOP_RUNNER_INTERNAL_TOPICS` for the
+    /// rationale and the audit checklist before adding new entries.
+    ///
+    /// Regression case: code-assist and pdd-to-code-assist both have
+    /// Builder hat publishing `build.blocked` with no hat subscriber.
+    /// The loop runner's thrashing detector consumes it instead.
+    #[test]
+    fn test_validate_hats_orphan_loop_runner_internal_is_exempt() {
+        let mut config_registry = HatRegistry::new();
+        config_registry.register(mock_hat("Builder", &["build.task"], &["build.blocked"]));
+
+        let config = RalphConfig::default();
+        let mut buf = Vec::new();
+
+        validate_hats(&mut buf, &config, &config_registry, &config_registry, false, false).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        assert!(
+            !output.contains("'build.blocked' published by 'Builder' has no hat subscribers"),
+            "`build.blocked` is consumed by the loop runner's thrashing detector, \
+             must not be flagged as orphan. Output: {}",
+            output
+        );
+    }
+
+    /// CRITICAL REGRESSION GUARD: the exemptions above must not
+    /// silently swallow real orphan events. A hat that publishes a
+    /// typo (e.g. `work.dnoe` instead of `work.done`) must still
+    /// produce a warning. If this test fails, the orphan check has
+    /// been over-broadened and `hats validate` has lost its
+    /// ability to catch typos and missing subscribers.
+    #[test]
+    fn test_validate_hats_real_orphan_still_warns() {
+        let mut config_registry = HatRegistry::new();
+        // Hat publishes a topic that no one subscribes to, is not the
+        // completion promise, is not in required_events, and is not a
+        // known loop-runner-internal topic. This MUST be flagged.
+        config_registry.register(mock_hat(
+            "Sloppy",
+            &["trigger.z"],
+            &["orphan.typo"],
+        ));
+
+        let config = RalphConfig::default();
+        let mut buf = Vec::new();
+
+        validate_hats(&mut buf, &config, &config_registry, &config_registry, false, false).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        assert!(
+            output.contains("Event 'orphan.typo' published by 'Sloppy' has no hat subscribers"),
+            "Real orphan events must still be warned. The exemptions added to \
+             validate_hats must not silently widen past their intended scope. \
+             Output: {}",
+            output
+        );
     }
 
     // ──────────────────────────────────────────────────────────────────────

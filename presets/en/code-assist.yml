@@ -29,13 +29,35 @@ event_loop:
   max_iterations: 100              # Generous for multi-task implementation
   max_runtime_seconds: 14400       # 4 hours max
   checkpoint_interval: 5
-  # U7: Payload contract schemas (tasks.*, review.*, finalization.*) loaded
-  # from the shared `presets/schemas/` directory. Path is resolved relative
-  # to this preset file.
+  # U7: Payload contract schemas (tasks.*, review.*, finalization.*)
+  # inlined below as `event_policy.schemas`. The previous
+  # `schema_file: "../schemas/code-assist.yml"` approach was broken for
+  # builtin presets (no on-disk preset file for `resolve_schema_files`
+  # to anchor the relative path against) and has been folded in.
+  # Mirror in `presets/schemas/code-assist.yml` is kept as a reference
+  # copy only; do not reintroduce `schema_file` here.
   event_policy:
     enabled: true
     mode: enforce
-    schema_file: "../schemas/code-assist.yml"
+    schemas:
+      tasks.ready:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      tasks.rejected:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      review.ready:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      review.rejected:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      finalization.failed:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      finalization.completed:
+        required_fields: [task_id, task_key]
+        payload: json_object
 
 cli:
   backend: "kiro"

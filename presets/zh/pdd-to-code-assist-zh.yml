@@ -30,11 +30,58 @@ event_loop:
   max_iterations: 150              # 为完整的想法→提交周期预留充足空间
   max_runtime_seconds: 14400       # 最长 4 小时
   checkpoint_interval: 5
-  # U7: 中文 preset 与英文 preset 共用同一份 schema 契约
+  # U7: 中文 preset 与英文 preset 共用同一份 schema 契约。
+  # schemas 已内联到 `event_policy.schemas`,与 `presets/en/pdd-to-code-assist.yml` 保持一致。
+  # 之前的 `schema_file` 形式对 builtin preset 不可解析,已改用内联形式。
   event_policy:
     enabled: true
     mode: enforce
-    schema_file: "../schemas/pdd-to-code-assist.yml"
+    schemas:
+      question.asked:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      requirements.complete:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      design.start:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      design.drafted:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      design.approved:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      design.rejected:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      answer.proposed:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      context.ready:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      plan.ready:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      work.ready:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      work.done:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      work.failed:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      review.passed:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      review.failed:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      report.done:
+        required_fields: [task_id, task_key]
+        payload: json_object
 
 cli:
   backend: "claude"

@@ -476,11 +476,28 @@ fn validate_core_config_shape(value: &Value, label: &str) -> Result<()> {
 }
 
 const ALLOWED_HATS_TOP_LEVEL: &[&str] = &["hats", "events", "event_loop", "name", "description"];
+// Event-loop keys that a hat collection overlay is allowed to provide.
+//
+// Original 4 (workflow promises + starting event) are the historic core
+// minimum. The 3 contract keys below (`event_policy`, `verdict_gate`,
+// `execution_contracts`) are hat-driven by design: a hat collection
+// declares the payload contract and the verdict/contract gates that
+// enforce its safety properties, so they must survive overlay merge
+// for builtin presets like `ce-executor` to work end-to-end.
+//
+// Note: resource budgets (`max_iterations`, `max_runtime_seconds`,
+// `checkpoint_interval`) and `enforce_hat_scope` are intentionally
+// NOT in this list. They are operator-controlled, not hat-controlled,
+// so a hat collection must not be able to widen the loop budget or
+// disable scope enforcement behind the user's back.
 const ALLOWED_HATS_EVENT_LOOP_OVERLAY_KEYS: &[&str] = &[
     "completion_promise",
     "starting_event",
     "cancellation_promise",
     "required_events",
+    "event_policy",
+    "verdict_gate",
+    "execution_contracts",
 ];
 
 fn hats_disallowed_keys(mapping: &Mapping) -> Vec<String> {
@@ -832,6 +849,137 @@ hats:
             config.event_loop.starting_event.as_deref(),
             Some("work.start")
         );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Hat overlay must preserve hat-driven event_loop settings.
+    //
+    // Bug history: `ALLOWED_HATS_EVENT_LOOP_OVERLAY_KEYS` was originally
+    // limited to `completion_promise` / `starting_event` /
+    // `cancellation_promise` / `required_events`. This silently dropped
+    // `event_policy` (payload contract schemas) and `verdict_gate` /
+    // `execution_contracts` from builtin hat collections, breaking
+    // `ralph -H builtin:ce-executor run` with
+    // `Payload contract gate failed ... SchemaMissingForRequiredTopic`
+    // and stripping the fail-closed semantics those blocks were
+    // designed to enforce.
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn merge_hats_overlay_preserves_event_policy_from_hats() {
+        let core: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  completion_promise: LOOP_COMPLETE
+",
+        )
+        .unwrap();
+
+        let hats: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+    schemas:
+      work.done:
+        required_fields: [plan_name, task_id, task_key, step]
+        payload: json_object
+hats:
+  reviewer:
+    name: Reviewer
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        let policy = config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .expect("event_policy must survive hat overlay merge");
+        assert!(policy.enabled, "event_policy.enabled must be true");
+        let schema = policy
+            .schemas
+            .get("work.done")
+            .expect("work.done schema must be present after overlay merge");
+        assert!(schema.required_fields.contains(&"plan_name".to_string()));
+    }
+
+    #[test]
+    fn merge_hats_overlay_preserves_verdict_gate_from_hats() {
+        let core: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  completion_promise: LOOP_COMPLETE
+",
+        )
+        .unwrap();
+
+        let hats: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  verdict_gate:
+    topic: REVIEW_COMPLETE
+    fail_field: pass_or_fail
+    fail_value: fail
+hats:
+  shipper:
+    name: Shipper
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        let gate = config
+            .event_loop
+            .verdict_gate
+            .as_ref()
+            .expect("verdict_gate must survive hat overlay merge");
+        assert_eq!(gate.topic, "REVIEW_COMPLETE");
+        assert_eq!(gate.fail_field, "pass_or_fail");
+        assert_eq!(gate.fail_value, "fail");
+    }
+
+    #[test]
+    fn merge_hats_overlay_preserves_execution_contracts_from_hats() {
+        let core: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  completion_promise: LOOP_COMPLETE
+",
+        )
+        .unwrap();
+
+        let hats: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  execution_contracts:
+    enabled: true
+    rules:
+      work.done:
+        require_payload_fields: [task_id, task_key]
+hats:
+  executor:
+    name: Executor
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        let contracts = config
+            .event_loop
+            .execution_contracts
+            .as_ref()
+            .expect("execution_contracts must survive hat overlay merge");
+        assert!(contracts.enabled);
+        assert!(contracts.rules.contains_key("work.done"));
     }
 
     #[tokio::test]

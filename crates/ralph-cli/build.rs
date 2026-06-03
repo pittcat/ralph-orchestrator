@@ -23,7 +23,13 @@
 //   * `presets/extras/`     — Orphan / demo files, not embedded.
 //   * `presets/minimal/`    — Used by the smoke-test fixture loader,
 //                              read from the canonical path at runtime.
-//   * `presets/schemas/`    — Read at runtime via `event_policy.schema_file`.
+//   * `presets/schemas/`    — Reference copies of payload schemas that
+//                              USED to be loaded at runtime via
+//                              `event_policy.schema_file`. That path is
+//                              now broken (see audit fix 2026-06-03 in
+//                              commit history) and the schemas are
+//                              inlined into `presets/en/*.yml` instead.
+//                              Kept here for diff-able reference only.
 
 use std::fs;
 use std::path::PathBuf;

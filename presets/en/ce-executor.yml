@@ -58,12 +58,61 @@ event_loop:
           mode: "optional"  # "optional" | "required_payload_field"
           payload_field: "tests"  # field name to check when mode is "required_payload_field"
   # U7: Payload contract schemas (work.ready, work.done, review.*, plan.*, etc.)
-  # are loaded from the shared `presets/schemas/` directory. Path is
-  # resolved relative to this preset file's directory.
+  # are inlined below as `event_policy.schemas`. The previous
+  # `schema_file: "../schemas/ce-executor.yml"` approach was broken for
+  # builtin presets (no on-disk preset file for `resolve_schema_files`
+  # to anchor the relative path against) and has been folded in.
+  # Mirror in `presets/schemas/ce-executor.yml` is kept as a reference
+  # copy only; do not reintroduce `schema_file` here.
   event_policy:
     enabled: true
     mode: enforce
-    schema_file: "../schemas/ce-executor.yml"
+    schemas:
+      work.ready:
+        required_fields: [plan_name, plan_path, task_id, task_key, step, complexity]
+        payload: json_object
+      work.done:
+        required_fields: [plan_name, task_id, task_key, step]
+        payload: json_object
+      work.failed:
+        required_fields: [reason]
+        payload: json_object
+      review.wave.ready:
+        required_fields: [dimension, focus, depth, diff_base, intent_summary, changed_files, plan_name, task_id, task_key, step]
+        payload: json_object
+      review.dimension.done:
+        required_fields: [dimension, findings_count, findings_file, plan_name, task_id, task_key, step]
+        payload: json_object
+      review.passed:
+        required_fields: [plan_name, task_id, task_key, step, findings_count, fix_round, verdict]
+        payload: json_object
+      review.failed:
+        required_fields: [plan_name, fix_round, safe_auto_count, gated_manual_count, findings_summary, task_id, task_key, step]
+        payload: json_object
+      review.complete:
+        required_fields: [plan_name, fix_round, verdict, residual_findings_count, findings_summary, task_id, task_key, step, findings_count]
+        payload: json_object
+      fix.applied:
+        required_fields: [plan_name, fix_round, applied_count, failed_count, task_id, task_key, step]
+        payload: json_object
+      fix.exhausted:
+        required_fields: [plan_name, fix_round, task_id, task_key, step]
+        payload: json_object
+      queue.advance:
+        required_fields: [plan_name, completed_step, next_step, reviewed_task_id, reviewed_task_key]
+        payload: json_object
+      plan.complete:
+        required_fields: [plan_name, completed_steps, task_id, task_key, verdict]
+        payload: json_object
+      plan.blocked:
+        required_fields: [plan_name, reason, task_id, task_key]
+        payload: json_object
+      REVIEW_COMPLETE:
+        required_fields: [plan_name, verdict, pass_or_fail, residual_findings_summary]
+        payload: json_object
+      report.done:
+        required_fields: [report_path]
+        payload: json_object
 
 cli:
   backend: "claude"

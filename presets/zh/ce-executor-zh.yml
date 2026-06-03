@@ -56,11 +56,59 @@ event_loop:
         require_test_evidence:
           mode: "optional"  # "optional" | "required_payload_field"
           payload_field: "tests"  # field name to check when mode is "required_payload_field"
-  # U7: 中文 preset 与英文 preset 共用同一份 schema 文件,保证契约一致
+  # U7: 中文 preset 与英文 preset 共用同一份 schema 契约。
+  # schemas 已内联到 `event_policy.schemas`,与 `presets/en/ce-executor.yml` 保持一致。
+  # 之前的 `schema_file: "../schemas/ce-executor.yml"` 对 builtin preset 不可解析
+  # (无磁盘路径),已改用内联形式。
   event_policy:
     enabled: true
     mode: enforce
-    schema_file: "../schemas/ce-executor.yml"
+    schemas:
+      work.ready:
+        required_fields: [plan_name, plan_path, task_id, task_key, step, complexity]
+        payload: json_object
+      work.done:
+        required_fields: [plan_name, task_id, task_key, step]
+        payload: json_object
+      work.failed:
+        required_fields: [reason]
+        payload: json_object
+      review.wave.ready:
+        required_fields: [dimension, focus, depth, diff_base, intent_summary, changed_files, plan_name, task_id, task_key, step]
+        payload: json_object
+      review.dimension.done:
+        required_fields: [dimension, findings_count, findings_file, plan_name, task_id, task_key, step]
+        payload: json_object
+      review.passed:
+        required_fields: [plan_name, task_id, task_key, step, findings_count, fix_round, verdict]
+        payload: json_object
+      review.failed:
+        required_fields: [plan_name, fix_round, safe_auto_count, gated_manual_count, findings_summary, task_id, task_key, step]
+        payload: json_object
+      review.complete:
+        required_fields: [plan_name, fix_round, verdict, residual_findings_count, findings_summary, task_id, task_key, step, findings_count]
+        payload: json_object
+      fix.applied:
+        required_fields: [plan_name, fix_round, applied_count, failed_count, task_id, task_key, step]
+        payload: json_object
+      fix.exhausted:
+        required_fields: [plan_name, fix_round, task_id, task_key, step]
+        payload: json_object
+      queue.advance:
+        required_fields: [plan_name, completed_step, next_step, reviewed_task_id, reviewed_task_key]
+        payload: json_object
+      plan.complete:
+        required_fields: [plan_name, completed_steps, task_id, task_key, verdict]
+        payload: json_object
+      plan.blocked:
+        required_fields: [plan_name, reason, task_id, task_key]
+        payload: json_object
+      REVIEW_COMPLETE:
+        required_fields: [plan_name, verdict, pass_or_fail, residual_findings_summary]
+        payload: json_object
+      report.done:
+        required_fields: [report_path]
+        payload: json_object
 
 cli:
   backend: "claude"

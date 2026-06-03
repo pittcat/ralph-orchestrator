@@ -1,8 +1,18 @@
 # Payload schemas for ce-executor.
 #
-# Loaded by `presets/ce-executor.yml` (and its -zh sibling) via
-# `event_policy.schema_file: "../schemas/ce-executor.yml"`. The path is
-# resolved relative to the preset file's directory at load time.
+# STATUS: DEPRECATED REFERENCE COPY. As of 2026-06-03 the same content is
+# inlined into `presets/en/ce-executor.yml` under `event_policy.schemas`,
+# and `presets/en/ce-executor.yml` no longer sets `event_policy.schema_file`.
+# `resolve_schema_files` cannot resolve a relative `schema_file` for builtin
+# presets (no on-disk anchor), so the previous `../schemas/ce-executor.yml`
+# reference caused `ralph -H builtin:ce-executor run` to fail with
+# `Payload contract gate failed ... SchemaMissingForRequiredTopic` for
+# 5 topics (work.done, review.wave.ready, review.passed, review.complete,
+# fix.applied).
+#
+# This file is kept as a diff-able reference only. If you add or change a
+# schema, edit `presets/en/ce-executor.yml` and update this file in lockstep
+# (or delete it once no consumers remain).
 #
 # Coverage:
 #   coordinator     -> work.ready

@@ -30,12 +30,62 @@ event_loop:
   max_iterations: 150              # Generous for full idea→commit cycle
   max_runtime_seconds: 14400       # 4 hours max
   checkpoint_interval: 5
-  # U7: Payload contract schemas (design.*, work.*, review.*, etc.) loaded
-  # from the shared `presets/schemas/` directory.
+  # U7: Payload contract schemas (design.*, work.*, review.*, etc.)
+  # inlined below as `event_policy.schemas`. The previous
+  # `schema_file: "../schemas/pdd-to-code-assist.yml"` approach was
+  # broken for builtin presets (no on-disk preset file for
+  # `resolve_schema_files` to anchor the relative path against) and has
+  # been folded in. Mirror in `presets/schemas/pdd-to-code-assist.yml`
+  # is kept as a reference copy only; do not reintroduce `schema_file`.
   event_policy:
     enabled: true
     mode: enforce
-    schema_file: "../schemas/pdd-to-code-assist.yml"
+    schemas:
+      question.asked:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      requirements.complete:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      design.start:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      design.drafted:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      design.approved:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      design.rejected:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      answer.proposed:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      context.ready:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      plan.ready:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      work.ready:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      work.done:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      work.failed:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      review.passed:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      review.failed:
+        required_fields: [task_id, task_key]
+        payload: json_object
+      report.done:
+        required_fields: [task_id, task_key]
+        payload: json_object
 
 cli:
   backend: "claude"

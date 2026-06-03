@@ -966,37 +966,47 @@ contracts verify the *completion declaration* (e.g. `work.done` has
 
 ### Schema Sources
 
-Schemas can be declared inline in the preset yml, or in a sibling
-file referenced by `event_policy.schema_file`:
+Schemas are declared inline in the preset yml under
+`event_policy.schemas`. The previous `event_policy.schema_file` form
+(relative to a sibling file under `presets/schemas/`) was broken for
+builtin presets — `resolve_schema_files` has no on-disk preset file
+to anchor the relative path against, so the schemas silently went
+unloaded and `ralph hats validate` / `ralph run` reported
+`SchemaMissingForRequiredTopic` for every topic the preset declared.
+As of 2026-06-03 the builtin presets inline the schemas directly:
 
 ```yaml
 event_loop:
   event_policy:
     enabled: true
     mode: enforce
-    schema_file: "../schemas/ce-executor.yml"
+    schemas:
+      work.ready:
+        required_fields: [plan_name, plan_path, task_id, task_key, step, complexity]
+        payload: json_object
+      # ...
 ```
 
-Schemas live in `presets/schemas/` (canonical) and
-`crates/ralph-cli/presets/schemas/` (embedded). The
-`scripts/sync-embedded-files.sh` script keeps them in sync; add a new
-schema to both directories plus a `MIRRORED_FILES` entry.
+The `presets/schemas/` directory is kept as a deprecated reference
+copy of the inlined schemas. For file-based hat collections (i.e.
+`ralph run -H .ralph/hats/my.yml`) the relative `schema_file` form
+still works, but the inline form is preferred for consistency.
 
 ### Builtin Schema Library
 
-| Schema file | Referenced by |
-|---|---|
-| `schemas/ce-executor.yml`        | `ce-executor`, `ce-executor-zh` |
-| `schemas/code-assist.yml`        | `code-assist`, `code-assist-zh` |
-| `schemas/pdd-to-code-assist.yml` | `pdd-to-code-assist` |
+| Schema file | Referenced by | Status |
+|---|---|---|
+| `schemas/ce-executor.yml`        | `ce-executor`         | Deprecated reference copy (schemas inlined into `presets/en/ce-executor.yml`) |
+| `schemas/code-assist.yml`        | `code-assist`         | Deprecated reference copy (schemas inlined into `presets/en/code-assist.yml`) |
+| `schemas/pdd-to-code-assist.yml` | `pdd-to-code-assist`  | Deprecated reference copy (schemas inlined into `presets/en/pdd-to-code-assist.yml`) |
 
 ### Checklist for Preset Authors (Payload Contracts)
 
-- [ ] Do any hats' instructions reference payload fields with `From event payload:` or `payload MUST include:`? If yes, declare the field in the topic's schema `required_fields`.
-- [ ] Are Chinese (-zh) and English presets using the same `schema_file`? They must share one contract.
-- [ ] Is the new schema file mirrored to `crates/ralph-cli/presets/schemas/` and listed in `scripts/sync-embedded-files.sh`?
+- [ ] Do any hats' instructions reference payload fields with `From event payload:` or `payload MUST include:`? If yes, declare the field in the topic's schema `required_fields` directly under `event_policy.schemas` in the preset yml.
+- [ ] Do NOT reintroduce `event_policy.schema_file` in a builtin preset. It is broken by design for builtins (no on-disk anchor). The inline form is the only correct option.
+- [ ] For Chinese (`-zh`) presets: do not declare a separate schema. The Chinese preset is a hat collection overlay, and `event_policy` flows through from the English preset. If `-zh` needs different schemas, you have bigger design problems.
 - [ ] Does `ralph hats validate --strict` exit 0 for the preset?
-- [ ] Does `./scripts/sync-embedded-files.sh check` pass?
+- [ ] Does `./scripts/sync-embedded-files.sh check` pass? (Not applicable if no schema files are mirrored.)
 
 See `docs/guide/payload-contracts.md` for the full schema format,
 extractor behaviour, and the boundary with execution contracts.
