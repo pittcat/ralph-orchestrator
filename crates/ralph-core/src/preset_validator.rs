@@ -13,8 +13,17 @@
 
 use crate::config::RalphConfig;
 use crate::hat_registry::HatRegistry;
+use crate::payload_contract::{
+    validate_payload_contract, PayloadContractError, PayloadContractValidationResult,
+};
 use ralph_proto::{Hat, Topic};
 use std::collections::{HashMap, HashSet, VecDeque};
+
+/// Re-export payload contract types from `payload_contract` for callers
+/// that prefer to import everything from the validator surface.
+pub use crate::payload_contract::{
+    PayloadContractErrorKind, PayloadContractValidationResult as _PayloadContractValidationResult,
+};
 
 /// Maximum number of BFS iterations to prevent infinite loops on cyclic graphs.
 const MAX_BFS_ITERATIONS: usize = 1000;
@@ -349,6 +358,78 @@ impl<'a> TopologyGraph<'a> {
 
         // Completion not reachable without required topic -> it's on all paths
         true
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Combined preset validation (U3 integration)
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Combined result of preset validation (topology + payload contracts).
+#[derive(Debug, Default, Clone)]
+pub struct PresetValidationResult {
+    pub topology: TopologyValidationResult,
+    pub payload_contracts: PayloadContractValidationResult,
+}
+
+impl PresetValidationResult {
+    pub fn is_valid(&self) -> bool {
+        self.topology.is_valid() && self.payload_contracts.is_valid()
+    }
+
+    /// Number of topology errors + payload contract errors.
+    pub fn error_count(&self) -> usize {
+        self.topology.errors.len() + self.payload_contracts.errors.len()
+    }
+}
+
+/// Run both topology and payload-contract validation in one call.
+///
+/// `strict` controls payload-contract strictness (see
+/// `validate_payload_contract`).
+pub fn validate_preset(
+    config: &RalphConfig,
+    registry: &HatRegistry,
+    strict: bool,
+) -> PresetValidationResult {
+    let topology = validate_preset_topology(config, registry);
+    let payload_contracts = validate_payload_contract(config, registry, strict);
+    PresetValidationResult {
+        topology,
+        payload_contracts,
+    }
+}
+
+/// Format a payload contract error as a single human-readable line.
+pub fn format_payload_contract_error(err: &PayloadContractError) -> String {
+    match &err.field {
+        Some(field) => format!(
+            "[{}] hat={} topic={} field={} source_hats=[{}] schema={} line={:?} pattern={:?}",
+            match err.kind {
+                PayloadContractErrorKind::FieldMissingFromSchema => "FieldMissingFromSchema",
+                PayloadContractErrorKind::SchemaMissingForRequiredTopic =>
+                    "SchemaMissingForRequiredTopic",
+            },
+            err.hat_id,
+            err.topic,
+            field,
+            err.source_hats.join(", "),
+            err.schema_defined_in,
+            err.instructions_line,
+            err.pattern,
+        ),
+        None => format!(
+            "[{}] hat={} topic={} source_hats=[{}] schema={}",
+            match err.kind {
+                PayloadContractErrorKind::FieldMissingFromSchema => "FieldMissingFromSchema",
+                PayloadContractErrorKind::SchemaMissingForRequiredTopic =>
+                    "SchemaMissingForRequiredTopic",
+            },
+            err.hat_id,
+            err.topic,
+            err.source_hats.join(", "),
+            err.schema_defined_in,
+        ),
     }
 }
 
@@ -1239,5 +1320,125 @@ event_loop:
             "report.done must remain on all paths after adding plan-gate: {:?}",
             result.errors
         );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // U3 integration: combined preset validation
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn validate_preset_combines_topology_and_payload_contracts() {
+        // Topology: valid. Payload contracts: schema exists but field is
+        // missing. Combined result must report the payload-contract error.
+        let yaml = r#"
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+  event_policy:
+    enabled: true
+    mode: observe
+    schemas:
+      work.ready:
+        required_fields: ["task_id"]
+hats:
+  a:
+    name: "A"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+    instructions: "Publish."
+  b:
+    name: "B"
+    triggers: ["work.ready"]
+    publishes: ["LOOP_COMPLETE"]
+    instructions: |
+      From event payload: task_id, plan_name
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset(&config, &registry, false);
+        assert!(result.topology.is_valid());
+        assert!(!result.payload_contracts.is_valid());
+        assert!(!result.is_valid());
+        assert!(result
+            .payload_contracts
+            .errors
+            .iter()
+            .any(|e| e.field.as_deref() == Some("plan_name")));
+    }
+
+    #[test]
+    fn validate_preset_default_mode_missing_schema_is_warning() {
+        // Default mode: missing schema is a warning, not an error.
+        let yaml = r#"
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+hats:
+  a:
+    name: "A"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+    instructions: "Publish."
+  b:
+    name: "B"
+    triggers: ["work.ready"]
+    publishes: ["LOOP_COMPLETE"]
+    instructions: |
+      From event payload: task_id
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset(&config, &registry, false);
+        assert!(result.is_valid());
+        assert!(!result.payload_contracts.warnings.is_empty());
+    }
+
+    #[test]
+    fn validate_preset_strict_mode_missing_schema_is_error() {
+        // Strict mode: missing schema is an error.
+        let yaml = r#"
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+hats:
+  a:
+    name: "A"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+    instructions: "Publish."
+  b:
+    name: "B"
+    triggers: ["work.ready"]
+    publishes: ["LOOP_COMPLETE"]
+    instructions: |
+      From event payload: task_id
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset(&config, &registry, true);
+        assert!(!result.is_valid());
+        assert!(!result.payload_contracts.errors.is_empty());
+    }
+
+    #[test]
+    fn format_payload_contract_error_field_missing_includes_required_fields() {
+        let err = PayloadContractError {
+            kind: PayloadContractErrorKind::FieldMissingFromSchema,
+            hat_id: "executor".to_string(),
+            topic: "work.ready".to_string(),
+            field: Some("plan_name".to_string()),
+            source_hats: vec!["coordinator".to_string()],
+            schema_defined_in: "inline".to_string(),
+            instructions_line: Some(12),
+            pattern: Some("From event payload".to_string()),
+            source_excerpt: Some("From event payload: task_id, plan_name".to_string()),
+            message: "msg".to_string(),
+        };
+        let line = format_payload_contract_error(&err);
+        assert!(line.contains("executor"));
+        assert!(line.contains("work.ready"));
+        assert!(line.contains("plan_name"));
+        assert!(line.contains("coordinator"));
+        assert!(line.contains("FieldMissingFromSchema"));
     }
 }

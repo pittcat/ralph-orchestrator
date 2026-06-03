@@ -1,0 +1,160 @@
+# Payload schemas for ce-executor.
+#
+# Loaded by `presets/ce-executor.yml` (and its -zh sibling) via
+# `event_policy.schema_file: "schemas/ce-executor.yml"`. The path is
+# resolved relative to the preset file's directory at load time.
+#
+# Coverage:
+#   coordinator     -> work.ready
+#   coordinator/executor -> work.failed
+#   executor        -> work.done
+#   review-coordinator  -> review.wave.ready
+#   dimension-reviewer  -> review.dimension.done
+#   review-synthesizer  -> review.passed / review.failed / review.complete
+#   fixer           -> fix.applied / fix.exhausted
+#   plan-gate       -> queue.advance / plan.complete / plan.blocked
+#   shipper         -> REVIEW_COMPLETE
+#   reporter        -> report.done
+
+work.ready:
+  required_fields:
+    - plan_name
+    - plan_path
+    - task_id
+    - task_key
+    - step
+    - complexity
+  payload: json_object
+
+work.done:
+  required_fields:
+    - plan_name
+    - task_id
+    - task_key
+    - step
+  payload: json_object
+
+work.failed:
+  required_fields:
+    - reason
+  payload: json_object
+
+review.wave.ready:
+  required_fields:
+    - dimension
+    - focus
+    - depth
+    - diff_base
+    - intent_summary
+    - changed_files
+    - plan_name
+    - task_id
+    - task_key
+    - step
+  payload: json_object
+
+review.dimension.done:
+  required_fields:
+    - dimension
+    - findings_count
+    - findings_file
+    - plan_name
+    - task_id
+    - task_key
+    - step
+  payload: json_object
+
+review.passed:
+  required_fields:
+    - plan_name
+    - task_id
+    - task_key
+    - step
+    - findings_count
+    - fix_round
+    - verdict
+  payload: json_object
+
+review.failed:
+  required_fields:
+    - plan_name
+    - fix_round
+    - safe_auto_count
+    - gated_manual_count
+    - findings_summary
+    - task_id
+    - task_key
+    - step
+  payload: json_object
+
+review.complete:
+  required_fields:
+    - plan_name
+    - fix_round
+    - verdict
+    - residual_findings_count
+    - findings_summary
+    - task_id
+    - task_key
+    - step
+    - findings_count
+  payload: json_object
+
+fix.applied:
+  required_fields:
+    - plan_name
+    - fix_round
+    - applied_count
+    - failed_count
+    - task_id
+    - task_key
+    - step
+  payload: json_object
+
+fix.exhausted:
+  required_fields:
+    - plan_name
+    - fix_round
+    - task_id
+    - task_key
+    - step
+  payload: json_object
+
+queue.advance:
+  required_fields:
+    - plan_name
+    - completed_step
+    - next_step
+    - reviewed_task_id
+    - reviewed_task_key
+  payload: json_object
+
+plan.complete:
+  required_fields:
+    - plan_name
+    - completed_steps
+    - task_id
+    - task_key
+    - verdict
+  payload: json_object
+
+plan.blocked:
+  required_fields:
+    - plan_name
+    - reason
+    - task_id
+    - task_key
+  payload: json_object
+
+REVIEW_COMPLETE:
+  required_fields:
+    - plan_name
+    - verdict
+    - pass_or_fail
+    - residual_findings_summary
+  payload: json_object
+
+report.done:
+  required_fields:
+    - report_path
+  payload: json_object

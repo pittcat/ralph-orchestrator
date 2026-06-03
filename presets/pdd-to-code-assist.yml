@@ -30,6 +30,12 @@ event_loop:
   max_iterations: 150              # Generous for full idea→commit cycle
   max_runtime_seconds: 14400       # 4 hours max
   checkpoint_interval: 5
+  # U7: Payload contract schemas (design.*, work.*, review.*, etc.) loaded
+  # from the shared `presets/schemas/` directory.
+  event_policy:
+    enabled: true
+    mode: enforce
+    schema_file: "schemas/pdd-to-code-assist.yml"
 
 cli:
   backend: "claude"

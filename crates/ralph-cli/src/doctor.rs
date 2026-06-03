@@ -632,6 +632,7 @@ mod tests {
             backend_args: None,
             backend,
             default_publishes: None,
+            ignore_payload_fields: vec![],
             max_activations: None,
             scratchpad: None,
             disallowed_tools: vec![],

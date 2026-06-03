@@ -45,6 +45,13 @@ MIRRORED_FILES=(
     "presets/pdd-to-code-assist.yml:crates/ralph-cli/presets/pdd-to-code-assist.yml"
     "presets/research.yml:crates/ralph-cli/presets/research.yml"
     "presets/review.yml:crates/ralph-cli/presets/review.yml"
+    # Payload contract schemas (U7) — referenced by `event_policy.schema_file`
+    # in the corresponding preset yml. Each preset points at the shared
+    # `presets/schemas/` directory; the path is resolved relative to the
+    # preset yml at load time.
+    "presets/schemas/ce-executor.yml:crates/ralph-cli/presets/schemas/ce-executor.yml"
+    "presets/schemas/code-assist.yml:crates/ralph-cli/presets/schemas/code-assist.yml"
+    "presets/schemas/pdd-to-code-assist.yml:crates/ralph-cli/presets/schemas/pdd-to-code-assist.yml"
 )
 
 # Colors for output

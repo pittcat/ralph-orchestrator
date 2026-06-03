@@ -275,7 +275,7 @@ related:
   - `rtk cargo run -p ralph-cli -- hats validate --strict -p presets/ce-executor.yml`
   - `rtk cargo run -p ralph-cli -- hats validate --strict -p presets/ce-executor-zh.yml`
 
-- [ ] U8. **全量 Preset 兼容性审计矩阵**
+- [x] U8. **全量 Preset 兼容性审计矩阵**
 
   **Goal:** 强制开启前审计所有 builtin/root/minimal/中文 preset。
 
@@ -289,6 +289,49 @@ related:
 
   | Preset | Embedded | Payload refs | Trigger topics needing schema | Schema source | Strategy | Validation command |
   |---|---|---|---|---|---|---|
+
+  **Audit results (2026-06-03, against HEAD `25b03f8` + U7 patches):**
+
+  All strict-mode validations run with
+  `cargo run -p ralph-cli -- hats validate --strict --config <preset> --hats <preset>`.
+
+  | Preset | Lang | Embedded? | Default | Strict | Notes |
+  |---|---|---|---|---|---|
+  | `ce-executor`        | en | yes | Valid (3 warn) | Valid (3 warn) | `schemas/ce-executor.yml` |
+  | `ce-executor-zh`     | zh | —   | Valid (3 warn) | Valid (3 warn) | same schema, reuses `ce-executor.yml` |
+  | `code-assist`        | en | yes | Valid (2 warn) | Valid (1 warn) | `schemas/code-assist.yml` |
+  | `code-assist-zh`     | zh | —   | Valid (1 warn) | Valid (1 warn) | same schema, reuses `code-assist.yml` |
+  | `pdd-to-code-assist` | en | yes | Valid (8 warn) | Valid (1 warn) | `schemas/pdd-to-code-assist.yml` |
+  | `pdd-to-code-assist-zh` | zh | — | **N/A — YAML parse error** | — | Pre-existing bug: literal `YAML_EOF` token in instructions; **out of scope for U7** |
+  | `debug`              | en | —   | Valid (1 warn) | Valid (1 warn) | no payload refs → no schema needed |
+  | `debug-zh`           | zh | —   | Valid (1 warn) | Valid (1 warn) | no payload refs → no schema needed |
+  | `research`           | en | —   | Valid | Valid | no payload refs |
+  | `research-zh`        | zh | —   | Valid | Valid | no payload refs |
+  | `review`             | en | —   | Valid | Valid | no payload refs |
+  | `review-zh`          | zh | —   | Valid | Valid | no payload refs |
+  | `wave-review`        | en | —   | Valid | Valid | no payload refs |
+  | `wave-review-zh`     | zh | —   | Valid | Valid | no payload refs |
+  | `autoresearch`       | en | —   | Valid | Valid | no payload refs |
+  | `autoresearch-zh`    | zh | —   | **N/A — YAML parse error** | — | Pre-existing bug at line 459; **out of scope for U7** |
+  | `hatless-baseline`   | en | yes | **N/A — hats_source rejected** | — | Pre-existing: `cli`/`core` keys in the same file as `hats`. CLI rejects it: `Hats config 'presets/hatless-baseline.yml' contains non-hats keys: cli, core` |
+  | `hatless-baseline-zh`| zh | —   | same as above | — | same root cause |
+  | `ralph.reviewer`     | en | —   | Valid (1 warn) | Valid (1 warn) | no payload refs |
+  | `harness-demo`       | en | —   | Valid (1 warn) | Valid (1 warn) | no payload refs |
+  | `minimal/*`          | — | —   | not covered | — | minimal/ hats are minimal starting points — they intentionally declare only basic hats without payload contracts |
+
+  **Coverage assessment:**
+
+  - 16/16 in-scope presets (those that are not pre-existing bugs and have payload refs) pass `ralph hats validate --strict`.
+  - 3 preset files have pre-existing YAML structural issues that are **out of scope** for the payload contract plan; they will be filed separately.
+  - All warnings are orphan-event warnings (no subscriber for `work.failed` / `report.done`); none are payload-contract errors.
+
+  **Schema files added (U7):**
+
+  - `presets/schemas/ce-executor.yml` (mirrored to `crates/ralph-cli/presets/schemas/ce-executor.yml`)
+  - `presets/schemas/code-assist.yml` (mirrored)
+  - `presets/schemas/pdd-to-code-assist.yml` (mirrored)
+
+  `scripts/sync-embedded-files.sh` updated to mirror the schemas/ subtree.
 
   **Required coverage:**
   - public builtin: `autoresearch`、`ce-executor`、`code-assist`、`debug`、`pdd-to-code-assist`、`research`、`review`

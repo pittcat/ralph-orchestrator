@@ -13,6 +13,9 @@ Practical guides for using Ralph Orchestrator effectively.
 | [Writing Prompts](prompts.md) | Prompt engineering tips |
 | [Cost Management](cost-management.md) | Controlling API costs |
 | [Telegram Integration](telegram.md) | Human-in-the-loop via Telegram |
+| [Harness Extensions](harness-extensions.md) | Event filter / projection / state injection / preflight hooks |
+| [Payload Contracts](payload-contracts.md) | Schema-based field enforcement between hats |
+| [Execution Contracts](execution-contracts.md) | `work.done` completion gate (task closed, git evidence, tests) |
 
 ## Quick Links
 

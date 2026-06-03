@@ -57,6 +57,13 @@ event_loop:
         require_test_evidence:
           mode: "optional"  # "optional" | "required_payload_field"
           payload_field: "tests"  # field name to check when mode is "required_payload_field"
+  # U7: Payload contract schemas (work.ready, work.done, review.*, plan.*, etc.)
+  # are loaded from the shared `presets/schemas/` directory. Path is
+  # resolved relative to this preset file's directory.
+  event_policy:
+    enabled: true
+    mode: enforce
+    schema_file: "schemas/ce-executor.yml"
 
 cli:
   backend: "claude"

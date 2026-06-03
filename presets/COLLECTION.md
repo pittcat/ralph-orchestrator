@@ -949,3 +949,55 @@ This ensures:
 - [ ] Is the completion topic entering downstream without real validation?
 - [ ] Can the completion state be reconstructed from task/git/test evidence?
 - [ ] Should execution contracts be enabled for this workflow?
+
+---
+
+## Payload Contracts
+
+Payload contracts verify that events flowing between hats carry the
+fields the downstream hat actually reads. They run at preset-load
+time (as part of `ralph hats validate` and the `ralph run` startup
+hard gate) and at runtime (when `event_policy.mode: enforce`).
+
+Payload contracts are complementary to execution contracts: execution
+contracts verify the *completion declaration* (e.g. `work.done` has
+`task_id` and a closed runtime task); payload contracts verify the
+*event shape* itself.
+
+### Schema Sources
+
+Schemas can be declared inline in the preset yml, or in a sibling
+file referenced by `event_policy.schema_file`:
+
+```yaml
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+    schema_file: "schemas/ce-executor.yml"
+```
+
+Schemas live in `presets/schemas/` (canonical) and
+`crates/ralph-cli/presets/schemas/` (embedded). The
+`scripts/sync-embedded-files.sh` script keeps them in sync; add a new
+schema to both directories plus a `MIRRORED_FILES` entry.
+
+### Builtin Schema Library
+
+| Schema file | Referenced by |
+|---|---|
+| `schemas/ce-executor.yml`        | `ce-executor`, `ce-executor-zh` |
+| `schemas/code-assist.yml`        | `code-assist`, `code-assist-zh` |
+| `schemas/pdd-to-code-assist.yml` | `pdd-to-code-assist` |
+
+### Checklist for Preset Authors (Payload Contracts)
+
+- [ ] Do any hats' instructions reference payload fields with `From event payload:` or `payload MUST include:`? If yes, declare the field in the topic's schema `required_fields`.
+- [ ] Are Chinese (-zh) and English presets using the same `schema_file`? They must share one contract.
+- [ ] Is the new schema file mirrored to `crates/ralph-cli/presets/schemas/` and listed in `scripts/sync-embedded-files.sh`?
+- [ ] Does `ralph hats validate --strict` exit 0 for the preset?
+- [ ] Does `./scripts/sync-embedded-files.sh check` pass?
+
+See `docs/guide/payload-contracts.md` for the full schema format,
+extractor behaviour, and the boundary with execution contracts.
+

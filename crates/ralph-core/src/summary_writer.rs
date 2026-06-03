@@ -243,6 +243,7 @@ impl SummaryWriter {
             TerminationReason::RestartRequested => "Restarting by human request",
             TerminationReason::WorkspaceGone => "Failed: workspace directory removed",
             TerminationReason::Cancelled => "Cancelled gracefully (human rejection or timeout)",
+            TerminationReason::PayloadContractViolation => "Failed: payload contract violation",
         }
     }
 

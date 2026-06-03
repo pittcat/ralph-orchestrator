@@ -493,3 +493,17 @@ escalation, or any scenario requiring an abort while keeping the workspace intac
 | State file not in prompt | `state_files.enabled: false` or path resolution failure | Check path is relative to workspace root; look for `stderr` warnings |
 | Preflight hook "Failed to execute" | Shell or command not found | Ensure the command works standalone; hooks run via `sh -c "..."` |
 | `{{config_path}}` resolves to empty string | Config loaded from stdin or memory | Use `{{project_root}}` or absolute paths instead |
+
+---
+
+## See also: Payload Contracts
+
+Beyond the four mechanisms above, Ralph also enforces **payload
+contracts** between hats. Payload contracts check that every event
+carries the fields its downstream consumers expect. They run both at
+preset-load time (`ralph hats validate --strict` and the `ralph run`
+startup hard gate) and at runtime (when `event_policy.mode: enforce`).
+
+See `docs/guide/payload-contracts.md` for the schema format,
+extractor behaviour, runtime diagnostic fields, and the boundary with
+execution contracts.

@@ -15,8 +15,8 @@ use crate::event_parser::{
     parse_backpressure_json, parse_review_json,
 };
 use crate::event_policy::{
-    PolicyDecision, PolicyRuntimeState, check_completion_guard, check_completion_honored,
-    validate_event,
+    PolicyDecision, PolicyFinding, PolicyRuntimeState, check_completion_guard,
+    check_completion_honored, validate_event,
 };
 use crate::event_reader::{Event as JsonlEvent, EventReader};
 use crate::execution_contract::{
@@ -59,6 +59,9 @@ pub struct ProcessedEvents {
     pub accepted_events: Vec<Event>,
     /// Findings from execution contract rejections (U5).
     pub contract_rejections: Vec<ExecutionContractFinding>,
+    /// U6: payload contract violation detected at runtime (if any).
+    /// When present, the loop must pause and emit a structured diagnostic.
+    pub payload_contract_violation: Option<crate::payload_contract::PayloadContractViolation>,
 }
 
 /// Result of processing events from JSONL with wave events partitioned out.
@@ -99,6 +102,8 @@ pub enum TerminationReason {
     WorkspaceGone,
     /// Loop was cancelled gracefully via loop.cancel event (human rejection, timeout).
     Cancelled,
+    /// U6: runtime payload contract violation caused the loop to pause.
+    PayloadContractViolation,
 }
 
 impl TerminationReason {
@@ -117,7 +122,8 @@ impl TerminationReason {
             | TerminationReason::LoopStale
             | TerminationReason::ValidationFailure
             | TerminationReason::Stopped
-            | TerminationReason::WorkspaceGone => 1,
+            | TerminationReason::WorkspaceGone
+            | TerminationReason::PayloadContractViolation => 1,
             TerminationReason::MaxIterations
             | TerminationReason::MaxRuntime
             | TerminationReason::MaxCost => 2,
@@ -148,6 +154,7 @@ impl TerminationReason {
             TerminationReason::RestartRequested => "restart_requested",
             TerminationReason::WorkspaceGone => "workspace_gone",
             TerminationReason::Cancelled => "cancelled",
+            TerminationReason::PayloadContractViolation => "payload_contract_violation",
         }
     }
 
@@ -383,6 +390,9 @@ struct PolicyValidationResult {
     events: Vec<JsonlEvent>,
     hold_triggered: bool,
     hold_reason: Option<String>,
+    /// U6: payload contract violation captured during policy validation
+    /// (if any). When set, the loop should pause and emit a diagnostic.
+    payload_contract_violation: Option<crate::payload_contract::PayloadContractViolation>,
 }
 
 fn apply_event_policy_validation(
@@ -391,7 +401,40 @@ fn apply_event_policy_validation(
     policy_state: &mut PolicyRuntimeState,
     bus: &mut EventBus,
     write_diagnostic: bool,
+    source_hats_by_topic: &std::collections::HashMap<String, Vec<String>>,
+    target_hats_by_topic: &std::collections::HashMap<String, Vec<String>>,
 ) -> PolicyValidationResult {
+    let mut payload_contract_violation: Option<
+        crate::payload_contract::PayloadContractViolation,
+    > = None;
+    let mut capture_violation = |finding: &PolicyFinding, payload: Option<&str>| {
+        if payload_contract_violation.is_some() {
+            return; // capture only the first
+        }
+        let source_hats = source_hats_by_topic
+            .get(&finding.topic)
+            .cloned()
+            .unwrap_or_default();
+        let target_hats = target_hats_by_topic
+            .get(&finding.topic)
+            .cloned()
+            .unwrap_or_default();
+        let schema_defined_in = match policy_config.schemas.get(&finding.topic) {
+            Some(_) => match &policy_config.schema_file {
+                Some(f) => format!("inline + file:{}", f),
+                None => "inline".to_string(),
+            },
+            None => "(none)".to_string(),
+        };
+        payload_contract_violation = finding_to_payload_contract_violation(
+            finding,
+            payload,
+            &source_hats,
+            &target_hats,
+            &schema_defined_in,
+        );
+    };
+
     let mut validated_events = Vec::with_capacity(events.len());
     let mut hold_triggered = false;
     let mut hold_reason = None;
@@ -491,6 +534,7 @@ fn apply_event_policy_validation(
                 validated_events.push(event);
             }
             PolicyDecision::RejectWithResume(finding) => {
+                capture_violation(&finding, event.payload.as_deref());
                 let recovery_payload = format!(
                     "EVENT_POLICY_REJECTED: event '{}' violates policy.\n{}\n\n\
                      Wait for the correct event schema before emitting this event. \
@@ -502,6 +546,7 @@ fn apply_event_policy_validation(
                 // Do NOT record the rejected event
             }
             PolicyDecision::Hold(finding) => {
+                capture_violation(&finding, event.payload.as_deref());
                 hold_triggered = true;
                 hold_reason = Some(finding.message.clone());
                 let recovery_payload = format!(
@@ -525,7 +570,82 @@ fn apply_event_policy_validation(
         events: validated_events,
         hold_triggered,
         hold_reason,
+        payload_contract_violation,
     }
+}
+
+/// U6: convert a `PolicyFinding` into a `PayloadContractViolation` if and only
+/// if the finding is schema-derived (MissingRequiredField, PayloadTypeMismatch,
+/// InvalidFieldValue). Terminal-monotonicity and completion-guard violations
+/// are NOT payload contract violations and are passed through unchanged.
+fn finding_to_payload_contract_violation(
+    finding: &PolicyFinding,
+    payload: Option<&str>,
+    source_hats: &[String],
+    target_hats: &[String],
+    schema_defined_in: &str,
+) -> Option<crate::payload_contract::PayloadContractViolation> {
+    use crate::event_policy::ViolationType;
+    use crate::payload_contract::{
+        PayloadContractViolation, PayloadContractViolationKind,
+    };
+    let (kind, field) = match &finding.violation_type {
+        ViolationType::MissingRequiredField { field } => (
+            PayloadContractViolationKind::MissingRequiredField,
+            Some(field.clone()),
+        ),
+        ViolationType::PayloadTypeMismatch { .. } => (
+            PayloadContractViolationKind::PayloadTypeMismatch,
+            None,
+        ),
+        ViolationType::InvalidFieldValue { field, .. } => (
+            PayloadContractViolationKind::AllowedValueMismatch,
+            Some(field.clone()),
+        ),
+        // Terminal / completion-guard violations are NOT payload contract
+        // violations and must not be reported as such.
+        ViolationType::TerminalMonotonicityViolation { .. }
+        | ViolationType::DuplicateTerminalEvent { .. }
+        | ViolationType::BusinessEventAfterCompletion { .. } => return None,
+    };
+    let fix_hint = match kind {
+        PayloadContractViolationKind::MissingRequiredField => format!(
+            "Add the missing field to the payload of the '{}' event. \
+             If the field is optional, remove it from the schema's required_fields.",
+            finding.topic
+        ),
+        PayloadContractViolationKind::PayloadTypeMismatch => format!(
+            "Ensure the payload of '{}' matches the schema's declared payload type.",
+            finding.topic
+        ),
+        PayloadContractViolationKind::AllowedValueMismatch => format!(
+            "Update the payload of '{}' to a value allowed by the schema.",
+            finding.topic
+        ),
+        PayloadContractViolationKind::SchemaMissingForRequiredTopic => {
+            "Add a schema for this topic.".to_string()
+        }
+    };
+    Some(PayloadContractViolation {
+        error_type: kind,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        topic: finding.topic.clone(),
+        field,
+        source_hat: source_hats.to_vec(),
+        target_hat: target_hats.to_vec(),
+        schema_defined_in: schema_defined_in.to_string(),
+        downstream_reference: None,
+        upstream_reference: None,
+        fix_hint,
+        payload_excerpt: payload.map(|p| {
+            const MAX: usize = 240;
+            if p.len() > MAX {
+                format!("{}…", &p[..MAX])
+            } else {
+                p.to_string()
+            }
+        }),
+    })
 }
 
 impl EventLoop {
@@ -3114,6 +3234,13 @@ impl EventLoop {
         &mut self,
         result: crate::event_reader::ParseResult,
     ) -> std::io::Result<ProcessedEvents> {
+        // U6: capture payload contract violation produced by event policy
+        // validation. The loop runner will read this and pause with a
+        // diagnostic.
+        let mut payload_contract_violation: Option<
+            crate::payload_contract::PayloadContractViolation,
+        > = None;
+
         // Handle malformed lines with backpressure
         for malformed in &result.malformed {
             let payload = format!(
@@ -3145,6 +3272,7 @@ impl EventLoop {
                 has_orphans: false,
                 accepted_events: Vec::new(),
                 contract_rejections: Vec::new(),
+                payload_contract_violation: None,
             });
         }
 
@@ -3283,6 +3411,26 @@ impl EventLoop {
                 .state
                 .policy_runtime_state
                 .get_or_insert_with(PolicyRuntimeState::default);
+            // U6: build source/target hat indexes for payload contract
+            // violation attribution.
+            let mut source_hats_by_topic: std::collections::HashMap<String, Vec<String>> =
+                std::collections::HashMap::new();
+            let mut target_hats_by_topic: std::collections::HashMap<String, Vec<String>> =
+                std::collections::HashMap::new();
+            for (hat_id, hat_config) in &self.config.hats {
+                for t in &hat_config.publishes {
+                    source_hats_by_topic
+                        .entry(t.clone())
+                        .or_default()
+                        .push(hat_id.clone());
+                }
+                for t in &hat_config.triggers {
+                    target_hats_by_topic
+                        .entry(t.clone())
+                        .or_default()
+                        .push(hat_id.clone());
+                }
+            }
             let policy_result = apply_event_policy_validation(
                 events,
                 policy_config,
@@ -3291,6 +3439,8 @@ impl EventLoop {
                 policy_config
                     .completion_after_terminal
                     .write_diagnostic_event,
+                &source_hats_by_topic,
+                &target_hats_by_topic,
             );
             events = policy_result.events;
 
@@ -3299,6 +3449,11 @@ impl EventLoop {
                 && let Err(e) = self.write_hold_artifact(policy_result.hold_reason.as_deref())
             {
                 warn!(error = %e, "Failed to write hold artifact");
+            }
+            // U6: capture the first payload contract violation for the
+            // loop runner to surface.
+            if payload_contract_violation.is_none() {
+                payload_contract_violation = policy_result.payload_contract_violation;
             }
         }
         // --- End event policy validation ---
@@ -4256,6 +4411,7 @@ impl EventLoop {
             has_orphans,
             accepted_events: accepted_log_events,
             contract_rejections,
+            payload_contract_violation,
         })
     }
 
@@ -4314,6 +4470,8 @@ impl EventLoop {
                 policy_config
                     .completion_after_terminal
                     .write_diagnostic_event,
+                &std::collections::HashMap::new(),
+                &std::collections::HashMap::new(),
             );
 
             // Write hold artifact if policy hold was triggered
@@ -4529,5 +4687,8 @@ fn termination_status_text(reason: &TerminationReason) -> &'static str {
         TerminationReason::RestartRequested => "Restarting by human request.",
         TerminationReason::WorkspaceGone => "Workspace directory removed externally.",
         TerminationReason::Cancelled => "Cancelled gracefully (human rejection or timeout).",
+        TerminationReason::PayloadContractViolation => {
+            "Payload contract violation - loop paused."
+        }
     }
 }

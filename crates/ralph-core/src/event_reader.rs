@@ -94,6 +94,7 @@ pub struct Event {
         deserialize_with = "deserialize_flexible_payload"
     )]
     pub payload: Option<String>,
+    #[serde(default)]
     pub ts: String,
 
     /// Hat that published this event.
@@ -655,6 +656,30 @@ mod tests {
         assert_eq!(result.malformed.len(), 1);
         assert_eq!(result.events[0].topic, "valid1");
         assert_eq!(result.events[1].topic, "valid2");
+    }
+
+    #[test]
+    fn test_missing_ts_defaults_to_empty_string() {
+        // Wave workers may write events without a ts field directly to the
+        // events file. The reader should accept these with a default empty
+        // string rather than marking them as malformed.
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, r#"{{"topic":"review.dimension.done","payload":"ok"}}"#).unwrap();
+        writeln!(
+            file,
+            r#"{{"topic":"review.dimension.done","payload":"ok","ts":"2024-01-01T00:00:00Z"}}"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let mut reader = EventReader::new(file.path());
+        let result = reader.read_new_events().unwrap();
+
+        assert_eq!(result.events.len(), 2);
+        assert_eq!(result.events[0].topic, "review.dimension.done");
+        assert_eq!(result.events[0].ts, "");
+        assert_eq!(result.events[1].ts, "2024-01-01T00:00:00Z");
+        assert!(result.malformed.is_empty());
     }
 
     #[test]

@@ -1,0 +1,45 @@
+# Payload schemas for code-assist.
+#
+# Loaded by `presets/code-assist.yml` via
+# `event_policy.schema_file: "schemas/code-assist.yml"`.
+#
+# Coverage mirrors the explicit `payload MUST include:` lines in
+# code-assist.yml. Each `tasks.*` / `review.*` / `finalization.*` topic
+# must carry at least `task_id` and `task_key` so consumers can correlate
+# the work to the runtime task store.
+
+tasks.ready:
+  required_fields:
+    - task_id
+    - task_key
+  payload: json_object
+
+tasks.rejected:
+  required_fields:
+    - task_id
+    - task_key
+  payload: json_object
+
+review.ready:
+  required_fields:
+    - task_id
+    - task_key
+  payload: json_object
+
+review.rejected:
+  required_fields:
+    - task_id
+    - task_key
+  payload: json_object
+
+finalization.failed:
+  required_fields:
+    - task_id
+    - task_key
+  payload: json_object
+
+finalization.completed:
+  required_fields:
+    - task_id
+    - task_key
+  payload: json_object

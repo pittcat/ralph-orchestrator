@@ -4,7 +4,117 @@
 //! the Ralph orchestration loop, along with supporting types and helper
 //! functions for PTY execution and termination handling.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
+use ralph_core::payload_contract::validate_payload_contract;
+
+/// Payload contract hard gate (U5).
+///
+/// `ralph run` MUST call this BEFORE spawning any backend. In strict mode
+/// (always on for `ralph run`), any payload contract error is fatal:
+/// - the backend must NOT be spawned
+/// - the orchestrator must exit with a non-zero status
+/// - the error message must be actionable (hat id, topic, field, schema source)
+///
+/// There is no skip flag for this gate. Plan non-regression: payload contract
+/// gate is required and cannot be bypassed.
+pub fn enforce_payload_contract_gate(config: &ralph_core::RalphConfig) -> Result<()> {
+    let registry = ralph_core::HatRegistry::from_runtime_config(config);
+    let result = validate_payload_contract(config, &registry, true);
+    if result.is_valid() {
+        // Surface any non-fatal warnings on stderr so users notice them.
+        for w in &result.warnings {
+            eprintln!("[payload-contract] warning: {}", w);
+        }
+        return Ok(());
+    }
+    let mut msg = String::from(
+        "Payload contract gate failed. The preset's hat topology references \
+         payload fields that are not covered by the configured schemas.\n\n\
+         Errors:\n",
+    );
+    for err in &result.errors {
+        msg.push_str(&format!(
+            "  - [{}] hat={} topic={} field={} source_hats=[{}] schema={} line={:?}\n    {}\n",
+            match err.kind {
+                ralph_core::payload_contract::PayloadContractErrorKind::FieldMissingFromSchema =>
+                    "FieldMissingFromSchema",
+                ralph_core::payload_contract::PayloadContractErrorKind::SchemaMissingForRequiredTopic =>
+                    "SchemaMissingForRequiredTopic",
+            },
+            err.hat_id,
+            err.topic,
+            err.field.as_deref().unwrap_or("(none)"),
+            err.source_hats.join(", "),
+            err.schema_defined_in,
+            err.instructions_line,
+            err.message,
+        ));
+    }
+    msg.push_str(
+        "\nFix by adding the missing fields to `event_policy.schemas.<topic>.required_fields`,\n\
+         adding a `schema_file`, or removing the payload reference from the hat instructions.\n\
+         Run `ralph hats validate` for a top-level view.\n",
+    );
+    bail!(msg);
+}
+
+/// U6: write a payload contract violation report to
+/// `.ralph/diagnostics/payload-contract-error-{timestamp}.json`.
+///
+/// Returns the file path of the written report (even if the write failed,
+/// the path is still useful for the user). The diagnostic must include:
+/// error_type, timestamp, topic, field, source_hat[], target_hat,
+/// schema_defined_in, downstream_reference, upstream_reference, fix_hint.
+pub fn write_payload_contract_violation_report(
+    diagnostics_dir: &std::path::Path,
+    violation: &ralph_core::payload_contract::PayloadContractViolation,
+) -> std::path::PathBuf {
+    use std::io::Write as _;
+    let stamp = violation.timestamp.replace(':', "-").replace('.', "-");
+    let path = diagnostics_dir.join(format!("payload-contract-error-{}.json", stamp));
+    let body = match serde_json::to_string_pretty(violation) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[payload-contract] failed to serialize violation: {}", e);
+            return path;
+        }
+    };
+    if let Err(e) = std::fs::create_dir_all(diagnostics_dir) {
+        eprintln!(
+            "[payload-contract] failed to create diagnostics dir {}: {}",
+            diagnostics_dir.display(),
+            e
+        );
+        eprintln!("[PAYLOAD CONTRACT VIOLATION] {}", violation.topic);
+        eprintln!("  field: {:?}", violation.field);
+        eprintln!("  source_hats: {:?}", violation.source_hat);
+        eprintln!("  target_hats: {:?}", violation.target_hat);
+        eprintln!("  fix_hint: {}", violation.fix_hint);
+        return path;
+    }
+    match std::fs::File::create(&path).and_then(|mut f| f.write_all(body.as_bytes())) {
+        Ok(()) => {
+            eprintln!(
+                "[PAYLOAD CONTRACT VIOLATION] Loop paused. Diagnostic written to {}",
+                path.display()
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "[payload-contract] failed to write diagnostic to {}: {}",
+                path.display(),
+                e
+            );
+            // Non-regression: must still surface the violation summary.
+            eprintln!("[PAYLOAD CONTRACT VIOLATION] {}", violation.topic);
+            eprintln!("  field: {:?}", violation.field);
+            eprintln!("  source_hats: {:?}", violation.source_hat);
+            eprintln!("  target_hats: {:?}", violation.target_hat);
+            eprintln!("  fix_hint: {}", violation.fix_hint);
+        }
+    }
+    path
+}
 use ralph_adapters::{
     AcpExecutor, ClaudeStreamEvent, ClaudeStreamParser, CliBackend, CliExecutor,
     ConsoleStreamHandler, ContentBlock, CopilotStreamParser, JsonRpcStreamHandler,
@@ -119,6 +229,11 @@ pub async fn run_loop_impl(
     warmup_only: bool,
     force_warmup: bool,
 ) -> Result<TerminationReason> {
+    // U5: Payload contract hard gate. Runs BEFORE any backend is spawned.
+    // In strict mode (always on for `ralph run`), any payload contract
+    // error is fatal: the agent must not be started. There is no skip flag.
+    enforce_payload_contract_gate(&config)?;
+
     // Set up process group leadership per spec
     // "The orchestrator must run as a process group leader"
     process_management::setup_process_group();
@@ -845,6 +960,7 @@ pub async fn run_loop_impl(
                 TerminationReason::RestartRequested => "restart_requested",
                 TerminationReason::WorkspaceGone => "workspace_gone",
                 TerminationReason::Cancelled => "cancelled",
+                TerminationReason::PayloadContractViolation => "payload_contract_violation",
             };
 
             if matches!(reason, TerminationReason::Interrupted) {
@@ -916,6 +1032,7 @@ pub async fn run_loop_impl(
                     TerminationReason::RestartRequested => "restart requested",
                     TerminationReason::WorkspaceGone => "workspace directory removed",
                     TerminationReason::Cancelled => "cancelled by human",
+                    TerminationReason::PayloadContractViolation => "payload contract violation",
                 };
                 if let Err(e) = queue.mark_needs_review(loop_id, reason_str) {
                     warn!(loop_id = %loop_id, error = %e, "Failed to mark merge as needs-review");
@@ -2413,6 +2530,27 @@ pub async fn run_loop_impl(
         // Rejections do NOT terminate the loop — guidance drives the next iteration.
         if let Some(processed) = processed_events.as_ref() {
             handle_execution_contract_rejections(processed, &event_loop, &display_hat);
+        }
+
+        // ── U6: Handle payload contract violations ───────────────────────────
+        // Unlike execution contract rejections (which drive recovery via
+        // human.guidance), payload contract violations pause the loop and
+        // emit a structured diagnostic. The non-regression contract is:
+        //   - the diagnostic file MUST be written
+        //   - the loop MUST terminate with PayloadContractViolation
+        //   - the diagnostic must surface on stderr even if file write fails
+        if let Some(processed) = processed_events.as_ref()
+            && let Some(violation) = &processed.payload_contract_violation
+        {
+            // U6: write diagnostic and terminate. Default location is
+            // `<workspace>/.ralph/diagnostics`; the loop context is the
+            // source of truth for the workspace.
+            let diagnostics_dir = event_loop
+                .loop_context()
+                .map(|c| c.workspace().join(".ralph").join("diagnostics"))
+                .unwrap_or_else(|| std::path::PathBuf::from(".ralph/diagnostics"));
+            write_payload_contract_violation_report(&diagnostics_dir, violation);
+            return Ok(TerminationReason::PayloadContractViolation);
         }
 
         // ── PhaseWatcher: Check for experiment.evaluated during warmup ───────
@@ -7087,6 +7225,209 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
 
+    // ──────────────────────────────────────────────────────────────────────
+    // U5: payload contract hard gate
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn hard_gate_passes_when_no_hats() {
+        // Hatless / solo mode: no contract to validate → pass.
+        let config = ralph_core::RalphConfig::default();
+        let result = enforce_payload_contract_gate(&config);
+        assert!(result.is_ok(), "Hatless mode should pass: {:?}", result);
+    }
+
+    #[test]
+    fn hard_gate_passes_when_contracts_covered() {
+        // All required fields are in the schema → pass.
+        let yaml = r#"
+hats:
+  a:
+    name: "A"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+    instructions: "Publish."
+  b:
+    name: "B"
+    triggers: ["work.ready"]
+    publishes: ["LOOP_COMPLETE"]
+    instructions: |
+      From event payload: task_id
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+  event_policy:
+    enabled: true
+    mode: observe
+    schemas:
+      work.ready:
+        required_fields: ["task_id"]
+"#;
+        let config: ralph_core::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = enforce_payload_contract_gate(&config);
+        assert!(result.is_ok(), "Covered contracts should pass: {:?}", result);
+    }
+
+    #[test]
+    fn hard_gate_fails_when_field_missing_from_schema() {
+        // `plan_name` is referenced but not in required_fields → fatal error.
+        let yaml = r#"
+hats:
+  a:
+    name: "A"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+    instructions: "Publish."
+  b:
+    name: "B"
+    triggers: ["work.ready"]
+    publishes: ["LOOP_COMPLETE"]
+    instructions: |
+      From event payload: task_id, plan_name
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+  event_policy:
+    enabled: true
+    mode: observe
+    schemas:
+      work.ready:
+        required_fields: ["task_id"]
+"#;
+        let config: ralph_core::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = enforce_payload_contract_gate(&config).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("Payload contract gate failed"), "msg: {}", msg);
+        assert!(msg.contains("plan_name"), "msg must mention field: {}", msg);
+        assert!(msg.contains("work.ready"), "msg must mention topic: {}", msg);
+        assert!(msg.contains("FieldMissingFromSchema"), "msg must include kind: {}", msg);
+    }
+
+    #[test]
+    fn hard_gate_fails_when_schema_missing_in_strict_mode() {
+        // Trigger topic has no schema → strict mode treats it as an error.
+        let yaml = r#"
+hats:
+  a:
+    name: "A"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+    instructions: "Publish."
+  b:
+    name: "B"
+    triggers: ["work.ready"]
+    publishes: ["LOOP_COMPLETE"]
+    instructions: |
+      From event payload: task_id
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+"#;
+        let config: ralph_core::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = enforce_payload_contract_gate(&config).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("SchemaMissingForRequiredTopic"),
+            "msg must mention kind: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn hard_gate_message_is_actionable() {
+        // Error message must list all errors, mention source hats, schema
+        // source, and provide a fix hint.
+        let yaml = r#"
+hats:
+  coordinator:
+    name: "Coordinator"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+    instructions: "Publish."
+  executor:
+    name: "Executor"
+    triggers: ["work.ready"]
+    publishes: ["LOOP_COMPLETE"]
+    instructions: |
+      From event payload: task_id, plan_name
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+  event_policy:
+    enabled: true
+    mode: observe
+    schemas:
+      work.ready:
+        required_fields: ["task_id"]
+"#;
+        let config: ralph_core::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = enforce_payload_contract_gate(&config).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("coordinator"), "msg must list source hat: {}", msg);
+        assert!(msg.contains("Fix by"), "msg must include fix hint: {}", msg);
+        assert!(
+            msg.contains("event_policy.schemas"),
+            "msg must point to fix location: {}",
+            msg
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // U6: payload contract violation report writing
+    // ──────────────────────────────────────────────────────────────────────
+
+    fn sample_violation() -> ralph_core::payload_contract::PayloadContractViolation {
+        ralph_core::payload_contract::PayloadContractViolation {
+            error_type: ralph_core::payload_contract::PayloadContractViolationKind::MissingRequiredField,
+            timestamp: "2026-06-03T12:34:56.789Z".to_string(),
+            topic: "work.ready".to_string(),
+            field: Some("plan_name".to_string()),
+            source_hat: vec!["coordinator".to_string()],
+            target_hat: vec!["executor".to_string()],
+            schema_defined_in: "inline".to_string(),
+            downstream_reference: None,
+            upstream_reference: None,
+            fix_hint: "Add the missing field to the payload of the 'work.ready' event.".to_string(),
+            payload_excerpt: Some(r#"{"task_id": "t-1"}"#.to_string()),
+        }
+    }
+
+    #[test]
+    fn u6_writes_violation_report_to_diagnostics_dir() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = temp.path();
+        let violation = sample_violation();
+        let path = write_payload_contract_violation_report(dir, &violation);
+        assert!(path.exists(), "report file must be created: {}", path.display());
+        let body = std::fs::read_to_string(&path).unwrap();
+        // Must include required fields
+        assert!(body.contains("work.ready"), "body must include topic: {}", body);
+        assert!(body.contains("plan_name"), "body must include field: {}", body);
+        assert!(body.contains("coordinator"), "body must include source hat: {}", body);
+        assert!(body.contains("executor"), "body must include target hat: {}", body);
+        assert!(body.contains("inline"), "body must include schema source: {}", body);
+        assert!(body.contains("Add the missing field"), "body must include fix_hint: {}", body);
+    }
+
+    #[test]
+    fn u6_report_filename_uses_rfc3339_timestamp() {
+        // Filename should be `payload-contract-error-{ts}.json` where the
+        // timestamp is the violation's timestamp with `:` and `.` replaced
+        // (so the file is portable across filesystems).
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = temp.path();
+        let violation = sample_violation();
+        let path = write_payload_contract_violation_report(dir, &violation);
+        let name = path.file_name().unwrap().to_str().unwrap();
+        assert!(
+            name.starts_with("payload-contract-error-"),
+            "filename: {}",
+            name
+        );
+        assert!(name.ends_with(".json"), "filename: {}", name);
+        assert!(!name.contains(':'), "filename must not contain colons: {}", name);
+    }
+
     #[test]
     fn test_resolve_loop_id_fresh_generates_new() {
         let temp = tempfile::TempDir::new().unwrap();
@@ -10866,6 +11207,7 @@ hats:
                 scratchpad: None,
                 event_filter: None,
                 phase_triggers: None,
+                ignore_payload_fields: vec![],
             },
             events: vec![event],
             total: 1,
@@ -14280,6 +14622,7 @@ hats:
                 message: "test rejection".to_string(),
                 topic: "work.done".to_string(),
             }],
+            payload_contract_violation: None,
         };
 
         let agent_wrote_any_valid_or_rejected =
@@ -14334,6 +14677,7 @@ hats:
             has_orphans: false,
             accepted_events: vec![],
             contract_rejections: vec![],
+        payload_contract_violation: None,
         };
         let gate_would_fire = !empty.had_raw_events
             && !empty.had_rejected_events
@@ -14353,6 +14697,7 @@ hats:
             has_orphans: false,
             accepted_events: vec![],
             contract_rejections: vec![],
+        payload_contract_violation: None,
         };
         let gate_would_fire = !rejected.had_raw_events
             && !rejected.had_rejected_events

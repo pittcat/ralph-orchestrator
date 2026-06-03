@@ -29,6 +29,13 @@ event_loop:
   max_iterations: 100              # Generous for multi-task implementation
   max_runtime_seconds: 14400       # 4 hours max
   checkpoint_interval: 5
+  # U7: Payload contract schemas (tasks.*, review.*, finalization.*) loaded
+  # from the shared `presets/schemas/` directory. Path is resolved relative
+  # to this preset file.
+  event_policy:
+    enabled: true
+    mode: enforce
+    schema_file: "schemas/code-assist.yml"
 
 cli:
   backend: "kiro"

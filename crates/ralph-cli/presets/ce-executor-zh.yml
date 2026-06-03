@@ -56,6 +56,11 @@ event_loop:
         require_test_evidence:
           mode: "optional"  # "optional" | "required_payload_field"
           payload_field: "tests"  # field name to check when mode is "required_payload_field"
+  # U7: 中文 preset 与英文 preset 共用同一份 schema 文件,保证契约一致
+  event_policy:
+    enabled: true
+    mode: enforce
+    schema_file: "schemas/ce-executor.yml"
 
 cli:
   backend: "claude"

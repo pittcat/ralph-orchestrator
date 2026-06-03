@@ -30,8 +30,12 @@ pub struct HatsArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum HatsCommands {
-    /// Validate hat topology and report issues
-    Validate,
+    /// Validate hat topology and payload contracts
+    Validate {
+        /// Strict payload contract validation: missing schemas are errors (not warnings)
+        #[arg(long)]
+        strict: bool,
+    },
     /// Display hat topology graph
     Graph {
         /// Output format (unicode, ascii, compact, mermaid)
@@ -103,12 +107,13 @@ pub async fn execute(
         Some(HatsCommands::Show(show_args)) => {
             show_hat(&mut stdout, &config_registry, &show_args.name, use_colors)
         }
-        Some(HatsCommands::Validate) => validate_hats(
+        Some(HatsCommands::Validate { strict }) => validate_hats(
             &mut stdout,
             &config,
             &runtime_registry,
             &config_registry,
             use_colors,
+            strict,
         ),
         Some(HatsCommands::Graph { format, backend }) => graph_hats(
             &mut stdout,
@@ -168,6 +173,7 @@ fn validate_hats<W: Write>(
     runtime_registry: &HatRegistry,
     config_registry: &HatRegistry,
     use_colors: bool,
+    strict: bool,
 ) -> Result<()> {
     writeln!(writer, "Hat Topology Validation")?;
     writeln!(writer, "=======================")?;
@@ -190,6 +196,35 @@ fn validate_hats<W: Write>(
                 use_colors,
             )?;
         }
+    }
+
+    // U4: Payload contract validation (default in addition to topology).
+    let payload_result =
+        ralph_core::payload_contract::validate_payload_contract(config, runtime_registry, strict);
+    for warn in &payload_result.warnings {
+        print_check(
+            writer,
+            CheckResult::Warn,
+            &format!("Payload contract: {}", warn),
+            use_colors,
+        )?;
+    }
+    for err in &payload_result.errors {
+        print_check(
+            writer,
+            CheckResult::Error,
+            &format!(
+                "Payload contract: {} (hat={} topic={} field={} source_hats=[{}] schema={} line={:?})",
+                err.message,
+                err.hat_id,
+                err.topic,
+                err.field.as_deref().unwrap_or(""),
+                err.source_hats.join(", "),
+                err.schema_defined_in,
+                err.instructions_line,
+            ),
+            use_colors,
+        )?;
     }
 
     writeln!(writer, "Hats: {} configured", config_registry.len())?;
@@ -265,6 +300,11 @@ fn validate_hats<W: Write>(
     if dead_ends == 0 {
         print_check(writer, CheckResult::Ok, "No dead-end hats", use_colors)?;
     }
+
+    // U4: Roll payload contract counts into the totals so a payload contract
+    // error fails validation.
+    errors += payload_result.errors.len();
+    warnings += payload_result.warnings.len();
 
     writeln!(writer)?;
     if errors > 0 {
@@ -769,7 +809,7 @@ mod tests {
 
         // Validation might exit process on error, so we test warning scenario
         // Test registries have no builtin ralph, so pass the same as both params
-        validate_hats(&mut buf, &config, &config_registry, &config_registry, false).unwrap();
+        validate_hats(&mut buf, &config, &config_registry, &config_registry, false, false).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         // Should warn about build.done having no subscribers
@@ -778,6 +818,153 @@ mod tests {
         );
         assert!(output.contains("Result: Valid (1 warnings)"));
     }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // U4: --strict flag and payload contract validation in `ralph hats validate`
+    // ──────────────────────────────────────────────────────────────────────
+
+    fn config_with_payload_contracts() -> RalphConfig {
+        // Hat b references payload fields, but the trigger topic has no schema.
+        // Default mode → warning only.
+        // Strict mode → error, validation fails.
+        let yaml = r#"
+hats:
+  a:
+    name: "A"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+    instructions: "Publish."
+  b:
+    name: "B"
+    triggers: ["work.ready"]
+    publishes: ["LOOP_COMPLETE"]
+    instructions: |
+      From event payload: task_id, plan_name
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+"#;
+        serde_yaml::from_str(yaml).unwrap()
+    }
+
+    #[test]
+    fn test_validate_hats_default_runs_payload_contract_as_warning() {
+        let config = config_with_payload_contracts();
+        let config_registry = HatRegistry::from_config(&config);
+        let runtime_registry = HatRegistry::from_runtime_config(&config);
+        let mut buf = Vec::new();
+        // strict=false (default). Payload contract is a warning, not error.
+        let result =
+            validate_hats(&mut buf, &config, &runtime_registry, &config_registry, false, false);
+        assert!(result.is_ok(), "Default mode should not fail: {:?}", result);
+        let output = String::from_utf8(buf).unwrap();
+        assert!(
+            output.contains("payload contract") || output.contains("Payload"),
+            "Output should mention payload contract validation: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_validate_hats_strict_fails_on_missing_schema() {
+        let config = config_with_payload_contracts();
+        let config_registry = HatRegistry::from_config(&config);
+        let runtime_registry = HatRegistry::from_runtime_config(&config);
+        let mut buf = Vec::new();
+        // strict=true → missing schema is an error → validation fails.
+        let result =
+            validate_hats(&mut buf, &config, &runtime_registry, &config_registry, false, true);
+        assert!(
+            result.is_err(),
+            "Strict mode should fail when payload contract is violated"
+        );
+        let output = String::from_utf8(buf).unwrap();
+        assert!(
+            output.contains("SchemaMissingForRequiredTopic")
+                || output.contains("schema"),
+            "Output should mention schema issue: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_validate_hats_payload_field_missing_in_schema() {
+        // Schema exists but required_fields does not include `plan_name`.
+        let yaml = r#"
+hats:
+  a:
+    name: "A"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+    instructions: "Publish."
+  b:
+    name: "B"
+    triggers: ["work.ready"]
+    publishes: ["LOOP_COMPLETE"]
+    instructions: |
+      From event payload: task_id, plan_name
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+  event_policy:
+    enabled: true
+    mode: observe
+    schemas:
+      work.ready:
+        required_fields: ["task_id"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let config_registry = HatRegistry::from_config(&config);
+        let runtime_registry = HatRegistry::from_runtime_config(&config);
+        let mut buf = Vec::new();
+        // FieldMissingFromSchema is always an error (default and strict).
+        let result =
+            validate_hats(&mut buf, &config, &runtime_registry, &config_registry, false, false);
+        assert!(result.is_err(), "Field missing from schema must error");
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains("plan_name"), "Output must mention field: {}", output);
+        assert!(output.contains("work.ready"), "Output must mention topic: {}", output);
+    }
+
+    #[test]
+    fn test_validate_hats_output_includes_preset_path_and_line() {
+        // The error output must include hat id, topic, field, schema source.
+        let yaml = r#"
+hats:
+  a:
+    name: "A"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+    instructions: "Publish."
+  b:
+    name: "B"
+    triggers: ["work.ready"]
+    publishes: ["LOOP_COMPLETE"]
+    instructions: |
+      From event payload: task_id, plan_name
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+  event_policy:
+    enabled: true
+    mode: observe
+    schemas:
+      work.ready:
+        required_fields: ["task_id"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let config_registry = HatRegistry::from_config(&config);
+        let runtime_registry = HatRegistry::from_runtime_config(&config);
+        let mut buf = Vec::new();
+        validate_hats(&mut buf, &config, &runtime_registry, &config_registry, false, false)
+            .unwrap_err();
+        let output = String::from_utf8(buf).unwrap();
+        // Must include hat id, topic, field
+        assert!(output.contains("b"), "must include hat id: {}", output);
+        assert!(output.contains("work.ready"), "must include topic: {}", output);
+        assert!(output.contains("plan_name"), "must include field: {}", output);
+    }
+
 
     #[test]
     fn test_graph_hats_compact() {
@@ -901,7 +1088,7 @@ mod tests {
         let mut buf = Vec::new();
 
         // Test registries have no builtin ralph, so pass the same as both params
-        validate_hats(&mut buf, &config, &config_registry, &config_registry, false).unwrap();
+        validate_hats(&mut buf, &config, &config_registry, &config_registry, false, false).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         assert!(output.contains("No hats configured"));
@@ -918,7 +1105,7 @@ mod tests {
         let mut buf = Vec::new();
 
         // Test registries have no builtin ralph, so pass the same as both params
-        validate_hats(&mut buf, &config, &config_registry, &config_registry, false).unwrap();
+        validate_hats(&mut buf, &config, &config_registry, &config_registry, false, false).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         assert!(output.contains("No dead-end hats") || output.contains("Result: Valid"));
