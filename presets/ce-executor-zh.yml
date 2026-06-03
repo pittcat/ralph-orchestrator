@@ -357,8 +357,8 @@ hats:
     description: "基于 wave 的单维度专注代码审查。"
     triggers: ["review.wave.ready"]
     publishes: ["review.dimension.done"]
-    concurrency: 4
-    timeout: 900
+    concurrency: 9
+    timeout: 1800
     instructions: |
       ## DIMENSION REVIEWER MODE — 专注的 {dimension} 审查
 

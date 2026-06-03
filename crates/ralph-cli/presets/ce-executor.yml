@@ -5,7 +5,7 @@
 # - Coordinator: Parses plan files, assesses complexity, creates working directory and runtime tasks
 # - Executor: TDD implementation following plan content, one runtime task per iteration
 # - review-coordinator: Diff analysis, intent discovery, conditional dimension selection, wave emission
-# - dimension-reviewer (wave, concurrency 4): Parallel focused code review per dimension
+# - dimension-reviewer (wave, concurrency 9): Parallel focused code review per dimension
 # - review-synthesizer (aggregate): Merges all dimension findings, deduplicates, routes
 # - Fixer: Applies safe_auto findings up to 3 rounds
 # - plan-gate: Reconciles review verdict against plan.md / progress.md / runtime tasks; decides queue.advance vs plan.complete
@@ -397,8 +397,8 @@ hats:
     description: "Focused wave-based code review for a single dimension."
     triggers: ["review.wave.ready"]
     publishes: ["review.dimension.done"]
-    concurrency: 4
-    timeout: 900
+    concurrency: 9
+    timeout: 1800
     instructions: |
       ## DIMENSION REVIEWER MODE — Focused {dimension} Review
 
