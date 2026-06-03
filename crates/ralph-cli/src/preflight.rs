@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use clap::{ArgAction, Parser, ValueEnum};
 use ralph_core::{CheckResult, CheckStatus, PreflightReport, PreflightRunner, RalphConfig};
 use serde_yaml::{Mapping, Value};
+use std::path::PathBuf;
 use tracing::{info, warn};
 
 use crate::{ConfigSource, HatsSource, config_resolution, presets};
@@ -232,6 +233,17 @@ pub(crate) async fn load_config_for_preflight(
             ConfigSource::File(path) => Some(path.clone()),
             _ => None,
         });
+
+    // Resolve external schema files referenced in event_policy.schema_file.
+    // Base path is the config file's directory, or workspace_root if no config file.
+    let schema_base_path = config
+        .config_path
+        .as_ref()
+        .and_then(|p| p.parent().map(PathBuf::from))
+        .unwrap_or_else(|| config.core.workspace_root.clone());
+    if let Err(e) = config.resolve_schema_files(&schema_base_path) {
+        anyhow::bail!("Failed to resolve schema files: {}", e);
+    }
 
     crate::apply_config_overrides(&mut config, &overrides)?;
 

@@ -699,6 +699,17 @@ pub(crate) fn load_config_with_overrides(
             _ => None,
         });
 
+    // Resolve external schema files referenced in event_policy.schema_file.
+    // Base path is the config file's directory, or workspace_root if no config file.
+    let schema_base_path = config
+        .config_path
+        .as_ref()
+        .and_then(|p| p.parent().map(PathBuf::from))
+        .unwrap_or_else(|| config.core.workspace_root.clone());
+    if let Err(e) = config.resolve_schema_files(&schema_base_path) {
+        anyhow::bail!("Failed to resolve schema files: {}", e);
+    }
+
     // Apply CLI config overrides
     apply_config_overrides(&mut config, &overrides)?;
 
