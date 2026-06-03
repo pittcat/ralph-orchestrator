@@ -1277,12 +1277,18 @@ pub struct TestEvidenceRequirement {
     /// Mode: "optional" or "required_payload_field".
     #[serde(default = "default_test_evidence_mode")]
     pub mode: String,
+
+    /// Payload field name to check for test evidence (used when mode is "required_payload_field").
+    /// Common values: "tests", "test_results", "test_output".
+    #[serde(default)]
+    pub payload_field: Option<String>,
 }
 
 impl Default for TestEvidenceRequirement {
     fn default() -> Self {
         Self {
             mode: default_test_evidence_mode(),
+            payload_field: None,
         }
     }
 }

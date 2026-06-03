@@ -3445,7 +3445,7 @@ impl EventLoop {
                             let guidance_event = Event::new(rule.reject.guidance_topic.as_str(), guidance_payload);
                             self.bus.publish(guidance_event);
 
-                            contract_rejections.push(finding.clone());
+                            contract_rejections.extend(findings.iter().cloned());
                         }
                     }
                 } else {

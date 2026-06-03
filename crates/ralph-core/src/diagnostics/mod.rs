@@ -140,6 +140,27 @@ impl DiagnosticsCollector {
         }
     }
 
+    /// Logs execution contract rejections to diagnostics.
+    ///
+    /// Does nothing if diagnostics are disabled.
+    pub fn log_execution_contract_rejections(
+        &self,
+        iteration: u32,
+        hat: &str,
+        rejections: &[crate::execution_contract::ExecutionContractFinding],
+    ) {
+        if !rejections.is_empty() {
+            for finding in rejections {
+                let event = OrchestrationEvent::ExecutionContractRejected {
+                    topic: finding.topic.clone(),
+                    violation_kind: format!("{:?}", finding.kind),
+                    message: finding.message.clone(),
+                };
+                self.log_orchestration(iteration, hat, event);
+            }
+        }
+    }
+
     /// Logs a performance metric.
     ///
     /// Does nothing if diagnostics are disabled.

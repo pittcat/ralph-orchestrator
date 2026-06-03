@@ -38,6 +38,25 @@ event_loop:
     topic: "REVIEW_COMPLETE"
     fail_field: "pass_or_fail"
     fail_value: "fail"
+  # U7: Enable execution contract for work.done validation.
+  # Protects against false positives when executor forgets to emit or emits invalid work.done.
+  execution_contracts:
+    enabled: true
+    rules:
+      work.done:
+        require_payload_fields: ["plan_name", "plan_path", "task_id", "task_key", "step"]
+        require_task:
+          id_field: "task_id"
+          key_field: "task_key"
+          loop_scoped: true
+          allowed_terminal_statuses: ["closed"]
+          auto_close_on_valid: false
+        require_git_change:
+          mode: "diff_or_commit"
+          allow_empty_for_steps: ["trivial"]
+        require_test_evidence:
+          mode: "optional"  # "optional" | "required_payload_field"
+          payload_field: "tests"  # field name to check when mode is "required_payload_field"
 
 cli:
   backend: "claude"

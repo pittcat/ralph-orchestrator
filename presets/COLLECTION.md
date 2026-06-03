@@ -855,3 +855,97 @@ hats:
 - `<phase>.ready` / `<phase>.done` — Phase transitions
 - `<thing>.approved` / `<thing>.rejected` — Review gates
 - `<noun>.found` / `<noun>.missing` — Discovery events
+
+---
+
+## `default_publishes` vs Execution Contracts
+
+### The Core Problem
+
+When a hat forgets to emit an event, `default_publishes` provides a fallback. But not all fallbacks are equal:
+
+| Hat Type | Should Use `default_publishes`? | Should Use Execution Contract? |
+|----------|-------------------------------|------------------------------|
+| **实施型 (Implementation)** | ❌ NO | ✅ YES |
+| **Gate 型** | ✅ YES (fail-closed default) | ❌ NO |
+| **Report 型** | ⚠️ Use with caution | ⚠️ Add defensive checks |
+
+### When NOT to use `default_publishes`
+
+**实施型 hats** (e.g., executor, implementer) that publish `work.done` should NOT use `default_publishes: "work.done"`:
+
+```yaml
+# ❌ WRONG: executor with success default
+hats:
+  executor:
+    publishes: ["work.done", "work.failed"]
+    default_publishes: "work.done"  # DANGEROUS: masks forgetfulness
+
+# ✅ CORRECT: executor without default
+hats:
+  executor:
+    publishes: ["work.done", "work.failed"]
+    # No default_publishes - must explicitly emit
+```
+
+**Why?** If the executor forgets to emit `work.done`, Ralph injects a fake `work.done`, making it appear the work succeeded when it didn't. The review-coordinator then triggers on fake success.
+
+### When TO use `default_publishes`
+
+**Gate 型 hats** can use fail-closed defaults:
+
+```yaml
+# ✅ GOOD: plan-gate blocks if no decision
+hats:
+  plan-gate:
+    publishes: ["queue.advance", "plan.complete", "plan.blocked"]
+    default_publishes: "plan.blocked"  # Safe: fail-closed
+
+# ✅ GOOD: fixer exhausts after 3 rounds
+hats:
+  fixer:
+    publishes: ["fix.applied", "fix.exhausted"]
+    default_publishes: "fix.exhausted"  # Safe: fail-closed
+```
+
+**Report 型 hats** can use report defaults, but should add defensive checks:
+
+```yaml
+# ⚠️ OK with caution: reporter defaults to report.done
+hats:
+  reporter:
+    publishes: ["report.done", "LOOP_COMPLETE"]
+    default_publishes: "report.done"  # Caution: ensure completion checks exist
+```
+
+### Using Execution Contracts for Implementation Hats
+
+For实施型 hats, use execution contracts to validate completion:
+
+```yaml
+event_loop:
+  execution_contracts:
+    enabled: true
+    rules:
+      work.done:
+        require_payload_fields: ["task_id", "task_key", "step"]
+        require_task:
+          id_field: "task_id"
+          loop_scoped: true
+          allowed_terminal_statuses: ["closed"]
+        require_git_change:
+          mode: "diff_or_commit"
+          allow_empty_for_steps: ["trivial"]
+```
+
+This ensures:
+1. **Payload validation**: Required fields present
+2. **Task validation**: Task is closed
+3. **Git validation**: Real changes exist (unless trivial)
+
+### Checklist for Preset Authors
+
+- [ ] Does this hat's success default mask forgetfulness?
+- [ ] Is the completion topic entering downstream without real validation?
+- [ ] Can the completion state be reconstructed from task/git/test evidence?
+- [ ] Should execution contracts be enabled for this workflow?

@@ -2402,6 +2402,13 @@ pub async fn run_loop_impl(
             );
         }
 
+        // ── U6: Handle execution contract rejections ─────────────────────────
+        // Log contract rejections for operator visibility and diagnostics.
+        // Rejections do NOT terminate the loop — guidance drives the next iteration.
+        if let Some(processed) = processed_events.as_ref() {
+            handle_execution_contract_rejections(processed, &event_loop, &display_hat);
+        }
+
         // ── PhaseWatcher: Check for experiment.evaluated during warmup ───────
         // PhaseWatcher monitors accepted events and triggers phase transitions
         // when the configured exit condition is met (e.g., experiment.evaluated)
@@ -3092,6 +3099,70 @@ fn should_gate_missing_events(hat_id: &HatId, event_loop: &EventLoop) -> bool {
     };
     // Hat has an obligation to publish but no automatic fallback
     !config.publishes.is_empty() && config.default_publishes.is_none()
+}
+
+/// U6: Handle execution contract rejections for operator visibility.
+///
+/// Logs warnings with topic, hat, reason, task_id for each rejection.
+/// Writes to diagnostics file if RALPH_DIAGNOSTICS=1.
+/// Does NOT terminate the loop — guidance drives the next iteration.
+fn handle_execution_contract_rejections(
+    processed: &ralph_core::ProcessedEvents,
+    event_loop: &EventLoop,
+    hat_id: &HatId,
+) {
+    use std::io::Write;
+
+    let rejections = &processed.contract_rejections;
+    if rejections.is_empty() {
+        return;
+    }
+
+    let iteration = event_loop.state().iteration;
+    let hat_name = hat_id.as_str();
+
+    // Log warning for each rejection
+    for finding in rejections {
+        warn!(
+            topic = %finding.topic,
+            hat = %hat_name,
+            violation = ?finding.kind,
+            message = %finding.message,
+            "Execution contract rejected event"
+        );
+    }
+
+    // Log to diagnostics file if RALPH_DIAGNOSTICS=1
+    if std::env::var("RALPH_DIAGNOSTICS").as_deref() == Ok("1") {
+        // Write to execution-contract.jsonl in diagnostics directory
+        let diag_path = std::path::Path::new(".ralph/diagnostics");
+        if diag_path.exists() {
+            // Find the most recent diagnostics session directory
+            if let Ok(entries) = std::fs::read_dir(diag_path) {
+                let mut dirs: Vec<_> = entries
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.path().is_dir())
+                    .collect();
+                dirs.sort_by_key(|e| e.path());
+                if let Some(last_dir) = dirs.last() {
+                    let contract_file = last_dir.path().join("execution-contract.jsonl");
+                    if let Ok(mut file) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&contract_file)
+                    {
+                        let entry = serde_json::json!({
+                            "timestamp": chrono::Utc::now().to_rfc3339(),
+                            "iteration": iteration,
+                            "hat": hat_name,
+                            "findings": rejections,
+                        });
+                        let _ = writeln!(file, "{}", entry);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Inject a human.guidance event directly into the events file so the agent

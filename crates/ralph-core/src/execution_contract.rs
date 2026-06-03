@@ -71,6 +71,8 @@ pub enum ExecutionContractViolationKind {
     TaskNotTerminal { task_id: String, status: String, allowed: Vec<String> },
     /// Git evidence check failed (no diff and no commit).
     NoGitEvidence { step: Option<String> },
+    /// Test evidence check failed (required field missing or falsy).
+    NoTestEvidence { field: String },
 }
 
 /// Validate an event against an execution contract rule.
@@ -107,6 +109,13 @@ pub fn validate_execution_contract(
     // 3. Git evidence validation (if task validation passed)
     if findings.is_empty() {
         if let Some(rejection) = validate_git_change(event, rule, workspace_root) {
+            findings.push(rejection);
+        }
+    }
+
+    // 4. Test evidence validation (if git evidence passed)
+    if findings.is_empty() {
+        if let Some(rejection) = validate_test_evidence(event, rule) {
             findings.push(rejection);
         }
     }
@@ -314,6 +323,65 @@ fn validate_git_change(
     None
 }
 
+/// Validate that test evidence is present in the payload (if required).
+fn validate_test_evidence(
+    event: &Event,
+    rule: &ExecutionContractRule,
+) -> Option<ExecutionContractFinding> {
+    // "optional" mode — always pass
+    if rule.require_test_evidence.mode == "optional" {
+        return None;
+    }
+
+    // "required_payload_field" mode — check for the specified field
+    let field_name = rule
+        .require_test_evidence
+        .payload_field
+        .as_deref()
+        .unwrap_or("tests");
+
+    let payload_str = event.payload.as_str();
+    if payload_str.trim().is_empty() {
+        return Some(ExecutionContractFinding {
+            kind: ExecutionContractViolationKind::NoTestEvidence {
+                field: field_name.to_string(),
+            },
+            message: format!(
+                "work.done payload is empty but contract requires test evidence in field '{}'",
+                field_name
+            ),
+            topic: event.topic.to_string(),
+        });
+    }
+
+    let Ok(payload) = serde_json::from_str::<Value>(payload_str) else {
+        return None;
+    };
+
+    let Value::Object(map) = &payload else {
+        return None;
+    };
+
+    // Check if the field exists and is non-empty
+    match map.get(field_name) {
+        Some(Value::String(s)) if !s.trim().is_empty() => None,
+        Some(Value::Array(arr)) if !arr.is_empty() => None,
+        Some(Value::Object(obj)) if !obj.is_empty() => None,
+        Some(Value::Bool(b)) if *b => None,
+        _ => Some(ExecutionContractFinding {
+            kind: ExecutionContractViolationKind::NoTestEvidence {
+                field: field_name.to_string(),
+            },
+            message: format!(
+                "work.done payload is missing or empty test evidence field '{}'. \
+                 Provide test results, test output, or set the field to a non-empty value.",
+                field_name
+            ),
+            topic: event.topic.to_string(),
+        }),
+    }
+}
+
 /// Check if there are uncommitted changes in the git working tree.
 fn check_git_diff(workspace_root: &Path) -> bool {
     use std::process::Command;
@@ -374,6 +442,7 @@ mod tests {
             },
             require_test_evidence: TestEvidenceRequirement {
                 mode: "optional".to_string(),
+                payload_field: None,
             },
             reject: ContractRejectConfig::default(),
         }
@@ -395,6 +464,7 @@ mod tests {
             },
             require_test_evidence: TestEvidenceRequirement {
                 mode: "optional".to_string(),
+                payload_field: None,
             },
             reject: ContractRejectConfig::default(),
         }
@@ -403,7 +473,7 @@ mod tests {
     #[test]
     fn test_accepts_valid_work_done() {
         let rule = make_work_done_rule();
-        let event = Event::new(
+        let _event = Event::new(
             "work.done",
             r#"{"plan_name":"test","plan_path":"/test","task_id":"task-1","task_key":"key-1","step":"step-01"}"#,
         );
@@ -471,7 +541,7 @@ mod tests {
     #[test]
     fn test_trivial_step_allows_empty_git() {
         let rule = make_trivial_rule();
-        let event = Event::new(
+        let _event = Event::new(
             "work.done",
             r#"{"task_id":"task-1","task_key":"key-1","step":"trivial"}"#,
         );

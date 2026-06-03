@@ -56,6 +56,12 @@ pub enum OrchestrationEvent {
         timed_out: bool,
         duration_ms: u64,
     },
+    /// Execution contract was rejected for an event (U6).
+    ExecutionContractRejected {
+        topic: String,
+        violation_kind: String,
+        message: String,
+    },
 }
 
 pub struct OrchestrationLogger {

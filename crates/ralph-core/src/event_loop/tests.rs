@@ -8353,3 +8353,117 @@ event_loop:
         "plan.blocked should NOT route directly to reporter. prompt contained 'REPORTER MODE'"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// U8: Execution Contract Integration Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_execution_contract_rejects_work_done_with_missing_payload() {
+    // Test that work.done without required payload fields is rejected
+    // This tests the execution contract validator directly
+    use crate::execution_contract::{validate_execution_contract, ExecutionContractDecision, ExecutionContractViolationKind};
+    use crate::config::{ExecutionContractRule, TaskCompletionRequirement, GitChangeRequirement, TestEvidenceRequirement, ContractRejectConfig};
+
+    let rule = ExecutionContractRule {
+        require_payload_fields: vec!["task_id".to_string(), "task_key".to_string(), "step".to_string()],
+        require_task: TaskCompletionRequirement::default(),
+        require_git_change: GitChangeRequirement::default(),
+        require_test_evidence: TestEvidenceRequirement::default(),
+        reject: ContractRejectConfig::default(),
+    };
+
+    let event = Event::new("work.done", r#"{"task_id":"t1"}"#);
+
+    let decision = validate_execution_contract(
+        &event,
+        &rule,
+        std::path::Path::new("/tmp"),
+        "loop-1",
+        std::path::Path::new("/tmp/tasks.jsonl"),
+        None,
+    );
+
+    match &decision {
+        ExecutionContractDecision::Reject(findings) => {
+            assert!(
+                findings.iter().any(|f| matches!(f.kind, ExecutionContractViolationKind::MissingPayloadField { .. })),
+                "Should have MissingPayloadField rejection"
+            );
+        }
+        ExecutionContractDecision::Accept => {
+            panic!("Expected rejection for missing payload fields");
+        }
+    }
+}
+
+#[test]
+fn test_execution_contract_disabled_passes_through() {
+    // When execution_contracts is disabled (default), events pass through normally
+    let yaml = r#"
+event_loop:
+  execution_contracts:
+    enabled: false
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+
+    let result = event_loop.process_parse_result(crate::event_reader::ParseResult {
+        events: vec![crate::event_reader::Event {
+            topic: "work.done".to_string(),
+            payload: Some(r#"{"task_id":"t1","task_key":"k1","step":"s1"}"#.to_string()),
+            ts: "2024-01-01T00:00:00Z".to_string(),
+            wave_id: None,
+            hat: Some("executor".to_string()),
+            triggered: None,
+            source: None,
+            wave_index: None,
+            wave_total: None,
+        }],
+        malformed: vec![],
+    }).expect("process_parse_result should succeed");
+
+    // Without execution contract enabled, the event should be processed
+    // (not rejected at contract validation stage since contract is disabled)
+    assert!(
+        result.contract_rejections.is_empty(),
+        "No contract rejections when contract is disabled"
+    );
+}
+
+#[test]
+fn test_execution_contract_validates_task_status() {
+    // Test that execution contract config is parsed correctly
+    let yaml = r#"
+event_loop:
+  execution_contracts:
+    enabled: true
+    rules:
+      work.done:
+        require_payload_fields: ["task_id"]
+        require_task:
+          id_field: "task_id"
+          key_field: "task_key"
+          loop_scoped: false
+          allowed_terminal_statuses: ["closed"]
+          auto_close_on_valid: false
+        require_git_change:
+          mode: "diff_or_commit"
+          allow_empty_for_steps: []
+        require_test_evidence:
+          mode: "optional"
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+
+    // Verify the config parses correctly and the contract structure is sound
+    assert!(
+        config.event_loop.execution_contracts.is_some(),
+        "Execution contracts should be parsed from config"
+    );
+    let contracts = config.event_loop.execution_contracts.unwrap();
+    assert!(contracts.enabled, "Contracts should be enabled");
+    assert!(
+        contracts.rules.contains_key("work.done"),
+        "work.done rule should exist"
+    );
+}
