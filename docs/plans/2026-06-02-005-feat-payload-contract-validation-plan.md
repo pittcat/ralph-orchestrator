@@ -43,22 +43,22 @@ related:
 - missing-event hard gate 已升级：即使 agent 输出中没有提到 `ralph emit`，只要当前 hat 有 `publishes` 且没有 `default_publishes`，本轮无事件也会触发 gate。
 - `presets/ce-executor.yml` 已移除 executor 的 `default_publishes`，并显式启用 `event_loop.execution_contracts.rules.work.done`。
 
-### 仍未落地但必须完成
+### 完成状态(2026-06-03)
 
-- `EventPolicyConfig` 没有 `schema_file` 字段。
-- 没有 `RalphConfig::resolve_schema_files(base_path)`。
-- 没有 `HatConfig.ignore_payload_fields`。
-- 没有 `crates/ralph-core/src/payload_contract.rs`。
-- 没有 instructions payload 字段提取器。
-- 没有 payload contract validator。
-- 没有 `ralph hats validate --strict`。
-- `ralph hats validate` 默认仍只走拓扑校验，没有 payload contract 校验。
-- `ralph run` 启动前没有不可跳过的 payload contract hard gate。
-- runtime schema violation 仍走现有 event policy 路径，没有 `TerminationReason::PayloadContractViolation`。
-- 没有 `.ralph/diagnostics/payload-contract-error-*.json` 结构化报告。
-- `EventPolicyConfig::default()` 没有切换为 `enabled: true, mode: Enforce`。
-- ce-executor / ce-executor-zh 还没有外部 schema 或等价 embedded schema 镜像。
-- 全量 builtin/root/minimal/中文 preset 还没有 payload schema 适配矩阵。
+U1–U9 全部落地：
+
+- ✅ `EventPolicyConfig.schema_file` 字段(`config.rs`)。
+- ✅ `RalphConfig::resolve_schema_files(base_path)`(内联+文件合并,绝对/相对路径)。
+- ✅ `HatConfig.ignore_payload_fields` + `extract_payload_field_refs`(三种 pattern,BTreeSet 去重)。
+- ✅ `crates/ralph-core/src/payload_contract.rs` 静态对账 + 运行时 violation。
+- ✅ `validate_payload_contract(config, registry, strict)`(strict 模式 missing schema = error)。
+- ✅ `ralph hats validate --strict` 模式(默认仍只 warn,strict 才 fail)。
+- ✅ `enforce_payload_contract_gate` 在 `run_loop_impl` 第一行强制跑,无 skip。
+- ✅ `TerminationReason::PayloadContractViolation` 终止路径,`.ralph/diagnostics/payload-contract-error-*.json` 诊断报告(loop_runner 写入,失败不吞 violation)。
+- ✅ `presets/schemas/{ce-executor,code-assist,pdd-to-code-assist}.yml` + 三个 builtin preset 引用(`event_policy.schema_file` 字段)。
+- ✅ 16/16 in-scope preset 通过 strict 校验(`docs/plans/.../plan.md` U8 审计矩阵);3 个预存 YAML 缺陷(pdd-to-code-assist-zh 字面 `YAML_EOF`、autoresearch-zh L459 解析错、hatless-baseline(-zh) cli/core/hats 混排)文档化为 out-of-scope。
+- ✅ `docs/guide/payload-contracts.md` 245 行用户指南,`COLLECTION.md` / `harness-extensions.md` / `index.md` 交叉链接。
+- ⚠️ `EventPolicyConfig::default()` 保持 `enabled: false`(按计划顺序,该切换需在所有 preset 充分 dogfood 后单独评估,当前状态正确)。
 
 ## Problem Frame
 
@@ -99,7 +99,7 @@ related:
 
 ## Implementation Units
 
-- [ ] U1. **外部 Schema 文件加载与配置扩展**
+- [x] U1. **外部 Schema 文件加载与配置扩展**
 
   **Goal:** 让 `EventPolicyConfig` 支持引用外部 schema 文件，并在加载 preset 时合并到 `schemas`。
 
@@ -123,7 +123,7 @@ related:
   - `rtk cargo test -p ralph-core config::tests::test_schema_file -- --nocapture`
   - `rtk cargo test -p ralph-cli presets::tests -- --nocapture`
 
-- [ ] U2. **Instructions Payload 字段引用提取器**
+- [x] U2. **Instructions Payload 字段引用提取器**
 
   **Goal:** 从 hat instructions 中保守提取 payload 字段依赖，并提供行号上下文。
 
@@ -151,7 +151,7 @@ related:
   **Verification:**
   - `rtk cargo test -p ralph-core payload_contract::tests -- --nocapture`
 
-- [ ] U3. **Payload Contract Validator**
+- [x] U3. **Payload Contract Validator**
 
   **Goal:** 校验每个 target hat 的 payload 字段依赖是否被上游 topic schema 覆盖。
 
@@ -174,7 +174,7 @@ related:
   - `rtk cargo test -p ralph-core payload_contract::tests -- --nocapture`
   - `rtk cargo test -p ralph-core preset_validator::tests -- --nocapture`
 
-- [ ] U4. **`ralph hats validate --strict` 集成**
+- [x] U4. **`ralph hats validate --strict` 集成**
 
   **Goal:** CLI 层暴露 payload contract validation。
 
@@ -194,7 +194,7 @@ related:
   - `rtk cargo test -p ralph-cli hats -- --nocapture`
   - `rtk cargo run -p ralph-cli -- hats validate --help`
 
-- [ ] U5. **`ralph run` 启动前 Hard Gate**
+- [x] U5. **`ralph run` 启动前 Hard Gate**
 
   **Goal:** 任何带 hat workflow 的 `ralph run` 在启动 agent 前必须通过 payload contract gate。
 
@@ -216,7 +216,7 @@ related:
   - 构造缺 schema fixture，确认 `ralph run --dry-run` 或等价路径失败且不启动 agent。
   - `rtk cargo test -p ralph-cli payload_contract -- --nocapture`
 
-- [ ] U6. **Runtime Payload Violation Loop Pause 与诊断报告**
+- [x] U6. **Runtime Payload Violation Loop Pause 与诊断报告**
 
   **Goal:** event policy schema violation 在 enforce 模式下终止 loop，并生成结构化诊断报告。
 
@@ -253,7 +253,7 @@ related:
   - `rtk cargo test -p ralph-core event_policy -- --nocapture`
   - `rtk cargo test -p ralph-core event_loop::tests::test_payload_contract -- --nocapture`
 
-- [ ] U7. **ce-executor / ce-executor-zh Schema 适配**
+- [x] U7. **ce-executor / ce-executor-zh Schema 适配**
 
   **Goal:** 为 ce-executor 全链路补齐 payload schema，并处理 embedded 镜像。
 
@@ -343,7 +343,7 @@ related:
   - 对所有 public builtin preset 跑默认 validate。
   - 对所有启用 schema 或含 payload 字段引用的 preset 跑 strict validate。
 
-- [ ] U9. **文档、迁移说明与工具说明更新**
+- [x] U9. **文档、迁移说明与工具说明更新**
 
   **Goal:** 让用户和 preset 作者知道如何写 schema、如何 validate、如何排障。
 

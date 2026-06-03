@@ -61,7 +61,6 @@ pub fn extract_payload_field_refs(
     let from_payload_regex = Regex::new(r"(?i)From\s+event\s+payload\s*:\s*").unwrap();
     let must_include_regex = Regex::new(r"(?i)payload\s+MUST\s+include\s*:\s*").unwrap();
     let backtick_field_regex = Regex::new(r"`([^`]+)`").unwrap();
-    let payload_line_regex = Regex::new(r"(?i).*payload.*").unwrap();
 
     let ignore_set: BTreeSet<String> = ignore_fields.iter().cloned().collect();
     // Track seen (hat_id, field) pairs for deduplication

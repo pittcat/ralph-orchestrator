@@ -38,22 +38,6 @@ pub enum ViolationType {
     },
 }
 
-/// Classification of a runtime payload contract violation (U6).
-///
-/// Distinguishes the three kinds of schema-derived violations produced by
-/// the event policy layer when a real event arrives with bad shape.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PayloadContractViolationKind {
-    /// A required field declared in the schema is missing from the payload.
-    MissingRequiredField,
-    /// The payload's shape (e.g. JSON object) does not match the schema's
-    /// declared payload type.
-    PayloadTypeMismatch,
-    /// A field's value is not in the schema's allowed values for that path.
-    AllowedValueMismatch,
-}
-
 /// A single policy finding.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PolicyFinding {
