@@ -1432,8 +1432,8 @@ mod tests {
             .expect("ce-executor must define a 'dimension-reviewer' hat");
         assert_eq!(
             reviewer.timeout,
-            Some(900),
-            "dimension-reviewer timeout must be explicitly set to 900 seconds"
+            Some(1800),
+            "dimension-reviewer timeout must be explicitly set to 1800 seconds"
         );
     }
 
@@ -1459,8 +1459,8 @@ mod tests {
             .expect("ce-executor-zh must define a 'dimension-reviewer' hat");
         assert_eq!(
             reviewer.timeout,
-            Some(900),
-            "ce-executor-zh dimension-reviewer timeout must be explicitly set to 900 seconds"
+            Some(1800),
+            "ce-executor-zh dimension-reviewer timeout must be explicitly set to 1800 seconds"
         );
     }
 

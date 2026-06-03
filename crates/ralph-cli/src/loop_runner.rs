@@ -2712,6 +2712,12 @@ pub async fn run_loop_impl(
             .map(|events| events.had_events)
             .unwrap_or(false);
 
+        // Agent wrote any valid or rejected events — used for missing-event gate
+        let agent_wrote_any_valid_or_rejected = processed_events
+            .as_ref()
+            .map(|events| events.had_raw_events || events.had_rejected_events)
+            .unwrap_or(false);
+
         let mut late_termination_reason: Option<TerminationReason> = None;
         let mut hard_gate_triggered_this_iteration = false;
         if !agent_wrote_events && output_mentions_ralph_emit(&output) {
@@ -2778,7 +2784,8 @@ pub async fn run_loop_impl(
         // MISSING-EVENT GATE (U1): Regardless of whether output mentioned `ralph emit`,
         // if the hat has a publish obligation but no default_publishes fallback,
         // hard gate on missing events. This catches the "completely forgot" case.
-        if !agent_wrote_events
+        // Contract rejection does NOT trigger this gate because the agent DID try to emit.
+        if !agent_wrote_any_valid_or_rejected
             && wave_events.is_empty()
             && !hard_gate_triggered_this_iteration
             && should_gate_missing_events(&display_hat, &event_loop)
@@ -2794,7 +2801,7 @@ pub async fn run_loop_impl(
                 consecutive = event_loop.state().consecutive_hard_gates,
                 "Hard gate triggered: hat has publish obligation but emitted no event"
             );
-        } else if !agent_wrote_events
+        } else if !agent_wrote_any_valid_or_rejected
             && wave_events.is_empty()
             && !hard_gate_triggered_this_iteration
         {

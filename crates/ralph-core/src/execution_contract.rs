@@ -34,7 +34,71 @@ use crate::task_store::TaskStore;
 use ralph_proto::Event;
 use serde_json::Value;
 use std::path::Path;
+use std::process::Command;
 use tracing::warn;
+
+/// Git evidence provider abstraction for testability.
+pub trait GitEvidenceProvider: Send + Sync {
+    /// Returns true if the workspace is a git repository.
+    fn is_git_repo(&self, workspace: &Path) -> bool;
+    /// Returns true if there are unstaged or staged changes.
+    fn has_uncommitted_changes(&self, workspace: &Path) -> bool;
+    /// Returns true if there are commits since the given baseline SHA.
+    fn has_new_commits_since(&self, workspace: &Path, start_sha: Option<&str>) -> bool;
+}
+
+/// Production git evidence provider using git CLI.
+pub struct DefaultGitEvidenceProvider;
+
+impl GitEvidenceProvider for DefaultGitEvidenceProvider {
+    fn is_git_repo(&self, workspace: &Path) -> bool {
+        Command::new("git")
+            .args(["rev-parse", "--git-dir"])
+            .current_dir(workspace)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    fn has_uncommitted_changes(&self, workspace: &Path) -> bool {
+        // git diff --quiet: exit 0 = no diff (false), exit 1 = has diff (true), exit 128+ = not a git repo (false)
+        let unstaged = Command::new("git")
+            .args(["diff", "--quiet"])
+            .current_dir(workspace)
+            .output()
+            .map(|o| o.status.code() == Some(1))
+            .unwrap_or(false);
+        let staged = Command::new("git")
+            .args(["diff", "--cached", "--quiet"])
+            .current_dir(workspace)
+            .output()
+            .map(|o| o.status.code() == Some(1))
+            .unwrap_or(false);
+        unstaged || staged
+    }
+
+    fn has_new_commits_since(&self, workspace: &Path, start_sha: Option<&str>) -> bool {
+        match start_sha {
+            Some(start) => {
+                let output = Command::new("git")
+                    .args(["rev-list", &format!("{}..HEAD", start), "--count"])
+                    .current_dir(workspace)
+                    .output();
+                match output {
+                    Ok(out) if out.status.success() => {
+                        String::from_utf8_lossy(&out.stdout)
+                            .trim()
+                            .parse::<usize>()
+                            .unwrap_or(0)
+                            > 0
+                    }
+                    _ => false,
+                }
+            }
+            None => false,
+        }
+    }
+}
 
 /// Outcome of an execution contract validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +150,8 @@ pub fn validate_execution_contract(
     current_loop_id: &str,
     tasks_path: &Path,
     _hat_id: Option<&str>,
+    git_provider: &dyn GitEvidenceProvider,
+    loop_start_sha: Option<&str>,
 ) -> ExecutionContractDecision {
     let mut findings = Vec::new();
 
@@ -108,7 +174,9 @@ pub fn validate_execution_contract(
 
     // 3. Git evidence validation (if task validation passed)
     if findings.is_empty() {
-        if let Some(rejection) = validate_git_change(event, rule, workspace_root) {
+        if let Some(rejection) =
+            validate_git_change(event, rule, workspace_root, git_provider, loop_start_sha)
+        {
             findings.push(rejection);
         }
     }
@@ -195,33 +263,136 @@ fn validate_task(
     current_loop_id: &str,
     tasks_path: &Path,
 ) -> Option<ExecutionContractFinding> {
-    let payload_str = event.payload.as_str();
-    if payload_str.trim().is_empty() {
+    // Only validate task if id_field is configured
+    if rule.require_task.id_field.is_empty() {
         return None;
     }
 
+    let payload_str = event.payload.as_str();
+
+    // Empty payload with required task field → reject (fail-closed)
+    if payload_str.trim().is_empty() {
+        return Some(ExecutionContractFinding {
+            kind: ExecutionContractViolationKind::MissingPayloadField {
+                field: rule.require_task.id_field.clone(),
+            },
+            message: format!(
+                "work.done payload is empty but contract requires task field '{}'",
+                rule.require_task.id_field
+            ),
+            topic: event.topic.to_string(),
+        });
+    }
+
+    // JSON parse failure → reject (fail-closed)
     let Ok(payload) = serde_json::from_str::<Value>(payload_str) else {
-        return None;
+        return Some(ExecutionContractFinding {
+            kind: ExecutionContractViolationKind::InvalidPayload,
+            message: "work.done payload is not valid JSON, cannot read task_id".to_string(),
+            topic: event.topic.to_string(),
+        });
     };
 
+    // Not a JSON object → reject (fail-closed)
     let Value::Object(map) = &payload else {
-        return None;
+        return Some(ExecutionContractFinding {
+            kind: ExecutionContractViolationKind::InvalidPayload,
+            message: "work.done payload must be a JSON object to validate task".to_string(),
+            topic: event.topic.to_string(),
+        });
     };
 
-    let task_id = map.get(&rule.require_task.id_field)?.as_str()?.to_string();
-    let _task_key = map.get(&rule.require_task.key_field).and_then(|v| v.as_str());
-
-    // Load the task store
-    let store = match TaskStore::load(tasks_path) {
-        Ok(s) => s,
-        Err(e) => {
-            warn!(error = %e, "Failed to load task store for execution contract validation");
-            return None;
+    // task_id field must exist and be a non-empty string
+    let task_id = match map.get(&rule.require_task.id_field) {
+        Some(Value::String(s)) if !s.trim().is_empty() => s.trim().to_string(),
+        Some(other) => {
+            return Some(ExecutionContractFinding {
+                kind: ExecutionContractViolationKind::InvalidPayload,
+                message: format!(
+                    "task_id field '{}' must be a non-empty string, got: {:?}",
+                    rule.require_task.id_field, other
+                ),
+                topic: event.topic.to_string(),
+            });
+        }
+        None => {
+            return Some(ExecutionContractFinding {
+                kind: ExecutionContractViolationKind::MissingPayloadField {
+                    field: rule.require_task.id_field.clone(),
+                },
+                message: format!(
+                    "work.done payload is missing required task field '{}'",
+                    rule.require_task.id_field
+                ),
+                topic: event.topic.to_string(),
+            });
         }
     };
 
-    // Find the task
-    let task = store.get(&task_id)?;
+    // task_key field: if configured, must exist and be a string
+    let _task_key_from_payload = if !rule.require_task.key_field.is_empty() {
+        match map.get(&rule.require_task.key_field) {
+            Some(Value::String(s)) => Some(s.as_str()),
+            Some(other) => {
+                return Some(ExecutionContractFinding {
+                    kind: ExecutionContractViolationKind::InvalidPayload,
+                    message: format!(
+                        "task_key field '{}' must be a string, got: {:?}",
+                        rule.require_task.key_field, other
+                    ),
+                    topic: event.topic.to_string(),
+                });
+            }
+            None => {
+                return Some(ExecutionContractFinding {
+                    kind: ExecutionContractViolationKind::MissingPayloadField {
+                        field: rule.require_task.key_field.clone(),
+                    },
+                    message: format!(
+                        "work.done payload is missing required task key field '{}'",
+                        rule.require_task.key_field
+                    ),
+                    topic: event.topic.to_string(),
+                });
+            }
+        }
+    } else {
+        None
+    };
+
+    // Load the task store — fail-closed: load failure = reject
+    let store = match TaskStore::load(tasks_path) {
+        Ok(s) => s,
+        Err(e) => {
+            return Some(ExecutionContractFinding {
+                kind: ExecutionContractViolationKind::TaskNotFound {
+                    task_id: task_id.clone(),
+                },
+                message: format!(
+                    "Failed to load task store for validation: {}. Rejecting work.done to prevent false completion.",
+                    e
+                ),
+                topic: event.topic.to_string(),
+            });
+        }
+    };
+
+    // Find the task — fail-closed: not found = reject
+    let task = match store.get(&task_id) {
+        Some(t) => t,
+        None => {
+            return Some(ExecutionContractFinding {
+                kind: ExecutionContractViolationKind::TaskNotFound {
+                    task_id: task_id.clone(),
+                },
+                message: format!(
+                    "Task '{}' not found in task store. work.done rejected to prevent false completion.",
+                    task_id
+                ),
+                topic: event.topic.to_string(),
+            });
+        }
+    };
 
     // Check loop scoping
     if rule.require_task.loop_scoped {
@@ -289,7 +460,14 @@ fn validate_git_change(
     event: &Event,
     rule: &ExecutionContractRule,
     workspace_root: &Path,
+    git_provider: &dyn GitEvidenceProvider,
+    loop_start_sha: Option<&str>,
 ) -> Option<ExecutionContractFinding> {
+    // If workspace is not a git repo, git evidence check is not applicable
+    if !git_provider.is_git_repo(workspace_root) {
+        return None;
+    }
+
     // Check if this step allows empty git (trivial path)
     let payload_str = event.payload.as_str();
     if !payload_str.trim().is_empty() {
@@ -304,18 +482,37 @@ fn validate_git_change(
         }
     }
 
-    // Check git diff
-    let has_diff = check_git_diff(workspace_root);
-    let has_commit = check_git_commit(workspace_root);
+    let has_uncommitted = git_provider.has_uncommitted_changes(workspace_root);
+    let has_new_commits = git_provider.has_new_commits_since(workspace_root, loop_start_sha);
 
-    if !has_diff && !has_commit {
+    let has_evidence = match rule.require_git_change.mode.as_str() {
+        "diff_or_commit" => has_uncommitted || has_new_commits,
+        "diff_only" => has_uncommitted,
+        "commit_only" => has_new_commits,
+        other => {
+            // Unknown mode: warn and use conservative fail-closed
+            warn!(mode = %other, "Unknown git change mode, treating as diff_or_commit");
+            has_uncommitted || has_new_commits
+        }
+    };
+
+    if !has_evidence {
         let step = serde_json::from_str::<Value>(payload_str)
             .ok()
             .and_then(|v| v.get("step").and_then(|s| s.as_str().map(String::from)));
 
+        let detail = if loop_start_sha.is_none() {
+            "No uncommitted changes found. (Loop start SHA not tracked — commit-only evidence unavailable.)".to_string()
+        } else {
+            "No uncommitted changes and no new commits since loop start found.".to_string()
+        };
+
         return Some(ExecutionContractFinding {
             kind: ExecutionContractViolationKind::NoGitEvidence { step },
-            message: "work.done requires git evidence (diff or commit) before review can proceed. No diff or commit found.".to_string(),
+            message: format!(
+                "work.done requires git evidence before review can proceed. {}",
+                detail
+            ),
             topic: event.topic.to_string(),
         });
     }
@@ -355,11 +552,29 @@ fn validate_test_evidence(
     }
 
     let Ok(payload) = serde_json::from_str::<Value>(payload_str) else {
-        return None;
+        return Some(ExecutionContractFinding {
+            kind: ExecutionContractViolationKind::NoTestEvidence {
+                field: field_name.to_string(),
+            },
+            message: format!(
+                "work.done payload is not valid JSON, cannot verify test evidence field '{}'",
+                field_name
+            ),
+            topic: event.topic.to_string(),
+        });
     };
 
     let Value::Object(map) = &payload else {
-        return None;
+        return Some(ExecutionContractFinding {
+            kind: ExecutionContractViolationKind::NoTestEvidence {
+                field: field_name.to_string(),
+            },
+            message: format!(
+                "work.done payload must be a JSON object to verify test evidence field '{}'",
+                field_name
+            ),
+            topic: event.topic.to_string(),
+        });
     };
 
     // Check if the field exists and is non-empty
@@ -379,36 +594,6 @@ fn validate_test_evidence(
             ),
             topic: event.topic.to_string(),
         }),
-    }
-}
-
-/// Check if there are uncommitted changes in the git working tree.
-fn check_git_diff(workspace_root: &Path) -> bool {
-    use std::process::Command;
-
-    let output = Command::new("git")
-        .args(["diff", "--quiet"])
-        .current_dir(workspace_root)
-        .output();
-
-    match output {
-        Ok(out) => !out.status.success(),
-        Err(_) => false,
-    }
-}
-
-/// Check if there are any commits in the current branch.
-fn check_git_commit(workspace_root: &Path) -> bool {
-    use std::process::Command;
-
-    let output = Command::new("git")
-        .args(["log", "--oneline", "-1"])
-        .current_dir(workspace_root)
-        .output();
-
-    match output {
-        Ok(out) => out.status.success() && !out.stdout.is_empty(),
-        Err(_) => false,
     }
 }
 
@@ -498,6 +683,8 @@ mod tests {
             "loop-1",
             std::path::Path::new("/tmp/tasks.jsonl"),
             None,
+            &DefaultGitEvidenceProvider,
+            None,
         );
 
         match decision {
@@ -523,6 +710,8 @@ mod tests {
             std::path::Path::new("/tmp"),
             "loop-1",
             std::path::Path::new("/tmp/tasks.jsonl"),
+            None,
+            &DefaultGitEvidenceProvider,
             None,
         );
 
@@ -557,7 +746,20 @@ mod tests {
     #[test]
     fn test_disabled_contract_passes_through() {
         // When rule is Default (disabled), validation should pass
-        let rule = ExecutionContractRule::default();
+        // Use a truly disabled rule with empty id_field to skip task validation
+        let rule = ExecutionContractRule {
+            require_payload_fields: vec![],
+            require_task: TaskCompletionRequirement {
+                id_field: "".to_string(),  // Empty = task validation skipped
+                key_field: "".to_string(),
+                loop_scoped: false,
+                allowed_terminal_statuses: vec![],
+                auto_close_on_valid: false,
+            },
+            require_git_change: GitChangeRequirement::default(),
+            require_test_evidence: TestEvidenceRequirement::default(),
+            reject: ContractRejectConfig::default(),
+        };
         let event = Event::new("work.done", r#"{"task_id":"task-1"}"#);
 
         // A default/empty rule should accept any event
@@ -568,9 +770,208 @@ mod tests {
             "loop-1",
             std::path::Path::new("/tmp/tasks.jsonl"),
             None,
+            &DefaultGitEvidenceProvider,
+            None,
         );
 
         // Empty rule has no required fields, so it should accept
         assert!(matches!(decision, ExecutionContractDecision::Accept));
+    }
+
+    // === F1 Fail-closed tests ===
+
+    #[test]
+    fn test_rejects_task_id_missing() {
+        // Payload missing task_id field should be rejected
+        let rule = make_work_done_rule();
+        let event = Event::new(
+            "work.done",
+            r#"{"plan_name":"test","plan_path":"/test","task_key":"key-1","step":"step-01"}"#,
+        );
+
+        let decision = validate_execution_contract(
+            &event,
+            &rule,
+            std::path::Path::new("/tmp"),
+            "loop-1",
+            std::path::Path::new("/tmp/tasks.jsonl"),
+            None,
+            &DefaultGitEvidenceProvider,
+            None,
+        );
+
+        match &decision {
+            ExecutionContractDecision::Reject(findings) => {
+                assert!(
+                    findings.iter().any(|f| matches!(&f.kind, ExecutionContractViolationKind::MissingPayloadField { field } if field == "task_id")),
+                    "Should have MissingPayloadField for task_id"
+                );
+            }
+            ExecutionContractDecision::Accept => panic!("Expected rejection for missing task_id"),
+        }
+    }
+
+    #[test]
+    fn test_rejects_task_id_not_string() {
+        // task_id field is not a string should be rejected
+        let rule = make_work_done_rule();
+        let event = Event::new(
+            "work.done",
+            r#"{"plan_name":"test","plan_path":"/test","task_id":123,"task_key":"key-1","step":"step-01"}"#,
+        );
+
+        let decision = validate_execution_contract(
+            &event,
+            &rule,
+            std::path::Path::new("/tmp"),
+            "loop-1",
+            std::path::Path::new("/tmp/tasks.jsonl"),
+            None,
+            &DefaultGitEvidenceProvider,
+            None,
+        );
+
+        match &decision {
+            ExecutionContractDecision::Reject(findings) => {
+                assert!(
+                    findings.iter().any(|f| matches!(f.kind, ExecutionContractViolationKind::InvalidPayload)),
+                    "Should have InvalidPayload for non-string task_id"
+                );
+            }
+            ExecutionContractDecision::Accept => panic!("Expected rejection for non-string task_id"),
+        }
+    }
+
+    #[test]
+    fn test_rejects_task_id_empty_string() {
+        // task_id field is empty string should be rejected
+        let rule = make_work_done_rule();
+        let event = Event::new(
+            "work.done",
+            r#"{"plan_name":"test","plan_path":"/test","task_id":"","task_key":"key-1","step":"step-01"}"#,
+        );
+
+        let decision = validate_execution_contract(
+            &event,
+            &rule,
+            std::path::Path::new("/tmp"),
+            "loop-1",
+            std::path::Path::new("/tmp/tasks.jsonl"),
+            None,
+            &DefaultGitEvidenceProvider,
+            None,
+        );
+
+        match &decision {
+            ExecutionContractDecision::Reject(findings) => {
+                assert!(
+                    findings.iter().any(|f| matches!(f.kind, ExecutionContractViolationKind::InvalidPayload)),
+                    "Should have InvalidPayload for empty string task_id"
+                );
+            }
+            ExecutionContractDecision::Accept => panic!("Expected rejection for empty string task_id"),
+        }
+    }
+
+    #[test]
+    fn test_rejects_task_not_found() {
+        // Task doesn't exist in task store should be rejected
+        let rule = make_work_done_rule();
+        let event = Event::new(
+            "work.done",
+            r#"{"plan_name":"test","plan_path":"/test","task_id":"nonexistent-task","task_key":"key-1","step":"step-01"}"#,
+        );
+
+        let decision = validate_execution_contract(
+            &event,
+            &rule,
+            std::path::Path::new("/tmp"),
+            "loop-1",
+            std::path::Path::new("/tmp/nonexistent_tasks.jsonl"),
+            None,
+            &DefaultGitEvidenceProvider,
+            None,
+        );
+
+        match &decision {
+            ExecutionContractDecision::Reject(findings) => {
+                assert!(
+                    findings.iter().any(|f| matches!(f.kind, ExecutionContractViolationKind::TaskNotFound { .. })),
+                    "Should have TaskNotFound rejection"
+                );
+            }
+            ExecutionContractDecision::Accept => panic!("Expected rejection for nonexistent task"),
+        }
+    }
+
+    // === F2 Git evidence tests ===
+
+    #[test]
+    fn test_git_evidence_skipped_in_non_git_directory() {
+        // /tmp is not a git repo, so git evidence check should be skipped (not applicable)
+        // We use a rule with empty id_field to skip task validation
+        let rule = ExecutionContractRule {
+            require_payload_fields: vec![],
+            require_task: TaskCompletionRequirement {
+                id_field: "".to_string(),
+                key_field: "".to_string(),
+                loop_scoped: false,
+                allowed_terminal_statuses: vec![],
+                auto_close_on_valid: false,
+            },
+            require_git_change: GitChangeRequirement::default(),
+            require_test_evidence: TestEvidenceRequirement::default(),
+            reject: ContractRejectConfig::default(),
+        };
+        let event = Event::new("work.done", r#"{"step":"test"}"#);
+
+        // In /tmp (not a git repo), git evidence check is not applicable, so passes
+        let decision = validate_execution_contract(
+            &event,
+            &rule,
+            std::path::Path::new("/tmp"),
+            "loop-1",
+            std::path::Path::new("/tmp/tasks.jsonl"),
+            None,
+            &DefaultGitEvidenceProvider,
+            None,
+        );
+
+        // Git evidence check should be skipped in non-git directory, so accepts
+        assert!(matches!(decision, ExecutionContractDecision::Accept));
+    }
+
+    #[test]
+    fn test_rejects_invalid_payload_json() {
+        // Payload is not valid JSON should be rejected at payload validation
+        let mut rule = make_work_done_rule();
+        rule.require_test_evidence = TestEvidenceRequirement {
+            mode: "required_payload_field".to_string(),
+            payload_field: Some("tests".to_string()),
+        };
+
+        let event = Event::new("work.done", "not valid json at all");
+
+        let decision = validate_execution_contract(
+            &event,
+            &rule,
+            std::path::Path::new("/tmp"),
+            "loop-1",
+            std::path::Path::new("/tmp/tasks.jsonl"),
+            None,
+            &DefaultGitEvidenceProvider,
+            None,
+        );
+
+        // Invalid JSON is rejected at payload validation stage, before test evidence check
+        match &decision {
+            ExecutionContractDecision::Reject(findings) => {
+                assert!(
+                    findings.iter().any(|f| matches!(f.kind, ExecutionContractViolationKind::InvalidPayload)),
+                    "Should have InvalidPayload for invalid JSON"
+                );
+            }
+            ExecutionContractDecision::Accept => panic!("Expected rejection for invalid JSON payload"),
+        }
     }
 }

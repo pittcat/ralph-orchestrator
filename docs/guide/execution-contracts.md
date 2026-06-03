@@ -1,18 +1,18 @@
-# Execution Contracts
+# 执行契约（Execution Contracts）
 
-Execution contracts validate agent completion obligations before events can trigger downstream hats. They prevent false positives when agents forget to emit or emit incomplete completion signals.
+执行契约在 `work.done` 事件进入总线之前验证代理的完成义务。当代理忘记 emit 或 emit 不完整的完成信号时，执行契约可以防止误报。
 
-## Overview
+## 概述
 
-An execution contract validates three things before a `work.done` event enters the bus:
+执行契约在 `work.done` 事件进入总线之前验证三个方面：
 
-1. **Payload fields** — Required fields are present
-2. **Task state** — The referenced task is closed
-3. **Git evidence** — There are real changes (unless trivial)
+1. **Payload 字段** — 必填字段是否存在
+2. **任务状态** — 引用的任务是否已关闭
+3. **Git 证据** — 是否有实质性的更改（非 trivial 步骤）
 
-If any validation fails, the event is rejected and guidance is injected to drive correction.
+如果任何验证失败，事件将被拒绝，并注入指导以推动修正。
 
-## Configuration
+## 配置
 
 ```yaml
 event_loop:
@@ -20,10 +20,10 @@ event_loop:
     enabled: true
     rules:
       work.done:
-        # Required payload fields
+        # 必填 payload 字段
         require_payload_fields: ["task_id", "task_key", "step"]
 
-        # Task validation
+        # 任务验证
         require_task:
           id_field: "task_id"
           key_field: "task_key"
@@ -31,66 +31,66 @@ event_loop:
           allowed_terminal_statuses: ["closed"]
           auto_close_on_valid: false
 
-        # Git validation
+        # Git 验证
         require_git_change:
           mode: "diff_or_commit"
           allow_empty_for_steps: ["trivial"]
 
-        # Test evidence (future)
+        # 测试证据（未来功能）
         require_test_evidence:
           mode: "optional"
 ```
 
-## Field Reference
+## 字段参考
 
 ### `require_payload_fields`
 
-List of JSON field names that must be present in the event payload.
+事件 payload 中必须存在的 JSON 字段名列表。
 
 ### `require_task`
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `id_field` | string | `"task_id"` | JSON field containing task ID |
-| `key_field` | string | `"task_key"` | JSON field containing task key |
-| `loop_scoped` | bool | `true` | Task must belong to current loop |
-| `allowed_terminal_statuses` | list | `["closed"]` | Valid task statuses |
-| `auto_close_on_valid` | bool | `false` | Auto-close task if contract passes |
+| 字段 | 类型 | 默认值 | 描述 |
+|------|------|---------|-------------|
+| `id_field` | string | `"task_id"` | 包含任务 ID 的 JSON 字段 |
+| `key_field` | string | `"task_key"` | 包含任务 key 的 JSON 字段 |
+| `loop_scoped` | bool | `true` | 任务必须属于当前循环 |
+| `allowed_terminal_statuses` | list | `["closed"]` | 有效的任务状态 |
+| `auto_close_on_valid` | bool | `false` | 契约通过时自动关闭任务 |
 
 ### `require_git_change`
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `mode` | string | `"diff_or_commit"` | Git evidence mode |
-| `allow_empty_for_steps` | list | `[]` | Steps that don't need git evidence |
+| 字段 | 类型 | 默认值 | 描述 |
+|------|------|---------|-------------|
+| `mode` | string | `"diff_or_commit"` | Git 证据模式 |
+| `allow_empty_for_steps` | list | `[]` | 不需要 git 证据的步骤 |
 
-**Modes:**
-- `diff_or_commit`: Accept if `git diff` or `git log` shows changes
-- `diff_only`: Only accept if `git diff` has changes
-- `commit_only`: Only accept if there are commits
+**模式：**
+- `diff_or_commit`：如果 `git diff` 或 `git log` 显示有更改，则接受
+- `diff_only`：**尚未实现**，当前行为等同于 `diff_or_commit`
+- `commit_only`：**尚未实现**，当前行为等同于 `diff_or_commit`
 
 ### `require_test_evidence`
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `mode` | string | `"optional"` | Evidence requirement level |
+| 字段 | 类型 | 默认值 | 描述 |
+|------|------|---------|-------------|
+| `mode` | string | `"optional"` | 证据要求级别 |
 
-**Modes:**
-- `optional`: No test evidence required
-- `required_payload_field`: Check for `tests` field in payload (future)
+**模式：**
+- `optional`：不需要测试证据
+- `required_payload_field`：检查 payload 中的 `tests` 字段（未来功能）
 
-## Rejection Behavior
+## 拒绝行为
 
-When a contract is rejected:
+当契约被拒绝时：
 
-1. The original event is NOT published to the bus
-2. A diagnostic event is published to `event.execution_contract.rejected`
-3. Guidance is published to `human.guidance`
-4. The downstream hat does NOT receive the event
+1. 原始事件**不会**发布到总线
+2. 诊断事件发布到 `event.execution_contract.rejected`
+3. 指导发布到 `human.guidance`
+4. 下游 hat **不会**收到该事件
 
-## ce-executor Example
+## ce-executor 示例
 
-The `ce-executor` preset uses execution contracts to protect the executor:
+`ce-executor` 预设使用执行契约来保护 executor：
 
 ```yaml
 event_loop:
@@ -109,22 +109,24 @@ event_loop:
           allow_empty_for_steps: ["trivial"]
 ```
 
-This prevents:
-- Fake `work.done` when executor forgets to emit
-- `work.done` with open tasks (not closed)
-- `work.done` without real git changes
+这可以防止：
+- 当 executor 忘记 emit 时的虚假 `work.done`
+- 带有未完成任务（未关闭）的 `work.done`
+- 没有实质性 git 更改的 `work.done`
 
-## Diagnostics
+**注意：** 当前 git 证据验证检查工作目录中是否存在未提交的更改或自循环开始以来的新提交。如果工作目录不是 git 仓库，git 证据检查将被跳过（视为不适用）。
 
-Contract rejections are logged and visible in:
+## 诊断
 
-1. **Warnings**: Logged at `warn!` level with topic, hat, and violation reason
-2. **Diagnostics file**: When `RALPH_DIAGNOSTICS=1`, written to `.ralph/diagnostics/*/execution-contract.jsonl`
-3. **Human guidance**: Published to `human.guidance` for next iteration
+契约拒绝会被记录并可见于：
 
-## Testing
+1. **警告**：以 `warn!` 级别记录，包含 topic、hat 和违反原因
+2. **诊断文件**：当 `RALPH_DIAGNOSTICS=1` 时，写入 `.ralph/diagnostics/*/execution-contract.jsonl`
+3. **人工指导**：发布到 `human.guidance` 供下一次迭代参考
 
-Run execution contract tests:
+## 测试
+
+运行执行契约测试：
 
 ```bash
 cargo test -p ralph-core execution_contract -- --nocapture

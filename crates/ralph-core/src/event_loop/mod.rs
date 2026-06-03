@@ -19,7 +19,8 @@ use crate::event_policy::{
     validate_event,
 };
 use crate::execution_contract::{
-    validate_execution_contract, ExecutionContractDecision, ExecutionContractFinding,
+    validate_execution_contract, DefaultGitEvidenceProvider, ExecutionContractDecision,
+    ExecutionContractFinding,
 };
 use crate::event_reader::{Event as JsonlEvent, EventReader};
 use crate::hat_registry::HatRegistry;
@@ -43,6 +44,10 @@ use tracing::{debug, info, warn};
 pub struct ProcessedEvents {
     /// Whether any valid events were found and published.
     pub had_events: bool,
+    /// Whether any events were present at the contract validation layer (passed or rejected).
+    pub had_raw_events: bool,
+    /// Whether any events were rejected by execution contract validation.
+    pub had_rejected_events: bool,
     /// Whether any published events matched the semantic `plan.*` topic family.
     pub had_plan_events: bool,
     /// Structured context for the first processed `human.interact` event,
@@ -3113,6 +3118,8 @@ impl EventLoop {
         if result.events.is_empty() && result.malformed.is_empty() {
             return Ok(ProcessedEvents {
                 had_events: false,
+                had_raw_events: false,
+                had_rejected_events: false,
                 had_plan_events: false,
                 human_interact_context: None,
                 has_orphans: false,
@@ -3379,10 +3386,12 @@ impl EventLoop {
         // This runs after all other validation layers, before record/publish.
         // Contract rejection publishes diagnostic + guidance but does NOT record/publish the original.
         let execution_contracts = self.config.event_loop.execution_contracts.as_ref();
+        // Track raw event counts before contract filtering for missing-event gate logic
+        let contract_validation_input_count = events.len();
+        let mut contract_rejections: Vec<ExecutionContractFinding> = Vec::new();
         let contracts_enabled = execution_contracts
             .as_ref()
             .is_some_and(|c| c.enabled);
-        let mut contract_rejections: Vec<ExecutionContractFinding> = Vec::new();
         let events = if contracts_enabled {
             let contracts = execution_contracts.unwrap();
             let current_loop_id = self
@@ -3405,6 +3414,8 @@ impl EventLoop {
                         current_loop_id.as_str(),
                         &tasks_path,
                         self.state.last_active_hat_ids.first().map(|h| h.as_str()),
+                        &DefaultGitEvidenceProvider,
+                        None,
                     );
                     match decision {
                         ExecutionContractDecision::Accept => {
@@ -3458,6 +3469,19 @@ impl EventLoop {
             events
         };
         // --- End execution contract validation ---
+
+        // Calculate had_raw_events and had_rejected_events for missing-event gate logic
+        // had_raw_events: events that passed through contract validation (accepted OR rejected)
+        // had_rejected_events: events that were rejected by contract validation
+        let had_rejected_events = !contract_rejections.is_empty();
+        let had_raw_events = if contracts_enabled {
+            // Events that went through contract validation: accepted + rejected
+            // events.len() here is accepted.len() (passed or no-rule events)
+            events.len() + contract_rejections.len() > 0
+        } else {
+            // Contracts disabled: all events passed through
+            contract_validation_input_count > 0
+        };
 
         let mut has_orphans = false;
 
@@ -4205,6 +4229,8 @@ impl EventLoop {
 
         Ok(ProcessedEvents {
             had_events,
+            had_raw_events,
+            had_rejected_events,
             had_plan_events,
             human_interact_context,
             has_orphans,
