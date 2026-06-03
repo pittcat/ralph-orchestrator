@@ -3041,6 +3041,13 @@ pub struct HatConfig {
     /// behave differently in warmup vs production (e.g., harness hat).
     #[serde(default)]
     pub phase_triggers: Option<HashMap<String, Vec<String>>>,
+
+    /// Fields to ignore when extracting payload field references from instructions.
+    ///
+    /// Used by the static payload contract validator to exclude false positives.
+    /// Does not affect runtime event policy enforcement.
+    #[serde(default)]
+    pub ignore_payload_fields: Vec<String>,
 }
 
 fn default_concurrency() -> u32 {
@@ -3064,6 +3071,31 @@ pub struct AggregateConfig {
 pub enum AggregateMode {
     /// Wait for all wave instances to complete before activating the aggregator.
     WaitForAll,
+}
+
+impl Default for HatConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            description: None,
+            triggers: Vec::new(),
+            publishes: Vec::new(),
+            instructions: String::new(),
+            extra_instructions: Vec::new(),
+            backend: None,
+            backend_args: None,
+            default_publishes: None,
+            max_activations: None,
+            scratchpad: None,
+            disallowed_tools: Vec::new(),
+            timeout: None,
+            concurrency: 1,
+            aggregate: None,
+            event_filter: None,
+            phase_triggers: None,
+            ignore_payload_fields: Vec::new(),
+        }
+    }
 }
 
 impl HatConfig {

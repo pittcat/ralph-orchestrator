@@ -2009,6 +2009,7 @@ status: draft
                     events: vec![String::new(), "review.done".to_string()],
                 }),
                 phase_triggers: None,
+                ..Default::default()
             },
         );
 
@@ -2058,6 +2059,7 @@ status: draft
                     events: vec!["review file".to_string()],
                 }),
                 phase_triggers: None,
+                ..Default::default()
             },
         );
 

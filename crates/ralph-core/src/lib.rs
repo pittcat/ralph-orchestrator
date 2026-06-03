@@ -45,6 +45,7 @@ pub mod merge_queue;
 pub mod planning_session;
 pub mod preflight;
 pub mod preset_validator;
+pub mod payload_contract;
 #[cfg(feature = "recording")]
 mod session_player;
 #[cfg(feature = "recording")]

@@ -1115,6 +1115,7 @@ fn test_default_publishes_injects_when_no_events() {
             aggregate: None,
             event_filter: None,
             phase_triggers: None,
+            ..Default::default()
         },
     );
     config.hats = hats;
@@ -1175,6 +1176,7 @@ fn test_default_publishes_not_injected_when_events_written() {
             aggregate: None,
             event_filter: None,
             phase_triggers: None,
+            ..Default::default()
         },
     );
     config.hats = hats;
@@ -1377,6 +1379,7 @@ fn test_default_publishes_skipped_when_non_orphan_event_written() {
             aggregate: None,
             event_filter: None,
             phase_triggers: None,
+            ..Default::default()
         },
     );
     config.hats = hats;
@@ -1450,6 +1453,7 @@ fn test_default_publishes_not_injected_when_not_configured() {
             aggregate: None,
             event_filter: None,
             phase_triggers: None,
+            ..Default::default()
         },
     );
     config.hats = hats;
@@ -4185,6 +4189,7 @@ fn test_default_publishes_satisfies_required_events_for_completion() {
             aggregate: None,
             event_filter: None,
             phase_triggers: None,
+            ..Default::default()
         },
     );
     config.hats = hats;
@@ -4245,6 +4250,7 @@ fn test_default_publishes_completion_promise_triggers_termination() {
             aggregate: None,
             event_filter: None,
             phase_triggers: None,
+            ..Default::default()
         },
     );
     config.hats = hats;
