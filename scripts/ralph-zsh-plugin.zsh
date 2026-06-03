@@ -57,7 +57,6 @@ _RALPH_BUILTIN_HAT_VALUES=(
   "builtin:review"
   "builtin:pdd-to-code-assist"
   "builtin:autoresearch"
-  "builtin:hatless-baseline"
   "builtin:merge-loop"
 )
 
