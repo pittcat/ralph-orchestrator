@@ -48,12 +48,6 @@ const PRESETS: &[EmbeddedPreset] = &[
         public: true,
     },
     EmbeddedPreset {
-        name: "hatless-baseline",
-        description: "Baseline hatless mode for comparison",
-        content: include_str!(concat!(env!("OUT_DIR"), "/presets/hatless-baseline.yml")),
-        public: false,
-    },
-    EmbeddedPreset {
         name: "merge-loop",
         description: "Merges completed parallel loop from worktree back to main branch",
         content: include_str!(concat!(env!("OUT_DIR"), "/presets/merge-loop.yml")),
@@ -1082,19 +1076,19 @@ mod tests {
 
     #[test]
     fn test_ce_executor_required_events_is_report_done_for_root_preset() {
-        // Mirror-drift guard: the embedded preset is loaded via `include_str!` from
-        // `crates/ralph-cli/presets/ce-executor.yml` (a mirror). If a future change
-        // reverts the canonical `presets/ce-executor.yml` at the repo root while
-        // leaving the mirror untouched, the `get_preset` test above would still
-        // pass and the original infinite-loop bug would silently return. Read the
-        // root file at test runtime so cargo test fails whenever the two diverge
-        // on the completion gate — even if `sync-embedded-files.sh check` is not
-        // part of the local dev loop.
+        // Mirror-drift guard: the embedded preset is loaded via `include_str!`
+        // from `$OUT_DIR/presets/ce-executor.yml` (a copy made by build.rs from
+        // `presets/en/ce-executor.yml`). If a future change edits the canonical
+        // file but leaves a stale `$OUT_DIR` copy lying around, the `get_preset`
+        // test above would still pass and the original infinite-loop bug would
+        // silently return. Read the canonical file at test runtime so cargo test
+        // fails whenever the two diverge on the completion gate.
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let root_preset_path = std::path::Path::new(manifest_dir)
             .join("..")
             .join("..")
             .join("presets")
+            .join("en")
             .join("ce-executor.yml");
         let root_content = std::fs::read_to_string(&root_preset_path).unwrap_or_else(|e| {
             panic!(
@@ -1208,12 +1202,17 @@ mod tests {
     }
 
     /// Helper: read a non-embedded root preset YAML by relative path.
+    ///
+    /// Picks the right canonical subdirectory based on filename suffix:
+    /// `*`-zh.yml → `presets/zh/`, anything else → `presets/en/`.
     fn read_root_preset(filename: &str) -> String {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let subdir = if filename.ends_with("-zh.yml") { "zh" } else { "en" };
         let path = std::path::Path::new(manifest_dir)
             .join("..")
             .join("..")
             .join("presets")
+            .join(subdir)
             .join(filename);
         std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("failed to read root preset at {}: {}", path.display(), e))
@@ -1398,6 +1397,7 @@ mod tests {
             .join("..")
             .join("..")
             .join("presets")
+            .join("zh")
             .join("autoresearch-zh.yml");
         let zh_content = std::fs::read_to_string(&zh_path).unwrap_or_else(|e| {
             panic!(
@@ -1439,13 +1439,15 @@ mod tests {
 
     #[test]
     fn test_ce_executor_root_preset_matches_embedded() {
-        // Mirror-drift guard: the root preset and embedded mirror must stay in sync.
+        // Single-source-of-truth guard: the canonical preset and its embedded
+        // copy (made by `build.rs` from `presets/manifest.yml`) must stay in sync.
         let root_content = read_root_preset("ce-executor.yml");
         let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
         assert_eq!(
             root_content, preset.content,
-            "Root presets/ce-executor.yml must match crates/ralph-cli/presets/ce-executor.yml. \
-             Run ./scripts/sync-embedded-files.sh to sync."
+            "Canonical presets/en/ce-executor.yml must match the embedded copy in $OUT_DIR/presets/. \
+             The build script copies the canonical file on every change; if this fails, \
+             `cargo clean -p ralph-cli && cargo build` will refresh it."
         );
     }
 
@@ -1988,6 +1990,63 @@ mod tests {
                 && exhausted_section.contains("task_key")
                 && exhausted_section.contains("step"),
             "ce-executor-zh shipper fix.exhausted handling must read and publish task_id, task_key, step"
+        );
+    }
+
+    /// Cross-check the Rust `PRESETS` array against `presets/manifest.yml`.
+    ///
+    /// `build.rs` reads the manifest to decide which yml files to copy into
+    /// `$OUT_DIR`; this test makes sure the Rust side lists the same set of
+    /// names. If a contributor adds a preset to one place but not the other,
+    /// the inconsistency surfaces here (or, for the manifest-only case, as a
+    /// build.rs panic).
+    ///
+    /// The test only runs on the build host where `presets/manifest.yml` is
+    /// reachable at `CARGO_MANIFEST_DIR/../../presets/manifest.yml`. When the
+    /// crate is built from a crates.io tarball the manifest does not exist and
+    /// the test is skipped via the early return.
+    #[test]
+    fn presets_array_matches_manifest() {
+        let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("presets")
+            .join("manifest.yml");
+        if !manifest_path.is_file() {
+            eprintln!(
+                "presets_array_matches_manifest: {} not on build host; skipping",
+                manifest_path.display()
+            );
+            return;
+        }
+        let text = std::fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
+            panic!("failed to read {}: {}", manifest_path.display(), e);
+        });
+        let value: serde_yaml::Value =
+            serde_yaml::from_str(&text).expect("manifest.yml must be valid YAML");
+        let embedded = value
+            .get("embedded")
+            .and_then(|v| v.as_sequence())
+            .expect("manifest.yml must have an `embedded:` sequence");
+        let manifest_names: Vec<String> = embedded
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(|s| s.to_string())
+                    .expect("each entry under `embedded:` must be a string")
+            })
+            .collect();
+
+        let mut rust_names: Vec<String> = PRESETS.iter().map(|p| p.name.to_string()).collect();
+        rust_names.sort();
+        let mut expected = manifest_names.clone();
+        expected.sort();
+
+        assert_eq!(
+            rust_names, expected,
+            "PRESETS array in src/presets.rs disagrees with presets/manifest.yml.\n\
+             Either add the missing entry to the Rust array, or remove the extra one from \
+             the manifest. See presets/manifest.yml for authoring rules."
         );
     }
 }

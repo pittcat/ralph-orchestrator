@@ -1,31 +1,29 @@
 // build.rs for ralph-cli
 //
-// Strips the `crates/ralph-cli/presets/` mirror directory by copying
-// canonical preset yml files (the single source of truth at
-// `presets/` in the repo root) into Cargo's $OUT_DIR at compile time.
-// The Rust code embeds them via:
+// Copies canonical preset yml files (the single source of truth under
+// `presets/en/` in the repo root) into Cargo's $OUT_DIR at compile time,
+// per the explicit allow-list in `presets/manifest.yml`. The Rust code
+// embeds the copies via:
 //
 //     include_str!(concat!(env!("OUT_DIR"), "/presets/<name>.yml"))
 //
-// Why: `include_str!` content is baked into the binary, so the file
-// must exist on the build host's filesystem during compilation, but
-// the source location is otherwise free. That lets us delete the
-// mirror directory and rely on the canonical files alone.
+// Why a manifest: `include_str!` content is baked into the binary, so
+// the file must exist on the build host's filesystem during compilation,
+// but the source location is otherwise free. That lets us delete the
+// crate-internal mirror directory entirely. A manifest in addition
+// keeps the embedded set auditable: adding a new preset requires an
+// explicit opt-in in `presets/manifest.yml`, and a new entry in
+// `crates/ralph-cli/src/presets.rs` (the two sides cross-check each
+// other at compile time).
 //
-// Behaviour:
-//   * Copies only top-level `*.yml` files in `presets/`.
-//   * Skips any file whose name ends in `-zh.yml` — those are
-//     reference-only, never embedded (per the preset author policy
-//     recorded in `presets/COLLECTION.md`).
-//   * Does NOT copy the `schemas/` or `minimal/` subdirectories —
-//     nothing in the codebase uses `include_str!` on them. `schemas/`
-//     stays canonical and is read at runtime via
-//     `event_policy.schema_file`; `minimal/` is only used by the
-//     smoke-test fixture loader which reads from the canonical path.
+// Authoring rules live at the top of `presets/manifest.yml`.
 //
-// `cargo:rerun-if-changed` lines pin the build to the precise set
-// of copied source files so a yml edit triggers a rebuild but an
-// unrelated edit in `presets/COLLECTION.md` does not.
+// Directories that are NEVER read by this script:
+//   * `presets/zh/`         — Chinese reference copies, not embedded.
+//   * `presets/extras/`     — Orphan / demo files, not embedded.
+//   * `presets/minimal/`    — Used by the smoke-test fixture loader,
+//                              read from the canonical path at runtime.
+//   * `presets/schemas/`    — Read at runtime via `event_policy.schema_file`.
 
 use std::fs;
 use std::path::PathBuf;
@@ -46,18 +44,50 @@ fn main() {
         }
     };
 
-    let canonical = PathBuf::from(&manifest_dir)
+    let manifest_path = PathBuf::from(&manifest_dir)
         .join("..")
         .join("..")
-        .join("presets");
+        .join("presets")
+        .join("manifest.yml");
+    let en_dir = PathBuf::from(&manifest_dir)
+        .join("..")
+        .join("..")
+        .join("presets")
+        .join("en");
     let dest = PathBuf::from(&out_dir).join("presets");
 
-    if !canonical.is_dir() {
+    println!("cargo:rerun-if-changed={}", manifest_path.display());
+
+    let manifest_text = match fs::read_to_string(&manifest_path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!(
+                "build.rs: failed to read manifest at {}: {}; skipping preset copy. \
+                 This is expected when building from a crates.io tarball — the embedded \
+                 binary falls back to runtime path resolution in that case.",
+                manifest_path.display(),
+                e
+            );
+            return;
+        }
+    };
+
+    let names: Vec<String> = match parse_embedded_names(&manifest_text) {
+        Ok(v) => v,
+        Err(e) => panic!(
+            "build.rs: failed to parse `presets/manifest.yml` ({}). \
+             Expected a top-level `embedded:` key whose value is a YAML list of \
+             preset basenames (no `.yml` extension).",
+            e
+        ),
+    };
+
+    if !en_dir.is_dir() {
         eprintln!(
             "build.rs: canonical preset dir not found at {}; skipping preset copy. \
              This is expected when building from a crates.io tarball — the embedded \
              binary falls back to runtime path resolution in that case.",
-            canonical.display()
+            en_dir.display()
         );
         return;
     }
@@ -65,55 +95,110 @@ fn main() {
     fs::create_dir_all(&dest).expect("failed to create $OUT_DIR/presets");
 
     let mut copied = 0usize;
-    let mut skipped_zh = 0usize;
-    let mut total_seen = 0usize;
-
-    let entries = match fs::read_dir(&canonical) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!(
-                "build.rs: failed to read_dir({}): {}; skipping preset copy",
-                canonical.display(),
-                e
+    for name in &names {
+        if name.is_empty() {
+            panic!("build.rs: manifest contains an empty preset name");
+        }
+        if name.contains('/') || name.contains('\\') || name.contains("..") {
+            panic!(
+                "build.rs: manifest preset name `{}` is not a bare basename",
+                name
             );
-            return;
         }
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
+        let src = en_dir.join(format!("{}.yml", name));
+        let dest_file = dest.join(format!("{}.yml", name));
+        if !src.is_file() {
+            panic!(
+                "build.rs: manifest lists `{}` but presets/en/{}.yml does not exist \
+                 (looked at {}). Add the file or remove the name from manifest.yml.",
+                name,
+                name,
+                src.display()
+            );
         }
-        let name = match path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n,
-            None => continue,
-        };
-        if !name.ends_with(".yml") {
-            continue;
-        }
-        total_seen += 1;
-        if name.ends_with("-zh.yml") {
-            skipped_zh += 1;
-            // Intentionally do NOT emit rerun-if-changed for -zh files:
-            // they are reference material and never enter the binary.
-            continue;
-        }
-        let dest_file = dest.join(name);
-        if let Err(e) = fs::copy(&path, &dest_file) {
+        if let Err(e) = fs::copy(&src, &dest_file) {
             panic!(
                 "build.rs: failed to copy {} -> {}: {}",
-                path.display(),
+                src.display(),
                 dest_file.display(),
                 e
             );
         }
         copied += 1;
-        println!("cargo:rerun-if-changed={}", path.display());
+        println!("cargo:rerun-if-changed={}", src.display());
     }
 
     eprintln!(
-        "build.rs: copied {} preset yml (skipped {} -zh.yml, {} total yml seen)",
-        copied, skipped_zh, total_seen
+        "build.rs: copied {} preset yml from manifest ({} declared)",
+        copied,
+        names.len()
     );
+}
+
+/// Minimal `presets/manifest.yml` parser.
+///
+/// We avoid pulling in a YAML dependency in build.rs. The manifest format
+/// is a small, stable subset:
+///
+/// ```yaml
+/// # comments are allowed
+/// embedded:
+///   - name1
+///   - name2
+/// ```
+///
+/// Lines outside the `embedded:` block are ignored. Indentation must
+/// match the example (two spaces under `embedded:`).
+fn parse_embedded_names(text: &str) -> Result<Vec<String>, String> {
+    let mut names: Vec<String> = Vec::new();
+    let mut in_embedded = false;
+    let mut found_embedded_key = false;
+
+    for (idx, raw_line) in text.lines().enumerate() {
+        let line = raw_line.split('#').next().unwrap_or("").trim_end();
+        if line.is_empty() {
+            continue;
+        }
+        if !in_embedded {
+            // Look for "embedded:" at the start of a line (allowing leading spaces).
+            let stripped = line.trim_start();
+            if stripped.starts_with("embedded:") {
+                found_embedded_key = true;
+                in_embedded = true;
+                // Allow `embedded: [a, b, c]` flow-style too.
+                let rest = stripped["embedded:".len()..].trim();
+                if let Some(inner) = rest.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                    for n in inner.split(',') {
+                        let n = n.trim().trim_matches('"').trim_matches('\'');
+                        if !n.is_empty() {
+                            names.push(n.to_string());
+                        }
+                    }
+                    in_embedded = false;
+                }
+                continue;
+            }
+            // Any other top-level key terminates the search.
+            if !line.starts_with(' ') && !line.starts_with('\t') && line.contains(':') {
+                return Err(format!("line {}: unexpected key `{}`", idx + 1, line));
+            }
+        } else {
+            let stripped = line.trim_start();
+            if stripped.starts_with("- ") {
+                let n = stripped[2..].trim().trim_matches('"').trim_matches('\'');
+                if n.is_empty() {
+                    return Err(format!("line {}: empty entry in `embedded:` list", idx + 1));
+                }
+                names.push(n.to_string());
+            } else if !stripped.is_empty() {
+                // Another top-level key — the embedded block has ended.
+                in_embedded = false;
+            }
+        }
+    }
+
+    if !found_embedded_key {
+        return Err("no `embedded:` key found".to_string());
+    }
+    Ok(names)
 }

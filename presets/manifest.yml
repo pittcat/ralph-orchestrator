@@ -1,0 +1,31 @@
+# Preset build manifest.
+#
+# Single source of truth for which English presets `crates/ralph-cli/build.rs`
+# copies into $OUT_DIR at compile time, and which `presets.rs` lists in its
+# `PRESETS` array. Both sides read this file and panic on mismatch — see
+# `crates/ralph-cli/build.rs` and `crates/ralph-cli/src/presets.rs`.
+#
+# Authoring rules:
+#   * Add a new builtin preset by:
+#       1. Writing the YAML under `presets/en/<name>.yml`
+#       2. Adding `<name>` to the `embedded` list below
+#       3. Adding an `EmbeddedPreset { name, description, content, public }`
+#          entry in `crates/ralph-cli/src/presets.rs`
+#       4. Adding it to `presets/index.json` if user-facing
+#   * Chinese reference copies live under `presets/zh/<name>-zh.yml` and
+#     are NEVER embedded. `build.rs` does not read this directory.
+#   * Files under `presets/extras/` are kept for reference but are not
+#     embedded and not listed in `index.json`.
+#   * Files under `presets/minimal/` and `presets/schemas/` are not
+#     embedded either; see comments at the top of each subdirectory.
+
+embedded:
+  - autoresearch
+  - ce-executor
+  - code-assist
+  - debug
+  # - hatless-baseline
+  - merge-loop
+  - pdd-to-code-assist
+  - research
+  - review

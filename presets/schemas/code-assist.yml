@@ -1,7 +1,7 @@
 # Payload schemas for code-assist.
 #
 # Loaded by `presets/code-assist.yml` via
-# `event_policy.schema_file: "schemas/code-assist.yml"`.
+# `event_policy.schema_file: "../schemas/code-assist.yml"`.
 #
 # Coverage mirrors the explicit `payload MUST include:` lines in
 # code-assist.yml. Each `tasks.*` / `review.*` / `finalization.*` topic

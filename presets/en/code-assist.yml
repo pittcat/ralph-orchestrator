@@ -35,7 +35,7 @@ event_loop:
   event_policy:
     enabled: true
     mode: enforce
-    schema_file: "schemas/code-assist.yml"
+    schema_file: "../schemas/code-assist.yml"
 
 cli:
   backend: "kiro"

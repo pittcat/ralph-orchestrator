@@ -1,7 +1,7 @@
 # Payload schemas for pdd-to-code-assist.
 #
 # Loaded by `presets/pdd-to-code-assist.yml` via
-# `event_policy.schema_file: "schemas/pdd-to-code-assist.yml"`.
+# `event_policy.schema_file: "../schemas/pdd-to-code-assist.yml"`.
 #
 # Each topic in the PDD flow (requirements -> design -> context -> plan
 # -> work -> review -> report) carries the active `task_id` and

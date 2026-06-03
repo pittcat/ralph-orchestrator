@@ -1,7 +1,7 @@
 # Payload schemas for ce-executor.
 #
 # Loaded by `presets/ce-executor.yml` (and its -zh sibling) via
-# `event_policy.schema_file: "schemas/ce-executor.yml"`. The path is
+# `event_policy.schema_file: "../schemas/ce-executor.yml"`. The path is
 # resolved relative to the preset file's directory at load time.
 #
 # Coverage:

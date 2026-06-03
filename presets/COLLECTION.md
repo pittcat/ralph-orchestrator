@@ -974,7 +974,7 @@ event_loop:
   event_policy:
     enabled: true
     mode: enforce
-    schema_file: "schemas/ce-executor.yml"
+    schema_file: "../schemas/ce-executor.yml"
 ```
 
 Schemas live in `presets/schemas/` (canonical) and
