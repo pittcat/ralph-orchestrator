@@ -11,6 +11,11 @@ homepage.workspace = true
 [package.metadata.dist]
 dist = true
 
+# Copy canonical preset yml into $OUT_DIR at build time, so the
+# Rust code can `include_str!(concat!(env!("OUT_DIR"), "/..."))`
+# without the crate owning a `presets/` mirror directory.
+build = "build.rs"
+
 [lints]
 workspace = true
 

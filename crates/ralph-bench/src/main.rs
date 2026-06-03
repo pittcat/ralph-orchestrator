@@ -533,6 +533,7 @@ fn format_termination_reason(reason: &TerminationReason) -> String {
         TerminationReason::RestartRequested => "RestartRequested".to_string(),
         TerminationReason::WorkspaceGone => "WorkspaceGone".to_string(),
         TerminationReason::Cancelled => "Cancelled".to_string(),
+        TerminationReason::PayloadContractViolation => "PayloadContractViolation".to_string(),
     }
 }
 

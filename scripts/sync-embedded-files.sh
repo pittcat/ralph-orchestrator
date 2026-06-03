@@ -21,37 +21,16 @@ PDD_DEST="crates/ralph-cli/sops/pdd.md"
 
 # Define source -> destination mappings for direct file mirrors.
 # Format: "source_path:dest_path"
+#
+# Preset yml and payload-contract schemas are no longer mirrored here.
+# `crates/ralph-cli/build.rs` copies them from the canonical `presets/`
+# directory into $OUT_DIR at compile time, and the Rust code embeds
+# them via `include_str!(concat!(env!("OUT_DIR"), "/..."))`. The
+# mirror directory under `crates/ralph-cli/presets/` has been removed
+# in favour of a single source of truth.
 MIRRORED_FILES=(
     # SOPs for ralph plan/task commands
     ".claude/skills/code-task-generator/SKILL.md:crates/ralph-cli/sops/code-task-generator.md"
-
-    # Presets (canonical -> mirror for cargo install)
-    "presets/autoresearch.yml:crates/ralph-cli/presets/autoresearch.yml"
-    "presets/ce-executor.yml:crates/ralph-cli/presets/ce-executor.yml"
-    "presets/code-assist.yml:crates/ralph-cli/presets/code-assist.yml"
-    "presets/debug.yml:crates/ralph-cli/presets/debug.yml"
-    "presets/hatless-baseline.yml:crates/ralph-cli/presets/hatless-baseline.yml"
-    "presets/minimal/amp.yml:crates/ralph-cli/presets/minimal/amp.yml"
-    "presets/minimal/builder.yml:crates/ralph-cli/presets/minimal/builder.yml"
-    "presets/minimal/claude.yml:crates/ralph-cli/presets/minimal/claude.yml"
-    "presets/minimal/code-assist.yml:crates/ralph-cli/presets/minimal/code-assist.yml"
-    "presets/minimal/codex.yml:crates/ralph-cli/presets/minimal/codex.yml"
-    "presets/minimal/gemini.yml:crates/ralph-cli/presets/minimal/gemini.yml"
-    "presets/minimal/kiro.yml:crates/ralph-cli/presets/minimal/kiro.yml"
-    "presets/minimal/opencode.yml:crates/ralph-cli/presets/minimal/opencode.yml"
-    "presets/minimal/preset-evaluator.yml:crates/ralph-cli/presets/minimal/preset-evaluator.yml"
-    "presets/minimal/smoke.yml:crates/ralph-cli/presets/minimal/smoke.yml"
-    "presets/minimal/test.yml:crates/ralph-cli/presets/minimal/test.yml"
-    "presets/pdd-to-code-assist.yml:crates/ralph-cli/presets/pdd-to-code-assist.yml"
-    "presets/research.yml:crates/ralph-cli/presets/research.yml"
-    "presets/review.yml:crates/ralph-cli/presets/review.yml"
-    # Payload contract schemas (U7) — referenced by `event_policy.schema_file`
-    # in the corresponding preset yml. Each preset points at the shared
-    # `presets/schemas/` directory; the path is resolved relative to the
-    # preset yml at load time.
-    "presets/schemas/ce-executor.yml:crates/ralph-cli/presets/schemas/ce-executor.yml"
-    "presets/schemas/code-assist.yml:crates/ralph-cli/presets/schemas/code-assist.yml"
-    "presets/schemas/pdd-to-code-assist.yml:crates/ralph-cli/presets/schemas/pdd-to-code-assist.yml"
 )
 
 # Colors for output
