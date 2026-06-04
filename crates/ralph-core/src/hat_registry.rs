@@ -72,6 +72,12 @@ impl HatRegistry {
     ///
     /// This gives `ralph` just enough authority to coordinate the topology
     /// (dispatch, complete, cancel) without granting unrestricted publish access.
+    ///
+    /// Ralph subscribes to `*` so it acts as the universal bus destination for
+    /// orchestrator-internal signals (scope violations, terminal monotonicity
+    /// notices, task.resume) that no specific hat claims. Hat selection
+    /// (`get_for_topic` / `find_by_trigger`) **excludes Ralph** when any
+    /// concrete subscriber exists — see `select_for_topic_excluding_ralph`.
     fn add_builtin_ralph(&mut self, config: &RalphConfig) {
         let publishes = self.derive_builtin_ralph_publishes(config);
         let ralph_hat = Hat::new("ralph", "Ralph")
