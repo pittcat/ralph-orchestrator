@@ -96,7 +96,13 @@ pub enum CompletionAfterTerminalAction {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct CompletionAfterTerminalConfig {
+    /// Action for duplicate terminal events after completion.
+    #[serde(default)]
     pub duplicate_terminal: CompletionAfterTerminalAction,
+    /// Action for business events after completion.
+    #[serde(default)]
     pub business_after_completion: CompletionAfterTerminalAction,
+    /// Whether to write diagnostic events for blocked/ignored events.
+    #[serde(default)]
     pub write_diagnostic_event: bool,
 }
