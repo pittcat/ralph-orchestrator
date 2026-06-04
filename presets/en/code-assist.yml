@@ -27,7 +27,7 @@ event_loop:
   required_events: ["review.passed"]
   starting_event: "build.start"    # Ralph publishes this after coordination
   max_iterations: 100              # Generous for multi-task implementation
-  max_runtime_seconds: 14400       # 4 hours max
+  max_runtime_seconds: 28800       # 8 hours max
   checkpoint_interval: 5
   # U7: Payload contract schemas (tasks.*, review.*, finalization.*)
   # inlined below as `event_policy.schemas`. The previous

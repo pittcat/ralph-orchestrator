@@ -27,7 +27,7 @@ event_loop:
   required_events: ["review.passed"]
   starting_event: "build.start"    # Ralph 在协调后发布此事件
   max_iterations: 100              # 为多任务实现预留充足空间
-  max_runtime_seconds: 14400       # 最长 4 小时
+  max_runtime_seconds: 28800       # 最长 8 小时
   checkpoint_interval: 5
 
 cli:

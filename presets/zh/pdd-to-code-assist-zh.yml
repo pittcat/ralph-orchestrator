@@ -28,7 +28,7 @@ event_loop:
   required_events: ["design.approved", "plan.ready", "tasks.ready", "implementation.ready", "validation.passed"]
   starting_event: "design.start"
   max_iterations: 150              # 为完整的想法→提交周期预留充足空间
-  max_runtime_seconds: 14400       # 最长 4 小时
+  max_runtime_seconds: 28800       # 最长 8 小时
   checkpoint_interval: 5
   # U7: 中文 preset 与英文 preset 共用同一份 schema 契约。
   # schemas 已内联到 `event_policy.schemas`,与 `presets/en/pdd-to-code-assist.yml` 保持一致。

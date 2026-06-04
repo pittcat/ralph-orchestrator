@@ -28,7 +28,7 @@ event_loop:
   required_events: ["design.approved", "plan.ready", "tasks.ready", "implementation.ready", "validation.passed"]
   starting_event: "design.start"
   max_iterations: 150              # Generous for full idea→commit cycle
-  max_runtime_seconds: 14400       # 4 hours max
+  max_runtime_seconds: 28800       # 8 hours max
   checkpoint_interval: 5
   # U7: Payload contract schemas (design.*, work.*, review.*, etc.)
   # inlined below as `event_policy.schemas`. The previous

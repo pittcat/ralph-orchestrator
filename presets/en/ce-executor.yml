@@ -28,7 +28,7 @@ event_loop:
   required_events: ["report.done"]
   starting_event: "work.start"
   max_iterations: 50
-  max_runtime_seconds: 14400  # 4 hours
+  max_runtime_seconds: 28800  # 8 hours
   checkpoint_interval: 5
   enforce_hat_scope: true
   verdict_gate:
