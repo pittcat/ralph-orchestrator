@@ -2183,6 +2183,7 @@ pub async fn run_loop_impl(
 
         let output = outcome.output;
         let success = outcome.success;
+        let output_hat_id = resolve_hat_for_output_processing(&hat_id, &display_hat);
 
         // Note: TUI lines are now written directly to IterationBuffer during streaming,
         // so no post-execution transfer is needed.
@@ -2239,14 +2240,14 @@ pub async fn run_loop_impl(
         log_events_from_output(
             &mut event_logger,
             iteration,
-            &hat_id,
+            &output_hat_id,
             &output,
             event_loop.registry(),
             raw_output_logging_enabled,
         );
 
         // Process output
-        if let Some(reason) = event_loop.process_output(&hat_id, &output, success) {
+        if let Some(reason) = event_loop.process_output(&output_hat_id, &output, success) {
             // Per spec: Log "All done! {promise} detected." when completion promise found
             if reason == TerminationReason::CompletionPromise {
                 info!(
@@ -3480,6 +3481,14 @@ fn resolve_display_hat_for_execution(
         .first()
         .cloned()
         .unwrap_or_else(|| preview_display_hat.clone())
+}
+
+fn resolve_hat_for_output_processing(hat_id: &HatId, display_hat: &HatId) -> HatId {
+    if hat_id.as_str() == "ralph" {
+        display_hat.clone()
+    } else {
+        hat_id.clone()
+    }
 }
 
 fn build_loop_start_payload_input(
@@ -14578,6 +14587,22 @@ hats:
         );
 
         assert_eq!(display_hat.as_str(), "fixer");
+    }
+
+    #[test]
+    fn test_output_processing_hat_uses_display_hat_when_ralph_coordinates() {
+        let execution_hat =
+            resolve_hat_for_output_processing(&HatId::new("ralph"), &HatId::new("tester"));
+
+        assert_eq!(execution_hat.as_str(), "tester");
+    }
+
+    #[test]
+    fn test_output_processing_hat_keeps_explicit_non_ralph_hat() {
+        let execution_hat =
+            resolve_hat_for_output_processing(&HatId::new("fixer"), &HatId::new("tester"));
+
+        assert_eq!(execution_hat.as_str(), "fixer");
     }
 
     #[test]
