@@ -233,7 +233,7 @@ related:
 | 原文件 | 拆分目标 |
 |--------|----------|
 | `loop_runner.rs` (14 733 行) | `loop_runner/mod.rs`（200 行）+ `loop_runner/*.rs` 13 个子文件 + `loop_runner/wave/*.rs` 3 个子文件 + `loop_runner/hooks/*.rs` 5 个子文件 + `loop_runner/tests.rs` 0 个新文件（沿用原 7 500 行测试的拆分） |
-| `event_loop/tests.rs` (9 152 行) | `event_loop/tests/mod.rs`（50 行）+ `event_loop/tests/common/mod.rs` + `event_loop/tests/*.rs` 28 个主题子文件 + `event_loop/tests/replay_light_integration.rs` |
+| `event_loop/tests.rs` (9 152 行) | `event_loop/tests/mod.rs`（50 行）+ `event_loop/tests/common/mod.rs` + `event_loop/tests/*.rs` 29 个主题子文件 + `event_loop/tests/replay_light_integration.rs` |
 | `config.rs` (6 278 行) | `config/mod.rs`（800 行）+ `config/*.rs` 18 个子文件 |
 | `main.rs` (5 695 行) | `main.rs`（300–500 行）+ `cli/*.rs` 5 个共享子文件 + `commands/*.rs` 11 个子命令文件 |
 
@@ -497,7 +497,7 @@ crates/ralph-cli/src/
 - Delete: `crates/ralph-core/src/event_loop/tests.rs`
 - Create: `crates/ralph-core/src/event_loop/tests/mod.rs`（50 行）
 - Create: `crates/ralph-core/src/event_loop/tests/common/mod.rs`（150 行）
-- Create: 28 个主题子文件（如上结构）
+- Create: 29 个主题子文件（如上结构）
 - Modify: `crates/ralph-core/src/event_loop/mod.rs`（仅当 `mod tests;` 声明需要时——实际不需要，Rust 同时接受 `tests.rs` 和 `tests/mod.rs`）
 
 **Approach:**
@@ -508,11 +508,11 @@ crates/ralph-cli/src/
   mod common;
   mod initialization;
   mod termination;
-  // ... 其他 27 个 mod 声明
+  // ... 其他 28 个 mod 声明
   mod replay_light_integration;
   ```
 - 把 7 个共享 helper + 2 个 mock service 移到 `tests/common/mod.rs`，用 `pub(super)` 限定可见性。
-- 按上述映射表把 220 个测试函数分配到 28 个主题子文件，每个子文件 `use super::common::*;` 引用共享 helper。
+- 按上述映射表把 220 个测试函数分配到 29 个主题子文件，每个子文件 `use super::common::*;` 引用共享 helper。
 - `replay_light_integration` 整体（7 个测试 + 8 个 helper）作为一个独立子文件，保留 `mod replay_light_integration { ... }` 内部结构。
 - `tempfile`、`serde_yaml`、`ralph_proto::Event` 等公共 `use` 集中在子文件顶部。
 
