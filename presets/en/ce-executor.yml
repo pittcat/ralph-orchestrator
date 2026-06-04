@@ -503,7 +503,7 @@ hats:
       - **advisory**: Report only.
 
       ### Output Format
-      Write findings to `.agents/scratchpad/ce-executor/{plan_name}/findings-{dimension}.json`
+      Write findings to `.agents/scratchpad/ce-executor/{plan_name}/findings-{dimension}-{task_id}.json`
       as a JSON object:
       ```json
       {"reviewer": "correctness", "findings": [...], "residual_risks": [...], "testing_gaps": [...]}
@@ -515,7 +515,7 @@ hats:
       - Payload MUST include:
         - `dimension`: string
         - `findings_count`: int
-        - `findings_file`: string (path to findings-{dimension}.json)
+        - `findings_file`: string (path to findings-{dimension}-{task_id}.json)
         - `plan_name`: string (needed by review-synthesizer)
         - `task_id`, `task_key`, `step`: MUST be present. Copy from the triggering `review.wave.ready` payload. Do NOT omit — plan-gate needs these for correlation.
         - `p0_count`, `p1_count`, `p2_count`, `p3_count`: int
@@ -662,11 +662,11 @@ hats:
       ### Read Inputs
       - Wait for all `review.dimension.done` events (aggregate `wait_for_all` handles this)
       - Get `plan_name` from any `review.dimension.done` payload (all carry it)
-      - Read each finding file from `findings-{dimension}.json` paths (resolve `{plan_name}` from payload)
+      - Read each finding file from `findings-{dimension}-{task_id}.json` paths (resolve `{plan_name}` from payload)
       - Read context from `.agents/scratchpad/ce-executor/{plan_name}/`
 
       ### Input Validation & Partial Failure Handling
-      - **Missing or unreadable findings-{dimension}.json**: log the dimension as failed in Coverage, skip its findings
+      - **Missing or unreadable findings-{dimension}-{task_id}.json**: log the dimension as failed in Coverage, skip its findings
       - **Malformed JSON** (parse error in a findings file): skip that dimension's file, log in Coverage as "malformed JSON"
       - **Missing required fields** (title, severity, file, line, confidence, autofix_class, owner): drop that individual finding, log count in Coverage
       - **Partial timeout**: if some dimensions haven't arrived within the aggregate timeout, work with available findings and list missing dimensions in Coverage

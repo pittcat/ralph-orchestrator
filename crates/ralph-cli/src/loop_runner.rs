@@ -6039,6 +6039,11 @@ struct WaveOutputs<'a> {
 /// Orchestrates the full wave lifecycle — detection, parallel execution,
 /// result merging back to the events file, and re-reading for aggregator
 /// activation. Updates CLI, RPC, and TUI outputs as appropriate.
+///
+/// v2: Processes **all** valid waves detected in the batch, not just the
+/// lexicographically first one.  This prevents silent drops when a hat
+/// emits multiple waves in a single iteration (e.g. review-coordinator
+/// retrying after an empty payload).
 async fn handle_wave_events(
     wave_events: &[ralph_core::Event],
     event_loop: &mut ralph_core::EventLoop,
@@ -6050,16 +6055,14 @@ async fn handle_wave_events(
     tui_state: Option<&Arc<std::sync::Mutex<ralph_tui::TuiState>>>,
     loop_id: &str,
 ) {
-    let Some(detected) = ralph_core::detect_wave_events(wave_events, event_loop.registry()) else {
+    let waves = ralph_core::detect_all_wave_events(wave_events, event_loop.registry());
+    if waves.is_empty() {
         return;
-    };
+    }
 
     info!(
-        wave_id = %detected.wave_id,
-        total = detected.total,
-        hat = %detected.target_hat,
-        concurrency = detected.hat_config.concurrency,
-        "Wave detected, executing parallel workers"
+        wave_count = waves.len(),
+        "Detected multiple waves in single iteration, executing all"
     );
 
     let out = WaveOutputs {
@@ -6069,160 +6072,174 @@ async fn handle_wave_events(
         tui: tui_state,
     };
 
-    let wave_timeout_secs = detected.timeout_secs();
-
-    // Announce wave start to CLI / RPC / TUI
-    if out.show_cli {
-        print_wave_header(
-            &detected.hat_config.name,
-            detected.total as usize,
-            wave_timeout_secs,
-            out.use_colors,
-        );
-    }
-    if let Some(tx) = out.rpc_tx {
-        let _ = tx.try_send(RpcEvent::WaveStarted {
-            hat_name: detected.hat_config.name.clone(),
-            worker_count: detected.total,
-            timeout_secs: wave_timeout_secs,
-        });
-    }
-    if let Some(state) = out.tui {
-        if let Ok(mut s) = state.lock() {
-            info!(
-                hat = %detected.hat_config.name,
-                workers = detected.total,
-                "Setting wave_active on TUI state"
-            );
-            s.wave_active = Some(ralph_tui::state::WaveInfo::new(
-                detected.hat_config.name.clone(),
-                detected.total,
-            ));
-            s.wave_active_iteration_idx = Some(s.iterations.len().saturating_sub(1));
-            if let Some(ref wave) = s.wave_active {
-                for (i, buffer) in wave.worker_buffers.iter().enumerate() {
-                    if let Ok(mut buf_lines) = buffer.lines_handle().lock() {
-                        buf_lines.push(Line::from(Span::styled(
-                            format!("Worker {}/{}: launching...", i + 1, detected.total),
-                            Style::default().fg(Color::DarkGray),
-                        )));
-                    }
-                }
-            }
-        }
-        let header_line = Line::from(vec![
-            Span::styled("── WAVE: ", Style::default().fg(Color::Magenta)),
-            Span::styled(
-                format!(
-                    "{} | {} workers | timeout {}s",
-                    detected.hat_config.name, detected.total, wave_timeout_secs
-                ),
-                Style::default().fg(Color::Magenta),
-            ),
-            Span::styled(
-                " ──────────────────────",
-                Style::default().fg(Color::Magenta),
-            ),
-        ]);
-        push_to_tui_iteration(state, header_line);
-    }
-
     let main_events_file =
         resolve_emit_events_path(ctx, config_state_machine_enabled(event_loop.config()));
-    let wave_result = execute_wave(
-        &detected,
-        backend,
-        &main_events_file,
-        out.show_cli,
-        out.use_colors,
-        out.rpc_tx.cloned(),
-        out.tui.map(Arc::clone),
-        &loop_id,
-    )
-    .await;
 
-    match wave_result {
-        Ok(completed) => {
-            // Report completion to CLI / RPC / TUI
-            if out.show_cli {
-                print_wave_summary(
-                    completed.results.len(),
-                    completed.failures.len(),
-                    completed.duration,
-                    out.use_colors,
+    let mut any_success = false;
+
+    for detected in waves {
+        let wave_timeout_secs = detected.timeout_secs();
+
+        info!(
+            wave_id = %detected.wave_id,
+            total = detected.total,
+            hat = %detected.target_hat,
+            concurrency = detected.hat_config.concurrency,
+            "Wave detected, executing parallel workers"
+        );
+
+        // Announce wave start to CLI / RPC / TUI
+        if out.show_cli {
+            print_wave_header(
+                &detected.hat_config.name,
+                detected.total as usize,
+                wave_timeout_secs,
+                out.use_colors,
+            );
+        }
+        if let Some(tx) = out.rpc_tx {
+            let _ = tx.try_send(RpcEvent::WaveStarted {
+                hat_name: detected.hat_config.name.clone(),
+                worker_count: detected.total,
+                timeout_secs: wave_timeout_secs,
+            });
+        }
+        if let Some(state) = out.tui {
+            if let Ok(mut s) = state.lock() {
+                info!(
+                    hat = %detected.hat_config.name,
+                    workers = detected.total,
+                    "Setting wave_active on TUI state"
                 );
-            }
-            if let Some(tx) = out.rpc_tx {
-                let _ = tx.try_send(RpcEvent::WaveCompleted {
-                    succeeded: completed.results.len(),
-                    failed: completed.failures.len(),
-                    duration_ms: completed.duration.as_millis() as u64,
-                });
-            }
-            if let Some(state) = out.tui {
-                if let Ok(mut s) = state.lock() {
-                    let wave_iter_idx = s.wave_active_iteration_idx.take();
-                    if let Some(wave) = s.wave_active.take() {
-                        let target_idx =
-                            wave_iter_idx.unwrap_or(s.iterations.len().saturating_sub(1));
-                        if let Some(buf) = s.iterations.get_mut(target_idx) {
-                            buf.wave_info = Some(wave);
+                s.wave_active = Some(ralph_tui::state::WaveInfo::new(
+                    detected.hat_config.name.clone(),
+                    detected.total,
+                ));
+                s.wave_active_iteration_idx = Some(s.iterations.len().saturating_sub(1));
+                if let Some(ref wave) = s.wave_active {
+                    for (i, buffer) in wave.worker_buffers.iter().enumerate() {
+                        if let Ok(mut buf_lines) = buffer.lines_handle().lock() {
+                            buf_lines.push(Line::from(Span::styled(
+                                format!("Worker {}/{}: launching...", i + 1, detected.total),
+                                Style::default().fg(Color::DarkGray),
+                            )));
                         }
                     }
                 }
-                let secs = completed.duration.as_secs();
-                let color = if completed.failures.is_empty() {
-                    Color::Green
-                } else {
-                    Color::Yellow
-                };
-                let line = Line::from(Span::styled(
+            }
+            let header_line = Line::from(vec![
+                Span::styled("── WAVE: ", Style::default().fg(Color::Magenta)),
+                Span::styled(
                     format!(
-                        "── Wave complete: {} succeeded, {} failed ({}s) ──────────────────────",
+                        "{} | {} workers | timeout {}s",
+                        detected.hat_config.name, detected.total, wave_timeout_secs
+                    ),
+                    Style::default().fg(Color::Magenta),
+                ),
+                Span::styled(
+                    " ──────────────────────",
+                    Style::default().fg(Color::Magenta),
+                ),
+            ]);
+            push_to_tui_iteration(state, header_line);
+        }
+
+        let wave_result = execute_wave(
+            &detected,
+            backend,
+            &main_events_file,
+            out.show_cli,
+            out.use_colors,
+            out.rpc_tx.cloned(),
+            out.tui.map(Arc::clone),
+            loop_id,
+        )
+        .await;
+
+        match wave_result {
+            Ok(completed) => {
+                any_success = true;
+
+                // Report completion to CLI / RPC / TUI
+                if out.show_cli {
+                    print_wave_summary(
                         completed.results.len(),
                         completed.failures.len(),
-                        secs,
-                    ),
-                    Style::default().fg(color),
-                ));
-                push_to_tui_iteration(state, line);
+                        completed.duration,
+                        out.use_colors,
+                    );
+                }
+                if let Some(tx) = out.rpc_tx {
+                    let _ = tx.try_send(RpcEvent::WaveCompleted {
+                        succeeded: completed.results.len(),
+                        failed: completed.failures.len(),
+                        duration_ms: completed.duration.as_millis() as u64,
+                    });
+                }
+                if let Some(state) = out.tui {
+                    if let Ok(mut s) = state.lock() {
+                        let wave_iter_idx = s.wave_active_iteration_idx.take();
+                        if let Some(wave) = s.wave_active.take() {
+                            let target_idx =
+                                wave_iter_idx.unwrap_or(s.iterations.len().saturating_sub(1));
+                            if let Some(buf) = s.iterations.get_mut(target_idx) {
+                                buf.wave_info = Some(wave);
+                            }
+                        }
+                    }
+                    let secs = completed.duration.as_secs();
+                    let color = if completed.failures.is_empty() {
+                        Color::Green
+                    } else {
+                        Color::Yellow
+                    };
+                    let line = Line::from(Span::styled(
+                        format!(
+                            "── Wave complete: {} succeeded, {} failed ({}s) ──────────────────────",
+                            completed.results.len(),
+                            completed.failures.len(),
+                            secs,
+                        ),
+                        Style::default().fg(color),
+                    ));
+                    push_to_tui_iteration(state, line);
+                }
+
+                info!(
+                    wave_id = %completed.wave_id,
+                    results = completed.results.len(),
+                    failures = completed.failures.len(),
+                    duration_ms = completed.duration.as_millis() as u64,
+                    "Wave completed"
+                );
+
+                // Merge result events into main events file so aggregator hat picks them up
+                if let Err(e) = merge_wave_results_to_events_file(
+                    &completed,
+                    &main_events_file,
+                    &detected.hat_config.publishes,
+                ) {
+                    warn!(error = %e, "Failed to merge wave results to events file");
+                }
             }
-
-            info!(
-                wave_id = %completed.wave_id,
-                results = completed.results.len(),
-                failures = completed.failures.len(),
-                duration_ms = completed.duration.as_millis() as u64,
-                "Wave completed"
-            );
-
-            // Merge result events into main events file so aggregator hat picks them up
-            if let Err(e) = merge_wave_results_to_events_file(
-                &completed,
-                &main_events_file,
-                &detected.hat_config.publishes,
-            ) {
-                warn!(error = %e, "Failed to merge wave results to events file");
-            }
-
-            // Re-read events file to publish wave results to the bus.
-            // The EventReader's position was before the merge, so it picks up
-            // only the newly appended events (e.g. review.done). These target
-            // the aggregator hat (concurrency=1), so they're partitioned as
-            // regular events and published to the bus — making next_hat()
-            // find the aggregator on the next iteration.
-            if let Ok(reread) = event_loop.process_events_from_jsonl_with_waves()
-                && reread.processed.had_events
-            {
-                info!("Published wave result events to bus for aggregator");
-                // Wave results legitimately share the same topic (e.g.
-                // 3x review.done). Reset the stale-loop counter so
-                // this batch doesn't trigger LoopStale termination.
-                event_loop.reset_stale_topic_counter();
+            Err(e) => {
+                warn!(error = %e, "Wave execution failed");
             }
         }
-        Err(e) => {
-            warn!(error = %e, "Wave execution failed");
+    }
+
+    // Re-read events file once after all waves have been merged so that
+    // every wave result is published to the bus.  The EventReader's position
+    // was before any merge, so it picks up all newly appended events.
+    if any_success {
+        if let Ok(reread) = event_loop.process_events_from_jsonl_with_waves()
+            && reread.processed.had_events
+        {
+            info!("Published wave result events to bus for aggregator");
+            // Wave results legitimately share the same topic (e.g.
+            // 3x review.done). Reset the stale-loop counter so
+            // this batch doesn't trigger LoopStale termination.
+            event_loop.reset_stale_topic_counter();
         }
     }
 }
@@ -6438,9 +6455,6 @@ async fn execute_wave(
             }
         };
 
-    // Wait for progress reporter to finish
-    let _ = progress_handle.await;
-
     let mut reported_indices = std::collections::HashSet::new();
 
     for result in results {
@@ -6462,6 +6476,10 @@ async fn execute_wave(
             }
         }
     }
+
+    // Wait for progress reporter after consuming join results. Successful
+    // worker outcomes still own a sender until the result is dropped here.
+    let _ = progress_handle.await;
 
     // Record failures for any workers that didn't report back (panicked or timed out).
     for i in 0..wave.total {
@@ -6757,7 +6775,11 @@ async fn run_wave_worker_acp(
     )
     .await;
     let duration = start.elapsed();
-    let events = read_worker_events(worker_events_path);
+    let events = if timed_out {
+        read_worker_events_with_retry(worker_events_path, Duration::from_millis(250))
+    } else {
+        read_worker_events(worker_events_path)
+    };
     let _ = fs::remove_file(worker_events_path);
 
     match result {
@@ -7140,6 +7162,17 @@ fn read_worker_events(path: &Path) -> Vec<ralph_core::Event> {
         .lines()
         .filter_map(|line| serde_json::from_str::<ralph_core::Event>(line).ok())
         .collect()
+}
+
+fn read_worker_events_with_retry(path: &Path, timeout: Duration) -> Vec<ralph_core::Event> {
+    let start = std::time::Instant::now();
+    loop {
+        let events = read_worker_events(path);
+        if !events.is_empty() || start.elapsed() >= timeout {
+            return events;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 /// Merge wave result events into the main events file.

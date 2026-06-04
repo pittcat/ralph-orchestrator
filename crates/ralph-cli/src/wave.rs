@@ -6,7 +6,7 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use std::fs;
-use std::io::Write;
+use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
@@ -32,8 +32,12 @@ pub struct WaveEmitArgs {
     pub topic: String,
 
     /// Payloads for each wave event instance (one per parallel worker)
-    #[arg(long, num_args = 1..)]
+    #[arg(long, num_args = 1.., group = "payload_source")]
     pub payloads: Vec<String>,
+
+    /// Read payloads from stdin, one per line
+    #[arg(long, group = "payload_source")]
+    pub payloads_stdin: bool,
 }
 
 /// Execute a wave command.
@@ -53,14 +57,25 @@ fn execute_emit(args: WaveEmitArgs, use_colors: bool) -> Result<()> {
         );
     }
 
+    let payloads = if args.payloads_stdin {
+        read_payloads_from_stdin()?
+    } else {
+        args.payloads
+    };
+
+    if payloads.is_empty() {
+        bail!("At least one payload is required (use --payloads or --payloads-stdin)");
+    }
+    validate_payload_shape(&payloads)?;
+
     let events_file = resolve_events_file();
-    let wave_id = write_wave_events(&args.topic, &args.payloads, &events_file)?;
+    let wave_id = write_wave_events(&args.topic, &payloads, &events_file)?;
 
     // Print wave ID to stdout (machine-parseable)
     println!("{}", wave_id);
 
     // Human-readable confirmation to stderr
-    let total = args.payloads.len();
+    let total = payloads.len();
     if use_colors {
         eprintln!(
             "\x1b[32m\u{2713}\x1b[0m Wave dispatched: {} events on topic '{}' (wave {})",
@@ -74,6 +89,52 @@ fn execute_emit(args: WaveEmitArgs, use_colors: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Reject the historical footgun where agents passed one shell variable
+/// containing many newline-delimited JSON objects to `--payloads`.
+fn validate_payload_shape(payloads: &[String]) -> Result<()> {
+    for payload in payloads {
+        if looks_like_multiple_json_lines(payload) {
+            bail!(
+                "`--payloads` received one argument containing multiple JSON payload lines. \
+                 Use `--payloads-stdin` instead, e.g. `printf '%s\\n' \"$payloads\" | ralph wave emit <topic> --payloads-stdin`."
+            );
+        }
+    }
+    Ok(())
+}
+
+fn looks_like_multiple_json_lines(payload: &str) -> bool {
+    let json_like_lines = payload
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with('{') || trimmed.starts_with('[')
+        })
+        .take(2)
+        .count();
+    json_like_lines > 1
+}
+
+/// Read payloads from stdin, one JSON object per line.
+/// Empty lines are skipped.
+fn read_payloads_from_stdin() -> Result<Vec<String>> {
+    read_payloads_from_reader(io::stdin().lock())
+}
+
+/// Read payloads from any buffered reader, one payload per line.
+/// Empty lines are skipped.
+fn read_payloads_from_reader<R: BufRead>(reader: R) -> Result<Vec<String>> {
+    let mut payloads = Vec::new();
+    for line in reader.lines() {
+        let line = line.context("Failed to read line from reader")?;
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            payloads.push(trimmed.to_string());
+        }
+    }
+    Ok(payloads)
 }
 
 /// Write wave events to a JSONL file. Returns the generated wave ID.
@@ -265,5 +326,41 @@ mod tests {
         if result.as_deref() == Ok("1") {
             panic!("nested wave check should reject inside worker");
         }
+    }
+
+    #[test]
+    fn test_read_payloads_from_reader_skips_empty_lines() {
+        let input = "{\"dim\":\"correctness\"}\n\n{\"dim\":\"testing\"}\n\n{\"dim\":\"maintainability\"}\n";
+        let cursor = std::io::Cursor::new(input);
+        let payloads = read_payloads_from_reader(cursor).unwrap();
+        assert_eq!(payloads.len(), 3);
+        assert_eq!(payloads[0], r#"{"dim":"correctness"}"#);
+        assert_eq!(payloads[1], r#"{"dim":"testing"}"#);
+        assert_eq!(payloads[2], r#"{"dim":"maintainability"}"#);
+    }
+
+    #[test]
+    fn test_read_payloads_from_reader_rejects_all_empty() {
+        let input = "\n\n  \n";
+        let cursor = std::io::Cursor::new(input);
+        let payloads = read_payloads_from_reader(cursor).unwrap();
+        assert!(payloads.is_empty());
+    }
+
+    #[test]
+    fn test_validate_payload_shape_rejects_newline_joined_json_payloads() {
+        let payloads = vec![
+            "{\"dimension\":\"correctness\"}\n{\"dimension\":\"testing\"}".to_string(),
+        ];
+        let err = validate_payload_shape(&payloads).unwrap_err().to_string();
+        assert!(err.contains("--payloads-stdin"));
+    }
+
+    #[test]
+    fn test_validate_payload_shape_allows_single_multiline_json_payload() {
+        let payloads = vec![
+            "{\n  \"dimension\": \"correctness\",\n  \"focus\": \"check behavior\"\n}".to_string(),
+        ];
+        validate_payload_shape(&payloads).unwrap();
     }
 }

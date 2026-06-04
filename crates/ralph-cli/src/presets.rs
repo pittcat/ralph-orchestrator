@@ -2049,4 +2049,32 @@ mod tests {
              the manifest. See presets/manifest.yml for authoring rules."
         );
     }
+
+    #[test]
+    fn test_ce_executor_findings_include_task_id_isolation() {
+        // Bug #2 regression: dimension-reviewer must write findings files that
+        // include task_id so stale files from prior steps/presets do not串扰.
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let content = preset.content;
+
+        // dimension-reviewer instructions must reference task-id-scoped paths
+        assert!(
+            content.contains("findings-{dimension}-{task_id}.json"),
+            "ce-executor dimension-reviewer must instruct findings-{{dimension}}-{{task_id}}.json"
+        );
+
+        // The old bare findings-{dimension}.json pattern must be gone (except as
+        // a substring of the new, longer pattern).
+        let old_pattern = "findings-{dimension}.json";
+        let new_pattern = "findings-{dimension}-{task_id}.json";
+        // Every occurrence of the old pattern must be part of the new pattern.
+        for (idx, _) in content.match_indices(old_pattern) {
+            let end = idx + old_pattern.len();
+            assert!(
+                content[..end].ends_with(new_pattern),
+                "ce-executor still contains bare findings-{{dimension}}.json at offset {} — all findings paths must be task-id-scoped",
+                idx
+            );
+        }
+    }
 }

@@ -31,7 +31,17 @@ ralph wave emit [OPTIONS] <TOPIC>
 | 参数 | 类型 | 必需 | 默认值 | 说明 |
 |------|------|------|--------|------|
 | `<TOPIC>` | string | 是 | — | 所有 wave 事件的主题（如 `review.file`） |
-| `--payloads <PAYLOADS>...` | string… | **是** | — | 每个 wave worker 一个 payload（`num_args = 1..`，至少 1 个） |
+| `--payloads <PAYLOADS>...` | string… | 二选一 | — | 每个 wave worker 一个 payload（`num_args = 1..`，至少 1 个） |
+| `--payloads-stdin` | flag | 二选一 | false | 从 stdin 逐行读取 payload，适合 JSON payload 列表 |
+
+`--payloads` 与 `--payloads-stdin` 互斥，必须提供其中一个。不要把多行 JSON 列表塞进一个 shell 变量后传给 `--payloads "$PAYLOADS"`；该用法会被拒绝。多 JSON payload 使用：
+
+```bash
+printf '%s\n' \
+  '{"dimension":"correctness","focus":"..."}' \
+  '{"dimension":"testing","focus":"..."}' \
+  | ralph wave emit review.wave.ready --payloads-stdin
+```
 
 **事件文件解析优先级：**
 1. `RALPH_EVENTS_FILE` 环境变量（非空时）
@@ -47,6 +57,7 @@ ralph wave emit [OPTIONS] <TOPIC>
 **反模式 / 注意事项：**
 - 🔴 ralph wave emit 没有 format 选项。
 - 🔴 不要在 wave worker 内部调用 `ralph wave emit`。
+- 🔴 不要使用 `ralph wave emit <topic> --payloads "$PAYLOADS"` 传递多行 JSON；使用 `--payloads-stdin`。
 
 **校验：**
 ```bash
@@ -68,14 +79,15 @@ tail -n 3 "$events_file" | jq -s 'map(select(.topic == "YOUR_TOPIC")) | length'
 | 错误 | 原因 | 修复 |
 |------|------|------|
 | `Cannot dispatch waves from inside a wave worker` | 在 `RALPH_WAVE_WORKER=1` 的子进程中调用 `ralph wave emit` | worker 应通过 `ralph emit` 返回结果（会写入 candidate-events） |
-| `At least one payload is required` | `--payloads` 为空（`num_args = 1..` 在 clap 中仍允许空数组） | 至少提供 1 个 payload：`ralph wave emit review.file --payloads a.txt b.txt c.txt` |
+| `At least one payload is required` | `--payloads` 为空或 `--payloads-stdin` 未读到非空行 | 至少提供 1 个 payload：`ralph wave emit review.file --payloads a.txt b.txt c.txt`，或用 `--payloads-stdin` |
+| ``--payloads` received one argument containing multiple JSON payload lines` | 把多行 JSON 列表作为一个 shell 参数传给了 `--payloads` | 改用 `--payloads-stdin` |
 | `Failed to create directory: <path>` | 父目录无写权限或路径非法 | 检查 `.ralph/` 父目录权限；或设置 `RALPH_EVENTS_FILE` 指向可写路径 |
 | `Failed to open events file: <path>` | 事件文件路径不可写或不存在 | 确认 `RALPH_EVENTS_FILE` / marker 指向的路径可写；或 `mkdir -p .ralph` |
 | 任何命令失败 | 通用恢复 | 1. `ralph wave emit --help` 确认语法 2. 检查退出码 3. 查看错误信息 4. 重试 |
 
 > **wave worker 注意事项**：
 >
-> 1. **结果返回必须用 `ralph emit`**：在 `RALPH_WAVE_WORKER=1` 的子进程中，`ralph emit` 会将事件写入 **candidate-events**（不是 current-events），与 wave 调度器对 worker 输出的预期一致。`ralph wave emit` 本身在 worker 内被阻止（`crates/ralph-cli/src/wave.rs:49-54`）。
+> 1. **结果返回必须用 `ralph emit`**：在 `RALPH_WAVE_WORKER=1` 的子进程中，`ralph emit` 会将事件写入 **candidate-events**（不是 current-events），与 wave 调度器对 worker 输出的预期一致。`ralph wave emit` 本身在 worker 内被阻止（`crates/ralph-cli/src/wave.rs:51-57`）。
 >
 > 2. **candidate-events vs current-events 落点**：
 >    - `ralph wave emit` → 写入 **current-events**（主循环的合并目标，3 级回退：`RALPH_EVENTS_FILE` → `.ralph/current-events` → `.ralph/events.jsonl`）

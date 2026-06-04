@@ -2897,6 +2897,17 @@ fn should_policy_check_emit(args: &EmitArgs, config: Option<&RalphConfig>) -> Po
 ///
 /// Events are written to the path specified in `.ralph/current-events` marker file
 /// (created by `ralph run`), or falls back to `.ralph/events.jsonl` if no marker exists.
+/// Heuristic: does this payload look like a JSON object or array?
+///
+/// Used by `emit_command_with_root` to auto-detect JSON payloads when the
+/// agent omits the `--json` flag.  This prevents structured events such as
+/// `work.done` from being stored as plain strings and then rejected by the
+/// execution-contract validator.
+fn looks_like_json(payload: &str) -> bool {
+    let trimmed = payload.trim_start();
+    trimmed.starts_with('{') || trimmed.starts_with('[')
+}
+
 fn emit_command(color_mode: ColorMode, args: EmitArgs) -> Result<()> {
     emit_command_with_root(color_mode, args, None)
 }
@@ -3078,6 +3089,14 @@ fn emit_command_with_root(
         serde_json::from_str::<serde_json::Value>(&payload)?
     } else if payload.is_empty() {
         serde_json::Value::Null
+    } else if looks_like_json(&payload) {
+        // Auto-detect JSON objects/arrays even without --json so that
+        // agents emitting structured events (e.g. work.done) don't get
+        // their payload stored as a plain string and rejected by the
+        // execution contract validator.
+        serde_json::from_str::<serde_json::Value>(&payload).unwrap_or_else(|_| {
+            serde_json::Value::String(payload)
+        })
     } else {
         serde_json::Value::String(payload)
     };
@@ -5691,5 +5710,73 @@ event_loop:
         }
         let result = resolve_emit_path(&workspace, &workspace.join(".ralph/events.jsonl"), None);
         assert!(result.is_err(), "symlink to outside loop must be rejected");
+    }
+
+    #[test]
+    fn test_emit_auto_detects_json_payload_without_json_flag() {
+        // Bug #4 regression: work.done and other structured events must be
+        // stored as JSON objects even when the agent forgets --json.
+        let tmp = TempDir::new().unwrap();
+        let workspace = make_workspace(&tmp);
+        let events_file = workspace.join(".ralph/events.jsonl");
+
+        let args = EmitArgs {
+            topic: "work.done".to_string(),
+            payload: r#"{"plan_name":"test","task_id":"t1"}"#.to_string(),
+            json: false,
+            file: events_file.clone(),
+            policy_check: false,
+            no_policy_check: false,
+            hat: None,
+            triggered: None,
+            source: None,
+        };
+
+        emit_command_with_root(ColorMode::Never, args, Some(&workspace)).unwrap();
+
+        let content = std::fs::read_to_string(&events_file).unwrap();
+        let event: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
+        // payload must be an object, NOT a string
+        assert!(
+            event["payload"].is_object(),
+            "payload should be auto-detected as JSON object, got: {:?}",
+            event["payload"]
+        );
+        assert_eq!(event["payload"]["plan_name"], "test");
+    }
+
+    #[test]
+    fn test_emit_leaves_plain_string_as_string() {
+        // Non-JSON-looking strings must stay strings for backward compat.
+        let tmp = TempDir::new().unwrap();
+        let workspace = make_workspace(&tmp);
+        let events_file = workspace.join(".ralph/events.jsonl");
+
+        let args = EmitArgs {
+            topic: "build.done".to_string(),
+            payload: "Build succeeded".to_string(),
+            json: false,
+            file: events_file.clone(),
+            policy_check: false,
+            no_policy_check: false,
+            hat: None,
+            triggered: None,
+            source: None,
+        };
+
+        emit_command_with_root(ColorMode::Never, args, Some(&workspace)).unwrap();
+
+        let content = std::fs::read_to_string(&events_file).unwrap();
+        let event: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
+        assert_eq!(event["payload"], "Build succeeded");
+    }
+
+    #[test]
+    fn test_looks_like_json_heuristic() {
+        assert!(looks_like_json(r#"{"key":"val"}"#));
+        assert!(looks_like_json("  [{\"a\":1}]"));
+        assert!(!looks_like_json("hello world"));
+        assert!(!looks_like_json(""));
+        assert!(!looks_like_json("  plain text"));
     }
 }

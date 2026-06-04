@@ -42,42 +42,13 @@ impl DetectedWave {
     }
 }
 
-/// Detect wave events from a set of events.
-///
-/// Groups events by wave_id, validates that all events in a wave are consistent
-/// (same topic, matching wave_total), and resolves the target hat from the registry.
-///
-/// v1: Returns the first detected wave (one wave per iteration).
-/// Events without wave metadata are ignored.
-pub fn detect_wave_events(events: &[Event], registry: &HatRegistry) -> Option<DetectedWave> {
-    // Group events by wave_id
-    let mut wave_groups: HashMap<&str, Vec<&Event>> = HashMap::new();
-    for event in events {
-        if let Some(ref wave_id) = event.wave_id {
-            wave_groups.entry(wave_id.as_str()).or_default().push(event);
-        }
-    }
-
-    if wave_groups.is_empty() {
-        return None;
-    }
-
-    // v1: Take the lexicographically first wave_id (deterministic, one wave per iteration)
-    let wave_id = *wave_groups.keys().min()?;
-    if wave_groups.len() > 1 {
-        tracing::warn!(
-            selected = wave_id,
-            total_waves = wave_groups.len(),
-            "Multiple waves detected in single iteration, processing only the first"
-        );
-    }
-    let wave_events = wave_groups.remove(wave_id)?;
-
-    // Validate: all events must have the same topic and wave_total,
-    // and the batch must be a complete, well-formed wave (every event
-    // has wave_total, total > 0, indices < total, batch size matches
-    // total). These checks live here so the dispatch path can rely on
-    // `DetectedWave` invariants without re-validating.
+/// Attempt to build a validated `DetectedWave` from a group of events sharing
+/// the same `wave_id`.
+fn try_build_wave(
+    wave_id: &str,
+    wave_events: Vec<&Event>,
+    registry: &HatRegistry,
+) -> Option<DetectedWave> {
     let first = wave_events.first()?;
     let topic = &first.topic;
     let wave_total = first.wave_total?;
@@ -152,6 +123,70 @@ pub fn detect_wave_events(events: &[Event], registry: &HatRegistry) -> Option<De
         events: sorted_events,
         total: wave_total,
     })
+}
+
+/// Detect wave events from a set of events.
+///
+/// Groups events by wave_id, validates that all events in a wave are consistent
+/// (same topic, matching wave_total), and resolves the target hat from the registry.
+///
+/// v1: Returns the first detected wave (one wave per iteration).
+/// Events without wave metadata are ignored.
+pub fn detect_wave_events(events: &[Event], registry: &HatRegistry) -> Option<DetectedWave> {
+    // Group events by wave_id
+    let mut wave_groups: HashMap<&str, Vec<&Event>> = HashMap::new();
+    for event in events {
+        if let Some(ref wave_id) = event.wave_id {
+            wave_groups.entry(wave_id.as_str()).or_default().push(event);
+        }
+    }
+
+    if wave_groups.is_empty() {
+        return None;
+    }
+
+    // v1: Take the lexicographically first wave_id (deterministic, one wave per iteration)
+    let wave_id = *wave_groups.keys().min()?;
+    if wave_groups.len() > 1 {
+        tracing::warn!(
+            selected = wave_id,
+            total_waves = wave_groups.len(),
+            "Multiple waves detected in single iteration, processing only the first"
+        );
+    }
+    let wave_events = wave_groups.remove(wave_id)?;
+    try_build_wave(wave_id, wave_events, registry)
+}
+
+/// Detect **all** valid wave events from a set of events.
+///
+/// Unlike [`detect_wave_events`], this returns every well-formed, complete wave
+/// found in the event batch — not just the lexicographically first one.  This
+/// prevents silent drops when a hat emits multiple waves in a single iteration
+/// (e.g. review-coordinator retrying after an empty payload).
+///
+/// Waves are sorted by `wave_id` for deterministic execution order.
+/// Events without wave metadata, or belonging to an invalid/incomplete wave,
+/// are ignored.
+pub fn detect_all_wave_events(events: &[Event], registry: &HatRegistry) -> Vec<DetectedWave> {
+    // Group events by wave_id
+    let mut wave_groups: HashMap<&str, Vec<&Event>> = HashMap::new();
+    for event in events {
+        if let Some(ref wave_id) = event.wave_id {
+            wave_groups.entry(wave_id.as_str()).or_default().push(event);
+        }
+    }
+
+    let mut detected = Vec::new();
+    for (wave_id, wave_events) in wave_groups {
+        if let Some(wave) = try_build_wave(wave_id, wave_events, registry) {
+            detected.push(wave);
+        }
+    }
+
+    // Deterministic ordering by wave_id
+    detected.sort_by(|a, b| a.wave_id.cmp(&b.wave_id));
+    detected
 }
 
 #[cfg(test)]
@@ -388,5 +423,74 @@ mod tests {
         let wave = detect_wave_events(&events, &registry).expect("valid wave must be detected");
         assert_eq!(wave.total, 2);
         assert_eq!(wave.events.len(), 2);
+    }
+
+    // ---- detect_all_wave_events tests (Bug #1 regression) ----
+
+    #[test]
+    fn test_detect_all_returns_multiple_waves() {
+        let registry = make_registry_with_concurrent_hat();
+        // Three independent waves in one batch
+        let events = vec![
+            make_wave_event("review.file", "a1", "w-alpha", 0, 2),
+            make_wave_event("review.file", "a2", "w-alpha", 1, 2),
+            make_wave_event("review.file", "b1", "w-beta", 0, 1),
+            make_wave_event("review.file", "c1", "w-gamma", 0, 2),
+            make_wave_event("review.file", "c2", "w-gamma", 1, 2),
+        ];
+
+        let waves = detect_all_wave_events(&events, &registry);
+        assert_eq!(waves.len(), 3, "expected three valid waves");
+        assert_eq!(waves[0].wave_id, "w-alpha");
+        assert_eq!(waves[0].total, 2);
+        assert_eq!(waves[1].wave_id, "w-beta");
+        assert_eq!(waves[1].total, 1);
+        assert_eq!(waves[2].wave_id, "w-gamma");
+        assert_eq!(waves[2].total, 2);
+    }
+
+    #[test]
+    fn test_detect_all_skips_invalid_waves_but_keeps_valid_ones() {
+        let registry = make_registry_with_concurrent_hat();
+        // w-broken has batch size mismatch; w-good is valid
+        let events = vec![
+            make_wave_event("review.file", "bad", "w-broken", 0, 3),
+            make_wave_event("review.file", "ok1", "w-good", 0, 2),
+            make_wave_event("review.file", "ok2", "w-good", 1, 2),
+        ];
+
+        let waves = detect_all_wave_events(&events, &registry);
+        assert_eq!(waves.len(), 1, "only the valid wave should be returned");
+        assert_eq!(waves[0].wave_id, "w-good");
+    }
+
+    #[test]
+    fn test_detect_all_returns_empty_when_no_waves() {
+        let registry = make_registry_with_concurrent_hat();
+        let waves = detect_all_wave_events(&[], &registry);
+        assert!(waves.is_empty());
+    }
+
+    #[test]
+    fn test_detect_all_ignores_sequential_hat() {
+        let registry = make_registry_with_sequential_hat();
+        let events = vec![
+            make_wave_event("build.start", "p1", "w-seq", 0, 2),
+            make_wave_event("build.start", "p2", "w-seq", 1, 2),
+        ];
+        let waves = detect_all_wave_events(&events, &registry);
+        assert!(waves.is_empty(), "sequential hats should not produce waves");
+    }
+
+    #[test]
+    fn test_detect_all_skips_incomplete_waves() {
+        let registry = make_registry_with_concurrent_hat();
+        // w-partial is missing index 1 (only has 0 and 2 out of 3)
+        let events = vec![
+            make_wave_event("review.file", "p0", "w-partial", 0, 3),
+            make_wave_event("review.file", "p2", "w-partial", 2, 3),
+        ];
+        let waves = detect_all_wave_events(&events, &registry);
+        assert!(waves.is_empty(), "incomplete wave should be skipped");
     }
 }
