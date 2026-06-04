@@ -505,7 +505,7 @@ pub struct StateMachineStateSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{InstanceKeyConfig, TerminalGuardConfig, TransitionConfig};
+    use crate::config::state_machine::{InstanceKeyConfig, TerminalGuardConfig, TransitionConfig};
 
     fn make_experiment_config() -> StateMachineConfig {
         StateMachineConfig {

@@ -302,7 +302,7 @@ mod tests {
                     "LOOP_COMPLETE".to_string(),
                 ],
                 mode: WorkflowChainMode::Strict,
-                correlation: Some(crate::config::CorrelationConfig {
+                correlation: Some(crate::config::workflow_guards::CorrelationConfig {
                     from_payload: "id".to_string(),
                     from_topic: None,
                 }),
