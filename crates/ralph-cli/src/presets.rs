@@ -98,6 +98,7 @@ pub fn preset_names() -> Vec<&'static str> {
 mod tests {
     use super::*;
     use ralph_core::event_origin::{OriginCheck, validate_event_origin};
+    use ralph_core::payload_contract::validate_payload_contract;
     use ralph_core::{HatRegistry, RalphConfig};
 
     fn assert_public_preset_has_completion_path(preset: &EmbeddedPreset) {
@@ -1171,6 +1172,10 @@ mod tests {
             ("plan-gate", "queue.advance"),
             ("plan-gate", "plan.complete"),
             ("plan-gate", "plan.blocked"),
+            ("fixer", "fix.exhausted"),
+            ("debug-resolver", "fix.plan.ready"),
+            ("debug-resolver", "debug.exhausted"),
+            ("debug-resolver", "plan.blocked"),
             ("shipper", "REVIEW_COMPLETE"),
             ("reporter", "report.done"),
             ("reporter", "LOOP_COMPLETE"),
@@ -1605,8 +1610,12 @@ mod tests {
             "shipper must trigger on plan.blocked"
         );
         assert!(
-            shipper.triggers.contains(&"fix.exhausted".to_string()),
-            "shipper must trigger on fix.exhausted"
+            shipper.triggers.contains(&"debug.exhausted".to_string()),
+            "shipper must trigger on debug.exhausted"
+        );
+        assert!(
+            !shipper.triggers.contains(&"fix.exhausted".to_string()),
+            "shipper should NOT trigger on fix.exhausted in normal topology; debug-resolver handles that path"
         );
     }
 
@@ -1974,7 +1983,7 @@ mod tests {
 
     #[test]
     fn test_ce_executor_shipper_commit_only_on_plan_complete() {
-        // R14: shipper must NOT commit or mark plan completed on plan.blocked or fix.exhausted.
+        // R14: shipper must NOT commit or mark plan completed on plan.blocked/debug.exhausted.
         let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
         let content = preset.content;
         let shipper_section = content
@@ -1988,8 +1997,8 @@ mod tests {
             "shipper must gate commit and plan-status update to plan.complete only"
         );
         assert!(
-            shipper_section.contains("plan.blocked") && shipper_section.contains("fix.exhausted"),
-            "shipper must reference plan.blocked and fix.exhausted in its guarded sections"
+            shipper_section.contains("plan.blocked") && shipper_section.contains("debug.exhausted"),
+            "shipper must reference plan.blocked and debug.exhausted in its guarded sections"
         );
     }
 
@@ -2017,7 +2026,7 @@ mod tests {
     #[test]
     fn test_ce_executor_shipper_simplify_check_gated_to_plan_complete() {
         // R16: shipper's simplify check must be gated to plan.complete only.
-        // On plan.blocked or fix.exhausted, the state is not shippable — simplify is inappropriate.
+        // On plan.blocked or debug.exhausted, the state is not shippable — simplify is inappropriate.
         let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
         let content = preset.content;
         let shipper_section = content
@@ -2080,6 +2089,16 @@ mod tests {
         // R17: fixer must read task_id/task_key/step from review.failed payload
         // so that fix.applied / fix.exhausted can carry them downstream.
         let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
+        let fixer = config
+            .hats
+            .get("fixer")
+            .expect("ce-executor must define fixer");
+        assert!(
+            fixer.default_publishes.is_none(),
+            "fixer must NOT use default_publishes; fix.exhausted requires contextual payload"
+        );
         let content = preset.content;
         let fixer_section = content
             .split("fixer:")
@@ -2090,6 +2109,11 @@ mod tests {
                 && fixer_section.contains("task_key")
                 && fixer_section.contains("step"),
             "fixer Read State must reference task_id, task_key, step from review.failed payload"
+        );
+        assert!(
+            fixer_section.contains("MUST explicitly publish")
+                || fixer_section.contains("必须显式发布"),
+            "fixer instructions must require explicit fix.applied/fix.exhausted publishing"
         );
     }
 
@@ -2136,6 +2160,15 @@ mod tests {
     #[test]
     fn test_ce_executor_zh_fixer_reads_task_correlation_fields() {
         let content = read_root_preset("ce-executor-zh.yml");
+        let config = RalphConfig::parse_yaml(&content).expect("ce-executor-zh YAML should parse");
+        let fixer = config
+            .hats
+            .get("fixer")
+            .expect("ce-executor-zh must define fixer");
+        assert!(
+            fixer.default_publishes.is_none(),
+            "ce-executor-zh fixer must NOT use default_publishes"
+        );
         let fixer_section = content
             .split("fixer:")
             .nth(1)
@@ -2218,45 +2251,6 @@ mod tests {
                 && exhausted_section.contains("task_key")
                 && exhausted_section.contains("step"),
             "ce-executor-zh fixer early fix.exhausted path must carry task_id, task_key, step"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_shipper_fix_exhausted_preserves_task_correlation() {
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
-        let content = preset.content;
-        let shipper_section = content
-            .split("shipper:")
-            .nth(1)
-            .expect("ce-executor must have shipper section");
-        let exhausted_start = shipper_section
-            .find("`fix.exhausted`")
-            .expect("shipper must describe fix.exhausted handling");
-        let exhausted_section = &shipper_section[exhausted_start..];
-        assert!(
-            exhausted_section.contains("task_id")
-                && exhausted_section.contains("task_key")
-                && exhausted_section.contains("step"),
-            "shipper fix.exhausted handling must read and publish task_id, task_key, step"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_zh_shipper_fix_exhausted_preserves_task_correlation() {
-        let content = read_root_preset("ce-executor-zh.yml");
-        let shipper_section = content
-            .split("shipper:")
-            .nth(1)
-            .expect("ce-executor-zh must have shipper section");
-        let exhausted_start = shipper_section
-            .find("`fix.exhausted`")
-            .expect("ce-executor-zh shipper must describe fix.exhausted handling");
-        let exhausted_section = &shipper_section[exhausted_start..];
-        assert!(
-            exhausted_section.contains("task_id")
-                && exhausted_section.contains("task_key")
-                && exhausted_section.contains("step"),
-            "ce-executor-zh shipper fix.exhausted handling must read and publish task_id, task_key, step"
         );
     }
 
@@ -2343,5 +2337,367 @@ mod tests {
                 idx
             );
         }
+    }
+
+    #[test]
+    fn test_ce_executor_debug_resolver_exists_and_routes_correctly() {
+        // U6: debug-resolver must exist, subscribe to fix.exhausted, and publish
+        // fix.plan.ready / debug.exhausted / plan.blocked explicitly.
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
+
+        let resolver = config
+            .hats
+            .get("debug-resolver")
+            .expect("ce-executor must define a 'debug-resolver' hat");
+
+        assert_eq!(
+            resolver.triggers,
+            vec!["fix.exhausted".to_string()],
+            "debug-resolver must trigger on fix.exhausted"
+        );
+        assert!(
+            resolver.publishes.contains(&"fix.plan.ready".to_string()),
+            "debug-resolver must publish fix.plan.ready"
+        );
+        assert!(
+            resolver.publishes.contains(&"debug.exhausted".to_string()),
+            "debug-resolver must publish debug.exhausted"
+        );
+        assert!(
+            resolver.publishes.contains(&"plan.blocked".to_string()),
+            "debug-resolver must publish plan.blocked"
+        );
+        assert!(
+            resolver.default_publishes.is_none(),
+            "debug-resolver must NOT use default_publishes; debug.exhausted requires contextual payload"
+        );
+
+        let inst = resolver.instructions.as_str();
+        assert!(
+            inst.contains("Investigate before fixing") || inst.contains("先调查再修复"),
+            "debug-resolver instructions must state 'Investigate before fixing' or its Chinese equivalent"
+        );
+        assert!(
+            inst.contains("causal chain gate"),
+            "debug-resolver instructions must reference causal chain gate"
+        );
+        assert!(
+            inst.contains("prediction"),
+            "debug-resolver instructions must reference prediction"
+        );
+        assert!(
+            inst.contains("assumption audit"),
+            "debug-resolver instructions must reference assumption audit"
+        );
+        assert!(
+            inst.contains("smart escalation"),
+            "debug-resolver instructions must reference smart escalation"
+        );
+        assert!(
+            inst.contains("NEVER create, switch, or rename branches")
+                || inst.contains("MUST NOT create, switch, or rename branches")
+                || (inst.contains("绝对禁止") && inst.contains("git checkout -b")),
+            "debug-resolver instructions must forbid branch creation"
+        );
+        assert!(
+            !resolver.publishes.contains(&"work.done".to_string()),
+            "debug-resolver must not publish work.done"
+        );
+        assert!(
+            inst.contains("MUST explicitly publish") || inst.contains("必须显式发布"),
+            "debug-resolver instructions must require an explicit terminal handoff event"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_debug_resolver_forbids_branch_creation() {
+        // U6: debug-resolver must not create branches, push, or create PRs.
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
+        let resolver = config
+            .hats
+            .get("debug-resolver")
+            .expect("ce-executor must define a 'debug-resolver' hat");
+        let inst = resolver.instructions.as_str();
+
+        assert!(
+            inst.contains("NEVER create, switch, or rename branches")
+                || inst.contains("MUST NOT create, switch, or rename branches")
+                || (inst.contains("绝对禁止") && inst.contains("git checkout -b")),
+            "debug-resolver must explicitly forbid branch creation"
+        );
+        assert!(
+            inst.contains("push to origin")
+                || inst.contains("push 到 origin")
+                || inst.contains("MUST NOT push to origin")
+                || inst.contains("MUST NOT create pull requests")
+                || inst.contains("创建 pull request")
+                || inst.contains("create pull requests"),
+            "debug-resolver must explicitly forbid push / PR creation"
+        );
+        assert!(
+            !resolver.publishes.contains(&"work.done".to_string()),
+            "debug-resolver must not publish work.done"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_executor_accepts_fix_plan_ready() {
+        // U6: executor must accept fix.plan.ready and enter fix-plan execution mode.
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
+
+        let executor = config
+            .hats
+            .get("executor")
+            .expect("ce-executor must define an 'executor' hat");
+
+        assert!(
+            executor.triggers.contains(&"fix.plan.ready".to_string()),
+            "executor must trigger on fix.plan.ready"
+        );
+        assert!(
+            executor.instructions.contains("FIX PLAN EXECUTION MODE"),
+            "executor instructions must define FIX PLAN EXECUTION MODE"
+        );
+        assert!(
+            executor.instructions.contains("root_cause_summary")
+                && executor.instructions.contains("causal_chain")
+                && executor.instructions.contains("recommended_tests")
+                && executor.instructions.contains("fix_plan"),
+            "executor fix-plan mode instructions must reference all fix.plan.ready payload fields"
+        );
+        assert!(
+            !executor.publishes.contains(&"queue.advance".to_string()),
+            "executor must NOT publish queue.advance"
+        );
+        assert_eq!(
+            executor.default_publishes, None,
+            "executor must have no default_publishes"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_shipper_handles_debug_exhausted_not_fix_exhausted() {
+        // U6: shipper must trigger on debug.exhausted, not on fix.exhausted in normal topology.
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
+
+        let shipper = config
+            .hats
+            .get("shipper")
+            .expect("ce-executor must define a 'shipper' hat");
+
+        assert!(
+            shipper.triggers.contains(&"debug.exhausted".to_string()),
+            "shipper must trigger on debug.exhausted"
+        );
+        assert!(
+            !shipper.triggers.contains(&"fix.exhausted".to_string()),
+            "shipper must NOT trigger on fix.exhausted in normal topology; debug-resolver handles that path"
+        );
+        assert!(
+            shipper.instructions.contains("`debug.exhausted`")
+                && shipper.instructions.contains("pass_or_fail: \"fail\""),
+            "shipper instructions must describe debug.exhausted failure publishing with pass_or_fail fail"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_debug_topics_have_schemas() {
+        // U6: fix.plan.ready and debug.exhausted must have event_policy schemas with the
+        // documented required fields (task correlation + debug plan fields).
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
+        let policy = config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .expect("ce-executor should have event_policy");
+
+        let fix_plan = policy
+            .schemas
+            .get("fix.plan.ready")
+            .expect("ce-executor must define fix.plan.ready schema");
+        for field in [
+            "plan_name",
+            "task_id",
+            "task_key",
+            "step",
+            "root_cause_summary",
+            "causal_chain",
+            "recommended_tests",
+            "fix_plan",
+        ] {
+            assert!(
+                fix_plan.required_fields.contains(&field.to_string()),
+                "fix.plan.ready schema must require '{}'",
+                field
+            );
+        }
+
+        let debug_exhausted = policy
+            .schemas
+            .get("debug.exhausted")
+            .expect("ce-executor must define debug.exhausted schema");
+        for field in [
+            "plan_name",
+            "reason",
+            "task_id",
+            "task_key",
+            "step",
+            "debug_summary",
+        ] {
+            assert!(
+                debug_exhausted.required_fields.contains(&field.to_string()),
+                "debug.exhausted schema must require '{}'",
+                field
+            );
+        }
+    }
+
+    #[test]
+    fn test_ce_executor_zh_debug_topology_matches_en() {
+        // U6: Chinese preset must stay isomorphic to English for the new debug topology.
+        let en = read_root_preset("ce-executor.yml");
+        let zh = read_root_preset("ce-executor-zh.yml");
+        let en_config = RalphConfig::parse_yaml(&en).expect("English preset should parse");
+        let zh_config = RalphConfig::parse_yaml(&zh).expect("Chinese preset should parse");
+
+        let en_resolver = en_config
+            .hats
+            .get("debug-resolver")
+            .expect("EN preset must have debug-resolver");
+        let zh_resolver = zh_config
+            .hats
+            .get("debug-resolver")
+            .expect("ZH preset must have debug-resolver");
+
+        assert_eq!(
+            zh_resolver.triggers, en_resolver.triggers,
+            "ZH debug-resolver triggers must match EN"
+        );
+        assert_eq!(
+            zh_resolver.publishes, en_resolver.publishes,
+            "ZH debug-resolver publishes must match EN"
+        );
+        assert_eq!(
+            zh_resolver.default_publishes, en_resolver.default_publishes,
+            "ZH debug-resolver default_publishes must match EN"
+        );
+        assert!(
+            en_resolver.default_publishes.is_none(),
+            "EN debug-resolver must not configure default_publishes"
+        );
+
+        let en_policy = en_config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .expect("EN ce-executor should have event_policy");
+        let zh_policy = zh_config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .expect("ZH ce-executor should have event_policy");
+
+        for topic in ["fix.plan.ready", "debug.exhausted"] {
+            let en_schema = en_policy
+                .schemas
+                .get(topic)
+                .unwrap_or_else(|| panic!("EN ce-executor should define {} schema", topic));
+            let zh_schema = zh_policy
+                .schemas
+                .get(topic)
+                .unwrap_or_else(|| panic!("ZH ce-executor should define {} schema", topic));
+            assert_eq!(
+                zh_schema.required_fields, en_schema.required_fields,
+                "ZH {} schema required_fields must match EN",
+                topic
+            );
+        }
+
+        let en_executor = en_config
+            .hats
+            .get("executor")
+            .expect("EN preset must have executor");
+        let zh_executor = zh_config
+            .hats
+            .get("executor")
+            .expect("ZH preset must have executor");
+        assert!(
+            zh_executor.triggers.contains(&"fix.plan.ready".to_string()),
+            "ZH executor must trigger on fix.plan.ready"
+        );
+        assert_eq!(
+            zh_executor.triggers, en_executor.triggers,
+            "ZH executor triggers must match EN"
+        );
+
+        let en_shipper = en_config
+            .hats
+            .get("shipper")
+            .expect("EN preset must have shipper");
+        let zh_shipper = zh_config
+            .hats
+            .get("shipper")
+            .expect("ZH preset must have shipper");
+        assert!(
+            zh_shipper.triggers.contains(&"debug.exhausted".to_string()),
+            "ZH shipper must trigger on debug.exhausted"
+        );
+        assert_eq!(
+            zh_shipper.triggers, en_shipper.triggers,
+            "ZH shipper triggers must match EN"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_strict_payload_contract_is_valid() {
+        // Strict mode: every trigger topic with payload field references in
+        // instructions must have a schema, and all referenced fields must be
+        // declared in the schema's required_fields.
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
+        let registry = HatRegistry::from_config(&config);
+        let result = validate_payload_contract(&config, &registry, true);
+        assert!(
+            result.is_valid(),
+            "ce-executor strict payload contract validation failed: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_strict_payload_contract_is_valid_for_root_preset() {
+        let content = read_root_preset("ce-executor.yml");
+        let config = RalphConfig::parse_yaml(&content).expect("root ce-executor YAML should parse");
+        let registry = HatRegistry::from_config(&config);
+        let result = validate_payload_contract(&config, &registry, true);
+        assert!(
+            result.is_valid(),
+            "root ce-executor strict payload contract validation failed: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_zh_strict_payload_contract_is_valid() {
+        let content = read_root_preset("ce-executor-zh.yml");
+        let config = RalphConfig::parse_yaml(&content).expect("ce-executor-zh YAML should parse");
+        let registry = HatRegistry::from_config(&config);
+        let result = validate_payload_contract(&config, &registry, true);
+        assert!(
+            result.is_valid(),
+            "ce-executor-zh strict payload contract validation failed: {:?}",
+            result.errors
+        );
     }
 }

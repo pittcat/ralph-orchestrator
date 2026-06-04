@@ -22,6 +22,7 @@
 #   dimension-reviewer  -> review.dimension.done
 #   review-synthesizer  -> review.passed / review.failed / review.complete
 #   fixer           -> fix.applied / fix.exhausted
+#   debug-resolver  -> fix.plan.ready / debug.exhausted / plan.blocked
 #   plan-gate       -> queue.advance / plan.complete / plan.blocked
 #   shipper         -> REVIEW_COMPLETE
 #   reporter        -> report.done
@@ -129,6 +130,28 @@ fix.exhausted:
     - task_id
     - task_key
     - step
+  payload: json_object
+
+fix.plan.ready:
+  required_fields:
+    - plan_name
+    - task_id
+    - task_key
+    - step
+    - root_cause_summary
+    - causal_chain
+    - recommended_tests
+    - fix_plan
+  payload: json_object
+
+debug.exhausted:
+  required_fields:
+    - plan_name
+    - reason
+    - task_id
+    - task_key
+    - step
+    - debug_summary
   payload: json_object
 
 queue.advance:

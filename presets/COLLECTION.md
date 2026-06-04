@@ -952,6 +952,21 @@ This ensures:
 
 ---
 
+## Auto-Fix to Debug-Resolver Escalation Guidance
+
+When a preset includes an automatic fix loop:
+
+- The `fixer` hat is a fast-patcher for `safe_auto` findings only. It is not a debugger.
+- Cap `safe_auto` attempts at a small number (e.g., 3 rounds). After that, emit `fix.exhausted`.
+- Do not route `fix.exhausted` straight to a final failure report. Instead, hand it off to a `debug-resolver` hat that:
+  - performs root-cause diagnosis (investigation, assumption audit, causal chain gate, smart escalation),
+  - emits `fix.plan.ready` when the root cause is confirmed,
+  - emits `debug.exhausted` or `plan.blocked` when the cause cannot be confirmed.
+- The `executor` should have a dedicated `FIX PLAN EXECUTION MODE` triggered by `fix.plan.ready`, execute the plan, then re-enter the normal review loop via `work.done`.
+- Port diagnostic discipline from skills like `ce-debug`, but do **not** port their interactive menus, branch creation, or PR workflows into a preset.
+
+---
+
 ## Payload Contracts
 
 Payload contracts verify that events flowing between hats carry the

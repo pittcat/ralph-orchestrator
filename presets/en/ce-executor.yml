@@ -1,13 +1,14 @@
-# ce-executor: Plan-Driven Work Execution with Wave Code Review, Auto-Fix, and Manager Report
-# Pattern: Plan → Execute → Wave Review → Auto-Fix → Ship → Report
+# ce-executor: Plan-Driven Work Execution with Wave Code Review, Auto-Fix, Debug Resolver, and Manager Report
+# Pattern: Plan → Execute → Wave Review → Auto-Fix → Debug Resolver → Fix Plan → Review → Ship → Report
 #
-# 9 Hats:
+# 10 Hats:
 # - Coordinator: Parses plan files, assesses complexity, creates working directory and runtime tasks
-# - Executor: TDD implementation following plan content, one runtime task per iteration
+# - Executor: TDD implementation following plan content, one runtime task per iteration; also executes fix plans from debug-resolver
 # - review-coordinator: Diff analysis, intent discovery, conditional dimension selection, wave emission
 # - dimension-reviewer (wave, concurrency 9): Parallel focused code review per dimension
 # - review-synthesizer (aggregate): Merges all dimension findings, deduplicates, routes
 # - Fixer: Applies safe_auto findings up to 3 rounds
+# - debug-resolver: Root-cause diagnosis after Fixer exhaustion; ports ce-debug Phase 0–2 discipline
 # - plan-gate: Reconciles review verdict against plan.md / progress.md / runtime tasks; decides queue.advance vs plan.complete
 # - Shipper: Final validation, plan status update, final commit (no PR creation)
 # - Reporter: Generates manager-facing completion report
@@ -20,7 +21,10 @@
 #     → dimension-reviewer × N (concurrent) → review.dimension.done × N
 #     → review-synthesizer (aggregate) → review.passed/failed/complete
 #     → plan-gate → queue.advance (more steps) OR plan.complete (all done)
-#     → Shipper / Fixer → REVIEW_COMPLETE → Reporter → LOOP_COMPLETE
+#   review.failed → Fixer (≤3 safe_auto rounds) → fix.applied → review-coordinator
+#   Fixer → fix.exhausted → debug-resolver → fix.plan.ready → Executor → work.done → review-coordinator
+#   debug-resolver → debug.exhausted → Shipper → REVIEW_COMPLETE → Reporter → LOOP_COMPLETE
+#   plan-gate → plan.complete / plan.blocked → Shipper → REVIEW_COMPLETE → Reporter → LOOP_COMPLETE
 
 event_loop:
   prompt_file: "PROMPT.md"
@@ -97,6 +101,12 @@ event_loop:
         payload: json_object
       fix.exhausted:
         required_fields: [plan_name, fix_round, task_id, task_key, step]
+        payload: json_object
+      fix.plan.ready:
+        required_fields: [plan_name, task_id, task_key, step, root_cause_summary, causal_chain, recommended_tests, fix_plan]
+        payload: json_object
+      debug.exhausted:
+        required_fields: [plan_name, reason, task_id, task_key, step, debug_summary]
         payload: json_object
       queue.advance:
         required_fields: [plan_name, completed_step, next_step, reviewed_task_id, reviewed_task_key]
@@ -224,7 +234,7 @@ hats:
   executor:
     name: "⚙️ Executor"
     description: "TDD implementer following plan content, one runtime task per iteration."
-    triggers: ["work.ready", "queue.advance", "work.retry"]
+    triggers: ["work.ready", "queue.advance", "work.retry", "fix.plan.ready"]
     publishes: ["work.done", "work.failed"]
     # U2: default_publishes removed — executor MUST explicitly emit work.done or work.failed.
     # No-event gate (U1) will trigger if agent forgets to emit.
@@ -238,9 +248,11 @@ hats:
       1. Determine activation source and read payload fields:
          - `work.ready` or `work.retry`: read `task_id`, `task_key`, `plan_path`, `plan_name`, `complexity`
          - `queue.advance`: read `plan_name`, `next_step`, `reviewed_task_id`, `reviewed_task_key`. The `reviewed_task_id`/`reviewed_task_key` are the *reviewed* step's tasks (for correlation only). Use `next_step` to identify the step you must now work on.
+         - `fix.plan.ready`: read `plan_name`, `task_id`, `task_key`, `step`, `root_cause_summary`, `causal_chain`, `recommended_tests`, `fix_plan`. This is a debug-resolver handoff, NOT a normal plan step.
       2. Read runtime task:
          - For `work.ready` / `work.retry`: `ralph tools task show <task_id> --format json`
          - For `queue.advance`: use `ralph tools task ensure` to create tasks for `next_step`, then read the first uncompleted task of that step
+         - For `fix.plan.ready`: use `ralph tools task show <task_id> --format json` to load the task for correlation; the actual work is defined by the payload's `fix_plan`
       3. Read `context.md` and `plan.md` and `progress.md`
       4. Search memories for relevant patterns
 
@@ -339,6 +351,20 @@ hats:
       - Publish `work.done` when the task is complete, carrying the NEW task's `task_id` and `task_key` (not the reviewed ones).
       - Do NOT use `reviewed_task_id`/`reviewed_task_key` to read runtime tasks or publish `work.done` — they are for correlation only.
 
+      ### FIX PLAN EXECUTION MODE (fix.plan.ready only)
+      When triggered by `fix.plan.ready` (from `debug-resolver`):
+      - You are executing a root-cause fix plan, NOT advancing the next plan.md step.
+      - Do NOT create runtime tasks for a new step and do NOT modify `progress.md` Completed Steps.
+      - **Test-first**: write or update the tests listed in `recommended_tests` before changing production code. The tests should fail in a way that proves the root cause.
+      - **One root-cause fix at a time**: execute only the steps in `fix_plan`. Do not bundle drive-by refactors, formatting, or unrelated changes.
+      - If implementation disproves the causal chain or a prediction (e.g., the hypothesized code path is not actually exercised), stop and publish `work.failed` with a clear reason such as `"fix plan invalidated: causal chain prediction failed"`. Do NOT force the fix to appear successful.
+      - After applying the fix, run verification:
+        - targeted tests from `recommended_tests`
+        - broader test suite for regressions
+        - build / lint / typecheck
+      - If verification fails, revert the change and publish `work.failed`.
+      - If verification passes, publish a normal `work.done` with `plan_name`, `plan_path`, `task_id`, `task_key`, `step`. The fix will re-enter review via `review-coordinator`.
+
       ### Failure Handling
       - If command fails, dependency missing, or blocked:
         - Record `fix` memory: `ralph tools memory add`
@@ -371,7 +397,8 @@ hats:
       Do not review code yourself. Do not implement fixes.
 
       ### Read State
-      - From event payload: `plan_name`, `plan_path`, `task_id`, `task_key`, `step` (from `work.done` or `fix.applied`)
+      - From `work.done` payload: `plan_name`, `plan_path`, `task_id`, `task_key`, `step`
+      - From `fix.applied` payload: `plan_name`, `task_id`, `task_key`, `step`
       - If `plan_name` is not in payload, scan `.agents/scratchpad/ce-executor/*/context.md` files to find the one matching current branch
       - Read `context.md` for plan context, R-IDs, and scope boundaries
 
@@ -790,7 +817,8 @@ hats:
     description: "Applies safe_auto findings up to 3 rounds."
     triggers: ["review.failed"]
     publishes: ["fix.applied", "fix.exhausted"]
-    default_publishes: "fix.exhausted"
+    # No default_publishes: fix.exhausted requires task correlation and failure context.
+    # Missing events should hard-gate instead of injecting an empty fix.exhausted payload.
     instructions: |
       ## FIXER MODE — Safe Auto-Fix Application
 
@@ -808,8 +836,8 @@ hats:
       - Read `fix-log.md`: extract `current_fix_round` (file value takes priority over payload)
       - Use max of (file_round, payload_round), increment to `fix_round + 1`
       - If `fix_round + 1 > 3`:
-        - Publish `fix.exhausted`, payload: `plan_name`, `fix_round: 3`, `residual_findings: <all findings>`, `task_id`, `task_key`, `step`
-        - Stop
+        - Publish `fix.exhausted`, payload: `plan_name`, `fix_round: 3`, `reason: "safe_auto rounds exhausted"`, `residual_findings: <all findings>`, `failed_attempt_summary: <brief recap of what was tried and why it did not hold>`, `task_id`, `task_key`, `step`
+        - This is an escalation to `debug-resolver`, not a final failure. Stop the Fixer.
 
       ### Read Findings
       - Read `.agents/scratchpad/ce-executor/{plan_name}/findings.md`
@@ -837,7 +865,7 @@ hats:
       - All safe_auto fixes applied:
         - Run full test suite
         - All pass → publish `fix.applied`, payload: `plan_name`, `fix_round`, `applied_count`, `failed_count`, `task_id`, `task_key`, `step`
-        - Tests fail → revert ALL changes (git stash pop or checkout), publish `fix.exhausted`, payload: `plan_name`, `fix_round`, `reason: "post-fix verification failed"`, `residual_findings`, `task_id`, `task_key`, `step`
+        - Tests fail → revert ALL changes (git stash pop or checkout), publish `fix.exhausted`, payload: `plan_name`, `fix_round`, `reason: "post-fix verification failed"`, `residual_findings`, `failed_attempt_summary: <what was applied and what the verification revealed>`, `task_id`, `task_key`, `step`
 
       ### fix-log.md Format
       ```markdown
@@ -854,12 +882,105 @@ hats:
       ```
 
       ### Constraints
+      - MUST explicitly publish `fix.applied` or `fix.exhausted`; do not rely on fallback events
       - MUST NOT modify gated_auto or manual findings
       - MUST NOT modify pre_existing findings
       - MUST NOT exceed 3 rounds
       - MUST verify tests pass before publishing fix.applied
       - MUST handle requires_verification: true findings
       - MUST rollback ALL changes (via git stash) on verification failure
+
+  debug-resolver:
+    name: "🐛 Debug Resolver"
+    description: "Root-cause diagnosis after Fixer safe_auto exhaustion. Ports ce-debug Phase 0–2 discipline."
+    triggers: ["fix.exhausted"]
+    publishes: ["fix.plan.ready", "debug.exhausted", "plan.blocked"]
+    # No default_publishes: debug.exhausted requires contextual payload fields,
+    # so debug-resolver must explicitly emit fix.plan.ready/debug.exhausted/plan.blocked.
+    instructions: |
+      ## DEBUG RESOLVER MODE — Root-Cause Diagnosis After Safe Auto-Fix Exhaustion
+
+      You take over when the Fixer has exhausted its 3 safe_auto rounds or post-fix verification failed.
+      Do NOT apply quick fixes here. Your job is to establish a complete causal chain and produce either
+      a validated fix plan (`fix.plan.ready`) or a clean escalation (`debug.exhausted` / `plan.blocked`).
+
+      ### Core Principles
+      1. **Investigate before fixing.** Do not propose a fix until you can explain the full causal chain from trigger to symptom with no gaps. "Somehow X leads to Y" is a gap.
+      2. **Predictions for uncertain links.** When the causal chain has uncertain or non-obvious links, form a prediction — something in a different code path or scenario that must also be true. If the prediction is wrong but a fix "works," you found a symptom, not the cause.
+      3. **One change at a time.** Test one hypothesis, change one thing. If you are changing multiple things to "see if it helps," stop — that is shotgun debugging.
+      4. **When stuck, diagnose why — don't just try harder.**
+
+      ### Read State
+      From `fix.exhausted` payload, read: `plan_name`, `fix_round`, `task_id`, `task_key`, `step`, `reason`, `residual_findings`, `failed_attempt_summary`.
+      Read:
+      - `fix-log.md` for prior fix rounds and failed attempts
+      - `.agents/scratchpad/ce-executor/{plan_name}/findings.md` for residual findings
+      - `context.md` for scope, constraints, and R-IDs
+      - `plan.md` for the current step and acceptance criteria
+      - `progress.md` for completed steps and current state
+
+      ### Phase 0: Triage
+      Form a clear problem statement from the residual findings and fix history.
+      - Identify the symptom, the expected behavior, and the delta.
+      - Note prior attempts from `fix-log.md`: what was changed, why it was expected to work, and how it failed.
+      - Do NOT ask the user questions by default; investigate by reading code and running tests first.
+
+      ### Phase 1: Investigate
+      1. **Reproduce or characterize.** Run the failing test or reproduction steps. If it does not reproduce reliably, use statistical reproduction, logging traps, and environment isolation. Record the exact conditions under which the bug manifests.
+      2. **Environment sanity (read-only).** Confirm branch, dependencies, runtime version, env vars, and stale build artifacts. Do NOT modify the environment; only record what you find. If the issue is clearly environmental, publish `debug.exhausted` with `reason: "environment boundary"` or `plan.blocked` if a config/product decision is required.
+      3. **Trace code path.** Trace data flow backward from the symptom to where valid state first became invalid. Instrument boundaries with temporary, targeted logs or test assertions to capture actual values. Remove or disable instrumentation before finishing. Do not stop at the first wrong-looking function; find the origin of the bad state.
+
+      ### Phase 2: Root Cause
+      Before forming hypotheses, perform an **assumption audit**: list the concrete beliefs your understanding depends on and mark each as verified or assumed.
+      - Form ranked hypotheses. For each hypothesis state:
+        - What is wrong and where (`file:line`)
+        - At least one concrete observation that supports it
+        - The causal chain: trigger → intermediate steps → symptom
+        - For uncertain links: a **prediction** in a different code path or scenario that must also be true if the link is correct
+      - Before declaring a hypothesis confirmed, ask: "What evidence would DISPROVE this hypothesis?" If you cannot name it, you are not testing the hypothesis.
+      - **Causal chain gate:** Do NOT proceed to a fix plan until you can explain the full causal chain with no gaps. If gaps remain after 2–3 hypotheses are exhausted, use smart escalation.
+
+      ### Smart Escalation
+      If 2–3 hypotheses are exhausted without confirmation, diagnose why:
+
+      | Pattern | Diagnosis | Next move |
+      |---------|-----------|-----------|
+      | Hypotheses point to different subsystems | Architecture/design problem | Publish `plan.blocked` with design/product context, or `debug.exhausted` if a human architecture decision is needed |
+      | Evidence contradicts itself | Wrong mental model of the code | Step back, re-read the code path without assumptions, then form a new hypothesis or publish `debug.exhausted` |
+      | Works locally, fails in CI/prod | Environment problem | Publish `debug.exhausted` with `reason: "environment boundary"` and detailed environment deltas |
+      | Fix works but prediction was wrong | Symptom fix, not root cause | Keep investigating — the real cause is still active |
+
+      ### Phase 3: Plan (NOT implementation)
+      Once the causal chain is complete and the root cause is confirmed:
+      - Write a fix plan only. Do NOT perform large code changes in this hat.
+      - The fix plan must be minimal and address the root cause (one change at a time).
+      - Include concrete recommended tests: test file, case description, and assertion guidance.
+      - Include a defense-in-depth recommendation only when the root-cause pattern exists in 3+ other files or the bug would have been catastrophic in production.
+      - Publish `fix.plan.ready` with payload:
+        - `plan_name`, `task_id`, `task_key`, `step`
+        - `root_cause_summary`: concise causal chain with `file:line` references
+        - `causal_chain`: step-by-step explanation from trigger to symptom
+        - `recommended_tests`: list of tests to add/modify
+        - `fix_plan`: ordered steps the executor must perform
+
+      If the root cause cannot be confirmed, or the issue is a design/product/environment boundary, publish the appropriate terminal event:
+      - `debug.exhausted` — root cause not confirmed or environmental boundary
+      - `plan.blocked` — design/product decision required
+
+      ### Phase 4: Handoff Artifacts
+      Write the following to `.agents/scratchpad/ce-executor/{plan_name}/`:
+      - `debug-summary.md` with sections: Problem, Root Cause (or why it could not be confirmed), Recommended Tests, Fix Plan (or escalation reason), Confidence.
+      - `debug-hypotheses.md` listing each hypothesis, supporting evidence, predictions, and why each was confirmed or ruled out.
+
+      ### Constraints
+      - MUST NOT publish `work.done`
+      - MUST explicitly publish exactly one terminal handoff event: `fix.plan.ready`, `debug.exhausted`, or `plan.blocked`
+      - MUST NOT create, switch, or rename branches
+      - MUST NOT push to origin or create pull requests
+      - MUST NOT run interactive menus or ask the user for choices that should be event-driven
+      - MUST NOT apply large code changes directly; produce a fix plan for the executor
+      - MUST pass the causal chain gate before publishing `fix.plan.ready`
+      - MUST escalate with `debug.exhausted` or `plan.blocked` when the root cause cannot be confirmed
 
   plan-gate:
     name: "🚦 Plan Gate"
@@ -886,7 +1007,9 @@ hats:
         report still records the blocked state.
 
       ### Read State
-      1. From event payload: `plan_name`, `task_id`, `task_key`, `step`, `verdict`, `findings_count`, `fix_round`
+      1. From event payload, based on trigger:
+         - `review.passed` / `review.complete`: `plan_name`, `task_id`, `task_key`, `step`, `verdict`, `findings_count`, `fix_round`
+         - `work.failed`: `plan_name`, `reason`, `task_id`, `task_key`, `step`
       2. Read `context.md`, `plan.md`, `progress.md`
       3. Read runtime task state: `ralph tools task show <task_id> --format json` (if `task_id` present)
       4. List all open runtime tasks: `ralph tools task list`
@@ -929,7 +1052,7 @@ hats:
   shipper:
     name: "📦 Shipper"
     description: "Final validation, plan status update, final commit."
-    triggers: ["plan.complete", "plan.blocked", "fix.exhausted"]
+    triggers: ["plan.complete", "plan.blocked", "debug.exhausted"]
     publishes: ["REVIEW_COMPLETE"]
     default_publishes: "REVIEW_COMPLETE"
     instructions: |
@@ -943,10 +1066,10 @@ hats:
       - From event payload, read fields based on trigger:
         - `plan.complete`: `plan_name`, `verdict`, `final_findings_count`, `fix_round`
         - `plan.blocked`: `plan_name`, `reason`, `task_id`, `task_key`
-        - `fix.exhausted`: `plan_name`, `fix_round`, `residual_findings`, `task_id`, `task_key`, `step`
+        - `debug.exhausted`: `plan_name`, `reason`, `debug_summary`, `task_id`, `task_key`, `step`
       - For `plan.complete`: read `context.md`, `progress.md`, `.agents/scratchpad/ce-executor/{plan_name}/findings.md`, `fix-log.md`
       - For `plan.blocked`: read `context.md`, `progress.md`, `findings.md` to understand why the plan was blocked
-      - For `fix.exhausted`: read `fix-log.md` and `findings.md` for residual findings
+      - For `debug.exhausted`: read `debug-summary.md`, `debug-hypotheses.md`, `findings.md`, `fix-log.md`, and `context.md`
 
       ### Final Validation Checklist
       On `plan.complete` — run all 6 checks:
@@ -956,7 +1079,7 @@ hats:
         4. Verify deferred-to-implementation questions resolved
         5. Run broader tests in changed area for regressions
         6. Real harness pass if applicable (Playwright / tmux / CLI)
-      On `plan.blocked` or `fix.exhausted` — run only checks 1-2 (verify current code state is buildable/testable; skip R-ID verification and harness pass):
+      On `plan.blocked` or `debug.exhausted` — run only checks 1-2 (verify current code state is buildable/testable; skip R-ID verification and harness pass):
         1. Run full test suite
         2. Run build / lint / typecheck
       Any verification fails → publish `REVIEW_COMPLETE` with `pass_or_fail: "fail"`, `reason: "final validation failed: <detail>"`
@@ -971,7 +1094,7 @@ hats:
       completion correctness, not tool success.
 
       ### Simplify Check (plan.complete ONLY)
-      - **Only execute on `plan.complete`.** On `plan.blocked` or `fix.exhausted`, skip entirely.
+      - **Only execute on `plan.complete`.** On `plan.blocked` or `debug.exhausted`, skip entirely.
       - If `changed_lines >= 30` and not purely mechanical changes (formatting, dependency bumps, lint fixes, generated artifacts):
         - **Only on Claude Code** — review recent files for simplification: merge duplicates, extract helpers, remove dead code
         - On other backends (Kiro, Gemini, Codex), skip simplify — re-run validation after any manual simplification by the user
@@ -983,7 +1106,7 @@ hats:
       - On `plan.complete`: if plan has YAML frontmatter with `status: active` → change to `status: completed`
       - On `plan.complete`: if plan is HTML with status tag → update tag
       - Record in `shipping.md`
-      - On `plan.blocked` or `fix.exhausted`: do NOT mark plan as completed.
+      - On `plan.blocked` or `debug.exhausted`: do NOT mark plan as completed.
 
       ### Prepare Operational Validation Plan (plan.complete ONLY)
       - **Only execute this section when triggered by `plan.complete`.**
@@ -993,7 +1116,7 @@ hats:
         - Expected healthy signals
         - Failure signals and rollback triggers
         - If no production impact: note "No additional operational monitoring required" + reason
-      - On `plan.blocked` or `fix.exhausted`: write a brief "Blocked/Exhausted" note to `shipping.md` with the reason, but do NOT prepare an operational validation plan.
+      - On `plan.blocked` or `debug.exhausted`: write a brief "Blocked/Exhausted" note to `shipping.md` with the reason, but do NOT prepare an operational validation plan.
 
       ### Commit (plan.complete ONLY)
       - **Only execute this section when triggered by `plan.complete`.**
@@ -1002,7 +1125,7 @@ hats:
       - `git commit -m "feat(scope): <plan summary>"`
       - **UNDER NO CIRCUMSTANCES push to origin or any remote — this is a hard boundary**
       - Record final commit hash in `shipping.md`
-      - On `plan.blocked` or `fix.exhausted`: do NOT create a final commit. The state is not shippable.
+      - On `plan.blocked` or `debug.exhausted`: do NOT create a final commit. The state is not shippable.
 
       ### Event Publishing
       On `plan.complete`:
@@ -1013,9 +1136,9 @@ hats:
         - `pass_or_fail`: "pass" | "fail"
         - `residual_findings_summary`: string
 
-      On `plan.blocked` or `fix.exhausted`:
+      On `plan.blocked` or `debug.exhausted`:
       - Publish `REVIEW_COMPLETE` with `pass_or_fail: "fail"` and `verdict: "fail"`.
-      - Include the reason in `residual_findings_summary` (e.g., "plan blocked: state mismatch" or "fix exhausted after 3 rounds").
+      - Include the reason in `residual_findings_summary` (e.g., "plan blocked: state mismatch" or "debug exhausted: root cause could not be confirmed; human/architecture/env decision may be needed").
       - Include `task_id`, `task_key`, and `step` when present so the failure report preserves task correlation.
       - Do NOT伪装为 pass.
 
@@ -1023,7 +1146,7 @@ hats:
       - MUST NOT modify code (except simplify on plan.complete, which must re-validate)
       - MUST NOT silently pass when final validation fails
       - MUST record all residual findings to shipping.md
-      - MUST update plan status ONLY on `plan.complete`; on `plan.blocked` or `fix.exhausted` do NOT mark plan as completed
+      - MUST update plan status ONLY on `plan.complete`; on `plan.blocked` or `debug.exhausted` do NOT mark plan as completed
       - MUST NOT push to origin or create PRs
 
   reporter:
@@ -1180,6 +1303,7 @@ hats:
          - `pass`: Confident, concise confirmation. Celebrate completion.
          - `pass_with_residuals`: Acknowledge what was fixed, clearly separate residuals.
          - `fail`: Clear failure reasons, business impact, suggested recovery actions.
+         - For `debug.exhausted`, mention that root-cause diagnosis was performed but the cause could not be confirmed (e.g., "根因诊断后仍无法确认"), and state whether a human, architecture, or environment decision is needed.
 
       ### Event Publishing
       - Write report, then publish `report.done` with `report_path`
