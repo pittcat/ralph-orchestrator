@@ -9807,4 +9807,110 @@ event_loop:
              The source attribution is untrusted; fall back to diagnostic only."
         );
     }
+
+    // === Primary-loop current_loop_id() regression tests ===
+    //
+    // Background: `LoopContext::primary()` keeps `loop_id: None` (loop_context.rs:89),
+    // and primary loops identify themselves via the `.ralph/current-loop-id` marker
+    // that `LoopRunner::resolve_loop_id` writes (loop_runner.rs:183-203).
+    // `EventLoop::current_loop_id()` is the helper that reads the marker; the
+    // execution-contract call site at event_loop/mod.rs:3590 must use this helper
+    // (not a hand-rolled `ctx.loop_id()` lookup) so primary-loop tasks are not
+    // misclassified as belonging to a non-existent "default" loop.
+
+    #[test]
+    fn test_current_loop_id_reads_marker_for_primary_loop() {
+        use crate::loop_context::LoopContext;
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let ctx = LoopContext::primary(temp.path().to_path_buf());
+        std::fs::create_dir_all(ctx.ralph_dir()).unwrap();
+        std::fs::write(
+            ctx.ralph_dir().join("current-loop-id"),
+            "primary-20260604-091852\n",
+        )
+        .unwrap();
+
+        let mut config = RalphConfig::default();
+        config.core.workspace_root = temp.path().to_path_buf();
+        let event_loop = EventLoop::with_context(config, ctx);
+
+        assert_eq!(
+            event_loop.current_loop_id(),
+            Some("primary-20260604-091852".to_string()),
+            "Primary loop must resolve its loop_id from the marker file"
+        );
+    }
+
+    #[test]
+    fn test_current_loop_id_returns_none_when_marker_missing_for_primary() {
+        use crate::loop_context::LoopContext;
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let ctx = LoopContext::primary(temp.path().to_path_buf());
+        // Deliberately do not write the marker.
+
+        let mut config = RalphConfig::default();
+        config.core.workspace_root = temp.path().to_path_buf();
+        let event_loop = EventLoop::with_context(config, ctx);
+
+        assert_eq!(
+            event_loop.current_loop_id(),
+            None,
+            "Primary loop with no marker should return None (caller decides fallback)"
+        );
+    }
+
+    #[test]
+    fn test_current_loop_id_for_contract_uses_marker_for_primary_loop() {
+        use crate::loop_context::LoopContext;
+        use tempfile::TempDir;
+
+        // Regression for the `event_loop/mod.rs:3590` call site that previously
+        // resolved `current_loop_id` from `LoopContext::loop_id()` (which is
+        // always `None` for primary loops) and fell back to the literal
+        // "default", causing every primary-loop task to be misclassified as
+        // belonging to a non-existent "default" loop and rejected with
+        // `TaskWrongLoop`.
+        let temp = TempDir::new().unwrap();
+        let ctx = LoopContext::primary(temp.path().to_path_buf());
+        std::fs::create_dir_all(ctx.ralph_dir()).unwrap();
+        std::fs::write(
+            ctx.ralph_dir().join("current-loop-id"),
+            "primary-20260604-091852\n",
+        )
+        .unwrap();
+
+        let mut config = RalphConfig::default();
+        config.core.workspace_root = temp.path().to_path_buf();
+        let event_loop = EventLoop::with_context(config, ctx);
+
+        assert_eq!(
+            event_loop.current_loop_id_for_contract(),
+            "primary-20260604-091852",
+            "Contract check must see the marker value, not a hard-coded \"default\""
+        );
+    }
+
+    #[test]
+    fn test_current_loop_id_for_contract_falls_back_to_default_when_marker_missing() {
+        use crate::loop_context::LoopContext;
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let ctx = LoopContext::primary(temp.path().to_path_buf());
+        // Deliberately do not write the marker.
+
+        let mut config = RalphConfig::default();
+        config.core.workspace_root = temp.path().to_path_buf();
+        let event_loop = EventLoop::with_context(config, ctx);
+
+        assert_eq!(
+            event_loop.current_loop_id_for_contract(),
+            "default",
+            "When the marker is missing, the contract check should fall back to \"default\""
+        );
+    }
 }

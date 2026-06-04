@@ -2959,6 +2959,18 @@ impl EventLoop {
             .filter(|id| !id.is_empty())
     }
 
+    /// Returns the loop ID used for execution-contract task-loop checks.
+    ///
+    /// Primary loops keep `LoopContext::loop_id == None` and identify themselves
+    /// via the `.ralph/current-loop-id` marker; worktree loops carry their id
+    /// in the context. This helper funnels both shapes through the marker-based
+    /// reader so the contract check never misclassifies primary-loop tasks as
+    /// belonging to a non-existent "default" loop.
+    fn current_loop_id_for_contract(&self) -> String {
+        self.current_loop_id()
+            .unwrap_or_else(|| "default".to_string())
+    }
+
     /// Filters a task list by loop ID. When `loop_id` is `None`, returns all tasks.
     fn filter_tasks_by_loop<'a>(
         tasks: Vec<&'a crate::task::Task>,
@@ -3587,11 +3599,7 @@ impl EventLoop {
         let contracts_enabled = execution_contracts.as_ref().is_some_and(|c| c.enabled);
         let events = if contracts_enabled {
             let contracts = execution_contracts.unwrap();
-            let current_loop_id = self
-                .loop_context
-                .as_ref()
-                .and_then(|ctx| ctx.loop_id().map(String::from))
-                .unwrap_or_else(|| "default".to_string());
+            let current_loop_id = self.current_loop_id_for_contract();
             let workspace_root = std::path::Path::new(&self.config.core.workspace_root);
             let tasks_path = self.tasks_path();
 

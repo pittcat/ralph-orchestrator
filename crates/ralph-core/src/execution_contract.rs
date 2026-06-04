@@ -608,6 +608,9 @@ mod tests {
         ContractRejectConfig, ExecutionContractRule, GitChangeRequirement,
         TaskCompletionRequirement, TestEvidenceRequirement,
     };
+    use crate::task::{Task, TaskStatus};
+    use crate::task_store::TaskStore;
+    use tempfile::TempDir;
 
     fn make_work_done_rule() -> ExecutionContractRule {
         ExecutionContractRule {
@@ -955,6 +958,123 @@ mod tests {
 
         // Git evidence check should be skipped in non-git directory, so accepts
         assert!(matches!(decision, ExecutionContractDecision::Accept));
+    }
+
+    // === TaskWrongLoop primary-loop regression tests ===
+    //
+    // Background: `LoopContext::primary()` keeps `loop_id: None` (loop_context.rs:89),
+    // and primary loops identify themselves via the `.ralph/current-loop-id` marker
+    // that `LoopRunner::resolve_loop_id` writes (loop_runner.rs:183-203). The
+    // execution-contract call site at event_loop/mod.rs:3590 must pass the marker
+    // value (not the literal "default") so primary-loop tasks are not misclassified.
+    // These tests pin the validator's TaskWrongLoop behavior given a marker value,
+    // independent of the EventLoop wiring.
+
+    fn write_task_with_loop_id(tasks_path: &std::path::Path, task_id: &str, loop_id: Option<&str>) {
+        let mut store = TaskStore::load(tasks_path).unwrap();
+        let mut task =
+            Task::new(format!("task {task_id}"), 1).with_loop_id(loop_id.map(str::to_string));
+        task.id = task_id.to_string();
+        task.status = TaskStatus::Closed;
+        store.add(task);
+        store.save().unwrap();
+    }
+
+    fn read_marker(temp: &TempDir) -> String {
+        let marker = temp.path().join(".ralph/current-loop-id");
+        std::fs::read_to_string(&marker).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn test_contract_check_passes_when_task_loop_matches_marker_for_primary() {
+        let temp = TempDir::new().unwrap();
+        let ralph_dir = temp.path().join(".ralph");
+        std::fs::create_dir_all(ralph_dir.join("agent")).unwrap();
+        std::fs::write(
+            ralph_dir.join("current-loop-id"),
+            "primary-20260604-091852\n",
+        )
+        .unwrap();
+        let tasks_path = ralph_dir.join("agent/tasks.jsonl");
+        write_task_with_loop_id(&tasks_path, "task-1", Some("primary-20260604-091852"));
+
+        let rule = make_work_done_rule();
+        let event = Event::new(
+            "work.done",
+            r#"{"plan_name":"p","plan_path":"/p","task_id":"task-1","task_key":"k","step":"s"}"#,
+        );
+        let current_loop_id = read_marker(&temp);
+
+        let decision = validate_execution_contract(
+            &event,
+            &rule,
+            temp.path(),
+            &current_loop_id,
+            &tasks_path,
+            None,
+            &DefaultGitEvidenceProvider,
+            None,
+        );
+
+        assert!(
+            !matches!(decision, ExecutionContractDecision::Reject(_)),
+            "Task whose loop_id matches the marker should not be rejected. \
+             Marker={current_loop_id}"
+        );
+    }
+
+    #[test]
+    fn test_contract_check_rejects_when_task_loop_mismatches_marker_for_primary() {
+        let temp = TempDir::new().unwrap();
+        let ralph_dir = temp.path().join(".ralph");
+        std::fs::create_dir_all(ralph_dir.join("agent")).unwrap();
+        std::fs::write(
+            ralph_dir.join("current-loop-id"),
+            "primary-20260604-091852\n",
+        )
+        .unwrap();
+        let tasks_path = ralph_dir.join("agent/tasks.jsonl");
+        write_task_with_loop_id(&tasks_path, "task-1", Some("primary-OTHER-LOOP"));
+
+        let rule = make_work_done_rule();
+        let event = Event::new(
+            "work.done",
+            r#"{"plan_name":"p","plan_path":"/p","task_id":"task-1","task_key":"k","step":"s"}"#,
+        );
+        let current_loop_id = read_marker(&temp);
+
+        let decision = validate_execution_contract(
+            &event,
+            &rule,
+            temp.path(),
+            &current_loop_id,
+            &tasks_path,
+            None,
+            &DefaultGitEvidenceProvider,
+            None,
+        );
+
+        match decision {
+            ExecutionContractDecision::Reject(findings) => {
+                let wrong_loop = findings.iter().find_map(|f| match &f.kind {
+                    ExecutionContractViolationKind::TaskWrongLoop {
+                        expected_loop,
+                        actual_loop,
+                        ..
+                    } => Some((expected_loop.clone(), actual_loop.clone())),
+                    _ => None,
+                });
+                let (expected, actual) = wrong_loop.expect("expected TaskWrongLoop finding");
+                assert_eq!(
+                    expected, "primary-20260604-091852",
+                    "expected_loop must reflect the marker value, not a hard-coded literal"
+                );
+                assert_eq!(actual.as_deref(), Some("primary-OTHER-LOOP"));
+            }
+            ExecutionContractDecision::Accept => {
+                panic!("Task with wrong loop_id must be rejected")
+            }
+        }
     }
 
     #[test]
