@@ -1,3 +1,19 @@
+---
+title: "用显式 schema_refs 替换 payload_contract.rs 的正则提取"
+type: refactor
+status: active
+date: 2026-06-03
+progress:
+  Phase_0_baseline: pending
+  Phase_1_core: pending
+  Phase_2_preset_migration: pending
+  Phase_3_docs: pending
+  Phase_4_validation: pending
+related:
+  - docs/plans/2026-06-02-005-feat-payload-contract-validation-plan.md
+  - docs/plans/2026-06-03-001-feat-agent-execution-contract-gates-plan.md
+---
+
 # Plan: 用显式 `schema_refs` 替换 `payload_contract.rs` 的正则提取
 
 > **Scope**: 仅替换静态 payload 字段引用的来源（层面 B）。不改 `event_policy.schemas` 格式（不做层面 A），不改运行时 `event_policy.rs` 的事件 payload 校验语义，不做 Promptfoo，不添加正则 fallback。
@@ -25,6 +41,56 @@
 - 不改变运行时 `EventPolicy` 对 payload 的校验规则。
 - 不做旧正则与新 `schema_refs` 的运行时双轨兼容。
 - 不把 `schema_refs` 注入 agent prompt；它只服务静态校验和诊断。
+
+---
+
+## Implementation Status（2026-06-04 更新）
+
+**当前进度：计划整体未启动（Phase 0 仍 pending）；但与本计划**正交**的 2026-06-02-005 计划已落地。**
+
+### 本计划自身的实施状态
+
+| 阶段 | 状态 | 说明 |
+|------|------|------|
+| Phase 0. 基线与调用点清点 | ⏳ pending | 未做旧正则基线记录 |
+| Phase 1. 数据结构 + Rust 核心改造 | ⏳ pending | `HatConfig` 仍无 `schema_refs` 字段；`payload_contract.rs` 仍使用 `regex::Regex` 提取 |
+| Phase 2. 给所有 preset YAML 添加 `schema_refs` | ⏳ pending | 所有 builtin preset YAML 仍依赖 `instructions` 文案中的 `From event payload: ...` / `payload MUST include: ...` / 反引号字段 |
+| Phase 3. 文档、skill 和注释更新 | ⏳ pending | `docs/guide/payload-contracts.md` 仍描述旧正则行为 |
+| Phase 4. 回归验证与清理 | ⏳ pending | — |
+
+**当前代码与本计划设计目标的差距（2026-06-04 14:51 实测）：**
+
+- `crates/ralph-core/src/payload_contract.rs` 第 18 行仍有 `use regex::Regex;`；第 61-63、120-121 行仍定义 4 个正则常量（`from_payload_regex` / `must_include_regex` / `backtick_field_regex` / `backtick_intent_regex`）。
+- `crates/ralph-core/src/config.rs` 中 `HatConfig` 仍无 `schema_refs: HashMap<String, Vec<String>>` 字段。
+- 所有 builtin preset YAML（`presets/en/*.yml`、`presets/zh/*.yml`、`presets/extras/*.yml`、`presets/minimal/*.yml`）均无 `schema_refs:` 段。
+
+### 与本计划相关的 2026-06-02-005 计划已落地内容
+
+以下提交虽然不在本计划的 Implementation Units 中，但**直接影响**本计划后续 Phase 1–4 的设计与执行；本计划设计决策依然有效，但需以下文为前提重新审视：
+
+| 提交 | 日期 | 与本计划的关系 |
+|------|------|----------------|
+| `25b03f8 feat(payload-contract): U2 字段引用提取器与 HatConfig.ignore_payload_fields` | 2026-05-31 | `ignore_payload_fields` 字段已加进 `HatConfig`；本计划 §2.1 "ignore_payload_fields 暂时保留"的设计决策**变成现实**——本计划 Phase 1.1 需要把 `ignore_payload_fields` 接受结构化字段引用（§2.6 语义已定）。 |
+| `4be51c4 feat(payload-contract): U3-U9 静态校验、启动硬门、运行时 Enforce 与 builtin 集成` | 2026-06-03 | 启动硬门（`loop_runner.rs::enforce_payload_contract_gate`）+ 运行时 Enforce 模式 + 3 个 builtin schema 库（`ce-executor` / `code-assist` / `pdd-to-code-assist`）已上线；strict validate 模式已能识别 schema 缺失与 field 缺失。**这意味着本计划实施后，结构化字段引用将被立即接入运行时校验链**——Phase 4 验收时硬门必须仍 0 误报。 |
+| `f51c8c8 fix(payload-contract): 修复 builtin preset 启动硬门 SchemaMissingForRequiredTopic` | 2026-06-03 | 修复 `preflight::merge_hats_overlay` 白名单丢失 `event_policy` / `verdict_gate` / `execution_contracts` 的缺陷；3 个 builtin preset 的 `event_policy.schema_file` 已改为内联 `event_policy.schemas` 块。**本计划 Phase 2 填写 `schema_refs` 时需以"内联 schemas"为字段真实来源**——而不是 `schema_file` 引用。 |
+| `c815a99 fix(audit): 修复 payload contract 实现的 3 个代码质量 + 文档同步问题` | 2026-06-03 | 3 个代码质量 + 1 个文档同步问题已修。**本计划实施时需要从 4be51c4 + c815a99 后的稳定基线继续**，不要回退这些质量修复。 |
+| `ab07161 refactor(presets): 物理分 en/zh/extras 目录,引入 manifest.yml 白名单` | 2026-06-03 | preset 物理目录已分 `en/` / `zh/` / `extras/` / `minimal/` / `schemas/`，并引入 `manifest.yml` 白名单。**本计划 Phase 2.1 枚举 builtin preset 清单需以 `presets/manifest.yml` 为准**（§2.1 与 §4 中"presets/en/*.yml / zh/*.yml / extras/*.yml / minimal/*.yml"分组仍然正确，但 §4 表中"`presets/schemas/*.yml`"实际是 `presets/schemas/`，不是 en/zh 镜像）。 |
+| `6656f8d refactor(build): 用 build.rs 复制 preset yml,砍掉镜像目录与 sync 脚本条目` | 2026-06-03 | 镜像目录已砍掉；`scripts/sync-embedded-files.sh` 同步条目已简化。**本计划不再需要同步镜像目录**——`presets/COLLECTION.md` 与 `presets/schemas/*.yml` 的旧表述检查范围缩小。 |
+| `1f8e78b chore(zsh): 同步 builtin 补全列表,移除 hatless-baseline` | 2026-06-03 | `hatless-baseline` 已从 builtin 补全列表移除（但 YAML 文件仍在 `presets/en/hatless-baseline.yml` 和 `presets/zh/hatless-baseline-zh.yml`）。**本计划 Phase 2 迁移 builtin preset 时建议同步剔除 hatless-baseline**——它不在严格 builtin 集内。 |
+| `41c2e4e feat(ce-executor): 为 ce-executor preset 增加 debug-resolver 与修复计划执行能力，并补齐 strict payload-contract 校验` | 2026-06-04 | `ce-executor` preset 新增 `debug-resolver` hat 与 strict payload-contract 校验。**本计划 Phase 2 写 `ce-executor` 的 `schema_refs` 时需包含 `debug-resolver` 的新字段依赖**——该 hat 的字段依赖应来自它的 `instructions` 与 `event_policy.schemas`。 |
+
+### 本计划 Phase 1 实施时的额外提示
+
+1. **Step 1.1 改 `config.rs` 时**：当前 `HatConfig` 的"已知字段清单"已包含 `ignore_payload_fields`（来自 4be51c4 系族）。`schema_refs` 加在 `instructions` / `extra_instructions` 后、`ignore_payload_fields` 前，与本计划 §2.1 设计一致。
+2. **Step 1.2 全量修复 `HatConfig` struct literal**：`grep` 命中范围会包含 `4be51c4` 系列与 `41c2e4e` 系列新增的 `HatConfig` 构造点（`crates/ralph-core/src/payload_contract.rs` 测试、`crates/ralph-cli/src/doctor.rs` 的 `ignore_payload_fields` 初始化点、`crates/ralph-cli/src/loop_runner.rs` 的 `inject_hat_execution_env` 周边、以及 `presets/en/ce-executor.yml` 翻译时新增的 debug-resolver hat）。
+3. **Step 1.5 改错误格式化时**：当前 `preset_validator.rs` 与 `hats.rs` 已能正确输出 `source_hats` 与 `schema_defined_in`（4be51c4 落地后），新结构化来源 `source=schema_refs` 需要在它们的 `format_payload_contract_error` 里增加分支——不能假设输入是旧的 `Some(line/pattern/source_excerpt)`。
+4. **Phase 2 写 `schema_refs` 时**：`ce-executor` 的字段依赖需要回看 `41c2e4e` 后 `presets/en/ce-executor.yml` 与 `crates/ralph-cli/presets/en/ce-executor.yml`（`include_str!` 嵌入路径）是否一致——本计划 Step 2.1 应同时核对两个路径。
+
+### 计划其余章节的说明
+
+- **§2. 方案设计 / §3. 实施步骤 / §4. 文件修改清单 / §5. 测试策略 / §6. 新旧对比验证 / §7. 风险与缓解 / §8. 回滚方案 / §9. 验收标准 / §10. 工作量估算 / §11. 实施者注意事项** 全部设计与约束保持有效。
+- 本计划**未发生根本性方向调整**；上文仅是同步：(1) `ignore_payload_fields` 字段已落地、运行时硬门已建立、`schema_refs` 接入的"消费者"已就位；(2) preset 物理目录与 build 流程已重构，旧计划中"同步镜像"的检查动作已不再需要。
+- 重新启动本计划时，从 Phase 0.3（旧正则基线记录）开始；不要复用任何已过期的"当前实现"假设。
 
 ---
 

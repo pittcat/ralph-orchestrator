@@ -3,6 +3,13 @@ title: "重构：拆分 4 个超大源文件为模块化结构"
 type: refactor
 status: active
 date: 2026-06-03
+progress:
+  U1: done (2026-06-04, 4ba6e37 — 共享 helper 模块就位)
+  U2: pending
+  U3: pending
+  U4: pending
+  U5: pending
+  U6: pending
 origin: "用户反馈：项目里有 4 个文件超过 5000 行，loop_runner.rs 高达 14733 行，可读性和可维护性严重下降，且 IDE 索引/编译变慢"
 related:
   - docs/plans/2026-06-03-001-feat-agent-execution-contract-gates-plan.md
@@ -19,10 +26,10 @@ related:
 
 | 文件 | 行数 | 现状 |
 |------|-----:|------|
-| `crates/ralph-cli/src/loop_runner.rs` | 14 733 | 包含 80+ 个顶级 fn、单体 2 933 行 `run_loop_impl`、7 500 行内联测试 |
-| `crates/ralph-core/src/event_loop/tests.rs` | 9 152 | 220 个集成测试散落在单文件，仅靠注释分段 |
-| `crates/ralph-core/src/config.rs` | 6 278 | 配置中心，13 个逻辑集群、30+ 个 struct、46% 测试代码 |
-| `crates/ralph-cli/src/main.rs` | 5 695 | 11 个子命令、570 行共享工具、38% 测试代码 |
+| `crates/ralph-cli/src/loop_runner.rs` | 14 942 | 包含 90+ 个顶级 fn、单体 ~2 950 行 `run_loop_impl`、~8 000 行内联测试（含 hook suspend/retry、execution contract recovery、payload input builders 等新增逻辑） |
+| `crates/ralph-core/src/event_loop/tests.rs` | 9 810 | ~260 个集成测试散落在单文件，含 execution contract、ce-executor routing、stale breaker 等新测试段 |
+| `crates/ralph-core/src/config.rs` | 6 345 | 配置中心，15 个逻辑集群、35+ 个 struct（新增 `extra_instructions`/`phase_triggers`/`event_filter`/`aggregate`/`disallowed_tools`/`ignore_payload_fields`/`timeout`/`concurrency` 等）、46% 测试代码 |
+| `crates/ralph-cli/src/main.rs` | 5 781 | 11 个子命令 + 4 个新增内部模块（`config_resolution`/`interact`/`sop_runner`/`task_cli`）、570 行共享工具、38% 测试代码 |
 
 **目标**：每个被拆分文件最终不超过 ~2 000 行（除非像 `run_loop_impl` 这种无法机械切分的单体函数），单个子文件控制在 100–500 行之间，公开 API 表面（pub fn、pub struct、pub enum、crate 重导出）逐项保持兼容。
 
@@ -32,6 +39,49 @@ related:
 3. **测试跟着生产代码走**——避免 main.rs / tests.rs 测试大量散落难以维护。
 4. **渐进式拆分**——每个 U 完成时跑测试，绿灯后才能进入下一个 U。
 5. **不改行为**——禁止"顺手优化"或"趁重构修复 bug"。
+
+---
+
+## Implementation Status（2026-06-04 更新）
+
+**当前进度：U1 完成，U2–U6 仍待执行。**
+
+| U | 状态 | 提交/事件 | 说明 |
+|---|------|----------|------|
+| U1. 公共基础设施 + 测试夹具集中 | ✅ done | `4ba6e37` (2026-06-04 13:46) | 在 `event_loop/tests.rs` 顶部添加 `mod common;` 声明，新建 `event_loop/tests/common/mod.rs`（214 行，7 个共享 helper + 2 个 mock service），原 `tests.rs` 中的 helper 暂未删除；226 个 event_loop tests 全绿。 |
+| U2. 拆 `event_loop/tests.rs` → `event_loop/tests/` | ⏳ pending | — | U1 已就位，等跟进。 |
+| U3. 拆 `config.rs` → `config/` | ⏳ pending | — | 与 U2 可并行。 |
+| U4. 拆 `main.rs` → `cli/` + `commands/` | ⏳ pending | — | 建议在 U3 之后。 |
+| U5. 拆 `loop_runner.rs` → `loop_runner/` | ⏳ pending | — | 必须在 U4 之后。 |
+| U6. 完整验证 + 文档同步 | ⏳ pending | — | 末位执行。 |
+
+**当前 4 个被拆分文件实际行数（截至 2026-06-04 14:51）：**
+
+| 文件 | 当前行数 | 与本计划基线对比 |
+|------|---------:|------------------|
+| `crates/ralph-cli/src/loop_runner.rs` | 14 942 | 较基线（14 733）+209 行，主要是 `run_loop_impl` 新增 hook suspend/retry、execution contract recovery、payload input builders 等逻辑 |
+| `crates/ralph-core/src/event_loop/tests.rs` | 9 810 | 较基线（9 152）+658 行，主要是 execution contract、ce-executor routing、stale breaker 等新测试段 |
+| `crates/ralph-core/src/config.rs` | 6 345 | 较基线（6 278）+67 行，新增 `extra_instructions` / `phase_triggers` / `event_filter` / `aggregate` / `disallowed_tools` / `ignore_payload_fields` / `timeout` / `concurrency` 等字段 |
+| `crates/ralph-cli/src/main.rs` | 5 781 | 较基线（5 695）+86 行，新增 4 个内部模块（`config_resolution` / `interact` / `sop_runner` / `task_cli`） |
+
+**计划仍需更新的位置**（跟随实际行号）：
+
+- `loop_runner.rs` 中 4 处 `#[cfg(test)]` 内部 hook 的当前行号已写入上文 "关键依赖关系" 段。
+- `event_loop/tests.rs` 中 `replay_light_integration` 子模块的当前行号区间 `L9 116–9 810` 已更新。
+- `run_loop_impl` 内部新增了"execution contract rejection / recovery status / hook termination/suspend/retry"调用对象，已写入上文 "为什么不直接拆分" 段。
+
+**未来 U2–U6 执行时的注意事项：**
+
+1. **U1 未删除 `tests.rs` 中的原 helper**（按计划要求"先复制不删"），U2 实际拆分时需再次 review 这些 helper 是否可整体迁移。
+2. **U3 拆 `config.rs` 时注意新增字段**（`extra_instructions` / `phase_triggers` / `event_filter` / `aggregate` / `disallowed_tools` / `ignore_payload_fields` / `timeout` / `concurrency` 等）必须同步分到对应子模块；`ignore_payload_fields` 属于 hat 字段，期望进入 `hat.rs`。
+3. **U4 拆 `main.rs` 时 4 个新内部模块**（`config_resolution` / `interact` / `sop_runner` / `task_cli`）已存在独立文件，归属到 `cli/` 或 `commands/` 需结合其依赖判断。
+4. **U5 拆 `loop_runner.rs` 时 `run_loop_impl` 已增长 209 行**，新出现的 hook suspend/retry、execution contract recovery、payload input builders 等调用对象是新的"调用对象"边界，拆分时应识别为单独子模块（如 `loop_runner/contract_recovery.rs`）。
+5. **测试夹具 `loop_runner` 内联测试已新增 209 行**（与生产代码增长一致），U5 拆分时需重新评估 `loop_runner/test_helpers.rs` 的目标规模（计划中估计 800 行，实际可能更大）。
+
+**对本计划其余章节的说明：**
+
+- **Requirements / Scope Boundaries / KTD / File Structure / Implementation Units / Sequencing / Test Matrix / Risks / Acceptance Criteria / Out of Plan** 全部设计与约束保持有效，不因进度变化而修改。
+- 计划自创建以来**未发生根本性方向调整**，只是规模/行数微调；本更新只为同步仓库真实状态。
 
 ---
 
@@ -48,7 +98,7 @@ related:
 
 ### 为什么不直接拆分
 
-- **`run_loop_impl` 本身有 2 933 行**——这是单体 async 函数，内部有数十个闭包、可变状态、`tokio::select!` 块。本计划**不在本次拆分 `run_loop_impl` 内部**，只把它的"调用对象"（hooks、payload inputs、late events、hard gate、wave、execution、event_logging、merge_queue 等）抽到子模块。`run_loop_impl` 内部章节抽取作为 follow-up 单独 PR。
+- **`run_loop_impl` 本身有 ~2 950 行**——这是单体 async 函数，内部有数十个闭包、可变状态、`tokio::select!` 块。本计划**不在本次拆分 `run_loop_impl` 内部**，只把它的"调用对象"（hooks、payload inputs、late events、hard gate、wave、execution、event_logging、merge_queue、execution contract rejection、recovery status、hook termination/suspend/retry 等）抽到子模块。`run_loop_impl` 内部章节抽取作为 follow-up 单独 PR。
 - **配置 `pub use` 锁定**：`lib.rs:73-80` 已经一次性 re-export 27 个项，下游 `ralph-cli` 大量依赖 `ralph_core::RalphConfig` 等路径。拆分时必须保留所有现有导出名。
 - **clap 派生 cross-module**：`main.rs` 的 `Cli` 派发已经穿过多个子命令文件（doctor/hats/hooks/loops/mcp/tools/wave/web 已经是独立文件），继续把剩余 11 个命令下沉是**沿用现有模式**。
 - **`#[serde(untagged)]` HatBackend 顺序敏感**：任何重新排序都会破坏反序列化。
@@ -158,11 +208,11 @@ related:
 - `main.rs:25` 声明 `mod loop_runner;`（非 `pub mod`），所以 `loop_runner` 内部结构对 crate 外不可见。
 - `lib.rs:73-80` 的 `pub use config::{...}` 是 `ralph-core` 公开 API 合约。
 - `loop_runner` 文件内部 4 处 `#[cfg(test)]` 单函数 / 单结构（不是 `mod tests`），是**生产代码引用的测试 hook**，必须随对应生产代码一起迁移：
-  - `detect_solo_output_completion`（L4 777–4 784）
-  - `MockAcpExecution` enum（L6 615–6 687）
-  - `MOCK_ACP_EXECUTIONS` / `MOCK_ACP_EXECUTION_SERIAL` 全局（L6 689–6 696）
-  - `forced_test_wave_pty_failure`（L6 795–6 801）
-- `event_loop/tests.rs` 唯一一个嵌套子模块是 `replay_light_integration`（L8 742–9 152），它有自己的 helper 和外部 `git` 依赖。
+  - `detect_solo_output_completion`（L4 834–4 841）
+  - `MockAcpExecution` enum（L6 689–6 761）
+  - `MOCK_ACP_EXECUTIONS` / `MOCK_ACP_EXECUTION_SERIAL` 全局（L6 763–6 770）
+  - `forced_test_wave_pty_failure`（L6 869–6 875）
+- `event_loop/tests.rs` 唯一一个嵌套子模块是 `replay_light_integration`（L9 116–9 810），它有自己的 helper 和外部 `git` 依赖。
 
 ### 关键风险点
 
