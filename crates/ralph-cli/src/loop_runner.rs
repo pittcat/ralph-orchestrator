@@ -145,13 +145,13 @@ use tracing::{debug, error, info, warn};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
+use crate::cli::process_management;
+use crate::cli::{ColorMode, Verbosity};
 use crate::display::{
     build_tui_hat_map, print_iteration_footer, print_iteration_separator, print_loop_banner,
     print_termination, print_wave_header, print_wave_summary, print_wave_worker_done,
 };
-use crate::process_management;
 use crate::rpc_stdin::{GuidanceMessage, RpcDispatcher, run_stdin_reader, run_stdout_emitter};
-use crate::{ColorMode, Verbosity};
 
 /// Outcome of executing a prompt via PTY or CLI executor.
 pub(crate) struct ExecutionOutcome {
