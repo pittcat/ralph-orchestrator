@@ -6775,11 +6775,7 @@ async fn run_wave_worker_acp(
     )
     .await;
     let duration = start.elapsed();
-    let events = if timed_out {
-        read_worker_events_with_retry(worker_events_path, Duration::from_millis(250))
-    } else {
-        read_worker_events(worker_events_path)
-    };
+    let events = read_worker_events(worker_events_path);
     let _ = fs::remove_file(worker_events_path);
 
     match result {
@@ -7036,7 +7032,11 @@ async fn run_wave_worker_pty(
     let success = status.map(|s| s.success() && !timed_out).unwrap_or(false);
     let duration = start.elapsed();
 
-    let events = read_worker_events(worker_events_path);
+    let events = if timed_out {
+        read_worker_events_with_retry(worker_events_path, Duration::from_secs(1))
+    } else {
+        read_worker_events(worker_events_path)
+    };
     let _ = fs::remove_file(worker_events_path);
 
     if timed_out && events.is_empty() {
