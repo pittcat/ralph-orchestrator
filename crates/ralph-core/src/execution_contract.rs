@@ -605,8 +605,11 @@ fn validate_test_evidence(
 mod tests {
     use super::*;
     use crate::config::{
-        ContractRejectConfig, ExecutionContractRule, GitChangeRequirement,
-        TaskCompletionRequirement, TestEvidenceRequirement,
+        ExecutionContractRule,
+        execution_contracts::{
+            ContractRejectConfig, GitChangeRequirement, TaskCompletionRequirement,
+            TestEvidenceRequirement,
+        },
     };
     use crate::task::{Task, TaskStatus};
     use crate::task_store::TaskStore;

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::default_true;
+use super::error::ConfigError;
 
 /// Hooks configuration.
 ///
@@ -133,7 +133,7 @@ impl HookPhaseEvent {
     }
 
     /// Returns the canonical key string for this phase-event.
-    pub fn as_key(&self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::PreLoopStart => "pre.loop.start",
             Self::PostLoopStart => "post.loop.start",
@@ -149,21 +149,18 @@ impl HookPhaseEvent {
             Self::PostLoopError => "post.loop.error",
         }
     }
-
-    /// Returns the canonical key string for this phase-event.
-    pub fn as_str(&self) -> &'static str {
-        self.as_key()
-    }
 }
 
 impl std::fmt::Display for HookPhaseEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_key())
+        f.write_str((*self).as_str())
     }
 }
 
 /// Validates that all keys in the `hooks.events` mapping are supported v1 phase-event keys.
-pub fn validate_hooks_phase_event_keys(value: &serde_yaml::Value) -> Result<(), ConfigError> {
+pub(super) fn validate_hooks_phase_event_keys(
+    value: &serde_yaml::Value,
+) -> Result<(), ConfigError> {
     let Some(root) = value.as_mapping() else {
         return Ok(());
     };
@@ -196,8 +193,6 @@ pub fn validate_hooks_phase_event_keys(value: &serde_yaml::Value) -> Result<(), 
     }
     Ok(())
 }
-
-use super::error::ConfigError;
 
 /// Failure behavior for hooks (`warn`, `block`, `suspend`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -283,9 +278,4 @@ pub struct HookSpec {
     /// Unknown keys captured for v1 guardrails.
     #[serde(default, flatten)]
     pub extra: HashMap<String, serde_yaml::Value>,
-}
-
-#[allow(dead_code)]
-fn _ensure_default_true_used() {
-    let _ = default_true();
 }

@@ -44,7 +44,7 @@ pub struct AdapterSettings {
     pub tool_permissions: Option<Vec<String>>,
 }
 
-pub(crate) fn default_timeout() -> u64 {
+fn default_timeout() -> u64 {
     300 // 5 minutes
 }
 

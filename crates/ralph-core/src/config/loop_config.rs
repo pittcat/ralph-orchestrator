@@ -33,7 +33,7 @@ pub enum PayloadType {
     Array,
 }
 
-fn default_prompt_file() -> String {
+pub(super) fn default_prompt_file() -> String {
     "PROMPT.md".to_string()
 }
 

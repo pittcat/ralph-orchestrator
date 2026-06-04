@@ -9,45 +9,36 @@ mod error;
 mod event_filter;
 mod event_policy;
 mod event_projection;
-mod execution_contracts;
+pub(crate) mod execution_contracts;
 mod features;
 mod hat;
 mod hooks;
 mod loop_config;
 mod memories;
 mod preflight_ext;
-mod robot;
+pub(crate) mod robot;
 mod skills;
 mod state_files;
-mod state_machine;
+pub(crate) mod state_machine;
 mod tasks;
 mod v1_adapters;
 mod warning;
-mod workflow_guards;
+pub(crate) mod workflow_guards;
 
 pub use cli::{CliConfig, TuiConfig};
-pub(crate) use core::deserialize_optional_scratchpad_config;
-#[allow(unused_imports)]
-pub(crate) use core::deserialize_scratchpad_config;
 pub use core::{CoreConfig, ScratchpadConfig};
 pub use error::ConfigError;
 pub use event_filter::{EventFilterConfig, EventFilterMode};
 pub use event_policy::{
-    CompletionAfterTerminalAction, CompletionAfterTerminalConfig, EventPolicyConfig,
-    EventPolicyMode, ViolationAction,
+    CompletionAfterTerminalAction, EventPolicyConfig, EventPolicyMode, ViolationAction,
 };
 pub use event_projection::{EventProjectionConfig, ProjectionMode, ProjectionRule};
-pub use execution_contracts::{
-    ContractRejectConfig, ExecutionContractRule, ExecutionContractsConfig, GitChangeRequirement,
-    TaskCompletionRequirement, TestEvidenceRequirement,
-};
+pub use execution_contracts::ExecutionContractRule;
 pub use features::FeaturesConfig;
-#[allow(unused_imports)]
-pub(crate) use features::PreflightConfig;
-pub use hat::{AggregateConfig, AggregateMode, EventMetadata, HatBackend, HatConfig};
+pub use hat::{EventMetadata, HatBackend, HatConfig};
 pub use hooks::{
     HookDefaults, HookMutationConfig, HookOnError, HookPhaseEvent, HookSpec, HookSuspendMode,
-    HooksConfig, validate_hooks_phase_event_keys,
+    HooksConfig,
 };
 pub use loop_config::{
     EventLoopConfig, EventSchema, PayloadType, Phase, PhaseConfig, VerdictGateConfig, WarmupConfig,
@@ -55,22 +46,16 @@ pub use loop_config::{
 pub use memories::{InjectMode, MemoriesConfig, MemoriesFilter};
 pub use preflight_ext::{HookStage, PreflightExtensionsConfig, PreflightHook};
 pub use robot::RobotConfig;
-#[allow(unused_imports)]
-pub(crate) use robot::TelegramBotConfig;
 pub use skills::{SkillOverride, SkillsConfig};
 pub use state_files::{StateFileEntry, StateFileFormat, StateFilesConfig};
-pub use state_machine::{
-    BusinessAfterTerminalAction, DuplicateTerminalAction, InstanceKeyConfig, StateMachineConfig,
-    TerminalGuardConfig, TransitionConfig,
-};
+pub use state_machine::{BusinessAfterTerminalAction, DuplicateTerminalAction, StateMachineConfig};
 pub use tasks::TasksConfig;
 pub use v1_adapters::{AdapterSettings, AdaptersConfig};
 pub use warning::ConfigWarning;
 pub use workflow_guards::{
-    CorrelationConfig, HatExecutionMode, WorkflowChain, WorkflowChainMode, WorkflowGuardsConfig,
+    HatExecutionMode, WorkflowChain, WorkflowChainMode, WorkflowGuardsConfig,
 };
 
-use ralph_proto::Topic;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -280,7 +265,7 @@ impl RalphConfig {
             return Err(ConfigError::DeprecatedProjectKey);
         }
 
-        validate_hooks_phase_event_keys(&value)?;
+        hooks::validate_hooks_phase_event_keys(&value)?;
 
         let config: Self = serde_yaml::from_value(value)?;
         debug!(
@@ -402,7 +387,7 @@ impl RalphConfig {
         // Only error if both are explicitly set (not defaults)
         if self.event_loop.prompt.is_some()
             && !self.event_loop.prompt_file.is_empty()
-            && self.event_loop.prompt_file != default_prompt_file()
+            && self.event_loop.prompt_file != loop_config::default_prompt_file()
         {
             return Err(ConfigError::MutuallyExclusive {
                 field1: "event_loop.prompt".to_string(),
@@ -937,30 +922,6 @@ impl RalphConfig {
     }
 }
 
-fn default_prompt_file() -> String {
-    "PROMPT.md".to_string()
-}
-
-fn default_completion_promise() -> String {
-    "LOOP_COMPLETE".to_string()
-}
-
-fn default_max_iterations() -> u32 {
-    100
-}
-
-fn default_max_runtime() -> u64 {
-    14400 // 4 hours
-}
-
-fn default_max_failures() -> u32 {
-    5
-}
-
-fn default_cancellation_promise() -> String {
-    "loop.cancel".to_string()
-}
-
 /// Hooks configuration.
 ///
 /// Controls per-project orchestrator lifecycle hooks. Hooks are disabled by
@@ -982,6 +943,7 @@ fn default_cancellation_promise() -> String {
 /// ```
 #[cfg(test)]
 mod tests {
+    use super::robot::TelegramBotConfig;
     use super::*;
 
     #[test]
@@ -2893,7 +2855,7 @@ hats:
         let aggregator = config.hats.get("aggregator").unwrap();
         assert_eq!(aggregator.concurrency, 1); // default
         let agg = aggregator.aggregate.as_ref().unwrap();
-        assert!(matches!(agg.mode, AggregateMode::WaitForAll));
+        assert!(matches!(agg.mode, hat::AggregateMode::WaitForAll));
         assert_eq!(agg.timeout, 600);
     }
 

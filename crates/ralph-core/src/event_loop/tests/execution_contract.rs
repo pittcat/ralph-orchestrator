@@ -61,8 +61,11 @@ fn test_execution_contract_rejects_work_done_with_missing_payload() {
     // Test that work.done without required payload fields is rejected
     // This tests the execution contract validator directly
     use crate::config::{
-        ContractRejectConfig, ExecutionContractRule, GitChangeRequirement,
-        TaskCompletionRequirement, TestEvidenceRequirement,
+        ExecutionContractRule,
+        execution_contracts::{
+            ContractRejectConfig, GitChangeRequirement, TaskCompletionRequirement,
+            TestEvidenceRequirement,
+        },
     };
     use crate::execution_contract::{
         DefaultGitEvidenceProvider, ExecutionContractDecision, ExecutionContractViolationKind,
