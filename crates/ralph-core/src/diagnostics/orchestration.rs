@@ -62,6 +62,15 @@ pub enum OrchestrationEvent {
         violation_kind: String,
         message: String,
     },
+    /// Targeted contract recovery was routed (or could not be routed) to a
+    /// source hat (2026-06-04 plan U7). When `retry_target` is `None` and
+    /// `no_retry_reason` is `Some`, the rejected event has no safe recovery
+    /// path and operators must intervene.
+    ContractRecoveryRouted {
+        topic: String,
+        retry_target: Option<String>,
+        no_retry_reason: Option<String>,
+    },
 }
 
 pub struct OrchestrationLogger {

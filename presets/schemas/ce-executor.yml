@@ -39,6 +39,7 @@ work.ready:
 work.done:
   required_fields:
     - plan_name
+    - plan_path
     - task_id
     - task_key
     - step
@@ -150,10 +151,7 @@ plan.complete:
 
 plan.blocked:
   required_fields:
-    - plan_name
     - reason
-    - task_id
-    - task_key
   payload: json_object
 
 REVIEW_COMPLETE:

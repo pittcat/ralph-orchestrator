@@ -68,7 +68,7 @@ event_loop:
         required_fields: [plan_name, plan_path, task_id, task_key, step, complexity]
         payload: json_object
       work.done:
-        required_fields: [plan_name, task_id, task_key, step]
+        required_fields: [plan_name, plan_path, task_id, task_key, step]
         payload: json_object
       work.failed:
         required_fields: [reason]
@@ -101,7 +101,7 @@ event_loop:
         required_fields: [plan_name, completed_steps, task_id, task_key, verdict]
         payload: json_object
       plan.blocked:
-        required_fields: [plan_name, reason, task_id, task_key]
+        required_fields: [reason]
         payload: json_object
       REVIEW_COMPLETE:
         required_fields: [plan_name, verdict, pass_or_fail, residual_findings_summary]
@@ -310,7 +310,7 @@ hats:
 
       ### 步骤推进
       - 当前步骤所有 tasks 完成 → 更新 `progress.md`（移动步骤到 Completed Steps）
-      - 发布 `work.done`，payload 携带 `task_id`、`task_key`、`step`、`commit_count`、`changed_lines`
+      - 发布 `work.done`，payload 携带 `plan_name`、`plan_path`、`task_id`、`task_key`、`step`、`commit_count`、`changed_lines`
       - 不得从执行器发布 `queue.advance`。队列推进由 `plan-gate` 负责。
 
       ### queue.advance 激活
@@ -707,7 +707,7 @@ hats:
   plan-gate:
     name: "🚦 计划门控"
     description: "对账 review 结果与 plan 进度，决定 queue.advance 或 plan.complete。"
-    triggers: ["review.passed", "review.complete"]
+    triggers: ["review.passed", "review.complete", "work.failed"]
     publishes: ["queue.advance", "plan.complete", "plan.blocked"]
     default_publishes: "plan.blocked"
     instructions: |
@@ -715,6 +715,15 @@ hats:
 
       你是 plan 全局推进门控。你不审查、不实现、不验证。
       唯一职责：判断已审查的增量意味着「继续下一步」还是「所有步骤完成——进入交付」。
+
+      ### work.failed 路由（2026-06-04 plan U5）
+      被 `work.failed`（来自 coordinator 或 executor）触发时，将失败翻译为
+      `plan.blocked`，以便后续流水线（shipper、reporter）仍能将失败上报给 manager。
+      - 必需 payload 字段：`plan_name`、`reason`、`task_id`、`task_key`、`step`。
+      - 若任一字段缺失，不要猜测——发布 `plan.blocked`，并以
+        `reason: "work.failed 缺少必需字段: <missing>"` 标明，附带你已持有的字段。
+      - 失败不能跳过最终报告。`plan.blocked` 流向
+        `shipper -> REVIEW_COMPLETE -> reporter -> LOOP_COMPLETE`，manager 报告仍记录 blocked 状态。
 
       ### 读取状态
       1. 从事件 payload：`plan_name`、`task_id`、`task_key`、`step`、`verdict`、`findings_count`、`fix_round`

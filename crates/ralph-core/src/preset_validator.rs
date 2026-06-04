@@ -14,7 +14,7 @@
 use crate::config::RalphConfig;
 use crate::hat_registry::HatRegistry;
 use crate::payload_contract::{
-    validate_payload_contract, PayloadContractError, PayloadContractValidationResult,
+    PayloadContractError, PayloadContractValidationResult, validate_payload_contract,
 };
 use ralph_proto::{Hat, Topic};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -1359,11 +1359,13 @@ hats:
         assert!(result.topology.is_valid());
         assert!(!result.payload_contracts.is_valid());
         assert!(!result.is_valid());
-        assert!(result
-            .payload_contracts
-            .errors
-            .iter()
-            .any(|e| e.field.as_deref() == Some("plan_name")));
+        assert!(
+            result
+                .payload_contracts
+                .errors
+                .iter()
+                .any(|e| e.field.as_deref() == Some("plan_name"))
+        );
     }
 
     #[test]

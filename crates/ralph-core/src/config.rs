@@ -1006,24 +1006,22 @@ impl RalphConfig {
         if !resolved_path.exists() {
             return Err(ConfigError::SchemaFileNotFound {
                 path: resolved_path.display().to_string(),
-                source: std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "file not found",
-                ),
+                source: std::io::Error::new(std::io::ErrorKind::NotFound, "file not found"),
             });
         }
 
         let content = std::fs::read_to_string(&resolved_path)?;
-        let value: serde_yaml::Value = serde_yaml::from_str(&content).map_err(|e| {
-            ConfigError::SchemaFileParseError {
+        let value: serde_yaml::Value =
+            serde_yaml::from_str(&content).map_err(|e| ConfigError::SchemaFileParseError {
                 path: resolved_path.display().to_string(),
                 source: e,
-            }
-        })?;
+            })?;
 
-        let map = value.as_mapping().ok_or_else(|| ConfigError::SchemaFileNotMap {
-            path: resolved_path.display().to_string(),
-        })?;
+        let map = value
+            .as_mapping()
+            .ok_or_else(|| ConfigError::SchemaFileNotMap {
+                path: resolved_path.display().to_string(),
+            })?;
 
         // Get existing inline schemas to merge with (inline takes priority)
         let inline_schemas = self
@@ -1038,13 +1036,14 @@ impl RalphConfig {
 
         for (topic, schema_value) in map {
             let topic_str = topic.as_str().unwrap_or_default();
-            let schema: EventSchema = serde_yaml::from_value(schema_value.clone()).map_err(|e| {
-                ConfigError::SchemaFileInvalidSchema {
-                    path: resolved_path.display().to_string(),
-                    topic: topic_str.to_string(),
-                    source: e,
-                }
-            })?;
+            let schema: EventSchema =
+                serde_yaml::from_value(schema_value.clone()).map_err(|e| {
+                    ConfigError::SchemaFileInvalidSchema {
+                        path: resolved_path.display().to_string(),
+                        topic: topic_str.to_string(),
+                        source: e,
+                    }
+                })?;
             merged_schemas.insert(topic_str.to_string(), schema);
         }
 
@@ -3357,12 +3356,18 @@ pub enum ConfigError {
     #[error(
         "Schema file not found: {path}\nFix: ensure the file exists relative to the config/preset directory."
     )]
-    SchemaFileNotFound { path: String, source: std::io::Error },
+    SchemaFileNotFound {
+        path: String,
+        source: std::io::Error,
+    },
 
     #[error(
         "Schema file parse error at '{path}': {source}\nFix: ensure the schema file is valid YAML."
     )]
-    SchemaFileParseError { path: String, source: serde_yaml::Error },
+    SchemaFileParseError {
+        path: String,
+        source: serde_yaml::Error,
+    },
 
     #[error(
         "Schema file root at '{path}' must be a map of topic -> schema.\nFix: structure the schema file as:\n  topic.name:\n    payload: json_object\n    required_fields: [field1, field2]"
@@ -3372,7 +3377,11 @@ pub enum ConfigError {
     #[error(
         "Invalid schema for topic '{topic}' in schema file '{path}': {source}\nFix: check the schema definition for this topic."
     )]
-    SchemaFileInvalidSchema { path: String, topic: String, source: serde_yaml::Error },
+    SchemaFileInvalidSchema {
+        path: String,
+        topic: String,
+        source: serde_yaml::Error,
+    },
 }
 
 #[cfg(test)]
@@ -6068,7 +6077,15 @@ event_loop:
         let result = config.resolve_schema_files(std::path::Path::new("/tmp"));
         assert!(result.is_ok());
         // Schemas should remain empty
-        assert!(config.event_loop.event_policy.as_ref().unwrap().schemas.is_empty());
+        assert!(
+            config
+                .event_loop
+                .event_policy
+                .as_ref()
+                .unwrap()
+                .schemas
+                .is_empty()
+        );
     }
 
     #[test]
@@ -6094,13 +6111,16 @@ event_loop:
         let schema_path = temp_dir.join("invalid_schema.yml");
         std::fs::write(&schema_path, "not: [valid: yaml: broken").unwrap();
 
-        let yaml = format!(r#"
+        let yaml = format!(
+            r#"
 event_loop:
   event_policy:
     enabled: true
     mode: observe
     schema_file: "{}"
-"#, schema_path.file_name().unwrap().to_string_lossy());
+"#,
+            schema_path.file_name().unwrap().to_string_lossy()
+        );
 
         let mut config: RalphConfig = serde_yaml::from_str(&yaml).unwrap();
         let result = config.resolve_schema_files(&temp_dir);
@@ -6118,13 +6138,16 @@ event_loop:
         // YAML with array at root instead of map
         std::fs::write(&schema_path, "- topic1\n  - topic2").unwrap();
 
-        let yaml = format!(r#"
+        let yaml = format!(
+            r#"
 event_loop:
   event_policy:
     enabled: true
     mode: observe
     schema_file: "{}"
-"#, schema_path.file_name().unwrap().to_string_lossy());
+"#,
+            schema_path.file_name().unwrap().to_string_lossy()
+        );
 
         let mut config: RalphConfig = serde_yaml::from_str(&yaml).unwrap();
         let result = config.resolve_schema_files(&temp_dir);
@@ -6140,19 +6163,26 @@ event_loop:
         let temp_dir = std::env::temp_dir();
         let schema_path = temp_dir.join("bad_topic_schema.yml");
         // Valid YAML but invalid schema structure for the topic
-        std::fs::write(&schema_path, r#"
+        std::fs::write(
+            &schema_path,
+            r#"
 experiment.planned:
   payload: json_object
   required_fields: not_an_array
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
-        let yaml = format!(r#"
+        let yaml = format!(
+            r#"
 event_loop:
   event_policy:
     enabled: true
     mode: observe
     schema_file: "{}"
-"#, schema_path.file_name().unwrap().to_string_lossy());
+"#,
+            schema_path.file_name().unwrap().to_string_lossy()
+        );
 
         let mut config: RalphConfig = serde_yaml::from_str(&yaml).unwrap();
         let result = config.resolve_schema_files(&temp_dir);
@@ -6167,7 +6197,9 @@ event_loop:
     fn test_resolve_schema_files_loads_and_merges() {
         let temp_dir = std::env::temp_dir();
         let schema_path = temp_dir.join("merged_schema.yml");
-        std::fs::write(&schema_path, r#"
+        std::fs::write(
+            &schema_path,
+            r#"
 experiment.planned:
   payload: json_object
   required_fields:
@@ -6177,9 +6209,12 @@ work.done:
   payload: json_object
   required_fields:
     - task_id
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
-        let yaml = format!(r#"
+        let yaml = format!(
+            r#"
 event_loop:
   event_policy:
     enabled: true
@@ -6191,7 +6226,9 @@ event_loop:
         required_fields:
           - task_key
           - dimension
-"#, schema_path.file_name().unwrap().to_string_lossy());
+"#,
+            schema_path.file_name().unwrap().to_string_lossy()
+        );
 
         let mut config: RalphConfig = serde_yaml::from_str(&yaml).unwrap();
         let result = config.resolve_schema_files(&temp_dir);
@@ -6200,10 +6237,22 @@ event_loop:
         let schemas = &config.event_loop.event_policy.as_ref().unwrap().schemas;
         // experiment.planned: inline schema takes priority, replaces file schema
         let exp_planned = schemas.get("experiment.planned").unwrap();
-        assert!(exp_planned.required_fields.contains(&"task_key".to_string()));
-        assert!(exp_planned.required_fields.contains(&"dimension".to_string()));
+        assert!(
+            exp_planned
+                .required_fields
+                .contains(&"task_key".to_string())
+        );
+        assert!(
+            exp_planned
+                .required_fields
+                .contains(&"dimension".to_string())
+        );
         // plan_name from file is NOT present because inline replaces entire topic schema
-        assert!(!exp_planned.required_fields.contains(&"plan_name".to_string()));
+        assert!(
+            !exp_planned
+                .required_fields
+                .contains(&"plan_name".to_string())
+        );
         // work.done should be loaded from file only (not in inline)
         let work_done = schemas.get("work.done").unwrap();
         assert!(work_done.required_fields.contains(&"task_id".to_string()));
@@ -6215,14 +6264,19 @@ event_loop:
     fn test_resolve_schema_files_inline_takes_priority() {
         let temp_dir = std::env::temp_dir();
         let schema_path = temp_dir.join("priority_schema.yml");
-        std::fs::write(&schema_path, r#"
+        std::fs::write(
+            &schema_path,
+            r#"
 work.ready:
   payload: json_object
   required_fields:
     - file_source
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
-        let yaml = format!(r#"
+        let yaml = format!(
+            r#"
 event_loop:
   event_policy:
     enabled: true
@@ -6233,7 +6287,9 @@ event_loop:
         payload: json_object
         required_fields:
           - task_key
-"#, schema_path.file_name().unwrap().to_string_lossy());
+"#,
+            schema_path.file_name().unwrap().to_string_lossy()
+        );
 
         let mut config: RalphConfig = serde_yaml::from_str(&yaml).unwrap();
         let result = config.resolve_schema_files(&temp_dir);
@@ -6244,7 +6300,11 @@ event_loop:
         let work_ready = schemas.get("work.ready").unwrap();
         assert_eq!(work_ready.required_fields, vec!["task_key"]);
         // file_source from file should NOT be present since inline overrides
-        assert!(!work_ready.required_fields.contains(&"file_source".to_string()));
+        assert!(
+            !work_ready
+                .required_fields
+                .contains(&"file_source".to_string())
+        );
 
         std::fs::remove_file(&schema_path).ok();
     }
@@ -6253,18 +6313,25 @@ event_loop:
     fn test_resolve_schema_files_absolute_path() {
         let temp_dir = std::env::temp_dir();
         let schema_path = temp_dir.join("absolute_schema.yml");
-        std::fs::write(&schema_path, r#"
+        std::fs::write(
+            &schema_path,
+            r#"
 test.topic:
   payload: json_object
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
-        let yaml = format!(r#"
+        let yaml = format!(
+            r#"
 event_loop:
   event_policy:
     enabled: true
     mode: observe
     schema_file: "{}"
-"#, schema_path.display());
+"#,
+            schema_path.display()
+        );
 
         let mut config: RalphConfig = serde_yaml::from_str(&yaml).unwrap();
         let result = config.resolve_schema_files(&temp_dir);

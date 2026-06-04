@@ -15,9 +15,9 @@
 use crate::config::RalphConfig;
 use crate::hat_registry::HatRegistry;
 use ralph_proto::HatId;
-use std::collections::{BTreeSet, HashMap};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeSet, HashMap};
 
 /// A single extracted payload field reference.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -75,7 +75,8 @@ pub fn extract_payload_field_refs(
             let after = caps.get(0).map(|m| m.end()).unwrap_or(0);
             let content = &line[after..];
             for field in extract_comma_separated_fields(content) {
-                if !ignore_set.contains(&field) && seen.insert((hat_id.to_string(), field.clone())) {
+                if !ignore_set.contains(&field) && seen.insert((hat_id.to_string(), field.clone()))
+                {
                     refs.push(PayloadFieldRef {
                         hat_id: hat_id.to_string(),
                         field,
@@ -92,7 +93,8 @@ pub fn extract_payload_field_refs(
             let after = caps.get(0).map(|m| m.end()).unwrap_or(0);
             let content = &line[after..];
             for field in extract_comma_separated_fields(content) {
-                if !ignore_set.contains(&field) && seen.insert((hat_id.to_string(), field.clone())) {
+                if !ignore_set.contains(&field) && seen.insert((hat_id.to_string(), field.clone()))
+                {
                     refs.push(PayloadFieldRef {
                         hat_id: hat_id.to_string(),
                         field,
@@ -123,10 +125,11 @@ pub fn extract_payload_field_refs(
                 if let Some(field_match) = caps.get(1) {
                     let raw = field_match.as_str().trim();
                     let is_identifier = !raw.is_empty()
-                        && raw.chars().all(|c| {
-                            c.is_ascii_alphanumeric() || c == '_'
-                        })
-                        && raw.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+                        && raw.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                        && raw
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
                     if is_identifier
                         && !ignore_set.contains(raw)
                         && seen.insert((hat_id.to_string(), raw.to_string()))
@@ -273,7 +276,6 @@ pub struct PayloadContractViolation {
     pub payload_excerpt: Option<String>,
 }
 
-
 ///
 /// For each hat trigger topic that has at least one payload field reference
 /// in its instructions, the validator checks:
@@ -320,7 +322,10 @@ pub fn validate_payload_contract(
             }
         }
         for t in pub_topics {
-            source_hats_by_topic.entry(t).or_default().push(hat_id.clone());
+            source_hats_by_topic
+                .entry(t)
+                .or_default()
+                .push(hat_id.clone());
         }
     }
     // Also include the registry hat's declared publishes for completeness.
@@ -460,9 +465,18 @@ mod tests {
         let instructions = "From event payload: task_id, plan_name, step";
         let refs = extract_payload_field_refs("test-hat", instructions, &[]);
         assert_eq!(refs.len(), 3);
-        assert!(refs.iter().any(|r| r.field == "task_id" && r.pattern == "From event payload"));
-        assert!(refs.iter().any(|r| r.field == "plan_name" && r.pattern == "From event payload"));
-        assert!(refs.iter().any(|r| r.field == "step" && r.pattern == "From event payload"));
+        assert!(
+            refs.iter()
+                .any(|r| r.field == "task_id" && r.pattern == "From event payload")
+        );
+        assert!(
+            refs.iter()
+                .any(|r| r.field == "plan_name" && r.pattern == "From event payload")
+        );
+        assert!(
+            refs.iter()
+                .any(|r| r.field == "step" && r.pattern == "From event payload")
+        );
     }
 
     #[test]
@@ -470,8 +484,14 @@ mod tests {
         let instructions = "payload MUST include: task_id, task_key";
         let refs = extract_payload_field_refs("test-hat", instructions, &[]);
         assert_eq!(refs.len(), 2);
-        assert!(refs.iter().any(|r| r.field == "task_id" && r.pattern == "payload MUST include"));
-        assert!(refs.iter().any(|r| r.field == "task_key" && r.pattern == "payload MUST include"));
+        assert!(
+            refs.iter()
+                .any(|r| r.field == "task_id" && r.pattern == "payload MUST include")
+        );
+        assert!(
+            refs.iter()
+                .any(|r| r.field == "task_key" && r.pattern == "payload MUST include")
+        );
     }
 
     #[test]
@@ -628,7 +648,11 @@ mod tests {
         let config = RalphConfig::default();
         let registry = runtime_registry("hats: {}");
         let result = validate_payload_contract(&config, &registry, false);
-        assert!(result.is_valid(), "Empty hats should be valid: {:?}", result);
+        assert!(
+            result.is_valid(),
+            "Empty hats should be valid: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -657,12 +681,17 @@ mod tests {
         let config: RalphConfig = serde_yaml::from_str(&yaml).unwrap();
         let registry = runtime_registry(&yaml);
         let result = validate_payload_contract(&config, &registry, true);
-        assert!(!result.is_valid(), "Strict mode: missing schema must be error");
+        assert!(
+            !result.is_valid(),
+            "Strict mode: missing schema must be error"
+        );
         let err = result
             .errors
             .iter()
-            .find(|e| e.topic == "work.ready"
-                && e.kind == PayloadContractErrorKind::SchemaMissingForRequiredTopic)
+            .find(|e| {
+                e.topic == "work.ready"
+                    && e.kind == PayloadContractErrorKind::SchemaMissingForRequiredTopic
+            })
             .expect("expected SchemaMissingForRequiredTopic error for work.ready");
         assert_eq!(err.hat_id, "b");
     }
@@ -717,11 +746,7 @@ mod tests {
     #[test]
     fn validator_all_fields_in_required_fields_passes() {
         let policy = "    enabled: true\n    mode: observe\n    schemas:\n      work.ready:\n        required_fields: [\"task_id\", \"plan_name\"]";
-        let yaml = two_hat_fixture(
-            policy,
-            "From event payload: task_id, plan_name",
-            "Publish.",
-        );
+        let yaml = two_hat_fixture(policy, "From event payload: task_id, plan_name", "Publish.");
         let config: RalphConfig = serde_yaml::from_str(&yaml).unwrap();
         let registry = runtime_registry(&yaml);
         let result = validate_payload_contract(&config, &registry, true);
@@ -773,9 +798,11 @@ hats:
         let err = result
             .errors
             .iter()
-            .find(|e| e.hat_id == "b"
-                && e.topic == "work.ready"
-                && e.field.as_deref() == Some("extra_field"))
+            .find(|e| {
+                e.hat_id == "b"
+                    && e.topic == "work.ready"
+                    && e.field.as_deref() == Some("extra_field")
+            })
             .expect("expected FieldMissingFromSchema error for extra_field");
         assert_eq!(err.kind, PayloadContractErrorKind::FieldMissingFromSchema);
         // Must list BOTH source hats, not guess one.
@@ -873,22 +900,19 @@ hats:
             "instructions_line should be 2 or later: {:?}",
             err.instructions_line
         );
-        assert!(err
-            .source_excerpt
-            .as_deref()
-            .unwrap_or("")
-            .contains("plan_name"));
+        assert!(
+            err.source_excerpt
+                .as_deref()
+                .unwrap_or("")
+                .contains("plan_name")
+        );
     }
 
     #[test]
     fn validator_error_message_mentions_hat_topic_and_field() {
         // Error message must be actionable: include hat id, topic, and field.
         let policy = "    enabled: true\n    mode: observe\n    schemas:\n      work.ready:\n        required_fields: [\"task_id\"]";
-        let yaml = two_hat_fixture(
-            policy,
-            "From event payload: task_id, plan_name",
-            "Publish.",
-        );
+        let yaml = two_hat_fixture(policy, "From event payload: task_id, plan_name", "Publish.");
         let config: RalphConfig = serde_yaml::from_str(&yaml).unwrap();
         let registry = runtime_registry(&yaml);
         let result = validate_payload_contract(&config, &registry, false);
@@ -897,8 +921,20 @@ hats:
             .iter()
             .find(|e| e.field.as_deref() == Some("plan_name"))
             .expect("expected plan_name error");
-        assert!(err.message.contains("b"), "msg should mention hat: {}", err.message);
-        assert!(err.message.contains("work.ready"), "msg should mention topic: {}", err.message);
-        assert!(err.message.contains("plan_name"), "msg should mention field: {}", err.message);
+        assert!(
+            err.message.contains("b"),
+            "msg should mention hat: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("work.ready"),
+            "msg should mention topic: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("plan_name"),
+            "msg should mention field: {}",
+            err.message
+        );
     }
 }

@@ -404,9 +404,8 @@ fn apply_event_policy_validation(
     source_hats_by_topic: &std::collections::HashMap<String, Vec<String>>,
     target_hats_by_topic: &std::collections::HashMap<String, Vec<String>>,
 ) -> PolicyValidationResult {
-    let mut payload_contract_violation: Option<
-        crate::payload_contract::PayloadContractViolation,
-    > = None;
+    let mut payload_contract_violation: Option<crate::payload_contract::PayloadContractViolation> =
+        None;
     let mut capture_violation = |finding: &PolicyFinding, payload: Option<&str>| {
         if payload_contract_violation.is_some() {
             return; // capture only the first
@@ -586,18 +585,15 @@ fn finding_to_payload_contract_violation(
     schema_defined_in: &str,
 ) -> Option<crate::payload_contract::PayloadContractViolation> {
     use crate::event_policy::ViolationType;
-    use crate::payload_contract::{
-        PayloadContractViolation, PayloadContractViolationKind,
-    };
+    use crate::payload_contract::{PayloadContractViolation, PayloadContractViolationKind};
     let (kind, field) = match &finding.violation_type {
         ViolationType::MissingRequiredField { field } => (
             PayloadContractViolationKind::MissingRequiredField,
             Some(field.clone()),
         ),
-        ViolationType::PayloadTypeMismatch { .. } => (
-            PayloadContractViolationKind::PayloadTypeMismatch,
-            None,
-        ),
+        ViolationType::PayloadTypeMismatch { .. } => {
+            (PayloadContractViolationKind::PayloadTypeMismatch, None)
+        }
         ViolationType::InvalidFieldValue { field, .. } => (
             PayloadContractViolationKind::AllowedValueMismatch,
             Some(field.clone()),
@@ -2529,6 +2525,16 @@ impl EventLoop {
         let mut entrypoint_hat_ids = Vec::new();
         let mut progressed_hat_ids = Vec::new();
         for event in events {
+            // Skip system/observability events (event.*) — they are not hat
+            // progress signals, only diagnostic/audit trails. The Ralph
+            // fallback hat subscribes to "*" and would otherwise activate
+            // for `event.execution_contract.rejected` and similar topics,
+            // shadowing the targeted recovery event for the source hat.
+            // See docs/plans/2026-06-04-001-fix-contract-rejection-hat-retry-plan.md
+            // (U3: Preserve Active Hat Selection Through Guidance Partitioning).
+            if Self::is_system_event(event.topic.as_str()) {
+                continue;
+            }
             // Prefer direct event target over topic-based lookup
             let hat_id = if let Some(target) = &event.target
                 && self.registry.get(target).is_some()
@@ -2562,19 +2568,33 @@ impl EventLoop {
     }
 
     fn effective_regular_events<'a>(&self, events: &'a [Event]) -> Vec<&'a Event> {
-        let has_downstream_event = events
-            .iter()
-            .any(|event| !Self::is_kickoff_or_recovery_event(event.topic.as_str()));
+        let has_downstream_event = events.iter().any(|event| {
+            !Self::is_system_event(event.topic.as_str())
+                && !Self::is_kickoff_or_recovery_event(event.topic.as_str())
+        });
         events
             .iter()
             .filter(|event| {
-                !has_downstream_event || !Self::is_kickoff_or_recovery_event(event.topic.as_str())
+                // Also drop system/observability events from prompt context —
+                // they are diagnostic, not actionable hat progress.
+                !Self::is_system_event(event.topic.as_str())
+                    && (!has_downstream_event
+                        || !Self::is_kickoff_or_recovery_event(event.topic.as_str()))
             })
             .collect()
     }
 
     fn is_kickoff_or_recovery_event(topic: &str) -> bool {
         topic == "task.start" || topic == "task.resume" || topic.strip_suffix(".start").is_some()
+    }
+
+    /// Returns true for system/observability event topics that should not
+    /// influence active hat selection or appear as actionable progress in
+    /// the prompt (e.g. `event.execution_contract.rejected`,
+    /// `event.malformed`, `event.scope_violation`). These are audit/diagnostic
+    /// events, not hat routing signals.
+    fn is_system_event(topic: &str) -> bool {
+        topic.starts_with("event.")
     }
 
     fn is_entrypoint_topic(&self, topic: &str) -> bool {
@@ -3604,12 +3624,96 @@ impl EventLoop {
                                 "Execution contract rejected event"
                             );
 
-                            // Publish structured diagnostic
+                            // Targeted contract recovery (2026-06-04 plan U2):
+                            // The rejected event must NOT advance downstream hats,
+                            // but the source hat must be told to retry. Publish a
+                            // `task.resume` with `target=source_hat` so the next
+                            // prompt activates the responsible hat, not the Ralph
+                            // fallback.
+                            let source_hat_str: Option<&str> = event.hat.as_deref().or_else(|| {
+                                self.state.last_active_hat_ids.first().map(|h| h.as_str())
+                            });
+                            let mut retry_target: Option<HatId> = None;
+                            let mut no_retry_reason: Option<String> = None;
+                            if let Some(hat_id_str) = source_hat_str {
+                                if hat_id_str == "ralph" {
+                                    // Ralph is the generic executor; in multi-hat
+                                    // mode a `hat=ralph` invalid emit means the
+                                    // agent misattributed. Do not loop back to
+                                    // Ralph as recovery.
+                                    no_retry_reason =
+                                        Some("source hat is fallback ralph".to_string());
+                                } else {
+                                    let hat_id = HatId::new(hat_id_str);
+                                    match self.registry.get(&hat_id) {
+                                        None => {
+                                            no_retry_reason = Some(format!(
+                                                "source hat '{}' not registered",
+                                                hat_id_str
+                                            ));
+                                        }
+                                        Some(_) => {
+                                            let can_retry = self
+                                                .registry
+                                                .can_publish(&hat_id, event.topic.as_str());
+                                            let can_fail =
+                                                self.registry.can_publish(&hat_id, "work.failed");
+                                            if !can_retry && !can_fail {
+                                                no_retry_reason = Some(format!(
+                                                    "source hat '{}' cannot publish '{}' or 'work.failed'",
+                                                    hat_id_str,
+                                                    event.topic.as_str()
+                                                ));
+                                            } else {
+                                                retry_target = Some(hat_id);
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                no_retry_reason =
+                                    Some("no source hat recorded on event or in state".to_string());
+                            }
+
+                            if let Some(hat_id) = &retry_target {
+                                let retry_payload = serde_json::json!({
+                                    "rejected_topic": event.topic.as_str(),
+                                    "reason": finding.message,
+                                    "finding_kind": format!("{:?}", finding.kind),
+                                    "required_action": format!(
+                                        "Fix the issue and emit '{}' again with correct payload, or emit 'work.failed' if unrecoverable.",
+                                        event.topic.as_str()
+                                    ),
+                                    "original_payload": event.payload.as_deref().unwrap_or(""),
+                                    "retry_publish_topics": [event.topic.as_str(), "work.failed"],
+                                    "contract_finding": finding,
+                                });
+                                let retry_event =
+                                    Event::new("task.resume", retry_payload.to_string())
+                                        .with_target(hat_id.clone());
+                                debug!(
+                                    target = %hat_id.as_str(),
+                                    topic = %event.topic.as_str(),
+                                    "Publishing targeted contract recovery event to source hat"
+                                );
+                                self.bus.publish(retry_event);
+                            } else if let Some(reason) = &no_retry_reason {
+                                warn!(
+                                    topic = %event.topic.as_str(),
+                                    reason = %reason,
+                                    "No safe retry target for rejected event; recovery is human.guidance only"
+                                );
+                            }
+
+                            // Publish structured diagnostic (now carries
+                            // retry_target and no_retry_reason for observability).
                             let diagnostic_topic = rule.reject.diagnostic_topic.clone();
                             let diagnostic_payload = serde_json::json!({
                                 "topic": event.topic.as_str(),
                                 "finding": findings,
                                 "rejected_at": chrono::Utc::now().to_rfc3339(),
+                                "retry_target": retry_target.as_ref().map(|h| h.as_str()),
+                                "no_retry_reason": no_retry_reason,
                             });
                             let diagnostic_event = Event::new(
                                 diagnostic_topic.as_str(),
@@ -4687,8 +4791,6 @@ fn termination_status_text(reason: &TerminationReason) -> &'static str {
         TerminationReason::RestartRequested => "Restarting by human request.",
         TerminationReason::WorkspaceGone => "Workspace directory removed externally.",
         TerminationReason::Cancelled => "Cancelled gracefully (human rejection or timeout).",
-        TerminationReason::PayloadContractViolation => {
-            "Payload contract violation - loop paused."
-        }
+        TerminationReason::PayloadContractViolation => "Payload contract violation - loop paused.",
     }
 }

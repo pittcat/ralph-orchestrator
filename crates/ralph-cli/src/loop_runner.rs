@@ -4,7 +4,7 @@
 //! the Ralph orchestration loop, along with supporting types and helper
 //! functions for PTY execution and termination handling.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use ralph_core::payload_contract::validate_payload_contract;
 
 /// Payload contract hard gate (U5).
@@ -2529,7 +2529,7 @@ pub async fn run_loop_impl(
         // Log contract rejections for operator visibility and diagnostics.
         // Rejections do NOT terminate the loop — guidance drives the next iteration.
         if let Some(processed) = processed_events.as_ref() {
-            handle_execution_contract_rejections(processed, &event_loop, &display_hat);
+            handle_execution_contract_rejections(processed, &mut event_loop, &display_hat);
         }
 
         // ── U6: Handle payload contract violations ───────────────────────────
@@ -3262,9 +3262,14 @@ fn should_gate_missing_events(hat_id: &HatId, event_loop: &EventLoop) -> bool {
 /// already subscribe to via the EventBus. No-op when diagnostics are
 /// disabled. Does NOT terminate the loop — guidance drives the next
 /// iteration.
+///
+/// 2026-06-04 plan U7: Also emits `OrchestrationEvent::ContractRecoveryRouted`
+/// for each rejected topic so operators can distinguish
+///   (a) rejected event will be retried by the source hat, from
+///   (b) rejected event has no safe retry target and needs human intervention.
 fn handle_execution_contract_rejections(
     processed: &ralph_core::ProcessedEvents,
-    event_loop: &EventLoop,
+    event_loop: &mut EventLoop,
     hat_id: &HatId,
 ) {
     let rejections = &processed.contract_rejections;
@@ -3275,14 +3280,45 @@ fn handle_execution_contract_rejections(
     let iteration = event_loop.state().iteration;
     let hat_name = hat_id.as_str();
 
-    // Console-visible warning for each rejection.
+    // Console-visible warning for each rejection. Include retry_target
+    // status when available so operators can see at a glance whether the
+    // rejection will auto-recover or needs intervention.
     for finding in rejections {
-        warn!(
-            topic = %finding.topic,
-            hat = %hat_name,
-            violation = ?finding.kind,
-            message = %finding.message,
-            "Execution contract rejected event"
+        let recovery = compute_recovery_status(event_loop, finding.topic.as_str());
+        match &recovery {
+            Some(target) => warn!(
+                topic = %finding.topic,
+                hat = %hat_name,
+                violation = ?finding.kind,
+                message = %finding.message,
+                retry_target = %target,
+                "Execution contract rejected event; targeted recovery routed to source hat"
+            ),
+            None => warn!(
+                topic = %finding.topic,
+                hat = %hat_name,
+                violation = ?finding.kind,
+                message = %finding.message,
+                "Execution contract rejected event; NO safe retry target — recovery is human.guidance only"
+            ),
+        }
+
+        // Structured diagnostics: record whether recovery was routed.
+        let (retry_target, no_retry_reason) = match &recovery {
+            Some(t) => (Some(t.clone()), None),
+            None => (
+                None,
+                Some("no safe retry target (see human.guidance)".to_string()),
+            ),
+        };
+        event_loop.diagnostics().log_orchestration(
+            iteration,
+            hat_name,
+            ralph_core::diagnostics::OrchestrationEvent::ContractRecoveryRouted {
+                topic: finding.topic.clone(),
+                retry_target,
+                no_retry_reason,
+            },
         );
     }
 
@@ -3292,6 +3328,26 @@ fn handle_execution_contract_rejections(
     event_loop
         .diagnostics()
         .log_execution_contract_rejections(iteration, hat_name, rejections);
+}
+
+/// Inspects the bus for a targeted `task.resume` event whose target is a
+/// registered hat. Returns the target hat name if a recovery was published
+/// for the given topic in the current iteration's pending queues.
+fn compute_recovery_status(event_loop: &mut EventLoop, topic: &str) -> Option<String> {
+    let bus = event_loop.bus();
+    for hat_id in bus.hat_ids() {
+        if let Some(pending) = bus.peek_pending(hat_id) {
+            for event in pending {
+                if event.topic.as_str() == "task.resume"
+                    && event.payload.contains(topic)
+                    && let Some(target) = event.target.as_ref()
+                {
+                    return Some(target.as_str().to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Inject a human.guidance event directly into the events file so the agent
@@ -7298,7 +7354,11 @@ event_loop:
 "#;
         let config: ralph_core::RalphConfig = serde_yaml::from_str(yaml).unwrap();
         let result = enforce_payload_contract_gate(&config);
-        assert!(result.is_ok(), "Covered contracts should pass: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Covered contracts should pass: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -7332,8 +7392,16 @@ event_loop:
         let msg = format!("{}", err);
         assert!(msg.contains("Payload contract gate failed"), "msg: {}", msg);
         assert!(msg.contains("plan_name"), "msg must mention field: {}", msg);
-        assert!(msg.contains("work.ready"), "msg must mention topic: {}", msg);
-        assert!(msg.contains("FieldMissingFromSchema"), "msg must include kind: {}", msg);
+        assert!(
+            msg.contains("work.ready"),
+            "msg must mention topic: {}",
+            msg
+        );
+        assert!(
+            msg.contains("FieldMissingFromSchema"),
+            "msg must include kind: {}",
+            msg
+        );
     }
 
     #[test]
@@ -7396,7 +7464,11 @@ event_loop:
         let config: ralph_core::RalphConfig = serde_yaml::from_str(yaml).unwrap();
         let err = enforce_payload_contract_gate(&config).unwrap_err();
         let msg = format!("{}", err);
-        assert!(msg.contains("coordinator"), "msg must list source hat: {}", msg);
+        assert!(
+            msg.contains("coordinator"),
+            "msg must list source hat: {}",
+            msg
+        );
         assert!(msg.contains("Fix by"), "msg must include fix hint: {}", msg);
         assert!(
             msg.contains("event_policy.schemas"),
@@ -7411,7 +7483,8 @@ event_loop:
 
     fn sample_violation() -> ralph_core::payload_contract::PayloadContractViolation {
         ralph_core::payload_contract::PayloadContractViolation {
-            error_type: ralph_core::payload_contract::PayloadContractViolationKind::MissingRequiredField,
+            error_type:
+                ralph_core::payload_contract::PayloadContractViolationKind::MissingRequiredField,
             timestamp: "2026-06-03T12:34:56.789Z".to_string(),
             topic: "work.ready".to_string(),
             field: Some("plan_name".to_string()),
@@ -7431,15 +7504,43 @@ event_loop:
         let dir = temp.path();
         let violation = sample_violation();
         let path = write_payload_contract_violation_report(dir, &violation);
-        assert!(path.exists(), "report file must be created: {}", path.display());
+        assert!(
+            path.exists(),
+            "report file must be created: {}",
+            path.display()
+        );
         let body = std::fs::read_to_string(&path).unwrap();
         // Must include required fields
-        assert!(body.contains("work.ready"), "body must include topic: {}", body);
-        assert!(body.contains("plan_name"), "body must include field: {}", body);
-        assert!(body.contains("coordinator"), "body must include source hat: {}", body);
-        assert!(body.contains("executor"), "body must include target hat: {}", body);
-        assert!(body.contains("inline"), "body must include schema source: {}", body);
-        assert!(body.contains("Add the missing field"), "body must include fix_hint: {}", body);
+        assert!(
+            body.contains("work.ready"),
+            "body must include topic: {}",
+            body
+        );
+        assert!(
+            body.contains("plan_name"),
+            "body must include field: {}",
+            body
+        );
+        assert!(
+            body.contains("coordinator"),
+            "body must include source hat: {}",
+            body
+        );
+        assert!(
+            body.contains("executor"),
+            "body must include target hat: {}",
+            body
+        );
+        assert!(
+            body.contains("inline"),
+            "body must include schema source: {}",
+            body
+        );
+        assert!(
+            body.contains("Add the missing field"),
+            "body must include fix_hint: {}",
+            body
+        );
     }
 
     #[test]
@@ -7458,7 +7559,11 @@ event_loop:
             name
         );
         assert!(name.ends_with(".json"), "filename: {}", name);
-        assert!(!name.contains(':'), "filename must not contain colons: {}", name);
+        assert!(
+            !name.contains(':'),
+            "filename must not contain colons: {}",
+            name
+        );
     }
 
     #[test]
@@ -14710,7 +14815,7 @@ hats:
             has_orphans: false,
             accepted_events: vec![],
             contract_rejections: vec![],
-        payload_contract_violation: None,
+            payload_contract_violation: None,
         };
         let gate_would_fire = !empty.had_raw_events
             && !empty.had_rejected_events
@@ -14730,7 +14835,7 @@ hats:
             has_orphans: false,
             accepted_events: vec![],
             contract_rejections: vec![],
-        payload_contract_violation: None,
+            payload_contract_violation: None,
         };
         let gate_would_fire = !rejected.had_raw_events
             && !rejected.had_rejected_events
@@ -14761,6 +14866,77 @@ hats:
         assert_eq!(
             resolve_emit_events_path(&ctx, false),
             temp.path().join(".ralph/events-accepted.jsonl")
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 2026-06-04 plan U7: recovery status observability tests
+    // ─────────────────────────────────────────────────────────────────────────
+    //
+    // `compute_recovery_status` is the helper that lets the loop runner's
+    // `handle_execution_contract_rejections` distinguish
+    //   (a) rejected event will be retried by a specific source hat
+    //   (b) rejected event has no safe retry target
+    // so operators can act on the difference.
+
+    fn make_event_loop_for_recovery_test() -> EventLoop {
+        let yaml = r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["task.*"]
+    publishes: ["work.done", "work.failed"]
+  reviewer:
+    name: "Reviewer"
+    triggers: ["work.done"]
+    publishes: ["review.done"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        EventLoop::new(config)
+    }
+
+    #[test]
+    fn test_compute_recovery_status_returns_target_when_targeted_retry_published() {
+        // 2026-06-04 plan U7: a `task.resume` event with `target=executor`
+        // and a payload mentioning the rejected topic must register as
+        // recovery routed to executor.
+        use ralph_proto::Event;
+        let mut event_loop = make_event_loop_for_recovery_test();
+        let payload = serde_json::json!({
+            "rejected_topic": "work.done",
+            "reason": "task not closed",
+            "required_action": "fix and re-emit",
+            "original_payload": "{}",
+            "retry_publish_topics": ["work.done", "work.failed"],
+        })
+        .to_string();
+        event_loop
+            .bus()
+            .publish(Event::new("task.resume", payload).with_target("executor"));
+
+        let status = compute_recovery_status(&mut event_loop, "work.done");
+        assert_eq!(
+            status.as_deref(),
+            Some("executor"),
+            "compute_recovery_status must return the target hat when a targeted retry was published"
+        );
+    }
+
+    #[test]
+    fn test_compute_recovery_status_returns_none_when_no_targeted_retry() {
+        // When no targeted retry was published, the operator log must say
+        // "no safe retry target" so they know to intervene.
+        use ralph_proto::Event;
+        let mut event_loop = make_event_loop_for_recovery_test();
+        // Publish a human.guidance event but no targeted retry.
+        event_loop
+            .bus()
+            .publish(Event::new("human.guidance", "see doc"));
+
+        let status = compute_recovery_status(&mut event_loop, "work.done");
+        assert!(
+            status.is_none(),
+            "compute_recovery_status must return None when no targeted retry is in the bus"
         );
     }
 }

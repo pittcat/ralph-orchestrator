@@ -8766,6 +8766,192 @@ event_loop:
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 2026-06-04: Contract rejection recovery routing characterization tests
+// (docs/plans/2026-06-04-001-fix-contract-rejection-hat-retry-plan.md)
+//
+// These tests characterize the gap: a rejected `work.done` must produce a
+// targeted recovery event for the source hat so the next prompt activates
+// the source hat, not the Ralph fallback.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_contract_rejection_publishes_targeted_retry_to_source_hat() {
+    // When executor's `work.done` is rejected, a regular targeted recovery
+    // event must be published to executor's pending queue. This is the
+    // characterization test for the gap fixed by 2026-06-04 plan U2.
+    use ralph_proto::Event;
+    let config = contract_enabled_config();
+    let mut event_loop = EventLoop::new(config);
+
+    // Capture every event seen on the bus to assert guidance is still
+    // persisted for operator visibility.
+    let observed: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed_clone = std::sync::Arc::clone(&observed);
+    event_loop.bus().add_observer(move |event: &Event| {
+        observed_clone
+            .lock()
+            .unwrap()
+            .push(event.topic.as_str().to_string());
+    });
+
+    let result = event_loop
+        .process_parse_result(crate::event_reader::ParseResult {
+            events: vec![make_work_done_event()],
+            malformed: vec![],
+        })
+        .expect("process_parse_result should succeed");
+
+    let observed_topics = observed.lock().unwrap().clone();
+
+    // The contract was rejected.
+    assert!(
+        !result.contract_rejections.is_empty(),
+        "Expected contract rejections for missing task"
+    );
+
+    // The executor's pending queue must contain a regular recovery event
+    // with `target=executor`.
+    let executor_id = HatId::new("executor");
+    let pending = event_loop
+        .bus
+        .peek_pending(&executor_id)
+        .cloned()
+        .unwrap_or_default();
+    let targeted_retry = pending.iter().find(|e| {
+        e.topic.as_str() != "human.guidance"
+            && e.target.as_ref().map(|t| t.as_str()) == Some("executor")
+    });
+    assert!(
+        targeted_retry.is_some(),
+        "Rejected work.done must publish a targeted recovery event to executor's pending queue. \
+         Pending events: {:?}",
+        pending
+            .iter()
+            .map(|e| (e.topic.as_str(), e.target.as_ref().map(|t| t.as_str())))
+            .collect::<Vec<_>>()
+    );
+    // The recovery event must mention the rejected topic so executor can
+    // reason about what to re-emit.
+    let payload = targeted_retry.unwrap().payload.as_str();
+    assert!(
+        payload.contains("work.done"),
+        "Recovery event payload must mention the rejected topic 'work.done'. payload={}",
+        payload
+    );
+    // human.guidance is still persisted for operator visibility.
+    assert!(
+        observed_topics.iter().any(|t| t == "human.guidance"),
+        "human.guidance must still be published for operator visibility. observed: {:?}",
+        observed_topics
+    );
+    // The structured diagnostic event is also published.
+    assert!(
+        observed_topics
+            .iter()
+            .any(|t| t == "event.execution_contract.rejected"),
+        "Diagnostic event must be published. observed: {:?}",
+        observed_topics
+    );
+}
+
+#[test]
+fn test_contract_rejection_activates_source_hat_for_next_prompt() {
+    // After a rejected `work.done`, the next active hat must be executor
+    // (via targeted retry), not the Ralph fallback. Today this assertion
+    // fails because only `human.guidance` is published and it is partitioned
+    // away from active hat selection.
+    let config = contract_enabled_config();
+    let mut event_loop = EventLoop::new(config);
+
+    let result = event_loop
+        .process_parse_result(crate::event_reader::ParseResult {
+            events: vec![make_work_done_event()],
+            malformed: vec![],
+        })
+        .expect("process_parse_result should succeed");
+    assert!(
+        !result.contract_rejections.is_empty(),
+        "Expected contract rejections for missing task"
+    );
+
+    let active_hat_id = event_loop.get_active_hat_id();
+    assert_eq!(
+        active_hat_id.as_str(),
+        "executor",
+        "After rejected work.done, the next active hat must be the source hat \
+         (executor) via targeted retry, not Ralph fallback. Got: {}",
+        active_hat_id.as_str()
+    );
+}
+
+#[test]
+fn test_contract_rejection_does_not_activate_reviewer() {
+    // Regression guard: even though the contract path publishes a targeted
+    // retry to executor, reviewer must not be activated by a rejected
+    // `work.done`. The original event must stay out of the bus.
+    let config = contract_enabled_config();
+    let mut event_loop = EventLoop::new(config);
+
+    let result = event_loop
+        .process_parse_result(crate::event_reader::ParseResult {
+            events: vec![make_work_done_event()],
+            malformed: vec![],
+        })
+        .expect("process_parse_result should succeed");
+    assert!(
+        !result.contract_rejections.is_empty(),
+        "Expected contract rejections for missing task"
+    );
+
+    let reviewer_id = HatId::new("reviewer");
+    let reviewer_pending = event_loop
+        .bus
+        .peek_pending(&reviewer_id)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !reviewer_pending
+            .iter()
+            .any(|e| e.topic.as_str() == "work.done"),
+        "Reviewer must not receive a rejected work.done. Pending: {:?}",
+        reviewer_pending
+            .iter()
+            .map(|e| e.topic.as_str())
+            .collect::<Vec<_>>()
+    );
+    let active_hat_id = event_loop.get_active_hat_id();
+    assert_ne!(
+        active_hat_id.as_str(),
+        "reviewer",
+        "Reviewer must not be activated by rejected work.done"
+    );
+}
+
+#[test]
+fn test_valid_work_done_directly_published_activates_reviewer() {
+    // Regression guard for the accepted path: a valid `work.done` published
+    // directly to the bus (bypassing contract validation, which would
+    // require real task/git setup) must still activate reviewer via the
+    // registry's trigger mapping. This proves the fix to U2 does not regress
+    // the accepted path.
+    use ralph_proto::Event;
+    let config = contract_enabled_config();
+    let mut event_loop = EventLoop::new(config);
+
+    event_loop
+        .bus
+        .publish(Event::new("work.done", "valid work complete"));
+
+    let active_hat_id = event_loop.get_active_hat_id();
+    assert_eq!(
+        active_hat_id.as_str(),
+        "reviewer",
+        "A valid work.done event must activate reviewer"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // U8: Replay-light integration tests (deterministic event loop paths)
 // ─────────────────────────────────────────────────────────────────────────────
 //
@@ -9191,6 +9377,434 @@ event_loop:
             observed_topics.iter().any(|t| t == "human.guidance"),
             "Guidance event should be published, observed: {:?}",
             observed_topics
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 2026-06-04 plan U6: Accepted and rejected end-to-end event-loop tests
+    // ─────────────────────────────────────────────────────────────────────────
+    //
+    // These tests exercise the full pipeline through real `EventLoop` +
+    // `EventBus` + `HatRegistry` + task store to prove the contract rejection
+    // recovery path works as a single integrated flow (not just isolated
+    // unit assertions). They cover R10/R11/R12/R14.
+
+    /// Accepted path: closed task + complete payload + diff → work.done
+    /// is published to the bus and reviewer becomes the next active hat.
+    #[test]
+    fn test_accepted_work_done_routes_to_reviewer() {
+        let temp = TempDir::new().unwrap();
+        let workspace = temp.path();
+        init_git_repo(workspace);
+        let tasks_path = workspace.join(".ralph/agent/tasks.jsonl");
+        write_task(&tasks_path, "test-id-1", TaskStatus::Closed);
+
+        // Provide git evidence: modify a tracked file.
+        std::fs::write(
+            workspace.join("README.md"),
+            "# Test\nagent change for diff\n",
+        )
+        .unwrap();
+
+        let config = build_test_config(workspace);
+        let mut event_loop = make_event_loop(config);
+
+        let result = process_events(vec![work_done_event("test-id-1")], &mut event_loop);
+
+        assert!(
+            result.contract_rejections.is_empty(),
+            "Closed task + diff should be accepted, got: {:?}",
+            result.contract_rejections
+        );
+        assert!(result.had_events);
+        assert!(
+            result
+                .accepted_events
+                .iter()
+                .any(|e| e.topic.as_str() == "work.done"),
+            "Original work.done must be in accepted events"
+        );
+
+        // Reviewer's pending queue should contain the work.done event.
+        let reviewer_id = ralph_proto::HatId::new("reviewer");
+        let reviewer_pending = event_loop
+            .bus
+            .peek_pending(&reviewer_id)
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            reviewer_pending
+                .iter()
+                .any(|e| e.topic.as_str() == "work.done"),
+            "Reviewer must receive the accepted work.done. Pending: {:?}",
+            reviewer_pending
+                .iter()
+                .map(|e| e.topic.as_str())
+                .collect::<Vec<_>>()
+        );
+
+        // The next active hat should be the reviewer (downstream of work.done).
+        let active_hat_id = event_loop.get_active_hat_id();
+        assert_eq!(
+            active_hat_id.as_str(),
+            "reviewer",
+            "Accepted work.done must activate reviewer as the next hat"
+        );
+    }
+
+    /// Rejected path: open task → work.done is dropped, executor receives
+    /// a targeted `task.resume` retry event, reviewer stays inactive.
+    #[test]
+    fn test_rejected_open_task_routes_retry_to_executor_not_reviewer() {
+        let temp = TempDir::new().unwrap();
+        let workspace = temp.path();
+        init_git_repo(workspace);
+        let tasks_path = workspace.join(".ralph/agent/tasks.jsonl");
+        write_task(&tasks_path, "test-id-1", TaskStatus::Open);
+
+        let config = build_test_config(workspace);
+        let mut event_loop = make_event_loop(config);
+
+        let result = process_events(vec![work_done_event("test-id-1")], &mut event_loop);
+
+        // Contract rejected the open task.
+        assert!(
+            !result.contract_rejections.is_empty(),
+            "Open task should be rejected"
+        );
+        let has_task_not_terminal = result.contract_rejections.iter().any(|f| {
+            matches!(
+                f.kind,
+                crate::execution_contract::ExecutionContractViolationKind::TaskNotTerminal { .. }
+            )
+        });
+        assert!(
+            has_task_not_terminal,
+            "Expected TaskNotTerminal finding, got: {:?}",
+            result.contract_rejections
+        );
+
+        // Original work.done is not in accepted events.
+        assert!(
+            !result
+                .accepted_events
+                .iter()
+                .any(|e| e.topic.as_str() == "work.done"),
+            "Rejected work.done must not be in accepted events"
+        );
+
+        // Reviewer must not have work.done in its queue.
+        let reviewer_id = ralph_proto::HatId::new("reviewer");
+        let reviewer_pending = event_loop
+            .bus
+            .peek_pending(&reviewer_id)
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            !reviewer_pending
+                .iter()
+                .any(|e| e.topic.as_str() == "work.done"),
+            "Reviewer must not see rejected work.done"
+        );
+
+        // Executor must receive a targeted retry event (not just human.guidance).
+        let executor_id = ralph_proto::HatId::new("executor");
+        let executor_pending = event_loop
+            .bus
+            .peek_pending(&executor_id)
+            .cloned()
+            .unwrap_or_default();
+        let targeted_retry = executor_pending.iter().find(|e| {
+            e.topic.as_str() != "human.guidance"
+                && e.target.as_ref().map(|t| t.as_str()) == Some("executor")
+        });
+        assert!(
+            targeted_retry.is_some(),
+            "Executor must receive a targeted retry for rejected work.done. \
+             Pending: {:?}",
+            executor_pending
+                .iter()
+                .map(|e| (e.topic.as_str(), e.target.as_ref().map(|t| t.as_str())))
+                .collect::<Vec<_>>()
+        );
+
+        // Next active hat must be executor, not reviewer or ralph.
+        let active_hat_id = event_loop.get_active_hat_id();
+        assert_eq!(
+            active_hat_id.as_str(),
+            "executor",
+            "After rejected work.done, the next active hat must be executor via \
+             targeted retry, not reviewer/ralph. Got: {}",
+            active_hat_id.as_str()
+        );
+    }
+
+    /// Rejected path: missing `plan_path` in payload → finding names the
+    /// missing field, retry target remains executor.
+    #[test]
+    fn test_rejected_missing_plan_path_names_finding_and_routes_retry() {
+        let temp = TempDir::new().unwrap();
+        let workspace = temp.path();
+        init_git_repo(workspace);
+        let tasks_path = workspace.join(".ralph/agent/tasks.jsonl");
+        write_task(&tasks_path, "test-id-1", TaskStatus::Closed);
+
+        std::fs::write(
+            workspace.join("README.md"),
+            "# Test\nagent change for diff\n",
+        )
+        .unwrap();
+
+        let config = build_test_config(workspace);
+        let mut event_loop = make_event_loop(config);
+
+        // Build event WITHOUT plan_path.
+        let mut event = work_done_event("test-id-1");
+        event.payload = Some(
+            r#"{"plan_name":"p","task_id":"test-id-1","task_key":"k1","step":"step-01"}"#
+                .to_string(),
+        );
+
+        let result = process_events(vec![event], &mut event_loop);
+
+        assert!(
+            !result.contract_rejections.is_empty(),
+            "Missing plan_path should reject"
+        );
+        let has_missing_plan_path = result.contract_rejections.iter().any(|f| {
+            matches!(
+                f.kind,
+                crate::execution_contract::ExecutionContractViolationKind::MissingPayloadField { ref field }
+                    if field == "plan_path"
+            )
+        });
+        assert!(
+            has_missing_plan_path,
+            "Expected MissingPayloadField(plan_path) finding, got: {:?}",
+            result.contract_rejections
+        );
+
+        // Retry target remains executor.
+        let executor_id = ralph_proto::HatId::new("executor");
+        let executor_pending = event_loop
+            .bus
+            .peek_pending(&executor_id)
+            .cloned()
+            .unwrap_or_default();
+        let targeted_retry = executor_pending.iter().find(|e| {
+            e.target.as_ref().map(|t| t.as_str()) == Some("executor")
+                && e.topic.as_str() != "human.guidance"
+        });
+        assert!(
+            targeted_retry.is_some(),
+            "Even with missing plan_path, retry target must be executor"
+        );
+    }
+
+    #[test]
+    fn test_rejected_work_done_retry_payload_reaches_executor_prompt() {
+        let temp = TempDir::new().unwrap();
+        let workspace = temp.path();
+        init_git_repo(workspace);
+        let tasks_path = workspace.join(".ralph/agent/tasks.jsonl");
+        write_task(&tasks_path, "test-id-1", TaskStatus::Closed);
+
+        std::fs::write(
+            workspace.join("README.md"),
+            "# Test\nagent change for diff\n",
+        )
+        .unwrap();
+
+        let config = build_test_config(workspace);
+        let mut event_loop = make_event_loop(config);
+
+        let mut event = work_done_event("test-id-1");
+        event.payload = Some(
+            r#"{"plan_name":"p","task_id":"test-id-1","task_key":"k1","step":"step-01"}"#
+                .to_string(),
+        );
+
+        let result = process_events(vec![event], &mut event_loop);
+
+        assert!(
+            !result.contract_rejections.is_empty(),
+            "Missing plan_path should reject"
+        );
+
+        let prompt = event_loop
+            .build_prompt(&ralph_proto::HatId::new("ralph"))
+            .expect("contract rejection retry should build a prompt");
+
+        assert_eq!(
+            event_loop
+                .state
+                .last_active_hat_ids
+                .first()
+                .map(|id| id.as_str()),
+            Some("executor"),
+            "Retry prompt should activate executor"
+        );
+        assert!(
+            prompt.contains("rejected_topic") && prompt.contains("work.done"),
+            "Retry prompt must include structured rejected topic context. Prompt:\n{}",
+            prompt
+        );
+        assert!(
+            prompt.contains("original_payload") && prompt.contains("plan_path"),
+            "Retry prompt must include original payload and finding context. Prompt:\n{}",
+            prompt
+        );
+    }
+
+    /// Retry path: after a targeted retry, executor closes the task and
+    /// re-emits valid work.done. Reviewer activates on the corrected event.
+    #[test]
+    fn test_retry_path_corrected_work_done_activates_reviewer() {
+        let temp = TempDir::new().unwrap();
+        let workspace = temp.path();
+        init_git_repo(workspace);
+        let tasks_path = workspace.join(".ralph/agent/tasks.jsonl");
+        write_task(&tasks_path, "test-id-1", TaskStatus::Open);
+
+        let config = build_test_config(workspace);
+        let mut event_loop = make_event_loop(config);
+
+        // Step 1: Reject open task → executor gets retry.
+        let result = process_events(vec![work_done_event("test-id-1")], &mut event_loop);
+        assert!(
+            !result.contract_rejections.is_empty(),
+            "First work.done should be rejected (open task)"
+        );
+        let executor_id = ralph_proto::HatId::new("executor");
+        assert!(
+            event_loop
+                .bus
+                .peek_pending(&executor_id)
+                .map(|p| p
+                    .iter()
+                    .any(|e| e.target.as_ref().map(|t| t.as_str()) == Some("executor")))
+                .unwrap_or(false),
+            "Executor must receive retry event after rejection"
+        );
+
+        // Step 2: Simulate executor closing the task and re-emitting work.done.
+        let mut store = TaskStore::load(&tasks_path).unwrap();
+        if let Some(t) = store.get_mut("test-id-1") {
+            t.status = TaskStatus::Closed;
+        }
+        store.save().unwrap();
+
+        // Add git evidence (modify a tracked file) so the contract accepts
+        // the corrected work.done. The retry guidance told executor to
+        // complete the work; the simulation is that executor commits the
+        // change before re-emitting.
+        std::fs::write(
+            workspace.join("README.md"),
+            "# Test\nexecutor fix on retry\n",
+        )
+        .unwrap();
+
+        // Drain the bus so we can observe the second round cleanly.
+        event_loop.bus().take_pending(&executor_id);
+        let _ = event_loop
+            .bus()
+            .take_pending(&ralph_proto::HatId::new("reviewer"));
+
+        let result2 = process_events(vec![work_done_event("test-id-1")], &mut event_loop);
+        assert!(
+            result2.contract_rejections.is_empty(),
+            "Second work.done (after closing task) should be accepted, got: {:?}",
+            result2.contract_rejections
+        );
+        assert!(
+            result2
+                .accepted_events
+                .iter()
+                .any(|e| e.topic.as_str() == "work.done"),
+            "Corrected work.done must be accepted"
+        );
+
+        // Reviewer activates.
+        let reviewer_id = ralph_proto::HatId::new("reviewer");
+        let reviewer_pending = event_loop
+            .bus
+            .peek_pending(&reviewer_id)
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            reviewer_pending
+                .iter()
+                .any(|e| e.topic.as_str() == "work.done"),
+            "Reviewer must receive the corrected work.done"
+        );
+        let active_hat_id = event_loop.get_active_hat_id();
+        assert_eq!(
+            active_hat_id.as_str(),
+            "reviewer",
+            "After corrected work.done, reviewer must be the next active hat"
+        );
+    }
+
+    /// Safety path: a forged `hat=ralph` work.done must NOT generate a
+    /// targeted retry to ralph (which is a generic executor, not a real
+    /// producer). The diagnostic still fires but with no retry target.
+    #[test]
+    fn test_forged_ralph_work_done_does_not_create_retry_to_ralph() {
+        let temp = TempDir::new().unwrap();
+        let workspace = temp.path();
+        init_git_repo(workspace);
+        let tasks_path = workspace.join(".ralph/agent/tasks.jsonl");
+        write_task(&tasks_path, "test-id-1", TaskStatus::Open);
+
+        let config = build_test_config(workspace);
+        let mut event_loop = make_event_loop(config);
+
+        // Build event with hat=ralph (forged attribution).
+        let mut event = work_done_event("test-id-1");
+        event.hat = Some("ralph".to_string());
+
+        let result = process_events(vec![event], &mut event_loop);
+        assert!(
+            !result.contract_rejections.is_empty(),
+            "Open task should still reject"
+        );
+
+        // No targeted retry should be published, because ralph is the generic
+        // fallback and is not a safe retry target in multi-hat mode.
+        let ralph_pending = event_loop
+            .bus
+            .peek_pending(&ralph_proto::HatId::new("ralph"))
+            .cloned()
+            .unwrap_or_default();
+        let targeted_to_ralph = ralph_pending.iter().find(|e| {
+            e.topic.as_str() != "human.guidance"
+                && e.target.as_ref().map(|t| t.as_str()) == Some("ralph")
+        });
+        assert!(
+            targeted_to_ralph.is_none(),
+            "Forged hat=ralph must NOT generate a targeted retry to ralph. \
+             Ralph is a generic executor, not a real work.done producer. \
+             Pending: {:?}",
+            ralph_pending
+                .iter()
+                .map(|e| (e.topic.as_str(), e.target.as_ref().map(|t| t.as_str())))
+                .collect::<Vec<_>>()
+        );
+        // Executor (the real producer in this preset) must NOT get a retry
+        // either, because the source attribution was forged to ralph.
+        let executor_pending = event_loop
+            .bus
+            .peek_pending(&ralph_proto::HatId::new("executor"))
+            .cloned()
+            .unwrap_or_default();
+        let targeted_to_executor = executor_pending.iter().find(|e| {
+            e.topic.as_str() != "human.guidance"
+                && e.target.as_ref().map(|t| t.as_str()) == Some("executor")
+        });
+        assert!(
+            targeted_to_executor.is_none(),
+            "Forged hat=ralph must NOT redirect retry to executor either. \
+             The source attribution is untrusted; fall back to diagnostic only."
         );
     }
 }

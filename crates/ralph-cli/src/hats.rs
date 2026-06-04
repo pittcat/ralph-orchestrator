@@ -852,7 +852,15 @@ mod tests {
 
         // Validation might exit process on error, so we test warning scenario
         // Test registries have no builtin ralph, so pass the same as both params
-        validate_hats(&mut buf, &config, &config_registry, &config_registry, false, false).unwrap();
+        validate_hats(
+            &mut buf,
+            &config,
+            &config_registry,
+            &config_registry,
+            false,
+            false,
+        )
+        .unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         // Should warn about build.done having no subscribers
@@ -886,7 +894,15 @@ event_loop:
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
         let mut buf = Vec::new();
 
-        validate_hats(&mut buf, &config, &config_registry, &config_registry, false, false).unwrap();
+        validate_hats(
+            &mut buf,
+            &config,
+            &config_registry,
+            &config_registry,
+            false,
+            false,
+        )
+        .unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         // `report.done` must NOT be flagged — it's a required_events gate.
@@ -919,7 +935,15 @@ event_loop:
         let config = RalphConfig::default();
         let mut buf = Vec::new();
 
-        validate_hats(&mut buf, &config, &config_registry, &config_registry, false, false).unwrap();
+        validate_hats(
+            &mut buf,
+            &config,
+            &config_registry,
+            &config_registry,
+            false,
+            false,
+        )
+        .unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         assert!(
@@ -942,16 +966,20 @@ event_loop:
         // Hat publishes a topic that no one subscribes to, is not the
         // completion promise, is not in required_events, and is not a
         // known loop-runner-internal topic. This MUST be flagged.
-        config_registry.register(mock_hat(
-            "Sloppy",
-            &["trigger.z"],
-            &["orphan.typo"],
-        ));
+        config_registry.register(mock_hat("Sloppy", &["trigger.z"], &["orphan.typo"]));
 
         let config = RalphConfig::default();
         let mut buf = Vec::new();
 
-        validate_hats(&mut buf, &config, &config_registry, &config_registry, false, false).unwrap();
+        validate_hats(
+            &mut buf,
+            &config,
+            &config_registry,
+            &config_registry,
+            false,
+            false,
+        )
+        .unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         assert!(
@@ -998,8 +1026,14 @@ event_loop:
         let runtime_registry = HatRegistry::from_runtime_config(&config);
         let mut buf = Vec::new();
         // strict=false (default). Payload contract is a warning, not error.
-        let result =
-            validate_hats(&mut buf, &config, &runtime_registry, &config_registry, false, false);
+        let result = validate_hats(
+            &mut buf,
+            &config,
+            &runtime_registry,
+            &config_registry,
+            false,
+            false,
+        );
         assert!(result.is_ok(), "Default mode should not fail: {:?}", result);
         let output = String::from_utf8(buf).unwrap();
         assert!(
@@ -1016,16 +1050,21 @@ event_loop:
         let runtime_registry = HatRegistry::from_runtime_config(&config);
         let mut buf = Vec::new();
         // strict=true → missing schema is an error → validation fails.
-        let result =
-            validate_hats(&mut buf, &config, &runtime_registry, &config_registry, false, true);
+        let result = validate_hats(
+            &mut buf,
+            &config,
+            &runtime_registry,
+            &config_registry,
+            false,
+            true,
+        );
         assert!(
             result.is_err(),
             "Strict mode should fail when payload contract is violated"
         );
         let output = String::from_utf8(buf).unwrap();
         assert!(
-            output.contains("SchemaMissingForRequiredTopic")
-                || output.contains("schema"),
+            output.contains("SchemaMissingForRequiredTopic") || output.contains("schema"),
             "Output should mention schema issue: {}",
             output
         );
@@ -1062,12 +1101,26 @@ event_loop:
         let runtime_registry = HatRegistry::from_runtime_config(&config);
         let mut buf = Vec::new();
         // FieldMissingFromSchema is always an error (default and strict).
-        let result =
-            validate_hats(&mut buf, &config, &runtime_registry, &config_registry, false, false);
+        let result = validate_hats(
+            &mut buf,
+            &config,
+            &runtime_registry,
+            &config_registry,
+            false,
+            false,
+        );
         assert!(result.is_err(), "Field missing from schema must error");
         let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("plan_name"), "Output must mention field: {}", output);
-        assert!(output.contains("work.ready"), "Output must mention topic: {}", output);
+        assert!(
+            output.contains("plan_name"),
+            "Output must mention field: {}",
+            output
+        );
+        assert!(
+            output.contains("work.ready"),
+            "Output must mention topic: {}",
+            output
+        );
     }
 
     #[test]
@@ -1100,15 +1153,29 @@ event_loop:
         let config_registry = HatRegistry::from_config(&config);
         let runtime_registry = HatRegistry::from_runtime_config(&config);
         let mut buf = Vec::new();
-        validate_hats(&mut buf, &config, &runtime_registry, &config_registry, false, false)
-            .unwrap_err();
+        validate_hats(
+            &mut buf,
+            &config,
+            &runtime_registry,
+            &config_registry,
+            false,
+            false,
+        )
+        .unwrap_err();
         let output = String::from_utf8(buf).unwrap();
         // Must include hat id, topic, field
         assert!(output.contains("b"), "must include hat id: {}", output);
-        assert!(output.contains("work.ready"), "must include topic: {}", output);
-        assert!(output.contains("plan_name"), "must include field: {}", output);
+        assert!(
+            output.contains("work.ready"),
+            "must include topic: {}",
+            output
+        );
+        assert!(
+            output.contains("plan_name"),
+            "must include field: {}",
+            output
+        );
     }
-
 
     #[test]
     fn test_graph_hats_compact() {
@@ -1232,7 +1299,15 @@ event_loop:
         let mut buf = Vec::new();
 
         // Test registries have no builtin ralph, so pass the same as both params
-        validate_hats(&mut buf, &config, &config_registry, &config_registry, false, false).unwrap();
+        validate_hats(
+            &mut buf,
+            &config,
+            &config_registry,
+            &config_registry,
+            false,
+            false,
+        )
+        .unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         assert!(output.contains("No hats configured"));
@@ -1249,7 +1324,15 @@ event_loop:
         let mut buf = Vec::new();
 
         // Test registries have no builtin ralph, so pass the same as both params
-        validate_hats(&mut buf, &config, &config_registry, &config_registry, false, false).unwrap();
+        validate_hats(
+            &mut buf,
+            &config,
+            &config_registry,
+            &config_registry,
+            false,
+            false,
+        )
+        .unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         assert!(output.contains("No dead-end hats") || output.contains("Result: Valid"));

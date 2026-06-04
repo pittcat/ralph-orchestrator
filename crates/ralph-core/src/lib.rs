@@ -42,10 +42,10 @@ mod memory;
 pub mod memory_parser;
 mod memory_store;
 pub mod merge_queue;
+pub mod payload_contract;
 pub mod planning_session;
 pub mod preflight;
 pub mod preset_validator;
-pub mod payload_contract;
 #[cfg(feature = "recording")]
 mod session_player;
 #[cfg(feature = "recording")]

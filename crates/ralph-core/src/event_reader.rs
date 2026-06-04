@@ -664,7 +664,11 @@ mod tests {
         // events file. The reader should accept these with a default empty
         // string rather than marking them as malformed.
         let mut file = NamedTempFile::new().unwrap();
-        writeln!(file, r#"{{"topic":"review.dimension.done","payload":"ok"}}"#).unwrap();
+        writeln!(
+            file,
+            r#"{{"topic":"review.dimension.done","payload":"ok"}}"#
+        )
+        .unwrap();
         writeln!(
             file,
             r#"{{"topic":"review.dimension.done","payload":"ok","ts":"2024-01-01T00:00:00Z"}}"#

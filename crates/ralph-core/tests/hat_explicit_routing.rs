@@ -57,6 +57,7 @@ fn ce_executor_full_chain_routes_to_explicit_hats() {
         ("review.failed", "fixer"),
         ("review.passed", "plan-gate"),
         ("review.complete", "plan-gate"),
+        ("work.failed", "plan-gate"),
         ("plan.complete", "shipper"),
         ("plan.blocked", "shipper"),
         ("REVIEW_COMPLETE", "reporter"),
@@ -87,18 +88,23 @@ fn orphan_topics_fall_back_to_ralph() {
 }
 
 #[test]
-fn work_failed_is_orphan_in_ce_executor_topology() {
-    // Documents a known gap: `coordinator` and `executor` both publish
-    // `work.failed`, but no hat subscribes to it. This is a preset defect,
-    // NOT a hat-routing bug. The correct fix is to add a subscriber
-    // (e.g. `plan-gate: triggers: ["work.failed", ...]`) so failure events
-    // route into the plan-level state machine.
+fn work_failed_routes_to_plan_gate_in_ce_executor_topology() {
+    // 2026-06-04 plan U5: `coordinator` and `executor` both publish
+    // `work.failed`. plan-gate subscribes to it and translates the failure
+    // into `plan.blocked` so the manager report still records the blocked
+    // state. This replaces the previous orphan behavior where
+    // `work.failed` fell back to Ralph.
     let registry = load_ce_executor_registry();
 
     let selected = registry
         .get_for_topic("work.failed")
-        .expect("work.failed should fall back to ralph (no explicit subscriber)");
-    assert_eq!(selected.id.as_str(), "ralph");
+        .expect("work.failed must have an explicit subscriber in ce-executor");
+    assert_eq!(
+        selected.id.as_str(),
+        "plan-gate",
+        "work.failed must route to plan-gate, not Ralph fallback. \
+         Failure events need a concrete path to plan.blocked → shipper → reporter."
+    );
 }
 
 #[test]

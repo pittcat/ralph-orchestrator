@@ -1207,7 +1207,11 @@ mod tests {
     /// `*`-zh.yml → `presets/zh/`, anything else → `presets/en/`.
     fn read_root_preset(filename: &str) -> String {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let subdir = if filename.ends_with("-zh.yml") { "zh" } else { "en" };
+        let subdir = if filename.ends_with("-zh.yml") {
+            "zh"
+        } else {
+            "en"
+        };
         let path = std::path::Path::new(manifest_dir)
             .join("..")
             .join("..")
@@ -1527,6 +1531,9 @@ mod tests {
         // R1-R4: plan-gate must exist, must subscribe to review.passed + review.complete,
         // must publish queue.advance / plan.complete / plan.blocked, and must NOT
         // listen to fix.applied.
+        // 2026-06-04 plan U5: plan-gate must ALSO trigger on work.failed so
+        // failure events from coordinator/executor route to plan.blocked
+        // instead of falling back to Ralph.
         let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
@@ -1535,10 +1542,17 @@ mod tests {
             .hats
             .get("plan-gate")
             .expect("ce-executor must define a 'plan-gate' hat");
-        assert_eq!(
-            plan_gate.triggers,
-            vec!["review.passed".to_string(), "review.complete".to_string()],
-            "plan-gate must trigger on review.passed and review.complete"
+        assert!(
+            plan_gate.triggers.contains(&"review.passed".to_string()),
+            "plan-gate must trigger on review.passed"
+        );
+        assert!(
+            plan_gate.triggers.contains(&"review.complete".to_string()),
+            "plan-gate must trigger on review.complete"
+        );
+        assert!(
+            plan_gate.triggers.contains(&"work.failed".to_string()),
+            "plan-gate must trigger on work.failed so failures route to plan.blocked (U5)"
         );
         assert!(
             plan_gate.publishes.contains(&"queue.advance".to_string()),
@@ -1614,8 +1628,261 @@ mod tests {
     }
 
     #[test]
+    fn test_ce_executor_work_done_field_consistency() {
+        // R6/R7/R13 (2026-06-04 plan U4): work.done required fields must be the
+        // same set in execution contract and event policy schema. Drift
+        // between these layers lets an agent emit a payload that passes one
+        // gate and fails the other, which is exactly the false-positive
+        // trap the contract is supposed to prevent.
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
+
+        let contracts = config
+            .event_loop
+            .execution_contracts
+            .as_ref()
+            .expect("ce-executor should have execution_contracts");
+        let policy = config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .expect("ce-executor should have event_policy");
+
+        let contract_rule = contracts
+            .rules
+            .get("work.done")
+            .expect("ce-executor execution contract should define work.done rule");
+        let contract_fields: std::collections::BTreeSet<&str> = contract_rule
+            .require_payload_fields
+            .iter()
+            .map(String::as_str)
+            .collect();
+
+        let schema = policy
+            .schemas
+            .get("work.done")
+            .expect("ce-executor event_policy should define work.done schema");
+        let schema_fields: std::collections::BTreeSet<&str> =
+            schema.required_fields.iter().map(String::as_str).collect();
+
+        // Every field the contract requires must also be in the schema
+        // (the schema is the second gate and must not silently accept
+        // fields the contract rejects).
+        let missing_in_schema: Vec<&&str> = contract_fields
+            .iter()
+            .filter(|f| !schema_fields.contains(*f))
+            .collect();
+        assert!(
+            missing_in_schema.is_empty(),
+            "work.done: contract requires {:?} but event_policy schema is missing {:?}. \
+             A payload that fails the contract must not silently pass the schema gate. \
+             See docs/plans/2026-06-04-001-fix-contract-rejection-hat-retry-plan.md (U4).",
+            contract_fields,
+            missing_in_schema
+        );
+
+        // The required set must be exactly the plan's documented minimum
+        // (plan_name, plan_path, task_id, task_key, step). If a future
+        // change drops one of these fields, contract validation will
+        // weaken silently.
+        let required_minimum: std::collections::BTreeSet<&str> =
+            ["plan_name", "plan_path", "task_id", "task_key", "step"]
+                .iter()
+                .copied()
+                .collect();
+        assert_eq!(
+            contract_fields, required_minimum,
+            "ce-executor work.done contract must require exactly \
+             {{plan_name, plan_path, task_id, task_key, step}}"
+        );
+        assert_eq!(
+            schema_fields, required_minimum,
+            "ce-executor work.done event_policy schema must require exactly \
+             {{plan_name, plan_path, task_id, task_key, step}}"
+        );
+
+        // Executor instructions must mention every required field. Use
+        // concise token search (not exact paragraph match) so prose edits
+        // do not break the test.
+        let executor = config
+            .hats
+            .get("executor")
+            .expect("ce-executor should have executor hat");
+        let instructions = executor.instructions.as_str();
+        for field in &required_minimum {
+            assert!(
+                instructions.contains(field),
+                "executor instructions must mention required work.done field '{}'",
+                field
+            );
+        }
+
+        // Review-coordinator read-state must mention every required field
+        // that review-coordinator needs from work.done.
+        let reviewer = config
+            .hats
+            .get("review-coordinator")
+            .expect("ce-executor should have review-coordinator hat");
+        let reviewer_instructions = reviewer.instructions.as_str();
+        for field in &required_minimum {
+            assert!(
+                reviewer_instructions.contains(field),
+                "review-coordinator instructions must mention required work.done field '{}'",
+                field
+            );
+        }
+    }
+
+    #[test]
+    fn test_ce_executor_zh_work_done_field_consistency() {
+        // R6/R7/R13 ZH parity: the Chinese preset must keep the same work.done
+        // field set as the English preset.
+        let en = read_root_preset("ce-executor.yml");
+        let zh = read_root_preset("ce-executor-zh.yml");
+        let en_config = RalphConfig::parse_yaml(&en).expect("English preset should parse");
+        let zh_config = RalphConfig::parse_yaml(&zh).expect("Chinese preset should parse");
+
+        let en_contracts = en_config
+            .event_loop
+            .execution_contracts
+            .as_ref()
+            .expect("EN ce-executor should have execution_contracts");
+        let en_rule = en_contracts
+            .rules
+            .get("work.done")
+            .expect("EN work.done contract should exist");
+        let en_required: std::collections::BTreeSet<&str> = en_rule
+            .require_payload_fields
+            .iter()
+            .map(String::as_str)
+            .collect();
+
+        let zh_contracts = zh_config
+            .event_loop
+            .execution_contracts
+            .as_ref()
+            .expect("ZH ce-executor should have execution_contracts");
+        let zh_rule = zh_contracts
+            .rules
+            .get("work.done")
+            .expect("ZH work.done contract should exist");
+        let zh_required: std::collections::BTreeSet<&str> = zh_rule
+            .require_payload_fields
+            .iter()
+            .map(String::as_str)
+            .collect();
+
+        assert_eq!(
+            en_required, zh_required,
+            "ZH ce-executor work.done contract must require the same field set as EN"
+        );
+
+        let zh_policy = zh_config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .expect("ZH ce-executor should have event_policy");
+        let zh_schema = zh_policy
+            .schemas
+            .get("work.done")
+            .expect("ZH work.done schema should exist");
+        let zh_schema_fields: std::collections::BTreeSet<&str> = zh_schema
+            .required_fields
+            .iter()
+            .map(String::as_str)
+            .collect();
+
+        for field in &en_required {
+            assert!(
+                zh_schema_fields.contains(field),
+                "ZH ce-executor work.done event_policy schema must require '{}' (EN contract does)",
+                field
+            );
+        }
+    }
+
+    #[test]
+    fn test_ce_executor_failure_topics_accept_reason_only_payloads() {
+        // Early failure paths can happen before a plan is parsed or a task is
+        // selected, so they may not have plan_name/task_id/task_key/step yet.
+        // The schema must allow those failures to reach plan-gate instead of
+        // rejecting them at the event policy layer.
+        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
+        let policy = config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .expect("ce-executor should have event_policy");
+
+        for topic in ["work.failed", "plan.blocked"] {
+            let schema = policy
+                .schemas
+                .get(topic)
+                .unwrap_or_else(|| panic!("ce-executor should define {} schema", topic));
+            assert_eq!(
+                schema.required_fields,
+                vec!["reason".to_string()],
+                "{} must require only reason; additional task/plan fields are optional context",
+                topic
+            );
+        }
+
+        let coordinator = config
+            .hats
+            .get("coordinator")
+            .expect("ce-executor should have coordinator hat");
+        assert!(
+            coordinator.instructions.contains(r#"payload: `{"reason":"#),
+            "coordinator documents reason-only work.failed early failure payloads"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_zh_failure_topics_match_en_reason_only_schema() {
+        let en = read_root_preset("ce-executor.yml");
+        let zh = read_root_preset("ce-executor-zh.yml");
+        let en_config = RalphConfig::parse_yaml(&en).expect("English preset should parse");
+        let zh_config = RalphConfig::parse_yaml(&zh).expect("Chinese preset should parse");
+
+        let en_policy = en_config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .expect("EN ce-executor should have event_policy");
+        let zh_policy = zh_config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .expect("ZH ce-executor should have event_policy");
+
+        for topic in ["work.failed", "plan.blocked"] {
+            let en_schema = en_policy
+                .schemas
+                .get(topic)
+                .unwrap_or_else(|| panic!("EN ce-executor should define {} schema", topic));
+            let zh_schema = zh_policy
+                .schemas
+                .get(topic)
+                .unwrap_or_else(|| panic!("ZH ce-executor should define {} schema", topic));
+            assert_eq!(
+                zh_schema.required_fields, en_schema.required_fields,
+                "ZH {} schema must match EN",
+                topic
+            );
+            assert_eq!(
+                zh_schema.required_fields,
+                vec!["reason".to_string()],
+                "ZH {} schema must allow reason-only early failures",
+                topic
+            );
+        }
+    }
+
+    #[test]
     fn test_ce_executor_zh_plan_gate_matches_en() {
-        // R9: Chinese preset plan-gate must have identical triggers/publishes/default_publishes.
         let en = read_root_preset("ce-executor.yml");
         let zh = read_root_preset("ce-executor-zh.yml");
 

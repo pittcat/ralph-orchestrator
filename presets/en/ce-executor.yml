@@ -72,7 +72,7 @@ event_loop:
         required_fields: [plan_name, plan_path, task_id, task_key, step, complexity]
         payload: json_object
       work.done:
-        required_fields: [plan_name, task_id, task_key, step]
+        required_fields: [plan_name, plan_path, task_id, task_key, step]
         payload: json_object
       work.failed:
         required_fields: [reason]
@@ -105,7 +105,7 @@ event_loop:
         required_fields: [plan_name, completed_steps, task_id, task_key, verdict]
         payload: json_object
       plan.blocked:
-        required_fields: [plan_name, reason, task_id, task_key]
+        required_fields: [reason]
         payload: json_object
       REVIEW_COMPLETE:
         required_fields: [plan_name, verdict, pass_or_fail, residual_findings_summary]
@@ -328,7 +328,7 @@ hats:
 
       ### Step Advancement
       - All tasks in current step done → update `progress.md` (move step to Completed Steps)
-      - Publish `work.done` with `plan_name`, `task_id`, `task_key`, `step`, `commit_count`, `changed_lines`
+      - Publish `work.done` with `plan_name`, `plan_path`, `task_id`, `task_key`, `step`, `commit_count`, `changed_lines`
       - Do NOT publish `queue.advance` from the executor. Queue advancement is owned by `plan-gate`.
 
       ### queue.advance Activation
@@ -371,7 +371,7 @@ hats:
       Do not review code yourself. Do not implement fixes.
 
       ### Read State
-      - From event payload: `plan_name`, `task_id`, `task_key`, `step` (from `work.done` or `fix.applied`)
+      - From event payload: `plan_name`, `plan_path`, `task_id`, `task_key`, `step` (from `work.done` or `fix.applied`)
       - If `plan_name` is not in payload, scan `.agents/scratchpad/ce-executor/*/context.md` files to find the one matching current branch
       - Read `context.md` for plan context, R-IDs, and scope boundaries
 
@@ -864,7 +864,7 @@ hats:
   plan-gate:
     name: "🚦 Plan Gate"
     description: "Reconciles review verdict against plan progress and decides queue.advance vs plan.complete."
-    triggers: ["review.passed", "review.complete"]
+    triggers: ["review.passed", "review.complete", "work.failed"]
     publishes: ["queue.advance", "plan.complete", "plan.blocked"]
     default_publishes: "plan.blocked"
     instructions: |
@@ -873,6 +873,17 @@ hats:
       You are the plan-wide advancement gate. You do not review, implement, or validate.
       Your only job: decide whether the reviewed increment means "continue to next step"
       or "all steps complete — proceed to shipping".
+
+      ### work.failed Routing (2026-06-04 plan U5)
+      When triggered by `work.failed` (from coordinator or executor), translate the
+      failure into a `plan.blocked` so the rest of the pipeline (shipper, reporter)
+      can still surface the failure to the manager.
+      - Required payload fields: `plan_name`, `reason`, `task_id`, `task_key`, `step`.
+      - If any field is missing, do NOT guess — publish `plan.blocked` with
+        `reason: "work.failed missing required field: <missing>"` and the fields you do have.
+      - The failure must NOT skip final reporting. `plan.blocked` flows to
+        `shipper -> REVIEW_COMPLETE -> reporter -> LOOP_COMPLETE`, so the manager
+        report still records the blocked state.
 
       ### Read State
       1. From event payload: `plan_name`, `task_id`, `task_key`, `step`, `verdict`, `findings_count`, `fix_round`

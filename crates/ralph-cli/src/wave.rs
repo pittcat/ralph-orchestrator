@@ -330,7 +330,8 @@ mod tests {
 
     #[test]
     fn test_read_payloads_from_reader_skips_empty_lines() {
-        let input = "{\"dim\":\"correctness\"}\n\n{\"dim\":\"testing\"}\n\n{\"dim\":\"maintainability\"}\n";
+        let input =
+            "{\"dim\":\"correctness\"}\n\n{\"dim\":\"testing\"}\n\n{\"dim\":\"maintainability\"}\n";
         let cursor = std::io::Cursor::new(input);
         let payloads = read_payloads_from_reader(cursor).unwrap();
         assert_eq!(payloads.len(), 3);
@@ -349,9 +350,8 @@ mod tests {
 
     #[test]
     fn test_validate_payload_shape_rejects_newline_joined_json_payloads() {
-        let payloads = vec![
-            "{\"dimension\":\"correctness\"}\n{\"dimension\":\"testing\"}".to_string(),
-        ];
+        let payloads =
+            vec!["{\"dimension\":\"correctness\"}\n{\"dimension\":\"testing\"}".to_string()];
         let err = validate_payload_shape(&payloads).unwrap_err().to_string();
         assert!(err.contains("--payloads-stdin"));
     }

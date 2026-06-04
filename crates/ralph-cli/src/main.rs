@@ -3094,9 +3094,8 @@ fn emit_command_with_root(
         // agents emitting structured events (e.g. work.done) don't get
         // their payload stored as a plain string and rejected by the
         // execution contract validator.
-        serde_json::from_str::<serde_json::Value>(&payload).unwrap_or_else(|_| {
-            serde_json::Value::String(payload)
-        })
+        serde_json::from_str::<serde_json::Value>(&payload)
+            .unwrap_or_else(|_| serde_json::Value::String(payload))
     } else {
         serde_json::Value::String(payload)
     };
