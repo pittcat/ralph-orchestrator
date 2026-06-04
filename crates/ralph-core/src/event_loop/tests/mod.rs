@@ -1,0 +1,35 @@
+//! Test suite for event_loop module, organized by topic.
+
+use super::*;
+
+mod active_hat;
+mod backpressure;
+mod build_prompt;
+mod ce_executor;
+mod chain_validation;
+mod common;
+mod completion_honored;
+mod default_publishes;
+mod event_filter;
+mod event_policy;
+mod execution_contract;
+mod hat_backend;
+mod hat_exhaustion;
+mod human_timeout;
+mod initialization;
+mod loop_context;
+mod objective;
+mod origin_guard;
+mod payload_types;
+mod persistent_mode;
+mod replay_light_integration;
+mod robot_skill;
+mod scope_enforcement;
+mod scratchpad;
+mod stale_breaker;
+mod state_machine;
+mod structured_evidence;
+mod termination;
+mod text_fallback;
+mod wave_results;
+mod workflow_guard;
