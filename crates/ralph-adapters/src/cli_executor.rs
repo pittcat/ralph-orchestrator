@@ -7,6 +7,7 @@
 use crate::cli_backend::PromptMode;
 use crate::cli_backend::{CliBackend, OutputFormat};
 use crate::copilot_stream::CopilotStreamParser;
+use crate::trae_stream::TraeStreamParser;
 #[cfg(unix)]
 use nix::sys::signal::{Signal, kill};
 #[cfg(unix)]
@@ -199,6 +200,17 @@ impl CliExecutor {
                             write!(output_writer, "{text}")?;
                             if !text.ends_with('\n') {
                                 writeln!(output_writer)?;
+                            }
+                        }
+                    } else if self.backend.output_format == OutputFormat::TraeStreamJson {
+                        // TraeStreamJson: parse NDJSON lines and extract assistant text
+                        if let Some(event) = TraeStreamParser::parse_line(&line) {
+                            // Only extract text from assistant messages (ignore system, tool calls, results)
+                            if let crate::trae_stream::TraeStreamEvent::Assistant { message } = event {
+                                if let crate::trae_stream::TraeAssistantMessage::Text { content } = message {
+                                    write!(output_writer, "{}", content.text)?;
+                                    output_writer.flush()?;
+                                }
                             }
                         }
                     } else {
