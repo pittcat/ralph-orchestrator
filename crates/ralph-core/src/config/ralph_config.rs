@@ -596,6 +596,31 @@ impl RalphConfig {
         }
     }
 
+    /// Resolves the effective inactivity watchdog (seconds) for the
+    /// autonomous / RPC / worktree path of `backend`.
+    ///
+    /// Resolution order (plan 2026-06-06-001, R5/R6):
+    /// 1. `cli.autonomous_idle_timeout_secs` — explicit per-Ralph override.
+    ///    `Some(0)` means *disabled*; `Some(N > 0)` means watchdog after N
+    ///    seconds of silence. This is the documented escape hatch when a
+    ///    specific operator wants to override the adapter-wide default.
+    /// 2. `adapters.<backend>.timeout` — per-adapter inactivity timeout
+    ///    (default 300s). This already carries the right "CLI execution
+    ///    inactivity timeout" semantics, so the autonomous watchdog reuses
+    ///    it instead of inventing a new field.
+    ///
+    /// Both sources use 0 to mean "no watchdog" (R8). The PTY executor and
+    /// the CLI executor both honor that semantic.
+    ///
+    /// Callers typically pass this directly to `PtyConfig::idle_timeout_secs`
+    /// or `CliExecutor::execute(... timeout ...)` so the watchdog fires
+    /// consistently across PTY and non-PTY autonomous paths.
+    pub fn autonomous_idle_timeout_secs(&self, backend: &str) -> u64 {
+        self.cli
+            .autonomous_idle_timeout_secs
+            .unwrap_or_else(|| self.adapter_settings(backend).timeout)
+    }
+
     /// Resolves and loads external schema files referenced in `event_policy.schema_file`.
     ///
     /// Relative paths are resolved against `base_path` (typically the preset file's directory).
@@ -883,6 +908,88 @@ adapters:
         let gemini = config.adapter_settings("gemini");
         assert_eq!(gemini.timeout, 300);
         assert!(!gemini.enabled);
+    }
+
+    // ── Unit 2 (plan 2026-06-06-001) — autonomous watchdog resolution ──
+
+    /// Default behavior: with no `cli.autonomous_idle_timeout_secs` and no
+    /// per-adapter override, the watchdog resolves to the adapter default
+    /// (300s). This is the R5 / R6 baseline: never fall back to the
+    /// interactive `cli.idle_timeout_secs` (30s) and never disable the
+    /// watchdog silently.
+    #[test]
+    fn test_autonomous_idle_timeout_secs_falls_back_to_adapter_default() {
+        let config = RalphConfig::default();
+        // AdapterSettings::default() uses the 300s `default_timeout()`.
+        assert_eq!(config.autonomous_idle_timeout_secs("claude"), 300);
+        assert_eq!(config.autonomous_idle_timeout_secs("gemini"), 300);
+        assert_eq!(config.autonomous_idle_timeout_secs("kiro"), 300);
+    }
+
+    /// Per-adapter override: `adapters.<backend>.timeout` is the second-tier
+    /// source. Setting `adapters.claude.timeout: 600` makes the claude
+    /// watchdog 600s while leaving gemini on 300s.
+    #[test]
+    fn test_autonomous_idle_timeout_secs_uses_adapter_override() {
+        let yaml = r"
+adapters:
+  claude:
+    timeout: 600
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.autonomous_idle_timeout_secs("claude"), 600);
+        // Other backends still see their own adapter default.
+        assert_eq!(config.autonomous_idle_timeout_secs("gemini"), 300);
+    }
+
+    /// Per-Ralph override: `cli.autonomous_idle_timeout_secs` wins over
+    /// `adapters.<backend>.timeout` (the documented escape hatch). The
+    /// `Some(0)` case must round-trip as `0` and explicitly disable the
+    /// watchdog (R8), not be silently re-mapped to the adapter default.
+    #[test]
+    fn test_autonomous_idle_timeout_secs_cli_override_takes_precedence() {
+        let yaml = r"
+cli:
+  autonomous_idle_timeout_secs: 120
+adapters:
+  claude:
+    timeout: 600
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.autonomous_idle_timeout_secs("claude"),
+            120,
+            "cli.autonomous_idle_timeout_secs must win over adapters.claude.timeout"
+        );
+
+        // Explicit disable (Some(0)) must NOT be re-mapped to the adapter
+        // default. R8: `0` means disabled in this field, period.
+        let yaml = r"
+cli:
+  autonomous_idle_timeout_secs: 0
+adapters:
+  claude:
+    timeout: 600
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.autonomous_idle_timeout_secs("claude"),
+            0,
+            "cli.autonomous_idle_timeout_secs=0 must remain 0 (explicit disable)"
+        );
+    }
+
+    /// Unknown / non-`AdapterSettings` backend name falls back to the claude
+    /// settings (per `adapter_settings()`), which itself defaults to 300s.
+    /// This matches the existing `adapter_settings` fallback contract so the
+    /// watchdog resolution stays consistent across the codebase.
+    #[test]
+    fn test_autonomous_idle_timeout_secs_unknown_backend_uses_claude_default() {
+        let config = RalphConfig::default();
+        assert_eq!(
+            config.autonomous_idle_timeout_secs("some-future-backend"),
+            300
+        );
     }
 
     #[test]

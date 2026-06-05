@@ -149,14 +149,19 @@ pub async fn execute_pty(
         e.set_backend(backend.clone());
         e
     } else {
-        let idle_timeout_secs = if interactive {
-            config.cli.idle_timeout_secs
+        // Interactive mode uses the user-facing 30s default; autonomous
+        // (RPC / worktree / TUI-observation) uses the resolver. The previous
+        // hard-coded `0` for the autonomous branch disabled the watchdog
+        // entirely and hung the outer loop on silent, non-exiting backends
+        // (see pty_executor.rs and plan 2026-06-06-001).
+        let idle_timeout_secs: u64 = if interactive {
+            u64::from(config.cli.idle_timeout_secs)
         } else {
-            0
+            config.autonomous_idle_timeout_secs(backend_name)
         };
         let pty_config = PtyConfig {
             interactive,
-            idle_timeout_secs,
+            idle_timeout_secs: u32::try_from(idle_timeout_secs).unwrap_or(u32::MAX),
             workspace_root: config.core.workspace_root.clone(),
             ..PtyConfig::from_env()
         };

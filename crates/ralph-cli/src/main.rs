@@ -45,13 +45,13 @@ use anyhow::Result;
 use clap::{ArgAction, Parser, Subcommand};
 
 // Shared CLI infrastructure layer (U4 step-01 extraction).
+#[cfg(test)]
+use crate::cli::OutputFormat;
 use crate::cli::{
     ColorMode, ConfigSource, HatsSource, apply_config_overrides, default_config_path,
     ensure_scratchpad_directory, install_panic_hook, load_config_with_overrides,
     resolve_path_from_workspace, resolve_workspace_root,
 };
-#[cfg(test)]
-use crate::cli::OutputFormat;
 
 /// Ralph Orchestrator - Multi-agent orchestration framework
 #[derive(Parser, Debug)]
@@ -384,6 +384,7 @@ async fn main() -> Result<()> {
                 rpc: false,
                 legacy_tui: false,
                 idle_timeout: None,
+                autonomous_idle_timeout: None,
                 exclusive: false,
                 no_auto_merge: false,
                 worktree: false,

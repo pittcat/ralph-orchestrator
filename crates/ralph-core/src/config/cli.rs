@@ -28,6 +28,28 @@ pub struct CliConfig {
     #[serde(default = "default_idle_timeout")]
     pub idle_timeout_secs: u32,
 
+    /// Watchdog timeout (seconds) for autonomous / RPC / worktree paths
+    /// (`ralph run --no-tui`, `ralph run --rpc`, `ralph run --worktree`, etc.).
+    /// Resets on every stdout/stderr/stream-json byte the backend emits;
+    /// fires `IdleTimeout` and SIGTERMs the child when no activity is observed
+    /// for the full duration.
+    ///
+    /// Semantics (R6 / R8 of plan 2026-06-06-001):
+    /// - `None` (default) — fall back to the per-adapter `adapters.<backend>.timeout`
+    ///   (typically 300s). This is the recommended source; it already carries
+    ///   the right "CLI execution inactivity timeout" semantics.
+    /// - `Some(0)` — explicitly DISABLE the autonomous watchdog. Use with care:
+    ///   the outer loop will wait forever on a silent, non-exiting backend.
+    /// - `Some(N)` where `N > 0` — fire the watchdog after N seconds of inactivity.
+    ///
+    /// This field is intentionally separate from `idle_timeout_secs` (which
+    /// governs interactive mode and defaults to 30s); reusing the 30s default
+    /// for autonomous / RPC / worktree would kill any backend that legitimately
+    /// needs >30s of silence (e.g. long-running tool calls, model thinking,
+    /// network-bound operations).
+    #[serde(default)]
+    pub autonomous_idle_timeout_secs: Option<u64>,
+
     /// Custom arguments to pass to the CLI command (for backend: "custom").
     /// These are inserted before the prompt argument.
     #[serde(default)]
@@ -63,6 +85,7 @@ impl Default for CliConfig {
             prompt_mode: default_prompt_mode(),
             default_mode: default_mode(),
             idle_timeout_secs: default_idle_timeout(),
+            autonomous_idle_timeout_secs: None,
             args: Vec::new(),
             prompt_flag: None,
         }
@@ -205,5 +228,49 @@ mod tests {
              value as `disabled` — Unit 2/3 may not silently change the \
              semantics of `0` (R8)."
         );
+    }
+
+    #[test]
+    fn cli_config_autonomous_idle_timeout_defaults_to_none() {
+        // Plan 2026-06-06-001 R5: when `cli.autonomous_idle_timeout_secs` is
+        // absent, the runner must fall back to `adapters.<backend>.timeout`
+        // (the existing per-adapter inactivity timeout, default 300s). The
+        // `None` default is the wire that connects those two fields.
+        let config = CliConfig::default();
+        assert!(
+            config.autonomous_idle_timeout_secs.is_none(),
+            "CliConfig::default().autonomous_idle_timeout_secs must be None \
+             (fall back to adapters.<backend>.timeout), got {:?}",
+            config.autonomous_idle_timeout_secs
+        );
+    }
+
+    #[test]
+    fn cli_config_autonomous_idle_timeout_parses_explicit_value() {
+        // Both `Some(0)` (explicit disable) and `Some(N)` (override) must
+        // round-trip through serde without losing the user intent. The
+        // presence-vs-meaning distinction is what makes "0 = disabled" safe
+        // to add on top of the inherited default (R6 / R8).
+        let yaml = "autonomous_idle_timeout_secs: 0\n";
+        let parsed: CliConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.autonomous_idle_timeout_secs, Some(0));
+
+        let yaml = "autonomous_idle_timeout_secs: 600\n";
+        let parsed: CliConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.autonomous_idle_timeout_secs, Some(600));
+    }
+
+    #[test]
+    fn cli_config_autonomous_idle_timeout_absent_in_yaml_yields_none() {
+        // Backwards compat: a YAML that does NOT mention
+        // `autonomous_idle_timeout_secs` must keep its `None` default and
+        // let `RalphConfig::autonomous_idle_timeout_secs(backend)` fall
+        // back to the per-adapter timeout. Any pre-Unit-2 config keeps
+        // working unchanged.
+        let yaml = "backend: claude\nidle_timeout_secs: 30\n";
+        let parsed: CliConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(parsed.autonomous_idle_timeout_secs.is_none());
+        assert_eq!(parsed.backend, "claude");
+        assert_eq!(parsed.idle_timeout_secs, 30);
     }
 }

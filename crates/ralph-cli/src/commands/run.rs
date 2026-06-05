@@ -1,7 +1,4 @@
-use crate::cli::{
-    ColorMode, ConfigSource, HatsSource, Verbosity,
-    ensure_scratchpad_directory,
-};
+use crate::cli::{ColorMode, ConfigSource, HatsSource, Verbosity, ensure_scratchpad_directory};
 use crate::display::truncate;
 use crate::loop_runner;
 use crate::preflight;
@@ -85,6 +82,15 @@ pub struct RunArgs {
     /// Set to 0 to disable idle timeout.
     #[arg(long)]
     pub idle_timeout: Option<u32>,
+
+    /// Watchdog timeout (seconds) for autonomous / RPC / worktree paths
+    /// (`--no-tui`, `--rpc`, `--worktree`). Resets on every backend
+    /// output byte; fires `IdleTimeout` and SIGTERMs the child when the
+    /// backend is silent for the full duration. Default: inherit from
+    /// `adapters.<backend>.timeout` (300s for most backends).
+    /// Set to 0 to explicitly disable the autonomous watchdog.
+    #[arg(long)]
+    pub autonomous_idle_timeout: Option<u64>,
 
     // ─────────────────────────────────────────────────────────────────────────
     // Multi-Loop Concurrency Options
@@ -475,6 +481,13 @@ pub async fn run_command(
         config.cli.idle_timeout_secs = timeout;
     }
 
+    // Override autonomous watchdog if specified. Takes precedence over the
+    // per-adapter `adapters.<backend>.timeout` default (see plan
+    // 2026-06-06-001, R5/R6).
+    if let Some(timeout) = args.autonomous_idle_timeout {
+        config.cli.autonomous_idle_timeout_secs = Some(timeout);
+    }
+
     // Apply backend override from CLI (takes precedence over config)
     if let Some(backend) = args.backend {
         config.cli.backend = backend;
@@ -552,6 +565,17 @@ pub async fn run_command(
         println!("  Default mode: {}", config.cli.default_mode);
         if config.cli.default_mode == "interactive" {
             println!("  Idle timeout: {}s", config.cli.idle_timeout_secs);
+        } else {
+            // Autonomous / RPC / worktree path: the inactivity watchdog comes
+            // from cli.autonomous_idle_timeout_secs (override) or
+            // adapters.<backend>.timeout (default 300s). Print it so operators
+            // can confirm the watchdog is wired up and is not the old broken
+            // "always disabled" behavior.
+            let autonomous_timeout = config.autonomous_idle_timeout_secs(&config.cli.backend);
+            println!(
+                "  Autonomous watchdog: {}s (0 = disabled)",
+                autonomous_timeout
+            );
         }
         if !warnings.is_empty() {
             println!("  Warnings: {}", warnings.len());
@@ -1136,6 +1160,7 @@ pub(crate) fn default_run_args() -> RunArgs {
         rpc: false,
         legacy_tui: false,
         idle_timeout: None,
+        autonomous_idle_timeout: None,
         exclusive: false,
         no_auto_merge: false,
         worktree: false,

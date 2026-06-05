@@ -378,12 +378,23 @@ impl PtyExecutor {
         drop(pair.slave);
 
         let mut output = Vec::new();
-        let timeout_duration = if !self.config.interactive || self.config.idle_timeout_secs == 0 {
-            None
-        } else {
+        // The idle_timeout_secs field is the single source of truth for the
+        // inactivity watchdog: 0 means "disabled", any non-zero value means
+        // "fire IdleTimeout after that many seconds of no PTY output".
+        //
+        // The previous `!self.config.interactive || ... == 0` short-circuit
+        // coupled the watchdog to interactive mode, so the autonomous / RPC
+        // / worktree path (interactive=false) was *always* disabled regardless
+        // of the configured value. That bug is fixed in Unit 2 of plan
+        // 2026-06-06-001: the runner / execution now pass a non-zero watchdog
+        // (sourced from cli.autonomous_idle_timeout_secs or adapters.<backend>.
+        // timeout) for autonomous paths, and this check now honors that value.
+        let timeout_duration = if self.config.idle_timeout_secs > 0 {
             Some(Duration::from_secs(u64::from(
                 self.config.idle_timeout_secs,
             )))
+        } else {
+            None
         };
 
         let mut termination = TerminationType::Natural;
@@ -682,12 +693,18 @@ impl PtyExecutor {
         let mut trae_state = TraeSessionState::default();
         let mut completion: Option<SessionResult> = None;
         let start_time = Instant::now();
-        let timeout_duration = if !self.config.interactive || self.config.idle_timeout_secs == 0 {
-            None
-        } else {
+        // See the corresponding comment in `run_observe`: this field is the
+        // single source of truth for the inactivity watchdog. The previous
+        // `!interactive || ... == 0` short-circuit disabled the watchdog for
+        // every autonomous / RPC / worktree invocation; Unit 2 of plan
+        // 2026-06-06-001 removed that coupling so a non-zero value now
+        // actually fires IdleTimeout on long-silence backends.
+        let timeout_duration = if self.config.idle_timeout_secs > 0 {
             Some(Duration::from_secs(u64::from(
                 self.config.idle_timeout_secs,
             )))
+        } else {
+            None
         };
 
         let mut termination = TerminationType::Natural;
@@ -2589,27 +2606,27 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────────────────────────────
-    // Characterization tests (Unit 1 of plan 2026-06-06-001):
-    // Pin down the current autonomous-PTY behavior so the watchdog fix in
-    // Unit 2/3 has a stable regression baseline. These tests target the
-    // exact (interactive=false, idle_timeout_secs=0) configuration that
-    // `loop_runner::runner` (runner.rs:425-450) and `loop_runner::execution`
-    // (execution.rs:152-156) construct for the ce-executor / --rpc / worktree
-    // path. The bug is that idle_timeout_secs=0 disables the PTY watchdog,
-    // so a silent, non-exiting backend hangs the outer loop forever.
+    // Watchdog contract tests (Unit 2 of plan 2026-06-06-001):
+    //
+    // Post-fix contract for `idle_timeout_secs` in PtyConfig:
+    //   - `0`   → watchdog is **disabled** (no timeout fires regardless of mode)
+    //   - `> 0` → watchdog fires after that many seconds of PTY silence and
+    //              returns `TerminationType::IdleTimeout`
+    //
+    // The watchdog no longer depends on `interactive` (the previous
+    // `!interactive || ... == 0` short-circuit was the bug). The caller
+    // (loop_runner::runner / loop_runner::execution) is now responsible for
+    // passing a non-zero watchdog for autonomous / RPC / worktree paths via
+    // `RalphConfig::autonomous_idle_timeout_secs(backend)`.
     // ──────────────────────────────────────────────────────────────────────
 
-    /// Pin down the current bug: with `interactive=false, idle_timeout_secs=0`
-    /// (the configuration `loop_runner::runner` builds for autonomous / RPC /
-    /// worktree paths), `PtyExecutor::run_observe` MUST eventually time out
-    /// when the backend produces no output and never exits.
+    /// Contract: `interactive=false, idle_timeout_secs=1` fires the watchdog
+    /// on a silent, non-exiting backend and returns `TerminationType::IdleTimeout`.
     ///
-    /// The test wraps the call in its own wallclock timeout (5 seconds) so the
-    /// test suite never hangs. If the executor's own watchdog ever fires before
-    /// that wallclock, the inner future resolves with `TerminationType::IdleTimeout`
-    /// and the assertion below passes. With the current implementation, the
-    /// inner future never returns, the wallclock fires, and the test fails —
-    /// which is exactly the regression we want to catch once Unit 2/3 land.
+    /// Mirrors what the production loop_runner now passes for autonomous /
+    /// RPC / worktree paths after Unit 2 (the watchdog value, not `0`).
+    /// The test uses a 1-second watchdog so the assertion finishes well
+    /// inside the 5-second wallclock budget.
     #[cfg(unix)]
     #[tokio::test]
     async fn test_run_observe_autonomous_silent_backend_must_time_out() {
@@ -2623,10 +2640,13 @@ mod tests {
             output_format: OutputFormat::Text,
             env_vars: vec![],
         };
-        // Mirrors runner.rs:425-450 autonomous path: idle_timeout_secs=0.
+        // Post-fix autonomous path: caller passes a real watchdog (typically
+        // resolved from `adapters.<backend>.timeout` via
+        // `RalphConfig::autonomous_idle_timeout_secs(backend)`). 1s keeps the
+        // test fast while still validating the machinery.
         let config = PtyConfig {
             interactive: false,
-            idle_timeout_secs: 0,
+            idle_timeout_secs: 1,
             cols: 80,
             rows: 24,
             workspace_root: temp_dir.path().to_path_buf(),
@@ -2634,9 +2654,6 @@ mod tests {
         let executor = PtyExecutor::new(backend, config);
         let (_tx, rx) = tokio::sync::watch::channel(false);
 
-        // The watchdog (when implemented) should fire well before 5s. We give
-        // the executor a generous wallclock budget so the test fails on a
-        // *real* hang, not on a slow watchdog.
         let wallclock_budget = Duration::from_secs(5);
         let start = std::time::Instant::now();
         let outcome =
@@ -2645,7 +2662,6 @@ mod tests {
 
         match outcome {
             Ok(Ok(result)) => {
-                // The watchdog fired: this is the post-fix expected behavior.
                 assert_eq!(
                     result.termination,
                     TerminationType::IdleTimeout,
@@ -2660,35 +2676,31 @@ mod tests {
             }
             Ok(Err(e)) => panic!("PTY observe returned an error: {e}"),
             Err(_elapsed) => {
-                // The watchdog did NOT fire within the wallclock: the test
-                // wrapper timed out. This is the current (buggy) behavior we
-                // are pinning down. Fail the test so Unit 2/3 will fix it.
                 panic!(
                     "autonomous PTY hung for the full wallclock budget ({:?}) \
-                     — PtyExecutor did not fire its own idle watchdog. \
-                     This is the regression that Unit 2/3 of plan \
-                     2026-06-06-001 must fix.",
+                     — PtyExecutor did not fire its own idle watchdog even though \
+                     `idle_timeout_secs=1` was configured. The post-fix contract \
+                     of Unit 2 of plan 2026-06-06-001 was broken.",
                     wallclock_budget
                 );
             }
         }
     }
 
-    /// Same characterization as above, but using the streaming observer
-    /// (`run_observe_streaming`) — the path that `loop_runner::execution`
-    /// takes for BOTH TUI observation and RPC streaming output (see
-    /// `crates/ralph-cli/src/loop_runner/execution.rs:191-243`, which
-    /// dispatches TUI, RPC, and the non-interactive verbosity handlers all
-    /// through this single streaming entry point).
+    /// Same contract as above, but via `run_observe_streaming` — the path
+    /// `loop_runner::execution` takes for TUI observation, RPC streaming,
+    /// and non-interactive verbosity handlers (see
+    /// `crates/ralph-cli/src/loop_runner/execution.rs:188-243`). Unit 2
+    /// removed the `!interactive || idle_timeout_secs == 0` short-circuit in
+    /// this code path too, so it must honor the same watchdog contract.
     ///
     /// Scope note: this test pins the `run_observe_streaming` code path in
     /// `PtyExecutor` itself. It does NOT exercise the end-to-end
-    /// worktree + `--rpc` integration (real RALPH_RPC_DIR + JSON-RPC
-    /// client + worktree setup); that end-to-end coverage is the job of
-    /// Unit 4 of plan 2026-06-06-001 ("回归护栏与文档同步"). For now, this
-    /// test is the lower-level guard that any caller of
-    /// `run_observe_streaming` (TUI, RPC, worktree, non-interactive) is
-    /// covered by the same bug-pin.
+    /// worktree + `--rpc` integration (real RALPH_RPC_DIR + JSON-RPC client
+    /// + worktree setup); that end-to-end coverage is the job of Unit 4
+    /// ("回归护栏与文档同步"). For now, this test is the lower-level guard
+    /// that any caller of `run_observe_streaming` (TUI, RPC, worktree,
+    /// non-interactive) is covered by the same watchdog contract.
     #[cfg(unix)]
     #[tokio::test]
     async fn test_run_observe_streaming_autonomous_silent_backend_must_time_out() {
@@ -2716,7 +2728,7 @@ mod tests {
         };
         let config = PtyConfig {
             interactive: false,
-            idle_timeout_secs: 0,
+            idle_timeout_secs: 1,
             cols: 80,
             rows: 24,
             workspace_root: temp_dir.path().to_path_buf(),
@@ -2753,13 +2765,132 @@ mod tests {
             Err(_elapsed) => {
                 panic!(
                     "autonomous PTY streaming hung for the full wallclock budget \
-                     ({:?}) — PtyExecutor did not fire its own idle watchdog. \
-                     This is the regression that Unit 2/3 of plan \
-                     2026-06-06-001 must fix.",
+                     ({:?}) — PtyExecutor did not fire its own idle watchdog even \
+                     though `idle_timeout_secs=1` was configured. The post-fix \
+                     contract of Unit 2 of plan 2026-06-06-001 was broken.",
                     wallclock_budget
                 );
             }
         }
+    }
+
+    /// Contract: `idle_timeout_secs=0` means **disabled** regardless of mode.
+    ///
+    /// This is R8 of plan 2026-06-06-001 — the documented `0 = disabled`
+    /// semantic on `PtyConfig::idle_timeout_secs` must be preserved by
+    /// Unit 2. The test wraps the call in a 3s wallclock budget: if the
+    /// executor silently re-introduced a watchdog for `0`, the test would
+    /// observe a non-Natural termination or fire the wallclock and panic
+    /// with a mismatch.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_run_observe_autonomous_zero_idle_timeout_is_disabled() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let backend = CliBackend {
+            command: "sh".to_string(),
+            args: vec!["-c".to_string()],
+            prompt_mode: PromptMode::Arg,
+            prompt_flag: None,
+            output_format: OutputFormat::Text,
+            env_vars: vec![],
+        };
+        let config = PtyConfig {
+            interactive: false,
+            idle_timeout_secs: 0, // explicit disable
+            cols: 80,
+            rows: 24,
+            workspace_root: temp_dir.path().to_path_buf(),
+        };
+        let executor = PtyExecutor::new(backend, config);
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+
+        // Use a fast command so the test exits cleanly inside the budget
+        // without needing the watchdog. The assertion is that the executor
+        // returns `TerminationType::Natural` and that completion is bounded
+        // by command runtime, not by the watchdog.
+        let start = std::time::Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(3),
+            executor.run_observe("echo disabled-watchdog", rx),
+        )
+        .await
+        .expect("executor must not hang when watchdog is disabled")
+        .expect("PTY observe must not return an io error");
+
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "command should finish promptly (no watchdog delay)"
+        );
+        assert_eq!(
+            outcome.termination,
+            TerminationType::Natural,
+            "with idle_timeout_secs=0 the watchdog must not fire; \
+             got {:?} instead of Natural",
+            outcome.termination
+        );
+        assert!(outcome.success);
+    }
+
+    /// Contract: PTY output activity resets the watchdog timer.
+    ///
+    /// A backend that emits a byte every <N> seconds (where N is the
+    /// configured watchdog) must NEVER be killed by the watchdog, even
+    /// though the *wallclock* duration exceeds the watchdog. This is the
+    /// "inactivity timeout" semantic — silence kills, activity keeps alive.
+    /// This guards the `last_activity = Instant::now()` resets at the
+    /// `OutputEvent::Data` arm of the `tokio::select!` in `run_observe`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_run_observe_activity_resets_watchdog() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        // Emit a byte every 200ms, for a total of ~2s (10 emits) — well
+        // above the 1s watchdog interval but the command itself never
+        // produces long gaps, so the watchdog must never fire.
+        let backend = CliBackend {
+            command: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "for i in 1 2 3 4 5 6 7 8 9 10; do echo tick; sleep 0.2; done".to_string(),
+            ],
+            prompt_mode: PromptMode::Arg,
+            prompt_flag: None,
+            output_format: OutputFormat::Text,
+            env_vars: vec![],
+        };
+        let config = PtyConfig {
+            interactive: false,
+            idle_timeout_secs: 1, // 1s inactivity window
+            cols: 80,
+            rows: 24,
+            workspace_root: temp_dir.path().to_path_buf(),
+        };
+        let executor = PtyExecutor::new(backend, config);
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+
+        // Wallclock budget: generous slack above the ~2s command runtime,
+        // but well below "the watchdog would have fired" if resets were
+        // broken (which would happen at ~1s of silence; the command
+        // has at most 200ms of silence between ticks).
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(10), executor.run_observe("ignored", rx))
+                .await
+                .expect("command must finish under wallclock budget")
+                .expect("PTY observe must not error");
+
+        assert_eq!(
+            outcome.termination,
+            TerminationType::Natural,
+            "frequent-output backend must complete naturally, not be killed by the watchdog"
+        );
+        assert!(outcome.success);
+        // The output should contain all 10 ticks (catches the case where the
+        // watchdog fires mid-run and we lose tail output).
+        let ticks = outcome.stripped_output.matches("tick").count();
+        assert_eq!(
+            ticks, 10,
+            "expected 10 tick lines in output, got {ticks}: {}",
+            outcome.stripped_output
+        );
     }
 
     /// R2 baseline: when `interactive=true` and `idle_timeout_secs=1`, the

@@ -424,10 +424,16 @@ pub async fn run_loop_impl(
 
     // Create PTY executor if using interactive mode
     let mut pty_executor = if use_pty {
-        let idle_timeout_secs = if user_interactive {
-            config.cli.idle_timeout_secs
+        // The watchdog value in seconds. Interactive mode uses the user-facing
+        // 30s default; autonomous / RPC / worktree mode uses the resolver
+        // below (explicit override or per-adapter timeout, default 300s).
+        // Hard-coding 0 for autonomous used to silently disable the watchdog
+        // and hang the outer loop on a silent, non-exiting backend — see
+        // pty_executor.rs and plan 2026-06-06-001.
+        let idle_timeout_secs: u64 = if user_interactive {
+            u64::from(config.cli.idle_timeout_secs)
         } else {
-            0
+            config.autonomous_idle_timeout_secs(&config.cli.backend)
         };
         // In autonomous (non-interactive) mode, use a very wide PTY to prevent
         // line wrapping of long NDJSON output (Pi emits 800+ char JSON lines that
@@ -437,9 +443,12 @@ pub async fn run_loop_impl(
         } else {
             32768
         };
+        // The watchdog u64 is bounded to u32::MAX so PtyConfig's u32 field
+        // can hold it without silent truncation; the realistic value (300s
+        // default) fits trivially.
         let pty_config = PtyConfig {
             interactive: user_interactive,
-            idle_timeout_secs,
+            idle_timeout_secs: u32::try_from(idle_timeout_secs).unwrap_or(u32::MAX),
             cols,
             workspace_root: config.core.workspace_root.clone(),
             ..PtyConfig::from_env()
