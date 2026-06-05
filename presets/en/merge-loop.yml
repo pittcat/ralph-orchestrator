@@ -36,6 +36,8 @@ cli:
 
 core:
   specs_dir: "./specs/"
+  guardrails:
+    - "ABSOLUTE PROHIBITION: NEVER kill, signal, or terminate any `ralph` / `ralph-orchestrator` process — including `kill`, `pkill`, `killall`, `kill -9`, `kill -TERM`, `kill -HUP`, `taskkill`, or any equivalent process-control command targeting the loop's parent PID, the TUI subprocess PID recorded in `.ralph/loop.lock`, any PID listed in `.ralph/loops.json`, or any PID returned by `ps` / `pgrep` matching `ralph`. The currently running ralph IS the parent process of this very agent iteration — killing it ends the agent itself mid-thought and corrupts orchestration state (stale lock, in_progress tasks, lost events, partial commits). If the loop needs to restart to pick up new configuration, emit `loop.cancel`, surface a `merge.failed` / `MERGE_COMPLETE` with a clear reason, or instruct the human operator to run `ralph loops stop <loop_id>`. Stopping the orchestrator is the operator's decision, not the agent's."
 
 hats:
   merger:

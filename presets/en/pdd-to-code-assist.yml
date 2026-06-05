@@ -100,6 +100,7 @@ core:
     - "KISS always — simplest solution that works"
     - "Preserve primary sources — all referenced files, research findings, code snippets, and external docs must be captured with source attribution"
     - "Confidence protocol: score decisions 0-100. >80 proceed autonomously; 50-80 proceed + document in .ralph/agent/decisions.md; <50 choose safe default + document."
+    - "ABSOLUTE PROHIBITION: NEVER kill, signal, or terminate any `ralph` / `ralph-orchestrator` process — including `kill`, `pkill`, `killall`, `kill -9`, `kill -TERM`, `kill -HUP`, `taskkill`, or any equivalent process-control command targeting the loop's parent PID, the TUI subprocess PID recorded in `.ralph/loop.lock`, any PID listed in `.ralph/loops.json`, or any PID returned by `ps` / `pgrep` matching `ralph`. The currently running ralph IS the parent process of this very agent iteration — killing it ends the agent itself mid-thought and corrupts orchestration state (stale lock, in_progress tasks, lost events, partial commits). If the loop needs to restart to pick up new configuration, emit `loop.cancel`, surface a `work.failed` with a clear reason, or instruct the human operator to run `ralph loops stop <loop_id>`. Stopping the orchestrator is the operator's decision, not the agent's."
 
 hats:
   inquisitor:

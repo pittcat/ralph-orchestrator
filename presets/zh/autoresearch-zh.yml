@@ -64,6 +64,7 @@ core:
     - "卡住时多思考——重新阅读源文件，研究数据，分析根本原因"
     - "评审员打分是一等公民——评审 hat 始终运行，对硬性指标和主观质量 alike 进行打分"
     - "绝对禁止：agent 不得创建、切换或重命名分支，也不得创建 worktree。loop 默认在当前工作分支上运行。只有当用户在 ralph run 时显式传入 --worktree，orchestrator 才会创建新的 worktree+branch，那个动作发生在 agent 激活之前，agent 不应该也无法复现。Agent 禁止运行 `git checkout -b`、`git switch -c`、`git worktree add` 或任何等价命令。如果任务似乎要求新建分支，停下来，发出 `experiment.blocked` 并附上明确原因——分支决策权在用户，不在 agent。"
+    - "绝对禁止：严禁向任何 `ralph` / `ralph-orchestrator` 进程发送信号或终止它 —— 包括 `kill`、`pkill`、`killall`、`kill -9`、`kill -TERM`、`kill -HUP`、`taskkill`，以及任何针对 loop 父进程 PID、TUI 子进程 PID（写在 `.ralph/loop.lock` 里）、`.ralph/loops.json` 里登记的任何 PID、或 `ps` / `pgrep` 匹配到的任何 `ralph` PID 的进程控制命令。当前运行中的 ralph **就是本次 agent 迭代的父进程** —— 杀掉它等于在思考中途切断自己，并造成 orchestration 状态损坏（陈旧 lock、卡在 in_progress 的 task、丢失的 event、不完整的 commit）。如果需要让 loop 重启以加载新配置，emit `loop.cancel`、发出 `experiment.blocked` 并写清原因、或指导人类操作者运行 `ralph loops stop <loop_id>`。何时停止 orchestrator 是操作者的决策，不是 agent 的。"
 
 hats:
   strategist:

@@ -21,6 +21,8 @@ cli:
 
 core:
   specs_dir: ".agents/scratchpad/"
+  guardrails:
+    - "绝对禁令：严禁向任何 `ralph` / `ralph-orchestrator` 进程发送信号或终止它 —— 包括 `kill`、`pkill`、`killall`、`kill -9`、`kill -TERM`、`kill -HUP`、`taskkill`，以及任何针对 loop 父进程 PID、TUI 子进程 PID（写在 `.ralph/loop.lock` 里）、`.ralph/loops.json` 里登记的任何 PID、或 `ps` / `pgrep` 匹配到的任何 `ralph` PID 的进程控制命令。当前运行中的 ralph **就是本次 agent 迭代的父进程** —— 杀掉它等于在思考中途切断自己，并造成 orchestration 状态损坏（陈旧 lock、卡在 in_progress 的 task、丢失的 event）。如果需要让 loop 重启以加载新配置，emit `loop.cancel`、发出 `research.blocked` / `RESEARCH_COMPLETE` 并写清原因、或指导人类操作者运行 `ralph loops stop <loop_id>`。何时停止 orchestrator 是操作者的决策，不是 agent 的。"
 
 hats:
   researcher:
