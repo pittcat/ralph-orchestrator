@@ -39,7 +39,6 @@ event_loop:
   starting_event: "work.start"
   max_iterations: 50
   max_runtime_seconds: 28800  # 8 hours
-  checkpoint_interval: 5
   enforce_hat_scope: true
   verdict_gate:
     # Reject LOOP_COMPLETE if the most recent REVIEW_COMPLETE event has
