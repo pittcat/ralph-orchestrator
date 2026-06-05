@@ -255,6 +255,16 @@ impl PtyExecutor {
         self.backend = backend;
     }
 
+    /// Updates the idle watchdog timeout for the next PTY execution.
+    ///
+    /// The loop runner reuses a single executor in TUI/RPC mode while hats may
+    /// switch backend configuration between iterations, so the timeout must be
+    /// refreshed alongside the backend. `0` keeps the documented disabled
+    /// semantics.
+    pub fn set_idle_timeout_secs(&mut self, idle_timeout_secs: u32) {
+        self.config.idle_timeout_secs = idle_timeout_secs;
+    }
+
     /// Returns a handle for TUI integration.
     ///
     /// Can only be called once - panics if called multiple times.

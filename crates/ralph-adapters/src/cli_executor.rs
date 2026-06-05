@@ -159,8 +159,18 @@ impl CliExecutor {
 
         while !stdout_done || !stderr_done {
             let now = tokio::time::Instant::now();
+            if post_event_deadline.is_some_and(|deadline| deadline <= now) {
+                warn!(
+                    timeout_secs = 0,
+                    "Execution post-event grace timeout reached, sending SIGTERM"
+                );
+                timed_out = true;
+                post_event_timed_out = true;
+                terminated_status = Some(Self::terminate_child_and_wait(&mut child).await?);
+                break;
+            }
+
             let effective_timeout = match (timeout, post_event_deadline) {
-                (_, Some(deadline)) if deadline <= now => Some(Duration::ZERO),
                 (Some(duration), Some(deadline)) => {
                     Some(duration.min(deadline.saturating_duration_since(now)))
                 }

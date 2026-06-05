@@ -37,6 +37,10 @@ pub fn resolve_loop_id(
     })
 }
 
+pub(crate) fn adapter_timeout_duration(timeout_secs: u64) -> Option<Duration> {
+    (timeout_secs > 0).then(|| Duration::from_secs(timeout_secs))
+}
+
 /// Core loop implementation supporting both fresh start and continue modes.
 ///
 /// # Arguments
@@ -1840,7 +1844,7 @@ pub async fn run_loop_impl(
 
         // Step 3: Get timeout from config based on actual backend being used
         let timeout_secs = config.adapter_settings(&backend_name_for_timeout).timeout;
-        let timeout = Some(Duration::from_secs(timeout_secs));
+        let timeout = adapter_timeout_duration(timeout_secs);
 
         // For TUI mode, get the shared lines buffer for this iteration.
         // The buffer is owned by TuiState's IterationBuffer, so writes from

@@ -178,6 +178,12 @@ pub async fn execute_pty(
         // This is critical for hat-level backend support - without this update,
         // the executor would continue using the global backend it was created with
         e.set_backend(backend.clone());
+        let idle_timeout_secs: u64 = if interactive {
+            u64::from(config.cli.idle_timeout_secs)
+        } else {
+            config.autonomous_idle_timeout_secs(backend_name)
+        };
+        e.set_idle_timeout_secs(u32::try_from(idle_timeout_secs).unwrap_or(u32::MAX));
         e
     } else {
         // Interactive mode uses the user-facing 30s default; autonomous

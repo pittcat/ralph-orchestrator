@@ -8088,6 +8088,101 @@ cli:
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn test_execute_pty_reused_executor_refreshes_autonomous_watchdog_timeout() {
+    use crate::cli::Verbosity;
+    use ralph_adapters::{OutputFormat as CliOutputFormat, PromptMode, PtyConfig, PtyExecutor};
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().expect("temp dir");
+    let bin_dir = temp_dir.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("bin dir");
+    let worker_path = bin_dir.join("fake-hat-backend");
+    std::fs::write(&worker_path, "#!/bin/sh\nexec sleep 60\n").expect("write script");
+    let mut perms = std::fs::metadata(&worker_path)
+        .expect("metadata")
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&worker_path, perms).expect("chmod");
+
+    let backend = ralph_adapters::CliBackend {
+        command: worker_path.display().to_string(),
+        args: vec![],
+        prompt_mode: PromptMode::Stdin,
+        prompt_flag: None,
+        output_format: CliOutputFormat::StreamJson,
+        env_vars: vec![],
+    };
+
+    let yaml = r#"
+core:
+  scratchpad: ".ralph/agent/scratchpad.md"
+  specs_dir: "./specs"
+cli:
+  backend: claude
+  default_mode: autonomous
+  autonomous_idle_timeout_secs: 1
+"#;
+    let config: ralph_core::RalphConfig = serde_yaml::from_str(yaml).expect("parse config");
+
+    let pty_config = PtyConfig {
+        interactive: false,
+        idle_timeout_secs: 0,
+        cols: 32768,
+        rows: 24,
+        workspace_root: temp_dir.path().to_path_buf(),
+    };
+    let mut executor = PtyExecutor::new(backend.clone(), pty_config);
+    let (_interrupt_tx, interrupt_rx) = tokio::sync::watch::channel(false);
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        execute_pty(
+            Some(&mut executor),
+            &backend,
+            &config,
+            "ignored",
+            false,
+            interrupt_rx,
+            Verbosity::Quiet,
+            None,
+            None,
+            0,
+            "executor",
+            "claude",
+        ),
+    )
+    .await
+    .expect(
+        "reused PTY executor must refresh its idle timeout from the current backend; \
+         otherwise TUI/RPC mode keeps the stale 0 timeout and hangs",
+    )
+    .expect("PTY observe must not return an io error");
+
+    assert!(
+        outcome.watchdog_timeout,
+        "reused PTY executor must fire the refreshed autonomous watchdog"
+    );
+}
+
+#[test]
+fn test_adapter_timeout_zero_maps_to_no_cli_timeout() {
+    use std::time::Duration;
+
+    assert!(
+        runner::adapter_timeout_duration(0).is_none(),
+        "adapter timeout 0 is the disabled sentinel; headless CliExecutor must receive None"
+    );
+    assert_eq!(
+        runner::adapter_timeout_duration(5),
+        Some(Duration::from_secs(5)),
+        "positive adapter timeout values must still enable the inactivity watchdog"
+    );
+}
+
 /// Companion to the test above for the explicit-disable path: when the
 /// operator sets `autonomous_idle_timeout_secs: 0`, the resolver must
 /// pass `0` through to the PTY executor. The PTY executor then
