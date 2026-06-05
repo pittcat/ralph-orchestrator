@@ -284,7 +284,7 @@ jobs:
       - plan
       - host
     # Only publish on actual releases (not PRs) and after GitHub release succeeds
-    if: ${{ needs.plan.outputs.publishing == 'true' && needs.host.result == 'success' }}
+    if: ${{ needs.plan.outputs.publishing == 'true' && needs.host.result == 'success' && vars.PUBLIC_RELEASE == 'true' }}
     runs-on: "ubuntu-22.04"
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -335,7 +335,7 @@ jobs:
       - plan
       - host
     # Only publish on actual releases (not PRs) and after GitHub release succeeds
-    if: ${{ needs.plan.outputs.publishing == 'true' && needs.host.result == 'success' }}
+    if: ${{ needs.plan.outputs.publishing == 'true' && needs.host.result == 'success' && vars.PUBLIC_RELEASE == 'true' }}
     runs-on: "ubuntu-22.04"
     environment: npm  # Required for OIDC trusted publishing
     permissions:
@@ -379,7 +379,7 @@ jobs:
     needs:
       - plan
       - publish-crates
-    if: ${{ needs.plan.outputs.publishing == 'true' && needs.publish-crates.result == 'success' }}
+    if: ${{ needs.plan.outputs.publishing == 'true' && needs.publish-crates.result == 'success' && vars.PUBLIC_RELEASE == 'true' }}
     runs-on: "ubuntu-22.04"
     steps:
       - name: Install Rust toolchain
@@ -418,7 +418,7 @@ jobs:
     # use "always() && ..." to allow us to wait for all publish jobs while
     # still allowing individual publish jobs to skip themselves (for prereleases).
     # "host" however must run to completion, no skipping allowed!
-    if: ${{ always() && needs.host.result == 'success' && (needs.publish-crates.result == 'skipped' || needs.publish-crates.result == 'success') && (needs.publish-npm.result == 'skipped' || needs.publish-npm.result == 'success') && (needs.smoke-test-install.result == 'skipped' || needs.smoke-test-install.result == 'success') }}
+    if: ${{ vars.PUBLIC_RELEASE != 'true' || (always() && needs.host.result == 'success' && (needs.publish-crates.result == 'skipped' || needs.publish-crates.result == 'success') && (needs.publish-npm.result == 'skipped' || needs.publish-npm.result == 'success') && (needs.smoke-test-install.result == 'skipped' || needs.smoke-test-install.result == 'success')) }}
     runs-on: "ubuntu-22.04"
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
