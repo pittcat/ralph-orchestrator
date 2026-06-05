@@ -167,19 +167,46 @@ mod tests {
 
     #[test]
     fn cli_config_zero_idle_timeout_means_disabled_in_documentation() {
-        // The doc comment on `idle_timeout_secs` says: "Set to 0 to disable
-        // idle timeout." This is a contract that callers and tests rely on.
-        // Unit 2/3 must NOT silently change `0` semantics (R8) — if the
-        // autonomous watchdog gets its own field, `0` must continue to mean
-        // "disabled" for the field that documents it as such.
-        let doc = concat!(
-            "Idle timeout in seconds for interactive mode.",
-            " Process is terminated after this many seconds of inactivity ",
-            "(no output AND no user input). Set to 0 to disable idle timeout.",
+        // The doc comment on `idle_timeout_secs` (this file, lines 25-27)
+        // says: "Idle timeout in seconds for interactive mode. ...
+        // Process is terminated after this many seconds of inactivity
+        // (no output AND no user input). Set to 0 to disable idle timeout."
+        // This is a contract that callers and tests rely on. Unit 2/3
+        // must NOT silently change `0` semantics (R8) — if the autonomous
+        // watchdog gets its own field, `0` must continue to mean "disabled"
+        // for the field that documents it as such.
+        //
+        // We deliberately read the source file via `include_str!` (rather
+        // than re-stating the doc string as a literal here) so that this
+        // test fails if a future edit removes the documented phrases from
+        // the actual `idle_timeout_secs` doc comment. This is the regression
+        // guard for R6 / R8.
+        //
+        // The two search needles are assembled at runtime via `format!`
+        // from disjoint string fragments so that the full needle never
+        // appears as a literal in this file. Otherwise `include_str!`
+        // would always find the literal in the test code itself and the
+        // assertions would trivially pass. The `    ///` prefix further
+        // restricts each match to the field's actual doc-comment block
+        // (this file's line comments start with `//`, not `///`).
+        let source = include_str!("cli.rs");
+        let open_doc_needle = format!(
+            "    /// Idle timeout in seconds for {}",
+            "interactive mode."
         );
-        // Sanity: just re-state the documented contract so a doc-only change
-        // is visible in tests.
-        assert!(doc.contains("interactive mode"));
-        assert!(doc.contains("Set to 0 to disable"));
+        let disable_doc_needle = format!("    /// Set to {}", "0 to disable");
+        assert!(
+            source.contains(&open_doc_needle),
+            "idle_timeout_secs doc comment must still open with `Idle \
+             timeout in seconds for interactive mode.` — if this field is \
+             being reused for autonomous / RPC, the doc must explicitly \
+             call that out and the R6 contract is being broken."
+        );
+        assert!(
+            source.contains(&disable_doc_needle),
+            "idle_timeout_secs doc comment must still document the `0` \
+             value as `disabled` — Unit 2/3 may not silently change the \
+             semantics of `0` (R8)."
+        );
     }
 }

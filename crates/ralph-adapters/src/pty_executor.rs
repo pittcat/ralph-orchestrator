@@ -2675,9 +2675,20 @@ mod tests {
     }
 
     /// Same characterization as above, but using the streaming observer
-    /// (`run_observe_streaming`) — the path actually used by `loop_runner`
-    /// for both TUI observation and RPC streaming output (see runner.rs:191-243
-    /// and execution.rs:191-243). This covers R5 (worktree + --rpc).
+    /// (`run_observe_streaming`) — the path that `loop_runner::execution`
+    /// takes for BOTH TUI observation and RPC streaming output (see
+    /// `crates/ralph-cli/src/loop_runner/execution.rs:191-243`, which
+    /// dispatches TUI, RPC, and the non-interactive verbosity handlers all
+    /// through this single streaming entry point).
+    ///
+    /// Scope note: this test pins the `run_observe_streaming` code path in
+    /// `PtyExecutor` itself. It does NOT exercise the end-to-end
+    /// worktree + `--rpc` integration (real RALPH_RPC_DIR + JSON-RPC
+    /// client + worktree setup); that end-to-end coverage is the job of
+    /// Unit 4 of plan 2026-06-06-001 ("回归护栏与文档同步"). For now, this
+    /// test is the lower-level guard that any caller of
+    /// `run_observe_streaming` (TUI, RPC, worktree, non-interactive) is
+    /// covered by the same bug-pin.
     #[cfg(unix)]
     #[tokio::test]
     async fn test_run_observe_streaming_autonomous_silent_backend_must_time_out() {
