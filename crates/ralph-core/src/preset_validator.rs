@@ -1450,10 +1450,12 @@ hats:
     // contract layer does not silently change strict semantics.
     // ──────────────────────────────────────────────────────────────────────
 
-    /// U0 characterization: `validate_preset_topology` is independent of
-    /// payload contract strict mode. A topology that is reachable must
-    /// remain `is_valid() = true` regardless of whether strict mode is
-    /// passed downstream.
+    /// U0 characterization: the topology sub-result of `validate_preset`
+    /// is independent of the `strict` flag. The strict flag controls
+    /// payload-contract strictness (see `validate_payload_contract`), not
+    /// topology. A topology that is reachable must remain
+    /// `is_valid() = true` in both strict and non-strict mode, and the
+    /// topology errors must be byte-for-byte equal.
     #[test]
     fn u0_topology_validity_independent_of_payload_strict_mode() {
         // Linear chain, no payload field references → no payload errors.
@@ -1475,19 +1477,31 @@ event_loop:
 "#;
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
         let registry = runtime_registry(yaml);
-        let result = validate_preset_topology(&config, &registry);
+
+        // Run the combined validator in both strict modes. `validate_preset`
+        // is the entry point that actually takes a `strict` flag, so this
+        // is the function whose strict-independent topology we want to pin.
+        // The previous body called `validate_preset_topology` twice with
+        // identical args, which is f(x) == f(x) and never fails.
+        let non_strict = validate_preset(&config, &registry, false);
+        let strict = validate_preset(&config, &registry, true);
+
+        // Both modes must agree on the topology sub-result.
         assert!(
-            result.is_valid(),
-            "valid linear topology must be is_valid()=true: {:?}",
-            result
+            non_strict.topology.is_valid(),
+            "valid linear topology must be is_valid()=true in non-strict: {:?}",
+            non_strict.topology
         );
-        // Topology result has no payload semantics — its is_valid must not
-        // depend on strict flag.
-        let strict_replay = validate_preset_topology(&config, &registry);
+        assert!(
+            strict.topology.is_valid(),
+            "valid linear topology must be is_valid()=true in strict: {:?}",
+            strict.topology
+        );
+        // The two topology sub-results must be equal — the strict flag must
+        // not affect reachability, error kind, error message, or warnings.
         assert_eq!(
-            strict_replay.is_valid(),
-            result.is_valid(),
-            "validate_preset_topology must not change is_valid() based on strict mode"
+            strict.topology, non_strict.topology,
+            "validate_preset topology sub-result must not depend on strict flag"
         );
     }
 

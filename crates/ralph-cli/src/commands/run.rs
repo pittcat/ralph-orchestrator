@@ -1271,6 +1271,25 @@ mod tests {
     // so the U1/U2 shared contract layer cannot silently change semantics.
     // ──────────────────────────────────────────────────────────────────────
 
+    /// 30s wall-clock guard for U0 async preflight tests. U0 tests are
+    /// pure (no network, no I/O beyond `tempdir`), but if a future refactor
+    /// pulls in a network call (e.g. `git fetch` for topology) or a
+    /// blocking `Command::output()` on a hung child, the test could hang
+    /// the entire `cargo test` invocation. Tokio's default test runtime
+    /// has no per-test timeout (and `.config/nextest.toml` has no
+    /// `default-timeout` key), so wrap the future explicitly.
+    async fn u0_timeout<F, T>(fut: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        match tokio::time::timeout(std::time::Duration::from_secs(30), fut).await {
+            Ok(value) => value,
+            Err(_) => {
+                panic!("U0 preflight test exceeded 30s timeout (likely a blocking syscall hung)")
+            }
+        }
+    }
+
     /// U0 characterization: the default `RalphConfig` has
     /// `features.preflight.enabled = false`. `run_auto_preflight()` must
     /// return `Ok(None)` and never invoke the preflight runner. This is the
@@ -1286,9 +1305,14 @@ mod tests {
             "default config must have preflight disabled"
         );
 
-        let result = run_auto_preflight(&config, false, false, AutoPreflightMode::DryRun)
-            .await
-            .expect("run_auto_preflight should not error when preflight is disabled");
+        let result = u0_timeout(run_auto_preflight(
+            &config,
+            false,
+            false,
+            AutoPreflightMode::DryRun,
+        ))
+        .await
+        .expect("run_auto_preflight should not error when preflight is disabled");
 
         assert!(
             result.is_none(),
@@ -1298,9 +1322,14 @@ mod tests {
         );
 
         // Same for Run mode: no error, no report, no checks.
-        let run_result = run_auto_preflight(&config, false, false, AutoPreflightMode::Run)
-            .await
-            .expect("run_auto_preflight Run mode should not error when preflight is disabled");
+        let run_result = u0_timeout(run_auto_preflight(
+            &config,
+            false,
+            false,
+            AutoPreflightMode::Run,
+        ))
+        .await
+        .expect("run_auto_preflight Run mode should not error when preflight is disabled");
         assert!(
             run_result.is_none(),
             "preflight disabled in Run mode must short-circuit to None; got: {:?}",
@@ -1334,18 +1363,28 @@ mod tests {
         config.cli.command = Some("definitely-missing-12345".to_string());
 
         // skip_preflight=true must short-circuit.
-        let result = run_auto_preflight(&config, true, false, AutoPreflightMode::DryRun)
-            .await
-            .expect("skip_preflight=true should not error");
+        let result = u0_timeout(run_auto_preflight(
+            &config,
+            true,
+            false,
+            AutoPreflightMode::DryRun,
+        ))
+        .await
+        .expect("skip_preflight=true should not error");
         assert!(
             result.is_none(),
             "skip_preflight=true must short-circuit; got: {:?}",
             result
         );
 
-        let run_result = run_auto_preflight(&config, true, false, AutoPreflightMode::Run)
-            .await
-            .expect("skip_preflight=true in Run mode should not error");
+        let run_result = u0_timeout(run_auto_preflight(
+            &config,
+            true,
+            false,
+            AutoPreflightMode::Run,
+        ))
+        .await
+        .expect("skip_preflight=true in Run mode should not error");
         assert!(
             run_result.is_none(),
             "skip_preflight=true in Run mode must short-circuit; got: {:?}",
@@ -1396,10 +1435,15 @@ mod tests {
         config.cli.backend = "custom".to_string();
         config.cli.command = Some(backend_cmd.to_string_lossy().to_string());
 
-        let report = run_auto_preflight(&config, false, false, AutoPreflightMode::DryRun)
-            .await
-            .expect("preflight should not error")
-            .expect("preflight enabled must return a report");
+        let report = u0_timeout(run_auto_preflight(
+            &config,
+            false,
+            false,
+            AutoPreflightMode::DryRun,
+        ))
+        .await
+        .expect("preflight should not error")
+        .expect("preflight enabled must return a report");
 
         assert!(
             report.passed,

@@ -176,10 +176,24 @@ event_loop:
 // hard-gate semantics. The hard gate is a *non-skippable* invariant.
 // ──────────────────────────────────────────────────────────────────────
 
-/// U0 characterization: the error message must include the source hats
-/// that can publish the trigger topic. This is critical for users to
-/// debug "which hat is the upstream producer of the bad field?" without
-/// running `ralph hats validate` separately.
+/// U0 characterization: the hard gate error must list the source hats
+/// (upstream publishers) of the offending trigger topic. This is critical
+/// for users to debug "which hat is the upstream producer of the bad
+/// field?" without running `ralph hats validate` separately.
+///
+/// **Why structural assertions on `validate_payload_contract`**: the
+/// formatted `enforce_payload_contract_gate` error embeds source hats as
+/// `source_hats=[<id>, <id>]` in a multi-line human-readable message.
+/// Asserting on the literal `source_hats` label or the joined hat list
+/// inside that string is brittle: any future refactor that promotes
+/// `source_hats` to a structured `RuntimeContractFinding.details` field
+/// (planned for U1/U2) would silently leave the label inside a JSON key
+/// (e.g. `"source_hats": [...]`) and the test would pass for the wrong
+/// reason. To pin the contract semantically, this test calls
+/// `validate_payload_contract` directly and asserts on the structured
+/// `PayloadContractError.source_hats` field. The user-facing message
+/// is still exercised once, against the consumer-hat label, to backstop
+/// the `enforce_payload_contract_gate` code path.
 #[test]
 fn u0_hard_gate_error_includes_source_hats() {
     // Two hats publish work.ready. The error must list BOTH in source_hats.
@@ -212,26 +226,44 @@ event_loop:
         required_fields: ["task_id"]
 "#;
     let config: ralph_core::RalphConfig = serde_yaml::from_str(yaml).unwrap();
-    let err = enforce_payload_contract_gate(&config).unwrap_err();
-    let msg = format!("{}", err);
-    // The message must list source_hats (at least one of the publishers).
-    // Per current code, source_hats is shown as comma-separated list under
-    // `source_hats=[...]`. We verify the substrings that must appear:
+    let registry = ralph_core::HatRegistry::from_runtime_config(&config);
+
+    // Structural path: invoke the validator directly so the test asserts on
+    // the typed `source_hats` field, not on a substring of the formatted
+    // error message.
+    let result = ralph_core::payload_contract::validate_payload_contract(&config, &registry, true);
     assert!(
-        msg.contains("coordinator"),
-        "msg must list 'coordinator' as a source hat: {}",
-        msg
+        !result.is_valid(),
+        "fixture must produce a payload contract error: {:?}",
+        result
+    );
+    let err = result
+        .errors
+        .iter()
+        .find(|e| {
+            e.hat_id == "executor"
+                && e.topic == "work.ready"
+                && e.field.as_deref() == Some("plan_name")
+        })
+        .expect("expected FieldMissingFromSchema error for executor/work.ready/plan_name");
+    // source_hats must structurally include both upstream publishers.
+    assert!(
+        err.source_hats.contains(&"coordinator".to_string()),
+        "source_hats must include 'coordinator': {:?}",
+        err.source_hats
     );
     assert!(
-        msg.contains("alternate"),
-        "msg must list 'alternate' as a source hat: {}",
-        msg
+        err.source_hats.contains(&"alternate".to_string()),
+        "source_hats must include 'alternate': {:?}",
+        err.source_hats
     );
-    assert!(
-        msg.contains("source_hats"),
-        "msg must explicitly label source_hats so users can find them: {}",
-        msg
-    );
+
+    // Formatted-message backstop: the user-facing error from
+    // `enforce_payload_contract_gate` must still surface the consumer hat
+    // via the `hat=<id>` label. This guards the hard-gate code path
+    // independently from the structured field above.
+    let gate_err = enforce_payload_contract_gate(&config).unwrap_err();
+    let msg = format!("{}", gate_err);
     assert!(
         msg.contains("hat=executor"),
         "msg must identify the consumer hat via the 'hat=<id>' label ('executor'): {}",
