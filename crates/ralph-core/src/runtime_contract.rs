@@ -312,6 +312,16 @@ mod tests {
         )
     }
 
+    fn pass_finding() -> RuntimeContractFinding {
+        RuntimeContractFinding::new(
+            "config.ok",
+            FindingSource::Config,
+            FindingSeverity::Pass,
+            FindingStage::Authoring,
+            "ok",
+        )
+    }
+
     #[test]
     fn empty_report_passes() {
         let report = RuntimeContractReport::new("empty", RuntimeContractStrictness::default());
@@ -556,18 +566,64 @@ mod tests {
     fn add_finding_pass_severity_does_not_increment_counters() {
         let mut report =
             RuntimeContractReport::new("pass-only", RuntimeContractStrictness::default());
-        let pass = RuntimeContractFinding::new(
-            "config.ok",
-            FindingSource::Config,
-            FindingSeverity::Pass,
-            FindingStage::Authoring,
-            "ok",
-        );
+        let pass = pass_finding();
         report.add_finding(pass);
         assert_eq!(report.warnings, 0, "Pass finding must not bump warnings");
         assert_eq!(report.errors, 0, "Pass finding must not bump errors");
         assert_eq!(report.findings.len(), 1);
         assert!(report.passed);
+    }
+
+    // ---- T1-extended (P2 #2): Pass + Warn + Error mixed combo ----
+    // guards counter accumulation AND `recompute_passed` over multiple
+    // findings. T1 (above) only covered Pass in isolation; this test
+    // exercises all three severities in a single report so a future
+    // refactor that mis-classifies Pass into Warn/Error counters (or
+    // double-counts when `add_finding` is called more than once) fails
+    // loudly under both `fail_on_warnings` settings.
+    #[test]
+    fn add_finding_pass_warn_error_mixed_counters_and_recompute_passed() {
+        // Non-strict: Warn does not block, only Error does.
+        let mut report =
+            RuntimeContractReport::new("mixed-non-strict", RuntimeContractStrictness::default());
+        report.add_finding(pass_finding());
+        report.add_finding(warn_finding());
+        report.add_finding(error_finding());
+        assert_eq!(report.findings.len(), 3);
+        assert_eq!(
+            report.warnings, 1,
+            "Warn finding must bump warnings exactly once"
+        );
+        assert_eq!(
+            report.errors, 1,
+            "Error finding must bump errors exactly once"
+        );
+        assert!(
+            !report.passed,
+            "non-strict report with Error finding must be failed"
+        );
+
+        // Strict: Warn is now blocking in addition to Error; recompute_passed
+        // still must produce `passed == false`. The Pass finding is
+        // non-blocking under both settings and must never change the
+        // boolean result by itself.
+        let mut strict_report = RuntimeContractReport::new(
+            "mixed-strict",
+            RuntimeContractStrictness {
+                payload_strict: false,
+                fail_on_warnings: true,
+            },
+        );
+        strict_report.add_finding(pass_finding());
+        strict_report.add_finding(warn_finding());
+        strict_report.add_finding(error_finding());
+        assert_eq!(strict_report.warnings, 1);
+        assert_eq!(strict_report.errors, 1);
+        assert_eq!(strict_report.findings.len(), 3);
+        assert!(
+            !strict_report.passed,
+            "strict report with Warn + Error must be failed"
+        );
     }
 
     // ---- T2: skip_serializing_if must drop empty details and None
@@ -621,6 +677,59 @@ mod tests {
         let roundtripped: RuntimeContractReport =
             serde_json::from_value(value).expect("deserialize report");
         assert_eq!(roundtripped, report);
+    }
+
+    // ---- T3-extended: deserialization must accept JSON that omits the
+    // optional `details` and `action_hint` keys entirely (the form
+    // produced by `skip_serializing_if` on the way out). This validates
+    // that the omit direction is symmetric with T2's serialise-omit
+    // assertion: a downstream consumer that writes a stripped JSON
+    // document by hand and feeds it back to `RuntimeContractReport`
+    // sees `details == BTreeMap::new()` and `action_hint == None`,
+    // not a deserialization error. ----
+    #[test]
+    fn json_deserialization_with_omitted_optional_fields_defaults_correctly() {
+        // Hand-build a minimal JSON object with `details` and
+        // `action_hint` keys ABSENT (not `null`, not `{}` — simply
+        // missing). All other fields are the natural defaults of an
+        // empty report.
+        let minimal_json = serde_json::json!({
+            "source_label": "minimal",
+            "payload_strict": false,
+            "fail_on_warnings": false,
+            "passed": true,
+            "warnings": 0,
+            "errors": 0,
+            "findings": [],
+            "checked_at": "1970-01-01T00:00:00+00:00",
+        });
+        let report: RuntimeContractReport = serde_json::from_value(minimal_json)
+            .expect("report must deserialize when details/action_hint are absent");
+        assert!(
+            report.findings.is_empty(),
+            "findings should be empty Vec by default"
+        );
+        // No way to assert `details`/`action_hint` here because we
+        // never roundtripped through a `RuntimeContractFinding`. Build
+        // a finding JSON with the same omit pattern to validate the
+        // per-finding defaults.
+        let minimal_finding_json = serde_json::json!({
+            "id": "config.minimal",
+            "source": "config",
+            "severity": "warn",
+            "stage": "authoring",
+            "message": "minimal payload",
+        });
+        let finding: RuntimeContractFinding = serde_json::from_value(minimal_finding_json)
+            .expect("finding must deserialize when details/action_hint are absent");
+        assert!(
+            finding.details.is_empty(),
+            "absent details must default to empty BTreeMap"
+        );
+        assert!(
+            finding.action_hint.is_none(),
+            "absent action_hint must default to None"
+        );
     }
 
     // ---- T4a: extend_findings on an empty iterator must be a no-op. ----
