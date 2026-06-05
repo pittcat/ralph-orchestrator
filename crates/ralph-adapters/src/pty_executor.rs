@@ -2588,6 +2588,218 @@ mod tests {
         assert_eq!(result.termination, TerminationType::Natural);
     }
 
+    // ──────────────────────────────────────────────────────────────────────
+    // Characterization tests (Unit 1 of plan 2026-06-06-001):
+    // Pin down the current autonomous-PTY behavior so the watchdog fix in
+    // Unit 2/3 has a stable regression baseline. These tests target the
+    // exact (interactive=false, idle_timeout_secs=0) configuration that
+    // `loop_runner::runner` (runner.rs:425-450) and `loop_runner::execution`
+    // (execution.rs:152-156) construct for the ce-executor / --rpc / worktree
+    // path. The bug is that idle_timeout_secs=0 disables the PTY watchdog,
+    // so a silent, non-exiting backend hangs the outer loop forever.
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// Pin down the current bug: with `interactive=false, idle_timeout_secs=0`
+    /// (the configuration `loop_runner::runner` builds for autonomous / RPC /
+    /// worktree paths), `PtyExecutor::run_observe` MUST eventually time out
+    /// when the backend produces no output and never exits.
+    ///
+    /// The test wraps the call in its own wallclock timeout (5 seconds) so the
+    /// test suite never hangs. If the executor's own watchdog ever fires before
+    /// that wallclock, the inner future resolves with `TerminationType::IdleTimeout`
+    /// and the assertion below passes. With the current implementation, the
+    /// inner future never returns, the wallclock fires, and the test fails —
+    /// which is exactly the regression we want to catch once Unit 2/3 land.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_run_observe_autonomous_silent_backend_must_time_out() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        // Mock backend: never produces output, never exits on its own.
+        let backend = CliBackend {
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), "sleep 60".to_string()],
+            prompt_mode: PromptMode::Stdin,
+            prompt_flag: None,
+            output_format: OutputFormat::Text,
+            env_vars: vec![],
+        };
+        // Mirrors runner.rs:425-450 autonomous path: idle_timeout_secs=0.
+        let config = PtyConfig {
+            interactive: false,
+            idle_timeout_secs: 0,
+            cols: 80,
+            rows: 24,
+            workspace_root: temp_dir.path().to_path_buf(),
+        };
+        let executor = PtyExecutor::new(backend, config);
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+
+        // The watchdog (when implemented) should fire well before 5s. We give
+        // the executor a generous wallclock budget so the test fails on a
+        // *real* hang, not on a slow watchdog.
+        let wallclock_budget = Duration::from_secs(5);
+        let start = std::time::Instant::now();
+        let outcome =
+            tokio::time::timeout(wallclock_budget, executor.run_observe("ignored", rx)).await;
+        let elapsed = start.elapsed();
+
+        match outcome {
+            Ok(Ok(result)) => {
+                // The watchdog fired: this is the post-fix expected behavior.
+                assert_eq!(
+                    result.termination,
+                    TerminationType::IdleTimeout,
+                    "autonomous PTY watchdog must terminate the backend with IdleTimeout, got {:?}",
+                    result.termination
+                );
+                assert!(
+                    elapsed < wallclock_budget,
+                    "watchdog fired only at wallclock boundary (elapsed={:?})",
+                    elapsed
+                );
+            }
+            Ok(Err(e)) => panic!("PTY observe returned an error: {e}"),
+            Err(_elapsed) => {
+                // The watchdog did NOT fire within the wallclock: the test
+                // wrapper timed out. This is the current (buggy) behavior we
+                // are pinning down. Fail the test so Unit 2/3 will fix it.
+                panic!(
+                    "autonomous PTY hung for the full wallclock budget ({:?}) \
+                     — PtyExecutor did not fire its own idle watchdog. \
+                     This is the regression that Unit 2/3 of plan \
+                     2026-06-06-001 must fix.",
+                    wallclock_budget
+                );
+            }
+        }
+    }
+
+    /// Same characterization as above, but using the streaming observer
+    /// (`run_observe_streaming`) — the path actually used by `loop_runner`
+    /// for both TUI observation and RPC streaming output (see runner.rs:191-243
+    /// and execution.rs:191-243). This covers R5 (worktree + --rpc).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_run_observe_streaming_autonomous_silent_backend_must_time_out() {
+        use crate::stream_handler::{SessionResult, StreamHandler};
+
+        // Minimal capturing handler so run_observe_streaming has somewhere to
+        // route lines. We never expect any lines for the silent backend.
+        struct NoopHandler;
+        impl StreamHandler for NoopHandler {
+            fn on_text(&mut self, _text: &str) {}
+            fn on_tool_call(&mut self, _name: &str, _id: &str, _input: &serde_json::Value) {}
+            fn on_tool_result(&mut self, _id: &str, _output: &str) {}
+            fn on_error(&mut self, _error: &str) {}
+            fn on_complete(&mut self, _result: &SessionResult) {}
+        }
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let backend = CliBackend {
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), "sleep 60".to_string()],
+            prompt_mode: PromptMode::Stdin,
+            prompt_flag: None,
+            output_format: OutputFormat::Text,
+            env_vars: vec![],
+        };
+        let config = PtyConfig {
+            interactive: false,
+            idle_timeout_secs: 0,
+            cols: 80,
+            rows: 24,
+            workspace_root: temp_dir.path().to_path_buf(),
+        };
+        let executor = PtyExecutor::new(backend, config);
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let mut handler = NoopHandler;
+
+        let wallclock_budget = Duration::from_secs(5);
+        let start = std::time::Instant::now();
+        let outcome = tokio::time::timeout(
+            wallclock_budget,
+            executor.run_observe_streaming("ignored", rx, &mut handler),
+        )
+        .await;
+        let elapsed = start.elapsed();
+
+        match outcome {
+            Ok(Ok(result)) => {
+                assert_eq!(
+                    result.termination,
+                    TerminationType::IdleTimeout,
+                    "autonomous PTY streaming watchdog must terminate the backend \
+                     with IdleTimeout, got {:?}",
+                    result.termination
+                );
+                assert!(
+                    elapsed < wallclock_budget,
+                    "watchdog fired only at wallclock boundary (elapsed={:?})",
+                    elapsed
+                );
+            }
+            Ok(Err(e)) => panic!("PTY observe_streaming returned an error: {e}"),
+            Err(_elapsed) => {
+                panic!(
+                    "autonomous PTY streaming hung for the full wallclock budget \
+                     ({:?}) — PtyExecutor did not fire its own idle watchdog. \
+                     This is the regression that Unit 2/3 of plan \
+                     2026-06-06-001 must fix.",
+                    wallclock_budget
+                );
+            }
+        }
+    }
+
+    /// R2 baseline: when `interactive=true` and `idle_timeout_secs=1`, the
+    /// PTY watchdog DOES fire and returns `TerminationType::IdleTimeout`.
+    ///
+    /// Pairs with the two bug-pin tests above. The bug-pin tests show that
+    /// autonomous / RPC / worktree (`interactive=false`) hangs forever; this
+    /// test shows the watchdog machinery itself works in interactive mode.
+    /// After Unit 2 lands, this test must continue to pass — Unit 2 must
+    /// preserve R2 ("interactive 模式现有行为保持不变") while adding a separate
+    /// autonomous watchdog.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_run_observe_interactive_nonzero_idle_timeout_triggers_idle_timeout() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let backend = CliBackend {
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), "sleep 60".to_string()],
+            prompt_mode: PromptMode::Stdin,
+            prompt_flag: None,
+            output_format: OutputFormat::Text,
+            env_vars: vec![],
+        };
+        let config = PtyConfig {
+            interactive: true,
+            idle_timeout_secs: 1, // 1 second: short, but long enough to be safe
+            cols: 80,
+            rows: 24,
+            workspace_root: temp_dir.path().to_path_buf(),
+        };
+        let executor = PtyExecutor::new(backend, config);
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+
+        // Allow generous slack for slow CI: 1s timeout + 9s slack.
+        let wallclock_budget = Duration::from_secs(10);
+        let outcome = tokio::time::timeout(wallclock_budget, executor.run_observe("ignored", rx))
+            .await
+            .expect("interactive watchdog must fire well within wallclock budget")
+            .expect("PTY observe must not return an io error");
+
+        assert_eq!(
+            outcome.termination,
+            TerminationType::IdleTimeout,
+            "interactive mode with non-zero idle_timeout_secs must trigger IdleTimeout"
+        );
+        assert!(
+            !outcome.success,
+            "timed-out execution must not be marked success"
+        );
+    }
+
     /// Regression test for #280: large stdin-mode prompts deadlocked the PTY
     /// because the PTY line discipline limits canonical input to ~4KB. The fix
     /// converts stdin-mode to arg-mode in non-interactive PTY execution via

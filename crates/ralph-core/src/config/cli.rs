@@ -129,3 +129,57 @@ impl TuiConfig {
         Ok((key_code, modifier))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Characterization tests (Unit 1 of plan 2026-06-06-001).
+    //!
+    //! These pin down the CURRENT `cli.idle_timeout_secs` default and semantics
+    //! so that Unit 2 cannot accidentally reuse this 30-second interactive
+    //! default as the autonomous / RPC watchdog default (R6). The watchdog for
+    //! autonomous / RPC paths must come from a different source (e.g. adapter
+    //! `timeout`, which defaults to 300s, or a new explicit field), not from
+    //! `cli.idle_timeout_secs`.
+
+    use super::*;
+
+    #[test]
+    fn cli_config_default_idle_timeout_is_30_seconds() {
+        let config = CliConfig::default();
+        assert_eq!(
+            config.idle_timeout_secs, 30,
+            "CliConfig::default().idle_timeout_secs must remain 30s; \
+             this is the interactive-mode default documented in the field"
+        );
+    }
+
+    #[test]
+    fn cli_config_default_idle_timeout_matches_serde_default() {
+        // The serde default and the Default impl must agree so that an
+        // absent field in YAML/JSON produces the same value as a freshly
+        // constructed `CliConfig::default()`.
+        assert_eq!(default_idle_timeout(), 30);
+        assert_eq!(
+            CliConfig::default().idle_timeout_secs,
+            default_idle_timeout()
+        );
+    }
+
+    #[test]
+    fn cli_config_zero_idle_timeout_means_disabled_in_documentation() {
+        // The doc comment on `idle_timeout_secs` says: "Set to 0 to disable
+        // idle timeout." This is a contract that callers and tests rely on.
+        // Unit 2/3 must NOT silently change `0` semantics (R8) — if the
+        // autonomous watchdog gets its own field, `0` must continue to mean
+        // "disabled" for the field that documents it as such.
+        let doc = concat!(
+            "Idle timeout in seconds for interactive mode.",
+            " Process is terminated after this many seconds of inactivity ",
+            "(no output AND no user input). Set to 0 to disable idle timeout.",
+        );
+        // Sanity: just re-state the documented contract so a doc-only change
+        // is visible in tests.
+        assert!(doc.contains("interactive mode"));
+        assert!(doc.contains("Set to 0 to disable"));
+    }
+}

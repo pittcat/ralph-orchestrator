@@ -3629,6 +3629,55 @@ fn test_idle_timeout_autonomous_mode_stops() {
     );
 }
 
+// ──────────────────────────────────────────────────────────────────────
+// Characterization (Unit 1 of plan 2026-06-06-001):
+// Pin down the CURRENT mapping `convert_termination_type(IdleTimeout, !interactive)
+// -> Some(TerminationReason::Stopped)`. Unit 3 will review this mapping because:
+//   - It is reached only after the autonomous watchdog (added in Unit 2) fires,
+//     which is a backend-call end, NOT an operator stop.
+//   - It treats the timeout as if the user had pressed Stop, which can short-
+//     circuit the partial-event / hard-gate pipeline before it has a chance to
+//     run (R7 of the plan).
+// These two tests document the current contract; Unit 3 must update them
+// intentionally if the mapping changes, not silently.
+// ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_convert_termination_idle_timeout_autonomous_is_stopped_characterization() {
+    // Given: the autonomous / RPC / worktree path that the bug report covers
+    let termination_type = ralph_adapters::TerminationType::IdleTimeout;
+    let interactive = false;
+
+    // When/Then: current implementation maps IdleTimeout to Stopped
+    let result = convert_termination_type(termination_type, interactive);
+
+    assert_eq!(
+        result,
+        Some(TerminationReason::Stopped),
+        "Characterization: autonomous IdleTimeout is currently mapped to \
+         TerminationReason::Stopped. Unit 3 of plan 2026-06-06-001 must \
+         decide whether this should be re-mapped to a backend-call-end \
+         outcome that lets the partial-event / hard-gate pipeline still run."
+    );
+}
+
+#[test]
+fn test_convert_termination_idle_timeout_interactive_is_none_characterization() {
+    // Given: interactive mode
+    let termination_type = ralph_adapters::TerminationType::IdleTimeout;
+    let interactive = true;
+
+    // When/Then: current implementation returns None (let iteration progress)
+    let result = convert_termination_type(termination_type, interactive);
+
+    assert!(
+        result.is_none(),
+        "Characterization: interactive IdleTimeout currently maps to None \
+         (iteration continues, output is processed for events). R2 requires \
+         this semantic to be preserved by Unit 2/3."
+    );
+}
+
 #[test]
 fn test_natural_termination_always_continues() {
     // Given: Natural termination in any mode
