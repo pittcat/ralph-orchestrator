@@ -6,7 +6,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use ralph_adapters::{
     CopilotStreamParser, OutputFormat as BackendOutputFormat, PiAssistantEvent, PiContentBlock,
-    PiStreamEvent, PiStreamParser,
+    PiStreamEvent, PiStreamParser, TraeStreamEvent, TraeStreamParser, extract_assistant_text,
+    extract_assistant_tool_calls, extract_user_tool_result_text, user_is_tool_result,
 };
 use ratatui::text::Line;
 
@@ -132,11 +133,44 @@ pub fn extract_readable_delta(line: &str, output_format: BackendOutputFormat) ->
             }
             _ => None,
         },
-        // Trae parser lands in U2; until then, skip line-level preview rather
-        // than leak raw NDJSON to the TUI. The executor's own parser (U3) is
-        // the source of truth for execution — this arm only affects the wave
-        // worker preview pane.
-        BackendOutputFormat::TraeStreamJson => None,
+        // Parse trae NDJSON: extract assistant text, tool calls, and tool results
+        // for the wave worker preview pane (mirrors pi/copilot patterns above).
+        BackendOutputFormat::TraeStreamJson => match TraeStreamParser::parse_line(line) {
+            Some(TraeStreamEvent::Assistant { message }) => {
+                if let Some(text) = extract_assistant_text(&message) {
+                    let text = if text.ends_with('\n') {
+                        text
+                    } else {
+                        format!("{}\n", text)
+                    };
+                    return Some(text);
+                }
+                let calls = extract_assistant_tool_calls(&message);
+                if let Some(call) = calls.into_iter().next() {
+                    let args_display = if call.function.arguments.is_empty() {
+                        String::new()
+                    } else {
+                        truncate_wave_worker_preview(&call.function.arguments)
+                    };
+                    return Some(format!("⚙ {}({})\n", call.function.name, args_display));
+                }
+                None
+            }
+            Some(TraeStreamEvent::User { subtype, tool_use_id, content, .. }) => {
+                if user_is_tool_result(subtype.as_deref(), tool_use_id.as_deref(), &content) {
+                    if let Some(output) = extract_user_tool_result_text(&content) {
+                        if !output.is_empty() {
+                            return Some(format!(
+                                "→ {}\n",
+                                truncate_wave_worker_preview(&output)
+                            ));
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        },
     }
 }
 /// Read events from a per-worker events file.

@@ -1,7 +1,7 @@
 ---
 title: 修复 traecli backend 不可用问题
 type: fix
-status: active
+status: done
 date: 2026-06-02
 ---
 
@@ -138,7 +138,7 @@ trae-cli 服务端存在额外的 API 400 错误（`temperature is deprecated fo
 
 ## Implementation Units
 
-- [ ] U1. **新增 `OutputFormat::TraeStreamJson` 并修复 `traecli()` 配置**
+- [x] U1. **新增 `OutputFormat::TraeStreamJson` 并修复 `traecli()` 配置**
 
 **Goal:** 让 `traecli()` backend 生成正确的命令行参数并声明正确的输出格式。
 
@@ -173,7 +173,7 @@ trae-cli 服务端存在额外的 API 400 错误（`temperature is deprecated fo
 
 ---
 
-- [ ] U2. **新增 `trae_stream.rs` NDJSON parser 模块**
+- [x] U2. **新增 `trae_stream.rs` NDJSON parser 模块**
 
 **Goal:** 实现 trae-cli stream-json 输出格式的解析器，参考 Claude/Pi parser 的设计模式。
 
@@ -242,7 +242,7 @@ pub enum TraeStreamEvent {
 
 ---
 
-- [ ] U3. **在 `cli_executor.rs` 中集成 `TraeStreamJson` parser**
+- [x] U3. **在 `cli_executor.rs` 中集成 `TraeStreamJson` parser**
 
 **Goal:** 让 executor 在读取 trae-cli stdout 时调用新的 parser，而非当作纯文本打印。
 
@@ -280,7 +280,7 @@ pub enum TraeStreamEvent {
 
 ---
 
-- [ ] U4. **在 `lib.rs` 中注册并导出 `trae_stream` 模块**
+- [x] U4. **在 `lib.rs` 中注册并导出 `trae_stream` 模块**
 
 **Goal:** 使新模块成为 crate 的公开 API 的一部分。
 
@@ -302,7 +302,7 @@ pub enum TraeStreamEvent {
 
 ---
 
-- [ ] U5. **更新 zsh 补全插件和 skill 文档**
+- [x] U5. **更新 zsh 补全插件和 skill 文档**
 
 **Goal:** 确保 CLI 补全和 skill 文档反映 traecli backend 的可用性。
 
@@ -327,7 +327,7 @@ pub enum TraeStreamEvent {
 
 ---
 
-- [ ] U6. **端到端测试验证（trae_test 测试目录）**
+- [x] U6. **端到端测试验证（trae_test 测试目录）**
 
 **Goal:** 在真实 trae-cli 环境中验证修复后的集成效果。
 
@@ -404,3 +404,79 @@ pub enum TraeStreamEvent {
   - `crates/ralph-adapters/src/claude_stream.rs` (parser 参考)
   - `crates/ralph-adapters/src/pi_stream.rs` (dispatch 参考)
   - `crates/ralph-adapters/src/copilot_stream.rs` (extract_text 参考)
+
+---
+
+## Post-Mortem Remediation (2026-06-05)
+
+初版 U3/U5/U6 浅层完成,后续 review 发现多个集成回归点和 dead code。本节记录补救实施。
+
+### Review 发现的缺陷
+
+| 类别 | 位置 | 问题 |
+|------|------|------|
+| 回归 | `loop_runner/output_parsing.rs:16-21` | `normalize_cli_output_for_parsing` 通配落到原始 NDJSON, LOOP_COMPLETE 检测拿不到 assistant text |
+| 回归 | `loop_runner/wave/io.rs:139` | wave worker preview 对 trae 输出返回 `None`,与 pi/copilot 不一致 |
+| 回归 | `pty_executor.rs:632-634` | TUI/RPC/interactive 模式下走 PtyExecutor, 但 5 处 NDJSON 处理点都没 `is_trae_stream` 分支 |
+| Dead code | `trae_stream::dispatch_trae_stream_event` | pub 导出但无调用者(只测自己) |
+| 测试缺口 | `cli_executor.rs` | 无 `test_execute_trae_stream_*` 集成测试 |
+| 运维 | `~/.oh-my-zsh/plugins/ralph/ralph.plugin.zsh` | 仓库 `scripts/ralph-zsh-plugin.zsh` 更新后未 cp 安装 |
+| 运维 | E2E 验证 | 13:38 跑过但仅 max_iterations=1 终止, 无 trae-cli 调用证据,binary 未重装 |
+
+### 补救实施
+
+**新增 / 修改文件**:
+
+1. `crates/ralph-adapters/src/trae_stream.rs` — 新增 `TraeStreamParser::extract_text(line)` 和 `extract_all_text(raw_output)` 辅助函数,对齐 `CopilotStreamParser` 模式
+2. `crates/ralph-adapters/src/cli_executor.rs` — 改用 `TraeStreamParser::extract_text` 替换 inline 类型匹配;新增 3 个集成测试(`test_execute_trae_stream_writes_extracted_text`, `_ignores_tool_calls_and_results`, `_skips_malformed_lines`)
+3. `crates/ralph-adapters/src/pty_executor.rs` — 新增 `use TraeSessionState/TraeStreamParser/dispatch_trae_stream_event`; 新增 `is_trae_stream` 标记和 `trae_state` 变量;新增 `handle_trae_stream_line` helper;在 5 处 NDJSON 处理位置补 `is_trae_stream` 分支(主循环、EOF、退出排空、drain 排空、final buffer)
+4. `crates/ralph-cli/src/loop_runner/output_parsing.rs` — `normalize_cli_output_for_parsing` 新增 `TraeStreamJson => extract_trae_stream_text(...)` 分支;新增 `extract_trae_stream_text` 函数
+5. `crates/ralph-cli/src/loop_runner/wave/io.rs` — 新增 trae stream 类型 import;`TraeStreamJson` 分支从 `None` 改为按 pi/copilot 模式解析 assistant text / tool_use / tool_result
+
+**Dead code 消除**: `dispatch_trae_stream_event` 现在在 `pty_executor.rs` 的 5 个 NDJSON 处理位置都被通过 `handle_trae_stream_line` helper 调用。
+
+**测试验证**:
+
+- `cargo test -p ralph-adapters`: 306 passed, 0 failed (原 303 + 新增 3 个 cli_executor 集成测试)
+- `cargo test -p ralph-core --lib`: 1255 passed, 0 failed
+- `cargo test -p ralph-cli -- --test-threads=1`: all passed (并发模式下有 2 个 wave 测试干扰失败,顺序跑无问题,与本修复无关)
+- `cargo clippy -p ralph-adapters`: trae_stream 相关无新增警告
+
+**端到端验证 (2026-06-05 14:24)**:
+
+```bash
+# Mock trae-cli 模拟 NDJSON 输出
+mkdir -p /tmp/mock-bin && cat > /tmp/mock-bin/trae-cli << 'EOF'
+#!/bin/bash
+cat << 'NDJSON'
+{"type":"system","subtype":"init","session_id":"mock-session-001","model":"mock-model"}
+{"type":"assistant","message":{"type":"text","content":{"text":"Hello from mock trae-cli. LOOP_COMPLETE"}}}
+{"type":"result","duration_ms":42,"is_error":false,"num_turns":1}
+NDJSON
+EOF
+chmod +x /tmp/mock-bin/trae-cli
+
+# 跑 ralph
+cd /tmp/trae-e2e && git init -q
+echo 'cli:\n  backend: traecli\nevent_loop:\n  max_iterations: 3' > ralph.yml
+PATH=/tmp/mock-bin:$PATH RALPH_DIAGNOSTICS=1 ralph run -p "Mock test" --max-iterations 3 --no-tui
+```
+
+输出确认:
+- ✅ `Hello from mock trae-cli. LOOP_COMPLETE` 在每次迭代下显示(assistant text 被正确提取)
+- ✅ 没有裸 NDJSON 行泄漏(`{"type":"system"...}` 等被过滤)
+- ✅ `.ralph/diagnostics/*/errors.jsonl` 为空(NDJSON parser 无解析错误)
+- ✅ ralph 完成 3 次迭代后正常因 max_iterations 终止
+
+**真实 trae-cli 验证**: trae-cli 服务端 API 返回 400 (`temperature is deprecated for this model`),属于 trae-cli 自身问题(scope boundary #1 已声明非目标)。ralph 收到 result 事件中的 `is_error: true`,正确处理终止。
+
+### 已安装文件
+
+- `~/.cargo/bin/ralph` — 重新通过 `cargo install --path crates/ralph-cli` 安装,时间戳 2026-06-05 14:22
+- `~/.oh-my-zsh/plugins/ralph/ralph.plugin.zsh` — 同步自 `scripts/ralph-zsh-plugin.zsh`(包含 `traecli` 和 `roo` backend 补全)
+
+### Known Limitations (不在本修复范围)
+
+- `dispatch_trae_stream_event` 在 `Result` 事件上不调用 `handler.on_complete()`(与 pi 一致, 与 copilot 不同)。这是延续 pi_stream 的现有模式,如需 session result 上报到 handler, 可后续单独优化
+- TUI/PTY 模式下 trae 的 `tool_result` 通过 `dispatch_trae_stream_event` 走 `handler.on_text` 路径(parser 没获取 tool_call_id 来源,无法关联到 `on_tool_result`)
+- trae-cli `user` 事件的 plain string content 形式没有被 `TraeUserMessage` enum 捕获(它只匹配 `tool_result` tag),静默 fall through to `Other`

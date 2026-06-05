@@ -25,6 +25,7 @@ use crate::copilot_stream::{
 };
 use crate::pi_stream::{PiSessionState, PiStreamParser, dispatch_pi_stream_event};
 use crate::stream_handler::{SessionResult, StreamHandler};
+use crate::trae_stream::{TraeSessionState, TraeStreamParser, dispatch_trae_stream_event};
 #[cfg(unix)]
 use nix::sys::signal::{Signal, kill};
 #[cfg(unix)]
@@ -628,10 +629,12 @@ impl PtyExecutor {
         // StreamJson format uses NDJSON line parsing (Claude)
         // CopilotStreamJson format uses JSONL line parsing (Copilot prompt mode)
         // PiStreamJson format uses NDJSON line parsing (Pi)
+        // TraeStreamJson format uses NDJSON line parsing (Trae CLI)
         // Text format streams raw output directly to handler
         let is_stream_json = output_format == OutputFormat::StreamJson;
         let is_copilot_stream = output_format == OutputFormat::CopilotStreamJson;
         let is_pi_stream = output_format == OutputFormat::PiStreamJson;
+        let is_trae_stream = output_format == OutputFormat::TraeStreamJson;
         // Pi thinking deltas are noisy for plain console output but useful in TUI.
         let show_pi_thinking = is_pi_stream && self.tui_mode;
         let is_real_pi_backend = self.backend.command == "pi";
@@ -676,6 +679,7 @@ impl PtyExecutor {
         // Pi session state for accumulating cost/turns (wall-clock for duration)
         let mut pi_state = PiSessionState::new();
         let mut copilot_state = CopilotStreamState::new();
+        let mut trae_state = TraeSessionState::default();
         let mut completion: Option<SessionResult> = None;
         let start_time = Instant::now();
         let timeout_duration = if !self.config.interactive || self.config.idle_timeout_secs == 0 {
@@ -831,6 +835,21 @@ impl PtyExecutor {
                                             );
                                         }
                                     }
+                                } else if is_trae_stream {
+                                    // TraeStreamJson format: Parse NDJSON lines from trae-cli
+                                    line_buffer.push_str(text);
+
+                                    while let Some(newline_pos) = line_buffer.find('\n') {
+                                        let line = line_buffer[..newline_pos].to_string();
+                                        line_buffer = line_buffer[newline_pos + 1..].to_string();
+
+                                        handle_trae_stream_line(
+                                            &line,
+                                            handler,
+                                            &mut extracted_text,
+                                            &mut trae_state,
+                                        );
+                                    }
                                 } else {
                                     // Text format: Stream raw output directly to handler
                                     // This preserves ANSI escape codes for TUI rendering
@@ -878,6 +897,13 @@ impl PtyExecutor {
                                     &mut extracted_text,
                                     &mut pi_state,
                                     show_pi_thinking,
+                                );
+                            } else if is_trae_stream && !line_buffer.is_empty() {
+                                handle_trae_stream_line(
+                                    &line_buffer,
+                                    handler,
+                                    &mut extracted_text,
+                                    &mut trae_state,
                                 );
                             }
                             break;
@@ -976,6 +1002,19 @@ impl PtyExecutor {
                                         );
                                     }
                                 }
+                            } else if is_trae_stream {
+                                // TraeStreamJson: parse NDJSON lines
+                                line_buffer.push_str(text);
+                                while let Some(newline_pos) = line_buffer.find('\n') {
+                                    let line = line_buffer[..newline_pos].to_string();
+                                    line_buffer = line_buffer[newline_pos + 1..].to_string();
+                                    handle_trae_stream_line(
+                                        &line,
+                                        handler,
+                                        &mut extracted_text,
+                                        &mut trae_state,
+                                    );
+                                }
                             } else {
                                 // Text: stream raw output to handler
                                 handler.on_text(text);
@@ -1053,6 +1092,19 @@ impl PtyExecutor {
                                             );
                                         }
                                     }
+                                } else if is_trae_stream {
+                                    // TraeStreamJson: parse NDJSON lines
+                                    line_buffer.push_str(text);
+                                    while let Some(newline_pos) = line_buffer.find('\n') {
+                                        let line = line_buffer[..newline_pos].to_string();
+                                        line_buffer = line_buffer[newline_pos + 1..].to_string();
+                                        handle_trae_stream_line(
+                                            &line,
+                                            handler,
+                                            &mut extracted_text,
+                                            &mut trae_state,
+                                        );
+                                    }
                                 } else {
                                     // Text: stream raw output to handler
                                     handler.on_text(text);
@@ -1108,6 +1160,13 @@ impl PtyExecutor {
                         &mut extracted_text,
                         &mut pi_state,
                         show_pi_thinking,
+                    );
+                } else if is_trae_stream && !line_buffer.is_empty() {
+                    handle_trae_stream_line(
+                        &line_buffer,
+                        handler,
+                        &mut extracted_text,
+                        &mut trae_state,
                     );
                 }
 
@@ -1765,6 +1824,17 @@ fn handle_copilot_stream_line<H: StreamHandler>(
 ) -> Option<SessionResult> {
     let event = CopilotStreamParser::parse_line(line)?;
     dispatch_copilot_stream_event(event, handler, extracted_text, copilot_state)
+}
+
+fn handle_trae_stream_line<H: StreamHandler>(
+    line: &str,
+    handler: &mut H,
+    extracted_text: &mut String,
+    trae_state: &mut TraeSessionState,
+) {
+    if let Some(event) = TraeStreamParser::parse_line(line) {
+        dispatch_trae_stream_event(event, handler, extracted_text, trae_state);
+    }
 }
 
 fn inject_ralph_runtime_env(cmd_builder: &mut CommandBuilder, workspace_root: &std::path::Path) {

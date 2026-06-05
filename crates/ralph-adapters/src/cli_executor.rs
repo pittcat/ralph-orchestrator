@@ -204,13 +204,10 @@ impl CliExecutor {
                         }
                     } else if self.backend.output_format == OutputFormat::TraeStreamJson {
                         // TraeStreamJson: parse NDJSON lines and extract assistant text
-                        if let Some(event) = TraeStreamParser::parse_line(&line) {
-                            // Only extract text from assistant messages (ignore system, tool calls, results)
-                            if let crate::trae_stream::TraeStreamEvent::Assistant { message } = event {
-                                if let crate::trae_stream::TraeAssistantMessage::Text { content } = message {
-                                    write!(output_writer, "{}", content.text)?;
-                                    output_writer.flush()?;
-                                }
+                        if let Some(text) = TraeStreamParser::extract_text(&line) {
+                            write!(output_writer, "{text}")?;
+                            if !text.ends_with('\n') {
+                                writeln!(output_writer)?;
                             }
                         }
                     } else {
@@ -716,6 +713,110 @@ mod tests {
         assert!(result.success);
         assert!(result.output.contains("\"assistant.message\""));
         assert_eq!(String::from_utf8(output).unwrap(), "hello from copilot\n");
+    }
+
+    #[tokio::test]
+    async fn test_execute_trae_stream_writes_extracted_text() {
+        // Real trae-cli NDJSON shape (verified 2026-06-05, trae-cli 0.120.37):
+        // assistant.message has `role` + `content` (no `type` tag), result has
+        // a `result` field with the final output.
+        let backend = CliBackend {
+            command: "printf".to_string(),
+            args: vec![
+                "%s\n%s\n%s\n".to_string(),
+                r#"{"type":"system","subtype":"init","session_id":"abc"}"#.to_string(),
+                r#"{"type":"assistant","session_id":"abc","message":{"role":"assistant","content":"hello from trae"}}"#
+                    .to_string(),
+                r#"{"type":"result","subtype":"success","session_id":"abc","result":"hello from trae","is_error":false,"duration_ms":1234}"#.to_string(),
+            ],
+            prompt_mode: PromptMode::Stdin,
+            prompt_flag: None,
+            output_format: OutputFormat::TraeStreamJson,
+            env_vars: vec![],
+        };
+
+        let executor = CliExecutor::new(backend);
+        let mut output = Vec::new();
+
+        let result = executor
+            .execute("ignored", &mut output, None, false)
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        // Raw NDJSON should be preserved in accumulated output for debugging
+        assert!(result.output.contains("\"type\":\"assistant\""));
+        assert!(result.output.contains("\"type\":\"system\""));
+        // But output_writer should only contain the extracted assistant text,
+        // never the system/result envelopes.
+        let written = String::from_utf8(output).unwrap();
+        assert_eq!(written, "hello from trae\n");
+    }
+
+    #[tokio::test]
+    async fn test_execute_trae_stream_ignores_tool_calls_and_results() {
+        // Real trae-cli shape: assistant.message.tool_calls uses function.{name, arguments}
+        // (arguments is a JSON-encoded string); user tool_result has no `message`
+        // field — it has top-level subtype/tool_use_id/content instead.
+        let backend = CliBackend {
+            command: "printf".to_string(),
+            args: vec![
+                "%s\n%s\n%s\n".to_string(),
+                r#"{"type":"assistant","message":{"role":"assistant","content":"","tool_calls":[{"id":"t1","type":"function","function":{"name":"shell","arguments":"{\"cmd\":\"ls\"}"}}]}}"#.to_string(),
+                r#"{"type":"user","subtype":"tool_result","tool_use_id":"t1","tool_name":"shell","content":{"content":[{"type":"text","text":"file1\nfile2"}]}}"#.to_string(),
+                r#"{"type":"assistant","message":{"role":"assistant","content":"done"}}"#.to_string(),
+            ],
+            prompt_mode: PromptMode::Stdin,
+            prompt_flag: None,
+            output_format: OutputFormat::TraeStreamJson,
+            env_vars: vec![],
+        };
+
+        let executor = CliExecutor::new(backend);
+        let mut output = Vec::new();
+
+        let result = executor
+            .execute("ignored", &mut output, None, false)
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        // Only assistant text deltas land in the writer; tool_use and tool_result
+        // are owned by the StreamHandler path (PtyExecutor / dispatch fn).
+        let written = String::from_utf8(output).unwrap();
+        assert_eq!(written, "done\n");
+    }
+
+    #[tokio::test]
+    async fn test_execute_trae_stream_skips_malformed_lines() {
+        let backend = CliBackend {
+            command: "printf".to_string(),
+            args: vec![
+                "%s\n%s\n%s\n".to_string(),
+                "not valid json at all".to_string(),
+                r#"{"type":"assistant","message":{"role":"assistant","content":"valid"}}"#
+                    .to_string(),
+                "".to_string(),
+            ],
+            prompt_mode: PromptMode::Stdin,
+            prompt_flag: None,
+            output_format: OutputFormat::TraeStreamJson,
+            env_vars: vec![],
+        };
+
+        let executor = CliExecutor::new(backend);
+        let mut output = Vec::new();
+
+        let result = executor
+            .execute("ignored", &mut output, None, false)
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        let written = String::from_utf8(output).unwrap();
+        // Malformed line is dropped (debug log only), empty line yields no event;
+        // only the valid assistant text reaches output_writer.
+        assert_eq!(written, "valid\n");
     }
 
     #[tokio::test]

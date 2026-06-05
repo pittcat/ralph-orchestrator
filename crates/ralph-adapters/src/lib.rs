@@ -56,9 +56,10 @@ pub use pi_stream::{
     PiToolResult, PiTurnMessage, PiUsage, dispatch_pi_stream_event,
 };
 pub use trae_stream::{
-    TraeAssistantMessage, TraeSessionState, TraeStreamEvent, TraeStreamParser,
-    TraeTextContent, TraeToolResultContent, TraeToolUseContent, TraeUserMessage,
-    dispatch_trae_stream_event,
+    TraeAssistantMessage, TraeAssistantToolCall, TraeSessionState, TraeStreamEvent,
+    TraeStreamParser, TraeTextContent, TraeToolFunction, TraeToolResultContent,
+    TraeToolUseContent, TraeUserMessage, dispatch_trae_stream_event, extract_assistant_text,
+    extract_assistant_tool_calls, extract_user_tool_result_text, user_is_tool_result,
 };
 pub use pty_executor::{
     CtrlCAction, CtrlCState, PtyConfig, PtyExecutionResult, PtyExecutor, TerminationType,

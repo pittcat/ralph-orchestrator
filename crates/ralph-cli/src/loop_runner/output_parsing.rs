@@ -17,6 +17,7 @@ pub fn normalize_cli_output_for_parsing(
         BackendOutputFormat::StreamJson => extract_claude_stream_text(raw_output),
         BackendOutputFormat::CopilotStreamJson => CopilotStreamParser::extract_all_text(raw_output),
         BackendOutputFormat::PiStreamJson => extract_pi_stream_text(raw_output),
+        BackendOutputFormat::TraeStreamJson => extract_trae_stream_text(raw_output),
         _ => raw_output.to_string(),
     }
 }
@@ -60,6 +61,31 @@ pub fn extract_pi_stream_text(raw_output: &str) -> String {
             && let PiAssistantEvent::TextDelta { delta } = assistant_message_event
         {
             extracted.push_str(&delta);
+        }
+    }
+
+    if extracted.is_empty() {
+        raw_output.to_string()
+    } else {
+        extracted
+    }
+}
+
+pub fn extract_trae_stream_text(raw_output: &str) -> String {
+    use ralph_adapters::{TraeStreamEvent, TraeStreamParser, extract_assistant_text};
+
+    let mut extracted = String::new();
+
+    for line in raw_output.lines() {
+        let Some(event) = TraeStreamParser::parse_line(line) else {
+            continue;
+        };
+
+        if let TraeStreamEvent::Assistant { message } = event
+            && let Some(text) = extract_assistant_text(&message)
+        {
+            extracted.push_str(&text);
+            extracted.push('\n');
         }
     }
 
