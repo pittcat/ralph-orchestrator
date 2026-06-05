@@ -107,7 +107,7 @@ Config supports both v1.x flat format and v2.0 nested format for zero-config mig
 User YAML → RalphConfig → EventLoopConfig → HatConfig overrides → effective runtime config
 ```
 
-Key config modules in `crates/ralph-core/src/config.rs`:
+Key config modules in `crates/ralph-core/src/config/`:
 - `RalphConfig`: Top-level config
 - `CoreConfig`: Event loop, scratchpad, memories, tasks
 - `HatConfig`: Per-hat backend, triggers, publishes, instructions, concurrency
@@ -183,15 +183,15 @@ Presets define collections of hats. Located in `presets/` directory and `crates/
 - **Lock coordination**: `crates/ralph-core/src/worktree.rs`, `loop_lock.rs`, `file_lock.rs`
 - **Loop registry**: `crates/ralph-core/src/loop_registry.rs`
 - **Merge queue**: `crates/ralph-core/src/merge_queue.rs`
-- **Config**: `crates/ralph-core/src/config.rs` — all config types, v1/v2 format compatibility
-- **CLI commands**: `crates/ralph-cli/src/` — `loop_runner.rs`, `loops.rs`, `task_cli.rs`, `wave.rs`, `bot.rs`, `web.rs`, `mcp.rs`, `init.rs`, `hats.rs`, `presets.rs`, `hooks.rs`, `tools.rs`, `doctor.rs`
+- **Config**: `crates/ralph-core/src/config/` — all config types, v1/v2 format compatibility
+- **CLI commands**: `crates/ralph-cli/src/` — `commands/`, `cli/`, `loops.rs`, `task_cli.rs`, `wave.rs`, `bot.rs`, `web.rs`, `mcp.rs`, `init.rs`, `hats.rs`, `presets.rs`, `hooks.rs`, `tools.rs`, `doctor.rs`
 - **Telegram integration**: `crates/ralph-telegram/src/` (bot, service, state, handler)
-- **RObot config**: `crates/ralph-core/src/config.rs` (`RobotConfig`, `TelegramBotConfig`)
+- **RObot config**: `crates/ralph-core/src/config/robot.rs` (`RobotConfig`, `TelegramBotConfig`)
 - **Wave system**: `crates/ralph-core/src/wave_tracker.rs`, `wave_detection.rs`, `wave_prompt.rs`
 - **Wave CLI**: `crates/ralph-cli/src/wave.rs`
 - **Adapters**: `crates/ralph-adapters/src/` — `cli_backend.rs`, `cli_executor.rs`, `pty_executor.rs`, `auto_detect.rs`, stream parsers
 - **Preflight checks**: `crates/ralph-core/src/preflight.rs` — acceptance criteria extraction and validation
-- **Harness extensions**: `crates/ralph-core/src/config.rs` (config schema), `event_loop/mod.rs` (integration), `event_projection.rs`, `state_file_injector.rs`, `preflight.rs` (external command hooks)
+- **Harness extensions**: `crates/ralph-core/src/config/` (config schema), `event_loop/mod.rs` (integration), `event_projection.rs`, `state_file_injector.rs`, `preflight.rs` (external command hooks)
 - **Web server**: `backend/ralph-web-server/src/` (tRPC routes in `api/`, runners in `runner/`)
 - **Web dashboard**: `frontend/ralph-web/src/` (React components in `components/`)
 - **E2E tests**: `crates/ralph-e2e/src/` — scenarios in `scenarios/`, mock CLI, reporter
@@ -325,7 +325,7 @@ ralph wave emit review.file --payloads "src/main.rs" "src/lib.rs" "src/config.rs
 - **Wave detection**: `crates/ralph-core/src/wave_detection.rs`
 - **Worker prompt**: `crates/ralph-core/src/wave_prompt.rs`
 - **Wave tracker**: `crates/ralph-core/src/wave_tracker.rs`
-- **Loop integration**: `crates/ralph-cli/src/loop_runner.rs` (`execute_wave`)
+- **Loop integration**: `crates/ralph-cli/src/loop_runner/wave/dispatcher.rs` (`execute_wave`)
 
 ### Presets
 

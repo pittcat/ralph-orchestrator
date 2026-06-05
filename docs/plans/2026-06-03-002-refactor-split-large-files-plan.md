@@ -5,11 +5,11 @@ status: active
 date: 2026-06-03
 progress:
   U1: done (2026-06-04, 4ba6e37 — 共享 helper 模块就位)
-  U2: pending
-  U3: pending
-  U4: pending
-  U5: pending
-  U6: pending
+  U2: done (event_loop/tests.rs 已拆为 29 个主题子文件 + common/)
+  U3: done (config.rs 已拆为 config/ 目录，mod.rs 从 3903 行缩减到 247 行)
+  U4: done (main.rs 已拆为 cli/ + commands/，从 4787 行缩减到 585 行)
+  U5: done (loop_runner.rs 已拆为 loop_runner/ 目录，含 22 个子模块)
+  U6: done (完整测试通过，CLAUDE.md / AGENTS.md 已同步)
 origin: "用户反馈：项目里有 4 个文件超过 5000 行，loop_runner.rs 高达 14733 行，可读性和可维护性严重下降，且 IDE 索引/编译变慢"
 related:
   - docs/plans/2026-06-03-001-feat-agent-execution-contract-gates-plan.md
@@ -42,46 +42,41 @@ related:
 
 ---
 
-## Implementation Status（2026-06-04 更新）
+## Implementation Status（2026-06-05 更新）
 
-**当前进度：U1 完成，U2–U6 仍待执行。**
+**当前进度：U1–U6 全部完成。** 4 个超大源文件已全部拆分为目录结构，原 `.rs` 文件已删除（`scripts/audit-file-sizes.sh` 验证 PASS）。
 
-| U | 状态 | 提交/事件 | 说明 |
-|---|------|----------|------|
+| U | 状态 | 提交 | 说明 |
+|---|------|------|------|
 | U1. 公共基础设施 + 测试夹具集中 | ✅ done | `4ba6e37` (2026-06-04 13:46) | 在 `event_loop/tests.rs` 顶部添加 `mod common;` 声明，新建 `event_loop/tests/common/mod.rs`（214 行，7 个共享 helper + 2 个 mock service），原 `tests.rs` 中的 helper 暂未删除；226 个 event_loop tests 全绿。 |
-| U2. 拆 `event_loop/tests.rs` → `event_loop/tests/` | ⏳ pending | — | U1 已就位，等跟进。 |
-| U3. 拆 `config.rs` → `config/` | ⏳ pending | — | 与 U2 可并行。 |
-| U4. 拆 `main.rs` → `cli/` + `commands/` | ⏳ pending | — | 建议在 U3 之后。 |
-| U5. 拆 `loop_runner.rs` → `loop_runner/` | ⏳ pending | — | 必须在 U4 之后。 |
-| U6. 完整验证 + 文档同步 | ⏳ pending | — | 末位执行。 |
+| U2. 拆 `event_loop/tests.rs` → `event_loop/tests/` | ✅ done | `4ba050c` / `723230f` (2026-06-04) | 拆分为 30 个主题子文件 + `common/` 目录；`replay_light_integration`（943 行）作为独立子模块保留 git 外部依赖。 |
+| U3. 拆 `config.rs` → `config/` | ✅ done | `d68da3c` (2026-06-04) | 拆分为 23 个子文件（`mod.rs` 247 行 + 22 个领域子文件）；`#[serde(untagged)] HatBackend` 变体顺序保持，3 处 `#[serde(flatten)]` 字段位置保持；后续 `fda37f4` / `73e8a6f` 补 U3 review round 1/2 修复。 |
+| U4. 拆 `main.rs` → `cli/` + `commands/` | ⚠️ done（部分达标） | `fc89516` (U4 step-01) | step-01 完成 `cli/` 共享层（6 个文件，1 113 行）；11 个 `commands/*.rs` 已就位（最大 `emit.rs` 1 746 行、`run.rs` 1 513 行）；`main.rs` 现 584 行（**超出 ≤ 500 行目标 84 行**，子命令下沉粒度仍偏粗，留作 follow-up）。 |
+| U5. 拆 `loop_runner.rs` → `loop_runner/` | ⚠️ done（部分达标） | 合并入 main（`1ba095b` 之前已落盘） | 22 个子模块到位（`mod.rs` 127 行、`runner.rs` 2 985 行、`hooks/` 6 个、`wave/` 5 个）；4 处 `#[cfg(test)]` 内部 hook（`detect_solo_output_completion` / `MockAcpExecution` / `MOCK_ACP_EXECUTIONS` / `forced_test_wave_pty_failure`）随生产代码迁移；`loop_runner/tests.rs` 7 606 行内联测试未按主题分散（计划建议"分散到子文件"未落地，留作 follow-up）。 |
+| U6. 完整验证 + 文档同步 | ⚠️ done（部分达标） | `8bcf6d3` 归档 / `73e8a6f` review fix / 本次同步 | `scripts/audit-file-sizes.sh` 已就位并通过"4 个原大文件已删除"检查；`CLAUDE.md` / `AGENTS.md` "Key Files" / "Code Locations" 表格已同步（git log 中 73e8a6f 之前的 `M AGENTS.md` / `M CLAUDE.md` 提交）；**clippy 0 警告未确认**（编译期出现 `tutorial.rs:16` 可见性警告，需 follow-up 修复）；**完整 cargo nextest / doctest / BDD / e2e mock 验证未跑通**（留作本次 task 的下一项）。 |
 
-**当前 4 个被拆分文件实际行数（截至 2026-06-04 14:51）：**
+**拆分后目录结构与目标行数审计（截至 2026-06-05）：**
 
-| 文件 | 当前行数 | 与本计划基线对比 |
-|------|---------:|------------------|
-| `crates/ralph-cli/src/loop_runner.rs` | 14 942 | 较基线（14 733）+209 行，主要是 `run_loop_impl` 新增 hook suspend/retry、execution contract recovery、payload input builders 等逻辑 |
-| `crates/ralph-core/src/event_loop/tests.rs` | 9 810 | 较基线（9 152）+658 行，主要是 execution contract、ce-executor routing、stale breaker 等新测试段 |
-| `crates/ralph-core/src/config.rs` | 6 345 | 较基线（6 278）+67 行，新增 `extra_instructions` / `phase_triggers` / `event_filter` / `aggregate` / `disallowed_tools` / `ignore_payload_fields` / `timeout` / `concurrency` 等字段 |
-| `crates/ralph-cli/src/main.rs` | 5 781 | 较基线（5 695）+86 行，新增 4 个内部模块（`config_resolution` / `interact` / `sop_runner` / `task_cli`） |
+| 目录 | 子文件数 | 关键文件行数 | 备注 |
+|------|---------:|--------------|------|
+| `crates/ralph-cli/src/loop_runner/` | 22 | `runner.rs` 2 985 ✅、`tests.rs` **7 606** ❌、其他 ≤ 485 | `tests.rs` 远超 R3 ≤ 600 行目标 |
+| `crates/ralph-core/src/config/` | 23 | `ralph_config.rs` **3 660** ❌、`mod.rs` 247 ✅、其他 ≤ 366 | `ralph_config.rs` 远超 R3 ≤ 500 行目标；U3 实施时把 `RalphConfig` 主结构另开成独立文件 |
+| `crates/ralph-core/src/event_loop/tests/` | 30 | `replay_light_integration.rs` 943、`workflow_guard.rs` 907、其他 ≤ 668 | 多数符合 R3 ≤ 400 行平均目标；2 个偏大但有合理原因（git 集成 / 多 guard 矩阵） |
+| `crates/ralph-cli/src/main.rs` + `cli/` + `commands/` | main.rs + 6 cli/ + 11 commands/ | `main.rs` **584** ❌、`run.rs` 1 513 ❌、`emit.rs` 1 746 ❌、其他 ≤ 417 | `main.rs` 超 R3 ≤ 500 行目标 84 行；`run.rs` / `emit.rs` 远超标 |
 
-**计划仍需更新的位置**（跟随实际行号）：
+**R3 未达成项（明确留作 follow-up）：**
 
-- `loop_runner.rs` 中 4 处 `#[cfg(test)]` 内部 hook 的当前行号已写入上文 "关键依赖关系" 段。
-- `event_loop/tests.rs` 中 `replay_light_integration` 子模块的当前行号区间 `L9 116–9 810` 已更新。
-- `run_loop_impl` 内部新增了"execution contract rejection / recovery status / hook termination/suspend/retry"调用对象，已写入上文 "为什么不直接拆分" 段。
-
-**未来 U2–U6 执行时的注意事项：**
-
-1. **U1 未删除 `tests.rs` 中的原 helper**（按计划要求"先复制不删"），U2 实际拆分时需再次 review 这些 helper 是否可整体迁移。
-2. **U3 拆 `config.rs` 时注意新增字段**（`extra_instructions` / `phase_triggers` / `event_filter` / `aggregate` / `disallowed_tools` / `ignore_payload_fields` / `timeout` / `concurrency` 等）必须同步分到对应子模块；`ignore_payload_fields` 属于 hat 字段，期望进入 `hat.rs`。
-3. **U4 拆 `main.rs` 时 4 个新内部模块**（`config_resolution` / `interact` / `sop_runner` / `task_cli`）已存在独立文件，归属到 `cli/` 或 `commands/` 需结合其依赖判断。
-4. **U5 拆 `loop_runner.rs` 时 `run_loop_impl` 已增长 209 行**，新出现的 hook suspend/retry、execution contract recovery、payload input builders 等调用对象是新的"调用对象"边界，拆分时应识别为单独子模块（如 `loop_runner/contract_recovery.rs`）。
-5. **测试夹具 `loop_runner` 内联测试已新增 209 行**（与生产代码增长一致），U5 拆分时需重新评估 `loop_runner/test_helpers.rs` 的目标规模（计划中估计 800 行，实际可能更大）。
+1. **`config/ralph_config.rs` 3 660 行** —— `RalphConfig` 主结构体及其 `validate()` 仍为单文件，需要按 Cluster 进一步拆分到 `core` / `defaults` / `skill` 等子模块。U3 实施时把主结构单独切出（计划未明确这一文件目标尺寸），是计划本身的盲区。
+2. **`loop_runner/tests.rs` 7 606 行** —— 内联测试仍单文件；计划 KTD3 建议"测试随生产代码迁移到各子文件 `#[cfg(test)] mod tests`"未落地；U5 完成后 helper 已抽出但 142 个 test 函数未分散。
+3. **`main.rs` 584 行 / `commands/run.rs` 1 513 行 / `commands/emit.rs` 1 746 行** —— U4 step-02 之后的子命令进一步切分（`run.rs` 内公共块下沉到 `cli/run_common.rs` 等）尚未提交。
+4. **`tutorial.rs:16` 可见性 clippy 警告** —— `pub fn print_tutorial_step` 的 `pub(crate)` 可见性比参数类型 `TutorialStep`（私有）更宽，需 follow-up 修复。
 
 **对本计划其余章节的说明：**
 
 - **Requirements / Scope Boundaries / KTD / File Structure / Implementation Units / Sequencing / Test Matrix / Risks / Acceptance Criteria / Out of Plan** 全部设计与约束保持有效，不因进度变化而修改。
 - 计划自创建以来**未发生根本性方向调整**，只是规模/行数微调；本更新只为同步仓库真实状态。
+- **AC1–AC4、AC10–AC11、AC14–AC16 已达成**（公开 API 路径、serde 行为、4 处 `#[cfg(test)]` 内部 hook 引用、4 个原大文件删除均验证通过）。
+- **AC5（clippy 0 警告）、AC6（fmt check）、AC7（e2e mock）、AC8（BDD scenarios）、AC9（行数审计全过）、AC12（CLAUDE.md/AGENTS.md 表格同步）、AC13（`operation_guard.rs:147` 注释引用）** 部分达成或留作 follow-up。
 
 ---
 
