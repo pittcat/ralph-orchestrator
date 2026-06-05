@@ -198,12 +198,17 @@ pub fn convert_termination_type(
                 // backend-call end, NOT a loop terminate. Return None and let
                 // the runner's event-processing / hard-gate pipeline decide.
                 // The watchdog cause is preserved via
-                // `ExecutionOutcome.watchdog_timeout` for diagnostics.
-                warn!(
-                    "Autonomous PTY watchdog timeout reached; preserving partial output \
-                     for event parsing (loop will not be force-stopped, hard gate / \
-                     fallback handles missing events on next iteration)"
-                );
+                // `ExecutionOutcome.watchdog_timeout` for diagnostics; the
+                // matching "watchdog fired" warn is emitted by `runner.rs`
+                // (see `if outcome.watchdog_timeout { warn!(...) }`).
+                //
+                // This function intentionally emits no warn of its own: it is
+                // a pure mapping helper, and the runner is the single
+                // authority on the user-facing "backend watchdog timeout"
+                // diagnostic. Splitting the warn between two layers would
+                // produce two near-identical lines per PTY timeout and
+                // double the diagnostic noise compared to the CliExecutor
+                // path, which only warns once from the runner.
                 None
             }
         }

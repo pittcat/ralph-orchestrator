@@ -14,6 +14,26 @@ pub(crate) struct ExecutionOutcome {
     /// drive the partial-event / missing-event / hard-gate pipeline. If no
     /// partial events arrived, the existing missing-event hard gate / fallback
     /// path will fire on the next iteration.
+    ///
+    /// # Implementation notes
+    ///
+    /// The three executor paths compute this flag differently:
+    ///
+    /// - **PTY path** (`execute_pty`): set when
+    ///   `pty_result.termination == TerminationType::IdleTimeout`. The PTY
+    ///   executor has no `post_event_timed_out` equivalent — `IdleTimeout` is
+    ///   the only watchdog concept on this path.
+    /// - **CliExecutor path** (non-PTY branch in `runner.rs`): set when
+    ///   `result.timed_out && !result.post_event_timed_out`. `timed_out` is
+    ///   the raw inactivity-timeout fire; `post_event_timed_out` is a
+    ///   CliExecutor-only "soft wrap-up" signal meaning the backend emitted
+    ///   an event and then hung during the post-event grace window. Soft
+    ///   wrap-ups are treated as a normal successful backend call
+    ///   (`success = true`) and must *not* light up this flag, so the
+    ///   `&& !result.post_event_timed_out` guard is load-bearing.
+    /// - **ACP path** (`execute_acp`): always `false` — ACP currently has no
+    ///   watchdog concept. If one is added, this field must be updated in
+    ///   lockstep with the corresponding test in `tests.rs`.
     pub watchdog_timeout: bool,
     pub total_cost_usd: f64,
     pub input_tokens: u64,

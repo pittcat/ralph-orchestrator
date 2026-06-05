@@ -3901,6 +3901,97 @@ fn test_main_pty_watchdog_aligns_with_wave_worker_partial_events_semantics() {
     );
 }
 
+/// Code review I-1 (post Unit 3): pin that `convert_termination_type` is a
+/// *silent* pure mapping. The "backend watchdog timeout" warn is the runner's
+/// sole responsibility (see `runner.rs::if outcome.watchdog_timeout { warn! }`).
+/// Before I-1, both `format.rs::convert_termination_type` *and* `runner.rs`
+/// emitted a near-identical warn for the same PTY `IdleTimeout`, doubling the
+/// diagnostic noise on the autonomous PTY path (CliExecutor only warned once).
+///
+/// This test installs a thread-local `tracing_subscriber` that writes to a
+/// captured `Vec<u8>`, invokes `convert_termination_type(IdleTimeout, autonomous)`,
+/// and asserts that no `tracing::warn!` was emitted with the previously-
+/// duplicated message. A control warn emitted from inside the same scope
+/// proves the capture layer is wired up — without it, a regression that
+/// silently dropped the subscriber would let the test pass with `warn_count = 0`
+/// for the wrong reason.
+#[test]
+fn test_convert_termination_autonomous_idle_timeout_emits_no_warn() {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::fmt::MakeWriter;
+
+    /// Shared buffer the `MakeWriter` impl drains into.
+    #[derive(Clone, Default)]
+    struct VecWriter(Arc<Mutex<Vec<u8>>>);
+    impl Write for VecWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> MakeWriter<'a> for VecWriter {
+        type Writer = VecWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    let writer = VecWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(writer.clone())
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .with_target(false)
+        .finish();
+
+    tracing::subscriber::with_default(subscriber, || {
+        // Control: a hand-rolled warn emitted inside the same scope MUST be
+        // captured. If the buffer stays empty, the subscriber wiring is broken
+        // and the negative assertion below would be a false pass.
+        tracing::warn!("CONTROL_PROBE: capture layer is wired up");
+
+        // The function under test — must remain silent.
+        let result = convert_termination_type(
+            ralph_adapters::TerminationType::IdleTimeout,
+            false, // autonomous / RPC / worktree path
+        );
+        assert!(
+            result.is_none(),
+            "convert_termination_type(IdleTimeout, autonomous) must still return None \
+             (regression check: Unit 3 contract preserved by I-1). Got: {:?}",
+            result
+        );
+    });
+
+    let captured = String::from_utf8(writer.0.lock().unwrap().clone()).expect("utf-8");
+
+    // Control assertion first: if this fails, the capture layer itself is
+    // broken and the negative assertion below would be unreliable.
+    assert!(
+        captured.contains("CONTROL_PROBE"),
+        "Capture layer is not wired up — the test would silently pass on regressions. \
+         Captured logs were:\n{}",
+        captured
+    );
+
+    // Pin the specific message we deleted in I-1. We match on the unique
+    // phrase so a future unrelated warn from this file (e.g. a new
+    // characterization test) does not break the test.
+    assert!(
+        !captured.contains("Autonomous PTY watchdog timeout reached"),
+        "convert_termination_type(IdleTimeout, autonomous) must NOT emit a warn. \
+         The 'backend watchdog timeout' diagnostic is the runner's sole \
+         responsibility; emitting it here would duplicate the warn and break \
+         the PTY vs CliExecutor diagnostic parity that I-1 restored. \
+         Captured logs were:\n{}",
+        captured
+    );
+}
+
 #[test]
 fn test_detect_solo_output_completion_requires_hatless_mode() {
     let registry = HatRegistry::new();
