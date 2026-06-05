@@ -86,6 +86,8 @@ _RALPH_BACKENDS=(
   "copilot:Co-pilot backend"
   "opencode:Opencode backend"
   "pi:Pi backend"
+  "roo:Roo Code backend"
+  "traecli:Trae CLI backend"
   "custom:Custom backend"
 )
 
