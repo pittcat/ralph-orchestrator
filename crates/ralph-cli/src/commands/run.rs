@@ -1311,8 +1311,20 @@ mod tests {
     /// U0 characterization: `skip_preflight=true` (the `--skip-preflight` flag)
     /// must override `features.preflight.enabled = true` and return `None`
     /// without running any checks. This is the documented escape hatch.
+    ///
+    /// **Ordering invariant**: the short-circuit guard at `run_auto_preflight`
+    /// (line 215: `if skip_preflight || !config.features.preflight.enabled { return Ok(None) }`)
+    /// MUST execute before `PreflightRunner::default_checks_with_config(config)`
+    /// construction (line 219) and `runner.run_all/config` (line 222). This test
+    /// deliberately uses a non-resolvable backend (`definitely-missing-12345`) to
+    /// prove the short-circuit fires before any check would have a chance to fail
+    /// on the missing backend. If a future refactor moves the short-circuit
+    /// below the runner construction, this test's failure mode becomes
+    /// "backend missing" — still red, but no longer interpretable as
+    /// 'short-circuit ordering broke'. The test name and doc pin that
+    /// ordering so the failure mode stays meaningful.
     #[tokio::test]
-    async fn u0_auto_preflight_skip_preflight_overrides_enabled() {
+    async fn u0_skip_preflight_short_circuits_before_backend_check() {
         let temp_dir = tempfile::tempdir().unwrap();
         let mut config = RalphConfig::default();
         config.core.workspace_root = temp_dir.path().to_path_buf();
