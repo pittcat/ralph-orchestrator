@@ -35,6 +35,13 @@
 #   Fixer → fix.exhausted → debug-resolver → fix.plan.ready → serial-executor → work.done → review-coordinator
 #   debug-resolver → debug.exhausted → Shipper → REVIEW_COMPLETE → Reporter → LOOP_COMPLETE
 #   plan-gate → plan.complete / plan.blocked → Shipper → REVIEW_COMPLETE → Reporter → LOOP_COMPLETE
+
+tasks:
+  enabled: true
+  coordinator_hats:
+    - executor
+    - coordinator
+
 event_loop:
   prompt_file: "PROMPT.md"
   completion_promise: "LOOP_COMPLETE"
