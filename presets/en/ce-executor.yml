@@ -237,7 +237,8 @@ hats:
     triggers: ["work.ready", "queue.advance", "work.retry", "fix.plan.ready"]
     publishes: ["work.done", "work.failed"]
     # U2: default_publishes removed — executor MUST explicitly emit work.done or work.failed.
-    # No-event gate (U1) will trigger if agent forgets to emit.
+    # No progress topics: verification results belong in logs and the final
+    # work.done/work.failed payload, not as separate workflow events.
     instructions: |
       ## EXECUTOR MODE — Plan-Driven Task Execution
 
@@ -364,6 +365,11 @@ hats:
         - build / lint / typecheck
       - If verification fails, revert the change and publish `work.failed`.
       - If verification passes, publish a normal `work.done` with `plan_name`, `plan_path`, `task_id`, `task_key`, `step`. The fix will re-enter review via `review-coordinator`.
+
+      ### Events You MUST and MUST NOT Emit
+      - **Terminal events**: Only `work.done` (success) and `work.failed` (blocked/failure) advance the workflow. You MUST emit one of these at the end of every iteration.
+      - **DO NOT emit progress events**: Do NOT emit `build.done`, `test.done`, `lint.done`, or any verification progress topic. Record verification results in files/logs and include them in the final `work.done` payload if relevant.
+      - **DO NOT emit**: `queue.advance`, `review.wave.ready`, `fix.applied`, `plan.complete`, `REVIEW_COMPLETE`, `LOOP_COMPLETE`, `report.done` — these belong to other hats.
 
       ### Failure Handling
       - If command fails, dependency missing, or blocked:
@@ -539,6 +545,9 @@ hats:
       ### Event Publishing
       - Use the bash tool to execute: `ralph emit review.dimension.done --json '<payload>'`
       - Do NOT just write "I emit review.dimension.done" in prose — the command must actually run and the event must appear in the events file
+      - **HARD RULE — Hat Identity**: Emit with top-level hat provenance `dimension-reviewer` (`--hat dimension-reviewer` or the runner-provided `RALPH_CURRENT_HAT`).
+        Do NOT put `hat` inside the JSON payload, and do NOT change your hat name to `reviewer-standards`, `standards-reviewer`, or any variant.
+        Origin guard rejects unknown top-level hats, which voids the entire review result.
       - Payload MUST include:
         - `dimension`: string
         - `findings_count`: int
