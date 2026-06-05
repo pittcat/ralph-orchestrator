@@ -1907,6 +1907,12 @@ pub async fn run_loop_impl(
                     ),
                     success: result.success,
                     termination: None,
+                    // Unit 3: surface the CliExecutor inactivity timeout via the
+                    // same diagnostic flag the PTY path uses, so the runner can
+                    // log a consistent watchdog-timeout message across paths.
+                    // `post_event_timed_out` is treated as a normal soft
+                    // backend wrap-up (success=true), not a watchdog fire.
+                    watchdog_timeout: result.timed_out && !result.post_event_timed_out,
                     total_cost_usd: 0.0,
                     input_tokens: 0,
                     output_tokens: 0,
@@ -1970,6 +1976,24 @@ pub async fn run_loop_impl(
                 return Ok(reason);
             }
         };
+
+        // Unit 3 (plan 2026-06-06-001): surface backend watchdog timeout as a
+        // diagnostic warning, then let the loop continue down the regular
+        // event-processing path. Watchdog timeout is a backend-call end, NOT a
+        // loop terminate: if the agent emitted partial events before the
+        // watchdog fired, they will still be parsed and routed; if it emitted
+        // nothing, the existing missing-event hard gate / fallback path takes
+        // over on the next iteration. The matching `outcome.termination = None`
+        // mapping lives in `convert_termination_type` / `execute_pty`.
+        if outcome.watchdog_timeout {
+            warn!(
+                iteration = iteration,
+                hat = %display_hat.as_str(),
+                backend = %backend_name_for_timeout,
+                "Backend watchdog timeout fired; preserving partial output for event \
+                 processing (loop continues, hard gate / fallback handles missing events)"
+            );
+        }
 
         if let Some(reason) = outcome.termination {
             let reason = dispatch_pre_loop_termination_hooks(

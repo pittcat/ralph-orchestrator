@@ -158,16 +158,29 @@ pub fn disposition_from_on_error(on_error: HookOnError) -> HookDisposition {
 /// Executes a prompt in PTY mode with raw terminal handling.
 /// Converts PTY termination type to loop termination reason.
 ///
-/// In interactive mode, idle timeout signals "iteration complete" rather than
-/// "loop stopped", allowing the event loop to process output and continue.
+/// `IdleTimeout` in BOTH interactive and autonomous modes signals "this backend
+/// call ended" rather than "stop the whole loop". Returning `None` lets the
+/// runner continue to event parsing / `process_output` / `process_events_from_jsonl`
+/// so that any partial events emitted before the watchdog fired are still
+/// processed. If no valid events arrived, the existing missing-event hard gate
+/// / fallback / failure pipeline in the runner decides what to do next.
+///
+/// Unit 3 of plan 2026-06-06-001 intentionally remapped the autonomous
+/// `IdleTimeout` from `Some(TerminationReason::Stopped)` to `None`. The previous
+/// `Stopped` mapping short-circuited the partial-event pipeline and bypassed
+/// `process_output` / hard-gate entirely, which violated R3 (failure must
+/// propagate without being silently dropped or falsely declared successful).
+/// The runner separately surfaces "watchdog fired" via `ExecutionOutcome.
+/// watchdog_timeout`, which keeps the diagnostic visible while letting the
+/// existing failure machinery do its job.
 ///
 /// # Arguments
 /// * `termination_type` - The PTY executor's termination type
 /// * `interactive` - Whether running in interactive mode
 ///
 /// # Returns
-/// * `None` - Continue processing (iteration complete)
-/// * `Some(TerminationReason)` - Stop the loop
+/// * `None` - Continue processing (iteration complete / backend call ended)
+/// * `Some(TerminationReason)` - Stop the loop (operator interrupt / force kill)
 pub fn convert_termination_type(
     termination_type: ralph_adapters::TerminationType,
     interactive: bool,
@@ -181,8 +194,17 @@ pub fn convert_termination_type(
                 info!("PTY idle timeout in interactive mode, iteration complete");
                 None
             } else {
-                warn!("PTY idle timeout reached, terminating loop");
-                Some(TerminationReason::Stopped)
+                // Unit 3 of plan 2026-06-06-001: autonomous IdleTimeout is a
+                // backend-call end, NOT a loop terminate. Return None and let
+                // the runner's event-processing / hard-gate pipeline decide.
+                // The watchdog cause is preserved via
+                // `ExecutionOutcome.watchdog_timeout` for diagnostics.
+                warn!(
+                    "Autonomous PTY watchdog timeout reached; preserving partial output \
+                     for event parsing (loop will not be force-stopped, hard gate / \
+                     fallback handles missing events on next iteration)"
+                );
+                None
             }
         }
         ralph_adapters::TerminationType::UserInterrupt

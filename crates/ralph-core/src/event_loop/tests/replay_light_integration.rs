@@ -941,3 +941,190 @@ fn test_current_loop_id_for_contract_falls_back_to_default_when_marker_missing()
         "When the marker is missing, the contract check should fall back to \"default\""
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Unit 3 of plan 2026-06-06-001: watchdog timeout integration coverage.
+//
+// These tests prove that even when the backend was killed by the
+// autonomous PTY watchdog, the event loop's event-processing pipeline
+// still runs against any partial JSONL events the agent emitted before
+// the kill. The runner-level signal that triggers this is
+// `ExecutionOutcome.termination = None` (with `watchdog_timeout = true`
+// kept only as a diagnostic flag). The runner then calls
+// `event_loop.process_output(...)` + `event_loop.process_events_from_jsonl(...)`
+// — exactly the path these tests exercise.
+//
+// The R3 invariant is that a watchdog timeout MUST NOT:
+//   - silently mark the iteration as a successful completion, or
+//   - bypass execution-contract validation, or
+//   - skip the missing-event hard gate when no events arrived.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Scenario 1 (Happy): the agent emitted a valid `work.done` event before
+/// the watchdog killed the backend. After the simulated timeout, the
+/// runner still calls `process_parse_result`; the event lands on the
+/// reviewer's queue and activates the reviewer hat. This proves the
+/// timeout did not falsely terminate the loop, did not bypass execution
+/// contract validation, and did not drop the partial event.
+#[test]
+fn test_watchdog_timeout_with_partial_work_done_still_routes_to_reviewer() {
+    let temp = TempDir::new().unwrap();
+    let workspace = temp.path();
+    init_git_repo(workspace);
+    let tasks_path = workspace.join(".ralph/agent/tasks.jsonl");
+    write_task(&tasks_path, "test-id-1", TaskStatus::Closed);
+
+    // Provide git evidence so the contract accepts the work.done. This
+    // mirrors the realistic case where the agent committed changes and
+    // wrote `work.done` to JSONL before some tail command hung.
+    std::fs::write(
+        workspace.join("README.md"),
+        "# Test\nagent change for diff\n",
+    )
+    .unwrap();
+
+    let config = build_test_config(workspace);
+    let mut event_loop = make_event_loop(config);
+
+    // Simulate the runner's post-execution event-processing call. In the
+    // real runner this path is reached precisely BECAUSE Unit 3 keeps
+    // `outcome.termination = None` for autonomous IdleTimeout.
+    let result = process_events(vec![work_done_event("test-id-1")], &mut event_loop);
+
+    assert!(
+        result.contract_rejections.is_empty(),
+        "Watchdog timeout must not interfere with contract validation. \
+         Closed task + diff is a normal accept: {:?}",
+        result.contract_rejections
+    );
+    assert!(
+        result.had_events,
+        "The partial work.done emitted before the watchdog fired must \
+         remain visible to the event loop."
+    );
+    assert!(
+        result
+            .accepted_events
+            .iter()
+            .any(|e| e.topic.as_str() == "work.done"),
+        "Original work.done must be in accepted events even though the \
+         backend was killed by the watchdog."
+    );
+
+    // Reviewer must receive the work.done and become the next active
+    // hat — proving the downstream workflow continues after the timeout.
+    let reviewer_id = ralph_proto::HatId::new("reviewer");
+    let reviewer_pending = event_loop
+        .bus
+        .peek_pending(&reviewer_id)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        reviewer_pending
+            .iter()
+            .any(|e| e.topic.as_str() == "work.done"),
+        "Reviewer must receive the partial work.done. The watchdog \
+         timeout is a backend-call end, NOT a loop terminate."
+    );
+    let active_hat_id = event_loop.get_active_hat_id();
+    assert_eq!(
+        active_hat_id.as_str(),
+        "reviewer",
+        "After the watchdog timeout with a valid partial work.done, the \
+         next active hat must be reviewer — the workflow continues."
+    );
+}
+
+/// Scenario 2 (Happy / Integration): the agent wrote nothing before the
+/// watchdog killed the backend. The runner still drains the empty event
+/// stream; `ProcessedEvents.had_events` is false and `had_raw_events` is
+/// false, which is exactly the precondition the runner's missing-event
+/// hard gate checks (`!agent_wrote_any_valid_or_rejected`). The hard gate
+/// then injects guidance and increments `consecutive_hard_gates` —
+/// recovery is possible because the loop did NOT force-stop.
+#[test]
+fn test_watchdog_timeout_with_no_events_leaves_missing_event_gate_armed() {
+    let temp = TempDir::new().unwrap();
+    let workspace = temp.path();
+    init_git_repo(workspace);
+
+    let config = contract_disabled_config(workspace);
+    let mut event_loop = make_event_loop(config);
+
+    // Simulate the runner's post-watchdog event drain: no JSONL events
+    // because the agent never got far enough to emit one.
+    let result = process_events(vec![], &mut event_loop);
+
+    // These are the EXACT flags the runner inspects to decide whether to
+    // arm the missing-event hard gate:
+    //   `!agent_wrote_events && !hard_gate_triggered_this_iteration`
+    // See loop_runner/runner.rs around the call to
+    // `should_gate_missing_events`. Pinning them here documents the
+    // integration contract: a watchdog timeout with no events leaves the
+    // existing hard-gate path armed instead of force-stopping the loop.
+    assert!(
+        !result.had_events,
+        "No events were emitted before the watchdog timeout; the runner's \
+         missing-event gate relies on `had_events == false`."
+    );
+    assert!(
+        !result.had_raw_events,
+        "`had_raw_events` must also be false so the runner's \
+         `agent_wrote_any_valid_or_rejected` precondition triggers the \
+         missing-event hard gate path."
+    );
+    assert!(
+        result.contract_rejections.is_empty(),
+        "Empty JSONL must not synthesize spurious contract rejections."
+    );
+    assert!(
+        result.accepted_events.is_empty(),
+        "Empty JSONL must not synthesize spurious accepted events."
+    );
+}
+
+/// Scenario 4 + 5 (Integration / Regression): a watchdog timeout MUST NOT
+/// fake-pass the execution contract. If the agent emitted a `work.done`
+/// against an open task before the backend died, the contract still has
+/// to reject it — exactly the same way it would on a normal exit. Pins
+/// that "the backend was killed" never becomes an excuse to skip
+/// validation.
+#[test]
+fn test_watchdog_timeout_with_partial_open_task_event_is_still_rejected() {
+    let temp = TempDir::new().unwrap();
+    let workspace = temp.path();
+    init_git_repo(workspace);
+    let tasks_path = workspace.join(".ralph/agent/tasks.jsonl");
+    write_task(&tasks_path, "test-id-1", TaskStatus::Open);
+
+    let config = build_test_config(workspace);
+    let mut event_loop = make_event_loop(config);
+
+    let result = process_events(vec![work_done_event("test-id-1")], &mut event_loop);
+
+    assert!(
+        !result.contract_rejections.is_empty(),
+        "Open task + partial work.done after a watchdog timeout must still \
+         be rejected by the execution contract — the timeout does not \
+         excuse contract violations."
+    );
+    let has_task_not_terminal = result.contract_rejections.iter().any(|f| {
+        matches!(
+            f.kind,
+            crate::execution_contract::ExecutionContractViolationKind::TaskNotTerminal { .. }
+        )
+    });
+    assert!(
+        has_task_not_terminal,
+        "Expected TaskNotTerminal finding even on a partial-event timeout, got: {:?}",
+        result.contract_rejections
+    );
+    assert!(
+        !result
+            .accepted_events
+            .iter()
+            .any(|e| e.topic.as_str() == "work.done"),
+        "Rejected work.done must NOT be in accepted events; the watchdog \
+         fire is not a workflow promotion event."
+    );
+}

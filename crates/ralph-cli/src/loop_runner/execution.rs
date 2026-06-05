@@ -5,6 +5,16 @@ pub(crate) struct ExecutionOutcome {
     pub output: String,
     pub success: bool,
     pub termination: Option<TerminationReason>,
+    /// Whether the backend was terminated by a watchdog timeout
+    /// (PTY `IdleTimeout` or `CliExecutor` `timed_out`).
+    ///
+    /// Unit 3 of plan 2026-06-06-001: watchdog timeout is a backend-call end,
+    /// NOT a loop terminate. The runner uses this flag to surface the cause
+    /// in logs while still letting `process_output` / `process_events_from_jsonl`
+    /// drive the partial-event / missing-event / hard-gate pipeline. If no
+    /// partial events arrived, the existing missing-event hard gate / fallback
+    /// path will fire on the next iteration.
+    pub watchdog_timeout: bool,
     pub total_cost_usd: f64,
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -114,6 +124,7 @@ pub async fn execute_acp(
         output,
         success: pty_result.success,
         termination: None,
+        watchdog_timeout: false,
         total_cost_usd: pty_result.total_cost_usd,
         input_tokens: pty_result.input_tokens,
         output_tokens: pty_result.output_tokens,
@@ -249,6 +260,10 @@ pub async fn execute_pty(
 
     match result {
         Ok(pty_result) => {
+            let watchdog_timeout = matches!(
+                pty_result.termination,
+                ralph_adapters::TerminationType::IdleTimeout
+            );
             let termination = convert_termination_type(pty_result.termination, interactive);
 
             // Use extracted_text for event parsing when available (NDJSON backends like Claude),
@@ -264,6 +279,7 @@ pub async fn execute_pty(
                 output: output_for_parsing,
                 success: pty_result.success,
                 termination,
+                watchdog_timeout,
                 total_cost_usd: pty_result.total_cost_usd,
                 input_tokens: pty_result.input_tokens,
                 output_tokens: pty_result.output_tokens,

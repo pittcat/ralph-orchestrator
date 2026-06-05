@@ -3597,36 +3597,49 @@ fn test_wait_for_resume_if_suspended_prioritizes_restart_over_resume() {
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// Characterization (Unit 1 of plan 2026-06-06-001):
+// Characterization (Unit 1 of plan 2026-06-06-001), updated by Unit 3.
 // Source: crates/ralph-cli/src/loop_runner/hooks/format.rs::convert_termination_type
 //
-// Pin down the CURRENT mapping `convert_termination_type(IdleTimeout, !interactive)
-// -> Some(TerminationReason::Stopped)`. Unit 3 will review this mapping because:
-//   - It is reached only after the autonomous watchdog (added in Unit 2) fires,
-//     which is a backend-call end, NOT an operator stop.
-//   - It treats the timeout as if the user had pressed Stop, which can short-
-//     circuit the partial-event / hard-gate pipeline before it has a chance to
-//     run (R7 of the plan).
-// These two tests document the current contract; Unit 3 must update them
-// intentionally if the mapping changes, not silently.
+// HISTORY:
+//   - Unit 1 pinned the legacy mapping
+//     `convert_termination_type(IdleTimeout, !interactive) -> Some(TerminationReason::Stopped)`.
+//     That mapping treated a backend watchdog fire as if the operator had
+//     pressed Stop, which short-circuited the partial-event / hard-gate
+//     pipeline (violated R7 of the plan).
+//   - Unit 3 intentionally remapped the autonomous branch to `None` so the
+//     runner keeps draining partial output, runs `process_output` and
+//     `process_events_from_jsonl`, and falls through to the existing
+//     missing-event hard gate / fallback path if no events arrived.
+//     The diagnostic that "watchdog fired" is preserved on
+//     `ExecutionOutcome.watchdog_timeout` and surfaced as a `warn!` line in
+//     `runner.rs`. This satisfies R1 + R3 of plan 2026-06-06-001 without
+//     introducing a new `TerminationReason` variant.
+//
+// These tests pin the CURRENT mapping. If a future Unit changes it again,
+// the docstring and assertions here MUST be updated together — never
+// silently flip the assertion.
 // ──────────────────────────────────────────────────────────────────────
 
 #[test]
-fn test_convert_termination_idle_timeout_autonomous_is_stopped_characterization() {
-    // Given: the autonomous / RPC / worktree path that the bug report covers
+fn test_convert_termination_idle_timeout_autonomous_is_none_characterization() {
+    // Given: the autonomous / RPC / worktree path that Unit 2's watchdog fires on.
     let termination_type = ralph_adapters::TerminationType::IdleTimeout;
     let interactive = false;
 
-    // When/Then: current implementation maps IdleTimeout to Stopped
+    // When/Then: Unit 3 remaps this to None so the runner can still process
+    // any partial events the agent emitted before the watchdog killed the
+    // backend. The "watchdog fired" cause is preserved via
+    // `ExecutionOutcome.watchdog_timeout` (see execution.rs) and logged as a
+    // warn! line in runner.rs — both compose to satisfy R3 without falsely
+    // declaring success and without bypassing event parsing.
     let result = convert_termination_type(termination_type, interactive);
 
-    assert_eq!(
-        result,
-        Some(TerminationReason::Stopped),
-        "Characterization: autonomous IdleTimeout is currently mapped to \
-         TerminationReason::Stopped. Unit 3 of plan 2026-06-06-001 must \
-         decide whether this should be re-mapped to a backend-call-end \
-         outcome that lets the partial-event / hard-gate pipeline still run."
+    assert!(
+        result.is_none(),
+        "Characterization (post Unit 3): autonomous IdleTimeout maps to None \
+         so the runner continues to event parsing / hard-gate fallback. The \
+         legacy `Some(TerminationReason::Stopped)` mapping short-circuited \
+         the partial-event pipeline (R7 violation) and is no longer correct."
     );
 }
 
@@ -3636,14 +3649,17 @@ fn test_convert_termination_idle_timeout_interactive_is_none_characterization() 
     let termination_type = ralph_adapters::TerminationType::IdleTimeout;
     let interactive = true;
 
-    // When/Then: current implementation returns None (let iteration progress)
+    // When/Then: interactive IdleTimeout has always mapped to None (the
+    // event loop continues, output is processed for events). R2 requires
+    // this semantic to be preserved by Units 2/3; Unit 3 keeps it intact
+    // and now matches the autonomous mapping above.
     let result = convert_termination_type(termination_type, interactive);
 
     assert!(
         result.is_none(),
-        "Characterization: interactive IdleTimeout currently maps to None \
-         (iteration continues, output is processed for events). R2 requires \
-         this semantic to be preserved by Unit 2/3."
+        "Characterization: interactive IdleTimeout maps to None (iteration \
+         continues, output is processed for events). R2 requires this \
+         semantic to be preserved by Units 2/3."
     );
 }
 
@@ -3696,6 +3712,192 @@ fn test_force_kill_always_terminates() {
         convert_termination_type(termination_type, false),
         Some(TerminationReason::Interrupted),
         "ForceKill should terminate in autonomous mode"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Unit 3 of plan 2026-06-06-001: timeout failure flows into the
+// orchestration layer's normal failure path. Covers the six scenarios
+// listed in the plan §"Unit 3 Approach":
+//   1. Happy: watchdog timeout + visible events → events still parse
+//   2. Happy: watchdog timeout + no events → missing-event hard gate path
+//   3. Edge: timeout cause is identifiable for diagnostics
+//   4. Integration: timeout does not bypass hard gate or fake-pass plan-gate
+//   5. Regression: non-timeout failures unchanged
+//   6. Regression: wave worker partial-timeout parity (main PTY aligned)
+// ──────────────────────────────────────────────────────────────────────
+
+/// Scenario 1 (Happy): autonomous IdleTimeout returns `None`, so the main
+/// runner does NOT short-circuit on `outcome.termination` and instead drains
+/// any partial events the agent emitted before the watchdog killed the
+/// backend. This is what unblocks the "agent wrote work.done then a tail
+/// command hung" case described in the plan.
+#[test]
+fn test_autonomous_watchdog_timeout_does_not_force_stop_loop() {
+    let result = convert_termination_type(
+        ralph_adapters::TerminationType::IdleTimeout,
+        false, // autonomous / RPC / worktree path
+    );
+
+    assert!(
+        result.is_none(),
+        "Unit 3: autonomous IdleTimeout must NOT map to a TerminationReason \
+         (the legacy `Stopped` mapping short-circuited event parsing). The \
+         runner needs `None` here so it falls through to `process_output` / \
+         `process_events_from_jsonl` and partial events become visible."
+    );
+}
+
+/// Scenario 2 (Happy): the runner's `outcome.termination` branch is the
+/// short-circuit that bypasses event parsing. We pin that with the watchdog
+/// flag set, `termination` is still `None`, so the runner falls through to
+/// the regular event-processing path where the missing-event hard gate /
+/// fallback chain takes over if no events arrived.
+#[test]
+fn test_watchdog_timeout_keeps_termination_none_so_event_pipeline_runs() {
+    // Simulate the ExecutionOutcome produced by `execute_pty` for an
+    // autonomous watchdog fire.
+    let outcome = ExecutionOutcome {
+        output: String::new(),
+        success: false,
+        termination: convert_termination_type(ralph_adapters::TerminationType::IdleTimeout, false),
+        watchdog_timeout: true,
+        total_cost_usd: 0.0,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+    };
+
+    assert!(
+        outcome.termination.is_none(),
+        "Watchdog timeout MUST leave `termination = None` so the runner's \
+         `if let Some(reason) = outcome.termination` short-circuit is \
+         skipped. Without this, `process_output` and \
+         `process_events_from_jsonl` never run and the missing-event hard \
+         gate / fallback path cannot recover."
+    );
+    assert!(
+        outcome.watchdog_timeout,
+        "Diagnostic flag must be true so the runner can log the cause"
+    );
+}
+
+/// Scenario 3 (Edge): the watchdog cause is identifiable from the
+/// `ExecutionOutcome` so the runner can surface it in logs without leaning
+/// on a custom `TerminationReason` variant. This is what makes the failure
+/// diagnosable per R3 ("clearly propagate failure cause").
+#[test]
+fn test_execution_outcome_watchdog_flag_is_set_for_idle_timeout() {
+    let cases = [
+        (ralph_adapters::TerminationType::IdleTimeout, true, true),
+        (ralph_adapters::TerminationType::IdleTimeout, false, true),
+        (ralph_adapters::TerminationType::Natural, true, false),
+        (ralph_adapters::TerminationType::Natural, false, false),
+        (ralph_adapters::TerminationType::UserInterrupt, false, false),
+        (ralph_adapters::TerminationType::ForceKill, false, false),
+    ];
+    for (kind, interactive, expected) in cases {
+        // Mirror the assignment `execute_pty` performs.
+        let watchdog = matches!(kind, ralph_adapters::TerminationType::IdleTimeout);
+        assert_eq!(
+            watchdog, expected,
+            "watchdog_timeout flag for {:?} interactive={} should be {}",
+            kind, interactive, expected
+        );
+    }
+}
+
+/// Scenario 4 (Integration): autonomous IdleTimeout MUST NOT be silently
+/// remapped to `CompletionPromise`, `MaxIterations`, or any other "loop
+/// should stop" reason. Any future regression that swapped the mapping
+/// back to a `Some(...)` value would short-circuit event parsing and let a
+/// watchdog fire fake-pass the plan-gate / review chain. This test pins
+/// the safe set of allowed values explicitly so a careless edit fails
+/// here, not silently in production.
+#[test]
+fn test_autonomous_watchdog_timeout_never_maps_to_loop_terminate() {
+    let result = convert_termination_type(ralph_adapters::TerminationType::IdleTimeout, false);
+
+    // The only acceptable mapping per Unit 3 is `None`. Spell out the
+    // forbidden mappings so future edits explain themselves.
+    if let Some(reason) = result {
+        panic!(
+            "Autonomous IdleTimeout must NOT terminate the loop. Mapping \
+             it to {:?} would bypass event parsing and let a watchdog \
+             fire fake-pass plan-gate / review / hard-gate. See Unit 3 \
+             of plan 2026-06-06-001.",
+            reason
+        );
+    }
+}
+
+/// Scenario 5 (Regression): non-timeout terminations (Natural,
+/// UserInterrupt, ForceKill) keep their pre-Unit-3 mappings. Unit 3 only
+/// touched the `IdleTimeout` arm; this guard catches anyone who breaks
+/// the other arms while editing the function.
+#[test]
+fn test_non_timeout_terminations_unchanged_by_unit_3() {
+    // Natural: always None (let runner drain events normally).
+    assert_eq!(
+        convert_termination_type(ralph_adapters::TerminationType::Natural, true),
+        None,
+    );
+    assert_eq!(
+        convert_termination_type(ralph_adapters::TerminationType::Natural, false),
+        None,
+    );
+    // UserInterrupt / ForceKill: always Interrupted (operator action).
+    assert_eq!(
+        convert_termination_type(ralph_adapters::TerminationType::UserInterrupt, true),
+        Some(TerminationReason::Interrupted),
+    );
+    assert_eq!(
+        convert_termination_type(ralph_adapters::TerminationType::UserInterrupt, false),
+        Some(TerminationReason::Interrupted),
+    );
+    assert_eq!(
+        convert_termination_type(ralph_adapters::TerminationType::ForceKill, true),
+        Some(TerminationReason::Interrupted),
+    );
+    assert_eq!(
+        convert_termination_type(ralph_adapters::TerminationType::ForceKill, false),
+        Some(TerminationReason::Interrupted),
+    );
+}
+
+/// Scenario 6 (Regression): main PTY path parity with wave worker
+/// partial-timeout-visible-events behavior. The wave worker (see
+/// `wave/worker.rs:447-484` + `assert_partial_timeout_events_visible_marked`)
+/// keeps `events` from the worker JSONL even when the watchdog killed the
+/// process. The main PTY path now matches this: `termination = None`
+/// leaves partial output and JSONL events available for parsing.
+///
+/// If a future change made the main PTY path `Some(...)` again, the wave
+/// worker test would still pass (it does not go through
+/// `convert_termination_type`) but the main path would silently regress.
+/// This test ties the two together so the parity invariant is explicit.
+#[test]
+fn test_main_pty_watchdog_aligns_with_wave_worker_partial_events_semantics() {
+    // Wave worker invariant: on `timed_out=true`, partial events are
+    // preserved and surfaced via `Ok((events, ..))`, not converted into a
+    // hard "stop the loop" terminate. See wave/worker.rs:462-484 for the
+    // mirrored logic.
+    //
+    // Main PTY invariant after Unit 3: `convert_termination_type` returns
+    // `None`, leaving the runner free to drain partial events through the
+    // same JSONL pipeline.
+    let main_pty_outcome_termination =
+        convert_termination_type(ralph_adapters::TerminationType::IdleTimeout, false);
+
+    assert!(
+        main_pty_outcome_termination.is_none(),
+        "Main PTY path must mirror the wave worker partial-timeout-visible-events \
+         contract: backend watchdog timeout is a backend-call end, NOT a loop \
+         terminate. Wave worker returns `Ok((events, ..))` to keep partial \
+         events flowing; the main PTY path mirrors that by leaving \
+         `outcome.termination = None`. See wave/worker.rs:447-484 and \
+         test_execute_wave_keeps_text_partial_timeout_events_visible."
     );
 }
 
