@@ -1,8 +1,7 @@
 use crate::Cli;
 use anyhow::Result;
 use clap::{CommandFactory, Parser};
-use clap_complete::generate;
-use std::io::{ErrorKind, Write};
+use std::io::Write;
 
 /// Arguments for the completions subcommand.
 #[derive(Parser, Debug)]

@@ -23,12 +23,16 @@ mod suspend;
 mod wave;
 
 pub(crate) use execution::ExecutionOutcome;
-pub(crate) use loop_owner::{register_loop_owner, register_loop_owner_with_hat};
+pub(crate) use loop_owner::register_loop_owner;
+#[cfg(test)]
+pub(crate) use loop_owner::register_loop_owner_with_hat;
 pub use merge_queue::process_pending_merges_cli;
 pub use payload_contract_gate::{
     enforce_payload_contract_gate, write_payload_contract_violation_report,
 };
 pub use runner::run_loop_impl;
+#[cfg(test)]
+pub use runner::resolve_loop_id;
 pub use start_loop::start_loop;
 
 // Re-export all other module items for internal use and test access
@@ -41,10 +45,8 @@ pub use late_events::*;
 pub use merge_queue::*;
 pub use output_parsing::*;
 pub use paths::*;
-pub use payload_contract_gate::*;
 pub use payload_inputs::*;
 pub use prompt::*;
-pub use runner::*;
 pub use start_loop::*;
 pub use suspend::*;
 pub use wave::*;
@@ -65,9 +67,8 @@ use ralph_core::payload_contract::validate_payload_contract;
 use ralph_adapters::{
     AcpExecutor, ClaudeStreamEvent, ClaudeStreamParser, CliBackend, CliExecutor,
     ConsoleStreamHandler, ContentBlock, CopilotStreamParser, JsonRpcStreamHandler,
-    OutputFormat as BackendOutputFormat, PiAssistantEvent, PiContentBlock, PiStreamEvent,
-    PiStreamParser, PrettyStreamHandler, PtyConfig, PtyExecutor, QuietStreamHandler, StreamHandler,
-    TuiStreamHandler,
+    OutputFormat as BackendOutputFormat, PiAssistantEvent, PiStreamEvent, PiStreamParser,
+    PrettyStreamHandler, PtyConfig, PtyExecutor, QuietStreamHandler, TuiStreamHandler,
 };
 use ralph_core::diagnostics::{HookDisposition, HookRunTelemetryEntry};
 use ralph_core::{
@@ -89,14 +90,11 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
-use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Span};
-
 use crate::cli::process_management;
 use crate::cli::{ColorMode, Verbosity};
 use crate::display::{
     build_tui_hat_map, print_iteration_footer, print_iteration_separator, print_loop_banner,
-    print_termination, print_wave_header, print_wave_summary, print_wave_worker_done,
+    print_termination,
 };
 use crate::rpc_stdin::{GuidanceMessage, RpcDispatcher, run_stdin_reader, run_stdout_emitter};
 

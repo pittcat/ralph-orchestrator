@@ -1,6 +1,6 @@
 use crate::cli::{ColorMode, OutputFormat, resolve_marker_target, resolve_workspace_root};
 use crate::display::colors;
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use clap::Parser;
 use ralph_core::EventHistory;
 use std::fs;

@@ -5,7 +5,6 @@ use crate::preflight;
 use anyhow::{Context, Result};
 use clap::Parser;
 use ralph_adapters::detect_backend;
-use ralph_core::{LoopContext, RalphConfig, TerminationReason};
 use std::path::PathBuf;
 use tracing::info;
 

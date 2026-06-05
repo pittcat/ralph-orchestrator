@@ -4,12 +4,12 @@ use crate::cli::{
 };
 use crate::config_resolution;
 use crate::display::colors;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::Parser;
-use ralph_core::{PolicyRuntimeState, RalphConfig, UrgentSteerStore, validate_event};
+use ralph_core::{RalphConfig, UrgentSteerStore};
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Arguments for the emit subcommand.
 #[derive(Parser, Debug)]
@@ -76,7 +76,7 @@ where
 
 /// Determines whether and how a CLI emit should undergo policy validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PolicyCheckMode {
+pub enum PolicyCheckMode {
     /// Skip policy check entirely.
     Skip,
     /// User explicitly requested `--policy-check`.

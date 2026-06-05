@@ -46,10 +46,12 @@ use clap::{ArgAction, Parser, Subcommand};
 
 // Shared CLI infrastructure layer (U4 step-01 extraction).
 use crate::cli::{
-    ColorMode, ConfigSource, HatsSource, OutputFormat, apply_config_overrides, default_config_path,
+    ColorMode, ConfigSource, HatsSource, apply_config_overrides, default_config_path,
     ensure_scratchpad_directory, install_panic_hook, load_config_with_overrides,
     resolve_path_from_workspace, resolve_workspace_root,
 };
+#[cfg(test)]
+use crate::cli::OutputFormat;
 
 /// Ralph Orchestrator - Multi-agent orchestration framework
 #[derive(Parser, Debug)]

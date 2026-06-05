@@ -13,7 +13,7 @@ pub struct TutorialArgs {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct TutorialStep {
+pub(crate) struct TutorialStep {
     title: &'static str,
     body: &'static [&'static str],
 }

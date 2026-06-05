@@ -1,7 +1,5 @@
 use crate::cli::{ColorMode, ConfigSource, HatsSource};
 use crate::display::colors;
-use crate::preflight;
-use crate::sop_runner::{Sop, SopRunConfig, SopRunError};
 use anyhow::Result;
 use clap::Parser;
 

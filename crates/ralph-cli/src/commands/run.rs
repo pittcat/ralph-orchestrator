@@ -1,11 +1,11 @@
 use crate::cli::{
-    ColorMode, ConfigSource, HatsSource, Verbosity, default_config_path,
-    ensure_scratchpad_directory, load_config_with_overrides, resolve_workspace_root,
+    ColorMode, ConfigSource, HatsSource, Verbosity,
+    ensure_scratchpad_directory,
 };
-use crate::display::{colors, truncate};
+use crate::display::truncate;
 use crate::loop_runner;
 use crate::preflight;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::Parser;
 use ralph_adapters::detect_backend;
 use ralph_core::{
@@ -14,7 +14,6 @@ use ralph_core::{
     truncate_with_ellipsis,
     worktree::{WorktreeConfig, create_worktree, ensure_gitignore, remove_worktree},
 };
-use std::fs;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
