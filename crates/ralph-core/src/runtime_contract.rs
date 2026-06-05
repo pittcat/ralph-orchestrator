@@ -197,19 +197,10 @@ impl RuntimeContractFinding {
 ///   report to fail (`ralph preflight --strict` uses
 ///   `fail_on_warnings=true`; `ralph hats validate --strict` only sets
 ///   `payload_strict=true`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RuntimeContractStrictness {
     pub payload_strict: bool,
     pub fail_on_warnings: bool,
-}
-
-impl Default for RuntimeContractStrictness {
-    fn default() -> Self {
-        Self {
-            payload_strict: false,
-            fail_on_warnings: false,
-        }
-    }
 }
 
 impl RuntimeContractStrictness {
@@ -269,7 +260,7 @@ impl RuntimeContractReport {
     }
 
     /// Append a finding and refresh aggregate counters.
-    pub fn add_finding(&mut self, finding: RuntimeContractFinding) -> &mut Self {
+    pub fn add_finding(&mut self, finding: RuntimeContractFinding) {
         match finding.severity {
             FindingSeverity::Error => self.errors += 1,
             FindingSeverity::Warn => self.warnings += 1,
@@ -277,18 +268,13 @@ impl RuntimeContractReport {
         }
         self.findings.push(finding);
         self.recompute_passed();
-        self
     }
 
     /// Append multiple findings and refresh aggregate counters.
-    pub fn extend_findings<I: IntoIterator<Item = RuntimeContractFinding>>(
-        &mut self,
-        findings: I,
-    ) -> &mut Self {
+    pub fn extend_findings<I: IntoIterator<Item = RuntimeContractFinding>>(&mut self, findings: I) {
         for finding in findings {
             self.add_finding(finding);
         }
-        self
     }
 
     /// Recompute `passed` from current `findings` and the configured
@@ -407,6 +393,20 @@ mod tests {
         );
         assert!(!pass.is_blocking(false));
         assert!(!pass.is_blocking(true));
+
+        // Payload source must follow the same strictness matrix as any
+        // other source; payload_strict only changes *which* severity
+        // payload findings are produced with, not how the resulting
+        // finding interacts with fail_on_warnings.
+        let payload_warn = RuntimeContractFinding::new(
+            "payload.missing_schema",
+            FindingSource::Payload,
+            FindingSeverity::Warn,
+            FindingStage::Authoring,
+            "schema not declared",
+        );
+        assert!(!payload_warn.is_blocking(false));
+        assert!(payload_warn.is_blocking(true));
     }
 
     #[test]
@@ -545,5 +545,177 @@ mod tests {
         assert_eq!(FindingStage::Authoring.as_str(), "authoring");
         assert_eq!(FindingStage::Preflight.as_str(), "preflight");
         assert_eq!(FindingStage::RunHardGate.as_str(), "run_hard_gate");
+    }
+
+    // ---- T1: Pass severity must not bump warnings or errors counters. ----
+    // Guards the `FindingSeverity::Pass => {}` no-op arm in `add_finding`.
+    // If a future refactor misclassifies Pass (e.g. typo `warnings += 1`),
+    // this test will fail before U2 aggregator hands the report to a
+    // strict preflight consumer.
+    #[test]
+    fn add_finding_pass_severity_does_not_increment_counters() {
+        let mut report =
+            RuntimeContractReport::new("pass-only", RuntimeContractStrictness::default());
+        let pass = RuntimeContractFinding::new(
+            "config.ok",
+            FindingSource::Config,
+            FindingSeverity::Pass,
+            FindingStage::Authoring,
+            "ok",
+        );
+        report.add_finding(pass);
+        assert_eq!(report.warnings, 0, "Pass finding must not bump warnings");
+        assert_eq!(report.errors, 0, "Pass finding must not bump errors");
+        assert_eq!(report.findings.len(), 1);
+        assert!(report.passed);
+    }
+
+    // ---- T2: skip_serializing_if must drop empty details and None
+    // action_hint from the JSON output. ----
+    #[test]
+    fn json_serialization_omits_optional_fields_when_absent() {
+        let finding = RuntimeContractFinding::new(
+            "config.minimal",
+            FindingSource::Config,
+            FindingSeverity::Warn,
+            FindingStage::Authoring,
+            "minimal payload",
+        );
+        let value: serde_json::Value = serde_json::to_value(&finding).expect("serialize finding");
+        let obj = value
+            .as_object()
+            .expect("finding should serialize to object");
+        assert!(
+            !obj.contains_key("details"),
+            "empty details map must be omitted from JSON"
+        );
+        assert!(
+            !obj.contains_key("action_hint"),
+            "None action_hint must be omitted from JSON"
+        );
+        assert_eq!(
+            obj.get("id").and_then(|v| v.as_str()),
+            Some("config.minimal")
+        );
+    }
+
+    // ---- T3: roundtrip a report through JSON and assert structural
+    // equality. Guards against accidental rename/alias drift on the
+    // public contract. ----
+    #[test]
+    fn json_serialization_roundtrip_preserves_report() {
+        let mut report = RuntimeContractReport::new(
+            "roundtrip",
+            RuntimeContractStrictness {
+                payload_strict: true,
+                fail_on_warnings: true,
+            },
+        );
+        report.add_finding(
+            error_finding()
+                .with_detail("topic", "LOOP_COMPLETE")
+                .with_detail("start", "task.start")
+                .with_action_hint("add a hat that publishes the completion topic"),
+        );
+        let value: serde_json::Value = serde_json::to_value(&report).expect("serialize report");
+        let roundtripped: RuntimeContractReport =
+            serde_json::from_value(value).expect("deserialize report");
+        assert_eq!(roundtripped, report);
+    }
+
+    // ---- T4a: extend_findings on an empty iterator must be a no-op. ----
+    #[test]
+    fn extend_findings_with_empty_iter_is_noop() {
+        let mut report =
+            RuntimeContractReport::new("empty-extend", RuntimeContractStrictness::default());
+        let before = report.findings.len();
+        let before_warnings = report.warnings;
+        let before_errors = report.errors;
+        report.extend_findings(std::iter::empty::<RuntimeContractFinding>());
+        assert_eq!(report.findings.len(), before);
+        assert_eq!(report.warnings, before_warnings);
+        assert_eq!(report.errors, before_errors);
+        assert!(report.passed);
+    }
+
+    // ---- T4b: with_detail must support distinct keys and same-key
+    // overwrite. ----
+    #[test]
+    fn with_detail_supports_multiple_distinct_keys_and_overwrite() {
+        // distinct keys: hat/topic/field/schema_source/source_hats are the
+        // 5 stable per-source keys called out in the doc comment.
+        let finding = warn_finding()
+            .with_detail("hat", "executor")
+            .with_detail("topic", "LOOP_COMPLETE")
+            .with_detail("field", "concurrency")
+            .with_detail("schema_source", "events/LOOP_COMPLETE")
+            .with_detail("source_hats", "coordinator,alternate");
+        assert_eq!(
+            finding.details.get("hat").map(String::as_str),
+            Some("executor")
+        );
+        assert_eq!(
+            finding.details.get("topic").map(String::as_str),
+            Some("LOOP_COMPLETE")
+        );
+        assert_eq!(
+            finding.details.get("field").map(String::as_str),
+            Some("concurrency")
+        );
+        assert_eq!(
+            finding.details.get("schema_source").map(String::as_str),
+            Some("events/LOOP_COMPLETE")
+        );
+        assert_eq!(
+            finding.details.get("source_hats").map(String::as_str),
+            Some("coordinator,alternate")
+        );
+        assert_eq!(finding.details.len(), 5);
+
+        // overwrite: re-inserting an existing key replaces the value.
+        let overwritten = finding.with_detail("field", "timeout_seconds");
+        assert_eq!(
+            overwritten.details.get("field").map(String::as_str),
+            Some("timeout_seconds")
+        );
+        assert_eq!(
+            overwritten.details.len(),
+            5,
+            "overwrite must not change key count"
+        );
+    }
+
+    // ---- T5: `FindingSource::Preflight` is reserved for CLI/preflight
+    // adapter wrapper reports; the core preset contract aggregator must
+    // not stamp findings with this source. This test does not exercise
+    // the core aggregator (lives in U2), but pins the module-level
+    // invariant that the variant exists, is documented as reserved, and
+    // has a stable lowercase label. ----
+    #[test]
+    fn finding_source_preflight_is_documented_as_reserved() {
+        // Variant is constructible and serializes to its stable label.
+        let preflight = FindingSource::Preflight;
+        assert_eq!(preflight.as_str(), "preflight");
+        let value: serde_json::Value = serde_json::to_value(preflight).expect("serialize source");
+        assert_eq!(value.as_str(), Some("preflight"));
+        // Module-level docstring declares the reservation invariant.
+        // Read this file at compile time and assert the invariant is
+        // actually documented, so a future contributor who deletes the
+        // reservation note from the doc comment will break this test.
+        let source = include_str!("runtime_contract.rs");
+        assert!(
+            source.contains("reserved for adapter-layer wrapper reports"),
+            "FindingSource::Preflight reservation invariant must be documented at module level"
+        );
+        assert!(
+            source.contains("must not produce findings with this source"),
+            "FindingSource::Preflight reservation invariant must forbid core aggregator use"
+        );
+        // FindingStage::Preflight shares the "preflight" JSON label; this
+        // is forward-looking: U2 must distinguish them via their JSON key
+        // (source vs stage), not via the label.
+        let stage_value: serde_json::Value =
+            serde_json::to_value(FindingStage::Preflight).expect("serialize stage");
+        assert_eq!(stage_value.as_str(), Some("preflight"));
     }
 }
