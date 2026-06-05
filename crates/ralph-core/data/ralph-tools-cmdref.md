@@ -138,7 +138,8 @@ ralph run [OPTIONS] [-- <CUSTOM_ARGS>...]
 | `--skip-preflight` | flag | 否 | — | 跳过预检检查 |
 | `--warmup-only` | flag | 否 | — | 仅预热后退出（不执行编排） |
 | `--force-warmup` | flag | 否 | — | 即使未启用也强制后端预热 |
-| `--idle-timeout <SECONDS>` | int | 否 | — | 无活动时的超时秒数 |
+| `--idle-timeout <SECONDS>` | int | 否 | — | interactive 模式无活动超时秒数；`0` 表示禁用 |
+| `--autonomous-idle-timeout <SECONDS>` | int | 否 | adapter timeout | autonomous / RPC / worktree 后端无输出 watchdog；`0` 表示禁用 |
 | `--completion-promise <TEXT>` | string | 否 | — | 输出完成承诺文本（quiet 模式时仍可见） |
 | `--rpc` | flag | 否 | — | 启用 RPC 后端连接 |
 | `-v, --verbose` | flag | 否 | — | 详细输出 |

@@ -95,7 +95,8 @@ ralph run [OPTIONS]
 | `--dry-run` | Show what would execute |
 | `--no-tui` | Disable TUI mode |
 | `-a, --autonomous` | Force headless mode |
-| `--idle-timeout <SECS>` | TUI idle timeout |
+| `--idle-timeout <SECS>` | Interactive-mode idle timeout; `0` disables it |
+| `--autonomous-idle-timeout <SECS>` | Autonomous/RPC/worktree backend inactivity watchdog; defaults to adapter timeout, `0` disables it |
 | `--exclusive` | Wait for primary loop slot (conflicts with `--worktree`) |
 | `--worktree` | Create isolated git worktree for this run at `.worktrees/<loop-id>/`. The worktree and branch are preserved after completion for manual merge or cleanup. Conflicts with `--exclusive` |
 | `--no-auto-merge` | Skip automatic merge after worktree loops complete |

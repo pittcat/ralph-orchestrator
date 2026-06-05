@@ -117,7 +117,6 @@ event_loop:
   completion_promise: "LOOP_COMPLETE"  # Output that signals completion
   max_iterations: 100                   # Maximum orchestration loops
   max_runtime_seconds: 14400            # 4 hours max runtime
-  idle_timeout_secs: 1800               # 30 min idle timeout
   starting_event: "task.start"          # First event published (hat mode)
   checkpoint_interval: 5                # Git checkpoint frequency
   prompt_file: "PROMPT.md"              # Default prompt file
@@ -126,6 +125,8 @@ event_loop:
 cli:
   backend: "claude"                     # Backend name
   prompt_mode: "arg"                    # arg or stdin
+  idle_timeout_secs: 30                 # Interactive-mode idle timeout; 0 disables
+  autonomous_idle_timeout_secs: null    # Autonomous/RPC/worktree watchdog; null inherits adapter timeout, 0 disables
 
 # Core behaviors
 core:
@@ -216,13 +217,17 @@ Controls the orchestration loop behavior.
 | `completion_promise` | string | `"LOOP_COMPLETE"` | Output text that ends the loop |
 | `max_iterations` | integer | `100` | Maximum iterations before stopping |
 | `max_runtime_seconds` | integer | `14400` | Maximum runtime (4 hours) |
-| `idle_timeout_secs` | integer | `1800` | Idle timeout (30 minutes) |
 | `starting_event` | string | `null` | First event (enables hat mode) |
 | `checkpoint_interval` | integer | `5` | Git checkpoint frequency |
 | `prompt_file` | string | `"PROMPT.md"` | Default prompt file |
 | `execution_mode` | string | `"coordinator"` | Hat execution mode: `coordinator` or `isolated` |
 | `workflow_guards` | object | `null` | Ordered event chain enforcement (see below) |
 | `event_policy` | object | `null` | Typed event payload validation and lifecycle enforcement (see below) |
+
+| CLI Option | Type | Default | Description |
+|------------|------|---------|-------------|
+| `idle_timeout_secs` | integer | `30` | Interactive-mode idle timeout; `0` disables it |
+| `autonomous_idle_timeout_secs` | integer/null | `null` | Autonomous/RPC/worktree backend inactivity watchdog; `null` inherits `adapters.<backend>.timeout`, `0` disables it |
 
 ### event_policy
 
