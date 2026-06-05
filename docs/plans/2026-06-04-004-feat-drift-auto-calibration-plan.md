@@ -100,14 +100,26 @@ Drift 监控的价值在于提供**精确的、统计性的、跨事件的诊断
 
 ## Context & Research
 
+### Repo Drift Note（2026-06-05 追加）
+
+自本计划 6-04 写成后，仓库发生 2 个相关物理目录重构。本计划 Implementation Units 中所有 `crates/ralph-core/src/config.rs` 与精确行号引用须按下表替换再执行；其它路径（`event_loop/mod.rs`、`event_bus.rs`、`diagnostics/`、`event_logger.rs`、`session_recorder.rs`）位置仍然准确：
+
+| 原路径 | 拆分后实际位置 | 备注 |
+|---|---|---|
+| `crates/ralph-core/src/config.rs` | `crates/ralph-core/src/config/` 21 个子模块 | `HatConfig` 在 `config/hat.rs:88`；`MemoriesConfig` 在 `config/memories.rs:46`（取代原计划 `config.rs:2303-2334` 的引用）。所有"在 config.rs 第 NN 行"的引用作废。 |
+| `crates/ralph-core/src/event_loop/tests.rs` | `crates/ralph-core/src/event_loop/tests/` 29 个子文件 + `event_loop/tests/mod.rs` | U5 集成测试可放在 `event_loop/tests/execution_contract.rs` 或新建 `event_loop/tests/drift_integration.rs`；不建议再追加到 `event_loop/tests.rs`（已不存在）。 |
+| `crates/ralph-cli/src/loop_runner.rs` | `crates/ralph-cli/src/loop_runner/` 18 个子模块 | 主循环在 `loop_runner/runner.rs`（122 KB）。U5 中"每轮 iteration 结束前"的钩子点在 `loop_runner/runner.rs` 或 `loop_runner/exit_conditions.rs` 中按需选择。 |
+
+另：`presets/en/ce-executor-wave.yml` 是 21e8f47 提交新增的 wave preset，本计划 U7 集成测试可补一条"ce-executor-wave 编排下 coord_join_rate 监测"以验证 wave 拓扑的 drift 监控。
+
 ### Relevant Code and Patterns
 
 - **EventBus observer**：`crates/ralph-proto/src/event_bus.rs` — `add_observer()` 接收所有事件，sync closure，适合轻量入队
 - **Diagnostics 系统**：`crates/ralph-core/src/diagnostics/` — 按 session 组织的 JSONL 子 loggers，结构化 enum
 - **Config 扩展模式**：`crates/ralph-core/src/config.rs` — 新建 struct → `#[serde(default)]` → `RalphConfig` 字段 → `Default` 实现 → `validate()` → tests
-- **Prompt 注入点**：`crates/ralph-core/src/event_loop/mod.rs` — `inject_phase_into_prompt()`、`prepend_auto_inject_skills()` 展示注入模式
+- **Prompt 注入点**：`crates/ralph-core/src/event_loop/mod.rs` — `inject_phase_into_prompt()`（`:2107`）、`prepend_auto_inject_skills()` 展示注入模式。U5 注入点推荐位置：`build_prompt()` 在 `:1715` 入口，调用 `inject_drift_alert()` 后再走现有 phase/skill 注入流。
 - **Stall Recovery**：`crates/ralph-core/src/event_loop/mod.rs:1655` — `inject_fallback_event()` 展示 recovery event 发布模式
-- **Targeted Recovery**：`crates/ralph-core/src/event_loop/mod.rs:~3698` — Contract rejection 后精准 retry 源 hat
+- **Targeted Recovery**：`crates/ralph-core/src/event_loop/mod.rs:3300-3800 区间`（contract_rejection 相关处理散布于此：例如 `contract_rejections` 字段在 `:61`、`:3306`，rejection 处理逻辑在 `:3598-3767`）— Contract rejection 后精准 retry 源 hat。**取代原计划的"~3698"近似行号**——文件已增至 204 KB，单一行号不再稳定。
 
 ### Institutional Learnings
 
@@ -235,8 +247,9 @@ Round N+6: Retry Window 内恢复 → 标记"自愈成功"
 **Dependencies:** None
 
 **Files:**
-- Modify: `crates/ralph-core/src/config.rs`
-- Test: `crates/ralph-core/src/config.rs`（现有 config tests 底部追加）
+- Modify: `crates/ralph-core/src/config/hat.rs`（取代已拆分的 `config.rs`；参见 Repo Drift Note；`HatConfig` 在 `:88`）
+- Modify: `crates/ralph-core/src/config/memories.rs`（参考 `MemoriesConfig` 模式，在 `:46`；取代原计划引用的 `config.rs:2303-2334`）
+- Test: `crates/ralph-core/src/config/hat.rs`（在子文件测试模块追加，取代原"config tests 底部追加"）
 
 **Approach:**
 - 新建 `TelemetryConfig` struct，包含 `enabled: bool`、`drift: DriftConfig`
@@ -246,7 +259,7 @@ Round N+6: Retry Window 内恢复 → 标记"自愈成功"
 - 参考 `MemoriesConfig` / `FeaturesConfig` 的已有模式
 
 **Patterns to follow:**
-- `MemoriesConfig`（`config.rs:2303-2334`）的字段定义模式
+- `MemoriesConfig`（`config/memories.rs:46`，**取代原计划引用的 `config.rs:2303-2334`**；参见 Repo Drift Note）的字段定义模式
 - `RalphConfig` 中 `#[serde(default)]` 的接入方式
 - 底部 `#[cfg(test)]` 模块的测试模式
 
