@@ -233,8 +233,8 @@ event_loop:
         msg
     );
     assert!(
-        msg.contains("executor"),
-        "msg must identify the consumer hat ('executor'): {}",
+        msg.contains("hat=executor"),
+        "msg must identify the consumer hat via the 'hat=<id>' label ('executor'): {}",
         msg
     );
 }
