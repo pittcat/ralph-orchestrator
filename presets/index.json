@@ -10,6 +10,11 @@
     "category": "development"
   },
   {
+    "name": "ce-executor-wave",
+    "description": "Wave-based parallel plan-driven execution with adversarial review, auto-fix, and shipping",
+    "category": "development"
+  },
+  {
     "name": "code-assist",
     "description": "Default implementation workflow with TDD and adversarial validation",
     "category": "development"

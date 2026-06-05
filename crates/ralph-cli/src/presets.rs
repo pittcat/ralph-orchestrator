@@ -36,6 +36,12 @@ const PRESETS: &[EmbeddedPreset] = &[
         public: true,
     },
     EmbeddedPreset {
+        name: "ce-executor-wave",
+        description: "Wave-based parallel plan-driven execution with adversarial review, auto-fix, and shipping",
+        content: include_str!(concat!(env!("OUT_DIR"), "/presets/ce-executor-wave.yml")),
+        public: true,
+    },
+    EmbeddedPreset {
         name: "code-assist",
         description: "Default implementation workflow with TDD and adversarial validation",
         content: include_str!(concat!(env!("OUT_DIR"), "/presets/code-assist.yml")),
@@ -136,7 +142,7 @@ mod tests {
     #[test]
     fn test_list_presets_returns_all() {
         let presets = list_presets();
-        assert_eq!(presets.len(), 7, "Expected 7 public presets");
+        assert_eq!(presets.len(), 8, "Expected 8 public presets");
     }
 
     #[test]
@@ -210,9 +216,10 @@ mod tests {
     #[test]
     fn test_preset_names_returns_all_names() {
         let names = preset_names();
-        assert_eq!(names.len(), 7);
+        assert_eq!(names.len(), 8);
         assert!(names.contains(&"autoresearch"));
         assert!(names.contains(&"ce-executor"));
+        assert!(names.contains(&"ce-executor-wave"));
         assert!(names.contains(&"debug"));
         assert!(names.contains(&"code-assist"));
         assert!(names.contains(&"research"));
@@ -2699,5 +2706,933 @@ mod tests {
             "ce-executor-zh strict payload contract validation failed: {:?}",
             result.errors
         );
+    }
+
+    // ------------------------------------------------------------------
+    // ce-executor-wave preset tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_ce_executor_wave_required_events_is_report_done() {
+        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
+        assert_eq!(
+            config.event_loop.required_events,
+            &["report.done"],
+            "ce-executor-wave should require 'report.done' as its only completion gate event"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_wave_executor_has_no_default_publishes() {
+        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
+        let executor = config
+            .hats
+            .get("parallel-executor")
+            .expect("ce-executor-wave should define parallel-executor hat");
+        assert!(
+            executor.default_publishes.is_none(),
+            "parallel-executor must NOT have default_publishes; explicit emit is required"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_wave_publish_chain_origin_compatible() {
+        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
+        let registry = HatRegistry::from_config(&config);
+        let cancellation = &config.event_loop.cancellation_promise;
+        let completion = &config.event_loop.completion_promise;
+
+        let chain_publishes: Vec<(&str, &str)> = vec![
+            ("coordinator", "work.batch.ready"),
+            ("execution-dispatcher", "work.unit.ready"),
+            ("execution-dispatcher", "work.serial.ready"),
+            ("parallel-executor", "work.unit.done"),
+            ("parallel-executor", "work.unit.failed"),
+            ("execution-synthesizer", "work.done"),
+            ("execution-synthesizer", "work.failed"),
+            ("serial-executor", "work.done"),
+            ("serial-executor", "work.failed"),
+            ("review-coordinator", "review.wave.ready"),
+            ("review-coordinator", "review.passed"),
+            ("dimension-reviewer", "review.dimension.done"),
+            ("review-synthesizer", "review.passed"),
+            ("review-synthesizer", "review.failed"),
+            ("review-synthesizer", "review.complete"),
+            ("plan-gate", "queue.advance"),
+            ("plan-gate", "plan.complete"),
+            ("plan-gate", "plan.blocked"),
+            ("fixer", "fix.exhausted"),
+            ("debug-resolver", "fix.plan.ready"),
+            ("debug-resolver", "debug.exhausted"),
+            ("debug-resolver", "plan.blocked"),
+            ("shipper", "REVIEW_COMPLETE"),
+            ("reporter", "report.done"),
+            ("reporter", "LOOP_COMPLETE"),
+        ];
+
+        for (hat_name, expected_topic) in &chain_publishes {
+            let event = ralph_core::Event {
+                topic: expected_topic.to_string(),
+                payload: None,
+                ts: "2025-01-01T00:00:00Z".to_string(),
+                hat: Some(hat_name.to_string()),
+                triggered: None,
+                source: None,
+                wave_id: None,
+                wave_index: None,
+                wave_total: None,
+            };
+
+            let result = validate_event_origin(&event, &registry, cancellation, completion);
+            assert_eq!(
+                result,
+                OriginCheck::Accepted,
+                "ce-executor-wave: hat '{}' should be able to publish '{}', got: {:?}",
+                hat_name,
+                expected_topic,
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn test_ce_executor_wave_root_preset_matches_embedded() {
+        let root_content = read_root_preset("ce-executor-wave.yml");
+        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
+        assert_eq!(
+            root_content, preset.content,
+            "Canonical presets/en/ce-executor-wave.yml must match the embedded copy in $OUT_DIR/presets/. \
+             Run `cargo build` to refresh the $OUT_DIR mirror, or edit the canonical file and rebuild."
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_wave_parallel_executor_has_concurrency_3_no_aggregate() {
+        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
+        let executor = config
+            .hats
+            .get("parallel-executor")
+            .expect("ce-executor-wave should define parallel-executor hat");
+        assert_eq!(
+            executor.concurrency, 3,
+            "parallel-executor must have concurrency = 3"
+        );
+        assert!(
+            executor.aggregate.is_none(),
+            "parallel-executor must NOT have aggregate"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_wave_synthesizer_has_aggregate_no_concurrency() {
+        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
+        let synthesizer = config
+            .hats
+            .get("execution-synthesizer")
+            .expect("ce-executor-wave should define execution-synthesizer hat");
+        assert!(
+            matches!(
+                synthesizer.aggregate.as_ref().map(|a| a.mode.clone()),
+                Some(ralph_core::AggregateMode::WaitForAll)
+            ),
+            "execution-synthesizer aggregate.mode must be wait_for_all"
+        );
+        assert_eq!(
+            synthesizer.concurrency, 1,
+            "execution-synthesizer must use default concurrency (1), not an explicit override"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_wave_work_done_field_consistency() {
+        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
+
+        let contracts = config
+            .event_loop
+            .execution_contracts
+            .as_ref()
+            .expect("ce-executor-wave should have execution_contracts");
+        let policy = config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .expect("ce-executor-wave should have event_policy");
+
+        let contract_rule = contracts
+            .rules
+            .get("work.done")
+            .expect("ce-executor-wave execution contract should define work.done rule");
+        let contract_fields: std::collections::BTreeSet<&str> = contract_rule
+            .require_payload_fields
+            .iter()
+            .map(String::as_str)
+            .collect();
+
+        let schema = policy
+            .schemas
+            .get("work.done")
+            .expect("ce-executor-wave event_policy should define work.done schema");
+        let schema_fields: std::collections::BTreeSet<&str> =
+            schema.required_fields.iter().map(String::as_str).collect();
+
+        let required_minimum: std::collections::BTreeSet<&str> =
+            ["plan_name", "plan_path", "task_id", "task_key", "step"]
+                .iter()
+                .copied()
+                .collect();
+        assert_eq!(
+            contract_fields, required_minimum,
+            "ce-executor-wave work.done contract must require exactly \
+             {{plan_name, plan_path, task_id, task_key, step}}"
+        );
+        assert_eq!(
+            schema_fields, required_minimum,
+            "ce-executor-wave work.done event_policy schema must require exactly \
+             {{plan_name, plan_path, task_id, task_key, step}}"
+        );
+
+        // parallel-executor and serial-executor instructions must mention every required field
+        for hat_name in ["parallel-executor", "serial-executor"] {
+            let hat = config
+                .hats
+                .get(hat_name)
+                .unwrap_or_else(|| panic!("ce-executor-wave should have {} hat", hat_name));
+            let instructions = hat.instructions.as_str();
+            for field in &required_minimum {
+                assert!(
+                    instructions.contains(field),
+                    "{} instructions must mention required work.done field '{}'",
+                    hat_name,
+                    field
+                );
+            }
+        }
+
+        let reviewer = config
+            .hats
+            .get("review-coordinator")
+            .expect("ce-executor-wave should have review-coordinator hat");
+        let reviewer_instructions = reviewer.instructions.as_str();
+        for field in &required_minimum {
+            assert!(
+                reviewer_instructions.contains(field),
+                "review-coordinator instructions must mention required work.done field '{}'",
+                field
+            );
+        }
+    }
+
+    #[test]
+    fn test_ce_executor_wave_plan_gate_exists_and_routes_correctly() {
+        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
+
+        let plan_gate = config
+            .hats
+            .get("plan-gate")
+            .expect("ce-executor-wave must define a 'plan-gate' hat");
+        assert!(
+            plan_gate.triggers.contains(&"review.passed".to_string()),
+            "plan-gate must trigger on review.passed"
+        );
+        assert!(
+            plan_gate.triggers.contains(&"review.complete".to_string()),
+            "plan-gate must trigger on review.complete"
+        );
+        assert!(
+            plan_gate.triggers.contains(&"work.failed".to_string()),
+            "plan-gate must trigger on work.failed"
+        );
+        assert!(
+            plan_gate.publishes.contains(&"queue.advance".to_string()),
+            "plan-gate must publish queue.advance"
+        );
+        assert!(
+            plan_gate.publishes.contains(&"plan.complete".to_string()),
+            "plan-gate must publish plan.complete"
+        );
+        assert!(
+            plan_gate.publishes.contains(&"plan.blocked".to_string()),
+            "plan-gate must publish plan.blocked"
+        );
+        assert_eq!(
+            plan_gate.default_publishes.as_deref(),
+            Some("plan.blocked"),
+            "plan-gate default_publishes should be plan.blocked"
+        );
+        assert!(
+            !plan_gate.triggers.contains(&"fix.applied".to_string()),
+            "plan-gate must NOT listen to fix.applied"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_wave_shipper_triggers_finalization_only() {
+        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
+
+        let shipper = config
+            .hats
+            .get("shipper")
+            .expect("ce-executor-wave must define a 'shipper' hat");
+        assert!(
+            shipper.triggers.contains(&"plan.complete".to_string()),
+            "shipper must trigger on plan.complete"
+        );
+        assert!(
+            shipper.triggers.contains(&"plan.blocked".to_string()),
+            "shipper must trigger on plan.blocked"
+        );
+        assert!(
+            shipper.triggers.contains(&"debug.exhausted".to_string()),
+            "shipper must trigger on debug.exhausted"
+        );
+        assert!(
+            !shipper.triggers.contains(&"review.passed".to_string()),
+            "shipper must NOT trigger on review.passed"
+        );
+        assert!(
+            !shipper.triggers.contains(&"review.complete".to_string()),
+            "shipper must NOT trigger on review.complete"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_wave_failure_topics_accept_reason_only_payloads() {
+        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
+        let policy = config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .expect("ce-executor-wave should have event_policy");
+
+        for topic in ["work.failed", "plan.blocked"] {
+            let schema = policy
+                .schemas
+                .get(topic)
+                .unwrap_or_else(|| panic!("ce-executor-wave should define {} schema", topic));
+            assert_eq!(
+                schema.required_fields,
+                vec!["reason".to_string()],
+                "{} must require only reason; additional task/plan fields are optional context",
+                topic
+            );
+        }
+    }
+
+    #[test]
+    fn test_ce_executor_wave_forbids_agent_branch_creation() {
+        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
+        let content = preset.content;
+
+        assert!(
+            content.contains("NEVER create, switch, or rename branches")
+                && content.contains("`git checkout -b`")
+                && content.contains("`git worktree add`"),
+            "ce-executor-wave guardrails must explicitly forbid branch creation by the agent"
+        );
+
+        assert!(
+            !content.contains("create one (e.g., `feat/plan-name`)"),
+            "ce-executor-wave must NOT instruct the agent to auto-create a feature branch"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_wave_new_topics_have_schema_publisher_consumer() {
+        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
+        let policy = config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .expect("ce-executor-wave should have event_policy");
+
+        let new_topics = [
+            "work.batch.ready",
+            "work.unit.ready",
+            "work.unit.done",
+            "work.unit.failed",
+            "work.serial.ready",
+        ];
+
+        for topic in &new_topics {
+            // Some hat must publish this topic
+            let has_publisher = config.hats.values().any(|hat| {
+                hat.publishes.contains(&topic.to_string())
+                    || hat.default_publishes.as_deref() == Some(topic)
+            });
+            assert!(
+                has_publisher,
+                "ce-executor-wave: topic '{}' must have at least one publisher hat",
+                topic
+            );
+
+            // Some hat must trigger on this topic
+            let has_consumer = config
+                .hats
+                .values()
+                .any(|hat| hat.triggers.contains(&topic.to_string()));
+            assert!(
+                has_consumer,
+                "ce-executor-wave: topic '{}' must have at least one consumer (trigger) hat",
+                topic
+            );
+
+            // Schema must be defined
+            assert!(
+                policy.schemas.contains_key(*topic),
+                "ce-executor-wave: topic '{}' must have a schema defined in event_policy.schemas",
+                topic
+            );
+        }
+
+        // P2-14: Precise publisher/consumer assertions for each topic
+        let coordinator = config
+            .hats
+            .get("coordinator")
+            .expect("coordinator must exist");
+        assert!(
+            coordinator.publishes.contains(&"work.batch.ready".to_string()),
+            "coordinator must publish work.batch.ready"
+        );
+
+        let dispatcher = config
+            .hats
+            .get("execution-dispatcher")
+            .expect("execution-dispatcher must exist");
+        assert!(
+            dispatcher.publishes.contains(&"work.unit.ready".to_string()),
+            "execution-dispatcher must publish work.unit.ready"
+        );
+        assert!(
+            dispatcher.publishes.contains(&"work.serial.ready".to_string()),
+            "execution-dispatcher must publish work.serial.ready"
+        );
+        assert!(
+            dispatcher.triggers.contains(&"work.batch.ready".to_string()),
+            "execution-dispatcher must trigger on work.batch.ready"
+        );
+
+        let parallel_executor = config
+            .hats
+            .get("parallel-executor")
+            .expect("parallel-executor must exist");
+        assert!(
+            parallel_executor.publishes.contains(&"work.unit.done".to_string()),
+            "parallel-executor must publish work.unit.done"
+        );
+        assert!(
+            parallel_executor.publishes.contains(&"work.unit.failed".to_string()),
+            "parallel-executor must publish work.unit.failed"
+        );
+        assert!(
+            parallel_executor.triggers.contains(&"work.unit.ready".to_string()),
+            "parallel-executor must trigger on work.unit.ready"
+        );
+
+        let synthesizer = config
+            .hats
+            .get("execution-synthesizer")
+            .expect("execution-synthesizer must exist");
+        assert!(
+            synthesizer.triggers.contains(&"work.unit.done".to_string()),
+            "execution-synthesizer must trigger on work.unit.done"
+        );
+        assert!(
+            synthesizer.triggers.contains(&"work.unit.failed".to_string()),
+            "execution-synthesizer must trigger on work.unit.failed"
+        );
+
+        let serial_executor = config
+            .hats
+            .get("serial-executor")
+            .expect("serial-executor must exist");
+        assert!(
+            serial_executor.triggers.contains(&"work.serial.ready".to_string()),
+            "serial-executor must trigger on work.serial.ready"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_wave_parallel_executor_forbids_git_and_nested_waves() {
+        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
+        let content = preset.content;
+        let parallel_section = content
+            .split("parallel-executor:")
+            .nth(1)
+            .expect("parallel-executor section must exist");
+        let next_hat = parallel_section
+            .find("execution-synthesizer:")
+            .expect("execution-synthesizer must follow parallel-executor");
+        let parallel_instr = &parallel_section[..next_hat];
+
+        // Git operations prohibited
+        assert!(
+            parallel_instr.contains("MUST NOT run `git add` or `git commit`"),
+            "parallel-executor must prohibit git add/commit"
+        );
+        // Branch creation prohibited
+        assert!(
+            parallel_instr.contains("MUST NOT create, switch, or rename branches or worktrees"),
+            "parallel-executor must prohibit branch/worktree creation"
+        );
+        // Task lifecycle prohibited
+        assert!(
+            parallel_instr
+                .contains("MUST NOT run `ralph tools task start/close/fail/reopen`"),
+            "parallel-executor must prohibit task lifecycle operations"
+        );
+        // Nested waves prohibited
+        assert!(
+            parallel_instr.contains("MUST NOT run `ralph wave emit`"),
+            "parallel-executor must prohibit nested wave emission"
+        );
+        // owned_files boundary
+        assert!(
+            parallel_instr.contains("owned_files"),
+            "parallel-executor must reference owned_files boundary"
+        );
+        assert!(
+            parallel_instr.contains("outside owned_files"),
+            "parallel-executor must explicitly guard against modifying files outside owned_files"
+        );
+
+        // Timeout must be 1800 (not default 300)
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
+        let executor = config
+            .hats
+            .get("parallel-executor")
+            .expect("parallel-executor must exist");
+        assert_eq!(
+            executor.timeout, Some(1800),
+            "parallel-executor timeout must be 1800s (30 min), not default 300s"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_wave_dispatcher_safety_rules() {
+        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
+        let content = preset.content;
+        let dispatcher_section = content
+            .split("execution-dispatcher:")
+            .nth(1)
+            .expect("execution-dispatcher section must exist");
+        let next_hat = dispatcher_section
+            .find("parallel-executor:")
+            .expect("parallel-executor must follow execution-dispatcher");
+        let dispatcher_instr = &dispatcher_section[..next_hat];
+
+        // Current-step-only analysis
+        assert!(
+            dispatcher_instr.contains("current step"),
+            "dispatcher must scope analysis to current step only"
+        );
+        // Disjoint owned_files
+        assert!(
+            dispatcher_instr.contains("No two tasks share any file path"),
+            "dispatcher must require disjoint file ownership"
+        );
+        // Conservative fallback principle
+        assert!(
+            dispatcher_instr.contains("When in doubt, go serial"),
+            "dispatcher must encode conservative fallback principle"
+        );
+        assert!(
+            dispatcher_instr.contains("Safety over throughput"),
+            "dispatcher must prioritize safety over throughput"
+        );
+        // MUST NOT implement / modify tasks
+        assert!(
+            dispatcher_instr.contains("MUST NOT implement code"),
+            "dispatcher must be forbidden from implementing code"
+        );
+        assert!(
+            dispatcher_instr.contains("MUST NOT modify runtime tasks"),
+            "dispatcher must be forbidden from modifying runtime tasks"
+        );
+        // Payloads-stdin required
+        assert!(
+            dispatcher_instr.contains("--payloads-stdin"),
+            "dispatcher must use --payloads-stdin for wave dispatch"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_wave_work_unit_done_schema_consistency() {
+        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
+        let policy = config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .expect("ce-executor-wave should have event_policy");
+        let schema = policy
+            .schemas
+            .get("work.unit.done")
+            .expect("work.unit.done schema must exist");
+
+        let expected_fields = [
+            "plan_name",
+            "plan_path",
+            "step",
+            "task_id",
+            "task_key",
+            "owned_files",
+            "changed_files",
+            "tests",
+        ];
+        assert_eq!(
+            schema.required_fields.len(),
+            expected_fields.len(),
+            "work.unit.done schema field count mismatch"
+        );
+        for field in &expected_fields {
+            assert!(
+                schema.required_fields.contains(&field.to_string()),
+                "work.unit.done schema must require field '{}'",
+                field
+            );
+        }
+
+        // Instructions must mention all required payload fields
+        let content = preset.content;
+        let parallel_section = content
+            .split("parallel-executor:")
+            .nth(1)
+            .expect("parallel-executor section must exist");
+        let next_hat = parallel_section
+            .find("execution-synthesizer:")
+            .expect("execution-synthesizer must follow parallel-executor");
+        let parallel_instr = &parallel_section[..next_hat];
+        assert!(
+            parallel_instr.contains("changed_files"),
+            "parallel-executor instructions must reference changed_files"
+        );
+        assert!(
+            parallel_instr.contains("tests"),
+            "parallel-executor instructions must reference tests"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_wave_work_unit_failed_schema_consistency() {
+        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
+        let policy = config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .expect("ce-executor-wave should have event_policy");
+        let schema = policy
+            .schemas
+            .get("work.unit.failed")
+            .expect("work.unit.failed schema must exist");
+
+        let expected_fields = ["plan_name", "plan_path", "step", "task_id", "task_key", "reason"];
+        assert_eq!(
+            schema.required_fields.len(),
+            expected_fields.len(),
+            "work.unit.failed schema field count mismatch"
+        );
+        for field in &expected_fields {
+            assert!(
+                schema.required_fields.contains(&field.to_string()),
+                "work.unit.failed schema must require field '{}'",
+                field
+            );
+        }
+
+        // Instructions must reference the failure reason
+        let content = preset.content;
+        let parallel_section = content
+            .split("parallel-executor:")
+            .nth(1)
+            .expect("parallel-executor section must exist");
+        let next_hat = parallel_section
+            .find("execution-synthesizer:")
+            .expect("execution-synthesizer must follow parallel-executor");
+        let parallel_instr = &parallel_section[..next_hat];
+        assert!(
+            parallel_instr.contains("reason"),
+            "parallel-executor instructions must reference reason in failure payload"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_wave_synthesizer_fail_closed() {
+        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
+        let content = preset.content;
+        let synth_section = content
+            .split("execution-synthesizer:")
+            .nth(1)
+            .expect("execution-synthesizer section must exist");
+        let next_hat = synth_section
+            .find("serial-executor:")
+            .expect("serial-executor must follow execution-synthesizer");
+        let synth_instr = &synth_section[..next_hat];
+
+        // Partial failure handling
+        assert!(
+            synth_instr.contains("Any `work.unit.failed`"),
+            "synthesizer must treat any worker failure as batch failure"
+        );
+        assert!(
+            synth_instr.contains("batch failed"),
+            "synthesizer must reference batch failed state"
+        );
+        // Boundary violation handling
+        assert!(
+            synth_instr.contains("outside the worker's `owned_files`"),
+            "synthesizer must check owned_files boundary violations"
+        );
+        // Timeout / missing worker
+        assert!(
+            synth_instr.contains("missing worker result within timeout"),
+            "synthesizer must handle missing worker results (timeout)"
+        );
+        // Re-validation requirement
+        assert!(
+            synth_instr.contains("re-validation"),
+            "synthesizer must require re-validation"
+        );
+        assert!(
+            synth_instr.contains("Do NOT trust worker self-reported success alone"),
+            "synthesizer must distrust worker self-reported success"
+        );
+        // Rollback on failure
+        assert!(
+            synth_instr.contains("Rollback all worker modifications"),
+            "synthesizer must rollback worker modifications on batch failure"
+        );
+        assert!(
+            synth_instr.contains("git checkout -- .") || synth_instr.contains("git restore ."),
+            "synthesizer must specify git checkout/restore for rollback"
+        );
+        assert!(
+            synth_instr.contains("git status --short"),
+            "synthesizer must verify workspace is clean after rollback"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_wave_synthesizer_aggregate_timeout() {
+        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
+        let synthesizer = config
+            .hats
+            .get("execution-synthesizer")
+            .expect("execution-synthesizer must exist");
+        let aggregate = synthesizer
+            .aggregate
+            .as_ref()
+            .expect("execution-synthesizer must have aggregate");
+        assert_eq!(
+            aggregate.timeout, 300,
+            "execution-synthesizer aggregate timeout must be 300s"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_wave_dimension_reviewer_timeout() {
+        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
+        let reviewer = config
+            .hats
+            .get("dimension-reviewer")
+            .expect("dimension-reviewer must exist");
+        assert_eq!(
+            reviewer.timeout, Some(1800),
+            "dimension-reviewer timeout must be 1800s"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_wave_review_synthesizer_default_publishes() {
+        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
+        let reviewer = config
+            .hats
+            .get("review-synthesizer")
+            .expect("review-synthesizer must exist");
+        assert_eq!(
+            reviewer.default_publishes,
+            Some("review.complete".to_string()),
+            "review-synthesizer default_publishes must be review.complete"
+        );
+        assert!(
+            reviewer.publishes.contains(&"review.passed".to_string()),
+            "review-synthesizer must publish review.passed"
+        );
+        assert!(
+            reviewer.publishes.contains(&"review.failed".to_string()),
+            "review-synthesizer must publish review.failed"
+        );
+        assert!(
+            reviewer.publishes.contains(&"review.complete".to_string()),
+            "review-synthesizer must publish review.complete"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_wave_serial_executor_triggers() {
+        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
+        let serial = config
+            .hats
+            .get("serial-executor")
+            .expect("serial-executor must exist");
+        assert!(
+            serial.triggers.contains(&"work.serial.ready".to_string()),
+            "serial-executor must trigger on work.serial.ready"
+        );
+        assert!(
+            serial.triggers.contains(&"fix.plan.ready".to_string()),
+            "serial-executor must trigger on fix.plan.ready"
+        );
+        assert!(
+            serial.publishes.contains(&"work.done".to_string()),
+            "serial-executor must publish work.done"
+        );
+        assert!(
+            serial.publishes.contains(&"work.failed".to_string()),
+            "serial-executor must publish work.failed"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_wave_dispatcher_hat_config() {
+        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
+        let dispatcher = config
+            .hats
+            .get("execution-dispatcher")
+            .expect("execution-dispatcher must exist");
+        assert_eq!(
+            dispatcher.triggers,
+            vec!["work.batch.ready".to_string()],
+            "execution-dispatcher must trigger only on work.batch.ready"
+        );
+        assert!(
+            dispatcher.publishes.contains(&"work.unit.ready".to_string()),
+            "execution-dispatcher must publish work.unit.ready"
+        );
+        assert!(
+            dispatcher.publishes.contains(&"work.serial.ready".to_string()),
+            "execution-dispatcher must publish work.serial.ready"
+        );
+        assert!(
+            dispatcher.publishes.contains(&"work.failed".to_string()),
+            "execution-dispatcher must publish work.failed"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_wave_verdict_gate() {
+        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
+        let gate = config
+            .event_loop
+            .verdict_gate
+            .as_ref()
+            .expect("ce-executor-wave must have verdict_gate");
+        assert_eq!(gate.topic, "REVIEW_COMPLETE", "verdict_gate topic must be REVIEW_COMPLETE");
+        assert_eq!(
+            gate.fail_field, "pass_or_fail",
+            "verdict_gate fail_field must be pass_or_fail"
+        );
+        assert_eq!(
+            gate.fail_value, "fail",
+            "verdict_gate fail_value must be 'fail'"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_wave_shared_tail_matches_ce_executor() {
+        // P1-3: The back-half pipeline (fixer → debug-resolver → plan-gate → shipper → reporter)
+        // is intentionally shared between ce-executor and ce-executor-wave. This test
+        // gates against accidental drift in triggers/publishes/default_publishes.
+        let wave_preset = get_preset("ce-executor-wave").expect("ce-executor-wave should exist");
+        let wave_config =
+            RalphConfig::parse_yaml(wave_preset.content).expect("ce-executor-wave YAML should parse");
+
+        let base_preset = get_preset("ce-executor").expect("ce-executor should exist");
+        let base_config =
+            RalphConfig::parse_yaml(base_preset.content).expect("ce-executor YAML should parse");
+
+        let shared_hats = ["fixer", "debug-resolver", "plan-gate", "shipper", "reporter"];
+
+        for hat_name in &shared_hats {
+            let wave_hat = wave_config
+                .hats
+                .get(*hat_name)
+                .unwrap_or_else(|| panic!("ce-executor-wave must have {} hat", hat_name));
+            let base_hat = base_config
+                .hats
+                .get(*hat_name)
+                .unwrap_or_else(|| panic!("ce-executor must have {} hat", hat_name));
+
+            assert_eq!(
+                wave_hat.triggers, base_hat.triggers,
+                "{}: triggers must match between ce-executor-wave and ce-executor",
+                hat_name
+            );
+            assert_eq!(
+                wave_hat.publishes, base_hat.publishes,
+                "{}: publishes must match between ce-executor-wave and ce-executor",
+                hat_name
+            );
+            assert_eq!(
+                wave_hat.default_publishes, base_hat.default_publishes,
+                "{}: default_publishes must match between ce-executor-wave and ce-executor",
+                hat_name
+            );
+        }
+
+        // Verify both presets share the same core safety constraints in instructions
+        let wave_content = wave_preset.content;
+        let base_content = base_preset.content;
+        for phrase in [
+            "NEVER create, switch, or rename branches",
+            "NEVER push to origin",
+            "MUST NOT modify code",
+        ] {
+            assert!(
+                wave_content.contains(phrase),
+                "ce-executor-wave must contain safety phrase: '{}'",
+                phrase
+            );
+            assert!(
+                base_content.contains(phrase),
+                "ce-executor must contain safety phrase: '{}'",
+                phrase
+            );
+        }
     }
 }

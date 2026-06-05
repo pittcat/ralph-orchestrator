@@ -51,6 +51,7 @@ unset _ralph_fn
 # updates to `~/.oh-my-zsh/plugins/ralph/ralph.plugin.zsh`.
 _RALPH_BUILTIN_HAT_VALUES=(
   "builtin:ce-executor"
+  "builtin:ce-executor-wave"
   "builtin:code-assist"
   "builtin:debug"
   "builtin:research"
@@ -62,13 +63,13 @@ _RALPH_BUILTIN_HAT_VALUES=(
 
 _RALPH_BUILTIN_HAT_DESCRIPTIONS=(
   "Plan-driven work execution with wave code review, auto-fix, shipping, and manager report"
+  "Wave-based parallel plan-driven execution with adversarial review, auto-fix, and shipping"
   "Default implementation workflow with TDD and adversarial validation"
   "Bug investigation, root-cause analysis, and adversarial fix verification"
   "Read-only codebase and architecture exploration with evidence-first synthesis"
   "Adversarial code review without making modifications"
   "Advanced end-to-end idea-to-code workflow"
   "Autonomous experiment loop: try ideas, measure, keep what works"
-  "Minimal bare hat collection for baseline comparison"
   "Internal preset for loop merge operations"
 )
 

@@ -886,12 +886,14 @@ Look for `completion_rejection_signature` in the output to see what was blocking
 ```bash
 # Check topology
 ralph hats validate -H builtin:ce-executor
+ralph hats validate -H builtin:ce-executor-wave
 
 # Check open tasks
 ralph tools task list
 
 # Check preflight
 ralph preflight -c ralph.yml -H builtin:ce-executor
+ralph preflight -c ralph.yml -H builtin:ce-executor-wave
 ```
 
 See [Loop Detection](../advanced/loop-detection.md) for the technical details of backlog detection and [Presets](../guide/presets.md) for completion gate configuration.
