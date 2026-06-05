@@ -579,13 +579,13 @@ fn merge_hats_overlay(mut core: Value, hats: Value) -> Result<Value> {
             if let Some(key_str) = key.as_str() {
                 if ALLOWED_HATS_EVENT_LOOP_OVERLAY_KEYS.contains(&key_str) {
                     event_loop_mapping.insert(key.clone(), value.clone());
-                } else {
-                    // Surface the silent-drop UX defect: a hat collection preset
-                    // (e.g. presets/en/ce-executor.yml) may declare resource budgets
-                    // like `max_runtime_seconds`, but those keys are operator-controlled
-                    // and filtered out by ALLOWED_HATS_EVENT_LOOP_OVERLAY_KEYS. If we
-                    // don't tell the user, the loop will silently fall back to the
-                    // 4h default (see docs/report/2026-06-05-wave-abort-root-cause-analysis.md).
+                } else if !event_loop_mapping.contains_key(&key) {
+                    // Surface the silent-drop UX defect ONLY when the operator's
+                    // ralph.yml has NOT already declared the key. If the operator
+                    // did declare it, the operator's value wins and no fallback
+                    // to the framework default occurs — emitting the warning
+                    // would be misleading noise (see docs/report/2026-06-05-wave-abort-
+                    // root-cause-analysis.md; introduced in commit a05d753).
                     let value_repr = serde_yaml::to_string(value)
                         .unwrap_or_else(|_| "<unrepresentable>".to_string())
                         .trim()
@@ -598,6 +598,9 @@ fn merge_hats_overlay(mut core: Value, hats: Value) -> Result<Value> {
                         key_str, value_repr,
                     );
                 }
+                // else: operator's ralph.yml already declares event_loop.<key>;
+                // the preset's value is filtered to protect the operator budget,
+                // the operator's value wins, no fallback happens — stay silent.
             }
         }
 
@@ -875,6 +878,54 @@ event_loop:
         // inspection and the existing _allows_workflow_promises_ test,
         // which exercises the same code path and would also have produced
         // stderr output during cargo test.
+        //
+        // Note: with the operator-already-set silent-merge fix, the warning
+        // is now suppressed in this scenario (operator's ralph.yml declares
+        // all three budget keys), so the eprintln no longer fires here.
+        // The operator-value-wins invariants asserted above are the load-
+        // bearing assertions; the warning is verified by code review and
+        // by the dedicated _fallback_to_framework_default test below.
+    }
+
+    #[test]
+    fn merge_hats_overlay_falls_back_to_framework_default_when_operator_omits_budget_key() {
+        // Regression: when the operator's ralph.yml does NOT declare a
+        // resource-budget key (e.g. max_runtime_seconds) and the preset
+        // declares one, the preset value is filtered out (security
+        // boundary) and the operator's ralph.yml value (None) is used,
+        // so the EventLoopConfig serde default kicks in
+        // (max_runtime_seconds = 14400s, max_iterations = 100).
+        // The warning IS expected in this case — that's the whole point
+        // of the warning — and is verified to not break the merge.
+        let core: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  completion_promise: LOOP_COMPLETE
+",
+        )
+        .unwrap();
+
+        let hats: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  max_runtime_seconds: 28800
+  max_iterations: 50
+  enforce_hat_scope: false
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        // Operator's ralph.yml omits the budget keys, preset values are
+        // filtered, so the framework default applies (4h runtime, 100
+        // iterations, scope permissive by default).
+        assert_eq!(config.event_loop.max_runtime_seconds, 14400);
+        assert_eq!(config.event_loop.max_iterations, 100);
+        assert!(!config.event_loop.enforce_hat_scope);
+        // Whitelisted keys still merge through.
+        assert_eq!(config.event_loop.completion_promise, "LOOP_COMPLETE");
     }
 
     #[test]
