@@ -34,6 +34,7 @@ mod copilot_stream;
 mod json_rpc_handler;
 mod pi_stream;
 mod pty_executor;
+mod trae_stream;
 pub mod pty_handle;
 mod stream_handler;
 pub mod tool_preview;
@@ -53,6 +54,11 @@ pub use json_rpc_handler::{JsonRpcStreamHandler, stdout_json_rpc_handler};
 pub use pi_stream::{
     PiAssistantEvent, PiContentBlock, PiCost, PiSessionState, PiStreamEvent, PiStreamParser,
     PiToolResult, PiTurnMessage, PiUsage, dispatch_pi_stream_event,
+};
+pub use trae_stream::{
+    TraeAssistantMessage, TraeSessionState, TraeStreamEvent, TraeStreamParser,
+    TraeTextContent, TraeToolResultContent, TraeToolUseContent, TraeUserMessage,
+    dispatch_trae_stream_event,
 };
 pub use pty_executor::{
     CtrlCAction, CtrlCState, PtyConfig, PtyExecutionResult, PtyExecutor, TerminationType,
