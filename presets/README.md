@@ -10,6 +10,7 @@ Built-ins are embedded into the CLI from these files and exposed through `ralph 
 |---|---|---|
 | `autoresearch` | `presets/autoresearch.yml` | Autonomous experiment loop for any measurable improvement |
 | `ce-executor` | `presets/ce-executor.yml` | Plan-driven work execution with wave code review, auto-fix, and manager report |
+| `ce-executor-wave` | `presets/en/ce-executor-wave.yml` | Wave-based parallel variant of `ce-executor`; experimental, high-throughput for plans with multiple non-overlapping U-IDs per step |
 | `code-assist` | `presets/code-assist.yml` | Default implementation workflow |
 | `debug` | `presets/debug.yml` | Investigation and fix verification |
 | `research` | `presets/research.yml` | Read-only exploration and synthesis |
@@ -20,7 +21,6 @@ Built-ins are embedded into the CLI from these files and exposed through `ralph 
 
 These remain loadable for Ralph internals or testing, but are intentionally hidden from normal builtin listings:
 
-- `hatless-baseline`
 - `merge-loop`
 
 ## Product Positioning

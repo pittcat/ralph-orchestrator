@@ -149,7 +149,7 @@ Presets define collections of hats. Located in `presets/` directory and `crates/
 - **HatlessRalph** (`hatless_ralph.rs`): Hat topology, event subscription matching, hat selection algorithm
 - **HatRegistry**: Manages hat discovery, registration, subscription
 - Presets support Chinese (`*-zh.yml`) variants and chainable configurations
-- Builtin presets: `code-assist`, `debug`, `research`, `review`, `pdd-to-code-assist`, `ce-executor`, `autoresearch`, `harness-demo`, `hatless-baseline`
+- Builtin presets: `autoresearch`, `ce-executor`, `ce-executor-wave`, `code-assist`, `debug`, `merge-loop`, `pdd-to-code-assist`, `research`, `review`
 - `index.json` is the preset manifest
 
 ### Key Files

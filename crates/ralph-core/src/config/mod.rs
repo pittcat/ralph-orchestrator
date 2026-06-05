@@ -36,7 +36,7 @@ pub use event_policy::{
 pub use event_projection::{EventProjectionConfig, ProjectionMode, ProjectionRule};
 pub use execution_contracts::ExecutionContractRule;
 pub use features::FeaturesConfig;
-pub use hat::{EventMetadata, HatBackend, HatConfig};
+pub use hat::{AggregateConfig, AggregateMode, EventMetadata, HatBackend, HatConfig};
 pub use hooks::{
     HookDefaults, HookMutationConfig, HookOnError, HookPhaseEvent, HookSpec, HookSuspendMode,
     HooksConfig,

@@ -29,6 +29,7 @@
 embedded:
   - autoresearch
   - ce-executor
+  - ce-executor-wave
   - code-assist
   - debug
   # - hatless-baseline

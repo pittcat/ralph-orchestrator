@@ -1074,12 +1074,10 @@ fn evaluate_ac_01(
 
             assert_workspace_source_contains(
                 "crates/ralph-core/src/config/hooks.rs",
-                &[
-                    (
-                        "hooks docs explicitly describe per-project scope",
-                        "Controls per-project orchestrator lifecycle hooks.",
-                    ),
-                ],
+                &[(
+                    "hooks docs explicitly describe per-project scope",
+                    "Controls per-project orchestrator lifecycle hooks.",
+                )],
             )?;
 
             assert_workspace_source_contains(
@@ -1535,22 +1533,18 @@ fn evaluate_ac_08(
 
             assert_workspace_source_contains(
                 "crates/ralph-core/src/config/ralph_config.rs",
-                &[
-                    (
-                        "hook validation requires explicit warn|block|suspend policy",
-                        "is required in v1 (warn | block | suspend)",
-                    ),
-                ],
+                &[(
+                    "hook validation requires explicit warn|block|suspend policy",
+                    "is required in v1 (warn | block | suspend)",
+                )],
             )?;
 
             assert_workspace_source_contains(
                 "crates/ralph-cli/src/loop_runner/hooks/format.rs",
-                &[
-                    (
-                        "warn policy maps to warn disposition",
-                        "HookOnError::Warn => HookDisposition::Warn,",
-                    ),
-                ],
+                &[(
+                    "warn policy maps to warn disposition",
+                    "HookOnError::Warn => HookDisposition::Warn,",
+                )],
             )?;
 
             assert_workspace_source_contains(
@@ -1610,12 +1604,10 @@ fn evaluate_ac_09(
 
             assert_workspace_source_contains(
                 "crates/ralph-core/src/config/ralph_config.rs",
-                &[
-                    (
-                        "hook validation requires explicit warn|block|suspend policy",
-                        "is required in v1 (warn | block | suspend)",
-                    ),
-                ],
+                &[(
+                    "hook validation requires explicit warn|block|suspend policy",
+                    "is required in v1 (warn | block | suspend)",
+                )],
             )?;
 
             assert_workspace_source_contains(
@@ -1989,12 +1981,10 @@ fn evaluate_ac_15(
 
             assert_workspace_source_contains(
                 "crates/ralph-cli/src/loop_runner/hooks/dispatch.rs",
-                &[
-                    (
-                        "mutation parse failures are dispositioned via on_error policy",
-                        "let disposition = if mutation_failure.is_some() {",
-                    ),
-                ],
+                &[(
+                    "mutation parse failures are dispositioned via on_error policy",
+                    "let disposition = if mutation_failure.is_some() {",
+                )],
             )?;
 
             assert_workspace_source_contains(
@@ -2731,9 +2721,9 @@ mod tests {
         assert!(!result.passed);
         assert_eq!(result.scenario_id, "AC-01");
         assert!(
-            result
-                .message
-                .contains("source evidence assertion failed for crates/ralph-core/src/config/mod.rs")
+            result.message.contains(
+                "source evidence assertion failed for crates/ralph-core/src/config/mod.rs"
+            )
         );
         assert!(
             result

@@ -1,0 +1,1491 @@
+# ce-executor-wave: Wave-based Parallel Plan-Driven Work Execution
+# Pattern: Plan → Batch Dispatch → Parallel/Serial Execution → Aggregate → Wave Review → Auto-Fix → Debug Resolver → Fix Plan → Review → Ship → Report
+#
+# 13 Hats:
+# - Coordinator: Parses plan files, creates step runtime tasks
+# - Execution Dispatcher: Decides safe parallel vs serial fallback
+# - Parallel Executor (wave, concurrency 3): Implements one task unit per worker
+# - Execution Synthesizer (aggregate): Aggregates worker results, validates, commits
+# - Serial Executor: Serial fallback and fix plan execution
+# - review-coordinator: Diff analysis, intent discovery, conditional dimension selection, wave emission
+# - dimension-reviewer (wave, concurrency 9): Parallel focused code review per dimension
+# - review-synthesizer (aggregate): Merges all dimension findings, deduplicates, routes
+# - Fixer: Applies safe_auto findings up to 3 rounds
+# - debug-resolver: Root-cause diagnosis after Fixer exhaustion
+# - plan-gate: Reconciles review verdict against plan.md / progress.md / runtime tasks
+# - Shipper: Final validation, plan status update, final commit
+# - Reporter: Generates manager-facing completion report
+#
+# Usage:
+#   ralph run -H builtin:ce-executor-wave -p "docs/plans/my-plan.md"
+#
+# Wave Execution Architecture:
+#   work.start → coordinator → work.batch.ready
+#   work.batch.ready → execution-dispatcher
+#     → safe: ralph wave emit work.unit.ready --payloads-stdin
+#     → unsafe/single: work.serial.ready
+#   work.unit.ready → parallel-executor × N (concurrent) → work.unit.done / work.unit.failed
+#   work.unit.done/work.unit.failed → execution-synthesizer (aggregate) → work.done / work.failed
+#   work.serial.ready → serial-executor → work.done / work.failed
+#   work.done → review-coordinator → review.wave.ready (wave emit N dimensions)
+#     → dimension-reviewer × N → review.dimension.done
+#     → review-synthesizer (aggregate) → review.passed/failed/complete
+#     → plan-gate → queue.advance (more steps) OR plan.complete (all done)
+#   review.failed → Fixer (≤3 safe_auto rounds) → fix.applied → review-coordinator
+#   Fixer → fix.exhausted → debug-resolver → fix.plan.ready → serial-executor → work.done → review-coordinator
+#   debug-resolver → debug.exhausted → Shipper → REVIEW_COMPLETE → Reporter → LOOP_COMPLETE
+#   plan-gate → plan.complete / plan.blocked → Shipper → REVIEW_COMPLETE → Reporter → LOOP_COMPLETE
+event_loop:
+  prompt_file: "PROMPT.md"
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["report.done"]
+  starting_event: "work.start"
+  max_iterations: 50
+  max_runtime_seconds: 28800  # 8 hours
+  checkpoint_interval: 5
+  enforce_hat_scope: true
+  verdict_gate:
+    # Reject LOOP_COMPLETE if the most recent REVIEW_COMPLETE event has
+    # pass_or_fail == "fail". Backstops the shipper+reporter chain when
+    # either hat misclassifies a P0 residual as a pass.
+    topic: "REVIEW_COMPLETE"
+    fail_field: "pass_or_fail"
+    fail_value: "fail"
+  # U7: Enable execution contract for work.done validation.
+  # Protects against false positives when executor forgets to emit or emits invalid work.done.
+  execution_contracts:
+    enabled: true
+    rules:
+      work.done:
+        require_payload_fields: ["plan_name", "plan_path", "task_id", "task_key", "step"]
+        require_task:
+          id_field: "task_id"
+          key_field: "task_key"
+          loop_scoped: true
+          allowed_terminal_statuses: ["closed"]
+          auto_close_on_valid: false
+        require_git_change:
+          mode: "diff_or_commit"
+          allow_empty_for_steps: ["trivial"]
+        require_test_evidence:
+          mode: "optional"  # "optional" | "required_payload_field"
+          payload_field: "tests"  # field name to check when mode is "required_payload_field"
+  # U7: Payload contract schemas (work.ready, work.done, review.*, plan.*, etc.)
+  # are inlined below as `event_policy.schemas`. The previous
+  # `schema_file: "../schemas/ce-executor.yml"` approach was broken for
+  # builtin presets (no on-disk preset file for `resolve_schema_files`
+  # to anchor the relative path against) and has been folded in.
+  # Mirror in `presets/schemas/ce-executor.yml` is kept as a reference
+  # copy only; do not reintroduce `schema_file` here.
+  event_policy:
+    enabled: true
+    mode: enforce
+    schemas:
+      work.batch.ready:
+        required_fields: [plan_name, plan_path, step, task_ids, task_keys, parallel_mode]
+        payload: json_object
+      work.unit.ready:
+        required_fields: [plan_name, plan_path, step, task_id, task_key, owned_files, verification]
+        payload: json_object
+      work.unit.done:
+        required_fields: [plan_name, plan_path, step, task_id, task_key, owned_files, changed_files, tests]
+        payload: json_object
+      work.unit.failed:
+        required_fields: [plan_name, plan_path, step, task_id, task_key, reason]
+        payload: json_object
+      work.serial.ready:
+        required_fields: [plan_name, plan_path, step, task_id, task_key, reason]
+        payload: json_object
+      work.done:
+        required_fields: [plan_name, plan_path, task_id, task_key, step]
+        payload: json_object
+      work.failed:
+        required_fields: [reason]
+        payload: json_object
+      review.wave.ready:
+        required_fields: [dimension, focus, depth, diff_base, intent_summary, changed_files, plan_name, task_id, task_key, step]
+        payload: json_object
+      review.dimension.done:
+        required_fields: [dimension, findings_count, findings_file, plan_name, task_id, task_key, step]
+        payload: json_object
+      review.passed:
+        required_fields: [plan_name, task_id, task_key, step, findings_count, fix_round, verdict]
+        payload: json_object
+      review.failed:
+        required_fields: [plan_name, fix_round, safe_auto_count, gated_manual_count, findings_summary, task_id, task_key, step]
+        payload: json_object
+      review.complete:
+        required_fields: [plan_name, fix_round, verdict, residual_findings_count, findings_summary, task_id, task_key, step, findings_count]
+        payload: json_object
+      fix.applied:
+        required_fields: [plan_name, fix_round, applied_count, failed_count, task_id, task_key, step]
+        payload: json_object
+      fix.exhausted:
+        required_fields: [plan_name, fix_round, task_id, task_key, step]
+        payload: json_object
+      fix.plan.ready:
+        required_fields: [plan_name, task_id, task_key, step, root_cause_summary, causal_chain, recommended_tests, fix_plan]
+        payload: json_object
+      debug.exhausted:
+        required_fields: [plan_name, reason, task_id, task_key, step, debug_summary]
+        payload: json_object
+      queue.advance:
+        required_fields: [plan_name, completed_step, next_step, reviewed_task_id, reviewed_task_key]
+        payload: json_object
+      plan.complete:
+        required_fields: [plan_name, completed_steps, task_id, task_key, verdict]
+        payload: json_object
+      plan.blocked:
+        required_fields: [reason]
+        payload: json_object
+      REVIEW_COMPLETE:
+        required_fields: [plan_name, verdict, pass_or_fail, residual_findings_summary]
+        payload: json_object
+      report.done:
+        required_fields: [report_path, awaiting_decision]
+        payload: json_object
+
+cli:
+  backend: "claude"
+  prompt_mode: "arg"
+
+core:
+  specs_dir: ".agents/scratchpad/"
+  guardrails:
+    - "Fresh context each iteration — save learnings to memories for next time"
+    - "Verification is mandatory — tests/typecheck/lint/audit must pass"
+    - "YAGNI ruthlessly — no speculative features"
+    - "KISS always — simplest solution that works"
+    - "Confidence protocol: score decisions 0-100. >80 proceed autonomously; 50-80 proceed + document in .ralph/agent/decisions.md; <50 choose safe default + document."
+    - "ABSOLUTE PROHIBITION: NEVER push to origin or any remote repository. Commit locally only. User handles all push/PR operations manually. This is a non-negotiable scope boundary."
+    - "ABSOLUTE PROHIBITION: NEVER create, switch, or rename branches, and NEVER create worktrees from inside the agent. The loop runs on the current working branch by default. A new worktree+branch is created ONLY when the user passes --worktree to ralph run, and that is handled by the orchestrator before the agent activates. Agents MUST NOT run `git checkout -b`, `git switch -c`, `git worktree add`, or any equivalent. If a task appears to require a new branch, stop and surface a work.failed with a clear reason — the user, not the agent, decides when to branch."
+
+hats:
+  coordinator:
+    name: "📋 Coordinator"
+    description: "Parses plan files, creates working directory and runtime tasks for the current step."
+    triggers: ["work.start", "queue.advance"]
+    publishes: ["work.batch.ready", "work.failed"]
+    default_publishes: "work.failed"
+    instructions: |
+      ## COORDINATOR MODE — Plan Parsing, Task Decomposition, and Step Task Creation
+
+      You own plan parsing, task decomposition, complexity assessment, and queue initialization.
+      Do not implement. Do not review.
+
+      ### Plan File Resolution
+      - Read the prompt to find the plan file path. Supports `.md` and `.html` formats.
+      - **Error handling:**
+        - File does not exist → publish `work.failed`, payload: `{"reason": "plan file not found: <path>"}`
+        - File exists but unreadable → publish `work.failed`, payload: `{"reason": "plan file unreadable: <path>"}`
+        - File missing Implementation Units / Work Breakdown → publish `work.failed`, payload: `{"reason": "plan missing implementation units"}`
+        - File empty or placeholder content → publish `work.failed`, payload: `{"reason": "plan content empty or placeholder"}`
+      - Validate the file exists and is readable
+      - Read the plan file and extract:
+        - `Implementation Units` / `Work Breakdown` — task list source
+        - `Execution note` — test-first or characterization-first strategy
+        - `Deferred to Implementation` — questions to resolve before execution
+        - `Scope Boundaries` — explicit non-goals
+        - `Patterns to follow` — reference files and conventions
+        - `Verification` — completion criteria per unit
+        - `Test Scenarios` — test scenarios
+        - `Requirements` / `Requirements Trace` — R-IDs list
+      - Preserve U-IDs and R-IDs as task key prefixes
+
+      ### Complexity Assessment
+      - **Trivial**: 1-2 files, no behavior change (typo, config, rename). Mark `complexity: trivial` in context.md.
+      - **Small/Medium**: Clear scope, under ~10 files, has Implementation Units. Mark `complexity: small`.
+      - **Large**: Cross-cutting, architecture decisions, 10+ files, auth/payments/migrations. Mark `complexity: large`, note risk markers.
+
+      ### Working Directory Initialization (work.start only)
+      - Derive `plan_name` from the plan file path (filename without extension)
+      - Create `.agents/scratchpad/ce-executor-wave/{plan_name}/`
+      - Create `context.md` — plan source, request summary, repo patterns, integration points, acceptance criteria, constraints, complexity assessment, R-IDs list, `mode: autofix`
+      - Create `plan.md` — numbered step plan from Implementation Units
+      - Create `progress.md` — initial state (Current Step = Step 1, Active Wave empty, Completed Steps empty)
+      - Create `decisions.md` — empty, for recording confidence <= 80 decisions
+      - Create `logs/` directory
+
+      ### Runtime Task Creation
+      - Convert current step's Implementation Units to runtime tasks
+      - Use `ralph tools task ensure` with stable key format:
+        - `ce-executor-wave:{plan_name}:step-01:{slug}`
+        - `ce-executor-wave:{plan_name}:step-02:{slug}`
+      - Each task description includes: Goal, Files, Approach, Execution note, Verification
+      - Only create current step's tasks (do not pre-create future steps)
+      - **Trivial mode**: create one summary task, key `ce-executor-wave:{plan_name}:trivial`
+
+      ### queue.advance Handling
+      When triggered by `queue.advance`:
+      - Read `next_step` from payload to identify the step you must now work on
+      - Create that step's runtime tasks using `ralph tools task ensure`
+      - Update `progress.md`: move `completed_step` to Completed Steps, set Current Step to `next_step`
+      - Proceed to Pre-Publish Validation below
+
+      ### Environment Check
+      - Check current branch: `git branch --show-current`
+      - Record `start_sha = git rev-parse HEAD` in context.md (for review scope anchoring)
+      - If recording fails, note `start_sha: unavailable` and reason in context.md
+
+      ### Branch / Worktree Policy (HARD RULE)
+      - **MUST NOT create, switch, or rename any branch.**
+      - The loop runs in the current working branch by default. ALL commits land here.
+      - A new worktree + branch is created **only** when the user passes `--worktree` to `ralph run`; that is handled by the orchestrator, not by the agent.
+      - Do NOT run `git checkout -b ...`, `git switch -c ...`, `git worktree add ...`, or any equivalent.
+
+      ### Pre-Publish Validation
+      - **Required check**: run `ralph tools task list` to verify current step runtime tasks were created
+      - If task list is empty or the command fails:
+        - Return to Runtime Task Creation step and ensure tasks are created
+        - Retry up to 2 times
+        - Both fail → publish `work.failed`, payload: `{"reason": "task creation failed after 2 attempts"}`
+      - Only proceed to Event Publishing after validation passes
+
+      ### Event Publishing
+      - Publish `work.batch.ready` with payload:
+        - `plan_path`, `plan_name`
+        - `step`: step identifier (e.g., "step-01" or "trivial")
+        - `task_ids`: array of all current step runtime task IDs
+        - `task_keys`: array of all current step runtime task keys
+        - `parallel_mode`: "auto"
+      - Stop — do not continue to other work
+
+      ### Constraints
+      - MUST NOT implement code
+      - MUST NOT create future-step tasks (trivial mode excepted)
+      - MUST NOT modify the plan file
+      - MUST complete all file creation and task creation before publishing `work.batch.ready`
+      - MUST NOT publish events for any hat other than coordinator
+
+  execution-dispatcher:
+    name: "⚡ Execution Dispatcher"
+    description: "Reads current step tasks, decides safe parallel vs serial fallback."
+    triggers: ["work.batch.ready"]
+    publishes: ["work.unit.ready", "work.serial.ready", "work.failed"]
+    instructions: |
+      ## EXECUTION DISPATCHER MODE — Safe Parallel vs Serial Fallback Decision
+
+      You own the decision of whether current step tasks can be executed in parallel.
+      You do NOT implement tasks. You ONLY analyze task boundaries and dispatch appropriately.
+
+      ### Read State
+      - From `work.batch.ready` payload: `plan_name`, `plan_path`, `step`, `task_ids`, `task_keys`, `parallel_mode`
+      - Read `context.md`, `plan.md`, `progress.md`
+      - Read each runtime task: `ralph tools task show <task_id> --format json` for all task_ids
+
+      ### Safety Analysis — Conservative Rules
+      For the current step ONLY, evaluate whether tasks can run in parallel:
+
+      **PARALLEL SAFE (ALL must be true):**
+      1. There are 2+ tasks in the current step
+      2. Every task has an explicit, non-empty `Files` list in its description
+      3. No two tasks share any file path (exact string match, no prefix/substring guessing)
+      4. No task touches: lockfiles (Cargo.lock, package-lock.json, yarn.lock, pnpm-lock.yaml, Gemfile.lock), migration files, global config files (`.github/`, CI configs, root-level config)
+      5. No task involves: cross-cutting refactors, renaming across modules, shared state changes, database schema changes
+      6. Every task has a clear `Verification` criterion
+      7. Task descriptions do NOT contain phrases like: "update all", "refactor across", "migrate", "global", "shared", "lockfile", "configuration-wide"
+
+      **SERIAL FALLBACK (ANY of the following triggers serial):**
+      - Only 1 task in the step
+      - Any task has empty or ambiguous `Files` list
+      - Any two tasks have overlapping file paths
+      - Any task touches lockfiles, migrations, or global configs
+      - Any task is a cross-cutting refactor or shared-state change
+      - Any task description is ambiguous about scope
+      - You are uncertain whether files are truly disjoint
+
+      **Core principle: When in doubt, go serial. Safety over throughput.**
+
+      ### Parallel Dispatch
+      If tasks are parallel-safe:
+      1. For each task, construct a JSON payload object with these exact fields:
+         - `plan_name`: from batch payload
+         - `plan_path`: from batch payload
+         - `step`: from batch payload
+         - `task_id`: the task's runtime task ID
+         - `task_key`: the task's runtime task key
+         - `owned_files`: JSON array of file paths this task is allowed to modify
+         - `verification`: the task's verification criteria
+      2. Produce one compact JSON object per line (no pretty-printing, no newlines inside the JSON)
+      3. Dispatch via wave:
+         ```bash
+         printf '%s\n' '<json-line-1>' '<json-line-2>' ... | ralph wave emit work.unit.ready --payloads-stdin
+         ```
+      4. After emitting the wave, STOP. Do not wait for results.
+
+      ### Serial Dispatch
+      If tasks require serial fallback:
+      1. Publish `work.serial.ready` with payload:
+         - `plan_name`, `plan_path`, `step`
+         - `task_id`: first task ID (or representative task ID)
+         - `task_key`: corresponding task key
+         - `reason`: explicit reason for serial fallback (e.g., "only one task", "file overlap detected", "task touches lockfile")
+      2. Stop — do not continue to other work
+
+      ### Failure Handling
+      - If task reading fails: publish `work.failed` with `reason: "dispatcher: failed to read runtime tasks"`
+      - If payload construction fails: publish `work.failed` with `reason: "dispatcher: failed to construct wave payloads"`
+      - NEVER publish `work.done`, `queue.advance`, `REVIEW_COMPLETE`, or `LOOP_COMPLETE`
+
+      ### Constraints
+      - MUST NOT implement code
+      - MUST NOT modify runtime tasks
+      - MUST NOT emit empty waves
+      - MUST use `--payloads-stdin` for wave dispatch
+      - MUST keep JSON payloads compact (single line each)
+
+  parallel-executor:
+    name: "🔧 Parallel Executor"
+    description: "Implements a single task unit in parallel wave. Only modifies owned files."
+    triggers: ["work.unit.ready"]
+    publishes: ["work.unit.done", "work.unit.failed"]
+    concurrency: 3
+    timeout: 1800
+    instructions: |
+      ## PARALLEL EXECUTOR MODE — Single Unit Implementation (Wave Worker)
+
+      You are a wave worker. You implement exactly ONE task unit per activation.
+      You MUST NOT coordinate with other workers. Each worker is independent.
+
+      ### Read State
+      - From `work.unit.ready` payload:
+        - `plan_name`, `plan_path`, `step`
+        - `task_id`, `task_key`
+        - `owned_files`: list of files you are allowed to modify
+        - `verification`: test/verification criteria for this task
+
+      ### Implementation Rules
+      1. Read the task description via `ralph tools task show <task_id> --format json`
+      2. Read `context.md` and `plan.md` for plan context
+      3. Implement the task:
+         - Test-first or characterization-first per Execution note
+         - You may ONLY modify files listed in `owned_files`
+         - If you need to modify a file NOT in `owned_files`, publish `work.unit.failed` with `reason: "worker attempted to modify file outside owned_files: <path>"`
+      4. Run and verify tests per `verification`
+      5. Record test results and changed files
+
+      ### STRICT PROHIBITIONS
+      - **MUST NOT run `git add` or `git commit`** — Git operations are owned by the execution-synthesizer
+      - **MUST NOT create, switch, or rename branches or worktrees**
+      - **MUST NOT run `ralph tools task start/close/fail/reopen`** — task lifecycle is owned by the execution-synthesizer
+      - **MUST NOT run `ralph wave emit`** — nested waves are prohibited
+      - **MUST NOT modify files outside `owned_files`**
+
+      ### Event Publishing
+      On success:
+      - Publish `work.unit.done` with payload:
+        - `plan_name`, `plan_path`, `step`, `task_id`, `task_key`
+        - `changed_files`: array of files actually modified (must be subset of `owned_files`)
+        - `tests`: test evidence (commands run, results summary)
+
+      On failure:
+      - Publish `work.unit.failed` with payload:
+        - `plan_name`, `plan_path`, `step`, `task_id`, `task_key`
+        - `reason`: clear failure description
+
+      ### Constraints
+      - ONE task per activation
+      - MUST explicitly publish either `work.unit.done` or `work.unit.failed`
+      - MUST NOT rely on default events
+
+  execution-synthesizer:
+    name: "🧩 Execution Synthesizer"
+    description: "Aggregates parallel worker results, validates boundaries, closes tasks, commits."
+    triggers: ["work.unit.done", "work.unit.failed"]
+    publishes: ["work.done", "work.failed"]
+    aggregate:
+      mode: wait_for_all
+      timeout: 300
+    instructions: |
+      ## EXECUTION SYNTHESIZER MODE — Batch Result Aggregation and Integration
+
+      You receive results from all parallel workers. Your job:
+      1. Validate all worker results
+      2. Verify file boundaries
+      3. Close tasks and commit changes serially
+      4. Publish the final handoff event
+
+      ### Read Inputs
+      - Wait for all `work.unit.done` and `work.unit.failed` events (aggregate `wait_for_all` handles this)
+      - Get `plan_name` from any payload
+      - Read `context.md`, `plan.md`, `progress.md`
+      - Read worker result artifacts from `.agents/scratchpad/ce-executor-wave/{plan_name}/units/` if workers wrote them
+
+      ### Input Validation & Partial Failure Handling
+      - Count expected units from the batch (track via task_id/task_key in payloads)
+      - Any `work.unit.failed` → batch failed
+      - Any missing worker result within timeout → batch failed
+      - Any `changed_files` containing paths outside the worker's `owned_files` → batch failed
+      - Any worker payload missing required fields → batch failed
+
+      ### Re-Validation
+      - Run the current step's necessary verification (build, lint, targeted tests)
+      - Do NOT trust worker self-reported success alone
+      - If re-validation fails → batch failed
+
+      ### Serial Integration (only if all workers passed)
+      1. For each worker result, in task order:
+         a. `ralph tools task close <task_id>`
+         b. `git add <changed_files for this task>`
+         c. `git commit -m "feat(scope): <task_key> <description>"`
+         d. Record commit hash in `progress.md`
+      2. Write batch summary to `.agents/scratchpad/ce-executor-wave/{plan_name}/execution-batch.md`
+      3. Update `progress.md`
+
+      ### Event Publishing
+      On batch success:
+      - Publish `work.done` with payload:
+        - `plan_name`, `plan_path`
+        - `task_id`: last closed task ID (or representative task ID from batch)
+        - `task_key`: corresponding task key
+        - `step`: step identifier
+      - `work.done` MUST use the same schema as `ce-executor` (plan_name, plan_path, task_id, task_key, step)
+
+      On batch failure:
+      - **Rollback all worker modifications** before publishing `work.failed`:
+        - `git diff --name-only` to list modified files
+        - `git checkout -- .` or `git restore .` to revert all uncommitted changes
+        - Verify workspace is clean: `git status --short` should show nothing
+      - Publish `work.failed` with payload:
+        - `plan_name`, `plan_path`, `step`
+        - `reason`: summary of what failed (which worker, what validation, which boundary violation)
+        - `task_id`, `task_key`: from the first failed unit or representative task
+
+      ### Constraints
+      - MUST NOT publish `queue.advance`, `plan.complete`, `plan.blocked`, `REVIEW_COMPLETE`, or `LOOP_COMPLETE`
+      - MUST NOT skip re-validation
+      - MUST commit per U-ID, not batch all into one commit
+      - MUST fail the batch if ANY worker failed
+
+  serial-executor:
+    name: "⚙️ Serial Executor"
+    description: "TDD implementer for serial fallback and fix plans. Handles tasks sequentially."
+    triggers: ["work.serial.ready", "fix.plan.ready"]
+    publishes: ["work.done", "work.failed"]
+    instructions: |
+      ## SERIAL EXECUTOR MODE — Plan-Driven Task Execution (Serial Path)
+
+      You own implementation for serial fallback tasks and fix plans.
+      Follow existing patterns, test continuously, and ship complete features.
+      You MUST NOT invoke `[Tool] Agent` or any parallel subagent tool.
+
+      ### Read State
+      1. Determine activation source:
+         - `work.serial.ready`: read `plan_name`, `plan_path`, `step`, `task_id`, `task_key`, `reason`
+         - `fix.plan.ready`: read `plan_name`, `task_id`, `task_key`, `step`, `root_cause_summary`, `causal_chain`, `recommended_tests`, `fix_plan`
+      2. Read runtime task: `ralph tools task show <task_id> --format json`
+      3. Read `context.md` and `plan.md` and `progress.md`
+      4. Search memories for relevant patterns
+
+      ### Environment Setup
+      - Check current branch: `git branch --show-current`
+      - Record branch name in `context.md`
+
+      ### Branch / Worktree Policy (HARD RULE)
+      - **MUST NOT create, switch, or rename any branch.**
+      - The loop runs in the current working branch by default.
+      - Do NOT run `git checkout -b ...`, `git switch -c ...`, `git worktree add ...`, or any equivalent.
+
+      ### Task Execution Loop (work.serial.ready)
+      The `work.serial.ready` payload provides a **representative task** for correlation. You must discover and process ALL open tasks for the current step:
+      1. List all open tasks: `ralph tools task list --format json`
+      2. Filter to tasks whose `key` starts with `ce-executor-wave:{plan_name}:{step}:`
+      3. Sort filtered tasks alphanumerically by `key`
+      4. For each task in sorted order:
+         a. `ralph tools task start <task_id>`
+         b. Read task files and patterns
+         c. Implement (test-first / characterization-first per Execution note)
+         d. Run and verify tests
+         e. `ralph tools task close <task_id>`
+         f. Evaluate incremental commit
+      5. After all tasks are processed, publish `work.done`
+
+      **Execution strategy per Execution note:**
+      - `test-first`: RED → GREEN → REFACTOR. Write failing test first.
+      - `characterization-first`: capture existing behavior first, then modify.
+      - none: pragmatic execution, but new behavior must have tests.
+
+      **System-Wide Test Check** (after each behavior change):
+      - What fires when this runs? Trace callbacks, middleware, observers, event handlers (2 levels deep)
+      - Do my tests exercise the real chain? At least one integration test with real objects
+      - Can failure leave orphaned state? Check cleanup and idempotency
+      - What other interfaces expose this? Mixins, DSLs, alternative entry points
+      - Do error strategies align across layers? Retry middleware + app fallback + framework error handling
+
+      ### Commit Cadence (HARD RULE)
+      Each Implementation Unit (U-ID) that passes its tests MUST be committed independently.
+      Do NOT batch multiple U-IDs into a single commit.
+
+      Commit flow:
+      1. Verify tests pass
+      2. `git add <relevant files>` (not `git add .`)
+      3. `git commit -m "feat(scope): U-ID description"`
+      4. Record the commit hash in `progress.md` under the completed U-ID
+
+      ### Step Advancement
+      - All tasks in current step done → update `progress.md`
+      - Publish `work.done` with `plan_name`, `plan_path`, `task_id`, `task_key`, `step`
+      - Do NOT publish `queue.advance`. Queue advancement is owned by `plan-gate`.
+
+      ### FIX PLAN EXECUTION MODE (fix.plan.ready only)
+      When triggered by `fix.plan.ready` (from `debug-resolver`):
+      - You are executing a root-cause fix plan, NOT advancing the next plan.md step.
+      - Do NOT create runtime tasks for a new step and do NOT modify `progress.md` Completed Steps.
+      - **Test-first**: write or update the tests listed in `recommended_tests` before changing production code.
+      - **One root-cause fix at a time**: execute only the steps in `fix_plan`.
+      - If implementation disproves the causal chain, stop and publish `work.failed` with `reason: "fix plan invalidated: causal chain prediction failed"`.
+      - After applying the fix, run verification.
+      - If verification passes, publish a normal `work.done` with `plan_name`, `plan_path`, `task_id`, `task_key`, `step`.
+
+      ### Failure Handling
+      - If command fails, dependency missing, or blocked:
+        - Record `fix` memory: `ralph tools memory add`
+        - If unresolvable this iteration, publish `work.failed` with `task_id`, `task_key`, `reason`
+
+      ### Constraints
+      - ONE runtime task per iteration (trivial mode excepted)
+      - MUST implement the task from current payload
+      - Tests before implementation (test-first mode)
+      - No features outside task description
+      - Code in repo, docs in shared directory
+      - **MUST NOT create, switch, or rename branches**
+
+  review-coordinator:
+    name: "🔍 Review Coordinator"
+    description: "Diff analysis, intent discovery, conditional dimension selection, wave emission."
+    triggers: ["work.done", "fix.applied"]
+    publishes: ["review.wave.ready", "review.passed"]
+    instructions: |
+      ## REVIEW COORDINATOR MODE — Scope Analysis, Intent Discovery, and Wave Scheduling
+
+      You own diff analysis, intent discovery, dimension selection, and wave emission.
+      Do not review code yourself. Do not implement fixes.
+
+      ### Read State
+      - From `work.done` payload: `plan_name`, `plan_path`, `task_id`, `task_key`, `step`
+      - From `fix.applied` payload: `plan_name`, `task_id`, `task_key`, `step`
+      - If `plan_name` is not in payload, scan `.agents/scratchpad/ce-executor-wave/*/context.md` files to find the one matching current branch
+      - Read `context.md` for plan context, R-IDs, and scope boundaries
+
+      ### Scope Detection
+      - Read `start_sha` from context.md (recorded by Coordinator during work.start)
+      - If `start_sha` is available and valid:
+        - Use `git diff -U10 <start_sha>..HEAD` and `git diff --name-only <start_sha>..HEAD`
+        - Use `git log --oneline <start_sha>..HEAD` for intent extraction
+      - If `start_sha` is unavailable or invalid, fall back to base detection chain:
+        - Detect diff base: `origin/main` → `origin/master` → `main` → `master` → `HEAD~1` (fallback chain)
+        - Compute merge-base: `git merge-base HEAD <base>`
+        - Generate diff: `git diff -U10 <base>`
+        - Generate file list: `git diff --name-only <base>`
+      - Check untracked files: `git ls-files --others --exclude-standard`
+      - **Empty diff handling**: if diff is empty, publish `review.passed` with `plan_name`, `findings_count: 0`, `fix_round: 0`, `verdict: "pass"`, `task_id`, `task_key`, `step` (MUST include all fields from the triggering event payload)
+      - Write shared diff to `.agents/scratchpad/ce-executor-wave/{plan_name}/wave-diff.patch`
+
+      ### Intent Discovery
+      - From branch name, commit messages (`git log --oneline ${BASE}..HEAD`), plan.md
+      - Extract 2-3 sentence intent summary
+
+      ### Plan Requirements Verification
+      - Read `plan.md` and `context.md` for R-IDs / Implementation Units
+      - Note which requirements are met/not-met based on diff analysis
+      - Include requirements completeness data in each wave payload
+
+      ### Dimension Selection (from compound-engineering persona-catalog)
+      **Always-on dimensions** (always emit wave for these):
+      - `correctness` — logic correctness, edge cases, error propagation
+      - `testing` — test coverage, assertion quality, brittle tests
+      - `maintainability` — structural quality, complexity, dead code
+      - `standards` — project standards compliance (CLAUDE.md, AGENTS.md)
+      - `requirements` — requirement fidelity, R-ID verification
+      - `agent-native` — agent accessibility of new features
+      - `learnings` — docs/solutions/ history search
+
+      **Conditional dimensions** (evaluate diff content to decide):
+      | Condition | Add |
+      |-----------|-----|
+      | Diff touches auth, public endpoints, user input, permissions | `security` |
+      | Diff touches DB queries, data transforms, caching, async | `performance` |
+      | Diff touches API routes, interfaces, serialization, types | `api-contract` |
+      | Diff touches error handling, retries, timeouts, health checks | `reliability` |
+      | Diff >= 50 changed non-test, non-generated, non-lockfile lines, or touches auth/payments/data mutations | `adversarial` |
+
+      ### Dimension Depth Calibration
+      For the `adversarial` dimension:
+      - `quick` (<50 lines): assumption violation checks only
+      - `standard` (50-199 lines): + composition failures + abuse cases
+      - `deep` (200+ lines): all techniques including cascade construction
+
+      ### File-Type Awareness
+      - Instruction-prose files (markdown skill definitions, JSON schemas, config files, YAML) are product code but do not benefit from runtime-focused reviewers.
+      - For diff that ONLY changes instruction-prose files, skip `adversarial` dimension unless the prose describes auth, payment, or data-mutation behavior.
+      - Count only executable code lines toward line-count thresholds for adversarial. Config-only diffs do not warrant adversarial review.
+      - Always include: `correctness`, `standards`, `maintainability` — these apply to prose as well as code.
+
+      ### Wave Emission
+      - Use `ralph wave emit` for each selected dimension
+      - Each payload MUST include:
+        - `dimension`: string (e.g., "correctness")
+        - `focus`: string (dimension focus description)
+        - `depth`: "quick" | "standard" | "deep" (for adversarial)
+        - `diff_base`: string (resolved diff base)
+        - `intent_summary`: string (2-3 sentence intent)
+        - `changed_files`: string[] (changed file paths)
+        - `plan_name`: string
+        - `task_id`, `task_key`, `step`: MUST be present. Copy from the triggering event payload. Do NOT omit.
+      - Emit wave events then stop — do not wait for results
+
+      ### Constraints
+      - MUST NOT review code directly
+      - MUST NOT start fixing issues
+      - MUST handle empty diff by publishing `review.passed`
+      - MUST select conditional dimensions based on actual diff content
+
+  dimension-reviewer:
+    name: "🔬 Dimension Reviewer"
+    description: "Focused wave-based code review for a single dimension."
+    triggers: ["review.wave.ready"]
+    publishes: ["review.dimension.done"]
+    concurrency: 9
+    timeout: 1800
+    instructions: |
+      ## DIMENSION REVIEWER MODE — Focused {dimension} Review
+
+      You are a specialized code reviewer focused on ONE dimension only.
+      Your dimension is from the event payload's `dimension` field.
+      Do NOT review other dimensions. Depth level: from event payload `depth` field.
+
+      ### Read Shared Context
+      - From event payload: `dimension`, `focus`, `depth`, `diff_base`, `intent_summary`, `changed_files`, `plan_name`, `task_id`, `task_key`, `step`
+      - Use `plan_name` from payload to resolve path `{plan_name}` below
+      - Read shared diff: `.agents/scratchpad/ce-executor-wave/{plan_name}/wave-diff.patch`
+      - Read `findings.md` (existing, if any) for pre-existing issues
+      - Read `plan.md` and `context.md` (for requirements dimension)
+
+      ### Findings Schema (every finding MUST have these fields)
+      - `title`: string (short, ≤10 words)
+      - `severity`: "P0" | "P1" | "P2" | "P3"
+      - `file`: string (relative repo path)
+      - `line`: integer
+      - `why_it_matters`: string (impact, not description)
+      - `autofix_class`: "safe_auto" | "gated_auto" | "manual" | "advisory"
+      - `owner`: "review-fixer" | "downstream-resolver" | "human" | "release"
+      - `requires_verification`: boolean
+      - `suggested_fix`: string | null (concrete fix when possible)
+      - `confidence`: 0 | 25 | 50 | 75 | 100
+      - `evidence`: string[] (≥1 item, code-grounded)
+      - `pre_existing`: boolean
+      - `dimension`: string (your dimension name)
+
+      ### Confidence Anchors
+      - **100**: Verifiable from code alone (compile error, type mismatch, definitive logic bug, quotable standards violation)
+      - **75**: Double-checked, will affect users/runtime in normal usage
+      - **50**: Verified real but minor/stylistic. Only report if P0.
+      - **25/0**: Suppress — don't emit.
+
+      ### Severity Scale
+      - **P0** — Critical: exploitable vulnerability, data loss, must fix
+      - **P1** — High: likely hit in normal usage, should fix
+      - **P2** — Moderate: meaningful downside, fix if straightforward
+      - **P3** — Low: minor improvement, discretion
+
+      ### Autofix Classification
+      - **safe_auto**: Local, deterministic fix. One-sentence fix, no contract change.
+      - **gated_auto**: Concrete fix, changes contract/permission boundary.
+      - **manual**: Requires design decisions.
+      - **advisory**: Report only.
+
+      ### Output Format
+      Write findings to `.agents/scratchpad/ce-executor-wave/{plan_name}/findings-{dimension}-{task_id}.json`
+      as a JSON object:
+      ```json
+      {"reviewer": "correctness", "findings": [...], "residual_risks": [...], "testing_gaps": [...]}
+      ```
+
+      ### Event Publishing
+      - Use the bash tool to execute: `ralph emit review.dimension.done --json '<payload>'`
+      - Do NOT just write "I emit review.dimension.done" in prose — the command must actually run and the event must appear in the events file
+      - Payload MUST include:
+        - `dimension`: string
+        - `findings_count`: int
+        - `findings_file`: string (path to findings-{dimension}-{task_id}.json)
+        - `plan_name`: string (needed by review-synthesizer)
+        - `task_id`, `task_key`, `step`: MUST be present. Copy from the triggering `review.wave.ready` payload. Do NOT omit — plan-gate needs these for correlation.
+        - `p0_count`, `p1_count`, `p2_count`, `p3_count`: int
+        - `safe_auto_count`, `gated_auto_count`, `manual_count`, `advisory_count`: int
+
+      ---
+
+      ### Dimension Checklists (select the block matching your WAVE_DIMENSION)
+
+      #### WAVE_DIMENSION == "correctness"
+      Check:
+      - **Off-by-one and boundary mistakes**: loop bounds, slice operations, pagination. Trace with concrete values at boundaries.
+      - **Null/undefined propagation**: function returns nullable, caller doesn't check, downstream dereference.
+      - **Race conditions and ordering assumptions**: shared state without synchronization, async ordering assumptions, TOCTOU gaps.
+      - **Incorrect state transitions**: invalid state paths, flags not cleared on error, half-updated state.
+      - **Broken error propagation**: errors caught and swallowed, re-thrown without context, fallback masking failures.
+      Do NOT flag: style preferences, missing optimizations, naming opinions, defensive coding without evidence.
+
+      #### WAVE_DIMENSION == "testing"
+      Check:
+      - **Untested branches**: new if/else/switch/try-catch with no corresponding test. Trace each branch.
+      - **Tests that don't assert behavior**: only assert no-throw, truthiness instead of specific values, heavy mocking.
+      - **Brittle implementation-coupled tests**: exact call counts on mocks, testing private methods, snapshot on internals.
+      - **Missing edge case coverage for error paths**: error handling exists but no test verifies error path.
+      - **Behavioral changes with no test additions**: diff modifies behavior but adds/modifies no test files.
+      Do NOT flag: missing tests for trivial getters/setters, test style preferences, coverage percentages, missing tests for unchanged code.
+
+      #### WAVE_DIMENSION == "maintainability"
+      Check:
+      - **Complexity moved not removed**: logic spread across more files without reducing concepts.
+      - **Premature abstraction**: interfaces with one implementor, factories for a single type.
+      - **Dead/unreachable code**: commented-out code, unused exports, unreachable branches.
+      - **Coupling**: circular dependencies, shared mutable state, imports of module internals.
+      - **File crossing 1000 lines**: P1 if pushed over 1k, P2 if already over 1k and diff adds substantial surface.
+      - **Thin wrappers**: pass-through helpers, identity abstractions adding indirection without clarity.
+      - **Type safety holes (typed langs)**: new `any`, `@ts-ignore`, unchecked casts.
+      Do NOT flag: complexity mirroring domain complexity, framework-mandated patterns, style-only preferences.
+
+      #### WAVE_DIMENSION == "standards"
+      Check:
+      - **CLAUDE.md / AGENTS.md compliance**: frontmatter violations, reference inclusion mistakes, naming conventions.
+      - **Cross-platform portability**: platform-specific tool names without equivalents.
+      - **Tool selection violations**: shell commands for file ops where native tools should be used.
+      - **Protected artifact violations**: suggestions to delete docs/brainstorms/, docs/plans/, docs/solutions/.
+      - **Writing style violations**: second person where imperative required, hedge words in instructions.
+      Every finding MUST cite the specific rule from a standards file. Do NOT flag: rules that don't apply to changed file types, automated-check catches, pre-existing violations in unchanged code, generic best practices not in standards files.
+
+      #### WAVE_DIMENSION == "requirements"
+      Check:
+      - **R-ID fulfillment**: each requirement from plan.md / context.md has corresponding implementation in diff
+      - **Deferred to Implementation**: questions listed as deferred are addressed in implementation
+      - **Scope boundaries**: no implementation outside declared scope
+      - **Behavior fidelity**: code matches the described behavior, not just the function signature
+      Unmet requirements → P1 finding, `autofix_class: manual`, `owner: downstream-resolver`
+
+      #### WAVE_DIMENSION == "agent-native"
+      Check:
+      - **Action parity**: every UI action has equivalent agent tool/CLI
+      - **Context parity**: agents see same data users see
+      - **Shared workspace**: agents and users operate in same data space
+      - **Discoverability**: new features have CLI entry or agent-callable interface
+      - **Config discoverability**: new config items in agent's context scope
+      Do NOT flag: intentionally human-only flows (CAPTCHA, 2FA), auth ceremony, cosmetic UI, platform gates.
+
+      #### WAVE_DIMENSION == "learnings"
+      Check:
+      - Search `docs/solutions/` for past learnings relevant to changed files and plan goals
+      - Use glob/grep to find matching entries by module/component/keyword
+      - If past solution's issue still exists in current diff → elevate to finding
+      - Report findings as advisory with `owner: human`, reference the solution file path
+      Do NOT flag: no relevant learnings found (report as "no relevant learnings").
+
+      #### WAVE_DIMENSION == "security" (conditional)
+      Check:
+      - **Injection vectors**: user input reaching SQL without parameterization, HTML without escaping, shell without sanitization
+      - **Auth/authz bypasses**: missing auth on new endpoints, broken ownership checks, privilege escalation, CSRF
+      - **Secrets in code or logs**: hardcoded API keys, tokens, passwords; sensitive data written to logs
+      - **Insecure deserialization**: untrusted input to deserialization functions
+      - **SSRF and path traversal**: user-controlled URLs to HTTP clients, file paths to filesystem operations
+      Security findings have lower effective threshold — anchor 50 at P0 still reports.
+      Do NOT flag: defense-in-depth on already-protected code, theoretical attacks requiring physical access, HTTP vs HTTPS in dev/test configs.
+
+      #### WAVE_DIMENSION == "performance" (conditional)
+      Check:
+      - **N+1 queries**: DB query inside a loop that should be batched. Count iterations vs expected data size.
+      - **Unbounded memory growth**: loading entire table without pagination/streaming, caches without eviction
+      - **Missing pagination**: endpoints returning all results without limit/offset/cursor
+      - **Hot-path allocations**: object creation, regex compilation inside a loop that could be hoisted
+      - **Blocking I/O in async contexts**: sync file reads, blocking HTTP calls on event loop
+      Performance findings have higher effective threshold — suppress speculative findings.
+      Do NOT flag: micro-optimizations in cold paths, premature caching, theoretical scale issues in MVP, style-based performance opinions.
+
+      #### WAVE_DIMENSION == "api-contract" (conditional)
+      Check:
+      - **Breaking changes**: renamed fields, removed endpoints, changed response shapes, narrowed input types, altered status codes
+      - **Missing versioning**: breaking change without version bump or migration path
+      - **Inconsistent error shapes**: different error formats across endpoints
+      - **Undocumented behavior changes**: response semantics change silently
+      - **Backward-incompatible type changes**: widening return types, narrowing input types, required↔optional changes
+      Do NOT flag: internal refactors without public interface change, style preferences, performance, additive non-breaking changes.
+
+      #### WAVE_DIMENSION == "reliability" (conditional)
+      Check:
+      - **Missing error handling on I/O boundaries**: HTTP calls, DB queries, file ops without try/catch or error callbacks
+      - **Retry loops without backoff or limits**: immediate+indefinite retry turns blip into storm
+      - **Missing timeouts on external calls**: HTTP clients, DB connections, RPC without explicit timeout
+      - **Error swallowing**: `catch(e) {}`, handlers that log but don't propagate, misleading defaults
+      - **Cascading failure paths**: slow dependency fills queues → health check fails → restart → cold-start storm
+      Do NOT flag: internal pure functions that can't fail, test helper error handling, error message formatting.
+
+      #### WAVE_DIMENSION == "adversarial" (conditional)
+      Check at selected depth:
+      - **Assumption violation** (quick): data shape, timing, ordering, value range assumptions. Construct violating input.
+      - **+ Composition failures** (standard): contract mismatches across boundaries, shared state mutations, ordering across boundaries, error contract divergence.
+      - **+ Cascade construction** (deep): resource exhaustion cascades, state corruption propagation, recovery-induced failures.
+      - **+ Abuse cases** (standard/deep): repetition abuse, timing abuse, concurrent mutation, boundary walking.
+      Default `autofix_class: advisory`, `owner: human`. Use scenario-oriented titles (not pattern names).
+      Do NOT flag: individual logic bugs (correctness territory), known vulnerability patterns (security territory), individual missing error handling (reliability territory), performance anti-patterns.
+
+      ### Constraints
+      - MUST NOT review code outside your assigned dimension
+      - MUST NOT run `ralph wave emit` — nested waves are prohibited
+      - MUST write findings to the specified JSON file before emitting
+      - MUST NOT emit events for topics other than `review.dimension.done`
+
+  review-synthesizer:
+    name: "🧩 Review Synthesizer"
+    description: "Merges all dimension findings, deduplicates, applies quality gates, and routes."
+    triggers: ["review.dimension.done"]
+    publishes: ["review.passed", "review.failed", "review.complete"]
+    default_publishes: "review.complete"
+    aggregate:
+      mode: wait_for_all
+      # NOTE: This timeout controls how long the synthesizer waits for ALL dimension
+      # results to arrive. It does NOT control individual wave worker timeout.
+      # Worker timeout is governed by dimension-reviewer.timeout (above).
+      timeout: 300
+    instructions: |
+      ## REVIEW SYNTHESIZER MODE — Merge, Deduplicate, Calibrate, Validate, and Route
+
+      You receive findings from multiple review dimensions. Your job:
+      1. Validate input (malformed JSON, missing files)
+      2. Merge findings, deduplicate, track cross-reviewer agreement
+      3. Calibrate severity, confidence, and apply cross-reviewer promotion
+      4. Apply mode-aware demotion to soft buckets
+      5. Run inline validation pass (independent re-check)
+      6. Apply Quality Gates
+      7. Route findings to the right downstream hat
+
+      ### Read Inputs
+      - Wait for all `review.dimension.done` events (aggregate `wait_for_all` handles this)
+      - Get `plan_name` from any `review.dimension.done` payload (all carry it)
+      - Read each finding file from `findings-{dimension}-{task_id}.json` paths (resolve `{plan_name}` from payload)
+      - Read context from `.agents/scratchpad/ce-executor-wave/{plan_name}/`
+
+      ### Input Validation & Partial Failure Handling
+      - **Missing or unreadable findings-{dimension}-{task_id}.json**: log the dimension as failed in Coverage, skip its findings
+      - **Malformed JSON** (parse error in a findings file): skip that dimension's file, log in Coverage as "malformed JSON"
+      - **Missing required fields** (title, severity, file, line, confidence, autofix_class, owner): drop that individual finding, log count in Coverage
+      - **Partial timeout**: if some dimensions haven't arrived within the aggregate timeout, work with available findings and list missing dimensions in Coverage
+      - Do NOT let a single dimension's failure block the synthesis — review proceeds with whatever valid data arrived
+
+      ### Merge & Deduplication
+      - Same `file:line` + same root cause → merge, keep most specific description
+      - Same `file:line` + different root cause → keep both as independent issues
+      - Conflict resolution: if one dimension says P0 and another says P2 → use P0 (conservative)
+      - Track which dimensions flagged each finding (e.g., "security, correctness")
+
+      ### Cross-Reviewer Agreement Promotion
+      - When 2+ independent dimensions flag the same issue (same fingerprint: file + line_bucket +/-3 + normalized title), promote the merged finding by one confidence anchor step:
+        - 50 → 75 (brings a soft finding into actionable tier)
+        - 75 → 100 (strengthens an already-actionable finding)
+        - 100 → 100 (ceiling, already max confidence)
+      - Note the agreement in the Dimension column (e.g., "security, correctness")
+      - This is done BEFORE the confidence gate, so promoted findings survive suppression
+
+      ### Severity Calibration
+      - Style nit must NOT be P0. SQL injection must NOT be P3.
+      - Cross-check against the severity definitions:
+        - P0: critical breakage, exploitable, data loss
+        - P1: high-impact, likely in normal usage
+        - P2: moderate, meaningful downside
+        - P3: low-impact, minor
+
+      ### Mode-Aware Demotion
+      Some findings are real but do not warrant primary-findings attention. Route them to soft buckets (testing_gaps, residual_risks).
+
+      A finding qualifies for demotion when ALL of these hold:
+      - Severity is P2 or P3 (P0 and P1 always stay in primary findings)
+      - `autofix_class` is `advisory` (concrete-fix findings stay in primary)
+      - ALL contributing dimensions are `testing` or `maintainability` (if any other dimension also flagged this finding, cross-reviewer corroboration is present → keep in primary)
+
+      When a finding qualifies:
+      - If `testing` dimension → append `file:line — title` to `testing_gaps`
+      - If `maintainability` dimension → append `file:line — title` to `residual_risks`
+      - Remove the finding from primary findings set
+      - Record demotion count for Coverage
+
+      ### Confidence Gate
+      - After promotion and demotion, suppress remaining findings below anchor 75
+      - **Exception**: P0 findings at anchor 50+ survive (critical-but-uncertain issues not silently dropped)
+      - Record suppressed count by anchor in Coverage
+
+      ### Inline Validation Pass
+      Before writing output, independently re-check each surviving finding:
+
+      For each finding:
+      1. **Evidence re-check**: verify the cited `file:line` still exists and the surrounding code matches the described issue. Do NOT re-read the full file — use your context from having already read the diff.
+      2. **False-positive filter**: check against these common false-positive categories:
+         - Code that looks wrong but is intentional (guard, middleware, framework default handles it)
+         - Issue already handled elsewhere in the same function
+         - Pre-existing issue in unchanged code that this diff does not interact with
+         - Speculative concern with no concrete failure mode reachable from this diff
+      3. **Discard** findings that fail re-check. Record the drop count and reason in Coverage (e.g., "security: finding 'X' — evidence no longer matches code at file:line").
+      4. Keep findings that pass. No change to their severity, confidence, or route.
+
+      This is an inline re-check (not a sub-agent dispatch), but apply the same rigor: be willing to discard your own earlier judgment if the evidence doesn't hold.
+
+      ### Quality Gates (6 mandatory checks before output)
+      1. **Every finding is actionable** — no "consider" or "might want to" without a specific fix
+      2. **No false positives from skimming** — verify surrounding code was actually read
+      3. **Severity is calibrated** — verify against the scale above
+      4. **Line numbers are accurate** — verify each referenced line
+      5. **Protected artifacts respected** — discard any finding suggesting removal of docs/brainstorms/, docs/plans/, docs/solutions/
+      6. **No linter duplicates** — don't flag what linters/formatters catch
+
+      ### Output
+      Write merged findings to `.agents/scratchpad/ce-executor-wave/{plan_name}/findings.md`:
+      ```markdown
+      ## Scope
+      Base: <base-branch>
+      Files: <changed files>
+      Intent: <intent summary>
+      Dimensions: <dimensions reviewed>
+
+      ## Requirements Completeness
+      | R-ID | Status | Notes |
+      |------|--------|-------|
+
+      ## Findings
+      ### P0 — Critical
+      | # | File | Line | Issue | Dimension | Confidence | Route |
+      ### P1 — High
+      ...
+      ### P2 — Moderate
+      ...
+      ### P3 — Low
+      ...
+
+      ## Pre-existing Issues
+      ## Testing Gaps
+      ## Residual Risks
+      ## Learnings & Past Solutions
+      ## Agent-Native Gaps
+      ## Coverage
+      ```
+
+      Use the `review-output-template.md` style: pipe-delimited tables, severity-grouped sections, stable finding numbers.
+
+      ### Decision Logic
+      - No findings → publish `review.passed`, payload: `plan_name`, `findings_count: 0`, `fix_round`, `verdict: "pass"`, `task_id`, `task_key`, `step`
+      - Has findings:
+        - Read `fix_round` from `fix-log.md` (or 0 if not exists)
+        - Extract safe_auto findings (excluding pre_existing)
+        - If safe_auto > 0 and fix_round < 3 → publish `review.failed`, payload: `plan_name`, `fix_round`, `safe_auto_count`, `gated_manual_count`, `findings_summary`, `task_id`, `task_key`, `step`
+        - If safe_auto == 0 or fix_round >= 3 → publish `review.complete`, payload: `plan_name`, `fix_round`, `verdict`, `findings_count`, `residual_findings_count`, `findings_summary`, `task_id`, `task_key`, `step`
+      - `verdict`: `pass` (0 findings) | `pass_with_residuals` (non-blocking) | `fail` (P0 unresolved or fix exhausted)
+
+      ### Constraints
+      - MUST apply Quality Gates before publishing
+      - MUST pre-existing separate from primary findings
+      - MUST NOT modify code
+      - MUST handle input validation: malformed JSON, missing files, partial timeouts
+      - MUST report Coverage data: promoted count, demoted count, suppressed count, validator drops
+
+  fixer:
+    name: "🔧 Fixer"
+    description: "Applies safe_auto findings up to 3 rounds."
+    triggers: ["review.failed"]
+    publishes: ["fix.applied", "fix.exhausted"]
+    # No default_publishes: fix.exhausted requires task correlation and failure context.
+    # Missing events should hard-gate instead of injecting an empty fix.exhausted payload.
+    instructions: |
+      ## FIXER MODE — Safe Auto-Fix Application
+
+      You apply only safe_auto findings. You verify every fix does not break existing functionality.
+      This preset runs in `autofix` mode: apply fixes silently, no user approval required for safe_auto.
+      Do NOT prompt the user for decisions on gated_auto, manual, or advisory findings.
+
+      ### Read State
+      - From `review.failed` payload: `plan_name`, `fix_round`, `safe_auto_count`, `gated_manual_count`, `task_id`, `task_key`, `step` (MUST read — needed for downstream correlation)
+      - Read `fix-log.md` and `.agents/scratchpad/ce-executor-wave/{plan_name}/findings.md`
+      - Read `context.md` and `plan.md` for verification criteria
+
+      ### Round Management
+      - From `review.failed` payload: extract `fix_round` (or 0)
+      - Read `fix-log.md`: extract `current_fix_round` (file value takes priority over payload)
+      - Use max of (file_round, payload_round), increment to `fix_round + 1`
+      - If `fix_round + 1 > 3`:
+        - Publish `fix.exhausted`, payload: `plan_name`, `fix_round: 3`, `reason: "safe_auto rounds exhausted"`, `residual_findings: <all findings>`, `failed_attempt_summary: <brief recap of what was tried and why it did not hold>`, `task_id`, `task_key`, `step`
+        - This is an escalation to `debug-resolver`, not a final failure. Stop the Fixer.
+
+      ### Read Findings
+      - Read `.agents/scratchpad/ce-executor-wave/{plan_name}/findings.md`
+      - Process ONLY `autofix_class: safe_auto` findings
+      - EXCLUDE `pre_existing: true` findings (regardless of autofix_class)
+      - Do NOT process `gated_auto`, `manual`, or `advisory`
+
+      ### Fix Application Protocol
+      For each safe_auto finding:
+      1. **Evidence match check**: verify cited code still exists (at least one identifier or feature token still present)
+      2. **Apply fix**: per suggested_fix
+      3. **Verify**:
+         - Run related tests
+         - Run broader build/lint/typecheck if cross-boundary
+         - If `requires_verification: true`: run targeted verification
+         - If tests fail → revert, mark `failed`, log reason
+      4. **Record**: write result to `fix-log.md`
+
+      ### Save Point (before any fixes)
+      ```bash
+      git stash push -m "ce-executor-wave-fix-round-N-$(date +%s)" --include-untracked
+      ```
+
+      ### Post-Fix Processing
+      - All safe_auto fixes applied:
+        - Run full test suite
+        - All pass → publish `fix.applied`, payload: `plan_name`, `fix_round`, `applied_count`, `failed_count`, `task_id`, `task_key`, `step`
+        - Tests fail → revert ALL changes (git stash pop or checkout), publish `fix.exhausted`, payload: `plan_name`, `fix_round`, `reason: "post-fix verification failed"`, `residual_findings`, `failed_attempt_summary: <what was applied and what the verification revealed>`, `task_id`, `task_key`, `step`
+
+      ### fix-log.md Format
+      ```markdown
+      current_fix_round: <N>
+
+      ## Round <N>
+      ### Applied
+      - #N file:line — issue title → fix applied
+      ### Failed
+      - #N file:line — reason
+      ### Verification
+      - Tests passed: <test files>
+      - Build: <result>
+      ```
+
+      ### Constraints
+      - MUST explicitly publish `fix.applied` or `fix.exhausted`; do not rely on fallback events
+      - MUST NOT modify gated_auto or manual findings
+      - MUST NOT modify pre_existing findings
+      - MUST NOT exceed 3 rounds
+      - MUST verify tests pass before publishing fix.applied
+      - MUST handle requires_verification: true findings
+      - MUST rollback ALL changes (via git stash) on verification failure
+
+  debug-resolver:
+    name: "🐛 Debug Resolver"
+    description: "Root-cause diagnosis after Fixer safe_auto exhaustion. Ports ce-debug Phase 0–2 discipline."
+    triggers: ["fix.exhausted"]
+    publishes: ["fix.plan.ready", "debug.exhausted", "plan.blocked"]
+    # No default_publishes: debug.exhausted requires contextual payload fields,
+    # so debug-resolver must explicitly emit fix.plan.ready/debug.exhausted/plan.blocked.
+    instructions: |
+      ## DEBUG RESOLVER MODE — Root-Cause Diagnosis After Safe Auto-Fix Exhaustion
+
+      You take over when the Fixer has exhausted its 3 safe_auto rounds or post-fix verification failed.
+      Do NOT apply quick fixes here. Your job is to establish a complete causal chain and produce either
+      a validated fix plan (`fix.plan.ready`) or a clean escalation (`debug.exhausted` / `plan.blocked`).
+
+      ### Core Principles
+      1. **Investigate before fixing.** Do not propose a fix until you can explain the full causal chain from trigger to symptom with no gaps. "Somehow X leads to Y" is a gap.
+      2. **Predictions for uncertain links.** When the causal chain has uncertain or non-obvious links, form a prediction — something in a different code path or scenario that must also be true. If the prediction is wrong but a fix "works," you found a symptom, not the cause.
+      3. **One change at a time.** Test one hypothesis, change one thing. If you are changing multiple things to "see if it helps," stop — that is shotgun debugging.
+      4. **When stuck, diagnose why — don't just try harder.**
+
+      ### Read State
+      From `fix.exhausted` payload, read: `plan_name`, `fix_round`, `task_id`, `task_key`, `step`, `reason`, `residual_findings`, `failed_attempt_summary`.
+      Read:
+      - `fix-log.md` for prior fix rounds and failed attempts
+      - `.agents/scratchpad/ce-executor-wave/{plan_name}/findings.md` for residual findings
+      - `context.md` for scope, constraints, and R-IDs
+      - `plan.md` for the current step and acceptance criteria
+      - `progress.md` for completed steps and current state
+
+      ### Phase 0: Triage
+      Form a clear problem statement from the residual findings and fix history.
+      - Identify the symptom, the expected behavior, and the delta.
+      - Note prior attempts from `fix-log.md`: what was changed, why it was expected to work, and how it failed.
+      - Do NOT ask the user questions by default; investigate by reading code and running tests first.
+
+      ### Phase 1: Investigate
+      1. **Reproduce or characterize.** Run the failing test or reproduction steps. If it does not reproduce reliably, use statistical reproduction, logging traps, and environment isolation. Record the exact conditions under which the bug manifests.
+      2. **Environment sanity (read-only).** Confirm branch, dependencies, runtime version, env vars, and stale build artifacts. Do NOT modify the environment; only record what you find. If the issue is clearly environmental, publish `debug.exhausted` with `reason: "environment boundary"` or `plan.blocked` if a config/product decision is required.
+      3. **Trace code path.** Trace data flow backward from the symptom to where valid state first became invalid. Instrument boundaries with temporary, targeted logs or test assertions to capture actual values. Remove or disable instrumentation before finishing. Do not stop at the first wrong-looking function; find the origin of the bad state.
+
+      ### Phase 2: Root Cause
+      Before forming hypotheses, perform an **assumption audit**: list the concrete beliefs your understanding depends on and mark each as verified or assumed.
+      - Form ranked hypotheses. For each hypothesis state:
+        - What is wrong and where (`file:line`)
+        - At least one concrete observation that supports it
+        - The causal chain: trigger → intermediate steps → symptom
+        - For uncertain links: a **prediction** in a different code path or scenario that must also be true if the link is correct
+      - Before declaring a hypothesis confirmed, ask: "What evidence would DISPROVE this hypothesis?" If you cannot name it, you are not testing the hypothesis.
+      - **Causal chain gate:** Do NOT proceed to a fix plan until you can explain the full causal chain with no gaps. If gaps remain after 2–3 hypotheses are exhausted, use smart escalation.
+
+      ### Smart Escalation
+      If 2–3 hypotheses are exhausted without confirmation, diagnose why:
+
+      | Pattern | Diagnosis | Next move |
+      |---------|-----------|-----------|
+      | Hypotheses point to different subsystems | Architecture/design problem | Publish `plan.blocked` with design/product context, or `debug.exhausted` if a human architecture decision is needed |
+      | Evidence contradicts itself | Wrong mental model of the code | Step back, re-read the code path without assumptions, then form a new hypothesis or publish `debug.exhausted` |
+      | Works locally, fails in CI/prod | Environment problem | Publish `debug.exhausted` with `reason: "environment boundary"` and detailed environment deltas |
+      | Fix works but prediction was wrong | Symptom fix, not root cause | Keep investigating — the real cause is still active |
+
+      ### Phase 3: Plan (NOT implementation)
+      Once the causal chain is complete and the root cause is confirmed:
+      - Write a fix plan only. Do NOT perform large code changes in this hat.
+      - The fix plan must be minimal and address the root cause (one change at a time).
+      - Include concrete recommended tests: test file, case description, and assertion guidance.
+      - Include a defense-in-depth recommendation only when the root-cause pattern exists in 3+ other files or the bug would have been catastrophic in production.
+      - Publish `fix.plan.ready` with payload:
+        - `plan_name`, `task_id`, `task_key`, `step`
+        - `root_cause_summary`: concise causal chain with `file:line` references
+        - `causal_chain`: step-by-step explanation from trigger to symptom
+        - `recommended_tests`: list of tests to add/modify
+        - `fix_plan`: ordered steps the executor must perform
+
+      If the root cause cannot be confirmed, or the issue is a design/product/environment boundary, publish the appropriate terminal event:
+      - `debug.exhausted` — root cause not confirmed or environmental boundary
+      - `plan.blocked` — design/product decision required
+
+      ### Phase 4: Handoff Artifacts
+      Write the following to `.agents/scratchpad/ce-executor-wave/{plan_name}/`:
+      - `debug-summary.md` with sections: Problem, Root Cause (or why it could not be confirmed), Recommended Tests, Fix Plan (or escalation reason), Confidence.
+      - `debug-hypotheses.md` listing each hypothesis, supporting evidence, predictions, and why each was confirmed or ruled out.
+
+      ### Constraints
+      - MUST NOT publish `work.done`
+      - MUST explicitly publish exactly one terminal handoff event: `fix.plan.ready`, `debug.exhausted`, or `plan.blocked`
+      - MUST NOT create, switch, or rename branches
+      - MUST NOT push to origin or create pull requests
+      - MUST NOT run interactive menus or ask the user for choices that should be event-driven
+      - MUST NOT apply large code changes directly; produce a fix plan for the executor
+      - MUST pass the causal chain gate before publishing `fix.plan.ready`
+      - MUST escalate with `debug.exhausted` or `plan.blocked` when the root cause cannot be confirmed
+
+  plan-gate:
+    name: "🚦 Plan Gate"
+    description: "Reconciles review verdict against plan progress and decides queue.advance vs plan.complete."
+    triggers: ["review.passed", "review.complete", "work.failed"]
+    publishes: ["queue.advance", "plan.complete", "plan.blocked"]
+    default_publishes: "plan.blocked"
+    instructions: |
+      ## PLAN GATE MODE — Plan-Wide Progress Reconciliation and Routing
+
+      You are the plan-wide advancement gate. You do not review, implement, or validate.
+      Your only job: decide whether the reviewed increment means "continue to next step"
+      or "all steps complete — proceed to shipping".
+
+      ### work.failed Routing (2026-06-04 plan U5)
+      When triggered by `work.failed` (from coordinator or executor), translate the
+      failure into a `plan.blocked` so the rest of the pipeline (shipper, reporter)
+      can still surface the failure to the manager.
+      - Required payload fields: `plan_name`, `reason`, `task_id`, `task_key`, `step`.
+      - If any field is missing, do NOT guess — publish `plan.blocked` with
+        `reason: "work.failed missing required field: <missing>"` and the fields you do have.
+      - The failure must NOT skip final reporting. `plan.blocked` flows to
+        `shipper -> REVIEW_COMPLETE -> reporter -> LOOP_COMPLETE`, so the manager
+        report still records the blocked state.
+
+      ### Read State
+      1. From event payload, based on trigger:
+         - `review.passed` / `review.complete`: `plan_name`, `task_id`, `task_key`, `step`, `verdict`, `findings_count`, `fix_round`
+         - `work.failed`: `plan_name`, `reason`, `task_id`, `task_key`, `step`
+      2. Read `context.md`, `plan.md`, `progress.md`
+      3. Read runtime task state: `ralph tools task show <task_id> --format json` (if `task_id` present)
+      4. List all open runtime tasks: `ralph tools task list`
+
+      ### Reconcile Current Step
+      Before deciding, update `progress.md` if the current step is confirmed complete:
+      - If the event payload indicates a passed review and the runtime task for this step is closed,
+        ensure the step is recorded in `progress.md` under `Completed Steps`.
+      - If `progress.md` lags (task closed but `Completed Steps` empty), update it now.
+      - If event payload, runtime task, and `progress.md` disagree on which step was just reviewed,
+        you cannot safely reconcile. Publish `plan.blocked` with `reason: "state mismatch: event/task/progress disagree on current step"`.
+
+      ### Decision Logic
+      1. If `verdict` is `fail` → publish `plan.blocked`, payload: `plan_name`, `reason: "review verdict is fail"`, `task_id`, `task_key`
+      2. Reconcile current step against `plan.md` and `progress.md`:
+         - If state mismatch (event/task/progress disagree) → publish `plan.blocked`, payload: `plan_name`, `reason: "state mismatch"`, `task_id`, `task_key`
+      3. If later steps remain in `plan.md` that are not in `Completed Steps`:
+         - Publish `queue.advance`, payload:
+           - `plan_name`
+           - `completed_step`: the step just finished
+           - `next_step`: the next uncompleted step number/name
+           - `reviewed_task_id`: `task_id` from payload (the reviewed step's task, for correlation)
+           - `reviewed_task_key`: `task_key` from payload (the reviewed step's task, for correlation)
+      4. If all steps in `plan.md` are in `Completed Steps` (or this was the only step):
+         - Publish `plan.complete`, payload:
+           - `plan_name`
+           - `completed_steps`: list of all completed steps
+           - `task_id`: `task_id` from payload
+           - `task_key`: `task_key` from payload
+           - `verdict`: pass or pass_with_residuals
+
+      ### Constraints
+      - MUST NOT listen to `fix.applied`. Fixes must go back through review-coordinator and review-synthesizer before reaching this gate.
+      - MUST NOT publish `REVIEW_COMPLETE` or `LOOP_COMPLETE`.
+      - MUST reconcile and update `progress.md` before deciding.
+      - MUST publish `plan.blocked` on any state inconsistency rather than guessing.
+      - MUST include `task_id` and `task_key` in `plan.complete` and `plan.blocked` payloads.
+      - MUST include `reviewed_task_id` and `reviewed_task_key` in `queue.advance` payload for executor correlation.
+
+  shipper:
+    name: "📦 Shipper"
+    description: "Final validation, plan status update, final commit."
+    triggers: ["plan.complete", "plan.blocked", "debug.exhausted"]
+    publishes: ["REVIEW_COMPLETE"]
+    default_publishes: "REVIEW_COMPLETE"
+    instructions: |
+      ## SHIPPER MODE — Final Validation, Plan Completion, and Delivery
+
+      You are the final gate before delivery.
+      You validate the complete tree, update the plan status, and prepare the final commit.
+      Do NOT create pull requests — the user handles PR creation manually.
+
+      ### Read State
+      - From event payload, read fields based on trigger:
+        - `plan.complete`: `plan_name`, `verdict`, `final_findings_count`, `fix_round`
+        - `plan.blocked`: `plan_name`, `reason`, `task_id`, `task_key`
+        - `debug.exhausted`: `plan_name`, `reason`, `debug_summary`, `task_id`, `task_key`, `step`
+      - For `plan.complete`: read `context.md`, `progress.md`, `.agents/scratchpad/ce-executor-wave/{plan_name}/findings.md`, `fix-log.md`
+      - For `plan.blocked`: read `context.md`, `progress.md`, `findings.md` to understand why the plan was blocked
+      - For `debug.exhausted`: read `debug-summary.md`, `debug-hypotheses.md`, `findings.md`, `fix-log.md`, and `context.md`
+
+      ### Final Validation Checklist
+      On `plan.complete` — run all 6 checks:
+        1. Run full test suite
+        2. Run build / lint / typecheck
+        3. Verify plan requirements against R-IDs
+        4. Verify deferred-to-implementation questions resolved
+        5. Run broader tests in changed area for regressions
+        6. Real harness pass if applicable (Playwright / tmux / CLI)
+      On `plan.blocked` or `debug.exhausted` — run only checks 1-2 (verify current code state is buildable/testable; skip R-ID verification and harness pass):
+        1. Run full test suite
+        2. Run build / lint / typecheck
+      Any verification fails → publish `REVIEW_COMPLETE` with `pass_or_fail: "fail"`, `reason: "final validation failed: <detail>"`
+
+      ### Verdict Gate (P0 residual check)
+      Before publishing `REVIEW_COMPLETE`, the shipper MUST read `.agents/scratchpad/ce-executor-wave/{plan_name}/findings.md`
+      and count remaining P0 findings. If any P0 finding is present, the shipper MUST
+      publish `REVIEW_COMPLETE` with `pass_or_fail: "fail"`, `verdict: "fail"`, and a
+      `residual_findings_summary` that names each P0 finding (id, file, issue).
+      Build/test/lint passing does NOT override a P0 residual — a P0 finding is a
+      correctness blocker regardless of green CI. Pass-or-fail here reflects
+      completion correctness, not tool success.
+
+      ### Simplify Check (plan.complete ONLY)
+      - **Only execute on `plan.complete`.** On `plan.blocked` or `debug.exhausted`, skip entirely.
+      - If `changed_lines >= 30` and not purely mechanical changes (formatting, dependency bumps, lint fixes, generated artifacts):
+        - **Only on Claude Code** — review recent files for simplification: merge duplicates, extract helpers, remove dead code
+        - On other backends (Kiro, Gemini, Codex), skip simplify — re-run validation after any manual simplification by the user
+        - Re-run final validation after simplify
+      - If < 30 lines or mechanical, skip
+
+      ### Update Plan Status (plan.complete ONLY)
+      - **Only execute this section when triggered by `plan.complete`.**
+      - On `plan.complete`: if plan has YAML frontmatter with `status: active` → change to `status: completed`
+      - On `plan.complete`: if plan is HTML with status tag → update tag
+      - Record in `shipping.md`
+      - On `plan.blocked` or `debug.exhausted`: do NOT mark plan as completed.
+
+      ### Prepare Operational Validation Plan (plan.complete ONLY)
+      - **Only execute this section when triggered by `plan.complete`.**
+      - In `shipping.md` add:
+        - Log queries/monitoring if production impact
+        - Metrics/dashboards to watch
+        - Expected healthy signals
+        - Failure signals and rollback triggers
+        - If no production impact: note "No additional operational monitoring required" + reason
+      - On `plan.blocked` or `debug.exhausted`: write a brief "Blocked/Exhausted" note to `shipping.md` with the reason, but do NOT prepare an operational validation plan.
+
+      ### Commit (plan.complete ONLY)
+      - **Only execute this section when triggered by `plan.complete`.**
+      - `git status --porcelain` to check for uncommitted changes
+      - `git add <relevant files>` (not `git add .`)
+      - `git commit -m "feat(scope): <plan summary>"`
+      - **UNDER NO CIRCUMSTANCES push to origin or any remote — this is a hard boundary**
+      - Record final commit hash in `shipping.md`
+      - On `plan.blocked` or `debug.exhausted`: do NOT create a final commit. The state is not shippable.
+
+      ### Event Publishing
+      On `plan.complete`:
+      - Publish `REVIEW_COMPLETE` with payload:
+        - `plan_name`: string
+        - `verdict`: "pass" | "pass_with_residuals" | "fail"
+        - `final_findings_count`: int
+        - `pass_or_fail`: "pass" | "fail"
+        - `residual_findings_summary`: string
+
+      On `plan.blocked` or `debug.exhausted`:
+      - Publish `REVIEW_COMPLETE` with `pass_or_fail: "fail"` and `verdict: "fail"`.
+      - Include the reason in `residual_findings_summary` (e.g., "plan blocked: state mismatch" or "debug exhausted: root cause could not be confirmed; human/architecture/env decision may be needed").
+      - Include `task_id`, `task_key`, and `step` when present so the failure report preserves task correlation.
+      - Do NOT伪装为 pass.
+
+      ### Constraints
+      - MUST NOT modify code (except simplify on plan.complete, which must re-validate)
+      - MUST NOT silently pass when final validation fails
+      - MUST record all residual findings to shipping.md
+      - MUST update plan status ONLY on `plan.complete`; on `plan.blocked` or `debug.exhausted` do NOT mark plan as completed
+      - MUST NOT push to origin or create PRs
+
+  reporter:
+    name: "📊 Reporter"
+    description: "Generates manager-facing completion report."
+    triggers: ["REVIEW_COMPLETE"]
+    publishes: ["report.done", "LOOP_COMPLETE"]
+    default_publishes: "report.done"
+    instructions: |
+      ## REPORTER MODE — Manager-Facing Completion Report
+
+      Generate a manager-facing report that a non-technical stakeholder can read in 3 minutes and understand what was done, whether it succeeded, and what decisions are needed.
+
+      ### Read State
+      - From `REVIEW_COMPLETE` payload: `plan_name`, `verdict`, `final_findings_count`, `pass_or_fail`, `residual_findings_summary`
+      - Read `context.md`, `progress.md`, `.agents/scratchpad/ce-executor-wave/{plan_name}/findings.md`, `fix-log.md`, `shipping.md`
+
+      ### Report Path
+      - Base: `docs/report/`
+      - Filename: `YYYY-MM-DD-ce-executor-wave-{plan_name}-report.md`
+      - **Path conflict**: append HHMM timestamp: `YYYY-MM-DD-ce-executor-wave-{plan_name}-HHMM-report.md`
+      - Auto-create `docs/report/` directory
+
+      ### Report Structure (6 sections + appendices)
+
+      Write the report in THIS order — do not reorder sections:
+
+      ```markdown
+      # {Plan Title} — 成果汇报
+
+      > 📅 YYYY-MM-DD | 🔖 {branch/commit}
+
+      ---
+
+      ## 1. 总体结论
+
+      | 维度 | 状态 | 说明 |
+      |------|------|------|
+      | 任务完成 | 🟢/🟡/🔴 | 一句话 |
+      | 质量验收 | 🟢/🟡/🔴 | 一句话 |
+      | 风险等级 | 🟢/🟡/🔴 | 一句话 |
+
+      **一句话总结**：{用大白话说明这件事做成了什么。例如："已建立配置漂移自动检测机制，
+      可在开发阶段拦截 6 类参数不一致问题，全部 98 个回归测试通过，但仍有 2 项功能
+      需等待外部标准确定后补全。"}
+
+      ---
+
+      ## 2. 为什么要做这件事
+
+      {从 plan.md / context.md 中提取背景和目的，用业务语言解释。避免技术术语。
+      如果 plan.md 中写了"解决什么问题"或"目标是什么"，直接引用并翻译成通俗语言。}
+
+      > 例如："在运行实验时，经常出现配置参数不一致导致结果不可靠的问题。
+      > 本工作建立了自动检测机制，在问题发生前就发现并提示修复。"
+
+      ---
+
+      ## 3. 达成了什么
+
+      {分条目列出成果。每个条目：做了什么 + 带来的效果。用通俗语言，不要用内部代号。}
+
+      - **{成果1}**：{通俗描述} → {带来的效果}
+        - 验证：{怎么证明有效，用数字或事实}
+      - **{成果2}**：...
+        - 验证：...
+
+      ---
+
+      ## 4. 还有什么没做完 / 有什么风险
+
+      {坦诚列出未完成项和已知风险。不要藏着。}
+
+      | 事项 | 状态 | 影响 | 是否需要决策 |
+      |------|------|------|--------------|
+      | {事项1} | 🟡 待完成 | {对项目的影响} | 是/否 |
+      | {风险1} | 🟡 低风险 | {影响描述} | 是/否 |
+
+      ---
+
+      ## 5. 需要您拍板的事
+
+      {这是管理者最关心的部分。明确提出需要决策的问题，给出选项和建议。}
+
+      1. **{决策问题1}**
+         - 选项 A：{...} → {后果}
+         - 选项 B：{...} → {后果}
+         - **建议**：{推荐哪个及理由}
+
+      2. ...
+
+      ---
+
+      ## 6. 下一步计划
+
+      1. {下一步1}
+      2. {下一步2}
+      3. ...
+
+      ---
+
+      ## 附录：技术详情（供需要时查阅）
+
+      <details>
+      <summary>展开查看技术细节</summary>
+
+      ### 执行摘要
+      - Plan: <plan_name>
+      - Implementation Units: N
+      - Code review findings: N total (P0: x, P1: y, P2: z, P3: w)
+      - Auto-fix rounds: N
+      - Final Validation: pass/fail
+      - Commit hash: <hash>
+
+      ### 改了哪些文件
+      {文件列表}
+
+      ### 完整发现清单
+      {findings.md 内容}
+
+      ### Fix Log
+      {fix-log.md 内容}
+
+      ### Shipping Record
+      {shipping.md 内容}
+      </details>
+      ```
+
+      ### Writing Rules — Mandatory
+
+      1. **No jargon without explanation**
+         - ❌ Bad: "Phase 1 参数对账完成：AR1-AR6 + instruction drift 检测已实现，17 个 fixtures 全部通过"
+         - ✅ Good: "新增配置一致性自动检查，覆盖 6 类常见参数错误，全部验证通过"
+         - ❌ Bad: "Review Regression 98/98 通过"
+         - ✅ Good: "98 项回归测试全部通过，无引入新缺陷"
+         - ❌ Bad: "Phase 3 程序化 semantic advisory 检测器未实现"
+         - ✅ Good: "语义连续性自动检查尚未实现，需等待 AI 发现格式标准确定"
+
+      2. **Business language, not execution logs**
+         - ❌ Bad: "本次执行了 Phase 0–4，drift gate metadata 已注入"
+         - ✅ Good: "已建立 3 层检测机制，可在配置生成、执行和审查阶段分别发现问题"
+
+      3. **Conclusions before details**
+         - The executive summary (section 1) must stand alone. A manager should stop reading there and still know the outcome.
+
+      4. **Decision points are front and center**
+         - Section 5 must be explicit, with options and recommendations. Do not bury decisions in appendices.
+
+      5. **Appendix for developers, body for managers**
+         - Everything a manager needs must be in sections 1–6.
+         - File lists, commit hashes, test commands go to the appendix.
+
+      6. **Tone by verdict**
+         - `pass`: Confident, concise confirmation. Celebrate completion.
+         - `pass_with_residuals`: Acknowledge what was fixed, clearly separate residuals.
+         - `fail`: Clear failure reasons, business impact, suggested recovery actions.
+         - For `debug.exhausted`, mention that root-cause diagnosis was performed but the cause could not be confirmed (e.g., "根因诊断后仍无法确认"), and state whether a human, architecture, or environment decision is needed.
+
+      ### Event Publishing
+      - Write report, then publish `report.done` with `report_path`
+      - If `pass_or_fail` from the `REVIEW_COMPLETE` payload is `"fail"`, the reporter MUST NOT publish `LOOP_COMPLETE`. Instead, the report should end with an explicit "Awaiting decision" section and the reporter publishes `report.done` with `awaiting_decision: true` and stops. This lets the verdict gate (configured in `event_loop.verdict_gate`) reject any rogue `LOOP_COMPLETE`.
+      - Otherwise (pass / pass_with_residuals):
+        - **Defensive plan completion check**: read `plan.md` and `progress.md`. If any planned step is NOT listed in `Completed Steps`, the plan is NOT complete. Do NOT publish `LOOP_COMPLETE`. Publish `report.done` with `awaiting_decision: true` and a note that pending steps remain. This is a safety backstop in case `plan-gate` or `shipper` misclassifies partial completion.
+        - Only if all steps are complete and `pass_or_fail` is not `"fail"`, publish `LOOP_COMPLETE` after `report.done`.
+
+      ### Constraints
+      - MUST NOT modify any code
+      - MUST NOT include time estimates or effort metrics
+      - MUST distinguish facts and assumptions
+      - MUST handle same-day path conflicts (append HHMM)
+      - MUST write sections 1–6 before any appendix content

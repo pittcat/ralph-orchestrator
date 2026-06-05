@@ -26,7 +26,6 @@ ralph run -c ralph.yml -H builtin:code-assist -p "Add user authentication"
 Ralph also keeps a few internal/testing presets available without advertising them in the normal list:
 
 - `merge-loop`
-- `hatless-baseline`
 
 ## Recommended Workflow
 
@@ -44,7 +43,6 @@ Ralph also keeps a few internal/testing presets available without advertising th
 | `feature` | `presets/feature.yml` | `builder`, `reviewer` | `task.start` (default) | `LOOP_COMPLETE` | Feature development with integrated review |
 | `fresh-eyes` | `presets/fresh-eyes.yml` | `builder`, `fresh_eyes_auditor`, `fresh_eyes_gatekeeper` | `fresh_eyes.start` | `LOOP_COMPLETE` | Enforced repeated skeptical self-review passes |
 | `gap-analysis` | `presets/gap-analysis.yml` | `analyzer`, `verifier`, `reporter` | `gap.start` | `GAP_ANALYSIS_COMPLETE` | Spec-vs-implementation auditing |
-| `hatless-baseline` | `presets/hatless-baseline.yml` | _(none)_ | `task.start` | `LOOP_COMPLETE` | Baseline no-hat behavior for comparison |
 | `merge-loop` | `crates/ralph-cli/presets/merge-loop.yml` | `merger`, `resolver`, `tester`, `cleaner`, `failure_handler` | `merge.start` | `MERGE_COMPLETE` | Internal merge/worktree automation |
 | `pdd-to-code-assist` | `presets/pdd-to-code-assist.yml` | `inquisitor`, `architect`, `design_critic`, `explorer`, `planner`, `task_writer`, `builder`, `validator`, `committer` | `design.start` | `LOOP_COMPLETE` | Full idea → plan → implementation pipeline |
 | `pr-review` | `presets/pr-review.yml` | `correctness_reviewer`, `security_reviewer`, `architecture_reviewer`, `synthesizer` | `task.start` (default) | `LOOP_COMPLETE` | Multi-perspective PR review |
@@ -54,6 +52,7 @@ Ralph also keeps a few internal/testing presets available without advertising th
 | `spec-driven` | `presets/spec-driven.yml` | `spec_writer`, `spec_reviewer`, `implementer`, `verifier` | `spec.start` | `LOOP_COMPLETE` (default) | Specification-driven implementation |
 | `wave-review` | `presets/wave-review.yml` | `coordinator`, `reviewer` (x3), `synthesizer` | `review.start` | `LOOP_COMPLETE` | Specialized parallel code review (wave-enabled) |
 | `ce-executor` | `presets/ce-executor.yml` | `coordinator`, `executor`, `review-coordinator`, `dimension-reviewer` (wave), `review-synthesizer` (aggregate), `fixer`, `plan-gate`, `shipper`, `reporter` | `work.start` | `LOOP_COMPLETE` | Plan-driven execution with wave review, auto-fix, and manager report |
+| `ce-executor-wave` | `presets/en/ce-executor-wave.yml` | `coordinator`, `execution-dispatcher`, `parallel-executor` (wave), `execution-synthesizer` (aggregate), `serial-executor`, `review-coordinator`, `dimension-reviewer` (wave), `review-synthesizer` (aggregate), `fixer`, `debug-resolver`, `plan-gate`, `shipper`, `reporter` | `work.start` | `LOOP_COMPLETE` | Wave-parallel variant of `ce-executor`; executes disjoint implementation units within a step concurrently, then aggregates and reviews |
 
 ## Why The Builtin Set Is Small
 
@@ -109,6 +108,10 @@ ralph run -c ralph.yml -H builtin:ce-executor --worktree -p "docs/plans/my-plan.
 - Blocks all push operations (local commit only)
 - Includes a `plan-gate` hat that reconciles review verdict against `plan.md` / `progress.md` and decides whether to advance to the next step or complete the plan
 
+**When to use `ce-executor-wave` vs `ce-executor`:**
+- Use `ce-executor-wave` when a plan step contains multiple implementation units with **disjoint file ownership** (no overlapping files between units). The dispatcher will safely run them in parallel via wave workers.
+- Use `ce-executor` when file boundaries are unclear, units overlap, or you prefer deterministic serial execution.
+
 **When to use `--worktree`:**
 - Multiple parallel ce-executor runs
 - When you want isolation from main workspace changes
@@ -128,6 +131,10 @@ ralph run -H builtin:ce-executor --worktree -p "docs/plans/my-plan.md"
 
 # Isolated run with higher concurrency for review
 ralph run -H builtin:ce-executor --worktree -c ralph.yml -p "docs/plans/my-plan.md"
+
+# Wave-parallel execution (concurrent step units when safe)
+ralph run -H builtin:ce-executor-wave -p "docs/plans/my-plan.md"
+ralph run -H builtin:ce-executor-wave --worktree -p "docs/plans/my-plan.md"
 ```
 
 ## Common Workflow Patterns
