@@ -171,6 +171,151 @@ event_loop:
 }
 
 // ──────────────────────────────────────────────────────────────────────
+// U0 characterization: lock in current `enforce_payload_contract_gate`
+// behavior so U1/U2 shared contract layer cannot silently change the
+// hard-gate semantics. The hard gate is a *non-skippable* invariant.
+// ──────────────────────────────────────────────────────────────────────
+
+/// U0 characterization: the error message must include the source hats
+/// that can publish the trigger topic. This is critical for users to
+/// debug "which hat is the upstream producer of the bad field?" without
+/// running `ralph hats validate` separately.
+#[test]
+fn u0_hard_gate_error_includes_source_hats() {
+    // Two hats publish work.ready. The error must list BOTH in source_hats.
+    let yaml = r#"
+hats:
+  coordinator:
+    name: "Coordinator"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+    instructions: "Publish."
+  alternate:
+    name: "Alternate"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+    instructions: "Also publish."
+  executor:
+    name: "Executor"
+    triggers: ["work.ready"]
+    publishes: ["LOOP_COMPLETE"]
+    instructions: |
+      From event payload: task_id, plan_name
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+  event_policy:
+    enabled: true
+    mode: observe
+    schemas:
+      work.ready:
+        required_fields: ["task_id"]
+"#;
+    let config: ralph_core::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let err = enforce_payload_contract_gate(&config).unwrap_err();
+    let msg = format!("{}", err);
+    // The message must list source_hats (at least one of the publishers).
+    // Per current code, source_hats is shown as comma-separated list under
+    // `source_hats=[...]`. We verify the substrings that must appear:
+    assert!(
+        msg.contains("coordinator"),
+        "msg must list 'coordinator' as a source hat: {}",
+        msg
+    );
+    assert!(
+        msg.contains("alternate"),
+        "msg must list 'alternate' as a source hat: {}",
+        msg
+    );
+    assert!(
+        msg.contains("source_hats"),
+        "msg must explicitly label source_hats so users can find them: {}",
+        msg
+    );
+    assert!(
+        msg.contains("executor"),
+        "msg must identify the consumer hat ('executor'): {}",
+        msg
+    );
+}
+
+/// U0 characterization: `enforce_payload_contract_gate` is independent of
+/// `features.preflight.enabled` and `--skip-preflight`. Even if the user
+/// has preflight disabled, the payload hard gate MUST still run before
+/// backend spawn. This is a non-regression invariant: the gate is
+/// intentionally not coupled to the preflight toggle.
+#[test]
+fn u0_hard_gate_runs_independent_of_preflight_toggle() {
+    // Construct a config with a payload contract violation (plan_name
+    // missing from required_fields). Pre-flight is disabled at the
+    // config level. The hard gate must still fail.
+    let yaml = r#"
+features:
+  preflight:
+    enabled: false
+hats:
+  a:
+    name: "A"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+    instructions: "Publish."
+  b:
+    name: "B"
+    triggers: ["work.ready"]
+    publishes: ["LOOP_COMPLETE"]
+    instructions: |
+      From event payload: task_id, plan_name
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+  event_policy:
+    enabled: true
+    mode: observe
+    schemas:
+      work.ready:
+        required_fields: ["task_id"]
+"#;
+    let config: ralph_core::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    // Sanity: preflight is disabled in this config.
+    assert!(
+        !config.features.preflight.enabled,
+        "test fixture must have preflight disabled"
+    );
+    // The hard gate must still fire.
+    let err = enforce_payload_contract_gate(&config)
+        .expect_err("hard gate must fire even when preflight.enabled=false");
+    let msg = format!("{}", err);
+    assert!(
+        msg.contains("Payload contract gate failed"),
+        "msg must indicate hard-gate failure regardless of preflight: {}",
+        msg
+    );
+    assert!(
+        msg.contains("plan_name"),
+        "msg must name the offending field: {}",
+        msg
+    );
+}
+
+/// U0 characterization: hatless / solo mode (no custom hats) is the
+/// pass-through. There is nothing to validate, so the hard gate must
+/// succeed — even if preflight is otherwise disabled. This locks in the
+/// baseline behavior so adding a runtime contract layer doesn't
+/// accidentally start failing solo runs.
+#[test]
+fn u0_hard_gate_solo_mode_is_pass_through() {
+    let mut config = ralph_core::RalphConfig::default();
+    config.features.preflight.enabled = false;
+    assert!(config.hats.is_empty(), "default config has no custom hats");
+    let result = enforce_payload_contract_gate(&config);
+    assert!(
+        result.is_ok(),
+        "hatless/solo mode must pass through the hard gate: {:?}",
+        result
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────
 // U6: payload contract violation report writing
 // ──────────────────────────────────────────────────────────────────────
 

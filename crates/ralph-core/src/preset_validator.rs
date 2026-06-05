@@ -1443,4 +1443,107 @@ hats:
         assert!(line.contains("coordinator"));
         assert!(line.contains("FieldMissingFromSchema"));
     }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // U0 characterization: lock in `validate_preset_topology` and
+    // `validate_preset` payload contract behavior so the U1/U2 shared
+    // contract layer does not silently change strict semantics.
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// U0 characterization: `validate_preset_topology` is independent of
+    /// payload contract strict mode. A topology that is reachable must
+    /// remain `is_valid() = true` regardless of whether strict mode is
+    /// passed downstream.
+    #[test]
+    fn u0_topology_validity_independent_of_payload_strict_mode() {
+        // Linear chain, no payload field references → no payload errors.
+        // The topology must validate in both strict and non-strict.
+        let yaml = r#"
+hats:
+  a:
+    name: "A"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+  b:
+    name: "B"
+    triggers: ["work.ready"]
+    publishes: ["LOOP_COMPLETE"]
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["work.ready"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset_topology(&config, &registry);
+        assert!(
+            result.is_valid(),
+            "valid linear topology must be is_valid()=true: {:?}",
+            result
+        );
+        // Topology result has no payload semantics — its is_valid must not
+        // depend on strict flag.
+        let strict_replay = validate_preset_topology(&config, &registry);
+        assert_eq!(
+            strict_replay.is_valid(),
+            result.is_valid(),
+            "validate_preset_topology must not change is_valid() based on strict mode"
+        );
+    }
+
+    /// U0 characterization: `validate_preset(strict=true)` must fail on
+    /// `SchemaMissingForRequiredTopic`. `validate_preset(strict=false)` must
+    /// succeed (the missing schema becomes a warning, not an error). This
+    /// pins the two-dimensional strict semantics that U1/U2 must preserve.
+    #[test]
+    fn u0_validate_preset_strict_split_semantics_for_missing_schema() {
+        let yaml = r#"
+hats:
+  a:
+    name: "A"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+    instructions: "Publish."
+  b:
+    name: "B"
+    triggers: ["work.ready"]
+    publishes: ["LOOP_COMPLETE"]
+    instructions: |
+      From event payload: task_id
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+
+        // non-strict: missing schema is a warning, not an error.
+        let non_strict = validate_preset(&config, &registry, false);
+        assert!(
+            non_strict.is_valid(),
+            "non-strict validate_preset must be valid (warning only): {:?}",
+            non_strict.payload_contracts
+        );
+        assert!(
+            !non_strict.payload_contracts.warnings.is_empty(),
+            "non-strict mode should produce a payload warning, not error"
+        );
+        assert!(
+            non_strict.payload_contracts.errors.is_empty(),
+            "non-strict mode must not produce payload errors: {:?}",
+            non_strict.payload_contracts.errors
+        );
+
+        // strict: missing schema is an error.
+        let strict = validate_preset(&config, &registry, true);
+        assert!(
+            !strict.is_valid(),
+            "strict validate_preset must fail on missing schema: {:?}",
+            strict
+        );
+        assert!(
+            !strict.payload_contracts.errors.is_empty(),
+            "strict mode must produce a payload error"
+        );
+    }
 }

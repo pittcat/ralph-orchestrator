@@ -2338,6 +2338,49 @@ event_loop:
         );
         assert!(result.message.unwrap().contains("missing.event"));
     }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // U0 characterization: lock in the `preset-topology` check name and
+    // its default registration. The runtime contract consolidation plan
+    // explicitly forbids renaming this check (it would break
+    // `features.preflight.skip: ["preset-topology"]` and
+    // `ralph preflight --check preset-topology`). These tests guard the
+    // contract until U5 explicitly introduces a stable alias.
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// U0 characterization: the topology check's name is the stable string
+    /// `preset-topology`. The Runtime Contract consolidation plan requires
+    /// that any new contract layer adds aliases incrementally and does NOT
+    /// rename the existing check.
+    #[test]
+    fn u0_preset_topology_check_name_is_stable() {
+        let check = PresetTopologyCheck;
+        assert_eq!(
+            check.name(),
+            "preset-topology",
+            "preset-topology check name must remain stable; \
+             the Runtime Contract consolidation plan forbids renaming"
+        );
+    }
+
+    /// U0 characterization: the default check list registered for
+    /// `ralph run` must include `preset-topology`. This guarantees that
+    /// the topology check continues to run by default (subject to skip
+    /// lists) and is selectable via `ralph preflight --check`.
+    #[test]
+    fn u0_default_checks_include_preset_topology() {
+        let config = RalphConfig::default();
+        let runner = PreflightRunner::default_checks_with_config(&config);
+        let check_names = runner.check_names();
+
+        assert!(
+            check_names.contains(&"preset-topology"),
+            "default check list must include 'preset-topology' so \
+             `ralph preflight --check preset-topology` continues to work: \
+             got {:?}",
+            check_names
+        );
+    }
 }
 
 /// Preset topology validation check.
