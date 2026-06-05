@@ -3596,41 +3596,10 @@ fn test_wait_for_resume_if_suspended_prioritizes_restart_over_resume() {
     assert!(!suspend_state_store.resume_requested_path().exists());
 }
 
-#[test]
-fn test_idle_timeout_interactive_mode_continues() {
-    // Given: interactive mode and IdleTimeout termination
-    let termination_type = ralph_adapters::TerminationType::IdleTimeout;
-    let interactive = true;
-
-    // When: converting termination type
-    let result = convert_termination_type(termination_type, interactive);
-
-    // Then: should return None (allow iteration to continue)
-    assert!(
-        result.is_none(),
-        "Interactive mode idle timeout should return None to allow iteration progression"
-    );
-}
-
-#[test]
-fn test_idle_timeout_autonomous_mode_stops() {
-    // Given: autonomous mode and IdleTimeout termination
-    let termination_type = ralph_adapters::TerminationType::IdleTimeout;
-    let interactive = false;
-
-    // When: converting termination type
-    let result = convert_termination_type(termination_type, interactive);
-
-    // Then: should return Some(Stopped)
-    assert_eq!(
-        result,
-        Some(TerminationReason::Stopped),
-        "Autonomous mode idle timeout should return Stopped"
-    );
-}
-
 // ──────────────────────────────────────────────────────────────────────
 // Characterization (Unit 1 of plan 2026-06-06-001):
+// Source: crates/ralph-cli/src/loop_runner/hooks/format.rs::convert_termination_type
+//
 // Pin down the CURRENT mapping `convert_termination_type(IdleTimeout, !interactive)
 // -> Some(TerminationReason::Stopped)`. Unit 3 will review this mapping because:
 //   - It is reached only after the autonomous watchdog (added in Unit 2) fires,

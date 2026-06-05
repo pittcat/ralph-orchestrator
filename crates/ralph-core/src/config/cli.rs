@@ -144,24 +144,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cli_config_default_idle_timeout_is_30_seconds() {
+    fn cli_config_default_idle_timeout_is_30_seconds_for_interactive_mode() {
+        // The Default impl and the serde default fn must agree so that an
+        // absent field in YAML/JSON produces the same value as a freshly
+        // constructed `CliConfig::default()`. The value must remain 30s;
+        // this is the interactive-mode default documented in the field
+        // (see the `idle_timeout_secs` doc comment, R6 of the plan).
         let config = CliConfig::default();
         assert_eq!(
             config.idle_timeout_secs, 30,
-            "CliConfig::default().idle_timeout_secs must remain 30s; \
-             this is the interactive-mode default documented in the field"
+            "CliConfig::default().idle_timeout_secs must remain 30s"
         );
-    }
-
-    #[test]
-    fn cli_config_default_idle_timeout_matches_serde_default() {
-        // The serde default and the Default impl must agree so that an
-        // absent field in YAML/JSON produces the same value as a freshly
-        // constructed `CliConfig::default()`.
-        assert_eq!(default_idle_timeout(), 30);
         assert_eq!(
-            CliConfig::default().idle_timeout_secs,
-            default_idle_timeout()
+            default_idle_timeout(),
+            config.idle_timeout_secs,
+            "serde default fn and Default impl must agree"
         );
     }
 
