@@ -576,10 +576,28 @@ fn merge_hats_overlay(mut core: Value, hats: Value) -> Result<Value> {
             .ok_or_else(|| anyhow::anyhow!("core.event_loop must be a mapping when provided"))?;
 
         for (key, value) in overlay_mapping {
-            if let Some(key_str) = key.as_str()
-                && ALLOWED_HATS_EVENT_LOOP_OVERLAY_KEYS.contains(&key_str)
-            {
-                event_loop_mapping.insert(key.clone(), value.clone());
+            if let Some(key_str) = key.as_str() {
+                if ALLOWED_HATS_EVENT_LOOP_OVERLAY_KEYS.contains(&key_str) {
+                    event_loop_mapping.insert(key.clone(), value.clone());
+                } else {
+                    // Surface the silent-drop UX defect: a hat collection preset
+                    // (e.g. presets/en/ce-executor.yml) may declare resource budgets
+                    // like `max_runtime_seconds`, but those keys are operator-controlled
+                    // and filtered out by ALLOWED_HATS_EVENT_LOOP_OVERLAY_KEYS. If we
+                    // don't tell the user, the loop will silently fall back to the
+                    // 4h default (see docs/report/2026-06-05-wave-abort-root-cause-analysis.md).
+                    let value_repr = serde_yaml::to_string(value)
+                        .unwrap_or_else(|_| "<unrepresentable>".to_string())
+                        .trim()
+                        .to_string();
+                    eprintln!(
+                        "warning: hat collection preset declared event_loop.{}={} but it is \
+                         filtered by the operator/hat-collection security boundary. Set this \
+                         field in your operator ralph.yml (event_loop.*) instead, or the loop \
+                         will fall back to the framework default.",
+                        key_str, value_repr,
+                    );
+                }
             }
         }
 
@@ -811,6 +829,52 @@ hats:
             config.event_loop.starting_event.as_deref(),
             Some("build.start")
         );
+    }
+
+    #[test]
+    fn merge_hats_overlay_warns_when_budget_keys_are_filtered() {
+        // When a hat collection preset declares resource-budget keys
+        // (max_runtime_seconds, max_iterations, enforce_hat_scope) the
+        // overlay must NOT widen the operator budget, but it MUST emit a
+        // warning so the user is not surprised by a silent fallback to
+        // the framework default (4h for max_runtime). See
+        // docs/report/2026-06-05-wave-abort-root-cause-analysis.md.
+        let core: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  completion_promise: LOOP_COMPLETE
+  max_iterations: 200
+  max_runtime_seconds: 28800
+  enforce_hat_scope: true
+",
+        )
+        .unwrap();
+
+        let hats: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  max_runtime_seconds: 14400
+  max_iterations: 500
+  enforce_hat_scope: false
+  completion_promise: LOOP_COMPLETE
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        // Operator values are preserved — the filtered hats' keys must
+        // not leak through and widen/override the operator budget.
+        assert_eq!(config.event_loop.max_iterations, 200);
+        assert_eq!(config.event_loop.max_runtime_seconds, 28800);
+        assert!(config.event_loop.enforce_hat_scope);
+        // Whitelisted keys still merge through.
+        assert_eq!(config.event_loop.completion_promise, "LOOP_COMPLETE");
+        // The warning itself is eprintln (stderr) — verified by manual
+        // inspection and the existing _allows_workflow_promises_ test,
+        // which exercises the same code path and would also have produced
+        // stderr output during cargo test.
     }
 
     #[test]

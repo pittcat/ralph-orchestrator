@@ -1,6 +1,8 @@
 cli:
   backend: claude
+
 event_loop:
+  max_runtime_seconds: 28800 # 新增
   completion_promise: LOOP_COMPLETE
   max_iterations: 500
   prompt_file: PROMPT.md
