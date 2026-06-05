@@ -355,12 +355,12 @@ fn test_spawn_merge_ralph_uses_exclusive_flag() -> Result<()> {
     // Since we can't easily intercept the spawn call, we verify the source code
     // contains the expected flag. This is a meta-test that ensures the implementation
     // matches the spec.
-    let source = include_str!("../src/loop_runner.rs");
+    let source = include_str!("../src/loop_runner/merge_queue.rs");
 
     // Verify --exclusive is used in the merge-ralph spawn path
     assert!(
         source.contains(r#""--exclusive""#),
-        "loop_runner.rs should use --exclusive flag for merge-ralph spawns.\n\
+        "merge_queue.rs should use --exclusive flag for merge-ralph spawns.\n\
          Per spec: 'Auto-spawned merge loops use --exclusive to wait for the primary lock'"
     );
 
