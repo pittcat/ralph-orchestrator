@@ -1234,6 +1234,18 @@ mod tests {
             .unwrap_or_else(|e| panic!("failed to read root preset at {}: {}", path.display(), e))
     }
 
+    fn read_root_schema(filename: &str) -> String {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let path = std::path::Path::new(manifest_dir)
+            .join("..")
+            .join("..")
+            .join("presets")
+            .join("schemas")
+            .join(filename);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read root schema at {}: {}", path.display(), e))
+    }
+
     #[test]
     fn test_ce_executor_zh_required_events_is_report_done() {
         // Happy-path: the Chinese ce-executor-zh preset must use "report.done"
@@ -3012,7 +3024,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ce_executor_wave_failure_topics_accept_reason_only_payloads() {
+    fn test_ce_executor_wave_work_failed_requires_plan_context() {
         let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
@@ -3022,18 +3034,40 @@ mod tests {
             .as_ref()
             .expect("ce-executor-wave should have event_policy");
 
-        for topic in ["work.failed", "plan.blocked"] {
-            let schema = policy
-                .schemas
-                .get(topic)
-                .unwrap_or_else(|| panic!("ce-executor-wave should define {} schema", topic));
-            assert_eq!(
-                schema.required_fields,
-                vec!["reason".to_string()],
-                "{} must require only reason; additional task/plan fields are optional context",
-                topic
+        let schema = policy
+            .schemas
+            .get("work.failed")
+            .expect("ce-executor-wave should define work.failed schema");
+        let expected_fields = [
+            "plan_name",
+            "plan_path",
+            "step",
+            "task_id",
+            "task_key",
+            "reason",
+        ];
+        assert_eq!(
+            schema.required_fields.len(),
+            expected_fields.len(),
+            "work.failed schema field count mismatch"
+        );
+        for field in &expected_fields {
+            assert!(
+                schema.required_fields.contains(&field.to_string()),
+                "work.failed schema must require field '{}'",
+                field
             );
         }
+
+        let plan_blocked = policy
+            .schemas
+            .get("plan.blocked")
+            .expect("ce-executor-wave should define plan.blocked schema");
+        assert_eq!(
+            plan_blocked.required_fields,
+            vec!["reason".to_string()],
+            "plan.blocked may remain reason-only because it is the final manager-facing blocked topic"
+        );
     }
 
     #[test]
@@ -3445,18 +3479,46 @@ mod tests {
             synth_instr.contains("Do NOT trust worker self-reported success alone"),
             "synthesizer must distrust worker self-reported success"
         );
-        // Rollback on failure
+        // Failure cleanup must not destroy unrelated user changes.
         assert!(
-            synth_instr.contains("Rollback all worker modifications"),
-            "synthesizer must rollback worker modifications on batch failure"
+            synth_instr.contains("Do not run global rollback commands"),
+            "synthesizer must forbid global rollback commands on batch failure"
         );
         assert!(
-            synth_instr.contains("git checkout -- .") || synth_instr.contains("git restore ."),
-            "synthesizer must specify git checkout/restore for rollback"
+            synth_instr.contains("Never use `git checkout -- .`")
+                && synth_instr.contains("`git restore .`")
+                && synth_instr.contains("whole workspace"),
+            "synthesizer must explicitly forbid whole-workspace checkout/restore rollback"
         );
         assert!(
-            synth_instr.contains("git status --short"),
-            "synthesizer must verify workspace is clean after rollback"
+            synth_instr.contains("changed_files") && synth_instr.contains("owned_files"),
+            "synthesizer must scope failure cleanup to changed_files and owned_files"
+        );
+        assert!(
+            synth_instr.contains("execution-batch.md"),
+            "synthesizer must record dirty state in execution-batch.md"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_wave_reference_schema_matches_inline_schema() {
+        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
+        let inline_yaml: serde_yaml::Value =
+            serde_yaml::from_str(preset.content).expect("ce-executor-wave YAML should parse");
+        let inline_schemas = inline_yaml
+            .get("event_loop")
+            .and_then(|value| value.get("event_policy"))
+            .and_then(|value| value.get("schemas"))
+            .expect("ce-executor-wave inline schemas should exist")
+            .clone();
+
+        let reference_content = read_root_schema("ce-executor-wave.yml");
+        let reference_schemas: serde_yaml::Value =
+            serde_yaml::from_str(&reference_content).expect("reference schema YAML should parse");
+
+        assert_eq!(
+            inline_schemas, reference_schemas,
+            "presets/schemas/ce-executor-wave.yml must match inline event_policy.schemas"
         );
     }
 

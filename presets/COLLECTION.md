@@ -1012,6 +1012,7 @@ still works, but the inline form is preferred for consistency.
 | Schema file | Referenced by | Status |
 |---|---|---|
 | `schemas/ce-executor.yml`        | `ce-executor`         | Deprecated reference copy (schemas inlined into `presets/en/ce-executor.yml`) |
+| `schemas/ce-executor-wave.yml`   | `ce-executor-wave`    | Deprecated reference copy (schemas inlined into `presets/en/ce-executor-wave.yml`) |
 | `schemas/code-assist.yml`        | `code-assist`         | Deprecated reference copy (schemas inlined into `presets/en/code-assist.yml`) |
 | `schemas/pdd-to-code-assist.yml` | `pdd-to-code-assist`  | Deprecated reference copy (schemas inlined into `presets/en/pdd-to-code-assist.yml`) |
 
@@ -1025,4 +1026,3 @@ still works, but the inline form is preferred for consistency.
 
 See `docs/guide/payload-contracts.md` for the full schema format,
 extractor behaviour, and the boundary with execution contracts.
-

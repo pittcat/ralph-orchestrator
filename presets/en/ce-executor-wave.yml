@@ -75,7 +75,7 @@ event_loop:
   # `schema_file: "../schemas/ce-executor.yml"` approach was broken for
   # builtin presets (no on-disk preset file for `resolve_schema_files`
   # to anchor the relative path against) and has been folded in.
-  # Mirror in `presets/schemas/ce-executor.yml` is kept as a reference
+  # Mirror in `presets/schemas/ce-executor-wave.yml` is kept as a reference
   # copy only; do not reintroduce `schema_file` here.
   event_policy:
     enabled: true
@@ -100,7 +100,7 @@ event_loop:
         required_fields: [plan_name, plan_path, task_id, task_key, step]
         payload: json_object
       work.failed:
-        required_fields: [reason]
+        required_fields: [plan_name, plan_path, step, task_id, task_key, reason]
         payload: json_object
       review.wave.ready:
         required_fields: [dimension, focus, depth, diff_base, intent_summary, changed_files, plan_name, task_id, task_key, step]
@@ -176,10 +176,14 @@ hats:
       ### Plan File Resolution
       - Read the prompt to find the plan file path. Supports `.md` and `.html` formats.
       - **Error handling:**
-        - File does not exist → publish `work.failed`, payload: `{"reason": "plan file not found: <path>"}`
-        - File exists but unreadable → publish `work.failed`, payload: `{"reason": "plan file unreadable: <path>"}`
-        - File missing Implementation Units / Work Breakdown → publish `work.failed`, payload: `{"reason": "plan missing implementation units"}`
-        - File empty or placeholder content → publish `work.failed`, payload: `{"reason": "plan content empty or placeholder"}`
+        - File does not exist → publish `work.failed`
+        - File exists but unreadable → publish `work.failed`
+        - File missing Implementation Units / Work Breakdown → publish `work.failed`
+        - File empty or placeholder content → publish `work.failed`
+      - `work.failed` payloads MUST include `plan_name`, `plan_path`, `step`,
+        `task_id`, `task_key`, and `reason`. If the plan/task cannot be resolved
+        yet, use `"unknown"` for missing correlation fields and the attempted
+        path for `plan_path` when available.
       - Validate the file exists and is readable
       - Read the plan file and extract:
         - `Implementation Units` / `Work Breakdown` — task list source
@@ -238,7 +242,8 @@ hats:
       - If task list is empty or the command fails:
         - Return to Runtime Task Creation step and ensure tasks are created
         - Retry up to 2 times
-        - Both fail → publish `work.failed`, payload: `{"reason": "task creation failed after 2 attempts"}`
+        - Both fail → publish `work.failed` with `plan_name`, `plan_path`, `step`,
+          `task_id`, `task_key`, and `reason: "task creation failed after 2 attempts"`
       - Only proceed to Event Publishing after validation passes
 
       ### Event Publishing
@@ -323,8 +328,11 @@ hats:
       2. Stop — do not continue to other work
 
       ### Failure Handling
-      - If task reading fails: publish `work.failed` with `reason: "dispatcher: failed to read runtime tasks"`
-      - If payload construction fails: publish `work.failed` with `reason: "dispatcher: failed to construct wave payloads"`
+      - If task reading fails: publish `work.failed` with `plan_name`, `plan_path`,
+        `step`, `task_id`, `task_key`, and `reason: "dispatcher: failed to read runtime tasks"`
+      - If payload construction fails: publish `work.failed` with `plan_name`,
+        `plan_path`, `step`, `task_id`, `task_key`, and
+        `reason: "dispatcher: failed to construct wave payloads"`
       - NEVER publish `work.done`, `queue.advance`, `REVIEW_COMPLETE`, or `LOOP_COMPLETE`
 
       ### Constraints
@@ -442,10 +450,18 @@ hats:
       - `work.done` MUST use the same schema as `ce-executor` (plan_name, plan_path, task_id, task_key, step)
 
       On batch failure:
-      - **Rollback all worker modifications** before publishing `work.failed`:
-        - `git diff --name-only` to list modified files
-        - `git checkout -- .` or `git restore .` to revert all uncommitted changes
-        - Verify workspace is clean: `git status --short` should show nothing
+      - **Do not run global rollback commands.** Never use `git checkout -- .`,
+        `git restore .`, `git reset --hard`, or any command that reverts the
+        whole workspace. The working tree may contain user changes or unrelated
+        agent output that must not be destroyed.
+      - Before touching files, identify the failed units' `changed_files` and
+        compare them to each worker's `owned_files`.
+      - Leave failed worker changes in place for diagnosis unless every changed
+        path belongs only to the failed unit and no user pre-existing changes
+        are present for that path. If cleanup is safe, revert only those exact
+        paths and record what was reverted.
+      - Always record the dirty state in `execution-batch.md` so the manager
+        report can explain whether recovery needs human review.
       - Publish `work.failed` with payload:
         - `plan_name`, `plan_path`, `step`
         - `reason`: summary of what failed (which worker, what validation, which boundary violation)
@@ -533,14 +549,17 @@ hats:
       - Do NOT create runtime tasks for a new step and do NOT modify `progress.md` Completed Steps.
       - **Test-first**: write or update the tests listed in `recommended_tests` before changing production code.
       - **One root-cause fix at a time**: execute only the steps in `fix_plan`.
-      - If implementation disproves the causal chain, stop and publish `work.failed` with `reason: "fix plan invalidated: causal chain prediction failed"`.
+      - If implementation disproves the causal chain, stop and publish `work.failed`
+        with `plan_name`, `plan_path`, `step`, `task_id`, `task_key`, and
+        `reason: "fix plan invalidated: causal chain prediction failed"`.
       - After applying the fix, run verification.
       - If verification passes, publish a normal `work.done` with `plan_name`, `plan_path`, `task_id`, `task_key`, `step`.
 
       ### Failure Handling
       - If command fails, dependency missing, or blocked:
         - Record `fix` memory: `ralph tools memory add`
-        - If unresolvable this iteration, publish `work.failed` with `task_id`, `task_key`, `reason`
+        - If unresolvable this iteration, publish `work.failed` with `plan_name`,
+          `plan_path`, `step`, `task_id`, `task_key`, and `reason`
 
       ### Constraints
       - ONE runtime task per iteration (trivial mode excepted)
