@@ -2942,6 +2942,104 @@ mod tests {
         );
     }
 
+    // ──────────────────────────────────────────────────────────────────────
+    // Unit 4 test matrix (plan 2026-06-06-001, §"Unit 4 Approach"):
+    //
+    // The watchdog behavior is exercised by a deliberately-small matrix
+    // (see below). The plan calls for explicit documentation of *which*
+    // combinations have direct test coverage, which inherit coverage from
+    // lower-level tests, and which are known coverage gaps. Adding tests
+    // for every cell is not the goal — the goal is to make the matrix
+    // visible so future contributors can tell at a glance whether a new
+    // code path (e.g. a new output format) needs new coverage.
+    //
+    // Matrix axes:
+    //   - execution mode × output format × backend behavior × config state
+    //
+    // Legend:
+    //   [OK]   = direct test in this file or in loop_runner/tests.rs
+    //   [INH]  = inherited from a lower-level test (e.g. wave worker
+    //            partial-timeout contract; main PTY is required to mirror
+    //            it by `test_main_pty_watchdog_aligns_with_wave_worker_*`
+    //            in loop_runner/tests.rs)
+    //   [GAP]  = known coverage gap; documented here so a follow-up can
+    //            close it without rediscovering the conversation
+    //
+    // ┌─────────────────┬──────────────────┬──────────────┬─────────────────┬──────────────┐
+    // │ execution mode   │ output format    │ backend      │ config          │ coverage     │
+    // ├─────────────────┼──────────────────┼──────────────┼─────────────────┼──────────────┤
+    // │ use_pty=false    │ Text             │ silent       │ adapter timeout │ [INH] CliExec│
+    // │  (headless CLI)  │                  │              │  default (300s) │  path        │
+    // │                  │ Text             │ silent       │ Some(0)         │ [OK] cli     │
+    // │                  │                  │              │  (disable)      │  disable test│
+    // │                  │ Text             │ silent       │ explicit 60s    │ [INH]       │
+    // │                  ├──────────────────┼──────────────┼─────────────────┼──────────────┤
+    // │                  │ StreamJson       │ silent       │ default         │ [INH]       │
+    // │                  │ PiStreamJson     │ silent       │ default         │ [GAP]       │
+    // ├─────────────────┼──────────────────┼──────────────┼─────────────────┼──────────────┤
+    // │ use_pty=true     │ Text             │ silent       │ 1s override     │ [OK] this   │
+    // │  & enable_rpc=  │                  │              │                 │  file        │
+    // │  true (PTY RPC)  │ StreamJson       │ silent       │ 1s override     │ [OK] this   │
+    // │                  │                  │              │                 │  file        │
+    // │                  │ PiStreamJson     │ silent       │ 1s override     │ [GAP] Pi has│
+    // │                  │                  │              │                 │  its own     │
+    // │                  │                  │              │                 │  parser so   │
+    // │                  │                  │              │                 │  output-hand │
+    // │                  │                  │              │                 │  ler delta   │
+    // │                  │                  │              │                 │  not covered │
+    // ├─────────────────┼──────────────────┼──────────────┼─────────────────┼──────────────┤
+    // │ use_pty=true     │ Text             │ silent       │ 1s override     │ [INH] same  │
+    // │  & enable_tui=  │ StreamJson       │ silent       │ 1s override     │  PtyExecutor │
+    // │  true (PTY TUI) │                  │              │                 │  code path   │
+    // │  observation    │                  │              │                 │  ; TUI layer│
+    // │                  │                  │              │                 │  is present-│
+    // │                  │                  │              │                 │  ation only │
+    // ├─────────────────┼──────────────────┼──────────────┼─────────────────┼──────────────┤
+    // │ use_pty=true     │ Text             │ partial +    │ 1s override     │ [INH] wave  │
+    // │  autonomous     │                  │ valid event  │                 │  worker test │
+    // │  (--no-tui etc.)│                  │              │                 │ + this file  │
+    // │                  │ Text             │ periodic     │ 1s override     │ [OK]        │
+    // │                  │                  │ output, no   │                 │  activity-   │
+    // │                  │                  │ final event  │                 │  resets      │
+    // │                  │                  │              │                 │  watchdog    │
+    // │                  │ Text             │ silent       │ Some(0)         │ [OK] this   │
+    // │                  │                  │              │  (explicit      │  file (R8)  │
+    // │                  │                  │              │  disable)       │             │
+    // └─────────────────┴──────────────────┴──────────────┴─────────────────┴──────────────┘
+    //
+    // End-to-end (R4 / R5) coverage: the two new tests in
+    // `loop_runner::tests` — `test_execute_pty_autonomous_watchdog_fires_for_ce_executor_worktree_rpc`
+    // and `test_execute_pty_autonomous_watchdog_zero_means_disabled_under_real_runner` —
+    // drive the real `execute_pty` function the runner calls, with a real
+    // `RalphConfig` carrying `autonomous_idle_timeout_secs` and a fake
+    // shell backend. This is the highest-fidelity regression guard for
+    // the ce-executor / worktree / RPC scenario the plan was written
+    // for, and it complements (does not replace) the lower-level
+    // `PtyExecutor` unit tests above.
+    //
+    // Coverage gaps (none are blockers; each is a deliberate trade-off
+    // documented here for the next maintainer):
+    //   - [GAP] `PiStreamJson` × silent autonomous PTY RPC: Pi's parser
+    //     runs in the streaming layer; the watchdog fires at the PTY
+    //     layer and so the chain is the same as for `StreamJson`, but
+    //     there is no dedicated end-to-end test pinning that the
+    //     stream-json-to-event extraction step survives a watchdog kill
+    //     (the `Text` + `StreamJson` paths cover the watchdog; the
+    //     stream-json-to-event extraction is tested elsewhere in the
+    //     `normalize_cli_output_for_parsing` family of tests).
+    //   - [GAP] TUI observation × silent autonomous backend: the TUI
+    //     layer is observation-only (no input forwarding on the
+    //     autonomous path) and shares the same `PtyExecutor` as
+    //     `run_observe` — the watchdog contract is identical, so we
+    //     inherit coverage from the non-TUI tests rather than
+    //     duplicating it with a `TuiStreamHandler` in the loop.
+    //   - [GAP] ACP backend × silent: ACP does not currently have a
+    //     watchdog concept (see `ExecutionOutcome::watchdog_timeout`
+    //     field doc in `loop_runner/execution.rs`); the matrix entry
+    //     exists as a placeholder so a future addition of an ACP
+    //     watchdog must remember to also add a test.
+    // ──────────────────────────────────────────────────────────────────────
+
     /// Regression test for #280: large stdin-mode prompts deadlocked the PTY
     /// because the PTY line discipline limits canonical input to ~4KB. The fix
     /// converts stdin-mode to arg-mode in non-interactive PTY execution via

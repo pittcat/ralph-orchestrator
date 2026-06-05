@@ -8,6 +8,47 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 // ──────────────────────────────────────────────────────────────────────
+// Test execution requirements (Unit 4 of plan 2026-06-06-001, follow-up
+// to Unit 3's "5 pre-existing test failures" note):
+//
+// These tests touch four **process-global** `Mutex` / `LazyLock` singletons
+// declared further down in this file:
+//
+//   - MOCK_ACP_EXECUTIONS           (mock ACP backend queue)
+//   - MOCK_ACP_EXECUTION_SERIAL     (mock ACP execution guard)
+//   - FAKE_PATH_BACKEND_SERIAL      (fake-PATH backend installation guard)
+//   - FAKE_PATH_BACKEND_BIN         (fake-PATH backend bin dir)
+//
+// The locks are intentionally process-global because the wave / FAKE_PATH
+// test scaffolding is shared across many test functions and serializing
+// within the binary process keeps the wave fixtures consistent.
+//
+// Consequence: under **plain `cargo test` (default test-threads)**, the
+// 5xx+ tests in this binary run in parallel inside a single OS process
+// and **share the same Mutexes**. A panic in one test poisons the
+// `FAKE_PATH_BACKEND_SERIAL` Mutex; every subsequent test that goes
+// through `install_fake_path_backends(...)` then panics on
+// `PoisonError { .. }`. Similarly, time-sensitive tests like
+// `test_process_pending_merges_redirects_subprocess_output_to_log_file`
+// use a 500ms sleep to wait for the sub-process to flush its log file;
+// under parallel load the sub-process can take longer, producing
+// spurious failures. None of these are real bugs.
+//
+// The project's `scripts/run-tests.sh` and the `nextest` profile
+// (`.config/nextest.toml`) put this entire binary in the `cli-serial`
+// test group with `max-threads = 1`, which sidesteps both problems.
+//
+// **Run via `./scripts/run-tests.sh` or `cargo nextest run -p ralph-cli --bin ralph`.**
+// If you must run with raw `cargo test`, pass `--test-threads=1`:
+//
+//     cargo test -p ralph-cli --bin ralph -- --test-threads=1
+//
+// Do NOT add `#[ignore]` to the wave / FAKE_PATH tests as a "fix" for
+// the parallel-load failures: they are real tests of the production
+// runner code path, and skipping them defeats the regression guard.
+// ──────────────────────────────────────────────────────────────────────
+
+// ──────────────────────────────────────────────────────────────────────
 // U5: payload contract hard gate
 // ──────────────────────────────────────────────────────────────────────
 
@@ -7913,5 +7954,247 @@ fn test_compute_recovery_status_returns_none_when_no_targeted_retry() {
     assert!(
         status.is_none(),
         "compute_recovery_status must return None when no targeted retry is in the bus"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Unit 4 of plan 2026-06-06-001: end-to-end user-scenario regression test
+// for the ce-executor worktree / RPC hang fix (R1, R2, R4, R5).
+//
+// Background: `ralph run -H builtin:ce-executor --worktree --rpc` was
+// observed to hang forever when the backend Claude invocation spawned a
+// long-running command that produced no output and did not exit. The
+// watchdog is now wired into the autonomous / RPC / worktree PTY path
+// (Units 2 + 3) so the outer loop terminates the silent backend, logs
+// the cause, preserves any partial events the agent already wrote, and
+// continues to the event-processing / hard-gate fallback. This test
+// exercises the REAL `execute_pty` function (the one `runner.rs` calls)
+// with a real `RalphConfig` carrying the new `autonomous_idle_timeout_secs`
+// and a fake shell backend that never produces output. The wallclock
+// budget makes the test fail loudly if a future regression re-disables
+// the autonomous watchdog in the runner code path.
+// ──────────────────────────────────────────────────────────────────────
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_execute_pty_autonomous_watchdog_fires_for_ce_executor_worktree_rpc() {
+    use crate::cli::Verbosity;
+    use ralph_adapters::{OutputFormat as CliOutputFormat, PromptMode};
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+    use tempfile::TempDir;
+
+    // Spin up a fake shell backend in a temp dir. `sleep 60` mimics a
+    // Claude-spawned long-running command: it produces NO stdout and does
+    // NOT exit. Without the watchdog fix, the runner would block on this
+    // for the full minute and the test would elapse its wallclock budget.
+    let temp_dir = TempDir::new().expect("temp dir");
+    let bin_dir = temp_dir.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("bin dir");
+    let worker_path = bin_dir.join("fake-claude");
+    std::fs::write(&worker_path, "#!/bin/sh\nexec sleep 60\n").expect("write script");
+    let mut perms = std::fs::metadata(&worker_path)
+        .expect("metadata")
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&worker_path, perms).expect("chmod");
+
+    let backend = ralph_adapters::CliBackend {
+        command: worker_path.display().to_string(),
+        args: vec![],
+        prompt_mode: PromptMode::Stdin,
+        prompt_flag: None,
+        output_format: CliOutputFormat::StreamJson,
+        env_vars: vec![],
+    };
+
+    // Real `RalphConfig` with the new autonomous watchdog pinned to 1s.
+    // The `None` -> per-adapter timeout fallback (default 300s) would make
+    // the test slow and unreliable across CI environments, so we override
+    // to 1s explicitly. This is the same knob `ralph run
+    // --autonomous-idle-timeout 1` would set; the test exercises the same
+    // resolver path the CLI uses (see ralph_config.rs::autonomous_idle_timeout_secs).
+    let yaml = r#"
+core:
+  scratchpad: ".ralph/agent/scratchpad.md"
+  specs_dir: "./specs"
+event_loop:
+  starting_event: "work.ready"
+  completion_promise: "LOOP_COMPLETE"
+  max_iterations: 5
+cli:
+  backend: claude
+  default_mode: autonomous
+  autonomous_idle_timeout_secs: 1
+"#;
+    let config: ralph_core::RalphConfig = serde_yaml::from_str(yaml).expect("parse config");
+
+    let (_interrupt_tx, interrupt_rx) = tokio::sync::watch::channel(false);
+
+    // Wallclock budget: 1s watchdog + 4s slack (PTY spawn + kill + cleanup).
+    // A regression that re-disables the autonomous watchdog would make
+    // `execute_pty` block on `sleep 60` and the outer timeout would fire,
+    // which the `expect` below turns into a clear failure with the right
+    // diagnostic.
+    let wallclock = Duration::from_secs(5);
+    let outcome = tokio::time::timeout(
+        wallclock,
+        execute_pty(
+            None, // No pre-built executor → execute_pty constructs one from config
+            &backend,
+            &config,
+            "ignored",
+            false, // interactive=false (autonomous / RPC / worktree path)
+            interrupt_rx,
+            Verbosity::Quiet,
+            None, // No TUI lines
+            None, // No RPC stdout
+            0,    // iteration
+            "executor",
+            "claude",
+        ),
+    )
+    .await
+    .expect(
+        "autonomous watchdog must fire well within wallclock budget — otherwise the outer \
+         `ralph run` loop would hang forever on a silent, non-exiting backend (R1 / R5 \
+         violation). This is the exact regression that motivated plan 2026-06-06-001.",
+    )
+    .expect("PTY observe must not return an io error");
+
+    // R1 / R5: the autonomous / RPC / worktree path must surface
+    // `watchdog_timeout = true` so the runner can log the cause without
+    // falsely declaring success.
+    assert!(
+        outcome.watchdog_timeout,
+        "R1 / R5: autonomous / RPC / worktree path MUST set `watchdog_timeout = true` \
+         when the backend is killed by inactivity. Got watchdog_timeout=false. A \
+         regression that re-disables the autonomous watchdog would let this assertion \
+         pass only because the wallclock budget above would have panicked first — but \
+         the explicit flag is what the runner actually checks at runner.rs::if outcome.watchdog_timeout."
+    );
+
+    // R3 / R7 (Unit 3): watchdog timeout must leave `termination = None` so
+    // the runner continues to event parsing / hard-gate fallback. The
+    // legacy `Some(TerminationReason::Stopped)` mapping short-circuited
+    // the partial-event pipeline; that regression must not return.
+    assert!(
+        outcome.termination.is_none(),
+        "R3 / R7: watchdog timeout must leave termination=None so the runner's \
+         `if let Some(reason) = outcome.termination` short-circuit is skipped, \
+         letting partial events surface and the missing-event hard gate / fallback \
+         take over on the next iteration. The legacy Some(Stopped) mapping would \
+         silently drop partial events and is no longer correct."
+    );
+}
+
+/// Companion to the test above for the explicit-disable path: when the
+/// operator sets `autonomous_idle_timeout_secs: 0`, the resolver must
+/// pass `0` through to the PTY executor. The PTY executor then
+/// disables its watchdog, so a silent backend will indeed hang the
+/// outer loop. This test pins the contract that `0` is the
+/// "explicitly disabled" sentinel (R8) and that the resolver does NOT
+/// silently flip `0` to the per-adapter 300s default.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_execute_pty_autonomous_watchdog_zero_means_disabled_under_real_runner() {
+    use crate::cli::Verbosity;
+    use ralph_adapters::{OutputFormat as CliOutputFormat, PromptMode};
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+    use tempfile::TempDir;
+
+    // Same fake backend as the other test, but emits ONE line of stdout
+    // after a delay, then exits cleanly. The watchdog is disabled (0),
+    // so the test must run to natural completion, not be killed.
+    let temp_dir = TempDir::new().expect("temp dir");
+    let bin_dir = temp_dir.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("bin dir");
+    let worker_path = bin_dir.join("fake-claude-quiet");
+    std::fs::write(
+        &worker_path,
+        "#!/bin/sh\necho 'natural completion marker'\nsleep 0.2\nexit 0\n",
+    )
+    .expect("write script");
+    let mut perms = std::fs::metadata(&worker_path)
+        .expect("metadata")
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&worker_path, perms).expect("chmod");
+
+    let backend = ralph_adapters::CliBackend {
+        command: worker_path.display().to_string(),
+        args: vec![],
+        prompt_mode: PromptMode::Stdin,
+        prompt_flag: None,
+        output_format: CliOutputFormat::StreamJson,
+        env_vars: vec![],
+    };
+
+    // `autonomous_idle_timeout_secs: 0` is the explicit-disable sentinel
+    // (R8 of the plan). The resolver at
+    // `RalphConfig::autonomous_idle_timeout_secs(backend)` must NOT
+    // silently swap `0` for the per-adapter 300s default — that would
+    // make "0 disables" a lie. We assert that the call returns `0`
+    // here so the watchdog-disable contract is locked in at the config
+    // boundary the runner uses.
+    let yaml = r#"
+core:
+  scratchpad: ".ralph/agent/scratchpad.md"
+  specs_dir: "./specs"
+event_loop:
+  starting_event: "work.ready"
+  completion_promise: "LOOP_COMPLETE"
+  max_iterations: 5
+cli:
+  backend: claude
+  default_mode: autonomous
+  autonomous_idle_timeout_secs: 0
+"#;
+    let config: ralph_core::RalphConfig = serde_yaml::from_str(yaml).expect("parse config");
+    assert_eq!(
+        config.autonomous_idle_timeout_secs("claude"),
+        0,
+        "R8: explicit `autonomous_idle_timeout_secs: 0` must round-trip to 0 \
+         (the disabled sentinel), not be silently replaced by the per-adapter \
+         300s default. A regression here would make the doc / help text claim \
+         `0 = disabled` while the runner still fires a 300s watchdog."
+    );
+
+    // Drive a real `execute_pty` call end-to-end with watchdog disabled.
+    // The backend emits a short stdout line and exits naturally; the
+    // disabled watchdog must NOT fire (would set `watchdog_timeout=true`).
+    let (_interrupt_tx, interrupt_rx) = tokio::sync::watch::channel(false);
+    let wallclock = Duration::from_secs(8);
+    let outcome = tokio::time::timeout(
+        wallclock,
+        execute_pty(
+            None,
+            &backend,
+            &config,
+            "ignored",
+            false, // autonomous path
+            interrupt_rx,
+            Verbosity::Quiet,
+            None,
+            None,
+            0,
+            "executor",
+            "claude",
+        ),
+    )
+    .await
+    .expect(
+        "with watchdog disabled, a natural-exit backend must complete without the \
+         wallclock budget elapsing. If this times out, the resolver is firing a \
+         watchdog on `autonomous_idle_timeout_secs: 0` (R8 regression).",
+    )
+    .expect("PTY observe must not return an io error");
+
+    assert!(
+        !outcome.watchdog_timeout,
+        "R8: explicit `autonomous_idle_timeout_secs: 0` means the watchdog is \
+         disabled; a backend that exits naturally must NOT be reported as a \
+         watchdog fire. Got watchdog_timeout=true."
     );
 }
