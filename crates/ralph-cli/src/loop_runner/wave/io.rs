@@ -132,6 +132,11 @@ pub fn extract_readable_delta(line: &str, output_format: BackendOutputFormat) ->
             }
             _ => None,
         },
+        // Trae parser lands in U2; until then, skip line-level preview rather
+        // than leak raw NDJSON to the TUI. The executor's own parser (U3) is
+        // the source of truth for execution — this arm only affects the wave
+        // worker preview pane.
+        BackendOutputFormat::TraeStreamJson => None,
     }
 }
 /// Read events from a per-worker events file.

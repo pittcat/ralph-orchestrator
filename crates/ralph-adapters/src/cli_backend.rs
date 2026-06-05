@@ -20,6 +20,8 @@ pub enum OutputFormat {
     CopilotStreamJson,
     /// Newline-delimited JSON stream (Pi with --mode json)
     PiStreamJson,
+    /// Newline-delimited JSON stream (Trae CLI with --output-format stream-json)
+    TraeStreamJson,
     /// Agent Client Protocol over stdio (Kiro v2)
     Acp,
 }
@@ -624,16 +626,24 @@ impl CliBackend {
 
     /// Creates the Trae CLI backend for headless execution.
     ///
-    /// Uses `--yolo` to auto-approve tools and `--print` for non-interactive
-    /// output. Trae CLI supports `--json` with `--print` for structured output,
-    /// but we default to plain text for maximum compatibility.
+    /// Uses `--yolo` to auto-approve tools, `--print` for non-interactive
+    /// output, and `--output-format stream-json` to emit NDJSON event
+    /// streams (paired with `OutputFormat::TraeStreamJson` so the executor
+    /// can parse assistant text, tool calls, and session results).
+    /// Without `stream-json`, `trae-cli --yolo --print` exits with code 1
+    /// and produces empty stdout.
     pub fn traecli() -> Self {
         Self {
             command: "trae-cli".to_string(),
-            args: vec!["--yolo".to_string(), "--print".to_string()],
+            args: vec![
+                "--yolo".to_string(),
+                "--print".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+            ],
             prompt_mode: PromptMode::Arg,
             prompt_flag: None,
-            output_format: OutputFormat::Text,
+            output_format: OutputFormat::TraeStreamJson,
             env_vars: vec![],
         }
     }
@@ -641,7 +651,10 @@ impl CliBackend {
     /// Creates the Trae CLI backend for interactive mode with initial prompt.
     ///
     /// Runs trae-cli TUI without `--yolo` or `--print`, passing the prompt
-    /// as a positional argument. Used by `ralph plan` for interactive sessions.
+    /// as a positional argument. Output is plain `Text` because interactive
+    /// TUI mode does not emit the stream-json protocol — see
+    /// `copilot_tui()` / `claude_interactive()` for the same pattern.
+    /// Used by `ralph plan` for interactive sessions.
     pub fn traecli_interactive() -> Self {
         Self {
             command: "trae-cli".to_string(),
@@ -2058,9 +2071,18 @@ mod tests {
         let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
 
         assert_eq!(cmd, "trae-cli");
-        assert_eq!(args, vec!["--yolo", "--print", "test prompt"]);
+        assert_eq!(
+            args,
+            vec![
+                "--yolo",
+                "--print",
+                "--output-format",
+                "stream-json",
+                "test prompt"
+            ]
+        );
         assert!(stdin.is_none());
-        assert_eq!(backend.output_format, OutputFormat::Text);
+        assert_eq!(backend.output_format, OutputFormat::TraeStreamJson);
         assert_eq!(backend.prompt_flag, None);
     }
 
@@ -2081,7 +2103,7 @@ mod tests {
         let backend = CliBackend::from_name("traecli").unwrap();
         assert_eq!(backend.command, "trae-cli");
         assert_eq!(backend.prompt_flag, None);
-        assert_eq!(backend.output_format, OutputFormat::Text);
+        assert_eq!(backend.output_format, OutputFormat::TraeStreamJson);
     }
 
     #[test]
@@ -2095,9 +2117,11 @@ mod tests {
         let backend = CliBackend::from_config(&config).unwrap();
 
         assert_eq!(backend.command, "trae-cli");
-        assert_eq!(backend.output_format, OutputFormat::Text);
+        assert_eq!(backend.output_format, OutputFormat::TraeStreamJson);
         assert!(backend.args.contains(&"--yolo".to_string()));
         assert!(backend.args.contains(&"--print".to_string()));
+        assert!(backend.args.contains(&"--output-format".to_string()));
+        assert!(backend.args.contains(&"stream-json".to_string()));
     }
 
     #[test]
