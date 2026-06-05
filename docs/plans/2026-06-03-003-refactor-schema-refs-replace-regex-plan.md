@@ -48,6 +48,18 @@ related:
 
 **当前进度：计划整体未启动（Phase 0 仍 pending）；但与本计划**正交**的 2026-06-02-005 计划已落地。**
 
+### Repo Drift Note（2026-06-05 追加）
+
+自本计划 6-03 写成后，仓库发生 3 个相关物理目录重构。本计划 Phase 1 / Phase 4 中所有 `crates/ralph-core/src/config.rs`、`crates/ralph-core/src/event_loop/tests.rs`、`crates/ralph-cli/src/loop_runner.rs` 引用须按下表替换再执行：
+
+| 原路径 | 拆分后实际位置 | 备注 |
+|---|---|---|
+| `crates/ralph-core/src/config.rs` | `crates/ralph-core/src/config/{mod.rs,hat.rs,memories.rs,...}`（21 个子模块） | `HatConfig` 在 `config/hat.rs:88`；`ignore_payload_fields` 在 `config/hat.rs:202`；参考 `MemoriesConfig` 在 `config/memories.rs:46`。所有 `config.rs` 行号引用（如"`MemoriesConfig` 在 `config.rs:2303-2334`"）作废。 |
+| `crates/ralph-core/src/event_loop/tests.rs` | `crates/ralph-core/src/event_loop/tests/` 29 个子文件 + `event_loop/tests/mod.rs` | 按主题拆分（`active_hat.rs` / `backpressure.rs` / `payload_types.rs` / `execution_contract.rs` 等）。Phase 1.2 / 第 4 节 #10 须改为多文件列表。 |
+| `crates/ralph-cli/src/loop_runner.rs` | `crates/ralph-cli/src/loop_runner/` 18 个子模块 + `loop_runner/tests.rs` | 主循环在 `loop_runner/runner.rs`（122 KB）；`enforce_payload_contract_gate` 在 `loop_runner/payload_contract_gate.rs`；payload 输入在 `loop_runner/payload_inputs.rs`。 |
+
+另：`presets/en/ce-executor-wave.yml` 是 21e8f47 提交新增的 builtin preset（属于 2026-06-03-ce-executor-wave 计划），本计划 Phase 2.1 枚举 builtin 清单时须补入。
+
 ### 本计划自身的实施状态
 
 | 阶段 | 状态 | 说明 |
@@ -331,8 +343,8 @@ rtk grep "ignore_payload_fields|From event payload|payload MUST include|schema_r
 
 #### Step 1.1: 改 `config.rs`，新增 `schema_refs`
 
-- **文件**: `crates/ralph-core/src/config.rs`
-- **位置**: `HatConfig` 结构体，建议放在 `instructions`/`extra_instructions` 后或 `ignore_payload_fields` 前。
+- **文件**: `crates/ralph-core/src/config/hat.rs`（取代已拆分的 `crates/ralph-core/src/config.rs`；参见 Repo Drift Note）
+- **位置**: `HatConfig` 结构体在 `config/hat.rs:88`；建议把新 `schema_refs` 字段放在 `instructions`/`extra_instructions` 后或现有 `ignore_payload_fields`（`config/hat.rs:202`）前。
 - **修改**:
   - 新增 `#[serde(default)] pub schema_refs: HashMap<String, Vec<String>>`
   - 更新字段注释，明确它服务静态 payload contract validator。
@@ -353,10 +365,10 @@ rtk grep "ignore_payload_fields|From event payload|payload MUST include|schema_r
 rtk grep "HatConfig \\{" crates/ralph-core/src crates/ralph-cli/src
 ```
 
-当前已知位置必须逐一处理：
+当前已知位置必须逐一处理（`config.rs` 拆分后请优先 grep 实际子文件）：
 - `crates/ralph-cli/src/doctor.rs`
-- `crates/ralph-cli/src/loop_runner.rs`
-- `crates/ralph-core/src/event_loop/tests.rs`
+- `crates/ralph-cli/src/loop_runner/runner.rs`（取代原 `loop_runner.rs`；其他子模块视 grep 结果追加）
+- `crates/ralph-core/src/event_loop/tests/*.rs`（29 个子文件，按主题拆分；优先关注 `payload_types.rs` / `backpressure.rs` / `execution_contract.rs`）
 - `crates/ralph-core/src/preflight.rs`
 - `crates/ralph-core/src/wave_prompt.rs`
 
@@ -664,16 +676,16 @@ rtk ls "$TMPDIR" | rtk grep "ralph-schema-refs-"
 
 | # | 文件 | 修改类型 | 说明 |
 |---|------|---------|------|
-| 1 | `crates/ralph-core/src/config.rs` | 新增字段 | `HatConfig` 新增 `schema_refs: HashMap<String, Vec<String>>` |
-| 2 | `crates/ralph-core/src/config.rs` | 修改 | `impl Default for HatConfig` 初始化 `schema_refs` |
+| 1 | `crates/ralph-core/src/config/hat.rs`（原 `config.rs`，已拆分） | 新增字段 | `HatConfig` 新增 `schema_refs: HashMap<String, Vec<String>>` |
+| 2 | `crates/ralph-core/src/config/hat.rs` | 修改 | `impl Default for HatConfig` 初始化 `schema_refs` |
 | 3 | `crates/ralph-core/src/payload_contract.rs` | 重写 | `PayloadFieldRef`、`extract_payload_field_refs`、`validate_payload_contract` |
 | 4 | `crates/ralph-core/src/payload_contract.rs` | 删除 | `ExtractionPattern`、`extract_comma_separated_fields`、所有 Regex 提取逻辑 |
 | 5 | `crates/ralph-core/src/payload_contract.rs` | 重写 | 单元测试和 YAML fixture 集成测试 |
 | 6 | `crates/ralph-core/src/preset_validator.rs` | 适配 | payload contract 错误格式化处理 `schema_refs` 来源 |
 | 7 | `crates/ralph-cli/src/hats.rs` | 适配 | CLI 输出处理 `schema_refs` 来源 |
 | 8 | `crates/ralph-cli/src/doctor.rs` | 补全 | 硬编码 `HatConfig` 实例补字段或改 `..Default::default()` |
-| 9 | `crates/ralph-cli/src/loop_runner.rs` | 补全 | 硬编码 `HatConfig` 实例补字段或改 `..Default::default()` |
-| 10 | `crates/ralph-core/src/event_loop/tests.rs` | 补全 | 测试中的 `HatConfig` 构造适配 |
+| 9 | `crates/ralph-cli/src/loop_runner/runner.rs`（原 `loop_runner.rs`，已拆分） | 补全 | 硬编码 `HatConfig` 实例补字段或改 `..Default::default()`；同时检查 `loop_runner/payload_contract_gate.rs` 与 `loop_runner/payload_inputs.rs` |
+| 10 | `crates/ralph-core/src/event_loop/tests/*.rs`（原 `event_loop/tests.rs`，已拆为 29 个子文件） | 补全 | 多个测试子文件中的 `HatConfig` 构造适配 |
 | 11 | `crates/ralph-core/src/preflight.rs` | 补全 | 测试或 helper 中的 `HatConfig` 构造适配 |
 | 12 | `crates/ralph-core/src/wave_prompt.rs` | 补全 | 测试 helper 中的 `HatConfig` 构造适配 |
 | 13 | `presets/en/*.yml` | 新增 | 各 hat 按真实字段依赖添加 `schema_refs` |
