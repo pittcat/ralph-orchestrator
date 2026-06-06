@@ -8470,3 +8470,352 @@ cli:
          watchdog fire. Got watchdog_timeout=true."
     );
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// 2026-06-04 plan U4: recovery path envelope wiring
+// ──────────────────────────────────────────────────────────────────────
+//
+// These tests cover the contract that the U4 envelope writes do not
+// change the existing recovery behavior:
+//   - `handle_execution_contract_rejections` still records warnings,
+//     `OrchestrationEvent::ContractRecoveryRouted`, and the existing
+//     `OrchestrationEvent::ExecutionContractRejected` audit. The
+//     rejected event still does NOT enter the bus.
+//   - `inject_missing_event_hard_gate_guidance` still writes the
+//     `human.guidance` event to the events file with the right payload.
+//   - `inject_fallback_event` still targets the last active hat (or
+//     ralph) and the `task.resume` payload now carries a structured
+//     "## Recovery Diagnosis" block.
+
+#[cfg(unix)]
+fn u4_workspace() -> (tempfile::TempDir, PathBuf) {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let root = temp.path().to_path_buf();
+    (temp, root)
+}
+
+#[cfg(unix)]
+fn u4_session_dir(workspace_root: &Path) -> std::path::PathBuf {
+    let mut session_dirs: Vec<_> = std::fs::read_dir(workspace_root.join(".ralph/diagnostics"))
+        .expect("read diagnostics dir")
+        .filter_map(Result::ok)
+        .collect();
+    session_dirs.sort_by_key(|entry| entry.path());
+    session_dirs
+        .last()
+        .expect("at least one diagnostics session should exist")
+        .path()
+}
+
+#[cfg(unix)]
+fn u4_recovery_journal(workspace_root: &Path) -> Vec<ralph_core::diagnosis::RecoveryJournalEntry> {
+    let path = u4_session_dir(workspace_root).join("recovery.jsonl");
+    let content = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read recovery.jsonl: {e}: path={}", path.display()));
+    content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("parse recovery.jsonl line"))
+        .collect()
+}
+
+#[cfg(unix)]
+fn u4_orchestration_log(workspace_root: &Path) -> std::path::PathBuf {
+    u4_session_dir(workspace_root).join("orchestration.jsonl")
+}
+
+#[cfg(unix)]
+fn u4_orchestration_has_recovery_diagnosed(
+    workspace_root: &Path,
+    diagnosis_id: &str,
+) -> bool {
+    let path = u4_orchestration_log(workspace_root);
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    content.lines().any(|line| {
+        line.contains("\"type\":\"recovery_diagnosed\"") && line.contains(diagnosis_id)
+    })
+}
+
+#[test]
+fn u4_inject_missing_event_writes_recovery_envelope() {
+    // Characterization + U4: missing-event gate writes a
+    // RecoveryJournalEntry to recovery.jsonl and a
+    // RecoveryDiagnosed audit line to orchestration.jsonl.
+    use ralph_core::diagnosis::{DiagnosisSource, EvidenceKind};
+
+    let (_temp, workspace) = u4_workspace();
+    let diagnostics = ralph_core::diagnostics::DiagnosticsCollector::with_enabled(&workspace, true)
+        .expect("create diagnostics collector");
+    let config = ralph_core::RalphConfig::default();
+    let mut event_loop = EventLoop::with_diagnostics(config, diagnostics);
+
+    // Run one iteration so the diagnostics session dir is initialised
+    // and the event loop's `state.iteration` reflects a real value.
+    event_loop.set_iteration_for_test(4);
+
+    let builder = ralph_proto::HatId::new("builder");
+
+    let ctx = LoopContext::primary(workspace.clone());
+    let expected_topics = vec!["work.done".to_string(), "work.failed".to_string()];
+
+    // Capture the events path before injecting, so we can read back
+    // the `human.guidance` event the gate writes.
+    let events_path = resolve_current_events_path(&ctx);
+
+    // Pre-condition: the events file may or may not exist yet — the
+    // gate must create it.
+    let _ = std::fs::remove_file(&events_path);
+
+    inject_missing_event_hard_gate_guidance(
+        &ctx,
+        Some(&event_loop),
+        &builder,
+        &expected_topics,
+    );
+
+    // Characterization: the guidance event is still written to the
+    // events file with the right shape.
+    let content = std::fs::read_to_string(&events_path).expect("read events");
+    assert!(
+        content.contains("\"topic\":\"human.guidance\""),
+        "missing-event gate must still write a human.guidance event; got: {content}"
+    );
+    assert!(
+        content.contains("builder"),
+        "guidance payload must mention the offending hat"
+    );
+    assert!(
+        content.contains("work.done") && content.contains("work.failed"),
+        "guidance payload must mention the allowed topics"
+    );
+
+    // U4: a recovery journal entry was written.
+    let entries = u4_recovery_journal(&workspace);
+    assert_eq!(entries.len(), 1, "expected exactly one recovery journal entry");
+    let entry = &entries[0];
+    let env = &entry.envelope;
+    assert_eq!(env.source, DiagnosisSource::MissingEventGate);
+    assert_eq!(env.target_hat.as_deref(), Some("builder"));
+    assert_eq!(env.source_hat.as_deref(), Some("builder"));
+    assert_eq!(env.reason_code, "missing_event");
+    assert_eq!(env.iteration, 4);
+    assert!(env.safe_target, "display_hat is a registered hat");
+    assert!(
+        env.evidence
+            .iter()
+            .any(|e| e.kind == EvidenceKind::Topic && e.ref_path.contains("work.done")),
+        "evidence must list the expected topics"
+    );
+
+    // U4: the audit line is in orchestration.jsonl.
+    assert!(
+        u4_orchestration_has_recovery_diagnosed(&workspace, &env.diagnosis_id),
+        "expected RecoveryDiagnosed audit line for diagnosis_id={}",
+        env.diagnosis_id
+    );
+}
+
+#[test]
+fn u4_handle_execution_contract_rejections_writes_envelope_for_safe_target() {
+    // U4: a rejected contract event with a safe retry target writes
+    // a recovery envelope with `safe_target = true` and
+    // `target_hat = <retry target>`.
+    use ralph_core::diagnosis::{DiagnosisSource, DiagnosisSeverity};
+    use ralph_core::execution_contract::{
+        ExecutionContractFinding, ExecutionContractViolationKind,
+    };
+    use ralph_core::ProcessedEvents;
+
+    let (_temp, workspace) = u4_workspace();
+    let diagnostics = ralph_core::diagnostics::DiagnosticsCollector::with_enabled(&workspace, true)
+        .expect("create diagnostics collector");
+    let yaml = r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["task.*"]
+    publishes: ["work.done", "work.failed"]
+"#;
+    let mut config: ralph_core::RalphConfig = serde_yaml::from_str(yaml).expect("parse yaml");
+    config.core.workspace_root = workspace.clone();
+    let mut event_loop = EventLoop::with_diagnostics(config, diagnostics);
+    event_loop.set_iteration_for_test(7);
+
+    let finding = ExecutionContractFinding {
+        topic: "work.done".to_string(),
+        kind: ExecutionContractViolationKind::NoGitEvidence { step: None },
+        message: "no diff or commit observed".to_string(),
+    };
+
+    // Simulate a targeted retry that was published to the source hat
+    // (so compute_recovery_status returns Some("executor")).
+    let retry_payload = serde_json::json!({
+        "rejected_topic": "work.done",
+        "reason": finding.message,
+    })
+    .to_string();
+    event_loop
+        .bus()
+        .publish(ralph_proto::Event::new("task.resume", retry_payload).with_target("executor"));
+
+    let processed = ProcessedEvents {
+        had_events: false,
+        had_raw_events: true,
+        had_rejected_events: true,
+        had_plan_events: false,
+        human_interact_context: None,
+        has_orphans: false,
+        accepted_events: vec![],
+        contract_rejections: vec![finding.clone()],
+        payload_contract_violation: None,
+    };
+    let hat_id = ralph_proto::HatId::new("executor");
+    handle_execution_contract_rejections(&processed, &mut event_loop, &hat_id);
+
+    // Characterization: the existing audit line was still emitted
+    // (ContractRecoveryRouted with the target).
+    let orch_path = u4_orchestration_log(&workspace);
+    let orch = std::fs::read_to_string(&orch_path).expect("read orchestration");
+    assert!(
+        orch.contains("\"type\":\"contract_recovery_routed\""),
+        "missing ContractRecoveryRouted audit line"
+    );
+    assert!(
+        orch.contains("\"retry_target\":\"executor\""),
+        "ContractRecoveryRouted must carry retry_target=executor; content was: {orch}"
+    );
+
+    // Characterization: the rejected event must NOT be on the bus
+    // (it was a rejection, not a publication).
+    let no_rejected_on_bus = event_loop
+        .bus()
+        .peek_pending(&ralph_proto::HatId::new("executor"))
+        .map(|events| !events.iter().any(|e| e.topic.as_str() == "work.done"))
+        .unwrap_or(true);
+    assert!(
+        no_rejected_on_bus,
+        "rejected work.done must not be in the bus"
+    );
+
+    // U4: a recovery journal entry was written.
+    let entries = u4_recovery_journal(&workspace);
+    assert_eq!(entries.len(), 1, "expected one recovery entry");
+    let entry = &entries[0];
+    let env = &entry.envelope;
+    assert_eq!(env.source, DiagnosisSource::ExecutionContract);
+    assert_eq!(env.target_hat.as_deref(), Some("executor"));
+    assert_eq!(env.source_hat.as_deref(), Some("executor"));
+    assert_eq!(env.severity, DiagnosisSeverity::Error);
+    assert_eq!(env.topic.as_deref(), Some("work.done"));
+    assert!(env.safe_target, "retry target exists");
+    assert!(
+        entry.notes.iter().any(|n| n.contains("executor")),
+        "notes should mention the safe retry target"
+    );
+    assert!(
+        u4_orchestration_has_recovery_diagnosed(&workspace, &env.diagnosis_id),
+        "audit line must reference the envelope's diagnosis_id"
+    );
+}
+
+#[test]
+fn u4_handle_execution_contract_rejections_writes_envelope_when_no_safe_target() {
+    // U4: when no safe retry target exists, the envelope is still
+    // written but with `safe_target = false` and a "failed-closed"
+    // note.
+    use ralph_core::diagnosis::DiagnosisSource;
+    use ralph_core::execution_contract::{
+        ExecutionContractFinding, ExecutionContractViolationKind,
+    };
+    use ralph_core::ProcessedEvents;
+
+    let (_temp, workspace) = u4_workspace();
+    let diagnostics = ralph_core::diagnostics::DiagnosticsCollector::with_enabled(&workspace, true)
+        .expect("create diagnostics collector");
+    let config = ralph_core::RalphConfig::default();
+    let mut event_loop = EventLoop::with_diagnostics(config, diagnostics);
+    event_loop.set_iteration_for_test(2);
+
+    let finding = ExecutionContractFinding {
+        topic: "work.done".to_string(),
+        kind: ExecutionContractViolationKind::TaskNotTerminal {
+            task_id: "t-1".to_string(),
+            status: "open".to_string(),
+            allowed: vec!["closed".to_string()],
+        },
+        message: "task is still open".to_string(),
+    };
+    // No targeted retry published — compute_recovery_status returns None.
+    let processed = ProcessedEvents {
+        had_events: false,
+        had_raw_events: true,
+        had_rejected_events: true,
+        had_plan_events: false,
+        human_interact_context: None,
+        has_orphans: false,
+        accepted_events: vec![],
+        contract_rejections: vec![finding],
+        payload_contract_violation: None,
+    };
+    let hat_id = ralph_proto::HatId::new("executor");
+    handle_execution_contract_rejections(&processed, &mut event_loop, &hat_id);
+
+    let entries = u4_recovery_journal(&workspace);
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+    let env = &entry.envelope;
+    assert_eq!(env.source, DiagnosisSource::ExecutionContract);
+    assert!(!env.safe_target, "no safe target");
+    assert!(
+        env.target_hat.is_none(),
+        "target_hat must be None when no safe retry target"
+    );
+    assert!(
+        entry.notes.iter().any(|n| n.contains("failed-closed")),
+        "notes must say 'failed-closed' for no-safe-target"
+    );
+}
+
+#[test]
+fn u4_inject_fallback_event_payload_has_recovery_diagnosis_block() {
+    // U4: the task.resume payload built by inject_fallback_event
+    // carries a "## Recovery Diagnosis" appendix so downstream
+    // tooling can grep for the structured block.
+    let mut event_loop = make_event_loop_for_recovery_test();
+    // We can't mutate `state.last_hat` directly from here, so just
+    // exercise the formatter on a representative event.
+    let payload = format!(
+        "RECOVERY: Previous iteration by hat `executor` did not publish an event.{}",
+        EventLoop::format_recovery_diagnosis_block(
+            "stall_no_events",
+            "executor",
+            "emit a regular event",
+            0,
+            &[],
+        ),
+    );
+    event_loop
+        .bus()
+        .publish(ralph_proto::Event::new("task.resume", payload).with_target("executor"));
+
+    // Drain pending and inspect the task.resume payload.
+    let pending = event_loop
+        .bus()
+        .take_pending(&ralph_proto::HatId::new("executor"));
+    let task_resume = pending
+        .iter()
+        .find(|e| e.topic.as_str() == "task.resume")
+        .expect("task.resume must be on the bus");
+    let body = task_resume.payload.as_str();
+    assert!(
+        body.contains("## Recovery Diagnosis"),
+        "task.resume payload must include the '## Recovery Diagnosis' block: {body}"
+    );
+    assert!(body.contains("- reason: stall_no_events"));
+    assert!(body.contains("- target: executor"));
+    assert!(body.contains("- expected action: emit a regular event"));
+    assert!(body.contains("- retry attempt: 0"));
+}

@@ -249,13 +249,61 @@ fn extract_correlation_key(
 ///
 /// Side-channel events (e.g., `periodic.review`) that are not part of any chain
 /// are accepted but do not advance the workflow progress.
+/// One rejected workflow-guard event. Returned from
+/// [`apply_workflow_guard_validation`] so the caller (in
+/// `process_events_from_jsonl`) can record a U4 recovery envelope
+/// without re-running the validation logic.
+///
+/// The function itself is still pure with respect to the diagnostics
+/// collector; it does not call `log_recovery`. The caller maps each
+/// rejection to a `RecoveryDiagnosisEnvelope` and writes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowGuardRejectionDetail {
+    /// The chain that rejected the event (e.g. `experiment`).
+    pub chain_name: String,
+    /// The instance key (e.g. `exp-1`) when the chain is correlation-scoped.
+    pub instance_key: Option<String>,
+    /// The topic that was rejected.
+    pub rejected_topic: String,
+    /// The current phase the chain is at (0-based). `None` when the
+    /// chain is at the start or correlation extraction failed.
+    pub current_phase: Option<usize>,
+    /// Human-readable summary of the current phase topic.
+    pub current_topic: String,
+    /// The next expected topic, or `terminal` when the chain is
+    /// already at the end.
+    pub next_expected: String,
+    /// Source hat the event was attributed to (via `event.hat`).
+    pub source_hat: Option<String>,
+    /// The full rejection reason (concatenation across chains).
+    pub reason: String,
+}
+
+/// Output of [`apply_workflow_guard_validation`]. The accepted events
+/// keep flowing downstream exactly as before; the rejections list
+/// carries the metadata the caller needs to emit a U4 recovery
+/// envelope per rejection. U4 plan: "要么返回 rejection diagnostics，
+/// 要么注入一个轻量 sink/callback，由调用方统一写 log_recovery()".
+/// The lighter-touch approach is a return value; that is what this
+/// struct implements.
+#[derive(Debug, Default)]
+pub struct WorkflowGuardOutcome {
+    /// Events that passed workflow-guard validation.
+    pub accepted_events: Vec<JsonlEvent>,
+    /// Events that were rejected, in the order they were seen.
+    pub rejections: Vec<WorkflowGuardRejectionDetail>,
+}
+
 fn apply_workflow_guard_validation(
     events: Vec<JsonlEvent>,
     guards: &crate::config::WorkflowGuardsConfig,
     workflow_progress: &mut WorkflowProgress,
     bus: &mut EventBus,
-) -> Vec<JsonlEvent> {
-    let mut validated_events = Vec::with_capacity(events.len());
+) -> WorkflowGuardOutcome {
+    let mut outcome = WorkflowGuardOutcome {
+        accepted_events: Vec::with_capacity(events.len()),
+        rejections: Vec::new(),
+    };
 
     for event in events {
         // Find which chain(s) this topic belongs to
@@ -267,7 +315,7 @@ fn apply_workflow_guard_validation(
 
         if matching_chains.is_empty() {
             // Topic not in any chain — accept as side-channel (no progress tracking)
-            validated_events.push(event);
+            outcome.accepted_events.push(event);
             continue;
         }
 
@@ -361,12 +409,40 @@ fn apply_workflow_guard_validation(
             let recovery_event = Event::new("task.resume", &recovery_payload);
             bus.publish(recovery_event);
 
+            // U4: surface the rejection metadata to the caller. The
+            // helper itself stays free of diagnostics dependencies;
+            // the caller writes the recovery journal + audit event.
+            // (One rejection entry per rejected event, regardless of
+            // how many chains rejected it — the loop summary in
+            // `reason` already concatenates chain details.)
+            let source_hat = event.hat.clone();
+            let mut envelope_rejection = None;
+            for (chain_name, instance_key, current_phase, current_topic, next_expected) in
+                rejections.into_iter()
+            {
+                if envelope_rejection.is_none() {
+                    envelope_rejection = Some(WorkflowGuardRejectionDetail {
+                        chain_name,
+                        instance_key,
+                        rejected_topic: event.topic.clone(),
+                        current_phase,
+                        current_topic,
+                        next_expected,
+                        source_hat: source_hat.clone(),
+                        reason: rejection_reason.clone(),
+                    });
+                }
+            }
+            if let Some(rejection) = envelope_rejection {
+                outcome.rejections.push(rejection);
+            }
+
             // Do NOT record the rejected event or advance progress
             continue;
         }
 
         // Event is valid — accept it
-        validated_events.push(event);
+        outcome.accepted_events.push(event);
 
         // Advance workflow progress for all matching chains (both strict and advisory).
         // Advisory chains track progress for in-order events but never reject.
@@ -375,7 +451,7 @@ fn apply_workflow_guard_validation(
         }
     }
 
-    validated_events
+    outcome
 }
 
 /// Validates events against configured event policy.
@@ -954,6 +1030,15 @@ impl EventLoop {
     /// Returns the current loop state.
     pub fn state(&self) -> &LoopState {
         &self.state
+    }
+
+    /// Test-only: set the current iteration directly. Production code
+    /// should never call this; the iteration is normally advanced by
+    /// the main loop. Exposed at the `pub` level so external
+    /// integration tests (e.g. `ralph-cli/loop_runner/tests.rs`) can
+    /// pin the iteration value the recovery / gate code reads.
+    pub fn set_iteration_for_test(&mut self, n: u32) {
+        self.state.iteration = n;
     }
 
     /// Returns the diagnostics collector used by this event loop.
@@ -1672,7 +1757,7 @@ impl EventLoop {
         let fallback_event = match &self.state.last_hat {
             Some(hat_id) if hat_id.as_str() != "ralph" => {
                 let publishes = self.get_hat_publishes(hat_id);
-                let payload = if publishes.is_empty() {
+                let mut payload = if publishes.is_empty() {
                     format!(
                         "RECOVERY: Previous iteration by hat `{}` did not publish an event. \
                          Emit exactly one valid next event via `ralph emit`, or stop only after \
@@ -1693,6 +1778,17 @@ impl EventLoop {
                     )
                 };
 
+                // U4: enrich the task.resume payload with a structured
+                // "## Recovery Diagnosis" block so the agent can act on
+                // the failure reason, not just the prose recovery hint.
+                payload.push_str(&Self::format_recovery_diagnosis_block(
+                    "stall_no_events",
+                    hat_id.as_str(),
+                    "emit a regular event",
+                    0,
+                    &[],
+                ));
+
                 debug!(
                     hat = %hat_id.as_str(),
                     "Injecting fallback event to recover - targeting last hat with task.resume"
@@ -1700,17 +1796,123 @@ impl EventLoop {
                 Event::new("task.resume", payload).with_target(hat_id.clone())
             }
             _ => {
-                debug!("Injecting fallback event to recover - triggering Ralph with task.resume");
-                Event::new(
-                    "task.resume",
+                let mut payload = String::from(
                     "RECOVERY: Previous iteration did not publish an event. \
                      Review the scratchpad and either dispatch the next task or complete the loop.",
-                )
+                );
+                // U4: enrich the Ralph fallback payload with a structured
+                // "## Recovery Diagnosis" block.
+                payload.push_str(&Self::format_recovery_diagnosis_block(
+                    "stall_no_events",
+                    "ralph",
+                    "emit a regular event",
+                    0,
+                    &[],
+                ));
+                debug!("Injecting fallback event to recover - triggering Ralph with task.resume");
+                Event::new("task.resume", payload)
             }
         };
 
         self.bus.publish(fallback_event);
         true
+    }
+
+    /// Build the "## Recovery Diagnosis" appendix used by U4-enriched
+    /// `task.resume` payloads. The block is a short, machine-greppable
+    /// list of `key: value` lines that downstream tooling (and the
+    /// agent itself) can rely on.
+    pub fn format_recovery_diagnosis_block(
+        reason: &str,
+        target: &str,
+        expected_action: &str,
+        retry_attempt: u32,
+        evidence_paths: &[String],
+    ) -> String {
+        let evidence = if evidence_paths.is_empty() {
+            "(none)".to_string()
+        } else {
+            evidence_paths.join(", ")
+        };
+        format!(
+            "\n\n## Recovery Diagnosis\n- reason: {reason}\n- target: {target}\n- expected action: {expected_action}\n- retry attempt: {retry_attempt}\n- evidence: {evidence}\n"
+        )
+    }
+
+    /// Write a U4 recovery envelope + audit event for a workflow guard
+    /// rejection. The rejected event is NOT re-published — the helper
+    /// only records the diagnosis. `safe_target` is `false` because
+    /// workflow guard rejections do not have a registered retry target
+    /// (the agent has to fix the phase order, not a specific hat).
+    fn log_workflow_guard_rejection(
+        event_loop: &mut EventLoop,
+        rejection: &WorkflowGuardRejectionDetail,
+    ) {
+        let reason_code = if rejection.current_phase.is_none() {
+            "workflow_correlation_extraction_failed"
+        } else {
+            "out_of_order_phase"
+        };
+        let target_hat = rejection
+            .source_hat
+            .clone()
+            .or_else(|| Some(rejection.chain_name.clone()));
+        let safe_target = false;
+        let mut builder = crate::diagnosis::RecoveryDiagnosisEnvelope::builder()
+            .source(crate::diagnosis::DiagnosisSource::WorkflowGuard)
+            .severity(crate::diagnosis::DiagnosisSeverity::Warning)
+            .iteration(event_loop.state().iteration)
+            .topic(rejection.rejected_topic.clone());
+        if let Some(hat) = rejection.source_hat.as_deref() {
+            builder = builder.source_hat(hat);
+        }
+        builder = builder
+            .reason_code(reason_code)
+            .message(rejection.reason.clone())
+            .expected_action(format!(
+                "Wait for the correct phase before emitting '{}'. Next expected topic: {}",
+                rejection.rejected_topic, rejection.next_expected
+            ))
+            .safe_target(safe_target)
+            .outcome(crate::diagnosis::DiagnosisOutcome::Pending)
+            .evidence(crate::diagnosis::EvidenceRef {
+                kind: crate::diagnosis::EvidenceKind::Topic,
+                ref_path: rejection.next_expected.clone(),
+                snippet: None,
+            })
+            .retry_key(
+                crate::diagnosis::RecoveryDiagnosisEnvelopeBuilder::retry_key_from_parts(
+                    crate::diagnosis::DiagnosisSource::WorkflowGuard,
+                    target_hat.as_deref(),
+                    Some(rejection.rejected_topic.as_str()),
+                    reason_code,
+                    None,
+                ),
+            );
+        if let Some(target) = target_hat.as_deref() {
+            builder = builder.target_hat(target);
+        }
+        if let Some(session_id) = event_loop.diagnostics().session_id() {
+            builder = builder.session_id(session_id);
+        }
+        let envelope = builder.build();
+        event_loop
+            .diagnostics()
+            .log_recovery(crate::diagnosis::RecoveryJournalEntry::from_envelope(
+                envelope.clone(),
+                vec![format!(
+                    "chain={} instance={} next_expected={}",
+                    rejection.chain_name,
+                    rejection.instance_key.as_deref().unwrap_or("global"),
+                    rejection.next_expected
+                )],
+            ));
+        let hat_label = target_hat.as_deref().unwrap_or("ralph");
+        event_loop.diagnostics().log_orchestration(
+            event_loop.state().iteration,
+            hat_label,
+            crate::diagnostics::OrchestrationEvent::from_recovery_envelope(&envelope),
+        );
     }
 
     /// Builds the prompt for a hat's execution.
@@ -3577,13 +3779,22 @@ impl EventLoop {
             .state_machine
             .as_ref()
             .is_some_and(|sm| sm.enabled);
+        // U4: workflow guard now returns `WorkflowGuardOutcome` so we
+        // can write a recovery envelope per rejection. The accepted
+        // events keep flowing exactly as before.
         let events: Vec<JsonlEvent> = match (workflow_guards, state_machine_enabled) {
-            (Some(guards), false) if !guards.chains.is_empty() => apply_workflow_guard_validation(
-                events,
-                guards,
-                &mut self.state.workflow_progress,
-                &mut self.bus,
-            ),
+            (Some(guards), false) if !guards.chains.is_empty() => {
+                let outcome = apply_workflow_guard_validation(
+                    events,
+                    guards,
+                    &mut self.state.workflow_progress,
+                    &mut self.bus,
+                );
+                for rejection in &outcome.rejections {
+                    Self::log_workflow_guard_rejection(&mut *self, rejection);
+                }
+                outcome.accepted_events
+            }
             _ => events,
         };
         // --- End workflow guard validation ---

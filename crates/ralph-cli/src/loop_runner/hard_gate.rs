@@ -1,4 +1,8 @@
 use super::*;
+use ralph_core::diagnosis::{
+    DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, EvidenceKind, EvidenceRef,
+    RecoveryDiagnosisEnvelope, RecoveryDiagnosisEnvelopeBuilder, RecoveryJournalEntry,
+};
 
 pub fn should_hard_gate(hat_id: &HatId, event_loop: &EventLoop) -> bool {
     let Some(config) = event_loop.registry().get_config(hat_id) else {
@@ -35,6 +39,14 @@ pub fn should_gate_missing_events(hat_id: &HatId, event_loop: &EventLoop) -> boo
 /// for each rejected topic so operators can distinguish
 ///   (a) rejected event will be retried by the source hat, from
 ///   (b) rejected event has no safe retry target and needs human intervention.
+///
+/// 2026-06-04 plan U4 step-04: Also writes a `RecoveryDiagnosisEnvelope`
+/// per rejection to `recovery.jsonl` and a high-level
+/// `OrchestrationEvent::RecoveryDiagnosed` audit to `orchestration.jsonl`.
+/// The envelope's `safe_target` mirrors whether a retry target was
+/// routed; the `target_hat` is the routed hat or `None` for fail-closed
+/// rejections. The rejected event itself is NOT re-published — this
+/// function only records the diagnosis.
 pub fn handle_execution_contract_rejections(
     processed: &ralph_core::ProcessedEvents,
     event_loop: &mut EventLoop,
@@ -47,6 +59,7 @@ pub fn handle_execution_contract_rejections(
 
     let iteration = event_loop.state().iteration;
     let hat_name = hat_id.as_str();
+    let session_id = event_loop.diagnostics().session_id();
 
     // Console-visible warning for each rejection. Include retry_target
     // status when available so operators can see at a glance whether the
@@ -87,6 +100,51 @@ pub fn handle_execution_contract_rejections(
                 retry_target,
                 no_retry_reason,
             },
+        );
+
+        // U4: write recovery envelope for this rejection. The rejected
+        // event is NOT re-published; this only records the diagnosis.
+        let reason_code = format!("{:?}", finding.kind);
+        let target_hat_for_envelope = recovery.clone();
+        let safe_target = target_hat_for_envelope.is_some();
+        let mut builder = RecoveryDiagnosisEnvelope::builder()
+            .source(DiagnosisSource::ExecutionContract)
+            .severity(DiagnosisSeverity::Error)
+            .iteration(iteration)
+            .source_hat(hat_name)
+            .topic(finding.topic.as_str())
+            .reason_code(reason_code.clone())
+            .message(finding.message.clone())
+            .expected_action("re-emit with correct contract fields")
+            .retry_key(RecoveryDiagnosisEnvelopeBuilder::retry_key_from_parts(
+                DiagnosisSource::ExecutionContract,
+                target_hat_for_envelope.as_deref(),
+                Some(finding.topic.as_str()),
+                &reason_code,
+                None,
+            ))
+            .safe_target(safe_target)
+            .outcome(DiagnosisOutcome::Pending);
+        if let Some(session_id) = session_id.as_deref() {
+            builder = builder.session_id(session_id);
+        }
+        if let Some(target) = target_hat_for_envelope.as_deref() {
+            builder = builder.target_hat(target);
+        }
+        let envelope = builder.build();
+        let mut notes: Vec<String> = Vec::new();
+        if let Some(target) = target_hat_for_envelope.as_deref() {
+            notes.push(format!("safe retry target: {target}"));
+        } else {
+            notes.push("no safe retry target; failed-closed".to_string());
+        }
+        event_loop
+            .diagnostics()
+            .log_recovery(RecoveryJournalEntry::from_envelope(envelope.clone(), notes));
+        event_loop.diagnostics().log_orchestration(
+            iteration,
+            hat_name,
+            ralph_core::diagnostics::OrchestrationEvent::from_recovery_envelope(&envelope),
         );
     }
 
@@ -177,8 +235,15 @@ pub fn inject_hard_gate_guidance(ctx: &LoopContext, hat_id: &HatId, expected_top
 /// This is distinct from `inject_hard_gate_guidance` which handles the case
 /// where the agent claimed to emit but no event was written. This function
 /// handles the case where the agent simply did not emit any event at all.
+///
+/// 2026-06-04 plan U4 step-01: When `event_loop` is provided, also writes
+/// a `RecoveryDiagnosisEnvelope` to `recovery.jsonl` and a corresponding
+/// `OrchestrationEvent::RecoveryDiagnosed` audit to `orchestration.jsonl`
+/// so the missing-event gate is auditable. The guidance payload itself
+/// is unchanged; the envelope only records the diagnosis.
 pub fn inject_missing_event_hard_gate_guidance(
     ctx: &LoopContext,
+    event_loop: Option<&EventLoop>,
     hat_id: &HatId,
     expected_topics: &[String],
 ) {
@@ -230,6 +295,63 @@ pub fn inject_missing_event_hard_gate_guidance(
         Err(e) => {
             warn!(error = %e, "Failed serializing missing-event hard-gate guidance event");
         }
+    }
+
+    // U4: write recovery envelope for the missing-event gate. The
+    // `display_hat` is always a registered hat (the runner resolves
+    // it from `last_active_hat_ids`), so `safe_target = true`.
+    if let Some(event_loop) = event_loop {
+        let hat_name = hat_id.as_str();
+        let iteration = event_loop.state().iteration;
+        let session_id = event_loop.diagnostics().session_id();
+        let topic_for_envelope = expected_topics.first().cloned();
+        let reason_code = "missing_event";
+        let expected_action = if expected_topics.is_empty() {
+            "emit an event per the hat's publish obligation".to_string()
+        } else {
+            format!("emit one of: {}", expected_topics.join(", "))
+        };
+        let mut builder = RecoveryDiagnosisEnvelope::builder()
+            .source(DiagnosisSource::MissingEventGate)
+            .severity(DiagnosisSeverity::Warning)
+            .iteration(iteration)
+            .source_hat(hat_name)
+            .target_hat(hat_name)
+            .reason_code(reason_code)
+            .message(format!(
+                "Hat '{}' did not emit any event on its publish obligation",
+                hat_name
+            ))
+            .expected_action(expected_action)
+            .evidence(EvidenceRef {
+                kind: EvidenceKind::Topic,
+                ref_path: expected_topics.join(","),
+                snippet: None,
+            })
+            .safe_target(true)
+            .outcome(DiagnosisOutcome::Pending)
+            .retry_key(RecoveryDiagnosisEnvelopeBuilder::retry_key_from_parts(
+                DiagnosisSource::MissingEventGate,
+                Some(hat_name),
+                topic_for_envelope.as_deref(),
+                reason_code,
+                None,
+            ));
+        if let Some(session_id) = session_id.as_deref() {
+            builder = builder.session_id(session_id);
+        }
+        if let Some(topic) = topic_for_envelope.as_deref() {
+            builder = builder.topic(topic);
+        }
+        let envelope = builder.build();
+        event_loop
+            .diagnostics()
+            .log_recovery(RecoveryJournalEntry::from_envelope(envelope.clone(), Vec::new()));
+        event_loop.diagnostics().log_orchestration(
+            iteration,
+            hat_name,
+            ralph_core::diagnostics::OrchestrationEvent::from_recovery_envelope(&envelope),
+        );
     }
 }
 

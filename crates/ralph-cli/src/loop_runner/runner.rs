@@ -1510,6 +1510,63 @@ pub async fn run_loop_impl(
                 }
 
                 if event_loop.inject_fallback_event() {
+                    // U4: log a stall-recovery envelope so the no-event
+                    // iteration is auditable. `inject_fallback_event`
+                    // targets the last active hat (or the generic
+                    // "ralph" fallback when there is none); the
+                    // `safe_target` flag follows the same rule.
+                    let fallback_hat_id = event_loop
+                        .state()
+                        .last_hat
+                        .clone()
+                        .filter(|h| h.as_str() != "ralph");
+                    let target_label = fallback_hat_id
+                        .as_ref()
+                        .map(|h| h.as_str().to_string())
+                        .unwrap_or_else(|| "ralph".to_string());
+                    let safe_target = fallback_hat_id.is_some()
+                        && event_loop
+                            .registry()
+                            .get(fallback_hat_id.as_ref().unwrap())
+                            .is_some();
+                    let mut fb_builder = ralph_core::diagnosis::RecoveryDiagnosisEnvelope::builder()
+                        .source(ralph_core::diagnosis::DiagnosisSource::StallRecovery)
+                        .severity(ralph_core::diagnosis::DiagnosisSeverity::Warning)
+                        .iteration(event_loop.state().iteration)
+                        .target_hat(target_label.clone())
+                        .topic("task.resume")
+                        .reason_code("stall_no_events")
+                        .message("no events from the active hat; injected task.resume fallback")
+                        .expected_action("emit a regular event")
+                        .safe_target(safe_target)
+                        .outcome(ralph_core::diagnosis::DiagnosisOutcome::Pending)
+                        .retry_key(
+                            ralph_core::diagnosis::RecoveryDiagnosisEnvelopeBuilder::retry_key_from_parts(
+                                ralph_core::diagnosis::DiagnosisSource::StallRecovery,
+                                Some(target_label.as_str()),
+                                Some("task.resume"),
+                                "stall_no_events",
+                                None,
+                            ),
+                        );
+                    if let Some(session_id) = event_loop.diagnostics().session_id() {
+                        fb_builder = fb_builder.session_id(session_id);
+                    }
+                    let fb_envelope = fb_builder.build();
+                    event_loop
+                        .diagnostics()
+                        .log_recovery(ralph_core::diagnosis::RecoveryJournalEntry::from_envelope(
+                            fb_envelope.clone(),
+                            Vec::new(),
+                        ));
+                    event_loop.diagnostics().log_orchestration(
+                        event_loop.state().iteration,
+                        target_label.as_str(),
+                        ralph_core::diagnostics::OrchestrationEvent::from_recovery_envelope(
+                            &fb_envelope,
+                        ),
+                    );
+
                     // Fallback injected successfully, continue to next iteration
                     // The planner will be triggered and can either:
                     // - Dispatch more work if tasks remain
@@ -2432,7 +2489,56 @@ pub async fn run_loop_impl(
                 .loop_context()
                 .map(|c| c.workspace().join(".ralph").join("diagnostics"))
                 .unwrap_or_else(|| std::path::PathBuf::from(".ralph/diagnostics"));
-            write_payload_contract_violation_report(&diagnostics_dir, violation);
+            let report_path = write_payload_contract_violation_report(&diagnostics_dir, violation);
+
+            // U4: write a recovery envelope pointing at the on-disk
+            // violation report. `TerminationReason::PayloadContractViolation`
+            // is preserved by the explicit `return` below.
+            let report_path_str = report_path.to_string_lossy().to_string();
+            let mut pc_builder = ralph_core::diagnosis::RecoveryDiagnosisEnvelope::builder()
+                .source(ralph_core::diagnosis::DiagnosisSource::PayloadContract)
+                .severity(ralph_core::diagnosis::DiagnosisSeverity::Critical)
+                .iteration(event_loop.state().iteration)
+                .topic(violation.topic.as_str())
+                .reason_code("payload_contract_violation")
+                .message(format!(
+                    "Payload contract violation on topic '{}' (field: {:?})",
+                    violation.topic,
+                    violation.field
+                ))
+                .expected_action("fix preset payload_contract definition")
+                .safe_target(false)
+                .outcome(ralph_core::diagnosis::DiagnosisOutcome::NotRetriable)
+                .evidence(ralph_core::diagnosis::EvidenceRef {
+                    kind: ralph_core::diagnosis::EvidenceKind::File,
+                    ref_path: report_path_str.clone(),
+                    snippet: None,
+                })
+                .retry_key(
+                    ralph_core::diagnosis::RecoveryDiagnosisEnvelopeBuilder::retry_key_from_parts(
+                        ralph_core::diagnosis::DiagnosisSource::PayloadContract,
+                        None,
+                        Some(violation.topic.as_str()),
+                        "payload_contract_violation",
+                        violation.field.as_deref(),
+                    ),
+                );
+            if let Some(session_id) = event_loop.diagnostics().session_id() {
+                pc_builder = pc_builder.session_id(session_id);
+            }
+            let pc_envelope = pc_builder.build();
+            event_loop
+                .diagnostics()
+                .log_recovery(ralph_core::diagnosis::RecoveryJournalEntry::from_envelope(
+                    pc_envelope.clone(),
+                    vec![format!("see report at {}", report_path_str)],
+                ));
+            event_loop.diagnostics().log_orchestration(
+                event_loop.state().iteration,
+                "ralph",
+                ralph_core::diagnostics::OrchestrationEvent::from_recovery_envelope(&pc_envelope),
+            );
+
             return Ok(TerminationReason::PayloadContractViolation);
         }
 
@@ -2820,6 +2926,7 @@ pub async fn run_loop_impl(
             event_loop.increment_hard_gate_count();
             inject_missing_event_hard_gate_guidance(
                 &ctx,
+                Some(&event_loop),
                 &display_hat,
                 &event_loop.get_hat_publishes(&display_hat),
             );
