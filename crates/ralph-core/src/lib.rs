@@ -15,6 +15,7 @@ mod cli_capture;
 mod config;
 pub mod diagnosis;
 pub mod diagnostics;
+pub mod drift;
 mod event_logger;
 mod event_loop;
 pub mod event_origin;
@@ -89,6 +90,10 @@ pub use diagnosis::{
     RecoveryJournalEntry,
 };
 pub use diagnostics::{DiagnosisSummary, DiagnosticsCollector, DiagnosticsOptions};
+pub use drift::{
+    DeclaredEdges, DriftDetector, DriftFinding, DriftObserver, DriftWindow, EventSnapshot,
+    RequiredFields, EMIT_CADENCE_MIN_SAMPLES,
+};
 pub use event_logger::{EventHistory, EventLogger, EventRecord};
 pub use event_loop::{
     EventLoop, LoopState, ProcessedEvents, ProcessedEventsWithWaves, TerminationReason, UserPrompt,
