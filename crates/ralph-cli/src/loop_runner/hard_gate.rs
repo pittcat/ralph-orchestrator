@@ -1,7 +1,7 @@
 use super::*;
 use ralph_core::diagnosis::{
     DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, EvidenceKind, EvidenceRef,
-    RecoveryDiagnosisEnvelope, RecoveryDiagnosisEnvelopeBuilder, RecoveryJournalEntry,
+    RecoveryDiagnosisEnvelope, RecoveryDiagnosisEnvelopeBuilder,
 };
 
 pub fn should_hard_gate(hat_id: &HatId, event_loop: &EventLoop) -> bool {
@@ -138,14 +138,13 @@ pub fn handle_execution_contract_rejections(
         } else {
             notes.push("no safe retry target; failed-closed".to_string());
         }
-        event_loop
-            .diagnostics()
-            .log_recovery(RecoveryJournalEntry::from_envelope(envelope.clone(), notes));
-        event_loop.diagnostics().log_orchestration(
-            iteration,
-            hat_name,
-            ralph_core::diagnostics::OrchestrationEvent::from_recovery_envelope(&envelope),
-        );
+        // U6: the single entry point that funnels the envelope
+        // into both the U3 journal logger and the U6 recovery
+        // responder. The U3 `log_recovery` + `log_orchestration`
+        // calls were replaced by `record_recovery_envelope` so the
+        // responder can compute the escalation level for the next
+        // prompt build.
+        event_loop.record_recovery_envelope(&envelope, notes);
     }
 
     // Structured diagnostics: writes to orchestration.jsonl under
@@ -243,7 +242,7 @@ pub fn inject_hard_gate_guidance(ctx: &LoopContext, hat_id: &HatId, expected_top
 /// is unchanged; the envelope only records the diagnosis.
 pub fn inject_missing_event_hard_gate_guidance(
     ctx: &LoopContext,
-    event_loop: Option<&EventLoop>,
+    event_loop: Option<&mut EventLoop>,
     hat_id: &HatId,
     expected_topics: &[String],
 ) {
@@ -344,14 +343,11 @@ pub fn inject_missing_event_hard_gate_guidance(
             builder = builder.topic(topic);
         }
         let envelope = builder.build();
-        event_loop
-            .diagnostics()
-            .log_recovery(RecoveryJournalEntry::from_envelope(envelope.clone(), Vec::new()));
-        event_loop.diagnostics().log_orchestration(
-            iteration,
-            hat_name,
-            ralph_core::diagnostics::OrchestrationEvent::from_recovery_envelope(&envelope),
-        );
+        // U6: see `record_recovery_envelope` in the execution-contract
+        // path above. The missing-event gate envelopes always have a
+        // safe target (the hat itself), so the responder is the right
+        // place to surface them in the next prompt.
+        event_loop.record_recovery_envelope(&envelope, Vec::new());
     }
 }
 

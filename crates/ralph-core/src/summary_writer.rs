@@ -111,6 +111,41 @@ impl SummaryWriter {
         fs::write(&self.path, content)
     }
 
+    /// U6: append a `## Recovery Diagnosis` section to the summary
+    /// file when the recovery responder produced a
+    /// [`crate::diagnosis::TerminationHint`]. The section is
+    /// advisory; it does not introduce a new termination reason.
+    /// The hint's `retry_key` and `severity` are surfaced so the
+    /// operator can jump to the matching `recovery.jsonl` entry
+    /// without re-parsing the file.
+    pub fn append_recovery_section(
+        &self,
+        hint: &crate::diagnosis::TerminationHint,
+    ) -> io::Result<()> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut body = String::new();
+        body.push_str("\n\n## Recovery Diagnosis\n\n");
+        body.push_str("The runtime diagnosis responder escalated this loop to a pause/review state. The original termination reason above is the source of truth; this section is a pointer to the diagnosis journal.\n\n");
+        body.push_str(&format!("- **Reason:** {}\n", hint.reason));
+        body.push_str(&format!("- **Severity:** {}\n", hint.severity.as_str()));
+        if let Some(retry_key) = &hint.retry_key {
+            body.push_str(&format!("- **Retry key:** `{retry_key}`\n"));
+        }
+        body.push_str(
+            "\nFor the full audit timeline (recoveries, escalations, drift), see \
+             `.ralph/diagnostics/<session>/recovery.jsonl` and `orchestration.jsonl`.\n",
+        );
+        // Append-mode write so we do not clobber an existing summary.
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        std::io::Write::write_all(&mut file, body.as_bytes())?;
+        Ok(())
+    }
+
     /// Generates the markdown content for the summary with optional landing info.
     fn generate_content_with_landing(
         &self,

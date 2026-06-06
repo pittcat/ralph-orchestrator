@@ -8525,18 +8525,15 @@ fn u4_orchestration_log(workspace_root: &Path) -> std::path::PathBuf {
 }
 
 #[cfg(unix)]
-fn u4_orchestration_has_recovery_diagnosed(
-    workspace_root: &Path,
-    diagnosis_id: &str,
-) -> bool {
+fn u4_orchestration_has_recovery_diagnosed(workspace_root: &Path, diagnosis_id: &str) -> bool {
     let path = u4_orchestration_log(workspace_root);
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         Err(_) => return false,
     };
-    content.lines().any(|line| {
-        line.contains("\"type\":\"recovery_diagnosed\"") && line.contains(diagnosis_id)
-    })
+    content
+        .lines()
+        .any(|line| line.contains("\"type\":\"recovery_diagnosed\"") && line.contains(diagnosis_id))
 }
 
 #[test]
@@ -8571,7 +8568,7 @@ fn u4_inject_missing_event_writes_recovery_envelope() {
 
     inject_missing_event_hard_gate_guidance(
         &ctx,
-        Some(&event_loop),
+        Some(&mut event_loop),
         &builder,
         &expected_topics,
     );
@@ -8594,7 +8591,11 @@ fn u4_inject_missing_event_writes_recovery_envelope() {
 
     // U4: a recovery journal entry was written.
     let entries = u4_recovery_journal(&workspace);
-    assert_eq!(entries.len(), 1, "expected exactly one recovery journal entry");
+    assert_eq!(
+        entries.len(),
+        1,
+        "expected exactly one recovery journal entry"
+    );
     let entry = &entries[0];
     let env = &entry.envelope;
     assert_eq!(env.source, DiagnosisSource::MissingEventGate);
@@ -8623,11 +8624,11 @@ fn u4_handle_execution_contract_rejections_writes_envelope_for_safe_target() {
     // U4: a rejected contract event with a safe retry target writes
     // a recovery envelope with `safe_target = true` and
     // `target_hat = <retry target>`.
-    use ralph_core::diagnosis::{DiagnosisSource, DiagnosisSeverity};
+    use ralph_core::ProcessedEvents;
+    use ralph_core::diagnosis::{DiagnosisSeverity, DiagnosisSource};
     use ralph_core::execution_contract::{
         ExecutionContractFinding, ExecutionContractViolationKind,
     };
-    use ralph_core::ProcessedEvents;
 
     let (_temp, workspace) = u4_workspace();
     let diagnostics = ralph_core::diagnostics::DiagnosticsCollector::with_enabled(&workspace, true)
@@ -8726,11 +8727,11 @@ fn u4_handle_execution_contract_rejections_writes_envelope_when_no_safe_target()
     // U4: when no safe retry target exists, the envelope is still
     // written but with `safe_target = false` and a "failed-closed"
     // note.
+    use ralph_core::ProcessedEvents;
     use ralph_core::diagnosis::DiagnosisSource;
     use ralph_core::execution_contract::{
         ExecutionContractFinding, ExecutionContractViolationKind,
     };
-    use ralph_core::ProcessedEvents;
 
     let (_temp, workspace) = u4_workspace();
     let diagnostics = ralph_core::diagnostics::DiagnosticsCollector::with_enabled(&workspace, true)

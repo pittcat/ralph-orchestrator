@@ -1,5 +1,40 @@
 use super::*;
+use ralph_core::diagnosis::TerminationHint;
 use std::sync::Arc;
+
+/// U6: post-termination hook that appends a `## Recovery Diagnosis`
+/// section to the summary when the recovery responder produced a
+/// Final hint. The hint is taken (one-shot) so the next run does not
+/// see a stale signal. Called from each `return Ok(reason)` site in
+/// [`run_loop_impl`].
+///
+/// This is a free function so we can call it from the loop body
+/// without threading the hint through the `handle_termination`
+/// closure. The hint-taking is intentionally idempotent within a
+/// single loop run: once consumed, subsequent `take_termination_hint`
+/// calls return `None` until the next `record_finding` writes a new
+/// hint.
+fn finalize_recovery_diagnosis(
+    event_loop: &mut ralph_core::EventLoop,
+    ctx: &Option<ralph_core::LoopContext>,
+) {
+    let Some(hint) = event_loop.recovery_responder_mut().take_termination_hint() else {
+        return;
+    };
+    let summary_writer = if let Some(c) = ctx {
+        ralph_core::SummaryWriter::from_context(c)
+    } else {
+        ralph_core::SummaryWriter::default()
+    };
+    if let Err(e) = summary_writer.append_recovery_section(&hint) {
+        tracing::warn!("Failed to append recovery diagnosis section: {}", e);
+    }
+    // Suppress the unused-import lint when the function is the only
+    // user of `TerminationHint`. The type is re-exported in case the
+    // diagnostic report pipeline (U7) wants to introspect the hint
+    // structure directly.
+    let _ = std::marker::PhantomData::<TerminationHint>;
+}
 
 pub struct RpcSharedState {
     iteration: Arc<std::sync::atomic::AtomicU32>,
@@ -1070,6 +1105,8 @@ pub async fn run_loop_impl(
             let _ = handle.await;
         }
 
+        finalize_recovery_diagnosis(&mut event_loop, &loop_context);
+
         return Ok(reason);
     }
 
@@ -1156,6 +1193,7 @@ pub async fn run_loop_impl(
             );
             // Signal TUI to exit immediately on interrupt
             let _ = terminated_tx.send(true);
+            finalize_recovery_diagnosis(&mut event_loop, &loop_context);
             return Ok(reason);
         }
 
@@ -1282,6 +1320,7 @@ pub async fn run_loop_impl(
             if let Some(handle) = tui_handle.take() {
                 let _ = handle.await;
             }
+            finalize_recovery_diagnosis(&mut event_loop, &loop_context);
             return Ok(reason);
         }
 
@@ -1368,6 +1407,7 @@ pub async fn run_loop_impl(
                 if let Some(handle) = tui_handle.take() {
                     let _ = handle.await;
                 }
+                finalize_recovery_diagnosis(&mut event_loop, &loop_context);
                 return Ok(reason);
             }
         }
@@ -1442,6 +1482,7 @@ pub async fn run_loop_impl(
                         if let Some(handle) = tui_handle.take() {
                             let _ = handle.await;
                         }
+                        finalize_recovery_diagnosis(&mut event_loop, &loop_context);
                         return Ok(reason);
                     }
                     Some(LateEventRecovery::NoLateEvents) | None => {}
@@ -1506,6 +1547,7 @@ pub async fn run_loop_impl(
                     if let Some(handle) = tui_handle.take() {
                         let _ = handle.await;
                     }
+                    finalize_recovery_diagnosis(&mut event_loop, &loop_context);
                     return Ok(reason);
                 }
 
@@ -1553,19 +1595,13 @@ pub async fn run_loop_impl(
                         fb_builder = fb_builder.session_id(session_id);
                     }
                     let fb_envelope = fb_builder.build();
-                    event_loop
-                        .diagnostics()
-                        .log_recovery(ralph_core::diagnosis::RecoveryJournalEntry::from_envelope(
-                            fb_envelope.clone(),
-                            Vec::new(),
-                        ));
-                    event_loop.diagnostics().log_orchestration(
-                        event_loop.state().iteration,
-                        target_label.as_str(),
-                        ralph_core::diagnostics::OrchestrationEvent::from_recovery_envelope(
-                            &fb_envelope,
-                        ),
-                    );
+                    // U6: the fallback-injection envelope is
+                    // routed through `record_recovery_envelope` so
+                    // the responder can decide whether the next
+                    // prompt should fold a soft alert for the
+                    // stuck hat. The original U3 journal + audit
+                    // logging still happens, inside the helper.
+                    event_loop.record_recovery_envelope(&fb_envelope, Vec::new());
 
                     // Fallback injected successfully, continue to next iteration
                     // The planner will be triggered and can either:
@@ -1627,6 +1663,7 @@ pub async fn run_loop_impl(
                 if let Some(handle) = tui_handle.take() {
                     let _ = handle.await;
                 }
+                finalize_recovery_diagnosis(&mut event_loop, &loop_context);
                 return Ok(reason);
             }
         };
@@ -1726,6 +1763,7 @@ pub async fn run_loop_impl(
             if let Some(handle) = tui_handle.take() {
                 let _ = handle.await;
             }
+            finalize_recovery_diagnosis(&mut event_loop, &loop_context);
             return Ok(reason);
         }
 
@@ -2045,6 +2083,7 @@ pub async fn run_loop_impl(
                 handle_termination(&reason, event_loop.state(), &config.core.scratchpad.path, &loop_history, &loop_context, auto_merge, &prompt_content);
                 // Signal TUI to exit immediately on interrupt
                 let _ = terminated_tx.send(true);
+                finalize_recovery_diagnosis(&mut event_loop, &loop_context);
                 return Ok(reason);
             }
         };
@@ -2117,6 +2156,7 @@ pub async fn run_loop_impl(
             if let Some(handle) = tui_handle.take() {
                 let _ = handle.await;
             }
+            finalize_recovery_diagnosis(&mut event_loop, &loop_context);
             return Ok(reason);
         }
 
@@ -2245,6 +2285,7 @@ pub async fn run_loop_impl(
             if let Some(handle) = tui_handle.take() {
                 let _ = handle.await;
             }
+            finalize_recovery_diagnosis(&mut event_loop, &loop_context);
             return Ok(reason);
         }
 
@@ -2343,6 +2384,7 @@ pub async fn run_loop_impl(
                 if let Some(handle) = tui_handle.take() {
                     let _ = handle.await;
                 }
+                finalize_recovery_diagnosis(&mut event_loop, &loop_context);
                 return Ok(reason);
             }
         }
@@ -2439,6 +2481,7 @@ pub async fn run_loop_impl(
                 if let Some(handle) = tui_handle.take() {
                     let _ = handle.await;
                 }
+                finalize_recovery_diagnosis(&mut event_loop, &loop_context);
                 return Ok(reason);
             }
         }
@@ -2503,8 +2546,7 @@ pub async fn run_loop_impl(
                 .reason_code("payload_contract_violation")
                 .message(format!(
                     "Payload contract violation on topic '{}' (field: {:?})",
-                    violation.topic,
-                    violation.field
+                    violation.topic, violation.field
                 ))
                 .expected_action("fix preset payload_contract definition")
                 .safe_target(false)
@@ -2527,16 +2569,18 @@ pub async fn run_loop_impl(
                 pc_builder = pc_builder.session_id(session_id);
             }
             let pc_envelope = pc_builder.build();
-            event_loop
-                .diagnostics()
-                .log_recovery(ralph_core::diagnosis::RecoveryJournalEntry::from_envelope(
-                    pc_envelope.clone(),
-                    vec![format!("see report at {}", report_path_str)],
-                ));
-            event_loop.diagnostics().log_orchestration(
-                event_loop.state().iteration,
-                "ralph",
-                ralph_core::diagnostics::OrchestrationEvent::from_recovery_envelope(&pc_envelope),
+            // U6: payload contract violations use
+            // `DiagnosisOutcome::NotRetriable` and the responder's
+            // `safe_target` is `false`. The helper still funnels the
+            // envelope through the journal + audit loggers, but
+            // the responder will not synthesize a fake
+            // `task.resume` (its classifier routes `safe_target ==
+            // false` to Final, which the runner then surfaces as a
+            // hint — never as a replacement for
+            // `TerminationReason::PayloadContractViolation`).
+            event_loop.record_recovery_envelope(
+                &pc_envelope,
+                vec![format!("see report at {}", report_path_str)],
             );
 
             return Ok(TerminationReason::PayloadContractViolation);
@@ -2655,6 +2699,7 @@ pub async fn run_loop_impl(
                         if let Some(handle) = tui_handle.take() {
                             let _ = handle.await;
                         }
+                        finalize_recovery_diagnosis(&mut event_loop, &loop_context);
                         return Ok(reason);
                     }
                 }
@@ -2748,6 +2793,7 @@ pub async fn run_loop_impl(
                 if let Some(handle) = tui_handle.take() {
                     let _ = handle.await;
                 }
+                finalize_recovery_diagnosis(&mut event_loop, &loop_context);
                 return Ok(reason);
             }
         }
@@ -2836,6 +2882,7 @@ pub async fn run_loop_impl(
                 if let Some(handle) = tui_handle.take() {
                     let _ = handle.await;
                 }
+                finalize_recovery_diagnosis(&mut event_loop, &loop_context);
                 return Ok(reason);
             }
         }
@@ -2924,11 +2971,15 @@ pub async fn run_loop_impl(
             && should_gate_missing_events(&display_hat, &event_loop)
         {
             event_loop.increment_hard_gate_count();
+            // Resolve the publish list before the mutable borrow so
+            // the helper can take `&mut event_loop` (U6 recovery
+            // responder bookkeeping lives on the event loop).
+            let publishes = event_loop.get_hat_publishes(&display_hat);
             inject_missing_event_hard_gate_guidance(
                 &ctx,
-                Some(&event_loop),
+                Some(&mut event_loop),
                 &display_hat,
-                &event_loop.get_hat_publishes(&display_hat),
+                &publishes,
             );
             info!(
                 hat = %display_hat.as_str(),
@@ -2980,6 +3031,7 @@ pub async fn run_loop_impl(
             if let Some(handle) = tui_handle.take() {
                 let _ = handle.await;
             }
+            finalize_recovery_diagnosis(&mut event_loop, &loop_context);
             return Ok(reason);
         }
 
@@ -3039,6 +3091,7 @@ pub async fn run_loop_impl(
             if let Some(handle) = tui_handle.take() {
                 let _ = handle.await;
             }
+            finalize_recovery_diagnosis(&mut event_loop, &loop_context);
             return Ok(reason);
         }
 
@@ -3107,6 +3160,7 @@ pub async fn run_loop_impl(
                 if let Some(handle) = tui_handle.take() {
                     let _ = handle.await;
                 }
+                finalize_recovery_diagnosis(&mut event_loop, &loop_context);
                 return Ok(reason);
             }
             // Safety check rejected completion (persistent mode, missing required

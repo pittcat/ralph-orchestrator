@@ -9,6 +9,11 @@ mod tests;
 pub use loop_state::{LoopState, WorkflowProgress};
 
 use crate::config::{HatBackend, HatExecutionMode, InjectMode, RalphConfig, ScratchpadConfig};
+use crate::diagnosis::{
+    RUNTIME_DIAGNOSIS_ALERT_HEADER, RecoveryDiagnosisEnvelope, RecoveryJournalEntry,
+    RecoveryResponder,
+};
+use crate::diagnostics::OrchestrationEvent;
 use crate::event_origin::filter_events_by_origin;
 use crate::event_parser::{
     BuildStatus, EventParser, MutationEvidence, MutationStatus, ReviewStatus,
@@ -192,6 +197,13 @@ pub struct EventLoop {
     /// Robot service for human-in-the-loop communication.
     /// Injected externally when `human.enabled` is true and this is the primary loop.
     robot_service: Option<Box<dyn RobotService>>,
+    /// U6: Recovery responder — aggregates per-`retry_key` state and
+    /// decides whether the next prompt should fold a soft alert, the
+    /// runner should publish a targeted `task.resume`, or the loop
+    /// should surface a `TerminationHint`. The responder is
+    /// in-memory only; it never touches the diagnostics loggers
+    /// directly.
+    recovery_responder: RecoveryResponder,
 }
 
 /// Result of extracting a correlation key from an event payload.
@@ -753,17 +765,14 @@ impl EventLoop {
     pub fn with_context(config: RalphConfig, context: LoopContext) -> Self {
         let diagnostics = match context.prebuilt_diagnostics() {
             Some(collector) => (**collector).clone(),
-            None => {
-                crate::diagnostics::DiagnosticsCollector::new(context.workspace()).unwrap_or_else(
-                    |e| {
-                        warn!(
-                            "Failed to initialize diagnostics: {}, using disabled collector",
-                            e
-                        );
-                        crate::diagnostics::DiagnosticsCollector::disabled()
-                    },
-                )
-            }
+            None => crate::diagnostics::DiagnosticsCollector::new(context.workspace())
+                .unwrap_or_else(|e| {
+                    warn!(
+                        "Failed to initialize diagnostics: {}, using disabled collector",
+                        e
+                    );
+                    crate::diagnostics::DiagnosticsCollector::disabled()
+                }),
         };
 
         Self::with_context_and_diagnostics(config, context, diagnostics)
@@ -861,7 +870,7 @@ impl EventLoop {
         let event_reader = EventReader::new(&events_path);
 
         Self {
-            config,
+            config: config.clone(),
             registry,
             bus,
             state: LoopState::new(),
@@ -873,6 +882,9 @@ impl EventLoop {
             loop_context: Some(context),
             skill_registry,
             robot_service: None,
+            recovery_responder: RecoveryResponder::new(Arc::new(
+                config.telemetry.runtime_diagnosis.clone(),
+            )),
         }
     }
 
@@ -964,7 +976,7 @@ impl EventLoop {
         let event_reader = EventReader::new(&events_path);
 
         Self {
-            config,
+            config: config.clone(),
             registry,
             bus,
             state: LoopState::new(),
@@ -976,6 +988,9 @@ impl EventLoop {
             loop_context: None,
             skill_registry,
             robot_service: None,
+            recovery_responder: RecoveryResponder::new(Arc::new(
+                config.telemetry.runtime_diagnosis.clone(),
+            )),
         }
     }
 
@@ -1896,22 +1911,18 @@ impl EventLoop {
             builder = builder.session_id(session_id);
         }
         let envelope = builder.build();
-        event_loop
-            .diagnostics()
-            .log_recovery(crate::diagnosis::RecoveryJournalEntry::from_envelope(
-                envelope.clone(),
-                vec![format!(
-                    "chain={} instance={} next_expected={}",
-                    rejection.chain_name,
-                    rejection.instance_key.as_deref().unwrap_or("global"),
-                    rejection.next_expected
-                )],
-            ));
-        let hat_label = target_hat.as_deref().unwrap_or("ralph");
-        event_loop.diagnostics().log_orchestration(
-            event_loop.state().iteration,
-            hat_label,
-            crate::diagnostics::OrchestrationEvent::from_recovery_envelope(&envelope),
+        // U6: workflow-guard rejections also flow through
+        // `record_recovery_envelope` so the responder can surface
+        // them in the next prompt. The original U3 journal + audit
+        // logging is preserved by the helper.
+        event_loop.record_recovery_envelope(
+            &envelope,
+            vec![format!(
+                "chain={} instance={} next_expected={}",
+                rejection.chain_name,
+                rejection.instance_key.as_deref().unwrap_or("global"),
+                rejection.next_expected
+            )],
         );
     }
 
@@ -1962,6 +1973,12 @@ impl EventLoop {
                 let base_prompt = self.ralph.build_prompt(&events_context, &[]);
                 self.ralph.clear_robot_guidance();
                 let base_prompt = self.inject_phase_into_prompt(base_prompt);
+                // U6: fold the soft runtime-diagnosis alert into the
+                // prompt before skills prepending. The order
+                // (phase → diagnosis alert → skills) is fixed by the
+                // U6 plan so the skills index is never broken by the
+                // alert text.
+                let base_prompt = self.apply_runtime_diagnosis_prompt(base_prompt, hat_id);
                 let with_skills = self.prepend_auto_inject_skills(base_prompt);
                 let with_scratchpad = self.prepend_scratchpad(with_skills);
                 let with_state_files = self.prepend_state_files(with_scratchpad);
@@ -2097,6 +2114,11 @@ impl EventLoop {
                 // Clear guidance after active_hats references are no longer needed
                 self.ralph.clear_robot_guidance();
                 let base_prompt = self.inject_phase_into_prompt(base_prompt);
+                // U6: see solo-mode comment above. Coordinator
+                // path passes `hat_id` (the ralph hat) so the
+                // helper sees the full set of findings — the
+                // coordinator sees every hat's alerts.
+                let base_prompt = self.apply_runtime_diagnosis_prompt(base_prompt, hat_id);
                 let with_skills = self.prepend_auto_inject_skills(base_prompt);
                 let with_scratchpad = self.prepend_scratchpad(with_skills);
                 let with_state_files = self.prepend_state_files(with_scratchpad);
@@ -2182,6 +2204,11 @@ impl EventLoop {
             // Apply prepend pipeline (SAME order as coordinator path)
             self.ralph.clear_robot_guidance();
             let base_prompt = self.inject_phase_into_prompt(base_prompt);
+            // U6: in isolated mode the helper filters findings to
+            // those whose target/source hat matches `hat_id`. The
+            // plan's "isolated hat mode 下 alert 只注入目标 hat"
+            // contract is enforced inside `apply_runtime_diagnosis_prompt`.
+            let base_prompt = self.apply_runtime_diagnosis_prompt(base_prompt, hat_id);
             let with_skills = self.prepend_auto_inject_skills(base_prompt);
             let with_scratchpad = self.prepend_scratchpad(with_skills);
             let with_state_files = self.prepend_state_files(with_scratchpad);
@@ -2215,12 +2242,22 @@ impl EventLoop {
             "build_prompt: routing to build_custom_hat() for '{}'",
             hat_id.as_str()
         );
-        Some(
-            self.inject_phase_into_prompt(
-                self.instruction_builder
-                    .build_custom_hat(hat, &events_context),
-            ),
-        )
+        // U6: in the backward-compat custom-hat path there is no
+        // isolated-mode filtering (the path is reached only when
+        // execution_mode != Isolated), so we always pass the full
+        // hat_id; the responder injects every finding whose hat
+        // matches or has no hat binding.
+        let base = self
+            .instruction_builder
+            .build_custom_hat(hat, &events_context);
+        let with_phase = self.inject_phase_into_prompt(base);
+        let with_diagnosis = self.apply_runtime_diagnosis_prompt(with_phase, hat_id);
+        // We intentionally skip `prepend_auto_inject_skills` here
+        // because the backward-compat custom-hat path predates
+        // that pipeline and tests assert the absence of skill
+        // injection for this branch.
+        let _ = RUNTIME_DIAGNOSIS_ALERT_HEADER; // silence unused-import lint
+        Some(with_diagnosis)
     }
 
     /// Stores guidance payloads, persists them to scratchpad, and prepares them for prompt injection.
@@ -2326,6 +2363,101 @@ impl EventLoop {
         }
         let phase = self.registry.current_phase();
         format!("{}\n## Current Phase\n\n{}\n", prompt, phase)
+    }
+
+    /// U6: Append a `## Runtime Diagnosis Alert` block to the prompt
+    /// when the recovery responder has findings that the next agent
+    /// should see.
+    ///
+    /// This helper is the single chokepoint for prompt-level
+    /// diagnosis injection and is called from every `build_prompt`
+    /// path (solo ralph, multi-hat coordinator, isolated hat,
+    /// backward-compat custom hat). The injection order is fixed by
+    /// the U6 plan: `inject_phase_into_prompt` → diagnosis alert →
+    /// `prepend_auto_inject_skills`, so the skills index never gets
+    /// split by the alert.
+    ///
+    /// Returns `prompt` unchanged when the responder has nothing to
+    /// surface (no pending findings, prompt injection disabled, or
+    /// runtime-diagnosis entirely off).
+    fn apply_runtime_diagnosis_prompt(&self, prompt: String, hat_id: &HatId) -> String {
+        if !self.config.telemetry.runtime_diagnosis.enabled
+            || !self
+                .config
+                .telemetry
+                .runtime_diagnosis
+                .prompt_injection_enabled
+        {
+            return prompt;
+        }
+        if !self.recovery_responder.has_pending_findings() {
+            return prompt;
+        }
+        let current_iteration = self.state.iteration;
+        let hat_filter = if self.config.event_loop.execution_mode == HatExecutionMode::Isolated
+            && hat_id.as_str() != "ralph"
+        {
+            Some(hat_id)
+        } else {
+            None
+        };
+        self.recovery_responder
+            .inject_prompt_alert(&prompt, hat_filter, current_iteration)
+    }
+
+    /// U6: Record a recovery envelope that the recovery responder
+    /// should respond to. This is the single entry point that U4
+    /// write paths use to feed the responder. The function
+    ///
+    /// 1. Writes the journal entry to `recovery.jsonl` (U3 behavior).
+    /// 2. Emits the high-level audit event to `orchestration.jsonl`.
+    /// 3. Updates the responder's in-memory state and computes the
+    ///    escalation level for this iteration.
+    ///
+    /// The function never fails: I/O errors are swallowed (matching
+    /// the existing U3 logger contract) and the responder is updated
+    /// regardless so the in-memory state stays consistent.
+    pub fn record_recovery_envelope(
+        &mut self,
+        envelope: &RecoveryDiagnosisEnvelope,
+        notes: Vec<String>,
+    ) -> crate::diagnosis::EscalationDecision {
+        let hat = envelope
+            .source_hat
+            .as_deref()
+            .unwrap_or(envelope.target_hat.as_deref().unwrap_or("ralph"));
+        self.diagnostics
+            .log_recovery(RecoveryJournalEntry::from_envelope(envelope.clone(), notes));
+        self.diagnostics.log_orchestration(
+            envelope.iteration,
+            hat,
+            OrchestrationEvent::from_recovery_envelope(envelope),
+        );
+        let current_iteration = envelope.iteration.max(self.state.iteration);
+        self.recovery_responder
+            .record_finding(envelope, current_iteration)
+    }
+
+    /// U6: Mark the next iteration as fresh. Clears the responder's
+    /// per-iteration caches (`pending_findings`, hard-escalation
+    /// queue, termination hint) so the prompt builder does not
+    /// re-inject stale alerts.
+    pub fn begin_diagnosis_iteration(&mut self) {
+        self.recovery_responder.begin_iteration();
+    }
+
+    /// U6: Read-only access to the recovery responder. Useful for
+    /// the loop runner when checking the most recent hard
+    /// escalation or termination hint.
+    pub fn recovery_responder(&self) -> &RecoveryResponder {
+        &self.recovery_responder
+    }
+
+    /// U6: Mutable access to the recovery responder. Used by the
+    /// loop runner to mark findings as recovered after each
+    /// iteration.
+    pub fn recovery_responder_mut(&mut self) -> &mut RecoveryResponder {
+        &mut self.recovery_responder
     }
 
     /// This generalizes the former `prepend_memories()` into a skill auto-injection

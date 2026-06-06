@@ -24,12 +24,16 @@
 //!   builder.
 //! - [`journal`]: `RecoveryJournalEntry` and `DriftJournalEntry` JSONL
 //!   record types.
+//! - [`responder`]: U6 `RecoveryResponder` — soft alerts, targeted
+//!   `task.resume`, and Final escalation. The only place that turns
+//!   diagnoses into runtime action.
 //!
 //! See the 2026-06-04 "Runtime Diagnosis & Recovery Intelligence" plan
 //! for context.
 
 mod envelope;
 mod journal;
+mod responder;
 
 #[cfg(test)]
 mod tests;
@@ -39,3 +43,7 @@ pub use envelope::{
     RecoveryDiagnosisEnvelope, RecoveryDiagnosisEnvelopeBuilder,
 };
 pub use journal::{DriftJournalEntry, DriftMetric, RecoveryJournalEntry};
+pub use responder::{
+    EscalationDecision, EscalationLevel, RUNTIME_DIAGNOSIS_ALERT_HEADER, RecoveryAction,
+    RecoveryResponder, TerminationHint,
+};

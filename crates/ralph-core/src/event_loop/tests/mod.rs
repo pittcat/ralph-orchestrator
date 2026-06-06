@@ -10,6 +10,7 @@ mod chain_validation;
 mod common;
 mod completion_honored;
 mod default_publishes;
+mod drift_integration;
 mod event_filter;
 mod event_policy;
 mod execution_contract;
