@@ -152,6 +152,9 @@ enum Commands {
     /// Manage Telegram bot setup and testing
     Bot(bot::BotArgs),
 
+    /// Manage and validate presets
+    Preset(commands::preset::PresetArgs),
+
     /// Generate shell completions
     Completions(commands::completions::CompletionsArgs),
 }
@@ -364,6 +367,15 @@ async fn main() -> Result<()> {
                 args,
                 &config_sources,
                 hats_source.as_ref(),
+                cli.color.should_use_colors(),
+            )
+            .await
+        }
+        Some(Commands::Preset(args)) => {
+            commands::preset::execute(
+                &config_sources,
+                hats_source.as_ref(),
+                args,
                 cli.color.should_use_colors(),
             )
             .await
