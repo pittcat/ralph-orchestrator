@@ -412,6 +412,18 @@ jq 'select(.type == "tool_call")' .ralph/diagnostics/*/agent-output.jsonl
 ralph clean --diagnostics
 ```
 
+## Runtime Diagnosis
+
+Runtime Diagnosis（U0–U8）是在上述 TUI / full diagnostics 之上的**可观测性 + 自校准层**：把反压点（payload / execution contract、workflow guard、stall、loop stale 等）落 `recovery.jsonl`，把 U5 drift detector 的 3 个指标（field completeness / coord join rate / emit cadence）跌破阈值时落 `drift.jsonl`，loop 终止时把 `## Diagnostics` 段追加到 `.ralph/agent/summary.md`，并写 `diagnosis-summary.json` 种子。
+
+- 启用（env 优先）：`RALPH_DIAGNOSTICS=1 ralph run -c ralph.yml -H builtin:<preset> -p "..."`。仅想写盘不写 prompt alert，可在 `ralph.yml` 配 `telemetry.runtime_diagnosis: { enabled: true, write_artifacts: true, prompt_injection_enabled: true, ... }`。
+- 报告：`ralph diagnose --session latest`（Markdown）或 `--format json`（CI，schema_version="1"）；`--diagnostics-root` 可自定义根目录。
+- 退出码：`0` 渲染成功 / `2` 无 session / `3` 路径非法 / `4` I/O 失败。
+- 8 个 envelope source：`stall_recovery / missing_event_gate / workflow_guard / execution_contract / payload_contract / drift_monitor / hook_retry / loop_stale`；6 个 outcome：`pending / recovered / repeated / escalated / failed / not_retriable`。
+- Responder 三档升级：Soft（prompt alert）→ Hard（`task.resume` 路由到 safe target）→ Final（`TerminationHint`，不覆盖 `PayloadContractViolation`）。
+
+详见 `docs/guide/runtime-diagnosis.md`（配置矩阵、report 字段、常见症状排查流程、磁盘文件清单）。
+
 ## IMPORTANT
 
 - 讨论 ralph-orchestrator 的任何功能、架构、行为时，必须先去读源码确认，不允许凭记忆或猜测讨论
