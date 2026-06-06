@@ -2,10 +2,110 @@ use super::*;
 use ralph_core::diagnosis::TerminationHint;
 use std::sync::Arc;
 
-/// U6: post-termination hook that appends a `## Recovery Diagnosis`
+/// U8: Build the operator-facing [`ralph_core::DiagnosisHint`]
+/// and the `diagnosis-summary.json` seed for a terminating loop run.
+///
+/// Returns `None` (and writes nothing) when diagnostics are disabled
+/// for this run AND the caller did not provide a payload-contract
+/// violation reference. The two artifacts are returned as a pair so
+/// the caller can choose to ignore the seed while still appending
+/// the hint, or vice versa.
+pub(crate) fn build_termination_diagnostics(
+    event_loop: &ralph_core::EventLoop,
+    payload_violation_report_relpath: Option<&str>,
+) -> Option<(
+    ralph_core::DiagnosisHint,
+    ralph_core::diagnostics::DiagnosisSummary,
+)> {
+    let session_id = event_loop.diagnostics().session_id()?;
+
+    // Workspace-relative path so the hint survives a worktree
+    // checkout. The session directory always lives at
+    // `<workspace>/.ralph/diagnostics/<session_id>`, matching
+    // [`ralph_core::LoopContext::diagnostics_dir`].
+    let session_relpath = Some(format!(".ralph/diagnostics/{session_id}"));
+    let diagnose_command = Some("ralph diagnose --session latest".to_string());
+
+    let mut references = Vec::new();
+    if let Some(relpath) = payload_violation_report_relpath {
+        references.push(ralph_core::DiagnosisReference {
+            label: "Payload contract violation report".to_string(),
+            relpath: relpath.to_string(),
+        });
+    }
+
+    let hint = ralph_core::DiagnosisHint {
+        session_relpath,
+        diagnose_command,
+        references,
+    };
+
+    let state = event_loop.state();
+    let now = chrono::Utc::now();
+    let summary = ralph_core::diagnostics::DiagnosisSummary {
+        schema_version: ralph_core::diagnostics::DiagnosisSummary::SCHEMA_VERSION,
+        session_id: session_id.clone(),
+        generated_at: now,
+        loop_started_at: None,
+        loop_terminated_at: Some(now),
+        total_iterations: Some(state.iteration),
+        termination_reason: None,
+        recovery_journal_path: Some(format!(".ralph/diagnostics/{session_id}/recovery.jsonl")),
+        drift_journal_path: Some(format!(".ralph/diagnostics/{session_id}/drift.jsonl")),
+        orchestration_log_path: Some(format!(
+            ".ralph/diagnostics/{session_id}/orchestration.jsonl"
+        )),
+        errors_log_path: Some(format!(".ralph/diagnostics/{session_id}/errors.jsonl")),
+        recovery_count: 0,
+        drift_finding_count: 0,
+        notes: Vec::new(),
+    };
+
+    Some((hint, summary))
+}
+
+/// U8: write the diagnosis summary seed and append the
+/// operator-facing `## Diagnostics` hint to `summary.md`.
+///
+/// Skipped silently when:
+/// - the diagnostics collector has no session directory (i.e.
+///   diagnostics disabled for this run), AND
+/// - the caller did not provide a payload contract violation
+///   reference.
+///
+/// In that combined case the runner must not invent an empty hint
+/// section: it would expose invalid paths and contradict the
+/// "no hint when diagnostics are off" contract.
+pub(crate) fn write_termination_diagnostics(
+    event_loop: &ralph_core::EventLoop,
+    summary_writer: &ralph_core::SummaryWriter,
+    payload_violation_report_relpath: Option<&str>,
+) {
+    let Some((hint, summary)) =
+        build_termination_diagnostics(event_loop, payload_violation_report_relpath)
+    else {
+        return;
+    };
+
+    if let Err(e) = summary_writer.append_diagnosis_hint(Some(&hint)) {
+        tracing::warn!(
+            target: "ralph_cli::loop_runner",
+            error = %e,
+            "Failed to append diagnosis hint section to summary.md"
+        );
+    }
+
+    event_loop
+        .diagnostics()
+        .write_diagnosis_summary_seed(&summary);
+}
+
+/// U6/U8: post-termination hook that appends a `## Recovery Diagnosis`
 /// section to the summary when the recovery responder produced a
-/// Final hint. The hint is taken (one-shot) so the next run does not
-/// see a stale signal. Called from each `return Ok(reason)` site in
+/// Final hint, then (U8) writes the operator-facing
+/// `## Diagnostics` hint and the `diagnosis-summary.json` seed. The
+/// responder hint is taken (one-shot) so the next run does not see
+/// a stale signal. Called from each `return Ok(reason)` site in
 /// [`run_loop_impl`].
 ///
 /// This is a free function so we can call it from the loop body
@@ -14,21 +114,47 @@ use std::sync::Arc;
 /// single loop run: once consumed, subsequent `take_termination_hint`
 /// calls return `None` until the next `record_finding` writes a new
 /// hint.
+///
+/// `payload_violation_report_relpath` is the workspace-relative
+/// path of the root-level `payload-contract-error-*.json` report
+/// (U4 / U6 hard gate), or `None` for the normal-termination
+/// path. Only the U4 payload contract violation path passes
+/// `Some(_)`; every other caller passes `None`. The flag is plumbed
+/// through this helper rather than `handle_termination` so the
+/// closure signature stays stable.
 fn finalize_recovery_diagnosis(
     event_loop: &mut ralph_core::EventLoop,
     ctx: &Option<ralph_core::LoopContext>,
+    payload_violation_report_relpath: Option<&str>,
 ) {
-    let Some(hint) = event_loop.recovery_responder_mut().take_termination_hint() else {
-        return;
-    };
     let summary_writer = if let Some(c) = ctx {
         ralph_core::SummaryWriter::from_context(c)
     } else {
         ralph_core::SummaryWriter::default()
     };
-    if let Err(e) = summary_writer.append_recovery_section(&hint) {
-        tracing::warn!("Failed to append recovery diagnosis section: {}", e);
+
+    // U6: drain the responder's hint and append the existing
+    // `## Recovery Diagnosis` section. The hint may be `None` on
+    // non-final terminations; the section is then skipped, but the
+    // U8 step below still runs as long as diagnostics are enabled.
+    if let Some(hint) = event_loop.recovery_responder_mut().take_termination_hint()
+        && let Err(e) = summary_writer.append_recovery_section(&hint)
+    {
+        tracing::warn!(
+            target: "ralph_cli::loop_runner",
+            error = %e,
+            "Failed to append recovery diagnosis section to summary.md"
+        );
     }
+
+    // U8: append the operator-facing `## Diagnostics` hint and
+    // write the `diagnosis-summary.json` seed.
+    write_termination_diagnostics(
+        event_loop,
+        &summary_writer,
+        payload_violation_report_relpath,
+    );
+
     // Suppress the unused-import lint when the function is the only
     // user of `TerminationHint`. The type is re-exported in case the
     // diagnostic report pipeline (U7) wants to introspect the hint
@@ -805,253 +931,278 @@ pub async fn run_loop_impl(
     event_loop.set_loop_start_sha(base_commit.clone());
 
     // Helper closure to handle termination (writes summary, prints status, records history)
-    let handle_termination = |reason: &TerminationReason,
-                              state: &ralph_core::LoopState,
-                              scratchpad: &str,
-                              history: &Option<LoopHistory>,
-                              context: &Option<LoopContext>,
-                              auto_merge: bool,
-                              prompt: &str| {
-        // Per spec: Write summary file on termination
-        let summary_writer = if let Some(ctx) = context {
-            SummaryWriter::from_context(ctx)
-        } else {
-            SummaryWriter::default()
-        };
-        let scratchpad_path = if let Some(ctx) = context {
-            ctx.scratchpad_path()
-        } else {
-            PathBuf::from(scratchpad)
-        };
-        let scratchpad_opt = if scratchpad_path.exists() {
-            Some(scratchpad_path.as_path())
-        } else {
-            None
-        };
-
-        // Get final commit SHA if available
-        let final_commit = get_last_commit_info();
-
-        if let Err(e) = summary_writer.write(reason, state, scratchpad_opt, final_commit.as_deref())
-        {
-            warn!("Failed to write summary file: {}", e);
-        }
-
-        // Record termination in history
-        if let Some(hist) = history {
-            let reason_str = match reason {
-                TerminationReason::CompletionPromise => "completion_promise",
-                TerminationReason::MaxIterations => "max_iterations",
-                TerminationReason::MaxRuntime => "max_runtime",
-                TerminationReason::MaxCost => "max_cost",
-                TerminationReason::ConsecutiveFailures => "consecutive_failures",
-                TerminationReason::LoopThrashing => "loop_thrashing",
-                TerminationReason::LoopStale => "loop_stale",
-                TerminationReason::ValidationFailure => "validation_failure",
-                TerminationReason::Stopped => "stopped",
-                TerminationReason::Interrupted => "interrupted",
-                TerminationReason::RestartRequested => "restart_requested",
-                TerminationReason::WorkspaceGone => "workspace_gone",
-                TerminationReason::Cancelled => "cancelled",
-                TerminationReason::PayloadContractViolation => "payload_contract_violation",
-            };
-
-            if matches!(reason, TerminationReason::Interrupted) {
-                if let Err(e) = hist.record_terminated("SIGTERM") {
-                    warn!("Failed to record termination in history: {}", e);
-                }
-            } else if let Err(e) = hist.record_completed(reason_str) {
-                warn!("Failed to record completion in history: {}", e);
-            }
-        }
-
-        // Handle merge queue state transitions for merge loops
-        // Per spec: CompletionPromise → merged, other → needs-review
-        if let Some(ref loop_id) = merge_loop_id {
-            let repo_root = context
-                .as_ref()
-                .map(|ctx| ctx.repo_root().to_path_buf())
-                .unwrap_or_else(|| PathBuf::from("."));
-            let queue = MergeQueue::new(&repo_root);
-
-            if matches!(reason, TerminationReason::CompletionPromise) {
-                // Get commit SHA from git rev-parse HEAD
-                let commit = Command::new("git")
-                    .args(["rev-parse", "HEAD"])
-                    .output()
-                    .ok()
-                    .and_then(|output| {
-                        if output.status.success() {
-                            String::from_utf8(output.stdout)
-                                .ok()
-                                .map(|s| s.trim().to_string())
-                        } else {
-                            None
-                        }
-                    });
-
-                match commit {
-                    Some(sha) => {
-                        if let Err(e) = queue.mark_merged(loop_id, &sha) {
-                            warn!(loop_id = %loop_id, error = %e, "Failed to mark merge as completed");
-                        } else {
-                            info!(loop_id = %loop_id, commit = %sha, "Merge completed successfully");
-                        }
-                    }
-                    None => {
-                        // Per spec: "If commit SHA cannot be resolved, mark as needs-review"
-                        if let Err(e) =
-                            queue.mark_needs_review(loop_id, "merge complete but commit not found")
-                        {
-                            warn!(loop_id = %loop_id, error = %e, "Failed to mark merge as needs-review");
-                        } else {
-                            warn!(loop_id = %loop_id, "Merge completed but could not resolve commit SHA");
-                        }
-                    }
-                }
+    let handle_termination =
+        |reason: &TerminationReason,
+         state: &ralph_core::LoopState,
+         scratchpad: &str,
+         history: &Option<LoopHistory>,
+         context: &Option<LoopContext>,
+         auto_merge: bool,
+         prompt: &str,
+         payload_violation_report_relpath: Option<&str>| {
+            // Per spec: Write summary file on termination
+            let summary_writer = if let Some(ctx) = context {
+                SummaryWriter::from_context(ctx)
             } else {
-                // Any non-CompletionPromise termination → needs-review
-                let reason_str = match reason {
-                    TerminationReason::MaxIterations => "max iterations reached",
-                    TerminationReason::MaxRuntime => "max runtime exceeded",
-                    TerminationReason::MaxCost => "max cost exceeded",
-                    TerminationReason::ConsecutiveFailures => "consecutive failures",
-                    TerminationReason::LoopThrashing => "loop thrashing detected",
-                    TerminationReason::LoopStale => "stale loop detected",
-                    TerminationReason::ValidationFailure => "validation failure",
-                    TerminationReason::Stopped => "manually stopped",
-                    TerminationReason::Interrupted => "interrupted by signal",
-                    TerminationReason::CompletionPromise => unreachable!(),
-                    TerminationReason::RestartRequested => "restart requested",
-                    TerminationReason::WorkspaceGone => "workspace directory removed",
-                    TerminationReason::Cancelled => "cancelled by human",
-                    TerminationReason::PayloadContractViolation => "payload contract violation",
+                SummaryWriter::default()
+            };
+            let scratchpad_path = if let Some(ctx) = context {
+                ctx.scratchpad_path()
+            } else {
+                PathBuf::from(scratchpad)
+            };
+            let scratchpad_opt = if scratchpad_path.exists() {
+                Some(scratchpad_path.as_path())
+            } else {
+                None
+            };
+
+            // Get final commit SHA if available
+            let final_commit = get_last_commit_info();
+
+            if let Err(e) =
+                summary_writer.write(reason, state, scratchpad_opt, final_commit.as_deref())
+            {
+                warn!("Failed to write summary file: {}", e);
+            }
+
+            // U8: payload contract violation path also appends a violation
+            // reference to the operator-facing `## Diagnostics` section. We
+            // build the hint here (closure-internal) so the section stays
+            // attached to summary.md even when the responder hint is empty;
+            // the diagnosis-summary.json seed is still written by
+            // `finalize_recovery_diagnosis` (which has the EventLoop
+            // reference needed to reach the diagnostics collector).
+            if let Some(relpath) = payload_violation_report_relpath {
+                let hint = ralph_core::DiagnosisHint {
+                    session_relpath: None,
+                    diagnose_command: None,
+                    references: vec![ralph_core::DiagnosisReference {
+                        label: "Payload contract violation report".to_string(),
+                        relpath: relpath.to_string(),
+                    }],
                 };
-                if let Err(e) = queue.mark_needs_review(loop_id, reason_str) {
-                    warn!(loop_id = %loop_id, error = %e, "Failed to mark merge as needs-review");
+                if let Err(e) = summary_writer.append_diagnosis_hint(Some(&hint)) {
+                    warn!("Failed to append payload violation reference: {}", e);
+                }
+            }
+
+            // Record termination in history
+            if let Some(hist) = history {
+                let reason_str = match reason {
+                    TerminationReason::CompletionPromise => "completion_promise",
+                    TerminationReason::MaxIterations => "max_iterations",
+                    TerminationReason::MaxRuntime => "max_runtime",
+                    TerminationReason::MaxCost => "max_cost",
+                    TerminationReason::ConsecutiveFailures => "consecutive_failures",
+                    TerminationReason::LoopThrashing => "loop_thrashing",
+                    TerminationReason::LoopStale => "loop_stale",
+                    TerminationReason::ValidationFailure => "validation_failure",
+                    TerminationReason::Stopped => "stopped",
+                    TerminationReason::Interrupted => "interrupted",
+                    TerminationReason::RestartRequested => "restart_requested",
+                    TerminationReason::WorkspaceGone => "workspace_gone",
+                    TerminationReason::Cancelled => "cancelled",
+                    TerminationReason::PayloadContractViolation => "payload_contract_violation",
+                };
+
+                if matches!(reason, TerminationReason::Interrupted) {
+                    if let Err(e) = hist.record_terminated("SIGTERM") {
+                        warn!("Failed to record termination in history: {}", e);
+                    }
+                } else if let Err(e) = hist.record_completed(reason_str) {
+                    warn!("Failed to record completion in history: {}", e);
+                }
+            }
+
+            // Handle merge queue state transitions for merge loops
+            // Per spec: CompletionPromise → merged, other → needs-review
+            if let Some(ref loop_id) = merge_loop_id {
+                let repo_root = context
+                    .as_ref()
+                    .map(|ctx| ctx.repo_root().to_path_buf())
+                    .unwrap_or_else(|| PathBuf::from("."));
+                let queue = MergeQueue::new(&repo_root);
+
+                if matches!(reason, TerminationReason::CompletionPromise) {
+                    // Get commit SHA from git rev-parse HEAD
+                    let commit = Command::new("git")
+                        .args(["rev-parse", "HEAD"])
+                        .output()
+                        .ok()
+                        .and_then(|output| {
+                            if output.status.success() {
+                                String::from_utf8(output.stdout)
+                                    .ok()
+                                    .map(|s| s.trim().to_string())
+                            } else {
+                                None
+                            }
+                        });
+
+                    match commit {
+                        Some(sha) => {
+                            if let Err(e) = queue.mark_merged(loop_id, &sha) {
+                                warn!(loop_id = %loop_id, error = %e, "Failed to mark merge as completed");
+                            } else {
+                                info!(loop_id = %loop_id, commit = %sha, "Merge completed successfully");
+                            }
+                        }
+                        None => {
+                            // Per spec: "If commit SHA cannot be resolved, mark as needs-review"
+                            if let Err(e) = queue
+                                .mark_needs_review(loop_id, "merge complete but commit not found")
+                            {
+                                warn!(loop_id = %loop_id, error = %e, "Failed to mark merge as needs-review");
+                            } else {
+                                warn!(loop_id = %loop_id, "Merge completed but could not resolve commit SHA");
+                            }
+                        }
+                    }
                 } else {
-                    info!(loop_id = %loop_id, reason = reason_str, "Merge marked as needs-review");
+                    // Any non-CompletionPromise termination → needs-review
+                    let reason_str = match reason {
+                        TerminationReason::MaxIterations => "max iterations reached",
+                        TerminationReason::MaxRuntime => "max runtime exceeded",
+                        TerminationReason::MaxCost => "max cost exceeded",
+                        TerminationReason::ConsecutiveFailures => "consecutive failures",
+                        TerminationReason::LoopThrashing => "loop thrashing detected",
+                        TerminationReason::LoopStale => "stale loop detected",
+                        TerminationReason::ValidationFailure => "validation failure",
+                        TerminationReason::Stopped => "manually stopped",
+                        TerminationReason::Interrupted => "interrupted by signal",
+                        TerminationReason::CompletionPromise => unreachable!(),
+                        TerminationReason::RestartRequested => "restart requested",
+                        TerminationReason::WorkspaceGone => "workspace directory removed",
+                        TerminationReason::Cancelled => "cancelled by human",
+                        TerminationReason::PayloadContractViolation => "payload contract violation",
+                    };
+                    if let Err(e) = queue.mark_needs_review(loop_id, reason_str) {
+                        warn!(loop_id = %loop_id, error = %e, "Failed to mark merge as needs-review");
+                    } else {
+                        info!(loop_id = %loop_id, reason = reason_str, "Merge marked as needs-review");
+                    }
                 }
             }
-        }
 
-        // Handle completion for all loops (landing + merge queue for worktrees)
-        // Per spec: merge loops do NOT enqueue themselves, even if run in worktree context
-        if let Some(ctx) = context {
-            if merge_loop_id.is_none() && matches!(reason, TerminationReason::CompletionPromise) {
-                let handler = LoopCompletionHandler::new(auto_merge);
-                match handler.handle_completion(ctx, prompt, base_commit.as_deref()) {
-                    Ok(CompletionAction::None) => {
-                        debug!("Loop completed, no action needed");
-                    }
-                    Ok(CompletionAction::Landed { landing }) => {
-                        info!(
-                            committed = landing.committed,
-                            handoff = %landing.handoff_path,
-                            open_tasks = landing.open_task_count,
-                            "Primary loop landed successfully"
-                        );
-                    }
-                    Ok(CompletionAction::Enqueued { loop_id, landing }) => {
-                        info!(loop_id = %loop_id, "Loop queued for auto-merge");
-                        if let Some(ref l) = landing {
-                            debug!(
-                                committed = l.committed,
-                                handoff = %l.handoff_path,
-                                "Landing completed before enqueue"
+            // Handle completion for all loops (landing + merge queue for worktrees)
+            // Per spec: merge loops do NOT enqueue themselves, even if run in worktree context
+            if let Some(ctx) = context {
+                if merge_loop_id.is_none() && matches!(reason, TerminationReason::CompletionPromise)
+                {
+                    let handler = LoopCompletionHandler::new(auto_merge);
+                    match handler.handle_completion(ctx, prompt, base_commit.as_deref()) {
+                        Ok(CompletionAction::None) => {
+                            debug!("Loop completed, no action needed");
+                        }
+                        Ok(CompletionAction::Landed { landing }) => {
+                            info!(
+                                committed = landing.committed,
+                                handoff = %landing.handoff_path,
+                                open_tasks = landing.open_task_count,
+                                "Primary loop landed successfully"
                             );
                         }
-                        if let Some(hist) = history {
-                            let _ = hist.record_merge_queued();
+                        Ok(CompletionAction::Enqueued { loop_id, landing }) => {
+                            info!(loop_id = %loop_id, "Loop queued for auto-merge");
+                            if let Some(ref l) = landing {
+                                debug!(
+                                    committed = l.committed,
+                                    handoff = %l.handoff_path,
+                                    "Landing completed before enqueue"
+                                );
+                            }
+                            if let Some(hist) = history {
+                                let _ = hist.record_merge_queued();
+                            }
+                            // Worktree loop exits cleanly; merge will be processed
+                            // when the primary loop completes and checks the queue
                         }
-                        // Worktree loop exits cleanly; merge will be processed
-                        // when the primary loop completes and checks the queue
-                    }
-                    Ok(CompletionAction::ManualMerge {
-                        loop_id,
-                        worktree_path,
-                        landing,
-                    }) => {
-                        info!(
-                            loop_id = %loop_id,
-                            "Loop completed. To merge manually: cd {} && git merge",
-                            worktree_path
-                        );
-                        if let Some(ref l) = landing {
-                            debug!(
-                                committed = l.committed,
-                                handoff = %l.handoff_path,
-                                "Landing completed (manual merge mode)"
+                        Ok(CompletionAction::ManualMerge {
+                            loop_id,
+                            worktree_path,
+                            landing,
+                        }) => {
+                            info!(
+                                loop_id = %loop_id,
+                                "Loop completed. To merge manually: cd {} && git merge",
+                                worktree_path
                             );
+                            if let Some(ref l) = landing {
+                                debug!(
+                                    committed = l.committed,
+                                    handoff = %l.handoff_path,
+                                    "Landing completed (manual merge mode)"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Completion handler failed: {}", e);
                         }
                     }
-                    Err(e) => {
-                        warn!("Completion handler failed: {}", e);
+                }
+
+                // Handle merge queue processing for primary loop completion
+                if ctx.is_primary() && matches!(reason, TerminationReason::CompletionPromise) {
+                    process_pending_merges(ctx.repo_root());
+                }
+
+                // Always deregister from registry — process is exiting regardless of reason.
+                // CompletionPromise loops are tracked by the merge queue from here on.
+                let registry = LoopRegistry::new(ctx.repo_root());
+                if let Err(e) = registry.deregister_current_process() {
+                    warn!("Failed to deregister loop from registry: {}", e);
+                }
+            }
+
+            // Print termination info to console (skip in TUI mode - TUI handles display)
+            // Skip in RPC mode - JSON events replace console output
+            if !enable_tui && !enable_rpc {
+                print_termination(reason, state, use_colors, Some(&loop_id));
+            }
+
+            // Mark RPC state as completed so get_state reflects termination
+            if let Some(ref shared) = rpc_dispatcher_started {
+                shared
+                    .completed
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+
+            // Emit RPC loop_terminated event
+            if let Some(ref tx) = rpc_event_tx {
+                let terminated_at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+
+                let rpc_reason = match reason {
+                    TerminationReason::CompletionPromise => {
+                        ralph_proto::json_rpc::TerminationReason::Completed
                     }
-                }
+                    TerminationReason::MaxIterations => {
+                        ralph_proto::json_rpc::TerminationReason::MaxIterations
+                    }
+                    TerminationReason::Interrupted | TerminationReason::Stopped => {
+                        ralph_proto::json_rpc::TerminationReason::Interrupted
+                    }
+                    _ => ralph_proto::json_rpc::TerminationReason::Error,
+                };
+
+                let accumulated_cost = rpc_dispatcher_started
+                    .as_ref()
+                    .and_then(|s| s.total_cost_usd.lock().ok().map(|g| *g))
+                    .unwrap_or(0.0);
+
+                let terminate_event = RpcEvent::LoopTerminated {
+                    reason: rpc_reason,
+                    total_iterations: state.iteration,
+                    duration_ms: state.elapsed().as_millis() as u64,
+                    total_cost_usd: accumulated_cost,
+                    terminated_at,
+                };
+                let _ = tx.try_send(terminate_event);
             }
-
-            // Handle merge queue processing for primary loop completion
-            if ctx.is_primary() && matches!(reason, TerminationReason::CompletionPromise) {
-                process_pending_merges(ctx.repo_root());
-            }
-
-            // Always deregister from registry — process is exiting regardless of reason.
-            // CompletionPromise loops are tracked by the merge queue from here on.
-            let registry = LoopRegistry::new(ctx.repo_root());
-            if let Err(e) = registry.deregister_current_process() {
-                warn!("Failed to deregister loop from registry: {}", e);
-            }
-        }
-
-        // Print termination info to console (skip in TUI mode - TUI handles display)
-        // Skip in RPC mode - JSON events replace console output
-        if !enable_tui && !enable_rpc {
-            print_termination(reason, state, use_colors, Some(&loop_id));
-        }
-
-        // Mark RPC state as completed so get_state reflects termination
-        if let Some(ref shared) = rpc_dispatcher_started {
-            shared
-                .completed
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-
-        // Emit RPC loop_terminated event
-        if let Some(ref tx) = rpc_event_tx {
-            let terminated_at = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-
-            let rpc_reason = match reason {
-                TerminationReason::CompletionPromise => {
-                    ralph_proto::json_rpc::TerminationReason::Completed
-                }
-                TerminationReason::MaxIterations => {
-                    ralph_proto::json_rpc::TerminationReason::MaxIterations
-                }
-                TerminationReason::Interrupted | TerminationReason::Stopped => {
-                    ralph_proto::json_rpc::TerminationReason::Interrupted
-                }
-                _ => ralph_proto::json_rpc::TerminationReason::Error,
-            };
-
-            let accumulated_cost = rpc_dispatcher_started
-                .as_ref()
-                .and_then(|s| s.total_cost_usd.lock().ok().map(|g| *g))
-                .unwrap_or(0.0);
-
-            let terminate_event = RpcEvent::LoopTerminated {
-                reason: rpc_reason,
-                total_iterations: state.iteration,
-                duration_ms: state.elapsed().as_millis() as u64,
-                total_cost_usd: accumulated_cost,
-                terminated_at,
-            };
-            let _ = tx.try_send(terminate_event);
-        }
-    };
+        };
 
     if let Some(reason) = pending_suspend_termination_reason.take() {
         let reason = dispatch_pre_loop_termination_hooks(
@@ -1098,6 +1249,7 @@ pub async fn run_loop_impl(
             &loop_context,
             auto_merge,
             &prompt_content,
+            None,
         );
 
         // Wait for user to exit TUI (press 'q') on natural completion
@@ -1105,7 +1257,7 @@ pub async fn run_loop_impl(
             let _ = handle.await;
         }
 
-        finalize_recovery_diagnosis(&mut event_loop, &loop_context);
+        finalize_recovery_diagnosis(&mut event_loop, &loop_context, None);
 
         return Ok(reason);
     }
@@ -1190,10 +1342,11 @@ pub async fn run_loop_impl(
                 &loop_context,
                 auto_merge,
                 &prompt_content,
+                None,
             );
             // Signal TUI to exit immediately on interrupt
             let _ = terminated_tx.send(true);
-            finalize_recovery_diagnosis(&mut event_loop, &loop_context);
+            finalize_recovery_diagnosis(&mut event_loop, &loop_context, None);
             return Ok(reason);
         }
 
@@ -1315,12 +1468,13 @@ pub async fn run_loop_impl(
                 &loop_context,
                 auto_merge,
                 &prompt_content,
+                None,
             );
             // Wait for user to exit TUI (press 'q') on natural completion
             if let Some(handle) = tui_handle.take() {
                 let _ = handle.await;
             }
-            finalize_recovery_diagnosis(&mut event_loop, &loop_context);
+            finalize_recovery_diagnosis(&mut event_loop, &loop_context, None);
             return Ok(reason);
         }
 
@@ -1402,12 +1556,13 @@ pub async fn run_loop_impl(
                     &loop_context,
                     auto_merge,
                     &prompt_content,
+                    None,
                 );
                 // Wait for user to exit TUI (press 'q') on natural completion
                 if let Some(handle) = tui_handle.take() {
                     let _ = handle.await;
                 }
-                finalize_recovery_diagnosis(&mut event_loop, &loop_context);
+                finalize_recovery_diagnosis(&mut event_loop, &loop_context, None);
                 return Ok(reason);
             }
         }
@@ -1478,11 +1633,12 @@ pub async fn run_loop_impl(
                             &loop_context,
                             auto_merge,
                             &prompt_content,
+                            None,
                         );
                         if let Some(handle) = tui_handle.take() {
                             let _ = handle.await;
                         }
-                        finalize_recovery_diagnosis(&mut event_loop, &loop_context);
+                        finalize_recovery_diagnosis(&mut event_loop, &loop_context, None);
                         return Ok(reason);
                     }
                     Some(LateEventRecovery::NoLateEvents) | None => {}
@@ -1542,12 +1698,13 @@ pub async fn run_loop_impl(
                         &loop_context,
                         auto_merge,
                         &prompt_content,
+                        None,
                     );
                     // Wait for user to exit TUI (press 'q') on natural completion
                     if let Some(handle) = tui_handle.take() {
                         let _ = handle.await;
                     }
-                    finalize_recovery_diagnosis(&mut event_loop, &loop_context);
+                    finalize_recovery_diagnosis(&mut event_loop, &loop_context, None);
                     return Ok(reason);
                 }
 
@@ -1658,12 +1815,13 @@ pub async fn run_loop_impl(
                     &loop_context,
                     auto_merge,
                     &prompt_content,
+                    None,
                 );
                 // Wait for user to exit TUI (press 'q') on natural completion
                 if let Some(handle) = tui_handle.take() {
                     let _ = handle.await;
                 }
-                finalize_recovery_diagnosis(&mut event_loop, &loop_context);
+                finalize_recovery_diagnosis(&mut event_loop, &loop_context, None);
                 return Ok(reason);
             }
         };
@@ -1758,12 +1916,13 @@ pub async fn run_loop_impl(
                 &loop_context,
                 auto_merge,
                 &prompt_content,
+                None,
             );
             // Wait for user to exit TUI (press 'q') on natural completion
             if let Some(handle) = tui_handle.take() {
                 let _ = handle.await;
             }
-            finalize_recovery_diagnosis(&mut event_loop, &loop_context);
+            finalize_recovery_diagnosis(&mut event_loop, &loop_context, None);
             return Ok(reason);
         }
 
@@ -2080,10 +2239,10 @@ pub async fn run_loop_impl(
                 )
                 .await?;
 
-                handle_termination(&reason, event_loop.state(), &config.core.scratchpad.path, &loop_history, &loop_context, auto_merge, &prompt_content);
+                handle_termination(&reason, event_loop.state(), &config.core.scratchpad.path, &loop_history, &loop_context, auto_merge, &prompt_content, None);
                 // Signal TUI to exit immediately on interrupt
                 let _ = terminated_tx.send(true);
-                finalize_recovery_diagnosis(&mut event_loop, &loop_context);
+                finalize_recovery_diagnosis(&mut event_loop, &loop_context, None);
                 return Ok(reason);
             }
         };
@@ -2151,12 +2310,13 @@ pub async fn run_loop_impl(
                 &loop_context,
                 auto_merge,
                 &prompt_content,
+                None,
             );
             // Wait for user to exit TUI (press 'q') on natural completion
             if let Some(handle) = tui_handle.take() {
                 let _ = handle.await;
             }
-            finalize_recovery_diagnosis(&mut event_loop, &loop_context);
+            finalize_recovery_diagnosis(&mut event_loop, &loop_context, None);
             return Ok(reason);
         }
 
@@ -2280,12 +2440,13 @@ pub async fn run_loop_impl(
                 &loop_context,
                 auto_merge,
                 &prompt_content,
+                None,
             );
             // Wait for user to exit TUI (press 'q') on natural completion
             if let Some(handle) = tui_handle.take() {
                 let _ = handle.await;
             }
-            finalize_recovery_diagnosis(&mut event_loop, &loop_context);
+            finalize_recovery_diagnosis(&mut event_loop, &loop_context, None);
             return Ok(reason);
         }
 
@@ -2380,11 +2541,12 @@ pub async fn run_loop_impl(
                     &loop_context,
                     auto_merge,
                     &prompt_content,
+                    None,
                 );
                 if let Some(handle) = tui_handle.take() {
                     let _ = handle.await;
                 }
-                finalize_recovery_diagnosis(&mut event_loop, &loop_context);
+                finalize_recovery_diagnosis(&mut event_loop, &loop_context, None);
                 return Ok(reason);
             }
         }
@@ -2477,11 +2639,12 @@ pub async fn run_loop_impl(
                     &loop_context,
                     auto_merge,
                     &prompt_content,
+                    None,
                 );
                 if let Some(handle) = tui_handle.take() {
                     let _ = handle.await;
                 }
-                finalize_recovery_diagnosis(&mut event_loop, &loop_context);
+                finalize_recovery_diagnosis(&mut event_loop, &loop_context, None);
                 return Ok(reason);
             }
         }
@@ -2583,6 +2746,42 @@ pub async fn run_loop_impl(
                 vec![format!("see report at {}", report_path_str)],
             );
 
+            // U8: route the violation path through the unified
+            // termination pipeline so summary.md, history, deregister,
+            // RPC events, and the `## Diagnostics` hint + diagnosis
+            // seed all land in the same place they would for any
+            // other termination. The workspace-relative report path
+            // is passed through so the operator-facing hint can
+            // include it.
+            let payload_violation_report_relpath = event_loop
+                .loop_context()
+                .map(|ctx| {
+                    report_path
+                        .strip_prefix(ctx.workspace())
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|_| report_path_str.clone())
+                })
+                .unwrap_or_else(|| report_path_str.clone());
+            let reason = TerminationReason::PayloadContractViolation;
+            handle_termination(
+                &reason,
+                event_loop.state(),
+                &config.core.scratchpad.path,
+                &loop_history,
+                &loop_context,
+                auto_merge,
+                &prompt_content,
+                Some(&payload_violation_report_relpath),
+            );
+            // Wait for user to exit TUI (press 'q') on natural completion
+            if let Some(handle) = tui_handle.take() {
+                let _ = handle.await;
+            }
+            finalize_recovery_diagnosis(
+                &mut event_loop,
+                &loop_context,
+                Some(&payload_violation_report_relpath),
+            );
             return Ok(TerminationReason::PayloadContractViolation);
         }
 
@@ -2695,11 +2894,12 @@ pub async fn run_loop_impl(
                             &loop_context,
                             auto_merge,
                             &prompt_content,
+                            None,
                         );
                         if let Some(handle) = tui_handle.take() {
                             let _ = handle.await;
                         }
-                        finalize_recovery_diagnosis(&mut event_loop, &loop_context);
+                        finalize_recovery_diagnosis(&mut event_loop, &loop_context, None);
                         return Ok(reason);
                     }
                 }
@@ -2789,11 +2989,12 @@ pub async fn run_loop_impl(
                     &loop_context,
                     auto_merge,
                     &prompt_content,
+                    None,
                 );
                 if let Some(handle) = tui_handle.take() {
                     let _ = handle.await;
                 }
-                finalize_recovery_diagnosis(&mut event_loop, &loop_context);
+                finalize_recovery_diagnosis(&mut event_loop, &loop_context, None);
                 return Ok(reason);
             }
         }
@@ -2878,11 +3079,12 @@ pub async fn run_loop_impl(
                     &loop_context,
                     auto_merge,
                     &prompt_content,
+                    None,
                 );
                 if let Some(handle) = tui_handle.take() {
                     let _ = handle.await;
                 }
-                finalize_recovery_diagnosis(&mut event_loop, &loop_context);
+                finalize_recovery_diagnosis(&mut event_loop, &loop_context, None);
                 return Ok(reason);
             }
         }
@@ -3027,11 +3229,12 @@ pub async fn run_loop_impl(
                 &loop_context,
                 auto_merge,
                 &prompt_content,
+                None,
             );
             if let Some(handle) = tui_handle.take() {
                 let _ = handle.await;
             }
-            finalize_recovery_diagnosis(&mut event_loop, &loop_context);
+            finalize_recovery_diagnosis(&mut event_loop, &loop_context, None);
             return Ok(reason);
         }
 
@@ -3087,11 +3290,12 @@ pub async fn run_loop_impl(
                 &loop_context,
                 auto_merge,
                 &prompt_content,
+                None,
             );
             if let Some(handle) = tui_handle.take() {
                 let _ = handle.await;
             }
-            finalize_recovery_diagnosis(&mut event_loop, &loop_context);
+            finalize_recovery_diagnosis(&mut event_loop, &loop_context, None);
             return Ok(reason);
         }
 
@@ -3156,11 +3360,12 @@ pub async fn run_loop_impl(
                     &loop_context,
                     auto_merge,
                     &prompt_content,
+                    None,
                 );
                 if let Some(handle) = tui_handle.take() {
                     let _ = handle.await;
                 }
-                finalize_recovery_diagnosis(&mut event_loop, &loop_context);
+                finalize_recovery_diagnosis(&mut event_loop, &loop_context, None);
                 return Ok(reason);
             }
             // Safety check rejected completion (persistent mode, missing required

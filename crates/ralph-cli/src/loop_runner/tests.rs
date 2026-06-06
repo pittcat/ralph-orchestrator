@@ -8820,3 +8820,278 @@ fn u4_inject_fallback_event_payload_has_recovery_diagnosis_block() {
     assert!(body.contains("- expected action: emit a regular event"));
     assert!(body.contains("- retry attempt: 0"));
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// U8: Loop Summary / Termination Integration
+// ──────────────────────────────────────────────────────────────────────
+//
+// These tests exercise the U8 wiring in `runner.rs`:
+//   - `build_termination_diagnostics` returns the right (hint, seed)
+//     pair for enabled vs. disabled diagnostics
+//   - `write_termination_diagnostics` only emits a seed / hint when
+//     diagnostics are enabled
+//   - the payload contract violation path forwards the report
+//     relative path into both the hint and the seed
+//
+// The tests do NOT exercise the full `run_loop_impl` path; that
+// surface is covered by the U5/U6 integration tests above. The U8
+// helper is a pure function over the EventLoop's diagnostics
+// collector, so we can assert the contract end-to-end by driving it
+// directly from a tmpdir-backed EventLoop.
+
+fn build_u8_event_loop(
+    workspace: std::path::PathBuf,
+    diagnostics_enabled: bool,
+) -> ralph_core::EventLoop {
+    let config = ralph_core::RalphConfig::default();
+    let ctx = ralph_core::LoopContext::primary(workspace);
+    let collector = if diagnostics_enabled {
+        // Bypass `RALPH_DIAGNOSTICS` env so the test is hermetic;
+        // `with_enabled(_, true)` is the same path U0 takes when the
+        // operator sets the env var.
+        ralph_core::diagnostics::DiagnosticsCollector::with_enabled(
+            &ctx.workspace().join(".ralph"),
+            true,
+        )
+        .expect("diagnostics collector must initialize in tmpdir")
+    } else {
+        ralph_core::diagnostics::DiagnosticsCollector::disabled()
+    };
+    ralph_core::EventLoop::with_context_and_diagnostics(config, ctx, collector)
+}
+
+#[test]
+fn u8_build_termination_diagnostics_returns_none_when_disabled() {
+    // diagnostics disabled → no hint, no seed. Even with a payload
+    // contract violation reference, the operator-facing artifacts
+    // stay out of summary.md / diagnosis-summary.json.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let event_loop = build_u8_event_loop(tmp.path().to_path_buf(), false);
+
+    let pair = build_termination_diagnostics(&event_loop, Some(".ralph/diagnostics/report.json"));
+    assert!(
+        pair.is_none(),
+        "build_termination_diagnostics must return None when diagnostics are disabled, got: {:?}",
+        pair
+    );
+}
+
+#[test]
+fn u8_build_termination_diagnostics_returns_hint_and_seed_when_enabled() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let event_loop = build_u8_event_loop(tmp.path().to_path_buf(), true);
+
+    let (hint, seed) = build_termination_diagnostics(&event_loop, None)
+        .expect("hint + seed must be Some when diagnostics are enabled");
+
+    // Workspace-relative session path with no `..` and the literal
+    // `.ralph/diagnostics/<id>` layout that the rest of the pipeline
+    // (U3, U7) expects.
+    let session_relpath = hint
+        .session_relpath
+        .as_deref()
+        .expect("session_relpath must be set when diagnostics enabled");
+    assert!(
+        session_relpath.starts_with(".ralph/diagnostics/"),
+        "session_relpath must be a workspace-relative diagnostics path, got: {session_relpath}"
+    );
+    assert_eq!(
+        session_relpath.trim_start_matches(".ralph/diagnostics/"),
+        seed.session_id
+    );
+    assert!(hint.diagnose_command.is_some());
+    assert!(
+        hint.references.is_empty(),
+        "no violation reference was supplied, references must be empty"
+    );
+
+    // Seed sanity: schema version and journal paths are aligned.
+    assert_eq!(
+        seed.schema_version,
+        ralph_core::diagnostics::DiagnosisSummary::SCHEMA_VERSION
+    );
+    assert_eq!(
+        seed.recovery_journal_path.as_deref(),
+        Some(".ralph/diagnostics/<id>/recovery.jsonl")
+            .map(|s| s.replace("<id>", &seed.session_id))
+            .as_deref()
+            .or(Some(
+                format!(".ralph/diagnostics/{}/recovery.jsonl", seed.session_id).as_str()
+            ))
+    );
+    assert!(seed.loop_terminated_at.is_some());
+    assert_eq!(seed.total_iterations, Some(event_loop.state().iteration));
+}
+
+#[test]
+fn u8_build_termination_diagnostics_includes_violation_reference() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let event_loop = build_u8_event_loop(tmp.path().to_path_buf(), true);
+
+    let relpath = ".ralph/diagnostics/payload-contract-error-2026-06-05T12-34-56-789Z.json";
+    let (hint, _seed) =
+        build_termination_diagnostics(&event_loop, Some(relpath)).expect("hint+seed must be Some");
+
+    assert_eq!(hint.references.len(), 1);
+    let reference = &hint.references[0];
+    assert_eq!(reference.label, "Payload contract violation report");
+    assert_eq!(reference.relpath, relpath);
+}
+
+#[test]
+fn u8_write_termination_diagnostics_emits_seed_and_hint_when_enabled() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let event_loop = build_u8_event_loop(tmp.path().to_path_buf(), true);
+    let ctx = ralph_core::LoopContext::primary(tmp.path().to_path_buf());
+    let summary_writer = ralph_core::SummaryWriter::from_context(&ctx);
+
+    // First write the summary body (handle_termination does this).
+    summary_writer
+        .write(
+            &ralph_core::TerminationReason::CompletionPromise,
+            event_loop.state(),
+            None,
+            Some("deadbeef: feat: example"),
+        )
+        .expect("summary.md must be writable");
+
+    write_termination_diagnostics(&event_loop, &summary_writer, None);
+
+    // Hint must be appended to summary.md.
+    let summary_path = tmp.path().join(".ralph/agent/summary.md");
+    let summary_body = std::fs::read_to_string(&summary_path).unwrap();
+    assert!(
+        summary_body.contains("## Diagnostics"),
+        "summary.md must contain a ## Diagnostics section, got:\n{summary_body}"
+    );
+    assert!(
+        summary_body.contains("Run: `ralph diagnose --session latest`"),
+        "summary.md must surface the diagnose command:\n{summary_body}"
+    );
+
+    // Seed must be written under the session directory.
+    let session_id = event_loop
+        .diagnostics()
+        .session_id()
+        .expect("session_id must be present when diagnostics are enabled");
+    let actual_session_dir = event_loop
+        .diagnostics()
+        .session_dir()
+        .expect("session_dir must be present when diagnostics are enabled");
+    let seed_path = actual_session_dir.join("diagnosis-summary.json");
+    assert!(
+        seed_path.exists(),
+        "diagnosis-summary.json must be written at: {}",
+        seed_path.display()
+    );
+    let seed_body = std::fs::read_to_string(&seed_path).unwrap();
+    let parsed: ralph_core::diagnostics::DiagnosisSummary =
+        serde_json::from_str(&seed_body).expect("seed must round-trip through DiagnosisSummary");
+    assert_eq!(parsed.session_id, session_id);
+    assert_eq!(
+        parsed.schema_version,
+        ralph_core::diagnostics::DiagnosisSummary::SCHEMA_VERSION
+    );
+}
+
+#[test]
+fn u8_write_termination_diagnostics_is_noop_when_disabled() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let event_loop = build_u8_event_loop(tmp.path().to_path_buf(), false);
+    let ctx = ralph_core::LoopContext::primary(tmp.path().to_path_buf());
+    let summary_writer = ralph_core::SummaryWriter::from_context(&ctx);
+
+    summary_writer
+        .write(
+            &ralph_core::TerminationReason::CompletionPromise,
+            event_loop.state(),
+            None,
+            None,
+        )
+        .unwrap();
+    let summary_path = tmp.path().join(".ralph/agent/summary.md");
+    let before = std::fs::read_to_string(&summary_path).unwrap();
+
+    write_termination_diagnostics(&event_loop, &summary_writer, None);
+
+    let after = std::fs::read_to_string(&summary_path).unwrap();
+    assert_eq!(
+        before, after,
+        "summary.md must not change when diagnostics are disabled"
+    );
+    assert!(!after.contains("## Diagnostics"));
+
+    // The disabled collector has no session directory, so no seed
+    // path can be constructed.
+    assert!(event_loop.diagnostics().session_dir().is_none());
+}
+
+#[test]
+fn u8_write_termination_diagnostics_emits_violation_reference_when_enabled() {
+    // Payload contract violation: hint must point at the root-level
+    // report, and the seed must still be written under the session
+    // directory. The U4 hard gate writes
+    // `<workspace>/.ralph/diagnostics/payload-contract-error-*.json`
+    // at the workspace root (NOT inside the session dir), and the U8
+    // hint must surface that exact path so the operator can follow it.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let event_loop = build_u8_event_loop(tmp.path().to_path_buf(), true);
+    let ctx = ralph_core::LoopContext::primary(tmp.path().to_path_buf());
+    let summary_writer = ralph_core::SummaryWriter::from_context(&ctx);
+
+    summary_writer
+        .write(
+            &ralph_core::TerminationReason::PayloadContractViolation,
+            event_loop.state(),
+            None,
+            None,
+        )
+        .unwrap();
+
+    let relpath = ".ralph/diagnostics/payload-contract-error-2026-06-05T12-34-56-789Z.json";
+    write_termination_diagnostics(&event_loop, &summary_writer, Some(relpath));
+
+    let summary_body = std::fs::read_to_string(tmp.path().join(".ralph/agent/summary.md")).unwrap();
+    assert!(
+        summary_body.contains("## Diagnostics"),
+        "summary.md must contain a Diagnostics section:\n{summary_body}"
+    );
+    assert!(
+        summary_body.contains(&format!("Payload contract violation report: `{relpath}`")),
+        "summary.md must surface the violation reference:\n{summary_body}"
+    );
+}
+
+#[test]
+fn u8_write_termination_diagnostics_drops_violation_reference_when_disabled() {
+    // The plan's "diagnostics disabled" contract is strict: even a
+    // payload contract violation reference must not surface an
+    // empty-path section. The violation is still on disk and
+    // surfaced on stderr by U4; the operator-facing summary hint
+    // follows the same opt-in as `ralph diagnose`.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let event_loop = build_u8_event_loop(tmp.path().to_path_buf(), false);
+    let ctx = ralph_core::LoopContext::primary(tmp.path().to_path_buf());
+    let summary_writer = ralph_core::SummaryWriter::from_context(&ctx);
+    summary_writer
+        .write(
+            &ralph_core::TerminationReason::PayloadContractViolation,
+            event_loop.state(),
+            None,
+            None,
+        )
+        .unwrap();
+    let summary_path = tmp.path().join(".ralph/agent/summary.md");
+    let before = std::fs::read_to_string(&summary_path).unwrap();
+
+    write_termination_diagnostics(
+        &event_loop,
+        &summary_writer,
+        Some(".ralph/diagnostics/payload-contract-error-2026-06-05T12-34-56-789Z.json"),
+    );
+
+    let after = std::fs::read_to_string(&summary_path).unwrap();
+    assert_eq!(before, after);
+    assert!(!after.contains("## Diagnostics"));
+    assert!(!after.contains("Payload contract violation"));
+}

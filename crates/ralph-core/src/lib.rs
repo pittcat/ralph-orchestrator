@@ -91,8 +91,8 @@ pub use diagnosis::{
 };
 pub use diagnostics::{DiagnosisSummary, DiagnosticsCollector, DiagnosticsOptions};
 pub use drift::{
-    DeclaredEdges, DriftDetector, DriftFinding, DriftObserver, DriftWindow, EventSnapshot,
-    RequiredFields, EMIT_CADENCE_MIN_SAMPLES,
+    DeclaredEdges, DriftDetector, DriftFinding, DriftObserver, DriftWindow,
+    EMIT_CADENCE_MIN_SAMPLES, EventSnapshot, RequiredFields,
 };
 pub use event_logger::{EventHistory, EventLogger, EventRecord};
 pub use event_loop::{
@@ -172,7 +172,7 @@ pub use state_machine::{
     InstanceState, StateMachineDecision, StateMachineFinding, StateMachineRuntimeState,
     StateMachineStateSummary,
 };
-pub use summary_writer::SummaryWriter;
+pub use summary_writer::{DiagnosisHint, DiagnosisReference, SummaryWriter};
 pub use task::{Task, TaskStatus};
 pub use task_definition::{
     TaskDefinition, TaskDefinitionError, TaskSetup, TaskSuite, Verification,
