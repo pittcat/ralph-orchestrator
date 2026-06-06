@@ -27,7 +27,7 @@ fn default_format() -> String {
 }
 
 fn default_max_length() -> usize {
-    80
+    120
 }
 
 impl Default for LoopNamingConfig {
@@ -108,6 +108,39 @@ impl LoopNameGenerator {
         generate_timestamp_id()
     }
 
+    /// Generate a unique name from an already meaningful name prefix.
+    ///
+    /// Unlike prompt-based generation, this preserves the full sanitized prefix
+    /// where possible. Use it for file stems such as plan or task names.
+    pub fn generate_unique_with_prefix(
+        &self,
+        prefix: &str,
+        exists: impl Fn(&str) -> bool,
+    ) -> String {
+        if self.config.format == "timestamp" {
+            return generate_timestamp_id();
+        }
+
+        let prefix = sanitize_for_git(prefix);
+        let prefix = if prefix.is_empty() {
+            "loop".to_string()
+        } else {
+            prefix
+        };
+
+        for _ in 0..3 {
+            let suffix = self.generate_suffix();
+            let name = format!("{}-{}", prefix, suffix);
+            let name = self.truncate_to_max_length(&name);
+
+            if !exists(&name) {
+                return name;
+            }
+        }
+
+        generate_timestamp_id()
+    }
+
     /// Generate a memorable name (adjective-noun only, no keywords).
     ///
     /// Returns a name like "bright-maple" or "swift-falcon".
@@ -146,7 +179,7 @@ impl LoopNameGenerator {
         // Prioritize action verbs
         for word in &words {
             let lower = word.to_lowercase();
-            if ACTION_VERBS.contains(&lower.as_str()) && keywords.len() < 5 {
+            if ACTION_VERBS.contains(&lower.as_str()) && !keywords.contains(&lower) {
                 keywords.push(lower);
             }
         }
@@ -156,7 +189,6 @@ impl LoopNameGenerator {
             let lower = word.to_lowercase();
             if !STOP_WORDS.contains(&lower.as_str())
                 && !keywords.contains(&lower)
-                && keywords.len() < 5
                 && lower.len() >= 2
             {
                 keywords.push(lower);
@@ -168,7 +200,6 @@ impl LoopNameGenerator {
             .into_iter()
             .map(|w| sanitize_for_git(&w))
             .filter(|w| !w.is_empty())
-            .take(5)
             .collect()
     }
 
@@ -372,17 +403,17 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_keywords_limits_to_five() {
+    fn test_extract_keywords_keeps_all_significant_words() {
         let generator = LoopNameGenerator::new(LoopNamingConfig::default());
 
         let keywords =
             generator.extract_keywords("Fix header footer sidebar navigation menu content layout");
-        assert!(keywords.len() <= 5);
         assert_eq!(
             keywords.len(),
-            5,
-            "Expected 5 keywords with 8 significant words in prompt"
+            8,
+            "Expected all significant words to be preserved"
         );
+        assert!(keywords.contains(&"layout".to_string()));
     }
 
     #[test]
@@ -456,6 +487,20 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_unique_with_prefix_preserves_long_file_stem() {
+        let generator = LoopNameGenerator::new(LoopNamingConfig::default());
+
+        let name = generator
+            .generate_unique_with_prefix("2026-06-06-001-fix-autonomous-pty-timeout-plan", |_| {
+                false
+            });
+
+        assert!(name.starts_with("2026-06-06-001-fix-autonomous-pty-timeout-plan-"));
+        assert!(name.len() <= 120);
+        assert!(name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+    }
+
+    #[test]
     fn test_generate_unique_falls_back_to_timestamp() {
         let generator = LoopNameGenerator::new(LoopNamingConfig::default());
 
@@ -470,7 +515,7 @@ mod tests {
     fn test_default_config() {
         let config = LoopNamingConfig::default();
         assert_eq!(config.format, "human-readable");
-        assert_eq!(config.max_length, 80);
+        assert_eq!(config.max_length, 120);
     }
 
     #[test]

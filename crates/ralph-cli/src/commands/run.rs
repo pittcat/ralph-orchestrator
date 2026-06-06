@@ -315,17 +315,24 @@ fn print_preflight_summary(
 fn spawn_worktree_loop(
     workspace_root: &Path,
     prompt_summary: &str,
+    file_name_prefix: Option<&str>,
     loop_naming: &ralph_core::LoopNamingConfig,
     pending_worktree_registration: &mut Option<LoopEntry>,
 ) -> Result<(LoopContext, Option<LockGuard>), anyhow::Error> {
     let worktree_config = WorktreeConfig::default();
 
-    // Generate loop ID from prompt keywords + unique suffix
-    // Produces short names like "feat-ce-integration-swift-peacock"
+    // Generate loop ID from the most identifiable source + unique suffix.
+    // Prompt files use their file name so worktrees can be mapped back to plans.
     let name_generator = ralph_core::LoopNameGenerator::from_config(loop_naming);
-    let loop_id = name_generator.generate_unique(prompt_summary, |name| {
-        ralph_core::worktree_exists(workspace_root, name, &worktree_config)
-    });
+    let loop_id = if let Some(prefix) = file_name_prefix {
+        name_generator.generate_unique_with_prefix(prefix, |name| {
+            ralph_core::worktree_exists(workspace_root, name, &worktree_config)
+        })
+    } else {
+        name_generator.generate_unique(prompt_summary, |name| {
+            ralph_core::worktree_exists(workspace_root, name, &worktree_config)
+        })
+    };
 
     // Ensure worktree directory is in .gitignore
     ensure_gitignore(workspace_root, ".worktrees")
@@ -379,6 +386,7 @@ fn handle_active_lock(
     existing: LockMetadata,
     workspace_root: &Path,
     prompt_summary: &str,
+    file_name_prefix: Option<&str>,
     exclusive: bool,
     parallel: bool,
     loop_naming: &ralph_core::LoopNamingConfig,
@@ -414,9 +422,78 @@ fn handle_active_lock(
         spawn_worktree_loop(
             workspace_root,
             prompt_summary,
+            file_name_prefix,
             loop_naming,
             pending_worktree_registration,
         )
+    }
+}
+
+fn worktree_file_name_prefix(
+    prompt_file: &str,
+    prompt_summary: &str,
+    workspace_root: &Path,
+) -> Option<String> {
+    if let Some(stem) = plan_file_stem_from_text(prompt_summary) {
+        return Some(stem);
+    }
+
+    if prompt_file.is_empty() {
+        return None;
+    }
+
+    let prompt_path = Path::new(prompt_file);
+    let prompt_path = if prompt_path.is_absolute() {
+        prompt_path.to_path_buf()
+    } else {
+        workspace_root.join(prompt_path)
+    };
+
+    if !prompt_path.exists() {
+        return None;
+    }
+
+    if let Ok(prompt_content) = std::fs::read_to_string(&prompt_path)
+        && let Some(stem) = plan_file_stem_from_text(&prompt_content)
+    {
+        return Some(stem);
+    }
+
+    prompt_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.trim().is_empty())
+        .filter(|stem| stem.to_ascii_lowercase() != "prompt")
+        .map(std::string::ToString::to_string)
+}
+
+fn plan_file_stem_from_text(text: &str) -> Option<String> {
+    text.split_whitespace()
+        .filter_map(plan_path_candidate)
+        .find_map(|path| {
+            Path::new(&path)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .filter(|stem| !stem.trim().is_empty())
+                .map(std::string::ToString::to_string)
+        })
+}
+
+fn plan_path_candidate(token: &str) -> Option<String> {
+    let token = token.trim_matches(|c: char| {
+        c.is_ascii_punctuation() && c != '/' && c != '.' && c != '-' && c != '_' && c != ':'
+    });
+    let candidate = token
+        .find("plan:")
+        .map(|idx| &token[idx + "plan:".len()..])
+        .unwrap_or(token)
+        .trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c == ')' || c == ']');
+
+    let lower = candidate.to_ascii_lowercase();
+    if (lower.ends_with(".md") || lower.ends_with(".html")) && candidate.contains('/') {
+        Some(candidate.to_string())
+    } else {
+        None
     }
 }
 
@@ -611,6 +688,12 @@ pub async fn run_command(
         })
         .map(|p| truncate(&p, 100))
         .unwrap_or_else(|| "[no prompt]".to_string());
+    let workspace_root = &config.core.workspace_root;
+    let worktree_file_name_prefix = worktree_file_name_prefix(
+        &config.event_loop.prompt_file,
+        &prompt_summary,
+        workspace_root,
+    );
 
     let mut pending_worktree_registration: Option<LoopEntry> = None;
 
@@ -624,7 +707,6 @@ pub async fn run_command(
     // This implements the lock detection flow from the multi-loop spec
     // Skip lock acquisition in subprocess TUI mode - let the child acquire it
     // Skip lock acquisition in --worktree mode - create worktree directly without needing the lock
-    let workspace_root = &config.core.workspace_root;
     let (loop_context, _lock_guard) = if use_subprocess_tui {
         // In subprocess TUI mode, don't acquire lock here - the child RPC process will do it
         // This avoids the self-lock contention where parent holds lock and child sees it,
@@ -639,6 +721,7 @@ pub async fn run_command(
         spawn_worktree_loop(
             workspace_root,
             &prompt_summary,
+            worktree_file_name_prefix.as_deref(),
             &config.features.loop_naming,
             &mut pending_worktree_registration,
         )?
@@ -658,6 +741,7 @@ pub async fn run_command(
                             existing,
                             workspace_root,
                             &prompt_summary,
+                            worktree_file_name_prefix.as_deref(),
                             args.exclusive,
                             config.features.parallel,
                             &config.features.loop_naming,
@@ -694,6 +778,7 @@ pub async fn run_command(
                             existing,
                             workspace_root,
                             &prompt_summary,
+                            worktree_file_name_prefix.as_deref(),
                             args.exclusive,
                             config.features.parallel,
                             &config.features.loop_naming,
@@ -717,6 +802,7 @@ pub async fn run_command(
                     metadata,
                     workspace_root,
                     &prompt_summary,
+                    worktree_file_name_prefix.as_deref(),
                     args.exclusive,
                     config.features.parallel,
                     &config.features.loop_naming,
@@ -738,6 +824,7 @@ pub async fn run_command(
                         existing,
                         workspace_root,
                         &prompt_summary,
+                        worktree_file_name_prefix.as_deref(),
                         args.exclusive,
                         config.features.parallel,
                         &config.features.loop_naming,
@@ -1179,8 +1266,7 @@ mod tests {
     use super::*;
     use crate::test_support::CwdGuard;
     use ralph_core::{HookMutationConfig, HookOnError, HookPhaseEvent, HookSpec};
-    use std::path::PathBuf;
-    use tempfile::TempDir;
+
     #[test]
     fn test_required_restart_command_matches_contract() {
         let command = required_restart_command(4242);
@@ -1204,6 +1290,79 @@ mod tests {
             !restart_path.exists(),
             "restart sentinel should be removed before restart command dispatch"
         );
+    }
+
+    #[test]
+    fn test_worktree_file_name_prefix_uses_prompt_file_stem() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let prompt_path = temp_dir
+            .path()
+            .join("custom-drift-auto-calibration-prompt.md");
+        std::fs::write(&prompt_path, "Implement something").unwrap();
+
+        let source = worktree_file_name_prefix(
+            prompt_path.to_str().unwrap(),
+            "Implement something",
+            temp_dir.path(),
+        );
+
+        assert_eq!(
+            source.as_deref(),
+            Some("custom-drift-auto-calibration-prompt")
+        );
+    }
+
+    #[test]
+    fn test_worktree_file_name_prefix_returns_none_without_prompt_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let source = worktree_file_name_prefix("", "Implement something", temp_dir.path());
+
+        assert_eq!(source, None);
+    }
+
+    #[test]
+    fn test_worktree_file_name_prefix_uses_inline_plan_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let source = worktree_file_name_prefix(
+            "PROMPT.md",
+            "Implement dev plan:docs/plans/2026-06-04-004-feat-drift-auto-calibration-plan.md",
+            temp_dir.path(),
+        );
+
+        assert_eq!(
+            source.as_deref(),
+            Some("2026-06-04-004-feat-drift-auto-calibration-plan")
+        );
+    }
+
+    #[test]
+    fn test_worktree_file_name_prefix_ignores_task_md_and_uses_prompt_file_content() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp_dir.path().join("task.md"),
+            "Implement dev plan:docs/plans/2026-06-04-004-feat-from-task-md-plan.md",
+        )
+        .unwrap();
+        std::fs::write(
+            temp_dir.path().join("PROMPT.md"),
+            "Implement dev plan:docs/plans/2026-06-04-004-feat-from-prompt-md-plan.md",
+        )
+        .unwrap();
+
+        let source = worktree_file_name_prefix("PROMPT.md", "[no prompt]", temp_dir.path());
+
+        assert_eq!(
+            source.as_deref(),
+            Some("2026-06-04-004-feat-from-prompt-md-plan")
+        );
+    }
+
+    #[test]
+    fn test_worktree_file_name_prefix_ignores_missing_default_prompt_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let source = worktree_file_name_prefix("PROMPT.md", "[no prompt]", temp_dir.path());
+
+        assert_eq!(source, None);
     }
 
     #[tokio::test]
