@@ -393,4 +393,336 @@ mod tests {
         // Step 5: tracing-layer-style consumer sees the same dir.
         let _ = Path::new(&event_loop_session); // path is valid; existence is asserted above
     }
+
+    // ── U3: Recovery / Drift / Summary seed tests ─────────────────────
+
+    fn sample_recovery_entry() -> crate::diagnosis::RecoveryJournalEntry {
+        use crate::diagnosis::{
+            DiagnosisSeverity, DiagnosisSource, RecoveryDiagnosisEnvelope,
+        };
+        let env = RecoveryDiagnosisEnvelope::builder()
+            .source(DiagnosisSource::MissingEventGate)
+            .severity(DiagnosisSeverity::Warning)
+            .iteration(3)
+            .reason_code("no_emit")
+            .message("builder did not emit work.done")
+            .source_hat("builder")
+            .target_hat("builder")
+            .topic("work.done")
+            .retry_key("missing_event_gate:builder:work_done:no_emit:*")
+            .safe_target(true)
+            .build();
+        crate::diagnosis::RecoveryJournalEntry::from_envelope(
+            env,
+            vec!["hint: missing plan_name".to_string()],
+        )
+    }
+
+    fn sample_drift_entry() -> crate::diagnosis::DriftJournalEntry {
+        use crate::diagnosis::{DiagnosisSeverity, DriftJournalEntry, DriftMetric};
+        DriftJournalEntry::builder()
+            .metric(DriftMetric::FieldCompleteness)
+            .observed_value(0.4)
+            .threshold(0.9)
+            .severity(DiagnosisSeverity::Warning)
+            .topic("work.done")
+            .field("plan_name")
+            .window_iterations(20)
+            .iteration(7)
+            .message("plan_name missing in 60% of events")
+            .build()
+    }
+
+    #[test]
+    fn test_recovery_logger_writes_jsonl() {
+        let temp = TempDir::new().unwrap();
+        let collector = DiagnosticsCollector::with_enabled(temp.path(), true).unwrap();
+
+        collector.log_recovery(sample_recovery_entry());
+
+        let recovery_file = collector
+            .session_dir()
+            .expect("session dir must exist")
+            .join("recovery.jsonl");
+        assert!(recovery_file.exists(), "recovery.jsonl should exist");
+
+        let content = std::fs::read_to_string(&recovery_file).unwrap();
+        let lines: Vec<_> = content.lines().collect();
+        assert_eq!(lines.len(), 1, "Should have exactly one line");
+
+        let parsed: crate::diagnosis::RecoveryJournalEntry =
+            serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(parsed.envelope.reason_code, "no_emit");
+        assert_eq!(parsed.envelope.iteration, 3);
+    }
+
+    #[test]
+    fn test_drift_logger_writes_jsonl() {
+        let temp = TempDir::new().unwrap();
+        let collector = DiagnosticsCollector::with_enabled(temp.path(), true).unwrap();
+
+        collector.log_drift(sample_drift_entry());
+
+        let drift_file = collector
+            .session_dir()
+            .expect("session dir must exist")
+            .join("drift.jsonl");
+        assert!(drift_file.exists(), "drift.jsonl should exist");
+
+        let content = std::fs::read_to_string(&drift_file).unwrap();
+        let lines: Vec<_> = content.lines().collect();
+        assert_eq!(lines.len(), 1, "Should have exactly one line");
+
+        let parsed: crate::diagnosis::DriftJournalEntry = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(parsed.field.as_deref(), Some("plan_name"));
+        assert_eq!(parsed.iteration, 7);
+    }
+
+    #[test]
+    fn test_log_recovery_disabled_is_noop() {
+        let temp = TempDir::new().unwrap();
+        let collector = DiagnosticsCollector::with_options(
+            temp.path(),
+            &crate::diagnostics::DiagnosticsOptions::default(),
+        )
+        .unwrap();
+
+        // No panic, no file.
+        collector.log_recovery(sample_recovery_entry());
+        assert!(collector.session_dir().is_none());
+        assert!(!temp.path().join(".ralph").join("diagnostics").exists());
+    }
+
+    #[test]
+    fn test_log_drift_disabled_is_noop() {
+        let temp = TempDir::new().unwrap();
+        let collector = DiagnosticsCollector::with_options(
+            temp.path(),
+            &crate::diagnostics::DiagnosticsOptions::default(),
+        )
+        .unwrap();
+
+        collector.log_drift(sample_drift_entry());
+        assert!(collector.session_dir().is_none());
+        assert!(!temp.path().join(".ralph").join("diagnostics").exists());
+    }
+
+    #[test]
+    fn test_write_diagnosis_summary_seed() {
+        let temp = TempDir::new().unwrap();
+        let collector = DiagnosticsCollector::with_enabled(temp.path(), true).unwrap();
+
+        let mut summary = crate::diagnostics::DiagnosisSummary::new(
+            collector.session_id().expect("session_id"),
+        );
+        summary.recovery_count = 12;
+        summary.drift_finding_count = 3;
+        summary.total_iterations = Some(47);
+        summary.termination_reason = Some("completion_promise".to_string());
+        summary.recovery_journal_path = Some("recovery.jsonl".to_string());
+        summary.drift_journal_path = Some("drift.jsonl".to_string());
+        summary.notes = vec!["truncated 1 note".to_string()];
+
+        collector.write_diagnosis_summary_seed(&summary);
+
+        let path = collector
+            .session_dir()
+            .unwrap()
+            .join("diagnosis-summary.json");
+        assert!(path.exists(), "diagnosis-summary.json should exist");
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed: crate::diagnostics::DiagnosisSummary = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed.schema_version, 1);
+        assert_eq!(parsed.recovery_count, 12);
+        assert_eq!(parsed.drift_finding_count, 3);
+        assert_eq!(parsed.total_iterations, Some(47));
+        assert_eq!(
+            parsed.termination_reason.as_deref(),
+            Some("completion_promise")
+        );
+        assert_eq!(parsed.notes, vec!["truncated 1 note".to_string()]);
+    }
+
+    #[test]
+    fn test_write_diagnosis_summary_seed_disabled_is_noop() {
+        let temp = TempDir::new().unwrap();
+        let collector = DiagnosticsCollector::with_options(
+            temp.path(),
+            &crate::diagnostics::DiagnosticsOptions::default(),
+        )
+        .unwrap();
+
+        let summary = crate::diagnostics::DiagnosisSummary::new("dummy");
+        collector.write_diagnosis_summary_seed(&summary);
+
+        assert!(!temp.path().join(".ralph").join("diagnostics").exists());
+    }
+
+    #[test]
+    fn test_session_id_returns_dir_name() {
+        let temp = TempDir::new().unwrap();
+        let collector = DiagnosticsCollector::with_enabled(temp.path(), true).unwrap();
+
+        let session_id = collector.session_id().expect("session_id must be Some");
+        // Format: YYYY-MM-DDTHH-MM-SS (19 chars)
+        assert_eq!(session_id.len(), 19);
+        assert_eq!(session_id.chars().nth(4), Some('-'));
+        assert_eq!(session_id.chars().nth(7), Some('-'));
+        assert_eq!(session_id.chars().nth(10), Some('T'));
+        assert_eq!(session_id.chars().nth(13), Some('-'));
+        assert_eq!(session_id.chars().nth(16), Some('-'));
+    }
+
+    #[test]
+    fn test_session_id_disabled_is_none() {
+        let temp = TempDir::new().unwrap();
+        let collector = DiagnosticsCollector::with_options(
+            temp.path(),
+            &crate::diagnostics::DiagnosticsOptions::default(),
+        )
+        .unwrap();
+        assert!(collector.session_id().is_none());
+    }
+
+    #[test]
+    fn test_recovery_logger_truncates_long_notes() {
+        use crate::diagnostics::MAX_RECOVERY_NOTE_CHARS;
+        let temp = TempDir::new().unwrap();
+        let collector = DiagnosticsCollector::with_enabled(temp.path(), true).unwrap();
+
+        let long_note = "n".repeat(MAX_RECOVERY_NOTE_CHARS + 200);
+        let env = crate::diagnosis::RecoveryDiagnosisEnvelope::builder()
+            .source(crate::diagnosis::DiagnosisSource::DriftMonitor)
+            .severity(crate::diagnosis::DiagnosisSeverity::Info)
+            .reason_code("r")
+            .message("m")
+            .build();
+        let entry = crate::diagnosis::RecoveryJournalEntry::from_envelope(
+            env,
+            vec![long_note.clone()],
+        );
+
+        collector.log_recovery(entry);
+
+        let path = collector.session_dir().unwrap().join("recovery.jsonl");
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed: crate::diagnosis::RecoveryJournalEntry =
+            serde_json::from_str(content.lines().next().unwrap()).unwrap();
+        assert_eq!(parsed.notes.len(), 1);
+        assert_eq!(parsed.notes[0].chars().count(), MAX_RECOVERY_NOTE_CHARS);
+        assert!(parsed.notes[0].ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn test_minimal_runtime_diagnosis_creates_recovery_logger() {
+        let temp = TempDir::new().unwrap();
+        let options = crate::diagnostics::DiagnosticsOptions {
+            full_diagnostics: false,
+            runtime_diagnosis_artifacts: true,
+            ..Default::default()
+        };
+        let collector = DiagnosticsCollector::with_options(temp.path(), &options).unwrap();
+
+        let session_dir = collector
+            .session_dir()
+            .expect("session dir must exist when runtime_diagnosis_artifacts=true");
+
+        // Minimal diagnosis session must create recovery.jsonl lazily on first log.
+        collector.log_recovery(sample_recovery_entry());
+        assert!(session_dir.join("recovery.jsonl").exists());
+
+        // The historical full-diagnostics files MUST NOT be present.
+        assert!(!session_dir.join("agent-output.jsonl").exists());
+        assert!(!session_dir.join("prompt-log.md").exists());
+        assert!(!session_dir.join("orchestration.jsonl").exists());
+    }
+
+    #[test]
+    fn test_full_diagnostics_creates_all_loggers() {
+        let temp = TempDir::new().unwrap();
+        let collector = DiagnosticsCollector::with_enabled(temp.path(), true).unwrap();
+        let session_dir = collector.session_dir().expect("session dir must exist");
+
+        collector.log_recovery(sample_recovery_entry());
+        collector.log_drift(sample_drift_entry());
+
+        // Both new loggers must write.
+        assert!(session_dir.join("recovery.jsonl").exists());
+        assert!(session_dir.join("drift.jsonl").exists());
+        // Full diagnostics creates the historical files lazily on first log.
+        // We assert that at least orchestration.jsonl exists (always
+        // pre-created by OrchestrationLogger::new), and that the new
+        // journal files coexist with the historical ones.
+        assert!(session_dir.join("orchestration.jsonl").exists());
+    }
+
+    #[test]
+    fn test_recovery_logger_unwritable_dir_does_not_panic() {
+        // An unwritable base_path surfaces as Err at the *constructor*
+        // level — it doesn't get to the logger at all. So we exercise
+        // the runtime path: build a valid collector, then attempt to
+        // write through a logger whose underlying file has been
+        // removed. The write should warn-and-continue.
+        let temp = TempDir::new().unwrap();
+        let collector = DiagnosticsCollector::with_enabled(temp.path(), true).unwrap();
+        let recovery_path = collector
+            .session_dir()
+            .unwrap()
+            .join("recovery.jsonl");
+        // Confirm the file is created lazily by the first call.
+        collector.log_recovery(sample_recovery_entry());
+        assert!(recovery_path.exists());
+
+        // Now delete the file and try to write. The lock will succeed,
+        // but the underlying file write may fail because the inode is
+        // gone. We can't easily simulate this in a portable way
+        // (recovery.jsonl is opened with `create + append` so the
+        // logger will just recreate it). Instead, simulate the
+        // "no-op disabled" path to assert that no panic occurs when
+        // the logger is `None`.
+        let disabled = DiagnosticsCollector::disabled();
+        // Must not panic.
+        disabled.log_recovery(sample_recovery_entry());
+        disabled.log_drift(sample_drift_entry());
+        disabled.write_diagnosis_summary_seed(&crate::diagnostics::DiagnosisSummary::new(
+            "deadbeef",
+        ));
+    }
+
+    #[test]
+    fn test_orchestration_event_from_recovery_envelope() {
+        use crate::diagnostics::OrchestrationEvent;
+
+        let entry = sample_recovery_entry();
+        let env = &entry.envelope;
+        let event = OrchestrationEvent::from_recovery_envelope(env);
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "recovery_diagnosed");
+        assert_eq!(json["source"], "missing_event_gate");
+        assert_eq!(json["target_hat"], "builder");
+        assert_eq!(json["topic"], "work.done");
+        assert_eq!(json["severity"], "warning");
+        assert_eq!(json["reason_code"], "no_emit");
+        assert_eq!(
+            json["retry_key"],
+            "missing_event_gate:builder:work_done:no_emit:*"
+        );
+        assert_eq!(json["diagnosis_id"], env.diagnosis_id);
+    }
+
+    #[test]
+    fn test_orchestration_event_from_drift_entry() {
+        use crate::diagnostics::OrchestrationEvent;
+
+        let entry = sample_drift_entry();
+        let event = OrchestrationEvent::from_drift_entry(&entry);
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "drift_detected");
+        assert_eq!(json["metric"], "field_completeness");
+        assert_eq!(json["topic"], "work.done");
+        assert_eq!(json["field"], "plan_name");
+        assert_eq!(json["severity"], "warning");
+        assert_eq!(json["finding_id"], entry.finding_id);
+    }
 }

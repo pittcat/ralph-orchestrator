@@ -88,7 +88,7 @@ pub use diagnosis::{
     EvidenceKind, EvidenceRef, RecoveryDiagnosisEnvelope, RecoveryDiagnosisEnvelopeBuilder,
     RecoveryJournalEntry,
 };
-pub use diagnostics::{DiagnosticsCollector, DiagnosticsOptions};
+pub use diagnostics::{DiagnosisSummary, DiagnosticsCollector, DiagnosticsOptions};
 pub use event_logger::{EventHistory, EventLogger, EventRecord};
 pub use event_loop::{
     EventLoop, LoopState, ProcessedEvents, ProcessedEventsWithWaves, TerminationReason, UserPrompt,
