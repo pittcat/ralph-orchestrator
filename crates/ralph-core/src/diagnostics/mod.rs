@@ -60,7 +60,7 @@ use std::sync::{Arc, Mutex};
 /// the tracing-layer setup in `main.rs`) has already created the timestamped
 /// directory and we want the `EventLoop` to write to the same dir instead
 /// of generating a second one.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DiagnosticsOptions {
     /// `RALPH_DIAGNOSTICS=1` enables the historical full diagnostic set:
     /// orchestration, performance, errors, hook-runs, agent-output, prompt-log.
