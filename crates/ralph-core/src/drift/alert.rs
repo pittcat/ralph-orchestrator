@@ -153,7 +153,7 @@ fn make_retry_key(finding: &DriftFinding) -> String {
     let to = finding.to_topic.as_deref().unwrap_or("*");
     format!(
         "drift_monitor:{}:{}:{}:{}:{}",
-        finding.metric.as_str(),
+        finding.metric.reason_code(),
         topic,
         field,
         from,

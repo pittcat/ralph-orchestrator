@@ -44,7 +44,7 @@
 //! - The detector never panics. The constructor accepts
 //!   `DriftConfig` but tolerates empty `required_fields` per topic.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -570,39 +570,54 @@ impl DriftDetector {
             return;
         }
         let (avg, stddev) = mean_stddev(&intervals);
-        if stddev <= 0.0 {
-            // Perfectly even cadence — no finding.
-            return;
-        }
-        // The last interval is the most recent one; we compare it
-        // against the average and trigger a finding when it sits
-        // more than `sigma` standard deviations above the average.
-        let last = *intervals.last().expect("non-empty by check above");
-        let z = (last - avg).max(0.0) / stddev;
-        if z > self.config.emit_cadence_sigma {
-            let severity = pick_severity(
-                (z - self.config.emit_cadence_sigma) / self.config.emit_cadence_sigma.max(1.0),
+        // Always emit one emit_cadence record per iteration so
+        // downstream consumers can see the metric even when the
+        // window is uniform. The record's `severity` reflects the
+        // worst breach in the window: `Info` when no interval sits
+        // more than `sigma` above the average, `Error` / `Critical`
+        // when one does. `observed_value` is the worst z-score.
+        let worst_z = if stddev <= 0.0 {
+            0.0
+        } else {
+            intervals
+                .iter()
+                .map(|iv| (iv - avg).max(0.0) / stddev)
+                .fold(0.0_f64, f64::max)
+        };
+        let breached = worst_z > self.config.emit_cadence_sigma;
+        let severity = if breached {
+            pick_severity(
+                (worst_z - self.config.emit_cadence_sigma) / self.config.emit_cadence_sigma.max(1.0),
                 1.0,
-            );
-            self.seen.insert(key);
-            out.push(DriftFinding {
-                finding_id: uuid::Uuid::new_v4().to_string(),
-                metric: DriftMetric::EmitCadence,
-                topic: Some(topic.to_string()),
-                field: None,
-                from_topic: None,
-                to_topic: None,
-                observed_value: round4(z),
-                threshold: self.config.emit_cadence_sigma,
-                severity,
-                iteration: self.last_iteration,
-                window_size: snapshots.len(),
-                message: format!(
-                    "emit cadence on `{topic}` is {z:.2}σ above the rolling average (last={last:?}, avg={avg:?}, stddev={stddev:?}); required threshold {:.2}σ",
+            )
+        } else {
+            DiagnosisSeverity::Info
+        };
+        self.seen.insert(key);
+        out.push(DriftFinding {
+            finding_id: uuid::Uuid::new_v4().to_string(),
+            metric: DriftMetric::EmitCadence,
+            topic: Some(topic.to_string()),
+            field: None,
+            from_topic: None,
+            to_topic: None,
+            observed_value: round4(worst_z),
+            threshold: self.config.emit_cadence_sigma,
+            severity,
+            iteration: self.last_iteration,
+            window_size: snapshots.len(),
+            message: if breached {
+                format!(
+                    "emit cadence on `{topic}` worst interval is {worst_z:.2}σ above the rolling average (avg={avg:?}, stddev={stddev:?}); required threshold {:.2}σ",
                     self.config.emit_cadence_sigma
-                ),
-            });
-        }
+                )
+            } else {
+                format!(
+                    "emit cadence on `{topic}` is within the rolling average (worst z={worst_z:.2}σ, avg={avg:?}, stddev={stddev:?}); threshold {:.2}σ",
+                    self.config.emit_cadence_sigma
+                )
+            },
+        });
     }
 }
 
@@ -740,36 +755,23 @@ fn mean_stddev(xs: &[f64]) -> (f64, f64) {
     (mean, var.sqrt())
 }
 
-/// Count how many `to_timestamps` are at-or-after the latest
-/// `from_timestamp` seen so far. Used by `coord_join_rate`.
+/// Count how many `to_timestamps` are at-or-after the earliest
+/// `from_timestamp`. Used by `coord_join_rate`.
 ///
-/// The current implementation is a two-pointer walk: we scan the
-/// from-timestamps in order, then advance a pointer over the
-/// to-timestamps for each "newer" from-event. The output is the
-/// final pointer position.
+/// The current implementation reports the *distinct* to-events
+/// that follow at least one from-event in the same window. The
+/// rate formula in `check_coord_join_rate` divides this by
+/// `from_size`, so the metric answers "of all from-emissions, what
+/// fraction was followed by at least one matching to-emission".
 fn count_joined(from_timestamps: &[DateTime<Utc>], to_timestamps: &[DateTime<Utc>]) -> usize {
     if from_timestamps.is_empty() || to_timestamps.is_empty() {
         return 0;
     }
-    // The two lists are taken from the windows in insertion order;
-    // we sort defensively because the detector does not require
-    // monotonic inserts (e.g. waves can interleave workers).
-    let mut from_sorted: BTreeMap<DateTime<Utc>, ()> = BTreeMap::new();
-    for t in from_timestamps {
-        from_sorted.insert(*t, ());
-    }
     let mut to_sorted: Vec<DateTime<Utc>> = to_timestamps.to_vec();
     to_sorted.sort();
-    let mut joined = 0usize;
-    let mut cursor = 0usize;
-    for (t, _) in &from_sorted {
-        while cursor < to_sorted.len() && to_sorted[cursor] < *t {
-            cursor += 1;
-        }
-        // `cursor` is now the first to-event at-or-after `t`.
-        // Count everything from `cursor` onwards (i.e. all to-events
-        // that arrived after this from-event).
-        joined = joined.saturating_add(to_sorted.len().saturating_sub(cursor));
-    }
-    joined.min(to_sorted.len() * from_sorted.len().max(1))
+    let earliest_from = *from_timestamps.iter().min().expect("non-empty");
+    to_sorted
+        .iter()
+        .filter(|t| **t >= earliest_from)
+        .count()
 }

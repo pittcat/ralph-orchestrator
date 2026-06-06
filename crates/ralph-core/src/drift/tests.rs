@@ -164,7 +164,10 @@ fn test_field_completeness_policy_required() {
         det.observe(snap("t", 1, i, &[]));
     }
     det.reset_seen();
-    let findings = det.observe(snap("t", 1, 100, &[]));
+    // Re-push a snapshot *with* the required field so the pop
+    // triggered by the cap-100 window evicts a `with` snapshot and
+    // the new `with` keeps the ratio at 50/100.
+    let findings = det.observe(snap("t", 1, 100, &["field_b"]));
     let fc = findings
         .iter()
         .find(|f| f.metric == DriftMetric::FieldCompleteness)
@@ -204,7 +207,9 @@ fn test_field_completeness_execution_contract_fields_merged() {
         }
     }
     det.reset_seen();
-    let findings = det.observe(snap("t", 1, 100, &[]));
+    // Re-push with the field so the cap-100 pop evicts a `with`
+    // snapshot and the new `with` keeps the ratio at 80/100.
+    let findings = det.observe(snap("t", 1, 100, &["x"]));
     let fc = findings
         .iter()
         .find(|f| f.metric == DriftMetric::FieldCompleteness)
@@ -410,8 +415,7 @@ fn test_finding_dedup_reset_seen_allows_re_emit() {
         required,
         DeclaredEdges::new(),
     );
-    det.observe(snap("t", 1, 0, &[]));
-    let first = det.observe(snap("t", 1, 1, &[]));
+    let first = det.observe(snap("t", 1, 0, &[]));
     let fc_first = first
         .iter()
         .filter(|f| f.metric == DriftMetric::FieldCompleteness)
