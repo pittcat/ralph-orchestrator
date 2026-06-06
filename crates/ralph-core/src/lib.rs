@@ -145,8 +145,9 @@ pub use preset_validator::{
     TopologyError, TopologyErrorKind, TopologyValidationResult, validate_preset_topology,
 };
 pub use runtime_contract::{
-    FindingSeverity, FindingSource, FindingStage, RuntimeContractFinding, RuntimeContractReport,
-    RuntimeContractStrictness,
+    FindingSeverity, FindingSource, FindingStage, LOOP_RUNNER_INTERNAL_TOPICS,
+    RuntimeContractAggregator, RuntimeContractFinding, RuntimeContractReport,
+    RuntimeContractStrictness, detect_orphan_topics,
 };
 #[cfg(feature = "recording")]
 pub use session_player::{PlayerConfig, ReplayMode, SessionPlayer, TimestampedRecord};
