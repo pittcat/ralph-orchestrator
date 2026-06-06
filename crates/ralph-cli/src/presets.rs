@@ -3736,4 +3736,116 @@ mod tests {
             );
         }
     }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // U6: Builtin Preset Contract Regression Matrix
+    // ──────────────────────────────────────────────────────────────────────
+
+    use ralph_core::runtime_contract::{
+        FindingSeverity, RuntimeContractAggregator, RuntimeContractStrictness,
+    };
+
+    /// All public builtin presets must parse, pass config validation,
+    /// and pass the authoring contract check (topology, payload non-strict,
+    /// orphan). Presets with known topology exceptions are listed in
+    /// `TOPOLOGY_EXEMPT_PRESETS`.
+    #[test]
+    fn test_all_public_presets_pass_authoring_contract() {
+        // Presets with known topology issues (required events not on all
+        // completion paths). These are documented exceptions, not hidden
+        // failures. Add to this list only with a comment explaining why.
+        let topology_exempt: &[&str] = &[
+            // autoresearch: experiment loop has branching completion paths
+            // where required events (experiment.scored, experiment.evaluated)
+            // are not on every path — this is by design for the experiment
+            // loop's try/measure/keep/discard flow.
+            "autoresearch",
+            // debug: debug loop has branching paths where required events
+            // (hypothesis.confirmed, fix.applied, fix.verified) are not on
+            // every completion path — this is by design for the debug loop's
+            // hypothesis/fix/verify flow.
+            "debug",
+        ];
+
+        for preset in PRESETS.iter().filter(|p| p.public) {
+            let config =
+                RalphConfig::parse_yaml(preset.content).expect("embedded preset YAML should parse");
+            let registry = HatRegistry::from_runtime_config(&config);
+            let strictness = RuntimeContractStrictness::default(); // non-strict
+            let report = RuntimeContractAggregator::aggregate(
+                &format!("builtin:{}", preset.name),
+                &config,
+                &registry,
+                strictness,
+            );
+
+            if report.passed {
+                continue;
+            }
+
+            // Check if all errors are topology errors for an exempt preset
+            let errors: Vec<_> = report
+                .findings
+                .iter()
+                .filter(|f| matches!(f.severity, FindingSeverity::Error))
+                .collect();
+            let all_topology = errors
+                .iter()
+                .all(|f| matches!(f.source, ralph_core::runtime_contract::FindingSource::Topology));
+
+            if topology_exempt.contains(&preset.name) && all_topology {
+                // Known topology exception — record but don't fail
+                eprintln!(
+                    "NOTE: preset '{}' has known topology exceptions (exempt from authoring contract): {:?}",
+                    preset.name,
+                    errors.iter().map(|f| &f.id).collect::<Vec<_>>()
+                );
+                continue;
+            }
+
+            panic!(
+                "Public preset '{}' failed authoring contract: {:?}",
+                preset.name,
+                errors
+                    .iter()
+                    .map(|f| format!("{}: {}", f.id, f.message))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// Development presets must pass strict payload contract check.
+    /// These presets are used for active development and must have
+    /// fully declared schemas.
+    #[test]
+    fn test_development_presets_pass_strict_contract() {
+        let strict_presets = &["ce-executor", "ce-executor-wave", "code-assist", "pdd-to-code-assist"];
+        for preset_name in strict_presets {
+            let preset = PRESETS
+                .iter()
+                .find(|p| p.name == *preset_name)
+                .unwrap_or_else(|| panic!("preset '{}' not found", preset_name));
+            let config =
+                RalphConfig::parse_yaml(preset.content).expect("embedded preset YAML should parse");
+            let registry = HatRegistry::from_runtime_config(&config);
+            let strictness = RuntimeContractStrictness::preset_check_strict();
+            let report = RuntimeContractAggregator::aggregate(
+                &format!("builtin:{}", preset.name),
+                &config,
+                &registry,
+                strictness,
+            );
+            assert!(
+                report.passed,
+                "Development preset '{}' failed strict contract: {:?}",
+                preset.name,
+                report
+                    .findings
+                    .iter()
+                    .filter(|f| matches!(f.severity, FindingSeverity::Error))
+                    .map(|f| format!("{}: {}", f.id, f.message))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
 }
