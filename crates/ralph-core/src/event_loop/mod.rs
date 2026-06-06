@@ -666,15 +666,29 @@ impl EventLoop {
     /// The loop context determines where events, tasks, and other state files
     /// are located. Use this for multi-loop scenarios where each loop runs
     /// in an isolated workspace (git worktree).
+    ///
+    /// **Diagnostics ownership (U0).** If `context.prebuilt_diagnostics()` is
+    /// `Some`, that collector is reused as the authoritative session — the
+    /// CLI builds it in `main.rs` and shares it with the tracing layer so
+    /// the run produces a single timestamped session dir. Otherwise, a
+    /// fresh `DiagnosticsCollector::new(workspace)` is created. Either way,
+    /// init failure falls back to a disabled collector (with a `tracing::warn!`)
+    /// — diagnostics never panic the loop.
     pub fn with_context(config: RalphConfig, context: LoopContext) -> Self {
-        let diagnostics = crate::diagnostics::DiagnosticsCollector::new(context.workspace())
-            .unwrap_or_else(|e| {
-                debug!(
-                    "Failed to initialize diagnostics: {}, using disabled collector",
-                    e
-                );
-                crate::diagnostics::DiagnosticsCollector::disabled()
-            });
+        let diagnostics = match context.prebuilt_diagnostics() {
+            Some(collector) => (**collector).clone(),
+            None => {
+                crate::diagnostics::DiagnosticsCollector::new(context.workspace()).unwrap_or_else(
+                    |e| {
+                        warn!(
+                            "Failed to initialize diagnostics: {}, using disabled collector",
+                            e
+                        );
+                        crate::diagnostics::DiagnosticsCollector::disabled()
+                    },
+                )
+            }
+        };
 
         Self::with_context_and_diagnostics(config, context, diagnostics)
     }

@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use ralph_adapters::detect_backend;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tracing::info;
 
 /// Arguments for the resume subcommand.
@@ -60,6 +61,7 @@ pub async fn resume_command(
     verbose: bool,
     color_mode: ColorMode,
     args: ResumeArgs,
+    prebuilt_diagnostics: Option<Arc<ralph_core::diagnostics::DiagnosticsCollector>>,
 ) -> Result<()> {
     // Show deprecation warning
     eprintln!(
@@ -155,6 +157,7 @@ pub async fn resume_command(
         None,       // Deprecated resume command doesn't support --loop-id
         false,      // warmup_only (resume uses normal flow)
         false,      // force_warmup (resume uses normal flow)
+        prebuilt_diagnostics,
     )
     .await?;
     let exit_code = reason.exit_code();

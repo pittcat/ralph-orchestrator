@@ -332,4 +332,65 @@ mod tests {
             "disabled diagnostics should not create diagnostics artifacts"
         );
     }
+
+    /// U0: integration test for "one session per run".
+    ///
+    /// Simulates the CLI flow: build the authoritative collector in
+    /// `main.rs`, pass it as the `LoopContext`'s prebuilt diagnostics,
+    /// and verify that `EventLoop::with_context` reuses it. The result
+    /// is a single timestamped session directory even though the
+    /// `EventLoop` is built from the same `LoopContext` that
+    /// `with_context` would otherwise use to build its own.
+    #[test]
+    fn test_one_session_per_run_when_prebuilt_collector_attached() {
+        use crate::event_loop::EventLoop;
+        use crate::loop_context::LoopContext;
+        use std::path::Path;
+        use std::sync::Arc;
+
+        let temp_dir = TempDir::new().unwrap();
+
+        // Step 1: build the authoritative collector (what `main.rs` does).
+        let authoritative =
+            DiagnosticsCollector::with_options(
+                temp_dir.path(),
+                &crate::diagnostics::DiagnosticsOptions {
+                    full_diagnostics: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let authoritative_session = authoritative.session_dir().unwrap().to_path_buf();
+        let authoritative = Arc::new(authoritative);
+
+        // Step 2: build a LoopContext that pre-hooks the collector.
+        let context = LoopContext::primary(temp_dir.path().to_path_buf())
+            .with_prebuilt_diagnostics(authoritative.clone());
+
+        // Step 3: build the EventLoop with that context. It should reuse
+        // the prebuilt collector — NOT create a second session.
+        let config = RalphConfig::default();
+        let event_loop = EventLoop::with_context(config, context);
+        let event_loop_session = event_loop.diagnostics().session_dir().unwrap().to_path_buf();
+
+        assert_eq!(
+            event_loop_session, authoritative_session,
+            "EventLoop must reuse the prebuilt collector's session dir"
+        );
+
+        // Step 4: confirm only one session dir was created.
+        let diagnostics_root = temp_dir.path().join(".ralph").join("diagnostics");
+        let session_count = std::fs::read_dir(&diagnostics_root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .count();
+        assert_eq!(
+            session_count, 1,
+            "expected exactly one session dir, found {session_count}"
+        );
+
+        // Step 5: tracing-layer-style consumer sees the same dir.
+        let _ = Path::new(&event_loop_session); // path is valid; existence is asserted above
+    }
 }

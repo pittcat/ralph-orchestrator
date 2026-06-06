@@ -54,8 +54,10 @@
 //!            "/project/.worktrees/loop-1234-abcd/.ralph/events.jsonl");
 //! ```
 
+use crate::diagnostics::DiagnosticsCollector;
 use crate::text::truncate_with_ellipsis;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Context for resolving paths within a Ralph loop.
 ///
@@ -77,6 +79,15 @@ pub struct LoopContext {
 
     /// Whether this is the primary loop (holds loop.lock).
     is_primary: bool,
+
+    /// Optional pre-built diagnostics collector (U0).
+    ///
+    /// When `Some`, `EventLoop::with_context` reuses this collector
+    /// instead of constructing a fresh one. The CLI builds the
+    /// authoritative collector once in `main.rs` and threads it through
+    /// the tracing layer and the loop runner so a single `ralph run`
+    /// owns exactly one diagnostics session.
+    prebuilt_diagnostics: Option<Arc<DiagnosticsCollector>>,
 }
 
 impl LoopContext {
@@ -90,6 +101,7 @@ impl LoopContext {
             repo_root: workspace.clone(),
             workspace,
             is_primary: true,
+            prebuilt_diagnostics: None,
         }
     }
 
@@ -113,7 +125,26 @@ impl LoopContext {
             workspace: worktree_path,
             repo_root,
             is_primary: false,
+            prebuilt_diagnostics: None,
         }
+    }
+
+    /// Attaches a pre-built diagnostics collector (U0 centralization).
+    ///
+    /// The CLI builds the authoritative `DiagnosticsCollector` once in
+    /// `main.rs` (so the tracing layer and the `EventLoop` share one
+    /// session) and threads it through. Without this, `EventLoop::with_context`
+    /// falls back to building its own collector — preserving the historical
+    /// behavior for tests and library consumers.
+    #[must_use]
+    pub fn with_prebuilt_diagnostics(mut self, collector: Arc<DiagnosticsCollector>) -> Self {
+        self.prebuilt_diagnostics = Some(collector);
+        self
+    }
+
+    /// Returns the pre-built diagnostics collector, if any.
+    pub fn prebuilt_diagnostics(&self) -> Option<&Arc<DiagnosticsCollector>> {
+        self.prebuilt_diagnostics.as_ref()
     }
 
     /// Returns the loop identifier, if any.

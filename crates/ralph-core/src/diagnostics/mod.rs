@@ -2,6 +2,24 @@
 //!
 //! Captures agent output, orchestration decisions, traces, performance metrics,
 //! and errors to structured JSONL files when `RALPH_DIAGNOSTICS=1` is set.
+//!
+//! # Activation Matrix (U0 contract)
+//!
+//! The collector is driven by [`DiagnosticsOptions`]. Exactly one of three modes
+//! is active for a given collector:
+//!
+//! | `full_diagnostics` | `runtime_diagnosis_artifacts` | `session_dir` | Behavior |
+//! |---|---|---|---|
+//! | `false` | `false` | `None` (default) | Disabled. No I/O. `is_enabled()` is false. |
+//! | `true`  | any     | `None`             | Full session. Creates `<base>/.ralph/diagnostics/<timestamp>/` and all existing loggers (orchestration, performance, errors, hook-runs, agent-output, prompt-log). |
+//! | `false` | `true`  | `None`             | Minimal diagnosis session. Creates the timestamped directory but does NOT instantiate any of the historical full-diagnostics loggers. U3 will add `recovery.jsonl`/`drift.jsonl`/`diagnosis-summary.json` to this dir. |
+//! | `true`  | any     | `Some(p)`          | Full session reusing the provided path. No new dir is created. |
+//! | `false` | `true`  | `Some(p)`          | Minimal diagnosis session reusing the provided path. |
+//!
+//! The CLI is responsible for building **one** authoritative collector per
+//! `ralph run` and threading it through the tracing layer, the loop runner
+//! and `EventLoop`. Multiple collectors would create competing timestamp
+//! directories, so this is enforced by convention plus this central type.
 
 mod agent_output;
 mod errors;
@@ -29,12 +47,71 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+/// Activation matrix for a [`DiagnosticsCollector`].
+///
+/// This struct is the single source of truth for whether diagnostics are
+/// captured during a run. U1 (`telemetry.runtime_diagnosis` config) will
+/// populate this from YAML; for U0 the CLI populates `full_diagnostics`
+/// from `RALPH_DIAGNOSTICS=1` and leaves `runtime_diagnosis_artifacts`
+/// at its default `false`. U3 will read the same struct to decide which
+/// minimal loggers to spin up.
+///
+/// `session_dir` is set by the CLI when an upstream component (typically
+/// the tracing-layer setup in `main.rs`) has already created the timestamped
+/// directory and we want the `EventLoop` to write to the same dir instead
+/// of generating a second one.
+#[derive(Debug, Clone, Default)]
+pub struct DiagnosticsOptions {
+    /// `RALPH_DIAGNOSTICS=1` enables the historical full diagnostic set:
+    /// orchestration, performance, errors, hook-runs, agent-output, prompt-log.
+    pub full_diagnostics: bool,
+
+    /// `telemetry.runtime_diagnosis.write_artifacts=true` enables a minimal
+    /// diagnosis session (timestamped dir only; U3 adds recovery/drift/summary
+    /// loggers). Ignored when `full_diagnostics` is already true, since
+    /// full diagnostics subsumes it.
+    pub runtime_diagnosis_artifacts: bool,
+
+    /// Reuse an existing session directory instead of creating a new one.
+    /// Used by `main.rs` to share the dir between the tracing layer and the
+    /// `EventLoop`. When `None`, a new timestamped dir is created lazily.
+    pub session_dir: Option<PathBuf>,
+}
+
+impl DiagnosticsOptions {
+    /// Returns true when any diagnostic capture is active.
+    pub fn is_enabled(&self) -> bool {
+        self.full_diagnostics || self.runtime_diagnosis_artifacts
+    }
+
+    /// Resolves the activation matrix entry based on env and (optionally)
+    /// a pre-built session dir. Used by [`DiagnosticsCollector::new`].
+    pub fn from_env(session_dir: Option<PathBuf>) -> Self {
+        let full_diagnostics = std::env::var("RALPH_DIAGNOSTICS")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        Self {
+            full_diagnostics,
+            runtime_diagnosis_artifacts: false,
+            session_dir,
+        }
+    }
+}
+
 /// Central coordinator for diagnostic logging.
 ///
 /// Checks `RALPH_DIAGNOSTICS` environment variable and creates a timestamped
-/// session directory if enabled.
+/// session directory if enabled. U0: exactly one instance per `ralph run`,
+/// built in `main.rs` and shared with the tracing layer and the `EventLoop`.
+///
+/// `Clone` is a shallow clone: the underlying `Arc<Mutex<...>>` loggers
+/// and `PathBuf` session dir are shared by reference. Cloning the
+/// collector does NOT open a second session dir.
+#[derive(Clone)]
 pub struct DiagnosticsCollector {
     enabled: bool,
+    full_diagnostics: bool,
+    runtime_diagnosis_artifacts: bool,
     session_dir: Option<PathBuf>,
     orchestration_logger: Option<Arc<Mutex<orchestration::OrchestrationLogger>>>,
     performance_logger: Option<Arc<Mutex<performance::PerformanceLogger>>>,
@@ -42,47 +119,100 @@ pub struct DiagnosticsCollector {
     hook_run_logger: Option<Arc<Mutex<hook_runs::HookRunLogger>>>,
 }
 
+impl std::fmt::Debug for DiagnosticsCollector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DiagnosticsCollector")
+            .field("enabled", &self.enabled)
+            .field("full_diagnostics", &self.full_diagnostics)
+            .field("runtime_diagnosis_artifacts", &self.runtime_diagnosis_artifacts)
+            .field("session_dir", &self.session_dir)
+            .field("has_orchestration_logger", &self.orchestration_logger.is_some())
+            .field("has_performance_logger", &self.performance_logger.is_some())
+            .field("has_error_logger", &self.error_logger.is_some())
+            .field("has_hook_run_logger", &self.hook_run_logger.is_some())
+            .finish()
+    }
+}
+
 impl DiagnosticsCollector {
     /// Creates a new diagnostics collector.
     ///
-    /// If `RALPH_DIAGNOSTICS=1`, creates `.ralph/diagnostics/<timestamp>/` directory.
+    /// Honors `RALPH_DIAGNOSTICS=1` (see [`DiagnosticsOptions::from_env`]).
+    /// For programmatic control, build [`DiagnosticsOptions`] explicitly
+    /// and call [`Self::with_options`].
     pub fn new(base_path: &Path) -> std::io::Result<Self> {
-        let enabled = std::env::var("RALPH_DIAGNOSTICS")
-            .map(|v| v == "1")
-            .unwrap_or(false);
-
-        Self::with_enabled(base_path, enabled)
+        let options = DiagnosticsOptions::from_env(None);
+        Self::with_options(base_path, &options)
     }
 
     /// Creates a diagnostics collector with explicit enabled flag (for testing).
+    ///
+    /// Thin wrapper over [`Self::with_options`] that maps the legacy bool
+    /// onto [`DiagnosticsOptions::full_diagnostics`].
     pub fn with_enabled(base_path: &Path, enabled: bool) -> std::io::Result<Self> {
-        let (session_dir, orchestration_logger, performance_logger, error_logger, hook_run_logger) =
-            if enabled {
+        let options = DiagnosticsOptions {
+            full_diagnostics: enabled,
+            ..DiagnosticsOptions::default()
+        };
+        Self::with_options(base_path, &options)
+    }
+
+    /// Canonical constructor.
+    ///
+    /// Drives the activation matrix in [`DiagnosticsOptions`]. When both
+    /// flags are false, returns a no-op disabled collector with no I/O.
+    /// When enabled, creates (or reuses) a timestamped session directory
+    /// and instantiates the appropriate logger set.
+    pub fn with_options(base_path: &Path, options: &DiagnosticsOptions) -> std::io::Result<Self> {
+        if !options.is_enabled() {
+            return Ok(Self::disabled());
+        }
+
+        // Resolve or create the session directory exactly once per collector.
+        let session_dir = match options.session_dir.as_ref() {
+            Some(p) => {
+                fs::create_dir_all(p)?;
+                p.clone()
+            }
+            None => {
                 let timestamp = Local::now().format("%Y-%m-%dT%H-%M-%S");
                 let dir = base_path
                     .join(".ralph")
                     .join("diagnostics")
                     .join(timestamp.to_string());
                 fs::create_dir_all(&dir)?;
+                dir
+            }
+        };
 
-                let orch_logger = orchestration::OrchestrationLogger::new(&dir)?;
-                let perf_logger = performance::PerformanceLogger::new(&dir)?;
-                let err_logger = errors::ErrorLogger::new(&dir)?;
-                let hook_logger = hook_runs::HookRunLogger::new(&dir)?;
-                (
-                    Some(dir),
-                    Some(Arc::new(Mutex::new(orch_logger))),
-                    Some(Arc::new(Mutex::new(perf_logger))),
-                    Some(Arc::new(Mutex::new(err_logger))),
-                    Some(Arc::new(Mutex::new(hook_logger))),
-                )
-            } else {
-                (None, None, None, None, None)
-            };
+        // Historical loggers are tied to full_diagnostics. The minimal
+        // runtime-diagnosis session deliberately skips them so we don't
+        // create files nobody asked for.
+        let (
+            orchestration_logger,
+            performance_logger,
+            error_logger,
+            hook_run_logger,
+        ) = if options.full_diagnostics {
+            let orch_logger = orchestration::OrchestrationLogger::new(&session_dir)?;
+            let perf_logger = performance::PerformanceLogger::new(&session_dir)?;
+            let err_logger = errors::ErrorLogger::new(&session_dir)?;
+            let hook_logger = hook_runs::HookRunLogger::new(&session_dir)?;
+            (
+                Some(Arc::new(Mutex::new(orch_logger))),
+                Some(Arc::new(Mutex::new(perf_logger))),
+                Some(Arc::new(Mutex::new(err_logger))),
+                Some(Arc::new(Mutex::new(hook_logger))),
+            )
+        } else {
+            (None, None, None, None)
+        };
 
         Ok(Self {
-            enabled,
-            session_dir,
+            enabled: true,
+            full_diagnostics: options.full_diagnostics,
+            runtime_diagnosis_artifacts: options.runtime_diagnosis_artifacts,
+            session_dir: Some(session_dir),
             orchestration_logger,
             performance_logger,
             error_logger,
@@ -94,6 +224,8 @@ impl DiagnosticsCollector {
     pub fn disabled() -> Self {
         Self {
             enabled: false,
+            full_diagnostics: false,
+            runtime_diagnosis_artifacts: false,
             session_dir: None,
             orchestration_logger: None,
             performance_logger: None,
@@ -102,9 +234,19 @@ impl DiagnosticsCollector {
         }
     }
 
-    /// Returns whether diagnostics are enabled.
+    /// Returns whether any diagnostics are enabled.
     pub fn is_enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// Returns true if the historical full-diagnostics logger set is active.
+    pub fn is_full_diagnostics(&self) -> bool {
+        self.full_diagnostics
+    }
+
+    /// Returns true if the minimal runtime-diagnosis session is active.
+    pub fn has_runtime_diagnosis_artifacts(&self) -> bool {
+        self.runtime_diagnosis_artifacts
     }
 
     /// Returns the session directory if diagnostics are enabled.
@@ -116,7 +258,9 @@ impl DiagnosticsCollector {
     ///
     /// Returns the original handler if diagnostics are disabled.
     pub fn wrap_stream_handler<H>(&self, handler: H) -> Result<DiagnosticStreamHandler<H>, H> {
-        if let Some(session_dir) = &self.session_dir {
+        if let Some(session_dir) = &self.session_dir
+            && self.full_diagnostics
+        {
             match AgentOutputLogger::new(session_dir) {
                 Ok(logger) => {
                     let logger = Arc::new(Mutex::new(logger));
@@ -125,13 +269,13 @@ impl DiagnosticsCollector {
                 Err(_) => Err(handler), // Return original handler on error
             }
         } else {
-            Err(handler) // Diagnostics disabled, return original
+            Err(handler) // Diagnostics disabled or minimal, return original
         }
     }
 
     /// Logs an orchestration event.
     ///
-    /// Does nothing if diagnostics are disabled.
+    /// Does nothing if full diagnostics are disabled.
     pub fn log_orchestration(&self, iteration: u32, hat: &str, event: OrchestrationEvent) {
         if let Some(logger) = &self.orchestration_logger
             && let Ok(mut logger) = logger.lock()
@@ -142,7 +286,7 @@ impl DiagnosticsCollector {
 
     /// Logs execution contract rejections to diagnostics.
     ///
-    /// Does nothing if diagnostics are disabled.
+    /// Does nothing if full diagnostics are disabled.
     pub fn log_execution_contract_rejections(
         &self,
         iteration: u32,
@@ -163,7 +307,7 @@ impl DiagnosticsCollector {
 
     /// Logs a performance metric.
     ///
-    /// Does nothing if diagnostics are disabled.
+    /// Does nothing if full diagnostics are disabled.
     pub fn log_performance(&self, iteration: u32, hat: &str, metric: PerformanceMetric) {
         if let Some(logger) = &self.performance_logger
             && let Ok(mut logger) = logger.lock()
@@ -174,7 +318,7 @@ impl DiagnosticsCollector {
 
     /// Logs an error.
     ///
-    /// Does nothing if diagnostics are disabled.
+    /// Does nothing if full diagnostics are disabled.
     pub fn log_error(&self, iteration: u32, hat: &str, error: DiagnosticError) {
         if let Some(logger) = &self.error_logger
             && let Ok(mut logger) = logger.lock()
@@ -186,7 +330,7 @@ impl DiagnosticsCollector {
 
     /// Logs a hook run telemetry entry.
     ///
-    /// Does nothing if diagnostics are disabled.
+    /// Does nothing if full diagnostics are disabled.
     pub fn log_hook_run(&self, entry: HookRunTelemetryEntry) {
         if let Some(logger) = &self.hook_run_logger
             && let Ok(mut logger) = logger.lock()
@@ -197,9 +341,11 @@ impl DiagnosticsCollector {
 
     /// Logs the full prompt for an iteration to `prompt-log.md`.
     ///
-    /// Does nothing if diagnostics are disabled.
+    /// Does nothing if full diagnostics are disabled.
     pub fn log_prompt(&self, iteration: u32, hat: &str, prompt: &str) {
-        if let Some(session_dir) = &self.session_dir {
+        if let Some(session_dir) = &self.session_dir
+            && self.full_diagnostics
+        {
             use std::io::Write;
             let path = session_dir.join("prompt-log.md");
             if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
@@ -222,7 +368,11 @@ mod tests {
     fn test_diagnostics_disabled_by_default() {
         let temp = TempDir::new().unwrap();
 
-        let collector = DiagnosticsCollector::with_enabled(temp.path(), false).unwrap();
+        let collector = DiagnosticsCollector::with_options(
+            temp.path(),
+            &DiagnosticsOptions::default(),
+        )
+        .unwrap();
 
         assert!(!collector.is_enabled());
         assert!(collector.session_dir().is_none());
@@ -338,5 +488,120 @@ mod tests {
             assert!(parsed.get("message").is_some());
             assert!(parsed.get("context").is_some());
         }
+    }
+
+    // ── U0 activation matrix tests ───────────────────────────────────────
+
+    #[test]
+    fn test_activation_matrix_default_disabled() {
+        let temp = TempDir::new().unwrap();
+        let collector = DiagnosticsCollector::with_options(
+            temp.path(),
+            &DiagnosticsOptions::default(),
+        )
+        .unwrap();
+
+        assert!(!collector.is_enabled());
+        assert!(!collector.is_full_diagnostics());
+        assert!(!collector.has_runtime_diagnosis_artifacts());
+        assert!(collector.session_dir().is_none());
+        assert!(!temp.path().join(".ralph").join("diagnostics").exists());
+    }
+
+    #[test]
+    fn test_activation_matrix_full_diagnostics() {
+        let temp = TempDir::new().unwrap();
+        let options = DiagnosticsOptions {
+            full_diagnostics: true,
+            ..DiagnosticsOptions::default()
+        };
+        let collector = DiagnosticsCollector::with_options(temp.path(), &options).unwrap();
+
+        assert!(collector.is_enabled());
+        assert!(collector.is_full_diagnostics());
+        let session_dir = collector.session_dir().expect("session dir must exist");
+        assert!(session_dir.exists());
+        // Historical files (orchestration/performance/errors/hook-runs) are
+        // created lazily by their respective loggers, but the dir is ready.
+        assert!(session_dir.join("orchestration.jsonl").exists());
+        assert!(session_dir.join("performance.jsonl").exists());
+        assert!(session_dir.join("errors.jsonl").exists());
+        assert!(session_dir.join("hook-runs.jsonl").exists());
+    }
+
+    #[test]
+    fn test_activation_matrix_runtime_only_creates_dir_no_historical_files() {
+        let temp = TempDir::new().unwrap();
+        let options = DiagnosticsOptions {
+            full_diagnostics: false,
+            runtime_diagnosis_artifacts: true,
+            ..DiagnosticsOptions::default()
+        };
+        let collector = DiagnosticsCollector::with_options(temp.path(), &options).unwrap();
+
+        assert!(collector.is_enabled());
+        assert!(!collector.is_full_diagnostics());
+        assert!(collector.has_runtime_diagnosis_artifacts());
+        let session_dir = collector.session_dir().expect("session dir must exist");
+        assert!(session_dir.exists());
+
+        // Verify the timestamp format.
+        let dir_name = session_dir.file_name().unwrap().to_str().unwrap();
+        assert_eq!(dir_name.len(), 19, "expected YYYY-MM-DDTHH-MM-SS");
+
+        // The historical full-diagnostics files MUST NOT be present.
+        assert!(!session_dir.join("orchestration.jsonl").exists());
+        assert!(!session_dir.join("performance.jsonl").exists());
+        assert!(!session_dir.join("errors.jsonl").exists());
+        assert!(!session_dir.join("hook-runs.jsonl").exists());
+        assert!(!session_dir.join("prompt-log.md").exists());
+    }
+
+    #[test]
+    fn test_activation_matrix_session_dir_reuse_full() {
+        let temp = TempDir::new().unwrap();
+        let preset_dir = temp.path().join("reused-session");
+        std::fs::create_dir_all(&preset_dir).unwrap();
+
+        let options = DiagnosticsOptions {
+            full_diagnostics: true,
+            session_dir: Some(preset_dir.clone()),
+            ..DiagnosticsOptions::default()
+        };
+        let collector = DiagnosticsCollector::with_options(temp.path(), &options).unwrap();
+
+        assert_eq!(collector.session_dir().unwrap(), preset_dir);
+        // Make sure the timestamped dir under .ralph/diagnostics was NOT created.
+        assert!(!temp.path().join(".ralph").join("diagnostics").exists());
+    }
+
+    #[test]
+    fn test_activation_matrix_session_dir_reuse_minimal() {
+        let temp = TempDir::new().unwrap();
+        let preset_dir = temp.path().join("reused-session");
+        std::fs::create_dir_all(&preset_dir).unwrap();
+
+        let options = DiagnosticsOptions {
+            full_diagnostics: false,
+            runtime_diagnosis_artifacts: true,
+            session_dir: Some(preset_dir.clone()),
+        };
+        let collector = DiagnosticsCollector::with_options(temp.path(), &options).unwrap();
+
+        assert_eq!(collector.session_dir().unwrap(), preset_dir);
+        assert!(!temp.path().join(".ralph").join("diagnostics").exists());
+    }
+
+    #[test]
+    fn test_init_failure_does_not_panic() {
+        // An unwritable base_path must surface as an io::Error, not a panic.
+        // On Linux, writing under /proc/self/foo is invalid.
+        let bogus = std::path::Path::new("/proc/self/cannot-write-here");
+        let options = DiagnosticsOptions {
+            full_diagnostics: true,
+            ..DiagnosticsOptions::default()
+        };
+        let result = DiagnosticsCollector::with_options(bogus, &options);
+        assert!(result.is_err(), "expected io::Error, got {:?}", result.is_ok());
     }
 }

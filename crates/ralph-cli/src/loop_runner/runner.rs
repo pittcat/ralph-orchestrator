@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 
 pub struct RpcSharedState {
     iteration: Arc<std::sync::atomic::AtomicU32>,
@@ -66,6 +67,7 @@ pub async fn run_loop_impl(
     resume_loop_id: Option<String>,
     warmup_only: bool,
     force_warmup: bool,
+    prebuilt_diagnostics: Option<Arc<ralph_core::diagnostics::DiagnosticsCollector>>,
 ) -> Result<TerminationReason> {
     // U5: Payload contract hard gate. Runs BEFORE any backend is spawned.
     // In strict mode (always on for `ralph run`), any payload contract
@@ -117,9 +119,18 @@ pub async fn run_loop_impl(
 
     // Create or use provided loop context for path resolution
     // This ensures events are written to the correct location for worktree loops
-    let ctx = loop_context
+    let mut ctx = loop_context
         .clone()
         .unwrap_or_else(|| LoopContext::primary(config.core.workspace_root.clone()));
+
+    // U0: attach the CLI's authoritative diagnostics collector (built in
+    // `main.rs`) so the EventLoop reuses the same session dir as the
+    // tracing layer. When `None`, the EventLoop falls back to building
+    // its own collector based on `RALPH_DIAGNOSTICS=1`.
+    if let Some(collector) = prebuilt_diagnostics {
+        ctx = ctx.with_prebuilt_diagnostics(collector);
+    }
+
     let urgent_steer_path = ctx.urgent_steer_path();
     let urgent_steer_store = UrgentSteerStore::new(urgent_steer_path.clone());
     urgent_steer_store

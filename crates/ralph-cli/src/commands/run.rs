@@ -5,6 +5,7 @@ use crate::preflight;
 use anyhow::{Context, Result};
 use clap::Parser;
 use ralph_adapters::detect_backend;
+use std::sync::Arc;
 use ralph_core::{
     CheckStatus, LockError, LockGuard, LockMetadata, LockStatus, LoopContext, LoopEntry, LoopLock,
     LoopRegistry, PreflightReport, PreflightRunner, RalphConfig, TerminationReason,
@@ -503,6 +504,9 @@ pub async fn run_command(
     verbose: bool,
     color_mode: ColorMode,
     args: RunArgs,
+    prebuilt_diagnostics: Option<
+        Arc<ralph_core::diagnostics::DiagnosticsCollector>,
+    >,
 ) -> Result<()> {
     let mut config = preflight::load_config_for_preflight(config_sources, hats_source).await?;
 
@@ -929,6 +933,7 @@ pub async fn run_command(
             args.loop_id,
             args.warmup_only,
             args.force_warmup,
+            prebuilt_diagnostics,
         )
         .await?
     };
@@ -1827,7 +1832,7 @@ mod tests {
         let mut args = default_run_args();
         args.continue_mode = true;
 
-        let err = run_command(&[], None, false, ColorMode::Never, args)
+        let err = run_command(&[], None, false, ColorMode::Never, args, None)
             .await
             .expect_err("expected missing scratchpad error");
         assert!(err.to_string().contains("scratchpad not found"));
@@ -1842,7 +1847,7 @@ mod tests {
         args.dry_run = true;
         args.prompt_text = Some("Test inline prompt".to_string());
 
-        run_command(&[], None, false, ColorMode::Never, args)
+        run_command(&[], None, false, ColorMode::Never, args, None)
             .await
             .expect("dry run should succeed");
     }
@@ -1877,6 +1882,7 @@ hats:
             false,
             ColorMode::Never,
             args,
+            None,
         )
         .await
         .expect("combined config should be accepted");
