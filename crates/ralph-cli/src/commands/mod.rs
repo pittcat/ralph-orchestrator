@@ -1,6 +1,7 @@
 pub mod clean;
 pub mod code_task;
 pub mod completions;
+pub mod diagnose;
 pub mod emit;
 pub mod events;
 pub mod init;

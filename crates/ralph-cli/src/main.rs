@@ -156,6 +156,9 @@ enum Commands {
 
     /// Generate shell completions
     Completions(commands::completions::CompletionsArgs),
+
+    /// Build an offline diagnosis report from `.ralph/diagnostics/<session>/` (U7)
+    Diagnose(commands::diagnose::DiagnoseArgs),
 }
 
 /// Returns true if the given command is eligible for diagnostics session creation.
@@ -383,6 +386,7 @@ async fn main() -> Result<()> {
             .await
         }
         Some(Commands::Completions(args)) => commands::completions::completions_command(args),
+        Some(Commands::Diagnose(args)) => commands::diagnose::diagnose_command(cli.color, args),
         None => {
             let args = commands::run::RunArgs {
                 prompt_text: None,

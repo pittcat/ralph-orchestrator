@@ -33,6 +33,7 @@
 
 mod envelope;
 mod journal;
+mod reporter;
 mod responder;
 
 #[cfg(test)]
@@ -43,6 +44,10 @@ pub use envelope::{
     RecoveryDiagnosisEnvelope, RecoveryDiagnosisEnvelopeBuilder,
 };
 pub use journal::{DriftJournalEntry, DriftMetric, RecoveryJournalEntry};
+pub use reporter::{
+    DIAGNOSE_JSON_SCHEMA_VERSION, RankedFinding, Report, ReporterError, SessionData,
+    SessionSelector, build_report, load_session, render_json, render_markdown, resolve_session,
+};
 pub use responder::{
     EscalationDecision, EscalationLevel, RUNTIME_DIAGNOSIS_ALERT_HEADER, RecoveryAction,
     RecoveryResponder, TerminationHint,
