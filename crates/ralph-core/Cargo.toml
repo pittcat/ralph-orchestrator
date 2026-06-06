@@ -26,6 +26,7 @@ tracing-subscriber.workspace = true
 chrono.workspace = true
 crossterm.workspace = true
 regex.workspace = true
+uuid.workspace = true
 keyring.workspace = true
 reqwest.workspace = true
 

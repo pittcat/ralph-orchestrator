@@ -13,6 +13,7 @@
 #[cfg(feature = "recording")]
 mod cli_capture;
 mod config;
+pub mod diagnosis;
 pub mod diagnostics;
 mod event_logger;
 mod event_loop;
@@ -82,6 +83,11 @@ pub use config::{
     WarmupConfig,
 };
 // Re-export loop_name types (also available via FeaturesConfig.loop_naming)
+pub use diagnosis::{
+    DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, DriftJournalEntry, DriftMetric,
+    EvidenceKind, EvidenceRef, RecoveryDiagnosisEnvelope, RecoveryDiagnosisEnvelopeBuilder,
+    RecoveryJournalEntry,
+};
 pub use diagnostics::{DiagnosticsCollector, DiagnosticsOptions};
 pub use event_logger::{EventHistory, EventLogger, EventRecord};
 pub use event_loop::{

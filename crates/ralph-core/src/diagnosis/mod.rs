@@ -1,0 +1,41 @@
+//! Runtime diagnosis data model.
+//!
+//! Defines the shared [`RecoveryDiagnosisEnvelope`] and journal record types
+//! that every recovery / drift / report path funnels into. U3 onwards will
+//! serialize these types to `.ralph/diagnostics/<session>/recovery.jsonl`
+//! and `drift.jsonl`; U7's `ralph diagnose` will read them back to produce
+//! operator-facing reports.
+//!
+//! # Stability rules
+//!
+//! - The JSON field names produced by these types are part of the public
+//!   contract — renaming or repurposing them is a breaking change for
+//!   downstream `ralph diagnose` consumers.
+//! - All fields are forward-compatible: every optional field carries
+//!   `#[serde(default)]`, so older readers can deserialize newer envelopes
+//!   without crashing.
+//! - The types in this module are pure data. They MUST NOT depend on
+//!   `EventBus`, `HatRegistry`, or other runtime types.
+//!
+//! # Layers
+//!
+//! - [`envelope`]: `RecoveryDiagnosisEnvelope`, `DiagnosisSource`,
+//!   `DiagnosisSeverity`, `DiagnosisOutcome`, `EvidenceRef`, and the
+//!   builder.
+//! - [`journal`]: `RecoveryJournalEntry` and `DriftJournalEntry` JSONL
+//!   record types.
+//!
+//! See the 2026-06-04 "Runtime Diagnosis & Recovery Intelligence" plan
+//! for context.
+
+mod envelope;
+mod journal;
+
+#[cfg(test)]
+mod tests;
+
+pub use envelope::{
+    DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, EvidenceKind, EvidenceRef,
+    RecoveryDiagnosisEnvelope, RecoveryDiagnosisEnvelopeBuilder,
+};
+pub use journal::{DriftJournalEntry, DriftMetric, RecoveryJournalEntry};
