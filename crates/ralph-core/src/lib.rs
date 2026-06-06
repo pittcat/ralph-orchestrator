@@ -46,6 +46,7 @@ pub mod payload_contract;
 pub mod planning_session;
 pub mod preflight;
 pub mod preset_validator;
+pub mod runtime_contract;
 #[cfg(feature = "recording")]
 mod session_player;
 #[cfg(feature = "recording")]
@@ -142,6 +143,11 @@ pub use preflight::{
 };
 pub use preset_validator::{
     TopologyError, TopologyErrorKind, TopologyValidationResult, validate_preset_topology,
+};
+pub use runtime_contract::{
+    FindingSeverity, FindingSource, FindingStage, LOOP_RUNNER_INTERNAL_TOPICS,
+    RuntimeContractAggregator, RuntimeContractFinding, RuntimeContractReport,
+    RuntimeContractStrictness, detect_orphan_topics,
 };
 #[cfg(feature = "recording")]
 pub use session_player::{PlayerConfig, ReplayMode, SessionPlayer, TimestampedRecord};

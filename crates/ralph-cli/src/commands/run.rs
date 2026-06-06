@@ -1265,7 +1265,7 @@ pub(crate) fn default_run_args() -> RunArgs {
 mod tests {
     use super::*;
     use crate::test_support::CwdGuard;
-    use ralph_core::{HookMutationConfig, HookOnError, HookPhaseEvent, HookSpec};
+    use ralph_core::{HatConfig, HookMutationConfig, HookOnError, HookPhaseEvent, HookSpec};
 
     #[test]
     fn test_required_restart_command_matches_contract() {
@@ -1451,6 +1451,194 @@ mod tests {
             .expect_err("expected preflight failure in run mode");
 
         assert!(err.to_string().contains("Preflight checks failed"));
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // U0 characterization tests: lock in existing preflight gating behavior
+    // so the U1/U2 shared contract layer cannot silently change semantics.
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// 30s wall-clock guard for U0 async preflight tests. U0 tests are
+    /// pure (no network, no I/O beyond `tempdir`), but if a future refactor
+    /// pulls in a network call (e.g. `git fetch` for topology) or a
+    /// blocking `Command::output()` on a hung child, the test could hang
+    /// the entire `cargo test` invocation. Tokio's default test runtime
+    /// has no per-test timeout (and `.config/nextest.toml` has no
+    /// `default-timeout` key), so wrap the future explicitly.
+    async fn u0_timeout<F, T>(fut: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        match tokio::time::timeout(std::time::Duration::from_secs(30), fut).await {
+            Ok(value) => value,
+            Err(_) => {
+                panic!("U0 preflight test exceeded 30s timeout (likely a blocking syscall hung)")
+            }
+        }
+    }
+
+    /// U0 characterization: the default `RalphConfig` has
+    /// `features.preflight.enabled = false`. `run_auto_preflight()` must
+    /// return `Ok(None)` and never invoke the preflight runner. This is the
+    /// default `ralph run` behavior and must not regress.
+    #[tokio::test]
+    async fn u0_auto_preflight_disabled_returns_none() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = RalphConfig::default();
+        config.core.workspace_root = temp_dir.path().to_path_buf();
+        // Default: enabled = false. No skip list, no strict, no override.
+        assert!(
+            !config.features.preflight.enabled,
+            "default config must have preflight disabled"
+        );
+
+        let result = u0_timeout(run_auto_preflight(
+            &config,
+            false,
+            false,
+            AutoPreflightMode::DryRun,
+        ))
+        .await
+        .expect("run_auto_preflight should not error when preflight is disabled");
+
+        assert!(
+            result.is_none(),
+            "preflight disabled must short-circuit to None (no report, no checks); \
+             got: {:?}",
+            result
+        );
+
+        // Same for Run mode: no error, no report, no checks.
+        let run_result = u0_timeout(run_auto_preflight(
+            &config,
+            false,
+            false,
+            AutoPreflightMode::Run,
+        ))
+        .await
+        .expect("run_auto_preflight Run mode should not error when preflight is disabled");
+        assert!(
+            run_result.is_none(),
+            "preflight disabled in Run mode must short-circuit to None; got: {:?}",
+            run_result
+        );
+    }
+
+    /// U0 characterization: `skip_preflight=true` (the `--skip-preflight` flag)
+    /// must override `features.preflight.enabled = true` and return `None`
+    /// without running any checks. This is the documented escape hatch.
+    ///
+    /// **Ordering invariant**: the short-circuit guard at `run_auto_preflight`
+    /// (line 215: `if skip_preflight || !config.features.preflight.enabled { return Ok(None) }`)
+    /// MUST execute before `PreflightRunner::default_checks_with_config(config)`
+    /// construction (line 219) and `runner.run_all/config` (line 222). This test
+    /// deliberately uses a non-resolvable backend (`definitely-missing-12345`) to
+    /// prove the short-circuit fires before any check would have a chance to fail
+    /// on the missing backend. If a future refactor moves the short-circuit
+    /// below the runner construction, this test's failure mode becomes
+    /// "backend missing" — still red, but no longer interpretable as
+    /// 'short-circuit ordering broke'. The test name and doc pin that
+    /// ordering so the failure mode stays meaningful.
+    #[tokio::test]
+    async fn u0_skip_preflight_short_circuits_before_backend_check() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = RalphConfig::default();
+        config.core.workspace_root = temp_dir.path().to_path_buf();
+        config.features.preflight.enabled = true;
+        // Backend missing would fail if preflight actually ran.
+        config.cli.backend = "custom".to_string();
+        config.cli.command = Some("definitely-missing-12345".to_string());
+
+        // skip_preflight=true must short-circuit.
+        let result = u0_timeout(run_auto_preflight(
+            &config,
+            true,
+            false,
+            AutoPreflightMode::DryRun,
+        ))
+        .await
+        .expect("skip_preflight=true should not error");
+        assert!(
+            result.is_none(),
+            "skip_preflight=true must short-circuit; got: {:?}",
+            result
+        );
+
+        let run_result = u0_timeout(run_auto_preflight(
+            &config,
+            true,
+            false,
+            AutoPreflightMode::Run,
+        ))
+        .await
+        .expect("skip_preflight=true in Run mode should not error");
+        assert!(
+            run_result.is_none(),
+            "skip_preflight=true in Run mode must short-circuit; got: {:?}",
+            run_result
+        );
+    }
+
+    /// U0 characterization: when `features.preflight.enabled = true`, the
+    /// env-dependent checks are skipped, and the topology is valid,
+    /// `run_auto_preflight()` must return a passing report. This locks in
+    /// the "valid preset → preflight passes" semantic for the G0 gate.
+    #[tokio::test]
+    async fn u0_auto_preflight_enabled_with_valid_topology_passes() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = RalphConfig::default();
+        config.core.workspace_root = temp_dir.path().to_path_buf();
+        config.features.preflight.enabled = true;
+        // Skip env-only checks (git, tools) so we are left with config
+        // semantic + topology + hooks checks.
+        config.features.preflight.skip = vec!["git".to_string(), "tools".to_string()];
+        // Configure a valid linear topology so preset-topology passes.
+        config.event_loop.starting_event = Some("work.start".to_string());
+        config.event_loop.completion_promise = "LOOP_COMPLETE".to_string();
+        config.hats.insert(
+            "executor".to_string(),
+            HatConfig {
+                name: "Executor".to_string(),
+                description: Some("Execute the task.".to_string()),
+                triggers: vec!["work.start".to_string()],
+                publishes: vec!["work.done".to_string()],
+                ..Default::default()
+            },
+        );
+        config.hats.insert(
+            "reporter".to_string(),
+            HatConfig {
+                name: "Reporter".to_string(),
+                description: Some("Report the result.".to_string()),
+                triggers: vec!["work.done".to_string()],
+                publishes: vec!["LOOP_COMPLETE".to_string()],
+                ..Default::default()
+            },
+        );
+
+        // Provide a resolvable backend so the backend check is satisfied.
+        let backend_cmd = temp_dir.path().join("backend-ok");
+        std::fs::write(&backend_cmd, "ok").unwrap();
+        config.cli.backend = "custom".to_string();
+        config.cli.command = Some(backend_cmd.to_string_lossy().to_string());
+
+        let report = u0_timeout(run_auto_preflight(
+            &config,
+            false,
+            false,
+            AutoPreflightMode::DryRun,
+        ))
+        .await
+        .expect("preflight should not error")
+        .expect("preflight enabled must return a report");
+
+        assert!(
+            report.passed,
+            "valid topology + skipped env checks must produce a passing report; \
+             failures={} warnings={} checks={:?}",
+            report.failures, report.warnings, report.checks
+        );
+        assert_eq!(report.failures, 0, "no check should fail in this scenario");
     }
 
     #[test]

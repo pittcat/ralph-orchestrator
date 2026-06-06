@@ -15,6 +15,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use indicatif::{ProgressBar, ProgressStyle};
 use ralph_adapters::{CliBackend, detect_backend_default};
 use ralph_core::preset_validator;
+use ralph_core::runtime_contract::LOOP_RUNNER_INTERNAL_TOPICS;
 use ralph_core::{HatRegistry, RalphConfig, truncate_with_ellipsis};
 use std::collections::HashSet;
 use std::io::Write;
@@ -80,30 +81,6 @@ pub struct ShowArgs {
     /// Name of the hat to show (ID or display name)
     pub name: String,
 }
-
-/// Topics consumed by the event loop runner itself (not by any hat).
-///
-/// These are hat-publishable topics whose consumers live in
-/// `crates/ralph-core/src/event_loop/`, not in the hat graph. The
-/// orphan-event check in `validate_hats` must skip them, otherwise it
-/// produces false-positive warnings like "Event 'build.blocked' has no
-/// hat subscribers" when in reality the loop runner is tracking the
-/// event for thrashing detection.
-///
-/// **Adding to this list**: only add a topic if you have verified (by
-/// reading the consuming code in `event_loop/mod.rs`) that the loop
-/// runner subscribes to it without any hat subscription. This list is
-/// intentionally narrow — every other orphan warning is real and
-/// indicates a typo, a missing hat, or a stale `publishes` list.
-const LOOP_RUNNER_INTERNAL_TOPICS: &[&str] = &[
-    // `build.blocked` triggers thrashing detection in
-    // `event_loop::EventLoop::process_events` (around the comment
-    // "Track build.blocked events for thrashing detection"). After 3
-    // consecutive blocked events on the same task, the loop runner
-    // synthesizes `build.task.abandoned` and abandons the task. The
-    // Builder hat is the typical publisher; no hat needs to subscribe.
-    "build.blocked",
-];
 
 /// Execute a hats command.
 pub async fn execute(
