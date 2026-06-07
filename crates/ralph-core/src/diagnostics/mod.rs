@@ -40,7 +40,9 @@ pub use drift::{DriftLogger, MAX_DRIFT_MESSAGE_CHARS};
 pub use errors::{DiagnosticError, ErrorLogger};
 pub use hook_runs::{HookDisposition, HookRunLogger, HookRunTelemetryEntry};
 pub use log_rotation::{create_log_file, rotate_logs};
-pub use orchestration::{OrchestrationEntry, OrchestrationEvent, OrchestrationLogger};
+pub use orchestration::{
+    OrchestrationContext, OrchestrationEntry, OrchestrationEvent, OrchestrationLogger,
+};
 pub use performance::{PerformanceLogger, PerformanceMetric};
 pub use recovery::{MAX_RECOVERY_NOTE_CHARS, RecoveryLogger};
 pub use stream_handler::DiagnosticStreamHandler;

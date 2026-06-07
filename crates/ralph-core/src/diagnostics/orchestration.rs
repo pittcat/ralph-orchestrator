@@ -11,6 +11,30 @@ pub struct OrchestrationEntry {
     pub iteration: u32,
     pub hat: String,
     pub event: OrchestrationEvent,
+    /// Stable loop id (R5: lets operators distinguish primary from worktree
+    /// loops in the timeline). Set by the runner via `OrchestrationLogger::log_with_context`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_id: Option<String>,
+    /// Absolute path of the workspace this entry was recorded in. Together
+    /// with `loop_id` this is the canonical anchor for cross-worktree
+    /// forensics (R5: cross-workspace task stores must not interleave).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    /// Business/display hat — the hat the event was attributed to by the
+    /// Coordinator-mode `display_hat` resolution. May differ from `hat`
+    /// (the executor hat, typically `ralph`) when outputs are remapped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub business_hat: Option<String>,
+    /// Executor hat that physically produced the output. In Coordinator
+    /// mode this is usually `ralph`, but the entry's primary `hat` field
+    /// stays as the business attribution for index stability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executor_hat: Option<String>,
+    /// Task id from the event payload, when present. Used by the loop
+    /// isolation test (R5: the same task_id may exist in two worktrees;
+    /// the workspace + loop_id prefix disambiguates them).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,12 +195,60 @@ impl OrchestrationLogger {
             iteration,
             hat: hat.to_string(),
             event,
+            loop_id: None,
+            workspace: None,
+            business_hat: None,
+            executor_hat: None,
+            task_id: None,
         };
         serde_json::to_writer(&mut self.writer, &entry)?;
         self.writer.write_all(b"\n")?;
         self.writer.flush()?;
         Ok(())
     }
+
+    /// Variant of `log` that records loop/workspace/business hat attribution
+    /// alongside the iteration.  Used by the runner when a Coordinator-mode
+    /// `display_hat` is in play, or when entries are emitted from a known
+    /// loop scope (R5: the timeline must carry enough metadata to point an
+    /// operator at the right workspace + loop + business hat + task).
+    pub fn log_with_context(
+        &mut self,
+        iteration: u32,
+        hat: &str,
+        event: OrchestrationEvent,
+        ctx: &OrchestrationContext<'_>,
+    ) -> std::io::Result<()> {
+        let entry = OrchestrationEntry {
+            timestamp: chrono::Local::now().to_rfc3339(),
+            iteration,
+            hat: hat.to_string(),
+            event,
+            loop_id: ctx.loop_id.map(str::to_string),
+            workspace: ctx.workspace.map(str::to_string),
+            business_hat: ctx.business_hat.map(str::to_string),
+            executor_hat: ctx.executor_hat.map(str::to_string),
+            task_id: ctx.task_id.map(str::to_string),
+        };
+        serde_json::to_writer(&mut self.writer, &entry)?;
+        self.writer.write_all(b"\n")?;
+        self.writer.flush()?;
+        Ok(())
+    }
+}
+
+/// Optional context carried by an orchestration entry.  Every field is
+/// optional so existing callers (which only know iteration + hat) can keep
+/// using `OrchestrationLogger::log`.  Runners that emit diagnostics in
+/// Coordinator mode should prefer `log_with_context` and pass at minimum
+/// the business hat so forensics don't have to re-derive it from the bus.
+#[derive(Debug, Clone, Default)]
+pub struct OrchestrationContext<'a> {
+    pub loop_id: Option<&'a str>,
+    pub workspace: Option<&'a str>,
+    pub business_hat: Option<&'a str>,
+    pub executor_hat: Option<&'a str>,
+    pub task_id: Option<&'a str>,
 }
 
 #[cfg(test)]
@@ -304,6 +376,88 @@ mod tests {
     }
 
     #[test]
+    fn test_log_with_context_records_loop_workspace_business_hat() {
+        // R5: when a Coordinator-mode runner writes a recovery diagnosis, the
+        // entry must carry loop_id / workspace / business_hat / executor_hat
+        // / task_id so a postmortem can point to the exact run, not just
+        // the exact hat.
+        let temp_dir = TempDir::new().unwrap();
+        let mut logger = OrchestrationLogger::new(temp_dir.path()).unwrap();
+
+        let ctx = OrchestrationContext {
+            loop_id: Some("primary-20260606-002000"),
+            workspace: Some("/worktrees/sleek-sparrow"),
+            business_hat: Some("executor"),
+            executor_hat: Some("ralph"),
+            task_id: Some("task-anon-001"),
+        };
+        logger
+            .log_with_context(
+                3,
+                "executor",
+                OrchestrationEvent::ExecutionContractRejected {
+                    topic: "work.done".into(),
+                    violation_kind: "MissingPayloadField".into(),
+                    message: "missing plan_path".into(),
+                },
+                &ctx,
+            )
+            .unwrap();
+
+        drop(logger);
+
+        let file = File::open(temp_dir.path().join("orchestration.jsonl")).unwrap();
+        let reader = BufReader::new(file);
+        let line = reader.lines().next().unwrap().unwrap();
+        let entry: OrchestrationEntry = serde_json::from_str(&line).unwrap();
+
+        assert_eq!(entry.iteration, 3);
+        assert_eq!(entry.hat, "executor");
+        assert_eq!(entry.loop_id.as_deref(), Some("primary-20260606-002000"));
+        assert_eq!(
+            entry.workspace.as_deref(),
+            Some("/worktrees/sleek-sparrow")
+        );
+        assert_eq!(entry.business_hat.as_deref(), Some("executor"));
+        assert_eq!(entry.executor_hat.as_deref(), Some("ralph"));
+        assert_eq!(entry.task_id.as_deref(), Some("task-anon-001"));
+    }
+
+    #[test]
+    fn test_log_with_context_omits_unset_fields_in_json() {
+        // Backwards compat: callers that pass only some context fields
+        // must produce a JSON line that omits the unset keys (so old
+        // tooling that parses the file isn't confused by nulls).
+        let temp_dir = TempDir::new().unwrap();
+        let mut logger = OrchestrationLogger::new(temp_dir.path()).unwrap();
+
+        let ctx = OrchestrationContext {
+            loop_id: Some("loop-x"),
+            workspace: None,
+            business_hat: None,
+            executor_hat: None,
+            task_id: None,
+        };
+        logger
+            .log_with_context(
+                0,
+                "ralph",
+                OrchestrationEvent::IterationStarted,
+                &ctx,
+            )
+            .unwrap();
+        drop(logger);
+
+        let raw = std::fs::read(temp_dir.path().join("orchestration.jsonl")).unwrap();
+        let line = std::str::from_utf8(&raw).unwrap();
+        assert!(line.contains("\"loop_id\":\"loop-x\""));
+        assert!(!line.contains("\"workspace\""));
+        assert!(!line.contains("\"business_hat\""));
+        assert!(!line.contains("\"executor_hat\""));
+        assert!(!line.contains("\"task_id\""));
+    }
+
+    #[test]
     fn test_u3_event_variants_serialize_roundtrip() {
         // The new U3 variants must round-trip through serde so the
         // audit timeline written by orchestration.jsonl can be
@@ -369,6 +523,11 @@ mod tests {
             iteration: 4,
             hat: "builder".to_string(),
             event,
+            loop_id: None,
+            workspace: None,
+            business_hat: None,
+            executor_hat: None,
+            task_id: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
