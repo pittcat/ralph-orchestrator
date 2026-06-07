@@ -501,6 +501,8 @@ mod tests {
             consecutive_completion_rejections: 0,
             last_rejection_fingerprint: 0,
             loop_start_sha: None,
+            rejection_retry_counts: std::collections::HashMap::new(),
+            rejection_last_iteration: std::collections::HashMap::new(),
         }
     }
 

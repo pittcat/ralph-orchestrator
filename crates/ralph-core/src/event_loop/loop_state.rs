@@ -9,6 +9,13 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::{Duration, Instant};
 
+/// Maximum number of times the same rejection key may be retried
+/// before the runner stops attempting targeted `task.resume` and
+/// escalates to a fail-closed terminal reason.  Chosen to match
+/// the historical `consecutive_hard_gates` ceiling so operators see
+/// a single, consistent retry budget across failure modes.
+pub const U2_REJECTION_RETRY_LIMIT: u32 = 3;
+
 /// Fingerprint of the last emitted event for stale loop detection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventSignature {
@@ -102,6 +109,20 @@ pub struct LoopState {
     /// The last event signature emitted (for stale loop detection).
     pub last_emitted_signature: Option<EventSignature>,
 
+    /// Per-rejection-key retry counts (2026-06-07 plan U2).  The key is
+    /// the stable string returned by `Rejection::compute_retry_key`
+    /// (`stage:source_hat:topic:violation_class`).  Increments each
+    /// time the runner sees the same key in a fresh batch.  When a
+    /// key crosses `U2_REJECTION_RETRY_LIMIT` the next attempt
+    /// emits a fail-closed `NonRetryableReason::RetryBudgetExhausted`
+    /// so the runner can terminate or escalate.
+    pub rejection_retry_counts: HashMap<String, u32>,
+
+    /// Iteration at which each rejection key was last seen, used by
+    /// the recovery responder (U6) to de-duplicate recovery envelopes
+    /// written for the same key across adjacent iterations.
+    pub rejection_last_iteration: HashMap<String, u32>,
+
     /// Consecutive times the same event signature was emitted (for stale loop detection).
     pub consecutive_same_signature: u32,
 
@@ -181,6 +202,8 @@ impl Default for LoopState {
             consecutive_completion_rejections: 0,
             last_rejection_fingerprint: 0,
             loop_start_sha: None,
+            rejection_retry_counts: HashMap::new(),
+            rejection_last_iteration: HashMap::new(),
         }
     }
 }
@@ -321,6 +344,30 @@ impl LoopState {
         self.started_at.elapsed()
     }
 
+    /// Increment the per-rejection-key retry counter and return the
+    /// post-increment value.  When the result exceeds
+    /// [`U2_REJECTION_RETRY_LIMIT`] the caller must mark the rejection
+    /// as fail-closed (R2: bounded retry to prevent infinite loops).
+    pub fn record_rejection_key(&mut self, key: &str) -> u32 {
+        let entry = self.rejection_retry_counts.entry(key.to_string()).or_insert(0);
+        *entry = entry.saturating_add(1);
+        *entry
+    }
+
+    /// Current count of retries observed for a given rejection key.
+    /// Returns 0 when the key has never been recorded.
+    pub fn rejection_retry_count(&self, key: &str) -> u32 {
+        self.rejection_retry_counts.get(key).copied().unwrap_or(0)
+    }
+
+    /// Returns `true` if a rejection key has crossed the bounded-retry
+    /// threshold.  Used by the runner to decide between
+    /// `task.resume` (retryable) and `TerminationReason::Recovered`
+    /// (fail-closed escalation).
+    pub fn rejection_key_is_exhausted(&self, key: &str) -> bool {
+        self.rejection_retry_count(key) >= U2_REJECTION_RETRY_LIMIT
+    }
+
     fn event_counts_toward_stale_loop(event: &Event) -> bool {
         !matches!(event.topic.as_str(), "task.complete")
     }
@@ -452,7 +499,7 @@ fn fingerprint_payload(payload: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{LoopState, WorkflowProgress};
+    use super::{LoopState, U2_REJECTION_RETRY_LIMIT, WorkflowProgress};
     use ralph_proto::Event;
 
     #[test]
@@ -663,5 +710,51 @@ mod tests {
         assert!(progress.is_phase_valid(chain, instance, 2)); // idempotent re-emit
         assert!(progress.is_phase_valid(chain, instance, 3)); // next
         assert!(!progress.is_phase_valid(chain, instance, 4)); // skip
+    }
+
+    #[test]
+    fn u2_rejection_retry_counter_increments_and_saturates() {
+        // 2026-06-07 plan U2: per-key retry counter must increment
+        // monotonically and surface exhaustion at the configured limit.
+        let mut state = LoopState::new();
+        let key = "execution_contract:executor:work.done:missing_field";
+
+        assert_eq!(state.rejection_retry_count(key), 0);
+        assert!(!state.rejection_key_is_exhausted(key));
+
+        for i in 1..=U2_REJECTION_RETRY_LIMIT {
+            let n = state.record_rejection_key(key);
+            assert_eq!(n, i, "post-increment count must match attempt {i}");
+        }
+        assert!(state.rejection_key_is_exhausted(key));
+
+        // One more attempt is still allowed to increment (saturating) —
+        // the runner is the one that reads `is_exhausted` and stops
+        // publishing `task.resume`.  We must not panic on overflow.
+        let n = state.record_rejection_key(key);
+        assert_eq!(n, U2_REJECTION_RETRY_LIMIT + 1);
+        assert!(state.rejection_key_is_exhausted(key));
+    }
+
+    #[test]
+    fn u2_rejection_retry_keys_are_independent() {
+        // Two distinct rejection keys must not share counts.
+        let mut state = LoopState::new();
+        let k1 = "execution_contract:executor:work.done:missing_field";
+        let k2 = "execution_contract:executor:work.done:type_mismatch";
+        state.record_rejection_key(k1);
+        state.record_rejection_key(k1);
+        state.record_rejection_key(k2);
+        assert_eq!(state.rejection_retry_count(k1), 2);
+        assert_eq!(state.rejection_retry_count(k2), 1);
+        assert!(!state.rejection_key_is_exhausted(k1));
+        assert!(!state.rejection_key_is_exhausted(k2));
+    }
+
+    #[test]
+    fn u2_rejection_retry_counter_starts_at_zero_for_unknown_key() {
+        let state = LoopState::new();
+        assert_eq!(state.rejection_retry_count("nonexistent"), 0);
+        assert!(!state.rejection_key_is_exhausted("nonexistent"));
     }
 }

@@ -20,7 +20,10 @@
 //! (`crates/ralph-core/tests/scenarios/ce_executor_recovery.yml`).
 
 use ralph_core::event_origin::{OriginCheck, validate_event_origin};
-use ralph_core::{Event as JsonlEvent, HatRegistry, RalphConfig};
+use ralph_core::{
+    Event as JsonlEvent, HatRegistry, NonRetryableReason, RalphConfig, Rejection,
+    RejectionStage, build_task_resume_payload, rejection_from_origin,
+};
 use std::path::PathBuf;
 
 /// Returns the path to the recovery fixture shipped with `ralph-core`.
@@ -277,4 +280,100 @@ fn task_keys_in_fixture_are_loop_scoped() {
         keys.len() >= 2,
         "fixture must carry ≥2 distinct task_keys to exercise loop isolation; got {keys:?}"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 2026-06-07 plan Unit 2: unified rejection classification + targeted retry
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn u2_origin_rejection_from_fixture_classifies_as_non_retryable() {
+    // The fixture's `review-coordinator work.done` event is rejected
+    // by the origin guard with the "out-of-scope topic for declared
+    // hat" reason.  The new `Rejection::from_origin` wrapper must
+    // classify that as non-retryable (R1: do not auto-relax publishes).
+    let events = load_recovery_events();
+    let registry = ce_executor_registry();
+
+    let rogue = events
+        .iter()
+        .find(|e| e.topic == "work.done" && e.hat.as_deref() == Some("review-coordinator"))
+        .expect("fixture must include a review-coordinator work.done");
+
+    let check = validate_event_origin(rogue, &registry, "loop.cancel", "LOOP_COMPLETE");
+    let rejection = rejection_from_origin(&check, rogue.hat.clone())
+        .expect("rejected event must produce a Rejection");
+
+    assert_eq!(rejection.stage, RejectionStage::Origin);
+    assert_eq!(rejection.topic, "work.done");
+    assert_eq!(rejection.source_hat.as_deref(), Some("review-coordinator"));
+    assert!(!rejection.retry_eligible, "out-of-scope must be fail-closed");
+    assert_eq!(rejection.non_retryable_reason, Some(NonRetryableReason::OutOfScope));
+    assert_eq!(rejection.target_hat, None, "no target → no task.resume");
+    assert!(!rejection.should_publish_resume());
+
+    // The retry key must remain stable across two such rejections so
+    // the runner can count them and surface exhaustion at the budget.
+    let again = rejection_from_origin(&check, rogue.hat.clone()).unwrap();
+    assert_eq!(rejection.retry_key, again.retry_key);
+    assert!(rejection.retry_key.starts_with("origin:review-coordinator:work.done:"));
+}
+
+#[test]
+fn u2_executor_missing_field_rejection_classifies_as_retryable() {
+    // The fixture's `ralph work.done` event with missing `plan_path`
+    // is rejected by the execution contract layer, not the origin
+    // guard (origin accepts ralph's built-in publish scope).  Wrapping
+    // the finding as a Rejection must mark it retryable with a
+    // target_hat = "ralph" — that's the path U2's targeted retry takes.
+    let events = load_recovery_events();
+    let ralph_fallback = events
+        .iter()
+        .find(|e| e.topic == "work.done" && e.hat.as_deref() == Some("ralph"))
+        .expect("fixture must include a ralph work.done");
+
+    // Mimic the layer that produces ExecutionContractFinding from
+    // the missing plan_path payload.  Real production code wraps
+    // the finding in `Rejection::from_execution_contract`.
+    let finding = ralph_core::execution_contract::ExecutionContractFinding {
+        kind: ralph_core::execution_contract::ExecutionContractViolationKind::MissingPayloadField {
+            field: "plan_path".into(),
+        },
+        message: "missing plan_path".into(),
+        topic: "work.done".into(),
+    };
+    let rejection = Rejection::from_execution_contract(
+        &finding,
+        ralph_fallback.hat.clone(),
+        ralph_fallback.hat.clone(),
+    );
+
+    assert_eq!(rejection.stage, RejectionStage::ExecutionContract);
+    assert_eq!(rejection.topic, "work.done");
+    assert_eq!(rejection.source_hat.as_deref(), Some("ralph"));
+    assert!(rejection.retry_eligible);
+    assert_eq!(rejection.target_hat.as_deref(), Some("ralph"));
+    assert!(rejection.should_publish_resume());
+    assert!(rejection.retry_key.contains("execution_contract:ralph:work.done:missing_field"));
+
+    // The task.resume payload must carry the violation + allowed
+    // topics + original trigger context so the resumed hat can
+    // self-correct without guessing.
+    let payload_str = build_task_resume_payload(
+        &rejection,
+        &["work.done".into()],
+        &["plan_path".into()],
+        Some("work.ready"),
+        ralph_fallback.payload.as_deref(),
+    );
+    let v: serde_json::Value = serde_json::from_str(&payload_str).unwrap();
+    assert_eq!(v["stage"], "execution_contract");
+    assert_eq!(v["topic"], "work.done");
+    assert_eq!(v["allowed_topics"][0], "work.done");
+    assert_eq!(v["required_fields"][0], "plan_path");
+    assert_eq!(v["original_trigger_topic"], "work.ready");
+    assert!(v["retry_key"]
+        .as_str()
+        .unwrap()
+        .contains("execution_contract:ralph:work.done:missing_field"));
 }

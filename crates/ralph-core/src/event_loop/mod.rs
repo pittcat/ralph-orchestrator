@@ -3,10 +3,19 @@
 //! The event loop coordinates the execution of hats via pub/sub messaging.
 
 mod loop_state;
+pub mod rejection;
 #[cfg(test)]
 mod tests;
 
 pub use loop_state::{LoopState, WorkflowProgress};
+// Items are also re-exported from `crate::*` via `lib.rs`. The lib-side
+// re-export keeps the public API stable; the `pub use` here is a
+// convenience path for in-crate consumers (the runner).
+#[allow(unused_imports)]
+pub use rejection::{
+    NonRetryableReason, Rejection, RejectionStage, build_task_resume_payload,
+    rejection_from_origin, resolve_target_hat,
+};
 
 use crate::config::{HatBackend, HatExecutionMode, InjectMode, RalphConfig, ScratchpadConfig};
 use crate::diagnosis::{

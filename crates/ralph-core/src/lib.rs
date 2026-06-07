@@ -97,6 +97,10 @@ pub use drift::{
 pub use event_logger::{EventHistory, EventLogger, EventRecord};
 pub use event_loop::{
     EventLoop, LoopState, ProcessedEvents, ProcessedEventsWithWaves, TerminationReason, UserPrompt,
+    rejection::{
+        NonRetryableReason, Rejection, RejectionStage, build_task_resume_payload,
+        rejection_from_origin, resolve_target_hat,
+    },
 };
 pub use event_origin::{
     HumanInteractValidation, TRUSTED_HUMAN_RESPONSE_SOURCE, is_trusted_human_response,
