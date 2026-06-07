@@ -1,4 +1,5 @@
 use super::*;
+use crate::diagnostics::DiagnosticsOptions;
 use std::collections::HashMap;
 use std::path::Path;
 use tracing::debug;
@@ -213,6 +214,13 @@ impl RalphConfig {
 
         // Validate RObot config
         self.robot.validate()?;
+
+        // Validate telemetry / runtime-diagnosis config (U1). Soft
+        // warnings (e.g. enabled=false && write_artifacts=true) are
+        // returned through the same channel as other warnings; hard
+        // errors short-circuit validate.
+        let telemetry_warnings = self.telemetry.validate()?;
+        warnings.extend(telemetry_warnings);
 
         // Validate hooks config semantics (v1 guardrails)
         self.validate_hooks()?;
@@ -594,6 +602,24 @@ impl RalphConfig {
             "amp" => &self.adapters.amp,
             _ => &self.adapters.claude, // Default fallback
         }
+    }
+
+    /// Build a [`DiagnosticsOptions`] from this config + the
+    /// `RALPH_DIAGNOSTICS` environment variable.
+    ///
+    /// The returned options drive the activation matrix in
+    /// `crate::diagnostics::DiagnosticsCollector::with_options`. The CLI
+    /// uses this to populate the authoritative collector U0 introduced,
+    /// and U3 will read the same options to know whether to spin up the
+    /// minimal diagnosis loggers (`recovery.jsonl`, `drift.jsonl`,
+    /// `diagnosis-summary.json`).
+    ///
+    /// `workspace` is accepted for forward-compatibility with the
+    /// session-dir-reuse path U3 may introduce. The U1 implementation
+    /// ignores it; `session_dir` is always `None` here.
+    #[must_use]
+    pub fn diagnostics_options(&self, workspace: &Path) -> DiagnosticsOptions {
+        self.telemetry.to_diagnostics_options(workspace)
     }
 
     /// Resolves the effective inactivity watchdog (seconds) for the
@@ -2420,6 +2446,114 @@ hats:
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
         let hat = config.hats.get("simple").unwrap();
         assert!(hat.extra_instructions.is_empty());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // TELEMETRY / RUNTIME-DIAGNOSIS CONFIG TESTS (U1)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// AC: omitting `telemetry:` from `ralph.yml` yields the documented
+    /// no-op defaults. This is the non-regression contract for existing
+    /// preset files.
+    #[test]
+    fn test_telemetry_section_absent_uses_defaults() {
+        let yaml = r"
+agent: claude
+event_loop:
+  completion_promise: DONE
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.telemetry,
+            super::telemetry::TelemetryConfig::default()
+        );
+        assert!(!config.telemetry.runtime_diagnosis.enabled);
+        assert!(!config.telemetry.runtime_diagnosis.write_artifacts);
+    }
+
+    /// AC: `telemetry.runtime_diagnosis.drift.emit_cadence_sigma = -1.0`
+    /// must be rejected by `RalphConfig::validate`.
+    #[test]
+    fn test_telemetry_validate_rejects_negative_emit_cadence_sigma() {
+        let yaml = r"
+telemetry:
+  runtime_diagnosis:
+    drift:
+      emit_cadence_sigma: -1.0
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = config.validate();
+        assert!(
+            result.is_err(),
+            "negative emit_cadence_sigma must fail validate"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::TelemetryValidation { field, .. } if field.contains("emit_cadence_sigma")),
+            "expected TelemetryValidation for emit_cadence_sigma, got {err:?}"
+        );
+    }
+
+    /// AC: a default `telemetry` block must validate cleanly with zero
+    /// errors. Soft warnings (e.g. `enabled=false && write_artifacts=true`)
+    /// are surfaced separately and only when the caller opted in.
+    #[test]
+    fn test_telemetry_validate_default_is_clean() {
+        let config = RalphConfig::default();
+        let warnings = config.validate().expect("default telemetry must validate");
+        // We only assert that no telemetry-derived warnings were emitted.
+        // Other sections (e.g. deferred features) may also be quiet.
+        assert!(
+            !warnings.iter().any(|w| matches!(w,
+                ConfigWarning::InvalidValue { field, .. }
+                if field.starts_with("telemetry.")
+            )),
+            "default telemetry must not emit warnings, got {warnings:?}"
+        );
+    }
+
+    /// AC: `telemetry.runtime_diagnosis.enabled: false` together with
+    /// `write_artifacts: true` must surface a soft `ConfigWarning` from
+    /// `validate` (not an error).
+    #[test]
+    fn test_telemetry_validate_warns_on_disabled_with_write_artifacts() {
+        let yaml = r"
+telemetry:
+  runtime_diagnosis:
+    enabled: false
+    write_artifacts: true
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = config.validate().expect("soft warning must not be Err");
+        assert!(
+            warnings.iter().any(|w| matches!(w,
+                ConfigWarning::InvalidValue { field, .. }
+                if field == "telemetry.runtime_diagnosis.write_artifacts"
+            )),
+            "expected soft warning for write_artifacts, got {warnings:?}"
+        );
+    }
+
+    /// AC: `RalphConfig::diagnostics_options` is a thin bridge to
+    /// `TelemetryConfig::to_diagnostics_options`. We test the *config*
+    /// contract (the inner, env-free path) by reading whatever the
+    /// current `RALPH_DIAGNOSTICS` value is and asserting the bridge
+    /// matches `to_diagnostics_options_with_full` with that value.
+    /// `forbid(unsafe_code)` prevents mutating the env directly.
+    #[test]
+    fn test_diagnostics_options_default_workspace_is_noop() {
+        let config = RalphConfig::default();
+        let opts = config.diagnostics_options(std::path::Path::new("."));
+        let env_value = std::env::var("RALPH_DIAGNOSTICS")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        let inner_opts = config
+            .telemetry
+            .to_diagnostics_options_with_full(std::path::Path::new("."), env_value);
+        assert_eq!(opts, inner_opts);
+
+        // `session_dir` is always None at the U1 boundary.
+        assert!(opts.session_dir.is_none());
     }
 
     // === Per-Hat Scratchpad Configuration Tests ===

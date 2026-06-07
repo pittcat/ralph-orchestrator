@@ -120,4 +120,9 @@ pub enum ConfigError {
         topic: String,
         source: serde_yaml::Error,
     },
+
+    #[error(
+        "Telemetry config validation error at '{field}': {message}\nFix: adjust the value under the 'telemetry' section of ralph.yml."
+    )]
+    TelemetryValidation { field: String, message: String },
 }

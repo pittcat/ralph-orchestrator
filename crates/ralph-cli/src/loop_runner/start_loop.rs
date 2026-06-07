@@ -86,6 +86,7 @@ pub async fn start_loop(
         None,               // no explicit loop ID
         false,              // warmup_only (daemon mode uses normal flow)
         false,              // force_warmup (daemon mode uses normal flow)
+        None,               // U0: no prebuilt diagnostics; EventLoop builds its own
     )
     .await
 }

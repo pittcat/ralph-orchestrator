@@ -22,6 +22,7 @@ mod skills;
 mod state_files;
 pub(crate) mod state_machine;
 mod tasks;
+mod telemetry;
 mod v1_adapters;
 mod warning;
 pub(crate) mod workflow_guards;
@@ -51,6 +52,7 @@ pub use skills::{SkillOverride, SkillsConfig};
 pub use state_files::{StateFileEntry, StateFileFormat, StateFilesConfig};
 pub use state_machine::{BusinessAfterTerminalAction, DuplicateTerminalAction, StateMachineConfig};
 pub use tasks::TasksConfig;
+pub use telemetry::{DriftConfig, MalformedJsonlPolicy, RuntimeDiagnosisConfig, TelemetryConfig};
 pub use v1_adapters::{AdapterSettings, AdaptersConfig};
 pub use warning::ConfigWarning;
 pub use workflow_guards::{
@@ -186,6 +188,12 @@ pub struct RalphConfig {
     #[serde(default)]
     pub features: FeaturesConfig,
 
+    /// Telemetry and runtime-diagnosis configuration (U1 of the 2026-06-04
+    /// Runtime Diagnosis plan). All sub-fields are opt-in: omitting
+    /// `telemetry:` from `ralph.yml` is a no-op.
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
+
     /// RObot (Ralph-Orchestrator bot) configuration for Telegram-based interaction.
     #[serde(default, rename = "RObot")]
     pub robot: RobotConfig,
@@ -238,6 +246,8 @@ impl Default for RalphConfig {
             skills: SkillsConfig::default(),
             // Features
             features: FeaturesConfig::default(),
+            // Telemetry / runtime diagnosis (U1)
+            telemetry: TelemetryConfig::default(),
             // RObot (Ralph-Orchestrator bot)
             robot: RobotConfig::default(),
             // Config file path (set at load time)

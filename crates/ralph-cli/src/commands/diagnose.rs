@@ -1,0 +1,378 @@
+//! `ralph diagnose` — offline report built from session artifacts.
+//!
+//! U7 of the drift-auto-calibration plan. Wraps the pure reporter in
+//! [`ralph_core::diagnosis::reporter`] with clap and stdout discipline:
+//!
+//! - Markdown output goes to stdout (default).
+//! - `--output <PATH>` writes the report to a file and prints only
+//!   the written path (or a short summary line for JSON).
+//! - `--format json` always writes JSON to stdout, never Markdown
+//!   headings.
+//! - Missing session is a non-zero exit with a stderr hint that
+//!   points at `RALPH_DIAGNOSTICS=1 ralph run ...` or the
+//!   `telemetry.runtime_diagnosis.write_artifacts` config.
+
+use crate::cli::ColorMode;
+use crate::display::colors;
+use anyhow::{Context, Result, bail};
+use clap::{Parser, ValueEnum};
+use ralph_core::diagnosis::{
+    Report, ReporterError, SessionSelector, build_report, render_json, render_markdown,
+};
+use std::path::{Path, PathBuf};
+
+/// Arguments for the `ralph diagnose` subcommand.
+#[derive(Parser, Debug)]
+pub struct DiagnoseArgs {
+    /// Session to read from. Accepts:
+    /// - "latest" (default) — pick the most recent timestamped session
+    /// - an absolute path
+    /// - a relative path
+    /// - a timestamped session id relative to `--diagnostics-root`
+    #[arg(long, default_value = "latest", value_name = "SESSION")]
+    pub session: String,
+
+    /// Output format. Markdown (default) is human-readable; JSON is
+    /// the stable CI contract (schema_version="1").
+    #[arg(long, value_enum, default_value_t = DiagnoseFormat::Markdown)]
+    pub format: DiagnoseFormat,
+
+    /// Write the report to this path instead of stdout. When set,
+    /// stdout receives only the written path (Markdown) or a short
+    /// summary line (JSON).
+    #[arg(long, value_name = "PATH")]
+    pub output: Option<PathBuf>,
+
+    /// Path to the diagnostics root. Defaults to
+    /// `<workspace>/.ralph/diagnostics`.
+    #[arg(long, value_name = "PATH")]
+    pub diagnostics_root: Option<PathBuf>,
+}
+
+/// Output format for `ralph diagnose`. Mirrors
+/// [`crate::cli::OutputFormat`] but stays local to keep the
+/// diagnose subcommand self-contained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum DiagnoseFormat {
+    /// Render a Markdown report on stdout (default).
+    Markdown,
+    /// Render a stable JSON document on stdout.
+    Json,
+}
+
+/// Exit codes. Match the spec from the U7 plan: missing session
+/// → non-zero, everything else (including missing partial files)
+/// → zero.
+pub const EXIT_OK: i32 = 0;
+pub const EXIT_NO_SESSION: i32 = 2;
+pub const EXIT_INVALID: i32 = 3;
+pub const EXIT_IO: i32 = 4;
+
+/// Error categories surfaced by `try_diagnose`. The CLI uses these
+/// to compute the right exit code and stderr message; tests use them
+/// to assert the failure mode.
+#[derive(Debug)]
+#[allow(dead_code)]
+pub enum DiagnoseExit {
+    /// The session was rendered (with or without warnings).
+    Ok,
+    /// The diagnostics root is missing or has no sessions.
+    NoSession(PathBuf),
+    /// An explicit session path is invalid.
+    InvalidSession(PathBuf),
+    /// I/O error reading the diagnostics root.
+    Io(PathBuf, std::io::Error),
+}
+
+impl DiagnoseExit {
+    /// Numeric exit code for the public CLI contract.
+    #[must_use]
+    pub fn code(&self) -> i32 {
+        match self {
+            DiagnoseExit::Ok => EXIT_OK,
+            DiagnoseExit::NoSession(_) => EXIT_NO_SESSION,
+            DiagnoseExit::InvalidSession(_) => EXIT_INVALID,
+            DiagnoseExit::Io(_, _) => EXIT_IO,
+        }
+    }
+}
+
+/// Public CLI entry point. Prints to stdout / stderr and exits with
+/// the appropriate code on failure.
+pub fn diagnose_command(color_mode: ColorMode, args: DiagnoseArgs) -> Result<()> {
+    match try_diagnose(color_mode, args) {
+        Ok(()) => Ok(()),
+        Err(exit) => {
+            if exit.code() != EXIT_OK {
+                std::process::exit(exit.code());
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Test-friendly entry point: returns the [`DiagnoseExit`] instead
+/// of calling `std::process::exit`. Used by `diagnose_command` and
+/// by integration / unit tests.
+pub fn try_diagnose(
+    color_mode: ColorMode,
+    args: DiagnoseArgs,
+) -> std::result::Result<(), DiagnoseExit> {
+    let use_colors = color_mode.should_use_colors();
+    validate_args(&args)
+        .map_err(|_| DiagnoseExit::InvalidSession(PathBuf::from("<invalid --output>")))?;
+    let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let diagnostics_root = match args.diagnostics_root.as_ref() {
+        Some(p) => p.clone(),
+        None => workspace_root.join(".ralph").join("diagnostics"),
+    };
+    let selector = if args.session.eq_ignore_ascii_case("latest") || args.session.is_empty() {
+        SessionSelector::Latest
+    } else {
+        SessionSelector::Explicit(args.session.as_str())
+    };
+    let report = match build_report(selector, &diagnostics_root) {
+        Ok(report) => report,
+        Err(ReporterError::NoSession(path)) => {
+            print_no_session_hint(&diagnostics_root, &path, use_colors);
+            return Err(DiagnoseExit::NoSession(path));
+        }
+        Err(ReporterError::InvalidSession(path)) => {
+            print_invalid_session(&path, use_colors);
+            return Err(DiagnoseExit::InvalidSession(path));
+        }
+        Err(ReporterError::Io(path, err)) => {
+            print_io_error(&path, &err, use_colors);
+            return Err(DiagnoseExit::Io(path, err));
+        }
+    };
+    emit_report(&report, &args, use_colors).map_err(|e| {
+        DiagnoseExit::Io(
+            report.session_path.clone(),
+            std::io::Error::other(e.to_string()),
+        )
+    })?;
+    Ok(())
+}
+
+fn emit_report(report: &Report, args: &DiagnoseArgs, use_colors: bool) -> Result<()> {
+    let body = match args.format {
+        DiagnoseFormat::Markdown => render_markdown(report),
+        DiagnoseFormat::Json => {
+            let value = render_json(report);
+            serde_json::to_string_pretty(&value)
+                .context("failed to serialize diagnose report to JSON")?
+        }
+    };
+    if let Some(path) = args.output.as_ref() {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create output directory {}", parent.display())
+            })?;
+        }
+        std::fs::write(path, body.as_bytes())
+            .with_context(|| format!("failed to write report to {}", path.display()))?;
+        let summary = match args.format {
+            DiagnoseFormat::Markdown => format!("wrote markdown report to {}", path.display()),
+            DiagnoseFormat::Json => {
+                format!("wrote json report to {} (schema v1)", path.display())
+            }
+        };
+        if use_colors {
+            println!("{}{}{}", colors::GREEN, summary, colors::RESET);
+        } else {
+            println!("{summary}");
+        }
+    } else {
+        println!("{body}");
+    }
+    Ok(())
+}
+
+fn print_no_session_hint(diagnostics_root: &Path, missing: &Path, use_colors: bool) {
+    if use_colors {
+        eprintln!(
+            "{}error:{} no diagnostics sessions at {}",
+            colors::RED,
+            colors::RESET,
+            diagnostics_root.display()
+        );
+    } else {
+        eprintln!(
+            "error: no diagnostics sessions at {}",
+            diagnostics_root.display()
+        );
+    }
+    eprintln!("(resolved to {})", missing.display());
+    eprintln!(
+        "Hint: re-run with `RALPH_DIAGNOSTICS=1 ralph run ...`,\n\
+         or set `telemetry.runtime_diagnosis.enabled: true` and\n\
+         `telemetry.runtime_diagnosis.write_artifacts: true` in ralph.yml."
+    );
+}
+
+fn print_invalid_session(path: &Path, use_colors: bool) {
+    if use_colors {
+        eprintln!(
+            "{}error:{} session path {} is not a valid diagnostics session directory",
+            colors::RED,
+            colors::RESET,
+            path.display()
+        );
+    } else {
+        eprintln!(
+            "error: session path {} is not a valid diagnostics session directory",
+            path.display()
+        );
+    }
+}
+
+fn print_io_error(path: &Path, err: &std::io::Error, use_colors: bool) {
+    if use_colors {
+        eprintln!(
+            "{}error:{} I/O reading {}: {}",
+            colors::RED,
+            colors::RESET,
+            path.display(),
+            err
+        );
+    } else {
+        eprintln!("error: I/O reading {}: {}", path.display(), err);
+    }
+}
+
+/// Validate that the CLI args are consistent. Empty `--output` is
+/// rejected so users get a clear error instead of a confusing
+/// "failed to write report to " failure.
+pub fn validate_args(args: &DiagnoseArgs) -> Result<()> {
+    if let Some(path) = &args.output
+        && path.as_os_str().is_empty()
+    {
+        bail!("--output must not be empty");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_args(diagnostics_root: &Path) -> DiagnoseArgs {
+        DiagnoseArgs {
+            session: "latest".to_string(),
+            format: DiagnoseFormat::Markdown,
+            output: None,
+            diagnostics_root: Some(diagnostics_root.to_path_buf()),
+        }
+    }
+
+    #[test]
+    fn empty_output_path_is_rejected() {
+        let mut args = DiagnoseArgs {
+            session: "latest".to_string(),
+            format: DiagnoseFormat::Markdown,
+            output: Some(PathBuf::new()),
+            diagnostics_root: None,
+        };
+        assert!(validate_args(&args).is_err());
+        args.output = None;
+        assert!(validate_args(&args).is_ok());
+    }
+
+    #[test]
+    fn try_diagnose_with_missing_root_returns_no_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let args = base_args(&tmp.path().join(".ralph/diagnostics"));
+        let result = try_diagnose(ColorMode::Never, args);
+        match result {
+            Err(DiagnoseExit::NoSession(_)) => {}
+            other => panic!("expected NoSession, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_diagnose_with_session_writes_report() {
+        let tmp = tempfile::tempdir().unwrap();
+        let diag = tmp.path().join(".ralph/diagnostics");
+        let session = diag.join("2026-06-05T10-20-30");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(
+            session.join("recovery.jsonl"),
+            "{\"schema_version\":1,\"envelope\":{\"schema_version\":1,\"diagnosis_id\":\"d1\",\"iteration\":1,\"source\":\"missing_event_gate\",\"severity\":\"error\",\"reason_code\":\"r\",\"message\":\"m\",\"retry_key\":\"k:1:r:*\",\"retry_attempt\":0,\"safe_target\":true,\"outcome\":\"pending\",\"timestamp\":\"2026-06-05T10:20:30Z\"},\"iteration\":1,\"timestamp\":\"2026-06-05T10:20:30Z\"}\n",
+        )
+        .unwrap();
+        let args = base_args(&diag);
+        try_diagnose(ColorMode::Never, args).expect("try_diagnose should succeed");
+    }
+
+    #[test]
+    fn try_diagnose_with_output_writes_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let diag = tmp.path().join(".ralph/diagnostics");
+        let session = diag.join("2026-06-05T10-20-30");
+        std::fs::create_dir_all(&session).unwrap();
+        let out = tmp.path().join("report.md");
+        let args = DiagnoseArgs {
+            session: "latest".to_string(),
+            format: DiagnoseFormat::Markdown,
+            output: Some(out.clone()),
+            diagnostics_root: Some(diag),
+        };
+        try_diagnose(ColorMode::Never, args).expect("try_diagnose should succeed");
+        assert!(out.exists(), "output file should be created");
+        let content = std::fs::read_to_string(&out).unwrap();
+        assert!(content.contains("# Ralph Diagnose Report"));
+    }
+
+    #[test]
+    fn try_diagnose_with_json_format_does_not_emit_markdown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let diag = tmp.path().join(".ralph/diagnostics");
+        let session = diag.join("2026-06-05T10-20-30");
+        std::fs::create_dir_all(&session).unwrap();
+        let out = tmp.path().join("report.json");
+        let args = DiagnoseArgs {
+            session: "latest".to_string(),
+            format: DiagnoseFormat::Json,
+            output: Some(out.clone()),
+            diagnostics_root: Some(diag),
+        };
+        try_diagnose(ColorMode::Never, args).expect("try_diagnose should succeed");
+        let content = std::fs::read_to_string(&out).unwrap();
+        // No markdown headings in the JSON output.
+        assert!(!content.contains("## "));
+        // JSON must carry the schema_version field.
+        let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(value["schema_version"], "1");
+    }
+
+    #[test]
+    fn try_diagnose_with_invalid_session_returns_invalid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let diag = tmp.path().join(".ralph/diagnostics");
+        std::fs::create_dir_all(&diag).unwrap();
+        let args = DiagnoseArgs {
+            session: "definitely-not-a-timestamp".to_string(),
+            format: DiagnoseFormat::Markdown,
+            output: None,
+            diagnostics_root: Some(diag),
+        };
+        let result = try_diagnose(ColorMode::Never, args);
+        assert!(matches!(result, Err(DiagnoseExit::InvalidSession(_))));
+    }
+
+    #[test]
+    fn exit_codes_match_plan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let diag = tmp.path().join(".ralph/diagnostics");
+        // No session under it.
+        std::fs::create_dir_all(&diag).unwrap();
+        let args = base_args(&diag);
+        match try_diagnose(ColorMode::Never, args) {
+            Err(exit) => assert_eq!(exit.code(), EXIT_NO_SESSION),
+            Ok(()) => panic!("expected error"),
+        }
+    }
+}

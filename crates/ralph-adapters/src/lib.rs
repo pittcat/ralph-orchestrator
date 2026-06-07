@@ -34,10 +34,10 @@ mod copilot_stream;
 mod json_rpc_handler;
 mod pi_stream;
 mod pty_executor;
-mod trae_stream;
 pub mod pty_handle;
 mod stream_handler;
 pub mod tool_preview;
+mod trae_stream;
 
 pub use acp_executor::AcpExecutor;
 pub use auto_detect::{
@@ -55,12 +55,6 @@ pub use pi_stream::{
     PiAssistantEvent, PiContentBlock, PiCost, PiSessionState, PiStreamEvent, PiStreamParser,
     PiToolResult, PiTurnMessage, PiUsage, dispatch_pi_stream_event,
 };
-pub use trae_stream::{
-    TraeAssistantMessage, TraeAssistantToolCall, TraeSessionState, TraeStreamEvent,
-    TraeStreamParser, TraeTextContent, TraeToolFunction, TraeToolResultContent,
-    TraeToolUseContent, TraeUserMessage, dispatch_trae_stream_event, extract_assistant_text,
-    extract_assistant_tool_calls, extract_user_tool_result_text, user_is_tool_result,
-};
 pub use pty_executor::{
     CtrlCAction, CtrlCState, PtyConfig, PtyExecutionResult, PtyExecutor, TerminationType,
 };
@@ -68,4 +62,10 @@ pub use pty_handle::{ControlCommand, PtyHandle};
 pub use stream_handler::{
     ConsoleStreamHandler, PrettyStreamHandler, QuietStreamHandler, SessionResult, StreamHandler,
     TuiStreamHandler,
+};
+pub use trae_stream::{
+    TraeAssistantMessage, TraeAssistantToolCall, TraeSessionState, TraeStreamEvent,
+    TraeStreamParser, TraeTextContent, TraeToolFunction, TraeToolResultContent, TraeToolUseContent,
+    TraeUserMessage, dispatch_trae_stream_event, extract_assistant_text,
+    extract_assistant_tool_calls, extract_user_tool_result_text, user_is_tool_result,
 };

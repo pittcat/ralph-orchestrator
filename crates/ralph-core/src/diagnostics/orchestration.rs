@@ -3,6 +3,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
+use crate::diagnosis::{DriftJournalEntry, RecoveryDiagnosisEnvelope};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrchestrationEntry {
     pub timestamp: String,
@@ -71,6 +73,76 @@ pub enum OrchestrationEvent {
         retry_target: Option<String>,
         no_retry_reason: Option<String>,
     },
+    // ── U3 diagnosis audit events ────────────────────────────────────
+    //
+    // These variants are the *high-level audit* counterpart of the
+    // detail-heavy entries written to `recovery.jsonl` and
+    // `drift.jsonl`. They carry enough information for the
+    // orchestration timeline to show *what happened* without
+    // re-parsing the journal files. The detail (full envelope,
+    // evidence, notes) lives in the journal.
+    /// A new recovery diagnosis was emitted (U4 integration point).
+    /// Detail goes to `recovery.jsonl` via
+    /// [`crate::diagnostics::DiagnosticsCollector::log_recovery`].
+    RecoveryDiagnosed {
+        diagnosis_id: String,
+        source: String,
+        target_hat: Option<String>,
+        topic: Option<String>,
+        severity: String,
+        reason_code: String,
+        retry_key: String,
+    },
+    /// A recovery diagnosis was escalated after repeated failures
+    /// (U6). Detail goes to `recovery.jsonl`.
+    RecoveryEscalated {
+        diagnosis_id: String,
+        retry_key: String,
+        attempt: u32,
+        reason: String,
+    },
+    /// A drift finding was emitted (U5). Detail goes to `drift.jsonl`
+    /// via [`crate::diagnostics::DiagnosticsCollector::log_drift`].
+    DriftDetected {
+        finding_id: String,
+        metric: String,
+        topic: Option<String>,
+        field: Option<String>,
+        severity: String,
+    },
+}
+
+impl OrchestrationEvent {
+    /// Map a [`RecoveryDiagnosisEnvelope`] to the
+    /// [`OrchestrationEvent::RecoveryDiagnosed`] high-level audit
+    /// variant. Used by the collector's `log_recovery` path (and by
+    /// U4 callers that emit both journal + audit events).
+    #[must_use]
+    pub fn from_recovery_envelope(env: &RecoveryDiagnosisEnvelope) -> Self {
+        OrchestrationEvent::RecoveryDiagnosed {
+            diagnosis_id: env.diagnosis_id.clone(),
+            source: env.source.as_str().to_string(),
+            target_hat: env.target_hat.clone(),
+            topic: env.topic.clone(),
+            severity: env.severity.as_str().to_string(),
+            reason_code: env.reason_code.clone(),
+            retry_key: env.retry_key.clone(),
+        }
+    }
+
+    /// Map a [`DriftJournalEntry`] to the
+    /// [`OrchestrationEvent::DriftDetected`] high-level audit
+    /// variant. Used by the collector's `log_drift` path.
+    #[must_use]
+    pub fn from_drift_entry(entry: &DriftJournalEntry) -> Self {
+        OrchestrationEvent::DriftDetected {
+            finding_id: entry.finding_id.clone(),
+            metric: entry.metric.as_str().to_string(),
+            topic: entry.topic.clone(),
+            field: entry.field.clone(),
+            severity: entry.severity.as_str().to_string(),
+        }
+    }
 }
 
 pub struct OrchestrationLogger {
@@ -158,6 +230,28 @@ mod tests {
                 timed_out: false,
                 duration_ms: 35000,
             },
+            OrchestrationEvent::RecoveryDiagnosed {
+                diagnosis_id: "diag-id".to_string(),
+                source: "missing_event_gate".to_string(),
+                target_hat: Some("builder".to_string()),
+                topic: Some("work.done".to_string()),
+                severity: "warning".to_string(),
+                reason_code: "no_emit".to_string(),
+                retry_key: "missing_event_gate:builder:work_done:no_emit:*".to_string(),
+            },
+            OrchestrationEvent::RecoveryEscalated {
+                diagnosis_id: "diag-id".to_string(),
+                retry_key: "stall_recovery:builder:*:*:stall:*".to_string(),
+                attempt: 3,
+                reason: "retry_window_exhausted".to_string(),
+            },
+            OrchestrationEvent::DriftDetected {
+                finding_id: "find-id".to_string(),
+                metric: "field_completeness".to_string(),
+                topic: Some("work.done".to_string()),
+                field: Some("plan_name".to_string()),
+                severity: "warning".to_string(),
+            },
         ];
 
         for event in events {
@@ -207,5 +301,115 @@ mod tests {
         let reader = BufReader::new(file);
         let lines: Vec<_> = reader.lines().collect();
         assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn test_u3_event_variants_serialize_roundtrip() {
+        // The new U3 variants must round-trip through serde so the
+        // audit timeline written by orchestration.jsonl can be
+        // replayed by U7.
+        let events = vec![
+            OrchestrationEvent::RecoveryDiagnosed {
+                diagnosis_id: "diag-1".to_string(),
+                source: "missing_event_gate".to_string(),
+                target_hat: Some("builder".to_string()),
+                topic: Some("work.done".to_string()),
+                severity: "warning".to_string(),
+                reason_code: "no_emit".to_string(),
+                retry_key: "missing_event_gate:builder:work_done:no_emit:*".to_string(),
+            },
+            OrchestrationEvent::RecoveryEscalated {
+                diagnosis_id: "diag-2".to_string(),
+                retry_key: "stall_recovery:builder:*:*:stall:*".to_string(),
+                attempt: 3,
+                reason: "retry_window_exhausted".to_string(),
+            },
+            OrchestrationEvent::DriftDetected {
+                finding_id: "find-1".to_string(),
+                metric: "field_completeness".to_string(),
+                topic: Some("work.done".to_string()),
+                field: Some("plan_name".to_string()),
+                severity: "warning".to_string(),
+            },
+        ];
+        for event in events {
+            let json = serde_json::to_string(&event).unwrap();
+            let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+            let tag = v.get("type").and_then(|t| t.as_str()).unwrap();
+            assert!(
+                matches!(
+                    tag,
+                    "recovery_diagnosed" | "recovery_escalated" | "drift_detected"
+                ),
+                "unexpected type tag: {tag}"
+            );
+            // round-trip
+            let _: OrchestrationEvent = serde_json::from_str(&json).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_from_recovery_envelope_maps_fields() {
+        let env = RecoveryDiagnosisEnvelope::builder()
+            .source(crate::diagnosis::DiagnosisSource::MissingEventGate)
+            .severity(crate::diagnosis::DiagnosisSeverity::Warning)
+            .iteration(4)
+            .reason_code("no_emit")
+            .message("builder missed work.done")
+            .source_hat("builder")
+            .target_hat("builder")
+            .topic("work.done")
+            .retry_key("missing_event_gate:builder:work_done:no_emit:*")
+            .safe_target(true)
+            .build();
+
+        let event = OrchestrationEvent::from_recovery_envelope(&env);
+        let entry = OrchestrationEntry {
+            timestamp: "ts".to_string(),
+            iteration: 4,
+            hat: "builder".to_string(),
+            event,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["event"]["type"], "recovery_diagnosed");
+        assert_eq!(v["event"]["source"], "missing_event_gate");
+        assert_eq!(v["event"]["target_hat"], "builder");
+        assert_eq!(v["event"]["topic"], "work.done");
+        assert_eq!(v["event"]["severity"], "warning");
+        assert_eq!(v["event"]["reason_code"], "no_emit");
+        assert_eq!(
+            v["event"]["retry_key"],
+            "missing_event_gate:builder:work_done:no_emit:*"
+        );
+        assert_eq!(v["event"]["diagnosis_id"], env.diagnosis_id);
+    }
+
+    #[test]
+    fn test_from_drift_entry_maps_fields() {
+        use crate::diagnosis::{DiagnosisSeverity, DriftJournalEntry, DriftMetric};
+
+        let entry = DriftJournalEntry::builder()
+            .metric(DriftMetric::CoordJoinRate)
+            .observed_value(0.3)
+            .threshold(0.8)
+            .severity(DiagnosisSeverity::Error)
+            .topic("work.done")
+            .to_topic("review.wave.ready")
+            .from_topic("work.done")
+            .field("plan_name")
+            .window_iterations(20)
+            .iteration(7)
+            .message("coord join dropped to 30%")
+            .build();
+        let event = OrchestrationEvent::from_drift_entry(&entry);
+        let json = serde_json::to_string(&event).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "drift_detected");
+        assert_eq!(v["metric"], "coord_join_rate");
+        assert_eq!(v["topic"], "work.done");
+        assert_eq!(v["field"], "plan_name");
+        assert_eq!(v["severity"], "error");
+        assert_eq!(v["finding_id"], entry.finding_id);
     }
 }

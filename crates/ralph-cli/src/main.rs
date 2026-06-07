@@ -43,6 +43,7 @@ mod web;
 
 use anyhow::Result;
 use clap::{ArgAction, Parser, Subcommand};
+use std::sync::Arc;
 
 // Shared CLI infrastructure layer (U4 step-01 extraction).
 #[cfg(test)]
@@ -52,6 +53,7 @@ use crate::cli::{
     ensure_scratchpad_directory, install_panic_hook, load_config_with_overrides,
     resolve_path_from_workspace, resolve_workspace_root,
 };
+use ralph_core::diagnostics::DiagnosticsCollector;
 
 /// Ralph Orchestrator - Multi-agent orchestration framework
 #[derive(Parser, Debug)]
@@ -157,6 +159,9 @@ enum Commands {
 
     /// Generate shell completions
     Completions(commands::completions::CompletionsArgs),
+
+    /// Build an offline diagnosis report from `.ralph/diagnostics/<session>/` (U7)
+    Diagnose(commands::diagnose::DiagnoseArgs),
 }
 
 /// Returns true if the given command is eligible for diagnostics session creation.
@@ -189,35 +194,50 @@ async fn main() -> Result<()> {
             .map(|v| v == "1")
             .unwrap_or(false);
 
+    // U0: build ONE authoritative diagnostics collector up front, so the
+    // tracing layer and the EventLoop share a single timestamped session
+    // directory. `EventLoop::with_context` reuses a prebuilt collector
+    // attached to the LoopContext, so the run never produces two sessions.
+    let authoritative_diagnostics: Option<Arc<DiagnosticsCollector>> = if diagnostics_enabled {
+        match DiagnosticsCollector::new(std::path::Path::new(".")) {
+            Ok(c) => Some(Arc::new(c)),
+            Err(e) => {
+                eprintln!(
+                    "warning: failed to initialize diagnostics: {e}; continuing with diagnostics disabled"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     if tui_enabled {
         if let Ok((file, _log_path)) =
             ralph_core::diagnostics::create_log_file(std::path::Path::new("."))
         {
-            if diagnostics_enabled {
+            if let Some(collector) = authoritative_diagnostics.as_ref()
+                && let Some(session_dir) = collector.session_dir()
+            {
                 use ralph_core::diagnostics::DiagnosticTraceLayer;
                 use tracing_subscriber::prelude::*;
 
-                if let Ok(collector) =
-                    ralph_core::diagnostics::DiagnosticsCollector::new(std::path::Path::new("."))
-                    && let Some(session_dir) = collector.session_dir()
-                {
-                    if let Ok(trace_layer) = DiagnosticTraceLayer::new(session_dir) {
-                        tracing_subscriber::registry()
-                            .with(
-                                tracing_subscriber::fmt::layer()
-                                    .with_writer(std::sync::Mutex::new(file))
-                                    .with_ansi(false),
-                            )
-                            .with(tracing_subscriber::EnvFilter::new(filter))
-                            .with(trace_layer)
-                            .init();
-                    } else {
-                        tracing_subscriber::fmt()
-                            .with_env_filter(filter)
-                            .with_writer(std::sync::Mutex::new(file))
-                            .with_ansi(false)
-                            .init();
-                    }
+                if let Ok(trace_layer) = DiagnosticTraceLayer::new(session_dir) {
+                    tracing_subscriber::registry()
+                        .with(
+                            tracing_subscriber::fmt::layer()
+                                .with_writer(std::sync::Mutex::new(file))
+                                .with_ansi(false),
+                        )
+                        .with(tracing_subscriber::EnvFilter::new(filter))
+                        .with(trace_layer)
+                        .init();
+                } else {
+                    tracing_subscriber::fmt()
+                        .with_env_filter(filter)
+                        .with_writer(std::sync::Mutex::new(file))
+                        .with_ansi(false)
+                        .init();
                 }
             } else {
                 tracing_subscriber::fmt()
@@ -233,23 +253,18 @@ async fn main() -> Result<()> {
             .with_writer(std::io::stderr)
             .init();
     } else {
-        if diagnostics_enabled {
+        if let Some(collector) = authoritative_diagnostics.as_ref()
+            && let Some(session_dir) = collector.session_dir()
+        {
             use ralph_core::diagnostics::DiagnosticTraceLayer;
             use tracing_subscriber::prelude::*;
 
-            if let Ok(collector) =
-                ralph_core::diagnostics::DiagnosticsCollector::new(std::path::Path::new("."))
-                && let Some(session_dir) = collector.session_dir()
-            {
-                if let Ok(trace_layer) = DiagnosticTraceLayer::new(session_dir) {
-                    tracing_subscriber::registry()
-                        .with(tracing_subscriber::fmt::layer())
-                        .with(tracing_subscriber::EnvFilter::new(filter))
-                        .with(trace_layer)
-                        .init();
-                } else {
-                    tracing_subscriber::fmt().with_env_filter(filter).init();
-                }
+            if let Ok(trace_layer) = DiagnosticTraceLayer::new(session_dir) {
+                tracing_subscriber::registry()
+                    .with(tracing_subscriber::fmt::layer())
+                    .with(tracing_subscriber::EnvFilter::new(filter))
+                    .with(trace_layer)
+                    .init();
             } else {
                 tracing_subscriber::fmt().with_env_filter(filter).init();
             }
@@ -278,6 +293,7 @@ async fn main() -> Result<()> {
                 cli.verbose,
                 cli.color,
                 args,
+                authoritative_diagnostics.clone(),
             )
             .await
         }
@@ -316,6 +332,7 @@ async fn main() -> Result<()> {
                 cli.verbose,
                 cli.color,
                 args,
+                authoritative_diagnostics.clone(),
             )
             .await
         }
@@ -381,6 +398,7 @@ async fn main() -> Result<()> {
             .await
         }
         Some(Commands::Completions(args)) => commands::completions::completions_command(args),
+        Some(Commands::Diagnose(args)) => commands::diagnose::diagnose_command(cli.color, args),
         None => {
             let args = commands::run::RunArgs {
                 prompt_text: None,
@@ -414,6 +432,7 @@ async fn main() -> Result<()> {
                 cli.verbose,
                 cli.color,
                 args,
+                authoritative_diagnostics.clone(),
             )
             .await
         }

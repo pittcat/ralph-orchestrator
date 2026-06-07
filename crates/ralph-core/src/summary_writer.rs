@@ -13,6 +13,59 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// A single pointer to an operator-facing artifact, rendered as a
+/// labelled bullet inside the `## Diagnostics` section appended by
+/// [`SummaryWriter::append_diagnosis_hint`].
+///
+/// `label` is the human-readable name of the artifact (e.g.
+/// `"Payload contract violation report"`); `relpath` is a path
+/// relative to the workspace root so the link works whether the
+/// operator reads the file from the repo or from a worktree.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiagnosisReference {
+    /// Short human-readable label.
+    pub label: String,
+    /// Path to the artifact, relative to the workspace root.
+    pub relpath: String,
+}
+
+/// Operator-facing hint appended to the end of `summary.md` when
+/// diagnostics are available. The hint is intentionally small: it
+/// never embeds the full report and never duplicates the on-disk
+/// artifacts. The operator is expected to follow the links and run
+/// `ralph diagnose` to drill down.
+///
+/// `None` (i.e. "no hint") is the only legal value when diagnostics
+/// are disabled; the [`SummaryWriter::append_diagnosis_hint`] writer
+/// treats that case as a no-op.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiagnosisHint {
+    /// Diagnostics session directory, relative to the workspace root
+    /// (e.g. `.ralph/diagnostics/2026-06-05T10-20-30`). `None` when
+    /// the collector was not enabled for this run.
+    pub session_relpath: Option<String>,
+    /// Pre-formatted `ralph diagnose` command the operator can copy
+    /// into a shell. `None` when there is no session to diagnose.
+    pub diagnose_command: Option<String>,
+    /// Additional pointers to root-level diagnostic files (e.g. a
+    /// payload-contract violation report) that the operator should
+    /// review alongside the session journal.
+    pub references: Vec<DiagnosisReference>,
+}
+
+impl DiagnosisHint {
+    /// True when the hint carries at least one operator-actionable
+    /// piece of information (a session path, a command, or a
+    /// reference). Used by the writer to decide whether emitting the
+    /// `## Diagnostics` section is worthwhile at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.session_relpath.is_none()
+            && self.diagnose_command.is_none()
+            && self.references.is_empty()
+    }
+}
+
 /// Writes the loop summary file on termination.
 ///
 /// Per spec section "Exit Summary":
@@ -109,6 +162,88 @@ impl SummaryWriter {
             landing,
         );
         fs::write(&self.path, content)
+    }
+
+    /// U6: append a `## Recovery Diagnosis` section to the summary
+    /// file when the recovery responder produced a
+    /// [`crate::diagnosis::TerminationHint`]. The section is
+    /// advisory; it does not introduce a new termination reason.
+    /// The hint's `retry_key` and `severity` are surfaced so the
+    /// operator can jump to the matching `recovery.jsonl` entry
+    /// without re-parsing the file.
+    pub fn append_recovery_section(
+        &self,
+        hint: &crate::diagnosis::TerminationHint,
+    ) -> io::Result<()> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut body = String::new();
+        body.push_str("\n\n## Recovery Diagnosis\n\n");
+        body.push_str("The runtime diagnosis responder escalated this loop to a pause/review state. The original termination reason above is the source of truth; this section is a pointer to the diagnosis journal.\n\n");
+        body.push_str(&format!("- **Reason:** {}\n", hint.reason));
+        body.push_str(&format!("- **Severity:** {}\n", hint.severity.as_str()));
+        if let Some(retry_key) = &hint.retry_key {
+            body.push_str(&format!("- **Retry key:** `{retry_key}`\n"));
+        }
+        body.push_str(
+            "\nFor the full audit timeline (recoveries, escalations, drift), see \
+             `.ralph/diagnostics/<session>/recovery.jsonl` and `orchestration.jsonl`.\n",
+        );
+        // Append-mode write so we do not clobber an existing summary.
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        std::io::Write::write_all(&mut file, body.as_bytes())?;
+        Ok(())
+    }
+
+    /// U8: append a `## Diagnostics` section to the summary file when
+    /// a [`DiagnosisHint`] is provided. The section is operator-facing
+    /// and contains three things at most:
+    ///
+    /// 1. The diagnostics session directory (workspace-relative).
+    /// 2. A copy-pasteable `ralph diagnose` command.
+    /// 3. Zero or more labelled references to root-level diagnostic
+    ///    files (e.g. a payload-contract violation report).
+    ///
+    /// The hint is intentionally additive: the existing summary body
+    /// is preserved verbatim and the section is only emitted when at
+    /// least one of the three fields is non-empty. When `hint` is
+    /// `None` (the diagnostics-disabled case) the function is a
+    /// no-op, so the loop runner can call it unconditionally.
+    pub fn append_diagnosis_hint(&self, hint: Option<&DiagnosisHint>) -> io::Result<()> {
+        let Some(hint) = hint else {
+            return Ok(());
+        };
+        if hint.is_empty() {
+            return Ok(());
+        }
+
+        let mut body = String::new();
+        body.push_str("\n\n## Diagnostics\n\n");
+        if let Some(session) = &hint.session_relpath {
+            body.push_str(&format!("- Session: `{session}`\n"));
+        }
+        if let Some(cmd) = &hint.diagnose_command {
+            body.push_str(&format!("- Run: `{cmd}`\n"));
+        }
+        for reference in &hint.references {
+            body.push_str(&format!("- {}: `{}`\n", reference.label, reference.relpath));
+        }
+
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        // Append-mode write so we do not clobber an existing summary
+        // written by [`Self::write`].
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        std::io::Write::write_all(&mut file, body.as_bytes())?;
+        Ok(())
     }
 
     /// Generates the markdown content for the summary with optional landing info.
@@ -244,6 +379,9 @@ impl SummaryWriter {
             TerminationReason::WorkspaceGone => "Failed: workspace directory removed",
             TerminationReason::Cancelled => "Cancelled gracefully (human rejection or timeout)",
             TerminationReason::PayloadContractViolation => "Failed: payload contract violation",
+            TerminationReason::RecoveryExhausted { .. } => {
+                "Failed: recovery retry window exhausted"
+            }
         }
     }
 
@@ -627,5 +765,207 @@ More text here.
         );
 
         assert!(content.contains("_No event history file found._"));
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // U8: append_diagnosis_hint
+    // ───────────────────────────────────────────────────────────────
+
+    fn write_summary_with_status(status: &str) -> (TempDir, SummaryWriter) {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("summary.md");
+        let writer = SummaryWriter::new(&path);
+        let state = test_state();
+        writer
+            .write(
+                &TerminationReason::CompletionPromise,
+                &state,
+                None,
+                Some("deadbeef: feat: example"),
+            )
+            .unwrap();
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(body.contains(status), "summary missing '{status}':\n{body}");
+        (tmp, writer)
+    }
+
+    #[test]
+    fn test_append_diagnosis_hint_none_is_noop() {
+        let (tmp, writer) = write_summary_with_status("Completed successfully");
+        let path = tmp.path().join("summary.md");
+        let before = fs::read_to_string(&path).unwrap();
+
+        // No hint → no-op; existing body is preserved bit-for-bit.
+        writer.append_diagnosis_hint(None).unwrap();
+
+        let after = fs::read_to_string(&path).unwrap();
+        assert_eq!(before, after);
+        assert!(
+            !after.contains("## Diagnostics"),
+            "summary must not contain a Diagnostics section when hint is None"
+        );
+    }
+
+    #[test]
+    fn test_append_diagnosis_hint_empty_does_not_emit_section() {
+        let (tmp, writer) = write_summary_with_status("Completed successfully");
+        let path = tmp.path().join("summary.md");
+        let before = fs::read_to_string(&path).unwrap();
+
+        // Empty hint (all None / empty vectors) → no-op; the section is
+        // only meaningful when at least one field is populated.
+        let hint = DiagnosisHint::default();
+        assert!(hint.is_empty());
+        writer.append_diagnosis_hint(Some(&hint)).unwrap();
+
+        let after = fs::read_to_string(&path).unwrap();
+        assert_eq!(before, after);
+        assert!(!after.contains("## Diagnostics"));
+    }
+
+    #[test]
+    fn test_append_diagnosis_hint_adds_session_and_command() {
+        let (tmp, writer) = write_summary_with_status("Completed successfully");
+        let path = tmp.path().join("summary.md");
+
+        let hint = DiagnosisHint {
+            session_relpath: Some(".ralph/diagnostics/2026-06-05T10-20-30".to_string()),
+            diagnose_command: Some("ralph diagnose --session latest".to_string()),
+            references: Vec::new(),
+        };
+        writer.append_diagnosis_hint(Some(&hint)).unwrap();
+
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(
+            body.contains("## Diagnostics"),
+            "Diagnostics section missing:\n{body}"
+        );
+        assert!(
+            body.contains("Session: `.ralph/diagnostics/2026-06-05T10-20-30`"),
+            "Session line missing:\n{body}"
+        );
+        assert!(
+            body.contains("Run: `ralph diagnose --session latest`"),
+            "Command line missing:\n{body}"
+        );
+        // Section appears AFTER the original summary body.
+        let section_idx = body.find("## Diagnostics").unwrap();
+        let status_idx = body.find("**Status:**").unwrap();
+        let commit_idx = body.find("deadbeef: feat: example").unwrap();
+        assert!(
+            section_idx > status_idx,
+            "Diagnostics section must appear after Status"
+        );
+        assert!(
+            section_idx > commit_idx,
+            "Diagnostics section must appear after Final Commit"
+        );
+    }
+
+    #[test]
+    fn test_append_diagnosis_hint_includes_payload_violation_reference() {
+        let (tmp, writer) = write_summary_with_status("Completed successfully");
+        let path = tmp.path().join("summary.md");
+
+        let hint = DiagnosisHint {
+            session_relpath: Some(".ralph/diagnostics/2026-06-05T10-20-30".to_string()),
+            diagnose_command: Some("ralph diagnose --session latest".to_string()),
+            references: vec![DiagnosisReference {
+                label: "Payload contract violation report".to_string(),
+                relpath: ".ralph/diagnostics/payload-contract-error-2026-06-05T12-34-56-789Z.json"
+                    .to_string(),
+            }],
+        };
+        writer.append_diagnosis_hint(Some(&hint)).unwrap();
+
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(body.contains("## Diagnostics"));
+        assert!(
+            body.contains("Payload contract violation report: `.ralph/diagnostics/payload-contract-error-2026-06-05T12-34-56-789Z.json`"),
+            "Violation reference line missing:\n{body}"
+        );
+    }
+
+    #[test]
+    fn test_append_diagnosis_hint_preserves_existing_summary() {
+        let (tmp, writer) = write_summary_with_status("Completed successfully");
+        let path = tmp.path().join("summary.md");
+
+        // Capture the body BEFORE appending the hint so we can compare.
+        let before = fs::read_to_string(&path).unwrap();
+        let hint = DiagnosisHint {
+            session_relpath: Some(".ralph/diagnostics/2026-06-05T10-20-30".to_string()),
+            diagnose_command: None,
+            references: Vec::new(),
+        };
+        writer.append_diagnosis_hint(Some(&hint)).unwrap();
+        let after = fs::read_to_string(&path).unwrap();
+
+        // Existing summary content is preserved verbatim; the hint is
+        // appended at the very end.
+        assert!(
+            after.starts_with(&before),
+            "append_diagnosis_hint must not mutate the existing body.\nbefore:\n{before}\n\nafter:\n{after}"
+        );
+        assert!(after.len() > before.len());
+        assert!(
+            after.ends_with(
+                "## Diagnostics\n\n- Session: `.ralph/diagnostics/2026-06-05T10-20-30`\n"
+            )
+        );
+    }
+
+    #[test]
+    fn test_append_diagnosis_hint_is_idempotent_when_called_twice() {
+        let (tmp, writer) = write_summary_with_status("Completed successfully");
+        let path = tmp.path().join("summary.md");
+
+        let hint = DiagnosisHint {
+            session_relpath: Some(".ralph/diagnostics/2026-06-05T10-20-30".to_string()),
+            diagnose_command: Some("ralph diagnose --session latest".to_string()),
+            references: Vec::new(),
+        };
+        writer.append_diagnosis_hint(Some(&hint)).unwrap();
+        let once = fs::read_to_string(&path).unwrap();
+        // Calling a second time with the same hint must double the section.
+        // The runner is expected to call this exactly once, but the writer
+        // contract is "append": we want loud test failures when callers
+        // accidentally double-invoke, not silent data loss.
+        writer.append_diagnosis_hint(Some(&hint)).unwrap();
+        let twice = fs::read_to_string(&path).unwrap();
+        assert_eq!(twice.matches("## Diagnostics").count(), 2);
+        assert!(twice.len() > once.len());
+    }
+
+    #[test]
+    fn test_diagnosis_hint_is_empty_predicate() {
+        assert!(DiagnosisHint::default().is_empty());
+        assert!(
+            !DiagnosisHint {
+                session_relpath: Some(".ralph/diagnostics/x".to_string()),
+                diagnose_command: None,
+                references: Vec::new(),
+            }
+            .is_empty()
+        );
+        assert!(
+            !DiagnosisHint {
+                session_relpath: None,
+                diagnose_command: Some("ralph diagnose --session latest".to_string()),
+                references: Vec::new(),
+            }
+            .is_empty()
+        );
+        assert!(
+            !DiagnosisHint {
+                session_relpath: None,
+                diagnose_command: None,
+                references: vec![DiagnosisReference {
+                    label: "report".to_string(),
+                    relpath: ".ralph/diagnostics/report.json".to_string(),
+                }],
+            }
+            .is_empty()
+        );
     }
 }

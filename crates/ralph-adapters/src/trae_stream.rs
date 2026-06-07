@@ -131,9 +131,7 @@ pub fn extract_assistant_text(message: &serde_json::Value) -> Option<String> {
 }
 
 /// Extracted tool calls from a trae assistant message (real shape).
-pub fn extract_assistant_tool_calls(
-    message: &serde_json::Value,
-) -> Vec<TraeAssistantToolCall> {
+pub fn extract_assistant_tool_calls(message: &serde_json::Value) -> Vec<TraeAssistantToolCall> {
     if !message.is_object() {
         return Vec::new();
     }
@@ -328,13 +326,20 @@ pub fn dispatch_trae_stream_event<H: StreamHandler>(
                 let input: serde_json::Value = if call.function.arguments.is_empty() {
                     serde_json::Value::Object(Default::default())
                 } else {
-                    serde_json::from_str(&call.function.arguments)
-                        .unwrap_or_else(|_| serde_json::Value::String(call.function.arguments.clone()))
+                    serde_json::from_str(&call.function.arguments).unwrap_or_else(|_| {
+                        serde_json::Value::String(call.function.arguments.clone())
+                    })
                 };
                 handler.on_tool_call(&call.function.name, &call.id, &input);
             }
         }
-        TraeStreamEvent::User { message, subtype, tool_use_id, content, .. } => {
+        TraeStreamEvent::User {
+            message,
+            subtype,
+            tool_use_id,
+            content,
+            ..
+        } => {
             if user_is_tool_result(subtype.as_deref(), tool_use_id.as_deref(), &content) {
                 if let Some(output) = extract_user_tool_result_text(&content) {
                     if !output.is_empty() {
@@ -351,7 +356,12 @@ pub fn dispatch_trae_stream_event<H: StreamHandler>(
                 handler.on_text(text);
             }
         }
-        TraeStreamEvent::Result { duration_ms, is_error, result, .. } => {
+        TraeStreamEvent::Result {
+            duration_ms,
+            is_error,
+            result,
+            ..
+        } => {
             state.duration_ms = duration_ms;
             state.is_error = is_error;
             if let Some(text) = result {
@@ -397,7 +407,11 @@ mod tests {
         let event = TraeStreamParser::parse_line(json).unwrap();
 
         match event {
-            TraeStreamEvent::System { subtype, session_id, .. } => {
+            TraeStreamEvent::System {
+                subtype,
+                session_id,
+                ..
+            } => {
                 assert_eq!(subtype, "init");
                 assert_eq!(session_id, Some("sess_123".to_string()));
             }
@@ -412,7 +426,10 @@ mod tests {
 
         match event {
             TraeStreamEvent::Assistant { message } => {
-                assert_eq!(extract_assistant_text(&message).as_deref(), Some("Hello world"));
+                assert_eq!(
+                    extract_assistant_text(&message).as_deref(),
+                    Some("Hello world")
+                );
             }
             _ => panic!("Expected Assistant event"),
         }
@@ -443,7 +460,12 @@ mod tests {
         let event = TraeStreamParser::parse_line(json).unwrap();
 
         match event {
-            TraeStreamEvent::User { content, subtype, tool_use_id, .. } => {
+            TraeStreamEvent::User {
+                content,
+                subtype,
+                tool_use_id,
+                ..
+            } => {
                 assert_eq!(subtype.as_deref(), Some("tool_result"));
                 assert_eq!(tool_use_id.as_deref(), Some("t1"));
                 let text = extract_user_tool_result_text(&content);
@@ -459,7 +481,11 @@ mod tests {
         let event = TraeStreamParser::parse_line(json).unwrap();
 
         match event {
-            TraeStreamEvent::Result { duration_ms, is_error, .. } => {
+            TraeStreamEvent::Result {
+                duration_ms,
+                is_error,
+                ..
+            } => {
                 assert_eq!(duration_ms, 1234);
                 assert!(!is_error);
             }
@@ -730,8 +756,8 @@ mod tests {
                 "extra": {"_source_model": "DeepSeek-V4-Flash"}
             }
         }"#;
-        let event = TraeStreamParser::parse_line(json)
-            .expect("real assistant text event must parse");
+        let event =
+            TraeStreamParser::parse_line(json).expect("real assistant text event must parse");
 
         match event {
             TraeStreamEvent::Assistant { message } => {
@@ -763,8 +789,8 @@ mod tests {
                 }]
             }
         }"#;
-        let event = TraeStreamParser::parse_line(json)
-            .expect("real assistant tool_call event must parse");
+        let event =
+            TraeStreamParser::parse_line(json).expect("real assistant tool_call event must parse");
 
         match event {
             TraeStreamEvent::Assistant { message } => {
@@ -794,8 +820,7 @@ mod tests {
                 "extra": {"is_original_user_input": true}
             }
         }"#;
-        let event = TraeStreamParser::parse_line(json)
-            .expect("real user input event must parse");
+        let event = TraeStreamParser::parse_line(json).expect("real user input event must parse");
 
         match event {
             TraeStreamEvent::User { .. } => {}
@@ -821,8 +846,8 @@ mod tests {
                 ]
             }
         }"#;
-        let event = TraeStreamParser::parse_line(json)
-            .expect("real user tool_result event must parse");
+        let event =
+            TraeStreamParser::parse_line(json).expect("real user tool_result event must parse");
 
         match event {
             TraeStreamEvent::User { .. } => {}
@@ -847,8 +872,7 @@ mod tests {
             "total_cost_usd": 0,
             "permission_mode": "bypass_permissions"
         }"#;
-        let event = TraeStreamParser::parse_line(json)
-            .expect("real result event must parse");
+        let event = TraeStreamParser::parse_line(json).expect("real result event must parse");
 
         match event {
             TraeStreamEvent::Result {
@@ -888,8 +912,7 @@ mod tests {
     #[test]
     fn test_real_user_event_minimal() {
         let json = r#"{"type":"user","session_id":"s1","uuid":"u9","subtype":"status"}"#;
-        let event = TraeStreamParser::parse_line(json)
-            .expect("minimal user event must parse");
+        let event = TraeStreamParser::parse_line(json).expect("minimal user event must parse");
         assert!(matches!(event, TraeStreamEvent::User { .. }));
     }
 }

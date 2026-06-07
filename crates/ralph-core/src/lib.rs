@@ -13,7 +13,9 @@
 #[cfg(feature = "recording")]
 mod cli_capture;
 mod config;
+pub mod diagnosis;
 pub mod diagnostics;
+pub mod drift;
 mod event_logger;
 mod event_loop;
 pub mod event_origin;
@@ -72,16 +74,26 @@ pub mod worktree;
 #[cfg(feature = "recording")]
 pub use cli_capture::{CliCapture, CliCapturePair};
 pub use config::{
-    AggregateConfig, AggregateMode, CliConfig, ConfigError, CoreConfig, EventFilterConfig,
-    EventFilterMode, EventLoopConfig, EventMetadata, EventPolicyConfig, EventPolicyMode,
-    EventProjectionConfig, EventSchema, FeaturesConfig, HatBackend, HatConfig, HookStage,
-    InjectMode, MemoriesConfig, MemoriesFilter, PayloadType, Phase, PhaseConfig,
-    PreflightExtensionsConfig, PreflightHook, ProjectionMode, ProjectionRule, RalphConfig,
-    ScratchpadConfig, SkillOverride, SkillsConfig, StateFileEntry, StateFileFormat,
-    StateFilesConfig, ViolationAction, WarmupConfig,
+    AggregateConfig, AggregateMode, CliConfig, ConfigError, CoreConfig, DriftConfig,
+    EventFilterConfig, EventFilterMode, EventLoopConfig, EventMetadata, EventPolicyConfig,
+    EventPolicyMode, EventProjectionConfig, EventSchema, FeaturesConfig, HatBackend, HatConfig,
+    HookStage, InjectMode, MalformedJsonlPolicy, MemoriesConfig, MemoriesFilter, PayloadType,
+    Phase, PhaseConfig, PreflightExtensionsConfig, PreflightHook, ProjectionMode, ProjectionRule,
+    RalphConfig, RuntimeDiagnosisConfig, ScratchpadConfig, SkillOverride, SkillsConfig,
+    StateFileEntry, StateFileFormat, StateFilesConfig, TelemetryConfig, ViolationAction,
+    WarmupConfig,
 };
 // Re-export loop_name types (also available via FeaturesConfig.loop_naming)
-pub use diagnostics::DiagnosticsCollector;
+pub use diagnosis::{
+    DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, DriftJournalEntry, DriftMetric,
+    EvidenceKind, EvidenceRef, RecoveryDiagnosisEnvelope, RecoveryDiagnosisEnvelopeBuilder,
+    RecoveryJournalEntry,
+};
+pub use diagnostics::{DiagnosisSummary, DiagnosticsCollector, DiagnosticsOptions};
+pub use drift::{
+    DeclaredEdges, DriftDetector, DriftFinding, DriftObserver, DriftWindow,
+    EMIT_CADENCE_MIN_SAMPLES, EventSnapshot, RequiredFields,
+};
 pub use event_logger::{EventHistory, EventLogger, EventRecord};
 pub use event_loop::{
     EventLoop, LoopState, ProcessedEvents, ProcessedEventsWithWaves, TerminationReason, UserPrompt,
@@ -160,7 +172,7 @@ pub use state_machine::{
     InstanceState, StateMachineDecision, StateMachineFinding, StateMachineRuntimeState,
     StateMachineStateSummary,
 };
-pub use summary_writer::SummaryWriter;
+pub use summary_writer::{DiagnosisHint, DiagnosisReference, SummaryWriter};
 pub use task::{Task, TaskStatus};
 pub use task_definition::{
     TaskDefinition, TaskDefinitionError, TaskSetup, TaskSuite, Verification,

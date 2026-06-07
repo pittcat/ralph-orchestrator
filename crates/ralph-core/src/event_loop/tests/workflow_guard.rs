@@ -905,3 +905,204 @@ event_loop:
         "Re-emitting old phase should not regress progress"
     );
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// 2026-06-04 plan U4: workflow guard envelope wiring
+// ──────────────────────────────────────────────────────────────────────
+//
+// These tests pin the existing workflow-guard behavior (so a future
+// refactor of `apply_workflow_guard_validation` cannot silently break
+// the rejection contract) and assert the new recovery envelope write
+// that U4 introduces.
+
+#[test]
+fn test_workflow_guard_rejection_writes_recovery_envelope() {
+    // U4: an out-of-order workflow event rejected by the guard must
+    //   (a) not enter the accepted events list (existing behavior);
+    //   (b) not advance workflow progress (existing behavior);
+    //   (c) emit a `task.resume` recovery event (existing behavior);
+    //   (d) NEW: write a `RecoveryJournalEntry` to `recovery.jsonl`
+    //       with `source = WorkflowGuard` and the next expected
+    //       topic as evidence.
+    use crate::diagnosis::{DiagnosisSource, EvidenceKind};
+    use ralph_proto::Event;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tempfile::TempDir;
+
+    let temp = TempDir::new().unwrap();
+    let events_path = temp.path().join("events.jsonl");
+    let diagnostics_root = temp.path().to_path_buf();
+
+    let yaml = r"
+event_loop:
+  max_iterations: 10
+  workflow_guards:
+    chains:
+      - name: experiment
+        topics:
+          - experiment.planned
+          - experiment.ready
+          - experiment.scored
+        mode: strict
+";
+    let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.workspace_root = diagnostics_root.clone();
+    let diagnostics =
+        crate::diagnostics::DiagnosticsCollector::with_enabled(&diagnostics_root, true)
+            .expect("create diagnostics collector");
+    let mut event_loop = EventLoop::with_diagnostics(config, diagnostics);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // Count task.resume events via lightweight observer to assert the
+    // existing recovery signal is still published.
+    let resume_count = Arc::new(AtomicUsize::new(0));
+    let count = resume_count.clone();
+    event_loop.bus.add_observer(move |event: &Event| {
+        if event.topic.as_str() == "task.resume" {
+            count.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+
+    // Phase 0 (planned) is allowed.
+    write_event_to_jsonl(&events_path, "experiment.planned", r"{}");
+    let _ = event_loop.process_events_from_jsonl();
+    // Skip ready and try scored — strict guard rejects.
+    write_event_to_jsonl(&events_path, "experiment.scored", r"{}");
+    let _ = event_loop.process_events_from_jsonl();
+
+    // Characterization: rejected event did NOT advance progress
+    // and did NOT enter the bus as accepted.
+    assert_eq!(
+        event_loop
+            .state
+            .workflow_progress
+            .get_phase("experiment", None),
+        Some(0),
+        "out-of-order scored must not advance workflow progress"
+    );
+    assert!(
+        !event_loop.state.seen_topics.contains("experiment.scored"),
+        "rejected event must not be recorded as seen"
+    );
+    // Characterization: task.resume was published.
+    assert!(
+        resume_count.load(Ordering::SeqCst) >= 1,
+        "rejection must publish a task.resume recovery event"
+    );
+
+    // U4: a recovery journal entry was written.
+    let mut session_dirs: Vec<_> = std::fs::read_dir(diagnostics_root.join(".ralph/diagnostics"))
+        .expect("read diagnostics dir")
+        .filter_map(Result::ok)
+        .collect();
+    session_dirs.sort_by_key(|entry| entry.path());
+    let session_path = session_dirs
+        .last()
+        .expect("at least one diagnostics session")
+        .path();
+    let recovery_path = session_path.join("recovery.jsonl");
+    let content = std::fs::read_to_string(&recovery_path)
+        .unwrap_or_else(|e| panic!("read recovery.jsonl: {e}: {}", recovery_path.display()));
+    let entries: Vec<crate::diagnosis::RecoveryJournalEntry> = content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("parse recovery entry"))
+        .collect();
+    assert_eq!(
+        entries.len(),
+        1,
+        "expected exactly one recovery entry, got: {:?}",
+        entries
+            .iter()
+            .map(|e| &e.envelope.reason_code)
+            .collect::<Vec<_>>()
+    );
+    let env = &entries[0].envelope;
+    assert_eq!(env.source, DiagnosisSource::WorkflowGuard);
+    assert_eq!(env.reason_code, "out_of_order_phase");
+    assert!(
+        !env.safe_target,
+        "workflow guard has no registered safe target"
+    );
+    assert_eq!(env.topic.as_deref(), Some("experiment.scored"));
+    assert!(
+        env.evidence
+            .iter()
+            .any(|e| e.kind == EvidenceKind::Topic && e.ref_path == "experiment.ready"),
+        "evidence must carry the next expected topic"
+    );
+}
+
+#[test]
+fn test_workflow_guard_recovery_publishes_recovery_diagnosis_audit() {
+    // U4: in addition to the journal entry, the rejection writes a
+    // high-level `OrchestrationEvent::RecoveryDiagnosed` audit line
+    // to `orchestration.jsonl` so the audit timeline can show the
+    // failure without re-parsing the journal.
+    use crate::diagnosis::DiagnosisSource;
+    use tempfile::TempDir;
+
+    let temp = TempDir::new().unwrap();
+    let events_path = temp.path().join("events.jsonl");
+    let diagnostics_root = temp.path().to_path_buf();
+
+    let yaml = r"
+event_loop:
+  max_iterations: 10
+  workflow_guards:
+    chains:
+      - name: experiment
+        topics:
+          - experiment.planned
+          - experiment.ready
+          - experiment.scored
+        mode: strict
+";
+    let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.workspace_root = diagnostics_root.clone();
+    let diagnostics =
+        crate::diagnostics::DiagnosticsCollector::with_enabled(&diagnostics_root, true)
+            .expect("create diagnostics collector");
+    let mut event_loop = EventLoop::with_diagnostics(config, diagnostics);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // Advance to phase 0, then attempt an out-of-order event.
+    write_event_to_jsonl(&events_path, "experiment.planned", r"{}");
+    let _ = event_loop.process_events_from_jsonl();
+    write_event_to_jsonl(&events_path, "experiment.scored", r"{}");
+    let _ = event_loop.process_events_from_jsonl();
+
+    // Find the recovery.jsonl and orchestration.jsonl entries.
+    let mut session_dirs: Vec<_> = std::fs::read_dir(diagnostics_root.join(".ralph/diagnostics"))
+        .expect("read diagnostics dir")
+        .filter_map(Result::ok)
+        .collect();
+    session_dirs.sort_by_key(|entry| entry.path());
+    let session_path = session_dirs.last().unwrap().path();
+    let recovery_path = session_path.join("recovery.jsonl");
+    let orch_path = session_path.join("orchestration.jsonl");
+    let recovery_content = std::fs::read_to_string(&recovery_path).unwrap();
+    let recovery_entry: crate::diagnosis::RecoveryJournalEntry = recovery_content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .next()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .expect("expected a recovery journal entry");
+    assert_eq!(
+        recovery_entry.envelope.source,
+        DiagnosisSource::WorkflowGuard
+    );
+
+    let orch_content = std::fs::read_to_string(&orch_path).unwrap();
+    assert!(
+        orch_content.contains("\"type\":\"recovery_diagnosed\""),
+        "orchestration.jsonl must include a RecoveryDiagnosed audit line for workflow guard rejections"
+    );
+    assert!(
+        orch_content.contains(&recovery_entry.envelope.diagnosis_id),
+        "orchestration.jsonl audit must reference the envelope's diagnosis_id"
+    );
+}

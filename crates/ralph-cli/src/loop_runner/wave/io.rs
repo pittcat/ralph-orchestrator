@@ -156,14 +156,16 @@ pub fn extract_readable_delta(line: &str, output_format: BackendOutputFormat) ->
                 }
                 None
             }
-            Some(TraeStreamEvent::User { subtype, tool_use_id, content, .. }) => {
+            Some(TraeStreamEvent::User {
+                subtype,
+                tool_use_id,
+                content,
+                ..
+            }) => {
                 if user_is_tool_result(subtype.as_deref(), tool_use_id.as_deref(), &content) {
                     if let Some(output) = extract_user_tool_result_text(&content) {
                         if !output.is_empty() {
-                            return Some(format!(
-                                "→ {}\n",
-                                truncate_wave_worker_preview(&output)
-                            ));
+                            return Some(format!("→ {}\n", truncate_wave_worker_preview(&output)));
                         }
                     }
                 }

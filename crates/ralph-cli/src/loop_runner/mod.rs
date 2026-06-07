@@ -30,9 +30,11 @@ pub use merge_queue::process_pending_merges_cli;
 pub use payload_contract_gate::{
     enforce_payload_contract_gate, write_payload_contract_violation_report,
 };
-pub use runner::run_loop_impl;
 #[cfg(test)]
 pub use runner::resolve_loop_id;
+pub use runner::run_loop_impl;
+#[cfg(test)]
+pub(crate) use runner::{build_termination_diagnostics, write_termination_diagnostics};
 pub use start_loop::start_loop;
 
 // Re-export all other module items for internal use and test access
@@ -72,8 +74,8 @@ use ralph_adapters::{
 };
 use ralph_core::diagnostics::{HookDisposition, HookRunTelemetryEntry};
 use ralph_core::{
-    CompletionAction, EventLogger, EventLoop, EventParser, EventRecord, HookEngine, HookExecutor,
-    HookExecutorContract, HookMutationConfig, HookOnError, HookPayloadBuilderInput,
+    CompletionAction, EventLogger, EventLoop, EventParser, EventRecord, HatConfig, HookEngine,
+    HookExecutor, HookExecutorContract, HookMutationConfig, HookOnError, HookPayloadBuilderInput,
     HookPayloadContextInput, HookPhaseEvent, HookRunRequest, HookRunResult, HookSuspendMode,
     LoopCompletionHandler, LoopContext, LoopHistory, LoopRegistry, MergeQueue, Phase, PhaseConfig,
     RalphConfig, Record, SessionRecorder, SummaryWriter, SuspendStateRecord, SuspendStateStore,
