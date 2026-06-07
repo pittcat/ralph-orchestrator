@@ -716,6 +716,142 @@ pub fn detect_orphan_topics(
     findings
 }
 
+/// R4 (2026-06-07 plan U5): every topic that the loop runner *requires*
+/// must have at least one publisher AND at least one subscriber.
+/// The topics in scope are:
+///
+///   - `config.event_loop.required_events` (loop-level gates).
+///   - Topics declared in `execution_contracts.rules[*]` keys —
+///     these are contractually protected at runtime and must therefore
+///     have a real producer and a real consumer in the topology.
+///   - Topics in `event_policy.schemas[*]` keys — every schema the
+///     preset declares must correspond to a topic that actually flows
+///     through the graph; otherwise the schema is dead config.
+///
+/// This check is the symmetric counterpart of `detect_orphan_topics`
+/// (which catches *published-but-unconsumed* topics) and the loop
+/// runner's `missing_required_events` (which only fires at runtime
+/// when the loop terminates without seeing the event).  Surfacing
+/// the gap at authoring time means the runner can `fail-fast` on a
+/// broken preset instead of looping until max_iterations.
+pub fn detect_required_topic_gaps(
+    config: &crate::config::RalphConfig,
+    registry: &HatRegistry,
+) -> Vec<RuntimeContractFinding> {
+    let mut findings = Vec::new();
+    let mut topics_to_check: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
+    for t in &config.event_loop.required_events {
+        topics_to_check.insert(t.clone());
+    }
+    if let Some(ec) = &config.event_loop.execution_contracts {
+        if ec.enabled {
+            for topic in ec.rules.keys() {
+                topics_to_check.insert(topic.clone());
+            }
+        }
+    }
+    if let Some(ep) = &config.event_loop.event_policy {
+        for topic in ep.schemas.keys() {
+            topics_to_check.insert(topic.clone());
+        }
+    }
+
+    for topic in &topics_to_check {
+        // Skip the completion promise — it has no publisher in the
+        // hat graph (it is emitted by the loop runner itself, not a
+        // hat) but it does have subscribers via ralph's wildcard.
+        if topic == &config.event_loop.completion_promise {
+            continue;
+        }
+        if LOOP_RUNNER_INTERNAL_TOPICS.contains(&topic.as_str()) {
+            continue;
+        }
+
+        let has_publisher = registry
+            .all()
+            .any(|h| h.publishes.iter().any(|p| p.matches_str(topic.as_str())));
+        // has_specific_subscriber excludes fallback-only hats (those
+        // subscribed to "*"), so it correctly returns false when
+        // ralph's wildcard is the only "subscriber".
+        let has_subscriber = registry.has_specific_subscriber(topic.as_str());
+
+        if !has_publisher {
+            let finding = RuntimeContractFinding::try_new_core(
+                "required.no_publisher",
+                FindingSource::Topology,
+                FindingSeverity::Error,
+                FindingStage::Authoring,
+                format!(
+                    "Required topic '{}' has no publisher in the hat graph",
+                    topic
+                ),
+            )
+            .expect("required-no-publisher finding uses no reserved source")
+            .with_detail("topic", topic.clone());
+            findings.push(finding);
+        }
+        if !has_subscriber {
+            let finding = RuntimeContractFinding::try_new_core(
+                "required.no_subscriber",
+                FindingSource::Topology,
+                FindingSeverity::Error,
+                FindingStage::Authoring,
+                format!(
+                    "Required topic '{}' has no subscriber in the hat graph",
+                    topic
+                ),
+            )
+            .expect("required-no-subscriber finding uses no reserved source")
+            .with_detail("topic", topic.clone());
+            findings.push(finding);
+        }
+    }
+    findings
+}
+
+/// R4 (U5): for every hat with `obligations:`, each
+/// `must_emit_any_of` topic must be present in the hat's `publishes`
+/// list.  Otherwise the activation-level path is incoherent: the
+/// runner would conclude the obligation is satisfiable by a topic
+/// the hat has no authority to publish, and the origin guard would
+/// reject the event at runtime.
+pub fn detect_obligation_topics_not_in_publishes(
+    config: &crate::config::RalphConfig,
+) -> Vec<RuntimeContractFinding> {
+    let mut findings = Vec::new();
+    for (hat_id, hat_config) in &config.hats {
+        let publishes: std::collections::HashSet<&str> = hat_config
+            .publishes
+            .iter()
+            .map(String::as_str)
+            .collect();
+        for obligation in &hat_config.obligations {
+            for topic in &obligation.must_emit_any_of {
+                if !publishes.contains(topic.as_str()) {
+                    let finding = RuntimeContractFinding::try_new_core(
+                        "obligation.topic_not_in_publishes",
+                        FindingSource::Topology,
+                        FindingSeverity::Error,
+                        FindingStage::Authoring,
+                        format!(
+                            "Hat '{}' obligation for trigger '{}' lists '{}' in \
+                             must_emit_any_of but the topic is not in publishes",
+                            hat_id, obligation.on_trigger, topic
+                        ),
+                    )
+                    .expect("obligation finding uses no reserved source")
+                    .with_detail("hat", hat_id.to_string())
+                    .with_detail("on_trigger", obligation.on_trigger.clone())
+                    .with_detail("topic", topic.clone());
+                    findings.push(finding);
+                }
+            }
+        }
+    }
+    findings
+}
+
 /// Preset Contract Aggregator — assembles a `RuntimeContractReport` from
 /// the existing config / topology / payload / orphan validators in
 /// the canonical order defined by the runtime contract consolidation
@@ -836,6 +972,23 @@ impl RuntimeContractAggregator {
         // excludes fallback-only hats so a `*` subscription by ralph
         // does not mask real orphans.
         for finding in detect_orphan_topics(config, registry) {
+            report.add_finding(finding);
+        }
+
+        // Step 5 (2026-06-07 plan U5 R4): required-topic coverage.
+        // Every topic in `required_events` / execution_contracts /
+        // event_policy.schemas must have a publisher AND a subscriber.
+        for finding in detect_required_topic_gaps(config, registry) {
+            report.add_finding(finding);
+        }
+
+        // Step 6 (2026-06-07 plan U5 R4): obligation-topic alignment.
+        // Each `obligations[*].must_emit_any_of` topic must be present
+        // in the same hat's `publishes` list.  Otherwise the
+        // activation-level path (Unit 4) would conclude the obligation
+        // is satisfiable by a topic the hat has no authority to emit,
+        // and the origin guard would reject the event at runtime.
+        for finding in detect_obligation_topics_not_in_publishes(config) {
             report.add_finding(finding);
         }
 
@@ -2235,6 +2388,178 @@ event_loop:
                 .all(|f| f.source != FindingSource::Preflight),
             "core aggregator must never stamp findings with source=preflight: {:?}",
             report.findings
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // 2026-06-07 plan U5: required-topic coverage + obligation alignment
+    // ──────────────────────────────────────────────────────────────────
+
+    use crate::RalphConfig;
+
+    fn u5_registry() -> (RalphConfig, HatRegistry) {
+        // Minimal but complete topology: every required topic is
+        // both published and subscribed, every obligation topic is in
+        // the hat's publishes.
+        let yaml = r#"
+hats:
+  coordinator:
+    name: "Coordinator"
+    triggers: ["work.start"]
+    publishes: ["work.ready", "work.failed"]
+  executor:
+    name: "Executor"
+    triggers: ["work.ready"]
+    publishes: ["work.done", "work.failed"]
+    obligations:
+      - on_trigger: "work.ready"
+        must_emit_any_of: ["work.done", "work.failed"]
+  reviewer:
+    name: "Reviewer"
+    triggers: ["work.done"]
+    publishes: ["review.passed"]
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["work.done"]
+  starting_event: "work.start"
+  event_policy:
+    enabled: true
+    mode: enforce
+    schemas:
+      work.done:
+        required_fields: [plan_name]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse test config");
+        let registry = HatRegistry::from_runtime_config(&config);
+        (config, registry)
+    }
+
+    #[test]
+    fn u5_detect_required_topic_gaps_clean_topology_produces_no_errors() {
+        let (config, registry) = u5_registry();
+        let findings = detect_required_topic_gaps(&config, &registry);
+        let errors: Vec<&RuntimeContractFinding> = findings
+            .iter()
+            .filter(|f| f.severity == FindingSeverity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "clean topology must produce no required-topic errors, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn u5_detect_required_topic_gaps_missing_publisher() {
+        // Topology without an executor → work.done has no publisher
+        // and the contract rule for work.done requires one.
+        let yaml = r#"
+hats:
+  observer:
+    name: "Observer"
+    triggers: ["work.start"]
+    publishes: ["work.start"]
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["work.done"]
+  starting_event: "work.start"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse");
+        let registry = HatRegistry::from_runtime_config(&config);
+        let findings = detect_required_topic_gaps(&config, &registry);
+        let codes: Vec<&str> = findings.iter().map(|f| f.id.as_str()).collect();
+        assert!(
+            codes.contains(&"required.no_publisher"),
+            "missing publisher must surface required.no_publisher, got: {codes:?}"
+        );
+    }
+
+    #[test]
+    fn u5_detect_required_topic_gaps_missing_subscriber() {
+        // Topology that publishes a topic nobody listens to: producer
+        // is fine, but the required topic has no subscriber.
+        let yaml = r#"
+hats:
+  emitter:
+    name: "Emitter"
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["work.done"]
+  starting_event: "work.start"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse");
+        let registry = HatRegistry::from_runtime_config(&config);
+        let findings = detect_required_topic_gaps(&config, &registry);
+        let codes: Vec<&str> = findings.iter().map(|f| f.id.as_str()).collect();
+        assert!(
+            codes.contains(&"required.no_subscriber"),
+            "missing subscriber must surface required.no_subscriber, got: {codes:?}"
+        );
+    }
+
+    #[test]
+    fn u5_detect_obligation_topics_not_in_publishes_catches_misconfiguration() {
+        // R4: a hat that lists a topic in `must_emit_any_of` without
+        // listing it in `publishes` is incoherent — the activation-
+        // level path would never actually let the hat satisfy the
+        // obligation (origin guard would reject the publish).
+        let yaml = r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.ready"]
+    publishes: ["work.failed"]
+    obligations:
+      - on_trigger: "work.ready"
+        must_emit_any_of: ["work.done", "work.failed"]
+  receiver:
+    name: "Receiver"
+    triggers: ["work.failed"]
+    publishes: ["ack"]
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["work.failed"]
+  starting_event: "work.start"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse");
+        let findings = detect_obligation_topics_not_in_publishes(&config);
+        let codes: Vec<&str> = findings.iter().map(|f| f.id.as_str()).collect();
+        assert!(
+            codes.contains(&"obligation.topic_not_in_publishes"),
+            "executor lists work.done in must_emit_any_of but not in publishes: {codes:?}"
+        );
+    }
+
+    #[test]
+    fn u5_detect_obligation_topics_clean_config_produces_no_findings() {
+        let (config, _registry) = u5_registry();
+        let findings = detect_obligation_topics_not_in_publishes(&config);
+        assert!(
+            findings.is_empty(),
+            "clean config must produce no obligation findings, got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn u5_aggregator_runs_required_topic_check() {
+        // End-to-end: the aggregator must call the new step.
+        let (config, registry) = u5_registry();
+        let report = RuntimeContractAggregator::aggregate(
+            "u5-test",
+            &config,
+            &registry,
+            RuntimeContractStrictness::preset_check_strict(),
+        );
+        let required_codes: Vec<&str> = report
+            .findings
+            .iter()
+            .filter(|f| f.id.starts_with("required."))
+            .map(|f| f.id.as_str())
+            .collect();
+        assert!(
+            required_codes.is_empty(),
+            "aggregator must not produce required.* findings on clean config, got: {required_codes:?}"
         );
     }
 }
