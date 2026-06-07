@@ -42,7 +42,7 @@ pub use hook_runs::{HookDisposition, HookRunLogger, HookRunTelemetryEntry};
 pub use log_rotation::{create_log_file, rotate_logs};
 pub use orchestration::{OrchestrationEntry, OrchestrationEvent, OrchestrationLogger};
 pub use performance::{PerformanceLogger, PerformanceMetric};
-pub use recovery::{RecoveryLogger, MAX_RECOVERY_NOTE_CHARS};
+pub use recovery::{MAX_RECOVERY_NOTE_CHARS, RecoveryLogger};
 pub use stream_handler::DiagnosticStreamHandler;
 pub use trace_layer::{DiagnosticTraceLayer, TraceEntry};
 // `DiagnosisSummary` is declared at module root below, so callers can
@@ -134,9 +134,15 @@ impl std::fmt::Debug for DiagnosticsCollector {
         f.debug_struct("DiagnosticsCollector")
             .field("enabled", &self.enabled)
             .field("full_diagnostics", &self.full_diagnostics)
-            .field("runtime_diagnosis_artifacts", &self.runtime_diagnosis_artifacts)
+            .field(
+                "runtime_diagnosis_artifacts",
+                &self.runtime_diagnosis_artifacts,
+            )
             .field("session_dir", &self.session_dir)
-            .field("has_orchestration_logger", &self.orchestration_logger.is_some())
+            .field(
+                "has_orchestration_logger",
+                &self.orchestration_logger.is_some(),
+            )
             .field("has_performance_logger", &self.performance_logger.is_some())
             .field("has_error_logger", &self.error_logger.is_some())
             .field("has_hook_run_logger", &self.hook_run_logger.is_some())
@@ -200,25 +206,21 @@ impl DiagnosticsCollector {
         // Historical loggers are tied to full_diagnostics. The minimal
         // runtime-diagnosis session deliberately skips them so we don't
         // create files nobody asked for.
-        let (
-            orchestration_logger,
-            performance_logger,
-            error_logger,
-            hook_run_logger,
-        ) = if options.full_diagnostics {
-            let orch_logger = orchestration::OrchestrationLogger::new(&session_dir)?;
-            let perf_logger = performance::PerformanceLogger::new(&session_dir)?;
-            let err_logger = errors::ErrorLogger::new(&session_dir)?;
-            let hook_logger = hook_runs::HookRunLogger::new(&session_dir)?;
-            (
-                Some(Arc::new(Mutex::new(orch_logger))),
-                Some(Arc::new(Mutex::new(perf_logger))),
-                Some(Arc::new(Mutex::new(err_logger))),
-                Some(Arc::new(Mutex::new(hook_logger))),
-            )
-        } else {
-            (None, None, None, None)
-        };
+        let (orchestration_logger, performance_logger, error_logger, hook_run_logger) =
+            if options.full_diagnostics {
+                let orch_logger = orchestration::OrchestrationLogger::new(&session_dir)?;
+                let perf_logger = performance::PerformanceLogger::new(&session_dir)?;
+                let err_logger = errors::ErrorLogger::new(&session_dir)?;
+                let hook_logger = hook_runs::HookRunLogger::new(&session_dir)?;
+                (
+                    Some(Arc::new(Mutex::new(orch_logger))),
+                    Some(Arc::new(Mutex::new(perf_logger))),
+                    Some(Arc::new(Mutex::new(err_logger))),
+                    Some(Arc::new(Mutex::new(hook_logger))),
+                )
+            } else {
+                (None, None, None, None)
+            };
 
         // U3: recovery / drift loggers. They are part of BOTH
         // `full_diagnostics` and the minimal `runtime_diagnosis_artifacts`
@@ -634,11 +636,9 @@ mod tests {
     fn test_diagnostics_disabled_by_default() {
         let temp = TempDir::new().unwrap();
 
-        let collector = DiagnosticsCollector::with_options(
-            temp.path(),
-            &DiagnosticsOptions::default(),
-        )
-        .unwrap();
+        let collector =
+            DiagnosticsCollector::with_options(temp.path(), &DiagnosticsOptions::default())
+                .unwrap();
 
         assert!(!collector.is_enabled());
         assert!(collector.session_dir().is_none());
@@ -761,11 +761,9 @@ mod tests {
     #[test]
     fn test_activation_matrix_default_disabled() {
         let temp = TempDir::new().unwrap();
-        let collector = DiagnosticsCollector::with_options(
-            temp.path(),
-            &DiagnosticsOptions::default(),
-        )
-        .unwrap();
+        let collector =
+            DiagnosticsCollector::with_options(temp.path(), &DiagnosticsOptions::default())
+                .unwrap();
 
         assert!(!collector.is_enabled());
         assert!(!collector.is_full_diagnostics());
@@ -868,6 +866,10 @@ mod tests {
             ..DiagnosticsOptions::default()
         };
         let result = DiagnosticsCollector::with_options(bogus, &options);
-        assert!(result.is_err(), "expected io::Error, got {:?}", result.is_ok());
+        assert!(
+            result.is_err(),
+            "expected io::Error, got {:?}",
+            result.is_ok()
+        );
     }
 }

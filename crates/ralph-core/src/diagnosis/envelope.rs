@@ -533,7 +533,9 @@ impl RecoveryDiagnosisEnvelopeBuilder {
         reason_code: &str,
         field: Option<&str>,
     ) -> String {
-        let target = target_hat.map(normalize_part).unwrap_or_else(|| "*".to_string());
+        let target = target_hat
+            .map(normalize_part)
+            .unwrap_or_else(|| "*".to_string());
         let topic = topic.map(normalize_part).unwrap_or_else(|| "*".to_string());
         let reason = normalize_part(reason_code);
         let field = field.map(normalize_part).unwrap_or_else(|| "*".to_string());
@@ -832,11 +834,7 @@ mod tests {
             .reason_code("missing_field")
             .message("m")
             .evidence(EvidenceRef::new(EvidenceKind::File, "src/x.rs", None))
-            .evidence(EvidenceRef::new(
-                EvidenceKind::Field,
-                "plan_name",
-                None,
-            ))
+            .evidence(EvidenceRef::new(EvidenceKind::Field, "plan_name", None))
             .build();
         // The builder should pick the most recent Field evidence as the
         // `field` part of the retry key.

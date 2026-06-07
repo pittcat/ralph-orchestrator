@@ -390,6 +390,33 @@ pub async fn run_loop_impl(
         event_loop.set_event_reader_path(resolve_candidate_events_path(&ctx));
     }
 
+    // ── U5/U6 production wiring (P1.1–P1.4) ──────────────────────────────
+    // Construct a `DriftEngine` that owns the drift observer,
+    // detector, and per-iteration responder glue. The engine is
+    // enabled iff `telemetry.runtime_diagnosis.enabled` is true.
+    // When disabled (the default), every per-iteration method is
+    // a cheap no-op so the loop runs unchanged.
+    let telemetry_config = Arc::new(config.telemetry.runtime_diagnosis.clone());
+    let mut drift_engine = if telemetry_config.enabled {
+        let required_fields = ralph_core::drift::engine::required_fields_from_config(
+            config.event_loop.event_policy.as_ref(),
+            config.event_loop.execution_contracts.as_ref(),
+        );
+        let hat_configs: Vec<HatConfig> = config.hats.values().cloned().collect();
+        let declared_edges = ralph_core::drift::engine::declared_edges_from_hats(&hat_configs);
+        ralph_core::drift::DriftEngine::enabled(
+            Arc::clone(&telemetry_config),
+            required_fields,
+            declared_edges,
+        )
+    } else {
+        ralph_core::drift::DriftEngine::disabled(Arc::clone(&telemetry_config))
+    };
+    // Install the drift observer on the EventBus as the very
+    // first observer so it observes every event the bus sees
+    // (including the recovery events we publish later).
+    drift_engine.install_observer(&mut event_loop);
+
     // Inject robot service (Telegram) for human-in-the-loop communication
     if config.robot.enabled
         && ctx.is_primary()
@@ -1004,6 +1031,7 @@ pub async fn run_loop_impl(
                     TerminationReason::WorkspaceGone => "workspace_gone",
                     TerminationReason::Cancelled => "cancelled",
                     TerminationReason::PayloadContractViolation => "payload_contract_violation",
+                    TerminationReason::RecoveryExhausted { .. } => "recovery_exhausted",
                 };
 
                 if matches!(reason, TerminationReason::Interrupted) {
@@ -1076,6 +1104,9 @@ pub async fn run_loop_impl(
                         TerminationReason::WorkspaceGone => "workspace directory removed",
                         TerminationReason::Cancelled => "cancelled by human",
                         TerminationReason::PayloadContractViolation => "payload contract violation",
+                        TerminationReason::RecoveryExhausted { .. } => {
+                            "recovery retry window exhausted"
+                        }
                     };
                     if let Err(e) = queue.mark_needs_review(loop_id, reason_str) {
                         warn!(loop_id = %loop_id, error = %e, "Failed to mark merge as needs-review");
@@ -1422,7 +1453,31 @@ pub async fn run_loop_impl(
         }
 
         // Check termination before execution
-        if let Some(reason) = event_loop.check_termination() {
+        // P1.4: drift engine termination hint check. When the
+        // responder produced a high-severity `TerminationHint`
+        // (Error or Critical) — i.e. a retry key exhausted its
+        // retry window or has no safe target — the engine surfaces
+        // a `RecoveryExhausted` termination reason. We only
+        // promote the hint to a real termination when
+        // `check_termination` did not already produce a stronger
+        // reason (PayloadContractViolation, LoopStale, etc.).
+        //
+        // R8 contract: a `Warning` Final hint does NOT promote
+        // to a termination reason — instead the engine publishes
+        // a `human.guidance` event (see
+        // `check_final_human_guidance`). The loop continues under
+        // operator supervision. We do that check inline here so
+        // the operator gets a chance to intervene before the
+        // next hat dispatch.
+        let guidance_published = drift_engine.check_final_human_guidance(&mut event_loop);
+        if guidance_published {
+            tracing::info!(
+                iteration = event_loop.state().iteration,
+                "drift engine published human.guidance for Final Warning hint"
+            );
+        }
+        let hint_reason = drift_engine.check_termination_hint(&event_loop);
+        if let Some(reason) = event_loop.check_termination().or(hint_reason) {
             let reason = dispatch_pre_loop_termination_hooks(
                 &event_loop,
                 hooks_dispatch_enabled,
@@ -1952,6 +2007,12 @@ pub async fn run_loop_impl(
                 continue;
             }
         };
+        // The previous iteration's findings must remain available
+        // through prompt construction and termination checking.
+        // Clear per-iteration responder caches only after the prompt
+        // has consumed them, then stamp observer snapshots with the
+        // iteration that is about to execute.
+        drift_engine.begin_iteration(&mut event_loop, iteration);
 
         let display_hat =
             resolve_display_hat_for_execution(&event_loop, &hat_id, &preview_display_hat);
@@ -2677,6 +2738,46 @@ pub async fn run_loop_impl(
         if let Some(processed) = processed_events.as_ref() {
             handle_execution_contract_rejections(processed, &mut event_loop, &display_hat);
         }
+
+        // ── P1.1: drift observer drain → detector → envelopes → journals ───
+        // Drain the drift observer's bounded channel, run each
+        // snapshot through the detector, and funnel any findings
+        // through the existing recovery responder path. Each
+        // finding also writes a `drift.jsonl` line and a
+        // high-level `OrchestrationEvent::DriftDetected` audit
+        // event. The drift observer is bounded and panic-safe; the
+        // engine swallows its own errors and never panics.
+        drift_engine.drain_observer(&mut event_loop);
+
+        // ── P1.2: hard escalation queue → targeted `task.resume` ───────────
+        // The responder's `drain_hard_escalations` queue is
+        // consumed here. Each action publishes a `task.resume`
+        // event targeted at the recommended hat with a stable,
+        // machine-detectable payload. The responder's queue is
+        // automatically cleared on the next `begin_iteration`.
+        drift_engine.drain_hard_escalations(&mut event_loop);
+
+        // ── P1.3: per-key recovery outcome tracking ────────────────────────
+        // For every retry key the responder is tracking, ask
+        // whether the iteration's accepted events satisfy the
+        // diagnosis. We pass per-event evidence (topic, fields,
+        // source hat, timestamp) so the responder can re-evaluate
+        // the SPECIFIC drift metric that produced the finding —
+        // `field_completeness` needs the field set,
+        // `coord_join_rate` needs (from, to, ts), `emit_cadence`
+        // needs the timestamp sequence. A bare topic list is no
+        // longer enough (R7 review).
+        let accepted_evidence: Vec<ralph_core::diagnosis::AcceptedEventEvidence> = processed_events
+            .as_ref()
+            .map(|p| {
+                ralph_core::drift::evidence_from_jsonl_events(
+                    p.accepted_events.iter().cloned(),
+                    event_loop.state().iteration,
+                )
+            })
+            .unwrap_or_default();
+        let _outcome_updates =
+            drift_engine.check_recovery_for_iteration(&mut event_loop, &accepted_evidence);
 
         // ── U6: Handle payload contract violations ───────────────────────────
         // Unlike execution contract rejections (which drive recovery via

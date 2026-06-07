@@ -59,11 +59,7 @@ impl EventSnapshot {
     /// Build a new `EventSnapshot` with `iteration` and `timestamp`
     /// defaulted to caller-controlled values.
     #[must_use]
-    pub fn new(
-        topic: impl Into<String>,
-        iteration: u32,
-        timestamp: DateTime<Utc>,
-    ) -> Self {
+    pub fn new(topic: impl Into<String>, iteration: u32, timestamp: DateTime<Utc>) -> Self {
         Self {
             topic: topic.into(),
             source_hat: None,

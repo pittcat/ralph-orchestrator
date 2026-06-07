@@ -114,9 +114,7 @@ fn truncate_note(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diagnosis::{
-        DiagnosisSource, DiagnosisSeverity, RecoveryDiagnosisEnvelope,
-    };
+    use crate::diagnosis::{DiagnosisSeverity, DiagnosisSource, RecoveryDiagnosisEnvelope};
     use std::fs;
     use tempfile::TempDir;
 
@@ -208,10 +206,7 @@ mod tests {
             .reason_code("stall")
             .message("m")
             .build();
-        let entry = RecoveryJournalEntry::from_envelope(
-            envelope,
-            vec![long_note.clone()],
-        );
+        let entry = RecoveryJournalEntry::from_envelope(envelope, vec![long_note.clone()]);
         let original_first_char_count = entry.notes[0].chars().count();
 
         logger.log(&entry).unwrap();

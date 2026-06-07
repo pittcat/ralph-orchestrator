@@ -245,10 +245,7 @@ impl DriftObserver {
     ///
     /// `iteration_fn` returns the current loop iteration. The
     /// observer stamps every snapshot with it.
-    pub fn observer_closure<F>(
-        &self,
-        iteration_fn: F,
-    ) -> impl Fn(&Event) + Send + 'static
+    pub fn observer_closure<F>(&self, iteration_fn: F) -> impl Fn(&Event) + Send + 'static
     where
         F: Fn() -> u32 + Send + Sync + 'static,
     {
@@ -262,15 +259,16 @@ impl DriftObserver {
             // never sees one. `AssertUnwindSafe` is sound here
             // because we don't expose any half-built state back to
             // the caller; we only mutate atomics.
-            let snapshot: EventSnapshot = match std::panic::catch_unwind(
-                std::panic::AssertUnwindSafe(|| project_event_to_snapshot(event, iteration_fn())),
-            ) {
-                Ok(snap) => snap,
-                Err(_) => {
-                    panicked.fetch_add(1, Ordering::Relaxed);
-                    return;
-                }
-            };
+            let snapshot: EventSnapshot =
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    project_event_to_snapshot(event, iteration_fn())
+                })) {
+                    Ok(snap) => snap,
+                    Err(_) => {
+                        panicked.fetch_add(1, Ordering::Relaxed);
+                        return;
+                    }
+                };
             if sender.try_send(snapshot).is_err() {
                 dropped.fetch_add(1, Ordering::Relaxed);
             }

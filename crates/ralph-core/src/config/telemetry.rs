@@ -350,10 +350,7 @@ impl DriftConfig {
         if self.emit_cadence_sigma <= 0.0 {
             return Err(ConfigError::TelemetryValidation {
                 field: "telemetry.runtime_diagnosis.drift.emit_cadence_sigma".to_string(),
-                message: format!(
-                    "value {} must be greater than 0.0",
-                    self.emit_cadence_sigma
-                ),
+                message: format!("value {} must be greater than 0.0", self.emit_cadence_sigma),
             });
         }
         Ok(())
@@ -453,7 +450,10 @@ mod tests {
         assert_eq!(cfg.runtime_diagnosis.retry_window_iterations, 5);
         assert_eq!(cfg.runtime_diagnosis.max_repeated_recoveries, 3);
         assert_eq!(cfg.runtime_diagnosis.artifact_retention, 10);
-        assert_eq!(cfg.runtime_diagnosis.malformed_jsonl_policy, MalformedJsonlPolicy::Warn);
+        assert_eq!(
+            cfg.runtime_diagnosis.malformed_jsonl_policy,
+            MalformedJsonlPolicy::Warn
+        );
 
         // Drift defaults.
         let drift = &cfg.runtime_diagnosis.drift;
@@ -736,7 +736,10 @@ runtime_diagnosis:
     fn test_validate_default_is_clean() {
         let cfg = RuntimeDiagnosisConfig::default();
         let warnings = cfg.validate().expect("defaults must validate");
-        assert!(warnings.is_empty(), "defaults must not emit warnings, got {warnings:?}");
+        assert!(
+            warnings.is_empty(),
+            "defaults must not emit warnings, got {warnings:?}"
+        );
     }
 
     /// The env-reading `to_diagnostics_options` must produce the same

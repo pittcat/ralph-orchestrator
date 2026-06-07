@@ -49,6 +49,6 @@ pub use reporter::{
     SessionSelector, build_report, load_session, render_json, render_markdown, resolve_session,
 };
 pub use responder::{
-    EscalationDecision, EscalationLevel, RUNTIME_DIAGNOSIS_ALERT_HEADER, RecoveryAction,
-    RecoveryResponder, TerminationHint,
+    AcceptedEventEvidence, EscalationDecision, EscalationLevel, RUNTIME_DIAGNOSIS_ALERT_HEADER,
+    RecoveryAction, RecoveryResponder, TerminationHint,
 };

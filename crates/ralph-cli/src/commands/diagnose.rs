@@ -114,11 +114,13 @@ pub fn diagnose_command(color_mode: ColorMode, args: DiagnoseArgs) -> Result<()>
 /// Test-friendly entry point: returns the [`DiagnoseExit`] instead
 /// of calling `std::process::exit`. Used by `diagnose_command` and
 /// by integration / unit tests.
-pub fn try_diagnose(color_mode: ColorMode, args: DiagnoseArgs) -> std::result::Result<(), DiagnoseExit> {
+pub fn try_diagnose(
+    color_mode: ColorMode,
+    args: DiagnoseArgs,
+) -> std::result::Result<(), DiagnoseExit> {
     let use_colors = color_mode.should_use_colors();
-    validate_args(&args).map_err(|_| {
-        DiagnoseExit::InvalidSession(PathBuf::from("<invalid --output>"))
-    })?;
+    validate_args(&args)
+        .map_err(|_| DiagnoseExit::InvalidSession(PathBuf::from("<invalid --output>")))?;
     let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let diagnostics_root = match args.diagnostics_root.as_ref() {
         Some(p) => p.clone(),
@@ -144,8 +146,12 @@ pub fn try_diagnose(color_mode: ColorMode, args: DiagnoseArgs) -> std::result::R
             return Err(DiagnoseExit::Io(path, err));
         }
     };
-    emit_report(&report, &args, use_colors)
-        .map_err(|e| DiagnoseExit::Io(report.session_path.clone(), std::io::Error::other(e.to_string())))?;
+    emit_report(&report, &args, use_colors).map_err(|e| {
+        DiagnoseExit::Io(
+            report.session_path.clone(),
+            std::io::Error::other(e.to_string()),
+        )
+    })?;
     Ok(())
 }
 
@@ -163,10 +169,7 @@ fn emit_report(report: &Report, args: &DiagnoseArgs, use_colors: bool) -> Result
             && !parent.as_os_str().is_empty()
         {
             std::fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "failed to create output directory {}",
-                    parent.display()
-                )
+                format!("failed to create output directory {}", parent.display())
             })?;
         }
         std::fs::write(path, body.as_bytes())

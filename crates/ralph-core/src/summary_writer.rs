@@ -379,6 +379,9 @@ impl SummaryWriter {
             TerminationReason::WorkspaceGone => "Failed: workspace directory removed",
             TerminationReason::Cancelled => "Cancelled gracefully (human rejection or timeout)",
             TerminationReason::PayloadContractViolation => "Failed: payload contract violation",
+            TerminationReason::RecoveryExhausted { .. } => {
+                "Failed: recovery retry window exhausted"
+            }
         }
     }
 

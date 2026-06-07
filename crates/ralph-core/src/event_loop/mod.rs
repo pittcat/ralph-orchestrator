@@ -109,6 +109,22 @@ pub enum TerminationReason {
     Cancelled,
     /// U6: runtime payload contract violation caused the loop to pause.
     PayloadContractViolation,
+    /// U6: recovery responder's retry window exhausted for a tracked
+    /// diagnosis key. The responder produced a `TerminationHint` of
+    /// severity `Error` or `Critical` and the runner promoted the
+    /// hint into a real termination. The carried `retry_key` and
+    /// `reason` are the values the responder produced so the
+    /// summary report can point operators to the diagnosis.
+    RecoveryExhausted {
+        /// The retry key the responder flagged as exhausted. Empty
+        /// when the responder produced a key-less hint (e.g. a
+        /// payload-contract-shaped Final escalation).
+        retry_key: String,
+        /// The free-form reason the responder attached to the
+        /// hint. Surfaced in `loop.terminate` payload and in
+        /// `summary.md`.
+        reason: String,
+    },
 }
 
 impl TerminationReason {
@@ -128,7 +144,8 @@ impl TerminationReason {
             | TerminationReason::ValidationFailure
             | TerminationReason::Stopped
             | TerminationReason::WorkspaceGone
-            | TerminationReason::PayloadContractViolation => 1,
+            | TerminationReason::PayloadContractViolation
+            | TerminationReason::RecoveryExhausted { .. } => 1,
             TerminationReason::MaxIterations
             | TerminationReason::MaxRuntime
             | TerminationReason::MaxCost => 2,
@@ -160,6 +177,7 @@ impl TerminationReason {
             TerminationReason::WorkspaceGone => "workspace_gone",
             TerminationReason::Cancelled => "cancelled",
             TerminationReason::PayloadContractViolation => "payload_contract_violation",
+            TerminationReason::RecoveryExhausted { .. } => "recovery_exhausted",
         }
     }
 
@@ -5157,5 +5175,8 @@ fn termination_status_text(reason: &TerminationReason) -> &'static str {
         TerminationReason::WorkspaceGone => "Workspace directory removed externally.",
         TerminationReason::Cancelled => "Cancelled gracefully (human rejection or timeout).",
         TerminationReason::PayloadContractViolation => "Payload contract violation - loop paused.",
+        TerminationReason::RecoveryExhausted { .. } => {
+            "Recovery responder exhausted retry window - loop paused."
+        }
     }
 }

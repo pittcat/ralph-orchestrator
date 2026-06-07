@@ -108,7 +108,15 @@ impl DriftFinding {
     /// to_topic)` used by [`DriftDetector`] to suppress duplicates
     /// within a single iteration.
     #[must_use]
-    pub fn dedup_key(&self) -> (DriftMetric, Option<String>, Option<String>, Option<String>, Option<String>) {
+    pub fn dedup_key(
+        &self,
+    ) -> (
+        DriftMetric,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) {
         (
             self.metric,
             self.topic.clone(),
@@ -145,11 +153,7 @@ impl RequiredFields {
     /// declaration (the metric is a no-op in that case).
     #[must_use]
     pub fn for_topic(&self, topic: &str) -> Vec<String> {
-        let mut merged: Vec<String> = self
-            .from_policy
-            .get(topic)
-            .cloned()
-            .unwrap_or_default();
+        let mut merged: Vec<String> = self.from_policy.get(topic).cloned().unwrap_or_default();
         if let Some(extra) = self.from_execution_contract.get(topic) {
             for f in extra {
                 if !merged.iter().any(|m| m == f) {
@@ -217,7 +221,13 @@ pub struct DriftDetector {
     config: DriftConfig,
     /// Last dedup set (cleared at the start of every `observe`
     /// call, or via `reset_seen`).
-    seen: HashSet<(DriftMetric, Option<String>, Option<String>, Option<String>, Option<String>)>,
+    seen: HashSet<(
+        DriftMetric,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )>,
     /// Required-field declarations for `field_completeness`.
     required_fields: RequiredFields,
     /// Declared edges for `coord_join_rate`.
@@ -391,10 +401,7 @@ impl DriftDetector {
             if self.seen.contains(&key) {
                 continue;
             }
-            let hits = window
-                .iter()
-                .filter(|s| s.fields.contains(field))
-                .count();
+            let hits = window.iter().filter(|s| s.fields.contains(field)).count();
             let observed = hits as f64 / total as f64;
             if observed < self.config.field_completeness_threshold {
                 let severity = pick_severity(
@@ -476,14 +483,10 @@ impl DriftDetector {
             //   joined = count of to-events whose timestamp >=
             //            the latest from-event timestamp seen so far
             //   rate   = min(1.0, joined / from_size)
-            let from_timestamps: Vec<DateTime<Utc>> = from_window
-                .iter()
-                .map(|s| s.timestamp)
-                .collect();
-            let to_timestamps: Vec<DateTime<Utc>> = this_window
-                .iter()
-                .map(|s| s.timestamp)
-                .collect();
+            let from_timestamps: Vec<DateTime<Utc>> =
+                from_window.iter().map(|s| s.timestamp).collect();
+            let to_timestamps: Vec<DateTime<Utc>> =
+                this_window.iter().map(|s| s.timestamp).collect();
             let joined = count_joined(&from_timestamps, &to_timestamps);
             let rate = (joined as f64 / from_size as f64).min(1.0);
             if rate < self.config.coord_join_rate_threshold {
@@ -534,21 +537,15 @@ impl DriftDetector {
         let snapshots: Vec<&EventSnapshot> = window.iter().collect();
         // Low-sample guard: we need at least `EMIT_CADENCE_MIN_SAMPLES`
         // events to compute a meaningful average and standard
-        // deviation.
+        // deviation. Below the floor the detector stays silent — a
+        // uniform short stream is *not* a drift signal, and the
+        // P2.2 review explicitly rejected the prior "always emit
+        // Info" behaviour because the responder was treating every
+        // healthy topic as a pending alert. We mark the key as
+        // seen so subsequent snapshots in the same iteration stay
+        // silent.
         if snapshots.len() < EMIT_CADENCE_MIN_SAMPLES {
-            // Surface an "insufficient-data" finding only when the
-            // window has at least one snapshot but below the
-            // minimum. We keep the dedup behavior so the
-            // insufficient-data signal does not spam every
-            // observation.
-            if !snapshots.is_empty() {
-                self.seen.insert(key.clone());
-                out.push(insufficient_cadence_finding(
-                    topic,
-                    self.last_iteration,
-                    snapshots.len(),
-                ));
-            }
+            self.seen.insert(key);
             return;
         }
         // Compute inter-emit intervals. Events that share a
@@ -559,23 +556,17 @@ impl DriftDetector {
         let intervals = compute_intervals(&snapshots);
         if intervals.is_empty() {
             // All events in the window belong to waves, so we have
-            // no real cadence to measure. Same insufficient-data
-            // path.
+            // no real cadence to measure. Same silent path as
+            // low-samples.
             self.seen.insert(key);
-            out.push(insufficient_cadence_finding(
-                topic,
-                self.last_iteration,
-                snapshots.len(),
-            ));
             return;
         }
         let (avg, stddev) = mean_stddev(&intervals);
-        // Always emit one emit_cadence record per iteration so
-        // downstream consumers can see the metric even when the
-        // window is uniform. The record's `severity` reflects the
-        // worst breach in the window: `Info` when no interval sits
-        // more than `sigma` above the average, `Error` / `Critical`
-        // when one does. `observed_value` is the worst z-score.
+        // `worst_z` is the worst positive z-score across the
+        // window's inter-emit intervals. Uniform cadence yields
+        // `worst_z == 0.0`; the metric must NOT emit a finding in
+        // that case. We only push a finding when the z-score is
+        // genuinely above the configured `sigma` threshold.
         let worst_z = if stddev <= 0.0 {
             0.0
         } else {
@@ -585,15 +576,15 @@ impl DriftDetector {
                 .fold(0.0_f64, f64::max)
         };
         let breached = worst_z > self.config.emit_cadence_sigma;
-        let severity = if breached {
-            pick_severity(
-                (worst_z - self.config.emit_cadence_sigma) / self.config.emit_cadence_sigma.max(1.0),
-                1.0,
-            )
-        } else {
-            DiagnosisSeverity::Info
-        };
         self.seen.insert(key);
+        if !breached {
+            // Healthy uniform cadence — not a diagnosis. Skip.
+            return;
+        }
+        let severity = pick_severity(
+            (worst_z - self.config.emit_cadence_sigma) / self.config.emit_cadence_sigma.max(1.0),
+            1.0,
+        );
         out.push(DriftFinding {
             finding_id: uuid::Uuid::new_v4().to_string(),
             metric: DriftMetric::EmitCadence,
@@ -606,17 +597,10 @@ impl DriftDetector {
             severity,
             iteration: self.last_iteration,
             window_size: snapshots.len(),
-            message: if breached {
-                format!(
-                    "emit cadence on `{topic}` worst interval is {worst_z:.2}σ above the rolling average (avg={avg:?}, stddev={stddev:?}); required threshold {:.2}σ",
-                    self.config.emit_cadence_sigma
-                )
-            } else {
-                format!(
-                    "emit cadence on `{topic}` is within the rolling average (worst z={worst_z:.2}σ, avg={avg:?}, stddev={stddev:?}); threshold {:.2}σ",
-                    self.config.emit_cadence_sigma
-                )
-            },
+            message: format!(
+                "emit cadence on `{topic}` worst interval is {worst_z:.2}σ above the rolling average (avg={avg:?}, stddev={stddev:?}); required threshold {:.2}σ",
+                self.config.emit_cadence_sigma
+            ),
         });
     }
 }
@@ -672,31 +656,6 @@ fn pick_severity(distance: f64, unit: f64) -> DiagnosisSeverity {
         DiagnosisSeverity::Warning
     } else {
         DiagnosisSeverity::Info
-    }
-}
-
-/// Build the "insufficient-data" finding for `emit_cadence` low
-/// samples.
-fn insufficient_cadence_finding(
-    topic: &str,
-    iteration: u32,
-    samples: usize,
-) -> DriftFinding {
-    DriftFinding {
-        finding_id: uuid::Uuid::new_v4().to_string(),
-        metric: DriftMetric::EmitCadence,
-        topic: Some(topic.to_string()),
-        field: None,
-        from_topic: None,
-        to_topic: None,
-        observed_value: samples as f64,
-        threshold: EMIT_CADENCE_MIN_SAMPLES as f64,
-        severity: DiagnosisSeverity::Info,
-        iteration,
-        window_size: samples,
-        message: format!(
-            "insufficient-data: emit_cadence needs at least {EMIT_CADENCE_MIN_SAMPLES} samples, have {samples} for topic `{topic}`; skipped"
-        ),
     }
 }
 
@@ -770,8 +729,5 @@ fn count_joined(from_timestamps: &[DateTime<Utc>], to_timestamps: &[DateTime<Utc
     let mut to_sorted: Vec<DateTime<Utc>> = to_timestamps.to_vec();
     to_sorted.sort();
     let earliest_from = *from_timestamps.iter().min().expect("non-empty");
-    to_sorted
-        .iter()
-        .filter(|t| **t >= earliest_from)
-        .count()
+    to_sorted.iter().filter(|t| **t >= earliest_from).count()
 }

@@ -69,14 +69,17 @@
 
 pub mod alert;
 pub mod detector;
+pub mod engine;
 pub mod window;
 
 #[cfg(test)]
 mod tests;
 
 pub use alert::{
-    DriftObserver, finding_to_envelope, finding_to_journal_entry,
-    finding_to_orchestration_event,
+    DriftObserver, finding_to_envelope, finding_to_journal_entry, finding_to_orchestration_event,
 };
-pub use detector::{DeclaredEdges, DriftDetector, DriftFinding, RequiredFields, EMIT_CADENCE_MIN_SAMPLES};
+pub use detector::{
+    DeclaredEdges, DriftDetector, DriftFinding, EMIT_CADENCE_MIN_SAMPLES, RequiredFields,
+};
+pub use engine::{DriftEngine, evidence_from_jsonl_events};
 pub use window::{DriftWindow, EventSnapshot};

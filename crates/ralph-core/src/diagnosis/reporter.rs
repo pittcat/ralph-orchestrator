@@ -28,9 +28,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 use thiserror::Error;
 
-use super::envelope::{
-    DiagnosisOutcome, DiagnosisSeverity, RecoveryDiagnosisEnvelope,
-};
+use super::envelope::{DiagnosisOutcome, DiagnosisSeverity, RecoveryDiagnosisEnvelope};
 use super::journal::{DriftJournalEntry, RecoveryJournalEntry};
 use crate::diagnostics::DiagnosisSummary;
 use crate::diagnostics::{OrchestrationEntry, OrchestrationEvent};
@@ -333,8 +331,7 @@ fn looks_like_session_timestamp(name: &str) -> bool {
         return false;
     }
     let bytes = head.as_bytes();
-    let is_digit =
-        |i: usize| bytes.get(i).is_some_and(|b| b.is_ascii_digit());
+    let is_digit = |i: usize| bytes.get(i).is_some_and(|b| b.is_ascii_digit());
     let is_sep = |i: usize, c: char| bytes.get(i).copied() == Some(c as u8);
     is_digit(0)
         && is_digit(1)
@@ -358,7 +355,8 @@ pub fn load_session(session_dir: &Path) -> SessionData {
     let summary = read_summary(&session_dir.join(DIAGNOSIS_SUMMARY_FILENAME), &mut warnings);
     let recovery = read_recovery_journal(&session_dir.join(RECOVERY_FILENAME), &mut warnings);
     let drift = read_drift_journal(&session_dir.join(DRIFT_FILENAME), &mut warnings);
-    let orchestration = read_orchestration(&session_dir.join(ORCHESTRATION_FILENAME), &mut warnings);
+    let orchestration =
+        read_orchestration(&session_dir.join(ORCHESTRATION_FILENAME), &mut warnings);
     let errors = read_errors(&session_dir.join(ERRORS_FILENAME), &mut warnings);
     SessionData {
         session_path: session_dir.to_path_buf(),
@@ -390,17 +388,17 @@ fn read_summary(path: &Path, warnings: &mut Vec<String>) -> Option<DiagnosisSumm
         Err(err) => {
             push_warning(
                 warnings,
-                format!("{}: I/O error reading diagnosis-summary.json: {err}", path.display()),
+                format!(
+                    "{}: I/O error reading diagnosis-summary.json: {err}",
+                    path.display()
+                ),
             );
             None
         }
     }
 }
 
-fn read_recovery_journal(
-    path: &Path,
-    warnings: &mut Vec<String>,
-) -> Vec<RecoveryJournalEntry> {
+fn read_recovery_journal(path: &Path, warnings: &mut Vec<String>) -> Vec<RecoveryJournalEntry> {
     let display = path.display().to_string();
     read_jsonl(path, "recovery.jsonl", warnings, |line| {
         serde_json::from_str::<RecoveryJournalEntry>(line)
@@ -416,10 +414,7 @@ fn read_drift_journal(path: &Path, warnings: &mut Vec<String>) -> Vec<DriftJourn
     })
 }
 
-fn read_orchestration(
-    path: &Path,
-    warnings: &mut Vec<String>,
-) -> Vec<OrchestrationEntry> {
+fn read_orchestration(path: &Path, warnings: &mut Vec<String>) -> Vec<OrchestrationEntry> {
     let display = path.display().to_string();
     read_jsonl(path, "orchestration.jsonl", warnings, |line| {
         serde_json::from_str::<OrchestrationEntry>(line)
@@ -439,12 +434,7 @@ fn read_errors(path: &Path, warnings: &mut Vec<String>) -> Vec<Value> {
 /// lines are skipped, and the per-line parser converts the line to
 /// `Result<T, String>` where the `Err` variant is the warning to
 /// record for that line.
-fn read_jsonl<T, F>(
-    path: &Path,
-    label: &str,
-    warnings: &mut Vec<String>,
-    mut parse: F,
-) -> Vec<T>
+fn read_jsonl<T, F>(path: &Path, label: &str, warnings: &mut Vec<String>, mut parse: F) -> Vec<T>
 where
     F: FnMut(&str) -> Result<T, String>,
 {
@@ -453,7 +443,10 @@ where
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
             push_warning(
                 warnings,
-                format!("{label} not found in session (expected at {})", path.display()),
+                format!(
+                    "{label} not found in session (expected at {})",
+                    path.display()
+                ),
             );
             return Vec::new();
         }
@@ -655,12 +648,12 @@ pub fn render_markdown(report: &Report) -> String {
         report.schema_version
     ));
     out.push_str("## Run summary\n\n");
-    out.push_str(&format!("- session path: `{}`\n", report.session_path.display()));
+    out.push_str(&format!(
+        "- session path: `{}`\n",
+        report.session_path.display()
+    ));
     if let Some(summary) = &report.summary {
-        out.push_str(&format!(
-            "- session id: `{}`\n",
-            summary.session_id
-        ));
+        out.push_str(&format!("- session id: `{}`\n", summary.session_id));
         if let Some(started) = summary.loop_started_at {
             out.push_str(&format!("- loop started: {started}\n"));
         }
@@ -673,8 +666,14 @@ pub fn render_markdown(report: &Report) -> String {
         if let Some(reason) = &summary.termination_reason {
             out.push_str(&format!("- termination reason: {reason}\n"));
         }
-        out.push_str(&format!("- recovery journal entries: {}\n", summary.recovery_count));
-        out.push_str(&format!("- drift findings: {}\n", summary.drift_finding_count));
+        out.push_str(&format!(
+            "- recovery journal entries: {}\n",
+            summary.recovery_count
+        ));
+        out.push_str(&format!(
+            "- drift findings: {}\n",
+            summary.drift_finding_count
+        ));
         for note in &summary.notes {
             out.push_str(&format!("- note: {note}\n"));
         }
@@ -876,10 +875,7 @@ fn push_contract_health_md(out: &mut String, report: &Report) {
                 };
                 out.push_str(&format!(
                     "| {} | {} | contract_recovery_routed | {} | {} |\n",
-                    entry.iteration,
-                    entry.hat,
-                    topic,
-                    detail,
+                    entry.iteration, entry.hat, topic, detail,
                 ));
             }
             _ => {}
@@ -989,13 +985,19 @@ fn suggested_actions_for_finding(f: &RankedFinding) -> Vec<String> {
             );
         }
         "stall_recovery" => {
-            out.push("检查 hat 是否被 OOM / 网络中断打断；考虑调低 max_iterations 触发更早的 steering".to_string());
+            out.push(
+                "检查 hat 是否被 OOM / 网络中断打断；考虑调低 max_iterations 触发更早的 steering"
+                    .to_string(),
+            );
         }
         "hook_retry" => {
             out.push("检查 `pre_agent` / `post_agent` hook 是否有超时或非零退出码".to_string());
         }
         "loop_stale" => {
-            out.push("loop 进入 stale 状态；运行 `ralph loops` 确认是否有并行 loop 在 hold state".to_string());
+            out.push(
+                "loop 进入 stale 状态；运行 `ralph loops` 确认是否有并行 loop 在 hold state"
+                    .to_string(),
+            );
         }
         _ => {
             out.push(format!(
@@ -1180,7 +1182,11 @@ mod tests {
     use crate::diagnosis::journal::DriftMetric;
     use tempfile::TempDir;
 
-    fn env(retry_key: &str, iteration: u32, severity: DiagnosisSeverity) -> RecoveryDiagnosisEnvelope {
+    fn env(
+        retry_key: &str,
+        iteration: u32,
+        severity: DiagnosisSeverity,
+    ) -> RecoveryDiagnosisEnvelope {
         RecoveryDiagnosisEnvelope::builder()
             .source(DiagnosisSource::MissingEventGate)
             .severity(severity)
@@ -1203,11 +1209,7 @@ mod tests {
         // TUI log dir — must be ignored.
         fs::create_dir_all(diag.join("logs")).unwrap();
         // Root-level violation report — must be ignored.
-        fs::write(
-            diag.join("payload-contract-error-2026-06-05.json"),
-            "{}",
-        )
-        .unwrap();
+        fs::write(diag.join("payload-contract-error-2026-06-05.json"), "{}").unwrap();
         // Old and new sessions.
         fs::create_dir_all(diag.join("2026-06-05T10-20-30")).unwrap();
         fs::create_dir_all(diag.join("2026-06-06T09-00-00")).unwrap();
@@ -1239,7 +1241,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let abs = tmp.path().join("2026-06-05T10-20-30");
         fs::create_dir_all(&abs).unwrap();
-        let resolved = resolve_session(SessionSelector::Explicit(abs.to_str().unwrap()), &abs).unwrap();
+        let resolved =
+            resolve_session(SessionSelector::Explicit(abs.to_str().unwrap()), &abs).unwrap();
         assert_eq!(resolved, abs);
     }
 
@@ -1259,8 +1262,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let diag = tmp.path().join(".ralph/diagnostics");
         fs::create_dir_all(&diag).unwrap();
-        let err =
-            resolve_session(SessionSelector::Explicit("not-a-timestamp"), &diag).unwrap_err();
+        let err = resolve_session(SessionSelector::Explicit("not-a-timestamp"), &diag).unwrap_err();
         assert!(matches!(err, ReporterError::InvalidSession(_)));
     }
 
@@ -1285,7 +1287,9 @@ mod tests {
             data.warnings
         );
         assert!(
-            data.warnings.iter().any(|w| w.contains("orchestration.jsonl")),
+            data.warnings
+                .iter()
+                .any(|w| w.contains("orchestration.jsonl")),
             "warnings: {:?}",
             data.warnings
         );
@@ -1316,7 +1320,8 @@ mod tests {
     #[test]
     fn load_session_parses_recovery_and_drift_journal() {
         let tmp = TempDir::new().unwrap();
-        let entry = RecoveryJournalEntry::from_envelope(env("rk:1", 1, DiagnosisSeverity::Warning), vec![]);
+        let entry =
+            RecoveryJournalEntry::from_envelope(env("rk:1", 1, DiagnosisSeverity::Warning), vec![]);
         fs::write(
             tmp.path().join("recovery.jsonl"),
             serde_json::to_string(&entry).unwrap(),
@@ -1344,7 +1349,9 @@ mod tests {
         // test; the loader must still record the missing-file
         // warnings but must not fail.
         assert!(
-            data.warnings.iter().any(|w| w.contains("orchestration.jsonl")),
+            data.warnings
+                .iter()
+                .any(|w| w.contains("orchestration.jsonl")),
             "warnings: {:?}",
             data.warnings
         );
@@ -1456,10 +1463,8 @@ mod tests {
 
     #[test]
     fn render_markdown_contains_all_sections() {
-        let entry = RecoveryJournalEntry::from_envelope(
-            env("rk:1", 1, DiagnosisSeverity::Error),
-            vec![],
-        );
+        let entry =
+            RecoveryJournalEntry::from_envelope(env("rk:1", 1, DiagnosisSeverity::Error), vec![]);
         let data = SessionData {
             session_path: PathBuf::from("/tmp/session"),
             recovery: vec![entry],
@@ -1517,10 +1522,8 @@ mod tests {
 
     #[test]
     fn render_json_does_not_contain_markdown_headings() {
-        let entry = RecoveryJournalEntry::from_envelope(
-            env("rk:1", 1, DiagnosisSeverity::Warning),
-            vec![],
-        );
+        let entry =
+            RecoveryJournalEntry::from_envelope(env("rk:1", 1, DiagnosisSeverity::Warning), vec![]);
         let data = SessionData {
             session_path: PathBuf::from("/tmp/session"),
             recovery: vec![entry],

@@ -2463,7 +2463,10 @@ event_loop:
   completion_promise: DONE
 ";
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.telemetry, super::telemetry::TelemetryConfig::default());
+        assert_eq!(
+            config.telemetry,
+            super::telemetry::TelemetryConfig::default()
+        );
         assert!(!config.telemetry.runtime_diagnosis.enabled);
         assert!(!config.telemetry.runtime_diagnosis.write_artifacts);
     }
@@ -2480,7 +2483,10 @@ telemetry:
 ";
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
         let result = config.validate();
-        assert!(result.is_err(), "negative emit_cadence_sigma must fail validate");
+        assert!(
+            result.is_err(),
+            "negative emit_cadence_sigma must fail validate"
+        );
         let err = result.unwrap_err();
         assert!(
             matches!(&err, ConfigError::TelemetryValidation { field, .. } if field.contains("emit_cadence_sigma")),

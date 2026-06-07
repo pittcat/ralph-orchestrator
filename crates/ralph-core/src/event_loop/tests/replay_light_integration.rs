@@ -1157,9 +1157,8 @@ fn test_u4_no_events_writes_diagnostics_summary_metadata() {
 
     let mut config = contract_disabled_config(workspace);
     config.core.workspace_root = workspace.to_path_buf();
-    let diagnostics =
-        crate::diagnostics::DiagnosticsCollector::with_enabled(workspace, true)
-            .expect("create diagnostics collector");
+    let diagnostics = crate::diagnostics::DiagnosticsCollector::with_enabled(workspace, true)
+        .expect("create diagnostics collector");
     let mut event_loop = EventLoop::with_diagnostics(config, diagnostics);
 
     let result = process_events(vec![], &mut event_loop);
@@ -1180,7 +1179,10 @@ fn test_u4_no_events_writes_diagnostics_summary_metadata() {
         .file_name()
         .and_then(|n| n.to_str())
         .map(String::from);
-    assert!(session_id.is_some(), "session id must be the directory name");
+    assert!(
+        session_id.is_some(),
+        "session id must be the directory name"
+    );
 
     // Writing to the recovery logger before any envelope is
     // constructed is a no-op (no file should be created when the
@@ -1207,6 +1209,12 @@ fn test_u4_no_events_writes_diagnostics_summary_metadata() {
     let recovery_path = session_path.join("recovery.jsonl");
     let content = std::fs::read_to_string(&recovery_path)
         .unwrap_or_else(|e| panic!("read recovery.jsonl: {e}: {}", recovery_path.display()));
-    assert!(content.contains("missing_event_gate"), "journal must list source");
-    assert!(content.contains(&envelope.diagnosis_id), "journal must list the diagnosis_id");
+    assert!(
+        content.contains("missing_event_gate"),
+        "journal must list source"
+    );
+    assert!(
+        content.contains(&envelope.diagnosis_id),
+        "journal must list the diagnosis_id"
+    );
 }

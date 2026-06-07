@@ -253,6 +253,9 @@ pub fn print_termination(
         TerminationReason::WorkspaceGone => (RED, "?", "Workspace directory removed"),
         TerminationReason::Cancelled => (CYAN, "⏹", "Cancelled gracefully"),
         TerminationReason::PayloadContractViolation => (RED, "⏸", "Payload contract violation"),
+        TerminationReason::RecoveryExhausted { .. } => {
+            (RED, "⏸", "Recovery retry window exhausted")
+        }
     };
 
     let separator = "-".repeat(58);

@@ -5,7 +5,6 @@ use crate::preflight;
 use anyhow::{Context, Result};
 use clap::Parser;
 use ralph_adapters::detect_backend;
-use std::sync::Arc;
 use ralph_core::{
     CheckStatus, LockError, LockGuard, LockMetadata, LockStatus, LoopContext, LoopEntry, LoopLock,
     LoopRegistry, PreflightReport, PreflightRunner, RalphConfig, TerminationReason,
@@ -14,6 +13,7 @@ use ralph_core::{
 };
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 /// Arguments for the run subcommand.
@@ -504,9 +504,7 @@ pub async fn run_command(
     verbose: bool,
     color_mode: ColorMode,
     args: RunArgs,
-    prebuilt_diagnostics: Option<
-        Arc<ralph_core::diagnostics::DiagnosticsCollector>,
-    >,
+    prebuilt_diagnostics: Option<Arc<ralph_core::diagnostics::DiagnosticsCollector>>,
 ) -> Result<()> {
     let mut config = preflight::load_config_for_preflight(config_sources, hats_source).await?;
 

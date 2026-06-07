@@ -23,9 +23,10 @@
 use super::*;
 use crate::config::{DriftConfig, MalformedJsonlPolicy, RuntimeDiagnosisConfig};
 use crate::diagnosis::{
-    DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, EscalationLevel,
+    AcceptedEventEvidence, DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, EscalationLevel,
     RUNTIME_DIAGNOSIS_ALERT_HEADER, RecoveryDiagnosisEnvelope, RecoveryResponder,
 };
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// Build a `RuntimeDiagnosisConfig` with all the U6-relevant knobs
@@ -415,12 +416,19 @@ fn check_recovery_drops_finding_from_prompt() {
     let _ = event_loop.record_recovery_envelope(&envelope, Vec::new());
 
     // Pretend the next iteration accepted the topic the envelope
-    // was complaining about.
-    let outcome = event_loop.recovery_responder_mut().check_recovery(
-        &envelope.retry_key,
-        &["work.done".to_string()],
-        2,
-    );
+    // was complaining about. Per the R7 review, we now pass
+    // per-event evidence (topic + field set + timestamp) so the
+    // responder can re-evaluate the specific drift metric.
+    let evidence = vec![AcceptedEventEvidence {
+        topic: "work.done".to_string(),
+        fields: BTreeSet::new(),
+        source_hat: Some("builder".to_string()),
+        timestamp: chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
+    }];
+    let outcome =
+        event_loop
+            .recovery_responder_mut()
+            .check_recovery(&envelope.retry_key, &evidence, 2);
     assert_eq!(outcome, Some(DiagnosisOutcome::Recovered));
 
     event_loop.begin_diagnosis_iteration();

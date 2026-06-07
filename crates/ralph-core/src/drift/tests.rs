@@ -18,10 +18,9 @@ use crate::diagnosis::{DiagnosisSeverity, DiagnosisSource, DriftMetric};
 use crate::diagnostics::OrchestrationEvent;
 
 use super::alert::{
-    DriftObserver, finding_to_envelope, finding_to_journal_entry,
-    finding_to_orchestration_event,
+    DriftObserver, finding_to_envelope, finding_to_journal_entry, finding_to_orchestration_event,
 };
-use super::detector::{DeclaredEdges, DriftDetector, DriftFinding, RequiredFields, EMIT_CADENCE_MIN_SAMPLES};
+use super::detector::{DeclaredEdges, DriftDetector, DriftFinding, RequiredFields};
 use super::window::{DriftWindow, EventSnapshot};
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -35,8 +34,7 @@ fn snap(topic: &str, iter: u32, seconds_offset: i64, fields: &[&str]) -> EventSn
     for f in fields {
         set.insert((*f).to_string());
     }
-    EventSnapshot::new(topic, iter, ts(seconds_offset))
-        .with_fields(set)
+    EventSnapshot::new(topic, iter, ts(seconds_offset)).with_fields(set)
 }
 
 fn snap_with_wave(topic: &str, iter: u32, seconds_offset: i64, wave_id: &str) -> EventSnapshot {
@@ -70,9 +68,7 @@ fn test_drift_window_bounded() {
 
 #[test]
 fn test_drift_window_from_events_pre_fills() {
-    let events: Vec<EventSnapshot> = (0..5)
-        .map(|i| snap("t", 0, i as i64, &[]))
-        .collect();
+    let events: Vec<EventSnapshot> = (0..5).map(|i| snap("t", 0, i as i64, &[])).collect();
     let window = DriftWindow::from_events(events, 10);
     assert_eq!(window.len(), 5);
     assert_eq!(window.capacity(), 10);
@@ -109,7 +105,9 @@ fn test_field_completeness_95_percent() {
     det.reset_seen();
     let findings = det.observe(snap("t", 1, 100, &["field_a"]));
     assert!(
-        findings.iter().all(|f| f.metric != DriftMetric::FieldCompleteness),
+        findings
+            .iter()
+            .all(|f| f.metric != DriftMetric::FieldCompleteness),
         "expected no field_completeness finding at 0.95, got {findings:?}"
     );
 
@@ -179,7 +177,9 @@ fn test_field_completeness_policy_required() {
         "DEBUG observed_value={} window={} hits={}",
         fc.observed_value,
         det.window_size_for("t"),
-        det.window("t").map(|w| w.iter().filter(|s| s.fields.contains("field_b")).count()).unwrap_or(0)
+        det.window("t")
+            .map(|w| w.iter().filter(|s| s.fields.contains("field_b")).count())
+            .unwrap_or(0)
     );
     assert!((fc.observed_value - 0.5).abs() < 0.01);
 }
@@ -294,7 +294,9 @@ fn test_coord_join_rate_no_declared_edge_is_noop() {
     det.reset_seen();
     let findings = det.observe(snap("b", 1, 200, &[]));
     assert!(
-        findings.iter().all(|f| f.metric != DriftMetric::CoordJoinRate),
+        findings
+            .iter()
+            .all(|f| f.metric != DriftMetric::CoordJoinRate),
         "no declared edge must not produce a finding, got {findings:?}"
     );
 }
@@ -302,7 +304,7 @@ fn test_coord_join_rate_no_declared_edge_is_noop() {
 // ── emit_cadence tests ───────────────────────────────────────────────
 
 #[test]
-fn test_emit_cadence_normal() {
+fn test_emit_cadence_uniform_emits_no_finding() {
     let mut det = DriftDetector::new(DriftConfig {
         emit_cadence_sigma: 2.0,
         ..drift_config()
@@ -313,21 +315,15 @@ fn test_emit_cadence_normal() {
     }
     det.reset_seen();
     let findings = det.observe(snap("t", 1, 10, &[]));
-    let cad = findings
-        .iter()
-        .find(|f| f.metric == DriftMetric::EmitCadence)
-        .expect("an emit_cadence record is expected even when normal — handled by insufficient-data or none");
-    // Even-cadence → no actual finding (info severity or none).
-    if !matches!(cad.severity, DiagnosisSeverity::Info) {
-        panic!("expected no hard finding on uniform cadence, got {cad:?}");
-    }
-    // The detector returns at most one emit_cadence record per
-    // iteration; the record's observed value should reflect the
-    // absence of an anomaly.
+    // Healthy uniform cadence is not a diagnosis. The P2.2 review
+    // explicitly rejected the prior "always emit an Info record"
+    // behaviour because the responder treated every healthy topic
+    // as a pending alert and produced log noise.
     assert!(
-        cad.message.starts_with("emit cadence on `t`") || cad.message.contains("insufficient-data"),
-        "unexpected message: {}",
-        cad.message
+        findings
+            .iter()
+            .all(|f| f.metric != DriftMetric::EmitCadence),
+        "uniform cadence must not emit an emit_cadence finding, got {findings:?}"
     );
 }
 
@@ -353,7 +349,7 @@ fn test_emit_cadence_anomaly() {
 }
 
 #[test]
-fn test_emit_cadence_low_sample() {
+fn test_emit_cadence_low_sample_emits_no_finding() {
     let mut det = DriftDetector::new(DriftConfig::default());
     // 3 events — below the min_samples guard.
     for i in 0..3 {
@@ -361,12 +357,14 @@ fn test_emit_cadence_low_sample() {
     }
     det.reset_seen();
     let findings = det.observe(snap("t", 1, 100, &[]));
-    let cad = findings
-        .iter()
-        .find(|f| f.metric == DriftMetric::EmitCadence)
-        .expect("low-sample finding expected");
-    assert!(cad.message.contains("insufficient-data"));
-    assert!(cad.message.contains(&EMIT_CADENCE_MIN_SAMPLES.to_string()));
+    // Low-samples are not a diagnosis either; the metric just
+    // cannot be computed yet. Stay silent.
+    assert!(
+        findings
+            .iter()
+            .all(|f| f.metric != DriftMetric::EmitCadence),
+        "low-sample emit_cadence must not emit a finding, got {findings:?}"
+    );
 }
 
 // ── dedup tests ──────────────────────────────────────────────────────
@@ -390,15 +388,23 @@ fn test_finding_dedup_within_iteration() {
     for i in 0..5 {
         det.observe(snap("t", 1, i, &[]));
     }
-    let total: usize = (0..5).map(|_| det.observe(snap("t", 1, 100, &[])).len()).sum();
+    let total: usize = (0..5)
+        .map(|_| det.observe(snap("t", 1, 100, &[])).len())
+        .sum();
     // After the first finding, all subsequent observes in the same
     // iteration collapse — we expect at most one field_completeness
     // finding across the whole burst.
     let fc_count = (0..5)
         .map(|_| det.observe(snap("t", 1, 100, &[])))
-        .flat_map(|f| f.into_iter().filter(|x| x.metric == DriftMetric::FieldCompleteness))
+        .flat_map(|f| {
+            f.into_iter()
+                .filter(|x| x.metric == DriftMetric::FieldCompleteness)
+        })
         .count();
-    assert!(fc_count <= 1, "expected dedup to collapse to ≤1 finding, got {fc_count} ({total} total)");
+    assert!(
+        fc_count <= 1,
+        "expected dedup to collapse to ≤1 finding, got {fc_count} ({total} total)"
+    );
 }
 
 #[test]
@@ -547,8 +553,15 @@ fn test_observer_non_blocking() {
     // drains, so the channel fills up after 4 events and the rest
     // are dropped. We never block, because the closure is what
     // we're testing.
-    assert!(observer.dropped() > dropped_before, "expected drops on full channel");
-    assert_eq!(observer.panicked(), 0, "no projection panic should occur on valid events");
+    assert!(
+        observer.dropped() > dropped_before,
+        "expected drops on full channel"
+    );
+    assert_eq!(
+        observer.panicked(),
+        0,
+        "no projection panic should occur on valid events"
+    );
 }
 
 #[test]
@@ -635,15 +648,15 @@ fn test_wave_id_handling_does_not_flag_cadence_anomaly() {
     }
     det.reset_seen();
     let findings = det.observe(snap_with_wave("t", 1, 100, "w-1"));
-    let cad: Vec<_> = findings
-        .iter()
-        .filter(|f| f.metric == DriftMetric::EmitCadence)
-        .collect();
-    // With one logical emit the window is "insufficient-data" and
-    // must not be flagged as an anomaly.
+    // With one logical emit the window cannot be measured at all
+    // and must not be flagged as a drift anomaly. The detector
+    // stays silent (P2.2 review: no more Info "insufficient-data"
+    // findings; healthy uniform cadence is *not* a diagnosis).
     assert!(
-        cad.iter().all(|f| f.message.contains("insufficient-data")),
-        "wave_id collapse must yield insufficient-data, got {cad:?}"
+        findings
+            .iter()
+            .all(|f| f.metric != DriftMetric::EmitCadence),
+        "wave_id collapse must not produce an emit_cadence finding, got {findings:?}"
     );
 }
 
@@ -675,7 +688,9 @@ fn test_detector_with_default_config_emits_no_finding() {
     det.reset_seen();
     let findings = det.observe(snap("t", 0, 100, &[]));
     assert!(
-        findings.iter().all(|f| f.metric != DriftMetric::FieldCompleteness),
+        findings
+            .iter()
+            .all(|f| f.metric != DriftMetric::FieldCompleteness),
         "default config has no required-fields source, so field_completeness must be a no-op, got {findings:?}"
     );
     assert!(det.observed_total() >= 20);

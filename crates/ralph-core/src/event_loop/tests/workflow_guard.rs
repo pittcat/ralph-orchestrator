@@ -948,8 +948,9 @@ event_loop:
 ";
     let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
     config.core.workspace_root = diagnostics_root.clone();
-    let diagnostics = crate::diagnostics::DiagnosticsCollector::with_enabled(&diagnostics_root, true)
-        .expect("create diagnostics collector");
+    let diagnostics =
+        crate::diagnostics::DiagnosticsCollector::with_enabled(&diagnostics_root, true)
+            .expect("create diagnostics collector");
     let mut event_loop = EventLoop::with_diagnostics(config, diagnostics);
     event_loop.initialize("Test");
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
@@ -982,10 +983,7 @@ event_loop:
         "out-of-order scored must not advance workflow progress"
     );
     assert!(
-        !event_loop
-            .state
-            .seen_topics
-            .contains("experiment.scored"),
+        !event_loop.state.seen_topics.contains("experiment.scored"),
         "rejected event must not be recorded as seen"
     );
     // Characterization: task.resume was published.
@@ -1016,12 +1014,18 @@ event_loop:
         entries.len(),
         1,
         "expected exactly one recovery entry, got: {:?}",
-        entries.iter().map(|e| &e.envelope.reason_code).collect::<Vec<_>>()
+        entries
+            .iter()
+            .map(|e| &e.envelope.reason_code)
+            .collect::<Vec<_>>()
     );
     let env = &entries[0].envelope;
     assert_eq!(env.source, DiagnosisSource::WorkflowGuard);
     assert_eq!(env.reason_code, "out_of_order_phase");
-    assert!(!env.safe_target, "workflow guard has no registered safe target");
+    assert!(
+        !env.safe_target,
+        "workflow guard has no registered safe target"
+    );
     assert_eq!(env.topic.as_deref(), Some("experiment.scored"));
     assert!(
         env.evidence
@@ -1058,8 +1062,9 @@ event_loop:
 ";
     let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
     config.core.workspace_root = diagnostics_root.clone();
-    let diagnostics = crate::diagnostics::DiagnosticsCollector::with_enabled(&diagnostics_root, true)
-        .expect("create diagnostics collector");
+    let diagnostics =
+        crate::diagnostics::DiagnosticsCollector::with_enabled(&diagnostics_root, true)
+            .expect("create diagnostics collector");
     let mut event_loop = EventLoop::with_diagnostics(config, diagnostics);
     event_loop.initialize("Test");
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
@@ -1086,7 +1091,10 @@ event_loop:
         .next()
         .map(|line| serde_json::from_str(line).unwrap())
         .expect("expected a recovery journal entry");
-    assert_eq!(recovery_entry.envelope.source, DiagnosisSource::WorkflowGuard);
+    assert_eq!(
+        recovery_entry.envelope.source,
+        DiagnosisSource::WorkflowGuard
+    );
 
     let orch_content = std::fs::read_to_string(&orch_path).unwrap();
     assert!(

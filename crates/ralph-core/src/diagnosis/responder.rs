@@ -37,16 +37,55 @@
 //! [`crate::event_loop::TerminationReason::PayloadContractViolation`]:
 //!     crate::event_loop::TerminationReason::PayloadContractViolation
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use ralph_proto::HatId;
 use serde::Serialize;
 
 use super::envelope::{
     DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, RecoveryDiagnosisEnvelope,
 };
+use super::journal::DriftMetric;
 use crate::config::RuntimeDiagnosisConfig;
+
+/// Minimum number of accepted-event samples the responder needs
+/// to re-evaluate an `EmitCadence` finding. Mirrors
+/// [`crate::drift::EMIT_CADENCE_MIN_SAMPLES`]; the constant is
+/// duplicated here so the responder does not need to import the
+/// drift module (which would create a `drift -> diagnosis -> drift`
+/// cycle — `drift::alert` already depends on `diagnosis`).
+pub const EMIT_CADENCE_RECOVERY_MIN_SAMPLES: usize = 5;
+
+/// Per-event evidence handed to
+/// [`RecoveryResponder::check_recovery`]. This is the responder's
+/// view of an accepted event: enough metadata to re-evaluate the
+/// specific drift metric that produced the original finding
+/// (`field_completeness` needs the field set, `coord_join_rate`
+/// needs `(from, to, ts)`, `emit_cadence` needs the timestamp
+/// sequence). Source-hats are kept for the prompt-injection filter.
+///
+/// A plain topic list is no longer enough — see the R7 review
+/// finding: "field_completeness 只要后续出现同 topic 就会标记
+/// Recovered，即使缺失字段仍未恢复". The responder now re-derives
+/// the metric from the accepted evidence instead of trusting
+/// "topic == state.topic".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedEventEvidence {
+    /// The accepted event's topic.
+    pub topic: String,
+    /// Top-level field names of a JSON-object payload. Empty for
+    /// non-JSON payloads. The field-completeness metric uses this
+    /// to verify the required field is actually present.
+    pub fields: BTreeSet<String>,
+    /// Hat that published the event, when known.
+    pub source_hat: Option<String>,
+    /// Wall-clock time the event was observed at. The coord-join
+    /// and cadence metrics use this to compute inter-event
+    /// intervals.
+    pub timestamp: DateTime<Utc>,
+}
 
 /// Header for the prompt-injection block. Stable, machine-detectable,
 /// distinct from `## ROBOT GUIDANCE` so the existing guidance detector
@@ -140,7 +179,11 @@ struct RetryState {
     attempt_count: u32,
     /// Loop iteration the key was first observed at.
     first_iteration: u32,
-    /// Loop iteration the key was last observed at.
+    /// Loop iteration the key was last observed at. Used for the
+    /// R7 "grace period" rule: a retry key CANNOT be marked
+    /// `Recovered` on the same iteration it was just produced —
+    /// the original event in the snapshot must come from a
+    /// later iteration's accepted event stream.
     last_iteration: u32,
     /// Most recent severity seen.
     last_severity: DiagnosisSeverity,
@@ -160,10 +203,79 @@ struct RetryState {
     /// or Final in a previous iteration. Used to avoid re-emitting a
     /// `task.resume` every iteration once the threshold is crossed.
     escalated: bool,
+    /// Drift metric that produced the original finding, when the
+    /// source is [`DiagnosisSource::DriftMonitor`]. The responder
+    /// uses this to pick the correct recovery criterion:
+    /// `FieldCompleteness` → field set check,
+    /// `CoordJoinRate` → declared-edge follow check,
+    /// `EmitCadence` → inter-emit z-score check.
+    /// `None` for non-drift findings; the responder falls back to
+    /// the topic-presence rule.
+    metric: Option<DriftMetric>,
+    /// Required field name, when the metric is
+    /// [`DriftMetric::FieldCompleteness`]. Pulled from
+    /// [`RecoveryDiagnosisEnvelope::evidence`]'s last
+    /// [`super::envelope::EvidenceKind::Field`] entry at observation
+    /// time.
+    required_field: Option<String>,
+    /// Coord-join source topic, when the metric is
+    /// [`DriftMetric::CoordJoinRate`]. The recovery criterion
+    /// requires an accepted event on `from_topic` followed by an
+    /// accepted event on `to_topic` (the state's `topic`).
+    from_topic: Option<String>,
+    /// Coord-join target topic. Mirrors `state.topic` for
+    /// `CoordJoinRate` findings, kept separate so the responder
+    /// can reason about edge cases (e.g. the from/to pair is
+    /// declared in the detector's `DeclaredEdges`).
+    to_topic: Option<String>,
 }
 
 impl RetryState {
     fn from_envelope(envelope: &RecoveryDiagnosisEnvelope) -> Self {
+        // Drift findings carry a `metric` inside their `reason_code`
+        // (the detector stamps `drift_field_completeness` /
+        // `drift_coord_join_rate` / `drift_emit_cadence`). We
+        // reverse that mapping here so the responder can pick
+        // the right recovery rule without re-parsing the reason
+        // string at every check.
+        let metric = if matches!(envelope.source, DiagnosisSource::DriftMonitor) {
+            match envelope.reason_code.as_str() {
+                "drift_field_completeness" => Some(DriftMetric::FieldCompleteness),
+                "drift_coord_join_rate" => Some(DriftMetric::CoordJoinRate),
+                "drift_emit_cadence" => Some(DriftMetric::EmitCadence),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        // The last Field-kind evidence ref carries the required
+        // field name. Drift findings always stamp one.
+        let required_field = envelope
+            .evidence
+            .iter()
+            .rev()
+            .find(|e| matches!(e.kind, super::envelope::EvidenceKind::Field))
+            .map(|e| e.ref_path.clone());
+        // Coord-join findings have neither `field` nor `topic`;
+        // the from/to pair is encoded as a single Topic ref of
+        // the form `from->to`. We split it back here so the
+        // responder can compare cleanly.
+        let (from_topic, to_topic) = envelope
+            .evidence
+            .iter()
+            .rev()
+            .find(|e| matches!(e.kind, super::envelope::EvidenceKind::Topic))
+            .and_then(|e| {
+                let mut parts = e.ref_path.splitn(2, "->");
+                let from = parts.next()?.to_string();
+                let to = parts.next()?.to_string();
+                if from.is_empty() || to.is_empty() {
+                    None
+                } else {
+                    Some((Some(from), Some(to)))
+                }
+            })
+            .unwrap_or((None, None));
         Self {
             attempt_count: 1,
             first_iteration: envelope.iteration,
@@ -175,6 +287,10 @@ impl RetryState {
             source: envelope.source,
             safe_target: envelope.safe_target,
             escalated: false,
+            metric,
+            required_field,
+            from_topic,
+            to_topic,
         }
     }
 }
@@ -270,6 +386,53 @@ impl RecoveryResponder {
         self.last_termination_hint.take()
     }
 
+    /// Read-only access to the most recent termination hint, if
+    /// any. Unlike [`Self::take_termination_hint`], the hint is
+    /// NOT removed; the loop runner's `finalize_recovery_diagnosis`
+    /// can still consume it for the operator summary.
+    ///
+    /// This is the API the drift engine uses to decide whether to
+    /// promote the hint into a [`crate::event_loop::TerminationReason`]
+    /// — it needs to peek without destroying the value.
+    #[must_use]
+    pub fn peek_termination_hint(&self) -> Option<&TerminationHint> {
+        self.last_termination_hint.as_ref()
+    }
+
+    /// Snapshot of every retry key the responder is currently
+    /// tracking. Used by the drift engine to call
+    /// [`Self::check_recovery`] for every tracked key after the
+    /// runner has collected the iteration's accepted topics.
+    #[must_use]
+    pub fn tracked_retry_keys_list(&self) -> Vec<String> {
+        self.state.keys().cloned().collect()
+    }
+
+    /// Look up the current outcome for `retry_key`. Returns
+    /// `None` when the key is not tracked.
+    ///
+    /// Used by the drift engine to detect outcome transitions
+    /// (Pending → Recovered, Pending → Repeated, ...) so it can
+    /// write a `recovery.jsonl` line for the reporter to surface.
+    #[must_use]
+    pub fn outcome_for(&self, retry_key: &str) -> Option<DiagnosisOutcome> {
+        self.state.get(retry_key).map(|s| s.last_outcome)
+    }
+
+    /// Most recent severity the responder recorded for
+    /// `retry_key`, or `None` when the key is not tracked.
+    #[must_use]
+    pub fn last_severity_for(&self, retry_key: &str) -> Option<DiagnosisSeverity> {
+        self.state.get(retry_key).map(|s| s.last_severity)
+    }
+
+    /// Topic the responder recorded for `retry_key`, or `None`
+    /// when the key is not tracked or had no topic.
+    #[must_use]
+    pub fn target_topic_for(&self, retry_key: &str) -> Option<String> {
+        self.state.get(retry_key).and_then(|s| s.topic.clone())
+    }
+
     /// Record a new envelope and compute the escalation level for the
     /// current iteration. Pure in-memory operation: the caller is
     /// responsible for persisting the envelope via
@@ -304,13 +467,13 @@ impl RecoveryResponder {
                 if let Some(hat) = target_hat.clone() {
                     let action = RecoveryAction {
                         retry_key: retry_key.clone(),
-                        target_hat: HatId::new(hat),
+                        target_hat: HatId::new(hat.clone()),
                         topic_hint: topic.clone(),
                         attempt,
                         severity,
                     };
                     self.last_hard_escalations.push(action);
-                    decision.target_hat = Some(retry_key.clone());
+                    decision.target_hat = Some(hat);
                 }
             }
             EscalationLevel::Final => {
@@ -367,53 +530,126 @@ impl RecoveryResponder {
     /// Mark a `retry_key` as recovered when the next iteration's
     /// accepted events include the expected `topic`. Returns the
     /// resulting outcome when state was updated, or `None` when the
-    /// key is not tracked.
+    /// Mark a `retry_key` as recovered when the iteration that just
+    /// completed satisfies the **specific** recovery criterion for
+    /// the finding's drift metric. Returns the resulting outcome
+    /// when state was updated, or `None` when the key is not
+    /// tracked.
     ///
-    /// `accepted_topics` should be the set of topics that the runtime
-    /// successfully accepted (i.e. passed through `EventPolicy`) in
-    /// the iteration that just completed.
+    /// # Per-metric recovery rules
+    ///
+    /// | Metric | Recovery condition |
+    /// |---|---|
+    /// | `FieldCompleteness` | At least one accepted event on `topic` includes the `required_field` |
+    /// | `CoordJoinRate` | At least one accepted event on `to_topic` is timestamped after an accepted event on `from_topic` |
+    /// | `EmitCadence` | At least [`EMIT_CADENCE_RECOVERY_MIN_SAMPLES`] accepted events on `topic` form a stable cadence (worst positive z-score < `2.0`) |
+    /// | non-drift / unknown | Backward-compatible: at least one accepted event on `state.topic`, OR (topic-less) any accepted event on the target hat |
+    ///
+    /// # Grace period (R7)
+    ///
+    /// A retry key CANNOT be marked `Recovered` on the same
+    /// iteration it was just recorded. The original event is part
+    /// of the same iteration's evidence stream, so a finding
+    /// produced in iteration `N` and an "evidence" event also in
+    /// iteration `N` would be self-referential and would mask
+    /// genuine recovery regressions. We require `current_iteration
+    /// > state.last_iteration` (the iteration the finding was
+    /// produced at) for the recovery path to fire.
+    ///
+    /// `accepted_evidence` should be the **accepted** event stream
+    /// of the iteration that just completed (i.e. the events that
+    /// passed through `EventPolicy` AND were not rejected by the
+    /// `EventOriginGuard`). The per-event `fields` and `timestamp`
+    /// fields are required for the metric-specific rules; callers
+    /// that only have a topic list should look at
+    /// [`Self::check_recovery_topics`] instead.
     pub fn check_recovery(
         &mut self,
         retry_key: &str,
-        accepted_topics: &[String],
+        accepted_evidence: &[AcceptedEventEvidence],
         current_iteration: u32,
     ) -> Option<DiagnosisOutcome> {
         let state = self.state.get_mut(retry_key)?;
-        // A key is recovered when the topic the diagnosis was about
-        // is now actually flowing through the bus. If the envelope
-        // has no topic, we cannot decide and leave the state alone.
-        if let Some(topic) = &state.topic {
-            if accepted_topics.iter().any(|t| t == topic) {
-                state.last_outcome = DiagnosisOutcome::Recovered;
-                state.last_iteration = current_iteration;
-                return Some(DiagnosisOutcome::Recovered);
-            }
-        } else if let Some(target) = &state.target_hat {
-            // Topic-less envelopes (e.g. workflow guard) recover
-            // when the next iteration's events include a publish on
-            // the target hat's expected topics. We treat any
-            // accepted event whose source matches the target as the
-            // recovery signal.
-            if accepted_topics.iter().any(|t| !t.is_empty()) {
-                // The "any accepted topic" check is a coarse proxy
-                // for the per-hat publish contract; the caller
-                // should pass the per-hat accepted topics when
-                // possible. The responder does not inspect the bus
-                // itself, by design.
-                state.last_outcome = DiagnosisOutcome::Recovered;
-                state.last_iteration = current_iteration;
-                let _ = target;
-                return Some(DiagnosisOutcome::Recovered);
-            }
+        // R7: a finding cannot self-heal in the iteration it was
+        // recorded. The drift snapshot and the next iteration's
+        // accepted events must come from different iterations.
+        if current_iteration <= state.last_iteration {
+            // We still need to set the outcome so the engine's
+            // transition detector does not flap. Pending is the
+            // most informative default — the finding has not yet
+            // had a chance to recover.
+            state.last_outcome = DiagnosisOutcome::Pending;
+            state.last_iteration = current_iteration;
+            return Some(DiagnosisOutcome::Pending);
         }
-        // Still pending or repeated.
-        if state.attempt_count > 1 {
+        // First, try the metric-specific rule. Drift findings
+        // carry a `metric`; non-drift findings fall through to the
+        // topic-presence rule.
+        let metric_recovered = match state.metric {
+            Some(DriftMetric::FieldCompleteness) => {
+                check_field_completeness_recovered(state, accepted_evidence)
+            }
+            Some(DriftMetric::CoordJoinRate) => {
+                check_coord_join_rate_recovered(state, accepted_evidence)
+            }
+            Some(DriftMetric::EmitCadence) => {
+                check_emit_cadence_recovered(state, accepted_evidence)
+            }
+            None => false,
+        };
+        // R7: when the finding has a metric, the topic-presence
+        // rule MUST NOT be used as a fallback. Otherwise a
+        // `field_completeness` finding that still has the field
+        // missing would recover as soon as a topic-matched
+        // event flows — which is exactly the regression the
+        // R7 review called out. The topic rule is reserved for
+        // non-drift findings (`MissingEventGate`,
+        // `WorkflowGuard`, ...) where the topic-presence
+        // condition is the genuine recovery signal.
+        let topic_recovered = if state.metric.is_some() {
+            false
+        } else {
+            check_topic_recovered(state, accepted_evidence)
+        };
+        let recovered = metric_recovered || topic_recovered;
+        if recovered {
+            state.last_outcome = DiagnosisOutcome::Recovered;
+        } else if state.attempt_count > 1 {
             state.last_outcome = DiagnosisOutcome::Repeated;
         } else {
             state.last_outcome = DiagnosisOutcome::Pending;
         }
         state.last_iteration = current_iteration;
         Some(state.last_outcome)
+    }
+
+    /// Backward-compatible recovery check that takes only the
+    /// topic list. Useful for callers that have not yet wired
+    /// [`AcceptedEventEvidence`] (e.g. older tests). The non-drift
+    /// recovery rule is applied: at least one accepted topic must
+    /// match `state.topic` (or, when topic-less, any non-empty
+    /// topic must match the target hat). The R7 grace period
+    /// still applies.
+    ///
+    /// New callers should prefer [`Self::check_recovery`] so the
+    /// metric-specific rule is honoured for drift findings.
+    pub fn check_recovery_topics(
+        &mut self,
+        retry_key: &str,
+        accepted_topics: &[String],
+        current_iteration: u32,
+    ) -> Option<DiagnosisOutcome> {
+        let evidence: Vec<AcceptedEventEvidence> = accepted_topics
+            .iter()
+            .filter(|t| !t.is_empty())
+            .map(|t| AcceptedEventEvidence {
+                topic: t.clone(),
+                fields: BTreeSet::new(),
+                source_hat: None,
+                timestamp: DateTime::<Utc>::from_timestamp(0, 0).unwrap_or_else(chrono::Utc::now),
+            })
+            .collect();
+        self.check_recovery(retry_key, &evidence, current_iteration)
     }
 
     /// Build the prompt-injection block. Returns a new prompt string
@@ -539,6 +775,10 @@ impl RecoveryResponder {
         current_iteration: u32,
     ) -> u32 {
         let window = self.config.retry_window_iterations.max(1) as u32;
+        // We pre-compute the metric-derived fields outside the
+        // `get_mut` borrow so the second-arm mutation does not
+        // double-borrow `self`.
+        let incoming = RetryState::from_envelope(envelope);
         let new_count = match self.state.get_mut(&retry_key) {
             None => {
                 // First observation: seed the state. We do the
@@ -546,7 +786,7 @@ impl RecoveryResponder {
                 // so the `attempt_count` field can be set explicitly
                 // (the constructor in `from_envelope` is shared with
                 // callers that do not want to bump the counter).
-                let mut state = RetryState::from_envelope(envelope);
+                let mut state = incoming;
                 state.first_iteration = envelope.iteration;
                 state.last_iteration = current_iteration;
                 state.attempt_count = 1;
@@ -574,6 +814,14 @@ impl RecoveryResponder {
                 entry.topic = envelope.topic.clone();
                 entry.source = envelope.source;
                 entry.safe_target = envelope.safe_target;
+                // Refresh the metric-derived fields so a re-fired
+                // finding (e.g. operator retried a different
+                // schema) re-uses the latest evidence rather than
+                // the stale values from the first observation.
+                entry.metric = incoming.metric;
+                entry.required_field = incoming.required_field;
+                entry.from_topic = incoming.from_topic;
+                entry.to_topic = incoming.to_topic;
                 entry.attempt_count
             }
         };
@@ -645,6 +893,146 @@ fn format_finding_line(env: &RecoveryDiagnosisEnvelope, current_iteration: u32) 
         iter = current_iteration,
         msg = env.message,
     )
+}
+
+/// R7: `FieldCompleteness` recovery rule.
+///
+/// The finding is recovered when at least one accepted event on
+/// `state.topic` carries the `required_field` in its top-level
+/// field set. A bare topic-presence match (e.g. "an event of
+/// topic `work.done` flowed through the bus") is NOT enough: the
+/// review explicitly rejected that as self-recovery because
+/// missing fields do not magically reappear.
+fn check_field_completeness_recovered(
+    state: &RetryState,
+    evidence: &[AcceptedEventEvidence],
+) -> bool {
+    let Some(topic) = state.topic.as_deref() else {
+        return false;
+    };
+    let Some(field) = state.required_field.as_deref() else {
+        // Field-completeness findings always carry a field.
+        // Without one we cannot decide, so we treat the finding
+        // as NOT recovered.
+        return false;
+    };
+    evidence
+        .iter()
+        .filter(|e| e.topic == topic)
+        .any(|e| e.fields.contains(field))
+}
+
+/// R7: `CoordJoinRate` recovery rule.
+///
+/// The finding is recovered when the accepted event stream
+/// contains at least one `(from_topic, to_topic)` pair where
+/// the `to_topic` event is timestamped at or after the
+/// `from_topic` event — i.e. the join actually happened in the
+/// observed window. We do not require the gap to be tight; the
+/// detector's threshold rule still applies. We just need to
+/// see the join.
+fn check_coord_join_rate_recovered(state: &RetryState, evidence: &[AcceptedEventEvidence]) -> bool {
+    let (Some(from_topic), Some(to_topic)) = (
+        state.from_topic.as_deref(),
+        state.to_topic.as_deref().or(state.topic.as_deref()),
+    ) else {
+        return false;
+    };
+    // Find the latest from-topic timestamp we have observed in
+    // the accepted evidence, and check whether any to-topic
+    // event was emitted at or after it.
+    let latest_from = evidence
+        .iter()
+        .filter(|e| e.topic == from_topic)
+        .map(|e| e.timestamp)
+        .max();
+    let Some(latest_from) = latest_from else {
+        return false;
+    };
+    evidence
+        .iter()
+        .any(|e| e.topic == to_topic && e.timestamp >= latest_from)
+}
+
+/// R7: `EmitCadence` recovery rule.
+///
+/// The finding is recovered when the accepted event stream on
+/// `state.topic` has at least [`EMIT_CADENCE_MIN_SAMPLES`]
+/// events that form a stable cadence. We define "stable" as
+/// "the worst positive z-score of the inter-emit intervals
+/// is below 2σ" — the same threshold the detector uses to
+/// raise a finding in the first place. A finding that was
+/// produced by a z-score > 2 is recovered only when the new
+/// z-score drops below 2.
+///
+/// We do not import the detector to keep the responder free
+/// of drift-internal types; the formula is small enough to
+/// re-implement here.
+fn check_emit_cadence_recovered(state: &RetryState, evidence: &[AcceptedEventEvidence]) -> bool {
+    let Some(topic) = state.topic.as_deref() else {
+        return false;
+    };
+    let timestamps: Vec<DateTime<Utc>> = evidence
+        .iter()
+        .filter(|e| e.topic == topic)
+        .map(|e| e.timestamp)
+        .collect();
+    if timestamps.len() < EMIT_CADENCE_RECOVERY_MIN_SAMPLES {
+        return false;
+    }
+    // Inter-emit intervals in seconds, sorted by timestamp
+    // (the input is already in accepted order but we re-sort
+    // to be safe).
+    let mut sorted = timestamps;
+    sorted.sort();
+    let intervals: Vec<f64> = sorted
+        .windows(2)
+        .map(|w| (w[1] - w[0]).num_milliseconds() as f64 / 1000.0)
+        .filter(|iv| *iv > 0.0)
+        .collect();
+    if intervals.len() < 2 {
+        // All events share the same timestamp (e.g. wave): the
+        // detector itself marks this as a silent path. We do
+        // the same — the cadence is not stable, it is undefined.
+        return false;
+    }
+    let avg = intervals.iter().sum::<f64>() / intervals.len() as f64;
+    let var = intervals.iter().map(|iv| (iv - avg).powi(2)).sum::<f64>() / intervals.len() as f64;
+    let stddev = var.sqrt();
+    let worst_z = if stddev <= 0.0 {
+        0.0
+    } else {
+        intervals
+            .iter()
+            .map(|iv| (iv - avg).max(0.0) / stddev)
+            .fold(0.0_f64, f64::max)
+    };
+    // The detector uses `emit_cadence_sigma` from
+    // `DriftConfig::emit_cadence_sigma` (default 2.0). The
+    // responder mirrors the same default. If the runtime
+    // overrides it, the detector's threshold and the
+    // responder's recovery threshold should be tuned together;
+    // see `DriftConfig::emit_cadence_sigma` for the source of
+    // truth.
+    worst_z < 2.0
+}
+
+/// Fallback recovery rule for findings without a metric
+/// (`MissingEventGate`, `WorkflowGuard`, ...) and topic-less
+/// envelopes (e.g. some `StallRecovery` cases). Returns `true`
+/// when the accepted evidence contains a topic that matches
+/// `state.topic` (or, when topic-less, contains a non-empty
+/// event whose source matches `state.target_hat`).
+fn check_topic_recovered(state: &RetryState, evidence: &[AcceptedEventEvidence]) -> bool {
+    if let Some(topic) = state.topic.as_deref() {
+        return evidence.iter().any(|e| e.topic == topic);
+    }
+    if let Some(target) = state.target_hat.as_deref() {
+        return evidence
+            .iter()
+            .any(|e| e.source_hat.as_deref() == Some(target));
+    }
+    false
 }
 
 /// Truncate a string to at most `max_chars` characters, appending the
@@ -749,6 +1137,7 @@ mod tests {
         let d = r.record_finding(&env, 3);
         assert_eq!(d.level, EscalationLevel::Hard, "iter 3 should be Hard");
         assert_eq!(d.attempt, 3);
+        assert_eq!(d.target_hat.as_deref(), Some("builder"));
         let actions = r.drain_hard_escalations();
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].target_hat.as_str(), "builder");
@@ -822,7 +1211,13 @@ mod tests {
         // Pretend the next iteration accepted the topic the envelope
         // was complaining about. `check_recovery` is the source of
         // truth for "this finding no longer needs a prompt alert".
-        let outcome = r.check_recovery("k:builder:work_done:r:*", &["work.done".to_string()], 2);
+        let evidence = vec![AcceptedEventEvidence {
+            topic: "work.done".to_string(),
+            fields: BTreeSet::new(),
+            source_hat: Some("builder".to_string()),
+            timestamp: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
+        }];
+        let outcome = r.check_recovery("k:builder:work_done:r:*", &evidence, 2);
         assert_eq!(outcome, Some(DiagnosisOutcome::Recovered));
         // The inject filter consults the state map, not the
         // envelope's outcome field, so the alert is dropped without

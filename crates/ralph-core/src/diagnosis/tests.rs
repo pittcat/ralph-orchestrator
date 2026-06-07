@@ -7,8 +7,8 @@
 
 use super::envelope::{
     DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, EvidenceKind, EvidenceRef,
-    RecoveryDiagnosisEnvelope, RecoveryDiagnosisEnvelopeBuilder,
     MAX_ENVELOPE_MESSAGE_CHARS, MAX_EVIDENCE_SNIPPET_CHARS, RECOVERY_ENVELOPE_SCHEMA_VERSION,
+    RecoveryDiagnosisEnvelope, RecoveryDiagnosisEnvelopeBuilder,
 };
 use super::journal::{DriftJournalEntry, DriftMetric, RecoveryJournalEntry};
 use chrono::Utc;
@@ -152,11 +152,7 @@ fn evidence_ref_truncates_long_snippet() {
 
 #[test]
 fn evidence_ref_short_snippet_preserved() {
-    let r = EvidenceRef::new(
-        EvidenceKind::Log,
-        "log",
-        Some("ERROR: foo".to_string()),
-    );
+    let r = EvidenceRef::new(EvidenceKind::Log, "log", Some("ERROR: foo".to_string()));
     assert_eq!(r.kind, EvidenceKind::Log);
     assert_eq!(r.ref_path, "log");
     assert_eq!(r.snippet.as_deref(), Some("ERROR: foo"));
@@ -164,11 +160,7 @@ fn evidence_ref_short_snippet_preserved() {
 
 #[test]
 fn evidence_ref_round_trips_through_serde() {
-    let r = EvidenceRef::new(
-        EvidenceKind::Log,
-        "log",
-        Some("ERROR: foo".to_string()),
-    );
+    let r = EvidenceRef::new(EvidenceKind::Log, "log", Some("ERROR: foo".to_string()));
     let s = serde_json::to_string(&r).unwrap();
     let back: EvidenceRef = serde_json::from_str(&s).unwrap();
     assert_eq!(back, r);
@@ -311,11 +303,7 @@ fn default_retry_key_uses_last_field_evidence() {
         .target_hat("builder")
         .topic("work.done")
         .evidence(EvidenceRef::new(EvidenceKind::File, "src/x.rs", None))
-        .evidence(EvidenceRef::new(
-            EvidenceKind::Field,
-            "plan_name",
-            None,
-        ))
+        .evidence(EvidenceRef::new(EvidenceKind::Field, "plan_name", None))
         .build();
     assert!(
         env.retry_key.ends_with(":plan_name"),

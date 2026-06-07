@@ -80,8 +80,7 @@ fn no_sessions_exits_non_zero() {
         "stderr should hint at missing sessions, got: {stderr}"
     );
     assert!(
-        stderr.contains("RALPH_DIAGNOSTICS=1")
-            || stderr.contains("telemetry.runtime_diagnosis"),
+        stderr.contains("RALPH_DIAGNOSTICS=1") || stderr.contains("telemetry.runtime_diagnosis"),
         "stderr should re-run hint, got: {stderr}"
     );
 }
@@ -126,11 +125,7 @@ fn latest_ignores_logs_and_payload_contract_files() {
     let diag = tmp.path().join(".ralph/diagnostics");
     fs::create_dir_all(diag.join("logs")).unwrap();
     // Root-level violation report must be ignored.
-    fs::write(
-        diag.join("payload-contract-error-2026-06-05.json"),
-        "{}",
-    )
-    .unwrap();
+    fs::write(diag.join("payload-contract-error-2026-06-05.json"), "{}").unwrap();
     let _old = fresh_session(&tmp, "2026-05-01T00-00-00");
     let _latest = fresh_session(&tmp, "2026-06-05T10-20-30");
 

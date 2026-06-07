@@ -351,15 +351,14 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         // Step 1: build the authoritative collector (what `main.rs` does).
-        let authoritative =
-            DiagnosticsCollector::with_options(
-                temp_dir.path(),
-                &crate::diagnostics::DiagnosticsOptions {
-                    full_diagnostics: true,
-                    ..Default::default()
-                },
-            )
-            .unwrap();
+        let authoritative = DiagnosticsCollector::with_options(
+            temp_dir.path(),
+            &crate::diagnostics::DiagnosticsOptions {
+                full_diagnostics: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let authoritative_session = authoritative.session_dir().unwrap().to_path_buf();
         let authoritative = Arc::new(authoritative);
 
@@ -371,7 +370,11 @@ mod tests {
         // the prebuilt collector — NOT create a second session.
         let config = RalphConfig::default();
         let event_loop = EventLoop::with_context(config, context);
-        let event_loop_session = event_loop.diagnostics().session_dir().unwrap().to_path_buf();
+        let event_loop_session = event_loop
+            .diagnostics()
+            .session_dir()
+            .unwrap()
+            .to_path_buf();
 
         assert_eq!(
             event_loop_session, authoritative_session,
@@ -397,9 +400,7 @@ mod tests {
     // ── U3: Recovery / Drift / Summary seed tests ─────────────────────
 
     fn sample_recovery_entry() -> crate::diagnosis::RecoveryJournalEntry {
-        use crate::diagnosis::{
-            DiagnosisSeverity, DiagnosisSource, RecoveryDiagnosisEnvelope,
-        };
+        use crate::diagnosis::{DiagnosisSeverity, DiagnosisSource, RecoveryDiagnosisEnvelope};
         let env = RecoveryDiagnosisEnvelope::builder()
             .source(DiagnosisSource::MissingEventGate)
             .severity(DiagnosisSeverity::Warning)
@@ -512,9 +513,8 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let collector = DiagnosticsCollector::with_enabled(temp.path(), true).unwrap();
 
-        let mut summary = crate::diagnostics::DiagnosisSummary::new(
-            collector.session_id().expect("session_id"),
-        );
+        let mut summary =
+            crate::diagnostics::DiagnosisSummary::new(collector.session_id().expect("session_id"));
         summary.recovery_count = 12;
         summary.drift_finding_count = 3;
         summary.total_iterations = Some(47);
@@ -598,10 +598,8 @@ mod tests {
             .reason_code("r")
             .message("m")
             .build();
-        let entry = crate::diagnosis::RecoveryJournalEntry::from_envelope(
-            env,
-            vec![long_note.clone()],
-        );
+        let entry =
+            crate::diagnosis::RecoveryJournalEntry::from_envelope(env, vec![long_note.clone()]);
 
         collector.log_recovery(entry);
 
@@ -666,10 +664,7 @@ mod tests {
         // removed. The write should warn-and-continue.
         let temp = TempDir::new().unwrap();
         let collector = DiagnosticsCollector::with_enabled(temp.path(), true).unwrap();
-        let recovery_path = collector
-            .session_dir()
-            .unwrap()
-            .join("recovery.jsonl");
+        let recovery_path = collector.session_dir().unwrap().join("recovery.jsonl");
         // Confirm the file is created lazily by the first call.
         collector.log_recovery(sample_recovery_entry());
         assert!(recovery_path.exists());
@@ -685,9 +680,8 @@ mod tests {
         // Must not panic.
         disabled.log_recovery(sample_recovery_entry());
         disabled.log_drift(sample_drift_entry());
-        disabled.write_diagnosis_summary_seed(&crate::diagnostics::DiagnosisSummary::new(
-            "deadbeef",
-        ));
+        disabled
+            .write_diagnosis_summary_seed(&crate::diagnostics::DiagnosisSummary::new("deadbeef"));
     }
 
     #[test]
