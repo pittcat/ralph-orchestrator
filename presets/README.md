@@ -56,3 +56,43 @@ Example workflow patterns now live in the docs rather than as shipped preset fil
 - Builtin index: `presets/index.json`
 - Embedded CLI mirror: `crates/ralph-cli/presets/*.yml`
 - Sync script: `./scripts/sync-embedded-files.sh`
+
+## Authoring Workflow: `ralph preset check`
+
+Editing or creating a preset? Run the contract check before pushing:
+
+```bash
+# Strict authoring check (recommended for CI and PR gates)
+ralph preset check -H builtin:ce-executor --strict
+
+# Non-strict smoke (faster, ignores warnings)
+ralph preset check -H builtin:ce-executor
+
+# JSON output for diagnostics / CI
+ralph preset check -H builtin:ce-executor --strict --format json
+```
+
+`ralph preset check` covers four authoring concerns in one pass:
+
+- `config` — `RalphConfig::validate()` semantic warnings and errors
+- `topology` — starting event, completion promise, required events reachability
+- `orphan` — published topics with no specific subscriber (typos and stale publishes)
+- `payload` — declared schemas vs. fields actually referenced by downstream hats
+
+This is the recommended entry point for preset authors. `ralph hats validate`
+keeps its narrower hat-debug focus; `ralph preflight` is for environment +
+config checks before a run. See `docs/guide/runtime-contracts.md` for the
+full behavior matrix and strict-semantics table.
+
+### Batch Validation
+
+To run the same check across every public builtin preset:
+
+```bash
+./scripts/validate-builtin-presets.sh           # non-strict, exempts known topology gaps
+./scripts/validate-builtin-presets.sh --strict  # strict, no exemptions
+```
+
+The script reads its preset list from `presets/index.json` (single source of
+truth), so adding a public preset to the index automatically widens the
+regression gate.

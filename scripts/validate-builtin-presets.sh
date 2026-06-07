@@ -5,19 +5,21 @@
 #   ./scripts/validate-builtin-presets.sh [--strict]
 #
 # Exit code:
-#   0 — all public presets passed (or had known topology exemptions)
+#   0 — all public presets passed (or had known topology exemptions in non-strict mode)
 #   1 — at least one public preset failed
 #
 # This script is a development/CI aid for the Runtime Contract consolidation
 # plan (U6). It is NOT wired into the default CI gate yet — that decision
 # depends on measured runtime cost.
 #
-# The PRESETS list and TOPOLOGY_EXEMPT_PRESETS list mirror the Rust unit tests
-# in crates/ralph-cli/src/presets.rs:
-#   - test_all_public_presets_pass_authoring_contract
-#   - test_development_presets_pass_strict_contract
-# If you add, remove, or rename a public builtin preset, or add a new known
-# topology exception, update both the Rust tests and this script.
+# The PRESETS list is derived from presets/index.json (single source of truth
+# for user-facing builtin presets; build.rs and presets.rs keep the embedded
+# array in lockstep with the manifest). The TOPOLOGY_EXEMPT_PRESETS list
+# below mirrors the same list in
+# crates/ralph-cli/src/presets.rs::tests::test_all_public_presets_pass_authoring_contract.
+# If you add or remove a public builtin preset, edit presets/index.json (and
+# the Rust PRESETS array if the preset is also embedded). If you add a new
+# known topology exception, update both lists.
 
 set -euo pipefail
 
@@ -53,31 +55,44 @@ if ! command -v jq &>/dev/null; then
     exit 1
 fi
 
-# Public builtin presets to check. Keep in sync with
-# crates/ralph-cli/src/presets.rs PRESETS where public=true.
-# `merge-loop` is intentionally excluded — it is public: false (internal
-# helper for the merge queue, not a user-facing preset).
-PRESETS=(
-    "autoresearch"
-    "ce-executor"
-    "ce-executor-wave"
-    "code-assist"
-    "debug"
-    "pdd-to-code-assist"
-    "research"
-    "review"
-)
+# Derive the public builtin preset list from presets/index.json. This is the
+# single source of truth for user-facing presets (the Rust `PRESETS` array
+# mirrors it via the same manifest). Reading from the manifest here means
+# adding or removing a preset to one place automatically updates this script
+# — no risk of silent drift.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PRESET_INDEX="${REPO_ROOT}/presets/index.json"
+
+if [[ ! -f "$PRESET_INDEX" ]]; then
+    echo "ERROR: presets/index.json not found at $PRESET_INDEX" >&2
+    exit 1
+fi
+
+# Use `map(select(.name))` to guard against stray entries without a name,
+# then sort for stable ordering across runs and platforms.
+PRESETS=()
+while IFS= read -r name; do
+    PRESETS+=("$name")
+done < <(jq -r '[.[] | select(.name) | .name] | sort | .[]' "$PRESET_INDEX")
+
+if [[ ${#PRESETS[@]} -eq 0 ]]; then
+    echo "ERROR: presets/index.json contains no entries with a .name field" >&2
+    exit 1
+fi
 
 # Presets with known topology issues (required events not on all completion
-# paths). These are documented exceptions, not hidden failures. Mirrors the
-# `topology_exempt` list in
+# paths). These are documented exceptions for non-strict mode only. Mirrors
+# the `topology_exempt` list in
 # crates/ralph-cli/src/presets.rs::tests::test_all_public_presets_pass_authoring_contract.
 # Add to this list only with a comment explaining why.
 #
-# The exemption applies only when ALL error findings come from the topology
-# source; any non-topology error (config/orphan/payload) is still a hard fail.
-# This is independent of strictness — the exemption is about known topology
-# gaps, not about payload strictness.
+# Strict mode policy: in --strict mode the exemption is intentionally NOT
+# applied. Strict means fail_on_warnings=true AND payload_strict=true, so any
+# non-topology warning (or new payload/orphan/config warning) must cause
+# failure. A preset that is "known topology" but suddenly gains a payload
+# warning must fail strict, not silently slip through. This is the regression
+# guard that the original review flagged.
 TOPOLOGY_EXEMPT_PRESETS=(
     # autoresearch: experiment loop has branching completion paths where
     # required events (experiment.scored, experiment.evaluated) are not on
@@ -91,7 +106,8 @@ TOPOLOGY_EXEMPT_PRESETS=(
 
 # Returns 0 (true) if every error-severity finding in $1 (a JSON report) has
 # source == "topology", or if there are no error-severity findings at all.
-# Returns 1 (false) otherwise.
+# Returns 1 (false) otherwise. The exemption is only meaningful for this
+# shape; warning checks live in the strict gate below.
 all_errors_are_topology() {
     local report_json="$1"
     # `defensive` is the jq safe-navigation style: if .findings is missing or
@@ -102,6 +118,20 @@ all_errors_are_topology() {
           | select(.severity == "error")
           | select(.source != "topology")
         ] | length == 0
+    ') || return 1
+    [[ "$result" == "true" ]]
+}
+
+# Returns 0 (true) if $1 (a JSON report) has zero warning-severity findings.
+# In --strict mode fail_on_warnings=true, so any warning must fail the gate.
+# This is the regression guard for the original review: the prior version
+# only checked errors, so a new payload/orphan/config warning could pass
+# strict as long as the topology errors remained.
+no_warnings() {
+    local report_json="$1"
+    local result
+    result=$(echo "$report_json" | jq -r '
+        [ (.findings // [])[] | select(.severity == "warn") ] | length == 0
     ') || return 1
     [[ "$result" == "true" ]]
 }
@@ -144,7 +174,48 @@ for preset in "${PRESETS[@]}"; do
         continue
     fi
 
-    # Slow path: report failed. Check for topology exemption.
+    # Slow path: report failed.
+    #
+    # Strict-mode gate (regression guard):
+    #   In --strict mode we deliberately do NOT apply the topology exemption
+    #   and we additionally verify there are zero warnings. The previous
+    #   version only checked `all_errors_are_topology`, which meant a new
+    #   payload/orphan/config warning (severity=warn) could pass the gate
+    #   when fail_on_warnings=true should have caught it. Strict means
+    #   strict — every warning or non-topology error is a real failure.
+    if [[ -n "$STRICT_FLAG" ]]; then
+        if no_warnings "$report_json"; then
+            # strict run with no warnings and only topology errors is
+            # surfaced verbatim — we do NOT exempt strict runs. The
+            # author must fix the topology issue for strict to pass.
+            error_ids=$(echo "$report_json" | jq -r '
+                [(.findings // [])[]
+                 | select(.severity == "error")
+                 | .id]
+                 | unique
+                 | join(", ")
+            ')
+            echo "FAIL (strict: ${error_ids})"
+        else
+            warn_ids=$(echo "$report_json" | jq -r '
+                [(.findings // [])[]
+                 | select(.severity == "warn")
+                 | .id]
+                 | unique
+                 | join(", ")
+            ')
+            echo "FAIL (strict warnings: ${warn_ids})"
+        fi
+        FAILED_PRESETS+=("$preset")
+        FAILED=1
+        continue
+    fi
+
+    # Non-strict slow path: topology exemption is allowed ONLY when every
+    # error-severity finding is from the topology source. This intentionally
+    # does not look at warnings, because non-strict mode treats warnings as
+    # non-blocking. If a future contributor wants the exemption to also
+    # cover warnings, add a separate gate with an explicit comment.
     if is_exempt "$preset" "${TOPOLOGY_EXEMPT_PRESETS[@]}" \
         && all_errors_are_topology "$report_json"; then
         error_ids=$(echo "$report_json" | jq -r '

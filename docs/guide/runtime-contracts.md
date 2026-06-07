@@ -44,7 +44,17 @@ ralph run -H builtin:ce-executor -p "your prompt"
 
 ## JSON 输出
 
-所有支持 `--format json` 的命令输出稳定的 JSON 结构：
+不同入口的 `--format json` 输出的 JSON 结构不同——这是有意为之：
+两个入口要表达的内容不同，共享一份结构会迫使其中一方在表达不准确时妥协。
+
+| 入口 | 输出类型 | 顶层字段 |
+|------|---------|---------|
+| `ralph preset check --format json` | `RuntimeContractReport` | `source_label`、`payload_strict`、`fail_on_warnings`、`passed`、`warnings`、`errors`、`findings[]`、`checked_at` |
+| `ralph preflight --format json` | `PreflightReport` | `passed`、`warnings`、`failures`、`checks[]` |
+
+`ralph hats validate` 目前只输出人类可读格式（plain text），不支持 `--format json`。
+
+### `ralph preset check --format json`
 
 ```json
 {
@@ -59,13 +69,45 @@ ralph run -H builtin:ce-executor -p "your prompt"
 }
 ```
 
-每个 finding 包含：
+`findings[]` 里每个 finding 包含：
 - `id`: 稳定机器 ID（如 `topology.unreachable_completion`）
 - `source`: 来源（`config` / `topology` / `orphan` / `payload`）
 - `severity`: 严重程度（`pass` / `warn` / `error`）
 - `stage`: 生命周期阶段（`authoring` / `preflight` / `run_hard_gate`）
 - `message`: 人类可读摘要
 - `details`: 可选结构化上下文
+- `action_hint`: 可选修复建议
+
+### `ralph preflight --format json`
+
+```json
+{
+  "passed": true,
+  "warnings": 1,
+  "failures": 0,
+  "checks": [
+    {
+      "name": "config",
+      "label": "Configuration valid",
+      "status": "pass"
+    }
+  ]
+}
+```
+
+`checks[]` 里每条 check 包含 `name`（check 标识）、`label`（人类摘要）、
+`status`（`pass` / `warn` / `fail`）。这是 preflight 早于 Runtime Contract
+设计时的结构，承载 `config + environment + topology` 的运行前检查。
+
+### 自动化消费指引
+
+- 解析 `ralph preset check` 的输出时，按 `RuntimeContractReport` 形态处理
+  `findings` 数组；按 `severity` + `fail_on_warnings` 推导最终 pass/fail。
+- 解析 `ralph preflight` 的输出时，按 `PreflightReport` 形态处理 `checks`
+  数组；按 `status` 推导每条 check 的结果，再根据 `--strict` 与 `warnings`/
+  `failures` 推导整体 pass/fail。
+- 不要把两者的 JSON 混为一谈；它们的字段名重叠（`passed` / `warnings`）
+  但语义和 schema 不同。
 
 ## 默认行为说明
 

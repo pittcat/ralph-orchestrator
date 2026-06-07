@@ -1026,3 +1026,32 @@ still works, but the inline form is preferred for consistency.
 
 See `docs/guide/payload-contracts.md` for the full schema format,
 extractor behaviour, and the boundary with execution contracts.
+
+## Runtime Contract Quality Gate
+
+`ralph preset check -H builtin:<name> --strict` is the recommended
+authoring entry point and supersedes `ralph hats validate` for new work.
+It folds config / topology / orphan / payload into a single
+`RuntimeContractReport` and supports a stable JSON output for CI.
+
+To validate every public builtin preset in one pass:
+
+```bash
+./scripts/validate-builtin-presets.sh --strict
+```
+
+The script reads its preset list from `presets/index.json` (single source
+of truth for user-facing presets) and exempts `autoresearch` and `debug`
+in non-strict mode for their known branching-topology design. In strict
+mode no exemption is applied — every warning or non-topology error
+fails the gate. See `docs/guide/runtime-contracts.md` for the strict
+semantics matrix and `scripts/validate-builtin-presets.sh` for the
+regression matrix source.
+
+### Checklist for Preset Authors (Runtime Contract)
+
+- [ ] Does `ralph preset check -H builtin:<name> --strict` exit 0?
+- [ ] Does `./scripts/validate-builtin-presets.sh --strict` pass after the change?
+- [ ] If a new finding id appears, is it documented in `docs/guide/runtime-contracts.md`?
+- [ ] For new public builtin presets, is the name added to `presets/index.json`?
+- [ ] For development presets (`ce-executor`, `ce-executor-wave`, `code-assist`, `pdd-to-code-assist`), does `ralph preset check --strict --format json` show zero findings?
