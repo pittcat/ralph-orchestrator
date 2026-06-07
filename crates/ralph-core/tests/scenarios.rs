@@ -537,3 +537,20 @@ fn test_isolated_with_event_projection() {
 
     println!("✓ {} passed", yaml.description);
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// 2026-06-07 plan U7: end-to-end recovery contract
+// ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_ce_executor_recovery_scenario() {
+    // The YAML ships a 5-mock-response loop that mirrors the
+    // 2026-06-06 drift run: executor activated, no event in iter 1
+    // (missing-event), valid work.done in iter 2, wave dispatch
+    // in iter 3, LOOP_COMPLETE in iter 4.  The deeper per-hypothesis
+    // assertions (origin guard, contract rejection, obligation
+    // alignment) live in `ralph-cli/tests/ce_executor_recovery.rs`.
+    // This scenario asserts the wire-level flow.
+    let yaml = load_scenario("tests/scenarios/ce_executor_recovery.yml");
+    run_scenario(yaml);
+}

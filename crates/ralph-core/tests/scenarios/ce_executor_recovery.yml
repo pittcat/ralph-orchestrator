@@ -1,0 +1,84 @@
+# ce_executor_recovery: End-to-end recovery contract for the ce-executor preset
+#
+# 2026-06-07 plan U7: 端到端闭环与回归验证
+#
+# This BDD scenario exercises the full recovery contract through the
+# real EventLoop / origin guard / event policy / execution contract /
+# task store paths, mirroring the failure modes observed in the
+# 2026-06-06 drift run (see
+# docs/report/2026-06-07-ce-executor-drift-plan-diagnostic-analysis.md).
+#
+# Iterations:
+#   - iteration 0: coordinator parses plan and publishes work.ready.
+#   - iteration 1: executor activated, no event → missing-event
+#     diagnosis (NOT contract rejection). Runner continues.
+#   - iteration 2: executor emits work.done with all required fields.
+#     The event passes origin + policy + execution contract and
+#     routes to review-coordinator.
+#   - iteration 3: review-coordinator dispatches a wave.
+#   - iteration 4: aggregator completes the loop with LOOP_COMPLETE.
+#
+# The deeper per-classification assertions (origin-guard fail-closed,
+# targeted-retry payload contents, obligation alignment) live in
+# crates/ralph-cli/tests/ce_executor_recovery.rs, which has access
+# to the public types and can compose multi-hypothesis scenarios.
+# This YAML exercises the wire-level loop with real mocks and
+# asserts only the high-level event flow.
+
+name: ce_executor_recovery
+description: End-to-end recovery contract for the ce-executor preset
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 6
+  hats:
+    coordinator:
+      subscribes_to:
+        - work.start
+      publishes:
+        - work.ready
+        - work.failed
+    executor:
+      subscribes_to:
+        - work.ready
+      publishes:
+        - work.done
+        - work.failed
+    review-coordinator:
+      subscribes_to:
+        - work.done
+      publishes:
+        - review.wave.ready
+        - review.passed
+
+# 5 mock responses, one per iteration.  Iteration 1 has the executor
+# forget to emit (so the runner records a missing-event diagnosis and
+# re-dispatches); iteration 2 emits a valid work.done.
+mock_responses:
+  - |
+    <event topic="work.start" plan_name="plan-x" plan_path="docs/plans/p.md" task_id="t1" task_key="k1" step="step-01">
+    Plan parsed.
+    </event>
+  - |
+    Implementing the change but forgot to call ralph emit.
+  - |
+    <event topic="work.done" plan_name="plan-x" plan_path="docs/plans/p.md" task_id="t1" task_key="k1" step="step-01">
+    Implementation done.
+    </event>
+  - |
+    <event topic="review.wave.ready" plan_name="plan-x" plan_path="docs/plans/p.md" task_id="t1" task_key="k1" step="step-01">
+    Reviewing.
+    </event>
+  - |
+    <event topic="LOOP_COMPLETE" plan_name="plan-x" plan_path="docs/plans/p.md" task_id="t1" task_key="k1" step="step-01">
+    Done.
+    </event>
+
+expected:
+  iterations: 5
+  events:
+    - topic: work.start
+    - topic: work.done
+    - topic: review.wave.ready
+    - topic: LOOP_COMPLETE
+  completion: true
