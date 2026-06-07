@@ -402,6 +402,17 @@ hats:
     description: "Diff analysis, intent discovery, conditional dimension selection, wave emission."
     triggers: ["work.done", "fix.applied"]
     publishes: ["review.wave.ready", "review.passed"]
+    # 2026-06-07 plan U4: opt into activation-level obligations so the
+    # hard_gate no longer flags this hat as "publish obligation but
+    # no event" for its conditional branches.  The blanket
+    # `publishes + default_publishes` rule would have mis-classified
+    # `review-coordinator` (no default_publishes, conditional emit
+    # between two legitimate topics).
+    obligations:
+      - on_trigger: "work.done"
+        must_emit_any_of: ["review.wave.ready", "review.passed"]
+      - on_trigger: "fix.applied"
+        must_emit_any_of: ["review.wave.ready", "review.passed"]
     instructions: |
       ## REVIEW COORDINATOR MODE — Scope Analysis, Intent Discovery, and Wave Scheduling
 

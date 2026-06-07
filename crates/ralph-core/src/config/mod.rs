@@ -11,7 +11,7 @@ mod event_policy;
 mod event_projection;
 pub(crate) mod execution_contracts;
 mod features;
-mod hat;
+pub mod hat;
 mod hooks;
 mod loop_config;
 mod memories;
@@ -37,7 +37,10 @@ pub use event_policy::{
 pub use event_projection::{EventProjectionConfig, ProjectionMode, ProjectionRule};
 pub use execution_contracts::ExecutionContractRule;
 pub use features::FeaturesConfig;
-pub use hat::{AggregateConfig, AggregateMode, EventMetadata, HatBackend, HatConfig};
+pub use hat::{
+    ActivationObligation, AggregateConfig, AggregateMode, EventMetadata, HatBackend, HatConfig,
+    obligation_satisfied,
+};
 pub use hooks::{
     HookDefaults, HookMutationConfig, HookOnError, HookPhaseEvent, HookSpec, HookSuspendMode,
     HooksConfig,

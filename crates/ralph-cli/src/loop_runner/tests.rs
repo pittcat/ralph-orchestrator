@@ -4542,6 +4542,7 @@ fn make_test_wave_with_timeout_and_payload(
             event_filter: None,
             phase_triggers: None,
             ignore_payload_fields: vec![],
+            obligations: vec![],
         },
         events: vec![event],
         total: 1,

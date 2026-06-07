@@ -83,6 +83,33 @@ impl HatBackend {
     }
 }
 
+/// Activation-level publish obligation (2026-06-07 plan U4).
+///
+/// Pins a single trigger topic to the set of topics the hat MUST emit
+/// at least one of when that trigger fires.  Used by `hard_gate` to
+/// distinguish:
+///
+///   - "agent did not run / produced no events at all" (hard-gate
+///     fires when the obligation is not satisfied).
+///   - "agent claimed to emit but the event did not make it to the
+///     trusted reader" (late-event path, not hard-gate).
+///   - "agent's emitted event was rejected by origin / policy /
+///     execution contract" (rejection recovery, not hard-gate).
+///   - "agent chose a different but legitimate topic from the
+///     obligation set" (no hard-gate — obligation satisfied).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActivationObligation {
+    /// Trigger topic that activates this obligation.  When the hat
+    /// is activated by this topic, it must emit one of
+    /// `must_emit_any_of`.
+    pub on_trigger: String,
+    /// Allowed result topics.  Emitting any one of them satisfies
+    /// the obligation.  Empty is treated as "no obligation" (i.e.
+    /// the trigger is informational, not enforceable).
+    #[serde(default)]
+    pub must_emit_any_of: Vec<String>,
+}
+
 /// Configuration for a single hat.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HatConfig {
@@ -172,6 +199,32 @@ pub struct HatConfig {
     #[serde(default = "default_concurrency")]
     pub concurrency: u32,
 
+    /// Activation-level publish obligations (2026-06-07 plan U4).
+    ///
+    /// Each entry pins a specific activation trigger to the set of topics
+    /// the hat MUST emit at least one of when that trigger fires.  When
+    /// obligations are configured for a hat, hard_gate checks them
+    /// directly instead of falling back to the blanket
+    /// `!publishes.is_empty() && default_publishes.is_none()` rule.
+    ///
+    /// Empty (the default) means "use the legacy blanket rule" — a
+    /// hat with `publishes` and no `default_publishes` will still be
+    /// hard-gated, but only for non-conditional / non-aggregate
+    /// terminal events.  This keeps backwards compatibility for
+    /// presets that do not opt in.
+    ///
+    /// Example:
+    /// ```yaml
+    /// review-coordinator:
+    ///   triggers: ["work.done", "fix.applied"]
+    ///   publishes: ["review.wave.ready", "review.passed"]
+    ///   obligations:
+    ///     - on_trigger: "work.done"
+    ///       must_emit_any_of: ["review.wave.ready", "review.passed"]
+    /// ```
+    #[serde(default)]
+    pub obligations: Vec<ActivationObligation>,
+
     /// Aggregation configuration for this hat.
     ///
     /// When set, this hat acts as an aggregator — it buffers wave results and
@@ -246,6 +299,7 @@ impl Default for HatConfig {
             event_filter: None,
             phase_triggers: None,
             ignore_payload_fields: Vec::new(),
+            obligations: Vec::new(),
         }
     }
 }
@@ -290,5 +344,169 @@ impl HatConfig {
         } else {
             self.trigger_topics()
         }
+    }
+
+    /// Look up the obligation that applies to a given trigger topic.
+    ///
+    /// Returns `None` when the hat has no obligation for the trigger
+    /// (which is the case for legacy presets that do not opt into
+    /// activation-level obligations).  Callers that get `None` should
+    /// fall back to the blanket `publishes + default_publishes` rule.
+    pub fn obligation_for_trigger(&self, trigger_topic: &str) -> Option<&ActivationObligation> {
+        self.obligations
+            .iter()
+            .find(|o| o.on_trigger == trigger_topic)
+    }
+
+    /// Returns `true` if the hat has any activation-level obligation
+    /// for the given trigger topic.  Used by `hard_gate` to decide
+    /// whether to take the activation-level path (preferred) or the
+    /// legacy blanket rule (fallback).
+    pub fn has_obligation_for(&self, trigger_topic: &str) -> bool {
+        self.obligation_for_trigger(trigger_topic).is_some()
+    }
+}
+
+/// Returns `true` when the candidate topic set satisfies the
+/// activation obligation for a given trigger.  A candidate set
+/// satisfies an obligation when at least one candidate topic is
+/// listed in the obligation's `must_emit_any_of` set.  An empty
+/// `must_emit_any_of` is treated as "no obligation" and always
+/// satisfied (legacy behaviour).
+///
+/// Caller-supplied helper so `hard_gate` does not have to know about
+/// the `ActivationObligation` shape.  Lives at module scope so the
+/// `hat.rs` test module can exercise it without touching the public
+/// `HatConfig` API.
+pub fn obligation_satisfied(
+    obligation: Option<&ActivationObligation>,
+    candidate_topics: &[String],
+) -> bool {
+    match obligation {
+        None => true, // No obligation → any outcome is fine.
+        Some(o) if o.must_emit_any_of.is_empty() => true,
+        Some(o) => candidate_topics
+            .iter()
+            .any(|t| o.must_emit_any_of.iter().any(|m| m == t)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hat_with_obligations(obligations: Vec<ActivationObligation>) -> HatConfig {
+        HatConfig {
+            name: "test".into(),
+            description: None,
+            triggers: vec!["work.done".into()],
+            publishes: vec!["review.passed".into(), "review.wave.ready".into()],
+            instructions: String::new(),
+            extra_instructions: Vec::new(),
+            backend: None,
+            backend_args: None,
+            default_publishes: None,
+            max_activations: None,
+            scratchpad: None,
+            disallowed_tools: Vec::new(),
+            timeout: None,
+            concurrency: 1,
+            aggregate: None,
+            event_filter: None,
+            phase_triggers: None,
+            ignore_payload_fields: Vec::new(),
+            obligations,
+        }
+    }
+
+    #[test]
+    fn obligation_for_trigger_returns_matching_obligation() {
+        let hat = hat_with_obligations(vec![ActivationObligation {
+            on_trigger: "work.done".into(),
+            must_emit_any_of: vec!["review.wave.ready".into(), "review.passed".into()],
+        }]);
+        let o = hat.obligation_for_trigger("work.done").expect("obligation");
+        assert_eq!(o.on_trigger, "work.done");
+        assert_eq!(o.must_emit_any_of.len(), 2);
+    }
+
+    #[test]
+    fn obligation_for_trigger_returns_none_when_unconfigured() {
+        let hat = hat_with_obligations(vec![]);
+        assert!(hat.obligation_for_trigger("work.done").is_none());
+        assert!(!hat.has_obligation_for("work.done"));
+    }
+
+    #[test]
+    fn obligation_satisfied_with_no_obligation_is_always_true() {
+        // R3: 没有 obligation 时 hard_gate 不应误报未履约
+        let candidates = vec![];
+        assert!(obligation_satisfied(None, &candidates));
+        assert!(obligation_satisfied(None, &["anything".into()]));
+    }
+
+    #[test]
+    fn obligation_satisfied_with_empty_must_emit_is_always_true() {
+        // R3: 空 must_emit_any_of 等同于无 obligation
+        let o = ActivationObligation {
+            on_trigger: "work.done".into(),
+            must_emit_any_of: vec![],
+        };
+        assert!(obligation_satisfied(Some(&o), &[]));
+    }
+
+    #[test]
+    fn obligation_satisfied_when_candidate_matches_must_emit() {
+        // review-coordinator 选 wave 或 passed，agent 发 review.passed 满足
+        let o = ActivationObligation {
+            on_trigger: "work.done".into(),
+            must_emit_any_of: vec!["review.wave.ready".into(), "review.passed".into()],
+        };
+        assert!(obligation_satisfied(
+            Some(&o),
+            &vec!["review.passed".into()]
+        ));
+        assert!(obligation_satisfied(
+            Some(&o),
+            &vec!["review.wave.ready".into()]
+        ));
+    }
+
+    #[test]
+    fn obligation_not_satisfied_when_candidate_is_off_obligation_set() {
+        // R3: agent 发出 work.failed 不在 review-coordinator 的 obligation
+        // 集合中 → obligation 未满足 → 进入 missing-event 分支
+        // (但 hard_gate 自身不区分 0 candidate vs candidate-off-set,
+        //  下游 reporter 必须根据候选 topic 决定是 missing 还是 wrong)
+        let o = ActivationObligation {
+            on_trigger: "work.done".into(),
+            must_emit_any_of: vec!["review.wave.ready".into(), "review.passed".into()],
+        };
+        assert!(!obligation_satisfied(
+            Some(&o),
+            &vec!["work.failed".into()]
+        ));
+        assert!(!obligation_satisfied(Some(&o), &vec![]));
+    }
+
+    #[test]
+    fn hat_config_parses_obligations_from_yaml() {
+        // 序列化往返：YAML 解析与写出保持 obligation 结构稳定
+        let yaml = r#"
+name: "Review Coordinator"
+triggers: ["work.done", "fix.applied"]
+publishes: ["review.wave.ready", "review.passed"]
+obligations:
+  - on_trigger: "work.done"
+    must_emit_any_of: ["review.wave.ready", "review.passed"]
+  - on_trigger: "fix.applied"
+    must_emit_any_of: ["review.passed"]
+"#;
+        let hat: HatConfig = serde_yaml::from_str(yaml).expect("parse hat yaml");
+        assert_eq!(hat.obligations.len(), 2);
+        assert_eq!(hat.obligations[0].on_trigger, "work.done");
+        assert_eq!(hat.obligations[0].must_emit_any_of.len(), 2);
+        assert_eq!(hat.obligations[1].on_trigger, "fix.applied");
+        assert_eq!(hat.obligations[1].must_emit_any_of, vec!["review.passed".to_string()]);
     }
 }

@@ -409,3 +409,81 @@ fn u3_u1_fixture_inventory_matches_wave_merge_contract() {
         "fixture must include both shapes so U3 merge normalization is exercised end-to-end"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// 2026-06-07 plan Unit 4: hard gate activation-level obligations
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn u4_hat_config_parses_obligations_from_yaml_roundtrip() {
+    // R3 / R4: a hat with `obligations:` must round-trip through
+    // YAML so preset authors can opt into the activation-level path
+    // without a schema migration.  The shape is:
+    //   obligations:
+    //     - on_trigger: "work.done"
+    //       must_emit_any_of: ["review.wave.ready", "review.passed"]
+    use ralph_core::{ActivationObligation, HatConfig};
+
+    let yaml = r#"
+name: "Review Coordinator"
+triggers: ["work.done", "fix.applied"]
+publishes: ["review.wave.ready", "review.passed"]
+obligations:
+  - on_trigger: "work.done"
+    must_emit_any_of: ["review.wave.ready", "review.passed"]
+  - on_trigger: "fix.applied"
+    must_emit_any_of: ["review.passed"]
+"#;
+    let hat: HatConfig = serde_yaml::from_str(yaml).expect("parse hat yaml");
+    assert_eq!(hat.obligations.len(), 2);
+    let o0 = &hat.obligations[0];
+    assert_eq!(o0.on_trigger, "work.done");
+    assert_eq!(o0.must_emit_any_of, vec!["review.wave.ready", "review.passed"]);
+    let o1 = &hat.obligations[1];
+    assert_eq!(o1.on_trigger, "fix.applied");
+    assert_eq!(o1.must_emit_any_of, vec!["review.passed"]);
+
+    // Round-trip: serialize back to YAML and re-parse; obligations
+    // must survive.
+    let yaml_out = serde_yaml::to_string(&hat).expect("serialize hat");
+    let hat2: HatConfig = serde_yaml::from_str(&yaml_out).expect("re-parse hat");
+    assert_eq!(hat2.obligations, hat.obligations);
+
+    // Equality with itself is a tautology; the meaningful check is
+    // that both obligations survive the round trip.  Test the
+    // explicit ActivationObligation equality to lock the contract.
+    let _eq: ActivationObligation = hat.obligations[0].clone();
+}
+
+#[test]
+fn u4_obligation_satisfied_for_each_review_coordinator_branch() {
+    // R3: review-coordinator 条件 emit 语义 (空 diff → review.passed;
+    // 有 diff → review.wave.ready) 必须各自满足 obligation，不被
+    // 误判为 missing-event。
+    use ralph_core::{obligation_satisfied, ActivationObligation};
+
+    let o = ActivationObligation {
+        on_trigger: "work.done".into(),
+        must_emit_any_of: vec!["review.wave.ready".into(), "review.passed".into()],
+    };
+
+    // Empty-diff branch: review-coordinator picks review.passed.
+    assert!(obligation_satisfied(
+        Some(&o),
+        &vec!["review.passed".into()]
+    ));
+    // Non-empty branch: review-coordinator picks review.wave.ready.
+    assert!(obligation_satisfied(
+        Some(&o),
+        &vec!["review.wave.ready".into()]
+    ));
+    // Off-obligation set: agent picked the wrong topic — this is a
+    // hard failure (R1) and must NOT satisfy the obligation so the
+    // downstream reporter can flag it.
+    assert!(!obligation_satisfied(
+        Some(&o),
+        &vec!["work.failed".into()]
+    ));
+    // No candidate at all: missing event — obligation not satisfied.
+    assert!(!obligation_satisfied(Some(&o), &vec![]));
+}

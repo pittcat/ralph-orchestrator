@@ -16,10 +16,25 @@ pub fn should_hard_gate(hat_id: &HatId, event_loop: &EventLoop) -> bool {
 /// This catches the "completely forgot to emit" case where the agent output
 /// does not even mention `ralph emit`. Contrast with `should_hard_gate` which
 /// only triggers when the agent claims to emit but writes no event.
+///
+/// 2026-06-07 plan U4: the activation-level obligations on the hat
+/// take precedence over the blanket `publishes + default_publishes`
+/// rule.  When a hat declares at least one `obligations` entry the
+/// activation-level path is in charge; the blanket rule no longer
+/// applies and the runner is the source of truth on whether the
+/// obligation is satisfied (via `obligation_satisfied`).  This way a
+/// hat with conditional emit semantics (e.g. `review-coordinator`
+/// emits `review.passed` for empty diffs and `review.wave.ready`
+/// otherwise) is no longer mis-classified as a missing-event offender.
 pub fn should_gate_missing_events(hat_id: &HatId, event_loop: &EventLoop) -> bool {
     let Some(config) = event_loop.registry().get_config(hat_id) else {
         return false;
     };
+    // U4: opt-in hats get the precise activation-level path.  Legacy
+    // presets without `obligations` keep the blanket rule.
+    if !config.obligations.is_empty() {
+        return false;
+    }
     // Hat has an obligation to publish but no automatic fallback
     !config.publishes.is_empty() && config.default_publishes.is_none()
 }

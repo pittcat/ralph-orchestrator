@@ -641,6 +641,7 @@ mod tests {
             aggregate: None,
             event_filter: None,
             phase_triggers: None,
+            obligations: vec![],
         }
     }
 

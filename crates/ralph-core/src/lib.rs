@@ -74,14 +74,14 @@ pub mod worktree;
 #[cfg(feature = "recording")]
 pub use cli_capture::{CliCapture, CliCapturePair};
 pub use config::{
-    AggregateConfig, AggregateMode, CliConfig, ConfigError, CoreConfig, DriftConfig,
-    EventFilterConfig, EventFilterMode, EventLoopConfig, EventMetadata, EventPolicyConfig,
-    EventPolicyMode, EventProjectionConfig, EventSchema, FeaturesConfig, HatBackend, HatConfig,
-    HookStage, InjectMode, MalformedJsonlPolicy, MemoriesConfig, MemoriesFilter, PayloadType,
-    Phase, PhaseConfig, PreflightExtensionsConfig, PreflightHook, ProjectionMode, ProjectionRule,
-    RalphConfig, RuntimeDiagnosisConfig, ScratchpadConfig, SkillOverride, SkillsConfig,
-    StateFileEntry, StateFileFormat, StateFilesConfig, TelemetryConfig, ViolationAction,
-    WarmupConfig,
+    ActivationObligation, AggregateConfig, AggregateMode, CliConfig, ConfigError, CoreConfig,
+    DriftConfig, EventFilterConfig, EventFilterMode, EventLoopConfig, EventMetadata,
+    EventPolicyConfig, EventPolicyMode, EventProjectionConfig, EventSchema, FeaturesConfig,
+    HatBackend, HatConfig, HookStage, InjectMode, MalformedJsonlPolicy, MemoriesConfig,
+    MemoriesFilter, PayloadType, Phase, PhaseConfig, PreflightExtensionsConfig, PreflightHook,
+    ProjectionMode, ProjectionRule, RalphConfig, RuntimeDiagnosisConfig, ScratchpadConfig,
+    SkillOverride, SkillsConfig, StateFileEntry, StateFileFormat, StateFilesConfig,
+    TelemetryConfig, ViolationAction, WarmupConfig, obligation_satisfied,
 };
 // Re-export loop_name types (also available via FeaturesConfig.loop_naming)
 pub use diagnosis::{
