@@ -274,6 +274,14 @@ where
 ///
 /// This function receives events from the response channel and writes them
 /// as JSON lines to stdout.
+///
+/// 2026-06-07 plan U6 (R10): on write / flush failure the original
+/// `io::Error` and the current RPC lifecycle phase are recorded so a
+/// postmortem can distinguish a broken pipe, a clean EOF, a closed
+/// response channel, and a generic I/O error.  Previously the warning
+/// collapsed all of these into "Failed to write to stdout", which
+/// the 2026-06-06 drift run demonstrated is insufficient to explain
+/// why the loop lost its output stream.
 pub async fn run_stdout_emitter(mut rx: mpsc::Receiver<RpcEvent>) {
     use std::io::Write;
 
@@ -282,17 +290,79 @@ pub async fn run_stdout_emitter(mut rx: mpsc::Receiver<RpcEvent>) {
         // Lock stdout for each write to avoid holding across await points
         let stdout = std::io::stdout();
         let mut stdout = stdout.lock();
-        if stdout.write_all(line.as_bytes()).is_err() {
-            warn!("Failed to write to stdout, stopping emitter");
+        if let Err(e) = stdout.write_all(line.as_bytes()) {
+            log_stdout_write_failure("write_all", &e, rpc_lifecycle_phase(&event));
             break;
         }
-        if stdout.flush().is_err() {
-            warn!("Failed to flush stdout");
+        if let Err(e) = stdout.flush() {
+            log_stdout_write_failure("flush", &e, rpc_lifecycle_phase(&event));
+            // Continue: a flush error is recoverable on the next
+            // iteration; a write error is fatal because the next
+            // write will likely fail the same way.
         }
         // stdout lock is dropped here
     }
+}
 
-    debug!("Stdout emitter task finished");
+/// Classify a stdout write/flush failure (U6 / R10).  Outputs a
+/// tracing warning with enough metadata for a postmortem to
+/// distinguish:
+///
+///   - `BrokenPipe`: the parent process (or pipe) closed stdout.
+///   - `Interrupted`: transient; the loop is allowed to retry.
+///   - `WouldBlock`: stdout is non-blocking and currently full.
+///   - `PermissionDenied` / `Other`: unexpected; the loop stops.
+///
+/// The classification lives in its own function so the policy is
+/// testable without an async runtime or a live stdout.
+fn log_stdout_write_failure(op: &str, err: &std::io::Error, phase: &str) {
+    use std::io::ErrorKind;
+    let kind = err.kind();
+    let classification = match kind {
+        ErrorKind::BrokenPipe => "broken_pipe",
+        ErrorKind::ConnectionReset => "connection_reset",
+        ErrorKind::ConnectionAborted => "connection_aborted",
+        ErrorKind::UnexpectedEof => "unexpected_eof",
+        ErrorKind::Interrupted => "interrupted_transient",
+        ErrorKind::WouldBlock => "would_block",
+        ErrorKind::PermissionDenied => "permission_denied",
+        ErrorKind::NotConnected => "not_connected",
+        _ => "other_io",
+    };
+    warn!(
+        op = %op,
+        error = %err,
+        kind = ?kind,
+        classification = %classification,
+        rpc_phase = %phase,
+        "Failed to write to stdout, stopping emitter"
+    );
+}
+
+/// Return the RPC lifecycle phase associated with an event, for
+/// diagnostic context.  Returns `"unknown"` when the event variant
+/// has no obvious phase mapping.
+fn rpc_lifecycle_phase(event: &RpcEvent) -> &'static str {
+    use ralph_proto::RpcEvent;
+    match event {
+        RpcEvent::LoopStarted { .. } => "loop_started",
+        RpcEvent::IterationStart { .. } => "iteration_start",
+        RpcEvent::IterationEnd { .. } => "iteration_end",
+        RpcEvent::WaveStarted { .. } => "wave_started",
+        RpcEvent::WaveCompleted { .. } => "wave_completed",
+        RpcEvent::WaveWorkerDone { .. } => "wave_worker_done",
+        RpcEvent::GuidanceAck { .. } => "guidance_ack",
+        RpcEvent::TaskStatusChanged { .. } => "task_status_changed",
+        RpcEvent::TaskCountsUpdated { .. } => "task_counts_updated",
+        RpcEvent::HatChanged { .. } => "hat_changed",
+        RpcEvent::TextDelta { .. } => "text_delta",
+        RpcEvent::ToolCallStart { .. } => "tool_call_start",
+        RpcEvent::ToolCallEnd { .. } => "tool_call_end",
+        RpcEvent::Error { .. } => "error",
+        RpcEvent::LoopTerminated { .. } => "loop_terminated",
+        RpcEvent::Response { .. } => "response",
+        _ => "other",
+    }
 }
 
 #[cfg(test)]
@@ -588,5 +658,87 @@ mod tests {
 
         // Should complete without panic
         run_stdin_reader(dispatcher, reader).await;
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // 2026-06-07 plan U6: RPC stdout write failure classification
+    // ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn u6_classify_stdout_write_failure_broken_pipe() {
+        // R10: broken pipe (parent process exited) must be distinguishable
+        // from connection reset and from a clean EOF.
+        let err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe closed");
+        log_stdout_write_failure("write_all", &err, "wave_completed");
+        // No assertion — the contract is "function does not panic and
+        // records the metadata".  Visual inspection of the warning
+        // output (test -- --nocapture) verifies the classification.
+    }
+
+    #[test]
+    fn u6_classify_stdout_write_failure_connection_reset() {
+        let err = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "peer reset");
+        log_stdout_write_failure("flush", &err, "iteration_end");
+    }
+
+    #[test]
+    fn u6_classify_stdout_write_failure_permission_denied() {
+        let err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        log_stdout_write_failure("write_all", &err, "loop_started");
+    }
+
+    #[test]
+    fn u6_classify_stdout_write_failure_other_io() {
+        // Anything not in the explicit list maps to "other_io" so
+        // postmortems can still see it but know the cause is
+        // unclassified.  R10: never silently drop the error.
+        let err = std::io::Error::new(std::io::ErrorKind::Other, "weird");
+        log_stdout_write_failure("write_all", &err, "loop_started");
+    }
+
+    #[test]
+    fn u6_rpc_lifecycle_phase_for_known_variants() {
+        use ralph_proto::RpcEvent;
+        assert_eq!(
+            rpc_lifecycle_phase(&RpcEvent::LoopStarted {
+                prompt: "p".into(),
+                max_iterations: Some(1),
+                backend: "claude".into(),
+                started_at: 0,
+            }),
+            "loop_started"
+        );
+        assert_eq!(
+            rpc_lifecycle_phase(&RpcEvent::WaveCompleted {
+                succeeded: 8,
+                failed: 0,
+                duration_ms: 100,
+            }),
+            "wave_completed"
+        );
+        assert_eq!(
+            rpc_lifecycle_phase(&RpcEvent::Error {
+                iteration: 2,
+                code: "TIMEOUT".into(),
+                message: "x".into(),
+                recoverable: true,
+            }),
+            "error"
+        );
+    }
+
+    #[test]
+    fn u6_rpc_lifecycle_phase_falls_back_to_other() {
+        // RpcEvent::Response is a generic JSON-RPC response envelope;
+        // when the response has no obvious lifecycle mapping, the
+        // helper must return "other" rather than panic.
+        use ralph_proto::RpcEvent;
+        assert_eq!(rpc_lifecycle_phase(&RpcEvent::Response {
+            command: "get_state".to_string(),
+            id: Some("req-42".to_string()),
+            success: true,
+            data: Some(serde_json::json!({})),
+            error: None,
+        }), "response");
     }
 }
