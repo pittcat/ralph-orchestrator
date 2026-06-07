@@ -581,7 +581,7 @@ fn topology_finding(err: &TopologyError) -> RuntimeContractFinding {
 /// only used as a defensive double-check so a future refactor that
 /// flips the validator's classification doesn't silently change the
 /// shared report's findings.
-fn payload_findings(result: &PayloadContractValidationResult) -> Vec<RuntimeContractFinding> {
+pub fn payload_findings_from_result(result: &PayloadContractValidationResult) -> Vec<RuntimeContractFinding> {
     let mut findings: Vec<RuntimeContractFinding> =
         result.errors.iter().map(payload_error_finding).collect();
     for w in &result.warnings {
@@ -825,7 +825,7 @@ impl RuntimeContractAggregator {
                 registry,
                 strictness.payload_strict,
             );
-        for finding in payload_findings(&payload_result) {
+        for finding in payload_findings_from_result(&payload_result) {
             report.add_finding(finding);
         }
 

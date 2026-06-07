@@ -5,6 +5,7 @@ pub mod emit;
 pub mod events;
 pub mod init;
 pub mod plan;
+pub mod preset;
 pub mod resume;
 pub mod run;
 pub mod tui;

@@ -147,6 +147,7 @@ impl PreflightRunner {
         checks.push(Box::new(ToolsInPathCheck::default()));
         checks.push(Box::new(SpecCompletenessCheck));
         checks.push(Box::new(PresetTopologyCheck));
+        checks.push(Box::new(PresetContractCheck));
 
         if let Some(extensions) = config.core.preflight_extensions.as_ref()
             && extensions.enabled
@@ -2421,6 +2422,75 @@ impl PreflightCheck for PresetTopologyCheck {
                 self.name(),
                 "Preset topology validation failed",
                 error_messages.join("; "),
+            )
+        }
+    }
+}
+
+/// Preset contract validation check (U5).
+///
+/// Runs the full preset contract aggregator (config, topology, payload,
+/// orphan) and wraps the result as a single `CheckResult`. This check
+/// is additive — it does NOT replace `preset-topology`. Users can skip
+/// it via `features.preflight.skip: ["preset-contract"]`.
+struct PresetContractCheck;
+
+#[async_trait]
+impl PreflightCheck for PresetContractCheck {
+    fn name(&self) -> &'static str {
+        "preset-contract"
+    }
+
+    async fn run(&self, config: &RalphConfig) -> CheckResult {
+        use crate::hat_registry::HatRegistry;
+        use crate::runtime_contract::{RuntimeContractAggregator, RuntimeContractStrictness};
+
+        let registry = HatRegistry::from_runtime_config(config);
+        let strictness = RuntimeContractStrictness::default();
+        let report = RuntimeContractAggregator::aggregate(
+            "preflight",
+            config,
+            &registry,
+            strictness,
+        );
+
+        if report.passed {
+            if report.warnings == 0 {
+                CheckResult::pass(self.name(), "Preset contract is valid")
+            } else {
+                let warning_msgs: Vec<String> = report
+                    .findings
+                    .iter()
+                    .filter(|f| {
+                        matches!(
+                            f.severity,
+                            crate::runtime_contract::FindingSeverity::Warn
+                        )
+                    })
+                    .map(|f| f.message.clone())
+                    .collect();
+                CheckResult::warn(
+                    self.name(),
+                    "Preset contract has warnings",
+                    warning_msgs.join("; "),
+                )
+            }
+        } else {
+            let error_msgs: Vec<String> = report
+                .findings
+                .iter()
+                .filter(|f| {
+                    matches!(
+                        f.severity,
+                        crate::runtime_contract::FindingSeverity::Error
+                    )
+                })
+                .map(|f| f.message.clone())
+                .collect();
+            CheckResult::fail(
+                self.name(),
+                "Preset contract validation failed",
+                error_msgs.join("; "),
             )
         }
     }

@@ -14,8 +14,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use indicatif::{ProgressBar, ProgressStyle};
 use ralph_adapters::{CliBackend, detect_backend_default};
-use ralph_core::preset_validator;
-use ralph_core::runtime_contract::LOOP_RUNNER_INTERNAL_TOPICS;
+use ralph_core::runtime_contract::{FindingSource, RuntimeContractStrictness};
 use ralph_core::{HatRegistry, RalphConfig, truncate_with_ellipsis};
 use std::collections::HashSet;
 use std::io::Write;
@@ -185,47 +184,76 @@ fn validate_hats<W: Write>(
         return Ok(());
     }
 
-    // Shared preset topology validator (uses runtime-aware registry for
-    // realistic reachability analysis including fallback Ralph).
-    let topology_result = preset_validator::validate_preset_topology(config, runtime_registry);
-    if !topology_result.is_valid() {
-        for err in &topology_result.errors {
-            print_check(
-                writer,
-                CheckResult::Error,
-                &format!("Topology: {}", err.message),
-                use_colors,
-            )?;
-        }
+    // U4: Use the shared report structure. We call the individual
+    // validators directly (not the full aggregator) because `hats validate`
+    // historically did NOT run config validation, and adding it would be a
+    // behavioral regression. The aggregator's config step short-circuits on
+    // error, which would prevent topology/payload/orphan checks from running
+    // on configs that `hats validate` previously accepted.
+    let strictness = RuntimeContractStrictness {
+        payload_strict: strict,
+        fail_on_warnings: false, // hats validate never fails on warnings alone
+    };
+    let mut report =
+        ralph_core::runtime_contract::RuntimeContractReport::new("hats-validate", strictness);
+
+    // Step 1: topology validation (via shared helper)
+    let topology_result = ralph_core::preset_validator::validate_preset_topology(config, runtime_registry);
+    for err in &topology_result.errors {
+        let finding = ralph_core::runtime_contract::RuntimeContractFinding::new(
+            "topology.error",
+            FindingSource::Topology,
+            ralph_core::runtime_contract::FindingSeverity::Error,
+            ralph_core::runtime_contract::FindingStage::Authoring,
+            err.message.clone(),
+        );
+        report.add_finding(finding);
     }
 
-    // U4: Payload contract validation (default in addition to topology).
+    // Step 2: payload contract validation (via shared helper)
     let payload_result =
         ralph_core::payload_contract::validate_payload_contract(config, runtime_registry, strict);
-    for warn in &payload_result.warnings {
-        print_check(
-            writer,
-            CheckResult::Warn,
-            &format!("Payload contract: {}", warn),
-            use_colors,
-        )?;
+    for finding in ralph_core::runtime_contract::payload_findings_from_result(&payload_result) {
+        report.add_finding(finding);
     }
-    for err in &payload_result.errors {
+
+    // Step 3: orphan topic detection (via shared helper)
+    for finding in ralph_core::runtime_contract::detect_orphan_topics(config, runtime_registry) {
+        report.add_finding(finding);
+    }
+
+    // Render topology findings
+    for finding in report.findings.iter().filter(|f| f.source == FindingSource::Topology) {
         print_check(
             writer,
             CheckResult::Error,
-            &format!(
-                "Payload contract: {} (hat={} topic={} field={} source_hats=[{}] schema={} line={:?})",
-                err.message,
-                err.hat_id,
-                err.topic,
-                err.field.as_deref().unwrap_or(""),
-                err.source_hats.join(", "),
-                err.schema_defined_in,
-                err.instructions_line,
-            ),
+            &finding.message,
             use_colors,
         )?;
+    }
+
+    // Render payload findings (legacy format: "Payload contract: <msg> (hat=... ...)")
+    for finding in report.findings.iter().filter(|f| f.source == FindingSource::Payload) {
+        let check_result = match finding.severity {
+            ralph_core::runtime_contract::FindingSeverity::Error => CheckResult::Error,
+            ralph_core::runtime_contract::FindingSeverity::Warn => CheckResult::Warn,
+            ralph_core::runtime_contract::FindingSeverity::Pass => CheckResult::Ok,
+        };
+        let msg = if finding.details.is_empty() {
+            format!("Payload contract: {}", finding.message)
+        } else {
+            format!(
+                "Payload contract: {} (hat={} topic={} field={} source_hats=[{}] schema={} line={:?})",
+                finding.message,
+                finding.details.get("hat").map(|s| s.as_str()).unwrap_or(""),
+                finding.details.get("topic").map(|s| s.as_str()).unwrap_or(""),
+                finding.details.get("field").map(|s| s.as_str()).unwrap_or(""),
+                finding.details.get("source_hats").map(|s| s.as_str()).unwrap_or(""),
+                finding.details.get("schema_defined_in").map(|s| s.as_str()).unwrap_or(""),
+                finding.details.get("instructions_line").map(|s| s.as_str()),
+            )
+        };
+        print_check(writer, check_result, &msg, use_colors)?;
     }
 
     writeln!(writer, "Hats: {} configured", config_registry.len())?;
@@ -237,9 +265,6 @@ fn validate_hats<W: Write>(
     writeln!(writer)?;
 
     writeln!(writer, "Checks:")?;
-
-    let mut warnings = 0;
-    let mut errors = 0;
 
     // 1. Starting event validation
     if let Some(start) = &config.event_loop.starting_event {
@@ -258,62 +283,18 @@ fn validate_hats<W: Write>(
                 &format!("starting_event '{}' has no subscribers", start),
                 use_colors,
             )?;
-            errors += 1;
         }
     }
 
-    // 2. Orphan event detection (published but no subscribers)
-    for hat in config_registry.all() {
-        for pub_event in &hat.publishes {
-            let topic = pub_event.as_str();
-            // Exemption 1: loop completion promise is consumed by the loop
-            // runner itself (it sets `completion_requested` and exits).
-            if topic == config.event_loop.completion_promise {
-                continue;
-            }
-            // Exemption 2: required_events topics are loop-level gates
-            // consumed by the loop runner via `missing_required_events`
-            // (event_loop/mod.rs around "Event chain validation"). They
-            // are not hat-to-hat signals, so flagging them as orphans
-            // would be a false positive. Example: ce-executor's
-            // `report.done` in `required_events: ["report.done"]`.
-            if config.event_loop.required_events.iter().any(|r| r == topic) {
-                continue;
-            }
-            // Exemption 3: topics the loop runner consumes directly,
-            // not via any hat subscription. See LOOP_RUNNER_INTERNAL_TOPICS
-            // for the rationale and audit checklist before adding new
-            // entries.
-            if LOOP_RUNNER_INTERNAL_TOPICS.contains(&topic) {
-                continue;
-            }
-            // If we get here, the topic is published by a hat but has
-            // no hat subscriber AND is not a known loop-level signal.
-            // That is the bug the orphan check is designed to catch:
-            // a typo, a missing hat, or a stale `publishes` entry.
-            if !config_registry.has_subscriber(topic) {
-                print_check(
-                    writer,
-                    CheckResult::Warn,
-                    &format!(
-                        "Event '{}' published by '{}' has no hat subscribers",
-                        topic, hat.name
-                    ),
-                    use_colors,
-                )?;
-                warnings += 1;
-            }
-        }
+    // 2. Orphan findings from the shared helper
+    for finding in report.findings.iter().filter(|f| f.source == FindingSource::Orphan) {
+        print_check(writer, CheckResult::Warn, &finding.message, use_colors)?;
     }
 
-    // 3. Dead end detection
+    // 3. Dead end detection (informational, not in shared helpers)
     let mut dead_ends = 0;
     for hat in config_registry.all() {
         if hat.publishes.is_empty() {
-            // It's okay to be a dead end if it's the Summarizer (which outputs completion promise via stdout/file, not event)
-            // But usually they publish something.
-            // Just info.
-            // print_check(CheckResult::Ok, &format!("Hat '{}' is a dead end (publishes nothing)", hat.name), use_colors);
             dead_ends += 1;
         }
     }
@@ -321,10 +302,9 @@ fn validate_hats<W: Write>(
         print_check(writer, CheckResult::Ok, "No dead-end hats", use_colors)?;
     }
 
-    // U4: Roll payload contract counts into the totals so a payload contract
-    // error fails validation.
-    errors += payload_result.errors.len();
-    warnings += payload_result.warnings.len();
+    // Roll report counts into the totals
+    let errors = report.errors;
+    let warnings = report.warnings;
 
     writeln!(writer)?;
     if errors > 0 {
@@ -333,7 +313,6 @@ fn validate_hats<W: Write>(
             "Result: Invalid ({} errors, {} warnings)",
             errors, warnings
         )?;
-        // Return error to propagate failure to main
         return Err(anyhow::anyhow!("Validation failed with {} errors", errors));
     } else if warnings > 0 {
         writeln!(writer, "Result: Valid ({} warnings)", warnings)?;
