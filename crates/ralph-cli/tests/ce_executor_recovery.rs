@@ -377,3 +377,35 @@ fn u2_executor_missing_field_rejection_classifies_as_retryable() {
         .unwrap()
         .contains("execution_contract:ralph:work.done:missing_field"));
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// 2026-06-07 plan Unit 3: 统一 wave 结果格式
+// (Note: the merge function itself is exercised by crate-internal
+//  tests in `loop_runner/tests.rs` because it lives behind the
+//  binary-crate visibility boundary.  Here we just record that the
+//  U1 fixture's 8 wave results exercise the contract.)
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn u3_u1_fixture_inventory_matches_wave_merge_contract() {
+    // The U1 fixture ships 8 review.dimension.done results.  Six of
+    // them carry wave_id/wave_index (5 explicit + 1 from the line
+    // where we deliberately kept wave metadata); two do not.  R8
+    // requires the framework to *standardize* all results before
+    // merge, so the U3 merge tests in `loop_runner/tests.rs` are the
+    // authoritative place to verify that.  This test only asserts
+    // the fixture's shape, so a future change to merge semantics can
+    // keep the fixture in sync.
+    let events = load_recovery_events();
+    let dim_results: Vec<&ralph_core::Event> = events
+        .iter()
+        .filter(|e| e.topic == "review.dimension.done")
+        .collect();
+    assert_eq!(dim_results.len(), 8, "fixture ships 8 review.dimension.done results");
+    let with_wave = dim_results.iter().filter(|e| e.wave_id.is_some()).count();
+    let without_wave = dim_results.iter().filter(|e| e.wave_id.is_none()).count();
+    assert!(
+        with_wave >= 1 && without_wave >= 1,
+        "fixture must include both shapes so U3 merge normalization is exercised end-to-end"
+    );
+}

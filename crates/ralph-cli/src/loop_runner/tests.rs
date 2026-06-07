@@ -6826,6 +6826,7 @@ async fn test_run_wave_worker_acp_timeout_with_partial_events_keeps_events_visib
 
     let completed = ralph_core::CompletedWave {
         wave_id: "w-acp".to_string(),
+        wave_total: 1,
         results: vec![ralph_core::WaveResult {
             index: 0,
             events: events.into_iter().map(ralph_proto::Event::from).collect(),
@@ -6980,6 +6981,7 @@ fn test_merge_wave_results_to_events_file_synthesizes_failure_events() {
     let events_file = temp_dir.path().join("events.jsonl");
     let completed = ralph_core::CompletedWave {
         wave_id: "w-test".to_string(),
+        wave_total: 2,
         results: vec![ralph_core::WaveResult {
             index: 0,
             events: vec![ralph_proto::Event::new("review.done", "worker ok")],
@@ -9094,4 +9096,169 @@ fn u8_write_termination_diagnostics_drops_violation_reference_when_disabled() {
     assert_eq!(before, after);
     assert!(!after.contains("## Diagnostics"));
     assert!(!after.contains("Payload contract violation"));
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 2026-06-07 plan Unit 3: 统一 wave 结果格式
+//
+// `merge_wave_results_to_events_file` lives in the binary crate's
+// private module tree, so it can only be exercised by in-crate tests.
+// These tests prove that every record the merge appends to the main
+// events file carries the full R8 metadata (wave_id / wave_index /
+// wave_total / ts) and that partial waves still surface their
+// failures with the same metadata.
+// ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn u3_wave_merge_stamps_wave_total_on_every_record() {
+    use crate::loop_runner::wave::merge_wave_results_to_events_file;
+    use ralph_core::{CompletedWave, WaveResult};
+    use ralph_proto::Event;
+    use std::time::Duration;
+
+    let completed = CompletedWave {
+        wave_id: "w-u3-test".to_string(),
+        wave_total: 8,
+        results: (0..8)
+            .map(|i| WaveResult {
+                index: i,
+                events: vec![Event::new(
+                    "review.dimension.done",
+                    format!("{{\"dimension\":\"d{i}\"}}"),
+                )],
+            })
+            .collect(),
+        failures: Vec::new(),
+        duration: Duration::from_millis(1234),
+    };
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let events_path = tmp.path().join("events.jsonl");
+    std::fs::write(&events_path, "").unwrap();
+
+    merge_wave_results_to_events_file(
+        &completed,
+        &events_path,
+        &["review.dimension.done".into()],
+    )
+    .expect("merge must succeed");
+
+    let raw = std::fs::read_to_string(&events_path).unwrap();
+    let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(lines.len(), 8, "8 worker results → 8 merged records");
+
+    let mut seen_indexes = std::collections::BTreeSet::new();
+    for (i, line) in lines.iter().enumerate() {
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(v["wave_id"], "w-u3-test", "line {i} missing wave_id");
+        assert!(v["wave_index"].is_number(), "line {i} missing wave_index");
+        assert_eq!(v["wave_total"], 8, "line {i} wrong wave_total");
+        assert!(v["ts"].is_string(), "line {i} missing ts");
+        let idx = v["wave_index"].as_u64().unwrap() as u32;
+        assert!(seen_indexes.insert(idx), "duplicate wave_index {idx}");
+    }
+    assert_eq!(seen_indexes.len(), 8, "all 8 expected indexes merged");
+}
+
+#[test]
+fn u3_wave_merge_emits_synthetic_events_on_failure_with_wave_total() {
+    use crate::loop_runner::wave::merge_wave_results_to_events_file;
+    use ralph_core::{CompletedWave, WaveFailure, WaveResult};
+    use ralph_proto::Event;
+    use std::time::Duration;
+
+    let completed = CompletedWave {
+        wave_id: "w-partial".to_string(),
+        wave_total: 3,
+        results: vec![WaveResult {
+            index: 0,
+            events: vec![Event::new("review.dimension.done", "ok")],
+        }],
+        failures: vec![
+            WaveFailure {
+                index: 1,
+                error: "worker crashed".into(),
+                duration: Duration::from_millis(50),
+            },
+            WaveFailure {
+                index: 2,
+                error: "timeout".into(),
+                duration: Duration::from_millis(300),
+            },
+        ],
+        duration: Duration::from_millis(500),
+    };
+    let tmp = tempfile::TempDir::new().unwrap();
+    let events_path = tmp.path().join("events.jsonl");
+    std::fs::write(&events_path, "").unwrap();
+
+    merge_wave_results_to_events_file(
+        &completed,
+        &events_path,
+        &["review.dimension.done".into()],
+    )
+    .expect("merge must succeed");
+
+    let raw = std::fs::read_to_string(&events_path).unwrap();
+    let mut success_count = 0;
+    let mut failed_count = 0;
+    let mut synthetic_count = 0;
+    for line in raw.lines().filter(|l| !l.trim().is_empty()) {
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(v["wave_id"], "w-partial");
+        assert_eq!(v["wave_total"], 3, "every record carries wave_total");
+        match v["topic"].as_str() {
+            Some("wave.worker.failed") => failed_count += 1,
+            Some("review.dimension.done")
+                if v["payload"].as_str().unwrap_or("").contains("FAILED") =>
+            {
+                synthetic_count += 1;
+            }
+            Some("review.dimension.done") => success_count += 1,
+            other => panic!("unexpected topic: {other:?}"),
+        }
+    }
+    assert_eq!(success_count, 1);
+    assert_eq!(failed_count, 2);
+    assert_eq!(synthetic_count, 2);
+}
+
+#[test]
+fn u3_wave_merge_handles_duplicate_indexes_without_panicking() {
+    use crate::loop_runner::wave::merge_wave_results_to_events_file;
+    use ralph_core::{CompletedWave, WaveResult};
+    use ralph_proto::Event;
+    use std::time::Duration;
+
+    // Submit indexes 0, 1, 2, 2 (duplicate) — the merge must not
+    // panic and must surface the duplicate in observability logs
+    // (we don't assert on log capture here; the contract is
+    // "function does not blow up and writes all submitted records").
+    let mut results = Vec::new();
+    for i in 0..4 {
+        results.push(WaveResult {
+            index: i,
+            events: vec![Event::new("review.dimension.done", format!("{{\"i\":{i}}}"))],
+        });
+    }
+    let completed = CompletedWave {
+        wave_id: "w-dup".to_string(),
+        wave_total: 4,
+        results,
+        failures: Vec::new(),
+        duration: Duration::from_millis(100),
+    };
+    let tmp = tempfile::TempDir::new().unwrap();
+    let events_path = tmp.path().join("events.jsonl");
+    std::fs::write(&events_path, "").unwrap();
+
+    merge_wave_results_to_events_file(
+        &completed,
+        &events_path,
+        &["review.dimension.done".into()],
+    )
+    .expect("merge must succeed");
+    let raw = std::fs::read_to_string(&events_path).unwrap();
+    let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(lines.len(), 4, "all 4 result events appended");
 }

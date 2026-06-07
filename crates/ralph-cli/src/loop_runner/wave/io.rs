@@ -200,6 +200,13 @@ pub fn read_worker_events_with_retry(path: &Path, timeout: Duration) -> Vec<ralp
 ///
 /// Appends all result events to the main JSONL file so the aggregator hat
 /// picks them up on the next iteration.
+///
+/// 2026-06-07 plan Unit 3 (R8): every record this function writes MUST
+/// carry `wave_id`, `wave_index`, `wave_total` and a `ts` field.  The
+/// worker process is forbidden from writing to the main events file
+/// (its `RALPH_EVENTS_FILE` env var points at a per-worker file), so
+/// any record missing these fields is a bypass attempt or a stale
+/// hand-written file from a historical run.
 pub fn merge_wave_results_to_events_file(
     completed: &ralph_core::CompletedWave,
     events_file: &Path,
@@ -219,7 +226,15 @@ pub fn merge_wave_results_to_events_file(
     // append (consistent with EventLogger::log and write_wave_events).
     let mut buf = String::new();
 
+    let mut merged_indexes: Vec<u32> = Vec::new();
+    let mut duplicate_indexes: Vec<u32> = Vec::new();
+
     for result in &completed.results {
+        if merged_indexes.contains(&result.index) {
+            duplicate_indexes.push(result.index);
+        } else {
+            merged_indexes.push(result.index);
+        }
         for event in &result.events {
             let record = serde_json::json!({
                 "topic": event.topic.as_str(),
@@ -227,6 +242,7 @@ pub fn merge_wave_results_to_events_file(
                 "ts": ts,
                 "wave_id": completed.wave_id,
                 "wave_index": result.index,
+                "wave_total": completed.wave_total,
             });
             buf.push_str(&serde_json::to_string(&record)?);
             buf.push('\n');
@@ -241,6 +257,7 @@ pub fn merge_wave_results_to_events_file(
             "ts": ts,
             "wave_id": completed.wave_id,
             "wave_index": failure.index,
+            "wave_total": completed.wave_total,
         });
         buf.push_str(&serde_json::to_string(&record)?);
         buf.push('\n');
@@ -257,6 +274,7 @@ pub fn merge_wave_results_to_events_file(
                 "ts": ts,
                 "wave_id": completed.wave_id,
                 "wave_index": failure.index,
+                "wave_total": completed.wave_total,
             });
             buf.push_str(&serde_json::to_string(&record)?);
             buf.push('\n');
@@ -264,6 +282,34 @@ pub fn merge_wave_results_to_events_file(
     }
 
     file.write_all(buf.as_bytes())?;
+
+    // R8 observability: log expected/merged/missing/duplicate indexes so a
+    // postmortem can tell at a glance whether the wave was complete.
+    let expected_indexes: std::collections::BTreeSet<u32> =
+        (0..completed.wave_total).collect();
+    let merged_set: std::collections::BTreeSet<u32> = merged_indexes.iter().copied().collect();
+    let missing_indexes: Vec<u32> =
+        expected_indexes.difference(&merged_set).copied().collect();
+    let failure_indexes: Vec<u32> = completed.failures.iter().map(|f| f.index).collect();
+
+    if !missing_indexes.is_empty() || !duplicate_indexes.is_empty() {
+        tracing::warn!(
+            wave_id = %completed.wave_id,
+            wave_total = completed.wave_total,
+            merged = merged_indexes.len(),
+            missing = ?missing_indexes,
+            duplicate = ?duplicate_indexes,
+            failures = ?failure_indexes,
+            "Wave merge produced incomplete or duplicate index set"
+        );
+    } else {
+        tracing::info!(
+            wave_id = %completed.wave_id,
+            wave_total = completed.wave_total,
+            merged = merged_indexes.len(),
+            "Wave merge complete with all expected indexes present"
+        );
+    }
 
     Ok(())
 }

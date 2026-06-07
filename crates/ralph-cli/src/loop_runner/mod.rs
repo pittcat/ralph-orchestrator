@@ -20,7 +20,7 @@ mod prompt;
 mod runner;
 mod start_loop;
 mod suspend;
-mod wave;
+pub mod wave;
 
 pub(crate) use execution::ExecutionOutcome;
 pub(crate) use loop_owner::register_loop_owner;

@@ -42,6 +42,10 @@ pub struct WaveFailure {
 #[derive(Debug)]
 pub struct CompletedWave {
     pub wave_id: String,
+    /// Total number of workers the dispatcher expected (R8: every
+    /// merged record must carry this so the aggregator can tell a
+    /// partial wave from a full one without re-reading the registry).
+    pub wave_total: u32,
     pub results: Vec<WaveResult>,
     pub failures: Vec<WaveFailure>,
     pub duration: Duration,
@@ -168,6 +172,7 @@ impl WaveTracker {
         let state = self.active_waves.remove(wave_id)?;
         Some(CompletedWave {
             wave_id: state.wave_id,
+            wave_total: state.expected_total,
             results: state.results,
             failures: state.failures,
             duration: state.started_at.elapsed(),
@@ -391,5 +396,52 @@ mod tests {
         // Completed wave should not appear in timed_out_waves
         let timed_out = tracker.timed_out_waves(Duration::ZERO);
         assert!(timed_out.is_empty());
+    }
+
+    #[test]
+    fn take_wave_results_propagates_wave_total() {
+        // R8: the merge function needs to know the original expected
+        // total to stamp every merged record with `wave_total`.  The
+        // tracker stores `expected_total` in the wave state — verify it
+        // makes it into the `CompletedWave` returned by `take_wave_results`.
+        let mut tracker = WaveTracker::new();
+        tracker.register_wave("w-u3".to_string(), 8);
+
+        // Record 8 results so the wave completes.
+        for i in 0..8 {
+            let ev = ralph_proto::Event::new("review.dimension.done", "{\"dim\":\"d\"}");
+            tracker.record_result("w-u3", i, vec![ev]);
+        }
+        let completed = tracker.take_wave_results("w-u3").expect("wave must complete");
+        assert_eq!(completed.wave_total, 8);
+        assert_eq!(completed.results.len(), 8);
+    }
+
+    #[test]
+    fn take_wave_results_wave_total_preserved_on_partial_completion() {
+        // Even when not all workers report back (the rest are failures
+        // or panics), `wave_total` must reflect the *expected* count, not
+        // the *received* count.  Aggregator uses this to detect
+        // partial-wave vs full-wave without re-querying the registry.
+        let mut tracker = WaveTracker::new();
+        tracker.register_wave("w-partial".to_string(), 8);
+        for i in 0..5 {
+            let ev = ralph_proto::Event::new("review.dimension.done", "");
+            tracker.record_result("w-partial", i, vec![ev]);
+        }
+        for i in 5..8 {
+            tracker.record_failure(
+                "w-partial",
+                i,
+                "worker panicked".into(),
+                Duration::from_millis(100),
+            );
+        }
+        let completed = tracker
+            .take_wave_results("w-partial")
+            .expect("wave must complete");
+        assert_eq!(completed.wave_total, 8, "expected_total must travel through take_wave_results");
+        assert_eq!(completed.results.len(), 5);
+        assert_eq!(completed.failures.len(), 3);
     }
 }
