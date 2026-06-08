@@ -719,4 +719,58 @@ mod tests {
         assert_eq!(json["severity"], "warning");
         assert_eq!(json["finding_id"], entry.finding_id);
     }
+
+    /// U0 wiring: when `telemetry.runtime_diagnosis.write_artifacts=true` is
+    /// passed via the new `from_env_with_telemetry` constructor, the minimal
+    /// session dir must be created WITHOUT requiring `RALPH_DIAGNOSTICS=1`.
+    /// Regression guard for the gap where `from_env` hardcoded
+    /// `runtime_diagnosis_artifacts: false` and `main.rs` only consulted the
+    /// env var.
+    #[test]
+    fn test_from_env_with_telemetry_enables_minimal_session_without_env() {
+        let temp = TempDir::new().unwrap();
+        let options = crate::diagnostics::DiagnosticsOptions::from_env_with_telemetry(
+            None, /* write_artifacts = */ true,
+        );
+        assert!(!options.full_diagnostics);
+        assert!(options.runtime_diagnosis_artifacts);
+        assert!(options.is_enabled());
+
+        let collector = DiagnosticsCollector::with_options(temp.path(), &options).unwrap();
+        let session_dir = collector
+            .session_dir()
+            .expect("session dir must be created when write_artifacts=true and no env");
+
+        // The session dir must contain the timestamped subdir (no logs fallback).
+        assert!(session_dir.exists());
+        let entries: Vec<_> = std::fs::read_dir(&session_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert!(
+            !entries.is_empty(),
+            "session dir should contain at least the timestamped subdir or recovery.jsonl"
+        );
+
+        // Minimal session: recovery.jsonl lazy-creates on first log; full-diagnostics
+        // files MUST NOT be present.
+        collector.log_recovery(sample_recovery_entry());
+        assert!(session_dir.join("recovery.jsonl").exists());
+        assert!(!session_dir.join("agent-output.jsonl").exists());
+        assert!(!session_dir.join("orchestration.jsonl").exists());
+    }
+
+    /// U0 wiring: `from_env_with_telemetry(None, false)` must produce a
+    /// fully-disabled collector. Mirrors the no-env / no-telemetry default.
+    #[test]
+    fn test_from_env_with_telemetry_false_disables_collector() {
+        let temp = TempDir::new().unwrap();
+        let options = crate::diagnostics::DiagnosticsOptions::from_env_with_telemetry(None, false);
+        assert!(!options.full_diagnostics);
+        assert!(!options.runtime_diagnosis_artifacts);
+        assert!(!options.is_enabled());
+
+        let collector = DiagnosticsCollector::with_options(temp.path(), &options).unwrap();
+        assert!(collector.session_dir().is_none());
+    }
 }

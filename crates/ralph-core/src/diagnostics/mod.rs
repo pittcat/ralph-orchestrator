@@ -106,6 +106,30 @@ impl DiagnosticsOptions {
             session_dir,
         }
     }
+
+    /// Resolves the activation matrix from env + the resolved value of
+    /// `telemetry.runtime_diagnosis.write_artifacts` from ralph.yml.
+    ///
+    /// U0 wiring fix: the legacy `from_env` hardcoded `runtime_diagnosis_artifacts:
+    /// false`, which silently dropped the `write_artifacts: true` config and left
+    /// the minimal session path unreachable. This variant lets the CLI thread the
+    /// resolved value through so the activation matrix matches plan U0:
+    /// `write_artifacts=true` ⇒ `runtime_diagnosis_artifacts=true` ⇒ minimal
+    /// session created without requiring `RALPH_DIAGNOSTICS=1`.
+    ///
+    /// `full_diagnostics` is still driven solely by `RALPH_DIAGNOSTICS=1` so the
+    /// historical full-diagnostics loggers (orchestration/performance/errors/hook-runs
+    /// + agent-output/prompt-log/trace) keep the same env-gated semantics.
+    pub fn from_env_with_telemetry(session_dir: Option<PathBuf>, write_artifacts: bool) -> Self {
+        let full_diagnostics = std::env::var("RALPH_DIAGNOSTICS")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        Self {
+            full_diagnostics,
+            runtime_diagnosis_artifacts: write_artifacts,
+            session_dir,
+        }
+    }
 }
 
 /// Central coordinator for diagnostic logging.
