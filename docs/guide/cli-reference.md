@@ -196,6 +196,50 @@ Run interactive intro walkthrough.
 ralph tutorial [OPTIONS]
 ```
 
+### ralph preset
+
+Manage and validate presets (includes template authoring commands).
+
+```bash
+ralph preset [OPTIONS] [COMMAND]
+```
+
+**Subcommands:**
+
+- `list [--format human|json]` — List available workflow templates
+- `show <NAME> [--format human|yaml]` — Show template details
+- `new <TEMPLATE> [--name <NAME>] [--description <TEXT>] [--output <PATH>] [--force] [--check] [--format human|json]` — Generate a new preset from a template
+- `check [--format human|json] [--strict]` — Check preset/workflow contract (config, topology, payload, orphan)
+- `diff --file <FILE> [--format human|json]` — Show differences between a local preset and its template baseline
+- `upgrade --file <FILE> [--format human|json]` — Preview upgrade information (dry-run only)
+
+**Examples:**
+
+```bash
+# List available templates
+ralph preset list
+
+# Show template details
+ralph preset show code-assist --format yaml
+
+# Generate a local preset
+ralph preset new code-assist --name my-flow --output .ralph/hats/my-flow.yml
+
+# Validate a preset
+ralph preset check -H .ralph/hats/my-flow.yml --strict
+
+# See differences from template baseline
+ralph preset diff --file .ralph/hats/my-flow.yml
+
+# Preview upgrade (dry-run)
+ralph preset upgrade --file .ralph/hats/my-flow.yml --dry-run
+```
+
+Notes:
+- Templates are authoring scaffolds; they do not become builtin presets.
+- `x_preset` metadata in generated files does not affect runtime behavior.
+- See [Preset Authoring Guide](./preset-authoring.md) for the full authoring workflow.
+
 ### ralph plan
 
 Start an interactive PDD planning session.

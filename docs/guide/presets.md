@@ -27,6 +27,34 @@ Ralph also keeps a few internal/testing presets available without advertising th
 
 - `merge-loop`
 
+## Templates: Create Your Own Workflow
+
+If the builtin presets don't fit your needs, Ralph provides **templates** — scaffold configurations you can customize. Templates generate ordinary YAML files that you can modify.
+
+See the [Preset Authoring Guide](./preset-authoring.md) for the full workflow:
+
+```bash
+# 1. Browse available templates
+ralph preset list
+
+# 2. Preview a template
+ralph preset show minimal-linear
+
+# 3. Generate a local preset from a template
+ralph preset new code-assist --name my-flow --output .ralph/hats/my-flow.yml
+
+# 4. Validate it
+ralph preset check -H .ralph/hats/my-flow.yml --strict
+
+# 5. Run it
+ralph run -c ralph.yml -H .ralph/hats/my-flow.yml -p "..."
+```
+
+**Key distinctions:**
+- **Template** ≠ **Builtin Preset**: Templates are authoring scaffolds, not Ralph product surface
+- **`x_preset` metadata**: Generated files include version info; it does **not** affect runtime
+- **Version diff/upgrade**: `ralph preset diff` and `ralph preset upgrade` help track template updates
+
 ## Recommended Workflow
 
 - Use `code-assist` for most implementation tasks.

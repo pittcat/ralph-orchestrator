@@ -1,7 +1,7 @@
 ---
 title: Preset Template & Versioning: Workflow 模板化与版本化作者工具
 type: feat
-status: active
+status: completed
 date: 2026-06-05
 origin: conversation
 ---
