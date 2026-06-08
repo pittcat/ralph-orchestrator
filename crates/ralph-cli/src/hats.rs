@@ -198,7 +198,8 @@ fn validate_hats<W: Write>(
         ralph_core::runtime_contract::RuntimeContractReport::new("hats-validate", strictness);
 
     // Step 1: topology validation (via shared helper)
-    let topology_result = ralph_core::preset_validator::validate_preset_topology(config, runtime_registry);
+    let topology_result =
+        ralph_core::preset_validator::validate_preset_topology(config, runtime_registry);
     for err in &topology_result.errors {
         let finding = ralph_core::runtime_contract::RuntimeContractFinding::new(
             "topology.error",
@@ -223,17 +224,20 @@ fn validate_hats<W: Write>(
     }
 
     // Render topology findings
-    for finding in report.findings.iter().filter(|f| f.source == FindingSource::Topology) {
-        print_check(
-            writer,
-            CheckResult::Error,
-            &finding.message,
-            use_colors,
-        )?;
+    for finding in report
+        .findings
+        .iter()
+        .filter(|f| f.source == FindingSource::Topology)
+    {
+        print_check(writer, CheckResult::Error, &finding.message, use_colors)?;
     }
 
     // Render payload findings (legacy format: "Payload contract: <msg> (hat=... ...)")
-    for finding in report.findings.iter().filter(|f| f.source == FindingSource::Payload) {
+    for finding in report
+        .findings
+        .iter()
+        .filter(|f| f.source == FindingSource::Payload)
+    {
         let check_result = match finding.severity {
             ralph_core::runtime_contract::FindingSeverity::Error => CheckResult::Error,
             ralph_core::runtime_contract::FindingSeverity::Warn => CheckResult::Warn,
@@ -246,10 +250,26 @@ fn validate_hats<W: Write>(
                 "Payload contract: {} (hat={} topic={} field={} source_hats=[{}] schema={} line={:?})",
                 finding.message,
                 finding.details.get("hat").map(|s| s.as_str()).unwrap_or(""),
-                finding.details.get("topic").map(|s| s.as_str()).unwrap_or(""),
-                finding.details.get("field").map(|s| s.as_str()).unwrap_or(""),
-                finding.details.get("source_hats").map(|s| s.as_str()).unwrap_or(""),
-                finding.details.get("schema_defined_in").map(|s| s.as_str()).unwrap_or(""),
+                finding
+                    .details
+                    .get("topic")
+                    .map(|s| s.as_str())
+                    .unwrap_or(""),
+                finding
+                    .details
+                    .get("field")
+                    .map(|s| s.as_str())
+                    .unwrap_or(""),
+                finding
+                    .details
+                    .get("source_hats")
+                    .map(|s| s.as_str())
+                    .unwrap_or(""),
+                finding
+                    .details
+                    .get("schema_defined_in")
+                    .map(|s| s.as_str())
+                    .unwrap_or(""),
                 finding.details.get("instructions_line").map(|s| s.as_str()),
             )
         };
@@ -287,7 +307,11 @@ fn validate_hats<W: Write>(
     }
 
     // 2. Orphan findings from the shared helper
-    for finding in report.findings.iter().filter(|f| f.source == FindingSource::Orphan) {
+    for finding in report
+        .findings
+        .iter()
+        .filter(|f| f.source == FindingSource::Orphan)
+    {
         print_check(writer, CheckResult::Warn, &finding.message, use_colors)?;
     }
 

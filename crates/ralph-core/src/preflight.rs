@@ -2447,12 +2447,8 @@ impl PreflightCheck for PresetContractCheck {
 
         let registry = HatRegistry::from_runtime_config(config);
         let strictness = RuntimeContractStrictness::default();
-        let report = RuntimeContractAggregator::aggregate(
-            "preflight",
-            config,
-            &registry,
-            strictness,
-        );
+        let report =
+            RuntimeContractAggregator::aggregate("preflight", config, &registry, strictness);
 
         if report.passed {
             if report.warnings == 0 {
@@ -2462,10 +2458,7 @@ impl PreflightCheck for PresetContractCheck {
                     .findings
                     .iter()
                     .filter(|f| {
-                        matches!(
-                            f.severity,
-                            crate::runtime_contract::FindingSeverity::Warn
-                        )
+                        matches!(f.severity, crate::runtime_contract::FindingSeverity::Warn)
                     })
                     .map(|f| f.message.clone())
                     .collect();
@@ -2479,12 +2472,7 @@ impl PreflightCheck for PresetContractCheck {
             let error_msgs: Vec<String> = report
                 .findings
                 .iter()
-                .filter(|f| {
-                    matches!(
-                        f.severity,
-                        crate::runtime_contract::FindingSeverity::Error
-                    )
-                })
+                .filter(|f| matches!(f.severity, crate::runtime_contract::FindingSeverity::Error))
                 .map(|f| f.message.clone())
                 .collect();
             CheckResult::fail(

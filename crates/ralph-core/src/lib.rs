@@ -96,7 +96,8 @@ pub use drift::{
 };
 pub use event_logger::{EventHistory, EventLogger, EventRecord};
 pub use event_loop::{
-    EventLoop, LoopState, ProcessedEvents, ProcessedEventsWithWaves, TerminationReason, UserPrompt,
+    EventLoop, LoopState, ProcessedEvents, ProcessedEventsWithWaves, TerminationReason,
+    U2_REJECTION_RETRY_LIMIT, UserPrompt,
     rejection::{
         NonRetryableReason, Rejection, RejectionStage, build_task_resume_payload,
         rejection_from_origin, resolve_target_hat,

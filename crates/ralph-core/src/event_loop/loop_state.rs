@@ -103,6 +103,9 @@ pub struct LoopState {
     /// Used to inject `default_publishes` when agent writes no events.
     pub last_active_hat_ids: Vec<HatId>,
 
+    /// Events that activated `last_active_hat_ids` for the current execution.
+    pub last_activation_events: Vec<Event>,
+
     /// Topics seen during the loop's lifetime (for event chain validation).
     pub seen_topics: HashSet<String>,
 
@@ -189,6 +192,7 @@ impl Default for LoopState {
             exhausted_hats: HashSet::new(),
             last_checkin_at: None,
             last_active_hat_ids: Vec::new(),
+            last_activation_events: Vec::new(),
             seen_topics: HashSet::new(),
             last_emitted_signature: None,
             consecutive_same_signature: 0,
@@ -349,7 +353,10 @@ impl LoopState {
     /// [`U2_REJECTION_RETRY_LIMIT`] the caller must mark the rejection
     /// as fail-closed (R2: bounded retry to prevent infinite loops).
     pub fn record_rejection_key(&mut self, key: &str) -> u32 {
-        let entry = self.rejection_retry_counts.entry(key.to_string()).or_insert(0);
+        let entry = self
+            .rejection_retry_counts
+            .entry(key.to_string())
+            .or_insert(0);
         *entry = entry.saturating_add(1);
         *entry
     }
@@ -364,8 +371,16 @@ impl LoopState {
     /// threshold.  Used by the runner to decide between
     /// `task.resume` (retryable) and `TerminationReason::Recovered`
     /// (fail-closed escalation).
+    ///
+    /// Semantics: the budget allows `U2_REJECTION_RETRY_LIMIT` retries.
+    /// When the *post-increment* count strictly **exceeds** the limit
+    /// the budget is exhausted and the next attempt must terminate.
+    /// This means counts 1..=LIMIT all permit a `task.resume`; the
+    /// (LIMIT+1)-th attempt is the first one marked exhausted.  The
+    /// `>` comparison is intentional — `>=` would silently drop the
+    /// last retry attempt.
     pub fn rejection_key_is_exhausted(&self, key: &str) -> bool {
-        self.rejection_retry_count(key) >= U2_REJECTION_RETRY_LIMIT
+        self.rejection_retry_count(key) > U2_REJECTION_RETRY_LIMIT
     }
 
     fn event_counts_toward_stale_loop(event: &Event) -> bool {
@@ -716,23 +731,42 @@ mod tests {
     fn u2_rejection_retry_counter_increments_and_saturates() {
         // 2026-06-07 plan U2: per-key retry counter must increment
         // monotonically and surface exhaustion at the configured limit.
+        // Semantics: budget allows U2_REJECTION_RETRY_LIMIT retries
+        // (counts 1..=LIMIT all permit a task.resume); the (LIMIT+1)-th
+        // attempt is the first one marked exhausted.
         let mut state = LoopState::new();
         let key = "execution_contract:executor:work.done:missing_field";
 
         assert_eq!(state.rejection_retry_count(key), 0);
         assert!(!state.rejection_key_is_exhausted(key));
 
+        // First LIMIT attempts must all be marked *not* exhausted so the
+        // runner actually issues task.resume for each.
         for i in 1..=U2_REJECTION_RETRY_LIMIT {
             let n = state.record_rejection_key(key);
             assert_eq!(n, i, "post-increment count must match attempt {i}");
+            assert!(
+                !state.rejection_key_is_exhausted(key),
+                "attempt {i} (count={i}) must NOT be exhausted; \
+                 the budget is `LIMIT` retries, not `LIMIT-1`"
+            );
         }
-        assert!(state.rejection_key_is_exhausted(key));
 
-        // One more attempt is still allowed to increment (saturating) —
+        // The (LIMIT+1)-th attempt is the first exhausted one.
+        let n = state.record_rejection_key(key);
+        assert_eq!(n, U2_REJECTION_RETRY_LIMIT + 1);
+        assert!(
+            state.rejection_key_is_exhausted(key),
+            "attempt {} (count={}) MUST be exhausted",
+            U2_REJECTION_RETRY_LIMIT + 1,
+            U2_REJECTION_RETRY_LIMIT + 1
+        );
+
+        // Further attempts are still allowed to increment (saturating) —
         // the runner is the one that reads `is_exhausted` and stops
         // publishing `task.resume`.  We must not panic on overflow.
         let n = state.record_rejection_key(key);
-        assert_eq!(n, U2_REJECTION_RETRY_LIMIT + 1);
+        assert_eq!(n, U2_REJECTION_RETRY_LIMIT + 2);
         assert!(state.rejection_key_is_exhausted(key));
     }
 

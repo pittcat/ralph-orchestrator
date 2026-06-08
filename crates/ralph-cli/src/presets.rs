@@ -3789,9 +3789,12 @@ mod tests {
                 .iter()
                 .filter(|f| matches!(f.severity, FindingSeverity::Error))
                 .collect();
-            let all_topology = errors
-                .iter()
-                .all(|f| matches!(f.source, ralph_core::runtime_contract::FindingSource::Topology));
+            let all_topology = errors.iter().all(|f| {
+                matches!(
+                    f.source,
+                    ralph_core::runtime_contract::FindingSource::Topology
+                )
+            });
 
             if topology_exempt.contains(&preset.name) && all_topology {
                 // Known topology exception — record but don't fail
@@ -3819,7 +3822,12 @@ mod tests {
     /// fully declared schemas.
     #[test]
     fn test_development_presets_pass_strict_contract() {
-        let strict_presets = &["ce-executor", "ce-executor-wave", "code-assist", "pdd-to-code-assist"];
+        let strict_presets = &[
+            "ce-executor",
+            "ce-executor-wave",
+            "code-assist",
+            "pdd-to-code-assist",
+        ];
         for preset_name in strict_presets {
             let preset = PRESETS
                 .iter()

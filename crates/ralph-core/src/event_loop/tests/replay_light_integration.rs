@@ -587,9 +587,15 @@ fn test_rejected_missing_plan_path_names_finding_and_routes_retry() {
 
     let config = build_test_config(workspace);
     let mut event_loop = make_event_loop(config);
+    event_loop.state.last_active_hat_ids = vec![ralph_proto::HatId::new("executor")];
+    event_loop.state.last_activation_events = vec![ralph_proto::Event::new(
+        "task.start",
+        r#"{"plan_path":"docs/plans/p.md","task_id":"test-id-1"}"#,
+    )];
 
     // Build event WITHOUT plan_path.
     let mut event = work_done_event("test-id-1");
+    event.hat = Some("ralph".to_string());
     event.payload = Some(
         r#"{"plan_name":"p","task_id":"test-id-1","task_key":"k1","step":"step-01"}"#.to_string(),
     );
@@ -627,6 +633,14 @@ fn test_rejected_missing_plan_path_names_finding_and_routes_retry() {
     assert!(
         targeted_retry.is_some(),
         "Even with missing plan_path, retry target must be executor"
+    );
+    let retry_payload: serde_json::Value =
+        serde_json::from_str(&targeted_retry.expect("targeted retry").payload)
+            .expect("retry payload is JSON");
+    assert_eq!(retry_payload["original_trigger_topic"], "task.start");
+    assert_eq!(
+        retry_payload["original_trigger_payload"]["plan_path"],
+        "docs/plans/p.md"
     );
 }
 

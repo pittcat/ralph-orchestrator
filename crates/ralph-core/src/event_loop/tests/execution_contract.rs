@@ -319,11 +319,14 @@ fn test_contract_rejection_with_trivial_step_passes() {
 
 #[test]
 fn test_contract_disabled_does_not_set_had_rejected_events() {
-    // When execution contracts are disabled, no rejections occur and the
-    // flags should reflect the default. This is a regression guard for the
-    // flag semantics: `had_rejected_events` is exclusively about contract
-    // rejections, not about malformed events or other failures.
+    // When execution contracts are disabled and origin validation accepts
+    // the event, no validation-layer rejection should be reported.
     let yaml = r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["task.*"]
+    publishes: ["work.done"]
 event_loop:
   execution_contracts:
     enabled: false

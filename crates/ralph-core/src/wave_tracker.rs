@@ -412,7 +412,9 @@ mod tests {
             let ev = ralph_proto::Event::new("review.dimension.done", "{\"dim\":\"d\"}");
             tracker.record_result("w-u3", i, vec![ev]);
         }
-        let completed = tracker.take_wave_results("w-u3").expect("wave must complete");
+        let completed = tracker
+            .take_wave_results("w-u3")
+            .expect("wave must complete");
         assert_eq!(completed.wave_total, 8);
         assert_eq!(completed.results.len(), 8);
     }
@@ -440,7 +442,10 @@ mod tests {
         let completed = tracker
             .take_wave_results("w-partial")
             .expect("wave must complete");
-        assert_eq!(completed.wave_total, 8, "expected_total must travel through take_wave_results");
+        assert_eq!(
+            completed.wave_total, 8,
+            "expected_total must travel through take_wave_results"
+        );
         assert_eq!(completed.results.len(), 5);
         assert_eq!(completed.failures.len(), 3);
     }

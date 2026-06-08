@@ -693,7 +693,6 @@ hats:
     description: "Merges all dimension findings, deduplicates, applies quality gates, and routes."
     triggers: ["review.dimension.done"]
     publishes: ["review.passed", "review.failed", "review.complete"]
-    default_publishes: "review.complete"
     aggregate:
       mode: wait_for_all
       # NOTE: This timeout controls how long the synthesizer waits for ALL dimension

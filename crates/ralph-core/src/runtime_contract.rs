@@ -583,7 +583,9 @@ fn topology_finding(err: &TopologyError) -> RuntimeContractFinding {
 /// only used as a defensive double-check so a future refactor that
 /// flips the validator's classification doesn't silently change the
 /// shared report's findings.
-pub fn payload_findings_from_result(result: &PayloadContractValidationResult) -> Vec<RuntimeContractFinding> {
+pub fn payload_findings_from_result(
+    result: &PayloadContractValidationResult,
+) -> Vec<RuntimeContractFinding> {
     let mut findings: Vec<RuntimeContractFinding> =
         result.errors.iter().map(payload_error_finding).collect();
     for w in &result.warnings {
@@ -739,8 +741,7 @@ pub fn detect_required_topic_gaps(
     registry: &HatRegistry,
 ) -> Vec<RuntimeContractFinding> {
     let mut findings = Vec::new();
-    let mut topics_to_check: std::collections::BTreeSet<String> =
-        std::collections::BTreeSet::new();
+    let mut topics_to_check: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for t in &config.event_loop.required_events {
         topics_to_check.insert(t.clone());
     }
@@ -771,6 +772,34 @@ pub fn detect_required_topic_gaps(
         let has_publisher = registry
             .all()
             .any(|h| h.publishes.iter().any(|p| p.matches_str(topic.as_str())));
+
+        // Skip the no_subscriber check for terminal workflow events:
+        // a required topic whose publishing hat also publishes the
+        // completion promise is a "loop-terminating event" — the loop
+        // runner observes it for `required_events` accounting, but
+        // there is intentionally no downstream hat subscription
+        // because the next event in the chain is the completion
+        // promise. Example: `reporter` emits `report.done` and
+        // `LOOP_COMPLETE`; no hat subscribes to `report.done` because
+        // the loop is about to terminate. Demanding a subscriber here
+        // would force every terminal workflow event to declare a
+        // throwaway hat or be downgraded from `required_events` to a
+        // soft expectation, neither of which matches the preset
+        // design intent.
+        //
+        // The builtin runtime `ralph` hat publishes a derived scope
+        // (all configured hats' triggers + publishes + completion
+        // promise) so it always trivially satisfies the dual-publisher
+        // test.  Excluding it keeps the heuristic honest: the dual
+        // publisher must be a real business hat, not the universal
+        // fallback that would mask otherwise-broken topologies.
+        let publishing_hat_also_publishes_completion = registry.all().any(|h| {
+            h.id.as_str() != "ralph"
+                && h.publishes.iter().any(|p| p.matches_str(topic.as_str()))
+                && h.publishes
+                    .iter()
+                    .any(|p| p.matches_str(config.event_loop.completion_promise.as_str()))
+        });
         // has_specific_subscriber excludes fallback-only hats (those
         // subscribed to "*"), so it correctly returns false when
         // ralph's wildcard is the only "subscriber".
@@ -791,7 +820,7 @@ pub fn detect_required_topic_gaps(
             .with_detail("topic", topic.clone());
             findings.push(finding);
         }
-        if !has_subscriber {
+        if !has_subscriber && !publishing_hat_also_publishes_completion {
             let finding = RuntimeContractFinding::try_new_core(
                 "required.no_subscriber",
                 FindingSource::Topology,
@@ -821,11 +850,8 @@ pub fn detect_obligation_topics_not_in_publishes(
 ) -> Vec<RuntimeContractFinding> {
     let mut findings = Vec::new();
     for (hat_id, hat_config) in &config.hats {
-        let publishes: std::collections::HashSet<&str> = hat_config
-            .publishes
-            .iter()
-            .map(String::as_str)
-            .collect();
+        let publishes: std::collections::HashSet<&str> =
+            hat_config.publishes.iter().map(String::as_str).collect();
         for obligation in &hat_config.obligations {
             for topic in &obligation.must_emit_any_of {
                 if !publishes.contains(topic.as_str()) {

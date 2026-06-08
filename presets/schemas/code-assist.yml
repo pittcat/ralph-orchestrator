@@ -24,12 +24,6 @@ tasks.ready:
     - task_key
   payload: json_object
 
-tasks.rejected:
-  required_fields:
-    - task_id
-    - task_key
-  payload: json_object
-
 review.ready:
   required_fields:
     - task_id
@@ -43,12 +37,6 @@ review.rejected:
   payload: json_object
 
 finalization.failed:
-  required_fields:
-    - task_id
-    - task_key
-  payload: json_object
-
-finalization.completed:
   required_fields:
     - task_id
     - task_key

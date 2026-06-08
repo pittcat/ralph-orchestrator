@@ -195,16 +195,28 @@ pub fn validate_event_origin(
     OriginCheck::Accepted
 }
 
+/// Information about an event that was rejected by the origin guard.
+/// Used by the CLI runner to produce unified recovery diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OriginRejection {
+    pub topic: String,
+    pub source_hat: Option<String>,
+    pub reason: &'static str,
+}
+
 /// Filters a batch of JSONL events through origin validation.
 ///
-/// Returns only the events that passed validation. Logs rejections at warn level.
+/// Returns `(accepted, rejections)` so the caller can produce unified
+/// recovery diagnostics for all three rejection sources (origin, policy,
+/// execution contract).
 pub fn filter_events_by_origin(
     events: Vec<JsonlEvent>,
     registry: &HatRegistry,
     cancellation_topic: &str,
     completion_promise: &str,
-) -> Vec<JsonlEvent> {
+) -> (Vec<JsonlEvent>, Vec<OriginRejection>) {
     let mut accepted = Vec::with_capacity(events.len());
+    let mut rejections = Vec::new();
     for event in events {
         match validate_event_origin(&event, registry, cancellation_topic, completion_promise) {
             OriginCheck::Accepted => accepted.push(event),
@@ -215,10 +227,15 @@ pub fn filter_events_by_origin(
                     reason = reason,
                     "JSONL event rejected by origin guard"
                 );
+                rejections.push(OriginRejection {
+                    topic,
+                    source_hat: hat,
+                    reason,
+                });
             }
         }
     }
-    accepted
+    (accepted, rejections)
 }
 
 #[cfg(test)]
@@ -515,8 +532,9 @@ hats:
             make_event("debug.step", None),              // accepted (no-hat pass-through)
             make_event("work.done", Some("strategist")), // rejected unknown hat
         ];
-        let filtered = filter_events_by_origin(events, &registry, "", "");
+        let (filtered, rejections) = filter_events_by_origin(events, &registry, "", "");
         assert_eq!(filtered.len(), 2);
+        assert_eq!(rejections.len(), 1);
         assert_eq!(filtered[0].topic, "work.done");
         assert_eq!(filtered[1].topic, "debug.step");
     }

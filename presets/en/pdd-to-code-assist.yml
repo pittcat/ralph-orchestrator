@@ -68,22 +68,10 @@ event_loop:
       plan.ready:
         required_fields: [task_id, task_key]
         payload: json_object
-      work.ready:
-        required_fields: [task_id, task_key]
-        payload: json_object
-      work.done:
-        required_fields: [task_id, task_key]
-        payload: json_object
-      work.failed:
-        required_fields: [task_id, task_key]
-        payload: json_object
       review.passed:
         required_fields: [task_id, task_key]
         payload: json_object
-      review.failed:
-        required_fields: [task_id, task_key]
-        payload: json_object
-      report.done:
+      review.rejected:
         required_fields: [task_id, task_key]
         payload: json_object
 

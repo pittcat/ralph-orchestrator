@@ -7843,30 +7843,87 @@ hats:
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
     let event_loop = EventLoop::new(config);
 
+    // U4 (2026-06-07): should_gate_missing_events now takes the
+    // candidate topic set so the activation-level obligation path can
+    // distinguish "no event at all" from "agent emitted a topic
+    // outside the obligation set".  Legacy hats without obligations
+    // ignore the candidate list and follow the blanket rule.
+    let no_candidates: Vec<String> = Vec::new();
+
     // Executor with publishes but no default_publishes -> should gate on missing events
     assert!(
-        should_gate_missing_events(&HatId::new("executor"), &event_loop),
+        should_gate_missing_events(&HatId::new("executor"), &event_loop, &no_candidates),
         "executor with publishes and no default_publishes should gate missing events"
     );
     // Reviewer with default_publishes -> should NOT gate (has fallback)
     assert!(
-        !should_gate_missing_events(&HatId::new("reviewer"), &event_loop),
+        !should_gate_missing_events(&HatId::new("reviewer"), &event_loop, &no_candidates),
         "hat with default_publishes should NOT gate missing events"
     );
     // Gate with default_publishes (fail-closed) -> should NOT gate
     assert!(
-        !should_gate_missing_events(&HatId::new("gate"), &event_loop),
+        !should_gate_missing_events(&HatId::new("gate"), &event_loop, &no_candidates),
         "gate with default_publishes should NOT gate missing events"
     );
     // Silent hat with no publishes -> should NOT gate
     assert!(
-        !should_gate_missing_events(&HatId::new("silent"), &event_loop),
+        !should_gate_missing_events(&HatId::new("silent"), &event_loop, &no_candidates),
         "hat with no publishes should NOT gate missing events"
     );
     // Unknown hat -> should NOT gate
     assert!(
-        !should_gate_missing_events(&HatId::new("nonexistent"), &event_loop),
+        !should_gate_missing_events(&HatId::new("nonexistent"), &event_loop, &no_candidates),
         "unknown hat should NOT gate missing events"
+    );
+}
+
+#[test]
+fn test_u4_obligation_path_gates_when_no_candidate_topics() {
+    // U4 (2026-06-07): hats with explicit `obligations:` now go
+    // through the activation-level path.  When the candidate topic
+    // set is empty, the obligation is unsatisfied and the gate
+    // MUST fire — the previous behaviour was to silently never gate,
+    // which left the loop hanging when such a hat forgot to emit.
+    let yaml = r#"
+hats:
+  review-coordinator:
+    name: "Review Coordinator"
+    triggers: ["work.done"]
+    publishes: ["review.wave.ready", "review.passed"]
+    obligations:
+      - on_trigger: "work.done"
+        must_emit_any_of: ["review.wave.ready", "review.passed"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.state_mut().last_activation_events =
+        vec![ralph_proto::Event::new("work.done", "{}")];
+    let hat = HatId::new("review-coordinator");
+
+    // Empty candidates → obligation unsatisfied → gate fires.
+    let empty: Vec<String> = Vec::new();
+    assert!(
+        should_gate_missing_events(&hat, &event_loop, &empty),
+        "obligation-equipped hat with no candidates must trigger missing-event gate"
+    );
+
+    // Off-obligation candidates → obligation unsatisfied → gate fires.
+    let off_obligation = vec!["work.failed".to_string()];
+    assert!(
+        should_gate_missing_events(&hat, &event_loop, &off_obligation),
+        "off-obligation candidate must not satisfy the obligation"
+    );
+
+    // On-obligation candidates → obligation satisfied → gate does NOT fire.
+    let on_obligation_wave = vec!["review.wave.ready".to_string()];
+    assert!(
+        !should_gate_missing_events(&hat, &event_loop, &on_obligation_wave),
+        "matching candidate must satisfy the obligation"
+    );
+    let on_obligation_passed = vec!["review.passed".to_string()];
+    assert!(
+        !should_gate_missing_events(&hat, &event_loop, &on_obligation_passed),
+        "second obligation branch must also satisfy"
     );
 }
 
@@ -7956,6 +8013,7 @@ fn test_contract_rejection_satisfies_any_valid_or_rejected() {
             },
             message: "test rejection".to_string(),
             topic: "work.done".to_string(),
+            source_hat: None,
         }],
         payload_contract_violation: None,
     };
@@ -7998,7 +8056,7 @@ hats:
     // Sanity: executor (publishes but no default_publishes) WOULD gate if
     // the agent emitted nothing.
     assert!(
-        should_gate_missing_events(&HatId::new("executor"), &event_loop),
+        should_gate_missing_events(&HatId::new("executor"), &event_loop, &[]),
         "executor should normally trigger missing-event gate"
     );
 
@@ -8016,7 +8074,7 @@ hats:
     };
     let gate_would_fire = !empty.had_raw_events
         && !empty.had_rejected_events
-        && should_gate_missing_events(&HatId::new("executor"), &event_loop);
+        && should_gate_missing_events(&HatId::new("executor"), &event_loop, &[]);
     assert!(
         gate_would_fire,
         "Missing-event gate MUST fire when agent wrote nothing"
@@ -8036,7 +8094,7 @@ hats:
     };
     let gate_would_fire = !rejected.had_raw_events
         && !rejected.had_rejected_events
-        && should_gate_missing_events(&HatId::new("executor"), &event_loop);
+        && should_gate_missing_events(&HatId::new("executor"), &event_loop, &[]);
     assert!(
         !gate_would_fire,
         "Missing-event gate MUST NOT fire when contract rejected an event"
@@ -8652,6 +8710,7 @@ hats:
         topic: "work.done".to_string(),
         kind: ExecutionContractViolationKind::NoGitEvidence { step: None },
         message: "no diff or commit observed".to_string(),
+        source_hat: Some("executor".to_string()),
     };
 
     // Simulate a targeted retry that was published to the source hat
@@ -8692,6 +8751,22 @@ hats:
         "ContractRecoveryRouted must carry retry_target=executor; content was: {orch}"
     );
 
+    // The runner observes EventLoop's targeted recovery and must not
+    // remove or duplicate the pending task.resume.
+    let pending: Vec<ralph_proto::Event> = event_loop
+        .bus()
+        .peek_pending(&ralph_proto::HatId::new("executor"))
+        .cloned()
+        .unwrap_or_default();
+    let resume_count = pending
+        .iter()
+        .filter(|e| e.topic.as_str() == "task.resume")
+        .count();
+    assert!(
+        resume_count >= 1,
+        "U2: at least one task.resume must be pending for the source hat; got {resume_count}"
+    );
+
     // Characterization: the rejected event must NOT be on the bus
     // (it was a rejection, not a publication).
     let no_rejected_on_bus = event_loop
@@ -8727,10 +8802,14 @@ hats:
 
 #[test]
 fn u4_handle_execution_contract_rejections_writes_envelope_when_no_safe_target() {
-    // U4: when no safe retry target exists, the envelope is still
-    // written but with `safe_target = false` and a "failed-closed"
-    // note.
+    // U2: when the bounded retry budget is exhausted, the envelope is
+    // still written but with `safe_target = false`, `target_hat = None`
+    // (since the runner refuses to publish a `task.resume` it knows will
+    // not be honored) and a "failed-closed" / "retry budget exhausted"
+    // note.  Pre-2026-06-07, this test asserted the no-task-resume-on-bus
+    // case; normal publication is owned by EventLoop.
     use ralph_core::ProcessedEvents;
+    use ralph_core::U2_REJECTION_RETRY_LIMIT;
     use ralph_core::diagnosis::DiagnosisSource;
     use ralph_core::execution_contract::{
         ExecutionContractFinding, ExecutionContractViolationKind,
@@ -8751,8 +8830,25 @@ fn u4_handle_execution_contract_rejections_writes_envelope_when_no_safe_target()
             allowed: vec!["closed".to_string()],
         },
         message: "task is still open".to_string(),
+        source_hat: Some("executor".to_string()),
     };
-    // No targeted retry published — compute_recovery_status returns None.
+
+    // Pre-exhaust the retry budget so the next rejection is the
+    // fail-closed case.  With the `>` semantics from the 2026-06-07
+    // rework, the budget is exhausted on the (LIMIT+1)-th attempt —
+    // we record LIMIT times so the rejection we're about to test
+    // becomes the (LIMIT+1)-th and triggers fail-closed.
+    for _ in 0..U2_REJECTION_RETRY_LIMIT {
+        let probe = ralph_core::Rejection::from_execution_contract(
+            &finding,
+            Some("executor".to_string()),
+            Some("executor".to_string()),
+        );
+        event_loop
+            .state_mut()
+            .record_rejection_key(&probe.retry_key);
+    }
+
     let processed = ProcessedEvents {
         had_events: false,
         had_raw_events: true,
@@ -8772,14 +8868,23 @@ fn u4_handle_execution_contract_rejections_writes_envelope_when_no_safe_target()
     let entry = &entries[0];
     let env = &entry.envelope;
     assert_eq!(env.source, DiagnosisSource::ExecutionContract);
-    assert!(!env.safe_target, "no safe target");
+    assert!(!env.safe_target, "budget exhausted → no safe target");
     assert!(
         env.target_hat.is_none(),
-        "target_hat must be None when no safe retry target"
+        "target_hat must be None when budget exhausted"
     );
     assert!(
         entry.notes.iter().any(|n| n.contains("failed-closed")),
-        "notes must say 'failed-closed' for no-safe-target"
+        "notes must say 'failed-closed' when budget is exhausted; got: {:?}",
+        entry.notes
+    );
+    assert!(
+        entry
+            .notes
+            .iter()
+            .any(|n| n.contains("retry budget exhausted")),
+        "notes must explain why failed-closed; got: {:?}",
+        entry.notes
     );
 }
 
@@ -9137,12 +9242,8 @@ fn u3_wave_merge_stamps_wave_total_on_every_record() {
     let events_path = tmp.path().join("events.jsonl");
     std::fs::write(&events_path, "").unwrap();
 
-    merge_wave_results_to_events_file(
-        &completed,
-        &events_path,
-        &["review.dimension.done".into()],
-    )
-    .expect("merge must succeed");
+    merge_wave_results_to_events_file(&completed, &events_path, &["review.dimension.done".into()])
+        .expect("merge must succeed");
 
     let raw = std::fs::read_to_string(&events_path).unwrap();
     let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
@@ -9193,12 +9294,8 @@ fn u3_wave_merge_emits_synthetic_events_on_failure_with_wave_total() {
     let events_path = tmp.path().join("events.jsonl");
     std::fs::write(&events_path, "").unwrap();
 
-    merge_wave_results_to_events_file(
-        &completed,
-        &events_path,
-        &["review.dimension.done".into()],
-    )
-    .expect("merge must succeed");
+    merge_wave_results_to_events_file(&completed, &events_path, &["review.dimension.done".into()])
+        .expect("merge must succeed");
 
     let raw = std::fs::read_to_string(&events_path).unwrap();
     let mut success_count = 0;
@@ -9239,7 +9336,10 @@ fn u3_wave_merge_handles_duplicate_indexes_without_panicking() {
     for i in 0..4 {
         results.push(WaveResult {
             index: i,
-            events: vec![Event::new("review.dimension.done", format!("{{\"i\":{i}}}"))],
+            events: vec![Event::new(
+                "review.dimension.done",
+                format!("{{\"i\":{i}}}"),
+            )],
         });
     }
     let completed = CompletedWave {
@@ -9253,12 +9353,8 @@ fn u3_wave_merge_handles_duplicate_indexes_without_panicking() {
     let events_path = tmp.path().join("events.jsonl");
     std::fs::write(&events_path, "").unwrap();
 
-    merge_wave_results_to_events_file(
-        &completed,
-        &events_path,
-        &["review.dimension.done".into()],
-    )
-    .expect("merge must succeed");
+    merge_wave_results_to_events_file(&completed, &events_path, &["review.dimension.done".into()])
+        .expect("merge must succeed");
     let raw = std::fs::read_to_string(&events_path).unwrap();
     let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
     assert_eq!(lines.len(), 4, "all 4 result events appended");

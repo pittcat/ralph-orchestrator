@@ -7,7 +7,7 @@ pub mod rejection;
 #[cfg(test)]
 mod tests;
 
-pub use loop_state::{LoopState, WorkflowProgress};
+pub use loop_state::{LoopState, U2_REJECTION_RETRY_LIMIT, WorkflowProgress};
 // Items are also re-exported from `crate::*` via `lib.rs`. The lib-side
 // re-export keeps the public API stable; the `pub use` here is a
 // convenience path for in-crate consumers (the runner).
@@ -60,7 +60,8 @@ pub struct ProcessedEvents {
     pub had_events: bool,
     /// Whether any events were present at the contract validation layer (passed or rejected).
     pub had_raw_events: bool,
-    /// Whether any events were rejected by execution contract validation.
+    /// Whether any events were rejected by origin, policy, payload, or
+    /// execution-contract validation.
     pub had_rejected_events: bool,
     /// Whether any published events matched the semantic `plan.*` topic family.
     pub had_plan_events: bool,
@@ -508,6 +509,9 @@ struct PolicyValidationResult {
     /// U6: payload contract violation captured during policy validation
     /// (if any). When set, the loop should pause and emit a diagnostic.
     payload_contract_violation: Option<crate::payload_contract::PayloadContractViolation>,
+    /// Origin/policy/payload rejections collected during validation.
+    /// Used by the CLI runner to produce unified recovery diagnostics.
+    policy_rejections: Vec<crate::event_policy::PolicyRejection>,
 }
 
 fn apply_event_policy_validation(
@@ -552,6 +556,7 @@ fn apply_event_policy_validation(
     let mut validated_events = Vec::with_capacity(events.len());
     let mut hold_triggered = false;
     let mut hold_reason = None;
+    let mut policy_rejections: Vec<crate::event_policy::PolicyRejection> = Vec::new();
 
     for event in events {
         // Completion-honored guard takes precedence: after a completion promise
@@ -577,6 +582,12 @@ fn apply_event_policy_validation(
                     validated_events.push(event);
                 }
                 PolicyDecision::RejectWithResume(finding) => {
+                    // Collect for unified rejection handler (Task #21)
+                    policy_rejections.push(crate::event_policy::PolicyRejection {
+                        topic: event.topic.clone(),
+                        source_hat: event.hat.clone(),
+                        finding: finding.clone(),
+                    });
                     let recovery_payload = format!(
                         "EVENT_POLICY_REJECTED: event '{}' violates completion guard.\n{}\n\n\
                          Wait for the correct event schema before emitting this event. \
@@ -589,6 +600,12 @@ fn apply_event_policy_validation(
                 PolicyDecision::Hold(finding) => {
                     hold_triggered = true;
                     hold_reason = Some(finding.message.clone());
+                    // Collect for unified rejection handler (Task #21)
+                    policy_rejections.push(crate::event_policy::PolicyRejection {
+                        topic: event.topic.clone(),
+                        source_hat: event.hat.clone(),
+                        finding: finding.clone(),
+                    });
                     let recovery_payload = format!(
                         "EVENT_POLICY_HOLD: event '{}' violates completion guard.\n{}\n\n\
                          Loop held due to completion guard violation. Use resume to continue.",
@@ -649,6 +666,12 @@ fn apply_event_policy_validation(
             }
             PolicyDecision::RejectWithResume(finding) => {
                 capture_violation(&finding, event.payload.as_deref());
+                // Collect for unified rejection handler (Task #21)
+                policy_rejections.push(crate::event_policy::PolicyRejection {
+                    topic: event.topic.clone(),
+                    source_hat: event.hat.clone(),
+                    finding: finding.clone(),
+                });
                 let recovery_payload = format!(
                     "EVENT_POLICY_REJECTED: event '{}' violates policy.\n{}\n\n\
                      Wait for the correct event schema before emitting this event. \
@@ -663,6 +686,12 @@ fn apply_event_policy_validation(
                 capture_violation(&finding, event.payload.as_deref());
                 hold_triggered = true;
                 hold_reason = Some(finding.message.clone());
+                // Collect for unified rejection handler (Task #21)
+                policy_rejections.push(crate::event_policy::PolicyRejection {
+                    topic: event.topic.clone(),
+                    source_hat: event.hat.clone(),
+                    finding: finding.clone(),
+                });
                 let recovery_payload = format!(
                     "EVENT_POLICY_HOLD: event '{}' violates policy.\n{}\n\n\
                      Loop held due to policy violation. Use resume to continue.",
@@ -685,6 +714,7 @@ fn apply_event_policy_validation(
         hold_triggered,
         hold_reason,
         payload_contract_violation,
+        policy_rejections,
     }
 }
 
@@ -1072,6 +1102,15 @@ impl EventLoop {
     /// Returns the current loop state.
     pub fn state(&self) -> &LoopState {
         &self.state
+    }
+
+    /// Returns a mutable reference to the loop state.  Used by the U2
+    /// targeted-retry machinery in the loop runner to record
+    /// per-rejection-key retry counts against the bounded budget
+    /// without having to take a `&mut self` on the whole `EventLoop`
+    /// in every helper.
+    pub fn state_mut(&mut self) -> &mut LoopState {
+        &mut self.state
     }
 
     /// Test-only: set the current iteration directly. Production code
@@ -2062,6 +2101,8 @@ impl EventLoop {
                 let active_hat_ids = self.determine_active_hat_ids(&regular_events);
                 self.record_hat_activations(&active_hat_ids);
                 self.state.last_active_hat_ids = active_hat_ids.clone();
+                self.state.last_activation_events =
+                    effective_regular_events.iter().copied().cloned().collect();
 
                 // Resolve scratchpad config for the active hat (or global default).
                 // Must happen BEFORE guidance persistence so guidance is written
@@ -3801,16 +3842,18 @@ impl EventLoop {
         // --- Origin guard: validate JSONL event provenance before bus publication ---
         // Events from JSONL are untrusted until provenance and scope checks accept them.
         // This rejects no-hat business events, unknown-hat events, and out-of-scope topics.
-        let mut events = filter_events_by_origin(
+        let (mut events, origin_rejections) = filter_events_by_origin(
             events,
             &self.registry,
             &self.config.event_loop.cancellation_promise,
             &self.config.event_loop.completion_promise,
         );
+        let had_origin_rejections = !origin_rejections.is_empty();
         // --- End origin guard ---
 
         // --- Event policy validation: check typed payload schema ---
         // Inserted after scope enforcement, before workflow guard validation
+        let mut had_policy_rejections = false;
         if let Some(ref policy_config) = self.config.event_loop.event_policy
             && policy_config.enabled
         {
@@ -3849,6 +3892,7 @@ impl EventLoop {
                 &source_hats_by_topic,
                 &target_hats_by_topic,
             );
+            had_policy_rejections = !policy_result.policy_rejections.is_empty();
             events = policy_result.events;
 
             // Write hold artifact if policy hold was triggered
@@ -3993,13 +4037,29 @@ impl EventLoop {
                 if let Some(rule) = contracts.rules.get(event.topic.as_str()) {
                     let proto_event =
                         Event::new(event.topic.as_str(), event.payload.as_deref().unwrap_or(""));
+                    // Provenance: prefer the hat the event declared on its
+                    // own JSONL `hat` field (most accurate — it identifies
+                    // the hat that *emitted* the event).  Fall back to the
+                    // runner's last active hat when the JSONL line did not
+                    // carry one (legacy fixtures / log-only emissions).
+                    // The provenance is stamped onto every
+                    // ExecutionContractFinding so the U2 recovery path can
+                    // route `task.resume` to the actual source hat rather
+                    // than the runner's current display hat.
+                    let active_business_hat =
+                        self.state.last_active_hat_ids.first().map(|h| h.as_str());
+                    let event_provenance: Option<&str> = match event.hat.as_deref() {
+                        Some("ralph") => active_business_hat.or(Some("ralph")),
+                        Some(hat) => Some(hat),
+                        None => active_business_hat,
+                    };
                     let decision = validate_execution_contract(
                         &proto_event,
                         rule,
                         workspace_root,
                         current_loop_id.as_str(),
                         &tasks_path,
-                        self.state.last_active_hat_ids.first().map(|h| h.as_str()),
+                        event_provenance,
                         &DefaultGitEvidenceProvider,
                         self.state.loop_start_sha.as_deref(),
                     );
@@ -4022,20 +4082,11 @@ impl EventLoop {
                             // `task.resume` with `target=source_hat` so the next
                             // prompt activates the responsible hat, not the Ralph
                             // fallback.
-                            let source_hat_str: Option<&str> = event.hat.as_deref().or_else(|| {
-                                self.state.last_active_hat_ids.first().map(|h| h.as_str())
-                            });
+                            let source_hat_str = finding.source_hat.as_deref();
                             let mut retry_target: Option<HatId> = None;
                             let mut no_retry_reason: Option<String> = None;
                             if let Some(hat_id_str) = source_hat_str {
-                                if hat_id_str == "ralph" {
-                                    // Ralph is the generic executor; in multi-hat
-                                    // mode a `hat=ralph` invalid emit means the
-                                    // agent misattributed. Do not loop back to
-                                    // Ralph as recovery.
-                                    no_retry_reason =
-                                        Some("source hat is fallback ralph".to_string());
-                                } else {
+                                if hat_id_str != "ralph" {
                                     let hat_id = HatId::new(hat_id_str);
                                     match self.registry.get(&hat_id) {
                                         None => {
@@ -4061,6 +4112,10 @@ impl EventLoop {
                                             }
                                         }
                                     }
+                                } else {
+                                    no_retry_reason = Some(
+                                        "no business hat available for fallback ralph".to_string(),
+                                    );
                                 }
                             } else {
                                 no_retry_reason =
@@ -4068,6 +4123,16 @@ impl EventLoop {
                             }
 
                             if let Some(hat_id) = &retry_target {
+                                let original_trigger =
+                                    self.state.last_activation_events.iter().rev().find(
+                                        |trigger| {
+                                            self.registry.get_config(hat_id).is_some_and(|config| {
+                                                config.trigger_topics().iter().any(|topic| {
+                                                    topic.matches_str(trigger.topic.as_str())
+                                                })
+                                            })
+                                        },
+                                    );
                                 let retry_payload = serde_json::json!({
                                     "rejected_topic": event.topic.as_str(),
                                     "reason": finding.message,
@@ -4077,6 +4142,19 @@ impl EventLoop {
                                         event.topic.as_str()
                                     ),
                                     "original_payload": event.payload.as_deref().unwrap_or(""),
+                                    "original_trigger_topic": original_trigger
+                                        .map(|trigger| trigger.topic.as_str()),
+                                    "original_trigger_payload": original_trigger
+                                        .map(|trigger| {
+                                            serde_json::from_str::<serde_json::Value>(
+                                                trigger.payload.as_str(),
+                                            )
+                                            .unwrap_or_else(|_| {
+                                                serde_json::Value::String(
+                                                    trigger.payload.clone(),
+                                                )
+                                            })
+                                        }),
                                     "retry_publish_topics": [event.topic.as_str(), "work.failed"],
                                     "contract_finding": finding,
                                 });
@@ -4144,7 +4222,8 @@ impl EventLoop {
         // Calculate had_raw_events and had_rejected_events for missing-event gate logic
         // had_raw_events: events that passed through contract validation (accepted OR rejected)
         // had_rejected_events: events that were rejected by contract validation
-        let had_rejected_events = !contract_rejections.is_empty();
+        let had_rejected_events =
+            had_origin_rejections || had_policy_rejections || !contract_rejections.is_empty();
         let had_raw_events = if contracts_enabled {
             // Events that went through contract validation: accepted + rejected
             // events.len() here is accepted.len() (passed or no-rule events)
@@ -4941,7 +5020,7 @@ impl EventLoop {
         // --- Origin guard: validate wave event provenance before policy validation ---
         // Wave dispatch events bypass process_parse_result, so origin validation must
         // run here to prevent forged wave events from reaching wave execution.
-        let wave_events = filter_events_by_origin(
+        let (wave_events, _origin_rejections) = filter_events_by_origin(
             wave_events,
             &self.registry,
             &self.config.event_loop.cancellation_promise,

@@ -296,9 +296,7 @@ pub async fn run_stdout_emitter(mut rx: mpsc::Receiver<RpcEvent>) {
         }
         if let Err(e) = stdout.flush() {
             log_stdout_write_failure("flush", &e, rpc_lifecycle_phase(&event));
-            // Continue: a flush error is recoverable on the next
-            // iteration; a write error is fatal because the next
-            // write will likely fail the same way.
+            break;
         }
         // stdout lock is dropped here
     }
@@ -733,12 +731,15 @@ mod tests {
         // when the response has no obvious lifecycle mapping, the
         // helper must return "other" rather than panic.
         use ralph_proto::RpcEvent;
-        assert_eq!(rpc_lifecycle_phase(&RpcEvent::Response {
-            command: "get_state".to_string(),
-            id: Some("req-42".to_string()),
-            success: true,
-            data: Some(serde_json::json!({})),
-            error: None,
-        }), "response");
+        assert_eq!(
+            rpc_lifecycle_phase(&RpcEvent::Response {
+                command: "get_state".to_string(),
+                id: Some("req-42".to_string()),
+                success: true,
+                data: Some(serde_json::json!({})),
+                error: None,
+            }),
+            "response"
+        );
     }
 }

@@ -2734,9 +2734,23 @@ pub async fn run_loop_impl(
 
         // ── U6: Handle execution contract rejections ─────────────────────────
         // Log contract rejections for operator visibility and diagnostics.
-        // Rejections do NOT terminate the loop — guidance drives the next iteration.
-        if let Some(processed) = processed_events.as_ref() {
-            handle_execution_contract_rejections(processed, &mut event_loop, &display_hat);
+        // When the bounded retry budget is exhausted for a rejection
+        // key, the function returns `Some(TerminationReason::RecoveryExhausted)`
+        // and the runner must break out of the loop instead of letting
+        // the next iteration re-run the same agent with the same
+        // contract violation.
+        if let Some(processed) = processed_events.as_ref()
+            && let Some(reason) =
+                handle_execution_contract_rejections(processed, &mut event_loop, &display_hat)
+        {
+            // No payload violation report for the contract-recovery
+            // path; the recovery diagnosis is already in
+            // `recovery.jsonl` and the audit is in
+            // `orchestration.jsonl`.  We still call
+            // `finalize_recovery_diagnosis` to flush the responder
+            // hint into `summary.md` before the runner returns.
+            finalize_recovery_diagnosis(&mut event_loop, &loop_context, None);
+            return Ok(reason);
         }
 
         // ── P1.1: drift observer drain → detector → envelopes → journals ───
@@ -3268,10 +3282,33 @@ pub async fn run_loop_impl(
         // if the hat has a publish obligation but no default_publishes fallback,
         // hard gate on missing events. This catches the "completely forgot" case.
         // Contract rejection does NOT trigger this gate because the agent DID try to emit.
+        //
+        // U4 (2026-06-07): collect the candidate topics the agent
+        // emitted this iteration so the gate can call
+        // `obligation_satisfied` on hats that opted into the
+        // activation-level path.  An empty candidate set against a
+        // hat with explicit obligations is now correctly reported as
+        // a missing event instead of silently passing.
+        let candidate_topics: Vec<String> = processed_events
+            .as_ref()
+            .map(|p| {
+                let mut topics: Vec<String> = p
+                    .accepted_events
+                    .iter()
+                    .map(|e| e.topic.to_string())
+                    .collect();
+                // Also surface contract-rejected topics — the agent
+                // DID try to emit these, so they should not count as
+                // "missing" even when the rejection kept them off the
+                // bus.
+                topics.extend(p.contract_rejections.iter().map(|f| f.topic.clone()));
+                topics
+            })
+            .unwrap_or_default();
         if !agent_wrote_any_valid_or_rejected
             && wave_events.is_empty()
             && !hard_gate_triggered_this_iteration
-            && should_gate_missing_events(&display_hat, &event_loop)
+            && should_gate_missing_events(&display_hat, &event_loop, &candidate_topics)
         {
             event_loop.increment_hard_gate_count();
             // Resolve the publish list before the mutable borrow so

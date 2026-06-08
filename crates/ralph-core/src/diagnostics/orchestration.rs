@@ -414,10 +414,7 @@ mod tests {
         assert_eq!(entry.iteration, 3);
         assert_eq!(entry.hat, "executor");
         assert_eq!(entry.loop_id.as_deref(), Some("primary-20260606-002000"));
-        assert_eq!(
-            entry.workspace.as_deref(),
-            Some("/worktrees/sleek-sparrow")
-        );
+        assert_eq!(entry.workspace.as_deref(), Some("/worktrees/sleek-sparrow"));
         assert_eq!(entry.business_hat.as_deref(), Some("executor"));
         assert_eq!(entry.executor_hat.as_deref(), Some("ralph"));
         assert_eq!(entry.task_id.as_deref(), Some("task-anon-001"));
@@ -439,12 +436,7 @@ mod tests {
             task_id: None,
         };
         logger
-            .log_with_context(
-                0,
-                "ralph",
-                OrchestrationEvent::IterationStarted,
-                &ctx,
-            )
+            .log_with_context(0, "ralph", OrchestrationEvent::IterationStarted, &ctx)
             .unwrap();
         drop(logger);
 

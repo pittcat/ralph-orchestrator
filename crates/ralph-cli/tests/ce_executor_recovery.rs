@@ -21,19 +21,26 @@
 
 use ralph_core::event_origin::{OriginCheck, validate_event_origin};
 use ralph_core::{
-    Event as JsonlEvent, HatRegistry, NonRetryableReason, RalphConfig, Rejection,
-    RejectionStage, build_task_resume_payload, rejection_from_origin,
+    Event as JsonlEvent, HatRegistry, NonRetryableReason, RalphConfig, Rejection, RejectionStage,
+    build_task_resume_payload, rejection_from_origin,
 };
 use std::path::PathBuf;
 
 /// Returns the path to the recovery fixture shipped with `ralph-core`.
+///
+/// The fixture lives in `tests/fixtures/recovery/` to keep it out of the
+/// `SmokeRunner` discovery path: the smoke runner scans every `.jsonl` in
+/// `tests/fixtures/` and expects `Record`-format sessions
+/// (`{ts: u64, event, data}`). The recovery fixture uses the per-event
+/// `{topic, payload, hat, ...}` shape and would otherwise fail
+/// `test_all_discovered_fixtures_are_valid`.
 fn recovery_fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .parent()
         .unwrap()
-        .join("crates/ralph-core/tests/fixtures/ce-executor-rejected-event-recovery.jsonl")
+        .join("crates/ralph-core/tests/fixtures/recovery/ce-executor-rejected-event-recovery.jsonl")
 }
 
 /// Read every line of the fixture as a [`JsonlEvent`].
@@ -44,8 +51,8 @@ fn load_recovery_events() -> Vec<JsonlEvent> {
         "recovery fixture must exist at {}",
         path.display()
     );
-    let raw = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let raw =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     raw.lines()
         .filter(|l| !l.trim().is_empty())
         .map(|l| {
@@ -142,9 +149,7 @@ fn contract_invalid_work_done_from_executor_is_rejected() {
     // work.done (an executor publishes topic) is in scope.
     match validate_event_origin(ralph_fallback, &registry, "loop.cancel", "LOOP_COMPLETE") {
         OriginCheck::Accepted => {}
-        other => panic!(
-            "ralph work.done should be in-scope for contract rejection, got {other:?}"
-        ),
+        other => panic!("ralph work.done should be in-scope for contract rejection, got {other:?}"),
     }
 
     // Confirm the payload is in fact missing plan_path — without this,
@@ -307,8 +312,14 @@ fn u2_origin_rejection_from_fixture_classifies_as_non_retryable() {
     assert_eq!(rejection.stage, RejectionStage::Origin);
     assert_eq!(rejection.topic, "work.done");
     assert_eq!(rejection.source_hat.as_deref(), Some("review-coordinator"));
-    assert!(!rejection.retry_eligible, "out-of-scope must be fail-closed");
-    assert_eq!(rejection.non_retryable_reason, Some(NonRetryableReason::OutOfScope));
+    assert!(
+        !rejection.retry_eligible,
+        "out-of-scope must be fail-closed"
+    );
+    assert_eq!(
+        rejection.non_retryable_reason,
+        Some(NonRetryableReason::OutOfScope)
+    );
     assert_eq!(rejection.target_hat, None, "no target → no task.resume");
     assert!(!rejection.should_publish_resume());
 
@@ -316,7 +327,11 @@ fn u2_origin_rejection_from_fixture_classifies_as_non_retryable() {
     // the runner can count them and surface exhaustion at the budget.
     let again = rejection_from_origin(&check, rogue.hat.clone()).unwrap();
     assert_eq!(rejection.retry_key, again.retry_key);
-    assert!(rejection.retry_key.starts_with("origin:review-coordinator:work.done:"));
+    assert!(
+        rejection
+            .retry_key
+            .starts_with("origin:review-coordinator:work.done:")
+    );
 }
 
 #[test]
@@ -341,6 +356,7 @@ fn u2_executor_missing_field_rejection_classifies_as_retryable() {
         },
         message: "missing plan_path".into(),
         topic: "work.done".into(),
+        source_hat: Some("ralph".into()),
     };
     let rejection = Rejection::from_execution_contract(
         &finding,
@@ -354,7 +370,11 @@ fn u2_executor_missing_field_rejection_classifies_as_retryable() {
     assert!(rejection.retry_eligible);
     assert_eq!(rejection.target_hat.as_deref(), Some("ralph"));
     assert!(rejection.should_publish_resume());
-    assert!(rejection.retry_key.contains("execution_contract:ralph:work.done:missing_field"));
+    assert!(
+        rejection
+            .retry_key
+            .contains("execution_contract:ralph:work.done:missing_field")
+    );
 
     // The task.resume payload must carry the violation + allowed
     // topics + original trigger context so the resumed hat can
@@ -372,10 +392,12 @@ fn u2_executor_missing_field_rejection_classifies_as_retryable() {
     assert_eq!(v["allowed_topics"][0], "work.done");
     assert_eq!(v["required_fields"][0], "plan_path");
     assert_eq!(v["original_trigger_topic"], "work.ready");
-    assert!(v["retry_key"]
-        .as_str()
-        .unwrap()
-        .contains("execution_contract:ralph:work.done:missing_field"));
+    assert!(
+        v["retry_key"]
+            .as_str()
+            .unwrap()
+            .contains("execution_contract:ralph:work.done:missing_field")
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -401,7 +423,11 @@ fn u3_u1_fixture_inventory_matches_wave_merge_contract() {
         .iter()
         .filter(|e| e.topic == "review.dimension.done")
         .collect();
-    assert_eq!(dim_results.len(), 8, "fixture ships 8 review.dimension.done results");
+    assert_eq!(
+        dim_results.len(),
+        8,
+        "fixture ships 8 review.dimension.done results"
+    );
     let with_wave = dim_results.iter().filter(|e| e.wave_id.is_some()).count();
     let without_wave = dim_results.iter().filter(|e| e.wave_id.is_none()).count();
     assert!(
@@ -438,7 +464,10 @@ obligations:
     assert_eq!(hat.obligations.len(), 2);
     let o0 = &hat.obligations[0];
     assert_eq!(o0.on_trigger, "work.done");
-    assert_eq!(o0.must_emit_any_of, vec!["review.wave.ready", "review.passed"]);
+    assert_eq!(
+        o0.must_emit_any_of,
+        vec!["review.wave.ready", "review.passed"]
+    );
     let o1 = &hat.obligations[1];
     assert_eq!(o1.on_trigger, "fix.applied");
     assert_eq!(o1.must_emit_any_of, vec!["review.passed"]);
@@ -460,7 +489,7 @@ fn u4_obligation_satisfied_for_each_review_coordinator_branch() {
     // R3: review-coordinator 条件 emit 语义 (空 diff → review.passed;
     // 有 diff → review.wave.ready) 必须各自满足 obligation，不被
     // 误判为 missing-event。
-    use ralph_core::{obligation_satisfied, ActivationObligation};
+    use ralph_core::{ActivationObligation, obligation_satisfied};
 
     let o = ActivationObligation {
         on_trigger: "work.done".into(),
@@ -480,10 +509,7 @@ fn u4_obligation_satisfied_for_each_review_coordinator_branch() {
     // Off-obligation set: agent picked the wrong topic — this is a
     // hard failure (R1) and must NOT satisfy the obligation so the
     // downstream reporter can flag it.
-    assert!(!obligation_satisfied(
-        Some(&o),
-        &vec!["work.failed".into()]
-    ));
+    assert!(!obligation_satisfied(Some(&o), &vec!["work.failed".into()]));
     // No candidate at all: missing event — obligation not satisfied.
     assert!(!obligation_satisfied(Some(&o), &vec![]));
 }

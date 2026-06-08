@@ -60,6 +60,18 @@ pub enum PolicyDecision {
     Ignore(PolicyFinding),
 }
 
+/// Information about an event that was rejected by policy validation.
+/// Used by the CLI runner to produce unified recovery diagnostics.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PolicyRejection {
+    /// Topic of the rejected event.
+    pub topic: String,
+    /// Source hat from the JSONL event (hat field).
+    pub source_hat: Option<String>,
+    /// The policy finding describing the violation.
+    pub finding: PolicyFinding,
+}
+
 /// Runtime state for policy validation across events.
 #[derive(Debug, Default)]
 pub struct PolicyRuntimeState {

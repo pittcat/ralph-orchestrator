@@ -119,15 +119,20 @@ pub(crate) async fn build_report(
         RuntimeContractStrictness::default()
     };
 
-    Ok(ralph_core::runtime_contract::RuntimeContractAggregator::aggregate(
-        &source_label,
-        &config,
-        &registry,
-        strictness,
-    ))
+    Ok(
+        ralph_core::runtime_contract::RuntimeContractAggregator::aggregate(
+            &source_label,
+            &config,
+            &registry,
+            strictness,
+        ),
+    )
 }
 
-fn preset_source_label(config_sources: &[ConfigSource], hats_source: Option<&HatsSource>) -> String {
+fn preset_source_label(
+    config_sources: &[ConfigSource],
+    hats_source: Option<&HatsSource>,
+) -> String {
     if let Some(source) = hats_source {
         return source.label().to_string();
     }
@@ -605,10 +610,7 @@ event_loop:
 
         // When only a file is supplied, the label is the file path.
         let only_file = vec![ConfigSource::File("/abs/path/to.yml".into())];
-        assert_eq!(
-            preset_source_label(&only_file, None),
-            "/abs/path/to.yml"
-        );
+        assert_eq!(preset_source_label(&only_file, None), "/abs/path/to.yml");
     }
 
     // ---- T7: default `ralph run` parse path is unaffected ----
@@ -637,14 +639,8 @@ event_loop:
         // `--format json`, `--strict`, and that the subcommand
         // discriminants are stable. If clap reorders or renames, this
         // test fails loudly.
-        let parsed = PresetArgs::try_parse_from([
-            "ralph",
-            "check",
-            "--format",
-            "json",
-            "--strict",
-        ])
-        .expect("preset check --format json --strict must parse");
+        let parsed = PresetArgs::try_parse_from(["ralph", "check", "--format", "json", "--strict"])
+            .expect("preset check --format json --strict must parse");
         match parsed.command {
             Some(PresetCommands::Check { format, strict }) => {
                 assert!(matches!(format, PresetCheckFormat::Json));

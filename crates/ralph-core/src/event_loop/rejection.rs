@@ -120,11 +120,7 @@ impl Rejection {
     /// topic is non-retryable; we cannot construct a `task.resume`
     /// target without a registered destination or a topic the target
     /// can publish.
-    pub fn from_origin(
-        source_hat: Option<String>,
-        topic: String,
-        reason: &str,
-    ) -> Self {
+    pub fn from_origin(source_hat: Option<String>, topic: String, reason: &str) -> Self {
         let (retry_eligible, non_retryable_reason) = classify_origin_reason(reason);
         let target_hat = source_hat.clone();
         let mut s = Self {
@@ -161,7 +157,11 @@ impl Rejection {
         } else {
             Some(NonRetryableReason::UnknownHat)
         };
-        let target_hat = if retry_eligible { source_hat.clone() } else { None };
+        let target_hat = if retry_eligible {
+            source_hat.clone()
+        } else {
+            None
+        };
         let mut s = Self {
             stage: RejectionStage::ExecutionContract,
             source_hat: source_hat.clone(),
@@ -234,18 +234,13 @@ fn violation_class(violation: &str) -> &'static str {
 
 /// Convert an [`OriginCheck::Rejected`] to a [`Rejection`].  Helper
 /// for callers that already have the origin guard's verdict.
-pub fn rejection_from_origin(
-    check: &OriginCheck,
-    source_hat: Option<String>,
-) -> Option<Rejection> {
+pub fn rejection_from_origin(check: &OriginCheck, source_hat: Option<String>) -> Option<Rejection> {
     match check {
-        OriginCheck::Rejected { topic, hat, reason } => {
-            Some(Rejection::from_origin(
-                hat.clone().or(source_hat),
-                topic.clone(),
-                reason,
-            ))
-        }
+        OriginCheck::Rejected { topic, hat, reason } => Some(Rejection::from_origin(
+            hat.clone().or(source_hat),
+            topic.clone(),
+            reason,
+        )),
         OriginCheck::Accepted => None,
     }
 }
@@ -296,7 +291,10 @@ pub fn build_task_resume_payload(
     original_trigger_payload: Option<&str>,
 ) -> String {
     let mut payload = serde_json::Map::new();
-    payload.insert("stage".into(), serde_json::Value::String(rejection.stage.as_str().into()));
+    payload.insert(
+        "stage".into(),
+        serde_json::Value::String(rejection.stage.as_str().into()),
+    );
     payload.insert(
         "topic".into(),
         serde_json::Value::String(rejection.topic.clone()),
@@ -346,10 +344,7 @@ pub fn build_task_resume_payload(
 /// `business_hat` (which captures Coordinator-mode display hat), then
 /// falls back to `source_hat`, and finally returns `None` if neither
 /// is present.
-pub fn resolve_target_hat(
-    business_hat: Option<&str>,
-    source_hat: Option<&str>,
-) -> Option<HatId> {
+pub fn resolve_target_hat(business_hat: Option<&str>, source_hat: Option<&str>) -> Option<HatId> {
     business_hat
         .or(source_hat)
         .map(|s| HatId::new(s.to_string()))
@@ -369,15 +364,15 @@ mod tests {
             "unknown hat rejected",
         );
         assert!(!r.retry_eligible);
-        assert_eq!(
-            r.non_retryable_reason,
-            Some(NonRetryableReason::UnknownHat)
-        );
+        assert_eq!(r.non_retryable_reason, Some(NonRetryableReason::UnknownHat));
         assert_eq!(r.stage.as_str(), "origin");
         assert_eq!(r.source_hat.as_deref(), Some("ghost-hat"));
         assert_eq!(r.topic, "work.done");
         assert!(!r.should_publish_resume());
-        assert!(r.retry_key.contains("origin:ghost-hat:work.done:unknown_hat"));
+        assert!(
+            r.retry_key
+                .contains("origin:ghost-hat:work.done:unknown_hat")
+        );
     }
 
     #[test]
@@ -391,10 +386,7 @@ mod tests {
             "out-of-scope topic for declared hat",
         );
         assert!(!r.retry_eligible);
-        assert_eq!(
-            r.non_retryable_reason,
-            Some(NonRetryableReason::OutOfScope)
-        );
+        assert_eq!(r.non_retryable_reason, Some(NonRetryableReason::OutOfScope));
         assert_eq!(r.target_hat, None);
     }
 
@@ -402,8 +394,11 @@ mod tests {
     fn from_execution_contract_with_business_hat_is_retryable() {
         let finding = ExecutionContractFinding {
             topic: "work.done".into(),
-            kind: ExecutionContractViolationKind::MissingPayloadField { field: "plan_path".into() },
+            kind: ExecutionContractViolationKind::MissingPayloadField {
+                field: "plan_path".into(),
+            },
             message: "missing plan_path".into(),
+            source_hat: None,
         };
         let r = Rejection::from_execution_contract(
             &finding,
@@ -414,7 +409,10 @@ mod tests {
         assert!(r.non_retryable_reason.is_none());
         assert_eq!(r.target_hat.as_deref(), Some("executor"));
         assert_eq!(r.stage.as_str(), "execution_contract");
-        assert!(r.retry_key.contains("execution_contract:executor:work.done:missing_field"));
+        assert!(
+            r.retry_key
+                .contains("execution_contract:executor:work.done:missing_field")
+        );
         assert!(r.should_publish_resume());
     }
 
@@ -422,15 +420,15 @@ mod tests {
     fn from_execution_contract_without_hat_is_non_retryable() {
         let finding = ExecutionContractFinding {
             topic: "work.done".into(),
-            kind: ExecutionContractViolationKind::MissingPayloadField { field: "plan_path".into() },
+            kind: ExecutionContractViolationKind::MissingPayloadField {
+                field: "plan_path".into(),
+            },
             message: "missing plan_path".into(),
+            source_hat: None,
         };
         let r = Rejection::from_execution_contract(&finding, None, None);
         assert!(!r.retry_eligible);
-        assert_eq!(
-            r.non_retryable_reason,
-            Some(NonRetryableReason::UnknownHat)
-        );
+        assert_eq!(r.non_retryable_reason, Some(NonRetryableReason::UnknownHat));
     }
 
     #[test]
@@ -456,8 +454,11 @@ mod tests {
         let r = Rejection::from_execution_contract(
             &ExecutionContractFinding {
                 topic: "work.done".into(),
-                kind: ExecutionContractViolationKind::MissingPayloadField { field: "plan_path".into() },
+                kind: ExecutionContractViolationKind::MissingPayloadField {
+                    field: "plan_path".into(),
+                },
                 message: "missing plan_path".into(),
+                source_hat: None,
             },
             Some("executor".into()),
             Some("executor".into()),
@@ -505,8 +506,11 @@ mod tests {
         let r1 = Rejection::from_execution_contract(
             &ExecutionContractFinding {
                 topic: "work.done".into(),
-                kind: ExecutionContractViolationKind::MissingPayloadField { field: "plan_path".into() },
+                kind: ExecutionContractViolationKind::MissingPayloadField {
+                    field: "plan_path".into(),
+                },
                 message: "missing plan_path".into(),
+                source_hat: None,
             },
             Some("executor".into()),
             Some("executor".into()),
@@ -514,8 +518,11 @@ mod tests {
         let r2 = Rejection::from_execution_contract(
             &ExecutionContractFinding {
                 topic: "work.done".into(),
-                kind: ExecutionContractViolationKind::MissingPayloadField { field: "task_id".into() },
+                kind: ExecutionContractViolationKind::MissingPayloadField {
+                    field: "task_id".into(),
+                },
                 message: "missing task_id".into(),
+                source_hat: None,
             },
             Some("executor".into()),
             Some("executor".into()),

@@ -482,10 +482,7 @@ mod tests {
             on_trigger: "work.done".into(),
             must_emit_any_of: vec!["review.wave.ready".into(), "review.passed".into()],
         };
-        assert!(!obligation_satisfied(
-            Some(&o),
-            &vec!["work.failed".into()]
-        ));
+        assert!(!obligation_satisfied(Some(&o), &vec!["work.failed".into()]));
         assert!(!obligation_satisfied(Some(&o), &vec![]));
     }
 
@@ -507,6 +504,9 @@ obligations:
         assert_eq!(hat.obligations[0].on_trigger, "work.done");
         assert_eq!(hat.obligations[0].must_emit_any_of.len(), 2);
         assert_eq!(hat.obligations[1].on_trigger, "fix.applied");
-        assert_eq!(hat.obligations[1].must_emit_any_of, vec!["review.passed".to_string()]);
+        assert_eq!(
+            hat.obligations[1].must_emit_any_of,
+            vec!["review.passed".to_string()]
+        );
     }
 }

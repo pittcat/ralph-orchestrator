@@ -110,7 +110,7 @@ pub enum ExecutionContractDecision {
 }
 
 /// A single finding from contract validation failure.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct ExecutionContractFinding {
     /// What kind of violation was detected.
     pub kind: ExecutionContractViolationKind,
@@ -118,6 +118,37 @@ pub struct ExecutionContractFinding {
     pub message: String,
     /// The event topic being validated.
     pub topic: String,
+    /// The original `event.hat` (or the runner's `last_active_hat_id`
+    /// fallback) for the rejected event.  Carries the **provenance**
+    /// of the event so downstream recovery (U2) can route the targeted
+    /// `task.resume` to the hat that actually emitted the event
+    /// rather than the runner's current display hat.  This is the
+    /// difference between "executor was running but the event came
+    /// from ralph's fallback" and "executor emitted the event".
+    /// `None` only when the caller (legacy code paths) did not supply
+    /// a hat id to `validate_execution_contract`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_hat: Option<String>,
+}
+
+impl ExecutionContractFinding {
+    /// Return the list of payload fields that the agent must add or
+    /// fix to make the rejected event satisfy its contract.  Used by
+    /// the U2 targeted-retry machinery (`build_task_resume_payload`)
+    /// to embed a "fix the contract" hint in the `task.resume` event
+    /// so the resumed hat does not have to guess what to change.
+    ///
+    /// Returns an empty list for violation kinds that are not
+    /// field-fixable (e.g. `TaskNotFound`, `NoGitEvidence`) so the
+    /// caller can safely treat the result as "no specific field to
+    /// fill in".
+    pub fn required_fields_for_resume(&self) -> Vec<String> {
+        match &self.kind {
+            ExecutionContractViolationKind::MissingPayloadField { field } => vec![field.clone()],
+            ExecutionContractViolationKind::NoTestEvidence { field } => vec![field.clone()],
+            _ => Vec::new(),
+        }
+    }
 }
 
 /// Kind of contract violation.
@@ -147,31 +178,53 @@ pub enum ExecutionContractViolationKind {
     NoTestEvidence { field: String },
 }
 
+impl Default for ExecutionContractViolationKind {
+    fn default() -> Self {
+        // Used only as a placeholder by `..Default::default()` on
+        // `ExecutionContractFinding` in the validate_* helpers — the
+        // actual variant is overwritten by the literal field
+        // initialiser that precedes `..Default::default()`.  Pick the
+        // simplest variant so accidental Default construction is
+        // visible in code review.
+        ExecutionContractViolationKind::InvalidPayload
+    }
+}
+
 /// Validate an event against an execution contract rule.
 ///
 /// Returns `Accept` if all contract requirements are satisfied, or `Reject`
 /// with a list of findings describing each violation.
+///
+/// `hat_id` is the **provenance** of the event (the hat that emitted
+/// it, as recorded on the original JSONL `event.hat` or the runner's
+/// `last_active_hat_id` fallback).  It is propagated onto every
+/// [`ExecutionContractFinding`] so downstream recovery (U2) can route
+/// the targeted `task.resume` to the correct hat — NOT the runner's
+/// current display hat.  When the caller cannot determine provenance
+/// (legacy path) it should pass `None`; in that case downstream code
+/// must fall back to the display hat.
 pub fn validate_execution_contract(
     event: &Event,
     rule: &ExecutionContractRule,
     workspace_root: &Path,
     current_loop_id: &str,
     tasks_path: &Path,
-    _hat_id: Option<&str>,
+    hat_id: Option<&str>,
     git_provider: &dyn GitEvidenceProvider,
     loop_start_sha: Option<&str>,
 ) -> ExecutionContractDecision {
+    let source_hat = hat_id.map(|s| s.to_string());
     let mut findings = Vec::new();
 
     // 1. Payload validation
     if let Some(rejection) = validate_payload(event, rule) {
-        findings.push(rejection);
+        findings.push(with_source_hat(rejection, source_hat.clone()));
     }
 
     // 2. Task validation (if payload has required fields)
     if findings.is_empty() {
         if let Some(rejection) = validate_task(event, rule, current_loop_id, tasks_path) {
-            findings.push(rejection);
+            findings.push(with_source_hat(rejection, source_hat.clone()));
         }
     }
 
@@ -180,14 +233,14 @@ pub fn validate_execution_contract(
         if let Some(rejection) =
             validate_git_change(event, rule, workspace_root, git_provider, loop_start_sha)
         {
-            findings.push(rejection);
+            findings.push(with_source_hat(rejection, source_hat.clone()));
         }
     }
 
     // 4. Test evidence validation (if git evidence passed)
     if findings.is_empty() {
         if let Some(rejection) = validate_test_evidence(event, rule) {
-            findings.push(rejection);
+            findings.push(with_source_hat(rejection, source_hat));
         }
     }
 
@@ -196,6 +249,18 @@ pub fn validate_execution_contract(
     } else {
         ExecutionContractDecision::Reject(findings)
     }
+}
+
+/// Stamp the provenance hat onto a finding.  Split out so the four
+/// `validate_*` helpers can keep their `None` literal return type for
+/// "no violation" and the validation pipeline still threads the
+/// provenance through uniformly.
+fn with_source_hat(
+    mut finding: ExecutionContractFinding,
+    source_hat: Option<String>,
+) -> ExecutionContractFinding {
+    finding.source_hat = source_hat;
+    finding
 }
 
 /// Validate that the event payload contains all required fields.
@@ -218,6 +283,7 @@ fn validate_payload(
                     rule.require_payload_fields
                 ),
                 topic: event.topic.to_string(),
+                ..Default::default()
             });
         }
     }
@@ -230,6 +296,7 @@ fn validate_payload(
                 payload_str.chars().take(100).collect::<String>()
             ),
             topic: event.topic.to_string(),
+            ..Default::default()
         });
     };
 
@@ -238,6 +305,7 @@ fn validate_payload(
             kind: ExecutionContractViolationKind::InvalidPayload,
             message: "work.done payload must be a JSON object".to_string(),
             topic: event.topic.to_string(),
+            ..Default::default()
         });
     };
 
@@ -249,6 +317,7 @@ fn validate_payload(
                 },
                 message: format!("work.done payload is missing required field: '{}'", field),
                 topic: event.topic.to_string(),
+                ..Default::default()
             });
         }
     }
@@ -281,6 +350,7 @@ fn validate_task(
                 rule.require_task.id_field
             ),
             topic: event.topic.to_string(),
+            ..Default::default()
         });
     }
 
@@ -290,6 +360,7 @@ fn validate_task(
             kind: ExecutionContractViolationKind::InvalidPayload,
             message: "work.done payload is not valid JSON, cannot read task_id".to_string(),
             topic: event.topic.to_string(),
+            ..Default::default()
         });
     };
 
@@ -299,6 +370,7 @@ fn validate_task(
             kind: ExecutionContractViolationKind::InvalidPayload,
             message: "work.done payload must be a JSON object to validate task".to_string(),
             topic: event.topic.to_string(),
+            ..Default::default()
         });
     };
 
@@ -313,6 +385,7 @@ fn validate_task(
                     rule.require_task.id_field, other
                 ),
                 topic: event.topic.to_string(),
+                ..Default::default()
             });
         }
         None => {
@@ -325,6 +398,7 @@ fn validate_task(
                     rule.require_task.id_field
                 ),
                 topic: event.topic.to_string(),
+                ..Default::default()
             });
         }
     };
@@ -341,6 +415,7 @@ fn validate_task(
                         rule.require_task.key_field, other
                     ),
                     topic: event.topic.to_string(),
+                    ..Default::default()
                 });
             }
             None => {
@@ -353,6 +428,7 @@ fn validate_task(
                         rule.require_task.key_field
                     ),
                     topic: event.topic.to_string(),
+                    ..Default::default()
                 });
             }
         }
@@ -373,6 +449,7 @@ fn validate_task(
                     e
                 ),
                 topic: event.topic.to_string(),
+                ..Default::default()
             });
         }
     };
@@ -390,6 +467,7 @@ fn validate_task(
                     task_id
                 ),
                 topic: event.topic.to_string(),
+                ..Default::default()
             });
         }
     };
@@ -409,6 +487,7 @@ fn validate_task(
                         task_id, task_loop_id, current_loop_id
                     ),
                     topic: event.topic.to_string(),
+                    ..Default::default()
                 });
             }
         } else {
@@ -424,6 +503,7 @@ fn validate_task(
                     task_id, current_loop_id
                 ),
                 topic: event.topic.to_string(),
+                ..Default::default()
             });
         }
     }
@@ -449,6 +529,7 @@ fn validate_task(
                 task_id, status_str, rule.require_task.allowed_terminal_statuses
             ),
             topic: event.topic.to_string(),
+            ..Default::default()
         });
     }
 
@@ -518,6 +599,7 @@ fn validate_git_change(
                 detail
             ),
             topic: event.topic.to_string(),
+            ..Default::default()
         });
     }
 
@@ -552,6 +634,7 @@ fn validate_test_evidence(
                 field_name
             ),
             topic: event.topic.to_string(),
+            ..Default::default()
         });
     }
 
@@ -565,6 +648,7 @@ fn validate_test_evidence(
                 field_name
             ),
             topic: event.topic.to_string(),
+            ..Default::default()
         });
     };
 
@@ -578,6 +662,7 @@ fn validate_test_evidence(
                 field_name
             ),
             topic: event.topic.to_string(),
+            ..Default::default()
         });
     };
 
@@ -597,6 +682,7 @@ fn validate_test_evidence(
                 field_name
             ),
             topic: event.topic.to_string(),
+            ..Default::default()
         }),
     }
 }

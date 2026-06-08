@@ -1,7 +1,10 @@
 use super::*;
-use ralph_core::diagnosis::{
-    DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, EvidenceKind, EvidenceRef,
-    RecoveryDiagnosisEnvelope, RecoveryDiagnosisEnvelopeBuilder,
+use ralph_core::{
+    NonRetryableReason, Rejection, TerminationReason, U2_REJECTION_RETRY_LIMIT,
+    diagnosis::{
+        DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, EvidenceKind, EvidenceRef,
+        RecoveryDiagnosisEnvelope, RecoveryDiagnosisEnvelopeBuilder,
+    },
 };
 
 pub fn should_hard_gate(hat_id: &HatId, event_loop: &EventLoop) -> bool {
@@ -20,22 +23,42 @@ pub fn should_hard_gate(hat_id: &HatId, event_loop: &EventLoop) -> bool {
 /// 2026-06-07 plan U4: the activation-level obligations on the hat
 /// take precedence over the blanket `publishes + default_publishes`
 /// rule.  When a hat declares at least one `obligations` entry the
-/// activation-level path is in charge; the blanket rule no longer
-/// applies and the runner is the source of truth on whether the
-/// obligation is satisfied (via `obligation_satisfied`).  This way a
-/// hat with conditional emit semantics (e.g. `review-coordinator`
-/// emits `review.passed` for empty diffs and `review.wave.ready`
-/// otherwise) is no longer mis-classified as a missing-event offender.
-pub fn should_gate_missing_events(hat_id: &HatId, event_loop: &EventLoop) -> bool {
+/// activation-level path is in charge; the runner is the source of
+/// truth on whether the obligation is satisfied (via
+/// `obligation_satisfied`).  This way a hat with conditional emit
+/// semantics (e.g. `review-coordinator` emits `review.passed` for
+/// empty diffs and `review.wave.ready` otherwise) is no longer
+/// mis-classified as a missing-event offender.
+///
+/// `candidate_topics` is the list of topics the agent emitted (or
+/// tried to emit) on this iteration.  When the hat has obligations
+/// the gate only fires if the candidates fail to satisfy the
+/// activation-level obligation.  When the hat has no obligations the
+/// legacy blanket rule is applied unchanged for backwards
+/// compatibility with presets that have not opted in.
+pub fn should_gate_missing_events(
+    hat_id: &HatId,
+    event_loop: &EventLoop,
+    candidate_topics: &[String],
+) -> bool {
     let Some(config) = event_loop.registry().get_config(hat_id) else {
         return false;
     };
     // U4: opt-in hats get the precise activation-level path.  Legacy
     // presets without `obligations` keep the blanket rule.
-    if !config.obligations.is_empty() {
-        return false;
+    let matching_obligations: Vec<_> = event_loop
+        .state()
+        .last_activation_events
+        .iter()
+        .filter_map(|event| config.obligation_for_trigger(event.topic.as_str()))
+        .collect();
+    if !matching_obligations.is_empty() {
+        return !matching_obligations.iter().any(|obligation| {
+            ralph_core::obligation_satisfied(Some(obligation), candidate_topics)
+        });
     }
-    // Hat has an obligation to publish but no automatic fallback
+    // Legacy blanket rule: hat has an obligation to publish but no
+    // automatic fallback.
     !config.publishes.is_empty() && config.default_publishes.is_none()
 }
 
@@ -62,29 +85,124 @@ pub fn should_gate_missing_events(hat_id: &HatId, event_loop: &EventLoop) -> boo
 /// routed; the `target_hat` is the routed hat or `None` for fail-closed
 /// rejections. The rejected event itself is NOT re-published — this
 /// function only records the diagnosis.
+///
+/// 2026-06-07 plan U2 (rework):
+///   - **Provenance**: the source hat for the rejection is read from
+///     `finding.source_hat` (the JSONL `event.hat` field, or the
+///     runner's `last_active_hat_id` fallback).  This is the hat
+///     that *emitted* the event — NOT the runner's current display
+///     hat.  In Coordinator mode the display hat can be "ralph"
+///     while the real source is `executor`; using the display hat
+///     would loop back to the wrong role.
+///   - **Original trigger snapshot**: the resume payload embeds the
+///     actual triggering event (e.g. `work.ready` for an `executor`
+///     retry) so the resumed hat sees the same context it saw on
+///     the first dispatch — not the rejected topic itself.
+///   - **Bounded retry budget**: the per-key counter
+///     (`record_rejection_key`) gates the retry.  When the post-
+///     increment count *exceeds* `U2_REJECTION_RETRY_LIMIT` the
+///     rejection is marked fail-closed and the function returns
+///     `Some(TerminationReason::RecoveryExhausted)` so the runner
+///     can terminate the loop instead of looping forever.
 pub fn handle_execution_contract_rejections(
     processed: &ralph_core::ProcessedEvents,
     event_loop: &mut EventLoop,
     hat_id: &HatId,
-) {
+) -> Option<TerminationReason> {
     let rejections = &processed.contract_rejections;
     if rejections.is_empty() {
-        return;
+        return None;
     }
 
     let iteration = event_loop.state().iteration;
     let hat_name = hat_id.as_str();
     let session_id = event_loop.diagnostics().session_id();
+    let display_hat = hat_name.to_string();
+    let mut termination: Option<TerminationReason> = None;
 
     // Console-visible warning for each rejection. Include retry_target
     // status when available so operators can see at a glance whether the
     // rejection will auto-recover or needs intervention.
     for finding in rejections {
+        // ── U2: build a unified Rejection from the contract finding ──
+        // The runner previously only wrote diagnostic envelopes for
+        // contract rejections and relied on human.guidance to drive
+        // the next iteration.  Per the 2026-06-07 plan Unit 2, the
+        // runner classifies the rejection via the shared Rejection type
+        // and records the stable retry key against the bounded budget.
+        // EventLoop owns publication of the targeted `task.resume`; this
+        // layer only observes that routing and records diagnostics.
+        //
+        // Provenance priority:
+        //   1. `finding.source_hat` — stamped onto the finding by
+        //      `validate_execution_contract` from the original JSONL
+        //      `event.hat` field (most accurate).
+        //   2. `display_hat` (the runner's current hat) — used as a
+        //      last-resort fallback when the finding is produced by a
+        //      legacy code path that does not stamp source_hat.
+        let real_source = finding
+            .source_hat
+            .clone()
+            .unwrap_or_else(|| display_hat.clone());
+        let business_hat = if real_source == "ralph" {
+            // In Coordinator mode, "ralph" is the umbrella; the
+            // display_hat is the actual business hat.  Treat
+            // display_hat as the business role for diagnostics.
+            display_hat.clone()
+        } else {
+            real_source.clone()
+        };
+        let mut rejection = Rejection::from_execution_contract(
+            finding,
+            Some(real_source.clone()),
+            Some(business_hat.clone()),
+        );
+
+        // Record the rejection key and check the bounded budget.
+        // `>` semantics: counts 1..=LIMIT all permit a task.resume;
+        // the (LIMIT+1)-th attempt is the first one marked exhausted
+        // and triggers a fail-closed termination.
+        let retry_count = event_loop
+            .state_mut()
+            .record_rejection_key(&rejection.retry_key);
+        let budget_exhausted = retry_count > U2_REJECTION_RETRY_LIMIT;
+        if budget_exhausted {
+            rejection.retry_eligible = false;
+            rejection.non_retryable_reason = Some(NonRetryableReason::RetryBudgetExhausted);
+            rejection.target_hat = None;
+            warn!(
+                topic = %finding.topic,
+                hat = %real_source,
+                violation = ?finding.kind,
+                retry_key = %rejection.retry_key,
+                retry_count = retry_count,
+                limit = U2_REJECTION_RETRY_LIMIT,
+                "Execution contract rejection budget exhausted; fail-closed"
+            );
+            // Promote the first exhausted rejection into a
+            // termination reason.  Subsequent exhausted rejections
+            // (if any) in the same batch collapse into the same
+            // TerminationReason — only the retry_key of the first
+            // one is carried so the operator can grep recovery.jsonl.
+            if termination.is_none() {
+                termination = Some(TerminationReason::RecoveryExhausted {
+                    retry_key: rejection.retry_key.clone(),
+                    reason: format!(
+                        "execution contract rejection on '{}' exceeded retry budget ({} > {})",
+                        finding.topic, retry_count, U2_REJECTION_RETRY_LIMIT
+                    ),
+                });
+            }
+        }
+
+        // EventLoop owns recovery publication. The runner only observes
+        // the already-routed task.resume and records bounded diagnostics.
         let recovery = compute_recovery_status(event_loop, finding.topic.as_str());
+
         match &recovery {
             Some(target) => warn!(
                 topic = %finding.topic,
-                hat = %hat_name,
+                hat = %real_source,
                 violation = ?finding.kind,
                 message = %finding.message,
                 retry_target = %target,
@@ -92,7 +210,7 @@ pub fn handle_execution_contract_rejections(
             ),
             None => warn!(
                 topic = %finding.topic,
-                hat = %hat_name,
+                hat = %real_source,
                 violation = ?finding.kind,
                 message = %finding.message,
                 "Execution contract rejected event; NO safe retry target — recovery is human.guidance only"
@@ -104,7 +222,11 @@ pub fn handle_execution_contract_rejections(
             Some(t) => (Some(t.clone()), None),
             None => (
                 None,
-                Some("no safe retry target (see human.guidance)".to_string()),
+                Some(if budget_exhausted {
+                    "retry budget exhausted for this rejection key".to_string()
+                } else {
+                    "no safe retry target (see human.guidance)".to_string()
+                }),
             ),
         };
         event_loop.diagnostics().log_orchestration(
@@ -121,16 +243,25 @@ pub fn handle_execution_contract_rejections(
         // event is NOT re-published; this only records the diagnosis.
         let reason_code = format!("{:?}", finding.kind);
         let target_hat_for_envelope = recovery.clone();
-        let safe_target = target_hat_for_envelope.is_some();
+        let safe_target = target_hat_for_envelope.is_some() && !budget_exhausted;
+        let outcome = if budget_exhausted {
+            DiagnosisOutcome::Escalated
+        } else {
+            DiagnosisOutcome::Pending
+        };
         let mut builder = RecoveryDiagnosisEnvelope::builder()
             .source(DiagnosisSource::ExecutionContract)
             .severity(DiagnosisSeverity::Error)
             .iteration(iteration)
-            .source_hat(hat_name)
+            .source_hat(&real_source)
             .topic(finding.topic.as_str())
             .reason_code(reason_code.clone())
             .message(finding.message.clone())
-            .expected_action("re-emit with correct contract fields")
+            .expected_action(if budget_exhausted {
+                "stop loop: same rejection has been retried past the bounded budget"
+            } else {
+                "re-emit with correct contract fields"
+            })
             .retry_key(RecoveryDiagnosisEnvelopeBuilder::retry_key_from_parts(
                 DiagnosisSource::ExecutionContract,
                 target_hat_for_envelope.as_deref(),
@@ -139,7 +270,7 @@ pub fn handle_execution_contract_rejections(
                 None,
             ))
             .safe_target(safe_target)
-            .outcome(DiagnosisOutcome::Pending);
+            .outcome(outcome);
         if let Some(session_id) = session_id.as_deref() {
             builder = builder.session_id(session_id);
         }
@@ -152,6 +283,12 @@ pub fn handle_execution_contract_rejections(
             notes.push(format!("safe retry target: {target}"));
         } else {
             notes.push("no safe retry target; failed-closed".to_string());
+        }
+        if budget_exhausted {
+            notes.push(format!(
+                "retry budget exhausted ({} > {})",
+                retry_count, U2_REJECTION_RETRY_LIMIT
+            ));
         }
         // U6: the single entry point that funnels the envelope
         // into both the U3 journal logger and the U6 recovery
@@ -168,6 +305,8 @@ pub fn handle_execution_contract_rejections(
     event_loop
         .diagnostics()
         .log_execution_contract_rejections(iteration, hat_name, rejections);
+
+    termination
 }
 
 /// Inspects the bus for a targeted `task.resume` event whose target is a

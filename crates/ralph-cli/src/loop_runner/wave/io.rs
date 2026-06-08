@@ -285,12 +285,17 @@ pub fn merge_wave_results_to_events_file(
 
     // R8 observability: log expected/merged/missing/duplicate indexes so a
     // postmortem can tell at a glance whether the wave was complete.
-    let expected_indexes: std::collections::BTreeSet<u32> =
-        (0..completed.wave_total).collect();
-    let merged_set: std::collections::BTreeSet<u32> = merged_indexes.iter().copied().collect();
-    let missing_indexes: Vec<u32> =
-        expected_indexes.difference(&merged_set).copied().collect();
+    let expected_indexes: std::collections::BTreeSet<u32> = (0..completed.wave_total).collect();
     let failure_indexes: Vec<u32> = completed.failures.iter().map(|f| f.index).collect();
+    let accounted_indexes: std::collections::BTreeSet<u32> = merged_indexes
+        .iter()
+        .chain(failure_indexes.iter())
+        .copied()
+        .collect();
+    let missing_indexes: Vec<u32> = expected_indexes
+        .difference(&accounted_indexes)
+        .copied()
+        .collect();
 
     if !missing_indexes.is_empty() || !duplicate_indexes.is_empty() {
         tracing::warn!(

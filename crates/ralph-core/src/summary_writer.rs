@@ -488,6 +488,7 @@ mod tests {
             exhausted_hats: std::collections::HashSet::new(),
             last_checkin_at: None,
             last_active_hat_ids: Vec::new(),
+            last_activation_events: Vec::new(),
             seen_topics: std::collections::HashSet::new(),
             last_emitted_signature: None,
             consecutive_same_signature: 0,
