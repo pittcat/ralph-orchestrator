@@ -169,6 +169,29 @@ fn is_diagnostics_eligible_command(command: Option<&Commands>) -> bool {
     matches!(command, Some(Commands::Run(_) | Commands::Resume(_)) | None)
 }
 
+/// Best-effort read of `telemetry.runtime_diagnosis.write_artifacts` from
+/// ralph.yml. Returns `false` on any error (missing file, parse error, missing
+/// field) so the activation matrix stays fail-closed and the "默认 no-op"
+/// constraint from plan U0 is preserved. We deliberately avoid loading the full
+/// [`RalphConfig`] here because the main entry point needs this signal before
+/// command dispatch, and a full config load can fail loudly in ways that
+/// should not block unrelated subcommands like `ralph diagnose`.
+fn read_telemetry_write_artifacts(ralph_yml_path: &std::path::Path) -> bool {
+    let content = match std::fs::read_to_string(ralph_yml_path) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let yaml: serde_yaml::Value = match serde_yaml::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    yaml.get("telemetry")
+        .and_then(|t| t.get("runtime_diagnosis"))
+        .and_then(|r| r.get("write_artifacts"))
+        .and_then(|w| w.as_bool())
+        .unwrap_or(false)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     install_panic_hook();
@@ -189,17 +212,38 @@ async fn main() -> Result<()> {
     let mcp_enabled = matches!(&cli.command, Some(Commands::Mcp(_)));
 
     let filter = if cli.verbose { "debug" } else { "info" };
+    // U0 activation matrix: session is created when EITHER `RALPH_DIAGNOSTICS=1`
+    // is set OR `telemetry.runtime_diagnosis.write_artifacts: true` is in
+    // ralph.yml. Previously the second path was dropped on the floor by
+    // `DiagnosticsOptions::from_env` hardcoding `runtime_diagnosis_artifacts: false`.
+    let diagnostics_env_set = std::env::var("RALPH_DIAGNOSTICS")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    let diagnostics_config_write_artifacts =
+        read_telemetry_write_artifacts(std::path::Path::new("ralph.yml"));
     let diagnostics_enabled = is_diagnostics_eligible_command(cli.command.as_ref())
-        && std::env::var("RALPH_DIAGNOSTICS")
-            .map(|v| v == "1")
-            .unwrap_or(false);
+        && (diagnostics_env_set || diagnostics_config_write_artifacts);
 
     // U0: build ONE authoritative diagnostics collector up front, so the
     // tracing layer and the EventLoop share a single timestamped session
     // directory. `EventLoop::with_context` reuses a prebuilt collector
     // attached to the LoopContext, so the run never produces two sessions.
+    //
+    // When the env var is set we take the historical full-diagnostics path
+    // (no telemetry config consulted, preserves the U0 contract that
+    // `RALPH_DIAGNOSTICS=1` is the full-diagnostics trigger). When the env
+    // is unset but `write_artifacts: true` is in ralph.yml we take the
+    // minimal session path through `from_env_with_telemetry`.
     let authoritative_diagnostics: Option<Arc<DiagnosticsCollector>> = if diagnostics_enabled {
-        match DiagnosticsCollector::new(std::path::Path::new(".")) {
+        let options = if diagnostics_env_set {
+            ralph_core::diagnostics::DiagnosticsOptions::from_env(None)
+        } else {
+            ralph_core::diagnostics::DiagnosticsOptions::from_env_with_telemetry(
+                None,
+                diagnostics_config_write_artifacts,
+            )
+        };
+        match DiagnosticsCollector::with_options(std::path::Path::new("."), &options) {
             Ok(c) => Some(Arc::new(c)),
             Err(e) => {
                 eprintln!(
