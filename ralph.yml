@@ -1,5 +1,6 @@
 cli:
   backend: claude
+  autonomous_idle_timeout_secs: 900
 
 event_loop:
   max_runtime_seconds: 28800 # 新增
@@ -13,6 +14,21 @@ tasks:
     - ralph
     - coordinator
 
+telemetry:
+  runtime_diagnosis:
+    enabled: true
+    write_artifacts: true
+    prompt_injection_enabled: true     # 让 agent 在 prompt 看到 "## Runtime Diagnosis Alert"
+    max_repeated_recoveries: 2         # 从默认 3 降到 2：第 2 次同 retry_key 直接 escalation
+    max_prompt_findings: 8             # 从默认 5 提到 8：更早暴露问题
+    artifact_retention: 20             # 从默认 10 提到 20：留更多回溯
+    max_prompt_chars: 4096             # 从默认 2000 提到 4096：容下 8 条较长 finding 不被截断
+    retry_window_iterations: 8         # 从默认 5 提到 8：拉长短期记忆到 4 小时（配合长 iter 时间）
+    drift:                             # U5 烟雾报警器：三个传感器阈值（多 hat preset 必配）
+      field_completeness_threshold: 0.85   # 从默认 0.9 降到 0.85：兼容"先占位后补全"的两阶段发事件
+      coord_join_rate_threshold: 0.6       # 默认 0.6：多 hat 协作上下衔接率底线
+      emit_cadence_sigma: 2.0              # 默认 2.0：节拍器灵敏度 2σ（工业界标准）
+
 core:
   guardrails:
     - "Fresh context each iteration — re-read scratchpad and plan."
@@ -23,6 +39,9 @@ core:
     - "Confidence protocol: >80 proceed; 50-80 proceed + note in scratchpad; <50 choose safe default + note."
     - "Preserve primary sources — capture referenced code snippets with file:line attribution in scratchpad."
     - "Run targeted tests per crate (`cargo test -p ralph-core`) during subtasks; full `cargo test --all` only at final step."
+
+
+
 
 backpressure:
   gates:
