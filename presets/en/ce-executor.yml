@@ -53,7 +53,12 @@ event_loop:
     enabled: true
     rules:
       work.done:
-        require_payload_fields: ["plan_name", "plan_path", "task_id", "task_key", "step"]
+        # commit_count + changed_lines let the review-coordinator
+        # gate distinguish "empty diff" from "non-trivial diff".
+        # Trivial steps are exempt via allow_empty_for_steps; the
+        # executor still reports commit_count=0, changed_lines=0 for
+        # them so the schema stays consistent.
+        require_payload_fields: ["plan_name", "plan_path", "task_id", "task_key", "step", "commit_count", "changed_lines"]
         require_task:
           id_field: "task_id"
           key_field: "task_key"
@@ -81,7 +86,10 @@ event_loop:
         required_fields: [plan_name, plan_path, task_id, task_key, step, complexity]
         payload: json_object
       work.done:
-        required_fields: [plan_name, plan_path, task_id, task_key, step]
+        # commit_count + changed_lines are required so the
+        # review-coordinator gate can distinguish "empty diff" from
+        # a non-trivial diff short-circuited to review.passed.
+        required_fields: [plan_name, plan_path, task_id, task_key, step, commit_count, changed_lines]
         payload: json_object
       work.failed:
         required_fields: [reason]
@@ -93,7 +101,11 @@ event_loop:
         required_fields: [dimension, findings_count, findings_file, plan_name, task_id, task_key, step]
         payload: json_object
       review.passed:
-        required_fields: [plan_name, task_id, task_key, step, findings_count, fix_round, verdict]
+        # skip_reason is a hard audit field — every review.passed
+        # MUST declare WHY the review was skipped. See the review-
+        # coordinator HARD RULE for valid values. Missing skip_reason
+        # is a schema violation.
+        required_fields: [plan_name, task_id, task_key, step, findings_count, fix_round, verdict, skip_reason]
         payload: json_object
       review.failed:
         required_fields: [plan_name, fix_round, safe_auto_count, gated_manual_count, findings_summary, task_id, task_key, step]
@@ -102,7 +114,11 @@ event_loop:
         required_fields: [plan_name, fix_round, verdict, residual_findings_count, findings_summary, task_id, task_key, step, findings_count]
         payload: json_object
       fix.applied:
-        required_fields: [plan_name, fix_round, applied_count, failed_count, task_id, task_key, step]
+        # Mirror work.done schema so the fix.applied → review-
+        # coordinator path carries diff-state context. Without these
+        # the gate cannot distinguish "fix changed 2 lines, skip
+        # review" from a real post-fix wave.
+        required_fields: [plan_name, fix_round, applied_count, failed_count, task_id, task_key, step, commit_count, changed_lines]
         payload: json_object
       fix.exhausted:
         required_fields: [plan_name, fix_round, task_id, task_key, step]
@@ -434,17 +450,30 @@ hats:
     description: "Diff analysis, intent discovery, conditional dimension selection, wave emission."
     triggers: ["work.done", "fix.applied"]
     publishes: ["review.wave.ready", "review.passed"]
-    # 2026-06-07 plan U4: opt into activation-level obligations so the
-    # hard_gate no longer flags this hat as "publish obligation but
-    # no event" for its conditional branches.  The blanket
-    # `publishes + default_publishes` rule would have mis-classified
-    # `review-coordinator` (no default_publishes, conditional emit
-    # between two legitimate topics).
+    # Activation-level obligations.  `conditional_must_emit`
+    # tightens the rule when the trigger payload shows non-trivial
+    # work (commit_count>=1 / changed_lines>=50 / untracked files):
+    # the agent MUST emit review.wave.ready, not review.passed.
+    # Mirrors the HARD RULE in `instructions:`.
     obligations:
       - on_trigger: "work.done"
         must_emit_any_of: ["review.wave.ready", "review.passed"]
+        conditional_must_emit:
+          - when: { commit_count_min: 1 }
+            must_emit_any_of: ["review.wave.ready"]
+          - when: { changed_lines_min: 50 }
+            must_emit_any_of: ["review.wave.ready"]
+          - when: { has_untracked: true }
+            must_emit_any_of: ["review.wave.ready"]
       - on_trigger: "fix.applied"
         must_emit_any_of: ["review.wave.ready", "review.passed"]
+        conditional_must_emit:
+          - when: { commit_count_min: 1 }
+            must_emit_any_of: ["review.wave.ready"]
+          - when: { changed_lines_min: 50 }
+            must_emit_any_of: ["review.wave.ready"]
+          - when: { has_untracked: true }
+            must_emit_any_of: ["review.wave.ready"]
     instructions: |
       ## REVIEW COORDINATOR MODE — Scope Analysis, Intent Discovery, and Wave Scheduling
 
@@ -452,8 +481,8 @@ hats:
       Do not review code yourself. Do not implement fixes.
 
       ### Read State
-      - From `work.done` payload: `plan_name`, `plan_path`, `task_id`, `task_key`, `step`
-      - From `fix.applied` payload: `plan_name`, `task_id`, `task_key`, `step`
+      - From `work.done` payload: `plan_name`, `plan_path`, `task_id`, `task_key`, `step`, `commit_count`, `changed_lines`
+      - From `fix.applied` payload: `plan_name`, `task_id`, `task_key`, `step`, `commit_count`, `changed_lines`
       - If `plan_name` is not in payload, scan `.agents/scratchpad/ce-executor/*/context.md` files to find the one matching current branch
       - Read `context.md` for plan context, R-IDs, and scope boundaries
 
@@ -462,14 +491,35 @@ hats:
       - If `start_sha` is available and valid:
         - Use `git diff -U10 <start_sha>..HEAD` and `git diff --name-only <start_sha>..HEAD`
         - Use `git log --oneline <start_sha>..HEAD` for intent extraction
+        - Read `commit_count` from `git rev-list --count <start_sha>..HEAD`
+        - Read `changed_lines` from `git diff --shortstat <start_sha>..HEAD` (sum of insertions+deletions)
       - If `start_sha` is unavailable or invalid, fall back to base detection chain:
         - Detect diff base: `origin/main` → `origin/master` → `main` → `master` → `HEAD~1` (fallback chain)
         - Compute merge-base: `git merge-base HEAD <base>`
         - Generate diff: `git diff -U10 <base>`
         - Generate file list: `git diff --name-only <base>`
+        - Read `commit_count` from `git rev-list --count <merge-base>..HEAD`
+        - Read `changed_lines` from `git diff --shortstat <base>`
       - Check untracked files: `git ls-files --others --exclude-standard`
-      - **Empty diff handling**: if diff is empty, publish `review.passed` with `plan_name`, `findings_count: 0`, `task_id`, `task_key`, `step` (MUST include all three from the triggering event payload)
-      - Write shared diff to `.agents/scratchpad/ce-executor/{plan_name}/wave-diff.patch`
+
+      ### HARD RULE: Wave vs Pass Decision
+      **This is a hard rule, not a heuristic. Choose based on objective diff state, not intent or "I already trust the executor."**
+
+      Emit `review.wave.ready` (must, no exception) when ANY of these is true:
+      - `commit_count >= 1` (any commit on top of base)
+      - `changed_lines >= 50` (per `git diff --shortstat` sum, including untracked)
+      - `git ls-files --others --exclude-standard` is non-empty (untracked files present)
+      - `git diff <base>..HEAD` (or `git diff <base>` fallback) is non-empty
+
+      Emit `review.passed` (with `skip_reason: "empty_diff"`) ONLY when ALL of these are true:
+      - `commit_count == 0` (no commits on top of base)
+      - `changed_lines == 0` (no changes vs base, per shortstat)
+      - `git ls-files --others --exclude-standard` is empty
+      - `git diff <base>..HEAD` (or `git diff <base>` fallback) is empty
+
+      **Audit field — mandatory**: every `review.passed` event MUST include `skip_reason: "empty_diff"` in its payload. Downstream reporters will REJECT `review.passed` without `skip_reason` (hard schema gate). When in doubt, choose wave.
+
+      Write shared diff to `.agents/scratchpad/ce-executor/{plan_name}/wave-diff.patch`
 
       ### Intent Discovery
       - From branch name, commit messages (`git log --oneline ${BASE}..HEAD`), plan.md
@@ -481,7 +531,7 @@ hats:
       - Include requirements completeness data in each wave payload
 
       ### Dimension Selection (from compound-engineering persona-catalog)
-      **Always-on dimensions** (always emit wave for these):
+      **Required dimensions** (MUST include in every emitted `review.wave.ready` wave — these are the floor, not the ceiling):
       - `correctness` — logic correctness, edge cases, error propagation
       - `testing` — test coverage, assertion quality, brittle tests
       - `maintainability` — structural quality, complexity, dead code
@@ -527,7 +577,8 @@ hats:
       ### Constraints
       - MUST NOT review code directly
       - MUST NOT start fixing issues
-      - MUST handle empty diff by publishing `review.passed`
+      - MUST decide wave vs pass per the HARD RULE above (commit_count / changed_lines / untracked / diff state), NOT based on intent or trust in the executor
+      - MUST include `skip_reason: "empty_diff"` in every `review.passed` payload (audit field — missing it is a hard schema violation)
       - MUST select conditional dimensions based on actual diff content
 
   dimension-reviewer:

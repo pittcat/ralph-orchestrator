@@ -7928,6 +7928,153 @@ hats:
 }
 
 #[test]
+fn test_p1_conditional_obligation_gates_when_commit_count_positive() {
+    // 2026-06-08 fix (P1): when a hat declares
+    // `conditional_must_emit` on a trigger and the trigger payload
+    // matches the predicate, the hard_gate must reject a candidate
+    // that satisfies the top-level OR but not the strict
+    // conditional.  This is the U3/U4 fix integration test:
+    //   work.done with commit_count=2 + review.passed → gate fires
+    //   (would otherwise skip the wave).
+    let yaml = r#"
+hats:
+  review-coordinator:
+    name: "Review Coordinator"
+    triggers: ["work.done"]
+    publishes: ["review.wave.ready", "review.passed"]
+    obligations:
+      - on_trigger: "work.done"
+        must_emit_any_of: ["review.wave.ready", "review.passed"]
+        conditional_must_emit:
+          - when: { commit_count_min: 1 }
+            must_emit_any_of: ["review.wave.ready"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.state_mut().last_activation_events = vec![ralph_proto::Event::new(
+        "work.done",
+        r#"{"commit_count": 2, "changed_lines": 400}"#,
+    )];
+    let hat = HatId::new("review-coordinator");
+
+    // Non-trivial diff + review.passed → conditional matched, candidate
+    // off strict set → obligation unsatisfied → gate fires.
+    let passed = vec!["review.passed".to_string()];
+    assert!(
+        should_gate_missing_events(&hat, &event_loop, &passed),
+        "non-trivial work.done (commit_count=2) with review.passed must trigger gate (U3/U4 bug)"
+    );
+
+    // Non-trivial diff + review.wave.ready → conditional matched, candidate
+    // in strict set → obligation satisfied → gate does NOT fire.
+    let wave = vec!["review.wave.ready".to_string()];
+    assert!(
+        !should_gate_missing_events(&hat, &event_loop, &wave),
+        "non-trivial work.done with review.wave.ready must not trigger gate"
+    );
+}
+
+#[test]
+fn test_p1_conditional_obligation_falls_back_to_legacy_or_on_empty_diff() {
+    // 2026-06-08 fix (P1) — empty-diff path: when the trigger payload
+    // does NOT match the conditional predicate (e.g. commit_count=0),
+    // the obligation falls back to the top-level OR semantics.
+    // review.passed is acceptable for a trivial 0-commit, 0-line diff.
+    let yaml = r#"
+hats:
+  review-coordinator:
+    name: "Review Coordinator"
+    triggers: ["work.done"]
+    publishes: ["review.wave.ready", "review.passed"]
+    obligations:
+      - on_trigger: "work.done"
+        must_emit_any_of: ["review.wave.ready", "review.passed"]
+        conditional_must_emit:
+          - when: { commit_count_min: 1 }
+            must_emit_any_of: ["review.wave.ready"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.state_mut().last_activation_events = vec![ralph_proto::Event::new(
+        "work.done",
+        r#"{"commit_count": 0, "changed_lines": 0}"#,
+    )];
+    let hat = HatId::new("review-coordinator");
+
+    // Empty diff + review.passed → no conditional matched → legacy OR applies
+    // → obligation satisfied → gate does NOT fire.
+    let passed = vec!["review.passed".to_string()];
+    assert!(
+        !should_gate_missing_events(&hat, &event_loop, &passed),
+        "empty diff (commit_count=0) with review.passed must NOT trigger gate (legacy OR fallback)"
+    );
+}
+
+#[test]
+fn test_p1_per_obligation_trigger_context_isolated() {
+    // 2026-06-08 fix (P1) — multi-trigger isolation: when a hat has
+    // obligations for multiple triggers (e.g. work.done + fix.applied),
+    // each obligation is evaluated against its OWN trigger event's
+    // payload, not the first matching event's payload.  This test
+    // exercises divergent payloads: work.done has commit_count=1
+    // (strict), fix.applied has commit_count=0 (legacy OR allows
+    // review.passed).  The fix.applied obligation must be evaluated
+    // with the fix.applied payload, so the gate does NOT fire
+    // (review.passed satisfies fix.applied's obligation).
+    let yaml = r#"
+hats:
+  review-coordinator:
+    name: "Review Coordinator"
+    triggers: ["work.done", "fix.applied"]
+    publishes: ["review.wave.ready", "review.passed"]
+    obligations:
+      - on_trigger: "work.done"
+        must_emit_any_of: ["review.wave.ready", "review.passed"]
+        conditional_must_emit:
+          - when: { commit_count_min: 1 }
+            must_emit_any_of: ["review.wave.ready"]
+      - on_trigger: "fix.applied"
+        must_emit_any_of: ["review.wave.ready", "review.passed"]
+        conditional_must_emit:
+          - when: { commit_count_min: 1 }
+            must_emit_any_of: ["review.wave.ready"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    // Note: work.done is first in last_activation_events, but the
+    // fix.applied obligation must still see fix.applied's payload
+    // (commit_count=0) so that its conditional does NOT match.
+    event_loop.state_mut().last_activation_events = vec![
+        ralph_proto::Event::new("work.done", r#"{"commit_count": 1}"#),
+        ralph_proto::Event::new("fix.applied", r#"{"commit_count": 0}"#),
+    ];
+    let hat = HatId::new("review-coordinator");
+
+    // work.done obligation: commit_count=1 conditional matches, review.passed
+    // is off strict set → unsatisfied.
+    // fix.applied obligation: commit_count=0 conditional does NOT match
+    // → fall back to legacy OR → review.passed satisfies.
+    // `any` returns true → gate does NOT fire.
+    let passed = vec!["review.passed".to_string()];
+    assert!(
+        !should_gate_missing_events(&hat, &event_loop, &passed),
+        "fix.applied obligation must use its own context (commit_count=0), not work.done's"
+    );
+
+    // Now flip: fix.applied has commit_count=1, work.done has commit_count=0.
+    // work.done obligation: legacy OR, review.passed satisfies.
+    // fix.applied obligation: strict, review.passed is off → unsatisfied.
+    event_loop.state_mut().last_activation_events = vec![
+        ralph_proto::Event::new("work.done", r#"{"commit_count": 0}"#),
+        ralph_proto::Event::new("fix.applied", r#"{"commit_count": 1}"#),
+    ];
+    assert!(
+        !should_gate_missing_events(&hat, &event_loop, &passed),
+        "work.done obligation must use its own context (commit_count=0), not fix.applied's"
+    );
+}
+
+#[test]
 fn test_inject_hat_execution_env_sets_reserved_and_preserves_user_vars() {
     let mut backend = CliBackend {
         command: "echo".into(),

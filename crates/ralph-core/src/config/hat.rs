@@ -83,7 +83,7 @@ impl HatBackend {
     }
 }
 
-/// Activation-level publish obligation (2026-06-07 plan U4).
+/// Activation-level publish obligation (2026-06-07 plan U4, hardened 2026-06-08).
 ///
 /// Pins a single trigger topic to the set of topics the hat MUST emit
 /// at least one of when that trigger fires.  Used by `hard_gate` to
@@ -97,6 +97,16 @@ impl HatBackend {
 ///     execution contract" (rejection recovery, not hard-gate).
 ///   - "agent chose a different but legitimate topic from the
 ///     obligation set" (no hard-gate — obligation satisfied).
+///
+/// 2026-06-08 fix: added `conditional_must_emit` to support
+/// per-trigger-payload tightening.  When the trigger event's payload
+/// matches a conditional's `when` predicate, the candidate topics
+/// must satisfy the *conditional* `must_emit_any_of` (which is
+/// strictly tighter than the legacy OR semantics on the top-level
+/// `must_emit_any_of`).  This closes the gap where a hat
+/// (e.g. `review-coordinator`) was technically satisfying its
+/// obligation by emitting `review.passed` for a non-trivial diff,
+/// skipping the wave entirely.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActivationObligation {
     /// Trigger topic that activates this obligation.  When the hat
@@ -108,6 +118,122 @@ pub struct ActivationObligation {
     /// the trigger is informational, not enforceable).
     #[serde(default)]
     pub must_emit_any_of: Vec<String>,
+    /// 2026-06-08 fix: conditional tightening.  When a conditional's
+    /// `when` predicate matches the trigger event context, the
+    /// candidate topics must satisfy that conditional's
+    /// `must_emit_any_of` (stricter than the legacy OR).  When no
+    /// conditional matches, the obligation falls back to the
+    /// top-level `must_emit_any_of` (legacy OR semantics).
+    #[serde(default)]
+    pub conditional_must_emit: Vec<ConditionalEmission>,
+}
+
+/// A single conditional tightening of an `ActivationObligation`.
+///
+/// When `when` matches the trigger event context, the candidate
+/// topics emitted by the agent must intersect the conditional's
+/// `must_emit_any_of`.  This is strictly tighter than the
+/// top-level `must_emit_any_of` OR semantics — it expresses
+/// "if the trigger payload shows non-trivial work, the agent MUST
+/// pick this specific topic (or one of these)".
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConditionalEmission {
+    /// Predicate over `TriggerContext`.  When `when` matches, this
+    /// conditional's `must_emit_any_of` applies.  An empty
+    /// `TriggerPredicate` (no fields set) matches all contexts and
+    /// is equivalent to "always apply this strict rule".
+    #[serde(default)]
+    pub when: TriggerPredicate,
+    /// Topics that satisfy this conditional.  Candidate topics
+    /// must include at least one of these when `when` matches.
+    pub must_emit_any_of: Vec<String>,
+}
+
+/// Predicate over `TriggerContext` (the trigger event payload
+/// snapshot taken at hard-gate evaluation time).
+///
+/// All fields are AND-ed.  A field set to `None` is a wildcard
+/// (matches anything).  An empty `TriggerPredicate` matches
+/// everything.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TriggerPredicate {
+    /// Minimum `commit_count` for the predicate to match.  When
+    /// set, the trigger event's `commit_count` (from the event
+    /// payload) must be `>= commit_count_min`.
+    #[serde(default)]
+    pub commit_count_min: Option<u32>,
+    /// Minimum `changed_lines` for the predicate to match.  Same
+    /// semantics as `commit_count_min` but on the `changed_lines`
+    /// payload field.
+    #[serde(default)]
+    pub changed_lines_min: Option<u32>,
+    /// Whether the working tree has untracked files.  When set,
+    /// the trigger event's `has_untracked` payload field must
+    /// equal this value.
+    #[serde(default)]
+    pub has_untracked: Option<bool>,
+}
+
+impl TriggerPredicate {
+    /// Evaluate this predicate against a `TriggerContext`.  Returns
+    /// `true` when all set fields match the context.  Unset fields
+    /// are wildcards.
+    pub fn matches(&self, ctx: &TriggerContext) -> bool {
+        if let Some(min) = self.commit_count_min
+            && ctx.commit_count.unwrap_or(0) < min
+        {
+            return false;
+        }
+        if let Some(min) = self.changed_lines_min
+            && ctx.changed_lines.unwrap_or(0) < min
+        {
+            return false;
+        }
+        if let Some(want) = self.has_untracked
+            && ctx.has_untracked.unwrap_or(false) != want
+        {
+            return false;
+        }
+        true
+    }
+}
+
+/// Snapshot of the trigger event payload, used by
+/// `obligation_satisfied` to evaluate `conditional_must_emit`.
+///
+/// Fields are `Option<...>` because not all trigger events carry
+/// diff-state metadata — only the work-done / fix-applied family
+/// does.  When a field is `None`, it is treated as the "neutral"
+/// value (0 for counts, false for booleans) during predicate
+/// evaluation, so a `commit_count_min: 1` predicate will not
+/// match a `None` context.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TriggerContext {
+    /// `commit_count` field from the trigger event payload.
+    pub commit_count: Option<u32>,
+    /// `changed_lines` field from the trigger event payload.
+    pub changed_lines: Option<u32>,
+    /// `has_untracked` field from the trigger event payload.
+    pub has_untracked: Option<bool>,
+}
+
+impl TriggerContext {
+    /// Construct from a trigger event's JSON payload (best-effort).
+    /// Missing fields stay `None`; non-numeric / non-bool values
+    /// also yield `None`.
+    pub fn from_payload(payload: &serde_json::Value) -> Self {
+        Self {
+            commit_count: payload
+                .get("commit_count")
+                .and_then(|v| v.as_u64())
+                .and_then(|n| u32::try_from(n).ok()),
+            changed_lines: payload
+                .get("changed_lines")
+                .and_then(|v| v.as_u64())
+                .and_then(|n| u32::try_from(n).ok()),
+            has_untracked: payload.get("has_untracked").and_then(|v| v.as_bool()),
+        }
+    }
 }
 
 /// Configuration for a single hat.
@@ -369,26 +495,64 @@ impl HatConfig {
 
 /// Returns `true` when the candidate topic set satisfies the
 /// activation obligation for a given trigger.  A candidate set
-/// satisfies an obligation when at least one candidate topic is
-/// listed in the obligation's `must_emit_any_of` set.  An empty
-/// `must_emit_any_of` is treated as "no obligation" and always
-/// satisfied (legacy behaviour).
+/// satisfies an obligation when:
 ///
-/// Caller-supplied helper so `hard_gate` does not have to know about
-/// the `ActivationObligation` shape.  Lives at module scope so the
+/// 1. **No obligation** (`None` or empty lists) → always satisfied.
+/// 2. **Any matching `conditional_must_emit` is satisfied** →
+///    candidate topics must include at least one topic from the
+///    conditional's `must_emit_any_of`.  ALL matching conditionals
+///    must be satisfied (AND across conditionals).
+/// 3. **Falls back to legacy OR semantics** when no conditional
+///    matched: candidate topics must include at least one topic
+///    from the top-level `must_emit_any_of`.
+///
+/// 2026-06-08 fix: the `trigger_context` parameter carries the
+/// trigger event payload snapshot (commit_count / changed_lines /
+/// has_untracked) so that conditional tightening can fire when the
+/// work is non-trivial.  Pass `None` for legacy behavior
+/// (no payload available).  Lives at module scope so the
 /// `hat.rs` test module can exercise it without touching the public
 /// `HatConfig` API.
 pub fn obligation_satisfied(
     obligation: Option<&ActivationObligation>,
     candidate_topics: &[String],
+    trigger_context: Option<&TriggerContext>,
 ) -> bool {
-    match obligation {
-        None => true, // No obligation → any outcome is fine.
-        Some(o) if o.must_emit_any_of.is_empty() => true,
-        Some(o) => candidate_topics
-            .iter()
-            .any(|t| o.must_emit_any_of.iter().any(|m| m == t)),
+    let Some(o) = obligation else {
+        return true; // No obligation → any outcome is fine.
+    };
+    let has_top_level = !o.must_emit_any_of.is_empty();
+    let has_conditionals = !o.conditional_must_emit.is_empty();
+    if !has_top_level && !has_conditionals {
+        return true; // Empty obligation → no enforcement.
     }
+    let ctx = trigger_context.cloned().unwrap_or_default();
+    let mut any_conditional_matched = false;
+    for cond in &o.conditional_must_emit {
+        if !cond.when.matches(&ctx) {
+            continue;
+        }
+        any_conditional_matched = true;
+        // Conditional matched → candidate MUST be in the strict set.
+        let matched = cond
+            .must_emit_any_of
+            .iter()
+            .any(|m| candidate_topics.iter().any(|t| t == m));
+        if !matched {
+            return false;
+        }
+    }
+    if any_conditional_matched {
+        // Strict conditionals already validated; obligation satisfied.
+        return true;
+    }
+    // No conditional matched: fall back to legacy OR semantics on the
+    // top-level must_emit_any_of (preserves the 2026-06-07 behaviour
+    // for presets that do not opt into conditional tightening).
+    has_top_level
+        && o.must_emit_any_of
+            .iter()
+            .any(|m| candidate_topics.iter().any(|t| t == m))
 }
 
 #[cfg(test)]
@@ -424,6 +588,7 @@ mod tests {
         let hat = hat_with_obligations(vec![ActivationObligation {
             on_trigger: "work.done".into(),
             must_emit_any_of: vec!["review.wave.ready".into(), "review.passed".into()],
+            conditional_must_emit: vec![],
         }]);
         let o = hat.obligation_for_trigger("work.done").expect("obligation");
         assert_eq!(o.on_trigger, "work.done");
@@ -441,18 +606,19 @@ mod tests {
     fn obligation_satisfied_with_no_obligation_is_always_true() {
         // R3: 没有 obligation 时 hard_gate 不应误报未履约
         let candidates = vec![];
-        assert!(obligation_satisfied(None, &candidates));
-        assert!(obligation_satisfied(None, &["anything".into()]));
+        assert!(obligation_satisfied(None, &candidates, None));
+        assert!(obligation_satisfied(None, &["anything".into()], None));
     }
 
     #[test]
-    fn obligation_satisfied_with_empty_must_emit_is_always_true() {
-        // R3: 空 must_emit_any_of 等同于无 obligation
+    fn obligation_satisfied_with_empty_lists_is_always_true() {
+        // R3: 空 must_emit_any_of + 空 conditional_must_emit 等同于无 obligation
         let o = ActivationObligation {
             on_trigger: "work.done".into(),
             must_emit_any_of: vec![],
+            conditional_must_emit: vec![],
         };
-        assert!(obligation_satisfied(Some(&o), &[]));
+        assert!(obligation_satisfied(Some(&o), &[], None));
     }
 
     #[test]
@@ -461,14 +627,17 @@ mod tests {
         let o = ActivationObligation {
             on_trigger: "work.done".into(),
             must_emit_any_of: vec!["review.wave.ready".into(), "review.passed".into()],
+            conditional_must_emit: vec![],
         };
         assert!(obligation_satisfied(
             Some(&o),
-            &vec!["review.passed".into()]
+            &vec!["review.passed".into()],
+            None
         ));
         assert!(obligation_satisfied(
             Some(&o),
-            &vec!["review.wave.ready".into()]
+            &vec!["review.wave.ready".into()],
+            None
         ));
     }
 
@@ -481,9 +650,264 @@ mod tests {
         let o = ActivationObligation {
             on_trigger: "work.done".into(),
             must_emit_any_of: vec!["review.wave.ready".into(), "review.passed".into()],
+            conditional_must_emit: vec![],
         };
-        assert!(!obligation_satisfied(Some(&o), &vec!["work.failed".into()]));
-        assert!(!obligation_satisfied(Some(&o), &vec![]));
+        assert!(!obligation_satisfied(
+            Some(&o),
+            &vec!["work.failed".into()],
+            None
+        ));
+        assert!(!obligation_satisfied(Some(&o), &vec![], None));
+    }
+
+    // ─── 2026-06-08 fix: conditional tightening tests ───
+
+    /// When the trigger payload shows non-trivial work (commit_count >= 1),
+    /// the candidate must be `review.wave.ready`, NOT `review.passed`.
+    /// This is the bug the diagnostic report identified: review-coordinator
+    /// was short-circuiting to `review.passed` even for 400-line diffs.
+    #[test]
+    fn conditional_must_emit_tightens_when_commit_count_positive() {
+        let o = ActivationObligation {
+            on_trigger: "work.done".into(),
+            // legacy top-level still allows both (preserves OR semantics
+            // for backward compatibility)
+            must_emit_any_of: vec!["review.wave.ready".into(), "review.passed".into()],
+            conditional_must_emit: vec![ConditionalEmission {
+                when: TriggerPredicate {
+                    commit_count_min: Some(1),
+                    ..Default::default()
+                },
+                must_emit_any_of: vec!["review.wave.ready".into()],
+            }],
+        };
+        // Non-trivial: agent emitted review.passed → NOT satisfied
+        let ctx_non_trivial = TriggerContext {
+            commit_count: Some(2),
+            ..Default::default()
+        };
+        assert!(
+            !obligation_satisfied(
+                Some(&o),
+                &vec!["review.passed".into()],
+                Some(&ctx_non_trivial)
+            ),
+            "non-trivial diff with review.passed must NOT satisfy obligation"
+        );
+        // Non-trivial: agent emitted review.wave.ready → satisfied
+        assert!(obligation_satisfied(
+            Some(&o),
+            &vec!["review.wave.ready".into()],
+            Some(&ctx_non_trivial)
+        ));
+        // Trivial: agent emitted review.passed → satisfied (legacy OR)
+        let ctx_trivial = TriggerContext {
+            commit_count: Some(0),
+            ..Default::default()
+        };
+        assert!(obligation_satisfied(
+            Some(&o),
+            &vec!["review.passed".into()],
+            Some(&ctx_trivial)
+        ));
+    }
+
+    /// When `changed_lines >= 50` the candidate must be `review.wave.ready`.
+    /// Mirrors the preset hard rule (200-line / 400-line diffs in the
+    /// diagnostic report).
+    #[test]
+    fn conditional_must_emit_tightens_when_changed_lines_meet_threshold() {
+        let o = ActivationObligation {
+            on_trigger: "work.done".into(),
+            must_emit_any_of: vec!["review.wave.ready".into(), "review.passed".into()],
+            conditional_must_emit: vec![ConditionalEmission {
+                when: TriggerPredicate {
+                    changed_lines_min: Some(50),
+                    ..Default::default()
+                },
+                must_emit_any_of: vec!["review.wave.ready".into()],
+            }],
+        };
+        // 400-line diff: review.passed must NOT satisfy
+        let ctx_big = TriggerContext {
+            changed_lines: Some(400),
+            ..Default::default()
+        };
+        assert!(!obligation_satisfied(
+            Some(&o),
+            &vec!["review.passed".into()],
+            Some(&ctx_big)
+        ));
+        assert!(obligation_satisfied(
+            Some(&o),
+            &vec!["review.wave.ready".into()],
+            Some(&ctx_big)
+        ));
+        // 10-line diff: review.passed still satisfies (legacy OR)
+        let ctx_small = TriggerContext {
+            changed_lines: Some(10),
+            ..Default::default()
+        };
+        assert!(obligation_satisfied(
+            Some(&o),
+            &vec!["review.passed".into()],
+            Some(&ctx_small)
+        ));
+    }
+
+    /// Untracked files (a common source of "review.passed when there is
+    /// actual untracked work") must trigger the wave.
+    #[test]
+    fn conditional_must_emit_tightens_when_has_untracked() {
+        let o = ActivationObligation {
+            on_trigger: "work.done".into(),
+            must_emit_any_of: vec!["review.wave.ready".into(), "review.passed".into()],
+            conditional_must_emit: vec![ConditionalEmission {
+                when: TriggerPredicate {
+                    has_untracked: Some(true),
+                    ..Default::default()
+                },
+                must_emit_any_of: vec!["review.wave.ready".into()],
+            }],
+        };
+        let ctx_untracked = TriggerContext {
+            has_untracked: Some(true),
+            ..Default::default()
+        };
+        assert!(!obligation_satisfied(
+            Some(&o),
+            &vec!["review.passed".into()],
+            Some(&ctx_untracked)
+        ));
+        let ctx_clean = TriggerContext {
+            has_untracked: Some(false),
+            ..Default::default()
+        };
+        assert!(obligation_satisfied(
+            Some(&o),
+            &vec!["review.passed".into()],
+            Some(&ctx_clean)
+        ));
+    }
+
+    /// Multiple conditionals all match → ALL must be satisfied
+    /// (AND across conditionals).  Defends against a "close enough"
+    /// emit that hits one conditional but not another.
+    #[test]
+    fn multiple_matching_conditionals_all_must_be_satisfied() {
+        let o = ActivationObligation {
+            on_trigger: "work.done".into(),
+            must_emit_any_of: vec!["review.wave.ready".into(), "review.passed".into()],
+            conditional_must_emit: vec![
+                ConditionalEmission {
+                    when: TriggerPredicate {
+                        commit_count_min: Some(1),
+                        ..Default::default()
+                    },
+                    must_emit_any_of: vec!["review.wave.ready".into()],
+                },
+                ConditionalEmission {
+                    when: TriggerPredicate {
+                        changed_lines_min: Some(50),
+                        ..Default::default()
+                    },
+                    must_emit_any_of: vec!["review.wave.ready".into()],
+                },
+            ],
+        };
+        // 2 commits, 400 lines: both conditionals match → must emit wave
+        let ctx = TriggerContext {
+            commit_count: Some(2),
+            changed_lines: Some(400),
+            ..Default::default()
+        };
+        assert!(!obligation_satisfied(
+            Some(&o),
+            &vec!["review.passed".into()],
+            Some(&ctx)
+        ));
+        assert!(obligation_satisfied(
+            Some(&o),
+            &vec!["review.wave.ready".into()],
+            Some(&ctx)
+        ));
+    }
+
+    /// `trigger_context = None` (legacy callers that cannot supply
+    /// payload) → fall back to top-level OR semantics, conditionals
+    /// are skipped (they need a context to evaluate).
+    #[test]
+    fn no_trigger_context_skips_conditionals_falls_back_to_top_level() {
+        let o = ActivationObligation {
+            on_trigger: "work.done".into(),
+            must_emit_any_of: vec!["review.wave.ready".into(), "review.passed".into()],
+            conditional_must_emit: vec![ConditionalEmission {
+                when: TriggerPredicate {
+                    commit_count_min: Some(1),
+                    ..Default::default()
+                },
+                must_emit_any_of: vec!["review.wave.ready".into()],
+            }],
+        };
+        // No context → conditionals skipped → legacy OR applies.
+        // review.passed satisfies the top-level OR even though
+        // a context would have rejected it.  This preserves the
+        // 2026-06-07 behavior for callers that haven't been
+        // updated to pass context yet.
+        assert!(obligation_satisfied(
+            Some(&o),
+            &vec!["review.passed".into()],
+            None
+        ));
+    }
+
+    /// When the payload explicitly carries `has_untracked: false` and
+    /// the predicate asks for `has_untracked: true`, the predicate
+    /// must NOT match.  Guards against a default-true slipping
+    /// through when the payload actually says "no untracked".
+    #[test]
+    fn has_untracked_false_does_not_match_true_predicate() {
+        let pred = TriggerPredicate {
+            has_untracked: Some(true),
+            ..Default::default()
+        };
+        let ctx = TriggerContext {
+            has_untracked: Some(false),
+            ..Default::default()
+        };
+        assert!(!pred.matches(&ctx));
+    }
+
+    /// `TriggerContext::from_payload` extracts numeric and bool fields,
+    /// tolerates missing fields (yields `None`), and ignores
+    /// non-numeric / non-bool types.
+    #[test]
+    fn trigger_context_from_payload_extracts_fields() {
+        let payload = serde_json::json!({
+            "commit_count": 3,
+            "changed_lines": 400u64,
+            "has_untracked": true,
+            "plan_name": "noise field"
+        });
+        let ctx = TriggerContext::from_payload(&payload);
+        assert_eq!(ctx.commit_count, Some(3));
+        assert_eq!(ctx.changed_lines, Some(400));
+        assert_eq!(ctx.has_untracked, Some(true));
+
+        let empty = serde_json::json!({});
+        let ctx_empty = TriggerContext::from_payload(&empty);
+        assert_eq!(ctx_empty.commit_count, None);
+        assert_eq!(ctx_empty.changed_lines, None);
+        assert_eq!(ctx_empty.has_untracked, None);
+
+        // Wrong types → None
+        let bad = serde_json::json!({
+            "commit_count": "three",
+            "has_untracked": 1
+        });
+        let ctx_bad = TriggerContext::from_payload(&bad);
+        assert_eq!(ctx_bad.commit_count, None);
+        assert_eq!(ctx_bad.has_untracked, None);
     }
 
     #[test]
@@ -508,5 +932,39 @@ obligations:
             hat.obligations[1].must_emit_any_of,
             vec!["review.passed".to_string()]
         );
+    }
+
+    /// 2026-06-08 fix: YAML must accept `conditional_must_emit` and
+    /// round-trip the new structure.
+    #[test]
+    fn hat_config_parses_conditional_must_emit_from_yaml() {
+        let yaml = r#"
+name: "Review Coordinator"
+triggers: ["work.done"]
+publishes: ["review.wave.ready", "review.passed"]
+obligations:
+  - on_trigger: "work.done"
+    must_emit_any_of: ["review.wave.ready", "review.passed"]
+    conditional_must_emit:
+      - when:
+          commit_count_min: 1
+        must_emit_any_of: ["review.wave.ready"]
+      - when:
+          changed_lines_min: 50
+        must_emit_any_of: ["review.wave.ready"]
+      - when:
+          has_untracked: true
+        must_emit_any_of: ["review.wave.ready"]
+"#;
+        let hat: HatConfig = serde_yaml::from_str(yaml).expect("parse hat yaml");
+        assert_eq!(hat.obligations.len(), 1);
+        let conds = &hat.obligations[0].conditional_must_emit;
+        assert_eq!(conds.len(), 3);
+        assert_eq!(conds[0].when.commit_count_min, Some(1));
+        assert_eq!(conds[1].when.changed_lines_min, Some(50));
+        assert_eq!(conds[2].when.has_untracked, Some(true));
+        for c in conds {
+            assert_eq!(c.must_emit_any_of, vec!["review.wave.ready".to_string()]);
+        }
     }
 }

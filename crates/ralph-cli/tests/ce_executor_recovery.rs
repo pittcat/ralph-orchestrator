@@ -489,27 +489,39 @@ fn u4_obligation_satisfied_for_each_review_coordinator_branch() {
     // R3: review-coordinator 条件 emit 语义 (空 diff → review.passed;
     // 有 diff → review.wave.ready) 必须各自满足 obligation，不被
     // 误判为 missing-event。
+    //
+    // 2026-06-08 fix: this test now exercises the legacy-OR path
+    // (no `conditional_must_emit`, no `trigger_context`).  The
+    // tightening behavior is covered by `hat.rs` unit tests
+    // (`conditional_must_emit_*`).
     use ralph_core::{ActivationObligation, obligation_satisfied};
 
     let o = ActivationObligation {
         on_trigger: "work.done".into(),
         must_emit_any_of: vec!["review.wave.ready".into(), "review.passed".into()],
+        conditional_must_emit: vec![],
     };
 
     // Empty-diff branch: review-coordinator picks review.passed.
     assert!(obligation_satisfied(
         Some(&o),
-        &vec!["review.passed".into()]
+        &vec!["review.passed".into()],
+        None
     ));
     // Non-empty branch: review-coordinator picks review.wave.ready.
     assert!(obligation_satisfied(
         Some(&o),
-        &vec!["review.wave.ready".into()]
+        &vec!["review.wave.ready".into()],
+        None
     ));
     // Off-obligation set: agent picked the wrong topic — this is a
     // hard failure (R1) and must NOT satisfy the obligation so the
     // downstream reporter can flag it.
-    assert!(!obligation_satisfied(Some(&o), &vec!["work.failed".into()]));
+    assert!(!obligation_satisfied(
+        Some(&o),
+        &vec!["work.failed".into()],
+        None
+    ));
     // No candidate at all: missing event — obligation not satisfied.
-    assert!(!obligation_satisfied(Some(&o), &vec![]));
+    assert!(!obligation_satisfied(Some(&o), &vec![], None));
 }

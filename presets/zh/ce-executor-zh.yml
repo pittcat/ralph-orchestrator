@@ -52,7 +52,8 @@ event_loop:
     enabled: true
     rules:
       work.done:
-        require_payload_fields: ["plan_name", "plan_path", "task_id", "task_key", "step"]
+        # commit_count + changed_lines 让 review-coordinator 闸门能区分"空 diff"和"非平凡 diff"
+        require_payload_fields: ["plan_name", "plan_path", "task_id", "task_key", "step", "commit_count", "changed_lines"]
         require_task:
           id_field: "task_id"
           key_field: "task_key"
@@ -77,7 +78,8 @@ event_loop:
         required_fields: [plan_name, plan_path, task_id, task_key, step, complexity]
         payload: json_object
       work.done:
-        required_fields: [plan_name, plan_path, task_id, task_key, step]
+        # commit_count + changed_lines 让 review-coordinator 闸门能区分"空 diff"和"非平凡 diff"
+        required_fields: [plan_name, plan_path, task_id, task_key, step, commit_count, changed_lines]
         payload: json_object
       work.failed:
         required_fields: [reason]
@@ -89,7 +91,8 @@ event_loop:
         required_fields: [dimension, findings_count, findings_file, plan_name, task_id, task_key, step]
         payload: json_object
       review.passed:
-        required_fields: [plan_name, task_id, task_key, step, findings_count, fix_round, verdict]
+        # skip_reason 是必填审计字段——每个 review.passed 都必须写明跳过审查的原因
+        required_fields: [plan_name, task_id, task_key, step, findings_count, fix_round, verdict, skip_reason]
         payload: json_object
       review.failed:
         required_fields: [plan_name, fix_round, safe_auto_count, gated_manual_count, findings_summary, task_id, task_key, step]
@@ -98,7 +101,8 @@ event_loop:
         required_fields: [plan_name, fix_round, verdict, residual_findings_count, findings_summary, task_id, task_key, step, findings_count]
         payload: json_object
       fix.applied:
-        required_fields: [plan_name, fix_round, applied_count, failed_count, task_id, task_key, step]
+        # 与 work.done schema 对齐，让 fix.applied → review-coordinator 路径也带上 diff-state 上下文
+        required_fields: [plan_name, fix_round, applied_count, failed_count, task_id, task_key, step, commit_count, changed_lines]
         payload: json_object
       fix.exhausted:
         required_fields: [plan_name, fix_round, task_id, task_key, step]
@@ -405,25 +409,75 @@ hats:
     description: "diff 分析、intent 发现、条件 dimension 选择、wave 发射。"
     triggers: ["work.done", "fix.applied"]
     publishes: ["review.wave.ready", "review.passed"]
-    default_publishes: "review.wave.ready"
+    # Activation-level obligations.  `conditional_must_emit`
+    # 在 trigger payload 显示非平凡工作时（commit_count>=1 /
+    # changed_lines>=50 / untracked 文件）收紧规则：agent 必须
+    # emit review.wave.ready，不能 emit review.passed。
+    # 与 `instructions:` 中的 HARD RULE 段镜像。
+    obligations:
+      - on_trigger: "work.done"
+        must_emit_any_of: ["review.wave.ready", "review.passed"]
+        conditional_must_emit:
+          - when: { commit_count_min: 1 }
+            must_emit_any_of: ["review.wave.ready"]
+          - when: { changed_lines_min: 50 }
+            must_emit_any_of: ["review.wave.ready"]
+          - when: { has_untracked: true }
+            must_emit_any_of: ["review.wave.ready"]
+      - on_trigger: "fix.applied"
+        must_emit_any_of: ["review.wave.ready", "review.passed"]
+        conditional_must_emit:
+          - when: { commit_count_min: 1 }
+            must_emit_any_of: ["review.wave.ready"]
+          - when: { changed_lines_min: 50 }
+            must_emit_any_of: ["review.wave.ready"]
+          - when: { has_untracked: true }
+            must_emit_any_of: ["review.wave.ready"]
     instructions: |
       ## REVIEW COORDINATOR MODE — 范围分析、Intent 发现和 Wave 调度
 
       你负责 diff 分析、intent 发现、dimension 选择和 wave 发射。
       不要自己审查代码。不要实现修复。
 
+      ### 读取状态
+      - 从 `work.done` payload：`plan_name`、`plan_path`、`task_id`、`task_key`、`step`、`commit_count`、`changed_lines`
+      - 从 `fix.applied` payload：`plan_name`、`task_id`、`task_key`、`step`、`commit_count`、`changed_lines`
+      - 如果 payload 中没有 `plan_name`，扫描 `.agents/scratchpad/ce-executor/*/context.md` 找到匹配当前分支的
+      - 读取 `context.md` 获取 plan 上下文、R-IDs 和 scope 边界
+
       ### Scope 检测
       - 从 context.md 读取 `start_sha`（由 Coordinator 在 work.start 时记录）
       - 如果 `start_sha` 可用且有效：
         - 使用 `git diff -U10 <start_sha>..HEAD` 和 `git diff --name-only <start_sha>..HEAD`
         - 使用 `git log --oneline <start_sha>..HEAD` 提取 intent
+        - 从 `git rev-list --count <start_sha>..HEAD` 读 `commit_count`
+        - 从 `git diff --shortstat <start_sha>..HEAD` 读 `changed_lines`（insertions+deletions 之和）
       - 如果 `start_sha` 不可用或无效，回退到 base 检测链：
         - diff base：`origin/main` → `origin/master` → `main` → `master` → `HEAD~1`（fallback 链）
         - 计算 merge-base：`git merge-base HEAD <base>`
         - 生成 diff：`git diff -U10 <base>`
         - 生成文件列表：`git diff --name-only <base>`
+        - 从 `git rev-list --count <merge-base>..HEAD` 读 `commit_count`
+        - 从 `git diff --shortstat <base>` 读 `changed_lines`
       - 检查 untracked 文件：`git ls-files --others --exclude-standard`
-      - **Empty diff**：diff 为空 → 发布 `review.passed`，携带 `plan_name`、`findings_count: 0`、`task_id`、`task_key`、`step`（必须从触发事件 payload 中读取并包含，缺一不可）
+
+      ### HARD RULE: Wave vs Pass Decision
+      **这是硬规则，不是启发式。根据客观 diff 状态选择，不要根据 intent 或"我已经信任 executor"。**
+
+      以下任一为真时，emit `review.wave.ready`（必须，无例外）：
+      - `commit_count >= 1`（base 上有任意 commit）
+      - `changed_lines >= 50`（按 `git diff --shortstat` 之和，包括 untracked）
+      - `git ls-files --others --exclude-standard` 非空（有 untracked 文件）
+      - `git diff <base>..HEAD`（或 `git diff <base>` fallback）非空
+
+      仅在以下全部为真时，emit `review.passed`（携带 `skip_reason: "empty_diff"`）：
+      - `commit_count == 0`（base 上无 commit）
+      - `changed_lines == 0`（按 shortstat 无变更）
+      - `git ls-files --others --exclude-standard` 为空
+      - `git diff <base>..HEAD`（或 `git diff <base>` fallback）为空
+
+      **审计字段 — 强制**：每个 `review.passed` 事件 payload 必须包含 `skip_reason: "empty_diff"`。下游 reporter 会 REJECT 没有 `skip_reason` 的 `review.passed`（硬 schema gate）。有疑问时选 wave。
+
       - 将共享 diff 写入 `.agents/scratchpad/ce-executor/{plan_name}/wave-diff.patch`
 
       ### Intent Discovery
@@ -435,12 +489,12 @@ hats:
       - 记录哪些需求已满足/未满足
 
       ### Dimension 选择（来自 compound-engineering persona-catalog）
-      **Always-on dimensions（始终发射）**：
-      - `correctness` — 逻辑正确性
-      - `testing` — 测试覆盖
-      - `maintainability` — 代码质量
-      - `standards` — 项目标准合规
-      - `requirements` — 需求保真度
+      **Required dimensions（必含于每个 emit 的 review.wave.ready — 这是下限，不是上限）**：
+      - `correctness` — 逻辑正确性、边界情况、错误传播
+      - `testing` — 测试覆盖、断言质量、脆弱测试
+      - `maintainability` — 结构质量、复杂度、死代码
+      - `standards` — 项目标准合规（CLAUDE.md、AGENTS.md）
+      - `requirements` — 需求保真度、R-ID 验证
       - `agent-native` — Agent 可访问性
       - `learnings` — docs/solutions/ 搜索
 
@@ -462,7 +516,8 @@ hats:
       ### Constraints
       - 必须 NOT 直接审查代码
       - 必须 NOT 开始修复问题
-      - 必须在 empty diff 时发布 `review.passed`
+      - 必须按上述 HARD RULE（commit_count / changed_lines / untracked / diff 状态）决定 wave vs pass，**不能**根据 intent 或对 executor 的信任
+      - 每个 `review.passed` payload 必须包含 `skip_reason: "empty_diff"`（审计字段 — 缺失是硬 schema 违规）
       - 必须根据实际 diff 内容选择 conditional dimensions
 
   dimension-reviewer:

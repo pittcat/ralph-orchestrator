@@ -53,8 +53,35 @@ pub fn should_gate_missing_events(
         .filter_map(|event| config.obligation_for_trigger(event.topic.as_str()))
         .collect();
     if !matching_obligations.is_empty() {
+        // 2026-06-08 fix: build a `TriggerContext` PER obligation,
+        // matched against that obligation's own `on_trigger` topic.
+        // This ensures that when a hat has obligations for multiple
+        // triggers (e.g. `work.done` and `fix.applied` on
+        // review-coordinator), each obligation is evaluated against
+        // the payload of its own trigger event — not the first
+        // matching event in `last_activation_events`. Without per-
+        // obligation isolation, divergent payloads would silently
+        // corrupt the conditional_must_emit decision.
+        //
+        // When the payload is not valid JSON or fields are missing,
+        // `TriggerContext::from_payload` returns a context with all
+        // fields `None` — which means predicates effectively never
+        // match (preserves legacy OR semantics as a safe default).
         return !matching_obligations.iter().any(|obligation| {
-            ralph_core::obligation_satisfied(Some(obligation), candidate_topics)
+            let trigger_context: Option<ralph_core::TriggerContext> = event_loop
+                .state()
+                .last_activation_events
+                .iter()
+                .find(|event| event.topic.as_str() == obligation.on_trigger)
+                .and_then(|event| {
+                    serde_json::from_str::<serde_json::Value>(&event.payload).ok()
+                })
+                .map(|payload| ralph_core::TriggerContext::from_payload(&payload));
+            ralph_core::obligation_satisfied(
+                Some(obligation),
+                candidate_topics,
+                trigger_context.as_ref(),
+            )
         });
     }
     // Legacy blanket rule: hat has an obligation to publish but no

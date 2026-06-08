@@ -1551,6 +1551,89 @@ mod tests {
     }
 
     #[test]
+    fn test_ce_executor_zh_review_coordinator_obligation_parity() {
+        // 2026-06-08 fix parity: ZH preset must mirror the EN preset's
+        // `obligations:` block with `conditional_must_emit` on
+        // review-coordinator. Without this the ZH preset cannot
+        // catch the U3/U4 failure mode (review-coordinator emits
+        // review.passed for a 400-line diff, skipping the wave).
+        let en = read_root_preset("ce-executor.yml");
+        let zh = read_root_preset("ce-executor-zh.yml");
+        let en_config = RalphConfig::parse_yaml(&en).expect("EN preset should parse");
+        let zh_config = RalphConfig::parse_yaml(&zh).expect("ZH preset should parse");
+
+        let en_rc = en_config
+            .hats
+            .get("review-coordinator")
+            .expect("EN must define review-coordinator");
+        let zh_rc = zh_config
+            .hats
+            .get("review-coordinator")
+            .expect("ZH must define review-coordinator");
+
+        // The structural fix requires `obligations:` on review-coordinator.
+        assert!(
+            !zh_rc.obligations.is_empty(),
+            "ZH review-coordinator must declare at least one obligation (U3/U4 bug fix)"
+        );
+
+        // Each EN obligation on work.done / fix.applied must have a
+        // matching ZH obligation on the same trigger topic.
+        for en_obligation in &en_rc.obligations {
+            let zh_obligation = zh_rc
+                .obligations
+                .iter()
+                .find(|o| o.on_trigger == en_obligation.on_trigger)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "ZH review-coordinator must have an obligation for on_trigger={}",
+                        en_obligation.on_trigger
+                    )
+                });
+            // Each EN conditional on a given trigger must have a
+            // matching ZH conditional (same predicate intent).
+            assert_eq!(
+                en_obligation.conditional_must_emit.len(),
+                zh_obligation.conditional_must_emit.len(),
+                "ZH obligation on '{}' must have the same number of conditional_must_emit entries as EN ({})",
+                en_obligation.on_trigger,
+                en_obligation.conditional_must_emit.len()
+            );
+            // The strict set for each EN conditional must be review.wave.ready
+            // (the same set ZH emits when an EN-style tightening applies).
+            for (en_cond, zh_cond) in en_obligation
+                .conditional_must_emit
+                .iter()
+                .zip(zh_obligation.conditional_must_emit.iter())
+            {
+                assert_eq!(
+                    en_cond.must_emit_any_of, zh_cond.must_emit_any_of,
+                    "ZH obligation on '{}' conditional must_emit_any_of must match EN",
+                    en_obligation.on_trigger
+                );
+            }
+        }
+
+        // ZH instructions must contain the HARD RULE段 and skip_reason audit mention.
+        let zh_instructions = zh_rc.instructions.as_str();
+        assert!(
+            zh_instructions.contains("HARD RULE"),
+            "ZH review-coordinator instructions must include HARD RULE段"
+        );
+        assert!(
+            zh_instructions.contains("skip_reason"),
+            "ZH review-coordinator instructions must mention skip_reason audit field"
+        );
+        // ZH should NOT have a soft default_publishes兜底 (the strict
+        // obligation path is in charge; keeping both would be confusing
+        // and could mask enforcement).
+        assert!(
+            zh_rc.default_publishes.is_none(),
+            "ZH review-coordinator must NOT have default_publishes — the strict obligation path replaces it"
+        );
+    }
+
+    #[test]
     fn test_ce_executor_plan_gate_exists_and_routes_correctly() {
         // R1-R4: plan-gate must exist, must subscribe to review.passed + review.complete,
         // must publish queue.advance / plan.complete / plan.blocked, and must NOT
@@ -1711,23 +1794,31 @@ mod tests {
         );
 
         // The required set must be exactly the plan's documented minimum
-        // (plan_name, plan_path, task_id, task_key, step). If a future
-        // change drops one of these fields, contract validation will
-        // weaken silently.
-        let required_minimum: std::collections::BTreeSet<&str> =
-            ["plan_name", "plan_path", "task_id", "task_key", "step"]
-                .iter()
-                .copied()
-                .collect();
+        // (plan_name, plan_path, task_id, task_key, step + 2026-06-08 fix:
+        // commit_count + changed_lines for the review-coordinator gate).
+        // If a future change drops one of these fields, contract validation
+        // will weaken silently.
+        let required_minimum: std::collections::BTreeSet<&str> = [
+            "plan_name",
+            "plan_path",
+            "task_id",
+            "task_key",
+            "step",
+            "commit_count",
+            "changed_lines",
+        ]
+        .iter()
+        .copied()
+        .collect();
         assert_eq!(
             contract_fields, required_minimum,
             "ce-executor work.done contract must require exactly \
-             {{plan_name, plan_path, task_id, task_key, step}}"
+             {{plan_name, plan_path, task_id, task_key, step, commit_count, changed_lines}}"
         );
         assert_eq!(
             schema_fields, required_minimum,
             "ce-executor work.done event_policy schema must require exactly \
-             {{plan_name, plan_path, task_id, task_key, step}}"
+             {{plan_name, plan_path, task_id, task_key, step, commit_count, changed_lines}}"
         );
 
         // Executor instructions must mention every required field. Use

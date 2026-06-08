@@ -38,8 +38,8 @@ pub use event_projection::{EventProjectionConfig, ProjectionMode, ProjectionRule
 pub use execution_contracts::ExecutionContractRule;
 pub use features::FeaturesConfig;
 pub use hat::{
-    ActivationObligation, AggregateConfig, AggregateMode, EventMetadata, HatBackend, HatConfig,
-    obligation_satisfied,
+    ActivationObligation, AggregateConfig, AggregateMode, ConditionalEmission, EventMetadata,
+    HatBackend, HatConfig, TriggerContext, TriggerPredicate, obligation_satisfied,
 };
 pub use hooks::{
     HookDefaults, HookMutationConfig, HookOnError, HookPhaseEvent, HookSpec, HookSuspendMode,
