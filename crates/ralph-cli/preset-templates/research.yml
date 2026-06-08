@@ -1,0 +1,67 @@
+# Research Preset Template
+# Deep exploration for codebase analysis, architecture review, technology evaluation
+#
+# Key behavior: NO code changes, NO commits. Pure information gathering.
+#
+# Usage:
+#   ralph preset new research --name my-research --output .ralph/hats/my-research.yml
+
+x_preset:
+  schema_version: 1
+  template: research
+  template_version: "1.0.0"
+  generated_by: "ralph preset new"
+  generated_at: {{generated_at}}
+  name: {{preset_name}}
+  description: {{description}}
+  check_profile: authoring
+  ralph_compat: ">=0.2.0"
+
+event_loop:
+  prompt_file: "PROMPT.md"
+  completion_promise: "RESEARCH_COMPLETE"
+  required_events: ["research.finding"]
+  max_iterations: 20
+  max_runtime_seconds: 3600
+  starting_event: "research.start"
+
+cli:
+  backend: "claude"
+
+core:
+  specs_dir: ".agents/scratchpad/"
+  guardrails:
+    - "ABSOLUTE PROHIBITION: NEVER kill, signal, or terminate any `ralph` / `ralph-orchestrator` process — including `kill`, `pkill`, `killall`, `kill -9`, `kill -TERM`, `kill -HUP`, `taskkill`, or any equivalent process-control command targeting the loop's parent PID, the TUI subprocess PID recorded in `.ralph/loop.lock`, any PID listed in `.ralph/loops.json`, or any PID returned by `ps` / `pgrep` matching `ralph`. The currently running ralph IS the parent process of this very agent iteration — killing it ends the agent itself mid-thought and corrupts orchestration state (stale lock, in_progress tasks, lost events). If the loop needs to restart to pick up new configuration, emit `loop.cancel`, surface a `research.blocked` / `RESEARCH_COMPLETE` with a clear reason, or instruct the human operator to run `ralph loops stop <loop_id>`. Stopping the orchestrator is the operator's decision, not the agent's."
+
+hats:
+  researcher:
+    name: "Researcher"
+    description: "Gathers information and analyzes patterns. No code changes."
+    triggers: ["research.start", "research.followup"]
+    publishes: ["research.finding"]
+    default_publishes: "research.finding"
+    instructions: |
+      ## RESEARCHER MODE
+
+      Gather information, analyze patterns, synthesize insights.
+      NO code changes, NO commits. Pure information gathering.
+
+      ### Process
+      1. Create `.eval-sandbox/research/plan.md` as a wave plan
+      2. Research the topic with evidence-backed findings
+      3. Update `.eval-sandbox/research/summary.md`
+      4. Emit `research.finding` with task_id and findings
+
+  synthesizer:
+    name: "Synthesizer"
+    description: "Reviews findings and creates coherent summary."
+    triggers: ["research.finding"]
+    publishes: ["research.followup", "RESEARCH_COMPLETE"]
+    instructions: |
+      ## SYNTHESIZER MODE
+
+      Review findings and create coherent summary.
+      Decide between follow-up research or completion.
+
+      If gaps remain, emit `research.followup`.
+      If complete, emit `RESEARCH_COMPLETE`.

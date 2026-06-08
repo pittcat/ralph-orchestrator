@@ -1,0 +1,92 @@
+# CE Executor Lite Preset Template
+# Simplified plan-driven execution without wave review
+# Good for straightforward implementation tasks
+#
+# Usage:
+#   ralph preset new ce-executor-lite --name my-executor --output .ralph/hats/my-executor.yml
+
+x_preset:
+  schema_version: 1
+  template: ce-executor-lite
+  template_version: "1.0.0"
+  generated_by: "ralph preset new"
+  generated_at: {{generated_at}}
+  name: {{preset_name}}
+  description: {{description}}
+  check_profile: strict
+  ralph_compat: ">=0.2.0"
+
+tasks:
+  enabled: true
+  coordinator_hats:
+    - executor
+
+event_loop:
+  prompt_file: "PROMPT.md"
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["work.done"]
+  starting_event: "work.start"
+  max_iterations: 30
+  max_runtime_seconds: 7200
+  enforce_hat_scope: true
+  event_policy:
+    enabled: true
+    mode: enforce
+    schemas:
+      work.ready:
+        required_fields: [plan_name, plan_path, task_id, task_key, step, complexity]
+        payload: json_object
+      work.done:
+        required_fields: [plan_name, plan_path, task_id, task_key, step]
+        payload: json_object
+      work.failed:
+        required_fields: [reason]
+        payload: json_object
+
+cli:
+  backend: "claude"
+  prompt_mode: "arg"
+
+core:
+  specs_dir: ".agents/scratchpad/"
+  guardrails:
+    - "Fresh context each iteration — save learnings to memories for next time"
+    - "Verification is mandatory — tests/typecheck/lint/audit must pass"
+    - "ABSOLUTE PROHIBITION: NEVER push to origin or any remote repository. Commit locally only."
+    - "ABSOLUTE PROHIBITION: NEVER kill, signal, or terminate any `ralph` / `ralph-orchestrator` process — including `kill`, `pkill`, `killall`, `kill -9`, `kill -TERM`, `kill -HUP`, `taskkill`, or any equivalent process-control command targeting the loop's parent PID, the TUI subprocess PID recorded in `.ralph/loop.lock`, any PID listed in `.ralph/loops.json`, or any PID returned by `ps` / `pgrep` matching `ralph`. The currently running ralph IS the parent process of this very agent iteration — killing it ends the agent itself mid-thought and corrupts orchestration state."
+
+hats:
+  coordinator:
+    name: "Coordinator"
+    description: "Parses plan files and creates runtime tasks."
+    triggers: ["work.start"]
+    publishes: ["work.ready", "work.failed"]
+    default_publishes: "work.failed"
+    instructions: |
+      ## COORDINATOR MODE
+
+      Parse the plan file and create runtime tasks.
+      Emit `work.ready` with first task.
+
+  executor:
+    name: "Executor"
+    description: "Implements plan-driven work, one task per iteration."
+    triggers: ["work.ready", "work.retry"]
+    publishes: ["work.done", "work.failed"]
+    instructions: |
+      ## EXECUTOR MODE
+
+      Execute the assigned task following plan.md.
+
+      ### Task Loop
+      1. Start the task
+      2. Read plan and context
+      3. Implement
+      4. Verify (tests, build, lint)
+      5. Close task
+      6. Emit `work.done`
+
+      ### Constraints
+      - ONE task per iteration
+      - Tests before implementation
+      - Commit after each completed unit
