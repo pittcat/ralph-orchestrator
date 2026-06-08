@@ -195,6 +195,30 @@ hats:
       - 只创建当前步骤的 tasks（不提前创建未来步骤）
       - **Trivial 模式**：只创建一个 summary task，key 为 `ce-executor:{plan_name}:trivial`
 
+      ### 任务拆分启发式
+      将 Implementation Units 转换为 runtime tasks 时，默认每个 U 拆为**一张 task**，
+      除非该 U 明确需要拆分。
+
+      **默认（每个 U 一张 task）：**
+      - U-ID 就是粒度。一个覆盖 4 个文件级改动的 U 算作**一张** task，
+        拥有唯一的 `task_id`，key 形如
+        `ce-executor:{plan_name}:step-01:u0-characterization-tests`。
+      - 理由：executor 在同一次迭代内完成整个 U，并发出恰好 1 个
+        `work.done`，其 payload 只引用该 `task_id`。这与契约一致：
+        `work.done` 必须与它引用的 task 对账。
+
+      **只有以下情况才拆为多张 task：**
+      - plan 显式枚举了子单元（U1a / U1b / U1c）并把它们标注为可独立测试的交付物。
+      - 工作天然适合 wave 并行（例如不同 crate 的独立测试文件），
+        且 plan 调用了 `concurrency > 1`。
+      - 该 U 跨越独立 worktree（ce-executor 中罕见；默认单工作区）。
+
+      **反模式（不要这样做）：**
+      - 把单个 U0（"为当前 preset 各面添加表征测试"）拆成 4 张独立 task
+        （每个文件一张），但 plan 并没有要求这样的粒度。executor 会写这 4 个
+        文件的代码，但只发 1 个 `work.done` 引用第一张 task —— 留下 3 张 task
+        未关闭，触发契约对未引用 task 的 `TaskNotTerminal` 拒绝。
+
       ### 环境检查
       - 检查当前分支：`git branch --show-current`
       - 记录 `start_sha = git rev-parse HEAD` 到 context.md（用于 review 范围锚定）
@@ -274,13 +298,17 @@ hats:
       **Small/Large**：进入标准任务执行循环。
 
       ### 任务执行循环（Small/Large）
+      ⚠️ 硬性规则：第 5 步（`ralph tools task close <task_id>`）是必做的，
+      在发出 `work.done` 之前必须先执行。执行契约会拒绝 `work.done`，
+      如果所引用的 task 不在终态。
+
       ```
       while (当前步骤有未完成的任务):
         1. ralph tools task start <task_id>
         2. 读取任务相关文件和模式
         3. 实现代码（根据 Execution note 选择策略）
         4. 运行并验证测试
-        5. ralph tools task close <task_id>
+        5. ralph tools task close <task_id>     ← 缺失 → 契约拒绝
         6. 评估增量提交
       ```
 

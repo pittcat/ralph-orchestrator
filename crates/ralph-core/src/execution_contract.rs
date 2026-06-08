@@ -37,6 +37,23 @@ use std::path::Path;
 use std::process::Command;
 use tracing::warn;
 
+/// Hint appended to the `TaskNotTerminal` rejection message so the rejected
+/// agent (or human reader) sees an actionable `ralph tools task close`
+/// command and knows the next concrete step. The `<task_id>` placeholder
+/// is replaced with the actual task id at the rejection site.
+///
+/// Kept as a single line on purpose (Tenet #2: backpressure over
+/// prescription): the `HUMAN GUIDANCE` injection path copies this string
+/// into a numbered list entry, so embedded newlines would break that
+/// contract and degrade the message into a hard-to-scan blob.
+const TASK_NOT_TERMINAL_HINT_TEMPLATE: &str =
+    " Run `ralph tools task close <task_id>` first, then re-emit work.done with task_id=<task_id>.";
+
+/// Render the `TaskNotTerminal` hint with the actual task id substituted in.
+fn task_not_terminal_hint(task_id: &str) -> String {
+    TASK_NOT_TERMINAL_HINT_TEMPLATE.replace("<task_id>", task_id)
+}
+
 /// Git evidence provider abstraction for testability.
 pub trait GitEvidenceProvider: Send + Sync {
     /// Returns true if the workspace is a git repository.
@@ -525,8 +542,11 @@ fn validate_task(
                 allowed: rule.require_task.allowed_terminal_statuses.clone(),
             },
             message: format!(
-                "Task '{}' has status '{}', expected one of {:?}",
-                task_id, status_str, rule.require_task.allowed_terminal_statuses
+                "Task '{}' has status '{}', expected one of {:?}.{}",
+                task_id,
+                status_str,
+                rule.require_task.allowed_terminal_statuses,
+                task_not_terminal_hint(task_id.as_str()),
             ),
             topic: event.topic.to_string(),
             ..Default::default()
@@ -1009,6 +1029,171 @@ mod tests {
                 );
             }
             ExecutionContractDecision::Accept => panic!("Expected rejection for nonexistent task"),
+        }
+    }
+
+    // === U1 / F1 TaskNotTerminal message-hint tests ===
+    //
+    // The cheery-eagle "forgot to close" incident (see plan
+    // docs/plans/2026-06-08-002-fix-ce-executor-preset-forgot-close-step-guard-plan.md)
+    // showed the previous `TaskNotTerminal` message only diagnosed the
+    // problem ("status is open, expected closed") without telling the
+    // agent what to do. These tests pin the new contract: the rejection
+    // message MUST include the `ralph tools task close <task_id>` command
+    // and MUST stay on a single line so the `HUMAN GUIDANCE` injection
+    // path can copy it verbatim into a numbered list entry.
+
+    /// Write a single task to a fresh tasks.jsonl with the given id, status,
+    /// and (optional) loop_id. Mirrors the helper used by the marker/loop
+    /// tests at the bottom of this module.
+    fn write_task(
+        tasks_path: &std::path::Path,
+        task_id: &str,
+        status: TaskStatus,
+        loop_id: Option<&str>,
+    ) {
+        if let Some(parent) = tasks_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let mut store = TaskStore::load(tasks_path).unwrap();
+        let mut task =
+            Task::new(format!("task {task_id}"), 1).with_loop_id(loop_id.map(str::to_string));
+        task.id = task_id.to_string();
+        task.status = status;
+        store.add(task);
+        store.save().unwrap();
+    }
+
+    #[test]
+    fn test_task_not_terminal_message_includes_close_hint() {
+        // Task exists in the store but is still `open`; the contract rule
+        // requires `closed`. The expected `TaskNotTerminal` finding's
+        // message must (a) preserve the original diagnostic and (b)
+        // include the actionable `ralph tools task close T` command with
+        // the real task id, not the `<task_id>` placeholder.
+        let temp = TempDir::new().unwrap();
+        let ralph_dir = temp.path().join(".ralph");
+        std::fs::create_dir_all(ralph_dir.join("agent")).unwrap();
+        let tasks_path = ralph_dir.join("agent/tasks.jsonl");
+        write_task(&tasks_path, "T", TaskStatus::Open, Some("loop-1"));
+
+        let rule = make_work_done_rule();
+        let event = Event::new(
+            "work.done",
+            r#"{"plan_name":"p","plan_path":"/p","task_id":"T","task_key":"k","step":"step-01"}"#,
+        );
+
+        let decision = validate_execution_contract(
+            &event,
+            &rule,
+            temp.path(),
+            "loop-1",
+            &tasks_path,
+            None,
+            &DefaultGitEvidenceProvider,
+            None,
+        );
+
+        match &decision {
+            ExecutionContractDecision::Reject(findings) => {
+                let finding = findings
+                    .iter()
+                    .find_map(|f| match &f.kind {
+                        ExecutionContractViolationKind::TaskNotTerminal { .. } => Some(f),
+                        _ => None,
+                    })
+                    .expect("Should have a TaskNotTerminal rejection");
+
+                // Diagnostic prefix is preserved.
+                assert!(
+                    finding.message.contains("Task 'T' has status 'open'"),
+                    "diagnostic prefix missing: {}",
+                    finding.message
+                );
+                // Actionable hint is present, with the real task id and
+                // the literal `ralph tools task close` command.
+                assert!(
+                    finding.message.contains("ralph tools task close T"),
+                    "close hint missing actual task id: {}",
+                    finding.message
+                );
+                // The placeholder must have been substituted, not leaked.
+                assert!(
+                    !finding.message.contains("<task_id>"),
+                    "placeholder leaked into message: {}",
+                    finding.message
+                );
+                // And the hint points the agent at re-emitting work.done
+                // with the same task_id.
+                assert!(
+                    finding.message.contains("re-emit work.done with task_id=T"),
+                    "re-emit hint missing: {}",
+                    finding.message
+                );
+            }
+            ExecutionContractDecision::Accept => {
+                panic!("Expected TaskNotTerminal rejection for open task")
+            }
+        }
+    }
+
+    #[test]
+    fn test_task_not_terminal_message_is_human_readable() {
+        // The HUMAN GUIDANCE injection path embeds finding messages into
+        // a numbered list. Any embedded newline would either be stripped
+        // (losing the hint) or break the bullet formatting. Pin the
+        // contract: the message must be a single line.
+        let temp = TempDir::new().unwrap();
+        let ralph_dir = temp.path().join(".ralph");
+        std::fs::create_dir_all(ralph_dir.join("agent")).unwrap();
+        let tasks_path = ralph_dir.join("agent/tasks.jsonl");
+        write_task(&tasks_path, "T", TaskStatus::Open, Some("loop-1"));
+
+        let rule = make_work_done_rule();
+        let event = Event::new(
+            "work.done",
+            r#"{"plan_name":"p","plan_path":"/p","task_id":"T","task_key":"k","step":"step-01"}"#,
+        );
+
+        let decision = validate_execution_contract(
+            &event,
+            &rule,
+            temp.path(),
+            "loop-1",
+            &tasks_path,
+            None,
+            &DefaultGitEvidenceProvider,
+            None,
+        );
+
+        match &decision {
+            ExecutionContractDecision::Reject(findings) => {
+                let finding = findings
+                    .iter()
+                    .find_map(|f| match &f.kind {
+                        ExecutionContractViolationKind::TaskNotTerminal { .. } => Some(f),
+                        _ => None,
+                    })
+                    .expect("Should have a TaskNotTerminal rejection");
+
+                assert!(
+                    !finding.message.contains('\n'),
+                    "TaskNotTerminal message must stay on a single line for HUMAN GUIDANCE: {:?}",
+                    finding.message
+                );
+                assert!(
+                    !finding.message.contains('\r'),
+                    "TaskNotTerminal message must not contain carriage returns: {:?}",
+                    finding.message
+                );
+                assert!(
+                    !finding.message.is_empty(),
+                    "TaskNotTerminal message must not be empty"
+                );
+            }
+            ExecutionContractDecision::Accept => {
+                panic!("Expected TaskNotTerminal rejection for open task")
+            }
         }
     }
 

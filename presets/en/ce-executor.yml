@@ -200,6 +200,34 @@ hats:
       - Only create current step's tasks (do not pre-create future steps)
       - **Trivial mode**: create one summary task, key `ce-executor:{plan_name}:trivial`
 
+      ### Task Split Heuristics
+      When converting Implementation Units to runtime tasks, prefer **one task per
+      Implementation Unit** unless the unit explicitly requires splitting.
+
+      **Default (one task per U):**
+      - U-ID is the granularity. A single U covering 4 file-level changes is
+        **one** task with a single `task_id` and a key like
+        `ce-executor:{plan_name}:step-01:u0-characterization-tests`.
+      - Rationale: the executor completes the whole U in one iteration and
+        emits exactly one `work.done` with that single `task_id`. This matches
+        the contract: `work.done` is checked against the task it references.
+
+      **Split into multiple tasks only when:**
+      - The plan explicitly enumerates sub-units (U1a / U1b / U1c) and labels
+        them as separately testable deliverables.
+      - The work is naturally wave-parallel (e.g., independent test files
+        for different crates) AND the plan invokes `concurrency > 1`.
+      - The unit spans independent worktrees (rare in ce-executor; default
+        is single-workspace).
+
+      **Anti-pattern (do not do):**
+      - Splitting a single U0 ("Add characterization tests for current preset
+        surfaces") into 4 separate tasks (one per file) when the plan does not
+        call for that granularity. The executor will write code for all 4 but
+        only emit 1 `work.done` referencing the first task — leaving 3 tasks
+        open and triggering the contract's `TaskNotTerminal` rejection for the
+        unreferenced ones.
+
       ### Environment Check
       - Check current branch: `git branch --show-current`
       - Record `start_sha = git rev-parse HEAD` in context.md (for review scope anchoring)
@@ -292,13 +320,17 @@ hats:
       **Small/Large**: Enter standard task execution loop.
 
       ### Task Execution Loop (Small/Large)
+      ⚠️ HARD RULE: Step 5 (`ralph tools task close <task_id>`) is REQUIRED
+      before emitting `work.done`. The execution contract will REJECT
+      `work.done` if the referenced task is not in a terminal state.
+
       ```
       while (current step has uncompleted tasks):
         1. ralph tools task start <task_id>
         2. Read task files and patterns
         3. Implement (test-first / characterization-first per Execution note)
         4. Run and verify tests
-        5. ralph tools task close <task_id>
+        5. ralph tools task close <task_id>     ← missing → contract rejection
         6. Evaluate incremental commit
       ```
 

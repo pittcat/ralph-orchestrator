@@ -1016,6 +1016,12 @@ still works, but the inline form is preferred for consistency.
 | `schemas/code-assist.yml`        | `code-assist`         | Deprecated reference copy (schemas inlined into `presets/en/code-assist.yml`) |
 | `schemas/pdd-to-code-assist.yml` | `pdd-to-code-assist`  | Deprecated reference copy (schemas inlined into `presets/en/pdd-to-code-assist.yml`) |
 
+### Task Split Heuristics (ce-executor)
+
+**Task Split Heuristics**: `ce-executor` coordinator 默认每 U 拆 1 张 task；
+只有在 plan 显式列子单元、需要 wave 并行、或跨 worktree 时才拆多张。
+详见 `presets/en/ce-executor.yml` 的 coordinator "Task Split Heuristics" 段。
+
 ### Checklist for Preset Authors (Payload Contracts)
 
 - [ ] Do any hats' instructions reference payload fields with `From event payload:` or `payload MUST include:`? If yes, declare the field in the topic's schema `required_fields` directly under `event_policy.schemas` in the preset yml.
