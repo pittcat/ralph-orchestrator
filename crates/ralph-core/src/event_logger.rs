@@ -43,6 +43,102 @@ where
         .unwrap_or_default())
 }
 
+/// Raw deserialization shape used to normalize off-spec event lines
+/// before constructing an `EventRecord`.
+///
+/// Background: the `ce-executor` wave worker StreamJson was observed to
+/// write event lines into the events file via an output-parsing side
+/// channel using non-canonical field names and a literal `null` for `ts`:
+///   - `{"timestamp":"2024-01-15T10:00:00Z", ...}`  (long-form key)
+///   - `{"ts": null, ...}`                          (literal null)
+///   - `{"type":"review.dimension.done", ...}`     (`type` instead of `topic`)
+///
+/// The default `String` deserializer on `ts: String` rejects `null` and
+/// `serde_json::from_str::<EventRecord>` returns `Err`, causing the read
+/// path (`EventHistory::read_all`, `event_watcher.rs`) to silently drop
+/// the line. This struct accepts every off-spec variant and the
+/// `From`/`From` conversion normalizes them into the canonical
+/// `EventRecord` form.
+#[derive(Debug, Deserialize)]
+pub struct EventRecordRaw {
+    /// Canonical ISO 8601 timestamp (`"ts"`), or `null`.
+    #[serde(default)]
+    ts: Option<String>,
+    /// StreamJson long-form timestamp (`"timestamp"`).
+    #[serde(default)]
+    timestamp: Option<String>,
+    /// Loop iteration number (0 if not provided by agent-written events).
+    #[serde(default)]
+    iteration: u32,
+    /// Hat that was active when event was published.
+    #[serde(default)]
+    hat: String,
+    /// Canonical event topic (`"topic"`).
+    #[serde(default)]
+    topic: Option<String>,
+    /// Off-spec event topic (`"type"`), used as a fallback when `topic` is absent.
+    #[serde(rename = "type", default)]
+    topic_type: Option<String>,
+    /// Hat that will be triggered by this event.
+    #[serde(default)]
+    triggered: Option<String>,
+    /// Event content (truncated if large).
+    #[serde(default, deserialize_with = "deserialize_flexible_payload")]
+    payload: String,
+    /// How many times this task has blocked.
+    #[serde(default)]
+    blocked_count: Option<u32>,
+    /// Wave correlation ID.
+    #[serde(default)]
+    wave_id: Option<String>,
+    /// Index of this event within the wave (0-based).
+    #[serde(default)]
+    wave_index: Option<u32>,
+    /// Total number of events in the wave.
+    #[serde(default)]
+    wave_total: Option<u32>,
+    /// Current orchestration phase (warmup / production).
+    #[serde(rename = "_phase", default)]
+    phase: Option<String>,
+}
+
+impl From<EventRecordRaw> for EventRecord {
+    fn from(raw: EventRecordRaw) -> Self {
+        // Resolve `ts`:
+        //   - canonical `"ts": "..."` -> as-is
+        //   - long-form `"timestamp": "..."` -> prefer over null `ts`
+        //   - `"ts": null` or missing -> fall back to `"timestamp"`, then `now()`
+        let ts = raw
+            .ts
+            .filter(|s| !s.is_empty())
+            .or(raw.timestamp)
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+
+        // Resolve `topic`:
+        //   - canonical `"topic": "..."` -> as-is
+        //   - off-spec `"type": "..."` -> fallback when `topic` is missing/null
+        //   - both missing -> empty string
+        let topic = raw
+            .topic
+            .or(raw.topic_type)
+            .unwrap_or_default();
+
+        Self {
+            ts,
+            iteration: raw.iteration,
+            hat: raw.hat,
+            topic,
+            triggered: raw.triggered,
+            payload: raw.payload,
+            blocked_count: raw.blocked_count,
+            wave_id: raw.wave_id,
+            wave_index: raw.wave_index,
+            wave_total: raw.wave_total,
+            phase: raw.phase,
+        }
+    }
+}
+
 /// A logged event record for debugging.
 ///
 /// Supports two schemas:
@@ -51,18 +147,22 @@ where
 /// 2. Simple agent format (written by agents):
 ///    `{"topic":"build.task","payload":"...","ts":"2024-01-15T10:24:12Z"}`
 ///
+/// In addition, the deserializer tolerates three off-spec writer shapes
+/// observed from the `ce-executor` wave worker StreamJson side channel:
+/// - `"timestamp"` instead of `"ts"`
+/// - `"ts": null` (falls back to `now()`)
+/// - `"type"` instead of `"topic"`
+///
 /// Fields that don't exist in the agent format default to sensible values.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct EventRecord {
     /// ISO 8601 timestamp.
     pub ts: String,
 
     /// Loop iteration number (0 if not provided by agent-written events).
-    #[serde(default)]
     pub iteration: u32,
 
     /// Hat that was active when event was published (empty string if not provided).
-    #[serde(default)]
     pub hat: String,
 
     /// Event topic.
@@ -74,7 +174,6 @@ pub struct EventRecord {
 
     /// Event content (truncated if large). Defaults to empty string for agent events without payload.
     /// Accepts both string and object payloads - objects are serialized to JSON strings.
-    #[serde(default, deserialize_with = "deserialize_flexible_payload")]
     pub payload: String,
 
     /// How many times this task has blocked (optional).
@@ -82,20 +181,30 @@ pub struct EventRecord {
     pub blocked_count: Option<u32>,
 
     /// Wave correlation ID.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub wave_id: Option<String>,
 
     /// Index of this event within the wave (0-based).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub wave_index: Option<u32>,
 
     /// Total number of events in the wave.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub wave_total: Option<u32>,
 
     /// Current orchestration phase (warmup / production).
-    #[serde(rename = "_phase", default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "_phase", skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for EventRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = EventRecordRaw::deserialize(deserializer)?;
+        Ok(EventRecord::from(raw))
+    }
 }
 
 impl EventRecord {
@@ -849,6 +958,66 @@ mod tests {
         let records = history.read_all().unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].topic, "test.history");
+    }
+
+    #[test]
+    fn test_ts_deserializer_accepts_long_form_timestamp_key() {
+        // StreamJson workers sometimes emit `"timestamp"` instead of `"ts"`.
+        // The deserializer should read `"timestamp"` and store it in `ts`.
+        let json = r#"{"timestamp":"2024-01-15T10:00:00Z","iteration":1,"hat":"dimension-reviewer","topic":"review.dimension.done","payload":"ok"}"#;
+        let record: EventRecord = serde_json::from_str(json).unwrap();
+        assert_eq!(record.ts, "2024-01-15T10:00:00Z");
+        assert_eq!(record.topic, "review.dimension.done");
+    }
+
+    #[test]
+    fn test_ts_deserializer_falls_back_to_now_when_null() {
+        // Writer path observed: `"ts": null`. The deserializer should fall
+        // back to a non-empty ISO 8601 timestamp rather than failing the
+        // read (which would silently drop the event line in the reader).
+        let json = r#"{"ts":null,"iteration":1,"hat":"dimension-reviewer","topic":"review.dimension.done","payload":"ok"}"#;
+        let record: EventRecord = serde_json::from_str(json).unwrap();
+        assert!(!record.ts.is_empty(), "ts should fall back to a non-empty value");
+        // Must be a valid RFC3339 timestamp.
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&record.ts).is_ok(),
+            "ts should be a valid RFC3339 string, got: {}",
+            record.ts
+        );
+    }
+
+    #[test]
+    fn test_ts_deserializer_falls_back_to_now_when_missing() {
+        // Some writers omit `ts` entirely. The deserializer should fall back
+        // to a current-time timestamp instead of failing.
+        let json = r#"{"iteration":1,"hat":"dimension-reviewer","topic":"review.dimension.done","payload":"ok"}"#;
+        let record: EventRecord = serde_json::from_str(json).unwrap();
+        assert!(!record.ts.is_empty(), "ts should fall back to a non-empty value");
+        assert!(chrono::DateTime::parse_from_rfc3339(&record.ts).is_ok());
+    }
+
+    #[test]
+    fn test_topic_deserializer_falls_back_to_type_key() {
+        // Writer path observed: `{"type":"review.dimension.done", ...}`.
+        // The deserializer should pull the topic from `type` when `topic` is
+        // missing.
+        let json = r#"{"type":"review.dimension.done","hat":"dimension-reviewer","payload":"ok","ts":"2024-01-15T10:00:00Z"}"#;
+        let record: EventRecord = serde_json::from_str(json).unwrap();
+        assert_eq!(record.topic, "review.dimension.done");
+        assert_eq!(record.ts, "2024-01-15T10:00:00Z");
+    }
+
+    #[test]
+    fn test_wave_worker_off_spec_event_roundtrips() {
+        // Combined regression: a single off-spec event from the wave worker
+        // StreamJson path (timestamp + topic, no canonical keys) should be
+        // read into a usable EventRecord with both `ts` and `topic` populated.
+        let json = r#"{"timestamp":"2024-01-15T10:00:00Z","hat":"dimension-reviewer","payload":"ok"}"#;
+        let record: EventRecord = serde_json::from_str(json).unwrap();
+        assert_eq!(record.ts, "2024-01-15T10:00:00Z");
+        // topic missing and no `type` key, so topic falls back to empty.
+        assert_eq!(record.topic, "");
+        assert_eq!(record.hat, "dimension-reviewer");
     }
 
     #[test]

@@ -121,6 +121,12 @@ fix.applied:
     - task_id
     - task_key
     - step
+    # Mirror work.done schema so the fix.applied → review-
+    # coordinator path carries diff-state context. Without these
+    # the gate cannot distinguish "fix changed 2 lines, skip
+    # review" from a real post-fix wave.
+    - commit_count
+    - changed_lines
   payload: json_object
 
 fix.exhausted:

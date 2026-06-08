@@ -796,8 +796,14 @@ hats:
       ### 修复后处理
       - 所有 safe_auto 修复完成：
         - 运行完整测试套件
-        - 全部通过 → publish `fix.applied`，payload：`fix_round`、`applied_count`、`failed_count`、`task_id`、`task_key`、`step`
+        - 全部通过 → publish `fix.applied`，payload：`plan_name`、`fix_round`、`applied_count`、`failed_count`、`task_id`、`task_key`、`step`、**`commit_count`**、**`changed_lines`**
         - 测试失败 → 回滚所有修改，publish `fix.exhausted`，payload：`plan_name`、`fix_round`、`reason: "post-fix verification failed"`、`residual_findings`、`failed_attempt_summary: <已应用的修改及验证揭示的问题>`、`task_id`、`task_key`、`step`
+
+      ### 计算 commit_count 和 changed_lines（硬性规则）
+      这两个字段是 preset 顶层 `event_policy.schemas.fix.applied` 合约的必填项——缺它们的 `fix.applied` 会被 EventPolicy 拒收，并产出 U7 `drift_field_completeness` envelope。值必须反映**发布时刻**的 diff 状态，而非修复前的状态：
+        - `commit_count` = `git rev-list --count ${BASE}..HEAD`（本轮新增 commit 数，解析为整数）
+        - `changed_lines` = `git diff --shortstat ${BASE}..HEAD` 中 insertions + deletions 之和（例如 `3 5` → 8）
+      如果本轮没产生新 commit（如纯文档编辑）但有文件改动，`commit_count` 可为 0，但 `changed_lines` 必须非零。`${BASE}` 使用 `context.md` 中记录的 `start_sha`。
 
       ### fix-log.md 格式
       ```markdown

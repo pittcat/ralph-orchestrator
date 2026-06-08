@@ -972,8 +972,21 @@ hats:
       ### Post-Fix Processing
       - All safe_auto fixes applied:
         - Run full test suite
-        - All pass → publish `fix.applied`, payload: `plan_name`, `fix_round`, `applied_count`, `failed_count`, `task_id`, `task_key`, `step`
+        - All pass → publish `fix.applied`, payload: `plan_name`, `fix_round`, `applied_count`, `failed_count`, `task_id`, `task_key`, `step`, **`commit_count`**, **`changed_lines`**
         - Tests fail → revert ALL changes (git stash pop or checkout), publish `fix.exhausted`, payload: `plan_name`, `fix_round`, `reason: "post-fix verification failed"`, `residual_findings`, `failed_attempt_summary: <what was applied and what the verification revealed>`, `task_id`, `task_key`, `step`
+
+      ### Computing commit_count and changed_lines (HARD RULE)
+      These two fields are required by the preset's `event_policy.schemas.fix.applied`
+      contract — emitting `fix.applied` without them is rejected by EventPolicy and
+      surfaces as U7 `drift_field_completeness` envelopes. The values MUST match the
+      diff state at the moment of publish, not the state before the fix round:
+        - `commit_count` = `git rev-list --count ${BASE}..HEAD` (number of commits
+          added during this fix round, parsed as integer)
+        - `changed_lines` = sum of insertions + deletions from
+          `git diff --shortstat ${BASE}..HEAD` (e.g., `3 5` parses to 8)
+      If the fix produced no new commits (e.g., a doc-only edit) but did change
+      files, `commit_count` may be 0; `changed_lines` must still be non-zero in
+      that case. Use the `start_sha` recorded in `context.md` as `${BASE}`.
 
       ### fix-log.md Format
       ```markdown
