@@ -1,0 +1,52 @@
+# Preset Static Lint: BDD scenario for authoring-time validation.
+#
+# Covers AE1: all builtin presets pass strict lint through the aggregator.
+# The scenario exercises real config parsing, aggregator, and gate paths
+# — not source-level string assertions.
+#
+# The config is a valid preset that passes all lint checks (topic format,
+# ownership, coordinator). A minimal mock response completes the loop
+# to prove the config round-trips through the event loop without error.
+
+name: preset_static_lint
+description: Valid preset config passes strict lint gate and completes loop
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 3
+  hats:
+    a:
+      name: "A"
+      description: "Producer"
+      triggers: ["work.start"]
+      publishes: ["work.ready"]
+      instructions: "Produce work."
+    b:
+      name: "B"
+      description: "Consumer"
+      triggers: ["work.ready"]
+      publishes: ["work.done"]
+      instructions: "Consume work."
+  event_loop:
+    starting_event: "work.start"
+    completion_promise: "work.done"
+  topic_owners:
+    work.ready: ["a"]
+    work.done: ["b"]
+  topic_format_whitelist:
+    - "LOOP_COMPLETE"
+  tasks:
+    enabled: false
+
+mock_responses:
+  - |
+    Task complete.
+    <event topic="work.done">
+    All work done.
+    </event>
+
+expected:
+  iterations: 1
+  events:
+    - topic: work.done
+  completion: true

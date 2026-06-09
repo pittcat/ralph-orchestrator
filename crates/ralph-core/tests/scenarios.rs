@@ -35,6 +35,12 @@ struct ConfigYaml {
     event_loop: serde_yaml::Value,
     #[serde(default)]
     core: serde_yaml::Value,
+    #[serde(default)]
+    tasks: serde_yaml::Value,
+    #[serde(default)]
+    topic_owners: serde_yaml::Value,
+    #[serde(default)]
+    topic_format_whitelist: serde_yaml::Value,
 }
 
 #[allow(dead_code)] // Test infrastructure - fields used for YAML deserialization
@@ -570,4 +576,88 @@ fn test_verdict_gate_fail_keeps_loop_open() {
     // `report.done` carried pass_or_fail="fail".
     let yaml = load_scenario("tests/scenarios/verdict_gate_fail_keeps_loop_open.yml");
     run_workflow_guard_scenario(yaml);
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// U6: Preset static lint BDD — AE1 coverage
+//
+// Exercises real config parsing, HatRegistry construction, and
+// RuntimeContractAggregator with strict preset_check_strict()
+// through the same path that `ralph preset check --strict` uses.
+// This is NOT a source-level string assertion — it runs the full
+// authoring lint pipeline.
+// ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_preset_static_lint_scenario() {
+    use ralph_core::HatRegistry;
+    use ralph_core::runtime_contract::{
+        FindingSeverity, RuntimeContractAggregator, RuntimeContractStrictness,
+    };
+
+    let yaml = load_scenario("tests/scenarios/preset_static_lint.yml");
+
+    // Build RalphConfig from the YAML config section (reuse workflow guard
+    // helper pattern for hat parsing).
+    let mut config = RalphConfig::default();
+    config.max_iterations = Some(yaml.config.max_iterations);
+    config.prompt_file = Some(yaml.config.prompt_file);
+    if !yaml.config.hats.is_null() {
+        if let Ok(hat_map) = serde_yaml::from_value::<
+            std::collections::HashMap<String, serde_yaml::Value>,
+        >(yaml.config.hats.clone())
+        {
+            let mut hats = std::collections::HashMap::new();
+            for (hat_id, mut hat_value) in hat_map {
+                if let Some(map) = hat_value.as_mapping_mut() {
+                    if !map.contains_key(&serde_yaml::Value::String("name".to_string())) {
+                        map.insert(
+                            serde_yaml::Value::String("name".to_string()),
+                            serde_yaml::Value::String(hat_id.clone()),
+                        );
+                    }
+                }
+                let hat_config: HatConfig = serde_yaml::from_value(hat_value)
+                    .unwrap_or_else(|e| panic!("Failed to parse hat '{}': {}", hat_id, e));
+                hats.insert(hat_id, hat_config);
+            }
+            config.hats = hats;
+        }
+    }
+    if !yaml.config.event_loop.is_null() {
+        config.event_loop = serde_yaml::from_value(yaml.config.event_loop).unwrap();
+    }
+    if !yaml.config.tasks.is_null() {
+        config.tasks = serde_yaml::from_value(yaml.config.tasks).unwrap();
+    }
+    if !yaml.config.topic_owners.is_null() {
+        config.topic_owners = serde_yaml::from_value(yaml.config.topic_owners).unwrap();
+    }
+    if !yaml.config.topic_format_whitelist.is_null() {
+        config.topic_format_whitelist =
+            serde_yaml::from_value(yaml.config.topic_format_whitelist).unwrap();
+    }
+
+    // Run the aggregator with strict preset_check_strict() — same path
+    // as `ralph preset check --strict` and the run hard gate.
+    let registry = HatRegistry::from_runtime_config(&config);
+    let strictness = RuntimeContractStrictness::preset_check_strict();
+    let report = RuntimeContractAggregator::aggregate(
+        "bdd:preset_static_lint",
+        &config,
+        &registry,
+        strictness,
+    );
+
+    // AE1: valid preset must pass strict lint.
+    assert!(
+        report.passed,
+        "preset_static_lint BDD scenario must pass strict lint: {:?}",
+        report
+            .findings
+            .iter()
+            .filter(|f| matches!(f.severity, FindingSeverity::Error | FindingSeverity::Warn))
+            .map(|f| format!("[{:?}] {}: {}", f.severity, f.id, f.message))
+            .collect::<Vec<_>>()
+    );
 }
