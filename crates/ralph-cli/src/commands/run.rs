@@ -941,6 +941,7 @@ pub async fn run_command(
             args.warmup_only,
             args.force_warmup,
             prebuilt_diagnostics,
+            args.no_sync_agent_docs,
         )
         .await?
     };

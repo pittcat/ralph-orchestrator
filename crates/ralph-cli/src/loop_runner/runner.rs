@@ -229,6 +229,7 @@ pub async fn run_loop_impl(
     warmup_only: bool,
     force_warmup: bool,
     prebuilt_diagnostics: Option<Arc<ralph_core::diagnostics::DiagnosticsCollector>>,
+    no_sync_agent_docs: bool,
 ) -> Result<TerminationReason> {
     // U5: Payload contract hard gate. Runs BEFORE any backend is spawned.
     // In strict mode (always on for `ralph run`), any payload contract
@@ -615,6 +616,92 @@ pub async fn run_loop_impl(
     // logger writes to a separate file from the trusted events file consumed
     // by EventReader. The start event only appears in history, not in the
     // trusted event stream.
+
+    // ── Agent doc sync (managed blocks injection) ────────────────────────
+    // Runs synchronously BEFORE backend spawn so constraint blocks are
+    // present in CLAUDE.md / AGENTS.md when the agent starts reading.
+    {
+        let env_skip = std::env::var("RALPH_AGENT_DOC_SYNC")
+            .map(|v| v == "0")
+            .unwrap_or(false);
+        let skip = ralph_core::should_skip(
+            env_skip,
+            no_sync_agent_docs,
+            &config.agent_doc_sync,
+        );
+
+        if skip {
+            tracing::debug!(
+                target: "ralph_cli::loop_runner",
+                "agent_doc_sync: skipped (disabled via flag/env/config)"
+            );
+        } else {
+            // Resolve block references from config to BlockSpec instances.
+            let mut blocks: Vec<ralph_core::agent_doc_sync::BlockSpec> = Vec::new();
+            for block_ref in &config.agent_doc_sync.blocks {
+                // Strip "builtin:" prefix to get the block ID.
+                let block_id = block_ref
+                    .strip_prefix("builtin:")
+                    .unwrap_or(block_ref);
+                match ralph_core::agent_doc_sync::builtin::builtin_block(block_id) {
+                    Some(spec) => blocks.push(spec),
+                    None => {
+                        tracing::warn!(
+                            target: "ralph_cli::loop_runner",
+                            block_ref = %block_ref,
+                            "agent_doc_sync: unknown block reference, skipping"
+                        );
+                    }
+                }
+            }
+
+            let on_error = match config.agent_doc_sync.on_error {
+                ralph_core::OnErrorPolicy::Warn => ralph_core::agent_doc_sync::OnError::Warn,
+                ralph_core::OnErrorPolicy::Strict => ralph_core::agent_doc_sync::OnError::Strict,
+            };
+
+            let sync_config = ralph_core::agent_doc_sync::SyncConfig {
+                skip: false,
+                on_error,
+                target_files: &["CLAUDE.md", "AGENTS.md"],
+                blocks: &blocks,
+            };
+
+            match ralph_core::agent_doc_sync::sync_all(
+                &config.core.workspace_root,
+                &sync_config,
+            ) {
+                Ok(report) => {
+                    tracing::debug!(
+                        target: "ralph_cli::loop_runner",
+                        synced = report.synced,
+                        skipped = report.skipped,
+                        failed = report.failed,
+                        "agent_doc_sync: complete"
+                    );
+                }
+                Err(e) => {
+                    match config.agent_doc_sync.on_error {
+                        ralph_core::OnErrorPolicy::Strict => {
+                            tracing::error!(
+                                target: "ralph_cli::loop_runner",
+                                error = %e,
+                                "agent_doc_sync: failed (strict mode), exiting"
+                            );
+                            std::process::exit(78);
+                        }
+                        ralph_core::OnErrorPolicy::Warn => {
+                            tracing::warn!(
+                                target: "ralph_cli::loop_runner",
+                                error = %e,
+                                "agent_doc_sync: failed; continuing"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Create backend from config - TUI mode uses the same backend as non-TUI
     // The TUI is an observation layer that displays output, not a different mode
