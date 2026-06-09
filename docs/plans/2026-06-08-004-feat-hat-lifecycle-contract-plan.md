@@ -1,7 +1,7 @@
 ---
 title: "feat: 强化 Hat 生命周期与 Topic 格式契约"
 type: feat
-status: active
+status: completed
 date: 2026-06-08
 origin: docs/brainstorms/2026-06-08-hat-lifecycle-contract-requirements.md
 ---
