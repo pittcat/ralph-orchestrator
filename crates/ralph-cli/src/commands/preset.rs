@@ -542,6 +542,7 @@ fn print_human_report(report: &RuntimeContractReport, use_colors: bool) {
 
     // Group findings by source
     let mut config_findings = Vec::new();
+    let mut lint_findings = Vec::new();
     let mut topology_findings = Vec::new();
     let mut orphan_findings = Vec::new();
     let mut payload_findings = Vec::new();
@@ -550,6 +551,9 @@ fn print_human_report(report: &RuntimeContractReport, use_colors: bool) {
         match finding.source {
             ralph_core::runtime_contract::FindingSource::Config => {
                 config_findings.push(finding);
+            }
+            ralph_core::runtime_contract::FindingSource::Lint => {
+                lint_findings.push(finding);
             }
             ralph_core::runtime_contract::FindingSource::Topology => {
                 topology_findings.push(finding);
@@ -572,6 +576,17 @@ fn print_human_report(report: &RuntimeContractReport, use_colors: bool) {
         print_finding_line(use_colors, FindingSeverity::Pass, "No config issues");
     } else {
         for finding in &config_findings {
+            print_finding_line(use_colors, finding.severity, &finding.message);
+        }
+    }
+    println!();
+
+    // Print Lint section
+    println!("Lint:");
+    if lint_findings.is_empty() {
+        print_finding_line(use_colors, FindingSeverity::Pass, "No lint issues");
+    } else {
+        for finding in &lint_findings {
             print_finding_line(use_colors, finding.severity, &finding.message);
         }
     }
