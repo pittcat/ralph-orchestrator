@@ -186,6 +186,7 @@ hats:
     triggers: ["work.start", "queue.advance"]
     publishes: ["work.batch.ready", "work.failed"]
     default_publishes: "work.failed"
+    terminal_events: ["work.batch.ready", "work.failed"]
     instructions: |
       ## COORDINATOR MODE — Plan Parsing, Task Decomposition, and Step Task Creation
 
@@ -286,6 +287,7 @@ hats:
     description: "Reads current step tasks, decides safe parallel vs serial fallback."
     triggers: ["work.batch.ready"]
     publishes: ["work.unit.ready", "work.serial.ready", "work.failed"]
+    terminal_events: ["work.unit.ready", "work.serial.ready", "work.failed"]
     instructions: |
       ## EXECUTION DISPATCHER MODE — Safe Parallel vs Serial Fallback Decision
 
@@ -366,6 +368,7 @@ hats:
     description: "Implements a single task unit in parallel wave. Only modifies owned files."
     triggers: ["work.unit.ready"]
     publishes: ["work.unit.done", "work.unit.failed"]
+    terminal_events: ["work.unit.done", "work.unit.failed"]
     concurrency: 3
     timeout: 1800
     instructions: |
@@ -423,6 +426,7 @@ hats:
     description: "Aggregates parallel worker results, validates boundaries, closes tasks, commits."
     triggers: ["work.unit.done", "work.unit.failed"]
     publishes: ["work.done", "work.failed"]
+    terminal_events: ["work.done", "work.failed"]
     aggregate:
       mode: wait_for_all
       timeout: 300
@@ -502,6 +506,7 @@ hats:
     description: "TDD implementer for serial fallback and fix plans. Handles tasks sequentially."
     triggers: ["work.serial.ready", "fix.plan.ready"]
     publishes: ["work.done", "work.failed"]
+    terminal_events: ["work.done", "work.failed"]
     instructions: |
       ## SERIAL EXECUTOR MODE — Plan-Driven Task Execution (Serial Path)
 
@@ -598,6 +603,7 @@ hats:
     description: "Diff analysis, intent discovery, conditional dimension selection, wave emission."
     triggers: ["work.done", "fix.applied"]
     publishes: ["review.wave.ready", "review.passed"]
+    terminal_events: ["review.wave.ready", "review.passed"]
     # Activation-level obligations.  `conditional_must_emit`
     # tightens the rule when the trigger payload shows non-trivial
     # work (commit_count>=1 / changed_lines>=50 / untracked files):
@@ -727,6 +733,7 @@ hats:
     description: "Focused wave-based code review for a single dimension."
     triggers: ["review.wave.ready"]
     publishes: ["review.dimension.done"]
+    terminal_events: ["review.dimension.done"]
     concurrency: 9
     timeout: 1800
     instructions: |
@@ -921,6 +928,7 @@ hats:
     triggers: ["review.dimension.done"]
     publishes: ["review.passed", "review.failed", "review.complete"]
     default_publishes: "review.complete"
+    terminal_events: ["review.passed", "review.failed", "review.complete"]
     aggregate:
       mode: wait_for_all
       # NOTE: This timeout controls how long the synthesizer waits for ALL dimension
@@ -1070,6 +1078,7 @@ hats:
     description: "Applies safe_auto findings up to 3 rounds."
     triggers: ["review.failed"]
     publishes: ["fix.applied", "fix.exhausted"]
+    terminal_events: ["fix.applied", "fix.exhausted"]
     # No default_publishes: fix.exhausted requires task correlation and failure context.
     # Missing events should hard-gate instead of injecting an empty fix.exhausted payload.
     instructions: |
@@ -1148,6 +1157,7 @@ hats:
     description: "Root-cause diagnosis after Fixer safe_auto exhaustion. Ports ce-debug Phase 0–2 discipline."
     triggers: ["fix.exhausted"]
     publishes: ["fix.plan.ready", "debug.exhausted", "plan.blocked"]
+    terminal_events: ["fix.plan.ready", "debug.exhausted", "plan.blocked"]
     # No default_publishes: debug.exhausted requires contextual payload fields,
     # so debug-resolver must explicitly emit fix.plan.ready/debug.exhausted/plan.blocked.
     instructions: |
@@ -1241,6 +1251,7 @@ hats:
     triggers: ["review.passed", "review.complete", "work.failed", "loop.cancel"]
     publishes: ["queue.advance", "plan.complete", "plan.blocked"]
     default_publishes: "plan.blocked"
+    terminal_events: ["queue.advance", "plan.complete", "plan.blocked"]
     instructions: |
       ## PLAN GATE MODE — Plan-Wide Progress Reconciliation and Routing
 
@@ -1308,6 +1319,7 @@ hats:
     triggers: ["plan.complete", "plan.blocked", "debug.exhausted"]
     publishes: ["REVIEW_COMPLETE"]
     default_publishes: "REVIEW_COMPLETE"
+    terminal_events: ["REVIEW_COMPLETE"]
     instructions: |
       ## SHIPPER MODE — Final Validation, Plan Completion, and Delivery
 
@@ -1408,6 +1420,7 @@ hats:
     triggers: ["REVIEW_COMPLETE"]
     publishes: ["report.done", "LOOP_COMPLETE"]
     default_publishes: "report.done"
+    terminal_events: ["report.done", "LOOP_COMPLETE"]
     obligations:
       - on_trigger: "REVIEW_COMPLETE"
         must_emit_any_of: ["report.done"]

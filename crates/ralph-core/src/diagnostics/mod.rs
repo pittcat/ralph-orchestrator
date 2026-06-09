@@ -541,6 +541,46 @@ impl DiagnosticsCollector {
         }
     }
 
+    /// Persist the current active hat activations to
+    /// `<session_dir>/active-activations.json`.
+    ///
+    /// Called at loop termination so that the offline `ralph diagnose`
+    /// reporter (U7) can render the `## Active Hat Activations` section.
+    /// The file is a JSON array of [`ActivationSnapshot`]s. An empty
+    /// array is written when no activations are active.
+    ///
+    /// No-op when no session directory is set. Internal I/O errors are
+    /// emitted via `tracing::warn!` and swallowed.
+    pub fn write_active_activations(
+        &self,
+        activations: &[crate::hat_lifecycle::ActivationSnapshot],
+    ) {
+        let Some(session_dir) = self.session_dir.as_ref() else {
+            return;
+        };
+        let path = session_dir.join("active-activations.json");
+        let file = match fs::File::create(&path) {
+            Ok(f) => f,
+            Err(err) => {
+                tracing::warn!(
+                    target: "ralph_core::diagnostics",
+                    session_dir = %session_dir.display(),
+                    error = %err,
+                    "failed to create active-activations.json; continuing without blocking the loop",
+                );
+                return;
+            }
+        };
+        if let Err(err) = serde_json::to_writer_pretty(file, activations) {
+            tracing::warn!(
+                target: "ralph_core::diagnostics",
+                session_dir = %session_dir.display(),
+                error = %err,
+                "failed to serialize active-activations.json",
+            );
+        }
+    }
+
     /// Returns the diagnostics session id, which is the timestamped
     /// directory name (e.g. `2026-06-05T10-20-30`). Returns `None`
     /// when the collector is disabled or has no session dir.

@@ -571,3 +571,15 @@ fn test_verdict_gate_fail_keeps_loop_open() {
     let yaml = load_scenario("tests/scenarios/verdict_gate_fail_keeps_loop_open.yml");
     run_workflow_guard_scenario(yaml);
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// U6: Hat lifecycle contract — terminal events close activations
+// ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_hat_lifecycle_contract() {
+    // Verifies that terminal events (work.done, review.complete, LOOP_COMPLETE)
+    // close hat activations as expected in a simple pipeline topology.
+    let yaml = load_scenario("tests/scenarios/hat_lifecycle_contract.yml");
+    run_scenario(yaml);
+}

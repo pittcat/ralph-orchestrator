@@ -627,6 +627,7 @@ mod tests {
             description: Some("Test hat".to_string()),
             triggers: vec!["work.start".to_string()],
             publishes: vec![],
+            terminal_events: vec![],
             instructions: String::new(),
             extra_instructions: vec![],
             backend_args: None,

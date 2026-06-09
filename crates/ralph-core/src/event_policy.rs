@@ -36,6 +36,12 @@ pub enum ViolationType {
     BusinessEventAfterCompletion {
         topic: String,
     },
+    /// Topic is not in the whitelist of known topics (R9).
+    /// Rejected without retry — only writes a recovery signal (R10).
+    InvalidTopicFormat {
+        topic: String,
+        allowed_topics: Vec<String>,
+    },
 }
 
 /// A single policy finding.
@@ -180,6 +186,100 @@ fn apply_completion_after_terminal_action(
         CompletionAfterTerminalAction::Ignore => PolicyDecision::Ignore(finding),
         CompletionAfterTerminalAction::Warn => PolicyDecision::Warn(vec![finding]),
     }
+}
+
+/// R9: Check topic format against the whitelist of known topics.
+///
+/// Rejects topics not in the whitelist **before** payload schema validation.
+/// Rejection is non-retryable — only writes a recovery signal (R10), no
+/// `task.resume` is emitted.
+///
+/// The whitelist is built from:
+/// - All hat `publishes` topics (from hat registry)
+/// - System/control topics (`event.*`, `human.*`, `loop.cancel`, `task.resume`,
+///   `build.task.abandoned`, completion promise)
+///
+/// Returns `None` if the topic is valid (accepted), or `Some(PolicyDecision::Block(...))`
+/// if the topic is not in the whitelist.
+pub fn check_topic_format(
+    topic: &str,
+    allowed_topics: &HashSet<String>,
+) -> Option<PolicyDecision> {
+    if allowed_topics.contains(topic) {
+        return None;
+    }
+
+    let finding = PolicyFinding {
+        topic: topic.to_string(),
+        violation_type: ViolationType::InvalidTopicFormat {
+            topic: topic.to_string(),
+            allowed_topics: allowed_topics.iter().cloned().collect(),
+        },
+        message: format!(
+            "Topic '{}' is not in the whitelist of known topics. \
+             Valid topics: {:?}",
+            topic,
+            allowed_topics.iter().collect::<Vec<_>>()
+        ),
+    };
+
+    // R10: Block (not RejectWithResume) — no retry, only recovery signal
+    Some(PolicyDecision::Block(finding))
+}
+
+/// Build the set of allowed topics from hat configs and system control topics.
+///
+/// Includes:
+/// - All hat `publishes` topics (what hats emit)
+/// - All hat `triggers` topics (what activates hats)
+/// - Event policy `terminal_topics` and `business_topics` (if configured)
+/// - System topics: `event.*` (prefixed), `human.*` (prefixed), `loop.cancel`,
+///   `task.resume`, `build.task.abandoned`, completion promise
+///
+/// The `*` prefix patterns (e.g. `event.*`) are stored as actual prefixes;
+/// `check_topic_format` checks with `starts_with` for these.
+pub fn build_allowed_topics(
+    hats: &std::collections::HashMap<String, crate::config::HatConfig>,
+    completion_promise: &str,
+    event_policy: Option<&EventPolicyConfig>,
+) -> HashSet<String> {
+    let mut allowed = HashSet::new();
+
+    // Add all hat publishes and triggers topics
+    for hat_config in hats.values() {
+        for topic in &hat_config.publishes {
+            allowed.insert(topic.clone());
+        }
+        for topic in &hat_config.triggers {
+            allowed.insert(topic.clone());
+        }
+    }
+
+    // Add event policy terminal and business topics
+    if let Some(policy) = event_policy {
+        for topic in &policy.terminal_topics {
+            allowed.insert(topic.clone());
+        }
+        for topic in &policy.business_topics {
+            allowed.insert(topic.clone());
+        }
+    }
+
+    // System/control topics (exact match)
+    allowed.insert("loop.cancel".to_string());
+    allowed.insert("task.resume".to_string());
+    allowed.insert("build.task.abandoned".to_string());
+    allowed.insert(completion_promise.to_string());
+
+    allowed
+}
+
+/// Check if a topic matches a system/control prefix pattern.
+///
+/// System topics start with `event.` or `human.` and are always allowed
+/// regardless of the whitelist.
+pub fn is_system_topic(topic: &str) -> bool {
+    topic.starts_with("event.") || topic.starts_with("human.")
 }
 
 /// Validates an event against the event policy.
@@ -967,5 +1067,114 @@ mod tests {
         assert_eq!(result.events[0].payload, Some("Start work".to_string()));
         assert!(result.events[1].payload.is_none());
         assert!(result.events[2].payload.is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // Topic format check tests (U5)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_check_topic_format_accepts_whitelisted_topic() {
+        let mut allowed = HashSet::new();
+        allowed.insert("work.done".to_string());
+        allowed.insert("review.passed".to_string());
+        assert_eq!(check_topic_format("work.done", &allowed), None);
+        assert_eq!(check_topic_format("review.passed", &allowed), None);
+    }
+
+    #[test]
+    fn test_check_topic_format_rejects_unknown_topic() {
+        let mut allowed = HashSet::new();
+        allowed.insert("work.done".to_string());
+        let result = check_topic_format("REVIEW_COMPLETE", &allowed);
+        assert!(result.is_some());
+        let decision = result.unwrap();
+        assert!(matches!(decision, PolicyDecision::Block(_)));
+    }
+
+    #[test]
+    fn test_check_topic_format_rejects_uppercase_topic() {
+        let mut allowed = HashSet::new();
+        allowed.insert("work.done".to_string());
+        // AE2: uppercase topic is rejected
+        let result = check_topic_format("LOOP_COMPLETE", &allowed);
+        assert!(result.is_some());
+        let decision = result.unwrap();
+        match decision {
+            PolicyDecision::Block(finding) => {
+                assert!(matches!(
+                    finding.violation_type,
+                    ViolationType::InvalidTopicFormat { .. }
+                ));
+            }
+            _ => panic!("Expected Block decision"),
+        }
+    }
+
+    #[test]
+    fn test_check_topic_format_accepts_loop_complete_when_whitelisted() {
+        // AE5: whitelisted completion token is accepted
+        let mut allowed = HashSet::new();
+        allowed.insert("LOOP_COMPLETE".to_string());
+        assert_eq!(check_topic_format("LOOP_COMPLETE", &allowed), None);
+    }
+
+    #[test]
+    fn test_is_system_topic_event_prefix() {
+        assert!(is_system_topic("event.malformed"));
+        assert!(is_system_topic("event.scope_violation"));
+        assert!(is_system_topic("event.policy_warning"));
+        assert!(!is_system_topic("work.done"));
+        assert!(!is_system_topic("review.passed"));
+    }
+
+    #[test]
+    fn test_is_system_topic_human_prefix() {
+        assert!(is_system_topic("human.interact"));
+        assert!(is_system_topic("human.response"));
+        assert!(is_system_topic("human.guidance"));
+        assert!(!is_system_topic("humanx.interact")); // no dot after prefix
+    }
+
+    #[test]
+    fn test_build_allowed_topics_includes_hat_publishes() {
+        let mut hats = std::collections::HashMap::new();
+        let mut hat_config = crate::config::HatConfig::default();
+        hat_config.publishes = vec!["work.done".to_string(), "review.passed".to_string()];
+        hats.insert("executor".to_string(), hat_config);
+
+        let allowed = build_allowed_topics(&hats, "LOOP_COMPLETE", None);
+        assert!(allowed.contains("work.done"));
+        assert!(allowed.contains("review.passed"));
+        assert!(allowed.contains("LOOP_COMPLETE"));
+        assert!(allowed.contains("loop.cancel"));
+        assert!(allowed.contains("task.resume"));
+        assert!(allowed.contains("build.task.abandoned"));
+    }
+
+    #[test]
+    fn test_build_allowed_topics_empty_hats() {
+        let hats = std::collections::HashMap::new();
+        let allowed = build_allowed_topics(&hats, "LOOP_COMPLETE", None);
+        // Only system topics
+        assert!(allowed.contains("LOOP_COMPLETE"));
+        assert!(allowed.contains("loop.cancel"));
+        assert!(allowed.contains("task.resume"));
+        assert!(allowed.contains("build.task.abandoned"));
+        assert!(!allowed.contains("work.done"));
+    }
+
+    #[test]
+    fn test_build_allowed_topics_includes_event_policy_topics() {
+        let hats = std::collections::HashMap::new();
+        let policy = EventPolicyConfig {
+            terminal_topics: vec!["review.file".to_string()],
+            business_topics: vec!["task.update".to_string()],
+            ..Default::default()
+        };
+        let allowed = build_allowed_topics(&hats, "LOOP_COMPLETE", Some(&policy));
+        assert!(allowed.contains("review.file"));
+        assert!(allowed.contains("task.update"));
+        assert!(allowed.contains("LOOP_COMPLETE"));
     }
 }

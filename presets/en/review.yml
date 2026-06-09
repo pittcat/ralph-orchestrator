@@ -30,6 +30,7 @@ hats:
     triggers: ["review.start", "review.followup"]
     publishes: ["review.section"]
     default_publishes: "review.section"
+    terminal_events: ["review.section"]
     instructions: |
       ## CODE REVIEWER MODE
 
@@ -128,6 +129,7 @@ hats:
     triggers: ["review.section"]
     publishes: ["analysis.complete"]
     default_publishes: "analysis.complete"
+    terminal_events: ["analysis.complete"]
     instructions: |
       ## DEEP ANALYZER MODE
 
@@ -160,6 +162,7 @@ hats:
     description: "Merges deep-analysis findings and advances or completes the review cleanly."
     triggers: ["analysis.complete"]
     publishes: ["review.followup", "REVIEW_COMPLETE"]
+    terminal_events: ["review.followup", "REVIEW_COMPLETE"]
     instructions: |
       ## REVIEW CLOSER MODE
 

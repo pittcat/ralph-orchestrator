@@ -16,6 +16,7 @@ mod event_policy;
 mod execution_contract;
 mod hat_backend;
 mod hat_exhaustion;
+mod hat_lifecycle_integration;
 mod human_timeout;
 mod initialization;
 mod loop_context;

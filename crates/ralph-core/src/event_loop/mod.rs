@@ -37,6 +37,7 @@ use crate::execution_contract::{
     DefaultGitEvidenceProvider, ExecutionContractDecision, ExecutionContractFinding,
     validate_execution_contract,
 };
+use crate::hat_lifecycle::{ActivationKey, ActivationLifecycleTracker, SystemTimeClock};
 use crate::hat_registry::HatRegistry;
 use crate::hatless_ralph::HatlessRalph;
 use crate::instructions::InstructionBuilder;
@@ -232,6 +233,12 @@ pub struct EventLoop {
     /// in-memory only; it never touches the diagnostics loggers
     /// directly.
     recovery_responder: RecoveryResponder,
+    /// U3: Activation lifecycle tracker — tracks each hat activation from
+    /// activate → observe_accepted_event → complete. Write APIs are called
+    /// by the event loop; read API (`active_activations`) is consumed only
+    /// by the `ralph diagnose` reporter (U4). Decision paths must NOT read
+    /// the tracker to avoid implicit feedback loops.
+    hat_lifecycle_tracker: ActivationLifecycleTracker<SystemTimeClock>,
 }
 
 /// Result of extracting a correlation key from an event payload.
@@ -743,11 +750,12 @@ fn finding_to_payload_contract_violation(
             PayloadContractViolationKind::AllowedValueMismatch,
             Some(field.clone()),
         ),
-        // Terminal / completion-guard violations are NOT payload contract
-        // violations and must not be reported as such.
+        // Terminal / completion-guard / topic-format violations are NOT payload
+        // contract violations and must not be reported as such.
         ViolationType::TerminalMonotonicityViolation { .. }
         | ViolationType::DuplicateTerminalEvent { .. }
-        | ViolationType::BusinessEventAfterCompletion { .. } => return None,
+        | ViolationType::BusinessEventAfterCompletion { .. }
+        | ViolationType::InvalidTopicFormat { .. } => return None,
     };
     let fix_hint = match kind {
         PayloadContractViolationKind::MissingRequiredField => format!(
@@ -957,6 +965,7 @@ impl EventLoop {
             recovery_responder: RecoveryResponder::new(Arc::new(
                 config.telemetry.runtime_diagnosis.clone(),
             )),
+            hat_lifecycle_tracker: ActivationLifecycleTracker::new(),
         }
     }
 
@@ -1063,6 +1072,7 @@ impl EventLoop {
             recovery_responder: RecoveryResponder::new(Arc::new(
                 config.telemetry.runtime_diagnosis.clone(),
             )),
+            hat_lifecycle_tracker: ActivationLifecycleTracker::new(),
         }
     }
 
@@ -1144,6 +1154,16 @@ impl EventLoop {
     /// `DiagnosticsCollector` API rather than hand-rolling file writes.
     pub fn diagnostics(&self) -> &crate::diagnostics::DiagnosticsCollector {
         &self.diagnostics
+    }
+
+    /// Returns a reference to the activation lifecycle tracker.
+    ///
+    /// This is the **read API** consumed by the `ralph diagnose` reporter (U4).
+    /// Event loop decision paths must NOT call this — they only use write APIs
+    /// (`activate`, `observe_accepted_event`, `complete`) to avoid implicit
+    /// feedback loops.
+    pub fn hat_lifecycle_tracker(&self) -> &ActivationLifecycleTracker<SystemTimeClock> {
+        &self.hat_lifecycle_tracker
     }
 
     /// Resets the stale-loop topic counter.
@@ -2113,6 +2133,33 @@ impl EventLoop {
                 let active_hat_ids = self.determine_active_hat_ids(&regular_events);
                 self.record_hat_activations(&active_hat_ids);
                 self.state.last_active_hat_ids = active_hat_ids.clone();
+
+                // U3: Record activation lifecycle for each active hat.
+                // For each hat activation, create an ActivationKey and activate the tracker.
+                // The trigger identity is the topic of the event that triggered this hat.
+                for hat_id in &active_hat_ids {
+                    let trigger_topic = effective_regular_events
+                        .iter()
+                        .find(|e| self.registry.can_publish(hat_id, e.topic.as_str()))
+                        .map(|e| e.topic.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let key = ActivationKey {
+                        loop_id: self
+                            .loop_context
+                            .as_ref()
+                            .and_then(|ctx| ctx.loop_id())
+                            .unwrap_or("primary")
+                            .to_string(),
+                        iteration: self.state.iteration,
+                        hat_id: hat_id.as_str().to_string(),
+                        trigger_identity: trigger_topic.clone(),
+                    };
+                    self.hat_lifecycle_tracker.activate(
+                        key,
+                        trigger_topic,
+                        None, // linked_task_id resolved later if available
+                    );
+                }
                 self.state.last_activation_events =
                     effective_regular_events.iter().copied().cloned().collect();
 
@@ -3859,6 +3906,48 @@ impl EventLoop {
         let had_origin_rejections = !origin_rejections.is_empty();
         // --- End origin guard ---
 
+        // --- Topic format check (U5 / R9): reject unknown topics before policy ---
+        // Builds a whitelist from hat publishes + system/control topics.
+        // Rejected topics produce a recovery signal but NO retry (R10).
+        // Only active when event_policy is enabled AND hats are configured
+        // (no hats = no whitelist to validate against, skip check).
+        if let Some(ref policy_config) = self.config.event_loop.event_policy
+            && policy_config.enabled
+            && !self.config.hats.is_empty()
+        {
+            use std::collections::HashSet;
+            let allowed_topics: HashSet<String> =
+                crate::event_policy::build_allowed_topics(&self.config.hats, &self.config.event_loop.completion_promise, self.config.event_loop.event_policy.as_ref());
+            let (topic_format_ok, topic_format_rejections): (Vec<_>, Vec<_>) =
+                events.into_iter().partition(|event| {
+                    if crate::event_policy::is_system_topic(&event.topic) {
+                        return true;
+                    }
+                    crate::event_policy::check_topic_format(&event.topic, &allowed_topics).is_none()
+                });
+            if !topic_format_rejections.is_empty() {
+                for event in &topic_format_rejections {
+                    warn!(
+                        topic = %event.topic,
+                        hat = ?event.hat,
+                        "Topic format rejection: unknown topic not in whitelist"
+                    );
+                    // Write recovery diagnostic event (R10: no retry)
+                    let diagnostic = Event::new(
+                        "event.topic_format.rejected",
+                        format!(
+                            "TOPIC_FORMAT_REJECTED: '{}' is not in the whitelist of known topics. \
+                             This event will not be retried.",
+                            event.topic
+                        ),
+                    );
+                    self.bus.publish(diagnostic);
+                }
+            }
+            events = topic_format_ok;
+        }
+        // --- End topic format check ---
+
         // --- Event policy validation: check typed payload schema ---
         // Inserted after scope enforcement, before workflow guard validation
         let mut had_policy_rejections = false;
@@ -4914,6 +5003,33 @@ impl EventLoop {
             self.state
                 .record_verdict_if_match(event, verdict_topics_slice);
 
+            // U3: Update hat lifecycle tracker for accepted events.
+            // Find the source hat for this event and update the tracker.
+            // Terminal events call complete(); non-terminal call observe_accepted_event().
+            if let Some(source_hat_id) = event.source.as_ref().or(self.state.last_active_hat_ids.first()) {
+                let hat_config = self.registry.get_config(source_hat_id);
+                let topic_str = event.topic.as_str();
+                let is_terminal = hat_config.is_some_and(|config| {
+                    config.terminal_topic_set().contains(topic_str)
+                });
+                let key = ActivationKey {
+                    loop_id: self
+                        .loop_context
+                        .as_ref()
+                        .and_then(|ctx| ctx.loop_id())
+                        .unwrap_or("primary")
+                        .to_string(),
+                    iteration: self.state.iteration,
+                    hat_id: source_hat_id.as_str().to_string(),
+                    trigger_identity: topic_str.to_string(),
+                };
+                if is_terminal {
+                    self.hat_lifecycle_tracker.complete(&key, topic_str);
+                } else {
+                    self.hat_lifecycle_tracker.observe_accepted_event(&key);
+                }
+            }
+
             self.diagnostics.log_orchestration(
                 self.state.iteration,
                 "jsonl",
@@ -5028,6 +5144,45 @@ impl EventLoop {
             &self.config.event_loop.cancellation_promise,
             &self.config.event_loop.completion_promise,
         );
+
+        // --- Topic format check (U5 / R9) for wave events ---
+        // Only active when event_policy is enabled AND hats are configured.
+        let wave_events = if let Some(ref policy_config) = self.config.event_loop.event_policy
+            && policy_config.enabled
+            && !self.config.hats.is_empty()
+        {
+            let allowed_topics: std::collections::HashSet<String> =
+                crate::event_policy::build_allowed_topics(&self.config.hats, &self.config.event_loop.completion_promise, self.config.event_loop.event_policy.as_ref());
+            let (wave_events_ok, wave_rejections): (Vec<_>, Vec<_>) =
+                wave_events.into_iter().partition(|event| {
+                    if crate::event_policy::is_system_topic(&event.topic) {
+                        return true;
+                    }
+                    crate::event_policy::check_topic_format(&event.topic, &allowed_topics).is_none()
+                });
+            if !wave_rejections.is_empty() {
+                for event in &wave_rejections {
+                    warn!(
+                        topic = %event.topic,
+                        hat = ?event.hat,
+                        "Topic format rejection (wave): unknown topic not in whitelist"
+                    );
+                    let diagnostic = Event::new(
+                        "event.topic_format.rejected",
+                        format!(
+                            "TOPIC_FORMAT_REJECTED: '{}' is not in the whitelist of known topics. \
+                             This event will not be retried.",
+                            event.topic
+                        ),
+                    );
+                    self.bus.publish(diagnostic);
+                }
+            }
+            wave_events_ok
+        } else {
+            wave_events
+        };
+        // --- End topic format check (wave) ---
 
         // --- Event policy validation for wave events ---
         // Wave dispatch events are partitioned before process_parse_result, so they

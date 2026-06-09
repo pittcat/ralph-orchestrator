@@ -394,6 +394,9 @@ fn config_error_id(err: &ConfigError) -> &'static str {
         ConfigError::SchemaFileNotMap { .. } => "config.schema_file_not_map",
         ConfigError::SchemaFileInvalidSchema { .. } => "config.schema_file_invalid_schema",
         ConfigError::TelemetryValidation { .. } => "config.telemetry_validation",
+        ConfigError::TerminalTopicNotInPublishes { .. } => {
+            "config.terminal_topic_not_in_publishes"
+        }
         ConfigError::Io(_) | ConfigError::Yaml(_) => "config.parse_error",
     }
 }
@@ -404,6 +407,7 @@ fn config_warning_id(warning: &ConfigWarning) -> &'static str {
         ConfigWarning::DeferredFeature { .. } => "config.deferred_feature",
         ConfigWarning::DroppedField { .. } => "config.dropped_field",
         ConfigWarning::InvalidValue { .. } => "config.invalid_value",
+        ConfigWarning::EmptyTerminalEvents { .. } => "config.empty_terminal_events",
     }
 }
 
@@ -435,6 +439,9 @@ fn config_warning_finding(warning: &ConfigWarning) -> RuntimeContractFinding {
         }
         ConfigWarning::InvalidValue { field, message: _ } => {
             finding = finding.with_detail("field", field.clone());
+        }
+        ConfigWarning::EmptyTerminalEvents { hat } => {
+            finding = finding.with_detail("hat", hat.clone());
         }
     }
     finding
@@ -534,6 +541,11 @@ fn config_error_finding(err: &ConfigError) -> RuntimeContractFinding {
         | ConfigError::InvalidCompletionPromise
         | ConfigError::CustomBackendRequiresCommand
         | ConfigError::TelemetryValidation { .. } => {}
+        ConfigError::TerminalTopicNotInPublishes { hat, topic } => {
+            finding = finding
+                .with_detail("hat", hat.clone())
+                .with_detail("topic", topic.clone());
+        }
     }
     finding
 }

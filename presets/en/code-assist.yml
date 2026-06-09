@@ -74,6 +74,7 @@ hats:
     triggers: ["build.start", "queue.advance"]
     publishes: ["tasks.ready"]
     default_publishes: "tasks.ready"
+    terminal_events: ["tasks.ready"]
     instructions: |
       ## PLANNER MODE — Step-Wave Strategy And Runtime Queue Ownership
 
@@ -232,6 +233,7 @@ hats:
     triggers: ["tasks.ready", "review.rejected", "finalization.failed"]
     publishes: ["review.ready", "build.blocked"]
     default_publishes: "review.ready"
+    terminal_events: ["review.ready", "build.blocked"]
     instructions: |
       ## BUILDER MODE — TDD Runtime Task Execution
 
@@ -357,6 +359,7 @@ hats:
     triggers: ["review.ready"]
     publishes: ["review.passed", "review.rejected"]
     default_publishes: "review.rejected"
+    terminal_events: ["review.passed", "review.rejected"]
     instructions: |
       ## CRITIC MODE — Fresh-Eyes Adversarial Review
 
@@ -458,6 +461,7 @@ hats:
     triggers: ["review.passed"]
     publishes: ["queue.advance", "finalization.failed", "LOOP_COMPLETE"]
     default_publishes: "finalization.failed"
+    terminal_events: ["queue.advance", "finalization.failed", "LOOP_COMPLETE"]
     instructions: |
       ## FINALIZER MODE — Whole-Prompt Gate And Step-Wave Exhaustion Check
 

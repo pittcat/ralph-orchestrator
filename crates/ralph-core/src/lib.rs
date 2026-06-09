@@ -16,6 +16,7 @@ mod config;
 pub mod diagnosis;
 pub mod diagnostics;
 pub mod drift;
+pub mod hat_lifecycle;
 mod event_logger;
 mod event_loop;
 pub mod event_origin;
@@ -95,6 +96,10 @@ pub use diagnostics::{DiagnosisSummary, DiagnosticsCollector, DiagnosticsOptions
 pub use drift::{
     DeclaredEdges, DriftDetector, DriftFinding, DriftObserver, DriftWindow,
     EMIT_CADENCE_MIN_SAMPLES, EventSnapshot, RequiredFields,
+};
+pub use hat_lifecycle::{
+    ActivationKey, ActivationLifecycleTracker, ActivationSnapshot, Clock, FakeClock,
+    SystemTimeClock,
 };
 pub use event_logger::{EventHistory, EventLogger, EventRecord};
 pub use event_loop::{
