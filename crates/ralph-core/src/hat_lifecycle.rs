@@ -190,7 +190,7 @@ enum ActivationState {
     },
     Completed {
         /// When the activation completed.
-        #[allow(dead_code)] // stored for potential diagnose reporter use
+        #[allow(dead_code)] // TODO(U4): remove after diagnose reporter integration
         completed_at: SystemTime,
         /// The terminal topic that closed the activation.
         terminal_topic: String,
@@ -331,7 +331,9 @@ impl<C: Clock> ActivationLifecycleTracker<C> {
                     linked_task_id,
                     hat_id,
                 } => {
-                    let duration = now.duration_since(*activated_at).unwrap_or_default();
+                    // If clock regresses (e.g. NTP skew), Duration::ZERO is a safe
+                    // fallback — production SystemTimeClock should never trigger this.
+                    let duration = now.duration_since(*activated_at).unwrap_or(Duration::ZERO);
                     Some(ActivationSnapshot {
                         hat_id: hat_id.clone(),
                         trigger_topic: trigger_topic.clone(),
