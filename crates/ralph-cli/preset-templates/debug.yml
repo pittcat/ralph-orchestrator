@@ -1,0 +1,84 @@
+# Debug Preset Template
+# For bug investigation and root cause analysis following scientific method
+#
+# Usage:
+#   ralph preset new debug --name my-debug --output .ralph/hats/my-debug.yml
+
+x_preset:
+  schema_version: 1
+  template: debug
+  template_version: "1.0.0"
+  generated_by: "ralph preset new"
+  generated_at: {{generated_at}}
+  name: {{preset_name}}
+  description: {{description}}
+  check_profile: authoring
+  ralph_compat: ">=0.2.0"
+
+event_loop:
+  prompt_file: "PROMPT.md"
+  completion_promise: "DEBUG_COMPLETE"
+  required_events: ["hypothesis.test", "hypothesis.confirmed", "fix.applied", "fix.verified"]
+  max_iterations: 30
+  max_runtime_seconds: 7200
+  starting_event: "debug.start"
+
+cli:
+  backend: "claude"
+
+core:
+  specs_dir: "./specs/"
+  guardrails:
+    - "ABSOLUTE PROHIBITION: NEVER kill, signal, or terminate any `ralph` / `ralph-orchestrator` process — including `kill`, `pkill`, `killall`, `kill -9`, `kill -TERM`, `kill -HUP`, `taskkill`, or any equivalent process-control command targeting the loop's parent PID, the TUI subprocess PID recorded in `.ralph/loop.lock`, any PID listed in `.ralph/loops.json`, or any PID returned by `ps` / `pgrep` matching `ralph`. The currently running ralph IS the parent process of this very agent iteration — killing it ends the agent itself mid-thought and corrupts orchestration state (stale lock, in_progress tasks, lost events, partial commits). If the loop needs to restart to pick up new configuration, emit `loop.cancel`, surface a `fix.failed` / `DEBUG_COMPLETE` with a clear reason, or instruct the human operator to run `ralph loops stop <loop_id>`. Stopping the orchestrator is the operator's decision, not the agent's."
+
+hats:
+  investigator:
+    name: "Investigator"
+    description: "Finds root cause through systematic investigation."
+    triggers: ["debug.start", "hypothesis.rejected", "hypothesis.confirmed", "fix.verified"]
+    publishes: ["hypothesis.test", "fix.propose", "DEBUG_COMPLETE"]
+    instructions: |
+      ## INVESTIGATOR MODE
+
+      Find the root cause through systematic investigation.
+      Form exactly one falsifiable hypothesis and emit `hypothesis.test`.
+
+      On `hypothesis.confirmed`, propose a fix with `fix.propose`.
+      On `fix.verified`, emit `DEBUG_COMPLETE`.
+
+  tester:
+    name: "Hypothesis Tester"
+    description: "Designs and runs experiments to test hypotheses."
+    triggers: ["hypothesis.test"]
+    publishes: ["hypothesis.confirmed", "hypothesis.rejected"]
+    instructions: |
+      ## HYPOTHESIS TESTER MODE
+
+      Design and run an experiment to test a hypothesis.
+      Emit `hypothesis.confirmed` or `hypothesis.rejected`.
+
+  fixer:
+    name: "Bug Fixer"
+    description: "Implements fix for confirmed root cause with regression test."
+    triggers: ["fix.propose", "fix.failed"]
+    publishes: ["fix.applied", "fix.blocked"]
+    default_publishes: "fix.blocked"
+    instructions: |
+      ## BUG FIXER MODE
+
+      Implement the minimal fix for a confirmed root cause.
+      Add a regression test.
+      Emit `fix.applied`.
+
+  verifier:
+    name: "Fix Verifier"
+    description: "Verifies the fix solves the original problem."
+    triggers: ["fix.applied"]
+    publishes: ["fix.verified", "fix.failed"]
+    default_publishes: "fix.failed"
+    instructions: |
+      ## FIX VERIFIER MODE
+
+      Verify the fix solves the original problem.
+      Re-run the original reproduction and adversarial cases.
+      Emit `fix.verified` or `fix.failed`.

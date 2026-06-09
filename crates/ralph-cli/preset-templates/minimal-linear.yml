@@ -1,0 +1,68 @@
+# Minimal Linear Preset Template
+# A simple two-hat linear workflow for learning and small tasks
+#
+# Usage:
+#   ralph preset new minimal-linear --name my-flow --output .ralph/hats/my-flow.yml
+
+x_preset:
+  schema_version: 1
+  template: minimal-linear
+  template_version: "1.0.0"
+  generated_by: "ralph preset new"
+  generated_at: {{generated_at}}
+  name: {{preset_name}}
+  description: {{description}}
+  check_profile: authoring
+  ralph_compat: ">=0.2.0"
+
+event_loop:
+  prompt_file: "PROMPT.md"
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["work.done"]
+  starting_event: "work.start"
+  max_iterations: 10
+  max_runtime_seconds: 1800
+
+cli:
+  backend: "claude"
+
+core:
+  specs_dir: ".agents/scratchpad/"
+
+hats:
+  planner:
+    name: "Planner"
+    description: "Breaks down the task into actionable steps."
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+    instructions: |
+      ## PLANNER MODE
+
+      Start from the auto-injected objective and current event context.
+      You are running inside Ralph. `ralph emit` and `ralph tools task` are available.
+
+      Create a clear, actionable plan for the task.
+
+      ### Process
+      1. Analyze the objective
+      2. Break it into concrete steps
+      3. Create runtime tasks for each step
+      4. Emit `work.ready` with the first task
+
+  executor:
+    name: "Executor"
+    description: "Implements the planned work."
+    triggers: ["work.ready"]
+    publishes: ["work.done"]
+    instructions: |
+      ## EXECUTOR MODE
+
+      Start from the auto-injected objective and current event context.
+      Execute the assigned task.
+
+      ### Process
+      1. Read the task details
+      2. Implement the solution
+      3. Verify with tests
+      4. Close the task
+      5. Emit `work.done`

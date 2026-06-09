@@ -31,6 +31,7 @@ mod memory;
 mod operation_guard;
 mod preflight;
 mod presets;
+mod preset_templates;
 mod rpc_stdin;
 mod skill_cli;
 mod sop_runner;

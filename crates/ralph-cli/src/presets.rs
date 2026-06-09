@@ -2421,6 +2421,167 @@ mod tests {
         );
     }
 
+    // ── U6: Builtin Authoring Maintenance Guard ───────────────────────────────
+
+    /// U6: Template-only names must NOT appear in `preset_names()`.
+    ///
+    /// Templates that share names with presets (code-assist, debug, research, review)
+    /// ARE preset names — that's intentional because the templates are based on those presets.
+    /// But template-only names (minimal-linear, ce-executor-lite) are NOT preset names.
+    #[test]
+    fn test_template_only_names_not_in_preset_names() {
+        // Template-only names that should NOT appear in preset_names()
+        let template_only_names = ["minimal-linear", "ce-executor-lite"];
+        let public_preset_names: std::collections::BTreeSet<String> =
+            preset_names().iter().map(|s| s.to_string()).collect();
+
+        for name in template_only_names {
+            assert!(
+                !public_preset_names.contains(name),
+                "Template-only name '{}' must NOT appear in preset_names(); \
+                 templates are authoring scaffolding, not builtin presets",
+                name
+            );
+        }
+
+        // Templates that share names with presets SHOULD appear in preset_names()
+        let shared_names = ["code-assist", "debug", "research", "review"];
+        for name in shared_names {
+            assert!(
+                public_preset_names.contains(name),
+                "Shared template/preset name '{}' SHOULD appear in preset_names() \
+                 because templates are based on that builtin preset",
+                name
+            );
+        }
+    }
+
+    /// U6: All public preset names must appear in `presets/index.json`.
+    #[test]
+    fn test_public_preset_names_in_index_json() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("presets");
+        let index_path = manifest_dir.join("index.json");
+        if !index_path.is_file() {
+            eprintln!(
+                "test_public_preset_names_in_index_json: {} not on build host; skipping",
+                index_path.display()
+            );
+            return;
+        }
+
+        let text = std::fs::read_to_string(&index_path).unwrap_or_else(|e| {
+            panic!("failed to read {}: {}", index_path.display(), e)
+        });
+        let entries: Vec<serde_json::Value> = serde_json::from_str(&text)
+            .unwrap_or_else(|e| panic!("index.json must be valid JSON: {}", e));
+
+        let index_names: std::collections::BTreeSet<String> = entries
+            .iter()
+            .map(|e| e.get("name").unwrap().as_str().unwrap().to_string())
+            .collect();
+
+        let public_names: std::collections::BTreeSet<String> =
+            preset_names().iter().map(|s| s.to_string()).collect();
+
+        let missing: Vec<_> = public_names
+            .difference(&index_names)
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "Public preset names missing from presets/index.json: {:?}. \
+             All public presets must be listed in index.json.",
+            missing
+        );
+    }
+
+    /// U6: All `presets/index.json` entries must appear in zsh builtin completion values.
+    #[test]
+    fn test_index_json_entries_have_zsh_completion() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("presets");
+        let index_path = manifest_dir.join("index.json");
+        if !index_path.is_file() {
+            eprintln!(
+                "test_index_json_entries_have_zsh_completion: {} not on build host; skipping",
+                index_path.display()
+            );
+            return;
+        }
+
+        let text = std::fs::read_to_string(&index_path).unwrap_or_else(|e| {
+            panic!("failed to read {}: {}", index_path.display(), e)
+        });
+        let entries: Vec<serde_json::Value> = serde_json::from_str(&text)
+            .unwrap_or_else(|e| panic!("index.json must be valid JSON: {}", e));
+
+        // Zsh completion values for builtin presets (from zsh plugin)
+        // This must stay in sync with scripts/ralph-zsh-plugin.zsh
+        let zsh_values: std::collections::BTreeSet<String> = [
+            "builtin:ce-executor",
+            "builtin:ce-executor-wave",
+            "builtin:code-assist",
+            "builtin:debug",
+            "builtin:research",
+            "builtin:review",
+            "builtin:pdd-to-code-assist",
+            "builtin:autoresearch",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+        for entry in entries {
+            let name = entry.get("name").unwrap().as_str().unwrap();
+            let expected_zsh_value = format!("builtin:{}", name);
+            assert!(
+                zsh_values.contains(&expected_zsh_value),
+                "Preset '{}' is in index.json but missing from zsh builtin completion values. \
+                 Add '{}' to _RALPH_BUILTIN_HAT_VALUES in scripts/ralph-zsh-plugin.zsh",
+                name,
+                expected_zsh_value
+            );
+        }
+    }
+
+    /// U6: Hidden presets (merge-loop) must NOT appear in index.json.
+    #[test]
+    fn test_hidden_presets_not_in_index_json() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("presets");
+        let index_path = manifest_dir.join("index.json");
+        if !index_path.is_file() {
+            eprintln!(
+                "test_hidden_presets_not_in_index_json: {} not on build host; skipping",
+                index_path.display()
+            );
+            return;
+        }
+
+        let text = std::fs::read_to_string(&index_path).unwrap_or_else(|e| {
+            panic!("failed to read {}: {}", index_path.display(), e)
+        });
+        let entries: Vec<serde_json::Value> = serde_json::from_str(&text)
+            .unwrap_or_else(|e| panic!("index.json must be valid JSON: {}", e));
+
+        let index_names: std::collections::BTreeSet<_> = entries
+            .iter()
+            .map(|e| e.get("name").unwrap().as_str().unwrap())
+            .collect();
+
+        // merge-loop is hidden and should NOT appear in index.json
+        assert!(
+            !index_names.contains("merge-loop"),
+            "Hidden preset 'merge-loop' must NOT appear in presets/index.json"
+        );
+    }
+
     #[test]
     fn test_ce_executor_findings_include_task_id_isolation() {
         // Bug #2 regression: dimension-reviewer must write findings files that

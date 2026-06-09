@@ -1,8 +1,18 @@
 # Ralph Hat Collections
 
-This directory contains the canonical built-in hat collections Ralph still ships and supports.
+This directory contains the canonical built-in hat collections Ralph still ships and support.
 
 Built-ins are embedded into the CLI from these files and exposed through `ralph init --list-presets`.
+
+## Builtin vs Template: What's the Difference?
+
+| Term | What it is | Where to find it |
+|------|------------|-----------------|
+| **Builtin Preset** | Ralph's officially shipped workflow | `presets/*.yml` (this directory) |
+| **Template** | Scaffold for creating your own workflow | `ralph preset list` (authoring tool) |
+| **Local Preset** | Your customized YAML file | You create with `ralph preset new` |
+
+Templates generate **ordinary YAML** with `x_preset` metadata. They do not become builtins or require special maintenance. See [Preset Authoring Guide](../docs/guide/preset-authoring.md) for details.
 
 ## Supported Builtins
 
