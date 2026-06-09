@@ -970,13 +970,16 @@ impl RuntimeContractAggregator {
         // coordinator checks. Lint findings are semantic (not structural)
         // and do not short-circuit subsequent topology/payload/orphan
         // checks, so callers see all authoring issues in one report.
-        let lint_strictness = if strictness.fail_on_warnings {
-            LintStrictness::Strict
-        } else {
-            LintStrictness::Default
-        };
-        for finding in run_preset_lint(config, lint_strictness) {
-            report.add_finding(finding);
+        //
+        // Only runs in strict mode (`fail_on_warnings=true`) to preserve
+        // backward compatibility: non-strict `preset check` historically
+        // did NOT run lint, and adding it would be a behavioral regression.
+        // The `ralph run` hard gate always uses strict mode, so lint is
+        // always enforced at startup.
+        if strictness.fail_on_warnings {
+            for finding in run_preset_lint(config, LintStrictness::Strict) {
+                report.add_finding(finding);
+            }
         }
 
         // Step 3: topology validation. Uses the runtime-aware registry
@@ -2669,7 +2672,7 @@ event_loop:
             "u3-lint-topic",
             &config,
             &registry,
-            RuntimeContractStrictness::default(),
+            RuntimeContractStrictness::preset_check_strict(),
         );
         let lint_findings: Vec<&RuntimeContractFinding> = report
             .findings
@@ -2778,7 +2781,7 @@ hats:
             "u3-lint-and-payload",
             &config,
             &registry,
-            RuntimeContractStrictness::default(),
+            RuntimeContractStrictness::preset_check_strict(),
         );
         let has_lint = report
             .findings
