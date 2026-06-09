@@ -45,13 +45,7 @@ npm run test:server                          # Backend tests
 npm run test                                 # All npm workspace tests
 ```
 
-### BDD / Cucumber Tests
-
-```bash
-cargo test -p ralph-core scenarios            # BDD scenario tests
-```
-
-BDD scenarios live in `crates/ralph-core/tests/scenarios/` (YAML files). They exercise real runtime code paths via integration tests.
+BDD scenarios (YAML, exercise real runtime paths) live in `crates/ralph-core/tests/scenarios/`.
 
 ## Architecture
 
@@ -150,7 +144,15 @@ Presets define collections of hats. Located in `presets/` directory and `crates/
 - **HatRegistry**: Manages hat discovery, registration, subscription
 - Presets support Chinese (`*-zh.yml`) variants and chainable configurations
 - Builtin presets: `autoresearch`, `ce-executor`, `ce-executor-wave`, `code-assist`, `debug`, `merge-loop`, `pdd-to-code-assist`, `research`, `review`
-- `index.json` is the preset manifest
+- `presets/index.json` is the user-facing preset manifest
+
+**`presets/manifest.yml` 是 builtin preset 的 single source of truth**（`crates/ralph-cli/build.rs` 和 `crates/ralph-cli/src/presets.rs` 都从这里读取并在不一致时 panic）。新增/重命名/删除一个 builtin preset 必须**同步改 4 处**：
+
+1. `presets/en/<name>.yml`（实际 YAML）
+2. `presets/manifest.yml` 的 `embedded:` 列表
+3. `crates/ralph-cli/src/presets.rs` 的 `PRESETS` 数组（`EmbeddedPreset { name, description, content, public }`）
+4. `presets/index.json`（如对用户可见）
+5. 同步更新本文件 Presets & Hats 段的 builtin preset 列表，以及 `scripts/ralph-zsh-plugin.zsh` 的 zsh 补全
 
 ### Key Files
 
@@ -170,34 +172,35 @@ Presets define collections of hats. Located in `presets/` directory and `crates/
 
 ### Code Locations
 
-- **Event loop**: `crates/ralph-core/src/event_loop/` — main orchestration loop (`mod.rs`), loop state (`loop_state.rs`)
-- **Hat system**: `crates/ralph-core/src/hatless_ralph.rs`, `hat_registry.rs`
-- **State machine**: `crates/ralph-core/src/state_machine.rs` — instance lifecycle enforcement
-- **Event policy**: `crates/ralph-core/src/event_policy.rs` — schema validation, terminal monotonicity
-- **Event origin**: `crates/ralph-core/src/event_origin.rs` — JSONL provenance guard
-- **Event projection**: `crates/ralph-core/src/event_projection.rs` — event transformation/redaction
-- **Memory system**: `crates/ralph-core/src/memory.rs`, `memory_store.rs`
-- **Task system**: `crates/ralph-core/src/task.rs`, `task_store.rs`, `task_definition.rs`
-- **Hook system**: `crates/ralph-core/src/hooks/` — engine, executor, suspend state
-- **Skill system**: `crates/ralph-core/src/skill.rs`, `skill_registry.rs`
-- **Lock coordination**: `crates/ralph-core/src/worktree.rs`, `loop_lock.rs`, `file_lock.rs`
-- **Loop registry**: `crates/ralph-core/src/loop_registry.rs`
-- **Merge queue**: `crates/ralph-core/src/merge_queue.rs`
-- **Config**: `crates/ralph-core/src/config/` — all config types, v1/v2 format compatibility
-- **CLI commands**: `crates/ralph-cli/src/` — `commands/`, `cli/`, `loops.rs`, `task_cli.rs`, `wave.rs`, `bot.rs`, `web.rs`, `mcp.rs`, `init.rs`, `hats.rs`, `presets.rs`, `hooks.rs`, `tools.rs`, `doctor.rs`
-- **Telegram integration**: `crates/ralph-telegram/src/` (bot, service, state, handler)
-- **RObot config**: `crates/ralph-core/src/config/robot.rs` (`RobotConfig`, `TelegramBotConfig`)
-- **Wave system**: `crates/ralph-core/src/wave_tracker.rs`, `wave_detection.rs`, `wave_prompt.rs`
-- **Wave CLI**: `crates/ralph-cli/src/wave.rs`
-- **Adapters**: `crates/ralph-adapters/src/` — `cli_backend.rs`, `cli_executor.rs`, `pty_executor.rs`, `auto_detect.rs`, stream parsers
-- **Preflight checks**: `crates/ralph-core/src/preflight.rs` — acceptance criteria extraction and validation
-- **Harness extensions**: `crates/ralph-core/src/config/` (config schema), `event_loop/mod.rs` (integration), `event_projection.rs`, `state_file_injector.rs`, `preflight.rs` (external command hooks)
-- **Web server**: `backend/ralph-web-server/src/` (tRPC routes in `api/`, runners in `runner/`)
-- **Web dashboard**: `frontend/ralph-web/src/` (React components in `components/`)
-- **E2E tests**: `crates/ralph-e2e/src/` — scenarios in `scenarios/`, mock CLI, reporter
-- **BDD scenarios**: `crates/ralph-core/tests/scenarios/` — YAML-based integration test scenarios
-- **Smoke fixtures**: `crates/ralph-core/tests/fixtures/` — recorded JSONL for replay tests
-- **Ralph proto types**: `crates/ralph-proto/src/` — Event, Hat, HatId, Topic, EventBus, RobotService, CheckinContext
+| Module | Path | Purpose |
+|---|---|---|
+| Event loop | `crates/ralph-core/src/event_loop/` | `mod.rs` (main loop), `loop_state.rs` |
+| Hat system | `crates/ralph-core/src/hatless_ralph.rs`, `hat_registry.rs` | Topology, subscription matching, selection |
+| State machine | `crates/ralph-core/src/state_machine.rs` | Instance lifecycle (`open → active → terminal`) |
+| Event policy | `crates/ralph-core/src/event_policy.rs` | Schema, terminal monotonicity |
+| Event origin | `crates/ralph-core/src/event_origin.rs` | JSONL provenance guard (fail-closed) |
+| Event projection | `crates/ralph-core/src/event_projection.rs` | Transform / redact events |
+| Memory | `crates/ralph-core/src/memory.rs`, `memory_store.rs` | Persistent learning (markdown) |
+| Task | `crates/ralph-core/src/task.rs`, `task_store.rs`, `task_definition.rs` | JSONL work tracking |
+| Hooks | `crates/ralph-core/src/hooks/` | engine, executor, suspend state |
+| Skills | `crates/ralph-core/src/skill.rs`, `skill_registry.rs` | Discovery, auto-injection |
+| Lock coordination | `crates/ralph-core/src/worktree.rs`, `loop_lock.rs`, `file_lock.rs` | Git-worktree + lockfiles |
+| Loop registry | `crates/ralph-core/src/loop_registry.rs` | Tracked loops across worktrees |
+| Merge queue | `crates/ralph-core/src/merge_queue.rs` | Event-sourced queue |
+| Config | `crates/ralph-core/src/config/` | v1/v2 compat; `robot.rs` for RObot |
+| CLI commands | `crates/ralph-cli/src/` | `commands/`, `cli/`, `loops.rs`, `task_cli.rs`, `wave.rs`, `bot.rs`, `web.rs`, `mcp.rs`, `init.rs`, `hats.rs`, `presets.rs`, `hooks.rs`, `tools.rs`, `doctor.rs` |
+| Telegram | `crates/ralph-telegram/src/` | bot, service, state, handler |
+| Wave | `crates/ralph-core/src/wave_tracker.rs`, `wave_detection.rs`, `wave_prompt.rs`; CLI in `crates/ralph-cli/src/wave.rs`; loop dispatch in `crates/ralph-cli/src/loop_runner/wave/dispatcher.rs` | Intra-loop parallelism |
+| Adapters | `crates/ralph-adapters/src/` | `cli_backend.rs`, `cli_executor.rs`, `pty_executor.rs`, `auto_detect.rs`, stream parsers |
+| Preflight | `crates/ralph-core/src/preflight.rs` | Acceptance criteria extraction / validation |
+| Harness extensions | `crates/ralph-core/src/{config,event_loop,event_projection,state_file_injector,preflight}.rs` | Event filtering, projection, state injection, preflight hooks |
+| Web server (Rust) | `crates/ralph-api/src/` | Axum REST/WS for TUI/dashboard |
+| Web server (Node, legacy) | `backend/ralph-web-server/src/` | Fastify + tRPC + SQLite (deprecated) |
+| Web frontend | `frontend/ralph-web/src/` | React components |
+| E2E | `crates/ralph-e2e/src/` | scenarios, mock CLI, reporter |
+| BDD scenarios | `crates/ralph-core/tests/scenarios/` | YAML integration scenarios |
+| Smoke fixtures | `crates/ralph-core/tests/fixtures/` | Recorded JSONL for replay |
+| Proto types | `crates/ralph-proto/src/` | `Event`, `Hat`, `HatId`, `Topic`, `EventBus`, `RobotService`, `DaemonAdapter`, `FrameCapture`, `UxEvent` |
 
 ## The Ralph Tenets
 
@@ -333,12 +336,7 @@ ralph wave emit review.file --payloads "src/main.rs" "src/lib.rs" "src/config.rs
 
 ## Smoke Tests (Replay-Based)
 
-Smoke tests use recorded JSONL fixtures instead of live API calls:
-
-```bash
-cargo test -p ralph-core smoke_runner        # All smoke tests
-cargo test -p ralph-core kiro                # Kiro-specific
-```
+Use the `smoke_runner` entry point from Build & Test above. Per-backend filters are passed as test name substrings, e.g. `cargo test -p ralph-core -- kiro`.
 
 **Fixtures location:** `crates/ralph-core/tests/fixtures/`
 
@@ -426,6 +424,8 @@ Runtime Diagnosis（U0–U8）是在上述 TUI / full diagnostics 之上的**可
 
 ## IMPORTANT
 
+> **以下规则优先级最高，请在动手写任何代码前先完整读完本段。** 任何「先看了某段就开始写」的冲动都应当先回头对照本段。
+
 - 讨论 ralph-orchestrator 的任何功能、架构、行为时，必须先去读源码确认，不允许凭记忆或猜测讨论
 - Run `cargo test` before declaring any task done
 - Backwards compatibility doesn't matter — it adds clutter for no reason
@@ -437,12 +437,17 @@ Runtime Diagnosis（U0–U8）是在上述 TUI / full diagnostics 之上的**可
 - When adding or changing `ralph tools` subcommands, update the appropriate file in `crates/ralph-core/data/`: `ralph-tools.md` (shared commands), `ralph-tools-tasks.md` (task commands), or `ralph-tools-memories.md` (memory commands). `.claude/skills/ralph-tools/SKILL.md` is a symlink to the base `ralph-tools.md`
 - **反向验证（必须）**：修改 ralph tools 子命令、被这些 skill 文档引用的源码（行号、参数、行为描述）后，必须用 `sed -n 'NN,MMp' <file>` 复核 `crates/ralph-core/data/*.md` 里所有形如 `xxx.rs:NN-MM` 的源码引用范围是否仍指向正确代码。**行号漂移、参数表与代码 clap 定义不符、引用了不存在的命令/字段，都算违规**。改完必须跑一次 `ralph <cmd> --help`（涉及命令语法）或对应 skill 列出的全部命令做冒烟测试（涉及行为）。发现漂移立即在文档里同步修正，不允许文档落后于代码。
 - When adding, removing, renaming, or changing builtin hat collections/presets in `crates/ralph-cli/src/presets.rs` or mirrored preset files, update `scripts/ralph-zsh-plugin.zsh` so `ralph run -H builtin:<TAB>` stays accurate. Preserve the current `compadd`-based completion style for values containing `:`; do not use `_describe` for `builtin:*` values. After updating the script, install it for the current user with `cp scripts/ralph-zsh-plugin.zsh ~/.oh-my-zsh/plugins/ralph/ralph.plugin.zsh` and verify zsh completion loads.
+- **builtin preset 改动后**：除上述 zsh 脚本外，还必须同步更新本文件「Presets & Hats System」段的 builtin preset 列表（参见该段对 `presets/manifest.yml` 单一事实源的说明）。文档落后于代码视为违规。
 - Design docs and specs go in `.ralph/specs` and one-off code tasks and bug fixes go in `.ralph/tasks`
+- **`DEVELOPMENT.md` 已弃用**：它描述的是旧 `specs/` 目录规范，已被 `.ralph/specs/` 取代；请遵循本文件「Specs & Tasks」段的规范。
+- **不要手动编辑 `.ralph/` 下的运行时状态文件**（`loop.lock` / `events.jsonl` / `agent/memories.md` / `agent/tasks.jsonl` / `loops.json` / `merge-queue.jsonl` / `telegram-state.json` / `diagnostics/`）。这些由 loop 自己维护；手工改动会与 in-flight 状态错位。确实需要重置时，先停掉所有相关 loop 再用对应 CLI（如 `ralph loops clean`）清理。
 - **所有中文输出规则**：无论使用哪个 skill 进行操作，所有面向人类的输出——包括但不限于计划文档、设计文档、需求文档、实施计划、任务文件、报告、总结、注释说明、代码 review 意见、PR 描述等——都必须使用中文撰写。不影响：文件名、代码中的字符串字面量、代码注释中的技术标识符（如变量名、函数名、crate 名）、命令行输出块。这条规则优先于任何 skill 内置的语言默认值。
-- **CLAUDE.md 与 AGENTS.md 同步规则**：这两个文件必须保持内容完全一致。修改其中一个时，必须同步更新另一个，确保不会出现差异。
+- **CLAUDE.md 与 AGENTS.md 同步规则**：这两个文件必须保持内容完全一致。修改其中一个时，必须同步更新另一个（推荐 `cp CLAUDE.md AGENTS.md`），确保不会出现差异。
 
 <!-- rtk-instructions v2 -->
 # RTK (Rust Token Killer) - Token-Optimized Commands
+
+> **可选优化**：本节是 token 节省提示，不影响项目行为。RTK 不可用时直接跑原命令即可。
 
 ## Golden Rule
 
