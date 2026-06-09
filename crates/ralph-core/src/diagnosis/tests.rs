@@ -25,6 +25,7 @@ fn every_source_variant_round_trips_through_serde() {
         DiagnosisSource::DriftMonitor,
         DiagnosisSource::HookRetry,
         DiagnosisSource::LoopStale,
+        DiagnosisSource::AgentDocSync,
     ];
     for source in sources {
         let json = serde_json::to_string(&source).unwrap();
@@ -76,6 +77,7 @@ fn source_strings_match_expected_snake_case() {
         (DiagnosisSource::DriftMonitor, "drift_monitor"),
         (DiagnosisSource::HookRetry, "hook_retry"),
         (DiagnosisSource::LoopStale, "loop_stale"),
+        (DiagnosisSource::AgentDocSync, "agent_doc_sync"),
     ];
     for (source, expected) in pairs {
         let json = serde_json::to_value(source).unwrap();

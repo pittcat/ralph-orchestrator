@@ -30,6 +30,7 @@
 
 pub mod block;
 pub mod builtin;
+pub mod persist;
 pub mod writer;
 
 use std::path::Path;
@@ -86,6 +87,9 @@ pub struct SyncConfig<'a> {
     pub target_files: &'a [&'a str],
     /// Blocks to inject.
     pub blocks: &'a [BlockSpec],
+    /// Diagnostics session directory for recovery envelope writes.
+    /// When `None`, recovery envelope is skipped (no-op).
+    pub session_dir: Option<&'a Path>,
 }
 
 /// Synchronously injects managed blocks into agent doc files.
@@ -168,6 +172,22 @@ pub fn sync_all(
         );
     }
 
+    // ── Persist: dual-write snapshot + recovery envelope ──────────────
+    // Both writes are independent and swallow I/O errors so the sync
+    // result is never lost (KTD-8).
+    if let Err(e) = persist::write_snapshot(workspace_root, &report) {
+        debug!(
+            error = %e,
+            "agent_doc_sync: failed to write snapshot; continuing"
+        );
+    }
+    if let Err(e) = persist::append_recovery_envelope(config.session_dir, &report) {
+        debug!(
+            error = %e,
+            "agent_doc_sync: failed to write recovery envelope; continuing"
+        );
+    }
+
     Ok(report)
 }
 
@@ -193,6 +213,7 @@ mod tests {
                 on_error: OnError::Warn,
                 target_files: &["CLAUDE.md"],
                 blocks: &[block.clone()],
+                session_dir: None,
             },
         )
         .unwrap();
@@ -221,6 +242,7 @@ mod tests {
                 on_error: OnError::Warn,
                 target_files: &["CLAUDE.md"],
                 blocks: &[block],
+                session_dir: None,
             },
         )
         .unwrap();
@@ -252,6 +274,7 @@ mod tests {
                 on_error: OnError::Warn,
                 target_files: &["CLAUDE.md"],
                 blocks: &[block],
+                session_dir: None,
             },
         )
         .unwrap();
@@ -281,6 +304,7 @@ mod tests {
                 on_error: OnError::Warn,
                 target_files: &["CLAUDE.md"],
                 blocks: &[block],
+                session_dir: None,
             },
         )
         .unwrap();
@@ -307,6 +331,7 @@ mod tests {
                 on_error: OnError::Warn,
                 target_files: &["CLAUDE.md"],
                 blocks: &[block],
+                session_dir: None,
             },
         )
         .unwrap();
@@ -328,6 +353,7 @@ mod tests {
                 on_error: OnError::Warn,
                 target_files: &["CLAUDE.md", "AGENTS.md"],
                 blocks: &[block],
+                session_dir: None,
             },
         )
         .unwrap();
@@ -349,6 +375,7 @@ mod tests {
                 on_error: OnError::Warn,
                 target_files: &["CLAUDE.md"],
                 blocks: &[block],
+                session_dir: None,
             },
         )
         .unwrap();
@@ -376,6 +403,7 @@ mod tests {
                 on_error: OnError::Warn,
                 target_files: &["CLAUDE.md"],
                 blocks: &[block],
+                session_dir: None,
             },
         )
         .unwrap();
@@ -400,6 +428,7 @@ mod tests {
                 on_error: OnError::Strict,
                 target_files: &["CLAUDE.md"],
                 blocks: &[block],
+                session_dir: None,
             },
         )
         .unwrap_err();
@@ -422,6 +451,7 @@ mod tests {
                 on_error: OnError::Warn,
                 target_files: &["CLAUDE.md"],
                 blocks: &[block],
+                session_dir: None,
             },
         )
         .unwrap();
@@ -453,6 +483,7 @@ mod tests {
                 on_error: OnError::Warn,
                 target_files: &["CLAUDE.md"],
                 blocks: &[block],
+                session_dir: None,
             },
         )
         .unwrap();
@@ -486,6 +517,7 @@ mod tests {
                 on_error: OnError::Warn,
                 target_files: &["CLAUDE.md"],
                 blocks: &[block.clone()],
+                session_dir: None,
             },
         )
         .unwrap();
@@ -524,6 +556,7 @@ mod tests {
                 on_error: OnError::Warn,
                 target_files: &["CLAUDE.md"],
                 blocks: &[block.clone()],
+                session_dir: None,
             },
         )
         .unwrap();

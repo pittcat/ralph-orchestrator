@@ -660,11 +660,19 @@ pub async fn run_loop_impl(
                 ralph_core::OnErrorPolicy::Strict => ralph_core::agent_doc_sync::OnError::Strict,
             };
 
+            // Resolve session_dir from the diagnostics collector for
+            // recovery envelope writes. When None, the persist module
+            // skips the recovery envelope (no-op).
+            let session_dir = ctx
+                .prebuilt_diagnostics()
+                .and_then(|d| d.session_dir());
+
             let sync_config = ralph_core::agent_doc_sync::SyncConfig {
                 skip: false,
                 on_error,
                 target_files: &["CLAUDE.md", "AGENTS.md"],
                 blocks: &blocks,
+                session_dir,
             };
 
             match ralph_core::agent_doc_sync::sync_all(

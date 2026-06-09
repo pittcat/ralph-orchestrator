@@ -74,6 +74,9 @@ pub enum DiagnosisSource {
     /// Loop itself went stale (no progress across iterations); usually
     /// paired with `LoopState::LoopStale`.
     LoopStale,
+    /// Agent doc sync (managed block injection into CLAUDE.md / AGENTS.md)
+    /// completed or failed. Produced at the end of every sync cycle.
+    AgentDocSync,
 }
 
 impl DiagnosisSource {
@@ -90,6 +93,7 @@ impl DiagnosisSource {
             DiagnosisSource::DriftMonitor => "drift_monitor",
             DiagnosisSource::HookRetry => "hook_retry",
             DiagnosisSource::LoopStale => "loop_stale",
+            DiagnosisSource::AgentDocSync => "agent_doc_sync",
         }
     }
 }
@@ -667,6 +671,7 @@ mod tests {
             DiagnosisSource::DriftMonitor,
             DiagnosisSource::HookRetry,
             DiagnosisSource::LoopStale,
+            DiagnosisSource::AgentDocSync,
         ] {
             let s = serde_json::to_string(&source).unwrap();
             let v: serde_json::Value = serde_json::from_str(&s).unwrap();
