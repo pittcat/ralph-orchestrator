@@ -12,6 +12,7 @@
 
 #[cfg(feature = "recording")]
 mod cli_capture;
+pub mod agent_doc_sync;
 mod config;
 pub mod diagnosis;
 pub mod diagnostics;
