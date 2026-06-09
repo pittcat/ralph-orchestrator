@@ -4528,6 +4528,7 @@ fn make_test_wave_with_timeout_and_payload(
             description: Some("Wave worker test".to_string()),
             triggers: vec!["review.perspective".to_string()],
             publishes,
+            terminal_events: vec![],
             instructions: "Emit review.done when finished.".to_string(),
             extra_instructions: vec![],
             backend: None,

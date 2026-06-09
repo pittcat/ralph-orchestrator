@@ -367,6 +367,27 @@ pub struct HatConfig {
     #[serde(default)]
     pub publishes: Vec<String>,
 
+    /// Terminal event topics that signal activation completion (U1 lifecycle config).
+    ///
+    /// Each activation of this hat is considered complete when any one of these
+    /// topics is emitted.  The set is non-empty for hats that participate in the
+    /// lifecycle contract; an empty set means the hat has no terminal events
+    /// configured (legacy / non-participating hats).
+    ///
+    /// Supports two YAML forms:
+    /// - **Array:** `terminal_events: ["work.done", "work.failed"]`
+    /// - **Single string alias:** `terminal_event: "work.done"` (resolves to
+    ///   a single-element set)
+    ///
+    /// The strict authoring contract (`ralph preset check --strict`) requires
+    /// non-empty terminal sets; non-strict mode emits a warning for empty sets.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_terminal_events",
+        alias = "terminal_event"
+    )]
+    pub terminal_events: Vec<String>,
+
     /// Instructions prepended to prompts.
     #[serde(default)]
     pub instructions: String,
@@ -493,6 +514,29 @@ pub struct HatConfig {
     pub ignore_payload_fields: Vec<String>,
 }
 
+/// Custom deserializer for `terminal_events` that accepts both:
+/// - A JSON/YAML array: `["topic1", "topic2"]`
+/// - A single string: `"topic1"` (resolved to a single-element array)
+///
+/// The `#[serde(alias = "terminal_event")]` on the struct field handles
+/// the YAML key alias, while this function handles the value type alias.
+fn deserialize_terminal_events<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum TerminalEventsInput {
+        Array(Vec<String>),
+        Single(String),
+    }
+
+    match TerminalEventsInput::deserialize(deserializer)? {
+        TerminalEventsInput::Array(v) => Ok(v),
+        TerminalEventsInput::Single(s) => Ok(vec![s]),
+    }
+}
+
 fn default_concurrency() -> u32 {
     1
 }
@@ -523,6 +567,7 @@ impl Default for HatConfig {
             description: None,
             triggers: Vec::new(),
             publishes: Vec::new(),
+            terminal_events: Vec::new(),
             instructions: String::new(),
             extra_instructions: Vec::new(),
             backend: None,
@@ -582,6 +627,12 @@ impl HatConfig {
         } else {
             self.trigger_topics()
         }
+    }
+
+    /// Returns the terminal event topics as a `HashSet` for efficient
+    /// membership checks.  Empty set means no terminal events configured.
+    pub fn terminal_topic_set(&self) -> std::collections::HashSet<&str> {
+        self.terminal_events.iter().map(String::as_str).collect()
     }
 
     /// Look up the obligation that applies to a given trigger topic.
@@ -701,6 +752,7 @@ mod tests {
             description: None,
             triggers: vec!["work.done".into()],
             publishes: vec!["review.passed".into(), "review.wave.ready".into()],
+            terminal_events: Vec::new(),
             instructions: String::new(),
             extra_instructions: Vec::new(),
             backend: None,
@@ -1367,5 +1419,96 @@ obligations:
                 .map(String::as_str),
             Some("fail")
         );
+    }
+
+    // ─── U1: Lifecycle 配置模型 tests ───
+
+    /// T-U1-1: 单字符串 `terminal_event` alias 解析为单元素集合，
+    /// 与 `terminal_events` 数组形式等价。
+    #[test]
+    fn terminal_event_string_alias_parses_to_single_element_set() {
+        let yaml_alias = r#"
+name: "Executor"
+triggers: ["work.ready"]
+publishes: ["work.done", "work.failed"]
+terminal_event: "work.done"
+"#;
+        let yaml_array = r#"
+name: "Executor"
+triggers: ["work.ready"]
+publishes: ["work.done", "work.failed"]
+terminal_events:
+  - "work.done"
+"#;
+        let hat_alias: HatConfig = serde_yaml::from_str(yaml_alias).expect("parse yaml alias");
+        let hat_array: HatConfig = serde_yaml::from_str(yaml_array).expect("parse yaml array");
+        assert_eq!(hat_alias.terminal_events, hat_array.terminal_events);
+        assert_eq!(hat_alias.terminal_events, vec!["work.done".to_string()]);
+    }
+
+    /// T-U1-2: `terminal_events` 数组形式解析为完整集合。
+    #[test]
+    fn terminal_events_array_parses_correctly() {
+        let yaml = r#"
+name: "Reporter"
+triggers: ["REVIEW_COMPLETE"]
+publishes: ["report.done", "LOOP_COMPLETE"]
+terminal_events:
+  - "report.done"
+  - "LOOP_COMPLETE"
+"#;
+        let hat: HatConfig = serde_yaml::from_str(yaml).expect("parse yaml");
+        assert_eq!(hat.terminal_events.len(), 2);
+        assert!(hat.terminal_events.contains(&"report.done".to_string()));
+        assert!(hat.terminal_events.contains(&"LOOP_COMPLETE".to_string()));
+    }
+
+    /// T-U1-3: 旧 preset（无 `terminal_event`/`terminal_events` 字段）
+    /// 解析为默认空集合，不阻塞。
+    #[test]
+    fn old_preset_without_terminal_events_parses_to_empty_vec() {
+        let yaml = r#"
+name: "Legacy"
+triggers: ["work.start"]
+publishes: ["work.done"]
+"#;
+        let hat: HatConfig = serde_yaml::from_str(yaml).expect("parse yaml");
+        assert!(hat.terminal_events.is_empty());
+    }
+
+    /// T-U1-4: `terminal_topic_set()` 返回高效成员检查集合。
+    #[test]
+    fn terminal_topic_set_returns_hashset() {
+        let hat = HatConfig {
+            terminal_events: vec!["work.done".into(), "work.failed".into()],
+            ..HatConfig::default()
+        };
+        let set = hat.terminal_topic_set();
+        assert!(set.contains("work.done"));
+        assert!(set.contains("work.failed"));
+        assert!(!set.contains("review.passed"));
+    }
+
+    /// T-U1-5: 空 `terminal_events` 时 `terminal_topic_set()` 返回空集合。
+    #[test]
+    fn terminal_topic_set_empty_when_no_terminal_events() {
+        let hat = HatConfig::default();
+        assert!(hat.terminal_topic_set().is_empty());
+    }
+
+    /// T-U1-6: YAML 序列化往返 — terminal_events 写出后重新解析保持一致。
+    #[test]
+    fn terminal_events_roundtrip_through_yaml() {
+        let hat = HatConfig {
+            name: "Executor".into(),
+            description: Some("Test".into()),
+            triggers: vec!["work.ready".into()],
+            publishes: vec!["work.done".into(), "work.failed".into()],
+            terminal_events: vec!["work.done".into(), "work.failed".into()],
+            ..HatConfig::default()
+        };
+        let yaml = serde_yaml::to_string(&hat).expect("serialize");
+        let parsed: HatConfig = serde_yaml::from_str(&yaml).expect("deserialize");
+        assert_eq!(parsed.terminal_events, hat.terminal_events);
     }
 }

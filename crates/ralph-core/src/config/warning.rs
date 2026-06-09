@@ -9,6 +9,8 @@ pub enum ConfigWarning {
     DroppedField { field: String, reason: String },
     /// Field has an invalid value.
     InvalidValue { field: String, message: String },
+    /// Hat has empty terminal_events (legacy / non-participating hat).
+    EmptyTerminalEvents { hat: String },
 }
 
 impl std::fmt::Display for ConfigWarning {
@@ -21,6 +23,13 @@ impl std::fmt::Display for ConfigWarning {
             }
             ConfigWarning::DroppedField { field, reason } => {
                 write!(f, "Warning [{field}]: Field ignored - {reason}")
+            }
+            ConfigWarning::EmptyTerminalEvents { hat } => {
+                write!(
+                    f,
+                    "Warning [terminal_events]: Hat '{hat}' has no terminal events configured; \
+                     lifecycle tracking will not apply. Add 'terminal_events' to opt in."
+                )
             }
         }
     }

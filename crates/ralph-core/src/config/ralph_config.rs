@@ -267,6 +267,27 @@ impl RalphConfig {
             }
         }
 
+        // Validate terminal_events: each terminal topic must exist in the hat's publishes.
+        // Empty terminal_events is allowed (legacy hats) but emits a warning.
+        for (hat_id, hat_config) in &self.hats {
+            if hat_config.terminal_events.is_empty() {
+                warnings.push(ConfigWarning::EmptyTerminalEvents {
+                    hat: hat_id.clone(),
+                });
+            } else {
+                let publishes: std::collections::HashSet<&str> =
+                    hat_config.publishes.iter().map(String::as_str).collect();
+                for topic in &hat_config.terminal_events {
+                    if !publishes.contains(topic.as_str()) {
+                        return Err(ConfigError::TerminalTopicNotInPublishes {
+                            hat: hat_id.clone(),
+                            topic: topic.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
         // Validate workflow guard config
         if let Some(workflow_guards) = &self.event_loop.workflow_guards {
             let mut seen_chain_names = std::collections::HashSet::new();
@@ -3897,5 +3918,111 @@ event_loop:
         assert!(schemas.contains_key("test.topic"));
 
         std::fs::remove_file(&schema_path).ok();
+    }
+
+    // ─── U1: terminal_events validation tests ───
+
+    /// T-U1-V1: terminal topic 不在 publishes 中时返回 error。
+    #[test]
+    fn validate_terminal_topic_not_in_publishes_returns_error() {
+        let yaml = r#"
+hats:
+  executor:
+    name: "Executor"
+    description: "Executes tasks"
+    triggers: ["work.ready"]
+    publishes: ["work.done"]
+    terminal_events: ["work.failed"]
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  starting_event: "work.start"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse yaml");
+        let result = config.validate();
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ConfigError::TerminalTopicNotInPublishes { hat, topic } => {
+                assert_eq!(hat, "executor");
+                assert_eq!(topic, "work.failed");
+            }
+            other => panic!("expected TerminalTopicNotInPublishes, got: {other:?}"),
+        }
+    }
+
+    /// T-U1-V2: terminal topic 在 publishes 中时验证通过（无 error）。
+    #[test]
+    fn validate_terminal_topic_in_publishes_passes() {
+        let yaml = r#"
+hats:
+  executor:
+    name: "Executor"
+    description: "Executes tasks"
+    triggers: ["work.ready"]
+    publishes: ["work.done", "work.failed"]
+    terminal_events: ["work.done", "work.failed"]
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  starting_event: "work.start"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse yaml");
+        let result = config.validate();
+        assert!(result.is_ok(), "validation should pass: {:?}", result.err());
+    }
+
+    /// T-U1-V3: 空 terminal_events 产生 EmptyTerminalEvents warning。
+    #[test]
+    fn validate_empty_terminal_events_emits_warning() {
+        let yaml = r#"
+hats:
+  legacy:
+    name: "Legacy"
+    description: "Legacy hat"
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  starting_event: "work.start"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse yaml");
+        let result = config.validate().expect("should not error");
+        let has_empty_warning = result.iter().any(|w| {
+            matches!(
+                w,
+                ConfigWarning::EmptyTerminalEvents { hat } if hat == "legacy"
+            )
+        });
+        assert!(
+            has_empty_warning,
+            "expected EmptyTerminalEvents warning for legacy hat: {result:?}"
+        );
+    }
+
+    /// T-U1-V4: 旧 preset（无 terminal_events 字段）产生 warning，不阻塞。
+    #[test]
+    fn validate_old_preset_no_terminal_events_produces_warning_not_error() {
+        let yaml = r#"
+hats:
+  a:
+    name: "A"
+    description: "Hat A"
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+  b:
+    name: "B"
+    description: "Hat B"
+    triggers: ["work.done"]
+    publishes: ["LOOP_COMPLETE"]
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  starting_event: "work.start"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse yaml");
+        let result = config.validate().expect("should not error");
+        // Both hats should produce EmptyTerminalEvents warnings
+        let empty_warnings: Vec<_> = result
+            .iter()
+            .filter(|w| matches!(w, ConfigWarning::EmptyTerminalEvents { .. }))
+            .collect();
+        assert_eq!(empty_warnings.len(), 2, "both hats should warn: {result:?}");
     }
 }
