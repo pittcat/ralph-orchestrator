@@ -342,10 +342,46 @@ pub enum LintStrictness {
 
 impl LintStrictness {
     /// Returns the severity to use for checks that are warn-by-default.
-    pub fn ownership_severity(self) -> &'static str {
+    pub fn ownership_severity(self) -> LintSeverity {
         match self {
-            Self::Default => "warn",
-            Self::Strict => "error",
+            Self::Default => LintSeverity::Warn,
+            Self::Strict => LintSeverity::Error,
+        }
+    }
+}
+
+/// Severity level for a lint finding.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum LintSeverity {
+    /// Hard error — must be fixed before proceeding.
+    Error,
+    /// Warning — should be fixed, but non-blocking in default mode.
+    Warn,
+    /// Informational pass — the check succeeded.
+    Pass,
+}
+
+impl std::fmt::Display for LintSeverity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Error => write!(f, "error"),
+            Self::Warn => write!(f, "warn"),
+            Self::Pass => write!(f, "pass"),
+        }
+    }
+}
+
+impl LintSeverity {
+    /// Parse a severity string, returning `None` for unknown values.
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s {
+            "error" => Some(Self::Error),
+            "warn" => Some(Self::Warn),
+            "pass" => Some(Self::Pass),
+            _ => None,
         }
     }
 }
@@ -355,8 +391,8 @@ impl LintStrictness {
 pub struct LintFinding {
     /// Stable machine finding ID (e.g. `preset.owner_unknown_hat`).
     pub id: &'static str,
-    /// Severity: `"error"`, `"warn"`, or `"pass"`.
-    pub severity: String,
+    /// Severity level — type-safe enum preventing invalid values.
+    pub severity: LintSeverity,
     /// Human-readable summary.
     pub message: String,
     /// Optional topic involved.
@@ -373,7 +409,7 @@ impl LintFinding {
     fn error(id: &'static str, message: impl Into<String>) -> Self {
         Self {
             id,
-            severity: "error".to_string(),
+            severity: LintSeverity::Error,
             message: message.into(),
             topic: None,
             hat: None,
@@ -432,14 +468,14 @@ pub fn check_owner_references(config: &RalphConfig) -> Vec<LintFinding> {
     findings
 }
 
-/// Collect all topics a hat explicitly publishes (via `publishes` or
-/// `default_publishes`).
-fn hat_publishes(hat_config: &crate::config::HatConfig) -> Vec<String> {
-    let mut topics: Vec<String> = hat_config.publishes.clone();
-    if let Some(dp) = &hat_config.default_publishes {
-        topics.push(dp.clone());
-    }
-    topics
+/// Iterate over all topics a hat explicitly publishes (via `publishes` or
+/// `default_publishes`) without allocating.
+fn hat_publishes_refs(hat_config: &crate::config::HatConfig) -> impl Iterator<Item = &str> {
+    hat_config
+        .publishes
+        .iter()
+        .map(String::as_str)
+        .chain(hat_config.default_publishes.as_deref())
 }
 
 /// Check R2 + R3: Owner hats must publish their owned topic, and
@@ -454,10 +490,7 @@ pub fn check_ownership_rules(config: &RalphConfig, strictness: LintStrictness) -
         let publishers: Vec<&str> = config
             .hats
             .iter()
-            .filter(|(_, hat)| {
-                let publishes = hat_publishes(hat);
-                publishes.iter().any(|p| p == topic)
-            })
+            .filter(|(_, hat)| hat_publishes_refs(hat).any(|p| p == topic))
             .map(|(hat_id, _)| hat_id.as_str())
             .collect();
 
@@ -467,7 +500,7 @@ pub fn check_ownership_rules(config: &RalphConfig, strictness: LintStrictness) -
                 let severity = strictness.ownership_severity();
                 findings.push(LintFinding {
                     id: FINDING_OWNER_NOT_PUBLISHER,
-                    severity: severity.to_string(),
+                    severity,
                     message: format!(
                         "hat \"{owner}\" is the declared owner of topic \"{topic}\" \
                              but does not publish it; add \"{topic}\" to its publishes \
@@ -489,7 +522,7 @@ pub fn check_ownership_rules(config: &RalphConfig, strictness: LintStrictness) -
                 let severity = strictness.ownership_severity();
                 findings.push(LintFinding {
                     id: FINDING_CROSS_HAT_UNAUTHORIZED_PUBLISH,
-                    severity: severity.to_string(),
+                    severity,
                     message: format!(
                         "hat \"{publisher}\" publishes topic \"{topic}\" which is \
                              owned by [{}]; non-owner publishing is not allowed",
@@ -528,10 +561,7 @@ pub fn check_coordinator_rules(config: &RalphConfig) -> Vec<LintFinding> {
         let candidates: Vec<&str> = config
             .hats
             .iter()
-            .filter(|(_, hat)| {
-                let publishes = hat_publishes(hat);
-                publishes.iter().any(|p| p.starts_with("task."))
-            })
+            .filter(|(_, hat)| hat_publishes_refs(hat).any(|p| p.starts_with("task.")))
             .map(|(hat_id, _)| hat_id.as_str())
             .collect();
 
@@ -567,14 +597,10 @@ pub fn check_coordinator_rules(config: &RalphConfig) -> Vec<LintFinding> {
 
     // R5b: Every hat publishing task.* must be in coordinator_hats.
     for (hat_id, hat_config) in &config.hats {
-        let publishes = hat_publishes(hat_config);
-        let has_task_topic = publishes.iter().any(|p| p.starts_with("task."));
-        if has_task_topic && !coordinator_set.contains(hat_id.as_str()) {
-            let task_topics: Vec<&str> = publishes
-                .iter()
-                .filter(|p| p.starts_with("task."))
-                .map(|s| s.as_str())
-                .collect();
+        let task_topics: Vec<&str> = hat_publishes_refs(hat_config)
+            .filter(|p| p.starts_with("task."))
+            .collect();
+        if !task_topics.is_empty() && !coordinator_set.contains(hat_id.as_str()) {
             findings.push(
                 LintFinding::error(
                     FINDING_TASK_PUBLISHER_NOT_COORDINATED,
@@ -1098,7 +1124,7 @@ event_loop:
         let findings = check_owner_references(&config);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].id, FINDING_OWNER_UNKNOWN_HAT);
-        assert_eq!(findings[0].severity, "error");
+        assert_eq!(findings[0].severity, LintSeverity::Error);
         assert_eq!(findings[0].topic.as_deref(), Some("work.done"));
         assert_eq!(findings[0].owner.as_deref(), Some("non_existent_hat"));
     }
@@ -1124,7 +1150,7 @@ event_loop:
             .iter()
             .find(|f| f.id == FINDING_OWNER_NOT_PUBLISHER);
         assert!(f.is_some(), "expected owner_not_publisher finding");
-        assert_eq!(f.unwrap().severity, "warn");
+        assert_eq!(f.unwrap().severity, LintSeverity::Warn);
     }
 
     #[test]
@@ -1146,7 +1172,7 @@ event_loop:
             .iter()
             .find(|f| f.id == FINDING_OWNER_NOT_PUBLISHER);
         assert!(f.is_some());
-        assert_eq!(f.unwrap().severity, "error");
+        assert_eq!(f.unwrap().severity, LintSeverity::Error);
     }
 
     // T3: non-owner publishes owner topic → warn in default, error in strict.
@@ -1175,7 +1201,7 @@ event_loop:
             f.is_some(),
             "expected cross_hat_unauthorized_publish finding"
         );
-        assert_eq!(f.unwrap().severity, "warn");
+        assert_eq!(f.unwrap().severity, LintSeverity::Warn);
         assert_eq!(f.unwrap().hat.as_deref(), Some("reviewer"));
     }
 
@@ -1201,7 +1227,7 @@ event_loop:
             .iter()
             .find(|f| f.id == FINDING_CROSS_HAT_UNAUTHORIZED_PUBLISH);
         assert!(f.is_some());
-        assert_eq!(f.unwrap().severity, "error");
+        assert_eq!(f.unwrap().severity, LintSeverity::Error);
     }
 
     // T4: no owner declared → no findings (missing_topic_owner not triggered
@@ -1262,7 +1288,7 @@ event_loop:
         let findings = check_coordinator_rules(&config);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].id, FINDING_COORDINATOR_MISSING);
-        assert_eq!(findings[0].severity, "error");
+        assert_eq!(findings[0].severity, LintSeverity::Error);
         // The hint should list candidate hats.
         assert!(
             findings[0]
@@ -1301,7 +1327,7 @@ event_loop:
             "expected task_publisher_not_coordinated finding"
         );
         assert_eq!(f.unwrap().hat.as_deref(), Some("executor"));
-        assert_eq!(f.unwrap().severity, "error");
+        assert_eq!(f.unwrap().severity, LintSeverity::Error);
     }
 
     // T8: task publisher IS in coordinator_hats → no error.
@@ -1426,8 +1452,14 @@ event_loop:
     // T13: LintStrictness ownership_severity returns correct values.
     #[test]
     fn strictness_severity_mapping() {
-        assert_eq!(LintStrictness::Default.ownership_severity(), "warn");
-        assert_eq!(LintStrictness::Strict.ownership_severity(), "error");
+        assert_eq!(
+            LintStrictness::Default.ownership_severity(),
+            LintSeverity::Warn
+        );
+        assert_eq!(
+            LintStrictness::Strict.ownership_severity(),
+            LintSeverity::Error
+        );
     }
 
     // T14: validate_ownership_and_coordinator returns deterministic sorted order.
