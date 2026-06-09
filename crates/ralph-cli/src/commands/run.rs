@@ -135,6 +135,15 @@ pub struct RunArgs {
     pub skip_preflight: bool,
 
     // ─────────────────────────────────────────────────────────────────────────
+    // Agent Doc Sync Options
+    // ─────────────────────────────────────────────────────────────────────────
+    /// Skip agent doc sync before loop start.
+    /// Disables injection of managed agent doc blocks into CLAUDE.md / AGENTS.md.
+    /// Equivalent to setting RALPH_AGENT_DOC_SYNC=0.
+    #[arg(long)]
+    pub no_sync_agent_docs: bool,
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Verbosity Options
     // ─────────────────────────────────────────────────────────────────────────
     /// Enable verbose output (show tool results and session summary)
@@ -1001,6 +1010,7 @@ struct SubprocessTuiArgs {
     pub exclusive: bool,
     pub no_auto_merge: bool,
     pub skip_preflight: bool,
+    pub no_sync_agent_docs: bool,
     pub worktree: bool,
     /// Config sources to forward to child process (-c args)
     pub config_sources: Vec<String>,
@@ -1030,6 +1040,7 @@ impl SubprocessTuiArgs {
             exclusive: args.exclusive,
             no_auto_merge: args.no_auto_merge,
             skip_preflight: args.skip_preflight,
+            no_sync_agent_docs: args.no_sync_agent_docs,
             worktree: args.worktree,
             config_sources: config_sources.iter().map(|s| s.to_cli_string()).collect(),
             hats_source: hats_source.map(|h| h.label()),
@@ -1141,6 +1152,11 @@ async fn run_subprocess_tui(
     // Forward preflight options
     if args.skip_preflight {
         child_args.push("--skip-preflight".to_string());
+    }
+
+    // Forward agent doc sync options
+    if args.no_sync_agent_docs {
+        child_args.push("--no-sync-agent-docs".to_string());
     }
 
     // Forward custom args (after --)
@@ -1255,6 +1271,7 @@ pub(crate) fn default_run_args() -> RunArgs {
         no_auto_merge: false,
         worktree: false,
         skip_preflight: true,
+        no_sync_agent_docs: false,
         verbose: false,
         quiet: false,
         record_session: None,

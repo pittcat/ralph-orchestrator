@@ -3,6 +3,7 @@
 //! This module supports both v1.x flat configuration format and v2.0 nested format.
 //! Users can switch from Python v1.x to Rust v2.0 with zero config changes.
 
+mod agent_doc_sync;
 mod cli;
 mod core;
 mod error;
@@ -27,6 +28,7 @@ mod v1_adapters;
 mod warning;
 pub(crate) mod workflow_guards;
 
+pub use agent_doc_sync::{AgentDocSyncConfig, OnErrorPolicy, should_skip};
 pub use cli::{CliConfig, TuiConfig};
 pub use core::{CoreConfig, ScratchpadConfig};
 pub use error::ConfigError;
@@ -197,6 +199,12 @@ pub struct RalphConfig {
     #[serde(default)]
     pub telemetry: TelemetryConfig,
 
+    /// Agent doc sync configuration for managed agent doc blocks.
+    /// When enabled (default), the sync engine injects curated constraint
+    /// blocks into `CLAUDE.md` / `AGENTS.md` before backend spawn.
+    #[serde(default)]
+    pub agent_doc_sync: AgentDocSyncConfig,
+
     /// RObot (Ralph-Orchestrator bot) configuration for Telegram-based interaction.
     #[serde(default, rename = "RObot")]
     pub robot: RobotConfig,
@@ -251,6 +259,8 @@ impl Default for RalphConfig {
             features: FeaturesConfig::default(),
             // Telemetry / runtime diagnosis (U1)
             telemetry: TelemetryConfig::default(),
+            // Agent doc sync
+            agent_doc_sync: AgentDocSyncConfig::default(),
             // RObot (Ralph-Orchestrator bot)
             robot: RobotConfig::default(),
             // Config file path (set at load time)
