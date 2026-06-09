@@ -692,7 +692,19 @@ hats:
       - Always include: `correctness`, `standards`, `maintainability` — these apply to prose as well as code.
 
       ### Wave Emission
-      - Use `ralph wave emit` for each selected dimension
+      - **HARD RULE — emit ALL selected dimensions in ONE wave call.** Collect every
+        selected dimension's payload into a list, then run exactly one
+        `ralph wave emit review.wave.ready` with the full list (either
+        `ralph wave emit review.wave.ready --payloads '<json1>' '<json2>' ... '<jsonN>'`
+        or pipe via `printf '%s\n' '<json1>' ... '<jsonN>' | ralph wave emit review.wave.ready --payloads-stdin`).
+        This produces ONE wave with `wave_total=N`, so `dimension-reviewer`'s
+        `concurrency: 9` actually runs N workers in parallel.
+      - **DO NOT call `ralph wave emit` once per dimension.** That produces N
+        independent waves with `wave_total=1` each. The dispatcher will then
+        serialize them back-to-back (wall time ≈ N × single-worker cost),
+        completely defeating `concurrency: 9`. Field trace 2026-06-09
+        (worktree 2026-06-09-001): this anti-pattern turned a 9-worker
+        review into ~30 minutes of sequential 1-worker waves.
       - Each payload MUST include:
         - `dimension`: string (e.g., "correctness")
         - `focus`: string (dimension focus description)

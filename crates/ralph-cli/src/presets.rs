@@ -1603,6 +1603,32 @@ mod tests {
     }
 
     #[test]
+    fn test_ce_executor_wave_review_coordinator_must_batch_wave_emission() {
+        // Mirror of test_ce_executor_review_coordinator_must_batch_wave_emission,
+        // for the wave-variant preset. The "for each dimension" anti-pattern
+        // would defeat dimension-reviewer's concurrency: 9 in the wave path too.
+        let content = read_root_preset("ce-executor-wave.yml");
+        let instructions = review_coordinator_instructions_from(&content);
+
+        assert!(
+            !instructions.contains("for each selected dimension"),
+            "ce-executor-wave review-coordinator still instructs 'ralph wave emit for each \
+             selected dimension'. Replace with the HARD RULE batched-emit version. \n\
+             Offending instructions excerpt:\n{instructions}"
+        );
+
+        // Tightened positive marker: require the literal "ONE wave call" phrase
+        // (the actual HARD RULE lead-in) AND the "--payloads" flag name.
+        let lower = instructions.to_ascii_lowercase();
+        assert!(
+            lower.contains("one wave call") && lower.contains("--payloads"),
+            "ce-executor-wave review-coordinator must include the HARD RULE batched-emit \
+             guidance: literal 'ONE wave call' marker AND '--payloads' flag. \n\
+             Offending instructions excerpt:\n{instructions}"
+        );
+    }
+
+    #[test]
     fn test_ce_executor_zh_has_hard_commit_cadence() {
         let content = read_root_preset("ce-executor-zh.yml");
         assert!(
