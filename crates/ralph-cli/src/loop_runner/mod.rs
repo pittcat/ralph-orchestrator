@@ -16,6 +16,7 @@ mod output_parsing;
 mod paths;
 mod payload_contract_gate;
 mod payload_inputs;
+mod preset_lint_gate;
 mod prompt;
 mod runner;
 mod start_loop;
@@ -29,6 +30,9 @@ pub(crate) use loop_owner::register_loop_owner_with_hat;
 pub use merge_queue::process_pending_merges_cli;
 pub use payload_contract_gate::{
     enforce_payload_contract_gate, write_payload_contract_violation_report,
+};
+pub use preset_lint_gate::{
+    EXIT_CODE_LINT_GATE, enforce_preset_lint_gate, write_preset_lint_artifact,
 };
 #[cfg(test)]
 pub use runner::resolve_loop_id;

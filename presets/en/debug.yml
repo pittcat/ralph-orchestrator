@@ -6,6 +6,12 @@
 # Usage:
 #   ralph run --config presets/debug.yml --prompt "Tests fail intermittently in CI"
 
+topic_format_whitelist:
+  - DEBUG_COMPLETE
+
+tasks:
+  enabled: false
+
 event_loop:
   prompt_file: "PROMPT.md"
   completion_promise: "DEBUG_COMPLETE"

@@ -7,6 +7,12 @@
 #   ralph run --config presets/review.yml --prompt "Review PR #123"
 #   ralph run --config presets/review.yml --prompt "Review changes in src/auth/"
 
+topic_format_whitelist:
+  - REVIEW_COMPLETE
+
+tasks:
+  enabled: false
+
 event_loop:
   prompt_file: "PROMPT.md"
   completion_promise: "REVIEW_COMPLETE"

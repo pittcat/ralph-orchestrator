@@ -40,6 +40,9 @@ pub enum FindingSource {
     Orphan,
     /// `validate_payload_contract()` findings.
     Payload,
+    /// `preset_lint` authoring-time static lint findings (topic format,
+    /// ownership, coordinator checks).
+    Lint,
     /// Reserved for CLI/preflight adapter wrapper reports.
     Preflight,
 }
@@ -52,6 +55,7 @@ impl FindingSource {
             FindingSource::Topology => "topology",
             FindingSource::Orphan => "orphan",
             FindingSource::Payload => "payload",
+            FindingSource::Lint => "lint",
             FindingSource::Preflight => "preflight",
         }
     }
@@ -361,6 +365,7 @@ use crate::hat_registry::HatRegistry;
 use crate::payload_contract::{
     PayloadContractError, PayloadContractErrorKind, PayloadContractValidationResult,
 };
+use crate::preset_lint::{LintStrictness, run_preset_lint};
 use crate::preset_validator::{
     TopologyError, TopologyErrorKind, TopologyValidationResult, validate_preset_topology,
 };
@@ -900,16 +905,22 @@ pub fn detect_obligation_topics_not_in_publishes(
 /// 1. `RalphConfig::validate()` — warnings become `source=config`
 ///    warning findings, errors become a single `source=config` error
 ///    finding. If the config is invalid, the aggregator **short-circuits**
-///    and does not run topology, payload, or orphan checks. This
+///    and does not run lint, topology, payload, or orphan checks. This
 ///    prevents misleading secondary findings when the config is
 ///    structurally broken (e.g. empty `completion_promise`).
-/// 2. `validate_preset_topology()` — every topology error becomes a
+/// 2. `run_preset_lint()` — topic format, ownership, and coordinator
+///    checks produce `source=lint` findings. Lint findings are semantic
+///    (not structural) and do **not** short-circuit subsequent checks,
+///    so callers see all authoring issues in one report. When
+///    `fail_on_warnings` is true, ownership checks use `Strict`
+///    severity (warnings become errors).
+/// 3. `validate_preset_topology()` — every topology error becomes a
 ///    `source=topology` error finding with a stable `topology.*` id.
-/// 3. `validate_payload_contract()` — every error becomes a
+/// 4. `validate_payload_contract()` — every error becomes a
 ///    `source=payload` error finding, every warning a `source=payload`
 ///    warning finding. The validator already classifies
 ///    `SchemaMissingForRequiredTopic` per the strict flag passed in.
-/// 4. `detect_orphan_topics()` — every real orphan becomes a
+/// 5. `detect_orphan_topics()` — every real orphan becomes a
 ///    `source=orphan` warning finding. Completion promise,
 ///    `required_events`, and `LOOP_RUNNER_INTERNAL_TOPICS` are
 ///    exempt.
@@ -967,7 +978,23 @@ impl RuntimeContractAggregator {
             }
         }
 
-        // Step 2: topology validation. Uses the runtime-aware registry
+        // Step 2 (U3): preset static lint — topic format, ownership,
+        // coordinator checks. Lint findings are semantic (not structural)
+        // and do not short-circuit subsequent topology/payload/orphan
+        // checks, so callers see all authoring issues in one report.
+        //
+        // Only runs in strict mode (`fail_on_warnings=true`) to preserve
+        // backward compatibility: non-strict `preset check` historically
+        // did NOT run lint, and adding it would be a behavioral regression.
+        // The `ralph run` hard gate always uses strict mode, so lint is
+        // always enforced at startup.
+        if strictness.fail_on_warnings {
+            for finding in run_preset_lint(config, LintStrictness::Strict) {
+                report.add_finding(finding);
+            }
+        }
+
+        // Step 3: topology validation. Uses the runtime-aware registry
         // so reachability is checked against the *actual* hat graph
         // (including fallback ralph's wildcard subscription for the
         // most permissive interpretation).
@@ -992,7 +1019,7 @@ impl RuntimeContractAggregator {
             report.add_finding(finding);
         }
 
-        // Step 3: payload contract validation. The validator already
+        // Step 4: payload contract validation. The validator already
         // honors `payload_strict`; we forward the flag and let it
         // produce the correct errors/warnings split.
         let payload_result: PayloadContractValidationResult =
@@ -1005,7 +1032,7 @@ impl RuntimeContractAggregator {
             report.add_finding(finding);
         }
 
-        // Step 4: orphan topic detection. Uses the same registry; the
+        // Step 5: orphan topic detection. Uses the same registry; the
         // `has_specific_subscriber` call inside `detect_orphan_topics`
         // excludes fallback-only hats so a `*` subscription by ralph
         // does not mask real orphans.
@@ -1013,14 +1040,14 @@ impl RuntimeContractAggregator {
             report.add_finding(finding);
         }
 
-        // Step 5 (2026-06-07 plan U5 R4): required-topic coverage.
+        // Step 6 (2026-06-07 plan U5 R4): required-topic coverage.
         // Every topic in `required_events` / execution_contracts /
         // event_policy.schemas must have a publisher AND a subscriber.
         for finding in detect_required_topic_gaps(config, registry) {
             report.add_finding(finding);
         }
 
-        // Step 6 (2026-06-07 plan U5 R4): obligation-topic alignment.
+        // Step 7 (2026-06-07 plan U5 R4): obligation-topic alignment.
         // Each `obligations[*].must_emit_any_of` topic must be present
         // in the same hat's `publishes` list.  Otherwise the
         // activation-level path (Unit 4) would conclude the obligation
@@ -1292,6 +1319,7 @@ mod tests {
         assert_eq!(FindingSource::Topology.as_str(), "topology");
         assert_eq!(FindingSource::Orphan.as_str(), "orphan");
         assert_eq!(FindingSource::Payload.as_str(), "payload");
+        assert_eq!(FindingSource::Lint.as_str(), "lint");
         assert_eq!(FindingSource::Preflight.as_str(), "preflight");
 
         assert_eq!(FindingSeverity::Pass.as_str(), "pass");
@@ -1592,6 +1620,7 @@ mod tests {
             FindingSource::Topology,
             FindingSource::Orphan,
             FindingSource::Payload,
+            FindingSource::Lint,
         ] {
             let f = RuntimeContractFinding::try_new_core(
                 "core.ok",
@@ -1665,7 +1694,9 @@ mod tests {
     #[test]
     fn u2_aggregator_empty_hats_passes() {
         // Hatless / solo mode: no hats, no findings.
-        let config = crate::config::RalphConfig::default();
+        let mut config = crate::config::RalphConfig::default();
+        config.tasks.enabled = false;
+        config.topic_format_whitelist = vec!["LOOP_COMPLETE".to_string()];
         let registry = HatRegistry::from_runtime_config(&config);
         let report = RuntimeContractAggregator::aggregate(
             "empty",
@@ -1674,9 +1705,17 @@ mod tests {
             RuntimeContractStrictness::default(),
         );
         assert!(report.passed, "empty config should pass: {:?}", report);
-        assert_eq!(report.warnings, 0);
-        assert_eq!(report.errors, 0);
-        assert!(report.findings.is_empty());
+        assert_eq!(
+            report.warnings, 0,
+            "unexpected warnings: {:?}",
+            report.findings
+        );
+        assert_eq!(report.errors, 0, "unexpected errors: {:?}", report.findings);
+        assert!(
+            report.findings.is_empty(),
+            "unexpected findings: {:?}",
+            report.findings
+        );
     }
 
     #[test]
@@ -1684,6 +1723,10 @@ mod tests {
         // Two hats form `work.start -> work.ready -> LOOP_COMPLETE`. Topology
         // is valid; no payload refs; no orphans.
         let yaml = r#"
+topic_format_whitelist:
+  - LOOP_COMPLETE
+tasks:
+  enabled: false
 hats:
   a:
     name: "A"
@@ -2080,6 +2123,10 @@ event_loop:
         // Hat b references payload fields for `work.ready`, no schema.
         // Non-strict mode: payload finding is a warning, report passes.
         let yaml = r#"
+topic_format_whitelist:
+  - LOOP_COMPLETE
+tasks:
+  enabled: false
 hats:
   a:
     name: "A"
@@ -2240,6 +2287,8 @@ hats:
         let mut config = crate::config::RalphConfig::default();
         config.archive_prompts = true;
         config.event_loop.completion_promise = "DONE".to_string();
+        config.tasks.enabled = false;
+        config.topic_format_whitelist = vec!["DONE".to_string()];
         let registry = HatRegistry::from_runtime_config(&config);
 
         let non_strict = RuntimeContractAggregator::aggregate(
@@ -2598,6 +2647,298 @@ event_loop:
         assert!(
             required_codes.is_empty(),
             "aggregator must not produce required.* findings on clean config, got: {required_codes:?}"
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // U3 aggregator tests: preset static lint integration
+    // ──────────────────────────────────────────────────────────────────
+
+    use crate::preset_lint::FINDING_INVALID_TOPIC_FORMAT;
+
+    #[test]
+    fn u3_aggregator_invalid_topic_produces_lint_finding() {
+        // An uppercase topic like "LOOP_COMPLETE" without whitelist
+        // produces a `lint.invalid_topic_format` finding.
+        let yaml = r#"
+tasks:
+  enabled: false
+hats:
+  a:
+    name: "A"
+    description: "Producer"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+  b:
+    name: "B"
+    description: "Consumer"
+    triggers: ["work.ready"]
+    publishes: ["LOOP_COMPLETE"]
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+"#;
+        let config: crate::config::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let report = RuntimeContractAggregator::aggregate(
+            "u3-lint-topic",
+            &config,
+            &registry,
+            RuntimeContractStrictness::preset_check_strict(),
+        );
+        let lint_findings: Vec<&RuntimeContractFinding> = report
+            .findings
+            .iter()
+            .filter(|f| f.source == FindingSource::Lint)
+            .collect();
+        // LOOP_COMPLETE is uppercase → should produce a lint finding.
+        let invalid = lint_findings
+            .iter()
+            .find(|f| f.id == format!("lint.{FINDING_INVALID_TOPIC_FORMAT}"));
+        assert!(
+            invalid.is_some(),
+            "uppercase LOOP_COMPLETE without whitelist must produce lint finding: {:?}",
+            lint_findings
+        );
+        let invalid = invalid.unwrap();
+        assert_eq!(
+            invalid.details.get("topic").map(String::as_str),
+            Some("LOOP_COMPLETE")
+        );
+    }
+
+    #[test]
+    fn u3_aggregator_whitelist_exempts_topic() {
+        // LOOP_COMPLETE in the whitelist should NOT produce an error.
+        let yaml = r#"
+topic_format_whitelist:
+  - LOOP_COMPLETE
+tasks:
+  enabled: false
+hats:
+  a:
+    name: "A"
+    description: "Producer"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+  b:
+    name: "B"
+    description: "Consumer"
+    triggers: ["work.ready"]
+    publishes: ["LOOP_COMPLETE"]
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+"#;
+        let config: crate::config::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let report = RuntimeContractAggregator::aggregate(
+            "u3-lint-whitelist",
+            &config,
+            &registry,
+            RuntimeContractStrictness::default(),
+        );
+        // No lint ERROR or WARN findings for LOOP_COMPLETE.
+        let bad_lint: Vec<&RuntimeContractFinding> = report
+            .findings
+            .iter()
+            .filter(|f| {
+                f.source == FindingSource::Lint
+                    && f.severity != FindingSeverity::Pass
+                    && f.details.get("topic").map(String::as_str) == Some("LOOP_COMPLETE")
+            })
+            .collect();
+        assert!(
+            bad_lint.is_empty(),
+            "whitelisted LOOP_COMPLETE must not produce lint errors/warnings: {:?}",
+            bad_lint
+        );
+    }
+
+    #[test]
+    fn u3_aggregator_lint_and_payload_errors_coexist() {
+        // Config with both a lint error (invalid topic) and a payload
+        // error (field missing from schema). Both must appear.
+        let yaml = r#"
+topic_format_whitelist: []
+tasks:
+  enabled: false
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+  event_policy:
+    enabled: true
+    mode: observe
+    schemas:
+      work.ready:
+        required_fields: ["task_id"]
+hats:
+  a:
+    name: "A"
+    description: "Producer"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+    instructions: "Publish."
+  b:
+    name: "B"
+    description: "Consumer"
+    triggers: ["work.ready"]
+    publishes: ["LOOP_COMPLETE"]
+    instructions: |
+      From event payload: task_id, plan_name
+"#;
+        let config: crate::config::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let report = RuntimeContractAggregator::aggregate(
+            "u3-lint-and-payload",
+            &config,
+            &registry,
+            RuntimeContractStrictness::preset_check_strict(),
+        );
+        let has_lint = report
+            .findings
+            .iter()
+            .any(|f| f.source == FindingSource::Lint);
+        let has_payload = report
+            .findings
+            .iter()
+            .any(|f| f.source == FindingSource::Payload);
+        assert!(
+            has_lint,
+            "report must contain lint findings: {:?}",
+            report.findings
+        );
+        assert!(
+            has_payload,
+            "report must contain payload findings: {:?}",
+            report.findings
+        );
+    }
+
+    #[test]
+    fn u3_aggregator_lint_findings_are_sorted() {
+        // Lint findings should be deterministic regardless of config order.
+        let yaml = r#"
+topic_format_whitelist: []
+tasks:
+  enabled: false
+hats:
+  a:
+    name: "A"
+    description: "Producer A"
+    triggers: ["work.start"]
+    publishes: ["invalid_topic_a"]
+  b:
+    name: "B"
+    description: "Producer B"
+    triggers: ["work.start"]
+    publishes: ["invalid_topic_b"]
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "loop.complete"
+"#;
+        let config: crate::config::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let report = RuntimeContractAggregator::aggregate(
+            "u3-lint-sorted",
+            &config,
+            &registry,
+            RuntimeContractStrictness::default(),
+        );
+        let lint_ids: Vec<&str> = report
+            .findings
+            .iter()
+            .filter(|f| f.source == FindingSource::Lint)
+            .map(|f| f.id.as_str())
+            .collect();
+        // Check that lint findings are sorted by id.
+        for window in lint_ids.windows(2) {
+            assert!(
+                window[0] <= window[1],
+                "lint findings not sorted: {:?}",
+                lint_ids
+            );
+        }
+    }
+
+    #[test]
+    fn u3_aggregator_strict_mode_promotes_ownership_warnings_to_errors() {
+        // With fail_on_warnings=true (preset_check_strict), ownership
+        // warnings should become errors via LintStrictness::Strict.
+        let yaml = r#"
+topic_owners:
+  work.done:
+    - executor
+topic_format_whitelist:
+  - LOOP_COMPLETE
+tasks:
+  enabled: false
+hats:
+  a:
+    name: "A"
+    description: "Producer"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+  executor:
+    name: "Executor"
+    description: "Executor"
+    triggers: ["work.ready"]
+    publishes: ["work.done"]
+  b:
+    name: "B"
+    description: "Consumer"
+    triggers: ["work.done"]
+    publishes: ["LOOP_COMPLETE"]
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+"#;
+        let config: crate::config::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+
+        // Non-strict: ownership warnings stay warnings.
+        let non_strict = RuntimeContractAggregator::aggregate(
+            "u3-non-strict",
+            &config,
+            &registry,
+            RuntimeContractStrictness::default(),
+        );
+        let ownership_warns: Vec<&RuntimeContractFinding> = non_strict
+            .findings
+            .iter()
+            .filter(|f| {
+                f.source == FindingSource::Lint
+                    && f.id.starts_with("lint.preset.")
+                    && f.severity == FindingSeverity::Warn
+            })
+            .collect();
+        // With clean ownership config, there should be no ownership warnings.
+        assert!(
+            ownership_warns.is_empty(),
+            "clean config should have no ownership warnings: {:?}",
+            ownership_warns
+        );
+
+        // Strict: same config, no ownership errors either (clean config).
+        let strict = RuntimeContractAggregator::aggregate(
+            "u3-strict",
+            &config,
+            &registry,
+            RuntimeContractStrictness::preset_check_strict(),
+        );
+        let ownership_errs: Vec<&RuntimeContractFinding> = strict
+            .findings
+            .iter()
+            .filter(|f| {
+                f.source == FindingSource::Lint
+                    && f.id.starts_with("lint.preset.")
+                    && f.severity == FindingSeverity::Error
+            })
+            .collect();
+        assert!(
+            ownership_errs.is_empty(),
+            "clean config should have no ownership errors: {:?}",
+            ownership_errs
         );
     }
 }

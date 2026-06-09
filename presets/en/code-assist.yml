@@ -21,6 +21,12 @@
 #   # From a rough description:
 #   ralph run --config presets/code-assist.yml --prompt "Add a --verbose flag to the CLI"
 
+topic_format_whitelist:
+  - LOOP_COMPLETE
+
+tasks:
+  enabled: false
+
 event_loop:
   prompt_file: "PROMPT.md"
   completion_promise: "LOOP_COMPLETE"

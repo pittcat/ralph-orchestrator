@@ -242,6 +242,20 @@ pub async fn run_loop_impl(
     // error is fatal: the agent must not be started. There is no skip flag.
     enforce_payload_contract_gate(&config)?;
 
+    // U4: Preset static lint hard gate. Runs BEFORE any backend is spawned
+    // and BEFORE process group setup. In strict mode (always on for
+    // `ralph run`), any lint error is fatal with exit code 2.
+    if let Err(lint_error) = enforce_preset_lint_gate(&config) {
+        let diagnostics_dir = std::path::Path::new(".").join(".ralph").join("diagnostics");
+        let _artifact_path = write_preset_lint_artifact(&diagnostics_dir, &lint_error);
+        eprintln!(
+            "\nPreset lint gate failed with {} error(s). No backend was started.\n\
+             Fix the preset configuration and retry.",
+            lint_error.error_count
+        );
+        std::process::exit(EXIT_CODE_LINT_GATE);
+    }
+
     // Set up process group leadership per spec
     // "The orchestrator must run as a process group leader"
     process_management::setup_process_group();

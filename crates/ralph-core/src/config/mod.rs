@@ -201,6 +201,26 @@ pub struct RalphConfig {
     #[serde(default, rename = "RObot")]
     pub robot: RobotConfig,
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // PRESET LINT FIELDS (U1 of plan 2026-06-08-003)
+    // ─────────────────────────────────────────────────────────────────────────
+    /// Topic ownership map: topic → owner hat(s).
+    ///
+    /// In strict mode, a topic's owner is its sole direct publisher.
+    /// Non-owner hats publishing the owner's topic produce
+    /// `cross_hat_unauthorized_publish` findings. Omitting this field
+    /// (empty map) means no ownership constraints are enforced.
+    #[serde(default)]
+    pub topic_owners: HashMap<String, Vec<String>>,
+
+    /// Tokens exempt from the lowercase dot-case topic format validator.
+    ///
+    /// Whitelisted tokens are reported as "exempt" rather than
+    /// "invalid" in lint output. The format check still runs on
+    /// non-whitelisted tokens.
+    #[serde(default)]
+    pub topic_format_whitelist: Vec<String>,
+
     /// Path to the config file that was loaded (not serialized).
     #[serde(skip)]
     pub config_path: Option<PathBuf>,
@@ -253,6 +273,9 @@ impl Default for RalphConfig {
             telemetry: TelemetryConfig::default(),
             // RObot (Ralph-Orchestrator bot)
             robot: RobotConfig::default(),
+            // Preset lint (U1 of plan 2026-06-08-003)
+            topic_owners: HashMap::new(),
+            topic_format_whitelist: Vec::new(),
             // Config file path (set at load time)
             config_path: None,
         }

@@ -8,6 +8,12 @@
 # Usage:
 #   ralph run --config presets/research.yml --prompt "Analyze the authentication flow"
 
+topic_format_whitelist:
+  - RESEARCH_COMPLETE
+
+tasks:
+  enabled: false
+
 event_loop:
   prompt_file: "PROMPT.md"
   completion_promise: "RESEARCH_COMPLETE"

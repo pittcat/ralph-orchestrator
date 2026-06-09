@@ -223,6 +223,22 @@ fn validate_hats<W: Write>(
         report.add_finding(finding);
     }
 
+    // Step 4: preset static lint (U4). Uses the same entry point as
+    // `preset check` and the `ralph run` hard gate. In strict mode,
+    // ownership warnings are promoted to errors. Only runs in strict
+    // mode to preserve backward compatibility — default mode historically
+    // did NOT run lint, and adding it would be a behavioral regression
+    // for existing `hats validate` users.
+    if strict {
+        let findings = ralph_core::preset_lint::run_preset_lint(
+            config,
+            ralph_core::preset_lint::LintStrictness::Strict,
+        );
+        for finding in findings {
+            report.add_finding(finding);
+        }
+    }
+
     // Render topology findings
     for finding in report
         .findings
@@ -315,7 +331,21 @@ fn validate_hats<W: Write>(
         print_check(writer, CheckResult::Warn, &finding.message, use_colors)?;
     }
 
-    // 3. Dead end detection (informational, not in shared helpers)
+    // 3. Lint findings (U4: shared with preset check and run gate)
+    for finding in report
+        .findings
+        .iter()
+        .filter(|f| f.source == FindingSource::Lint)
+    {
+        let check_result = match finding.severity {
+            ralph_core::runtime_contract::FindingSeverity::Error => CheckResult::Error,
+            ralph_core::runtime_contract::FindingSeverity::Warn => CheckResult::Warn,
+            ralph_core::runtime_contract::FindingSeverity::Pass => CheckResult::Ok,
+        };
+        print_check(writer, check_result, &finding.message, use_colors)?;
+    }
+
+    // 4. Dead end detection (informational, not in shared helpers)
     let mut dead_ends = 0;
     for hat in config_registry.all() {
         if hat.publishes.is_empty() {

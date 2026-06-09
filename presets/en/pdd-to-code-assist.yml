@@ -22,6 +22,12 @@
 # Usage:
 #   ralph run --config presets/pdd-to-code-assist.yml --prompt "Build a CLI tool for..."
 
+topic_format_whitelist:
+  - LOOP_COMPLETE
+
+tasks:
+  enabled: false
+
 event_loop:
   prompt_file: "PROMPT.md"
   completion_promise: "LOOP_COMPLETE"

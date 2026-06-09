@@ -462,7 +462,11 @@ impl fmt::Display for VersionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             VersionError::InvalidFormat { expected, found } => {
-                write!(f, "invalid version format: expected {}, found '{}'", expected, found)
+                write!(
+                    f,
+                    "invalid version format: expected {}, found '{}'",
+                    expected, found
+                )
             }
             VersionError::NonNumericComponent { component, value } => {
                 write!(
@@ -482,9 +486,15 @@ impl fmt::Display for VersionError {
                 write!(f, "prerelease tag cannot be empty")
             }
             VersionError::EmptyPrereleaseIdentifier => {
-                write!(f, "prerelease identifier cannot be empty (e.g., 'alpha.' or '.1' are invalid)")
+                write!(
+                    f,
+                    "prerelease identifier cannot be empty (e.g., 'alpha.' or '.1' are invalid)"
+                )
             }
-            VersionError::InvalidPrereleaseCharacter { character, identifier } => {
+            VersionError::InvalidPrereleaseCharacter {
+                character,
+                identifier,
+            } => {
                 write!(
                     f,
                     "prerelease identifier '{}' contains invalid character '{}' (only ASCII alphanumerics and hyphens allowed)",
@@ -558,10 +568,18 @@ impl fmt::Display for RenderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RenderError::UnknownPlaceholder { name } => {
-                write!(f, "unknown placeholder '{{{{{}}}}}': not in allowlist. Allowed: {:?}", name, ALLOWED_PLACEHOLDERS)
+                write!(
+                    f,
+                    "unknown placeholder '{{{{{}}}}}': not in allowlist. Allowed: {:?}",
+                    name, ALLOWED_PLACEHOLDERS
+                )
             }
             RenderError::MissingPlaceholderValue { name } => {
-                write!(f, "required placeholder '{{{{{}}}}}' has no value provided", name)
+                write!(
+                    f,
+                    "required placeholder '{{{{{}}}}}' has no value provided",
+                    name
+                )
             }
             RenderError::InvalidYaml { source } => {
                 write!(f, "template YAML is invalid: {}", source)
@@ -735,8 +753,8 @@ fn needs_quoting(value: &str) -> bool {
     // (YAML 1.2 §7.3.3). Including them unquoted would change the
     // document's structure.
     const RESERVED_START: &[char] = &[
-        '-', '?', ':', ',', '[', ']', '{', '}', '#', '&', '*', '!', '|', '>', '\'', '"',
-        '%', '@', '`',
+        '-', '?', ':', ',', '[', ']', '{', '}', '#', '&', '*', '!', '|', '>', '\'', '"', '%', '@',
+        '`',
     ];
     if let Some(first) = value.chars().next() {
         if RESERVED_START.contains(&first) {
@@ -784,10 +802,14 @@ fn looks_like_non_string_scalar(value: &str) -> bool {
         // bool (YAML 1.2 core schema)
         "true" | "false" | "True" | "False" | "TRUE" | "FALSE"
         // null
-        | "null" | "Null" | "NULL" | "~"
-        // int / float — start with a digit, optional sign
-    ) || (value.chars().next().map_or(false, |c| c.is_ascii_digit() || c == '-' || c == '+')
-        && value.chars().all(|c| c.is_ascii_digit() || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-'))
+        | "null" | "Null" | "NULL" | "~" // int / float — start with a digit, optional sign
+    ) || (value
+        .chars()
+        .next()
+        .map_or(false, |c| c.is_ascii_digit() || c == '-' || c == '+')
+        && value.chars().all(|c| {
+            c.is_ascii_digit() || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-'
+        }))
 }
 
 /// Returns true if `value` contains a YAML key-value separator pattern
@@ -803,7 +825,9 @@ fn contains_key_value_separator(value: &str) -> bool {
     let bytes = value.as_bytes();
     for (i, &b) in bytes.iter().enumerate() {
         if b == b':' {
-            if i + 1 < bytes.len() && (bytes[i + 1] == b' ' || bytes[i + 1] == b'\n' || bytes[i + 1] == b'\t') {
+            if i + 1 < bytes.len()
+                && (bytes[i + 1] == b' ' || bytes[i + 1] == b'\n' || bytes[i + 1] == b'\t')
+            {
                 return true;
             }
         }
@@ -1235,13 +1259,11 @@ impl TemplateCatalog {
     /// Render a template with the given values.
     ///
     /// Returns the rendered YAML content, or an error if rendering fails.
-    pub fn render_template(
-        name: &str,
-        values: &[(&str, &str)],
-    ) -> Result<String, RenderError> {
-        let template_content = Self::raw_template(name).ok_or_else(|| RenderError::InvalidYaml {
-            source: format!("unknown template: {}", name),
-        })?;
+    pub fn render_template(name: &str, values: &[(&str, &str)]) -> Result<String, RenderError> {
+        let template_content =
+            Self::raw_template(name).ok_or_else(|| RenderError::InvalidYaml {
+                source: format!("unknown template: {}", name),
+            })?;
 
         TemplateRenderer::render(template_content, values)
     }
@@ -1369,10 +1391,7 @@ mod tests {
     #[test]
     fn version_error_empty_component() {
         let err = Version::parse("1..3").unwrap_err();
-        assert!(matches!(
-            err,
-            VersionError::InvalidFormat { .. }
-        ));
+        assert!(matches!(err, VersionError::InvalidFormat { .. }));
     }
 
     // ── Version ordering ─────────────────────────────────────────────────────
@@ -1566,7 +1585,10 @@ x_preset:
         let err = XPresetMetadata::from_yaml_value(&value).unwrap_err();
         assert!(matches!(
             err,
-            XPresetParseError::UnsupportedSchemaVersion { found: 99, supported: 1 }
+            XPresetParseError::UnsupportedSchemaVersion {
+                found: 99,
+                supported: 1
+            }
         ));
     }
 
@@ -1684,7 +1706,10 @@ x_preset:
         let template = "name: {{preset_name}}\ndesc: {{description}}";
         let result = TemplateRenderer::render(
             template,
-            &[("preset_name", "my-flow"), ("description", "A test workflow")],
+            &[
+                ("preset_name", "my-flow"),
+                ("description", "A test workflow"),
+            ],
         )
         .unwrap();
         assert_eq!(result, "name: my-flow\ndesc: A test workflow");
@@ -1709,7 +1734,9 @@ x_preset:
         let template = "name: {{preset_name}}";
         // No values provided at all
         let err = TemplateRenderer::render(template, &[]).unwrap_err();
-        assert!(matches!(err, RenderError::MissingPlaceholderValue { name } if name == "preset_name"));
+        assert!(
+            matches!(err, RenderError::MissingPlaceholderValue { name } if name == "preset_name")
+        );
     }
 
     #[test]
@@ -1798,11 +1825,8 @@ x_preset:
 
     #[test]
     fn catalog_render_unknown_template() {
-        let err = TemplateCatalog::render_template(
-            "nonexistent",
-            &[("preset_name", "test")],
-        )
-        .unwrap_err();
+        let err = TemplateCatalog::render_template("nonexistent", &[("preset_name", "test")])
+            .unwrap_err();
         assert!(matches!(err, RenderError::InvalidYaml { .. }));
     }
 

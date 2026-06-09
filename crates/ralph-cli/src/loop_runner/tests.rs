@@ -9507,3 +9507,319 @@ fn u3_wave_merge_handles_duplicate_indexes_without_panicking() {
     let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
     assert_eq!(lines.len(), 4, "all 4 result events appended");
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// U6: Preset static lint gate — integration tests
+//
+// Covers AE1–AE4 through real config parsing, aggregator, and gate
+// paths. These are NOT source-level string assertions.
+// ──────────────────────────────────────────────────────────────────────
+
+/// AE1: Lint gate passes for a clean config with valid topic format,
+/// ownership, and coordinator. Exercises the full aggregator path
+/// (same as `ralph preset check --strict`).
+#[test]
+fn u6_lint_gate_passes_clean_config() {
+    let yaml = r#"
+hats:
+  coordinator:
+    name: "Coordinator"
+    description: "Plans work"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+    instructions: "Plan."
+  executor:
+    name: "Executor"
+    description: "Executes work"
+    triggers: ["work.ready"]
+    publishes: ["work.done"]
+    instructions: "Execute."
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "work.done"
+topic_owners:
+  work.ready: ["coordinator"]
+  work.done: ["executor"]
+topic_format_whitelist:
+  - "LOOP_COMPLETE"
+tasks:
+  enabled: false
+"#;
+    let config: ralph_core::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let result = enforce_preset_lint_gate(&config);
+    assert!(
+        result.is_ok(),
+        "clean config must pass lint gate: {:?}",
+        result
+    );
+}
+
+/// AE2: Config with cross-hat unauthorized publish is rejected by the
+/// lint gate in strict mode. No events file is created — the gate
+/// runs BEFORE any backend spawn or event loop initialization.
+#[test]
+fn u6_lint_gate_rejects_unauthorized_publish() {
+    // `executor` publishes `work.ready` which is owned by `coordinator`.
+    let yaml = r#"
+hats:
+  coordinator:
+    name: "Coordinator"
+    description: "Plans work"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+    instructions: "Plan."
+  executor:
+    name: "Executor"
+    description: "Executes work"
+    triggers: ["work.ready"]
+    publishes: ["work.ready", "work.done"]
+    instructions: "Execute."
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "work.done"
+topic_owners:
+  work.ready: ["coordinator"]
+  work.done: ["executor"]
+tasks:
+  enabled: false
+"#;
+    let config: ralph_core::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let result = enforce_preset_lint_gate(&config);
+    assert!(result.is_err(), "unauthorized publish must fail lint gate");
+    let err = result.unwrap_err();
+    assert!(err.error_count > 0, "must have at least one error finding");
+    assert!(
+        err.findings
+            .iter()
+            .any(|f| f.id.contains("cross_hat_unauthorized_publish")),
+        "must report cross_hat_unauthorized_publish finding, got: {:?}",
+        err.findings.iter().map(|f| &f.id).collect::<Vec<_>>()
+    );
+
+    // Verify no events.jsonl was created — the gate runs pre-loop.
+    // The gate itself does not touch the filesystem (R9: read-only),
+    // so we verify the error type carries findings, not side effects.
+    assert_eq!(
+        err.error_count, 1,
+        "exactly one error (the cross-hat finding)"
+    );
+}
+
+/// AE3: Whitelist only exempts listed tokens. `LOOP_COMPLETE` is
+/// exempt, but other uppercase tokens (e.g. `REVIEW_COMPLETE`)
+/// still produce lint findings when not whitelisted.
+#[test]
+fn u6_lint_gate_whitelist_only_exempts_listed_tokens() {
+    // Config with LOOP_COMPLETE (whitelisted) and REVIEW_COMPLETE (not whitelisted).
+    let yaml = r#"
+hats:
+  a:
+    name: "A"
+    description: "Producer"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+  b:
+    name: "B"
+    description: "Consumer"
+    triggers: ["work.ready"]
+    publishes: ["REVIEW_COMPLETE"]
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "work.done"
+topic_format_whitelist:
+  - "LOOP_COMPLETE"
+tasks:
+  enabled: false
+"#;
+    let config: ralph_core::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let result = enforce_preset_lint_gate(&config);
+    // REVIEW_COMPLETE is not whitelisted → lint finding (warn in default,
+    // but the gate runs in strict mode, so it's still a finding).
+    // The gate only fails on Error findings, and invalid_topic_format
+    // is Warn even in strict. However, the gate surfaces warnings.
+    // The key assertion: the gate MUST surface the finding.
+    match result {
+        Ok(()) => {
+            // If it passes, the finding was only a warning (not error).
+            // That's acceptable — the gate only blocks on errors.
+            // But we need to verify the finding exists in the report.
+            let findings = ralph_core::preset_lint::run_preset_lint(
+                &config,
+                ralph_core::preset_lint::LintStrictness::Strict,
+            );
+            assert!(
+                findings
+                    .iter()
+                    .any(|f| f.id.contains("invalid_topic_format")
+                        && f.details.get("topic").map(|s| s.as_str()) == Some("REVIEW_COMPLETE")),
+                "REVIEW_COMPLETE must produce invalid_topic_format finding"
+            );
+        }
+        Err(err) => {
+            // If it fails, verify the finding is about REVIEW_COMPLETE.
+            assert!(
+                err.findings
+                    .iter()
+                    .any(|f| f.id.contains("invalid_topic_format")
+                        && f.details.get("topic").map(|s| s.as_str()) == Some("REVIEW_COMPLETE")),
+                "must report invalid_topic_format for REVIEW_COMPLETE"
+            );
+        }
+    }
+
+    // Now verify LOOP_COMPLETE (whitelisted) does NOT produce a finding.
+    let findings = ralph_core::preset_lint::run_preset_lint(
+        &config,
+        ralph_core::preset_lint::LintStrictness::Strict,
+    );
+    let loop_complete_findings: Vec<_> = findings
+        .iter()
+        .filter(|f| {
+            f.id.contains("invalid_topic_format")
+                && f.details.get("topic").map(|s| s.as_str()) == Some("LOOP_COMPLETE")
+        })
+        .collect();
+    assert!(
+        loop_complete_findings.is_empty(),
+        "LOOP_COMPLETE must NOT produce invalid_topic_format finding (it is whitelisted)"
+    );
+}
+
+/// AE4: Missing coordinator with tasks.enabled reports candidate list.
+/// When coordinator_hats is empty, the coordinator_missing finding
+/// must include the names of hats that publish `task.*` topics as
+/// candidates.
+#[test]
+fn u6_lint_gate_missing_coordinator_reports_candidates() {
+    let yaml = r#"
+hats:
+  coordinator:
+    name: "Coordinator"
+    description: "Plans work"
+    triggers: ["work.start"]
+    publishes: ["work.ready", "task.created"]
+    instructions: "Plan."
+  executor:
+    name: "Executor"
+    description: "Executes work"
+    triggers: ["work.ready"]
+    publishes: ["work.done"]
+    instructions: "Execute."
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "work.done"
+tasks:
+  enabled: true
+  coordinator_hats: []
+"#;
+    let config: ralph_core::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let result = enforce_preset_lint_gate(&config);
+    assert!(result.is_err(), "missing coordinator must fail lint gate");
+    let err = result.unwrap_err();
+    // Should have coordinator_missing finding.
+    let coord_missing: Vec<_> = err
+        .findings
+        .iter()
+        .filter(|f| f.id.contains("coordinator_missing"))
+        .collect();
+    assert!(
+        !coord_missing.is_empty(),
+        "must report coordinator_missing, got: {:?}",
+        err.findings.iter().map(|f| &f.id).collect::<Vec<_>>()
+    );
+    // The action_hint should list candidate hats that publish task.*.
+    let has_candidate_hint = coord_missing.iter().any(|f| {
+        f.action_hint
+            .as_ref()
+            .map(|h| h.contains("coordinator"))
+            .unwrap_or(false)
+    });
+    assert!(
+        has_candidate_hint,
+        "coordinator_missing must include candidate hat names in action_hint"
+    );
+}
+
+/// AE4 (extended): When coordinator_hats is non-empty but a task
+/// publisher is missing, task_publisher_not_coordinated fires.
+#[test]
+fn u6_lint_gate_task_publisher_not_coordinated() {
+    let yaml = r#"
+hats:
+  coordinator:
+    name: "Coordinator"
+    description: "Plans work"
+    triggers: ["work.start"]
+    publishes: ["work.ready", "task.created"]
+    instructions: "Plan."
+  executor:
+    name: "Executor"
+    description: "Executes work"
+    triggers: ["work.ready"]
+    publishes: ["work.done", "task.updated"]
+    instructions: "Execute."
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "work.done"
+tasks:
+  enabled: true
+  coordinator_hats:
+    - coordinator
+"#;
+    let config: ralph_core::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let result = enforce_preset_lint_gate(&config);
+    assert!(
+        result.is_err(),
+        "task publisher not in coordinator_hats must fail"
+    );
+    let err = result.unwrap_err();
+    let task_pub_findings: Vec<_> = err
+        .findings
+        .iter()
+        .filter(|f| f.id.contains("task_publisher_not_coordinated"))
+        .collect();
+    assert!(
+        !task_pub_findings.is_empty(),
+        "must report task_publisher_not_coordinated"
+    );
+    // The finding should mention the executor hat.
+    let has_executor = task_pub_findings
+        .iter()
+        .any(|f| f.message.contains("executor"));
+    assert!(
+        has_executor,
+        "task_publisher_not_coordinated must mention the offending hat"
+    );
+}
+
+/// AE1 (extended): All embedded builtin presets pass strict lint through
+/// the gate function — same path as `ralph run` hard gate.
+#[test]
+fn u6_all_builtin_presets_pass_lint_gate() {
+    use crate::presets::list_presets;
+    use ralph_core::RalphConfig;
+
+    let mut failures = Vec::new();
+    for preset in list_presets().iter() {
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("embedded preset YAML should parse");
+        let result = enforce_preset_lint_gate(&config);
+        if let Err(err) = result {
+            failures.push(format!(
+                "'{}': {} error(s) — {:?}",
+                preset.name,
+                err.error_count,
+                err.findings
+                    .iter()
+                    .filter(|f| f.severity == ralph_core::runtime_contract::FindingSeverity::Error)
+                    .map(|f| format!("{}: {}", f.id, f.message))
+                    .collect::<Vec<_>>()
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "Builtins failed lint gate:\n{}",
+        failures.join("\n")
+    );
+}
