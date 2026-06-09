@@ -3,6 +3,7 @@
 //! Handles file locking with retry, marker insertion/replacement, and
 //! atomic writes via `tempfile` + `persist`.
 
+use std::fmt;
 use std::path::Path;
 use std::thread;
 use std::time::Duration;
@@ -28,6 +29,36 @@ impl Default for OnError {
     }
 }
 
+/// Errors that can occur during file sync operations.
+///
+/// Returned by [`sync_file`] and [`super::sync_all`] when `on_error` is `OnError::Strict`.
+#[derive(Debug)]
+pub enum SyncError {
+    /// Failed to acquire file lock after retries.
+    LockFailed { path: String },
+    /// Failed to read the target file (non-NotFound).
+    ReadFailed { path: String, source: std::io::Error },
+    /// Failed to write the target file.
+    WriteFailed { path: String, source: std::io::Error },
+    /// Write verification failed (content mismatch or read error after persist).
+    VerifyFailed { path: String, detail: String },
+}
+
+impl fmt::Display for SyncError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LockFailed { path } => write!(f, "failed to acquire lock: {path}"),
+            Self::ReadFailed { path, source } => write!(f, "failed to read {path}: {source}"),
+            Self::WriteFailed { path, source } => write!(f, "failed to write {path}: {source}"),
+            Self::VerifyFailed { path, detail } => {
+                write!(f, "write verification failed for {path}: {detail}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SyncError {}
+
 /// Configuration for a single file sync operation.
 #[derive(Debug)]
 pub(crate) struct FileSyncConfig<'a> {
@@ -41,6 +72,15 @@ pub(crate) struct FileSyncConfig<'a> {
     pub skip: bool,
 }
 
+/// Per-block outcome from syncing a single file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FileBlockOutcome {
+    /// Block identifier.
+    pub block_id: String,
+    /// Outcome of the sync operation.
+    pub outcome: super::SyncOutcome,
+}
+
 /// Result of syncing a single file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FileSyncResult {
@@ -50,6 +90,8 @@ pub(crate) struct FileSyncResult {
     pub skipped: usize,
     /// Number of blocks that failed (lock contention, I/O error, etc.).
     pub failed: usize,
+    /// Per-block outcomes (one entry per block in the input).
+    pub block_results: Vec<FileBlockOutcome>,
 }
 
 /// Acquires an exclusive file lock with retry.
@@ -97,7 +139,11 @@ pub(crate) enum BlockAction {
     /// Block is missing; append it to the managed blocks section.
     Append,
     /// Block markers exist but hash differs; replace in place.
-    Replace { begin_line: usize, end_line: usize },
+    /// `end_line` is `None` for orphan begin markers (replace from begin to EOF).
+    Replace {
+        begin_line: usize,
+        end_line: Option<usize>,
+    },
     /// Block is already up to date; no write needed.
     Skip,
 }
@@ -110,7 +156,7 @@ pub(crate) fn determine_action(content: &str, block: &BlockSpec) -> BlockAction 
         BlockState::UpToDate => BlockAction::Skip,
         BlockState::Mismatched { .. } => BlockAction::Replace {
             begin_line: begin.expect("mismatched state must have begin_line"),
-            end_line: end.expect("mismatched state must have end_line"),
+            end_line: end, // None for orphan begin markers
         },
         BlockState::Missing => BlockAction::Append,
     }
@@ -121,6 +167,7 @@ pub(crate) fn determine_action(content: &str, block: &BlockSpec) -> BlockAction 
 /// - `Append`: adds block to the `## Ralph Managed Blocks` section (creates
 ///   section if absent).
 /// - `Replace`: swaps content between begin/end markers and updates the hash.
+///   For orphan begin markers (`end_line: None`), replaces from begin to EOF.
 /// - `Skip`: returns `None` (no change).
 pub(crate) fn compute_new_content(
     content: &str,
@@ -196,7 +243,7 @@ fn compute_replace(
     content: &str,
     block: &BlockSpec,
     begin_line: usize,
-    end_line: usize,
+    end_line: Option<usize>,
 ) -> String {
     let lines: Vec<&str> = content.split('\n').collect();
     let begin = begin_marker(&block.id, &block.content_sha256);
@@ -210,12 +257,25 @@ fn compute_replace(
             if !block.content.ends_with('\n') {
                 result.push("");
             }
-        } else if i > begin_line && i < end_line {
-            // Skip old content between markers
-            continue;
-        } else if i == end_line {
-            result.push(end.as_str());
+            // For orphan begin markers (end_line is None), insert end marker
+            // to close the block. Subsequent lines (after the orphan) are
+            // user content and must be preserved — they fall through to the
+            // normal push below.
+            if end_line.is_none() {
+                result.push(end.as_str());
+            }
+        } else if let Some(end_idx) = end_line {
+            // Normal replace mode (end_line is Some)
+            if i > begin_line && i < end_idx {
+                // Skip old content between markers
+                continue;
+            } else if i == end_idx {
+                result.push(end.as_str());
+                continue;
+            }
+            result.push(line);
         } else {
+            // Lines after an orphan begin marker — preserve as user content
             result.push(line);
         }
     }
@@ -241,41 +301,53 @@ pub(crate) fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
 }
 
 /// Syncs blocks into a single file. Returns per-block results.
-pub(crate) fn sync_file(config: &FileSyncConfig<'_>) -> FileSyncResult {
+///
+/// In `OnError::Strict` mode, returns `Err` on lock, read, or write failures
+/// instead of silently tracking them in `FileSyncResult::failed`.
+pub(crate) fn sync_file(
+    config: &FileSyncConfig<'_>,
+) -> Result<FileSyncResult, SyncError> {
     if config.skip {
-        return FileSyncResult {
+        return Ok(FileSyncResult {
             synced: 0,
             skipped: 0,
             failed: 0,
-        };
+            block_results: Vec::new(),
+        });
     }
 
     let mut result = FileSyncResult {
         synced: 0,
         skipped: 0,
         failed: 0,
+        block_results: Vec::new(),
     };
+
+    let path_str = config.path.display().to_string();
 
     // Acquire lock with retry
     let _guard = match try_lock_with_retry(config.path, 3, Duration::from_millis(50)) {
         Some(g) => g,
         None => {
             result.failed = config.blocks.len();
+            for block in config.blocks {
+                result.block_results.push(FileBlockOutcome {
+                    block_id: block.id.clone(),
+                    outcome: super::SyncOutcome::Failed,
+                });
+            }
             match config.on_error {
                 OnError::Warn => {
                     warn!(
-                        path = %config.path.display(),
+                        path = %path_str,
                         "agent_doc_sync: failed to acquire lock after retries"
                     );
+                    return Ok(result);
                 }
                 OnError::Strict => {
-                    warn!(
-                        path = %config.path.display(),
-                        "agent_doc_sync: failed to acquire lock (strict mode)"
-                    );
+                    return Err(SyncError::LockFailed { path: path_str });
                 }
             }
-            return result;
         }
     };
 
@@ -285,15 +357,21 @@ pub(crate) fn sync_file(config: &FileSyncConfig<'_>) -> FileSyncResult {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => {
             result.failed = config.blocks.len();
+            for block in config.blocks {
+                result.block_results.push(FileBlockOutcome {
+                    block_id: block.id.clone(),
+                    outcome: super::SyncOutcome::Failed,
+                });
+            }
             match config.on_error {
                 OnError::Warn => {
-                    warn!(error = %e, path = %config.path.display(), "agent_doc_sync: failed to read file");
+                    warn!(error = %e, path = %path_str, "agent_doc_sync: failed to read file");
+                    return Ok(result);
                 }
                 OnError::Strict => {
-                    warn!(error = %e, path = %config.path.display(), "agent_doc_sync: failed to read file (strict)");
+                    return Err(SyncError::ReadFailed { path: path_str, source: e });
                 }
             }
-            return result;
         }
     };
 
@@ -306,10 +384,14 @@ pub(crate) fn sync_file(config: &FileSyncConfig<'_>) -> FileSyncResult {
             BlockAction::Skip => {
                 debug!(
                     block_id = %block.id,
-                    path = %config.path.display(),
+                    path = %path_str,
                     "skipped (up to date)"
                 );
                 result.skipped += 1;
+                result.block_results.push(FileBlockOutcome {
+                    block_id: block.id.clone(),
+                    outcome: super::SyncOutcome::Skipped,
+                });
             }
             _ => {
                 // Check if target file is writable (before we compute new content).
@@ -320,25 +402,27 @@ pub(crate) fn sync_file(config: &FileSyncConfig<'_>) -> FileSyncResult {
                         Ok(f) => drop(f),
                         Err(e) => {
                             result.failed += 1;
+                            result.block_results.push(FileBlockOutcome {
+                                block_id: block.id.clone(),
+                                outcome: super::SyncOutcome::Failed,
+                            });
                             match config.on_error {
                                 OnError::Warn => {
                                     warn!(
                                         error = %e,
                                         block_id = %block.id,
-                                        path = %config.path.display(),
+                                        path = %path_str,
                                         "agent_doc_sync: file is not writable"
                                     );
+                                    continue;
                                 }
                                 OnError::Strict => {
-                                    warn!(
-                                        error = %e,
-                                        block_id = %block.id,
-                                        path = %config.path.display(),
-                                        "agent_doc_sync: file is not writable (strict)"
-                                    );
+                                    return Err(SyncError::WriteFailed {
+                                        path: path_str,
+                                        source: e,
+                                    });
                                 }
                             }
-                            continue;
                         }
                     }
                 }
@@ -354,52 +438,67 @@ pub(crate) fn sync_file(config: &FileSyncConfig<'_>) -> FileSyncResult {
                                 Ok(verified) if verified == new_content => {
                                     debug!(
                                         block_id = %block.id,
-                                        path = %config.path.display(),
+                                        path = %path_str,
                                         action = ?action,
                                         "synced block"
                                     );
                                     current_content = new_content;
                                     result.synced += 1;
+                                    result.block_results.push(FileBlockOutcome {
+                                        block_id: block.id.clone(),
+                                        outcome: super::SyncOutcome::Synced,
+                                    });
                                 }
                                 Ok(_) => {
                                     // File exists but content doesn't match —
                                     // write was silently lost (e.g. readonly target)
                                     result.failed += 1;
+                                    result.block_results.push(FileBlockOutcome {
+                                        block_id: block.id.clone(),
+                                        outcome: super::SyncOutcome::Failed,
+                                    });
                                     match config.on_error {
                                         OnError::Warn => {
                                             warn!(
                                                 block_id = %block.id,
-                                                path = %config.path.display(),
+                                                path = %path_str,
                                                 "agent_doc_sync: write verification failed (content mismatch)"
                                             );
                                         }
                                         OnError::Strict => {
-                                            warn!(
-                                                block_id = %block.id,
-                                                path = %config.path.display(),
-                                                "agent_doc_sync: write verification failed (strict)"
-                                            );
+                                            return Err(SyncError::VerifyFailed {
+                                                path: path_str,
+                                                detail: format!(
+                                                    "content mismatch for block {}",
+                                                    block.id
+                                                ),
+                                            });
                                         }
                                     }
                                 }
                                 Err(e) => {
                                     result.failed += 1;
+                                    result.block_results.push(FileBlockOutcome {
+                                        block_id: block.id.clone(),
+                                        outcome: super::SyncOutcome::Failed,
+                                    });
                                     match config.on_error {
                                         OnError::Warn => {
                                             warn!(
                                                 error = %e,
                                                 block_id = %block.id,
-                                                path = %config.path.display(),
+                                                path = %path_str,
                                                 "agent_doc_sync: write verification failed (read error)"
                                             );
                                         }
                                         OnError::Strict => {
-                                            warn!(
-                                                error = %e,
-                                                block_id = %block.id,
-                                                path = %config.path.display(),
-                                                "agent_doc_sync: write verification failed (strict)"
-                                            );
+                                            return Err(SyncError::VerifyFailed {
+                                                path: path_str,
+                                                detail: format!(
+                                                    "read error after persist for block {}: {e}",
+                                                    block.id
+                                                ),
+                                            });
                                         }
                                     }
                                 }
@@ -407,22 +506,24 @@ pub(crate) fn sync_file(config: &FileSyncConfig<'_>) -> FileSyncResult {
                         }
                         Err(e) => {
                             result.failed += 1;
+                            result.block_results.push(FileBlockOutcome {
+                                block_id: block.id.clone(),
+                                outcome: super::SyncOutcome::Failed,
+                            });
                             match config.on_error {
                                 OnError::Warn => {
                                     warn!(
                                         error = %e,
                                         block_id = %block.id,
-                                        path = %config.path.display(),
+                                        path = %path_str,
                                         "agent_doc_sync: failed to write file"
                                     );
                                 }
                                 OnError::Strict => {
-                                    warn!(
-                                        error = %e,
-                                        block_id = %block.id,
-                                        path = %config.path.display(),
-                                        "agent_doc_sync: failed to write file (strict)"
-                                    );
+                                    return Err(SyncError::WriteFailed {
+                                        path: path_str,
+                                        source: e,
+                                    });
                                 }
                             }
                         }
@@ -432,7 +533,7 @@ pub(crate) fn sync_file(config: &FileSyncConfig<'_>) -> FileSyncResult {
         }
     }
 
-    result
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -457,7 +558,8 @@ mod tests {
             blocks: &[block.clone()],
             on_error: OnError::Warn,
             skip: false,
-        });
+        })
+        .unwrap();
 
         assert_eq!(result.synced, 1);
         assert_eq!(result.skipped, 0);
@@ -482,7 +584,8 @@ mod tests {
             blocks: &[block.clone()],
             on_error: OnError::Warn,
             skip: false,
-        });
+        })
+        .unwrap();
 
         assert_eq!(result.synced, 1);
         let content = fs::read_to_string(&path).unwrap();
@@ -513,7 +616,8 @@ mod tests {
             blocks: &[block],
             on_error: OnError::Warn,
             skip: false,
-        });
+        })
+        .unwrap();
 
         assert_eq!(result.skipped, 1);
         assert_eq!(result.synced, 0);
@@ -549,7 +653,8 @@ mod tests {
             blocks: &[block.clone()],
             on_error: OnError::Warn,
             skip: false,
-        });
+        })
+        .unwrap();
 
         assert_eq!(result.synced, 1);
         let content = fs::read_to_string(&path).unwrap();
@@ -575,7 +680,8 @@ mod tests {
             blocks: &[block],
             on_error: OnError::Warn,
             skip: false,
-        });
+        })
+        .unwrap();
 
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.starts_with(
@@ -594,7 +700,8 @@ mod tests {
             blocks: &[block],
             on_error: OnError::Warn,
             skip: false,
-        });
+        })
+        .unwrap();
 
         assert_eq!(result.synced, 1);
         assert_eq!(result.failed, 0);
@@ -614,7 +721,8 @@ mod tests {
             blocks: &[block],
             on_error: OnError::Warn,
             skip: false,
-        });
+        })
+        .unwrap();
 
         assert_eq!(result.failed, 1);
         assert_eq!(result.synced, 0);
@@ -638,7 +746,8 @@ mod tests {
             blocks: &[block],
             on_error: OnError::Warn,
             skip: false,
-        });
+        })
+        .unwrap();
 
         assert_eq!(result.failed, 1);
         assert_eq!(result.synced, 0);
@@ -663,20 +772,47 @@ mod tests {
         }
 
         let block = sample_block();
-        let result = sync_file(&FileSyncConfig {
+        let err = sync_file(&FileSyncConfig {
             path: &path,
             blocks: &[block],
             on_error: OnError::Strict,
             skip: false,
-        });
+        })
+        .unwrap_err();
 
-        assert_eq!(result.failed, 1);
+        assert!(
+            matches!(err, SyncError::WriteFailed { .. }),
+            "expected WriteFailed, got: {err:?}"
+        );
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         }
+    }
+
+    #[test]
+    fn sync_strict_mode_returns_err_on_lock_failure() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("CLAUDE.md");
+        let block = sample_block();
+
+        let lock = crate::file_lock::FileLock::new(&path).unwrap();
+        let _guard = lock.exclusive().unwrap();
+
+        let err = sync_file(&FileSyncConfig {
+            path: &path,
+            blocks: &[block],
+            on_error: OnError::Strict,
+            skip: false,
+        })
+        .unwrap_err();
+
+        assert!(
+            matches!(err, SyncError::LockFailed { .. }),
+            "expected LockFailed, got: {err:?}"
+        );
     }
 
     #[test]
@@ -690,7 +826,8 @@ mod tests {
             blocks: &[block],
             on_error: OnError::Warn,
             skip: true,
-        });
+        })
+        .unwrap();
 
         assert_eq!(result.synced, 0);
         assert_eq!(result.skipped, 0);
@@ -710,7 +847,8 @@ mod tests {
             blocks: &[block1.clone(), block2.clone()],
             on_error: OnError::Warn,
             skip: false,
-        });
+        })
+        .unwrap();
 
         assert_eq!(result.synced, 2);
         let content = fs::read_to_string(&path).unwrap();
@@ -726,5 +864,120 @@ mod tests {
         let block = sample_block();
         let result = compute_new_content(content, &block, &BlockAction::Skip);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn sync_replaces_orphan_begin_marker_without_duplication() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("CLAUDE.md");
+        let block = sample_block();
+
+        // File has an orphan begin marker (no matching end marker)
+        let orphan_hash = "b".repeat(64);
+        let existing = format!(
+            "# Project\n\n## Ralph Managed Blocks\n\n\
+             <!-- ralph:begin hang-prevention v=sha256:{orphan_hash} -->\n\
+             stale orphan content\n"
+        );
+        fs::write(&path, &existing).unwrap();
+
+        let result = sync_file(&FileSyncConfig {
+            path: &path,
+            blocks: &[block.clone()],
+            on_error: OnError::Warn,
+            skip: false,
+        })
+        .unwrap();
+
+        assert_eq!(result.synced, 1);
+        let content = fs::read_to_string(&path).unwrap();
+
+        // Should contain exactly ONE begin marker (the new one)
+        let begin_count = content.matches("<!-- ralph:begin hang-prevention").count();
+        assert_eq!(begin_count, 1, "expected exactly 1 begin marker, found {begin_count}");
+
+        // Should have proper begin+end pair
+        assert!(content.contains(&begin_marker("hang-prevention", &block.content_sha256)));
+        assert!(content.contains(&end_marker("hang-prevention")));
+        assert!(content.contains("Rule 1"));
+    }
+
+    #[test]
+    fn sync_replaces_orphan_begin_preserves_user_content_after() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("CLAUDE.md");
+        let block = sample_block();
+
+        // File has orphan begin marker followed by user content
+        let orphan_hash = "b".repeat(64);
+        let existing = format!(
+            "# Project\n\n## Ralph Managed Blocks\n\n\
+             <!-- ralph:begin hang-prevention v=sha256:{orphan_hash} -->\n\
+             stale orphan content\n\
+             ## Notes\n\nUser-written notes here.\n"
+        );
+        fs::write(&path, &existing).unwrap();
+
+        let result = sync_file(&FileSyncConfig {
+            path: &path,
+            blocks: &[block.clone()],
+            on_error: OnError::Warn,
+            skip: false,
+        })
+        .unwrap();
+
+        assert_eq!(result.synced, 1);
+        let content = fs::read_to_string(&path).unwrap();
+
+        // User content after orphan must be preserved
+        assert!(
+            content.contains("## Notes"),
+            "user content after orphan should be preserved"
+        );
+        assert!(
+            content.contains("User-written notes here"),
+            "user content after orphan should be preserved"
+        );
+
+        // Should have proper begin+end pair
+        assert!(content.contains(&begin_marker("hang-prevention", &block.content_sha256)));
+        assert!(content.contains(&end_marker("hang-prevention")));
+        assert!(content.contains("Rule 1"));
+    }
+
+    #[test]
+    fn sync_replaces_orphan_begin_with_matching_hash() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("CLAUDE.md");
+        let block = sample_block();
+
+        // File has orphan begin marker with CORRECT hash (should still replace)
+        let existing = format!(
+            "# Project\n\n## Ralph Managed Blocks\n\n\
+             <!-- ralph:begin hang-prevention v=sha256:{} -->\n\
+             stale content after orphan\n\
+             ## Notes\n\nUser notes.\n",
+            block.content_sha256
+        );
+        fs::write(&path, &existing).unwrap();
+
+        let result = sync_file(&FileSyncConfig {
+            path: &path,
+            blocks: &[block.clone()],
+            on_error: OnError::Warn,
+            skip: false,
+        })
+        .unwrap();
+
+        assert_eq!(result.synced, 1);
+        let content = fs::read_to_string(&path).unwrap();
+
+        // User content should be preserved
+        assert!(content.contains("## Notes"));
+        assert!(content.contains("User notes."));
+        // New block should be in place
+        assert!(content.contains(&begin_marker("hang-prevention", &block.content_sha256)));
+        assert!(content.contains(&end_marker("hang-prevention")));
+        assert!(content.contains("Rule 1"));
     }
 }

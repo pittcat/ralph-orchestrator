@@ -98,8 +98,13 @@ fn end_marker_re(id: &str) -> regex::Regex {
 /// Parses the file content and determines the state of markers for `block_id`.
 ///
 /// Returns `(state, begin_line_idx, end_line_idx)` where the line indices
-/// point to the begin and end marker lines (0-based). Indices are `None`
-/// when the state is `Missing`.
+/// point to the begin and end marker lines (0-based).
+///
+/// - `Missing` when no begin marker is found.
+/// - `Mismatched` when a begin marker is found but the end marker is missing
+///   (orphan begin) or the hash differs. `end_line` is `None` for orphan begin.
+/// - `UpToDate` when both markers exist and the hash matches (via
+///   [`parse_marker_state_with_version`]).
 pub(crate) fn parse_marker_state(
     content: &str,
     block_id: &str,
@@ -125,7 +130,14 @@ pub(crate) fn parse_marker_state(
         }
     }
 
-    (BlockState::Missing, begin_line, None)
+    // Orphan begin marker: begin found but no matching end.
+    // Return Mismatched so the caller triggers Replace (not Append),
+    // preventing duplicate blocks from being appended.
+    if found_begin {
+        return (BlockState::Mismatched { found_hash }, begin_line, None);
+    }
+
+    (BlockState::Missing, None, None)
 }
 
 /// Like [`parse_marker_state`] but returns `UpToDate` when the found hash
@@ -137,7 +149,12 @@ pub(crate) fn parse_marker_state_with_version(
 ) -> (BlockState, Option<usize>, Option<usize>) {
     let (state, begin, end) = parse_marker_state(content, block_id);
     match state {
-        BlockState::Mismatched { ref found_hash } if found_hash == expected_hash => {
+        // Only upgrade to UpToDate when hash matches AND end marker exists.
+        // An orphan begin (end is None) must remain Mismatched so the caller
+        // triggers Replace and补上 missing end marker.
+        BlockState::Mismatched { ref found_hash }
+            if found_hash == expected_hash && end.is_some() =>
+        {
             (BlockState::UpToDate, begin, end)
         }
         other => (other, begin, end),
@@ -259,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_marker_state_missing_when_only_begin() {
+    fn parse_marker_state_mismatched_when_only_begin() {
         let hash = "a".repeat(64);
         let content = build_content(
             &[
@@ -270,7 +287,10 @@ mod tests {
             true,
         );
         let (state, begin, end) = parse_marker_state(&content, "hang-prevention");
-        assert_eq!(state, BlockState::Missing);
+        assert!(
+            matches!(state, BlockState::Mismatched { .. }),
+            "orphan begin should be Mismatched, got: {state:?}"
+        );
         assert!(begin.is_some());
         assert!(end.is_none());
     }
@@ -309,7 +329,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_marker_state_ignores_partial_match() {
+    fn parse_marker_state_orphan_begin_is_mismatched() {
         let hash = "a".repeat(64);
         let content = build_content(
             &[
@@ -319,7 +339,35 @@ mod tests {
             ],
             true,
         );
-        let (state, _, _) = parse_marker_state(&content, "hang-prevention");
-        assert_eq!(state, BlockState::Missing);
+        let (state, begin, end) = parse_marker_state(&content, "hang-prevention");
+        assert!(
+            matches!(state, BlockState::Mismatched { .. }),
+            "orphan begin should return Mismatched, got: {state:?}"
+        );
+        assert!(begin.is_some());
+        assert!(end.is_none());
+    }
+
+    #[test]
+    fn parse_marker_state_with_version_orphan_begin_with_matching_hash_is_mismatched() {
+        let hash = compute_sha256("some content");
+        let content = build_content(
+            &[
+                "# My Project",
+                "",
+                &format!("<!-- ralph:begin hang-prevention v=sha256:{hash} -->"),
+                "some content",
+            ],
+            true,
+        );
+        // Hash matches but end marker is missing → must stay Mismatched
+        let (state, begin, end) =
+            parse_marker_state_with_version(&content, "hang-prevention", &hash);
+        assert!(
+            matches!(state, BlockState::Mismatched { .. }),
+            "orphan begin with matching hash should stay Mismatched, got: {state:?}"
+        );
+        assert!(begin.is_some());
+        assert!(end.is_none());
     }
 }

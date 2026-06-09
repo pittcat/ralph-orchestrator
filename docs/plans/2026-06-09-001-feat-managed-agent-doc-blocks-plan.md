@@ -1,7 +1,7 @@
 ---
 title: "feat: 在 ralph run 启动前同步 managed agent doc blocks"
 type: feat
-status: active
+status: completed
 date: 2026-06-09
 origin: docs/brainstorms/2026-06-09-managed-agent-doc-blocks-requirements.md
 ---
