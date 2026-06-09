@@ -9,6 +9,12 @@
 # Usage:
 #   ralph run --config presets/hatless-baseline.yml --prompt "Implement a fibonacci function"
 
+topic_format_whitelist:
+  - LOOP_COMPLETE
+
+tasks:
+  enabled: false
+
 event_loop:
   prompt_file: "PROMPT.md"
   completion_promise: "LOOP_COMPLETE"

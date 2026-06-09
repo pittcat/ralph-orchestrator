@@ -24,6 +24,12 @@
 #   ralph run --config presets/autoresearch.yml --prompt "Improve code quality score (reduce complexity, lint warnings)"
 #   ralph run --config presets/autoresearch.yml --prompt "Minimize cold-start latency for the Lambda handler"
 
+topic_format_whitelist:
+  - LOOP_COMPLETE
+
+tasks:
+  enabled: false
+
 event_loop:
   prompt_file: "PROMPT.md"
   completion_promise: "LOOP_COMPLETE"

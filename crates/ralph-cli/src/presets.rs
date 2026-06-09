@@ -2472,9 +2472,8 @@ mod tests {
             return;
         }
 
-        let text = std::fs::read_to_string(&index_path).unwrap_or_else(|e| {
-            panic!("failed to read {}: {}", index_path.display(), e)
-        });
+        let text = std::fs::read_to_string(&index_path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", index_path.display(), e));
         let entries: Vec<serde_json::Value> = serde_json::from_str(&text)
             .unwrap_or_else(|e| panic!("index.json must be valid JSON: {}", e));
 
@@ -2486,9 +2485,7 @@ mod tests {
         let public_names: std::collections::BTreeSet<String> =
             preset_names().iter().map(|s| s.to_string()).collect();
 
-        let missing: Vec<_> = public_names
-            .difference(&index_names)
-            .collect();
+        let missing: Vec<_> = public_names.difference(&index_names).collect();
         assert!(
             missing.is_empty(),
             "Public preset names missing from presets/index.json: {:?}. \
@@ -2513,9 +2510,8 @@ mod tests {
             return;
         }
 
-        let text = std::fs::read_to_string(&index_path).unwrap_or_else(|e| {
-            panic!("failed to read {}: {}", index_path.display(), e)
-        });
+        let text = std::fs::read_to_string(&index_path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", index_path.display(), e));
         let entries: Vec<serde_json::Value> = serde_json::from_str(&text)
             .unwrap_or_else(|e| panic!("index.json must be valid JSON: {}", e));
 
@@ -2564,9 +2560,8 @@ mod tests {
             return;
         }
 
-        let text = std::fs::read_to_string(&index_path).unwrap_or_else(|e| {
-            panic!("failed to read {}: {}", index_path.display(), e)
-        });
+        let text = std::fs::read_to_string(&index_path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", index_path.display(), e));
         let entries: Vec<serde_json::Value> = serde_json::from_str(&text)
             .unwrap_or_else(|e| panic!("index.json must be valid JSON: {}", e));
 
@@ -4114,5 +4109,65 @@ mod tests {
                     .collect::<Vec<_>>()
             );
         }
+    }
+
+    /// All embedded presets must pass strict lint (R10).
+    /// This covers the full manifest, not just the development subset.
+    /// Topology-exempt presets (known branching completion paths) are
+    /// excluded from the strict lint gate — their topology issues are
+    /// documented exceptions.
+    #[test]
+    fn test_all_embedded_presets_pass_strict_lint() {
+        // Presets with known topology issues (required events not on all
+        // completion paths, or completion promise not reachable from start).
+        // Same exemptions as authoring contract test, plus merge-loop
+        // (MERGE_COMPLETE not formally published by any hat).
+        let topology_exempt: &[&str] = &["autoresearch", "debug", "merge-loop"];
+
+        let mut failures = Vec::new();
+        for preset in PRESETS.iter() {
+            let config =
+                RalphConfig::parse_yaml(preset.content).expect("embedded preset YAML should parse");
+            let registry = HatRegistry::from_runtime_config(&config);
+            let strictness = RuntimeContractStrictness::preset_check_strict();
+            let report = RuntimeContractAggregator::aggregate(
+                &format!("builtin:{}", preset.name),
+                &config,
+                &registry,
+                strictness,
+            );
+            if report.passed {
+                continue;
+            }
+            // For topology-exempt presets, skip if ALL blocking findings
+            // (errors + warnings promoted by fail_on_warnings) are topology
+            // or orphan (known pre-existing issues).
+            if topology_exempt.contains(&preset.name) {
+                let all_exempt = report.findings.iter().all(|f| {
+                    matches!(
+                        f.source,
+                        ralph_core::runtime_contract::FindingSource::Topology
+                            | ralph_core::runtime_contract::FindingSource::Orphan
+                    )
+                });
+                if all_exempt {
+                    continue;
+                }
+            }
+            failures.push(format!(
+                "'{}': {:?}",
+                preset.name,
+                report
+                    .findings
+                    .iter()
+                    .map(|f| format!("[{:?}] {}: {}", f.severity, f.id, f.message))
+                    .collect::<Vec<_>>()
+            ));
+        }
+        assert!(
+            failures.is_empty(),
+            "Embedded presets failed strict lint:\n{}",
+            failures.join("\n")
+        );
     }
 }

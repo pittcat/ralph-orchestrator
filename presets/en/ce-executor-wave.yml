@@ -36,6 +36,10 @@
 #   debug-resolver → debug.exhausted → Shipper → REVIEW_COMPLETE → Reporter → LOOP_COMPLETE
 #   plan-gate → plan.complete / plan.blocked → Shipper → REVIEW_COMPLETE → Reporter → LOOP_COMPLETE
 
+topic_format_whitelist:
+  - LOOP_COMPLETE
+  - REVIEW_COMPLETE
+
 tasks:
   enabled: true
   coordinator_hats:
