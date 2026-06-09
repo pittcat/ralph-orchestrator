@@ -29,12 +29,13 @@
 //! ```
 
 pub mod block;
+pub mod builtin;
 pub mod writer;
 
 use std::path::Path;
 
 pub use block::BlockSpec;
-pub use writer::OnError;
+pub use writer::{OnError, SyncError};
 use writer::FileSyncConfig;
 
 use tracing::{debug, info};
@@ -101,15 +102,19 @@ pub struct SyncConfig<'a> {
 /// # Returns
 ///
 /// A [`SyncReport`] summarizing the outcome of all sync operations.
-pub fn sync_all(workspace_root: &Path, config: &SyncConfig<'_>) -> SyncReport {
+/// In `OnError::Strict` mode, returns `Err` if any file sync fails.
+pub fn sync_all(
+    workspace_root: &Path,
+    config: &SyncConfig<'_>,
+) -> Result<SyncReport, writer::SyncError> {
     if config.skip {
         debug!("agent_doc_sync: skipped (disabled via flag/env/config)");
-        return SyncReport {
+        return Ok(SyncReport {
             synced: 0,
             skipped: 0,
             failed: 0,
             block_results: Vec::new(),
-        };
+        });
     }
 
     let mut report = SyncReport {
@@ -126,27 +131,17 @@ pub fn sync_all(workspace_root: &Path, config: &SyncConfig<'_>) -> SyncReport {
             blocks: config.blocks,
             on_error: config.on_error,
             skip: false,
-        });
+        })?;
 
         report.synced += file_result.synced;
         report.skipped += file_result.skipped;
         report.failed += file_result.failed;
 
-        for block in config.blocks {
-            let outcome = if file_result.failed > 0 {
-                // Approximation: if any block failed, attribute to last block
-                // In practice, the writer handles per-block attribution
-                SyncOutcome::Failed
-            } else {
-                // Determine per-block outcome from the file result
-                // This is simplified; the real per-block attribution comes
-                // from the writer internals
-                SyncOutcome::Synced
-            };
+        for block_outcome in &file_result.block_results {
             report.block_results.push(BlockResult {
-                block_id: block.id.clone(),
+                block_id: block_outcome.block_id.clone(),
                 file: file_name.to_string(),
-                outcome,
+                outcome: block_outcome.outcome.clone(),
             });
         }
 
@@ -173,7 +168,7 @@ pub fn sync_all(workspace_root: &Path, config: &SyncConfig<'_>) -> SyncReport {
         );
     }
 
-    report
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -199,7 +194,8 @@ mod tests {
                 target_files: &["CLAUDE.md"],
                 blocks: &[block.clone()],
             },
-        );
+        )
+        .unwrap();
 
         assert_eq!(report.synced, 1);
         assert_eq!(report.skipped, 0);
@@ -226,7 +222,8 @@ mod tests {
                 target_files: &["CLAUDE.md"],
                 blocks: &[block],
             },
-        );
+        )
+        .unwrap();
 
         assert_eq!(report.synced, 1);
         let content = fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
@@ -256,7 +253,8 @@ mod tests {
                 target_files: &["CLAUDE.md"],
                 blocks: &[block],
             },
-        );
+        )
+        .unwrap();
 
         assert_eq!(report.skipped, 1);
         assert_eq!(report.synced, 0);
@@ -284,7 +282,8 @@ mod tests {
                 target_files: &["CLAUDE.md"],
                 blocks: &[block],
             },
-        );
+        )
+        .unwrap();
 
         assert_eq!(report.synced, 1);
         let content = fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
@@ -309,7 +308,8 @@ mod tests {
                 target_files: &["CLAUDE.md"],
                 blocks: &[block],
             },
-        );
+        )
+        .unwrap();
 
         let content = fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
         // User content at the start is preserved
@@ -329,7 +329,8 @@ mod tests {
                 target_files: &["CLAUDE.md", "AGENTS.md"],
                 blocks: &[block],
             },
-        );
+        )
+        .unwrap();
 
         assert_eq!(report.synced, 2);
         assert!(dir.path().join("CLAUDE.md").exists());
@@ -349,7 +350,8 @@ mod tests {
                 target_files: &["CLAUDE.md"],
                 blocks: &[block],
             },
-        );
+        )
+        .unwrap();
 
         assert_eq!(report.synced, 0);
         assert_eq!(report.skipped, 0);
@@ -375,9 +377,37 @@ mod tests {
                 target_files: &["CLAUDE.md"],
                 blocks: &[block],
             },
-        );
+        )
+        .unwrap();
 
         assert_eq!(report.failed, 1);
+    }
+
+    #[test]
+    fn sync_strict_mode_propagates_lock_error() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("CLAUDE.md");
+        let block = sample_block();
+
+        // Hold exclusive lock
+        let lock = crate::file_lock::FileLock::new(&path).unwrap();
+        let _guard = lock.exclusive().unwrap();
+
+        let err = sync_all(
+            dir.path(),
+            &SyncConfig {
+                skip: false,
+                on_error: OnError::Strict,
+                target_files: &["CLAUDE.md"],
+                blocks: &[block],
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, writer::SyncError::LockFailed { .. }),
+            "expected LockFailed, got: {err:?}"
+        );
     }
 
     #[test]
@@ -393,10 +423,121 @@ mod tests {
                 target_files: &["CLAUDE.md"],
                 blocks: &[block],
             },
-        );
+        )
+        .unwrap();
 
         assert_eq!(report.block_results.len(), 1);
         assert_eq!(report.block_results[0].block_id, "hang-prevention");
         assert_eq!(report.block_results[0].file, "CLAUDE.md");
+    }
+
+    #[test]
+    fn block_result_skipped_when_up_to_date() {
+        let dir = TempDir::new().unwrap();
+        let block = sample_block();
+
+        // Pre-populate with an up-to-date block
+        let existing = format!(
+            "# Project\n\n## Ralph Managed Blocks\n\n\
+             <!-- ralph:begin hang-prevention v=sha256:{} -->\n\
+             Rule 1\nRule 2\nRule 3\nRule 4\nRule 5\n\
+             <!-- ralph:end hang-prevention -->\n",
+            block.content_sha256
+        );
+        fs::write(dir.path().join("CLAUDE.md"), &existing).unwrap();
+
+        let report = sync_all(
+            dir.path(),
+            &SyncConfig {
+                skip: false,
+                on_error: OnError::Warn,
+                target_files: &["CLAUDE.md"],
+                blocks: &[block],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.skipped, 1);
+        assert_eq!(report.synced, 0);
+        assert_eq!(report.block_results.len(), 1);
+        assert_eq!(report.block_results[0].block_id, "hang-prevention");
+        assert_eq!(report.block_results[0].file, "CLAUDE.md");
+        assert_eq!(report.block_results[0].outcome, SyncOutcome::Skipped);
+    }
+
+    #[test]
+    fn sync_replaces_orphan_begin_marker_no_duplication() {
+        let dir = TempDir::new().unwrap();
+        let block = sample_block();
+
+        // File has an orphan begin marker (no matching end marker)
+        let orphan_hash = "b".repeat(64);
+        let existing = format!(
+            "# Project\n\n## Ralph Managed Blocks\n\n\
+             <!-- ralph:begin hang-prevention v=sha256:{orphan_hash} -->\n\
+             stale orphan content\n"
+        );
+        fs::write(dir.path().join("CLAUDE.md"), &existing).unwrap();
+
+        let report = sync_all(
+            dir.path(),
+            &SyncConfig {
+                skip: false,
+                on_error: OnError::Warn,
+                target_files: &["CLAUDE.md"],
+                blocks: &[block.clone()],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.synced, 1);
+        let content = fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
+
+        // Should contain exactly ONE begin marker
+        let begin_count = content.matches("<!-- ralph:begin hang-prevention").count();
+        assert_eq!(begin_count, 1, "expected exactly 1 begin marker, found {begin_count}");
+
+        // Should have proper markers
+        assert!(content.contains("Rule 1"));
+        assert!(content.contains("## Ralph Managed Blocks"));
+    }
+
+    #[test]
+    fn sync_replaces_orphan_begin_with_matching_hash_and_preserves_user_content() {
+        let dir = TempDir::new().unwrap();
+        let block = sample_block();
+
+        // File has orphan begin marker with CORRECT hash + user content after
+        let existing = format!(
+            "# Project\n\n## Ralph Managed Blocks\n\n\
+             <!-- ralph:begin hang-prevention v=sha256:{} -->\n\
+             stale orphan content\n\
+             ## Notes\n\nUser-written notes.\n",
+            block.content_sha256
+        );
+        fs::write(dir.path().join("CLAUDE.md"), &existing).unwrap();
+
+        let report = sync_all(
+            dir.path(),
+            &SyncConfig {
+                skip: false,
+                on_error: OnError::Warn,
+                target_files: &["CLAUDE.md"],
+                blocks: &[block.clone()],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.synced, 1);
+        let content = fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
+
+        // User content after orphan should be preserved
+        assert!(content.contains("## Notes"));
+        assert!(content.contains("User-written notes."));
+        // New block should be properly placed
+        assert!(content.contains("Rule 1"));
+        assert!(content.contains("## Ralph Managed Blocks"));
+        let begin_count = content.matches("<!-- ralph:begin hang-prevention").count();
+        assert_eq!(begin_count, 1, "expected exactly 1 begin marker, found {begin_count}");
     }
 }
