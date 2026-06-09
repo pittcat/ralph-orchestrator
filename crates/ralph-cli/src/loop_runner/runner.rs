@@ -155,6 +155,13 @@ fn finalize_recovery_diagnosis(
         payload_violation_report_relpath,
     );
 
+    // U4: persist active hat activations so `ralph diagnose` can
+    // render the `## Active Hat Activations` section.
+    let activations = event_loop.hat_lifecycle_tracker().active_activations();
+    event_loop
+        .diagnostics()
+        .write_active_activations(&activations);
+
     // Suppress the unused-import lint when the function is the only
     // user of `TerminationHint`. The type is re-exported in case the
     // diagnostic report pipeline (U7) wants to introspect the hint

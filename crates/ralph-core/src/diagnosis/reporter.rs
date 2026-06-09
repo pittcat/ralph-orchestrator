@@ -32,6 +32,7 @@ use super::envelope::{DiagnosisOutcome, DiagnosisSeverity, RecoveryDiagnosisEnve
 use super::journal::{DriftJournalEntry, RecoveryJournalEntry};
 use crate::diagnostics::DiagnosisSummary;
 use crate::diagnostics::{OrchestrationEntry, OrchestrationEvent};
+use crate::hat_lifecycle::ActivationSnapshot;
 
 /// Schema version of the `ralph diagnose` JSON output. Bump when the
 /// JSON shape changes non-additively; CI consumers key on this.
@@ -51,6 +52,9 @@ const ORCHESTRATION_FILENAME: &str = "orchestration.jsonl";
 
 /// Filename of the errors log.
 const ERRORS_FILENAME: &str = "errors.jsonl";
+
+/// Filename of the active activations snapshot written at termination.
+const ACTIVE_ACTIVATIONS_FILENAME: &str = "active-activations.json";
 
 /// Errors that abort `ralph diagnose` before any report is rendered.
 /// `ReporterError::NoSession` is the only error the CLI turns into a
@@ -99,6 +103,9 @@ pub struct SessionData {
     /// Free-form warnings (malformed lines, missing files, I/O
     /// errors). Surfaced in both Markdown and JSON reports.
     pub warnings: Vec<String>,
+    /// Active hat activation snapshots written at loop termination.
+    /// U4: populated from `active-activations.json` in the session dir.
+    pub active_activations: Vec<ActivationSnapshot>,
 }
 
 /// Public rank for a single finding. The reporter pre-aggregates by
@@ -188,6 +195,9 @@ pub struct Report {
     pub errors: Vec<Value>,
     /// Free-form warnings (malformed lines, missing files).
     pub warnings: Vec<String>,
+    /// Active hat activation snapshots (U4). Sorted by duration
+    /// descending (longest active first).
+    pub active_activations: Vec<ActivationSnapshot>,
 }
 
 impl Report {
@@ -197,6 +207,9 @@ impl Report {
     pub fn from_session(data: &SessionData) -> Self {
         let top_findings = aggregate_recovery(&data.recovery);
         let recovery_timeline = recovery_timeline(&data.recovery);
+        // U4: sort active activations by duration descending (longest first).
+        let mut active_activations = data.active_activations.clone();
+        active_activations.sort_by_key(|a| std::cmp::Reverse(a.duration));
         let drift_findings = data
             .drift
             .iter()
@@ -223,6 +236,7 @@ impl Report {
             orchestration: data.orchestration.clone(),
             errors: data.errors.clone(),
             warnings: data.warnings.clone(),
+            active_activations,
         }
     }
 }
@@ -358,6 +372,8 @@ pub fn load_session(session_dir: &Path) -> SessionData {
     let orchestration =
         read_orchestration(&session_dir.join(ORCHESTRATION_FILENAME), &mut warnings);
     let errors = read_errors(&session_dir.join(ERRORS_FILENAME), &mut warnings);
+    let active_activations =
+        read_active_activations(&session_dir.join(ACTIVE_ACTIVATIONS_FILENAME), &mut warnings);
     SessionData {
         session_path: session_dir.to_path_buf(),
         summary,
@@ -366,6 +382,7 @@ pub fn load_session(session_dir: &Path) -> SessionData {
         orchestration,
         errors,
         warnings,
+        active_activations,
     }
 }
 
@@ -428,6 +445,42 @@ fn read_errors(path: &Path, warnings: &mut Vec<String>) -> Vec<Value> {
         serde_json::from_str::<Value>(line)
             .map_err(|err| format!("{display}: malformed errors.jsonl line: {err}"))
     })
+}
+
+/// Read `active-activations.json` — a JSON array of
+/// [`ActivationSnapshot`]s written at loop termination (U4).
+/// Missing file is not a warning (the file is only present when
+/// diagnostics were enabled AND the loop terminated with activations).
+fn read_active_activations(
+    path: &Path,
+    warnings: &mut Vec<String>,
+) -> Vec<ActivationSnapshot> {
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Vec::new(),
+        Err(err) => {
+            push_warning(
+                warnings,
+                format!(
+                    "active-activations.json I/O error: {err} (path={})",
+                    path.display()
+                ),
+            );
+            return Vec::new();
+        }
+    };
+    match serde_json::from_str::<Vec<ActivationSnapshot>>(&content) {
+        Ok(v) => v,
+        Err(err) => {
+            push_warning(
+                warnings,
+                format!(
+                    "active-activations.json: malformed JSON ({err}); ignoring",
+                ),
+            );
+            Vec::new()
+        }
+    }
 }
 
 /// Generic JSONL reader: each line is `String::trim()`ed, blank
@@ -688,6 +741,7 @@ pub fn render_markdown(report: &Report) -> String {
     push_preset_topology_md(&mut out, &report.orchestration);
     push_contract_health_md(&mut out, report);
     push_errors_md(&mut out, &report.errors);
+    push_active_activations_md(&mut out, &report.active_activations);
     push_suggested_actions_md(&mut out, report);
     push_warnings_md(&mut out, &report.warnings);
     out
@@ -1036,6 +1090,64 @@ fn push_warnings_md(out: &mut String, warnings: &[String]) {
     out.push('\n');
 }
 
+/// Format a `Duration` as a human-readable string.
+///
+/// Examples: `"30s"`, `"5m 12s"`, `"1h 23m 45s"`, `"0s"`.
+fn format_duration(d: std::time::Duration) -> String {
+    let total_secs = d.as_secs();
+    let hours = total_secs / 3600;
+    let mins = (total_secs % 3600) / 60;
+    let secs = total_secs % 60;
+    match (hours, mins, secs) {
+        (0, 0, 0) => "0s".to_string(),
+        (0, 0, s) => format!("{s}s"),
+        (0, m, 0) => format!("{m}m"),
+        (0, m, s) => format!("{m}m {s}s"),
+        (h, 0, 0) => format!("{h}h"),
+        (h, 0, s) => format!("{h}h {s}s"),
+        (h, m, 0) => format!("{h}h {m}m"),
+        (h, m, s) => format!("{h}h {m}m {s}s"),
+    }
+}
+
+/// Format a `SystemTime` as a local datetime string.
+///
+/// Falls back to the raw debug representation if conversion fails.
+fn format_system_time(t: std::time::SystemTime) -> String {
+    let dt: chrono::DateTime<chrono::Local> = t.into();
+    dt.format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+/// Render the `## Active Hat Activations` section (U4).
+fn push_active_activations_md(out: &mut String, activations: &[ActivationSnapshot]) {
+    out.push_str("## Active Hat Activations\n\n");
+    if activations.is_empty() {
+        out.push_str("_No active hat activations._\n\n");
+        return;
+    }
+    out.push_str("| Hat | Activated at | Last event at | Duration | Task |\n");
+    out.push_str("|---|---|---|---|---|\n");
+    for a in activations {
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | {} |\n",
+            a.hat_id,
+            format_system_time(a.activated_at),
+            format_system_time(a.last_event_at),
+            format_duration(a.duration),
+            a.linked_task_id.as_deref().unwrap_or("-"),
+        ));
+    }
+    out.push_str(&format!(
+        "\n_{} active activation{}, sorted by duration descending._\n\n",
+        activations.len(),
+        if activations.len() == 1 {
+            ""
+        } else {
+            "s"
+        },
+    ));
+}
+
 /// Render the report as a stable JSON document. The structure is
 /// versioned via [`DIAGNOSE_JSON_SCHEMA_VERSION`] and intended for
 /// CI consumption.
@@ -1148,6 +1260,17 @@ pub fn render_json(report: &Report) -> Value {
         "orchestration": orch,
         "errors": report.errors,
         "warnings": report.warnings,
+        "active_activations": report.active_activations.iter().map(|a| {
+            json!({
+                "hat_id": a.hat_id,
+                "trigger_topic": a.trigger_topic,
+                "trigger_identity": a.trigger_identity,
+                "activated_at": format_system_time(a.activated_at),
+                "last_event_at": format_system_time(a.last_event_at),
+                "duration_secs": a.duration.as_secs(),
+                "linked_task_id": a.linked_task_id,
+            })
+        }).collect::<Vec<_>>(),
     })
 }
 
@@ -1481,6 +1604,7 @@ mod tests {
             "## Drift findings",
             "## Preset topology health",
             "## Contract health",
+            "## Active Hat Activations",
             "## Suggested next actions",
             "## Warnings",
         ] {
@@ -1566,5 +1690,147 @@ mod tests {
         assert_eq!(findings[0].evidence.len(), 1);
         assert_eq!(findings[0].evidence[0].kind, EvidenceKind::Field);
         assert_eq!(findings[0].evidence[0].ref_path, "plan_name");
+    }
+
+    // ── U4: Active Hat Activations tests ─────────────────────────────────
+
+    use crate::hat_lifecycle::{ActivationKey, ActivationSnapshot};
+    use std::time::Duration;
+
+    fn make_snapshot(hat_id: &str, duration_secs: u64, task_id: Option<&str>) -> ActivationSnapshot {
+        let now = std::time::SystemTime::now();
+        ActivationSnapshot {
+            hat_id: hat_id.to_string(),
+            trigger_topic: "work.start".to_string(),
+            trigger_identity: format!("{hat_id}:trigger"),
+            activated_at: now - Duration::from_secs(duration_secs),
+            last_event_at: now - Duration::from_secs(duration_secs / 2),
+            duration: Duration::from_secs(duration_secs),
+            linked_task_id: task_id.map(String::from),
+            key: ActivationKey {
+                loop_id: "loop-1".to_string(),
+                iteration: 1,
+                hat_id: hat_id.to_string(),
+                trigger_identity: format!("{hat_id}:trigger"),
+            },
+        }
+    }
+
+    #[test]
+    fn u4_empty_activations_renders_placeholder() {
+        let data = SessionData::default();
+        let report = Report::from_session(&data);
+        let md = render_markdown(&report);
+        assert!(
+            md.contains("_No active hat activations._"),
+            "expected placeholder in:\n{md}"
+        );
+    }
+
+    #[test]
+    fn u4_active_activations_renders_table() {
+        let mut data = SessionData::default();
+        data.active_activations = vec![make_snapshot("executor", 120, Some("task-abc"))];
+        let report = Report::from_session(&data);
+        let md = render_markdown(&report);
+        assert!(md.contains("## Active Hat Activations"));
+        assert!(md.contains("| executor |"));
+        assert!(md.contains("task-abc"));
+        assert!(md.contains("2m"));
+        assert!(md.contains("1 active activation, sorted by duration descending."));
+    }
+
+    #[test]
+    fn u4_multiple_activations_sorted_by_duration() {
+        let mut data = SessionData::default();
+        data.active_activations = vec![
+            make_snapshot("fast", 10, None),
+            make_snapshot("slow", 3661, None), // 1h 1m 1s
+        ];
+        let report = Report::from_session(&data);
+        let md = render_markdown(&report);
+        // slow (longer duration) should appear before fast.
+        let slow_pos = md.find("| slow |").unwrap();
+        let fast_pos = md.find("| fast |").unwrap();
+        assert!(
+            slow_pos < fast_pos,
+            "slow should appear before fast for duration-descending sort"
+        );
+        assert!(md.contains("1h 1m 1s"));
+        assert!(md.contains("2 active activations"));
+    }
+
+    #[test]
+    fn u4_completed_activation_not_in_section() {
+        let mut data = SessionData::default();
+        // Only completed activations (empty active list) → placeholder.
+        data.active_activations = vec![];
+        let report = Report::from_session(&data);
+        let md = render_markdown(&report);
+        assert!(md.contains("_No active hat activations._"));
+    }
+
+    #[test]
+    fn u4_json_includes_active_activations() {
+        let mut data = SessionData::default();
+        data.active_activations = vec![make_snapshot("reviewer", 60, Some("task-xyz"))];
+        let report = Report::from_session(&data);
+        let value = render_json(&report);
+        let activations = value["active_activations"].as_array().unwrap();
+        assert_eq!(activations.len(), 1);
+        assert_eq!(activations[0]["hat_id"], "reviewer");
+        assert_eq!(activations[0]["linked_task_id"], "task-xyz");
+        assert_eq!(activations[0]["duration_secs"], 60);
+    }
+
+    #[test]
+    fn u4_json_empty_activations_is_empty_array() {
+        let data = SessionData::default();
+        let report = Report::from_session(&data);
+        let value = render_json(&report);
+        let activations = value["active_activations"].as_array().unwrap();
+        assert!(activations.is_empty());
+    }
+
+    #[test]
+    fn u4_format_duration_variants() {
+        assert_eq!(format_duration(Duration::from_secs(0)), "0s");
+        assert_eq!(format_duration(Duration::from_secs(30)), "30s");
+        assert_eq!(format_duration(Duration::from_secs(300)), "5m");
+        assert_eq!(format_duration(Duration::from_secs(312)), "5m 12s");
+        assert_eq!(format_duration(Duration::from_secs(3600)), "1h");
+        assert_eq!(format_duration(Duration::from_secs(3660)), "1h 1m");
+        assert_eq!(format_duration(Duration::from_secs(5025)), "1h 23m 45s");
+    }
+
+    #[test]
+    fn u4_load_session_reads_activations_json() {
+        let tmp = TempDir::new().unwrap();
+        let activations = vec![make_snapshot("executor", 120, Some("task-1"))];
+        let json = serde_json::to_string_pretty(&activations).unwrap();
+        fs::write(
+            tmp.path().join("active-activations.json"),
+            json.as_bytes(),
+        )
+        .unwrap();
+        let data = load_session(tmp.path());
+        assert_eq!(data.active_activations.len(), 1);
+        assert_eq!(data.active_activations[0].hat_id, "executor");
+    }
+
+    #[test]
+    fn u4_load_session_missing_activations_file_is_not_warning() {
+        let tmp = TempDir::new().unwrap();
+        let data = load_session(tmp.path());
+        assert!(data.active_activations.is_empty());
+        // Missing file should NOT produce a warning.
+        assert!(
+            !data
+                .warnings
+                .iter()
+                .any(|w| w.contains("active-activations")),
+            "unexpected warning: {:?}",
+            data.warnings
+        );
     }
 }
