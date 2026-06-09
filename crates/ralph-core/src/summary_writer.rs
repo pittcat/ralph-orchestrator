@@ -507,6 +507,31 @@ mod tests {
         }
     }
 
+    /// RAII guard that switches the process cwd for the duration of a test
+    /// and restores it on drop (including panic unwinds). Used by tests that
+    /// depend on `EventHistory::default_path()` resolving to a path relative
+    /// to cwd, so a leftover `.ralph/events.jsonl` in the workspace root
+    /// (or any other directory) does not contaminate the assertion.
+    struct CwdGuard {
+        original: PathBuf,
+    }
+
+    impl CwdGuard {
+        fn chdir(path: &Path) -> Self {
+            let original = std::env::current_dir().expect("read current_dir");
+            std::env::set_current_dir(path).expect("chdir for test isolation");
+            Self { original }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            // Best-effort restore: if restoring fails the test environment
+            // is already broken, and we cannot do anything useful here.
+            let _ = std::env::set_current_dir(&self.original);
+        }
+    }
+
     #[test]
     fn test_status_text() {
         let writer = SummaryWriter::default();
@@ -664,6 +689,12 @@ More text here.
     fn test_events_file_missing() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("summary.md");
+
+        // Isolate from any leftover `.ralph/events.jsonl` in the workspace
+        // (or its parent directories) by running the assertion with cwd
+        // pointed at the empty tempdir. CwdGuard restores the original
+        // directory on drop, even when the assertion panics.
+        let _cwd = CwdGuard::chdir(tmp.path());
 
         // Point to a non-existent events file
         let writer = SummaryWriter::new(&path);
