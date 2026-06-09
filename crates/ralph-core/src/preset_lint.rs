@@ -37,6 +37,42 @@ pub const FINDING_INVALID_TOPIC_FORMAT: &str = "preset.invalid_topic_format";
 pub const FINDING_WHITELIST_EXEMPT_TOPIC: &str = "preset.whitelist_exempt_topic";
 
 // ──────────────────────────────────────────────────────────────────────────
+// U2: Ownership & coordinator finding IDs
+// ──────────────────────────────────────────────────────────────────────────
+
+/// `topic_owners` references a hat that does not exist in the config.
+///
+/// Always `Error` severity (regardless of strict mode).
+pub const FINDING_OWNER_UNKNOWN_HAT: &str = "preset.owner_unknown_hat";
+
+/// The owner hat of a topic does not declare that topic in its
+/// `publishes` or `default_publishes`.
+///
+/// `Warn` in default mode, `Error` in strict.
+pub const FINDING_OWNER_NOT_PUBLISHER: &str = "preset.owner_not_publisher";
+
+/// A non-owner hat publishes a topic that has a declared owner.
+///
+/// `Warn` in default mode, `Error` in strict.
+pub const FINDING_CROSS_HAT_UNAUTHORIZED_PUBLISH: &str = "preset.cross_hat_unauthorized_publish";
+
+/// A topic is declared in `topic_owners` but no hat publishes it.
+///
+/// `Warn` in default mode, `Error` in strict.
+pub const FINDING_MISSING_TOPIC_OWNER: &str = "preset.missing_topic_owner";
+
+/// `tasks.enabled=true` but `tasks.coordinator_hats` is empty.
+///
+/// Always `Error` severity.
+pub const FINDING_COORDINATOR_MISSING: &str = "preset.coordinator_missing";
+
+/// A hat publishes a `task.*` topic but is not listed in
+/// `tasks.coordinator_hats`.
+///
+/// Always `Error` severity.
+pub const FINDING_TASK_PUBLISHER_NOT_COORDINATED: &str = "preset.task_publisher_not_coordinated";
+
+// ──────────────────────────────────────────────────────────────────────────
 // Topic surface — where a topic was found in the config.
 // ──────────────────────────────────────────────────────────────────────────
 
@@ -290,6 +326,294 @@ pub fn suggest_topic_fix(token: &str) -> String {
 // ──────────────────────────────────────────────────────────────────────────
 
 use crate::config::RalphConfig;
+
+// ──────────────────────────────────────────────────────────────────────────
+// U2: Ownership & coordinator static rules
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Severity override for strict mode (U2 checks that are warn-by-default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LintStrictness {
+    /// Default mode: ownership warnings remain warnings.
+    Default,
+    /// Strict mode: ownership warnings become errors.
+    Strict,
+}
+
+impl LintStrictness {
+    /// Returns the severity to use for checks that are warn-by-default.
+    pub fn ownership_severity(self) -> &'static str {
+        match self {
+            Self::Default => "warn",
+            Self::Strict => "error",
+        }
+    }
+}
+
+/// Result of a single U2 ownership / coordinator check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LintFinding {
+    /// Stable machine finding ID (e.g. `preset.owner_unknown_hat`).
+    pub id: &'static str,
+    /// Severity: `"error"`, `"warn"`, or `"pass"`.
+    pub severity: String,
+    /// Human-readable summary.
+    pub message: String,
+    /// Optional topic involved.
+    pub topic: Option<String>,
+    /// Optional hat involved.
+    pub hat: Option<String>,
+    /// Optional owner hat.
+    pub owner: Option<String>,
+    /// Optional fix hint.
+    pub action_hint: Option<String>,
+}
+
+impl LintFinding {
+    fn error(id: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            id,
+            severity: "error".to_string(),
+            message: message.into(),
+            topic: None,
+            hat: None,
+            owner: None,
+            action_hint: None,
+        }
+    }
+
+    fn with_topic(mut self, topic: impl Into<String>) -> Self {
+        self.topic = Some(topic.into());
+        self
+    }
+
+    fn with_hat(mut self, hat: impl Into<String>) -> Self {
+        self.hat = Some(hat.into());
+        self
+    }
+
+    fn with_owner(mut self, owner: impl Into<String>) -> Self {
+        self.owner = Some(owner.into());
+        self
+    }
+
+    fn with_action_hint(mut self, hint: impl Into<String>) -> Self {
+        self.action_hint = Some(hint.into());
+        self
+    }
+}
+
+/// Check R2: Every owner hat referenced in `topic_owners` must exist
+/// in the config's hat map.
+///
+/// Returns `Error` findings for unknown hats.
+pub fn check_owner_references(config: &RalphConfig) -> Vec<LintFinding> {
+    let mut findings = Vec::new();
+
+    for (topic, owners) in &config.topic_owners {
+        for owner in owners {
+            if !config.hats.contains_key(owner) {
+                findings.push(
+                    LintFinding::error(
+                        FINDING_OWNER_UNKNOWN_HAT,
+                        format!(
+                            "topic_owners[\"{topic}\"] references unknown hat \"{owner}\"; \
+                             add a hat definition or remove the owner entry"
+                        ),
+                    )
+                    .with_topic(topic)
+                    .with_owner(owner)
+                    .with_action_hint(format!("Add hat \"{owner}\" to the hats section")),
+                );
+            }
+        }
+    }
+
+    findings
+}
+
+/// Collect all topics a hat explicitly publishes (via `publishes` or
+/// `default_publishes`).
+fn hat_publishes(hat_config: &crate::config::HatConfig) -> Vec<String> {
+    let mut topics: Vec<String> = hat_config.publishes.clone();
+    if let Some(dp) = &hat_config.default_publishes {
+        topics.push(dp.clone());
+    }
+    topics
+}
+
+/// Check R2 + R3: Owner hats must publish their owned topic, and
+/// non-owner hats must not publish owner topics.
+///
+/// In strict mode, all warnings become errors.
+pub fn check_ownership_rules(config: &RalphConfig, strictness: LintStrictness) -> Vec<LintFinding> {
+    let mut findings = Vec::new();
+
+    for (topic, owners) in &config.topic_owners {
+        // Build set of hats that publish this topic.
+        let publishers: Vec<&str> = config
+            .hats
+            .iter()
+            .filter(|(_, hat)| {
+                let publishes = hat_publishes(hat);
+                publishes.iter().any(|p| p == topic)
+            })
+            .map(|(hat_id, _)| hat_id.as_str())
+            .collect();
+
+        // R2: Each owner must publish the topic.
+        for owner in owners {
+            if !publishers.iter().any(|p| *p == owner) {
+                let severity = strictness.ownership_severity();
+                findings.push(LintFinding {
+                    id: FINDING_OWNER_NOT_PUBLISHER,
+                    severity: severity.to_string(),
+                    message: format!(
+                        "hat \"{owner}\" is the declared owner of topic \"{topic}\" \
+                             but does not publish it; add \"{topic}\" to its publishes \
+                             or default_publishes"
+                    ),
+                    topic: Some(topic.clone()),
+                    hat: Some(owner.clone()),
+                    owner: Some(owner.clone()),
+                    action_hint: Some(format!("Add \"{topic}\" to hat \"{owner}\" publishes list")),
+                });
+            }
+        }
+
+        // R3: Non-owner hats publishing owner topic produce unauthorized publish.
+        let owner_set: std::collections::HashSet<&str> =
+            owners.iter().map(|s| s.as_str()).collect();
+        for publisher in &publishers {
+            if !owner_set.contains(*publisher) {
+                let severity = strictness.ownership_severity();
+                findings.push(LintFinding {
+                    id: FINDING_CROSS_HAT_UNAUTHORIZED_PUBLISH,
+                    severity: severity.to_string(),
+                    message: format!(
+                        "hat \"{publisher}\" publishes topic \"{topic}\" which is \
+                             owned by [{}]; non-owner publishing is not allowed",
+                        owners.join(", ")
+                    ),
+                    topic: Some(topic.clone()),
+                    hat: Some(publisher.to_string()),
+                    owner: Some(owners.join(", ")),
+                    action_hint: Some(format!(
+                        "Remove \"{topic}\" from hat \"{publisher}\" publishes, \
+                             or add \"{publisher}\" as an owner"
+                    )),
+                });
+            }
+        }
+    }
+
+    findings
+}
+
+/// Check R5: When `tasks.enabled=true`, `coordinator_hats` must be
+/// non-empty, and every hat that publishes a `task.*` topic must be
+/// listed in `coordinator_hats`.
+///
+/// Always returns `Error` severity findings.
+pub fn check_coordinator_rules(config: &RalphConfig) -> Vec<LintFinding> {
+    let mut findings = Vec::new();
+
+    if !config.tasks.enabled {
+        return findings;
+    }
+
+    // R5a: coordinator_hats must be non-empty.
+    if config.tasks.coordinator_hats.is_empty() {
+        // Collect candidate hats that publish task.* topics.
+        let candidates: Vec<&str> = config
+            .hats
+            .iter()
+            .filter(|(_, hat)| {
+                let publishes = hat_publishes(hat);
+                publishes.iter().any(|p| p.starts_with("task."))
+            })
+            .map(|(hat_id, _)| hat_id.as_str())
+            .collect();
+
+        let hint = if candidates.is_empty() {
+            "Add coordinator_hats to the tasks section".to_string()
+        } else {
+            format!(
+                "Add coordinator_hats: [{}] to the tasks section",
+                candidates.join(", ")
+            )
+        };
+
+        findings.push(
+            LintFinding::error(
+                FINDING_COORDINATOR_MISSING,
+                "tasks.enabled is true but tasks.coordinator_hats is empty; \
+                 at least one coordinator hat is required",
+            )
+            .with_action_hint(hint),
+        );
+
+        // Don't check task publishers if coordinator is empty —
+        // the error above is sufficient and more actionable.
+        return findings;
+    }
+
+    let coordinator_set: std::collections::HashSet<&str> = config
+        .tasks
+        .coordinator_hats
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+
+    // R5b: Every hat publishing task.* must be in coordinator_hats.
+    for (hat_id, hat_config) in &config.hats {
+        let publishes = hat_publishes(hat_config);
+        let has_task_topic = publishes.iter().any(|p| p.starts_with("task."));
+        if has_task_topic && !coordinator_set.contains(hat_id.as_str()) {
+            let task_topics: Vec<&str> = publishes
+                .iter()
+                .filter(|p| p.starts_with("task."))
+                .map(|s| s.as_str())
+                .collect();
+            findings.push(
+                LintFinding::error(
+                    FINDING_TASK_PUBLISHER_NOT_COORDINATED,
+                    format!(
+                        "hat \"{hat_id}\" publishes task topics [{}] but is not \
+                         listed in tasks.coordinator_hats",
+                        task_topics.join(", ")
+                    ),
+                )
+                .with_hat(hat_id)
+                .with_action_hint(format!("Add \"{hat_id}\" to tasks.coordinator_hats")),
+            );
+        }
+    }
+
+    findings
+}
+
+/// Run all U2 ownership and coordinator checks.
+///
+/// Returns a sorted, deterministic list of findings.
+pub fn validate_ownership_and_coordinator(
+    config: &RalphConfig,
+    strictness: LintStrictness,
+) -> Vec<LintFinding> {
+    let mut findings = Vec::new();
+    findings.extend(check_owner_references(config));
+    findings.extend(check_ownership_rules(config, strictness));
+    findings.extend(check_coordinator_rules(config));
+
+    // Sort by (id, topic, hat) for deterministic output.
+    findings.sort_by(|a, b| {
+        a.id.cmp(b.id)
+            .then(a.topic.cmp(&b.topic))
+            .then(a.hat.cmp(&b.hat))
+    });
+
+    findings
+}
 
 /// Collect all topic tokens from the configuration across every surface.
 ///
@@ -752,5 +1076,388 @@ event_loop:
             FINDING_WHITELIST_EXEMPT_TOPIC,
             "preset.whitelist_exempt_topic"
         );
+    }
+
+    // ── U2: Ownership & coordinator static rules ───────────────────────
+
+    // T1: owner references unknown hat → always error.
+    #[test]
+    fn owner_unknown_hat_always_error() {
+        let yaml = r#"
+topic_owners:
+  work.done:
+    - non_existent_hat
+hats:
+  executor:
+    name: "Executor"
+    publishes: ["work.done"]
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let findings = check_owner_references(&config);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].id, FINDING_OWNER_UNKNOWN_HAT);
+        assert_eq!(findings[0].severity, "error");
+        assert_eq!(findings[0].topic.as_deref(), Some("work.done"));
+        assert_eq!(findings[0].owner.as_deref(), Some("non_existent_hat"));
+    }
+
+    // T2: owner does not publish its topic → warn in default, error in strict.
+    #[test]
+    fn owner_not_publisher_warn_default() {
+        let yaml = r#"
+topic_owners:
+  work.done:
+    - executor
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.ready"]
+    # Does NOT publish work.done
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let findings = check_ownership_rules(&config, LintStrictness::Default);
+        let f = findings
+            .iter()
+            .find(|f| f.id == FINDING_OWNER_NOT_PUBLISHER);
+        assert!(f.is_some(), "expected owner_not_publisher finding");
+        assert_eq!(f.unwrap().severity, "warn");
+    }
+
+    #[test]
+    fn owner_not_publisher_error_strict() {
+        let yaml = r#"
+topic_owners:
+  work.done:
+    - executor
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.ready"]
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let findings = check_ownership_rules(&config, LintStrictness::Strict);
+        let f = findings
+            .iter()
+            .find(|f| f.id == FINDING_OWNER_NOT_PUBLISHER);
+        assert!(f.is_some());
+        assert_eq!(f.unwrap().severity, "error");
+    }
+
+    // T3: non-owner publishes owner topic → warn in default, error in strict.
+    #[test]
+    fn cross_hat_unauthorized_publish_warn_default() {
+        let yaml = r#"
+topic_owners:
+  work.done:
+    - executor
+hats:
+  executor:
+    name: "Executor"
+    publishes: ["work.done"]
+  reviewer:
+    name: "Reviewer"
+    publishes: ["work.done"]
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let findings = check_ownership_rules(&config, LintStrictness::Default);
+        let f = findings
+            .iter()
+            .find(|f| f.id == FINDING_CROSS_HAT_UNAUTHORIZED_PUBLISH);
+        assert!(
+            f.is_some(),
+            "expected cross_hat_unauthorized_publish finding"
+        );
+        assert_eq!(f.unwrap().severity, "warn");
+        assert_eq!(f.unwrap().hat.as_deref(), Some("reviewer"));
+    }
+
+    #[test]
+    fn cross_hat_unauthorized_publish_error_strict() {
+        let yaml = r#"
+topic_owners:
+  work.done:
+    - executor
+hats:
+  executor:
+    name: "Executor"
+    publishes: ["work.done"]
+  reviewer:
+    name: "Reviewer"
+    publishes: ["work.done"]
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let findings = check_ownership_rules(&config, LintStrictness::Strict);
+        let f = findings
+            .iter()
+            .find(|f| f.id == FINDING_CROSS_HAT_UNAUTHORIZED_PUBLISH);
+        assert!(f.is_some());
+        assert_eq!(f.unwrap().severity, "error");
+    }
+
+    // T4: no owner declared → no findings (missing_topic_owner not triggered
+    //     unless topic_owners has an entry with no publisher).
+    #[test]
+    fn no_owner_topics_no_findings() {
+        let yaml = r#"
+tasks:
+  enabled: false
+hats:
+  executor:
+    name: "Executor"
+    publishes: ["work.done"]
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let findings = validate_ownership_and_coordinator(&config, LintStrictness::Default);
+        assert!(findings.is_empty(), "no ownership findings expected");
+    }
+
+    // T5: tasks disabled → no coordinator findings.
+    #[test]
+    fn tasks_disabled_no_coordinator_findings() {
+        let yaml = r#"
+tasks:
+  enabled: false
+hats:
+  executor:
+    name: "Executor"
+    publishes: ["task.created"]
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let findings = check_coordinator_rules(&config);
+        assert!(
+            findings.is_empty(),
+            "no coordinator findings when tasks disabled"
+        );
+    }
+
+    // T6: tasks enabled + empty coordinator_hats → error.
+    #[test]
+    fn tasks_enabled_empty_coordinator_error() {
+        let yaml = r#"
+tasks:
+  enabled: true
+  coordinator_hats: []
+hats:
+  executor:
+    name: "Executor"
+    publishes: ["task.created"]
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let findings = check_coordinator_rules(&config);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].id, FINDING_COORDINATOR_MISSING);
+        assert_eq!(findings[0].severity, "error");
+        // The hint should list candidate hats.
+        assert!(
+            findings[0]
+                .action_hint
+                .as_deref()
+                .unwrap()
+                .contains("executor")
+        );
+    }
+
+    // T7: task publisher not in coordinator_hats → error with candidate list.
+    #[test]
+    fn task_publisher_not_coordinated() {
+        let yaml = r#"
+tasks:
+  enabled: true
+  coordinator_hats:
+    - plan-gate
+hats:
+  executor:
+    name: "Executor"
+    publishes: ["task.created"]
+  plan-gate:
+    name: "Plan Gate"
+    publishes: ["queue.advance"]
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let findings = check_coordinator_rules(&config);
+        let f = findings
+            .iter()
+            .find(|f| f.id == FINDING_TASK_PUBLISHER_NOT_COORDINATED);
+        assert!(
+            f.is_some(),
+            "expected task_publisher_not_coordinated finding"
+        );
+        assert_eq!(f.unwrap().hat.as_deref(), Some("executor"));
+        assert_eq!(f.unwrap().severity, "error");
+    }
+
+    // T8: task publisher IS in coordinator_hats → no error.
+    #[test]
+    fn task_publisher_coordinated_ok() {
+        let yaml = r#"
+tasks:
+  enabled: true
+  coordinator_hats:
+    - executor
+hats:
+  executor:
+    name: "Executor"
+    publishes: ["task.created"]
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let findings = check_coordinator_rules(&config);
+        assert!(
+            findings.is_empty(),
+            "no error when task publisher is in coordinator_hats"
+        );
+    }
+
+    // T9: valid ownership — owner publishes topic, no non-owner publish.
+    #[test]
+    fn valid_ownership_no_findings() {
+        let yaml = r#"
+topic_owners:
+  work.done:
+    - executor
+tasks:
+  enabled: false
+hats:
+  executor:
+    name: "Executor"
+    publishes: ["work.done"]
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let findings = validate_ownership_and_coordinator(&config, LintStrictness::Default);
+        assert!(
+            findings.is_empty(),
+            "valid ownership should produce no findings"
+        );
+    }
+
+    // T10: multiple owners of same topic, all publish → no findings.
+    #[test]
+    fn multiple_owners_all_publish() {
+        let yaml = r#"
+topic_owners:
+  work.done:
+    - executor
+    - reviewer
+tasks:
+  enabled: false
+hats:
+  executor:
+    name: "Executor"
+    publishes: ["work.done"]
+  reviewer:
+    name: "Reviewer"
+    publishes: ["work.done"]
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let findings = validate_ownership_and_coordinator(&config, LintStrictness::Default);
+        assert!(findings.is_empty());
+    }
+
+    // T11: finding details (topic, hat, owner) are machine-readable.
+    #[test]
+    fn finding_details_are_machine_readable() {
+        let yaml = r#"
+topic_owners:
+  work.done:
+    - non_existent
+hats:
+  executor:
+    name: "Executor"
+    publishes: ["work.done"]
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let findings = check_owner_references(&config);
+        let f = &findings[0];
+        assert!(f.topic.is_some(), "topic field must be present");
+        assert!(f.owner.is_some(), "owner field must be present");
+        assert!(f.action_hint.is_some(), "action_hint must be present");
+    }
+
+    // T12: task.* prefix detection does not误把 wildcard trigger 当 publisher.
+    #[test]
+    fn task_prefix_only_matches_publishes_not_triggers() {
+        let yaml = r#"
+tasks:
+  enabled: true
+  coordinator_hats:
+    - plan-gate
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["task.created"]  # trigger, not publish
+    publishes: ["work.done"]
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let findings = check_coordinator_rules(&config);
+        // triggers don't count as publishing task.* — no finding expected.
+        assert!(
+            findings.is_empty(),
+            "trigger-only task.* should not produce coordinator finding"
+        );
+    }
+
+    // T13: LintStrictness ownership_severity returns correct values.
+    #[test]
+    fn strictness_severity_mapping() {
+        assert_eq!(LintStrictness::Default.ownership_severity(), "warn");
+        assert_eq!(LintStrictness::Strict.ownership_severity(), "error");
+    }
+
+    // T14: validate_ownership_and_coordinator returns deterministic sorted order.
+    #[test]
+    fn ownership_findings_are_sorted() {
+        let yaml = r#"
+topic_owners:
+  alpha.topic:
+    - non_existent_a
+  beta.topic:
+    - non_existent_b
+tasks:
+  enabled: false
+hats:
+  executor:
+    name: "Executor"
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let findings = validate_ownership_and_coordinator(&config, LintStrictness::Default);
+        // All findings should be sorted by id then topic.
+        for window in findings.windows(2) {
+            let a = &window[0];
+            let b = &window[1];
+            assert!(
+                (a.id, a.topic.as_deref(), a.hat.as_deref())
+                    <= (b.id, b.topic.as_deref(), b.hat.as_deref()),
+                "findings not sorted: {a:?} > {b:?}"
+            );
+        }
     }
 }
