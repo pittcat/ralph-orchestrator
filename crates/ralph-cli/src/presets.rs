@@ -1524,6 +1524,84 @@ mod tests {
         );
     }
 
+    /// Pulls `review-coordinator`'s `instructions` block out of a ce-executor
+    /// preset YAML so that callers can assert on prose contents.
+    ///
+    /// Pinned in 2026-06: review-coordinator's "Wave Emission" section used
+    /// to read "Use `ralph wave emit` for each selected dimension", which
+    /// produces N independent `wave_total=1` waves that the dispatcher then
+    /// serializes back-to-back (wall time ≈ N × single-worker cost). The
+    /// contract is: emit ONE wave with N payloads so dimension-reviewer's
+    /// `concurrency: 9` actually runs N workers in parallel.
+    fn review_coordinator_instructions_from(content: &str) -> String {
+        let config = RalphConfig::parse_yaml(content)
+            .expect("ce-executor preset YAML should parse as RalphConfig");
+        config
+            .hats
+            .get("review-coordinator")
+            .expect("ce-executor preset must define a 'review-coordinator' hat")
+            .instructions
+            .clone()
+    }
+
+    #[test]
+    fn test_ce_executor_review_coordinator_must_batch_wave_emission() {
+        // Contract: review-coordinator must emit ALL selected dimensions in ONE
+        // `ralph wave emit` call, not once per dimension. The "for each
+        // dimension" anti-pattern produces N single-worker waves that
+        // serialize at the dispatcher.
+        let content = read_root_preset("ce-executor.yml");
+        let instructions = review_coordinator_instructions_from(&content);
+
+        assert!(
+            !instructions.contains("for each selected dimension"),
+            "ce-executor review-coordinator still instructs 'ralph wave emit for each \
+             selected dimension'. This produces N independent wave_total=1 events that \
+             the dispatcher serializes, defeating dimension-reviewer's concurrency: 9. \
+             Replace with: 'Collect ALL selected dimensions and emit them in ONE \
+             `ralph wave emit` call (use --payloads p1 p2 ... pN or --payloads-stdin).' \n\
+             Offending instructions excerpt:\n{instructions}"
+        );
+
+        // Positive shape: instructions must steer toward a single batched emit.
+        // Tightened: require the literal "ONE wave call" marker (the HARD RULE
+        // lead-in) AND the "--payloads" flag name, instead of loose substrings
+        // like "single" / "one " / "batch" that match unrelated prose.
+        let lower = instructions.to_ascii_lowercase();
+        assert!(
+            lower.contains("one wave call") && lower.contains("--payloads"),
+            "ce-executor review-coordinator must include the HARD RULE batched-emit \
+             guidance: literal 'ONE wave call' marker AND '--payloads' flag. \n\
+             Offending instructions excerpt:\n{instructions}"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_zh_review_coordinator_must_batch_wave_emission() {
+        // Mirror of the English contract test, for the Chinese variant.
+        let content = read_root_preset("ce-executor-zh.yml");
+        let instructions = review_coordinator_instructions_from(&content);
+
+        assert!(
+            !instructions.contains("对每个选中的 dimension 发射")
+                && !instructions.contains("对每个选中的dimension发射"),
+            "ce-executor-zh review-coordinator still uses the 'for each dimension' \
+             anti-pattern. Replace with a single-batch emit instruction. \n\
+             Offending instructions excerpt:\n{instructions}"
+        );
+
+        let lower = instructions.to_ascii_lowercase();
+        // Tightened: require the literal "一次性 emit" marker (the HARD RULE
+        // lead-in for the Chinese variant) AND the "--payloads" flag name,
+        // instead of bare "一次" / "单个" which match many unrelated lines.
+        assert!(
+            lower.contains("一次性 emit") && lower.contains("--payloads"),
+            "ce-executor-zh review-coordinator must include the HARD RULE batched-emit \
+             guidance: literal '一次性 emit' marker AND '--payloads' flag. \n\
+             Offending instructions excerpt:\n{instructions}"
+        );
+    }
+
     #[test]
     fn test_ce_executor_zh_has_hard_commit_cadence() {
         let content = read_root_preset("ce-executor-zh.yml");

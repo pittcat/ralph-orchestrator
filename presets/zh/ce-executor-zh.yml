@@ -522,7 +522,17 @@ hats:
       | diff >= 50 行或涉及 auth/payments/data mutations | `adversarial` |
 
       ### Wave 发射
-      - 使用 `ralph wave emit` 对每个选中的 dimension 发射
+      - **硬性规则 — 一次性 emit 所有选中的 dimension**。把所有选中的 dimension payload
+        收集到一个列表，然后只调用一次 `ralph wave emit review.wave.ready`
+        （`ralph wave emit review.wave.ready --payloads '<json1>' '<json2>' ... '<jsonN>'`
+        或 `printf '%s\n' '<json1>' ... '<jsonN>' | ralph wave emit review.wave.ready --payloads-stdin`）。
+        这样会生成**一个** `wave_total=N` 的 wave，`dimension-reviewer` 的
+        `concurrency: 9` 才能真正并行起 N 个 worker。
+      - **禁止对每个 dimension 单独调一次 `ralph wave emit`**。那样会生成 N 个
+        `wave_total=1` 的独立 wave，dispatcher 会把它们一个接一个串行执行
+        （wall time ≈ N × 单 worker 耗时），完全废掉 `concurrency: 9`。
+        现场 trace 2026-06-09（worktree 2026-06-09-001）：此反模式把 9 worker
+        的 review 拖成约 30 分钟的串行 1-worker wave。
       - 每个 payload 必须包含：`dimension`、`focus`、`depth`、`diff_base`、`intent_summary`、`changed_files`、`plan_name`
       - `task_id`、`task_key`、`step`：必须存在。从触发事件 payload 中复制，不得省略。
       - 发射后停止 — 不等待结果
