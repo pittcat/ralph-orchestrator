@@ -1212,6 +1212,26 @@ impl TemplateCatalog {
         }
     }
 
+    /// Return the raw, unrendered template body for a given template name.
+    ///
+    /// Returns `None` if the template name is not in the catalog. This is
+    /// the single source of truth for the `include_str!` paths so callers
+    /// (the `show` command, the renderer, and any future template consumers)
+    /// all read from the same path table — adding a new template requires
+    /// updating exactly one match arm.
+    pub fn raw_template(name: &str) -> Option<&'static str> {
+        let body: &'static str = match name {
+            "minimal-linear" => include_str!("../preset-templates/minimal-linear.yml"),
+            "code-assist" => include_str!("../preset-templates/code-assist.yml"),
+            "debug" => include_str!("../preset-templates/debug.yml"),
+            "research" => include_str!("../preset-templates/research.yml"),
+            "review" => include_str!("../preset-templates/review.yml"),
+            "ce-executor-lite" => include_str!("../preset-templates/ce-executor-lite.yml"),
+            _ => return None,
+        };
+        Some(body)
+    }
+
     /// Render a template with the given values.
     ///
     /// Returns the rendered YAML content, or an error if rendering fails.
@@ -1219,17 +1239,9 @@ impl TemplateCatalog {
         name: &str,
         values: &[(&str, &str)],
     ) -> Result<String, RenderError> {
-        let template_content = match name {
-            "minimal-linear" => include_str!("../preset-templates/minimal-linear.yml"),
-            "code-assist" => include_str!("../preset-templates/code-assist.yml"),
-            "debug" => include_str!("../preset-templates/debug.yml"),
-            "research" => include_str!("../preset-templates/research.yml"),
-            "review" => include_str!("../preset-templates/review.yml"),
-            "ce-executor-lite" => include_str!("../preset-templates/ce-executor-lite.yml"),
-            _ => return Err(RenderError::InvalidYaml {
-                source: format!("unknown template: {}", name),
-            }),
-        };
+        let template_content = Self::raw_template(name).ok_or_else(|| RenderError::InvalidYaml {
+            source: format!("unknown template: {}", name),
+        })?;
 
         TemplateRenderer::render(template_content, values)
     }

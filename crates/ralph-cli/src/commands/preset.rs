@@ -252,15 +252,9 @@ fn show_template(name: &str, format: PresetShowFormat, _use_colors: bool) -> Res
     match format {
         PresetShowFormat::Yaml => {
             // Show the raw template YAML with placeholders
-            let template_content = match name {
-                "minimal-linear" => include_str!("../../preset-templates/minimal-linear.yml"),
-                "code-assist" => include_str!("../../preset-templates/code-assist.yml"),
-                "debug" => include_str!("../../preset-templates/debug.yml"),
-                "research" => include_str!("../../preset-templates/research.yml"),
-                "review" => include_str!("../../preset-templates/review.yml"),
-                "ce-executor-lite" => include_str!("../../preset-templates/ce-executor-lite.yml"),
-                _ => return Err(anyhow::anyhow!("unknown template: {}", name)),
-            };
+            let template_content = TemplateCatalog::raw_template(name).ok_or_else(|| {
+                anyhow::anyhow!("unknown template: {}", name)
+            })?;
             println!("{}", template_content);
         }
         PresetShowFormat::Human => {
