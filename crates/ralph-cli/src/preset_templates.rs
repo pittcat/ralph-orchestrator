@@ -625,11 +625,17 @@ impl TemplateRenderer {
             }
         }
 
-        // Second pass: substitute placeholders
+        // Second pass: substitute placeholders with YAML-quoted values.
+        // String-level substitution is lossy: a user value containing `:`,
+        // `"`, `#`, a reserved indicator at start, or control characters
+        // would produce broken YAML. We pre-quote every value into a
+        // YAML double-quoted scalar (which is unambiguous) before
+        // substitution, then verify the result parses as YAML.
         let mut result = template.to_string();
         for (name, value) in &value_map {
+            let safe_value = yaml_quote_scalar(value);
             let placeholder = format!("{{{{{}}}}}", name);
-            result = result.replace(&placeholder, value);
+            result = result.replace(&placeholder, &safe_value);
         }
 
         // Third pass: check for any remaining unsubstituted required placeholders
@@ -644,6 +650,21 @@ impl TemplateRenderer {
                 }
             }
         }
+
+        // Fourth pass (defense-in-depth): verify the rendered output is
+        // valid YAML. The static template is valid and every substituted
+        // value is now a properly-escaped YAML double-quoted scalar, so
+        // parsing should always succeed. If it doesn't, the template is
+        // broken or a code path produced an unsafe value; surface a clear
+        // error rather than writing a corrupt file.
+        serde_yaml::from_str::<serde_yaml::Value>(&result).map_err(|e| {
+            RenderError::YamlParseError {
+                source: format!(
+                    "rendered output is not valid YAML: {} (this is a renderer bug)",
+                    e
+                ),
+            }
+        })?;
 
         Ok(result)
     }
@@ -672,6 +693,333 @@ impl TemplateRenderer {
             }
         }
         Ok(())
+    }
+}
+
+/// Quote a user-supplied value as a YAML scalar (plain or double-quoted)
+/// so that string-level substitution into a YAML template cannot break
+/// the surrounding document.
+///
+/// Strategy:
+/// - If the value is safe as a YAML plain scalar, return it unchanged.
+///   This keeps simple preset names / descriptions readable in the
+///   generated file (e.g., `name: my-flow`).
+/// - Otherwise, emit a YAML double-quoted scalar with proper escapes.
+///   This is the safe path that handles every value round-trippably,
+///   including `:` ambiguity, reserved indicators, control chars, and
+///   values that look like bool/null/int/float.
+///
+/// The "needs quoting" rules below are the conservative subset of YAML
+/// 1.2 plain-scalar rules that, if missed, would cause a plain-scalar
+/// emission to either fail to parse or coerce to a non-string type.
+fn yaml_quote_scalar(value: &str) -> String {
+    if needs_quoting(value) {
+        quote_as_double_quoted(value)
+    } else {
+        value.to_string()
+    }
+}
+
+/// Return true if `value` cannot be safely emitted as a YAML plain scalar.
+fn needs_quoting(value: &str) -> bool {
+    if value.is_empty() {
+        return true;
+    }
+
+    // Leading or trailing whitespace changes the plain-scalar semantics.
+    if value != value.trim() {
+        return true;
+    }
+
+    // Reserved indicator characters at the start of a plain scalar
+    // (YAML 1.2 §7.3.3). Including them unquoted would change the
+    // document's structure.
+    const RESERVED_START: &[char] = &[
+        '-', '?', ':', ',', '[', ']', '{', '}', '#', '&', '*', '!', '|', '>', '\'', '"',
+        '%', '@', '`',
+    ];
+    if let Some(first) = value.chars().next() {
+        if RESERVED_START.contains(&first) {
+            return true;
+        }
+    }
+
+    for ch in value.chars() {
+        // Any control character forces quoting (we don't want raw \0,
+        // \x01, etc. in config files). \t/\n/\r are handled by the
+        // double-quoted escape table.
+        if ch.is_control() {
+            return true;
+        }
+    }
+
+    // ": " (colon-space) and ":\n" are the canonical "this looks like
+    // a key-value pair" patterns. We do NOT force-quote every colon
+    // (timestamps like `2026-06-09T03:22:06Z` have a `:` followed by
+    // digits, which is unambiguous as a plain scalar).
+    if contains_key_value_separator(value) {
+        return true;
+    }
+
+    // " #" (space-hash) is the comment marker in flow context. Hash at
+    // the start of a line is the block comment marker; we already handle
+    // that via the reserved-start check.
+    if value.contains(" #") {
+        return true;
+    }
+
+    // Lookalike scalars: avoid accidentally coercing to bool/null/int/float.
+    if looks_like_non_string_scalar(value) {
+        return true;
+    }
+
+    false
+}
+
+/// Conservative check: does `value` look like a non-string YAML scalar?
+/// (YAML 1.2 core schema types.)
+fn looks_like_non_string_scalar(value: &str) -> bool {
+    matches!(
+        value,
+        // bool (YAML 1.2 core schema)
+        "true" | "false" | "True" | "False" | "TRUE" | "FALSE"
+        // null
+        | "null" | "Null" | "NULL" | "~"
+        // int / float — start with a digit, optional sign
+    ) || (value.chars().next().map_or(false, |c| c.is_ascii_digit() || c == '-' || c == '+')
+        && value.chars().all(|c| c.is_ascii_digit() || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-'))
+}
+
+/// Returns true if `value` contains a YAML key-value separator pattern
+/// inside a plain scalar that would be ambiguous. The two patterns are
+/// `: ` (colon-space, the block-mapping separator) and `:\n` (colon
+/// followed by end of line, which can also be read as a block key).
+///
+/// We deliberately do NOT flag a bare `:` (e.g., timestamps like
+/// `2026-06-09T03:22:06Z`) because the surrounding plain scalar context
+/// makes the colon unambiguous: there is no space and no line break, so
+/// the value parses as a single plain scalar.
+fn contains_key_value_separator(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b':' {
+            if i + 1 < bytes.len() && (bytes[i + 1] == b' ' || bytes[i + 1] == b'\n' || bytes[i + 1] == b'\t') {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Emit `value` as a YAML 1.2 double-quoted scalar with full escaping.
+fn quote_as_double_quoted(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            '\0' => out.push_str("\\0"),
+            c if c.is_control() => {
+                // Other control chars: emit as a \uXXXX escape. This
+                // round-trips through serde_yaml back to the same string.
+                out.push_str(&format!("\\u{:04X}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+#[cfg(test)]
+mod yaml_quote_tests {
+    use super::{needs_quoting, quote_as_double_quoted, yaml_quote_scalar};
+
+    #[test]
+    fn plain_scalar_unchanged_for_safe_inputs() {
+        // Simple alphanumerics, hyphens, underscores, dots, slashes, parens
+        // should pass through as plain scalars.
+        for input in [
+            "my-flow",
+            "test-flow2",
+            "A simple two-hat linear workflow for learning and small tasks",
+            "Team code assist workflow",
+            "Planner",
+            "code-assist",
+        ] {
+            assert!(
+                !needs_quoting(input),
+                "expected plain-scalar pass-through for {:?}",
+                input
+            );
+            assert_eq!(yaml_quote_scalar(input), input, "input: {:?}", input);
+        }
+    }
+
+    #[test]
+    fn quote_when_empty() {
+        assert_eq!(yaml_quote_scalar(""), "\"\"");
+    }
+
+    #[test]
+    fn quote_when_starts_with_reserved_indicator() {
+        for input in ["-dash", "?question", ":colon", "#hash", "&amp", "*star"] {
+            assert!(needs_quoting(input), "input: {:?}", input);
+            assert_eq!(
+                yaml_quote_scalar(input),
+                format!("\"{}\"", input),
+                "input: {:?}",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn quote_when_contains_key_value_separator() {
+        // ": " (colon-space) is the canonical "looks like a key-value
+        // pair" pattern that forces quoting.
+        for input in [
+            "Test with: colon",
+            "key: value",
+            "trailing colon: ", // ends with ": "
+        ] {
+            assert!(needs_quoting(input), "input: {:?}", input);
+        }
+    }
+
+    #[test]
+    fn plain_scalar_passes_through_bare_colon() {
+        // A bare `:` (not followed by space/newline/tab) is fine in a
+        // plain scalar. This is the timestamp case:
+        // `2026-06-09T03:22:06.764181066+00:00` is unambiguous.
+        for input in [
+            "no:colon:here",
+            "2026-06-09T03:22:06.764181066+00:00",
+            "foo:bar",
+        ] {
+            assert!(
+                !needs_quoting(input),
+                "bare colon should not force quoting: {:?}",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn quote_when_contains_hash() {
+        for input in ["name with #hash", "a # b"] {
+            assert!(needs_quoting(input), "input: {:?}", input);
+        }
+    }
+
+    #[test]
+    fn plain_scalar_passes_through_double_quote() {
+        // YAML plain scalars allow embedded `"` (the only indicator that
+        // must not appear at the start). We pass through unchanged; the
+        // resulting plain scalar is still valid YAML and round-trips.
+        let input = r#"has "quote""#;
+        assert!(!needs_quoting(input));
+        assert_eq!(yaml_quote_scalar(input), input);
+    }
+
+    #[test]
+    fn plain_scalar_passes_through_backslash() {
+        // YAML plain scalars allow `\` as a literal character. We pass
+        // through unchanged.
+        let input = r"has \ slash";
+        assert!(!needs_quoting(input));
+        assert_eq!(yaml_quote_scalar(input), input);
+    }
+
+    #[test]
+    fn quote_when_contains_newline() {
+        assert_eq!(yaml_quote_scalar("line1\nline2"), "\"line1\\nline2\"");
+    }
+
+    #[test]
+    fn quote_when_contains_tab_or_carriage_return() {
+        assert_eq!(yaml_quote_scalar("tab\there"), "\"tab\\there\"");
+        assert_eq!(yaml_quote_scalar("cr\rhere"), "\"cr\\rhere\"");
+    }
+
+    #[test]
+    fn quote_when_looks_like_bool_or_null() {
+        for input in ["true", "false", "True", "FALSE", "null", "Null", "~"] {
+            assert!(needs_quoting(input), "input: {:?}", input);
+        }
+    }
+
+    #[test]
+    fn quote_when_looks_like_number() {
+        for input in ["0", "42", "-1.5", "1e10", "+0", "0.0", "100"] {
+            assert!(needs_quoting(input), "input: {:?}", input);
+        }
+    }
+
+    #[test]
+    fn quote_when_leading_or_trailing_whitespace() {
+        assert!(needs_quoting(" leading"));
+        assert!(needs_quoting("trailing "));
+    }
+
+    #[test]
+    fn quote_round_trip_through_yaml() {
+        // The safety contract: every quoted form must round-trip through
+        // serde_yaml and produce a string equal to the input.
+        let cases = [
+            "",
+            "simple",
+            "Test workflow with: colons and \"quotes\"",
+            "name with #hash",
+            "line1\nline2",
+            "tab\there",
+            "cr\rhere",
+            "unicode: 名前",
+            "starts with - dash",
+            "starts with ? question",
+            "starts with : colon",
+            "starts with [ bracket",
+            "starts with & ampersand",
+            "true",
+            "42",
+            "0.0",
+            "2026-06-09T03:22:06.764181066+00:00",
+        ];
+        for input in cases {
+            let quoted = yaml_quote_scalar(input);
+            let parsed: serde_yaml::Value =
+                serde_yaml::from_str(&quoted).expect("quoted output must parse");
+            let got = parsed.as_str().expect("must be a string");
+            assert_eq!(got, input, "round-trip failed for {:?}", input);
+        }
+    }
+
+    #[test]
+    fn plain_scalars_still_parse_correctly() {
+        // Plain-scalar inputs must still be valid YAML.
+        let cases = [
+            "my-flow",
+            "code-assist",
+            "A simple two-hat linear workflow for learning and small tasks",
+        ];
+        for input in cases {
+            let quoted = yaml_quote_scalar(input);
+            let parsed: serde_yaml::Value =
+                serde_yaml::from_str(&quoted).expect("plain-scalar output must parse");
+            assert_eq!(parsed.as_str(), Some(input));
+        }
+    }
+
+    #[test]
+    fn double_quoted_helper_handles_backslash_and_quote() {
+        // Direct test of the escape table.
+        assert_eq!(quote_as_double_quoted("a\\b"), "\"a\\\\b\"");
+        assert_eq!(quote_as_double_quoted("a\"b"), "\"a\\\"b\"");
+        assert_eq!(quote_as_double_quoted("a\nb"), "\"a\\nb\"");
     }
 }
 
