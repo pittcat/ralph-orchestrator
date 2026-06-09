@@ -1,0 +1,25 @@
+# Cargo configuration for the ralph-orchestrator workspace.
+#
+# This file is read by `cargo` for all invocations in this repository. It is
+# version-controlled alongside the code so the build, test, and run behaviour
+# is reproducible across machines and CI.
+#
+# See: https://doc.rust-lang.org/cargo/reference/config.html
+
+# Force NO_PROXY for every process cargo spawns (including test binaries).
+#
+# Background: `reqwest::Client::new()` reads the `HTTP_PROXY` / `HTTPS_PROXY`
+# env vars and routes 127.0.0.1 traffic through them when no `NO_PROXY`
+# exclusion exists. In environments with a corporate proxy (e.g.
+# `HTTP_PROXY=http://192.168.3.231:808`), the proxy cannot reach a local
+# `TcpListener::bind("127.0.0.1:0")` and closes the connection before the
+# HTTP response is delivered, producing
+# `error sending request ... connection closed before message completed`
+# in tests that spin up a local RPC server.
+#
+# Setting `NO_PROXY` here (with `force = true`) makes every test binary in
+# the workspace bypass the proxy for loopback hosts, regardless of what the
+# user has in their shell environment. The shell env is preserved for
+# non-cargo processes; this only affects `cargo` children.
+[env]
+NO_PROXY = { value = "127.0.0.1,localhost,::1", force = true }
