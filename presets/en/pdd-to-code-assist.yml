@@ -97,6 +97,7 @@ hats:
     triggers: ["design.start", "answer.proposed", "design.rejected"]
     publishes: ["question.asked", "requirements.complete"]
     default_publishes: "question.asked"
+    terminal_events: ["question.asked", "requirements.complete"]
     instructions: |
       ## INQUISITOR MODE — Requirements Through Questioning
 
@@ -154,6 +155,7 @@ hats:
     triggers: ["question.asked", "requirements.complete"]
     publishes: ["answer.proposed", "design.drafted"]
     default_publishes: "answer.proposed"
+    terminal_events: ["answer.proposed", "design.drafted"]
     instructions: |
       ## ARCHITECT MODE — Answers and Design Synthesis
 
@@ -225,6 +227,7 @@ hats:
     triggers: ["design.drafted"]
     publishes: ["design.approved", "design.rejected"]
     default_publishes: "design.approved"
+    terminal_events: ["design.approved", "design.rejected"]
     instructions: |
       ## DESIGN CRITIC MODE — Adversarial Design Review
 
@@ -289,6 +292,7 @@ hats:
     triggers: ["design.approved"]
     publishes: ["context.ready"]
     default_publishes: "context.ready"
+    terminal_events: ["context.ready"]
     instructions: |
       ## EXPLORER MODE — Codebase Research & Context Building
 
@@ -391,6 +395,7 @@ hats:
     triggers: ["context.ready"]
     publishes: ["plan.ready"]
     default_publishes: "plan.ready"
+    terminal_events: ["plan.ready"]
     instructions: |
       ## PLANNER MODE — Test Strategy & Implementation Plan
 
@@ -474,6 +479,7 @@ hats:
     triggers: ["plan.ready", "queue.advance"]
     publishes: ["tasks.ready"]
     default_publishes: "tasks.ready"
+    terminal_events: ["tasks.ready"]
     instructions: |
       ## TASK WRITER MODE — Code Task Generation And Step-Wave Materialization
 
@@ -599,6 +605,7 @@ hats:
     triggers: ["tasks.ready", "review.rejected", "finalization.failed", "validation.failed"]
     publishes: ["review.ready", "build.blocked"]
     default_publishes: "build.blocked"
+    terminal_events: ["review.ready", "build.blocked"]
     instructions: |
       ## BUILDER MODE — One Reviewed Increment At A Time
 
@@ -726,6 +733,7 @@ hats:
     triggers: ["review.ready"]
     publishes: ["review.passed", "review.rejected"]
     default_publishes: "review.rejected"
+    terminal_events: ["review.passed", "review.rejected"]
     instructions: |
       ## CRITIC MODE — Review The Increment, Not The Whole Project
 
@@ -780,6 +788,7 @@ hats:
     triggers: ["review.passed"]
     publishes: ["queue.advance", "implementation.ready", "finalization.failed"]
     default_publishes: "finalization.failed"
+    terminal_events: ["queue.advance", "implementation.ready", "finalization.failed"]
     instructions: |
       ## FINALIZER MODE — Step-Wave Queue Exhaustion And Implementation Readiness
 
@@ -823,6 +832,7 @@ hats:
     triggers: ["implementation.ready"]
     publishes: ["validation.passed", "validation.failed"]
     default_publishes: "validation.failed"
+    terminal_events: ["validation.passed", "validation.failed"]
     instructions: |
       ## VALIDATOR MODE — Exhaustive Quality Gate
 
@@ -947,6 +957,7 @@ hats:
     description: "Creates conventional commits after validation passes."
     triggers: ["validation.passed"]
     publishes: ["LOOP_COMPLETE"]
+    terminal_events: ["LOOP_COMPLETE"]
     instructions: |
       ## COMMITTER MODE — Git Commit Creation
 

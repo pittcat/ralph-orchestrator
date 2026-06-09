@@ -28,6 +28,7 @@ hats:
     description: "Finds root cause through systematic investigation."
     triggers: ["debug.start", "hypothesis.rejected", "hypothesis.confirmed", "fix.verified"]
     publishes: ["hypothesis.test", "fix.propose", "DEBUG_COMPLETE"]
+    terminal_events: ["hypothesis.test", "fix.propose", "DEBUG_COMPLETE"]
     instructions: |
       ## INVESTIGATOR MODE
 
@@ -98,6 +99,7 @@ hats:
     description: "Designs and runs experiments to test hypotheses."
     triggers: ["hypothesis.test"]
     publishes: ["hypothesis.confirmed", "hypothesis.rejected"]
+    terminal_events: ["hypothesis.confirmed", "hypothesis.rejected"]
     instructions: |
       ## HYPOTHESIS TESTER MODE
 
@@ -138,6 +140,7 @@ hats:
     description: "Implements fix for confirmed root cause with regression test."
     triggers: ["fix.propose", "fix.failed"]
     publishes: ["fix.applied", "fix.blocked"]
+    terminal_events: ["fix.applied", "fix.blocked"]
     instructions: |
       ## BUG FIXER MODE
 
@@ -176,6 +179,7 @@ hats:
     description: "Verifies the fix solves the original problem."
     triggers: ["fix.applied"]
     publishes: ["fix.verified", "fix.failed"]
+    terminal_events: ["fix.verified", "fix.failed"]
     instructions: |
       ## FIX VERIFIER MODE
 

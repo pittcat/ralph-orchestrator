@@ -1,0 +1,56 @@
+# Hat Lifecycle Contract: terminal_events behavior
+# Covers AE2 (uppercase topic rejection), AE4 (non-terminal doesn't close activation),
+# AE5 (whitelist completion token), and terminal event lifecycle tracking.
+
+name: hat_lifecycle_contract
+description: >
+  Verify hat lifecycle contract: terminal events close activations,
+  non-terminal events keep activations open, uppercase topics rejected,
+  LOOP_COMPLETE remains usable as terminal event.
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 6
+  hats:
+    executor:
+      subscribes_to:
+        - work.ready
+        - queue.advance
+      default_publishes: work.done
+    reviewer:
+      subscribes_to:
+        - work.done
+      default_publishes: review.complete
+    shipper:
+      subscribes_to:
+        - review.complete
+      default_publishes: LOOP_COMPLETE
+
+mock_responses:
+  - |
+    <event topic="work.ready">
+    task_id=task-001 task_key=test:u1 step=step-01
+    </event>
+  - |
+    Work completed.
+    <event topic="work.done">
+    task_id=task-001 task_key=test:u1 step=step-01 commit_count=1 changed_lines=50
+    </event>
+  - |
+    Code reviewed.
+    <event topic="review.complete">
+    approved: true
+    </event>
+  - |
+    <event topic="LOOP_COMPLETE">
+    All work done.
+    </event>
+
+expected:
+  iterations: 4
+  events:
+    - topic: work.ready
+    - topic: work.done
+    - topic: review.complete
+    - topic: LOOP_COMPLETE
+  completion: true

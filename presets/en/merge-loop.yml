@@ -46,6 +46,7 @@ hats:
     triggers: ["merge.start", "tests.passed"]
     publishes: ["merge.done", "conflict.detected", "merge.failed"]
     default_publishes: "merge.done"
+    terminal_events: ["merge.done", "conflict.detected", "merge.failed"]
     instructions: |
       ## BRANCH MERGER MODE
 
@@ -132,6 +133,7 @@ hats:
     description: "Resolves merge conflicts by understanding intent of both sides."
     triggers: ["conflict.detected"]
     publishes: ["conflict.resolved", "conflict.unresolvable"]
+    terminal_events: ["conflict.resolved", "conflict.unresolvable"]
     instructions: |
       ## CONFLICT RESOLVER MODE
 
@@ -197,6 +199,7 @@ hats:
     description: "Runs test suite to verify merge didn't break anything."
     triggers: ["conflict.resolved"]
     publishes: ["tests.passed", "tests.failed"]
+    terminal_events: ["tests.passed", "tests.failed"]
     instructions: |
       ## TEST VERIFIER MODE
 
@@ -236,6 +239,7 @@ hats:
     description: "Cleans up worktree and branch after successful merge."
     triggers: ["merge.done"]
     publishes: ["cleanup.done", "cleanup.failed"]
+    terminal_events: ["cleanup.done", "cleanup.failed"]
     instructions: |
       ## WORKTREE CLEANER MODE
 

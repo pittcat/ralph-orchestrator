@@ -1329,11 +1329,13 @@ hats:
     description: "Producer"
     triggers: ["work.start"]
     publishes: ["work.ready"]
+    terminal_events: ["work.ready"]
   b:
     name: "B"
     description: "Consumer"
     triggers: ["work.ready"]
     publishes: ["LOOP_COMPLETE"]
+    terminal_events: ["LOOP_COMPLETE"]
 event_loop:
   starting_event: "work.start"
   completion_promise: "LOOP_COMPLETE"
@@ -1349,12 +1351,14 @@ hats:
     description: "Producer"
     triggers: ["work.start"]
     publishes: ["work.ready"]
+    terminal_events: ["work.ready"]
     instructions: "Publish."
   b:
     name: "B"
     description: "Consumer"
     triggers: ["work.ready"]
     publishes: ["LOOP_COMPLETE"]
+    terminal_events: ["LOOP_COMPLETE"]
     instructions: |
       From event payload: task_id, plan_name
 event_loop:
@@ -2348,11 +2352,13 @@ hats:
     description: "Producer"
     triggers: ["work.start"]
     publishes: ["work.ready"]
+    terminal_events: ["work.ready"]
   b:
     name: "B"
     description: "Consumer"
     triggers: ["work.ready"]
     publishes: ["LOOP_COMPLETE"]
+    terminal_events: ["LOOP_COMPLETE"]
 event_loop:
   starting_event: "work.start"
   completion_promise: "LOOP_COMPLETE"

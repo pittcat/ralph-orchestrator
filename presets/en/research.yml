@@ -31,6 +31,7 @@ hats:
     triggers: ["research.start", "research.followup"]
     publishes: ["research.finding"]
     default_publishes: "research.finding"
+    terminal_events: ["research.finding"]
     instructions: |
       ## RESEARCHER MODE
 
@@ -118,6 +119,7 @@ hats:
     description: "Reviews findings and creates coherent summary."
     triggers: ["research.finding"]
     publishes: ["research.followup", "RESEARCH_COMPLETE"]
+    terminal_events: ["research.followup", "RESEARCH_COMPLETE"]
     instructions: |
       ## SYNTHESIZER MODE
 
