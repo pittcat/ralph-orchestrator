@@ -189,6 +189,7 @@ fn test_verdict_gate_rejects_loop_complete_when_payload_is_fail() {
         topic: "review.complete".to_string(),
         fail_field: "pass_or_fail".to_string(),
         fail_value: "fail".to_string(),
+        additional_topics: Vec::new(),
     });
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");
@@ -225,6 +226,7 @@ fn test_verdict_gate_accepts_loop_complete_when_payload_is_pass() {
         topic: "review.complete".to_string(),
         fail_field: "pass_or_fail".to_string(),
         fail_value: "fail".to_string(),
+        additional_topics: Vec::new(),
     });
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");

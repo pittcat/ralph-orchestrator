@@ -63,6 +63,12 @@ event_loop:
     topic: "REVIEW_COMPLETE"
     fail_field: "pass_or_fail"
     fail_value: "fail"
+    # 2026-06-09 fix: also gate on `report.done` mirroring the
+    # pass_or_fail field.  See presets/en/ce-executor.yml for
+    # the rationale — this is the second layer of defense
+    # alongside the reporter's `conditional_forbid_topics`
+    # obligation.
+    additional_topics: ["report.done"]
   # U7: Enable execution contract for work.done validation.
   # Protects against false positives when executor forgets to emit or emits invalid work.done.
   execution_contracts:
@@ -1361,6 +1367,15 @@ hats:
     obligations:
       - on_trigger: "REVIEW_COMPLETE"
         must_emit_any_of: ["report.done"]
+        # 2026-06-09 fix: see presets/en/ce-executor.yml for
+        # the rationale.  When REVIEW_COMPLETE carries
+        # pass_or_fail="fail", the reporter MUST NOT also emit
+        # LOOP_COMPLETE.
+        conditional_forbid_topics:
+          - when:
+              payload_field_equals:
+                pass_or_fail: "fail"
+            forbid_topics: ["LOOP_COMPLETE"]
     instructions: |
       ## REPORTER MODE — Manager-Facing Completion Report
 

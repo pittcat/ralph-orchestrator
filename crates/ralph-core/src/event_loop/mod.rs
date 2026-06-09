@@ -790,6 +790,21 @@ fn finding_to_payload_contract_violation(
 }
 
 impl EventLoop {
+    /// 2026-06-09: returns the union of `verdict_gate.topic` and
+    /// its `additional_topics`, or `None` when no gate is
+    /// configured.  Used at every record-verdict call site so the
+    /// 4 call sites stay in lockstep.  Allocates only when a
+    /// gate is present (the per-iteration cost is paid once, not
+    /// per event).
+    pub(crate) fn verdict_gate_topics(&self) -> Option<Vec<String>> {
+        self.config.event_loop.verdict_gate.as_ref().map(|v| {
+            let mut topics = Vec::with_capacity(1 + v.additional_topics.len());
+            topics.push(v.topic.clone());
+            topics.extend(v.additional_topics.iter().cloned());
+            topics
+        })
+    }
+
     /// Creates a new event loop from configuration.
     pub fn new(config: RalphConfig) -> Self {
         // Try to create diagnostics collector, but fall back to disabled if it fails
@@ -1777,16 +1792,13 @@ impl EventLoop {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        let verdict_topic = self
-            .config
-            .event_loop
-            .verdict_gate
-            .as_ref()
-            .map(|v| v.topic.as_str());
+        let verdict_topics = self.verdict_gate_topics();
+        let verdict_topics_slice = verdict_topics.as_deref();
         for message in messages {
             let event = Event::new("human.guidance", message.into());
             self.state.record_event(&event);
-            self.state.record_verdict_if_match(&event, verdict_topic);
+            self.state
+                .record_verdict_if_match(&event, verdict_topics_slice);
             self.bus.publish(event);
         }
     }
@@ -3135,14 +3147,10 @@ impl EventLoop {
             && let Some(default_topic) = &config.default_publishes
         {
             let default_event = Event::new(default_topic.as_str(), "").with_source(hat_id.clone());
-            let verdict_topic = self
-                .config
-                .event_loop
-                .verdict_gate
-                .as_ref()
-                .map(|v| v.topic.as_str());
+            let verdict_topics = self.verdict_gate_topics();
+            let verdict_topics_slice = verdict_topics.as_deref();
             self.state
-                .record_verdict_if_match(&default_event, verdict_topic);
+                .record_verdict_if_match(&default_event, verdict_topics_slice);
 
             debug!(
                 hat = %hat_id.as_str(),
@@ -4898,16 +4906,13 @@ impl EventLoop {
             .iter()
             .any(|event| event.topic.as_str().starts_with("plan."));
         // Record and diagnose validated events (before consuming them).
-        let verdict_topic = self
-            .config
-            .event_loop
-            .verdict_gate
-            .as_ref()
-            .map(|v| v.topic.as_str());
+        let verdict_topics = self.verdict_gate_topics();
+        let verdict_topics_slice = verdict_topics.as_deref();
         for event in &validated_events {
             // Record topic for event chain validation
             self.state.record_event(event);
-            self.state.record_verdict_if_match(event, verdict_topic);
+            self.state
+                .record_verdict_if_match(event, verdict_topics_slice);
 
             self.diagnostics.log_orchestration(
                 self.state.iteration,
@@ -4953,14 +4958,11 @@ impl EventLoop {
 
         // Publish human.response event if one was received during blocking
         if let Some(response) = response_event {
-            let verdict_topic = self
-                .config
-                .event_loop
-                .verdict_gate
-                .as_ref()
-                .map(|v| v.topic.as_str());
+            let verdict_topics = self.verdict_gate_topics();
+            let verdict_topics_slice = verdict_topics.as_deref();
             self.state.record_event(&response);
-            self.state.record_verdict_if_match(&response, verdict_topic);
+            self.state
+                .record_verdict_if_match(&response, verdict_topics_slice);
             info!(
                 topic = %response.topic,
                 "Publishing human.response event from robot service"

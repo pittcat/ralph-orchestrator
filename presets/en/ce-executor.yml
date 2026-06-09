@@ -52,6 +52,14 @@ event_loop:
     topic: "REVIEW_COMPLETE"
     fail_field: "pass_or_fail"
     fail_value: "fail"
+    # 2026-06-09 fix: also gate on `report.done` mirroring the
+    # pass_or_fail field.  When a rogue LOOP_COMPLETE follows a
+    # `report.done` that carries pass_or_fail="fail", the gate
+    # must still fire.  This is the second layer of defense
+    # alongside the reporter's `conditional_forbid_topics`
+    # obligation — either one alone would close the gap, but
+    # running both gives a defense-in-depth posture.
+    additional_topics: ["report.done"]
   # U7: Enable execution contract for work.done validation.
   # Protects against false positives when executor forgets to emit or emits invalid work.done.
   execution_contracts:
@@ -150,7 +158,13 @@ event_loop:
         required_fields: [plan_name, verdict, pass_or_fail, residual_findings_summary]
         payload: json_object
       report.done:
-        required_fields: [report_path]
+        # 2026-06-09 fix: awaiting_decision is set by the reporter
+        # on a failing review so the manager-facing report and the
+        # verdict_gate can both see that the loop has not passed
+        # final review.  Required field so the contract rejects
+        # reporters that silently emit report.done without the
+        # manager-decision flag.
+        required_fields: [report_path, awaiting_decision]
         payload: json_object
 
 cli:
@@ -1293,6 +1307,21 @@ hats:
     obligations:
       - on_trigger: "REVIEW_COMPLETE"
         must_emit_any_of: ["report.done"]
+        # 2026-06-09 fix: when the upstream REVIEW_COMPLETE
+        # carries pass_or_fail="fail", the reporter MUST NOT
+        # also emit LOOP_COMPLETE — that combination would mask
+        # a failing review as a successful loop.  This is the
+        # primary hard gate; the matching `additional_topics:
+        # ["report.done"]` verdict_gate (above) is the
+        # defense-in-depth backstop.  Either one alone closes
+        # the regression, but running both guarantees that
+        # even an agent that ignores the deny-list still has
+        # its rogue LOOP_COMPLETE rejected at the orchestrator.
+        conditional_forbid_topics:
+          - when:
+              payload_field_equals:
+                pass_or_fail: "fail"
+            forbid_topics: ["LOOP_COMPLETE"]
     instructions: |
       ## REPORTER MODE — Manager-Facing Completion Report
 
@@ -1445,14 +1474,18 @@ hats:
 
       ### Event Publishing (HARD RULES)
       - Write report, then publish `report.done` with `report_path`
+      - **2026-06-09 fix: every `report.done` payload MUST mirror `pass_or_fail` (and `verdict` when present) from the upstream `REVIEW_COMPLETE`**.  The verdict_gate's `additional_topics: ["report.done"]` reads `pass_or_fail` from the `report.done` payload to decide whether to reject a follow-up `LOOP_COMPLETE`.  Without the mirror field, a rogue `LOOP_COMPLETE` slips through the gate.  Example payload:
+        ```json
+        {"report_path": "docs/report/.../r.md", "awaiting_decision": true, "pass_or_fail": "fail", "verdict": "fail"}
+        ```
       - **HARD RULE — pass_or_fail="fail"**: If `pass_or_fail` from the `REVIEW_COMPLETE` payload is `"fail"`, the reporter MUST:
         1. NOT publish `LOOP_COMPLETE` — this is a hard gate, not advisory
         2. Write the report with an explicit "Awaiting decision" section
-        3. Publish `report.done` with `awaiting_decision: true`
-        4. Stop — the verdict gate (configured in `event_loop.verdict_gate`) checks REVIEW_COMPLETE payload when LOOP_COMPLETE is received, so any rogue LOOP_COMPLETE will also be rejected by the orchestrator
+        3. Publish `report.done` with `awaiting_decision: true` AND `pass_or_fail: "fail"` (the mirror field is what the verdict_gate reads)
+        4. Stop — the verdict gate (configured in `event_loop.verdict_gate`) checks both REVIEW_COMPLETE and report.done payloads when LOOP_COMPLETE is received, so any rogue LOOP_COMPLETE will also be rejected by the orchestrator
       - **HARD RULE — Defensive plan completion check**: Otherwise (pass / pass_with_residuals):
-        - **Defensive plan completion check**: read `plan.md` and `progress.md`. If any planned step is NOT listed in `Completed Steps`, the plan is NOT complete. Do NOT publish `LOOP_COMPLETE`. Publish `report.done` with `awaiting_decision: true` and a note that pending steps remain. This is a safety backstop in case `plan-gate` or `shipper` misclassifies partial completion.
-        - Only if all steps are complete and `pass_or_fail` is not `"fail"`, publish `LOOP_COMPLETE` after `report.done`.
+        - **Defensive plan completion check**: read `plan.md` and `progress.md`. If any planned step is NOT listed in `Completed Steps`, the plan is NOT complete. Do NOT publish `LOOP_COMPLETE`. Publish `report.done` with `awaiting_decision: true` and `pass_or_fail` from REVIEW_COMPLETE. This is a safety backstop in case `plan-gate` or `shipper` misclassifies partial completion.
+        - Only if all steps are complete and `pass_or_fail` is not `"fail"`, publish `LOOP_COMPLETE` after `report.done` (with `report.done` carrying `pass_or_fail: "pass"` for the verdict_gate's mirror record).
 
       ### Constraints
       - MUST NOT modify any code

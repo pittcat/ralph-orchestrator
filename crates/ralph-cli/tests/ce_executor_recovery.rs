@@ -500,6 +500,7 @@ fn u4_obligation_satisfied_for_each_review_coordinator_branch() {
         on_trigger: "work.done".into(),
         must_emit_any_of: vec!["review.wave.ready".into(), "review.passed".into()],
         conditional_must_emit: vec![],
+        conditional_forbid_topics: vec![],
     };
 
     // Empty-diff branch: review-coordinator picks review.passed.

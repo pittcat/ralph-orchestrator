@@ -107,6 +107,18 @@ impl HatBackend {
 /// (e.g. `review-coordinator`) was technically satisfying its
 /// obligation by emitting `review.passed` for a non-trivial diff,
 /// skipping the wave entirely.
+///
+/// 2026-06-09 fix: added `conditional_forbid_topics` to support
+/// the inverse — "when the trigger payload matches this predicate,
+/// the candidate topics MUST NOT include any of these forbidden
+/// topics".  Combined with `must_emit_any_of`, this expresses
+/// per-payload emit contracts that go beyond pure OR semantics.
+/// Primary use case: a `reporter` hat that must emit `report.done`
+/// but MUST NOT also emit `LOOP_COMPLETE` when the upstream
+/// `REVIEW_COMPLETE` carried `pass_or_fail: "fail"`.  Closes the
+/// "rogue LOOP_COMPLETE masks review failure" gap that was
+/// documented in the 2026-06-09 ce-executor mechanism-vs-orchestration
+/// diagnosis.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActivationObligation {
     /// Trigger topic that activates this obligation.  When the hat
@@ -126,6 +138,16 @@ pub struct ActivationObligation {
     /// top-level `must_emit_any_of` (legacy OR semantics).
     #[serde(default)]
     pub conditional_must_emit: Vec<ConditionalEmission>,
+    /// 2026-06-09: per-payload forbidden topics.  When a `when`
+    /// predicate matches, the candidate topics MUST NOT include
+    /// any topic in `forbid_topics`.  Multiple `ConditionalForbid`
+    /// entries are AND-ed: every matching entry must pass.  When
+    /// no `when` predicate matches, the forbid list does not
+    /// apply (the obligation falls back to the standard
+    /// `must_emit_any_of` rule).  This is the inverse of
+    /// `conditional_must_emit` and complements it.
+    #[serde(default)]
+    pub conditional_forbid_topics: Vec<ConditionalForbid>,
 }
 
 /// A single conditional tightening of an `ActivationObligation`.
@@ -149,12 +171,49 @@ pub struct ConditionalEmission {
     pub must_emit_any_of: Vec<String>,
 }
 
+/// 2026-06-09: a single conditional `forbid` rule on an
+/// `ActivationObligation`.  The inverse of `ConditionalEmission`:
+/// when `when` matches, the candidate topics MUST NOT include
+/// any topic in `forbid_topics`.  Empties (no `when` match)
+/// leave the rule inapplicable.
+///
+/// Example — forbid `LOOP_COMPLETE` on a failing review:
+///
+/// ```yaml
+/// - on_trigger: "REVIEW_COMPLETE"
+///   must_emit_any_of: ["report.done"]
+///   conditional_forbid_topics:
+///     - when:
+///         payload_field_equals:
+///           pass_or_fail: "fail"
+///       forbid_topics: ["LOOP_COMPLETE"]
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConditionalForbid {
+    /// Predicate over `TriggerContext`.  When `when` matches, this
+    /// forbid rule applies.  Empty `TriggerPredicate` matches
+    /// every context — use with care, it forbids the listed
+    /// topics unconditionally.
+    #[serde(default)]
+    pub when: TriggerPredicate,
+    /// Topics that MUST NOT appear in the candidate set when
+    /// `when` matches.  At least one of these appearing in
+    /// `candidate_topics` makes the obligation fail.
+    pub forbid_topics: Vec<String>,
+}
+
 /// Predicate over `TriggerContext` (the trigger event payload
 /// snapshot taken at hard-gate evaluation time).
 ///
-/// All fields are AND-ed.  A field set to `None` is a wildcard
-/// (matches anything).  An empty `TriggerPredicate` matches
-/// everything.
+/// All fields are AND-ed.  A field set to `None` / empty is a
+/// wildcard (matches anything).  An empty `TriggerPredicate`
+/// matches everything.
+///
+/// 2026-06-09 fix: added `payload_field_equals` so predicates
+/// can match arbitrary string-valued payload fields (e.g.
+/// `pass_or_fail: "fail"` from `REVIEW_COMPLETE`).  This is the
+/// mechanism that lets `conditional_forbid_topics` tighten
+/// obligations per-reporter-verdict.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TriggerPredicate {
     /// Minimum `commit_count` for the predicate to match.  When
@@ -172,6 +231,22 @@ pub struct TriggerPredicate {
     /// equal this value.
     #[serde(default)]
     pub has_untracked: Option<bool>,
+    /// 2026-06-09: per-field string equality predicates over the
+    /// trigger event's payload snapshot.  All entries are AND-ed
+    /// with the other predicate fields.  Each entry requires the
+    /// trigger payload to have the named field with the exact
+    /// string value.  Missing or differently-typed fields cause
+    /// the predicate to NOT match (consistent with the "unset
+    /// field" semantics on the typed predicates above).
+    ///
+    /// Example:
+    /// ```yaml
+    /// payload_field_equals:
+    ///   pass_or_fail: "fail"
+    ///   verdict: "fail"
+    /// ```
+    #[serde(default)]
+    pub payload_field_equals: HashMap<String, String>,
 }
 
 impl TriggerPredicate {
@@ -194,6 +269,16 @@ impl TriggerPredicate {
         {
             return false;
         }
+        // payload_field_equals: every (key, want) pair must match the
+        // trigger context's payload_fields.  A missing field (None in
+        // ctx) causes the predicate to NOT match, mirroring the
+        // "None treated as neutral" semantic on the typed fields.
+        for (field, want) in &self.payload_field_equals {
+            match ctx.payload_fields.get(field) {
+                Some(got) if got == want => continue,
+                _ => return false,
+            }
+        }
         true
     }
 }
@@ -207,6 +292,12 @@ impl TriggerPredicate {
 /// value (0 for counts, false for booleans) during predicate
 /// evaluation, so a `commit_count_min: 1` predicate will not
 /// match a `None` context.
+///
+/// 2026-06-09 fix: added `payload_fields` (string snapshot of the
+/// full trigger payload) so `TriggerPredicate::payload_field_equals`
+/// can match arbitrary string-valued fields like `pass_or_fail`.
+/// Numeric / boolean fields are still surfaced via the typed
+/// fields above for backward compatibility.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TriggerContext {
     /// `commit_count` field from the trigger event payload.
@@ -215,13 +306,33 @@ pub struct TriggerContext {
     pub changed_lines: Option<u32>,
     /// `has_untracked` field from the trigger event payload.
     pub has_untracked: Option<bool>,
+    /// 2026-06-09: string snapshot of all string-valued payload
+    /// fields on the trigger event.  Populated by `from_payload`
+    /// and consumed by `TriggerPredicate::payload_field_equals`.
+    /// Non-string fields (numbers, bools, arrays, objects) are
+    /// skipped — use the typed fields above for those.
+    #[serde(default)]
+    pub payload_fields: HashMap<String, String>,
 }
 
 impl TriggerContext {
     /// Construct from a trigger event's JSON payload (best-effort).
     /// Missing fields stay `None`; non-numeric / non-bool values
-    /// also yield `None`.
+    /// also yield `None`.  All string-valued fields are mirrored
+    /// into `payload_fields` for predicate lookup.
     pub fn from_payload(payload: &serde_json::Value) -> Self {
+        // Mirror all string-valued top-level payload fields for
+        // generic predicate lookup.  Skip non-string scalars and
+        // nested structures — those are still surfaced via the
+        // typed fields above when their meaning is known.
+        let payload_fields = payload
+            .as_object()
+            .map(|obj| {
+                obj.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             commit_count: payload
                 .get("commit_count")
@@ -232,6 +343,7 @@ impl TriggerContext {
                 .and_then(|v| v.as_u64())
                 .and_then(|n| u32::try_from(n).ok()),
             has_untracked: payload.get("has_untracked").and_then(|v| v.as_bool()),
+            payload_fields,
         }
     }
 }
@@ -505,6 +617,13 @@ impl HatConfig {
 /// 3. **Falls back to legacy OR semantics** when no conditional
 ///    matched: candidate topics must include at least one topic
 ///    from the top-level `must_emit_any_of`.
+/// 4. **2026-06-09 fix**: every matching `conditional_forbid_topics`
+///    entry MUST be respected — if any forbidden topic appears in
+///    the candidate set when its `when` predicate matches, the
+///    obligation is NOT satisfied.  This is the inverse of
+///    `conditional_must_emit` and runs as an independent gate
+///    (AND-ed with the must-emit checks above).  When no `when`
+///    predicate matches, the forbid list does not apply.
 ///
 /// 2026-06-08 fix: the `trigger_context` parameter carries the
 /// trigger event payload snapshot (commit_count / changed_lines /
@@ -523,10 +642,27 @@ pub fn obligation_satisfied(
     };
     let has_top_level = !o.must_emit_any_of.is_empty();
     let has_conditionals = !o.conditional_must_emit.is_empty();
-    if !has_top_level && !has_conditionals {
+    let has_forbids = !o.conditional_forbid_topics.is_empty();
+    if !has_top_level && !has_conditionals && !has_forbids {
         return true; // Empty obligation → no enforcement.
     }
     let ctx = trigger_context.cloned().unwrap_or_default();
+    // 2026-06-09: forbid gate runs first, independent of must-emit.
+    // This is intentional — even if a hat satisfies the must-emit
+    // rule (e.g. by emitting report.done), a forbidden topic in
+    // the candidate set (e.g. LOOP_COMPLETE on a failing review)
+    // must still fail the obligation.  Mirrors the "deny-list
+    // pre-condition" pattern common in security policies.
+    for forbid in &o.conditional_forbid_topics {
+        if !forbid.when.matches(&ctx) {
+            continue;
+        }
+        for forbidden in &forbid.forbid_topics {
+            if candidate_topics.iter().any(|t| t == forbidden) {
+                return false; // Deny-list hit → obligation fails.
+            }
+        }
+    }
     let mut any_conditional_matched = false;
     for cond in &o.conditional_must_emit {
         if !cond.when.matches(&ctx) {
@@ -589,6 +725,7 @@ mod tests {
             on_trigger: "work.done".into(),
             must_emit_any_of: vec!["review.wave.ready".into(), "review.passed".into()],
             conditional_must_emit: vec![],
+            conditional_forbid_topics: vec![],
         }]);
         let o = hat.obligation_for_trigger("work.done").expect("obligation");
         assert_eq!(o.on_trigger, "work.done");
@@ -617,6 +754,7 @@ mod tests {
             on_trigger: "work.done".into(),
             must_emit_any_of: vec![],
             conditional_must_emit: vec![],
+            conditional_forbid_topics: vec![],
         };
         assert!(obligation_satisfied(Some(&o), &[], None));
     }
@@ -628,6 +766,7 @@ mod tests {
             on_trigger: "work.done".into(),
             must_emit_any_of: vec!["review.wave.ready".into(), "review.passed".into()],
             conditional_must_emit: vec![],
+            conditional_forbid_topics: vec![],
         };
         assert!(obligation_satisfied(
             Some(&o),
@@ -651,6 +790,7 @@ mod tests {
             on_trigger: "work.done".into(),
             must_emit_any_of: vec!["review.wave.ready".into(), "review.passed".into()],
             conditional_must_emit: vec![],
+            conditional_forbid_topics: vec![],
         };
         assert!(!obligation_satisfied(
             Some(&o),
@@ -680,6 +820,7 @@ mod tests {
                 },
                 must_emit_any_of: vec!["review.wave.ready".into()],
             }],
+            conditional_forbid_topics: vec![],
         };
         // Non-trivial: agent emitted review.passed → NOT satisfied
         let ctx_non_trivial = TriggerContext {
@@ -727,6 +868,7 @@ mod tests {
                 },
                 must_emit_any_of: vec!["review.wave.ready".into()],
             }],
+            conditional_forbid_topics: vec![],
         };
         // 400-line diff: review.passed must NOT satisfy
         let ctx_big = TriggerContext {
@@ -769,6 +911,7 @@ mod tests {
                 },
                 must_emit_any_of: vec!["review.wave.ready".into()],
             }],
+            conditional_forbid_topics: vec![],
         };
         let ctx_untracked = TriggerContext {
             has_untracked: Some(true),
@@ -814,6 +957,7 @@ mod tests {
                     must_emit_any_of: vec!["review.wave.ready".into()],
                 },
             ],
+            conditional_forbid_topics: vec![],
         };
         // 2 commits, 400 lines: both conditionals match → must emit wave
         let ctx = TriggerContext {
@@ -848,6 +992,7 @@ mod tests {
                 },
                 must_emit_any_of: vec!["review.wave.ready".into()],
             }],
+            conditional_forbid_topics: vec![],
         };
         // No context → conditionals skipped → legacy OR applies.
         // review.passed satisfies the top-level OR even though
@@ -966,5 +1111,261 @@ obligations:
         for c in conds {
             assert_eq!(c.must_emit_any_of, vec!["review.wave.ready".to_string()]);
         }
+    }
+
+    // ─── 2026-06-09 fix: conditional_forbid_topics tests ───
+    //
+    // The reporter's "fail → do not emit LOOP_COMPLETE" hard rule
+    // requires the obligation to express a deny-list.  These
+    // tests pin the semantics of `conditional_forbid_topics` so
+    // that:
+    //   - fail payload + LOOP_COMPLETE candidate → obligation fails
+    //   - pass payload + LOOP_COMPLETE candidate → obligation passes
+    //   - fail payload + report.done candidate (no LOOP_COMPLETE) → passes
+    //   - multiple forbids AND-ed when multiple predicates match
+    //   - non-matching `when` predicate → forbid does not apply
+    //   - deny-list pre-condition runs even when must-emit is satisfied
+
+    /// Primary use case: REVIEW_COMPLETE with pass_or_fail=fail must
+    /// reject a candidate set that contains LOOP_COMPLETE.  This is
+    /// the exact "rogue LOOP_COMPLETE masks a failing review" bug
+    /// that the 2026-06-09 diagnosis flagged as a real regression
+    /// risk in the ce-executor preset.
+    #[test]
+    fn conditional_forbid_rejects_loop_complete_on_failing_review() {
+        let o = ActivationObligation {
+            on_trigger: "REVIEW_COMPLETE".into(),
+            must_emit_any_of: vec!["report.done".into()],
+            conditional_must_emit: vec![],
+            conditional_forbid_topics: vec![ConditionalForbid {
+                when: TriggerPredicate {
+                    payload_field_equals: [("pass_or_fail".to_string(), "fail".to_string())]
+                        .into_iter()
+                        .collect(),
+                    ..Default::default()
+                },
+                forbid_topics: vec!["LOOP_COMPLETE".into()],
+            }],
+        };
+        // Failing review + rogue LOOP_COMPLETE → NOT satisfied.
+        let ctx_fail = TriggerContext {
+            payload_fields: [("pass_or_fail".to_string(), "fail".to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        assert!(
+            !obligation_satisfied(
+                Some(&o),
+                &vec!["report.done".into(), "LOOP_COMPLETE".into()],
+                Some(&ctx_fail)
+            ),
+            "failing review + LOOP_COMPLETE in candidate set must fail obligation"
+        );
+        // Failing review + only report.done → satisfied (the deny-list
+        // pre-condition does not fire because LOOP_COMPLETE is absent).
+        assert!(obligation_satisfied(
+            Some(&o),
+            &vec!["report.done".into()],
+            Some(&ctx_fail)
+        ));
+        // Passing review + LOOP_COMPLETE → satisfied (forbid does not
+        // apply because the payload_field_equals predicate does not
+        // match pass).  The legacy OR on must_emit_any_of still
+        // accepts report.done.
+        let ctx_pass = TriggerContext {
+            payload_fields: [("pass_or_fail".to_string(), "pass".to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        assert!(obligation_satisfied(
+            Some(&o),
+            &vec!["report.done".into(), "LOOP_COMPLETE".into()],
+            Some(&ctx_pass)
+        ));
+    }
+
+    /// `TriggerPredicate::payload_field_equals` predicate semantics.
+    /// Mirrors the typed predicate fields above: every entry must
+    /// match the trigger context's payload_fields, missing fields
+    /// cause the predicate to NOT match.
+    #[test]
+    fn payload_field_equals_predicate_matches_string_payload() {
+        let pred = TriggerPredicate {
+            payload_field_equals: [("pass_or_fail".to_string(), "fail".to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let ctx_match = TriggerContext {
+            payload_fields: [("pass_or_fail".to_string(), "fail".to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        assert!(pred.matches(&ctx_match));
+
+        let ctx_mismatch = TriggerContext {
+            payload_fields: [("pass_or_fail".to_string(), "pass".to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        assert!(!pred.matches(&ctx_mismatch));
+
+        // Missing field → predicate does NOT match.
+        let ctx_missing = TriggerContext::default();
+        assert!(!pred.matches(&ctx_missing));
+    }
+
+    /// `TriggerContext::from_payload` mirrors all string-valued
+    /// top-level payload fields into `payload_fields`, so the
+    /// `pass_or_fail` string from a `REVIEW_COMPLETE` event
+    /// becomes available to predicates without any custom
+    /// wiring.
+    #[test]
+    fn trigger_context_from_payload_mirrors_string_fields() {
+        let payload = serde_json::json!({
+            "pass_or_fail": "fail",
+            "verdict": "fail",
+            "plan_name": "noise field",
+            "commit_count": 3,
+            "nested": { "key": "value" }
+        });
+        let ctx = TriggerContext::from_payload(&payload);
+        assert_eq!(
+            ctx.payload_fields.get("pass_or_fail").map(String::as_str),
+            Some("fail")
+        );
+        assert_eq!(
+            ctx.payload_fields.get("verdict").map(String::as_str),
+            Some("fail")
+        );
+        assert_eq!(
+            ctx.payload_fields.get("plan_name").map(String::as_str),
+            Some("noise field")
+        );
+        // Nested objects / non-string scalars should NOT be mirrored.
+        assert!(ctx.payload_fields.get("nested").is_none());
+        assert!(ctx.payload_fields.get("commit_count").is_none());
+        // Typed fields are still extracted for backward compatibility.
+        assert_eq!(ctx.commit_count, Some(3));
+    }
+
+    /// When no `when` predicate matches, the forbid list does not
+    /// apply — the obligation falls through to the standard
+    /// must_emit_any_of check.  This is the "fall-through"
+    /// semantic that lets a single obligation express both
+    /// "pass: allow LOOP_COMPLETE" and "fail: forbid LOOP_COMPLETE".
+    #[test]
+    fn conditional_forbid_falls_through_when_predicate_does_not_match() {
+        // No payload_field_equals → empty predicate matches every context,
+        // so the forbid ALWAYS applies.  This test uses a non-matching
+        // commit_count_min to make the predicate selective.
+        let o = ActivationObligation {
+            on_trigger: "REVIEW_COMPLETE".into(),
+            must_emit_any_of: vec!["report.done".into()],
+            conditional_must_emit: vec![],
+            conditional_forbid_topics: vec![ConditionalForbid {
+                when: TriggerPredicate {
+                    commit_count_min: Some(10),
+                    ..Default::default()
+                },
+                forbid_topics: vec!["LOOP_COMPLETE".into()],
+            }],
+        };
+        // commit_count=1 → predicate does not match → forbid does not apply.
+        let ctx_small = TriggerContext {
+            commit_count: Some(1),
+            ..Default::default()
+        };
+        assert!(obligation_satisfied(
+            Some(&o),
+            &vec!["report.done".into(), "LOOP_COMPLETE".into()],
+            Some(&ctx_small)
+        ));
+        // commit_count=42 → predicate matches → forbid applies.
+        let ctx_big = TriggerContext {
+            commit_count: Some(42),
+            ..Default::default()
+        };
+        assert!(!obligation_satisfied(
+            Some(&o),
+            &vec!["report.done".into(), "LOOP_COMPLETE".into()],
+            Some(&ctx_big)
+        ));
+    }
+
+    /// Deny-list runs as a pre-condition, even when the candidate
+    /// set would otherwise satisfy the must_emit rule.  Mirrors
+    /// the "deny-list beats allow-list" pattern from security
+    /// policies — the obligation reports failure the moment any
+    /// forbidden topic is detected, regardless of what else the
+    /// agent emitted.
+    #[test]
+    fn deny_list_pre_condition_runs_even_when_must_emit_satisfied() {
+        let o = ActivationObligation {
+            on_trigger: "REVIEW_COMPLETE".into(),
+            must_emit_any_of: vec!["report.done".into()],
+            conditional_must_emit: vec![],
+            conditional_forbid_topics: vec![ConditionalForbid {
+                when: TriggerPredicate {
+                    payload_field_equals: [("pass_or_fail".to_string(), "fail".to_string())]
+                        .into_iter()
+                        .collect(),
+                    ..Default::default()
+                },
+                forbid_topics: vec!["LOOP_COMPLETE".into()],
+            }],
+        };
+        let ctx_fail = TriggerContext {
+            payload_fields: [("pass_or_fail".to_string(), "fail".to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        // Both report.done AND LOOP_COMPLETE present:
+        //   - must_emit satisfied (report.done ∈ must_emit_any_of)
+        //   - forbid fails (LOOP_COMPLETE ∈ forbid_topics)
+        //   → overall: NOT satisfied
+        assert!(!obligation_satisfied(
+            Some(&o),
+            &vec!["report.done".into(), "LOOP_COMPLETE".into()],
+            Some(&ctx_fail)
+        ));
+    }
+
+    /// YAML round-trip: `conditional_forbid_topics` parses and
+    /// serializes the same way as `conditional_must_emit`.  This
+    /// is the contract the preset file relies on.
+    #[test]
+    fn hat_config_parses_conditional_forbid_from_yaml() {
+        let yaml = r#"
+name: "Reporter"
+triggers: ["REVIEW_COMPLETE"]
+publishes: ["report.done", "LOOP_COMPLETE"]
+obligations:
+  - on_trigger: "REVIEW_COMPLETE"
+    must_emit_any_of: ["report.done"]
+    conditional_forbid_topics:
+      - when:
+          payload_field_equals:
+            pass_or_fail: "fail"
+        forbid_topics: ["LOOP_COMPLETE"]
+"#;
+        let hat: HatConfig = serde_yaml::from_str(yaml).expect("parse hat yaml");
+        assert_eq!(hat.obligations.len(), 1);
+        let forbids = &hat.obligations[0].conditional_forbid_topics;
+        assert_eq!(forbids.len(), 1);
+        assert_eq!(forbids[0].forbid_topics, vec!["LOOP_COMPLETE".to_string()]);
+        assert_eq!(
+            forbids[0]
+                .when
+                .payload_field_equals
+                .get("pass_or_fail")
+                .map(String::as_str),
+            Some("fail")
+        );
     }
 }

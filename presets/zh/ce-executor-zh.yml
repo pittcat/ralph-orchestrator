@@ -51,6 +51,12 @@ event_loop:
     topic: "REVIEW_COMPLETE"
     fail_field: "pass_or_fail"
     fail_value: "fail"
+    # 2026-06-09 修复：同时拦截 `report.done` 镜像的 pass_or_fail 字段。
+    # 当 rogue LOOP_COMPLETE 跟在 pass_or_fail="fail" 的 report.done
+    # 之后时，verdict_gate 必须仍然触发。详见 presets/en/ce-executor.yml
+    # 的同名字段 — 这是与 reporter `conditional_forbid_topics`
+    # obligation 配合的双层防护。
+    additional_topics: ["report.done"]
   # U7: 启用 work.done 执行契约验证。
   # 防止 executor 忘记 emit 或发出无效的 work.done 时产生假阳性。
   execution_contracts:
@@ -131,7 +137,10 @@ event_loop:
         required_fields: [plan_name, verdict, pass_or_fail, residual_findings_summary]
         payload: json_object
       report.done:
-        required_fields: [report_path]
+        # 2026-06-09 修复：awaiting_decision 在 review 失败时由 reporter 设置，
+        # 供 manager 报告和 verdict_gate 共同判断 loop 是否通过最终审查。
+        # 提升为 required 字段以避免 reporter 静默发 report.done 而不带决策标记。
+        required_fields: [report_path, awaiting_decision]
         payload: json_object
 
 cli:
@@ -1090,6 +1099,16 @@ hats:
     obligations:
       - on_trigger: "REVIEW_COMPLETE"
         must_emit_any_of: ["report.done"]
+        # 2026-06-09 修复：上游 REVIEW_COMPLETE 携带 pass_or_fail="fail" 时，
+        # reporter 不得再发 LOOP_COMPLETE — 这种组合会把失败 review 伪装成
+        # 成功 loop。这是首要硬关；与之配合的 verdict_gate.additional_topics
+        # 是兜底防护。任一单独即可闭合此回归，但双层都跑保证即使 agent 忽略
+        # deny-list，其 rogue LOOP_COMPLETE 仍会被 orchestrator 拒。
+        conditional_forbid_topics:
+          - when:
+              payload_field_equals:
+                pass_or_fail: "fail"
+            forbid_topics: ["LOOP_COMPLETE"]
     instructions: |
       ## REPORTER MODE — 面向 Manager 的完成报告
 

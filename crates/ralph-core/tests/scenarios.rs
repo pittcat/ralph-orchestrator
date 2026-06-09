@@ -554,3 +554,20 @@ fn test_ce_executor_recovery_scenario() {
     let yaml = load_scenario("tests/scenarios/ce_executor_recovery.yml");
     run_scenario(yaml);
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// 2026-06-09: O3 regression — verdict_gate keeps loop open on fail
+// ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_verdict_gate_fail_keeps_loop_open() {
+    // Defense-in-depth verification of the 2026-06-09 fix.
+    // Three iterations exercise: pass, fail-without-rogue,
+    // fail-with-rogue.  After the third (failing) response,
+    // `completion_rejected: true` checkpoint confirms that
+    // `check_completion_event` returns None — the LOOP_COMPLETE
+    // is rejected by the verdict_gate because the most recent
+    // `report.done` carried pass_or_fail="fail".
+    let yaml = load_scenario("tests/scenarios/verdict_gate_fail_keeps_loop_open.yml");
+    run_workflow_guard_scenario(yaml);
+}

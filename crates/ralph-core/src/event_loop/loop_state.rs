@@ -420,12 +420,22 @@ impl LoopState {
     ///
     /// Called alongside `record_event` at every site. The most recent matching
     /// event's payload is retained so `check_completion_event` can read the
-    /// verdict without re-scanning event history. No-op when `verdict_topic`
-    /// is `None` or the event topic does not match.
-    pub fn record_verdict_if_match(&mut self, event: &Event, verdict_topic: Option<&str>) {
-        if let Some(topic) = verdict_topic
-            && event.topic.as_str() == topic
-        {
+    /// verdict without re-scanning event history. No-op when `verdict_topics`
+    /// is `None` / empty or the event topic does not match any entry.
+    ///
+    /// 2026-06-09 fix: now accepts a slice of topics so a single
+    /// gate can cover both the upstream verdict topic (e.g.
+    /// `REVIEW_COMPLETE`) and downstream events that mirror the
+    /// verdict payload (e.g. `report.done`).  When ANY of the
+    /// listed topics carries a failing verdict, the gate fires.
+    pub fn record_verdict_if_match(&mut self, event: &Event, verdict_topics: Option<&[String]>) {
+        let Some(topics) = verdict_topics else {
+            return;
+        };
+        if topics.is_empty() {
+            return;
+        }
+        if topics.iter().any(|t| t == event.topic.as_str()) {
             self.last_verdict_payload = Some(event.payload.clone());
         }
     }

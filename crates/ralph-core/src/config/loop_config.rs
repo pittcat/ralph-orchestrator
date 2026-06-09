@@ -214,8 +214,19 @@ impl Default for EventLoopConfig {
     }
 }
 
-/// Verdict gate: when the most recent event matching `topic` carries
-/// `fail_field == fail_value` in its payload, LOOP_COMPLETE is rejected.
+/// Verdict gate: when the most recent event matching any of
+/// `topic` (or `additional_topics`) carries `fail_field == fail_value`
+/// in its payload, LOOP_COMPLETE is rejected.
+///
+/// 2026-06-09 fix: added `additional_topics` so the gate can
+/// cover the case where the verdict payload is mirrored onto
+/// multiple topics — e.g. the ce-executor preset records
+/// `pass_or_fail` on the upstream `REVIEW_COMPLETE` *and* on the
+/// `report.done` summary event.  When `report.done` carries
+/// `pass_or_fail: "fail"`, the gate must fire and reject any
+/// follow-up `LOOP_COMPLETE` (closing the "rogue LOOP_COMPLETE
+/// masks a failing review" gap documented in the 2026-06-09
+/// ce-executor mechanism-vs-orchestration diagnosis).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VerdictGateConfig {
     /// Event topic carrying the verdict payload (e.g. "review.complete").
@@ -226,6 +237,15 @@ pub struct VerdictGateConfig {
 
     /// Value that triggers rejection of LOOP_COMPLETE (e.g. "fail").
     pub fail_value: String,
+
+    /// 2026-06-09: additional topics that should also feed the
+    /// verdict gate.  When ANY of `topic` or `additional_topics`
+    /// receives an event whose payload has `fail_field == fail_value`,
+    /// the gate fires.  Empty (the default) preserves the legacy
+    /// single-topic behavior, so existing presets keep working
+    /// unchanged.
+    #[serde(default)]
+    pub additional_topics: Vec<String>,
 }
 
 /// Orchestration phase enum.

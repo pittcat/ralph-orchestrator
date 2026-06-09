@@ -194,4 +194,11 @@ REVIEW_COMPLETE:
 report.done:
   required_fields:
     - report_path
+    # 2026-06-09 fix: awaiting_decision is set by the reporter
+    # on a failing review so the manager-facing report and the
+    # verdict_gate can both see that the loop has not passed
+    # final review.  Required field so the contract rejects
+    # reporters that silently emit report.done without the
+    # manager-decision flag.
+    - awaiting_decision
   payload: json_object
