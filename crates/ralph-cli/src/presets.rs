@@ -4228,6 +4228,17 @@ mod tests {
         // (MERGE_COMPLETE not formally published by any hat).
         let topology_exempt: &[&str] = &["autoresearch", "debug", "merge-loop"];
 
+        // Finding IDs that are exempt for specific presets due to known design tradeoffs.
+        // Format: (preset_name, finding_id_prefix) — any finding with this ID prefix is exempt.
+        let exempt_findings: &[(&str, &str)] = &[
+            // merge-loop: intentionally has no terminal events on failure_handler
+            ("merge-loop", "config.empty_terminal_events"),
+            // merge-loop: MERGE_COMPLETE is emitted by loop logic, not a hat
+            ("merge-loop", "topology.unreachable_completion"),
+            // merge-loop: cleanup.done is an internal implementation detail
+            ("merge-loop", "orphan.no_subscriber"),
+        ];
+
         let mut failures = Vec::new();
         for preset in PRESETS.iter() {
             let config =
@@ -4248,11 +4259,16 @@ mod tests {
             // or orphan (known pre-existing issues).
             if topology_exempt.contains(&preset.name) {
                 let all_exempt = report.findings.iter().all(|f| {
-                    matches!(
-                        f.source,
-                        ralph_core::runtime_contract::FindingSource::Topology
-                            | ralph_core::runtime_contract::FindingSource::Orphan
-                    )
+                    // Check if this finding matches any exempt (preset, finding_id) pair
+                    let is_id_exempt = exempt_findings
+                        .iter()
+                        .any(|(name, id_prefix)| *name == preset.name && f.id.starts_with(id_prefix));
+                    is_id_exempt
+                        || matches!(
+                            f.source,
+                            ralph_core::runtime_contract::FindingSource::Topology
+                                | ralph_core::runtime_contract::FindingSource::Orphan
+                        )
                 });
                 if all_exempt {
                     continue;

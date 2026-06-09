@@ -21,12 +21,14 @@ config:
       triggers: ["work.start"]
       publishes: ["work.ready"]
       instructions: "Produce work."
+      terminal_events: ["work.ready"]
     b:
       name: "B"
       description: "Consumer"
       triggers: ["work.ready"]
       publishes: ["work.done"]
       instructions: "Consume work."
+      terminal_events: ["work.done"]
   event_loop:
     starting_event: "work.start"
     completion_promise: "work.done"

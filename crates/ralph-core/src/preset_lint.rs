@@ -494,6 +494,27 @@ pub fn check_ownership_rules(config: &RalphConfig, strictness: LintStrictness) -
             .map(|(hat_id, _)| hat_id.as_str())
             .collect();
 
+        // R4: If a topic is declared in topic_owners, at least one hat must publish it.
+        if publishers.is_empty() && !owners.is_empty() {
+            let severity = strictness.ownership_severity();
+            findings.push(LintFinding {
+                id: FINDING_MISSING_TOPIC_OWNER,
+                severity,
+                message: format!(
+                    "topic \"{topic}\" is declared in topic_owners with owners [{}] \
+                         but no hat publishes it; at least one owner must publish this topic",
+                    owners.join(", ")
+                ),
+                topic: Some(topic.clone()),
+                hat: None,
+                owner: Some(owners.join(", ")),
+                action_hint: Some(format!(
+                    "Add \"{topic}\" to the publishes list of one of the owners: [{}]",
+                    owners.join(", ")
+                )),
+            });
+        }
+
         // R2: Each owner must publish the topic.
         for owner in owners {
             if !publishers.iter().any(|p| *p == owner) {

@@ -233,11 +233,12 @@ pub fn check_topic_format(
 /// - All hat `publishes` topics (what hats emit)
 /// - All hat `triggers` topics (what activates hats)
 /// - Event policy `terminal_topics` and `business_topics` (if configured)
-/// - System topics: `event.*` (prefixed), `human.*` (prefixed), `loop.cancel`,
-///   `task.resume`, `build.task.abandoned`, completion promise
+/// - System control topics: `loop.cancel`, `task.resume`, `build.task.abandoned`,
+///   completion promise
 ///
-/// The `*` prefix patterns (e.g. `event.*`) are stored as actual prefixes;
-/// `check_topic_format` checks with `starts_with` for these.
+/// Note: `event.*` and `human.*` topics are NOT stored here as prefixes.
+/// They are allowed by the `is_system_topic()` check which is applied
+/// BEFORE `check_topic_format` in the event loop validation flow.
 pub fn build_allowed_topics(
     hats: &std::collections::HashMap<String, crate::config::HatConfig>,
     completion_promise: &str,
@@ -271,13 +272,19 @@ pub fn build_allowed_topics(
     allowed.insert("build.task.abandoned".to_string());
     allowed.insert(completion_promise.to_string());
 
+    // Note: event.* and human.* topics are handled by is_system_topic() check
+    // (tested BEFORE check_topic_format in the event loop), not by prefix
+    // matching in this set. The comment above about "stored as actual prefixes"
+    // was incorrect - they are not inserted here.
+
     allowed
 }
 
 /// Check if a topic matches a system/control prefix pattern.
 ///
 /// System topics start with `event.` or `human.` and are always allowed
-/// regardless of the whitelist.
+/// regardless of the whitelist. This check is applied BEFORE
+/// check_topic_format in the event loop.
 pub fn is_system_topic(topic: &str) -> bool {
     topic.starts_with("event.") || topic.starts_with("human.")
 }

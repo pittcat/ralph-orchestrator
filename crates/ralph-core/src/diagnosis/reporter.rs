@@ -1833,4 +1833,17 @@ mod tests {
             data.warnings
         );
     }
+
+    #[test]
+    fn looks_like_session_timestamp_edge_cases() {
+        // Exactly 19 chars: valid ISO timestamp (YYYY-MM-DDTHH-MM-SS)
+        assert!(looks_like_session_timestamp("2025-01-15T10-30-00"));
+        // Less than 19 chars: too short
+        assert!(!looks_like_session_timestamp("2025-01-15T10-30"));
+        // More than 19 chars with suffix
+        assert!(looks_like_session_timestamp("2025-01-15T10-30-00.something"));
+        // Non-timestamp strings
+        assert!(!looks_like_session_timestamp("ralph-diagnostic"));
+        assert!(!looks_like_session_timestamp("events"));
+    }
 }

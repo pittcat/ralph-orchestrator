@@ -70,8 +70,8 @@ impl FakeClock {
         }
     }
 
-    /// Creates a fake clock starting at a fixed epoch (2026-01-01 00:00:00 UTC).
-    #[allow(clippy::duration_subsec)] // 1_735_689_600 seconds is ~55 years, days not more readable
+    /// Creates a fake clock starting at a fixed epoch (2025-01-01 00:00:00 UTC).
+    #[allow(clippy::duration_subsec)] // 1_735_689_600 seconds is ~55 years from epoch (1970 + 55 = 2025)
     pub fn fixed() -> Self {
         Self {
             now: Rc::new(Cell::new(
@@ -190,7 +190,7 @@ enum ActivationState {
     },
     Completed {
         /// When the activation completed.
-        #[allow(dead_code)] // TODO(U4): remove after diagnose reporter integration
+        #[allow(dead_code)] // Reserved for future U4 reporter use
         completed_at: SystemTime,
         /// The terminal topic that closed the activation.
         terminal_topic: String,

@@ -211,6 +211,10 @@ cli:
 event_loop:
   max_iterations: 3
   max_runtime_seconds: 10
+topic_format_whitelist:
+  - LOOP_COMPLETE
+tasks:
+  enabled: false
 "#,
     )
     .expect("write local config");
@@ -315,6 +319,10 @@ hooks:
 event_loop:
   max_iterations: 3
   max_runtime_seconds: 10
+topic_format_whitelist:
+  - LOOP_COMPLETE
+tasks:
+  enabled: false
 "#,
     )
     .expect("write local config");
@@ -381,6 +389,10 @@ event_loop:
   completion_promise: "LOOP_COMPLETE"
   max_iterations: 1
   max_runtime_seconds: 10
+topic_format_whitelist:
+  - LOOP_COMPLETE
+tasks:
+  enabled: false
 "#,
     )
     .expect("write config");
@@ -451,6 +463,10 @@ event_loop:
 adapters:
   custom:
     timeout: 30
+topic_format_whitelist:
+  - LOOP_COMPLETE
+tasks:
+  enabled: false
 "#,
     )
     .expect("write config");
@@ -523,6 +539,10 @@ event_loop:
 adapters:
   custom:
     timeout: 30
+topic_format_whitelist:
+  - LOOP_COMPLETE
+tasks:
+  enabled: false
 "#,
     )
     .expect("write config");

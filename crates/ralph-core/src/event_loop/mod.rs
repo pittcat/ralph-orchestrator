@@ -5012,6 +5012,16 @@ impl EventLoop {
                 let is_terminal = hat_config.is_some_and(|config| {
                     config.terminal_topic_set().contains(topic_str)
                 });
+                // Find the trigger topic from last_activation_events: use the event that
+                // triggered this hat's activation (not the terminal event's topic).
+                // This ensures trigger_identity matches what was stored during activate.
+                let trigger_identity = self
+                    .state
+                    .last_activation_events
+                    .iter()
+                    .find(|e| self.registry.can_publish(source_hat_id, e.topic.as_str()))
+                    .map(|e| e.topic.to_string())
+                    .unwrap_or_else(|| topic_str.to_string());
                 let key = ActivationKey {
                     loop_id: self
                         .loop_context
@@ -5021,7 +5031,7 @@ impl EventLoop {
                         .to_string(),
                     iteration: self.state.iteration,
                     hat_id: source_hat_id.as_str().to_string(),
-                    trigger_identity: topic_str.to_string(),
+                    trigger_identity,
                 };
                 if is_terminal {
                     self.hat_lifecycle_tracker.complete(&key, topic_str);

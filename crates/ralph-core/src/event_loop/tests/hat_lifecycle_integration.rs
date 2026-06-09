@@ -146,3 +146,167 @@ fn decision_path_does_not_read_tracker() {
     let snapshots = loop_instance.hat_lifecycle_tracker.active_activations();
     assert!(snapshots.is_empty());
 }
+
+/// T-U3-5: End-to-end flow — activate, observe events, then complete.
+/// This tests the full lifecycle: active → observed events → terminal → completed.
+#[test]
+fn end_to_end_lifecycle_flow() {
+    let mut config = RalphConfig::default();
+    config.hats.insert(
+        "executor".to_string(),
+        crate::config::HatConfig {
+            triggers: vec!["work.ready".to_string()],
+            publishes: vec!["work.done".to_string(), "progress.update".to_string()],
+            terminal_events: vec!["work.done".to_string()],
+            ..Default::default()
+        },
+    );
+    let mut loop_instance = make_test_loop(config);
+    loop_instance.state.iteration = 1;
+
+    let key = ActivationKey {
+        loop_id: "test-loop".to_string(),
+        iteration: 1,
+        hat_id: "executor".to_string(),
+        trigger_identity: "work.ready".to_string(),
+    };
+
+    // Step 1: Activate
+    loop_instance
+        .hat_lifecycle_tracker
+        .activate(key.clone(), "work.ready".to_string(), None);
+    assert!(loop_instance.hat_lifecycle_tracker.is_active(&key));
+    assert_eq!(loop_instance.hat_lifecycle_tracker.active_count(), 1);
+
+    // Step 2: Observe intermediate events (non-terminal)
+    loop_instance
+        .hat_lifecycle_tracker
+        .observe_accepted_event(&key);
+    assert!(loop_instance.hat_lifecycle_tracker.is_active(&key));
+    assert_eq!(loop_instance.hat_lifecycle_tracker.active_count(), 1);
+
+    // Step 3: Complete with terminal event
+    loop_instance
+        .hat_lifecycle_tracker
+        .complete(&key, "work.done");
+    assert!(!loop_instance.hat_lifecycle_tracker.is_active(&key));
+    assert_eq!(loop_instance.hat_lifecycle_tracker.active_count(), 0);
+    assert_eq!(loop_instance.hat_lifecycle_tracker.total_count(), 1);
+}
+
+/// T-U3-6: Parallel activations for the same hat with different trigger identities.
+/// Each activation is independent and must be closed individually.
+#[test]
+fn parallel_activations_same_hat_different_triggers() {
+    let mut config = RalphConfig::default();
+    config.hats.insert(
+        "executor".to_string(),
+        crate::config::HatConfig {
+            triggers: vec!["work.ready".to_string()],
+            publishes: vec!["work.done".to_string()],
+            terminal_events: vec!["work.done".to_string()],
+            ..Default::default()
+        },
+    );
+    let mut loop_instance = make_test_loop(config);
+    loop_instance.state.iteration = 1;
+
+    let key_a = ActivationKey {
+        loop_id: "test-loop".to_string(),
+        iteration: 1,
+        hat_id: "executor".to_string(),
+        trigger_identity: "work.ready.1".to_string(),
+    };
+    let key_b = ActivationKey {
+        loop_id: "test-loop".to_string(),
+        iteration: 1,
+        hat_id: "executor".to_string(),
+        trigger_identity: "work.ready.2".to_string(),
+    };
+
+    // Activate both
+    loop_instance
+        .hat_lifecycle_tracker
+        .activate(key_a.clone(), "work.ready.1".to_string(), None);
+    loop_instance
+        .hat_lifecycle_tracker
+        .activate(key_b.clone(), "work.ready.2".to_string(), None);
+
+    assert_eq!(loop_instance.hat_lifecycle_tracker.active_count(), 2);
+    assert!(loop_instance.hat_lifecycle_tracker.is_active(&key_a));
+    assert!(loop_instance.hat_lifecycle_tracker.is_active(&key_b));
+
+    // Complete only key_a
+    loop_instance
+        .hat_lifecycle_tracker
+        .complete(&key_a, "work.done");
+
+    // key_a closed, key_b still active
+    assert!(!loop_instance.hat_lifecycle_tracker.is_active(&key_a));
+    assert!(loop_instance.hat_lifecycle_tracker.is_active(&key_b));
+    assert_eq!(loop_instance.hat_lifecycle_tracker.active_count(), 1);
+    assert_eq!(loop_instance.hat_lifecycle_tracker.total_count(), 2);
+
+    // Complete key_b
+    loop_instance
+        .hat_lifecycle_tracker
+        .complete(&key_b, "work.done");
+
+    assert!(!loop_instance.hat_lifecycle_tracker.is_active(&key_a));
+    assert!(!loop_instance.hat_lifecycle_tracker.is_active(&key_b));
+    assert_eq!(loop_instance.hat_lifecycle_tracker.active_count(), 0);
+    assert_eq!(loop_instance.hat_lifecycle_tracker.total_count(), 2);
+}
+
+/// T-U3-7: Completing with a mismatched trigger_identity does not close the activation.
+/// The trigger_identity in the key must match what was stored during activate.
+#[test]
+fn complete_with_wrong_trigger_identity_does_not_close() {
+    let mut config = RalphConfig::default();
+    config.hats.insert(
+        "executor".to_string(),
+        crate::config::HatConfig {
+            triggers: vec!["work.ready".to_string()],
+            publishes: vec!["work.done".to_string()],
+            terminal_events: vec!["work.done".to_string()],
+            ..Default::default()
+        },
+    );
+    let mut loop_instance = make_test_loop(config);
+    loop_instance.state.iteration = 1;
+
+    let key = ActivationKey {
+        loop_id: "test-loop".to_string(),
+        iteration: 1,
+        hat_id: "executor".to_string(),
+        trigger_identity: "work.ready".to_string(),
+    };
+
+    // Activate with trigger_identity = "work.ready"
+    loop_instance
+        .hat_lifecycle_tracker
+        .activate(key.clone(), "work.ready".to_string(), None);
+
+    // Try to complete with wrong trigger_identity = "work.done"
+    let wrong_key = ActivationKey {
+        loop_id: "test-loop".to_string(),
+        iteration: 1,
+        hat_id: "executor".to_string(),
+        trigger_identity: "work.done".to_string(), // wrong!
+    };
+    loop_instance
+        .hat_lifecycle_tracker
+        .complete(&wrong_key, "work.done");
+
+    // Activation should still be active because key didn't match
+    assert!(loop_instance.hat_lifecycle_tracker.is_active(&key));
+    assert_eq!(loop_instance.hat_lifecycle_tracker.active_count(), 1);
+
+    // Complete with correct key
+    loop_instance
+        .hat_lifecycle_tracker
+        .complete(&key, "work.done");
+
+    assert!(!loop_instance.hat_lifecycle_tracker.is_active(&key));
+    assert_eq!(loop_instance.hat_lifecycle_tracker.active_count(), 0);
+}
