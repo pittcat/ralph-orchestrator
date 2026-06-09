@@ -71,7 +71,7 @@ pub enum PresetCommands {
         #[arg(long, value_enum, default_value_t = DiffFormat::Human)]
         format: DiffFormat,
     },
-    /// Preview upgrade information for a local preset (dry-run only)
+    /// Preview upgrade information for a local preset (MVP: dry-run only)
     Upgrade {
         /// Path to the local preset file
         #[arg(long)]
@@ -80,6 +80,11 @@ pub enum PresetCommands {
         /// Output format (human or json)
         #[arg(long, value_enum, default_value_t = UpgradeFormat::Human)]
         format: UpgradeFormat,
+
+        /// Preview upgrade without writing changes (MVP: always true; flag kept for
+        /// forward-compatibility with the planned write-back path).
+        #[arg(long, default_value_t = true)]
+        dry_run: bool,
 
         /// Force: apply upgrade even if there are user changes (not implemented in MVP)
         #[arg(long)]
@@ -176,8 +181,16 @@ pub async fn execute(
         Some(PresetCommands::Diff { file, format }) => {
             diff_preset(&file, format, use_colors)
         }
-        Some(PresetCommands::Upgrade { file, format, force: _ }) => {
-            // force flag is not implemented in MVP; reserved for future
+        Some(PresetCommands::Upgrade { file, format, dry_run, force: _ }) => {
+            // force flag is not implemented in MVP; reserved for future.
+            // dry_run is accepted and defaults to true; MVP always behaves
+            // as dry-run regardless of value (no write-back path yet).
+            if !dry_run {
+                eprintln!(
+                    "warning: --no-dry-run is not implemented in MVP; \
+                     upgrade will still report only and not modify the file"
+                );
+            }
             upgrade_preset(&file, format, use_colors)
         }
         None => {
@@ -296,12 +309,22 @@ async fn new_preset(
         .clone()
         .ok_or_else(|| anyhow::anyhow!("--name is required. Example: --name my-workflow"))?;
 
-    // Validate preset name (no spaces, no path traversal)
-    if preset_name.contains('/') || preset_name.contains('\\') || preset_name.contains("..") {
-        return Err(anyhow::anyhow!("preset name '{}' contains invalid characters. Use only letters, numbers, and hyphens.", preset_name));
-    }
+    // Validate preset name strictly: only [a-zA-Z0-9_-]. This blocks both
+    // path traversal and any character that would need quoting inside a YAML
+    // plain scalar (`:`, `"`, `#`, spaces, etc.), keeping the rendered output
+    // round-trippable through the re-quote step in TemplateRenderer::render.
     if preset_name.is_empty() {
         return Err(anyhow::anyhow!("preset name cannot be empty"));
+    }
+    if !preset_name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(anyhow::anyhow!(
+            "preset name '{}' contains invalid characters. \
+             Use only ASCII letters, digits, underscores, and hyphens.",
+            preset_name
+        ));
     }
 
     // Resolve output path
