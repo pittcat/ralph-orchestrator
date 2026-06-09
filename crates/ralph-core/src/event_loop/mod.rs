@@ -750,11 +750,12 @@ fn finding_to_payload_contract_violation(
             PayloadContractViolationKind::AllowedValueMismatch,
             Some(field.clone()),
         ),
-        // Terminal / completion-guard violations are NOT payload contract
-        // violations and must not be reported as such.
+        // Terminal / completion-guard / topic-format violations are NOT payload
+        // contract violations and must not be reported as such.
         ViolationType::TerminalMonotonicityViolation { .. }
         | ViolationType::DuplicateTerminalEvent { .. }
-        | ViolationType::BusinessEventAfterCompletion { .. } => return None,
+        | ViolationType::BusinessEventAfterCompletion { .. }
+        | ViolationType::InvalidTopicFormat { .. } => return None,
     };
     let fix_hint = match kind {
         PayloadContractViolationKind::MissingRequiredField => format!(
@@ -3905,6 +3906,48 @@ impl EventLoop {
         let had_origin_rejections = !origin_rejections.is_empty();
         // --- End origin guard ---
 
+        // --- Topic format check (U5 / R9): reject unknown topics before policy ---
+        // Builds a whitelist from hat publishes + system/control topics.
+        // Rejected topics produce a recovery signal but NO retry (R10).
+        // Only active when event_policy is enabled AND hats are configured
+        // (no hats = no whitelist to validate against, skip check).
+        if let Some(ref policy_config) = self.config.event_loop.event_policy
+            && policy_config.enabled
+            && !self.config.hats.is_empty()
+        {
+            use std::collections::HashSet;
+            let allowed_topics: HashSet<String> =
+                crate::event_policy::build_allowed_topics(&self.config.hats, &self.config.event_loop.completion_promise, self.config.event_loop.event_policy.as_ref());
+            let (topic_format_ok, topic_format_rejections): (Vec<_>, Vec<_>) =
+                events.into_iter().partition(|event| {
+                    if crate::event_policy::is_system_topic(&event.topic) {
+                        return true;
+                    }
+                    crate::event_policy::check_topic_format(&event.topic, &allowed_topics).is_none()
+                });
+            if !topic_format_rejections.is_empty() {
+                for event in &topic_format_rejections {
+                    warn!(
+                        topic = %event.topic,
+                        hat = ?event.hat,
+                        "Topic format rejection: unknown topic not in whitelist"
+                    );
+                    // Write recovery diagnostic event (R10: no retry)
+                    let diagnostic = Event::new(
+                        "event.topic_format.rejected",
+                        format!(
+                            "TOPIC_FORMAT_REJECTED: '{}' is not in the whitelist of known topics. \
+                             This event will not be retried.",
+                            event.topic
+                        ),
+                    );
+                    self.bus.publish(diagnostic);
+                }
+            }
+            events = topic_format_ok;
+        }
+        // --- End topic format check ---
+
         // --- Event policy validation: check typed payload schema ---
         // Inserted after scope enforcement, before workflow guard validation
         let mut had_policy_rejections = false;
@@ -5101,6 +5144,45 @@ impl EventLoop {
             &self.config.event_loop.cancellation_promise,
             &self.config.event_loop.completion_promise,
         );
+
+        // --- Topic format check (U5 / R9) for wave events ---
+        // Only active when event_policy is enabled AND hats are configured.
+        let wave_events = if let Some(ref policy_config) = self.config.event_loop.event_policy
+            && policy_config.enabled
+            && !self.config.hats.is_empty()
+        {
+            let allowed_topics: std::collections::HashSet<String> =
+                crate::event_policy::build_allowed_topics(&self.config.hats, &self.config.event_loop.completion_promise, self.config.event_loop.event_policy.as_ref());
+            let (wave_events_ok, wave_rejections): (Vec<_>, Vec<_>) =
+                wave_events.into_iter().partition(|event| {
+                    if crate::event_policy::is_system_topic(&event.topic) {
+                        return true;
+                    }
+                    crate::event_policy::check_topic_format(&event.topic, &allowed_topics).is_none()
+                });
+            if !wave_rejections.is_empty() {
+                for event in &wave_rejections {
+                    warn!(
+                        topic = %event.topic,
+                        hat = ?event.hat,
+                        "Topic format rejection (wave): unknown topic not in whitelist"
+                    );
+                    let diagnostic = Event::new(
+                        "event.topic_format.rejected",
+                        format!(
+                            "TOPIC_FORMAT_REJECTED: '{}' is not in the whitelist of known topics. \
+                             This event will not be retried.",
+                            event.topic
+                        ),
+                    );
+                    self.bus.publish(diagnostic);
+                }
+            }
+            wave_events_ok
+        } else {
+            wave_events
+        };
+        // --- End topic format check (wave) ---
 
         // --- Event policy validation for wave events ---
         // Wave dispatch events are partitioned before process_parse_result, so they

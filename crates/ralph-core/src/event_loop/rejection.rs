@@ -75,6 +75,9 @@ pub enum NonRetryableReason {
     /// Caller-supplied custom reason (e.g. the runner detected a
     /// state it cannot recover from).
     Custom(String),
+    /// Topic is not in the whitelist of known topics (R9).
+    /// Rejected without retry — only writes a recovery signal (R10).
+    InvalidTopicFormat,
 }
 
 /// Unified description of an event that was rejected somewhere in the
@@ -116,6 +119,30 @@ pub struct Rejection {
 }
 
 impl Rejection {
+    /// Wrap a topic-format rejection (R9/R10).
+    ///
+    /// Topic format rejections are **always non-retryable** — the agent
+    /// emitted an unknown topic and retrying with the same topic would
+    /// just hit the same rejection.  Only a recovery signal is written.
+    pub fn from_topic_format(source_hat: Option<String>, topic: String, _allowed: &[String]) -> Self {
+        let mut s = Self {
+            stage: RejectionStage::Policy,
+            source_hat: source_hat.clone(),
+            business_hat: source_hat.clone(),
+            topic: topic.clone(),
+            violation: format!(
+                "Topic '{}' is not in the whitelist of known topics",
+                topic
+            ),
+            retry_key: String::new(),
+            retry_eligible: false,
+            non_retryable_reason: Some(NonRetryableReason::InvalidTopicFormat),
+            target_hat: None,
+        };
+        s.retry_key = s.compute_retry_key();
+        s
+    }
+
     /// Wrap an origin-guard rejection.  R1: unknown hat or out-of-scope
     /// topic is non-retryable; we cannot construct a `task.resume`
     /// target without a registered destination or a topic the target
@@ -217,7 +244,9 @@ fn classify_origin_reason(reason: &str) -> (bool, Option<NonRetryableReason>) {
 /// while a `MissingPayloadField` and a `TypeMismatch` stay distinct.
 fn violation_class(violation: &str) -> &'static str {
     let lower = violation.to_lowercase();
-    if lower.contains("missingpayloadfield") || lower.contains("missing") {
+    if lower.contains("not in the whitelist") || lower.contains("topic format") {
+        "invalid_topic_format"
+    } else if lower.contains("missingpayloadfield") || lower.contains("missing") {
         "missing_field"
     } else if lower.contains("typemismatch") {
         "type_mismatch"
@@ -528,5 +557,41 @@ mod tests {
             Some("executor".into()),
         );
         assert_eq!(r1.retry_key, r2.retry_key);
+    }
+
+    #[test]
+    fn from_topic_format_is_non_retryable() {
+        let r = Rejection::from_topic_format(
+            Some("executor".into()),
+            "REVIEW_COMPLETE".into(),
+            &["work.done".into(), "review.passed".into()],
+        );
+        assert!(!r.retry_eligible);
+        assert_eq!(
+            r.non_retryable_reason,
+            Some(NonRetryableReason::InvalidTopicFormat)
+        );
+        assert_eq!(r.stage.as_str(), "policy");
+        assert_eq!(r.source_hat.as_deref(), Some("executor"));
+        assert_eq!(r.topic, "REVIEW_COMPLETE");
+        assert!(!r.should_publish_resume());
+        assert!(r
+            .retry_key
+            .contains("invalid_topic_format"));
+    }
+
+    #[test]
+    fn from_topic_format_with_unknown_hat() {
+        let r = Rejection::from_topic_format(
+            None,
+            "BAD_TOPIC".into(),
+            &["work.done".into()],
+        );
+        assert!(!r.retry_eligible);
+        assert_eq!(r.source_hat, None);
+        assert_eq!(r.topic, "BAD_TOPIC");
+        assert!(r
+            .retry_key
+            .contains("unknown:BAD_TOPIC:invalid_topic_format"));
     }
 }
