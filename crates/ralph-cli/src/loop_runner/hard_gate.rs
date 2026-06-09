@@ -73,9 +73,7 @@ pub fn should_gate_missing_events(
                 .last_activation_events
                 .iter()
                 .find(|event| event.topic.as_str() == obligation.on_trigger)
-                .and_then(|event| {
-                    serde_json::from_str::<serde_json::Value>(&event.payload).ok()
-                })
+                .and_then(|event| serde_json::from_str::<serde_json::Value>(&event.payload).ok())
                 .map(|payload| ralph_core::TriggerContext::from_payload(&payload));
             ralph_core::obligation_satisfied(
                 Some(obligation),

@@ -167,22 +167,21 @@ pub async fn execute(
     use_colors: bool,
 ) -> Result<()> {
     match args.command {
-        Some(PresetCommands::List { format }) => {
-            list_templates(format, use_colors)
-        }
-        Some(PresetCommands::Show { name, format }) => {
-            show_template(&name, format, use_colors)
-        }
+        Some(PresetCommands::List { format }) => list_templates(format, use_colors),
+        Some(PresetCommands::Show { name, format }) => show_template(&name, format, use_colors),
         Some(PresetCommands::New(new_args)) => {
             new_preset(config_sources, hats_source, new_args, use_colors).await
         }
         Some(PresetCommands::Check { format, strict }) => {
             check_preset(config_sources, hats_source, format, strict, use_colors).await
         }
-        Some(PresetCommands::Diff { file, format }) => {
-            diff_preset(&file, format, use_colors)
-        }
-        Some(PresetCommands::Upgrade { file, format, dry_run, force: _ }) => {
+        Some(PresetCommands::Diff { file, format }) => diff_preset(&file, format, use_colors),
+        Some(PresetCommands::Upgrade {
+            file,
+            format,
+            dry_run,
+            force: _,
+        }) => {
             // force flag is not implemented in MVP; reserved for future.
             // dry_run is accepted and defaults to true; MVP always behaves
             // as dry-run regardless of value (no write-back path yet).
@@ -232,7 +231,10 @@ fn list_templates(format: PresetListFormat, use_colors: bool) -> Result<()> {
                         println!("  {}", name);
                     }
                     println!("    {}", manifest.description);
-                    println!("    Difficulty: {} | Category: {}", difficulty_str, manifest.category);
+                    println!(
+                        "    Difficulty: {} | Category: {}",
+                        difficulty_str, manifest.category
+                    );
                     if let Some(source) = &manifest.source {
                         println!("    Source: {}", source);
                     }
@@ -247,15 +249,19 @@ fn list_templates(format: PresetListFormat, use_colors: bool) -> Result<()> {
 }
 
 fn show_template(name: &str, format: PresetShowFormat, _use_colors: bool) -> Result<()> {
-    let manifest = TemplateCatalog::get_manifest(name)
-        .ok_or_else(|| anyhow::anyhow!("template '{}' not found. Available templates: {}", name, TemplateCatalog::template_names().join(", ")))?;
+    let manifest = TemplateCatalog::get_manifest(name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "template '{}' not found. Available templates: {}",
+            name,
+            TemplateCatalog::template_names().join(", ")
+        )
+    })?;
 
     match format {
         PresetShowFormat::Yaml => {
             // Show the raw template YAML with placeholders
-            let template_content = TemplateCatalog::raw_template(name).ok_or_else(|| {
-                anyhow::anyhow!("unknown template: {}", name)
-            })?;
+            let template_content = TemplateCatalog::raw_template(name)
+                .ok_or_else(|| anyhow::anyhow!("unknown template: {}", name))?;
             println!("{}", template_content);
         }
         PresetShowFormat::Json => {
@@ -282,14 +288,20 @@ fn show_template(name: &str, format: PresetShowFormat, _use_colors: bool) -> Res
             println!("Placeholders:");
             for ph in &manifest.placeholders {
                 let default_str = ph.default.as_deref().unwrap_or("(required)");
-                println!("  - {}: {} [default: {}]", ph.name, ph.description, default_str);
+                println!(
+                    "  - {}: {} [default: {}]",
+                    ph.name, ph.description, default_str
+                );
             }
             if let Some(notes) = &manifest.output_notes {
                 println!("");
                 println!("Output notes: {}", notes);
             }
             println!("");
-            println!("Use `ralph preset show {} --format yaml` to see the raw template.", name);
+            println!(
+                "Use `ralph preset show {} --format yaml` to see the raw template.",
+                name
+            );
         }
     }
     Ok(())
@@ -302,11 +314,17 @@ async fn new_preset(
     use_colors: bool,
 ) -> Result<()> {
     // Validate template exists
-    let manifest = TemplateCatalog::get_manifest(&args.template)
-        .ok_or_else(|| anyhow::anyhow!("template '{}' not found. Available: {}", args.template, TemplateCatalog::template_names().join(", ")))?;
+    let manifest = TemplateCatalog::get_manifest(&args.template).ok_or_else(|| {
+        anyhow::anyhow!(
+            "template '{}' not found. Available: {}",
+            args.template,
+            TemplateCatalog::template_names().join(", ")
+        )
+    })?;
 
     // Resolve preset name
-    let preset_name = args.name
+    let preset_name = args
+        .name
         .clone()
         .ok_or_else(|| anyhow::anyhow!("--name is required. Example: --name my-workflow"))?;
 
@@ -330,16 +348,23 @@ async fn new_preset(
 
     // Resolve output path
     let output_path = args.output.clone().unwrap_or_else(|| {
-        PathBuf::from(".ralph").join("hats").join(format!("{}.yml", preset_name))
+        PathBuf::from(".ralph")
+            .join("hats")
+            .join(format!("{}.yml", preset_name))
     });
 
     // Check if output file exists (unless --force)
     if output_path.exists() && !args.force {
-        return Err(anyhow::anyhow!("output file '{}' already exists. Use --force to overwrite.", output_path.display()));
+        return Err(anyhow::anyhow!(
+            "output file '{}' already exists. Use --force to overwrite.",
+            output_path.display()
+        ));
     }
 
     // Prepare placeholder values
-    let description = args.description.clone()
+    let description = args
+        .description
+        .clone()
         .unwrap_or_else(|| manifest.description.clone());
     let generated_at = chrono_now_rfc3339();
 
@@ -351,12 +376,14 @@ async fn new_preset(
             ("description", &description),
             ("generated_at", &generated_at),
         ],
-    ).map_err(|e| anyhow::anyhow!("failed to render template: {}", e))?;
+    )
+    .map_err(|e| anyhow::anyhow!("failed to render template: {}", e))?;
 
     // Ensure parent directory exists
     if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| anyhow::anyhow!("failed to create directory '{}': {}", parent.display(), e))?;
+        std::fs::create_dir_all(parent).map_err(|e| {
+            anyhow::anyhow!("failed to create directory '{}': {}", parent.display(), e)
+        })?;
     }
 
     // Write atomically: write to a uniquely-named temp file in the same
@@ -373,7 +400,13 @@ async fn new_preset(
         .prefix(".ralph-preset-")
         .suffix(".tmp")
         .tempfile_in(&parent_dir)
-        .map_err(|e| anyhow::anyhow!("failed to create temp file in '{}': {}", parent_dir.display(), e))?;
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "failed to create temp file in '{}': {}",
+                parent_dir.display(),
+                e
+            )
+        })?;
     temp.as_file().write_all(rendered.as_bytes())?;
     temp.as_file().sync_all()?;
     temp.persist(&output_path)
@@ -391,18 +424,25 @@ async fn new_preset(
                 description: String,
                 check_profile: String,
             }
-            println!("{}", serde_json::to_string_pretty(&NewPresetResult {
-                path: output_path.display().to_string(),
-                template: args.template.clone(),
-                template_version: manifest.version.clone(),
-                name: preset_name,
-                description,
-                check_profile: manifest.recommended_checks.to_string(),
-            })?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&NewPresetResult {
+                    path: output_path.display().to_string(),
+                    template: args.template.clone(),
+                    template_version: manifest.version.clone(),
+                    name: preset_name,
+                    description,
+                    check_profile: manifest.recommended_checks.to_string(),
+                })?
+            );
         }
         NewPresetFormat::Human => {
             if use_colors {
-                println!("{}Preset generated successfully!{}", colors::GREEN, colors::RESET);
+                println!(
+                    "{}Preset generated successfully!{}",
+                    colors::GREEN,
+                    colors::RESET
+                );
             } else {
                 println!("Preset generated successfully!");
             }
@@ -416,8 +456,14 @@ async fn new_preset(
             println!("");
             println!("Next steps:");
             println!("  1. Review and customize: {}", output_path.display());
-            println!("  2. Run authoring checks: ralph preset check -H {}", output_path.display());
-            println!("  3. Execute the workflow:  ralph run -H {} -p '<prompt>'", output_path.display());
+            println!(
+                "  2. Run authoring checks: ralph preset check -H {}",
+                output_path.display()
+            );
+            println!(
+                "  3. Execute the workflow:  ralph run -H {} -p '<prompt>'",
+                output_path.display()
+            );
         }
     }
 
@@ -442,7 +488,10 @@ async fn new_preset(
                 println!("  Authoring checks: FAIL");
             }
             println!("  Warnings: {}, Errors: {}", report.warnings, report.errors);
-            println!("  The generated file has been kept at: {}", output_path.display());
+            println!(
+                "  The generated file has been kept at: {}",
+                output_path.display()
+            );
             std::process::exit(1);
         }
     }
@@ -773,11 +822,7 @@ impl DiffResult {
     /// from `needs_update` (catalog is newer) and `is_newer_version` (local
     /// is newer); no `upgrade` is available, but the user should know their
     /// local file diverges from the rendered baseline.
-    fn local_drift(
-        template: &str,
-        version: &str,
-        significant_diff: Vec<String>,
-    ) -> Self {
+    fn local_drift(template: &str, version: &str, significant_diff: Vec<String>) -> Self {
         DiffResult {
             template: template.to_string(),
             local_version: version.to_string(),
@@ -849,18 +894,18 @@ impl UpgradeResult {
     }
 
     /// Create an upgrade result for an outdated version.
-    fn needs_upgrade(
-        template: &str,
-        local_version: &str,
-        catalog_version: &str,
-    ) -> Self {
+    fn needs_upgrade(template: &str, local_version: &str, catalog_version: &str) -> Self {
         let mut suggestions = Vec::new();
         suggestions.push(format!(
             "Regenerate your preset: ralph preset new {} --name <name> --output /tmp/new.yml",
             template
         ));
-        suggestions.push("Compare the new template with your current preset and merge changes manually".to_string());
-        suggestions.push("Run: ralph preset diff --file /tmp/new.yml to see what changed".to_string());
+        suggestions.push(
+            "Compare the new template with your current preset and merge changes manually"
+                .to_string(),
+        );
+        suggestions
+            .push("Run: ralph preset diff --file /tmp/new.yml to see what changed".to_string());
 
         UpgradeResult {
             template: template.to_string(),
@@ -909,7 +954,8 @@ fn compute_unified_diff(original: &str, revised: &str) -> Vec<String> {
     let mut end = 0;
     let mut max_end = 0;
     while start + end < max_start
-        && original_lines[original_lines.len() - 1 - end] == revised_lines[revised_lines.len() - 1 - end]
+        && original_lines[original_lines.len() - 1 - end]
+            == revised_lines[revised_lines.len() - 1 - end]
     {
         max_end = end + 1;
         end += 1;
@@ -971,20 +1017,24 @@ fn diff_preset(path: &PathBuf, format: DiffFormat, use_colors: bool) -> Result<(
     let metadata = read_xpreset_metadata(path).map_err(|e| anyhow::anyhow!(e))?;
 
     // Find the template in the catalog
-    let manifest = TemplateCatalog::get_manifest(&metadata.template)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "template '{}' not found in current catalog. \
+    let manifest = TemplateCatalog::get_manifest(&metadata.template).ok_or_else(|| {
+        anyhow::anyhow!(
+            "template '{}' not found in current catalog. \
                 The template may have been removed or renamed.",
-                metadata.template
-            )
-        })?;
+            metadata.template
+        )
+    })?;
 
     let catalog_version = &manifest.version;
 
     // Compare versions
-    let local_version = Version::parse(&metadata.template_version)
-        .map_err(|e| anyhow::anyhow!("invalid local template_version '{}': {}", metadata.template_version, e))?;
+    let local_version = Version::parse(&metadata.template_version).map_err(|e| {
+        anyhow::anyhow!(
+            "invalid local template_version '{}': {}",
+            metadata.template_version,
+            e
+        )
+    })?;
 
     let catalog_ver = Version::parse(catalog_version)
         .map_err(|e| anyhow::anyhow!("invalid catalog version '{}': {}", catalog_version, e))?;
@@ -1054,7 +1104,11 @@ fn diff_preset(path: &PathBuf, format: DiffFormat, use_colors: bool) -> Result<(
         )
     } else {
         // Local is newer than catalog
-        DiffResult::is_newer_version(&metadata.template, &metadata.template_version, catalog_version)
+        DiffResult::is_newer_version(
+            &metadata.template,
+            &metadata.template_version,
+            catalog_version,
+        )
     };
 
     match format {
@@ -1137,20 +1191,24 @@ fn upgrade_preset(path: &PathBuf, format: UpgradeFormat, use_colors: bool) -> Re
     let metadata = read_xpreset_metadata(path).map_err(|e| anyhow::anyhow!(e))?;
 
     // Find the template in the catalog
-    let manifest = TemplateCatalog::get_manifest(&metadata.template)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "template '{}' not found in current catalog. \
+    let manifest = TemplateCatalog::get_manifest(&metadata.template).ok_or_else(|| {
+        anyhow::anyhow!(
+            "template '{}' not found in current catalog. \
                 The template may have been removed or renamed.",
-                metadata.template
-            )
-        })?;
+            metadata.template
+        )
+    })?;
 
     let catalog_version = &manifest.version;
 
     // Compare versions
-    let local_version = Version::parse(&metadata.template_version)
-        .map_err(|e| anyhow::anyhow!("invalid local template_version '{}': {}", metadata.template_version, e))?;
+    let local_version = Version::parse(&metadata.template_version).map_err(|e| {
+        anyhow::anyhow!(
+            "invalid local template_version '{}': {}",
+            metadata.template_version,
+            e
+        )
+    })?;
 
     let catalog_ver = Version::parse(catalog_version)
         .map_err(|e| anyhow::anyhow!("invalid catalog version '{}': {}", catalog_version, e))?;
@@ -1158,9 +1216,17 @@ fn upgrade_preset(path: &PathBuf, format: UpgradeFormat, use_colors: bool) -> Re
     let result = if local_version == catalog_ver {
         UpgradeResult::already_current(&metadata.template, &metadata.template_version)
     } else if local_version < catalog_ver {
-        UpgradeResult::needs_upgrade(&metadata.template, &metadata.template_version, catalog_version)
+        UpgradeResult::needs_upgrade(
+            &metadata.template,
+            &metadata.template_version,
+            catalog_version,
+        )
     } else {
-        UpgradeResult::local_is_newer(&metadata.template, &metadata.template_version, catalog_version)
+        UpgradeResult::local_is_newer(
+            &metadata.template,
+            &metadata.template_version,
+            catalog_version,
+        )
     };
 
     match format {
@@ -1711,7 +1777,8 @@ mod template_tests {
         let manifest = TemplateCatalog::get_manifest("minimal-linear")
             .expect("minimal-linear is a builtin template");
         let json = serde_json::to_string_pretty(&manifest).expect("manifest is serializable");
-        let parsed: serde_json::Value = serde_json::from_str(&json).expect("manifest json round-trips");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("manifest json round-trips");
         assert_eq!(parsed["name"], "minimal-linear");
         assert_eq!(parsed["version"], "1.0.0");
         assert!(parsed["placeholders"].is_array());
@@ -1760,7 +1827,12 @@ mod template_tests {
 
         let result = new_preset(&[], None, args, false).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("--name is required"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("--name is required")
+        );
     }
 
     // ── T9: preset new unknown template fails ─────────────────────────────────
@@ -1787,7 +1859,7 @@ mod template_tests {
     async fn new_preset_invalid_name_fails() {
         let args = NewPresetArgs {
             template: "minimal-linear".to_string(),
-            name: Some("my/invalid".to_string()),  // Contains path separator
+            name: Some("my/invalid".to_string()), // Contains path separator
             description: Some("Test".to_string()),
             output: None,
             force: false,
@@ -1878,10 +1950,22 @@ mod template_tests {
 
         // Verify x_preset structure
         let x_preset = parsed.get("x_preset").expect("x_preset should exist");
-        assert_eq!(x_preset.get("schema_version").and_then(|v| v.as_i64()), Some(1));
-        assert_eq!(x_preset.get("template").and_then(|v| v.as_str()), Some("minimal-linear"));
-        assert_eq!(x_preset.get("name").and_then(|v| v.as_str()), Some("metadata-test"));
-        assert_eq!(x_preset.get("generated_by").and_then(|v| v.as_str()), Some("ralph preset new"));
+        assert_eq!(
+            x_preset.get("schema_version").and_then(|v| v.as_i64()),
+            Some(1)
+        );
+        assert_eq!(
+            x_preset.get("template").and_then(|v| v.as_str()),
+            Some("minimal-linear")
+        );
+        assert_eq!(
+            x_preset.get("name").and_then(|v| v.as_str()),
+            Some("metadata-test")
+        );
+        assert_eq!(
+            x_preset.get("generated_by").and_then(|v| v.as_str()),
+            Some("ralph preset new")
+        );
     }
 
     // ── T14: generated preset is valid YAML that parses ───────────────────────
@@ -2063,7 +2147,8 @@ hats:
     #[test]
     fn diff_result_needs_update() {
         let diff_lines = vec!["-old".to_string(), "+new".to_string()];
-        let result = DiffResult::needs_update("minimal-linear", "1.0.0", "1.1.0", diff_lines.clone());
+        let result =
+            DiffResult::needs_update("minimal-linear", "1.0.0", "1.1.0", diff_lines.clone());
         assert_eq!(result.template, "minimal-linear");
         assert_eq!(result.local_version, "1.0.0");
         assert_eq!(result.catalog_version, "1.1.0");
@@ -2195,7 +2280,10 @@ event_loop:
         let result = DiffResult::local_drift(
             "minimal-linear",
             local_ver,
-            vec!["-name: my-flow".to_string(), "+name: my-flow-edited".to_string()],
+            vec![
+                "-name: my-flow".to_string(),
+                "+name: my-flow-edited".to_string(),
+            ],
         );
 
         assert_eq!(result.template, "minimal-linear");
@@ -2216,8 +2304,11 @@ event_loop:
     // `ralph preset upgrade` would be triggered for a non-existent upgrade.
     #[test]
     fn diff_local_drift_keeps_has_update_false() {
-        let result =
-            DiffResult::local_drift("minimal-linear", "1.0.0", vec!["-old".into(), "+new".into()]);
+        let result = DiffResult::local_drift(
+            "minimal-linear",
+            "1.0.0",
+            vec!["-old".into(), "+new".into()],
+        );
         assert!(!result.has_update);
         assert!(result.is_local_drift);
     }
@@ -2278,7 +2369,10 @@ mod u5_check_tests {
         assert!(result.is_err(), "Should fail for nonexistent template");
 
         // File should NOT exist (proving file is only written after template resolves)
-        assert!(!output_path.exists(), "File should not exist when template resolution fails");
+        assert!(
+            !output_path.exists(),
+            "File should not exist when template resolution fails"
+        );
     }
 
     // ── U5-T2: new_preset without --check generates file correctly ──────────
@@ -2301,15 +2395,25 @@ mod u5_check_tests {
         };
 
         let result = new_preset(&[], None, args, false).await;
-        assert!(result.is_ok(), "new_preset without --check should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "new_preset without --check should succeed: {:?}",
+            result
+        );
 
         // File should exist
         assert!(output_path.exists(), "Generated file should exist");
 
         // File should contain x_preset metadata
         let content = std::fs::read_to_string(&output_path).unwrap();
-        assert!(content.contains("x_preset:"), "File should contain x_preset metadata");
-        assert!(content.contains("template: minimal-linear"), "File should reference correct template");
+        assert!(
+            content.contains("x_preset:"),
+            "File should contain x_preset metadata"
+        );
+        assert!(
+            content.contains("template: minimal-linear"),
+            "File should reference correct template"
+        );
     }
 
     // ── U5-T3: build_report does NOT call backend ───────────────────────────
@@ -2346,7 +2450,11 @@ event_loop:
 
         // build_report should succeed without any backend installed
         let result = build_report(&sources, None, false).await;
-        assert!(result.is_ok(), "build_report should work without backend: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "build_report should work without backend: {:?}",
+            result
+        );
 
         let report = result.unwrap();
         assert!(report.passed, "Valid preset should pass: {:?}", report);
@@ -2386,7 +2494,11 @@ event_loop:
 
         // Verify report structure matches RuntimeContractReport
         assert!(report.passed, "Good YAML should pass: {:?}", report);
-        assert!(report.source_label.contains("good.yml"), "source_label should contain 'good.yml': {}", report.source_label);
+        assert!(
+            report.source_label.contains("good.yml"),
+            "source_label should contain 'good.yml': {}",
+            report.source_label
+        );
         assert_eq!(report.errors, 0, "Good YAML should have 0 errors");
         assert_eq!(report.warnings, 0, "Good YAML should have 0 warnings");
     }
@@ -2420,10 +2532,15 @@ event_loop:
         assert!(!report.passed, "Bad topology should fail: {:?}", report);
         assert!(report.errors > 0, "Should have errors for bad topology");
 
-        let has_topology_error = report.findings.iter().any(|f| {
-            f.source == ralph_core::runtime_contract::FindingSource::Topology
-        });
-        assert!(has_topology_error, "Should have topology finding: {:?}", report.findings);
+        let has_topology_error = report
+            .findings
+            .iter()
+            .any(|f| f.source == ralph_core::runtime_contract::FindingSource::Topology);
+        assert!(
+            has_topology_error,
+            "Should have topology finding: {:?}",
+            report.findings
+        );
     }
 
     // ── U5-T6: new --check and preset check produce consistent results ──────

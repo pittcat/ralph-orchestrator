@@ -118,10 +118,7 @@ impl From<EventRecordRaw> for EventRecord {
         //   - canonical `"topic": "..."` -> as-is
         //   - off-spec `"type": "..."` -> fallback when `topic` is missing/null
         //   - both missing -> empty string
-        let topic = raw
-            .topic
-            .or(raw.topic_type)
-            .unwrap_or_default();
+        let topic = raw.topic.or(raw.topic_type).unwrap_or_default();
 
         Self {
             ts,
@@ -977,7 +974,10 @@ mod tests {
         // read (which would silently drop the event line in the reader).
         let json = r#"{"ts":null,"iteration":1,"hat":"dimension-reviewer","topic":"review.dimension.done","payload":"ok"}"#;
         let record: EventRecord = serde_json::from_str(json).unwrap();
-        assert!(!record.ts.is_empty(), "ts should fall back to a non-empty value");
+        assert!(
+            !record.ts.is_empty(),
+            "ts should fall back to a non-empty value"
+        );
         // Must be a valid RFC3339 timestamp.
         assert!(
             chrono::DateTime::parse_from_rfc3339(&record.ts).is_ok(),
@@ -992,7 +992,10 @@ mod tests {
         // to a current-time timestamp instead of failing.
         let json = r#"{"iteration":1,"hat":"dimension-reviewer","topic":"review.dimension.done","payload":"ok"}"#;
         let record: EventRecord = serde_json::from_str(json).unwrap();
-        assert!(!record.ts.is_empty(), "ts should fall back to a non-empty value");
+        assert!(
+            !record.ts.is_empty(),
+            "ts should fall back to a non-empty value"
+        );
         assert!(chrono::DateTime::parse_from_rfc3339(&record.ts).is_ok());
     }
 
@@ -1012,7 +1015,8 @@ mod tests {
         // Combined regression: a single off-spec event from the wave worker
         // StreamJson path (timestamp + topic, no canonical keys) should be
         // read into a usable EventRecord with both `ts` and `topic` populated.
-        let json = r#"{"timestamp":"2024-01-15T10:00:00Z","hat":"dimension-reviewer","payload":"ok"}"#;
+        let json =
+            r#"{"timestamp":"2024-01-15T10:00:00Z","hat":"dimension-reviewer","payload":"ok"}"#;
         let record: EventRecord = serde_json::from_str(json).unwrap();
         assert_eq!(record.ts, "2024-01-15T10:00:00Z");
         // topic missing and no `type` key, so topic falls back to empty.

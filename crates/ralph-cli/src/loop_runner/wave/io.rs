@@ -204,10 +204,7 @@ fn parse_worker_event_line(line: &str) -> Option<ralph_core::Event> {
     // canonical `{"topic": "..."}`.  Promote `type` → `topic` only when
     // `topic` is absent or null, mirroring `EventRecordRaw`'s fallback.
     if let Some(obj) = value.as_object_mut() {
-        let topic_missing = obj
-            .get("topic")
-            .map(|v| v.is_null())
-            .unwrap_or(true);
+        let topic_missing = obj.get("topic").map(|v| v.is_null()).unwrap_or(true);
         if topic_missing {
             if let Some(type_val) = obj.remove("type") {
                 obj.insert("topic".to_string(), type_val);
@@ -368,11 +365,7 @@ mod tests {
         // Mix a canonical line, an off-spec `type` line, and a malformed
         // line.  Only the malformed one should be dropped.
         let mut f = std::fs::File::create(tmp.path()).unwrap();
-        writeln!(
-            f,
-            r#"{{"topic": "work.done", "payload": "canonical"}}"#
-        )
-        .unwrap();
+        writeln!(f, r#"{{"topic": "work.done", "payload": "canonical"}}"#).unwrap();
         writeln!(
             f,
             r#"{{"type": "review.wave.ready", "payload": "off-spec"}}"#
@@ -382,7 +375,11 @@ mod tests {
         drop(f);
 
         let events = read_worker_events(tmp.path());
-        assert_eq!(events.len(), 2, "malformed line must be skipped, others parsed");
+        assert_eq!(
+            events.len(),
+            2,
+            "malformed line must be skipped, others parsed"
+        );
 
         // Find each event by topic — order is preserved from the file.
         let canonical = events
