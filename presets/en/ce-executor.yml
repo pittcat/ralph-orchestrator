@@ -352,7 +352,7 @@ hats:
       ### Complexity Routing
       **Trivial** (`complexity: trivial`):
       - Implement directly (1-2 files), run minimal verification, commit with `git add <files>` + `git commit`
-      - Publish `work.done` with payload: `plan_name`, `plan_path`, `changed_lines`, `task_id`, `task_key`, `step` (MUST include all three from the triggering event payload — review-coordinator needs them for correlation)
+      - Publish `work.done` with payload: `plan_name`, `plan_path`, `commit_count`, `changed_lines`, `task_id`, `task_key`, `step` (MUST include all three from the triggering event payload — review-coordinator needs them for correlation)
       - Skip detailed task-by-task execution
 
       **Small/Large**: Enter standard task execution loop.

@@ -3151,20 +3151,27 @@ mod tests {
         let schema_fields: std::collections::BTreeSet<&str> =
             schema.required_fields.iter().map(String::as_str).collect();
 
-        let required_minimum: std::collections::BTreeSet<&str> =
-            ["plan_name", "plan_path", "task_id", "task_key", "step"]
-                .iter()
-                .copied()
-                .collect();
+        let required_minimum: std::collections::BTreeSet<&str> = [
+            "plan_name",
+            "plan_path",
+            "task_id",
+            "task_key",
+            "step",
+            "commit_count",
+            "changed_lines",
+        ]
+        .iter()
+        .copied()
+        .collect();
         assert_eq!(
             contract_fields, required_minimum,
             "ce-executor-wave work.done contract must require exactly \
-             {{plan_name, plan_path, task_id, task_key, step}}"
+             {{plan_name, plan_path, task_id, task_key, step, commit_count, changed_lines}}"
         );
         assert_eq!(
             schema_fields, required_minimum,
             "ce-executor-wave work.done event_policy schema must require exactly \
-             {{plan_name, plan_path, task_id, task_key, step}}"
+             {{plan_name, plan_path, task_id, task_key, step, commit_count, changed_lines}}"
         );
 
         // parallel-executor and serial-executor instructions must mention every required field

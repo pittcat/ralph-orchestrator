@@ -176,6 +176,14 @@ pub fn extract_readable_delta(line: &str, output_format: BackendOutputFormat) ->
     }
 }
 /// Read events from a per-worker events file.
+///
+/// Normalizes each line the same way `EventRecordRaw::from` does for the
+/// main events file (`ts`/`timestamp` and `topic`/`type` fallbacks).  The
+/// per-worker file is written by `merge_wave_results_to_events_file`
+/// using a similar bridge format, but agents may also hand-write events
+/// there (e.g. `ralph emit work.done --payload ...`) which uses the
+/// off-spec `"type"` field instead of `"topic"`.  Without this
+/// normalization step, the aggregator would silently drop those events.
 pub fn read_worker_events(path: &Path) -> Vec<ralph_core::Event> {
     let Ok(content) = fs::read_to_string(path) else {
         return Vec::new();
@@ -183,8 +191,31 @@ pub fn read_worker_events(path: &Path) -> Vec<ralph_core::Event> {
 
     content
         .lines()
-        .filter_map(|line| serde_json::from_str::<ralph_core::Event>(line).ok())
+        .filter_map(parse_worker_event_line)
         .collect()
+}
+
+/// Parse a single JSONL line into an `Event`, applying the same `topic`/
+/// `type` fallback that `EventRecordRaw` does for the main events file.
+fn parse_worker_event_line(line: &str) -> Option<ralph_core::Event> {
+    let mut value: serde_json::Value = serde_json::from_str(line).ok()?;
+
+    // Off-spec agents sometimes write `{"type": "..."}` instead of the
+    // canonical `{"topic": "..."}`.  Promote `type` → `topic` only when
+    // `topic` is absent or null, mirroring `EventRecordRaw`'s fallback.
+    if let Some(obj) = value.as_object_mut() {
+        let topic_missing = obj
+            .get("topic")
+            .map(|v| v.is_null())
+            .unwrap_or(true);
+        if topic_missing {
+            if let Some(type_val) = obj.remove("type") {
+                obj.insert("topic".to_string(), type_val);
+            }
+        }
+    }
+
+    serde_json::from_value::<ralph_core::Event>(value).ok()
 }
 pub fn read_worker_events_with_retry(path: &Path, timeout: Duration) -> Vec<ralph_core::Event> {
     let start = std::time::Instant::now();
@@ -317,4 +348,64 @@ pub fn merge_wave_results_to_events_file(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// Regression test for P1-#4: per-worker event files written by
+    /// off-spec agents using `{"type": "...", "payload": ...}` (instead
+    /// of the canonical `{"topic": "...", "payload": ...}`) used to be
+    /// silently dropped by `read_worker_events`, because the parser went
+    /// straight through `serde_json::from_str::<ralph_core::Event>`
+    /// without the `topic`/`type` fallback that `EventRecordRaw` applies
+    /// to the main events file.  This test pins the new normalization.
+    #[test]
+    fn read_worker_events_promotes_type_field_to_topic() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        // Mix a canonical line, an off-spec `type` line, and a malformed
+        // line.  Only the malformed one should be dropped.
+        let mut f = std::fs::File::create(tmp.path()).unwrap();
+        writeln!(
+            f,
+            r#"{{"topic": "work.done", "payload": "canonical"}}"#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"type": "review.wave.ready", "payload": "off-spec"}}"#
+        )
+        .unwrap();
+        writeln!(f, "not-json-at-all").unwrap();
+        drop(f);
+
+        let events = read_worker_events(tmp.path());
+        assert_eq!(events.len(), 2, "malformed line must be skipped, others parsed");
+
+        // Find each event by topic — order is preserved from the file.
+        let canonical = events
+            .iter()
+            .find(|e| e.topic.as_str() == "work.done")
+            .expect("canonical topic is preserved");
+        assert_eq!(canonical.payload.as_deref(), Some("canonical"));
+
+        let off_spec = events
+            .iter()
+            .find(|e| e.topic.as_str() == "review.wave.ready")
+            .expect("off-spec `type` is promoted to `topic`");
+        assert_eq!(off_spec.payload.as_deref(), Some("off-spec"));
+    }
+
+    /// Empty files and missing files are not errors — `read_worker_events`
+    /// is called on a best-effort basis and the dispatcher may invoke it
+    /// before the worker has produced any output.
+    #[test]
+    fn read_worker_events_missing_file_yields_empty() {
+        let path = std::path::Path::new("/tmp/ralph-read-worker-events-missing.jsonl");
+        let _ = std::fs::remove_file(path);
+        let events = read_worker_events(path);
+        assert!(events.is_empty());
+    }
 }

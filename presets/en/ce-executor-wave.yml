@@ -75,7 +75,7 @@ event_loop:
     enabled: true
     rules:
       work.done:
-        require_payload_fields: ["plan_name", "plan_path", "task_id", "task_key", "step"]
+        require_payload_fields: ["plan_name", "plan_path", "task_id", "task_key", "step", "commit_count", "changed_lines"]
         require_task:
           id_field: "task_id"
           key_field: "task_key"
@@ -115,7 +115,7 @@ event_loop:
         required_fields: [plan_name, plan_path, step, task_id, task_key, reason]
         payload: json_object
       work.done:
-        required_fields: [plan_name, plan_path, task_id, task_key, step]
+        required_fields: [plan_name, plan_path, task_id, task_key, step, commit_count, changed_lines]
         payload: json_object
       work.failed:
         required_fields: [plan_name, plan_path, step, task_id, task_key, reason]
@@ -404,6 +404,9 @@ hats:
         - `plan_name`, `plan_path`, `step`, `task_id`, `task_key`
         - `changed_files`: array of files actually modified (must be subset of `owned_files`)
         - `tests`: test evidence (commands run, results summary)
+        - `commit_count`: per-unit commit count (typically 0; execution-synthesizer
+          aggregates this into the final `work.done` event)
+        - `changed_lines`: per-unit diff stat (insertions+deletions)
 
       On failure:
       - Publish `work.unit.failed` with payload:
@@ -466,7 +469,9 @@ hats:
         - `task_id`: last closed task ID (or representative task ID from batch)
         - `task_key`: corresponding task key
         - `step`: step identifier
-      - `work.done` MUST use the same schema as `ce-executor` (plan_name, plan_path, task_id, task_key, step)
+        - `commit_count`: total commits in this batch (sum across units, ≥1)
+        - `changed_lines`: aggregate insertions+deletions from `git diff --shortstat HEAD~<batch>..HEAD`
+      - `work.done` MUST use the same schema as `ce-executor` (plan_name, plan_path, task_id, task_key, step, commit_count, changed_lines) so the review-coordinator gate can distinguish empty diffs from non-trivial ones
 
       On batch failure:
       - **Do not run global rollback commands.** Never use `git checkout -- .`,
@@ -559,7 +564,7 @@ hats:
 
       ### Step Advancement
       - All tasks in current step done → update `progress.md`
-      - Publish `work.done` with `plan_name`, `plan_path`, `task_id`, `task_key`, `step`
+      - Publish `work.done` with `plan_name`, `plan_path`, `task_id`, `task_key`, `step`, `commit_count`, `changed_lines`
       - Do NOT publish `queue.advance`. Queue advancement is owned by `plan-gate`.
 
       ### FIX PLAN EXECUTION MODE (fix.plan.ready only)
@@ -572,7 +577,7 @@ hats:
         with `plan_name`, `plan_path`, `step`, `task_id`, `task_key`, and
         `reason: "fix plan invalidated: causal chain prediction failed"`.
       - After applying the fix, run verification.
-      - If verification passes, publish a normal `work.done` with `plan_name`, `plan_path`, `task_id`, `task_key`, `step`.
+      - If verification passes, publish a normal `work.done` with `plan_name`, `plan_path`, `task_id`, `task_key`, `step`, `commit_count`, `changed_lines`.
 
       ### Failure Handling
       - If command fails, dependency missing, or blocked:
@@ -593,6 +598,33 @@ hats:
     description: "Diff analysis, intent discovery, conditional dimension selection, wave emission."
     triggers: ["work.done", "fix.applied"]
     publishes: ["review.wave.ready", "review.passed"]
+    # Activation-level obligations.  `conditional_must_emit`
+    # tightens the rule when the trigger payload shows non-trivial
+    # work (commit_count>=1 / changed_lines>=50 / untracked files):
+    # the agent MUST emit review.wave.ready, not review.passed.
+    # Mirrors the HARD RULE in `instructions:` and keeps ce-executor-wave
+    # symmetric with ce-executor.yml (otherwise a wave variant could
+    # short-circuit non-trivial diffs to review.passed and skip the
+    # wave-based review entirely).
+    obligations:
+      - on_trigger: "work.done"
+        must_emit_any_of: ["review.wave.ready", "review.passed"]
+        conditional_must_emit:
+          - when: { commit_count_min: 1 }
+            must_emit_any_of: ["review.wave.ready"]
+          - when: { changed_lines_min: 50 }
+            must_emit_any_of: ["review.wave.ready"]
+          - when: { has_untracked: true }
+            must_emit_any_of: ["review.wave.ready"]
+      - on_trigger: "fix.applied"
+        must_emit_any_of: ["review.wave.ready", "review.passed"]
+        conditional_must_emit:
+          - when: { commit_count_min: 1 }
+            must_emit_any_of: ["review.wave.ready"]
+          - when: { changed_lines_min: 50 }
+            must_emit_any_of: ["review.wave.ready"]
+          - when: { has_untracked: true }
+            must_emit_any_of: ["review.wave.ready"]
     instructions: |
       ## REVIEW COORDINATOR MODE — Scope Analysis, Intent Discovery, and Wave Scheduling
 
@@ -600,8 +632,8 @@ hats:
       Do not review code yourself. Do not implement fixes.
 
       ### Read State
-      - From `work.done` payload: `plan_name`, `plan_path`, `task_id`, `task_key`, `step`
-      - From `fix.applied` payload: `plan_name`, `task_id`, `task_key`, `step`
+      - From `work.done` payload: `plan_name`, `plan_path`, `task_id`, `task_key`, `step`, `commit_count`, `changed_lines`
+      - From `fix.applied` payload: `plan_name`, `task_id`, `task_key`, `step`, `commit_count`, `changed_lines`
       - If `plan_name` is not in payload, scan `.agents/scratchpad/ce-executor-wave/*/context.md` files to find the one matching current branch
       - Read `context.md` for plan context, R-IDs, and scope boundaries
 

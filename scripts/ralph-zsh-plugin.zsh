@@ -111,6 +111,7 @@ _RALPH_COMMANDS=(
   "wave:Dispatch wave events for parallel hat execution"
   "loops:Manage parallel loops"
   "hats:Manage configured hats"
+  "preset:Manage and validate presets"
   "tui:Attach TUI to a running ralph-api server"
   "web:Run web dashboard"
   "mcp:Run Ralph as an MCP server over stdio"
@@ -163,6 +164,30 @@ _RALPH_HATS_CMDS=(
   "validate:Validate hat topology and report issues"
   "graph:Display hat topology graph"
   "show:Show detailed configuration for a specific hat"
+)
+
+# =============================================================================
+# Preset Subcommands
+# =============================================================================
+_RALPH_PRESET_CMDS=(
+  "list:List available workflow templates"
+  "show:Show details of a specific template"
+  "new:Generate a new preset from a template"
+  "check:Check preset/workflow contract (config, topology, payload, orphan)"
+  "diff:Show differences between a local preset and its template baseline"
+  "upgrade:Preview upgrade information for a local preset (dry-run only)"
+)
+
+# Builtin template names — must mirror TemplateCatalog::template_names()
+# in crates/ralph-cli/src/preset_templates.rs.  When adding a new builtin
+# template, add it here too so `ralph preset <TAB>` still works.
+_RALPH_PRESET_TEMPLATES=(
+  "minimal-linear:Beginner two-hat linear workflow"
+  "code-assist:Spec/code/verify loop for code work"
+  "debug:Diagnose/fix/exit loop for debugging tasks"
+  "research:Multi-source research workflow"
+  "review:Wave-based code review"
+  "ce-executor-lite:Lightweight compound-engineering executor"
 )
 
 # =============================================================================
@@ -302,6 +327,9 @@ _ralph() {
         hats)
           _describe 'hats command' _RALPH_HATS_CMDS
           ;;
+        preset)
+          _describe 'preset command' _RALPH_PRESET_CMDS
+          ;;
         tui)
           _ralph_tui_args
           ;;
@@ -332,6 +360,9 @@ _ralph() {
           ;;
         hats)
           _ralph_hats_subcmd ${words[2]}
+          ;;
+        preset)
+          _ralph_preset_subcmd ${words[2]} ${words[CURRENT]}
           ;;
         bot)
           _ralph_bot_subcmd ${words[2]}
@@ -420,6 +451,77 @@ _ralph_run_args() {
       _describe 'backend' _RALPH_BACKENDS
       ;;
   esac
+}
+
+# =============================================================================
+# Preset Subcommand Arguments
+# =============================================================================
+(( $+functions[_ralph_preset_subcmd] )) ||
+_ralph_preset_subcmd() {
+  local subcmd=$1
+  local word_index=$2
+
+  case $subcmd in
+    list)
+      local -a list_opts
+      list_opts=(
+        '--format+[Output format]:format:(human json)'
+      )
+      _arguments $list_opts
+      ;;
+    show)
+      local -a show_opts
+      show_opts=(
+        '1:template:_ralph_preset_template'
+        '--format+[Output format]:format:(human yaml json)'
+      )
+      _arguments $show_opts
+      ;;
+    new)
+      local -a new_opts
+      new_opts=(
+        '1:template:_ralph_preset_template'
+        '--name+[Name for the generated preset]:name:_default'
+        '--description+[Description for the generated preset]:description:_default'
+        '--output+[Output file path]:file:_files'
+        '--force[Force overwrite if output file exists]'
+        '--check[Run authoring checks after generation]'
+        '--format+[Output format]:format:(human json)'
+      )
+      _arguments $new_opts
+      ;;
+    check)
+      local -a check_opts
+      check_opts=(
+        '--format+[Output format]:format:(human json)'
+        '--strict[Treat warnings as failures]'
+      )
+      _arguments $check_opts
+      ;;
+    diff)
+      local -a diff_opts
+      diff_opts=(
+        '--file+[Path to the local preset file]:file:_files'
+        '--format+[Output format]:format:(human json)'
+      )
+      _arguments $diff_opts
+      ;;
+    upgrade)
+      local -a upgrade_opts
+      upgrade_opts=(
+        '--file+[Path to the local preset file]:file:_files'
+        '--format+[Output format]:format:(human json)'
+        '--dry-run[Preview upgrade without writing changes]'
+        '--force[Apply upgrade even if there are user changes (not implemented in MVP)]'
+      )
+      _arguments $upgrade_opts
+      ;;
+  esac
+}
+
+(( $+functions[_ralph_preset_template] )) ||
+_ralph_preset_template() {
+  _describe 'template' _RALPH_PRESET_TEMPLATES
 }
 
 # =============================================================================
