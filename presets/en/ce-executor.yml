@@ -29,8 +29,13 @@
 tasks:
   enabled: true
   coordinator_hats:
-    - executor
     - coordinator
+    - executor
+    - plan-gate
+    - fixer
+    - debug-resolver
+    - shipper
+    - reporter
 
 event_loop:
   prompt_file: "PROMPT.md"
@@ -136,6 +141,9 @@ event_loop:
         required_fields: [plan_name, completed_steps, task_id, task_key, verdict]
         payload: json_object
       plan.blocked:
+        required_fields: [reason]
+        payload: json_object
+      loop.cancel:
         required_fields: [reason]
         payload: json_object
       REVIEW_COMPLETE:
@@ -1106,7 +1114,7 @@ hats:
   plan-gate:
     name: "🚦 Plan Gate"
     description: "Reconciles review verdict against plan progress and decides queue.advance vs plan.complete."
-    triggers: ["review.passed", "review.complete", "work.failed"]
+    triggers: ["review.passed", "review.complete", "work.failed", "loop.cancel"]
     publishes: ["queue.advance", "plan.complete", "plan.blocked"]
     default_publishes: "plan.blocked"
     instructions: |
@@ -1126,6 +1134,12 @@ hats:
       - The failure must NOT skip final reporting. `plan.blocked` flows to
         `shipper -> REVIEW_COMPLETE -> reporter -> LOOP_COMPLETE`, so the manager
         report still records the blocked state.
+
+      ### loop.cancel Routing
+      When triggered by `loop.cancel`, the loop is being explicitly cancelled.
+      Publish `plan.blocked` with `reason: "loop cancelled by agent"`. Include
+      `plan_name` (from payload or context.md), `task_id`, and `task_key` when
+      present for correlation.
 
       ### Read State
       1. From event payload, based on trigger:
@@ -1276,6 +1290,9 @@ hats:
     triggers: ["REVIEW_COMPLETE"]
     publishes: ["report.done", "LOOP_COMPLETE"]
     default_publishes: "report.done"
+    obligations:
+      - on_trigger: "REVIEW_COMPLETE"
+        must_emit_any_of: ["report.done"]
     instructions: |
       ## REPORTER MODE — Manager-Facing Completion Report
 
@@ -1426,10 +1443,14 @@ hats:
          - `fail`: Clear failure reasons, business impact, suggested recovery actions.
          - For `debug.exhausted`, mention that root-cause diagnosis was performed but the cause could not be confirmed (e.g., "根因诊断后仍无法确认"), and state whether a human, architecture, or environment decision is needed.
 
-      ### Event Publishing
+      ### Event Publishing (HARD RULES)
       - Write report, then publish `report.done` with `report_path`
-      - If `pass_or_fail` from the `REVIEW_COMPLETE` payload is `"fail"`, the reporter MUST NOT publish `LOOP_COMPLETE`. Instead, the report should end with an explicit "Awaiting decision" section and the reporter publishes `report.done` with `awaiting_decision: true` and stops. This lets the verdict gate (configured in `event_loop.verdict_gate`) reject any rogue `LOOP_COMPLETE`.
-      - Otherwise (pass / pass_with_residuals):
+      - **HARD RULE — pass_or_fail="fail"**: If `pass_or_fail` from the `REVIEW_COMPLETE` payload is `"fail"`, the reporter MUST:
+        1. NOT publish `LOOP_COMPLETE` — this is a hard gate, not advisory
+        2. Write the report with an explicit "Awaiting decision" section
+        3. Publish `report.done` with `awaiting_decision: true`
+        4. Stop — the verdict gate (configured in `event_loop.verdict_gate`) checks REVIEW_COMPLETE payload when LOOP_COMPLETE is received, so any rogue LOOP_COMPLETE will also be rejected by the orchestrator
+      - **HARD RULE — Defensive plan completion check**: Otherwise (pass / pass_with_residuals):
         - **Defensive plan completion check**: read `plan.md` and `progress.md`. If any planned step is NOT listed in `Completed Steps`, the plan is NOT complete. Do NOT publish `LOOP_COMPLETE`. Publish `report.done` with `awaiting_decision: true` and a note that pending steps remain. This is a safety backstop in case `plan-gate` or `shipper` misclassifies partial completion.
         - Only if all steps are complete and `pass_or_fail` is not `"fail"`, publish `LOOP_COMPLETE` after `report.done`.
 

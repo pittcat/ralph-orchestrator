@@ -10,8 +10,6 @@ event_loop:
 
 tasks:
   enabled: true
-  coordinator_hats:
-    - coordinator
 
 telemetry:
   runtime_diagnosis:

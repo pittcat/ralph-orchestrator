@@ -39,8 +39,13 @@
 tasks:
   enabled: true
   coordinator_hats:
-    - executor
     - coordinator
+    - executor
+    - plan-gate
+    - fixer
+    - debug-resolver
+    - shipper
+    - reporter
 
 event_loop:
   prompt_file: "PROMPT.md"
@@ -1183,7 +1188,7 @@ hats:
   plan-gate:
     name: "🚦 Plan Gate"
     description: "Reconciles review verdict against plan progress and decides queue.advance vs plan.complete."
-    triggers: ["review.passed", "review.complete", "work.failed"]
+    triggers: ["review.passed", "review.complete", "work.failed", "loop.cancel"]
     publishes: ["queue.advance", "plan.complete", "plan.blocked"]
     default_publishes: "plan.blocked"
     instructions: |
@@ -1353,6 +1358,9 @@ hats:
     triggers: ["REVIEW_COMPLETE"]
     publishes: ["report.done", "LOOP_COMPLETE"]
     default_publishes: "report.done"
+    obligations:
+      - on_trigger: "REVIEW_COMPLETE"
+        must_emit_any_of: ["report.done"]
     instructions: |
       ## REPORTER MODE — Manager-Facing Completion Report
 

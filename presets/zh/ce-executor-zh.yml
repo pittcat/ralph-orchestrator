@@ -29,8 +29,13 @@
 tasks:
   enabled: true
   coordinator_hats:
-    - executor
     - coordinator
+    - executor
+    - plan-gate
+    - fixer
+    - debug-resolver
+    - shipper
+    - reporter
 
 event_loop:
   prompt_file: "PROMPT.md"
@@ -921,7 +926,7 @@ hats:
   plan-gate:
     name: "🚦 计划门控"
     description: "对账 review 结果与 plan 进度，决定 queue.advance 或 plan.complete。"
-    triggers: ["review.passed", "review.complete", "work.failed"]
+    triggers: ["review.passed", "review.complete", "work.failed", "loop.cancel"]
     publishes: ["queue.advance", "plan.complete", "plan.blocked"]
     default_publishes: "plan.blocked"
     instructions: |
@@ -1082,6 +1087,9 @@ hats:
     triggers: ["REVIEW_COMPLETE"]
     publishes: ["report.done", "LOOP_COMPLETE"]
     default_publishes: "report.done"
+    obligations:
+      - on_trigger: "REVIEW_COMPLETE"
+        must_emit_any_of: ["report.done"]
     instructions: |
       ## REPORTER MODE — 面向 Manager 的完成报告
 
