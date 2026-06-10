@@ -42,6 +42,12 @@ pub enum ViolationType {
         topic: String,
         allowed_topics: Vec<String>,
     },
+    /// Event matched a topic-deny rule (hat_id + topic exact match).
+    /// The hat is explicitly forbidden from publishing this topic.
+    TopicDenied {
+        rule_hat: String,
+        rule_topic: String,
+    },
 }
 
 /// A single policy finding.
@@ -91,6 +97,9 @@ pub struct PolicyRuntimeState {
     pub completion_event_index: Option<u64>,
     /// The iteration at which completion was honored.
     pub completion_iteration: Option<u32>,
+    /// The current plan_name extracted from the most recent `work.ready` event.
+    /// Used for plan_name equality validation (U4).
+    pub current_plan_name: Option<String>,
 }
 
 impl PolicyRuntimeState {
@@ -100,6 +109,9 @@ impl PolicyRuntimeState {
     /// observed and which business topics have been seen. Malformed lines are
     /// skipped. String, object, and null payloads are all handled with the same
     /// compatibility semantics as `EventReader`.
+    ///
+    /// Also extracts `current_plan_name` from the most recent `work.ready` event,
+    /// used by the plan_name equality guard (U4).
     ///
     /// # Errors
     ///
@@ -116,6 +128,16 @@ impl PolicyRuntimeState {
             state.observed_topics.insert(event.topic.clone());
             if policy.terminal_topics.contains(&event.topic) {
                 state.terminal_observed = true;
+            }
+            // U4: Extract current_plan_name from work.ready events
+            if event.topic == "work.ready" {
+                if let Some(ref payload) = event.payload {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(payload) {
+                        if let Some(name) = val.get("plan_name").and_then(|v| v.as_str()) {
+                            state.current_plan_name = Some(name.to_string());
+                        }
+                    }
+                }
             }
         }
         Ok(state)
@@ -286,6 +308,46 @@ pub fn is_system_topic(topic: &str) -> bool {
     topic.starts_with("event.") || topic.starts_with("human.")
 }
 
+/// Check topic-deny rules against a (hat, topic) pair.
+///
+/// When the event policy is in `Enforce` mode and the (hat_id, topic) pair
+/// matches any `topic_deny_rules` entry, returns `Some(PolicyDecision::Block)`
+/// with reason `"topic_denied"`.  Otherwise returns `None`.
+///
+/// In `Observe` mode, matching a deny rule produces a `Warn` decision instead.
+pub fn check_topic_deny_rules(
+    hat: Option<&str>,
+    topic: &str,
+    config: &EventPolicyConfig,
+) -> Option<PolicyDecision> {
+    let hat_id = hat.unwrap_or("");
+    for rule in &config.topic_deny_rules {
+        if rule.hat_id == hat_id && rule.topic == topic {
+            let finding = PolicyFinding {
+                topic: topic.to_string(),
+                violation_type: ViolationType::TopicDenied {
+                    rule_hat: rule.hat_id.clone(),
+                    rule_topic: rule.topic.clone(),
+                },
+                message: format!(
+                    "Hat '{}' is denied from publishing topic '{}'",
+                    rule.hat_id, rule.topic
+                ),
+            };
+            return Some(match config.mode {
+                EventPolicyMode::Observe => PolicyDecision::Warn(vec![finding]),
+                EventPolicyMode::Enforce => match config.on_violation {
+                    ViolationAction::Warn => PolicyDecision::Warn(vec![finding]),
+                    ViolationAction::RejectWithResume => PolicyDecision::RejectWithResume(finding),
+                    ViolationAction::Hold => PolicyDecision::Hold(finding),
+                    ViolationAction::Block => PolicyDecision::Block(finding),
+                },
+            });
+        }
+    }
+    None
+}
+
 /// Validates an event against the event policy.
 pub fn validate_event(
     topic: &str,
@@ -425,6 +487,35 @@ pub fn validate_event(
         }
     }
 
+    // U4: plan_name equality — when enabled, work.done's plan_name must equal
+    // the current_plan_name extracted from the most recent work.ready event.
+    if config.plan_name_equality_required
+        && topic == "work.done"
+        && let Some(expected) = &state.current_plan_name
+    {
+        if let Some(p) = payload {
+            if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p) {
+                let actual = obj.get("plan_name").and_then(|v| v.as_str());
+                if actual != Some(expected.as_str()) {
+                    findings.push(PolicyFinding {
+                        topic: topic.to_string(),
+                        violation_type: ViolationType::InvalidFieldValue {
+                            field: "plan_name".to_string(),
+                            value: actual
+                                .map(|s| Value::String(s.to_string()))
+                                .unwrap_or(Value::Null),
+                        },
+                        message: format!(
+                            "work.done plan_name mismatch: expected '{}', got {:?}",
+                            expected,
+                            actual.unwrap_or("(missing)")
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
     if findings.is_empty() {
         return PolicyDecision::Accept;
     }
@@ -459,7 +550,7 @@ fn extract_json_field(value: &Value, path: &str) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::EventSchema;
+    use crate::config::{EventSchema, TopicDenyRule};
     use std::collections::HashMap;
     use std::io::Write;
     use tempfile::NamedTempFile;
@@ -1277,5 +1368,141 @@ mod tests {
             composed_admits_work("work.done"),
             "composed validation must admit whitelisted business topics"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // U3: topic-deny rules tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_topic_deny_rules_match_rejected() {
+        // Matching deny rule → Block when mode=Enforce
+        let config = EventPolicyConfig {
+            enabled: true,
+            mode: EventPolicyMode::Enforce,
+            on_violation: ViolationAction::Block,
+            topic_deny_rules: vec![TopicDenyRule {
+                hat_id: "executor".to_string(),
+                topic: "build.done".to_string(),
+            }],
+            ..Default::default()
+        };
+        let decision = check_topic_deny_rules(Some("executor"), "build.done", &config);
+        assert!(matches!(decision, Some(PolicyDecision::Block(_))));
+    }
+
+    #[test]
+    fn test_topic_deny_rules_non_matching_accepted() {
+        // Non-matching hat_id → None (allowed)
+        let config = EventPolicyConfig {
+            enabled: true,
+            mode: EventPolicyMode::Enforce,
+            on_violation: ViolationAction::Block,
+            topic_deny_rules: vec![TopicDenyRule {
+                hat_id: "executor".to_string(),
+                topic: "build.done".to_string(),
+            }],
+            ..Default::default()
+        };
+        // Different hat, same topic → no match
+        assert!(check_topic_deny_rules(Some("reviewer"), "build.done", &config).is_none());
+        // Same hat, different topic → no match
+        assert!(check_topic_deny_rules(Some("executor"), "work.done", &config).is_none());
+        // No hat → no match (empty string not matched)
+        assert!(check_topic_deny_rules(None, "build.done", &config).is_none());
+    }
+
+    #[test]
+    fn test_topic_deny_rules_observe_mode_warns() {
+        // Observe mode → Warn even when rule matches
+        let config = EventPolicyConfig {
+            enabled: true,
+            mode: EventPolicyMode::Observe,
+            topic_deny_rules: vec![TopicDenyRule {
+                hat_id: "executor".to_string(),
+                topic: "build.done".to_string(),
+            }],
+            ..Default::default()
+        };
+        let decision = check_topic_deny_rules(Some("executor"), "build.done", &config);
+        assert!(matches!(decision, Some(PolicyDecision::Warn(_))));
+    }
+
+    // -------------------------------------------------------------------------
+    // U4: plan_name equality tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_plan_name_equality_matches_accepted() {
+        // work.ready with plan_name=A → work.done with plan_name=A → Accept
+        let mut config = test_config();
+        config.plan_name_equality_required = true;
+        let mut state = PolicyRuntimeState::default();
+        state.current_plan_name = Some("plan-x".to_string());
+
+        let decision = validate_event(
+            "work.done",
+            Some(r#"{"plan_name": "plan-x"}"#),
+            &config,
+            &mut state,
+        );
+        assert_eq!(decision, PolicyDecision::Accept);
+    }
+
+    #[test]
+    fn test_plan_name_equality_mismatch_rejected() {
+        // work.ready with plan_name=A → work.done with plan_name=B → Reject
+        let mut config = test_config();
+        config.plan_name_equality_required = true;
+        let mut state = PolicyRuntimeState::default();
+        state.current_plan_name = Some("plan-x".to_string());
+
+        let decision = validate_event(
+            "work.done",
+            Some(r#"{"plan_name": "plan-y"}"#),
+            &config,
+            &mut state,
+        );
+        let is_rejected = matches!(decision, PolicyDecision::RejectWithResume(PolicyFinding {
+            violation_type: ViolationType::InvalidFieldValue { ref field, .. }, ..
+        }) if field == "plan_name");
+        assert!(
+            is_rejected,
+            "Expected RejectWithResume for plan_name mismatch, got {:?}",
+            decision
+        );
+    }
+
+    #[test]
+    fn test_plan_name_equality_disabled_accepts_mismatch() {
+        // plan_name_equality_required=false (default) → work.done plan_name=B still accepted
+        let config = test_config(); // default has plan_name_equality_required=false
+        let mut state = PolicyRuntimeState::default();
+        state.current_plan_name = Some("plan-x".to_string());
+
+        let decision = validate_event(
+            "work.done",
+            Some(r#"{"plan_name": "plan-y"}"#),
+            &config,
+            &mut state,
+        );
+        assert_eq!(decision, PolicyDecision::Accept);
+    }
+
+    #[test]
+    fn test_plan_name_equality_no_work_ready_skips_check() {
+        // No work.ready → current_plan_name is None → skip check
+        let mut config = test_config();
+        config.plan_name_equality_required = true;
+        let mut state = PolicyRuntimeState::default();
+        // current_plan_name is None (no work.ready received)
+
+        let decision = validate_event(
+            "work.done",
+            Some(r#"{"plan_name": "anything"}"#),
+            &config,
+            &mut state,
+        );
+        assert_eq!(decision, PolicyDecision::Accept);
     }
 }

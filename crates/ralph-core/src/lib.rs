@@ -10,9 +10,9 @@
 //! - Terminal capture for session recording
 //! - Benchmark task definitions and workspace isolation
 
+pub mod agent_doc_sync;
 #[cfg(feature = "recording")]
 mod cli_capture;
-pub mod agent_doc_sync;
 pub mod config;
 pub mod diagnosis;
 pub mod diagnostics;
@@ -77,15 +77,15 @@ pub mod worktree;
 #[cfg(feature = "recording")]
 pub use cli_capture::{CliCapture, CliCapturePair};
 pub use config::{
-    ActivationObligation, AggregateConfig, AggregateMode, AgentDocSyncConfig, CliConfig,
-    ConditionalEmission, ConfigError, CoreConfig, DriftConfig, EventFilterConfig,
-    EventFilterMode, EventLoopConfig, EventMetadata, EventPolicyConfig, EventPolicyMode,
-    EventProjectionConfig, EventSchema, FeaturesConfig, HatBackend, HatConfig, HookStage,
-    InjectMode, MalformedJsonlPolicy, MemoriesConfig, MemoriesFilter, OnErrorPolicy, PayloadType,
-    Phase, PhaseConfig, PreflightExtensionsConfig, PreflightHook, ProjectionMode,
-    ProjectionRule, RalphConfig, RuntimeDiagnosisConfig, ScratchpadConfig, SkillOverride,
-    SkillsConfig, StateFileEntry, StateFileFormat, StateFilesConfig, TelemetryConfig,
-    TriggerContext, TriggerPredicate, ViolationAction, WarmupConfig, obligation_satisfied,
+    ActivationObligation, AgentDocSyncConfig, AggregateConfig, AggregateMode, CliConfig,
+    ConditionalEmission, ConfigError, CoreConfig, DriftConfig, EventFilterConfig, EventFilterMode,
+    EventLoopConfig, EventMetadata, EventPolicyConfig, EventPolicyMode, EventProjectionConfig,
+    EventSchema, FeaturesConfig, HatBackend, HatConfig, HookStage, InjectMode,
+    MalformedJsonlPolicy, MemoriesConfig, MemoriesFilter, OnErrorPolicy, PayloadType, Phase,
+    PhaseConfig, PreflightExtensionsConfig, PreflightHook, ProjectionMode, ProjectionRule,
+    RalphConfig, RuntimeDiagnosisConfig, ScratchpadConfig, SkillOverride, SkillsConfig,
+    StateFileEntry, StateFileFormat, StateFilesConfig, TelemetryConfig, TriggerContext,
+    TriggerPredicate, ViolationAction, WarmupConfig, obligation_satisfied,
 };
 
 // Re-export loop_name types (also available via FeaturesConfig.loop_naming)
@@ -114,7 +114,8 @@ pub use event_origin::{
 };
 pub use event_parser::EventParser;
 pub use event_policy::{
-    PolicyDecision, PolicyFinding, PolicyRuntimeState, ViolationType, validate_event,
+    PolicyDecision, PolicyFinding, PolicyRuntimeState, ViolationType, check_topic_deny_rules,
+    validate_event,
 };
 pub use event_projection::apply_projection;
 pub use event_reader::{Event, EventReader, MalformedLine, ParseResult};

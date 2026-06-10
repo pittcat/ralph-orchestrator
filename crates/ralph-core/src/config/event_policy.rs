@@ -7,6 +7,19 @@ use serde::{Deserialize, Serialize};
 use super::default_true;
 use super::loop_config::EventSchema;
 
+/// A rule that denies a specific hat from publishing a specific topic.
+///
+/// Matching semantics: exact `hat_id` + exact `topic` (no glob).  When the
+/// event policy is in `Enforce` mode, a matching rule produces a
+/// `PolicyDecision::Block` with reason `"topic_denied"`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TopicDenyRule {
+    /// Hat ID to match (exact).
+    pub hat_id: String,
+    /// Topic to deny (exact match).
+    pub topic: String,
+}
+
 /// Opt-in event policy for typed payload validation and lifecycle enforcement.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventPolicyConfig {
@@ -37,6 +50,15 @@ pub struct EventPolicyConfig {
     /// Behavior after a terminal event has been observed.
     #[serde(default)]
     pub completion_after_terminal: CompletionAfterTerminalConfig,
+    /// Topic-deny rules: for each matching (hat_id, topic) pair, the event is
+    /// rejected with reason "topic_denied".  Exact match only (no glob).
+    #[serde(default)]
+    pub topic_deny_rules: Vec<TopicDenyRule>,
+    /// When true, `work.done` events are validated to have their `plan_name`
+    /// payload field equal to the `current_plan_name` extracted from the most
+    /// recent `work.ready` event.  Default false (backward compatible).
+    #[serde(default)]
+    pub plan_name_equality_required: bool,
 }
 
 impl Default for EventPolicyConfig {
@@ -53,6 +75,8 @@ impl Default for EventPolicyConfig {
             allow_unsafe_cli_emit: true,
             require_emit_provenance: false,
             completion_after_terminal: CompletionAfterTerminalConfig::default(),
+            topic_deny_rules: Vec::new(),
+            plan_name_equality_required: false,
         }
     }
 }

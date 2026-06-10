@@ -98,6 +98,13 @@ event_loop:
   event_policy:
     enabled: true
     mode: enforce
+    # U3: topic-deny rules — exact hat_id + topic match, no glob.
+    # executor must never emit build.done (it is a review-synthesizer output).
+    topic_deny_rules:
+      - {hat_id: executor, topic: build.done}
+    # U4: enable plan_name equality validation — work.done plan_name must match
+    # the current_plan_name from work.ready.
+    plan_name_equality_required: true
     schemas:
       work.ready:
         required_fields: [plan_name, plan_path, task_id, task_key, step, complexity]
@@ -106,6 +113,8 @@ event_loop:
         # commit_count + changed_lines are required so the
         # review-coordinator gate can distinguish "empty diff" from
         # a non-trivial diff short-circuited to review.passed.
+        # plan_name MUST equal the value from work.ready
+        # (see event_policy.plan_name_equality_required).
         required_fields: [plan_name, plan_path, task_id, task_key, step, commit_count, changed_lines]
         payload: json_object
       work.failed:

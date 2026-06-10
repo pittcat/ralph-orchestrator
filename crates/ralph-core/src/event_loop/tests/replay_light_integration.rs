@@ -594,8 +594,10 @@ fn test_rejected_missing_plan_path_names_finding_and_routes_retry() {
     )];
 
     // Build event WITHOUT plan_path.
+    // Use hat=executor (not ralph) — U2 rejects ralph business topics at
+    // the origin level, but this test exercises contract-level rejection.
     let mut event = work_done_event("test-id-1");
-    event.hat = Some("ralph".to_string());
+    event.hat = Some("executor".to_string());
     event.payload = Some(
         r#"{"plan_name":"p","task_id":"test-id-1","task_key":"k1","step":"step-01"}"#.to_string(),
     );
@@ -806,9 +808,17 @@ fn test_forged_ralph_work_done_does_not_create_retry_to_ralph() {
     event.hat = Some("ralph".to_string());
 
     let result = process_events(vec![event], &mut event_loop);
+    // U2: builtin ralph hat is now restricted to control topics only.
+    // work.done from hat=ralph is rejected at the origin guard BEFORE
+    // reaching the execution contract layer.  The event is still rejected
+    // (had_rejected_events=true) but no contract finding is produced.
     assert!(
-        !result.contract_rejections.is_empty(),
-        "Open task should still reject"
+        result.had_rejected_events,
+        "Forged hat=ralph event should be rejected (origin guard U2)"
+    );
+    assert!(
+        result.contract_rejections.is_empty(),
+        "Forged hat=ralph work.done is rejected at origin level, not contract level"
     );
 
     // No targeted retry should be published, because ralph is the generic

@@ -30,7 +30,7 @@ use crate::event_parser::{
 };
 use crate::event_policy::{
     PolicyDecision, PolicyFinding, PolicyRuntimeState, check_completion_guard,
-    check_completion_honored, validate_event,
+    check_completion_honored, check_topic_deny_rules, validate_event,
 };
 use crate::event_reader::{Event as JsonlEvent, EventReader};
 use crate::execution_contract::{
@@ -649,6 +649,69 @@ fn apply_event_policy_validation(
             continue;
         }
 
+        // U3: Topic-deny rules — check BEFORE payload schema validation.
+        // When a (hat_id, topic) pair matches a deny rule, the event is
+        // rejected according to the policy mode (Block, Warn, etc.).
+        if let Some(decision) =
+            check_topic_deny_rules(event.hat.as_deref(), &event.topic, policy_config)
+        {
+            match decision {
+                PolicyDecision::Accept => {
+                    validated_events.push(event);
+                }
+                PolicyDecision::Warn(findings) => {
+                    for finding in findings {
+                        let diagnostic = Event::new(
+                            "event.policy_warning",
+                            format!(
+                                "Topic-deny warning for '{}': {}",
+                                event.topic, finding.message
+                            ),
+                        );
+                        bus.publish(diagnostic);
+                    }
+                    validated_events.push(event);
+                }
+                PolicyDecision::RejectWithResume(finding) => {
+                    policy_rejections.push(crate::event_policy::PolicyRejection {
+                        topic: event.topic.clone(),
+                        source_hat: event.hat.clone(),
+                        finding: finding.clone(),
+                    });
+                    let recovery_payload = format!(
+                        "EVENT_POLICY_REJECTED: event '{}' matches topic-deny rule.\n{}\n\n\
+                         This hat is not allowed to publish this topic.",
+                        event.topic, finding.message
+                    );
+                    let recovery_event = Event::new("task.resume", &recovery_payload);
+                    bus.publish(recovery_event);
+                }
+                PolicyDecision::Hold(finding) => {
+                    hold_triggered = true;
+                    hold_reason = Some(finding.message.clone());
+                    policy_rejections.push(crate::event_policy::PolicyRejection {
+                        topic: event.topic.clone(),
+                        source_hat: event.hat.clone(),
+                        finding: finding.clone(),
+                    });
+                    let recovery_payload = format!(
+                        "EVENT_POLICY_HOLD: event '{}' matches topic-deny rule.\n{}\n\n\
+                         Loop held due to topic-deny rule. Use resume to continue.",
+                        event.topic, finding.message
+                    );
+                    let recovery_event = Event::new("task.resume", &recovery_payload);
+                    bus.publish(recovery_event);
+                }
+                PolicyDecision::Block(_finding) => {
+                    // Silently drop the event
+                }
+                PolicyDecision::Ignore(_finding) => {
+                    // Silently ignore the event
+                }
+            }
+            continue;
+        }
+
         let decision = validate_event(
             &event.topic,
             event.payload.as_deref(),
@@ -755,7 +818,8 @@ fn finding_to_payload_contract_violation(
         ViolationType::TerminalMonotonicityViolation { .. }
         | ViolationType::DuplicateTerminalEvent { .. }
         | ViolationType::BusinessEventAfterCompletion { .. }
-        | ViolationType::InvalidTopicFormat { .. } => return None,
+        | ViolationType::InvalidTopicFormat { .. }
+        | ViolationType::TopicDenied { .. } => return None,
     };
     let fix_hint = match kind {
         PayloadContractViolationKind::MissingRequiredField => format!(
@@ -2357,7 +2421,10 @@ impl EventLoop {
                 let base_prompt = self.ralph.build_prompt(
                     &events_context,
                     &active_hats,
-                    &trigger_topics.iter().map(String::as_str).collect::<Vec<_>>(),
+                    &trigger_topics
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>(),
                 );
 
                 // Build prompt with active hats - filters instructions to only active hats

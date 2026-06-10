@@ -34,7 +34,8 @@ pub use core::{CoreConfig, ScratchpadConfig};
 pub use error::ConfigError;
 pub use event_filter::{EventFilterConfig, EventFilterMode};
 pub use event_policy::{
-    CompletionAfterTerminalAction, EventPolicyConfig, EventPolicyMode, ViolationAction,
+    CompletionAfterTerminalAction, EventPolicyConfig, EventPolicyMode, TopicDenyRule,
+    ViolationAction,
 };
 pub use event_projection::{EventProjectionConfig, ProjectionMode, ProjectionRule};
 pub use execution_contracts::ExecutionContractRule;
