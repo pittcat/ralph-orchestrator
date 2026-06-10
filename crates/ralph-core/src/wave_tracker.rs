@@ -164,6 +164,13 @@ impl WaveTracker {
         state.progress()
     }
 
+    /// Check if a specific worker index has already reported (result or failure).
+    pub fn has_reported(&self, wave_id: &str, index: u32) -> bool {
+        self.active_waves
+            .get(wave_id)
+            .is_some_and(|state| state.has_index(index))
+    }
+
     /// Check if a wave is complete (all results + failures == expected total).
     pub fn is_complete(&self, wave_id: &str) -> bool {
         self.active_waves

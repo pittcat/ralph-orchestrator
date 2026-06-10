@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use futures::StreamExt;
 use ralph_adapters::CliBackend;
 use ralph_proto::RpcEvent;
 use ratatui::style::{Color, Style};
@@ -432,48 +433,118 @@ pub async fn execute_wave(
     let aggregate_timeout = Duration::from_secs(wave_timeout.as_secs().saturating_mul(batches))
         + Duration::from_secs(30);
 
-    // Collect results with aggregate timeout to prevent indefinite hangs
-    let results =
-        match tokio::time::timeout(aggregate_timeout, futures::future::join_all(handles)).await {
-            Ok(results) => results,
-            Err(_) => {
+    // U1: partial threshold at 80% of aggregate_timeout.
+    // When some workers haven't reported by this time, force-dispatch
+    // whatever results have arrived so far as a partial wave.
+    let partial_threshold = Duration::from_secs(
+        (aggregate_timeout.as_secs() * 8).div_ceil(10), // × 0.8, rounded up
+    );
+
+    // Collect results using FuturesUnordered so we can record each result
+    // to the tracker as it arrives, enabling accurate partial-threshold checks.
+    let mut pending = futures::stream::FuturesUnordered::new();
+    for handle in handles {
+        pending.push(handle);
+    }
+
+    let mut partial_threshold_fired = false;
+    let partial_deadline = tokio::time::Instant::now() + partial_threshold;
+    let aggregate_deadline = tokio::time::Instant::now() + aggregate_timeout;
+
+    loop {
+        if pending.is_empty() {
+            break;
+        }
+
+        let remaining_timeout = if partial_threshold_fired {
+            aggregate_deadline.saturating_duration_since(tokio::time::Instant::now())
+        } else {
+            partial_deadline.saturating_duration_since(tokio::time::Instant::now())
+        };
+
+        tokio::select! {
+            result = pending.next() => {
+                let Some(result) = result else { break };
+
+                match result {
+                    Ok((index, Ok((events, _duration, _success)))) => {
+                        let proto_events: Vec<ralph_proto::Event> =
+                            events.into_iter().map(ralph_proto::Event::from).collect();
+                        tracker.record_result(&wave.wave_id, index, proto_events);
+                    }
+                    Ok((index, Err((error, duration)))) => {
+                        tracker.record_failure(&wave.wave_id, index, error, duration);
+                    }
+                    Err(join_err) => {
+                        // Task panicked or was cancelled — index is lost from JoinError.
+                        // The missing-index sweep below will record the failure.
+                        warn!(error = %join_err, "Wave worker task panicked");
+                    }
+                }
+
+                // If wave is now complete, no need to wait further
+                if tracker.is_complete(&wave.wave_id) {
+                    break;
+                }
+            }
+            _ = tokio::time::sleep(remaining_timeout), if !partial_threshold_fired => {
+                // Partial threshold reached — check if wave is already complete
+                if tracker.is_complete(&wave.wave_id) {
+                    break;
+                }
+
+                // Force-dispatch partial wave
+                warn!(
+                    wave_id = %wave.wave_id,
+                    threshold_secs = partial_threshold.as_secs(),
+                    "Partial threshold reached, force-dispatching available results"
+                );
+                // Inject synthetic failures for workers that haven't reported yet
+                for i in 0..wave.total {
+                    if !tracker.has_reported(&wave.wave_id, i) {
+                        tracker.record_failure(
+                            &wave.wave_id,
+                            i,
+                            format!(
+                                "Worker {} did not report before partial threshold ({}s)",
+                                i, partial_threshold.as_secs()
+                            ),
+                            partial_threshold,
+                        );
+                    }
+                }
+                // Force-take whatever we have
+                let completed = tracker
+                    .force_take_wave_results(&wave.wave_id)
+                    .expect("wave must exist in tracker after registration");
+                // Cancel remaining worker tasks — they'll be dropped when
+                // the FuturesUnordered goes out of scope.
+                let _ = progress_handle.await;
+                return Ok(completed);
+            }
+            _ = tokio::time::sleep_until(aggregate_deadline), if partial_threshold_fired => {
+                // Aggregate timeout reached after partial threshold
                 warn!(
                     timeout_secs = aggregate_timeout.as_secs(),
                     "Wave aggregate timeout reached, cancelling remaining workers"
                 );
-                Vec::new()
+                break;
             }
-        };
+        }
 
-    let mut reported_indices = std::collections::HashSet::new();
-
-    for result in results {
-        match result {
-            Ok((index, Ok((events, _duration, _success)))) => {
-                reported_indices.insert(index);
-                let proto_events: Vec<ralph_proto::Event> =
-                    events.into_iter().map(ralph_proto::Event::from).collect();
-                tracker.record_result(&wave.wave_id, index, proto_events);
-            }
-            Ok((index, Err((error, duration)))) => {
-                reported_indices.insert(index);
-                tracker.record_failure(&wave.wave_id, index, error, duration);
-            }
-            Err(join_err) => {
-                // Task panicked or was cancelled — index is lost from JoinError.
-                // The missing-index sweep below will record the failure.
-                warn!(error = %join_err, "Wave worker task panicked");
-            }
+        // If we just passed the partial threshold point without the select
+        // firing (because workers were completing), mark it as fired.
+        if !partial_threshold_fired && tokio::time::Instant::now() >= partial_deadline {
+            partial_threshold_fired = true;
         }
     }
 
-    // Wait for progress reporter after consuming join results. Successful
-    // worker outcomes still own a sender until the result is dropped here.
+    // Wait for progress reporter after consuming join results.
     let _ = progress_handle.await;
 
     // Record failures for any workers that didn't report back (panicked or timed out).
     for i in 0..wave.total {
-        if !reported_indices.contains(&i) {
+        if !tracker.has_reported(&wave.wave_id, i) {
             warn!(
                 worker = i,
                 wave_id = %wave.wave_id,

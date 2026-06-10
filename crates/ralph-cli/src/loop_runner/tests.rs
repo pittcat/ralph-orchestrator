@@ -4547,6 +4547,7 @@ fn make_test_wave_with_timeout_and_payload(
         },
         events: vec![event],
         total: 1,
+        partial: false,
     }
 }
 

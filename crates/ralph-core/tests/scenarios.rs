@@ -674,3 +674,31 @@ fn test_preset_static_lint_scenario() {
             .collect::<Vec<_>>()
     );
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// 2026-06-09: four P0 guards BDD scenarios (U1–U4)
+// ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_u1_partial_wave_dispatch() {
+    let yaml = load_scenario("tests/scenarios/four-p0-guards/u1-partial-wave-dispatch.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_u2_ralph_pseudo_hat_rejection() {
+    let yaml = load_scenario("tests/scenarios/four-p0-guards/u2-ralph-pseudo-hat-rejection.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_u3_topic_deny_rule() {
+    let yaml = load_scenario("tests/scenarios/four-p0-guards/u3-topic-deny-rule.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_u4_plan_name_equality() {
+    let yaml = load_scenario("tests/scenarios/four-p0-guards/u4-plan-name-equality.yml");
+    run_workflow_guard_scenario(yaml);
+}

@@ -1,0 +1,49 @@
+# U4: plan_name 字段值锁死
+#
+# 场景：验证 work.done 的 plan_name 与 work.ready 一致时被接受。
+# plan_name_mismatch 的精确拒绝逻辑在 event_policy.rs 单元测试中覆盖。
+# 本 BDD 验证正常匹配路径不被误伤。
+
+name: u4_plan_name_equality
+description: 验证 plan_name 匹配时 work.done 被正常接受
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 4
+  hats:
+    coordinator:
+      subscribes_to:
+        - work.start
+      publishes:
+        - work.ready
+    executor:
+      subscribes_to:
+        - work.ready
+      publishes:
+        - work.done
+
+mock_responses:
+  - |
+    <event topic="work.start" plan_name="plan-u4" plan_path="docs/plans/u4.md" task_id="t1" task_key="k1" step="step-01">
+    Starting work.
+    </event>
+  - |
+    <event topic="work.ready" plan_name="plan-u4" plan_path="docs/plans/u4.md" task_id="t1" task_key="k1" step="step-01">
+    Work ready for execution.
+    </event>
+  - |
+    <event topic="work.done" plan_name="plan-u4" plan_path="docs/plans/u4.md" task_id="t1" task_key="k1" step="step-01">
+    Work completed with matching plan_name.
+    </event>
+  - |
+    <event topic="LOOP_COMPLETE">
+    All done.
+    </event>
+
+expected:
+  iterations: 4
+  events:
+    - topic: work.start
+    - topic: work.ready
+    - topic: work.done
+  completion: true

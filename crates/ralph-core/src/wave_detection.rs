@@ -9,6 +9,17 @@ use crate::hat_registry::HatRegistry;
 use ralph_proto::HatId;
 use std::collections::HashMap;
 
+/// Whether to accept partial waves (fewer events than `wave_total`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartialWavePolicy {
+    /// Only accept complete waves (all `wave_total` events present).
+    RequireComplete,
+    /// Accept partial waves when some events are present but fewer than
+    /// `wave_total`.  The dispatcher uses this after the staleness
+    /// threshold (80% of aggregate_timeout) has been reached.
+    AllowPartial,
+}
+
 /// A detected wave ready for execution.
 #[derive(Debug)]
 pub struct DetectedWave {
@@ -20,8 +31,13 @@ pub struct DetectedWave {
     pub hat_config: HatConfig,
     /// Individual events in this wave, ordered by wave_index.
     pub events: Vec<Event>,
-    /// Total expected events in the wave.
+    /// Total expected events in the wave (may be greater than `events.len()`
+    /// when this is a partial wave).
     pub total: u32,
+    /// Whether this wave was detected with fewer events than `total`.
+    /// When true, the aggregator should note that some workers did not
+    /// report back and list missing dimensions in Coverage.
+    pub partial: bool,
 }
 
 impl DetectedWave {
@@ -44,10 +60,16 @@ impl DetectedWave {
 
 /// Attempt to build a validated `DetectedWave` from a group of events sharing
 /// the same `wave_id`.
+///
+/// When `policy` is [`PartialWavePolicy::AllowPartial`], waves with fewer
+/// events than `wave_total` are accepted (marked `partial: true`).  This is
+/// used by the dispatcher after the staleness threshold (80% of
+/// aggregate_timeout) to force-dispatch whatever results have arrived so far.
 fn try_build_wave(
     wave_id: &str,
     wave_events: Vec<&Event>,
     registry: &HatRegistry,
+    policy: PartialWavePolicy,
 ) -> Option<DetectedWave> {
     let first = wave_events.first()?;
     let topic = &first.topic;
@@ -93,7 +115,8 @@ fn try_build_wave(
         }
     }
 
-    if wave_events.len() as u32 != wave_total {
+    let is_partial = wave_events.len() as u32 != wave_total;
+    if is_partial && policy == PartialWavePolicy::RequireComplete {
         tracing::warn!(
             wave_id,
             expected = wave_total,
@@ -101,6 +124,15 @@ fn try_build_wave(
             "wave batch size does not match wave_total; skipping wave"
         );
         return None;
+    }
+
+    if is_partial {
+        tracing::info!(
+            wave_id,
+            expected = wave_total,
+            actual = wave_events.len() as u32,
+            "Accepting partial wave (AllowPartial policy)"
+        );
     }
 
     // Resolve target hat from the event topic
@@ -122,6 +154,7 @@ fn try_build_wave(
         hat_config,
         events: sorted_events,
         total: wave_total,
+        partial: is_partial,
     })
 }
 
@@ -132,6 +165,8 @@ fn try_build_wave(
 ///
 /// v1: Returns the first detected wave (one wave per iteration).
 /// Events without wave metadata are ignored.
+/// Only complete waves are returned (use [`detect_all_wave_events_with_policy`]
+/// for partial wave support).
 pub fn detect_wave_events(events: &[Event], registry: &HatRegistry) -> Option<DetectedWave> {
     // Group events by wave_id
     let mut wave_groups: HashMap<&str, Vec<&Event>> = HashMap::new();
@@ -155,7 +190,7 @@ pub fn detect_wave_events(events: &[Event], registry: &HatRegistry) -> Option<De
         );
     }
     let wave_events = wave_groups.remove(wave_id)?;
-    try_build_wave(wave_id, wave_events, registry)
+    try_build_wave(wave_id, wave_events, registry, PartialWavePolicy::RequireComplete)
 }
 
 /// Detect **all** valid wave events from a set of events.
@@ -168,7 +203,25 @@ pub fn detect_wave_events(events: &[Event], registry: &HatRegistry) -> Option<De
 /// Waves are sorted by `wave_id` for deterministic execution order.
 /// Events without wave metadata, or belonging to an invalid/incomplete wave,
 /// are ignored.
+///
+/// Only complete waves are returned.  For partial wave support (after
+/// staleness threshold), use [`detect_all_wave_events_with_policy`].
 pub fn detect_all_wave_events(events: &[Event], registry: &HatRegistry) -> Vec<DetectedWave> {
+    detect_all_wave_events_with_policy(events, registry, PartialWavePolicy::RequireComplete)
+}
+
+/// Detect **all** valid wave events from a set of events, with configurable
+/// partial-wave policy.
+///
+/// When `policy` is [`PartialWavePolicy::AllowPartial`], waves with fewer
+/// events than `wave_total` are also returned (marked `partial: true`).
+/// The dispatcher calls this after the staleness threshold to force-dispatch
+/// whatever results have arrived.
+pub fn detect_all_wave_events_with_policy(
+    events: &[Event],
+    registry: &HatRegistry,
+    policy: PartialWavePolicy,
+) -> Vec<DetectedWave> {
     // Group events by wave_id
     let mut wave_groups: HashMap<&str, Vec<&Event>> = HashMap::new();
     for event in events {
@@ -179,7 +232,7 @@ pub fn detect_all_wave_events(events: &[Event], registry: &HatRegistry) -> Vec<D
 
     let mut detected = Vec::new();
     for (wave_id, wave_events) in wave_groups {
-        if let Some(wave) = try_build_wave(wave_id, wave_events, registry) {
+        if let Some(wave) = try_build_wave(wave_id, wave_events, registry, policy) {
             detected.push(wave);
         }
     }
@@ -248,6 +301,7 @@ mod tests {
         assert_eq!(wave.wave_id, "w-abc");
         assert_eq!(wave.total, 3);
         assert_eq!(wave.events.len(), 3);
+        assert!(!wave.partial, "complete wave must not be marked partial");
         assert_eq!(wave.target_hat.as_str(), "reviewer");
         assert_eq!(wave.hat_config.concurrency, 4);
     }
@@ -423,6 +477,7 @@ mod tests {
         let wave = detect_wave_events(&events, &registry).expect("valid wave must be detected");
         assert_eq!(wave.total, 2);
         assert_eq!(wave.events.len(), 2);
+        assert!(!wave.partial);
     }
 
     // ---- detect_all_wave_events tests (Bug #1 regression) ----
@@ -492,5 +547,60 @@ mod tests {
         ];
         let waves = detect_all_wave_events(&events, &registry);
         assert!(waves.is_empty(), "incomplete wave should be skipped");
+    }
+
+    // ---- U1: partial wave detection tests ----
+
+    #[test]
+    fn test_allow_partial_accepts_incomplete_wave() {
+        let registry = make_registry_with_concurrent_hat();
+        // 2 out of 3 events present — RequireComplete rejects, AllowPartial accepts
+        let events = vec![
+            make_wave_event("review.file", "p0", "w-part", 0, 3),
+            make_wave_event("review.file", "p2", "w-part", 2, 3),
+        ];
+
+        // RequireComplete → no wave
+        let waves = detect_all_wave_events(&events, &registry);
+        assert!(waves.is_empty(), "RequireComplete must skip partial wave");
+
+        // AllowPartial → wave with partial=true
+        let waves = detect_all_wave_events_with_policy(
+            &events,
+            &registry,
+            PartialWavePolicy::AllowPartial,
+        );
+        assert_eq!(waves.len(), 1);
+        assert!(waves[0].partial, "partial wave must be marked");
+        assert_eq!(waves[0].total, 3, "total must reflect expected count");
+        assert_eq!(waves[0].events.len(), 2, "events only contains arrived results");
+    }
+
+    #[test]
+    fn test_allow_partial_complete_wave_not_marked_partial() {
+        let registry = make_registry_with_concurrent_hat();
+        let events = vec![
+            make_wave_event("review.file", "a", "w-full", 0, 2),
+            make_wave_event("review.file", "b", "w-full", 1, 2),
+        ];
+        let waves = detect_all_wave_events_with_policy(
+            &events,
+            &registry,
+            PartialWavePolicy::AllowPartial,
+        );
+        assert_eq!(waves.len(), 1);
+        assert!(!waves[0].partial, "complete wave must not be marked partial even with AllowPartial");
+    }
+
+    #[test]
+    fn test_allow_partial_zero_events_still_skipped() {
+        let registry = make_registry_with_concurrent_hat();
+        // No events at all — nothing to detect
+        let waves = detect_all_wave_events_with_policy(
+            &[],
+            &registry,
+            PartialWavePolicy::AllowPartial,
+        );
+        assert!(waves.is_empty());
     }
 }
