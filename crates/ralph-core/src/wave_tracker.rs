@@ -49,6 +49,10 @@ pub struct CompletedWave {
     pub results: Vec<WaveResult>,
     pub failures: Vec<WaveFailure>,
     pub duration: Duration,
+    /// Whether this wave completed with fewer results than expected.
+    /// When true, the aggregator should note that some workers did not
+    /// report back and list missing dimensions in Coverage.
+    pub partial: bool,
 }
 
 /// Progress indicator returned by `record_result`.
@@ -170,12 +174,36 @@ impl WaveTracker {
     /// Consume a completed wave, removing it from tracking.
     pub fn take_wave_results(&mut self, wave_id: &str) -> Option<CompletedWave> {
         let state = self.active_waves.remove(wave_id)?;
+        // partial=true when not all workers produced successful results
+        let partial = (state.results.len() as u32) < state.expected_total;
         Some(CompletedWave {
             wave_id: state.wave_id,
             wave_total: state.expected_total,
             results: state.results,
             failures: state.failures,
             duration: state.started_at.elapsed(),
+            partial,
+        })
+    }
+
+    /// Force-take wave results even when the wave is not complete.
+    ///
+    /// Unlike `take_wave_results`, this does not require all workers to have
+    /// reported.  Use this for partial wave dispatch after staleness threshold,
+    /// or for emergency wave recovery.
+    ///
+    /// Returns `None` if the wave_id is not tracked.
+    pub fn force_take_wave_results(&mut self, wave_id: &str) -> Option<CompletedWave> {
+        let state = self.active_waves.remove(wave_id)?;
+        // partial=true when not all workers produced successful results
+        let partial = (state.results.len() as u32) < state.expected_total;
+        Some(CompletedWave {
+            wave_id: state.wave_id,
+            wave_total: state.expected_total,
+            results: state.results,
+            failures: state.failures,
+            duration: state.started_at.elapsed(),
+            partial,
         })
     }
 
@@ -448,5 +476,83 @@ mod tests {
         );
         assert_eq!(completed.results.len(), 5);
         assert_eq!(completed.failures.len(), 3);
+    }
+
+    // -------------------------------------------------------------------------
+    // U1: force_take_wave_results tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_force_take_wave_results_returns_partial_when_incomplete() {
+        // Register 8 workers, only 3 report → force_take returns partial wave
+        let mut tracker = WaveTracker::new();
+        tracker.register_wave("w-partial-ft".to_string(), 8);
+        for i in 0..3 {
+            let ev = ralph_proto::Event::new("review.dimension.done", "");
+            tracker.record_result("w-partial-ft", i, vec![ev]);
+        }
+        // 5 workers never report — force take
+        let completed = tracker
+            .force_take_wave_results("w-partial-ft")
+            .expect("force_take must return Some for tracked wave");
+        assert!(completed.partial, "incomplete wave must be marked partial");
+        assert_eq!(completed.results.len(), 3);
+        assert_eq!(completed.failures.len(), 0);
+        assert_eq!(completed.wave_total, 8);
+        // Wave should be removed from tracker
+        assert!(!tracker.has_active_waves());
+    }
+
+    #[test]
+    fn test_force_take_wave_results_returns_none_for_unknown() {
+        let mut tracker = WaveTracker::new();
+        assert!(tracker.force_take_wave_results("w-unknown").is_none());
+    }
+
+    #[test]
+    fn test_force_take_wave_results_complete_wave_not_partial() {
+        // All workers report → force_take should also set partial=false
+        let mut tracker = WaveTracker::new();
+        tracker.register_wave("w-full".to_string(), 3);
+        for i in 0..3 {
+            let ev = ralph_proto::Event::new("review.dimension.done", "");
+            tracker.record_result("w-full", i, vec![ev]);
+        }
+        let completed = tracker
+            .force_take_wave_results("w-full")
+            .expect("force_take must return Some for complete wave");
+        assert!(
+            !completed.partial,
+            "complete wave must NOT be marked partial"
+        );
+        assert_eq!(completed.results.len(), 3);
+    }
+
+    #[test]
+    fn test_take_wave_results_sets_partial_when_failures_exist() {
+        // All workers accounted (some failures) but not all succeeded → partial
+        let mut tracker = WaveTracker::new();
+        tracker.register_wave("w-mixed".to_string(), 5);
+        for i in 0..3 {
+            let ev = ralph_proto::Event::new("review.dimension.done", "");
+            tracker.record_result("w-mixed", i, vec![ev]);
+        }
+        for i in 3..5 {
+            tracker.record_failure(
+                "w-mixed",
+                i,
+                "worker failed".into(),
+                Duration::from_millis(50),
+            );
+        }
+        let completed = tracker
+            .take_wave_results("w-mixed")
+            .expect("wave must complete");
+        assert!(
+            completed.partial,
+            "mixed result/failure wave must be partial (not all succeeded)"
+        );
+        assert_eq!(completed.results.len(), 3);
+        assert_eq!(completed.failures.len(), 2);
     }
 }

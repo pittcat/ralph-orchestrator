@@ -6835,6 +6835,7 @@ async fn test_run_wave_worker_acp_timeout_with_partial_events_keeps_events_visib
         }],
         failures: vec![],
         duration: Duration::from_millis(1),
+        partial: false,
     };
 
     merge_wave_results_to_events_file(
@@ -6994,6 +6995,7 @@ fn test_merge_wave_results_to_events_file_synthesizes_failure_events() {
             duration: Duration::from_secs(1),
         }],
         duration: Duration::from_secs(1),
+        partial: false,
     };
 
     merge_wave_results_to_events_file(
@@ -9384,6 +9386,7 @@ fn u3_wave_merge_stamps_wave_total_on_every_record() {
             .collect(),
         failures: Vec::new(),
         duration: Duration::from_millis(1234),
+        partial: false,
     };
 
     let tmp = tempfile::TempDir::new().unwrap();
@@ -9437,6 +9440,7 @@ fn u3_wave_merge_emits_synthetic_events_on_failure_with_wave_total() {
             },
         ],
         duration: Duration::from_millis(500),
+        partial: false,
     };
     let tmp = tempfile::TempDir::new().unwrap();
     let events_path = tmp.path().join("events.jsonl");
@@ -9496,6 +9500,7 @@ fn u3_wave_merge_handles_duplicate_indexes_without_panicking() {
         results,
         failures: Vec::new(),
         duration: Duration::from_millis(100),
+        partial: false,
     };
     let tmp = tempfile::TempDir::new().unwrap();
     let events_path = tmp.path().join("events.jsonl");
