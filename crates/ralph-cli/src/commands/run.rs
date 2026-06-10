@@ -534,8 +534,11 @@ pub async fn run_command(
         );
     }
 
-    // Capture args for subprocess TUI mode BEFORE fields are consumed below
-    let subprocess_tui_args = SubprocessTuiArgs::new(&args, config_sources, hats_source);
+    // Capture args for subprocess TUI mode BEFORE fields are consumed below.
+    // `let mut` is required so the worktree branch (below) can rewrite
+    // `worktree=false` + `worktree_path=Some(...)` after spawn_worktree_loop
+    // returns. P1-F fix on 2026-06-10.
+    let mut subprocess_tui_args = SubprocessTuiArgs::new(&args, config_sources, hats_source);
 
     // Apply CLI overrides (after normalization so they take final precedence)
     // Per spec: CLI -p and -P are mutually exclusive (enforced by clap)
@@ -729,13 +732,27 @@ pub async fn run_command(
         // Explicit --worktree flag: create worktree directly without acquiring lock
         // Worktree mode does not hold .ralph/loop.lock - it's fully isolated
         debug!("Creating worktree for explicit --worktree mode");
-        spawn_worktree_loop(
+        let (wt_ctx, _wt_guard) = spawn_worktree_loop(
             workspace_root,
             &prompt_summary,
             worktree_file_name_prefix.as_deref(),
             &config.features.loop_naming,
             &mut pending_worktree_registration,
-        )?
+        )?;
+        // P1-F (2026-06-10): when the parent itself creates the worktree
+        // and then spawns a child RPC, the child MUST NOT receive
+        // `--worktree` (it would create a *second* worktree inside the
+        // parent's). Pass the worktree path instead so the child
+        // chdir's into the parent's worktree and runs there. Without
+        // this, the child sees `--worktree`, hits the same `args.worktree`
+        // branch, and spawns a nested worktree — the parent loop_context
+        // points at the first worktree (orphaned), the child runs in the
+        // second (different path), and LoopRegistry registers the first
+        // (inconsistent). See findings-correctness-task-*.json for the
+        // full causal chain.
+        subprocess_tui_args.worktree = false;
+        subprocess_tui_args.worktree_path = Some(wt_ctx.workspace().to_path_buf());
+        (wt_ctx, None)
     } else {
         match LoopLock::inspect(workspace_root) {
             Ok(LockStatus::None) => {
@@ -1115,6 +1132,12 @@ struct SubprocessTuiArgs {
     pub skip_preflight: bool,
     pub no_sync_agent_docs: bool,
     pub worktree: bool,
+    /// When set, the child RPC process chdir's into this path before starting.
+    /// Populated by the parent when `--worktree` is used: parent already
+    /// created the worktree, so the child must NOT receive `--worktree` (that
+    /// would cause a duplicate worktree). Instead, the child inherits the
+    /// parent's worktree path here. P1-F fix on 2026-06-10.
+    pub worktree_path: Option<PathBuf>,
     /// Config sources to forward to child process (-c args)
     pub config_sources: Vec<String>,
     /// Hats source to forward to child process (-H arg)
@@ -1145,6 +1168,7 @@ impl SubprocessTuiArgs {
             skip_preflight: args.skip_preflight,
             no_sync_agent_docs: args.no_sync_agent_docs,
             worktree: args.worktree,
+            worktree_path: None,
             config_sources: config_sources.iter().map(|s| s.to_cli_string()).collect(),
             hats_source: hats_source.map(|h| h.label()),
         }
@@ -1163,6 +1187,27 @@ async fn run_subprocess_tui(
 ) -> Result<TerminationReason> {
     use std::process::Stdio;
     use tokio::process::Command;
+
+    // P1-F (2026-06-10): when the parent created a worktree and is now
+    // spawning the child RPC, chdir into the worktree before spawn.
+    // Without this, the child inherits the parent's cwd (the main
+    // workspace) and runs the orchestration loop there — so its events,
+    // memories, and tasks all land in the main `.ralph/`, polluting the
+    // worktree isolation. The child does NOT receive `--worktree` (the
+    // boolean is cleared at the call site), so its loop_context will be
+    // primary() of whatever cwd it sees — we want cwd == worktree path.
+    if let Some(ref worktree_path) = args.worktree_path {
+        std::env::set_current_dir(worktree_path).with_context(|| {
+            format!(
+                "Failed to chdir into worktree path '{}' for child RPC process",
+                worktree_path.display()
+            )
+        })?;
+        debug!(
+            "Child RPC will run inside worktree at '{}'",
+            worktree_path.display()
+        );
+    }
 
     // Build child command: ralph [-c ...] [-H ...] run --rpc <forwarded args>
     // Note: -c and -H are global options that must come BEFORE the subcommand
