@@ -87,6 +87,22 @@ pub struct AgentDocSyncConfig {
     /// `"builtin:hang-prevention"` is supported.
     #[serde(default = "default_blocks")]
     pub blocks: Vec<String>,
+
+    /// Hard timeout (seconds) for the sync phase that runs before
+    /// backend spawn. Defaults to 30 seconds.
+    ///
+    /// The sync runs synchronously (blocking I/O) before the
+    /// orchestrator spawns the backend. A stuck file lock, slow disk,
+    /// or NFS round-trip could otherwise hang the outer loop. The
+    /// runner bounds the sync with a worker thread + `recv_timeout`;
+    /// when the timeout fires, a `startup_timeout` recovery envelope
+    /// is written and the loop continues (or aborts under
+    /// `OnError::Strict`).
+    ///
+    /// Set to `0` to disable the timeout (legacy behaviour, not
+    /// recommended).
+    #[serde(default = "default_startup_timeout_secs")]
+    pub startup_timeout_secs: u64,
 }
 
 impl Default for AgentDocSyncConfig {
@@ -95,6 +111,7 @@ impl Default for AgentDocSyncConfig {
             enabled: default_enabled(),
             on_error: OnErrorPolicy::default(),
             blocks: default_blocks(),
+            startup_timeout_secs: default_startup_timeout_secs(),
         }
     }
 }
@@ -107,6 +124,16 @@ fn default_enabled() -> bool {
 /// Returns the default `blocks` list (`["builtin:hang-prevention"]`).
 fn default_blocks() -> Vec<String> {
     vec!["builtin:hang-prevention".to_string()]
+}
+
+/// Returns the default `startup_timeout_secs` value (`30` seconds).
+///
+/// 30s is generous for a sync that writes 2 small markdown files on
+/// local disk (typical: <100ms). It guards against pathological cases
+/// (held file lock, NFS hang, sandboxed FS quirks) without firing on
+/// normal slow CI runners.
+fn default_startup_timeout_secs() -> u64 {
+    30
 }
 
 /// Determines whether sync should be skipped based on env, flag, and config.
@@ -134,6 +161,24 @@ mod tests {
         assert!(cfg.enabled);
         assert_eq!(cfg.on_error, OnErrorPolicy::Warn);
         assert_eq!(cfg.blocks, vec!["builtin:hang-prevention"]);
+        assert_eq!(cfg.startup_timeout_secs, 30);
+    }
+
+    #[test]
+    fn agent_doc_sync_config_startup_timeout_default_30() {
+        // D5: the default timeout is 30s (generous for local disk,
+        // protective against held locks / NFS).
+        let cfg = AgentDocSyncConfig::default();
+        assert_eq!(cfg.startup_timeout_secs, 30);
+    }
+
+    #[test]
+    fn agent_doc_sync_config_startup_timeout_zero_disables() {
+        // D5: setting to 0 explicitly disables the timeout (legacy
+        // behaviour, not recommended).
+        let yaml = "startup_timeout_secs: 0\n";
+        let cfg: AgentDocSyncConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.startup_timeout_secs, 0);
     }
 
     #[test]

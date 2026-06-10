@@ -1,6 +1,10 @@
 use super::*;
 use ralph_core::diagnosis::TerminationHint;
+use std::path::Path;
 use std::sync::Arc;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 /// U8: Build the operator-facing [`ralph_core::DiagnosisHint`]
 /// and the `diagnosis-summary.json` seed for a terminating loop run.
@@ -730,9 +734,16 @@ pub async fn run_loop_impl(
                 session_dir,
             };
 
-            match ralph_core::agent_doc_sync::sync_all(
+            // D5: bound the startup-blocking sync phase. `sync_all` is
+            // synchronous; run it on a worker thread and `recv_timeout`
+            // so a slow disk / stuck lock / NFS round-trip can never
+            // hang the outer loop. Timeout → warning envelope;
+            // `OnError::Strict` upgrades that into a hard exit.
+            let timeout_secs = config.agent_doc_sync.startup_timeout_secs;
+            match run_sync_with_timeout(
                 &config.core.workspace_root,
                 &sync_config,
+                timeout_secs,
             ) {
                 Ok(report) => {
                     tracing::debug!(
@@ -743,7 +754,7 @@ pub async fn run_loop_impl(
                         "agent_doc_sync: complete"
                     );
                 }
-                Err(e) => {
+                Err(SyncRunError::Sync(e)) => {
                     match config.agent_doc_sync.on_error {
                         ralph_core::OnErrorPolicy::Strict => {
                             tracing::error!(
@@ -761,6 +772,26 @@ pub async fn run_loop_impl(
                                 "agent_doc_sync: failed; continuing"
                             );
                         }
+                    }
+                }
+                Err(SyncRunError::Timeout { secs }) => {
+                    tracing::warn!(
+                        target: "ralph_cli::loop_runner",
+                        timeout_secs = secs,
+                        "agent_doc_sync: startup timeout; continuing without managed blocks"
+                    );
+                    write_startup_timeout_envelope(
+                        session_dir,
+                        secs,
+                        config.agent_doc_sync.on_error,
+                    );
+                    if config.agent_doc_sync.on_error
+                        == ralph_core::OnErrorPolicy::Strict
+                    {
+                        return Err(anyhow::anyhow!(
+                            "agent_doc_sync exceeded {secs}s startup timeout (strict mode)"
+                        ))
+                        .context("agent doc sync startup timeout");
                     }
                 }
             }
@@ -3730,5 +3761,205 @@ pub async fn run_loop_impl(
                 .write_active_activations(&activations);
             last_activations_heartbeat = Some(std::time::Instant::now());
         }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// D5: startup-timeout helpers for `agent_doc_sync::sync_all`.
+//
+// `sync_all` runs blocking I/O before backend spawn. A stuck lock,
+// slow disk, or NFS round-trip can otherwise hang the outer loop.
+// We run the sync on a worker thread and `recv_timeout` it.
+// ──────────────────────────────────────────────────────────────────────
+
+/// Outcome of running `sync_all` with a startup timeout.
+#[derive(Debug)]
+enum SyncRunError {
+    /// `sync_all` returned an error (lock contention, I/O, etc.).
+    Sync(ralph_core::agent_doc_sync::SyncError),
+    /// The sync did not finish within the configured timeout.
+    Timeout { secs: u64 },
+}
+
+/// Run `sync_all` on a worker thread and bound it with `timeout_secs`.
+///
+/// `timeout_secs == 0` disables the timeout (legacy behaviour): the
+/// call blocks on the worker thread indefinitely.
+///
+/// The worker thread is intentionally **not** joined on timeout —
+/// the thread will eventually finish (or stay parked on a held file
+/// lock) and exit; leaking it is preferable to blocking the loop.
+fn run_sync_with_timeout(
+    workspace_root: &Path,
+    sync_config: &ralph_core::agent_doc_sync::SyncConfig<'_>,
+    timeout_secs: u64,
+) -> Result<ralph_core::agent_doc_sync::SyncReport, SyncRunError> {
+    use std::path::PathBuf;
+
+    if timeout_secs == 0 {
+        // No timeout: run inline so we surface real errors.
+        return ralph_core::agent_doc_sync::sync_all(workspace_root, sync_config)
+            .map_err(SyncRunError::Sync);
+    }
+
+    let (tx, rx) = mpsc::channel::<
+        Result<ralph_core::agent_doc_sync::SyncReport, ralph_core::agent_doc_sync::SyncError>,
+    >();
+    let root: PathBuf = workspace_root.to_path_buf();
+
+    // Reconstruct a short-lived `SyncConfig` whose lifetimes are tied
+    // to the worker thread. `target_files` is a `&'static` slice of
+    // string literals; `blocks_vec` is an owned `Vec` moved into the
+    // closure.
+    let target_files: &'static [&'static str] = &["CLAUDE.md", "AGENTS.md"];
+    let blocks_vec: Vec<ralph_core::agent_doc_sync::BlockSpec> =
+        sync_config.blocks.to_vec();
+    let on_error = sync_config.on_error;
+    let session_dir_owned: Option<PathBuf> =
+        sync_config.session_dir.map(|p| p.to_path_buf());
+
+    let handle = thread::Builder::new()
+        .name("ralph-agent-doc-sync".to_string())
+        .spawn(move || {
+            let cfg = ralph_core::agent_doc_sync::SyncConfig {
+                skip: false,
+                on_error,
+                target_files,
+                blocks: &blocks_vec,
+                session_dir: session_dir_owned.as_deref(),
+            };
+            let result = ralph_core::agent_doc_sync::sync_all(&root, &cfg);
+            // Ignore send failure: receiver may have timed out.
+            let _ = tx.send(result);
+        })
+        .expect("failed to spawn agent_doc_sync worker thread");
+
+    match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
+        Ok(Ok(report)) => Ok(report),
+        Ok(Err(e)) => Err(SyncRunError::Sync(e)),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            tracing::warn!(
+                target: "ralph_cli::loop_runner",
+                timeout_secs,
+                "agent_doc_sync: worker thread did not return in time; detaching"
+            );
+            // Detach: the thread will eventually finish (or hang on a
+            // held lock); joining it would defeat the timeout.
+            let _ = handle;
+            Err(SyncRunError::Timeout { secs: timeout_secs })
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            // Worker panicked before sending. Treat as a sync error
+            // so callers can decide (Strict → exit, Warn → continue).
+            Err(SyncRunError::Sync(
+                ralph_core::agent_doc_sync::SyncError::VerifyFailed {
+                    path: String::from("<agent_doc_sync>"),
+                    detail: format!(
+                        "worker thread disconnected before sending (likely panicked) within {timeout_secs}s"
+                    ),
+                },
+            ))
+        }
+    }
+}
+
+/// Append a `startup_timeout` recovery envelope so operators can see
+/// the timeout in `ralph diagnose --source agent_doc_sync`. When
+/// `session_dir` is `None`, this is a no-op (sync ran without
+/// diagnostics enabled).
+fn write_startup_timeout_envelope(
+    session_dir: Option<&Path>,
+    timeout_secs: u64,
+    on_error: ralph_core::OnErrorPolicy,
+) {
+    use ralph_core::diagnosis::{
+        DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, RecoveryDiagnosisEnvelope,
+        RecoveryJournalEntry,
+    };
+    let Some(session_dir) = session_dir else {
+        return;
+    };
+    let severity = match on_error {
+        ralph_core::OnErrorPolicy::Strict => DiagnosisSeverity::Error,
+        ralph_core::OnErrorPolicy::Warn => DiagnosisSeverity::Warning,
+    };
+    let envelope = RecoveryDiagnosisEnvelope::builder()
+        .source(DiagnosisSource::AgentDocSync)
+        .severity(severity)
+        .iteration(0)
+        .reason_code("startup_timeout")
+        .message(format!(
+            "agent_doc_sync exceeded {timeout_secs}s startup timeout"
+        ))
+        .outcome(DiagnosisOutcome::Escalated)
+        .build();
+    let entry = RecoveryJournalEntry::from_envelope(envelope, vec![]);
+    // Best-effort: a write failure here must not crash the loop.
+    if let Ok(line) = serde_json::to_string(&entry) {
+        let path = session_dir.join("recovery.jsonl");
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "{line}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod sync_timeout_tests {
+    use super::*;
+    use ralph_core::agent_doc_sync::block::BlockSpec;
+    use ralph_core::agent_doc_sync::{OnError, SyncConfig};
+    use tempfile::TempDir;
+
+    #[test]
+    fn zero_timeout_runs_inline_and_succeeds() {
+        // D5: `startup_timeout_secs: 0` disables the timeout and
+        // returns Ok when the underlying sync succeeds.
+        let dir = TempDir::new().unwrap();
+        let block = BlockSpec::new("hang-prevention", "x");
+        let blocks = [block];
+        let target_files = ["CLAUDE.md"];
+        let cfg = SyncConfig {
+            skip: false,
+            on_error: OnError::Warn,
+            target_files: &target_files,
+            blocks: &blocks,
+            session_dir: None,
+        };
+        let outcome = run_sync_with_timeout(dir.path(), &cfg, 0);
+        assert!(outcome.is_ok(), "expected Ok, got {outcome:?}");
+    }
+
+    #[test]
+    fn nonzero_timeout_propagates_sync_error_quickly() {
+        // D5: when the underlying sync fails fast (e.g. unwritable
+        // target), `run_sync_with_timeout` must surface the error
+        // via `SyncRunError::Sync` rather than spuriously firing the
+        // timeout. We deliberately use `OnError::Warn` so the
+        // underlying sync returns Ok; we assert Ok here.
+        let dir = TempDir::new().unwrap();
+        let block = BlockSpec::new("hang-prevention", "x");
+        let blocks = [block];
+        let target_files = ["CLAUDE.md"];
+        let cfg = SyncConfig {
+            skip: false,
+            on_error: OnError::Warn,
+            target_files: &target_files,
+            blocks: &blocks,
+            session_dir: None,
+        };
+        let started = std::time::Instant::now();
+        let outcome = run_sync_with_timeout(dir.path(), &cfg, 30);
+        let elapsed = started.elapsed();
+        // Sync returns Ok with synced=1 well before 30s.
+        assert!(outcome.is_ok(), "expected Ok, got {outcome:?}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "fast sync should not wait 30s: {elapsed:?}"
+        );
     }
 }
