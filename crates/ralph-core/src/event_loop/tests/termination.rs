@@ -426,6 +426,111 @@ fn test_termination_reason_exit_codes() {
     }
 }
 
+/// P0-C (2026-06-10): fail-path auto-termination kicks in when the
+/// verdict gate has observed a failing verdict on the LAST configured
+/// topic. The verdict gate's purpose is to forbid `LOOP_COMPLETE` on
+/// fail, but until this fix there was no other exit signal — the
+/// loop would burn iterations forever. The new check in
+/// `check_termination()` returns `TerminationReason::ReviewFailed`
+/// with the topic that carried the final fail mirror.
+#[test]
+fn test_review_failed_termination_exit_code() {
+    // ReviewFailed is a 1 (failure) per spec: workflow reached its
+    // terminus but the verdict was fail, not the pass path.
+    let reason = TerminationReason::ReviewFailed {
+        topic: "report.done".to_string(),
+    };
+    assert_eq!(reason.exit_code(), 1);
+    assert_eq!(reason.as_str(), "review_failed");
+}
+
+/// P0-C: when the verdict gate is configured, recording a fail
+/// verdict on the LAST mirror topic should make the next
+/// `check_termination()` return `ReviewFailed` (with that topic).
+#[test]
+fn test_review_failed_triggers_when_verdict_propagates_to_last_mirror() {
+    use crate::config::VerdictGateConfig;
+
+    let mut config = RalphConfig::default();
+    // Mirror the ce-executor gate: REVIEW_COMPLETE is upstream,
+    // report.done is the final downstream mirror.
+    config.event_loop.verdict_gate = Some(VerdictGateConfig {
+        topic: "REVIEW_COMPLETE".to_string(),
+        fail_field: "pass_or_fail".to_string(),
+        fail_value: "fail".to_string(),
+        additional_topics: vec!["report.done".to_string()],
+    });
+
+    let mut event_loop = EventLoop::new(config);
+    // Drive the fail verdict to the LAST mirror (report.done).
+    event_loop.state_mut().last_verdict_topic = Some("report.done".to_string());
+    event_loop.state_mut().last_verdict_payload =
+        Some(r#"{"pass_or_fail":"fail","verdict":"fail"}"#.to_string());
+
+    let reason = event_loop.check_termination();
+    match reason {
+        Some(TerminationReason::ReviewFailed { topic }) => {
+            assert_eq!(topic, "report.done");
+        }
+        other => panic!("expected ReviewFailed, got {other:?}"),
+    }
+}
+
+/// P0-C: a fail verdict on an UPSTREAM topic (REVIEW_COMPLETE) must
+/// NOT auto-terminate — the workflow still has to propagate the
+/// verdict to the final mirror. The fix's correctness depends on
+/// waiting for the verdict chain to drain.
+#[test]
+fn test_review_failed_does_not_trigger_on_upstream_only() {
+    use crate::config::VerdictGateConfig;
+
+    let mut config = RalphConfig::default();
+    config.event_loop.verdict_gate = Some(VerdictGateConfig {
+        topic: "REVIEW_COMPLETE".to_string(),
+        fail_field: "pass_or_fail".to_string(),
+        fail_value: "fail".to_string(),
+        additional_topics: vec!["report.done".to_string()],
+    });
+
+    let mut event_loop = EventLoop::new(config);
+    // Only the upstream REVIEW_COMPLETE has fired.
+    event_loop.state_mut().last_verdict_topic = Some("REVIEW_COMPLETE".to_string());
+    event_loop.state_mut().last_verdict_payload = Some(r#"{"pass_or_fail":"fail"}"#.to_string());
+
+    let reason = event_loop.check_termination();
+    assert!(
+        !matches!(reason, Some(TerminationReason::ReviewFailed { .. })),
+        "ReviewFailed should not fire on upstream-only verdict, got {reason:?}"
+    );
+}
+
+/// P0-C: a PASS verdict on the final mirror must not auto-terminate.
+/// The verdict gate's job is to reject LOOP_COMPLETE only on FAIL;
+/// a pass verdict is the happy path and the normal completion
+/// machinery still applies.
+#[test]
+fn test_review_failed_does_not_trigger_on_pass_verdict() {
+    use crate::config::VerdictGateConfig;
+
+    let mut config = RalphConfig::default();
+    config.event_loop.verdict_gate = Some(VerdictGateConfig {
+        topic: "REVIEW_COMPLETE".to_string(),
+        fail_field: "pass_or_fail".to_string(),
+        fail_value: "fail".to_string(),
+        additional_topics: vec!["report.done".to_string()],
+    });
+
+    let mut event_loop = EventLoop::new(config);
+    event_loop.state_mut().last_verdict_topic = Some("report.done".to_string());
+    event_loop.state_mut().last_verdict_payload = Some(r#"{"pass_or_fail":"pass"}"#.to_string());
+
+    let reason = event_loop.check_termination();
+    assert!(
+        !matches!(reason, Some(TerminationReason::ReviewFailed { .. })),
+        "ReviewFailed must not fire on a pass verdict, got {reason:?}"
+    );
+}
+
 #[test]
 fn test_termination_reason_strings_and_flags() {
     let cases = [
