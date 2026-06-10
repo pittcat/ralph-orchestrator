@@ -7,7 +7,7 @@ metadata:
 
 # Ralph CLI 核心参考
 
-> **前提**：本 skill 仅在 `memories.enabled` 或 `tasks.enabled` 至少一个启用时被注入（`crates/ralph-core/src/event_loop/mod.rs:2062-2075`）。速查表中的"已注入"列均受此条件约束。
+> **前提**：本 skill 仅在 `memories.enabled` 或 `tasks.enabled` 至少一个启用时被注入（`crates/ralph-core/src/event_loop/mod.rs:910-930`）。速查表中的"已注入"列均受此条件约束。
 
 > **遇到不确定的命令语法时，先 `ralph <cmd> --help` 再执行。**
 
@@ -42,7 +42,7 @@ metadata:
 
 ## 事件文件解析优先级（`ralph emit` 完整规则）
 
-`ralph emit` 写入路径解析为 3 级回退 + allowlist 校验（`crates/ralph-cli/src/main.rs:243-348`）：
+`ralph emit` 写入路径解析为 3 级回退 + allowlist 校验（`crates/ralph-cli/src/cli/emit_path.rs:32-120`）：
 
 1. 显式 `RALPH_EVENTS_FILE` 环境变量或非默认 `--file`（**必须命中 events allowlist**——来源是 `.ralph/current-candidate-events` 或 `.ralph/current-events` marker——否则 `ralph emit` 拒绝写入并打印 allowlist 内容）
 2. `.ralph/current-candidate-events` marker 目标（仅当未提供显式路径时）

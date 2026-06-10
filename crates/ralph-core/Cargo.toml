@@ -29,6 +29,7 @@ regex.workspace = true
 uuid.workspace = true
 keyring.workspace = true
 reqwest.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 
 # For Unix file locking (flock)

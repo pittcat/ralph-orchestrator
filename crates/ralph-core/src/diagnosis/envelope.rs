@@ -78,6 +78,9 @@ pub enum DiagnosisSource {
     /// the registered hat publishes / system-control set (U5 / R9).
     /// Non-retryable — only writes a recovery signal, no `task.resume`.
     TopicFormat,
+    /// Agent doc sync (managed block injection into CLAUDE.md / AGENTS.md)
+    /// completed or failed. Produced at the end of every sync cycle.
+    AgentDocSync,
 }
 
 impl DiagnosisSource {
@@ -95,6 +98,7 @@ impl DiagnosisSource {
             DiagnosisSource::HookRetry => "hook_retry",
             DiagnosisSource::LoopStale => "loop_stale",
             DiagnosisSource::TopicFormat => "topic_format",
+            DiagnosisSource::AgentDocSync => "agent_doc_sync",
         }
     }
 }
@@ -673,6 +677,7 @@ mod tests {
             DiagnosisSource::HookRetry,
             DiagnosisSource::LoopStale,
             DiagnosisSource::TopicFormat,
+            DiagnosisSource::AgentDocSync,
         ] {
             let s = serde_json::to_string(&source).unwrap();
             let v: serde_json::Value = serde_json::from_str(&s).unwrap();

@@ -103,7 +103,7 @@ telemetry:
 
 U2 的 `RecoveryDiagnosisEnvelope`（schema_version=1）是 8 个 `source` × 4 个 `severity` × 6 个 `outcome` 的笛卡尔积，外加一个稳定的 `retry_key` 用来跨迭代聚合。
 
-### 8 个 `source`（诊断源）
+### 9 个 `source`（诊断源）
 
 | source | 含义 | 典型 reason_code |
 |---|---|---|
@@ -115,6 +115,7 @@ U2 的 `RecoveryDiagnosisEnvelope`（schema_version=1）是 8 个 `source` × 4 
 | `drift_monitor` | U5 drift detector 检出指标跌破阈值 | `drift_field_completeness`, `drift_coord_join_rate`, `drift_emit_cadence` |
 | `hook_retry` | pre/post agent hook 被重试 | `hook_timeout`, `hook_nonzero` |
 | `loop_stale` | 整个 loop 跨迭代无进展 | `stale` |
+| `agent_doc_sync` | `ralph run` 启动时同步 managed doc blocks 失败或降级 | `sync_failed`, `sync_lock_contention`, `sync_io_error` |
 
 ### 6 个 `outcome`（终态）
 
@@ -254,6 +255,7 @@ U2 的 `RecoveryDiagnosisEnvelope`（schema_version=1）是 8 个 `source` × 4 
 | `stall_recovery` | 检查 hat 是否被 OOM / 网络中断打断；考虑调低 max_iterations 触发更早的 steering |
 | `hook_retry` | 检查 `pre_agent` / `post_agent` hook 是否有超时或非零退出码 |
 | `loop_stale` | 运行 `ralph loops` 确认是否有并行 loop 在 hold state |
+| `agent_doc_sync` | 检查 `ralph.yml` 中 `agent_doc_sync.on_error` 设置；如为 `warn`，sync 失败不阻塞启动但会记录；如为 `strict`，进程已退出 78。确认目标文件（`CLAUDE.md` / `AGENTS.md`）可写且文件锁无竞争。详见 [Managed Agent Doc Blocks](managed-blocks.md) |
 
 如果某个 finding 已经 `escalated`，会附加一句"retry_key `<X>` 已 escalation N 次（first→last），建议人工介入或调高 `telemetry.runtime_diagnosis.max_repeated_recoveries`"。
 
@@ -395,6 +397,7 @@ ralph diagnose --diagnostics-root /var/log/ralph/sessions
 | `drift.jsonl` | U3 / U5 | 每行 1 个 `DriftJournalEntry`（schema_version=1） |
 | `orchestration.jsonl` | U3 (full diagnostics) | 每行 1 个 `OrchestrationEntry`，U5 也会用 finding 写入 |
 | `errors.jsonl` | U3 (full diagnostics) | 解析 / 校验失败记录 |
+| `agent_doc_sync.json` | agent_doc_sync | 紧凑快照（`synced` / `skipped` / `failed` / `last_success_at`），供 `ralph doctor` O(1) 读取 |
 
 > U3 还会在 `.ralph/diagnostics/logs/` 下保留 TUI 模式的最近 5 份 `ralph-{ts}.log`；`ralph clean --diagnostics` 会清理它们（不会动 session 目录）。
 >

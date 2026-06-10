@@ -12,6 +12,7 @@
 
 #[cfg(feature = "recording")]
 mod cli_capture;
+pub mod agent_doc_sync;
 mod config;
 pub mod diagnosis;
 pub mod diagnostics;
@@ -76,15 +77,16 @@ pub mod worktree;
 #[cfg(feature = "recording")]
 pub use cli_capture::{CliCapture, CliCapturePair};
 pub use config::{
-    ActivationObligation, AggregateConfig, AggregateMode, CliConfig, ConditionalEmission,
-    ConfigError, CoreConfig, DriftConfig, EventFilterConfig, EventFilterMode, EventLoopConfig,
-    EventMetadata, EventPolicyConfig, EventPolicyMode, EventProjectionConfig, EventSchema,
-    FeaturesConfig, HatBackend, HatConfig, HookStage, InjectMode, MalformedJsonlPolicy,
-    MemoriesConfig, MemoriesFilter, PayloadType, Phase, PhaseConfig, PreflightExtensionsConfig,
-    PreflightHook, ProjectionMode, ProjectionRule, RalphConfig, RuntimeDiagnosisConfig,
-    ScratchpadConfig, SkillOverride, SkillsConfig, StateFileEntry, StateFileFormat,
-    StateFilesConfig, TelemetryConfig, TriggerContext, TriggerPredicate, ViolationAction,
-    WarmupConfig, obligation_satisfied,
+    ActivationObligation, AggregateConfig, AggregateMode, AgentDocSyncConfig, CliConfig,
+    ConditionalEmission, ConfigError, CoreConfig, DriftConfig, EventFilterConfig,
+    EventFilterMode, EventLoopConfig, EventMetadata, EventPolicyConfig, EventPolicyMode,
+    EventProjectionConfig, EventSchema, FeaturesConfig, HatBackend, HatConfig, HookStage,
+    InjectMode, MalformedJsonlPolicy, MemoriesConfig, MemoriesFilter, OnErrorPolicy, PayloadType,
+    Phase, PhaseConfig, PreflightExtensionsConfig, PreflightHook, ProjectionMode,
+    ProjectionRule, RalphConfig, RuntimeDiagnosisConfig, ScratchpadConfig, SkillOverride,
+    SkillsConfig, StateFileEntry, StateFileFormat, StateFilesConfig, TelemetryConfig,
+    TriggerContext, TriggerPredicate, ViolationAction, WarmupConfig, obligation_satisfied,
+    should_skip,
 };
 
 // Re-export loop_name types (also available via FeaturesConfig.loop_naming)

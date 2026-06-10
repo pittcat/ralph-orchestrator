@@ -158,6 +158,7 @@ pub async fn resume_command(
         false,      // warmup_only (resume uses normal flow)
         false,      // force_warmup (resume uses normal flow)
         prebuilt_diagnostics,
+        false,      // no_sync_agent_docs (resume uses config default)
     )
     .await?;
     let exit_code = reason.exit_code();
