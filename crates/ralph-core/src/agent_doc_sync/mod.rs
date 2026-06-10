@@ -30,6 +30,7 @@
 
 pub mod block;
 pub mod builtin;
+pub mod health;
 pub mod persist;
 pub mod writer;
 

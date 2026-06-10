@@ -51,6 +51,11 @@ pub async fn execute(
     let auth_backends = auth_backend_names(&config);
     checks.push(auth_hint_check(&auth_backends, |key| env::var(key).ok()));
 
+    let diagnostics_dir = config.core.workspace_root.join(".ralph").join("diagnostics");
+    checks.push(ralph_core::agent_doc_sync::health::check_agent_doc_sync_health(
+        &diagnostics_dir,
+    ));
+
     checks.extend(other_checks);
 
     let report = report_from_checks(checks);
@@ -724,5 +729,18 @@ mod tests {
             canonical_backend_name("custom", Some("my-cli.exe")),
             "my-cli"
         );
+    }
+
+    #[test]
+    fn agent_doc_sync_check_runs_against_diagnostics_dir() {
+        // The function should be callable against the diagnostics dir;
+        // an empty directory should produce a Warn (snapshot missing)
+        // since the workspace has not been synced yet.
+        let dir = tempfile::TempDir::new().unwrap();
+        let diag = dir.path().join(".ralph").join("diagnostics");
+        std::fs::create_dir_all(&diag).unwrap();
+        let check = ralph_core::agent_doc_sync::health::check_agent_doc_sync_health(&diag);
+        assert_eq!(check.name, "agent_doc_sync");
+        assert_eq!(check.status, CheckStatus::Warn);
     }
 }
