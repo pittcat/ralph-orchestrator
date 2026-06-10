@@ -460,19 +460,31 @@ hats:
       - 读取 `context.md` 获取 plan 上下文、R-IDs 和 scope 边界
 
       ### Scope 检测
-      - 从 context.md 读取 `start_sha`（由 Coordinator 在 work.start 时记录）
-      - 如果 `start_sha` 可用且有效：
+      - 先识别触发事件是 `work.done`（executor 完成一个 step）还是 `fix.applied`（fixer 完成一轮修复）。触发事件就是激活本 hat 的那个事件。
+      - 从 `context.md` 读取 `last_reviewed_sha`（由上一次 wave 的 review-coordinator 落点）。若存在且有效，这就是首选的 diff base —— 它是最近一次 review 末尾的 commit SHA。
+      - 如果 `last_reviewed_sha` 可用且有效（通过 `git cat-file -t <sha> 2>/dev/null` 验证返回**正好**是字符串 `commit` —— 完整校验规则见下方"边界情况"段）：
+        - 使用 `git diff -U10 <last_reviewed_sha>..HEAD` 和 `git diff --name-only <last_reviewed_sha>..HEAD`
+        - 使用 `git log --oneline <last_reviewed_sha>..HEAD` 提取 intent
+        - 从 `git rev-list --count <last_reviewed_sha>..HEAD` 读 `commit_count`
+        - 从 `git diff --shortstat <last_reviewed_sha>..HEAD` 读 `changed_lines`（insertions+deletions 之和）
+        - wave payload 中 `diff_base = <last_reviewed_sha>`，**不要** 设置 `diff_base_fallback`（增量基线是正常路径）。
+      - 否则从 context.md 读取 `start_sha`（由 Coordinator 在 work.start 时记录）。若 `start_sha` 可用且有效：
         - 使用 `git diff -U10 <start_sha>..HEAD` 和 `git diff --name-only <start_sha>..HEAD`
         - 使用 `git log --oneline <start_sha>..HEAD` 提取 intent
         - 从 `git rev-list --count <start_sha>..HEAD` 读 `commit_count`
         - 从 `git diff --shortstat <start_sha>..HEAD` 读 `changed_lines`（insertions+deletions 之和）
-      - 如果 `start_sha` 不可用或无效，回退到 base 检测链：
+        - wave payload 中 `diff_base = <start_sha>`，在 wave payload 中用 `diff_base_fallback` 标注降级：
+          - 触发为 `work.done`：`diff_base_fallback: "no_prior_wave"`（本 plan 首次 wave，尚未记录 prior review）。
+          - 触发为 `fix.applied`：`diff_base_fallback: "no_last_reviewed_sha"`（异常 —— fix.applied 正常情况下意味着已经有一轮 prior review 的 SHA 落点；本标志意味着持久层缺失或被清空，例如 loop 重启时没有保存的状态）。
+      - 若 `last_reviewed_sha` 和 `start_sha` 都不可用或无效，回退到 base 检测链：
         - diff base：`origin/main` → `origin/master` → `main` → `master` → `HEAD~1`（fallback 链）
         - 计算 merge-base：`git merge-base HEAD <base>`
         - 生成 diff：`git diff -U10 <base>`
         - 生成文件列表：`git diff --name-only <base>`
         - 从 `git rev-list --count <merge-base>..HEAD` 读 `commit_count`
         - 从 `git diff --shortstat <base>` 读 `changed_lines`
+        - wave payload 中 `diff_base = <base>`，标注 `diff_base_fallback: "no_start_sha"`（极端异常 —— 连 loop 启动锚点都缺失）。
+      - 边界情况：`context.md` 中存在 `last_reviewed_sha` 或 `start_sha`，但 git 对象已不再是 `commit`（例如 commit 被 rebase/rewritten/amend 出历史）。校验方法：执行 `git cat-file -t <sha> 2>/dev/null` 并检查 stdout **正好**是 `commit`（该命令对有效的非 commit 对象会返回 `tag`/`tree`/`blob`，这应被正确判为缺失）。作为备用信号，`git diff <sha>..HEAD` 退出码非零也表明 base 失效。按缺失处理，回退到下一优先级（start_sha → base detection chain）。**不要**让 wave 失败 —— 降级路径始终安全，产生全量 review。
       - 检查 untracked 文件：`git ls-files --others --exclude-standard`
 
       ### HARD RULE: Wave vs Pass Decision
@@ -503,6 +515,9 @@ hats:
       - 记录哪些需求已满足/未满足
 
       ### Dimension 选择（来自 compound-engineering persona-catalog）
+      **触发事件决定 dimension 集合。** 选择 dimension 前先识别触发（work.done vs fix.applied）。触发感知的逻辑属于上限而非下限 —— work.done 保持完整 7+ 集合，fix.applied 收窄为聚焦的 3 维集合，避免重复覆盖 work.done 首评已查过的维度。
+
+      **`work.done` 触发（step 首评）**：
       **Required dimensions（必含于每个 emit 的 review.wave.ready — 这是下限，不是上限）**：
       - `correctness` — 逻辑正确性、边界情况、错误传播
       - `testing` — 测试覆盖、断言质量、脆弱测试
@@ -521,6 +536,19 @@ hats:
       | diff 涉及错误处理、重试、超时、健康检查 | `reliability` |
       | diff >= 50 行或涉及 auth/payments/data mutations | `adversarial` |
 
+      **`fix.applied` 触发（一轮 fix 的增量复评）**：
+      **Required dimensions（必含 —— 无条件，与 diff 内容无关）**：
+      - `correctness` — 验证修复逻辑正确，未引入新 bug
+      - `standards` — 验证修复遵循项目规约（CLAUDE.md、AGENTS.md）
+      - `requirements` — 验证修复针对原始 finding（R-ID / 维度匹配）
+
+      **不要包含** 另 4 个 required dimension（`testing`、`maintainability`、`agent-native`、`learnings`）。这些已被 work.done 首评覆盖；对小 fix 再次跑它们是重复 review，没有新信号。
+
+      **不要包含** 任何 conditional dimension（`security`、`performance`、`api-contract`、`reliability`、`adversarial`）。fix 阶段无条件走 3 维集合。这是已知权衡：若 fix 涉及 auth / payments / data-mutation 代码，这些区域的回归风险由本 step 的 work.done 首评覆盖（work.done wave 在完整 conditional 集合下审过同一段代码），不由 fix 阶段在小 fix delta 上重跑。这是增量 review 明确接受的成本。
+      **不要试图给 `fix.applied` wave 追加 `security` 或 `adversarial`，即便 diff 涉及 auth / payments / data-mutation 代码。** 这是设计如此，不是要补的窟窿 —— 本 step 的 work.done 首评已经为同一段代码覆盖了这些维度。在这里追加它们会破坏增量 review 的目的（重复审已审过的内容），也不会增加新信号。
+
+      **fix 复评的范围按设计就是增量。** 与 Scope Detection 中 `last_reviewed_sha` 推导的 `diff_base` 组合，fix wave 只看到自上次 review 之后的变更 —— 之前已 review 的代码不会被重读。
+
       ### Wave 发射
       - **硬性规则 — 一次性 emit 所有选中的 dimension**。把所有选中的 dimension payload
         收集到一个列表，然后只调用一次 `ralph wave emit review.wave.ready`
@@ -536,6 +564,25 @@ hats:
       - 每个 payload 必须包含：`dimension`、`focus`、`depth`、`diff_base`、`intent_summary`、`changed_files`、`plan_name`
       - `task_id`、`task_key`、`step`：必须存在。从触发事件 payload 中复制，不得省略。
       - 发射后停止 — 不等待结果
+
+      ### 终端事件后持久化 `last_reviewed_sha`
+      **为什么需要这一步：** `last_reviewed_sha` 是下一次 review-coordinator pass 的增量 diff base。`context.md` 的 key-value header 是选定的持久层（参考 Coordinator 在 `work.start` 时写入的 `start_sha`、以及 `fix-log.md` 中的 `current_fix_round`）。
+      **何时执行：** 立即在发出 `review.wave.ready` 或 `review.passed` 之后。两条路径都把当前 HEAD 标记为已 review。空 diff 的 `review.passed` 路径与 wave 路径同等重要：跳过 wave 不代表 HEAD 应该在下次被重新 review。如果不更新，下次 wave 的 `last_reviewed_sha` 会指得更早，造成重复覆盖。
+      **如何写入（单次原子写，无 Read+Write 竞态）：**
+      - 抓取当前 HEAD：`current_sha=$(git rev-parse HEAD)`
+      - 从触发事件 payload 的 `plan_name` 解析出本 plan 的 `context.md` 路径。
+      - 如果文件已有 `last_reviewed_sha:` 行，用单 fd 的 sed 原地替换（避免两个操作之间有并发写者落入的 TOCTOU 竞态）：`sed -i 's|^last_reviewed_sha:.*|last_reviewed_sha: '"$current_sha"'|' <context_md_path>`。**不要**追加重复行。
+      - 如果文件没有该行，一次性追加：`printf '\nlast_reviewed_sha: %s\n' "$current_sha" >> <context_md_path>`。
+      - key-value header 格式与 `start_sha` 一致——通过 `context.md` 抓取该字段的 agent 期望看到一行、格式良好的内容。
+      **如果写入失败：** 按下方 DEC-ID 模板记入 `decisions.md` 并继续。下次 wave 会降级到 `start_sha`（安全但冗余），所以失败的更新会优雅降级 —— 永远不会静默地重复 review 代码。这是单次写入 —— **不要**循环、重试或尝试部分恢复。
+
+      **DEC-ID 模板** 用于 `decisions.md` 失败日志 —— 原样复制，不要自创格式：
+      ```
+      ## DEC-$(date -u +%Y%m%d-%H%M%S)
+      - decision: skip last_reviewed_sha write
+      - reason: <sed/printf 的错误消息>
+      - impact: next wave uses start_sha (degraded but safe)
+      ```
 
       ### Constraints
       - 必须 NOT 直接审查代码

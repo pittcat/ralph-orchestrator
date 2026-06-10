@@ -352,7 +352,12 @@ impl HatlessRalph {
     /// full hat topology table for context.
     ///
     /// For solo mode (no hats), pass an empty slice: `&[]`
-    pub fn build_prompt(&self, context: &str, active_hats: &[&ralph_proto::Hat]) -> String {
+    pub fn build_prompt(
+        &self,
+        context: &str,
+        active_hats: &[&ralph_proto::Hat],
+        trigger_topics: &[&str],
+    ) -> String {
         let mut prompt = self.core_prompt();
 
         // Inject skill index between GUARDRAILS and OBJECTIVE
@@ -391,7 +396,7 @@ impl HatlessRalph {
         }
 
         if let Some(topology) = &self.hat_topology {
-            prompt.push_str(&self.hats_section(topology, active_hats));
+            prompt.push_str(&self.hats_section(topology, active_hats, trigger_topics));
         }
 
         prompt.push_str(&self.event_writing_section());
@@ -817,8 +822,28 @@ You MUST continue.\n\
         }
     }
 
-    fn hats_section(&self, topology: &HatTopology, active_hats: &[&ralph_proto::Hat]) -> String {
+    fn hats_section(
+        &self,
+        topology: &HatTopology,
+        active_hats: &[&ralph_proto::Hat],
+        trigger_topics: &[&str],
+    ) -> String {
         let mut section = String::new();
+
+        // When a specific hat is active, surface the trigger topic(s) that activated
+        // this iteration. Trigger-aware instructions (e.g. ce-executor review-coordinator
+        // branching behavior on work.done vs fix.applied) need the trigger visible in
+        // the prompt — without this, the agent has no reliable way to know which event
+        // fired. Multiple topics supported (when several events activate different hats
+        // in the same iteration).
+        if !active_hats.is_empty() && !trigger_topics.is_empty() {
+            section.push_str("## ACTIVE TRIGGER\n\n");
+            section.push_str("This iteration was activated by the following event(s):\n\n");
+            for topic in trigger_topics {
+                section.push_str(&format!("- `{}`\n", topic));
+            }
+            section.push('\n');
+        }
 
         // When a specific hat is active, skip the topology overview (table + Mermaid)
         // The hat just needs its instructions and publishing guide
@@ -1147,7 +1172,7 @@ mod tests {
         let registry = HatRegistry::new(); // Empty registry
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         // Identity with RFC2119 style
         assert!(prompt.contains(
@@ -1203,7 +1228,7 @@ hats:
         // Note: No starting_event - tests normal multi-hat workflow (not fast path)
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         // Identity with RFC2119 style
         assert!(prompt.contains(
@@ -1257,7 +1282,7 @@ hats:
         let registry = HatRegistry::new();
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         // Key RFC2119 language patterns
         assert!(
@@ -1298,7 +1323,7 @@ hats:
         let registry = HatRegistry::new();
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         // Auto-injection and append instructions are documented
         assert!(prompt.contains("auto-injected"));
@@ -1324,7 +1349,7 @@ hats:
             Some("tdd.start".to_string()),
         );
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         // Should include delegation instruction
         assert!(
@@ -1346,7 +1371,7 @@ hats:
         let registry = HatRegistry::from_config(&config);
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         // Should NOT include delegation instruction
         assert!(
@@ -1383,7 +1408,7 @@ hats:
         let tdd_writer = registry
             .get(&ralph_proto::HatId::new("tdd_writer"))
             .unwrap();
-        let prompt = ralph.build_prompt("", &[tdd_writer]);
+        let prompt = ralph.build_prompt("", &[tdd_writer], &[]);
 
         // Instructions should appear in the prompt
         assert!(
@@ -1414,7 +1439,7 @@ hats:
         let registry = HatRegistry::from_config(&config);
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         // No instructions section should appear for hats without instructions
         assert!(
@@ -1446,7 +1471,7 @@ hats:
         // Get both hats as active to see their instructions
         let planner = registry.get(&ralph_proto::HatId::new("planner")).unwrap();
         let builder = registry.get(&ralph_proto::HatId::new("builder")).unwrap();
-        let prompt = ralph.build_prompt("", &[planner, builder]);
+        let prompt = ralph.build_prompt("", &[planner, builder], &[]);
 
         // Both hats' instructions should appear
         assert!(
@@ -1489,7 +1514,7 @@ hats:
             Some("tdd.start".to_string()),
         );
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         // Should use fast path - immediate delegation with RFC2119
         assert!(
@@ -1522,7 +1547,7 @@ hats:
         let events_context = r"[task.start] User's task: Review this code for security vulnerabilities
 [build.done] Build completed successfully";
 
-        let prompt = ralph.build_prompt(events_context, &[]);
+        let prompt = ralph.build_prompt(events_context, &[], &[]);
 
         assert!(
             prompt.contains("## PENDING EVENTS"),
@@ -1547,7 +1572,7 @@ hats:
         let registry = HatRegistry::new();
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         assert!(
             !prompt.contains("## PENDING EVENTS"),
@@ -1564,7 +1589,7 @@ hats:
         let registry = HatRegistry::new();
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
 
-        let prompt = ralph.build_prompt("   \n\t  ", &[]);
+        let prompt = ralph.build_prompt("   \n\t  ", &[], &[]);
 
         assert!(
             !prompt.contains("## PENDING EVENTS"),
@@ -1582,7 +1607,7 @@ hats:
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
 
         let events_context = "[task.start] Implement feature X";
-        let prompt = ralph.build_prompt(events_context, &[]);
+        let prompt = ralph.build_prompt(events_context, &[], &[]);
 
         let events_pos = prompt
             .find("## PENDING EVENTS")
@@ -1627,7 +1652,7 @@ hats:
             .unwrap();
         let active_hats = vec![security_hat];
 
-        let prompt = ralph.build_prompt("Event: review.security - Check auth", &active_hats);
+        let prompt = ralph.build_prompt("Event: review.security - Check auth", &active_hats, &[]);
 
         // Should contain ONLY security_reviewer instructions
         assert!(
@@ -1685,7 +1710,7 @@ hats:
             .unwrap();
         let active_hats = vec![security_hat, arch_hat];
 
-        let prompt = ralph.build_prompt("Events", &active_hats);
+        let prompt = ralph.build_prompt("Events", &active_hats, &[]);
 
         // Should contain BOTH active hats' instructions
         assert!(
@@ -1713,6 +1738,96 @@ hats:
     }
 
     #[test]
+    fn test_active_trigger_injected_when_hat_and_topics_present() {
+        // Trigger-aware hats (e.g. ce-executor review-coordinator branching on
+        // work.done vs fix.applied) need the trigger topic visible in the prompt.
+        // Without this, the agent has no reliable way to know which event fired.
+        let yaml = r#"
+hats:
+  review_coordinator:
+    name: "Review Coordinator"
+    triggers: ["work.done", "fix.applied"]
+    instructions: "If trigger is work.done use 7 dimensions; if fix.applied use 3."
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = HatRegistry::from_config(&config);
+        let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
+
+        let review_hat = registry
+            .get(&ralph_proto::HatId::new("review_coordinator"))
+            .unwrap();
+        let active_hats = vec![review_hat];
+
+        // Single trigger (work.done) — ce-executor first-pass review
+        let prompt_work = ralph.build_prompt("Events", &active_hats, &["work.done"]);
+        assert!(
+            prompt_work.contains("## ACTIVE TRIGGER"),
+            "Should include ## ACTIVE TRIGGER section when hat is active and topics given"
+        );
+        assert!(
+            prompt_work.contains("- `work.done`"),
+            "Should list the trigger topic"
+        );
+        assert!(
+            !prompt_work.contains("- `fix.applied`"),
+            "Should NOT list non-triggered topics"
+        );
+
+        // Different trigger (fix.applied) — same hat, different prompt
+        let prompt_fix = ralph.build_prompt("Events", &active_hats, &["fix.applied"]);
+        assert!(
+            prompt_fix.contains("- `fix.applied`"),
+            "Should reflect the actual trigger topic"
+        );
+        assert!(
+            !prompt_fix.contains("- `work.done`"),
+            "Should NOT include the non-active trigger"
+        );
+
+        // No active hats → no ACTIVE TRIGGER section
+        let prompt_coordinating = ralph.build_prompt("Events", &[], &["work.done"]);
+        assert!(
+            !prompt_coordinating.contains("## ACTIVE TRIGGER"),
+            "Should NOT inject ACTIVE TRIGGER when Ralph is coordinating (no active hats)"
+        );
+
+        // Active hat but empty trigger_topics → no ACTIVE TRIGGER section
+        let prompt_no_topics = ralph.build_prompt("Events", &active_hats, &[]);
+        assert!(
+            !prompt_no_topics.contains("## ACTIVE TRIGGER"),
+            "Should NOT inject ACTIVE TRIGGER when topics list is empty"
+        );
+    }
+
+    #[test]
+    fn test_active_trigger_multiple_topics_supported() {
+        // Multiple events activating the same iteration should all be listed.
+        let yaml = r#"
+hats:
+  multi_event_hat:
+    name: "Multi-Event Hat"
+    triggers: ["event.a", "event.b"]
+    instructions: "Handle both events."
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = HatRegistry::from_config(&config);
+        let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
+
+        let hat = registry
+            .get(&ralph_proto::HatId::new("multi_event_hat"))
+            .unwrap();
+        let active_hats = vec![hat];
+
+        let prompt = ralph.build_prompt("Events", &active_hats, &["event.a", "event.b"]);
+        assert!(
+            prompt.contains("## ACTIVE TRIGGER"),
+            "Should include ACTIVE TRIGGER section"
+        );
+        assert!(prompt.contains("- `event.a`"), "Should list event.a");
+        assert!(prompt.contains("- `event.b`"), "Should list event.b");
+    }
+
+    #[test]
     fn test_no_active_hats_no_instructions() {
         // No active hats = no instructions section (but topology table still present)
         let yaml = r#"
@@ -1729,7 +1844,7 @@ hats:
         // No active hats
         let active_hats: Vec<&ralph_proto::Hat> = vec![];
 
-        let prompt = ralph.build_prompt("Events", &active_hats);
+        let prompt = ralph.build_prompt("Events", &active_hats, &[]);
 
         // Should NOT contain any instructions
         assert!(
@@ -1769,7 +1884,7 @@ hats:
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
 
         // Test 1: No active hats (Ralph coordinating) - should show table + Mermaid
-        let prompt_coordinating = ralph.build_prompt("Events", &[]);
+        let prompt_coordinating = ralph.build_prompt("Events", &[], &[]);
 
         assert!(
             prompt_coordinating.contains("## HATS"),
@@ -1788,7 +1903,7 @@ hats:
         let security_hat = registry
             .get(&ralph_proto::HatId::new("security_reviewer"))
             .unwrap();
-        let prompt_active = ralph.build_prompt("Events", &[security_hat]);
+        let prompt_active = ralph.build_prompt("Events", &[security_hat], &[]);
 
         assert!(
             prompt_active.contains("## ACTIVE HAT"),
@@ -1817,7 +1932,7 @@ hats:
         let registry = HatRegistry::new();
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         assert!(
             prompt.contains("### 0b. SCRATCHPAD"),
@@ -1841,7 +1956,7 @@ hats:
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None)
             .with_memories_enabled(true);
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         // Scratchpad should still be present
         assert!(
@@ -1867,7 +1982,7 @@ hats:
         let registry = HatRegistry::new();
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         // core_prompt no longer contains the tasks section (injected via skills)
         assert!(
@@ -1884,7 +1999,7 @@ hats:
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None)
             .with_memories_enabled(true);
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         // Workflow should mention scratchpad
         assert!(
@@ -1913,7 +2028,7 @@ hats:
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None)
             .with_memories_enabled(true);
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         // Multi-hat workflow should mention scratchpad
         assert!(
@@ -1935,7 +2050,7 @@ hats:
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None)
             .with_memories_enabled(true);
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         // With memories enabled + include_scratchpad still true (default),
         // the guardrail transformation doesn't apply
@@ -1954,7 +2069,7 @@ hats:
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
         // memories_enabled defaults to false
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         assert!(
             prompt.contains("### GUARDRAILS"),
@@ -1973,7 +2088,7 @@ hats:
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None)
             .with_memories_enabled(true);
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         // The tasks CLI instructions are now injected via the skills pipeline,
         // but the DONE section still requires task verification before completion
@@ -1995,7 +2110,7 @@ hats:
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None)
             .with_memories_enabled(true);
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         // Should have VERIFY & COMMIT step
         assert!(
@@ -2024,7 +2139,7 @@ hats:
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
         // memories_enabled defaults to false
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         // Scratchpad mode uses different format - COMMIT step without task CLI
         assert!(
@@ -2052,7 +2167,7 @@ hats:
         let mut ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
         ralph.set_objective("Implement user authentication with JWT tokens".to_string());
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         assert!(
             prompt.contains("## OBJECTIVE"),
@@ -2077,7 +2192,7 @@ hats:
         let mut ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
         ralph.set_objective("Fix the login bug in auth module".to_string());
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         // Check DONE section contains objective reinforcement
         let done_pos = prompt.find("## DONE").expect("Should have DONE section");
@@ -2102,7 +2217,7 @@ hats:
         ralph.set_objective("Build feature X".to_string());
 
         let context = "Event: task.start - Build feature X";
-        let prompt = ralph.build_prompt(context, &[]);
+        let prompt = ralph.build_prompt(context, &[], &[]);
 
         let objective_pos = prompt.find("## OBJECTIVE").expect("Should have OBJECTIVE");
         let events_pos = prompt
@@ -2125,7 +2240,7 @@ hats:
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
 
         let context = "Event: build.done - Build completed successfully";
-        let prompt = ralph.build_prompt(context, &[]);
+        let prompt = ralph.build_prompt(context, &[], &[]);
 
         assert!(
             !prompt.contains("## OBJECTIVE"),
@@ -2141,7 +2256,7 @@ hats:
         let mut ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
         ralph.set_objective("Review this PR for security issues".to_string());
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         assert!(
             prompt.contains("Review this PR for security issues"),
@@ -2159,7 +2274,7 @@ hats:
 
         let context =
             "Event: build.done - Previous build succeeded\nEvent: test.passed - All tests green";
-        let prompt = ralph.build_prompt(context, &[]);
+        let prompt = ralph.build_prompt(context, &[], &[]);
 
         assert!(
             prompt.contains("## OBJECTIVE"),
@@ -2178,7 +2293,7 @@ hats:
         let registry = HatRegistry::new();
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         assert!(prompt.contains("## DONE"), "Should have DONE section");
         assert!(
@@ -2206,7 +2321,7 @@ hats:
 
         // Simulate iteration 2: only non-start events present
         let context = "Event: build.done - Build completed";
-        let prompt = ralph.build_prompt(context, &[]);
+        let prompt = ralph.build_prompt(context, &[], &[]);
 
         assert!(
             prompt.contains("## OBJECTIVE"),
@@ -2235,7 +2350,7 @@ hats:
         ralph.set_objective("Implement feature X".to_string());
 
         let builder = registry.get(&ralph_proto::HatId::new("builder")).unwrap();
-        let prompt = ralph.build_prompt("Event: build.task - Do the build", &[builder]);
+        let prompt = ralph.build_prompt("Event: build.task - Do the build", &[builder], &[]);
 
         assert!(
             !prompt.contains("## DONE"),
@@ -2272,7 +2387,7 @@ hats:
         ralph.set_objective("Complete the TDD cycle".to_string());
 
         // No active hats - Ralph is coordinating
-        let prompt = ralph.build_prompt("Event: build.done - Build finished", &[]);
+        let prompt = ralph.build_prompt("Event: build.done - Build finished", &[], &[]);
 
         assert!(
             prompt.contains("## DONE"),
@@ -2296,7 +2411,7 @@ hats:
         let mut ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
         ralph.set_objective("Deploy the application".to_string());
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         let done_pos = prompt.find("## DONE").expect("Should have DONE section");
         let after_done = &prompt[done_pos..];
@@ -2336,7 +2451,7 @@ hats:
 
         // Get the builder hat as active
         let builder = registry.get(&ralph_proto::HatId::new("builder")).unwrap();
-        let prompt = ralph.build_prompt("[build.task] Build the feature", &[builder]);
+        let prompt = ralph.build_prompt("[build.task] Build the feature", &[builder], &[]);
 
         // Should include Event Publishing Guide
         assert!(
@@ -2382,7 +2497,7 @@ hats:
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
 
         let observer = registry.get(&ralph_proto::HatId::new("observer")).unwrap();
-        let prompt = ralph.build_prompt("[events.start] Start", &[observer]);
+        let prompt = ralph.build_prompt("[events.start] Start", &[observer], &[]);
 
         // Should NOT include Event Publishing Guide
         assert!(
@@ -2406,7 +2521,7 @@ hats:
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
 
         let solo = registry.get(&ralph_proto::HatId::new("solo")).unwrap();
-        let prompt = ralph.build_prompt("[solo.start] Go", &[solo]);
+        let prompt = ralph.build_prompt("[solo.start] Go", &[solo], &[]);
 
         assert!(
             prompt.contains("### Event Publishing Guide"),
@@ -2447,7 +2562,7 @@ hats:
         let broadcaster = registry
             .get(&ralph_proto::HatId::new("broadcaster"))
             .unwrap();
-        let prompt = ralph.build_prompt("[broadcast.start] Go", &[broadcaster]);
+        let prompt = ralph.build_prompt("[broadcast.start] Go", &[broadcaster], &[]);
 
         assert!(
             prompt.contains("### Event Publishing Guide"),
@@ -2479,7 +2594,7 @@ hats:
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
 
         let looper = registry.get(&ralph_proto::HatId::new("looper")).unwrap();
-        let prompt = ralph.build_prompt("[loop.start] Start", &[looper]);
+        let prompt = ralph.build_prompt("[loop.start] Start", &[looper], &[]);
 
         assert!(
             prompt.contains("### Event Publishing Guide"),
@@ -2513,7 +2628,7 @@ hats:
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
 
         let processor = registry.get(&ralph_proto::HatId::new("processor")).unwrap();
-        let prompt = ralph.build_prompt("[start] Go", &[processor]);
+        let prompt = ralph.build_prompt("[start] Go", &[processor], &[]);
 
         // process.retry routes back to Processor itself — should say so
         assert!(
@@ -2550,7 +2665,7 @@ hats:
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
 
         let sender = registry.get(&ralph_proto::HatId::new("sender")).unwrap();
-        let prompt = ralph.build_prompt("[send.start] Go", &[sender]);
+        let prompt = ralph.build_prompt("[send.start] Go", &[sender], &[]);
 
         assert!(
             prompt.contains("`message.sent` → Received by: NoDescReceiver"),
@@ -2585,7 +2700,7 @@ hats:
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
 
         // No active hats - Ralph is coordinating
-        let prompt = ralph.build_prompt("[task.start] Do TDD for feature X", &[]);
+        let prompt = ralph.build_prompt("[task.start] Do TDD for feature X", &[], &[]);
 
         // Should contain CONSTRAINT with valid events
         assert!(
@@ -2624,7 +2739,7 @@ hats:
 
         // Builder hat is active
         let builder = registry.get(&ralph_proto::HatId::new("builder")).unwrap();
-        let prompt = ralph.build_prompt("[build.task] Build feature X", &[builder]);
+        let prompt = ralph.build_prompt("[build.task] Build feature X", &[builder], &[]);
 
         // Should NOT contain the coordinating CONSTRAINT
         assert!(
@@ -2646,7 +2761,7 @@ hats:
         let registry = HatRegistry::new(); // Empty registry
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
 
-        let prompt = ralph.build_prompt("[task.start] Do something", &[]);
+        let prompt = ralph.build_prompt("[task.start] Do something", &[], &[]);
 
         // Should NOT contain CONSTRAINT (no hats to coordinate)
         assert!(
@@ -2665,7 +2780,7 @@ hats:
         let mut ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
         ralph.set_robot_guidance(vec!["Focus on error handling first".to_string()]);
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         assert!(
             prompt.contains("## ROBOT GUIDANCE"),
@@ -2694,7 +2809,7 @@ hats:
             "Check edge cases for empty input".to_string(),
         ]);
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         assert!(
             prompt.contains("## ROBOT GUIDANCE"),
@@ -2723,7 +2838,7 @@ hats:
         ralph.set_objective("Build feature X".to_string());
         ralph.set_robot_guidance(vec!["Use the new API".to_string()]);
 
-        let prompt = ralph.build_prompt("Event: build.task - Do the work", &[]);
+        let prompt = ralph.build_prompt("Event: build.task - Do the work", &[], &[]);
 
         let objective_pos = prompt.find("## OBJECTIVE").expect("Should have OBJECTIVE");
         let guidance_pos = prompt
@@ -2756,7 +2871,7 @@ hats:
         ralph.set_robot_guidance(vec!["First guidance".to_string()]);
 
         // First prompt should include guidance
-        let prompt1 = ralph.build_prompt("", &[]);
+        let prompt1 = ralph.build_prompt("", &[], &[]);
         assert!(
             prompt1.contains("## ROBOT GUIDANCE"),
             "First prompt should have guidance"
@@ -2766,7 +2881,7 @@ hats:
         ralph.clear_robot_guidance();
 
         // Second prompt should NOT include guidance
-        let prompt2 = ralph.build_prompt("", &[]);
+        let prompt2 = ralph.build_prompt("", &[], &[]);
         assert!(
             !prompt2.contains("## ROBOT GUIDANCE"),
             "After clearing, prompt should not have guidance"
@@ -2780,7 +2895,7 @@ hats:
         let registry = HatRegistry::new();
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
 
-        let prompt = ralph.build_prompt("Event: build.task - Do the work", &[]);
+        let prompt = ralph.build_prompt("Event: build.task - Do the work", &[], &[]);
 
         assert!(
             !prompt.contains("## ROBOT GUIDANCE"),
@@ -2804,7 +2919,7 @@ hats:
             path: ".ralph/agent/scratchpad.md".to_string(),
         });
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         // 0a. ORIENTATION should NOT contain scratchpad reference
         assert!(
@@ -2851,7 +2966,7 @@ hats:
             path: ".ralph/agent/planner.md".to_string(),
         });
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         // SCRATCHPAD section should reference custom path
         assert!(
@@ -2882,7 +2997,7 @@ hats:
         let registry = HatRegistry::new();
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         assert!(
             prompt.contains("`.ralph/agent/scratchpad.md`"),
@@ -2921,7 +3036,7 @@ hats:
 
         // First iteration (iteration=0): should trigger fast path
         ralph.set_iteration(0);
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
         assert!(
             prompt.contains("FAST PATH"),
             "First iteration with disabled scratchpad should trigger fast path"
@@ -2929,7 +3044,7 @@ hats:
 
         // Second iteration (iteration=1): should NOT trigger fast path
         ralph.set_iteration(1);
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
         assert!(
             !prompt.contains("FAST PATH"),
             "Second iteration should NOT trigger fast path even with disabled scratchpad"
@@ -2952,7 +3067,7 @@ hats:
             enabled: true,
             path: ".ralph/agent/planner.md".to_string(),
         });
-        let planner_prompt = ralph_planner.build_prompt("", &[]);
+        let planner_prompt = ralph_planner.build_prompt("", &[], &[]);
         assert!(
             planner_prompt.contains("`.ralph/agent/planner.md`"),
             "Planner should use custom path"
@@ -2963,7 +3078,7 @@ hats:
             HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None)
                 .with_memories_enabled(true);
         ralph_builder.set_active_scratchpad(config.core.scratchpad.clone());
-        let builder_prompt = ralph_builder.build_prompt("", &[]);
+        let builder_prompt = ralph_builder.build_prompt("", &[], &[]);
         assert!(
             builder_prompt.contains("`.ralph/agent/scratchpad.md`"),
             "Builder should use global path"
@@ -2977,7 +3092,7 @@ hats:
             enabled: false,
             path: ".ralph/agent/scratchpad.md".to_string(),
         });
-        let validator_prompt = ralph_validator.build_prompt("", &[]);
+        let validator_prompt = ralph_validator.build_prompt("", &[], &[]);
         assert!(
             !validator_prompt.contains("### 0b. SCRATCHPAD"),
             "Validator should have no scratchpad sections"

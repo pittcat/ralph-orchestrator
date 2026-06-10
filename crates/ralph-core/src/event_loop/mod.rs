@@ -2169,7 +2169,7 @@ impl EventLoop {
                 self.apply_robot_guidance();
 
                 // Build base prompt and prepend memories + scratchpad + ready tasks
-                let base_prompt = self.ralph.build_prompt(&events_context, &[]);
+                let base_prompt = self.ralph.build_prompt(&events_context, &[], &[]);
                 self.ralph.clear_robot_guidance();
                 let base_prompt = self.inject_phase_into_prompt(base_prompt);
                 // U6: fold the soft runtime-diagnosis alert into the
@@ -2335,6 +2335,17 @@ impl EventLoop {
                     effective_regular_events
                 };
 
+                // Extract trigger topic(s) for the active hats so they appear in the
+                // prompt as `## ACTIVE TRIGGER`. Derive from `filtered_events` (the
+                // FR-1-filtered subset) — not `regular_events` — so that the trigger
+                // list stays consistent with what the prompt's PENDING EVENTS section
+                // actually shows, avoiding re-injection of filtered-out events.
+                let trigger_topics: Vec<String> = filtered_events
+                    .iter()
+                    .filter(|e| !Self::is_system_event(e.topic.as_str()))
+                    .map(|e| e.topic.to_string())
+                    .collect();
+
                 // Format events for context
                 let events_context = filtered_events
                     .iter()
@@ -2343,7 +2354,11 @@ impl EventLoop {
                     .join("\n");
 
                 // Build base prompt and prepend memories + scratchpad if available
-                let base_prompt = self.ralph.build_prompt(&events_context, &active_hats);
+                let base_prompt = self.ralph.build_prompt(
+                    &events_context,
+                    &active_hats,
+                    &trigger_topics.iter().map(String::as_str).collect::<Vec<_>>(),
+                );
 
                 // Build prompt with active hats - filters instructions to only active hats
                 debug!(
@@ -3097,7 +3112,7 @@ impl EventLoop {
 
     /// Builds the Ralph prompt (coordination mode).
     pub fn build_ralph_prompt(&self, prompt_content: &str) -> String {
-        self.ralph.build_prompt(prompt_content, &[])
+        self.ralph.build_prompt(prompt_content, &[], &[])
     }
 
     /// Determines which hats should be active based on pending events.

@@ -516,19 +516,31 @@ hats:
       - Read `context.md` for plan context, R-IDs, and scope boundaries
 
       ### Scope Detection
-      - Read `start_sha` from context.md (recorded by Coordinator during work.start)
-      - If `start_sha` is available and valid:
+      - Identify your trigger: `work.done` (executor finished a step) vs `fix.applied` (fixer completed a fix round). The trigger is the event that activated you.
+      - Read `last_reviewed_sha` from `context.md` (persisted by the previous wave's review-coordinator pass). If present and valid, this is your preferred diff base — it is the SHA of the commit at the end of the most recent review.
+      - If `last_reviewed_sha` is available and valid (validated via `git cat-file -t <sha> 2>/dev/null` returning exactly the string `commit` — see Edge case below for full validation rules):
+        - Use `git diff -U10 <last_reviewed_sha>..HEAD` and `git diff --name-only <last_reviewed_sha>..HEAD`
+        - Use `git log --oneline <last_reviewed_sha>..HEAD` for intent extraction
+        - Read `commit_count` from `git rev-list --count <last_reviewed_sha>..HEAD`
+        - Read `changed_lines` from `git diff --shortstat <last_reviewed_sha>..HEAD` (sum of insertions+deletions)
+        - Set `diff_base = <last_reviewed_sha>` in wave payload. Do NOT set `diff_base_fallback` (incremental baseline is the happy path).
+      - Else, read `start_sha` from context.md (recorded by Coordinator during work.start). If `start_sha` is available and valid:
         - Use `git diff -U10 <start_sha>..HEAD` and `git diff --name-only <start_sha>..HEAD`
         - Use `git log --oneline <start_sha>..HEAD` for intent extraction
         - Read `commit_count` from `git rev-list --count <start_sha>..HEAD`
         - Read `changed_lines` from `git diff --shortstat <start_sha>..HEAD` (sum of insertions+deletions)
-      - If `start_sha` is unavailable or invalid, fall back to base detection chain:
+        - Set `diff_base = <start_sha>` in wave payload. Mark the downgrade with `diff_base_fallback` in the wave payload:
+          - If trigger is `work.done`: `diff_base_fallback: "no_prior_wave"` (first wave of this plan, no prior review has been recorded).
+          - If trigger is `fix.applied`: `diff_base_fallback: "no_last_reviewed_sha"` (abnormal — fix.applied normally implies a prior review whose SHA was persisted; this means the persistence layer is missing or was wiped, e.g. loop restart with no saved state).
+      - If neither `last_reviewed_sha` nor `start_sha` is available or valid, fall back to base detection chain:
         - Detect diff base: `origin/main` → `origin/master` → `main` → `master` → `HEAD~1` (fallback chain)
         - Compute merge-base: `git merge-base HEAD <base>`
         - Generate diff: `git diff -U10 <base>`
         - Generate file list: `git diff --name-only <base>`
         - Read `commit_count` from `git rev-list --count <merge-base>..HEAD`
         - Read `changed_lines` from `git diff --shortstat <base>`
+        - Set `diff_base = <base>` in wave payload. Mark with `diff_base_fallback: "no_start_sha"` (extreme abnormal — even the loop-start anchor is missing).
+      - Edge case: `last_reviewed_sha` or `start_sha` is present in `context.md` but the git object is no longer a `commit` (e.g. rebased, rewritten, amended out of history). Validate by running `git cat-file -t <sha> 2>/dev/null` and checking stdout is **exactly** `commit` (the command also returns `tag`/`tree`/`blob` for valid non-commit objects, which is correctly treated as missing). As a backup signal, `git diff <sha>..HEAD` exiting non-zero also indicates an invalid base. Treat as missing and fall through to the next priority level (start_sha → base detection chain). Do NOT fail the wave — the downgrade path is always safe and produces a full review.
       - Check untracked files: `git ls-files --others --exclude-standard`
 
       ### HARD RULE: Wave vs Pass Decision
@@ -560,6 +572,9 @@ hats:
       - Include requirements completeness data in each wave payload
 
       ### Dimension Selection (from compound-engineering persona-catalog)
+      **Trigger determines the dimension set.** Identify the trigger (work.done vs fix.applied) before selecting. The trigger-aware logic is part of the ceiling, not the floor — work.done stays at the full 7+ set, fix.applied narrows to a focused 3-dim set to avoid re-covering dimensions that the work.done first-pass already covered.
+
+      **`work.done` trigger (first-pass review of a step)**:
       **Required dimensions** (MUST include in every emitted `review.wave.ready` wave — these are the floor, not the ceiling):
       - `correctness` — logic correctness, edge cases, error propagation
       - `testing` — test coverage, assertion quality, brittle tests
@@ -577,6 +592,19 @@ hats:
       | Diff touches API routes, interfaces, serialization, types | `api-contract` |
       | Diff touches error handling, retries, timeouts, health checks | `reliability` |
       | Diff >= 50 changed non-test, non-generated, non-lockfile lines, or touches auth/payments/data mutations | `adversarial` |
+
+      **`fix.applied` trigger (incremental review of a fix round)**:
+      **Required dimensions** (MUST include — unconditional, regardless of diff content):
+      - `correctness` — verify the fix is logically correct and did not introduce a new bug
+      - `standards` — verify the fix follows project conventions (CLAUDE.md, AGENTS.md)
+      - `requirements` — verify the fix addresses the original finding (R-ID / dimension match)
+
+      **DO NOT include** the 4 other required dimensions (`testing`, `maintainability`, `agent-native`, `learnings`). They were already covered by the work.done first-pass; running them again on a small fix is duplicate review with no new signal.
+
+      **DO NOT include** any conditional dimension (`security`, `performance`, `api-contract`, `reliability`, `adversarial`). The fix stage is unconditionally a 3-dim set. This is a known tradeoff: if a fix touches auth / payments / data-mutation code, the regression risk in those areas is covered by the work.done first-pass for the step (the work.done wave reviewed the same code under the full conditional set), NOT by re-running it on the small fix delta. This is the explicit, accepted cost of incremental review.
+      **Do NOT attempt to retroactively add `security` or `adversarial` to a `fix.applied` wave, even if the diff touches auth, payments, or data-mutation code.** This is by design, not a gap to fill — the work.done first-pass for the step already covered those dimensions for the same code. Adding them here would defeat the purpose of the incremental review (re-covering work that was already reviewed) without adding signal.
+
+      **Scope of the fix review is incremental by design.** Combined with the `last_reviewed_sha`-based `diff_base` (see Scope Detection), the fix wave sees ONLY the changes since the previous review — the prior reviewed code is not re-read.
 
       ### Dimension Depth Calibration
       For the `adversarial` dimension:
@@ -614,6 +642,25 @@ hats:
         - `plan_name`: string
         - `task_id`, `task_key`, `step`: MUST be present. Copy from the triggering event payload. Do NOT omit.
       - Emit wave events then stop — do not wait for results
+
+      ### Persist `last_reviewed_sha` After Terminal Event
+      **Why this exists:** `last_reviewed_sha` is the incremental diff base for the NEXT review-coordinator pass. The `context.md` key-value header is the chosen persistence layer (see also `start_sha` written by Coordinator on `work.start`, and `current_fix_round` in `fix-log.md`).
+      **When to run:** immediately after emitting EITHER `review.wave.ready` OR `review.passed`. Both paths mark the current HEAD as reviewed. The empty-diff `review.passed` path matters as much as the wave path: skipping a wave on empty diff does NOT mean the HEAD should be re-reviewed next time. Without this update, the next wave's `last_reviewed_sha` would point too far back and double-cover code.
+      **How to write (single atomic write, no Read+Write race):**
+      - Capture current HEAD: `current_sha=$(git rev-parse HEAD)`
+      - Resolve the plan's `context.md` path (from `plan_name` in the trigger payload).
+      - If the file already has a `last_reviewed_sha:` line, replace it in place using a single-fd sed (avoids the TOCTOU race where a concurrent writer lands between two operations): `sed -i 's|^last_reviewed_sha:.*|last_reviewed_sha: '"$current_sha"'|' <context_md_path>`. Do NOT append a duplicate line.
+      - If the file does not have the line, append it once: `printf '\nlast_reviewed_sha: %s\n' "$current_sha" >> <context_md_path>`.
+      - The key-value header format mirrors `start_sha` — agents that grep `context.md` for the field expect a single, well-formed line.
+      **If the write fails:** log it to `decisions.md` using the DEC-ID template below and proceed. The next wave will downgrade to `start_sha` (safe but redundant), so a failed update degrades gracefully — it never silently double-reviews code. This is a one-shot write — do NOT loop, retry, or attempt partial recovery.
+
+      **DEC-ID template** for `decisions.md` failure logging — copy verbatim, do not invent your own format:
+      ```
+      ## DEC-$(date -u +%Y%m%d-%H%M%S)
+      - decision: skip last_reviewed_sha write
+      - reason: <error message from sed/printf>
+      - impact: next wave uses start_sha (degraded but safe)
+      ```
 
       ### Constraints
       - MUST NOT review code directly

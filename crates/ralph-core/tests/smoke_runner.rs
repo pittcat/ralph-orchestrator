@@ -1157,7 +1157,7 @@ mod skills_smoke_tests {
         )
         .with_skill_index(skill_index);
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
 
         // Skill index section should appear in the prompt
         assert!(
@@ -1296,7 +1296,7 @@ skills:
         )
         .with_skill_index(String::new()); // Empty index = skills disabled
 
-        let prompt = ralph.build_prompt("", &[]);
+        let prompt = ralph.build_prompt("", &[], &[]);
         assert!(
             !prompt.contains("## SKILLS"),
             "Disabled skills should not produce ## SKILLS section"
