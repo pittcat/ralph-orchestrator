@@ -463,6 +463,7 @@ async fn main() -> Result<()> {
                 exclusive: false,
                 no_auto_merge: false,
                 worktree: false,
+                worktree_path: None,
                 skip_preflight: false,
                 no_sync_agent_docs: false,
                 verbose: false,

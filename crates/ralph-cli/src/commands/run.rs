@@ -113,6 +113,12 @@ pub struct RunArgs {
     #[arg(long, conflicts_with = "exclusive")]
     pub worktree: bool,
 
+    /// Internal: used by the parent process to pass an already-created worktree
+    /// path to a child subprocess, so the child skips duplicate creation.
+    /// Not intended for direct user use.
+    #[arg(long, hide = true)]
+    pub worktree_path: Option<PathBuf>,
+
     // ─────────────────────────────────────────────────────────────────────────
     // Phase Options (Warmup/Production Two-Phase Loop)
     // ─────────────────────────────────────────────────────────────────────────
@@ -719,16 +725,16 @@ pub async fn run_command(
 
     // Try to acquire the loop lock for multi-loop concurrency support
     // This implements the lock detection flow from the multi-loop spec
-    // Skip lock acquisition in subprocess TUI mode - let the child acquire it
     // Skip lock acquisition in --worktree mode - create worktree directly without needing the lock
-    let (loop_context, _lock_guard) = if use_subprocess_tui {
-        // In subprocess TUI mode, don't acquire lock here - the child RPC process will do it
-        // This avoids the self-lock contention where parent holds lock and child sees it,
-        // then incorrectly spawns a worktree thinking there's another concurrent loop
-        debug!("Skipping lock acquisition in subprocess TUI mode (child will acquire)");
-        let context = LoopContext::primary(workspace_root.clone());
-        (context, None)
-    } else if args.worktree {
+    // Skip lock acquisition in subprocess TUI mode - let the child acquire it
+    //
+    // U1 (2026-06-10): `args.worktree` takes PRIORITY over `use_subprocess_tui`.
+    // When both are true (TTY + --worktree flag), we MUST create the worktree
+    // first so parent gets LoopContext::worktree and passes --worktree-path to child.
+    // The old order (use_subprocess_tui first) caused parent to use primary context
+    // and skip worktree creation entirely - child then created a second worktree
+    // in the main repo, defeating the isolation guarantee.
+    let (loop_context, _lock_guard) = if args.worktree {
         // Explicit --worktree flag: create worktree directly without acquiring lock
         // Worktree mode does not hold .ralph/loop.lock - it's fully isolated
         debug!("Creating worktree for explicit --worktree mode");
@@ -753,6 +759,36 @@ pub async fn run_command(
         subprocess_tui_args.worktree = false;
         subprocess_tui_args.worktree_path = Some(wt_ctx.workspace().to_path_buf());
         (wt_ctx, None)
+    } else if args.worktree_path.is_some() {
+        // U2 (2026-06-10): child received --worktree-path from parent: the worktree
+        // was already created by the parent, so we skip spawn_worktree_loop and
+        // use the path directly. This is the child's side of the fix — the parent
+        // creates the worktree once, passes the path via --worktree-path, and the
+        // child uses it without re-creating.
+        let worktree_path = args.worktree_path.as_ref().unwrap();
+        let loop_id = worktree_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        debug!(
+            "Child using existing worktree at '{}' (loop_id={})",
+            worktree_path.display(),
+            loop_id
+        );
+        let context = LoopContext::worktree(
+            loop_id,
+            worktree_path.clone(),
+            workspace_root.clone(),
+        );
+        (context, None)
+    } else if use_subprocess_tui {
+        // In subprocess TUI mode, don't acquire lock here - the child RPC process will do it
+        // This avoids the self-lock contention where parent holds lock and child sees it,
+        // then incorrectly spawns a worktree thinking there's another concurrent loop
+        debug!("Skipping lock acquisition in subprocess TUI mode (child will acquire)");
+        let context = LoopContext::primary(workspace_root.clone());
+        (context, None)
     } else {
         match LoopLock::inspect(workspace_root) {
             Ok(LockStatus::None) => {
@@ -1293,8 +1329,13 @@ async fn run_subprocess_tui(
     if args.no_auto_merge {
         child_args.push("--no-auto-merge".to_string());
     }
-    if args.worktree {
-        child_args.push("--worktree".to_string());
+    // U2 (2026-06-10): forward --worktree-path (not --worktree) when the parent
+    // already created a worktree. Passing --worktree would cause the child to
+    // create a duplicate worktree inside the parent's. The child detects
+    // --worktree-path and enters LoopContext::worktree directly, skipping creation.
+    if let Some(ref worktree_path) = args.worktree_path {
+        child_args.push("--worktree-path".to_string());
+        child_args.push(worktree_path.to_string_lossy().into_owned());
     }
 
     // Forward preflight options
@@ -1418,6 +1459,7 @@ pub(crate) fn default_run_args() -> RunArgs {
         exclusive: false,
         no_auto_merge: false,
         worktree: false,
+        worktree_path: None,
         skip_preflight: true,
         no_sync_agent_docs: false,
         verbose: false,
