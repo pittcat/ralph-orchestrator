@@ -1035,7 +1035,7 @@ pub(crate) fn run_loop_result_exit_code(err: &anyhow::Error) -> Option<i32> {
 #[cfg(test)]
 mod run_loop_result_exit_code_tests {
     use super::*;
-    use loop_runner::{EXIT_CODE_LINT_GATE, PresetLintGateError};
+    use loop_runner::{EXIT_CODE_AGENT_DOC_SYNC_STRICT, EXIT_CODE_LINT_GATE, PresetLintGateError};
 
     #[test]
     fn detects_lint_gate_error_in_chain() {
@@ -1053,6 +1053,28 @@ mod run_loop_result_exit_code_tests {
     fn ignores_unrelated_errors() {
         let err = anyhow::anyhow!("some unrelated IO failure");
         assert_eq!(run_loop_result_exit_code(&err), None);
+    }
+
+    #[test]
+    fn detects_agent_doc_sync_strict_in_chain() {
+        // The error string literal matches what `runner.rs` raises on
+        // agent_doc_sync strict-mode failure (B1-边界 contract).
+        let err = anyhow::anyhow!("agent_doc_sync failed in strict mode");
+        assert_eq!(
+            run_loop_result_exit_code(&err),
+            Some(EXIT_CODE_AGENT_DOC_SYNC_STRICT)
+        );
+        assert_eq!(EXIT_CODE_AGENT_DOC_SYNC_STRICT, 78);
+    }
+
+    #[test]
+    fn detects_agent_doc_sync_through_wrapped_context() {
+        let err: anyhow::Error = anyhow::anyhow!("agent_doc_sync failed in strict mode")
+            .context("agent doc sync strict mode");
+        assert_eq!(
+            run_loop_result_exit_code(&err),
+            Some(EXIT_CODE_AGENT_DOC_SYNC_STRICT)
+        );
     }
 
     #[test]

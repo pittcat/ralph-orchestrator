@@ -160,7 +160,20 @@ pub async fn resume_command(
         prebuilt_diagnostics,
         false,      // no_sync_agent_docs (resume uses config default)
     )
-    .await?;
+    .await
+    .map_err(|e| {
+        // Map `agent_doc_sync` strict-mode failures (and the typed
+        // preset-lint error) to their explicit exit codes so CI / cron
+        // callers can distinguish them from generic failures. Without
+        // this branch, `?` would propagate a plain `anyhow::Error` and
+        // the process would exit with 1 — swallowing the 78 / 2
+        // contract the run command already preserves (see
+        // `run_loop_result_exit_code` in commands/run.rs).
+        if let Some(code) = crate::commands::run::run_loop_result_exit_code(&e) {
+            std::process::exit(code);
+        }
+        e
+    })?;
     let exit_code = reason.exit_code();
 
     if exit_code != 0 {

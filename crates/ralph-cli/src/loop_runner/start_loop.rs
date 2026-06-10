@@ -90,6 +90,21 @@ pub async fn start_loop(
         false,              // no_sync_agent_docs (daemon uses config default)
     )
     .await
+    .map_err(|e| {
+        // B1-边界: `start_loop` is the daemon entry point. Without this
+        // mapping, `agent_doc_sync` strict-mode failures and preset-lint
+        // errors would surface as plain `anyhow::Error` to the caller
+        // and the process would exit 1 — swallowing the 78 / 2 contract
+        // that `commands/run.rs` already preserves via
+        // `run_loop_result_exit_code`. The bot caller (`bot.rs`) also
+        // maps the same errors; doing it here is idempotent because
+        // both call sites use `std::process::exit` and the second call
+        // is unreachable.
+        if let Some(code) = crate::commands::run::run_loop_result_exit_code(&e) {
+            std::process::exit(code);
+        }
+        e
+    })
 }
 
 /// Creates a robot service (Telegram) for human-in-the-loop communication.
