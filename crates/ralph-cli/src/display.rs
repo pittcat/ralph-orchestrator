@@ -154,6 +154,11 @@ fn resume_hint_for(reason: &TerminationReason, loop_id: &str) -> Option<String> 
         | TerminationReason::WorkspaceGone
         | TerminationReason::Cancelled
         | TerminationReason::RestartRequested => None,
+        TerminationReason::ReviewFailed { .. } => {
+            // P0-C: a failing review is a final verdict — no resume
+            // hint, the operator must fix the underlying issue first.
+            None
+        }
         _ => Some(format!("ralph run --continue --loop-id {loop_id}")),
     }
 }
@@ -255,6 +260,9 @@ pub fn print_termination(
         TerminationReason::PayloadContractViolation => (RED, "⏸", "Payload contract violation"),
         TerminationReason::RecoveryExhausted { .. } => {
             (RED, "⏸", "Recovery retry window exhausted")
+        }
+        TerminationReason::ReviewFailed { .. } => {
+            (RED, "✗", "Review verdict failed (verdict gate propagation)")
         }
     };
 

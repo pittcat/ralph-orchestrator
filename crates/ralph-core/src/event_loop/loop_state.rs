@@ -151,6 +151,14 @@ pub struct LoopState {
     /// been observed (or no verdict gate is configured).
     pub last_verdict_payload: Option<String>,
 
+    /// Topic of the most recent event whose topic matched the configured
+    /// verdict gate. Tracked alongside `last_verdict_payload` so the
+    /// fail-path auto-termination check (P0-C, 2026-06-10) can detect
+    /// when the verdict has fully propagated to the gate's last
+    /// downstream mirror topic (e.g. `report.done` for ce-executor).
+    /// `None` when no verdict has been observed.
+    pub last_verdict_topic: Option<String>,
+
     /// Signature of the most recent completion rejection (for stale-breaker).
     pub completion_rejection_signature: Option<String>,
 
@@ -202,6 +210,7 @@ impl Default for LoopState {
             policy_runtime_state: None,
             state_machine_runtime_state: None,
             last_verdict_payload: None,
+            last_verdict_topic: None,
             completion_rejection_signature: None,
             consecutive_completion_rejections: 0,
             last_rejection_fingerprint: 0,
@@ -436,6 +445,11 @@ impl LoopState {
             return;
         }
         if topics.iter().any(|t| t == event.topic.as_str()) {
+            // 2026-06-10 P0-C fix: track the topic alongside the payload
+            // so the fail-path auto-termination check can detect when
+            // the verdict has propagated to the LAST configured mirror
+            // topic (e.g. `report.done`).
+            self.last_verdict_topic = Some(event.topic.to_string());
             self.last_verdict_payload = Some(event.payload.clone());
         }
     }

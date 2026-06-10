@@ -136,6 +136,24 @@ pub enum TerminationReason {
         /// `summary.md`.
         reason: String,
     },
+    /// P0-C (2026-06-10): fail-path auto-termination. Triggered when
+    /// the verdict gate has observed a failing verdict (`fail_field ==
+    /// fail_value`) AND the verdict has propagated to the LAST
+    /// configured topic in the gate's mirror chain (i.e. either
+    /// `gate.topic` alone, or the final entry in `gate.additional_topics`).
+    ///
+    /// This closes the "loop hangs after a failing review" gap: the
+    /// verdict gate forbids `LOOP_COMPLETE` on fail (by design, to
+    /// prevent a rogue completion from masking the failure), but until
+    /// this fix there was no other exit signal — the loop would burn
+    /// iterations forever. Now the runner exits with a clear reason
+    /// once the fail verdict has reached the workflow's final
+    /// downstream mirror event (e.g. `report.done` for ce-executor).
+    ReviewFailed {
+        /// The topic where the fail verdict was last observed.
+        /// Surfaced in `loop.terminate` payload for operators.
+        topic: String,
+    },
 }
 
 impl TerminationReason {
@@ -156,7 +174,8 @@ impl TerminationReason {
             | TerminationReason::Stopped
             | TerminationReason::WorkspaceGone
             | TerminationReason::PayloadContractViolation
-            | TerminationReason::RecoveryExhausted { .. } => 1,
+            | TerminationReason::RecoveryExhausted { .. }
+            | TerminationReason::ReviewFailed { .. } => 1,
             TerminationReason::MaxIterations
             | TerminationReason::MaxRuntime
             | TerminationReason::MaxCost => 2,
@@ -189,6 +208,7 @@ impl TerminationReason {
             TerminationReason::Cancelled => "cancelled",
             TerminationReason::PayloadContractViolation => "payload_contract_violation",
             TerminationReason::RecoveryExhausted { .. } => "recovery_exhausted",
+            TerminationReason::ReviewFailed { .. } => "review_failed",
         }
     }
 
@@ -1390,6 +1410,46 @@ impl EventLoop {
                 "Stale loop detected: same event signature emitted consecutively"
             );
             return Some(TerminationReason::LoopStale);
+        }
+
+        // P0-C (2026-06-10): fail-path auto-termination. When the
+        // verdict gate is configured and a failing verdict has been
+        // observed, AND that verdict has propagated to the LAST
+        // configured topic in the gate's mirror chain, terminate with
+        // `ReviewFailed`. Closes the "loop hangs after failing review"
+        // gap where the gate forbids `LOOP_COMPLETE` on fail (correct)
+        // but offered no other exit signal.
+        //
+        // Semantics: `gate.topic` is the upstream verdict (e.g.
+        // `REVIEW_COMPLETE`); `gate.additional_topics` lists
+        // downstream mirror events in propagation order (e.g.
+        // `report.done`). The "last" mirror is whichever entry is
+        // the final downstream — when the verdict is observed on
+        // THAT topic, the workflow has reached its terminus.
+        if let Some(gate) = self.config.event_loop.verdict_gate.as_ref()
+            && let Some(topic) = self.state.last_verdict_topic.as_deref()
+            && let Some(payload) = self.state.last_verdict_payload.as_deref()
+            && Self::verdict_payload_is_fail(payload, gate)
+        {
+            // The "expected last" topic is the final mirror in the
+            // gate's chain — `additional_topics.last()` if non-empty,
+            // else `topic` itself.
+            let expected_last = gate
+                .additional_topics
+                .last()
+                .cloned()
+                .unwrap_or_else(|| gate.topic.clone());
+            if topic == expected_last.as_str() {
+                info!(
+                    verdict_topic = %topic,
+                    fail_field = %gate.fail_field,
+                    fail_value = %gate.fail_value,
+                    "Verdict gate fail verdict fully propagated — auto-terminating with ReviewFailed"
+                );
+                return Some(TerminationReason::ReviewFailed {
+                    topic: topic.to_string(),
+                });
+            }
         }
 
         // Check for stop signal from Telegram /stop or CLI stop-requested
@@ -5665,6 +5725,9 @@ fn termination_status_text(reason: &TerminationReason) -> &'static str {
         TerminationReason::PayloadContractViolation => "Payload contract violation - loop paused.",
         TerminationReason::RecoveryExhausted { .. } => {
             "Recovery responder exhausted retry window - loop paused."
+        }
+        TerminationReason::ReviewFailed { .. } => {
+            "Review verdict failed and propagated to final mirror - loop terminated."
         }
     }
 }

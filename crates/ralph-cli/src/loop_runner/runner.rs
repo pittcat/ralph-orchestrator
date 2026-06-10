@@ -1229,6 +1229,7 @@ pub async fn run_loop_impl(
                     TerminationReason::Cancelled => "cancelled",
                     TerminationReason::PayloadContractViolation => "payload_contract_violation",
                     TerminationReason::RecoveryExhausted { .. } => "recovery_exhausted",
+                    TerminationReason::ReviewFailed { .. } => "review_failed",
                 };
 
                 if matches!(reason, TerminationReason::Interrupted) {
@@ -1303,6 +1304,13 @@ pub async fn run_loop_impl(
                         TerminationReason::PayloadContractViolation => "payload contract violation",
                         TerminationReason::RecoveryExhausted { .. } => {
                             "recovery retry window exhausted"
+                        }
+                        TerminationReason::ReviewFailed { .. } => {
+                            // P0-C: failing review verdict propagated to the
+                            // last mirror — the workflow has reached its
+                            // terminus. Surface a human-readable reason
+                            // string for the merge-queue needs-review record.
+                            "review verdict failed (verdict gate propagation)"
                         }
                     };
                     if let Err(e) = queue.mark_needs_review(loop_id, reason_str) {

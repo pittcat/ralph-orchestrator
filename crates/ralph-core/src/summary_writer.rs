@@ -382,6 +382,9 @@ impl SummaryWriter {
             TerminationReason::RecoveryExhausted { .. } => {
                 "Failed: recovery retry window exhausted"
             }
+            TerminationReason::ReviewFailed { .. } => {
+                "Failed: review verdict failed and propagated to final mirror"
+            }
         }
     }
 
@@ -478,6 +481,7 @@ mod tests {
             consecutive_blocked: 0,
             last_blocked_hat: None,
             task_block_counts: std::collections::HashMap::new(),
+            last_verdict_topic: None,
             abandoned_tasks: Vec::new(),
             abandoned_task_redispatches: 0,
             consecutive_malformed_events: 0,
