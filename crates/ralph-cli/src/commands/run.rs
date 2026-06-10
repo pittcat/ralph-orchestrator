@@ -773,6 +773,16 @@ pub async fn run_command(
         // creates the worktree once, passes the path via --worktree-path, and the
         // child uses it without re-creating.
         let worktree_path = args.worktree_path.as_ref().unwrap();
+        // Defensive: validate the path exists. The parent should never pass
+        // an invalid path, but if it does, fail fast with a clear error
+        // instead of writing events into a phantom directory.
+        if !worktree_path.exists() {
+            return Err(anyhow::anyhow!(
+                "--worktree-path '{}' does not exist. The parent process must \
+                 create the worktree before passing it to the child.",
+                worktree_path.display()
+            ));
+        }
         let loop_id = worktree_path
             .file_name()
             .and_then(|n| n.to_str())

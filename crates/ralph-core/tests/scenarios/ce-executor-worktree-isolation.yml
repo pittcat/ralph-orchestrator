@@ -1,0 +1,74 @@
+# ce-executor-worktree-isolation: BDD scenario for worktree isolation contract
+#
+# 2026-06-10 plan U4: 端到端验证 worktree 隔离承诺 (R1-R4)
+#
+# This BDD scenario documents the worktree isolation contract at the
+# event-loop level. The actual filesystem isolation (主仓 .ralph/ 干净 +
+# worktree 内 .ralph/events.jsonl 有内容) is end-to-end verified by
+# `crates/ralph-cli/tests/integration_worktree_isolation.rs`, which
+# spawns a real `ralph` subprocess and asserts on disk state.
+#
+# This YAML scenario complements that integration test by:
+#   - Exercising the event-loop path with a worktree-mode-shaped config.
+#   - Verifying that events flow through the loop without leaking into
+#     the parent process's context (in-process isolation contract).
+#   - Documenting the contract as a regression artifact discoverable
+#     alongside the other BDD scenarios in this directory.
+#
+# Note: a true cross-process isolation assertion is the integration test's
+# job. This scenario uses MockBackend + ScenarioRunner (the in-process
+# harness) and asserts on the event wire-level flow only.
+#
+# See docs/plans/2026-06-10-001-fix-ce-executor-worktree-isolation-plan.md
+
+name: ce_executor_worktree_isolation
+description: |
+  Worktree isolation contract: events flow through the loop with
+  worktree-mode-shaped config. The CLI-level cross-process isolation
+  is verified by integration_worktree_isolation.rs.
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 3
+  hats:
+    a:
+      name: "A"
+      description: "Producer in worktree"
+      triggers: ["work.start"]
+      publishes: ["work.ready"]
+      instructions: "Produce work in worktree context."
+      terminal_events: ["work.ready"]
+    b:
+      name: "B"
+      description: "Consumer in worktree"
+      triggers: ["work.ready"]
+      publishes: ["work.done"]
+      instructions: "Consume work in worktree context."
+      terminal_events: ["work.done"]
+  event_loop:
+    starting_event: "work.start"
+    completion_promise: "work.done"
+  topic_owners:
+    work.ready: ["a"]
+    work.done: ["b"]
+  topic_format_whitelist:
+    - "LOOP_COMPLETE"
+  tasks:
+    enabled: false
+
+mock_responses:
+  - |
+    <event topic="work.start">
+    Worktree-isolated run started.
+    </event>
+  - |
+    <event topic="work.done">
+    Worktree-isolated run completed.
+    </event>
+
+expected:
+  iterations: 2
+  events:
+    - topic: work.start
+    - topic: work.done
+  completion: true

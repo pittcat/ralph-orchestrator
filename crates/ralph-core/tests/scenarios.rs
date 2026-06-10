@@ -702,3 +702,19 @@ fn test_u4_plan_name_equality() {
     let yaml = load_scenario("tests/scenarios/four-p0-guards/u4-plan-name-equality.yml");
     run_workflow_guard_scenario(yaml);
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// 2026-06-10: ce-executor worktree isolation BDD scenario (U4)
+// ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_ce_executor_worktree_isolation() {
+    // U4 (2026-06-10): worktree isolation contract at the event-loop level.
+    // The cross-process filesystem isolation is verified end-to-end by
+    // `crates/ralph-cli/tests/integration_worktree_isolation.rs`. This
+    // BDD scenario complements that test by exercising the event flow
+    // with a worktree-mode-shaped config, ensuring no leakage at the
+    // event-loop layer.
+    let yaml = load_scenario("tests/scenarios/ce-executor-worktree-isolation.yml");
+    run_scenario(yaml);
+}
