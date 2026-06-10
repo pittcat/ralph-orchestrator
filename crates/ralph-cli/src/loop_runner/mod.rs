@@ -32,7 +32,8 @@ pub use payload_contract_gate::{
     enforce_payload_contract_gate, write_payload_contract_violation_report,
 };
 pub use preset_lint_gate::{
-    EXIT_CODE_LINT_GATE, PresetLintGateError, enforce_preset_lint_gate, write_preset_lint_artifact,
+    EXIT_CODE_AGENT_DOC_SYNC_STRICT, EXIT_CODE_LINT_GATE, PresetLintGateError,
+    enforce_preset_lint_gate, write_preset_lint_artifact,
 };
 #[cfg(test)]
 pub use runner::resolve_loop_id;

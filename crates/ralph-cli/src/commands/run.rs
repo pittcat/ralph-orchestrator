@@ -1024,6 +1024,11 @@ pub(crate) fn run_loop_result_exit_code(err: &anyhow::Error) -> Option<i32> {
             return Some(loop_runner::EXIT_CODE_LINT_GATE);
         }
     }
+    for cause in err.chain() {
+        if cause.to_string().contains("agent_doc_sync failed in strict mode") {
+            return Some(loop_runner::EXIT_CODE_AGENT_DOC_SYNC_STRICT);
+        }
+    }
     None
 }
 

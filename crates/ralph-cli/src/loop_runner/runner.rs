@@ -669,9 +669,10 @@ pub async fn run_loop_impl(
     // present in CLAUDE.md / AGENTS.md when the agent starts reading.
     {
         let env_skip = std::env::var("RALPH_AGENT_DOC_SYNC")
-            .map(|v| v == "0")
+            .ok()
+            .map(|v| v.trim() == "0")
             .unwrap_or(false);
-        let skip = ralph_core::should_skip(
+        let skip = ralph_core::config::agent_doc_sync::should_skip(
             env_skip,
             no_sync_agent_docs,
             &config.agent_doc_sync,
@@ -702,10 +703,8 @@ pub async fn run_loop_impl(
                 }
             }
 
-            let on_error = match config.agent_doc_sync.on_error {
-                ralph_core::OnErrorPolicy::Warn => ralph_core::agent_doc_sync::OnError::Warn,
-                ralph_core::OnErrorPolicy::Strict => ralph_core::agent_doc_sync::OnError::Strict,
-            };
+            let on_error: ralph_core::agent_doc_sync::OnError =
+                config.agent_doc_sync.on_error.into();
 
             // Resolve session_dir from the diagnostics collector for
             // recovery envelope writes. When None, the persist module
@@ -741,9 +740,10 @@ pub async fn run_loop_impl(
                             tracing::error!(
                                 target: "ralph_cli::loop_runner",
                                 error = %e,
-                                "agent_doc_sync: failed (strict mode), exiting"
+                                "agent_doc_sync: failed (strict mode), aborting"
                             );
-                            std::process::exit(78);
+                            return Err(anyhow::anyhow!("agent_doc_sync failed in strict mode"))
+                                .context("agent doc sync strict mode");
                         }
                         ralph_core::OnErrorPolicy::Warn => {
                             tracing::warn!(

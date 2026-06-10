@@ -32,6 +32,10 @@ use super::SyncReport;
 /// Read by `ralph doctor` for a fast O(1) health check.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDocSyncSnapshot {
+    /// Schema version for forward-compatible readers.
+    /// Existing readers that lack the field see the serde default.
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
     /// Number of blocks synced (appended or replaced).
     pub synced: usize,
     /// Number of blocks skipped (already up to date).
@@ -40,6 +44,10 @@ pub struct AgentDocSyncSnapshot {
     pub failed: usize,
     /// Wall-clock time of the last successful sync (any block).
     pub last_success_at: Option<DateTime<Utc>>,
+}
+
+fn default_schema_version() -> u32 {
+    1
 }
 
 impl AgentDocSyncSnapshot {
@@ -51,6 +59,7 @@ impl AgentDocSyncSnapshot {
             None
         };
         Self {
+            schema_version: 1,
             synced: report.synced,
             skipped: report.skipped,
             failed: report.failed,

@@ -13,6 +13,8 @@ use ralph_core::runtime_contract::{FindingSeverity, FindingSource, FindingStage}
 
 /// Exit code for preset lint gate failure (R7).
 pub const EXIT_CODE_LINT_GATE: i32 = 2;
+/// Exit code for `agent_doc_sync` strict-mode failure (EX_CONFIG).
+pub const EXIT_CODE_AGENT_DOC_SYNC_STRICT: i32 = 78;
 
 /// Typed error for preset lint gate failure.
 ///

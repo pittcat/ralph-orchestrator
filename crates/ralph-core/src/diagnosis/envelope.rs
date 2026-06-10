@@ -53,6 +53,7 @@ pub const MAX_EVIDENCE_SNIPPET_CHARS: usize = 256;
 /// breaking change for the diagnostics report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum DiagnosisSource {
     /// Hat produced no events for the entire iteration; the loop
     /// injected a fallback `task.resume`.
