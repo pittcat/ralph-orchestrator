@@ -24,6 +24,20 @@ use tracing::{debug, warn};
 /// Note: `event.malformed`, `event.scope_violation`, and similar diagnostics are
 /// created by Ralph code and published directly to the bus — they should not need
 /// to pass as trusted JSONL events.
+/// Control topics that the builtin `ralph` hat is allowed to publish.
+///
+/// All other topics are treated as business topics and rejected for the `ralph`
+/// pseudo-hat.  This prevents the orchestration loop's fallback hat from
+/// masquerading as a workflow hat.
+pub const RALPH_CONTROL_TOPICS: &[&str] = &[
+    "LOOP_COMPLETE",
+    "loop.cancel",
+    "loop.start",
+    "human.interact",
+    "human.response",
+    "human.guidance",
+];
+
 pub(crate) fn is_jsonl_control_topic(topic: &str, cancellation_topic: &str) -> bool {
     matches!(
         topic,
@@ -176,6 +190,24 @@ pub fn validate_event_origin(
     // not enumerated in the hat's `publishes` list.
     if is_control {
         return OriginCheck::Accepted;
+    }
+
+    // Builtin `ralph` hat: only control topics allowed; all business topics
+    // rejected.  Prevents the fallback orchestration hat from masquerading as
+    // a workflow hat (e.g. signing `review.complete` or `work.start`).
+    if event.hat.as_deref() == Some("ralph") {
+        let is_ralph_control = RALPH_CONTROL_TOPICS.contains(&topic_str);
+        if !is_ralph_control {
+            warn!(
+                topic = %topic_str,
+                "Builtin ralph hat may only publish control topics; rejecting business topic"
+            );
+            return OriginCheck::Rejected {
+                topic: topic_str.to_string(),
+                hat: event.hat.clone(),
+                reason: "ralph_control_only",
+            };
+        }
     }
 
     // Registered hat + business topic: enforce publish scope.
@@ -694,8 +726,9 @@ hats:
 
     #[test]
     fn test_ralph_as_builtin_hat_passes_origin_guard() {
-        // R1/R2: With runtime-aware registry, hat=ralph is a known hat that
-        // can publish topics within the derived scope.
+        // U2: `ralph` pseudo-hat is restricted to control topics only.
+        // Business topics (work.start, totally.fake) are now rejected
+        // with reason "ralph_control_only".
         let registry = runtime_registry_with_hats(
             r#"
 hats:
@@ -706,40 +739,44 @@ hats:
 "#,
         );
 
-        // hat=ralph topic=work.start: starting event is in ralph's publish scope
+        // hat=ralph topic=work.start: business topic — rejected (ralph_control_only)
         let event = make_event("work.start", Some("ralph"));
         assert_eq!(
             validate_event_origin(&event, &registry, "loop.cancel", ""),
-            OriginCheck::Accepted,
-            "hat=ralph should pass origin guard for work.start (in scope)"
+            OriginCheck::Rejected {
+                topic: "work.start".to_string(),
+                hat: Some("ralph".to_string()),
+                reason: "ralph_control_only"
+            },
+            "hat=ralph with business topic should be rejected (ralph_control_only)"
         );
 
-        // hat=ralph topic=LOOP_COMPLETE: completion promise is in scope
+        // hat=ralph topic=LOOP_COMPLETE: completion promise is a control topic
         let event = make_event("LOOP_COMPLETE", Some("ralph"));
         assert_eq!(
             validate_event_origin(&event, &registry, "loop.cancel", ""),
             OriginCheck::Accepted,
-            "hat=ralph should pass origin guard for LOOP_COMPLETE (in scope)"
+            "hat=ralph should pass origin guard for LOOP_COMPLETE (control topic)"
         );
 
-        // hat=ralph topic=loop.cancel: cancellation promise is in scope
+        // hat=ralph topic=loop.cancel: cancellation promise is a control topic
         let event = make_event("loop.cancel", Some("ralph"));
         assert_eq!(
             validate_event_origin(&event, &registry, "loop.cancel", ""),
             OriginCheck::Accepted,
-            "hat=ralph should pass origin guard for loop.cancel (cancellation topic)"
+            "hat=ralph should pass origin guard for loop.cancel (control topic)"
         );
 
-        // hat=ralph topic=totally.fake: NOT in scope — should be rejected
+        // hat=ralph topic=totally.fake: not a control topic — rejected
         let event = make_event("totally.fake", Some("ralph"));
         assert_eq!(
             validate_event_origin(&event, &registry, "loop.cancel", ""),
             OriginCheck::Rejected {
                 topic: "totally.fake".to_string(),
                 hat: Some("ralph".to_string()),
-                reason: "out-of-scope topic for declared hat"
+                reason: "ralph_control_only"
             },
-            "hat=ralph with off-graph topic should be rejected"
+            "hat=ralph with off-graph topic should be rejected (ralph_control_only)"
         );
 
         // hat=fake topic=work.start: unknown hat — should be rejected
@@ -756,8 +793,10 @@ hats:
     }
 
     #[test]
-    fn test_ralph_as_builtin_hat_can_publish_executor_trigger_topics() {
-        // hat=ralph can publish executor's trigger topics (they're in ralph's scope).
+    fn test_ralph_pseudo_hat_rejected_for_business_topics() {
+        // U2: `ralph` pseudo-hat must NOT be able to publish business topics
+        // like work.start or review.ready. This was the original vulnerability
+        // in the worktree loop — `ralph` masquerading as executor.
         let registry = runtime_registry_with_hats(
             r#"
 hats:
@@ -768,22 +807,33 @@ hats:
 "#,
         );
 
+        // work.start is a business topic → rejected
         let event = make_event("work.start", Some("ralph"));
         assert_eq!(
             validate_event_origin(&event, &registry, "", ""),
-            OriginCheck::Accepted
+            OriginCheck::Rejected {
+                topic: "work.start".to_string(),
+                hat: Some("ralph".to_string()),
+                reason: "ralph_control_only"
+            }
         );
 
+        // review.ready is a business topic → rejected
         let event = make_event("review.ready", Some("ralph"));
         assert_eq!(
             validate_event_origin(&event, &registry, "", ""),
-            OriginCheck::Accepted
+            OriginCheck::Rejected {
+                topic: "review.ready".to_string(),
+                hat: Some("ralph".to_string()),
+                reason: "ralph_control_only"
+            }
         );
     }
 
     #[test]
-    fn test_ralph_as_builtin_hat_can_publish_executor_publish_topics() {
-        // hat=ralph can publish executor's publish topics (they're in ralph's scope).
+    fn test_ralph_pseudo_hat_rejected_for_workflow_publish_topics() {
+        // U2: `ralph` pseudo-hat must also be rejected for workflow publish
+        // topics like work.done and review.result — only control topics allowed.
         let registry = runtime_registry_with_hats(
             r#"
 hats:
@@ -794,16 +844,26 @@ hats:
 "#,
         );
 
+        // work.done is a business topic → rejected
         let event = make_event("work.done", Some("ralph"));
         assert_eq!(
             validate_event_origin(&event, &registry, "", ""),
-            OriginCheck::Accepted
+            OriginCheck::Rejected {
+                topic: "work.done".to_string(),
+                hat: Some("ralph".to_string()),
+                reason: "ralph_control_only"
+            }
         );
 
+        // review.result is a business topic → rejected
         let event = make_event("review.result", Some("ralph"));
         assert_eq!(
             validate_event_origin(&event, &registry, "", ""),
-            OriginCheck::Accepted
+            OriginCheck::Rejected {
+                topic: "review.result".to_string(),
+                hat: Some("ralph".to_string()),
+                reason: "ralph_control_only"
+            }
         );
     }
 }

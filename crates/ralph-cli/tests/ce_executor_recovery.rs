@@ -133,31 +133,39 @@ fn fixture_parses_to_expected_event_count() {
 #[test]
 fn contract_invalid_work_done_from_executor_is_rejected() {
     // The executor's work.done payload in the fixture is missing plan_path.
-    // The origin guard is not the right layer for that check (contract
-    // rejection lives in execution_contracts), but origin must still
-    // accept the event so the contract layer can reject it with the
-    // right diagnostic — that proves the executor is in scope.
+    // The origin guard should accept executor's work.done (executor is the
+    // legitimate producer), and the contract layer rejects it with the
+    // right diagnostic.
+    // U2 change: fixture hat previously was "ralph" — this was the original
+    // vulnerability. U2 now rejects ralph business topics at origin level,
+    // so the fixture's work.done uses hat="executor" instead.
     let registry = ce_executor_registry();
     let events = load_recovery_events();
 
-    let ralph_fallback = events
+    let executor_work_done = events
         .iter()
-        .find(|e| e.topic == "work.done" && e.hat.as_deref() == Some("ralph"))
-        .expect("fixture must include a ralph work.done");
+        .find(|e| e.topic == "work.done" && e.hat.as_deref() == Some("executor"))
+        .expect("fixture must include an executor work.done");
 
-    // ralph is a builtin runtime hat with derived publish scope, so
-    // work.done (an executor publishes topic) is in scope.
-    match validate_event_origin(ralph_fallback, &registry, "loop.cancel", "LOOP_COMPLETE") {
+    // executor is registered with publishes=["work.done"], so origin accepts it.
+    match validate_event_origin(
+        executor_work_done,
+        &registry,
+        "loop.cancel",
+        "LOOP_COMPLETE",
+    ) {
         OriginCheck::Accepted => {}
-        other => panic!("ralph work.done should be in-scope for contract rejection, got {other:?}"),
+        other => {
+            panic!("executor work.done should be in-scope for contract rejection, got {other:?}")
+        }
     }
 
     // Confirm the payload is in fact missing plan_path — without this,
     // the contract-rejection test in U2 cannot anchor to a real fixture.
-    let payload = ralph_fallback.payload.as_deref().unwrap_or("");
+    let payload = executor_work_done.payload.as_deref().unwrap_or("");
     assert!(
         !payload.contains("plan_path"),
-        "fixture ralph work.done must omit plan_path to exercise contract rejection; got {payload}"
+        "fixture executor work.done must omit plan_path to exercise contract rejection; got {payload}"
     );
 }
 
@@ -336,16 +344,18 @@ fn u2_origin_rejection_from_fixture_classifies_as_non_retryable() {
 
 #[test]
 fn u2_executor_missing_field_rejection_classifies_as_retryable() {
-    // The fixture's `ralph work.done` event with missing `plan_path`
+    // The fixture's `executor work.done` event with missing `plan_path`
     // is rejected by the execution contract layer, not the origin
-    // guard (origin accepts ralph's built-in publish scope).  Wrapping
+    // guard (origin accepts executor's publish scope).  Wrapping
     // the finding as a Rejection must mark it retryable with a
-    // target_hat = "ralph" — that's the path U2's targeted retry takes.
+    // target_hat = "executor" — that's the path U2's targeted retry takes.
+    // U2 change: fixture hat changed from "ralph" to "executor" (ralph is
+    // now restricted to control topics only).
     let events = load_recovery_events();
-    let ralph_fallback = events
+    let executor_work_done = events
         .iter()
-        .find(|e| e.topic == "work.done" && e.hat.as_deref() == Some("ralph"))
-        .expect("fixture must include a ralph work.done");
+        .find(|e| e.topic == "work.done" && e.hat.as_deref() == Some("executor"))
+        .expect("fixture must include an executor work.done");
 
     // Mimic the layer that produces ExecutionContractFinding from
     // the missing plan_path payload.  Real production code wraps
@@ -356,24 +366,24 @@ fn u2_executor_missing_field_rejection_classifies_as_retryable() {
         },
         message: "missing plan_path".into(),
         topic: "work.done".into(),
-        source_hat: Some("ralph".into()),
+        source_hat: Some("executor".into()),
     };
     let rejection = Rejection::from_execution_contract(
         &finding,
-        ralph_fallback.hat.clone(),
-        ralph_fallback.hat.clone(),
+        executor_work_done.hat.clone(),
+        executor_work_done.hat.clone(),
     );
 
     assert_eq!(rejection.stage, RejectionStage::ExecutionContract);
     assert_eq!(rejection.topic, "work.done");
-    assert_eq!(rejection.source_hat.as_deref(), Some("ralph"));
+    assert_eq!(rejection.source_hat.as_deref(), Some("executor"));
     assert!(rejection.retry_eligible);
-    assert_eq!(rejection.target_hat.as_deref(), Some("ralph"));
+    assert_eq!(rejection.target_hat.as_deref(), Some("executor"));
     assert!(rejection.should_publish_resume());
     assert!(
         rejection
             .retry_key
-            .contains("execution_contract:ralph:work.done:missing_field")
+            .contains("execution_contract:executor:work.done:missing_field")
     );
 
     // The task.resume payload must carry the violation + allowed
@@ -384,7 +394,7 @@ fn u2_executor_missing_field_rejection_classifies_as_retryable() {
         &["work.done".into()],
         &["plan_path".into()],
         Some("work.ready"),
-        ralph_fallback.payload.as_deref(),
+        executor_work_done.payload.as_deref(),
     );
     let v: serde_json::Value = serde_json::from_str(&payload_str).unwrap();
     assert_eq!(v["stage"], "execution_contract");
@@ -396,7 +406,7 @@ fn u2_executor_missing_field_rejection_classifies_as_retryable() {
         v["retry_key"]
             .as_str()
             .unwrap()
-            .contains("execution_contract:ralph:work.done:missing_field")
+            .contains("execution_contract:executor:work.done:missing_field")
     );
 }
 
