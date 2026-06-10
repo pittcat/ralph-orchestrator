@@ -611,6 +611,49 @@ fn merge_hats_overlay(mut core: Value, hats: Value) -> Result<Value> {
         );
     }
 
+    // U5 (2026-06-09) follow-up (2026-06-11): union-merge the preset's
+    // `topic_format_whitelist` into the core config. The preset declares
+    // protocol tokens (e.g. LOOP_COMPLETE, REVIEW_COMPLETE) that are exempt
+    // from the lowercase dot-case topic format rule. Without this merge,
+    // the preset's whitelist is silently dropped (it's a RalphConfig top-
+    // level field, not inside `event_loop`, so the event_loop branch above
+    // does not see it) and the user sees spurious "topic 'LOOP_COMPLETE'
+    // violates the lowercase dot-case format" warnings despite the
+    // whitelist being present in the preset.
+    //
+    // We UNION (deduplicated, operator's tokens first, then preset's) so
+    // neither side overwrites the other. Both halves are additive — there
+    // is no scenario where an operator would want to *remove* a preset-
+    // declared protocol token, and the lint is permissive-by-default
+    // (whitelist = more exemptions, not fewer).
+    if let Some(preset_whitelist_value) = mapping_get(hats_mapping, "topic_format_whitelist") {
+        let preset_tokens: Vec<String> = preset_whitelist_value
+            .as_sequence()
+            .ok_or_else(|| {
+                anyhow::anyhow!("hats.topic_format_whitelist must be a sequence of strings")
+            })?
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+
+        let operator_tokens: Vec<String> = mapping_get(core_mapping, "topic_format_whitelist")
+            .and_then(|v| v.as_sequence())
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut merged = operator_tokens.clone();
+        for token in preset_tokens {
+            if !merged.contains(&token) {
+                merged.push(token);
+            }
+        }
+        mapping_insert(core_mapping, "topic_format_whitelist", Value::Sequence(merged.into_iter().map(Value::String).collect()));
+    }
+
     Ok(core)
 }
 
@@ -964,6 +1007,205 @@ hats:
             config.event_loop.starting_event.as_deref(),
             Some("work.start")
         );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // U5 (2026-06-09) follow-up (2026-06-11): the preset's
+    // `topic_format_whitelist` (e.g. LOOP_COMPLETE / REVIEW_COMPLETE in
+    // builtin:ce-executor) MUST be union-merged into the operator's
+    // config. Without this, the U5 commit f876241 that added
+    // `topic_format_whitelist` to all 9 builtin presets was a no-op in
+    // real runs: the field lives at RalphConfig top level (not inside
+    // `event_loop`), so `merge_hats_overlay` silently dropped it, and
+    // the user saw spurious "topic 'LOOP_COMPLETE' violates the
+    // lowercase dot-case format" warnings.
+    //
+    // The U5 verification test (`test_all_embedded_presets_pass_strict_lint`
+    // in presets.rs) only exercised `RalphConfig::parse_yaml(preset.content)`,
+    // bypassing the real `merge_hats_overlay` path — so the bug slipped
+    // through. These tests exercise the actual merge, plus a full
+    // lint-after-merge end-to-end check.
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn merge_hats_overlay_unions_topic_format_whitelist_from_preset() {
+        // Operator ralph.yml has no whitelist; preset declares protocol
+        // tokens. After merge the operator's config must carry the
+        // preset's tokens so the lint treats them as exempt.
+        let core: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  completion_promise: LOOP_COMPLETE
+",
+        )
+        .unwrap();
+        let hats: Value = serde_yaml::from_str(
+            r"
+topic_format_whitelist:
+  - LOOP_COMPLETE
+  - REVIEW_COMPLETE
+hats:
+  reporter:
+    name: Reporter
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        assert_eq!(
+            config.topic_format_whitelist,
+            vec!["LOOP_COMPLETE".to_string(), "REVIEW_COMPLETE".to_string()],
+            "preset's topic_format_whitelist must be merged into operator config"
+        );
+    }
+
+    #[test]
+    fn merge_hats_overlay_preserves_operator_topic_format_whitelist() {
+        // Both sides declare whitelist tokens. Union is deduplicated,
+        // operator's tokens come first (operator's intent is honored
+        // for shared entries, and operator-only entries are preserved).
+        let core: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  completion_promise: LOOP_COMPLETE
+topic_format_whitelist:
+  - OPERATOR_TOKEN
+  - SHARED
+",
+        )
+        .unwrap();
+        let hats: Value = serde_yaml::from_str(
+            r"
+topic_format_whitelist:
+  - SHARED
+  - PRESET_TOKEN
+hats:
+  reporter:
+    name: Reporter
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        assert_eq!(
+            config.topic_format_whitelist,
+            vec![
+                "OPERATOR_TOKEN".to_string(),
+                "SHARED".to_string(),
+                "PRESET_TOKEN".to_string(),
+            ],
+            "merge must be a deduplicated union: operator first, then preset, \
+             shared entries appear once (operator's position wins)"
+        );
+    }
+
+    #[test]
+    fn merge_hats_overlay_skips_topic_format_whitelist_when_preset_omits_it() {
+        // Preset without whitelist field — operator's existing whitelist
+        // must be preserved untouched (no spurious clear).
+        let core: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  completion_promise: LOOP_COMPLETE
+topic_format_whitelist:
+  - KEEP_ME
+",
+        )
+        .unwrap();
+        let hats: Value = serde_yaml::from_str(
+            r"
+hats:
+  reviewer:
+    name: Reviewer
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        assert_eq!(config.topic_format_whitelist, vec!["KEEP_ME".to_string()]);
+    }
+
+    /// End-to-end regression guard for the U5 bug. The user's ralph.yml
+    /// uses uppercase `LOOP_COMPLETE` to match the ce-executor preset's
+    /// completion contract. After the real merge, the preset's
+    /// `topic_format_whitelist` MUST take effect, so the strict lint
+    /// must NOT warn about `LOOP_COMPLETE` / `REVIEW_COMPLETE` being
+    /// non-lowercase-dot-case.
+    ///
+    /// U5's `test_all_embedded_presets_pass_strict_lint` only validated
+    /// `parse_yaml(preset.content)` and missed this — this test is the
+    /// one that would have caught the bug originally.
+    #[test]
+    fn merge_then_lint_ce_executor_whitelist_eliminates_protocol_token_warnings() {
+        use ralph_core::preset_lint::{LintStrictness, run_preset_lint};
+        use ralph_core::runtime_contract::FindingSeverity;
+
+        // Minimal user ralph.yml that mirrors the operator's actual
+        // shape: an upper-case completion_promise matching the preset.
+        let core: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  completion_promise: LOOP_COMPLETE
+tasks:
+  enabled: true
+  coordinator_hats: [coordinator]
+",
+        )
+        .unwrap();
+        // Minimal hat slice that produces a LOOP_COMPLETE / REVIEW_COMPLETE
+        // reference inside the merged config. We use a single hat that
+        // publishes LOOP_COMPLETE — that is the same token the preset
+        // whitelists, so without the merge the lint would warn.
+        let hats: Value = serde_yaml::from_str(
+            r"
+topic_format_whitelist:
+  - LOOP_COMPLETE
+  - REVIEW_COMPLETE
+hats:
+  reporter:
+    name: Reporter
+    publishes:
+      - LOOP_COMPLETE
+      - REVIEW_COMPLETE
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        let findings = run_preset_lint(&config, LintStrictness::Strict);
+
+        // The lint's purpose here is to surface
+        // `invalid_topic_format` warnings. The merged whitelist MUST
+        // exempt the protocol tokens — so we expect zero
+        // invalid_topic_format findings of any severity (they would be
+        // either warn or pass, and we want neither warn nor pass-by-
+        // exemption-noise — just zero `invalid_topic_format`).
+        let invalid_format: Vec<_> = findings
+            .iter()
+            .filter(|f| f.id == "lint.preset.invalid_topic_format")
+            .collect();
+        assert!(
+            invalid_format.is_empty(),
+            "After merge, LOOP_COMPLETE / REVIEW_COMPLETE must be exempt from \
+             the lowercase dot-case format rule. Got: {:?}",
+            invalid_format
+                .iter()
+                .map(|f| format!("{}: {} ({:?})", f.id, f.message, f.severity))
+                .collect::<Vec<_>>()
+        );
+
+        // Sanity: the run does not accidentally downgrade other findings
+        // to error severity by mistake. We only assert the
+        // invalid_topic_format specific assertion above.
+        let _ = FindingSeverity::Error; // touch the import for clarity
     }
 
     // ──────────────────────────────────────────────────────────────────────
