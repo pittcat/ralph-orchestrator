@@ -475,7 +475,24 @@ fn validate_core_config_shape(value: &Value, label: &str) -> Result<()> {
     Ok(())
 }
 
-const ALLOWED_HATS_TOP_LEVEL: &[&str] = &["hats", "events", "event_loop", "name", "description"];
+const ALLOWED_HATS_TOP_LEVEL: &[&str] = &[
+    "hats",
+    "events",
+    "event_loop",
+    "name",
+    "description",
+    // U5 (2026-06-09) follow-up (2026-06-11): builtin presets declare
+    // `topic_format_whitelist` to exempt hat-contract protocol tokens
+    // (e.g. LOOP_COMPLETE, REVIEW_COMPLETE) from the lowercase dot-case
+    // format rule. Without this entry, the preset's whitelist is
+    // stripped by `extract_hat_overlay_from_preset` and the user sees
+    // spurious "topic 'X' violates the lowercase dot-case format"
+    // warnings. Like `event_policy` / `verdict_gate` / `execution_
+    // contracts`, this is hat-driven (additive, lint-permissive), so
+    // it is safe to allow it through the operator/hat-collection
+    // security boundary.
+    "topic_format_whitelist",
+];
 // Event-loop keys that a hat collection overlay is allowed to provide.
 //
 // Original 4 (workflow promises + starting event) are the historic core
@@ -536,7 +553,20 @@ fn extract_hat_overlay_from_preset(preset_value: Value) -> Result<Value> {
         .ok_or_else(|| anyhow::anyhow!("Builtin hat collection must be a YAML mapping"))?;
 
     let mut overlay = Mapping::new();
-    for key in ["name", "description", "event_loop", "events", "hats"] {
+    // U5 (2026-06-09) follow-up (2026-06-11): include
+    // `topic_format_whitelist` so preset-declared protocol tokens
+    // (e.g. LOOP_COMPLETE / REVIEW_COMPLETE) survive into
+    // `merge_hats_overlay` and the lint treats them as exempt. Without
+    // this, the U5 commit f876241 that added the whitelist to all 9
+    // builtin presets was a no-op in real runs.
+    for key in [
+        "name",
+        "description",
+        "event_loop",
+        "events",
+        "hats",
+        "topic_format_whitelist",
+    ] {
         if let Some(value) = mapping_get(mapping, key) {
             mapping_insert(&mut overlay, key, value.clone());
         }
