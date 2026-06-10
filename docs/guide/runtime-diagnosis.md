@@ -115,7 +115,7 @@ U2 的 `RecoveryDiagnosisEnvelope`（schema_version=1）是 8 个 `source` × 4 
 | `drift_monitor` | U5 drift detector 检出指标跌破阈值 | `drift_field_completeness`, `drift_coord_join_rate`, `drift_emit_cadence` |
 | `hook_retry` | pre/post agent hook 被重试 | `hook_timeout`, `hook_nonzero` |
 | `loop_stale` | 整个 loop 跨迭代无进展 | `stale` |
-| `agent_doc_sync` | `ralph run` 启动时同步 managed doc blocks 失败或降级 | `sync_failed`, `sync_lock_contention`, `sync_io_error` |
+| `agent_doc_sync` | `ralph run` 启动时同步 managed doc blocks 失败或降级 | `sync_failed`, `sync_completed`, `sync_up_to_date` |
 
 ### 6 个 `outcome`（终态）
 
