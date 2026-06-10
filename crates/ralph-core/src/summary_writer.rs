@@ -508,6 +508,8 @@ mod tests {
             loop_start_sha: None,
             rejection_retry_counts: std::collections::HashMap::new(),
             rejection_last_iteration: std::collections::HashMap::new(),
+            invariant_violation_count: 0,
+            last_invariant_violation: None,
         }
     }
 

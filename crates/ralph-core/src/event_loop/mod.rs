@@ -5384,6 +5384,56 @@ impl EventLoop {
             self.bus.publish(response);
         }
 
+        // --- U3: Invariant assertion checks ---
+        if self.config.core.invariant_assertions {
+            let control_prefixes = ["event.", "human."];
+            let control_exact = [
+                "LOOP_COMPLETE",
+                "REVIEW_COMPLETE",
+                "loop.cancel",
+                "task.resume",
+                "build.task.abandoned",
+                "event.isolation.boundary_violation",
+            ];
+
+            for event in &accepted_log_events {
+                let topic = event.topic.as_str();
+                let is_control = control_exact.contains(&topic)
+                    || control_prefixes.iter().any(|p| topic.starts_with(p));
+
+                // INV-1: Ralph must not publish business topics
+                if !is_control
+                    && event.source.as_ref().map(|h| h.as_str()) == Some("ralph")
+                {
+                    self.state.invariant_violation_count += 1;
+                    self.state.last_invariant_violation =
+                        Some(format!("INV-1:hat=ralph,topic={}", topic));
+
+                    self.diagnostics.log_orchestration(
+                        self.state.iteration,
+                        "ralph",
+                        crate::diagnostics::OrchestrationEvent::InvariantViolation {
+                            rule_id: "INV-1".to_string(),
+                            description: format!(
+                                "Ralph published business topic '{}'",
+                                topic
+                            ),
+                            topic: Some(topic.to_string()),
+                            source: Some("ralph".to_string()),
+                            iteration: self.state.iteration,
+                        },
+                    );
+
+                    warn!(
+                        topic = %topic,
+                        invariant = "INV-1",
+                        "Invariant violation: Ralph published business topic"
+                    );
+                }
+            }
+        }
+        // --- End invariant checks ---
+
         Ok(ProcessedEvents {
             had_events,
             had_raw_events,

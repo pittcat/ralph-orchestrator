@@ -143,7 +143,7 @@ Presets define collections of hats. Located in `presets/` directory and `crates/
 - **HatlessRalph** (`hatless_ralph.rs`): Hat topology, event subscription matching, hat selection algorithm
 - **HatRegistry**: Manages hat discovery, registration, subscription
 - Presets support Chinese (`*-zh.yml`) variants and chainable configurations
-- Builtin presets: `autoresearch`, `ce-executor`, `ce-executor-wave`, `code-assist`, `debug`, `merge-loop`, `pdd-to-code-assist`, `research`, `review`
+- Builtin presets: `autoresearch`, `ce-executor`, `ce-executor-isolated`, `ce-executor-wave`, `code-assist`, `debug`, `merge-loop`, `pdd-to-code-assist`, `research`, `review`
 - `presets/index.json` is the user-facing preset manifest
 
 **`presets/manifest.yml` 是 builtin preset 的 single source of truth**（`crates/ralph-cli/build.rs` 和 `crates/ralph-cli/src/presets.rs` 都从这里读取并在不一致时 panic）。新增/重命名/删除一个 builtin preset 必须**同步改 4 处**：
@@ -584,3 +584,40 @@ rtk init --global       # Add RTK to ~/.claude/CLAUDE.md
 
 Overall average: **60-90% token reduction** on common development operations.
 <!-- /rtk-instructions -->
+
+## Ralph Managed Blocks
+
+<!-- ralph:begin hang-prevention v=sha256:272439a4f9f9b6d5ebbf4b0edda64a2f4464396077c351e1b2e83d33e4a1ee7a -->
+## Command Hang Prevention Rules
+
+1. Never run infinite-follow commands directly.
+   Forbidden examples:
+   - tail -f
+   - tail -F
+   - journalctl -f
+   - adb logcat
+   - dmesg -w
+   - watch
+   - while true
+
+2. If follow mode is necessary, always wrap it with timeout:
+   - timeout 30s tail -f <file>
+   - timeout 60s adb logcat
+   - timeout 30s journalctl -f
+
+3. Prefer bounded commands:
+   - tail -n 200 <file>
+   - grep -n "ERROR" <file> | head -100
+   - journalctl -n 300 --no-pager
+   - dmesg | tail -200
+
+4. For large files, never cat the whole file.
+   Use:
+   - wc -l <file>
+   - tail -n 200 <file>
+   - head -n 100 <file>
+   - grep -n "keyword" <file> | head -50
+
+5. Every external command that may block must have timeout.
+
+<!-- ralph:end hang-prevention -->

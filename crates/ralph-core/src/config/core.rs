@@ -191,6 +191,14 @@ pub struct CoreConfig {
     /// This is especially important for E2E tests that run in isolated workspaces.
     #[serde(skip)]
     pub workspace_root: std::path::PathBuf,
+
+    /// Enable invariant assertion checks (U3, defense-in-depth).
+    ///
+    /// When true, the event loop checks for impersonation/source violations
+    /// on each iteration and records findings to diagnostics and LoopState.
+    /// Default is false (no runtime overhead).
+    #[serde(default)]
+    pub invariant_assertions: bool,
 }
 
 fn default_specs_dir() -> String {
@@ -222,6 +230,7 @@ impl Default for CoreConfig {
                 .unwrap_or_else(|_| {
                     std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
                 }),
+            invariant_assertions: false,
         }
     }
 }

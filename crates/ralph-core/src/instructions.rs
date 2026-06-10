@@ -296,6 +296,7 @@ mod tests {
             state_files: None,
             preflight_extensions: None,
             workspace_root: std::path::PathBuf::from("."),
+            invariant_assertions: false,
         };
         let builder = InstructionBuilder::new(custom_core);
 

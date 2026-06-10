@@ -36,6 +36,12 @@ const PRESETS: &[EmbeddedPreset] = &[
         public: true,
     },
     EmbeddedPreset {
+        name: "ce-executor-isolated",
+        description: "Isolated-mode plan-driven work execution with wave code review, auto-fix, shipping, and manager report",
+        content: include_str!(concat!(env!("OUT_DIR"), "/presets/ce-executor-isolated.yml")),
+        public: true,
+    },
+    EmbeddedPreset {
         name: "ce-executor-wave",
         description: "Wave-based parallel plan-driven execution with adversarial review, auto-fix, and shipping",
         content: include_str!(concat!(env!("OUT_DIR"), "/presets/ce-executor-wave.yml")),
@@ -142,7 +148,7 @@ mod tests {
     #[test]
     fn test_list_presets_returns_all() {
         let presets = list_presets();
-        assert_eq!(presets.len(), 8, "Expected 8 public presets");
+        assert_eq!(presets.len(), 9, "Expected 9 public presets");
     }
 
     #[test]
@@ -216,9 +222,10 @@ mod tests {
     #[test]
     fn test_preset_names_returns_all_names() {
         let names = preset_names();
-        assert_eq!(names.len(), 8);
+        assert_eq!(names.len(), 9);
         assert!(names.contains(&"autoresearch"));
         assert!(names.contains(&"ce-executor"));
+        assert!(names.contains(&"ce-executor-isolated"));
         assert!(names.contains(&"ce-executor-wave"));
         assert!(names.contains(&"debug"));
         assert!(names.contains(&"code-assist"));
@@ -2623,6 +2630,7 @@ mod tests {
         // This must stay in sync with scripts/ralph-zsh-plugin.zsh
         let zsh_values: std::collections::BTreeSet<String> = [
             "builtin:ce-executor",
+            "builtin:ce-executor-isolated",
             "builtin:ce-executor-wave",
             "builtin:code-assist",
             "builtin:debug",

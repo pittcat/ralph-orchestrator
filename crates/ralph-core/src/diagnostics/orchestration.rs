@@ -88,6 +88,21 @@ pub enum OrchestrationEvent {
         violation_kind: String,
         message: String,
     },
+    /// U3: Loop invariant violation detected (defense-in-depth).
+    InvariantViolation {
+        /// The invariant rule ID (e.g. "INV-1").
+        rule_id: String,
+        /// Description of the violation.
+        description: String,
+        /// The event topic that triggered the violation, if applicable.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        topic: Option<String>,
+        /// The event source hat that triggered the violation, if applicable.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
+        /// The iteration number when the violation occurred.
+        iteration: u32,
+    },
     /// Targeted contract recovery was routed (or could not be routed) to a
     /// source hat (2026-06-04 plan U7). When `retry_target` is `None` and
     /// `no_retry_reason` is `Some`, the rejected event has no safe recovery

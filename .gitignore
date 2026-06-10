@@ -11,7 +11,6 @@ __pycache__/
 
 # Ephemeral one-shot prompt files (D8): tracked transient scratch
 # notes used during a single loop run, never meant for git history.
-PROMPT.md
 *.so
 .Python
 build/

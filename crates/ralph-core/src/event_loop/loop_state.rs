@@ -169,6 +169,13 @@ pub struct LoopState {
     /// Used to detect whether real progress has occurred between rejections.
     pub last_rejection_fingerprint: u64,
 
+    /// Count of invariant assertion violations detected (U3).
+    /// Incremented each time an invariant check fails.
+    pub invariant_violation_count: u32,
+
+    /// The most recent violation rule ID (e.g. "INV-1") for diagnostic display.
+    pub last_invariant_violation: Option<String>,
+
     /// The git HEAD SHA at the moment the loop was started.
     ///
     /// Used by execution contract git-evidence validation to distinguish
@@ -217,6 +224,8 @@ impl Default for LoopState {
             loop_start_sha: None,
             rejection_retry_counts: HashMap::new(),
             rejection_last_iteration: HashMap::new(),
+            invariant_violation_count: 0,
+            last_invariant_violation: None,
         }
     }
 }
