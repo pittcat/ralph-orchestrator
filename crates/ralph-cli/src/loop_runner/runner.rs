@@ -685,6 +685,10 @@ pub async fn run_loop_impl(
             );
         } else {
             // Resolve block references from config to BlockSpec instances.
+            // D4: unknown block_ref is a **configuration** error, not a
+            // runtime I/O error. The runtime `OnError::Warn` policy must
+            // not mask it; we fail-closed and surface the offending ref
+            // so the operator can fix the config.
             let mut blocks: Vec<ralph_core::agent_doc_sync::BlockSpec> = Vec::new();
             for block_ref in &config.agent_doc_sync.blocks {
                 // Strip "builtin:" prefix to get the block ID.
@@ -694,11 +698,16 @@ pub async fn run_loop_impl(
                 match ralph_core::agent_doc_sync::builtin::builtin_block(block_id) {
                     Some(spec) => blocks.push(spec),
                     None => {
-                        tracing::warn!(
+                        tracing::error!(
                             target: "ralph_cli::loop_runner",
                             block_ref = %block_ref,
-                            "agent_doc_sync: unknown block reference, skipping"
+                            "agent_doc_sync: unknown block reference (fail-closed)"
                         );
+                        return Err(anyhow::anyhow!(
+                            "agent_doc_sync: unknown block_ref '{block_ref}' (registered builtins: {})",
+                            ralph_core::agent_doc_sync::builtin::known_builtin_ids().join(", ")
+                        ))
+                        .context("agent doc sync configuration error");
                     }
                 }
             }

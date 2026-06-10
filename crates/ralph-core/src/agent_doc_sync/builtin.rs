@@ -29,6 +29,19 @@ pub fn builtin_block(id: &str) -> Option<BlockSpec> {
     }
 }
 
+/// Returns the sorted list of builtin block IDs currently registered.
+///
+/// Used for fail-closed error messages (D4): when an unknown `block_ref`
+/// is encountered, the operator can see what builtins are available.
+#[must_use]
+pub fn known_builtin_ids() -> Vec<&'static str> {
+    let mut ids: Vec<&'static str> = BUILTIN_IDS.to_vec();
+    ids.sort_unstable();
+    ids
+}
+
+const BUILTIN_IDS: &[&str] = &["hang-prevention"];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -62,6 +75,16 @@ mod tests {
         assert!(builtin_block("nope").is_none());
         assert!(builtin_block("").is_none());
         assert!(builtin_block("HANG-PREVENTION").is_none());
+    }
+
+    #[test]
+    fn known_builtin_ids_includes_hang_prevention() {
+        let ids = known_builtin_ids();
+        assert!(ids.contains(&"hang-prevention"), "ids = {ids:?}");
+        // Sorted.
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(ids, sorted, "ids should be sorted");
     }
 
     #[test]
