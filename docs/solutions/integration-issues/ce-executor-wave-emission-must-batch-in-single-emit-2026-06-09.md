@@ -5,6 +5,7 @@ category: integration-issues
 module: ralph-presets
 problem_type: configuration_drift
 component: presets
+tags: [ce-executor, wave, emit, batching, integration]
 severity: high
 symptoms:
   - "TUI/log shows N consecutive 'WAVE: 🔬 Dimension Reviewer | 1 workers | timeout 1800s' segments instead of one '9 workers' segment"

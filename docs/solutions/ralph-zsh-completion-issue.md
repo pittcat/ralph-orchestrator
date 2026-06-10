@@ -1,3 +1,10 @@
+---
+title: "Ralph Zsh 插件补全问题报告"
+date: 2026-06-09
+category: ralph-cli
+tags: [cli, zsh, completion, bug]
+---
+
 # Ralph Zsh 插件补全问题报告
 
 ## 问题描述

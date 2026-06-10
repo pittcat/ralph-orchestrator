@@ -399,9 +399,7 @@ fn config_error_id(err: &ConfigError) -> &'static str {
         ConfigError::SchemaFileNotMap { .. } => "config.schema_file_not_map",
         ConfigError::SchemaFileInvalidSchema { .. } => "config.schema_file_invalid_schema",
         ConfigError::TelemetryValidation { .. } => "config.telemetry_validation",
-        ConfigError::TerminalTopicNotInPublishes { .. } => {
-            "config.terminal_topic_not_in_publishes"
-        }
+        ConfigError::TerminalTopicNotInPublishes { .. } => "config.terminal_topic_not_in_publishes",
         ConfigError::Io(_) | ConfigError::Yaml(_) => "config.parse_error",
     }
 }

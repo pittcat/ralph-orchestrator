@@ -129,8 +129,5 @@ pub enum ConfigError {
     #[error(
         "Hat '{hat}' terminal event '{topic}' is not in the hat's 'publishes' list.\nFix: add '{topic}' to the hat's 'publishes' array, or remove it from 'terminal_events'."
     )]
-    TerminalTopicNotInPublishes {
-        hat: String,
-        topic: String,
-    },
+    TerminalTopicNotInPublishes { hat: String, topic: String },
 }

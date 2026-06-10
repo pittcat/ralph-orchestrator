@@ -4224,20 +4224,31 @@ mod tests {
     fn test_all_embedded_presets_pass_strict_lint() {
         // Presets with known topology issues (required events not on all
         // completion paths, or completion promise not reachable from start).
-        // Same exemptions as authoring contract test, plus merge-loop
-        // (MERGE_COMPLETE not formally published by any hat).
-        let topology_exempt: &[&str] = &["autoresearch", "debug", "merge-loop"];
+        // Same exemptions as authoring contract test.
+        //
+        // Plan reference: `docs/plans/2026-06-08-003-feat-preset-static-lint-plan.md`
+        // section "U5: built-in preset migration" (autoresearch, debug explicitly
+        // deferred due to multi-branch completion topologies).
+        let topology_exempt: &[&str] = &["autoresearch", "debug"];
 
-        // Finding IDs that are exempt for specific presets due to known design tradeoffs.
-        // Format: (preset_name, finding_id_prefix) — any finding with this ID prefix is exempt.
-        let exempt_findings: &[(&str, &str)] = &[
-            // merge-loop: intentionally has no terminal events on failure_handler
-            ("merge-loop", "config.empty_terminal_events"),
-            // merge-loop: MERGE_COMPLETE is emitted by loop logic, not a hat
-            ("merge-loop", "topology.unreachable_completion"),
-            // merge-loop: cleanup.done is an internal implementation detail
-            ("merge-loop", "orphan.no_subscriber"),
-        ];
+        // Per-preset finding-id exemptions (P2 #16 + #22).
+        //
+        // Each tuple is `(preset_name, finding_id, plan_back_reference)`:
+        // - `preset_name` must match the embedded preset's `name` exactly.
+        // - `finding_id` is matched by **exact equality** on the runtime
+        //   contract finding id (NOT a prefix). This prevents a future
+        //   sibling id (e.g. `config.empty_terminal_events_v2`) from
+        //   being silently swallowed by a too-broad prefix.
+        // - `plan_back_reference` is a human-readable hint to the plan /
+        //   issue that documents why this exemption exists, so the next
+        //   maintainer does not have to grep git blame to understand it.
+        //
+        // Currently empty: merge-loop was previously exempt but has been
+        // migrated to a true strict-lint-clean topology (completion_promise =
+        // merge.handled, both cleaner and failure_handler publish + declare
+        // merge.handled as terminal, and the redundant cleanup.done /
+        // merge.complete publishes have been removed).
+        const EXEMPT_FINDINGS: &[(&str, &str, &str)] = &[];
 
         let mut failures = Vec::new();
         for preset in PRESETS.iter() {
@@ -4259,10 +4270,11 @@ mod tests {
             // or orphan (known pre-existing issues).
             if topology_exempt.contains(&preset.name) {
                 let all_exempt = report.findings.iter().all(|f| {
-                    // Check if this finding matches any exempt (preset, finding_id) pair
-                    let is_id_exempt = exempt_findings
+                    // P2 #16: exact-id match, NOT starts_with. See
+                    // EXEMPT_FINDINGS doc comment for rationale.
+                    let is_id_exempt = EXEMPT_FINDINGS
                         .iter()
-                        .any(|(name, id_prefix)| *name == preset.name && f.id.starts_with(id_prefix));
+                        .any(|(name, id, _plan_ref)| *name == preset.name && *id == f.id.as_str());
                     is_id_exempt
                         || matches!(
                             f.source,

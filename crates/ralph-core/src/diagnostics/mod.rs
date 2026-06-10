@@ -56,6 +56,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use tempfile::NamedTempFile;
 
 /// Activation matrix for a [`DiagnosticsCollector`].
 ///
@@ -519,24 +520,36 @@ impl DiagnosticsCollector {
             return;
         };
         let path = session_dir.join("diagnosis-summary.json");
-        let file = match fs::File::create(&path) {
-            Ok(f) => f,
+        // Atomic write (R8): same `tempfile + persist` pattern as
+        // `write_active_activations`. The destination is renamed into
+        // place only after the payload has been fully serialized.
+        let tmp = match NamedTempFile::new_in(session_dir) {
+            Ok(t) => t,
             Err(err) => {
                 tracing::warn!(
                     target: "ralph_core::diagnostics",
                     session_dir = %session_dir.display(),
                     error = %err,
-                    "failed to create diagnosis-summary.json; continuing without blocking the loop",
+                    "failed to create temp file for diagnosis-summary.json; continuing without blocking the loop",
                 );
                 return;
             }
         };
-        if let Err(err) = serde_json::to_writer_pretty(file, summary) {
+        if let Err(err) = serde_json::to_writer_pretty(tmp.as_file(), summary) {
             tracing::warn!(
                 target: "ralph_core::diagnostics",
                 session_dir = %session_dir.display(),
                 error = %err,
                 "failed to serialize diagnosis-summary.json",
+            );
+            return;
+        }
+        if let Err(err) = tmp.persist(&path) {
+            tracing::warn!(
+                target: "ralph_core::diagnostics",
+                session_dir = %session_dir.display(),
+                error = %err,
+                "failed to persist diagnosis-summary.json",
             );
         }
     }
@@ -544,10 +557,17 @@ impl DiagnosticsCollector {
     /// Persist the current active hat activations to
     /// `<session_dir>/active-activations.json`.
     ///
-    /// Called at loop termination so that the offline `ralph diagnose`
-    /// reporter (U7) can render the `## Active Hat Activations` section.
+    /// Called both at loop termination (so the offline `ralph diagnose`
+    /// reporter — U7 — can render the `## Active Hat Activations`
+    /// section) and periodically by the loop runner's heartbeat (so the
+    /// section stays fresh while the loop is still running; see
+    /// `crates/ralph-cli/src/loop_runner/runner.rs` — `RALPH_ACTIVATIONS_HEARTBEAT_SEC`).
     /// The file is a JSON array of [`ActivationSnapshot`]s. An empty
     /// array is written when no activations are active.
+    ///
+    /// The write is atomic via `tempfile::NamedTempFile::persist` so a
+    /// reader never sees a half-written file even if the loop is killed
+    /// mid-write (R8 contract).
     ///
     /// No-op when no session directory is set. Internal I/O errors are
     /// emitted via `tracing::warn!` and swallowed.
@@ -559,24 +579,37 @@ impl DiagnosticsCollector {
             return;
         };
         let path = session_dir.join("active-activations.json");
-        let file = match fs::File::create(&path) {
-            Ok(f) => f,
+        // Atomic write: write to a sibling temp file in the same dir
+        // (so `persist` is a single `rename(2)`), then `persist`
+        // atomically replaces the destination. Mirrors the R8
+        // contract used by the other journal writers.
+        let tmp = match NamedTempFile::new_in(session_dir) {
+            Ok(t) => t,
             Err(err) => {
                 tracing::warn!(
                     target: "ralph_core::diagnostics",
                     session_dir = %session_dir.display(),
                     error = %err,
-                    "failed to create active-activations.json; continuing without blocking the loop",
+                    "failed to create temp file for active-activations.json; continuing without blocking the loop",
                 );
                 return;
             }
         };
-        if let Err(err) = serde_json::to_writer_pretty(file, activations) {
+        if let Err(err) = serde_json::to_writer_pretty(tmp.as_file(), activations) {
             tracing::warn!(
                 target: "ralph_core::diagnostics",
                 session_dir = %session_dir.display(),
                 error = %err,
                 "failed to serialize active-activations.json",
+            );
+            return;
+        }
+        if let Err(err) = tmp.persist(&path) {
+            tracing::warn!(
+                target: "ralph_core::diagnostics",
+                session_dir = %session_dir.display(),
+                error = %err,
+                "failed to persist active-activations.json",
             );
         }
     }

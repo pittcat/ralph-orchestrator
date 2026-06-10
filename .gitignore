@@ -74,6 +74,11 @@ test_output.txt
 schema_debug.txt
 pbcopy
 
+# Agent ephemeral notes (DO NOT commit — see AGENTS.md "MUST not commit ephemeral files")
+bug.md
+fix-log.md
+/agent-notes/
+
 # Local configs
 .claude/settings.json
 .claude/*.local.md

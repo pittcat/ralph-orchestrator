@@ -49,6 +49,13 @@ unset _ralph_fn
 # =============================================================================
 # Keep this list in sync with `crates/ralph-cli/src/presets.rs` and install
 # updates to `~/.oh-my-zsh/plugins/ralph/ralph.plugin.zsh`.
+#
+# P3 #33: the list must mirror `PRESETS` entries where `public: true` in
+# `presets.rs`. `merge-loop` is `public: false` (it's an internal
+# orchestration helper, not a user-facing preset), so it MUST NOT appear
+# here — otherwise TAB completion will offer a preset that
+# `ralph preset list` does not show, breaking the discoverability
+# invariant.
 _RALPH_BUILTIN_HAT_VALUES=(
   "builtin:ce-executor"
   "builtin:ce-executor-wave"
@@ -58,7 +65,6 @@ _RALPH_BUILTIN_HAT_VALUES=(
   "builtin:review"
   "builtin:pdd-to-code-assist"
   "builtin:autoresearch"
-  "builtin:merge-loop"
 )
 
 _RALPH_BUILTIN_HAT_DESCRIPTIONS=(

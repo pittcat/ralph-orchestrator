@@ -201,10 +201,7 @@ fn apply_completion_after_terminal_action(
 ///
 /// Returns `None` if the topic is valid (accepted), or `Some(PolicyDecision::Block(...))`
 /// if the topic is not in the whitelist.
-pub fn check_topic_format(
-    topic: &str,
-    allowed_topics: &HashSet<String>,
-) -> Option<PolicyDecision> {
+pub fn check_topic_format(topic: &str, allowed_topics: &HashSet<String>) -> Option<PolicyDecision> {
     if allowed_topics.contains(topic) {
         return None;
     }
@@ -1183,5 +1180,102 @@ mod tests {
         assert!(allowed.contains("review.file"));
         assert!(allowed.contains("task.update"));
         assert!(allowed.contains("LOOP_COMPLETE"));
+    }
+
+    // P2 #20: regression guard for `is_system_topic` short-circuit.
+    //
+    // The `build_allowed_topics` doc (line 235-238) explicitly states
+    // that `event.*` and `human.*` topics are NOT inserted into the
+    // allowed-topics set; they are admitted by the `is_system_topic()`
+    // short-circuit, which the event loop applies BEFORE
+    // `check_topic_format`. If a future refactor ever:
+    //
+    // (a) reorders the event-loop partition so `check_topic_format` runs
+    //     first, OR
+    // (b) removes the `is_system_topic` short-circuit (e.g. by trying to
+    //     be "uniform" with the rest of the validation), OR
+    // (c) starts inserting `event.*` / `human.*` as prefix members into
+    //     `allowed_topics`,
+    //
+    // then `event.*` / `human.*` topics that have NEVER been declared
+    // anywhere would start failing format checks. The two halves of the
+    // contract (`is_system_topic` admits unknown system topics;
+    // `check_topic_format` rejects unknown business topics) must stay
+    // disjoint and applied in the documented order.
+    //
+    // This test pins both halves together by simulating the event-loop
+    // validation flow as a single composed operation and asserting that
+    // a "rogue" system topic (uppercase, would otherwise fail
+    // `check_topic_format`) is admitted ONLY when `is_system_topic` is
+    // consulted first.
+    #[test]
+    fn system_topic_short_circuit_runs_before_format_check() {
+        // Empty whitelist — `check_topic_format` would reject ANY non-empty
+        // topic that is not in the whitelist.
+        let allowed = build_allowed_topics(&HashMap::new(), "LOOP_COMPLETE", None);
+
+        // A topic that:
+        //   - has uppercase letters → would normally fail format checks
+        //   - is an `event.*` topic → admitted by `is_system_topic`
+        //   - is NOT in the whitelist (and never will be, by U3 design)
+        let rogue_system_topic = "event.foo.BAR";
+
+        // Sanity: the system-topic short-circuit admits it.
+        assert!(
+            is_system_topic(rogue_system_topic),
+            "test premise: '{rogue_system_topic}' must satisfy is_system_topic"
+        );
+
+        // Sanity: `check_topic_format` would reject it on its own — this
+        // is the whole reason we need the short-circuit.
+        assert!(
+            check_topic_format(rogue_system_topic, &allowed).is_some(),
+            "test premise: '{rogue_system_topic}' must be rejected by check_topic_format \
+             when called in isolation, so that the short-circuit is load-bearing"
+        );
+
+        // Now compose the two checks in the documented order
+        // (`is_system_topic` → `check_topic_format`). The composed
+        // operation MUST accept the system topic even though
+        // `check_topic_format` alone would reject it.
+        let composed_admits = |topic: &str| -> bool {
+            if is_system_topic(topic) {
+                return true;
+            }
+            check_topic_format(topic, &allowed).is_none()
+        };
+        assert!(
+            composed_admits(rogue_system_topic),
+            "composed validation (is_system_topic → check_topic_format) must admit \
+             '{rogue_system_topic}' — this is the order documented in build_allowed_topics"
+        );
+
+        // A non-system rogue topic (uppercase business topic) must STILL
+        // be rejected by the composed operation — proving we did not
+        // accidentally turn the short-circuit into a blanket bypass.
+        let rogue_business_topic = "WORK.DONE.WITH_UPPERCASE";
+        assert!(!is_system_topic(rogue_business_topic));
+        assert!(
+            !composed_admits(rogue_business_topic),
+            "composed validation must still reject unknown business topics; \
+             the short-circuit is for system topics only"
+        );
+
+        // And a well-formed business topic that's in the whitelist must
+        // still be admitted — proving `check_topic_format` is still
+        // doing its real job on the non-system side. Add "work.done"
+        // to the whitelist to exercise the admit path explicitly.
+        let mut allowed_with_work = allowed.clone();
+        allowed_with_work.insert("work.done".to_string());
+        let composed_admits_work = |topic: &str| -> bool {
+            if is_system_topic(topic) {
+                return true;
+            }
+            check_topic_format(topic, &allowed_with_work).is_none()
+        };
+        assert!(
+            composed_admits_work("work.done"),
+            "composed validation must admit whitelisted business topics"
+        );
     }
 }

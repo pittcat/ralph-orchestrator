@@ -933,7 +933,22 @@ pub async fn run_command(
             args.force_warmup,
             prebuilt_diagnostics,
         )
-        .await?
+        .await
+        .map_err(|e| {
+            // P1 finding #5: lift `PresetLintGateError` out of
+            // the error chain and exit with code2 here, AFTER
+            // the RAII drop chain has run. The `?` shortcut
+            // would still propagate, but the caller (`main`)
+            // has no way to map the typed error to a specific
+            // exit code without us flagging it here. Doing the
+            // mapping inside `run_command` keeps the change
+            // scoped to the run command path without
+            // restructuring `main`.
+            if let Some(code) = run_loop_result_exit_code(&e) {
+                std::process::exit(code);
+            }
+            e
+        })?
     };
 
     // Handle restart: run required single-command restart sequence.
@@ -983,6 +998,63 @@ fn clear_restart_request_signal(workspace_root: &std::path::Path) {
     let _ = std::fs::remove_file(&restart_path);
 }
 
+// P1 finding #5: lift the preset-lint error into a typed error chain so we
+// can map it to exit code2 *after* the RAII drop chain runs. The inner
+// `run_loop_impl` returns `anyhow::Error::new(PresetLintGateError)` instead
+// of calling `std::process::exit` directly.
+//
+// The user-facing stderr message already came from `enforce_preset_lint_gate`
+// (via the `Display` impl on `PresetLintGateError`), and the JSON artifact was
+// already written to `.ralph/diagnostics/preset-lint-error-*.json`. This
+// function only decides the *exit code*, not the operator-facing
+// narrative.
+pub(crate) fn run_loop_result_exit_code(err: &anyhow::Error) -> Option<i32> {
+    for cause in err.chain() {
+        if cause.is::<loop_runner::PresetLintGateError>() {
+            return Some(loop_runner::EXIT_CODE_LINT_GATE);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod run_loop_result_exit_code_tests {
+    use super::*;
+    use loop_runner::{EXIT_CODE_LINT_GATE, PresetLintGateError};
+
+    #[test]
+    fn detects_lint_gate_error_in_chain() {
+        let inner = PresetLintGateError {
+            findings: vec![],
+            error_count: 1,
+            warning_count: 0,
+        };
+        let err = anyhow::Error::new(inner);
+        assert_eq!(run_loop_result_exit_code(&err), Some(EXIT_CODE_LINT_GATE));
+        assert_eq!(EXIT_CODE_LINT_GATE, 2);
+    }
+
+    #[test]
+    fn ignores_unrelated_errors() {
+        let err = anyhow::anyhow!("some unrelated IO failure");
+        assert_eq!(run_loop_result_exit_code(&err), None);
+    }
+
+    #[test]
+    fn detects_lint_gate_through_wrapped_context() {
+        let inner = PresetLintGateError {
+            findings: vec![],
+            error_count: 2,
+            warning_count: 0,
+        };
+        // Wrap via `anyhow::Error::context` (a method on the error
+        // itself, not on `anyhow::Context::context` which only works
+        // for `Result<T, E>`). This adds a layer above the inner
+        // `PresetLintGateError`; the chain walk must still find it.
+        let err: anyhow::Error = anyhow::Error::new(inner).context("wrapping context");
+        assert_eq!(run_loop_result_exit_code(&err), Some(EXIT_CODE_LINT_GATE));
+    }
+}
 /// Arguments needed for subprocess TUI mode.
 /// We clone these early before RunArgs fields are consumed.
 #[derive(Clone)]

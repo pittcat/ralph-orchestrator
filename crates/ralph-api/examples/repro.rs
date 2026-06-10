@@ -35,7 +35,11 @@ async fn main() -> Result<()> {
     stream.shutdown().await?;
     let mut buf = Vec::new();
     let n = stream.read_to_end(&mut buf).await?;
-    println!("[repro] /health response ({} bytes):\n{}", n, String::from_utf8_lossy(&buf));
+    println!(
+        "[repro] /health response ({} bytes):\n{}",
+        n,
+        String::from_utf8_lossy(&buf)
+    );
 
     // Test 2: POST /rpc/v1 with system.health
     println!("\n[repro] TEST 2: POST /rpc/v1 system.health");
@@ -50,7 +54,11 @@ async fn main() -> Result<()> {
     stream.shutdown().await?;
     let mut buf = Vec::new();
     let n = stream.read_to_end(&mut buf).await?;
-    println!("[repro] /rpc/v1 response ({} bytes):\n{}", n, String::from_utf8_lossy(&buf));
+    println!(
+        "[repro] /rpc/v1 response ({} bytes):\n{}",
+        n,
+        String::from_utf8_lossy(&buf)
+    );
 
     let _ = tx.send(());
     let _ = server.await;

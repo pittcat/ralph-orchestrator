@@ -32,7 +32,7 @@ event_loop:
 
     ## Your Task
     Safely merge the loop's changes into the main branch, ensuring all tests pass.
-  completion_promise: "MERGE_COMPLETE"
+  completion_promise: "merge.handled"
   max_iterations: 15
   max_runtime_seconds: 1800
   starting_event: "merge.start"
@@ -132,7 +132,9 @@ hats:
       - Don't force push or rewrite history
 
       ### DONE
-      When merge is complete and tests pass, output: MERGE_COMPLETE
+      When merge is complete and tests pass, publish `merge.done` to trigger the cleanup
+      hat (which emits `merge.handled` to signal loop completion). The legacy
+      `MERGE_COMPLETE` protocol token is no longer the loop completion marker.
 
   resolver:
     name: "Conflict Resolver"
@@ -244,12 +246,13 @@ hats:
     name: "Worktree Cleaner"
     description: "Cleans up worktree and branch after successful merge."
     triggers: ["merge.done"]
-    publishes: ["cleanup.done", "cleanup.failed"]
-    terminal_events: ["cleanup.done", "cleanup.failed"]
+    publishes: ["merge.handled"]
+    terminal_events: ["merge.handled"]
     instructions: |
       ## WORKTREE CLEANER MODE
 
-      Clean up the worktree and branch after successful merge.
+      Clean up the worktree and branch after successful merge, then signal
+      loop completion by publishing `merge.handled`.
 
       ### Step 1: Get Loop ID
 
@@ -275,16 +278,22 @@ hats:
 
       ### Step 5: Update Merge Queue
 
-      Use ralph tools to mark the loop as merged:
+      Use ralph tools to mark the loop as merged in the external merge queue.
+      This is a side-effect step that does not produce a hat event:
       ```bash
-      ralph emit "merge.complete" --json '{"loop_id": "{loop_id}", "status": "merged"}'
+      ralph loops mark-merged {loop_id}
       ```
+      If that command is unavailable in this Ralph build, fall back to writing
+      a JSONL record under `.ralph/merge-queue.jsonl` with shape
+      `{"loop_id": "{loop_id}", "status": "merged"}`.
 
-      ### Step 6: Publish Result
+      ### Step 6: Publish Completion
 
-      Publish `cleanup.done` to signal completion.
+      Publish `merge.handled` to signal that the merge cycle is complete.
+      This is the loop's completion_promise; emitting it terminates the loop.
 
-      If any step fails, publish `cleanup.failed` with the error details.
+      If any cleanup step fails, publish `merge.handled` with the failure
+      details included in the payload so the runner can still exit cleanly.
 
       ### DON'T
       - Don't force-remove if there are uncommitted changes (investigate first)
@@ -293,12 +302,14 @@ hats:
   failure_handler:
     name: "Failure Handler"
     description: "Handles unresolvable conflicts and marks loop for review."
-    triggers: ["conflict.unresolvable", "tests.failed", "merge.failed", "cleanup.failed"]
-    publishes: []
+    triggers: ["conflict.unresolvable", "tests.failed", "merge.failed"]
+    publishes: ["merge.handled"]
+    terminal_events: ["merge.handled"]
     instructions: |
       ## FAILURE HANDLER MODE
 
-      Handle merge failures by marking the loop for manual review.
+      Handle merge failures by marking the loop for manual review, then
+      signal loop completion by publishing `merge.handled`.
 
       ### Step 1: Assess the Failure
 
@@ -306,7 +317,6 @@ hats:
       - `conflict.unresolvable` — Conflicts need human decision
       - `tests.failed` — Merge broke something
       - `merge.failed` — Merge operation itself failed
-      - `cleanup.failed` — Cleanup failed (merge may have succeeded)
 
       ### Step 2: Abort Merge (if in progress)
 
@@ -317,10 +327,14 @@ hats:
 
       ### Step 3: Update Merge Queue
 
-      Mark the loop as needing review:
+      Mark the loop as needing review. This is a side-effect step that
+      does not produce a hat event:
       ```bash
-      ralph emit "merge.needs_review" --json '{"loop_id": "{loop_id}", "reason": "{failure_reason}"}'
+      ralph loops mark-needs-review {loop_id} --reason "{failure_reason}"
       ```
+      If that command is unavailable in this Ralph build, fall back to
+      appending a record to `.ralph/merge-queue.jsonl` with shape
+      `{"loop_id": "{loop_id}", "status": "needs_review", "reason": "{failure_reason}"}`.
 
       ### Step 4: Provide Instructions
 
@@ -342,6 +356,11 @@ hats:
       **To discard:**
       Run: ralph loops discard {loop_id}
       ```
+
+      ### Step 5: Publish Completion
+
+      Publish `merge.handled` to signal that the failure has been handled
+      and the loop can terminate. Include the failure reason in the payload.
 
       ### DON'T
       - Don't keep retrying indefinitely

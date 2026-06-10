@@ -577,7 +577,20 @@ async fn run_daemon(
         let config_path = Some(config_path.clone());
         Box::pin(async move {
             let ws = std::env::current_dir()?;
-            let reason = crate::loop_runner::start_loop(prompt, ws, config_path).await?;
+            let result = crate::loop_runner::start_loop(prompt, ws, config_path).await;
+            // P1 finding #5: lift `PresetLintGateError` out of the
+            // error chain and exit with code2 here, AFTER the RAII
+            // drop chain has run. The bot daemon path has no `main`
+            // exit-code mapping; doing it here preserves the contract.
+            let reason = match result {
+                Ok(r) => r,
+                Err(e) => {
+                    if let Some(code) = crate::commands::run::run_loop_result_exit_code(&e) {
+                        std::process::exit(code);
+                    }
+                    return Err(e);
+                }
+            };
             Ok(format!("{:?}", reason))
         })
     });

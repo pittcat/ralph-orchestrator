@@ -191,8 +191,204 @@ MVP 版本不会。`ralph preset upgrade --dry-run` 只输出建议，需要人�
 
 不能。`diff` 需要 `x_preset` 元数据来找到对应的模板基线。旧 preset 没有元数据，会收到友好提示。
 
+## Migrating to topic_format gate（迁移指南）
+
+> 适用于 **2026-06 之后**首次启动 `topic_format` 静态门禁的 preset。作者升级旧配置或把项目里的 `ralph.yml` 接到新版时，请按本节顺序检查。
+
+### 背景
+
+`preset-static-lint` 计划（参见 [plan 003](../plans/2026-06-08-003-feat-preset-static-lint-plan.md)）引入了一个启动硬门禁：在 `ralph run`、`hats validate`、`preset check --strict` 三个入口共享同一份 contract report，对以下三类问题执行 **fail-closed**：
+
+1. **topic 命名格式**：所有 topic 必须满足 lowercase dot-case（例如 `work.done`）。遗留协议 token（如 `LOOP_COMPLETE`、`MERGE_COMPLETE`）用显式 `topic_format_whitelist` 列出豁免，不再"靠约定兼容"。
+2. **owner 独占语义**：`topic_owners[*]` 中声明的 hat 必须出现在该 hat 的 `publishes` / `default_publishes` 里；非 owner hat 不允许发布 owner topic。
+3. **coordinator 闭环**：当 `tasks.enabled=true` 时，所有发布 `task.*` 的 hat 都必须出现在 `tasks.coordinator_hats` 列表里。
+
+升级到这个版本后，**默认配置（既有 `LOOP_COMPLETE` 协议字 + 默认 `tasks.enabled=true`）会在 backend 启动之前直接 fail-fast**，不会进入正常的 event loop。这是有意的——避免在错误的拓扑上烧 token。本节给出三步迁移模板，让你的配置"能跑过 strict gate"。
+
+### 常见 3 步迁移
+
+#### Step 1：加 `topic_format_whitelist`
+
+把你的 preset 中所有**协议级 topic token**（非业务事件，但被 orchestrator 识别）显式列入白名单。最常见的候选是 `LOOP_COMPLETE`，在 `merge-loop` preset 里还需要加 `MERGE_COMPLETE`。
+
+**Before：**
+
+```yaml
+event_loop:
+  starting_event: "ralph.start"
+  completion_promise: "LOOP_COMPLETE"
+```
+
+**After：**
+
+```yaml
+event_loop:
+  starting_event: "ralph.start"
+  completion_promise: "LOOP_COMPLETE"
+  topic_format_whitelist:
+    - LOOP_COMPLETE       # completion promise 用到
+    # - MERGE_COMPLETE    # 仅 merge-loop 系列 preset 需要
+```
+
+> **判断标准**："这个 token 是不是 orchestrator 内部的协议字（ALL_CAPS），而不是我业务上要 listen / publish 的事件？" 如果是 → 加白名单；不是 → 把它改成 `lowercase.dot.case`（例如 `WorkComplete` → `work.complete`）。
+
+#### Step 2：补 `coordinator_hats`（当 `tasks.enabled=true`）
+
+只有当你显式启用了任务协议（`tasks.enabled=true`）时才需要这一步。如果你不使用 task system，**把 `tasks.enabled` 关掉**也可以绕过：
+
+```yaml
+tasks:
+  enabled: false
+```
+
+如果你使用 task system 并且想让 lint 通过，需要把 **所有发布 `task.*` topic 的 hat** 列进 `coordinator_hats`。lint 会自动检测 candidate hats 并在缺 coordinator 时把它们列在错误信息里。
+
+**Before：**
+
+```yaml
+tasks:
+  enabled: true
+hats:
+  planner:
+    triggers: ["ralph.start"]
+    publishes: ["task.create", "plan.done"]
+  executor:
+    triggers: ["plan.done"]
+    publishes: ["task.update", "work.done"]
+```
+
+**After：**
+
+```yaml
+tasks:
+  enabled: true
+  coordinator_hats:
+    - planner             # 发布 task.create
+    - executor            # 发布 task.update
+hats:
+  planner:
+    triggers: ["ralph.start"]
+    publishes: ["task.create", "plan.done"]
+  executor:
+    triggers: ["plan.done"]
+    publishes: ["task.update", "work.done"]
+```
+
+> 没有 `coordinator_hats` 但又启用了 `tasks.enabled` → lint 会抛 `preset.coordinator_missing` 并附带 candidate list（lint 启发式找出来的"看起来是 task 协调者"的 hats）。把它照搬到 `coordinator_hats` 通常就能过。
+
+#### Step 3：给每个 hat 补 `terminal_events`（可选但推荐）
+
+`terminal_events` 告诉 orchestrator "这个 hat 完事之后才算真正结束"。缺省时 lint 报 `config.empty_terminal_events`（Warn 级别，strict 模式下升级为 Error），同时 topology 也无法证明"completion promise 一定可达"。
+
+**Before：**
+
+```yaml
+hats:
+  executor:
+    triggers: ["plan.done"]
+    publishes: ["work.done"]
+```
+
+**After：**
+
+```yaml
+hats:
+  executor:
+    triggers: ["plan.done"]
+    publishes: ["work.done"]
+    terminal_events: ["work.done"]   # executor 结束 = work.done 落地
+```
+
+> **判断标准**：每个 hat 的 `terminal_events` 就是它"对世界宣告自己干完了"的那条 publish。一个 hat 通常有一条 terminal event；如果你有并发 + aggregate 的扇出场景，每个 wave worker 自己有一个 terminal event 即可。
+
+### 常见 finding id 速查
+
+> ID 是稳定的机器字符串（snake_case，前缀按 source 分类）。在 `ralph preset check --format json` 输出、`RuntimeContractFinding.id`、CI 报告里都能直接 grep。
+
+#### Topic format（plan 003 / U3）
+
+| finding id | 含义 | 怎么改 |
+|---|---|---|
+| `preset.invalid_topic_format` | topic 不符合 `lowercase.dot.case`，且不在 whitelist | 重命名为 `lowercase.dot.case`；或加入 `topic_format_whitelist` |
+| `preset.whitelist_exempt_topic` | whitelist 中的 token 被识别为 protocol token | **无需改**——这是 Pass severity 的提示，确认豁免正确即可 |
+
+#### Ownership（plan 003 / U2 + R2–R4）
+
+| finding id | 含义 | 怎么改 |
+|---|---|---|
+| `preset.owner_unknown_hat` | `topic_owners[topic]` 引用了不存在的 hat | 在 `hats:` 加这个 hat，或从 `topic_owners` 移除它 |
+| `preset.owner_not_publisher` | declared owner hat 没有把该 topic 写进 `publishes` / `default_publishes` | 把 topic 加进 owner hat 的 `publishes`（或 `default_publishes`） |
+| `preset.cross_hat_unauthorized_publish` | 非 owner hat 在 publish 一个被 owner 独占的 topic | 从该 hat 的 `publishes` 里删掉这个 topic；或把它加入 `topic_owners` |
+| `preset.missing_topic_owner` | `topic_owners[topic]` 存在但**没有任何 hat publish 它** | 把该 topic 加进至少一个 owner hat 的 `publishes` |
+
+#### Coordinator（plan 003 / U2 + R5）
+
+| finding id | 含义 | 怎么改 |
+|---|---|---|
+| `preset.coordinator_missing` | `tasks.enabled=true` 但 `coordinator_hats` 为空 | 填写 `tasks.coordinator_hats`；或关掉 `tasks.enabled` |
+| `preset.task_publisher_not_coordinated` | 有 hat publish `task.*` 但不在 `coordinator_hats` 里 | 把该 hat 加进 `coordinator_hats` |
+
+#### Config（runtime contract aggregator）
+
+| finding id | 含义 | 怎么改 |
+|---|---|---|
+| `config.terminal_topic_not_in_publishes` | `terminal_events` 里的 topic 没在 hat 的 `publishes` / `default_publishes` 出现 | 把它加进 `publishes`，或换一个确实会发布的 topic |
+| `config.empty_terminal_events` | hat 没有 `terminal_events`（default / strict 都报） | 给 hat 加 `terminal_events`；或确认这个 hat 不会"自然结束"（罕见） |
+| `config.invalid_completion_promise` | `completion_promise` 不在白名单格式 | 把 token 改成 `lowercase.dot.case`，或加进 `topic_format_whitelist` |
+| `config.reserved_trigger` | hat 的 `triggers` 用了 orchestrator 保留的协议 topic | 换一个业务 topic；或确认确实需要（保留字列表见 `config/reserved_topics.rs`） |
+| `config.invalid_concurrency` | `concurrency` 字段值非法 | 取值范围 1..=max_workers（默认上限见 config loader） |
+
+#### Topology
+
+| finding id | 含义 | 怎么改 |
+|---|---|---|
+| `topology.unreachable_start` | `starting_event` 不在任何 hat 的 `triggers` | 给至少一个 hat 的 `triggers` 加上 `starting_event` |
+| `topology.unreachable_completion` | `completion_promise` 没有 hat publish 它 | 把 `completion_promise` token 加进某个 hat 的 `publishes`（或白名单） |
+| `topology.unreachable_required` | `required_events` 中的 topic 在拓扑里不可达 | 让某个 hat 在路径上 publish 它 |
+| `topology.required_event_not_on_all_paths` | 某条路径上不会 emit required event | 调整 hat 的 `publishes`，确保每条路径都覆盖 |
+
+#### Orphan / Payload
+
+| finding id | 含义 | 怎么改 |
+|---|---|---|
+| `orphan.no_subscriber` | 有 hat publish 的 topic 没有触发任何 hat（"孤儿"） | 给某个 hat 的 `triggers` 加上这个 topic；或从 publish 方移除 |
+| `payload.schema_missing_for_required_topic` | required topic 没有声明 payload schema | 在 `event_loop.event_policy.schemas` 里补 schema |
+| `payload.field_missing_from_schema` | hat 用到的 payload 字段不在 schema | 在 schema 里加这个字段（type / required） |
+
+### 豁免（exempt_findings）机制
+
+极少数 preset 因为**有意的设计取舍**无法 100% 满足 strict lint。最常见的例子是 `merge-loop`：
+
+- `MERGE_COMPLETE` 是 loop 逻辑 emit 的，不是任何 hat publish 的（`topology.unreachable_completion`）
+- `cleanup.done` 是内部实现细节，没有外部 subscriber（`orphan.no_subscriber`）
+- `failure_handler` hat 没有 `terminal_events`（`config.empty_terminal_events`）
+
+这些 preset 在 `crates/ralph-cli/src/presets.rs` 的 `exempt_findings` 列表里登记豁免，CI 才能放行。**注意：`exempt_findings` 是 builtin preset 维护者的逃生通道，不是给用户配置用的。**
+
+用户 preset 不要靠 `exempt_findings` 绕过 lint——应当按上面 3 步迁移把配置改对。如果你必须使用 `exempt_findings`，请同时打开一个 issue 说明为什么不能用正常 3 步修复。
+
+> 详见 plan 003 的 **R10**（`docs/plans/2026-06-08-003-feat-preset-static-lint-plan.md` 的 U5 "内置 preset strict 迁移"段）。R10 要求 manifest 中所有 9 个嵌入 preset 通过 strict lint；只有带"已知设计取舍"的 preset 才允许走豁免名单。
+
+### 迁移完成自检
+
+完成上述 3 步后跑一遍：
+
+```bash
+# 1. strict lint 通过（应该没有 finding / 只有 Pass）
+ralph preset check -H .ralph/hats/my-flow.yml --strict
+
+# 2. JSON 输出检查所有 finding.id 都是 pass 或 whitelist-exempt
+ralph preset check -H .ralph/hats/my-flow.yml --format json | jq '.findings[] | select(.severity != "pass")'
+
+# 3. 真正启动一次，确认 gate 不再 fail-fast
+ralph run -c ralph.yml -H .ralph/hats/my-flow.yml --skip-preflight -p "smoke migration"
+```
+
+如果第 3 步仍然以退出码 2 失败，stderr 里会打印完整的 finding list（按 `source` 分组：config / topology / payload / orphan）。回到上面的"finding id 速查表"逐条对照即可。
+
 ## 相关文档
 
 - [Hat Collections](./presets.md) — builtin preset 和 hat collection 概览
 - [CLI Reference](./cli-reference.md) — 完整命令行参考
 - [Runtime Contracts](./runtime-contracts.md) — preset 检查的详细行为矩阵
+- [Plan: preset-static-lint](../plans/2026-06-08-003-feat-preset-static-lint-plan.md) — R1–R12 需求与 U1–U6 实现拆分

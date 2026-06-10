@@ -32,7 +32,11 @@ embedded:
   - ce-executor-wave
   - code-assist
   - debug
-  # - hatless-baseline
+  # - hatless-baseline  # P3 #29: legacy experimental preset; kept on disk
+  # for history but excluded from the embedded preset list. Listed as
+  # commented-out rather than deleted so a future curator can decide
+  # whether to promote it back into the public set or remove the file
+  # outright. See `presets/en/hatless-baseline.yml` for contents.
   - merge-loop
   - pdd-to-code-assist
   - research

@@ -12,7 +12,14 @@ origin: docs/brainstorms/2026-06-08-hat-lifecycle-contract-requirements.md
 
 为每次 hat activation 建立显式生命周期跟踪，支持多结果终态、激活元数据暴露给 `ralph diagnose` 报告做调试可观测性、以及运行时 topic 格式拒绝。实现复用现有 recovery envelope、execution contract 与 task store，不把 hat 生命周期硬塞进当前以业务 instance 为中心的 `state_machine.rs`。
 
-本 plan 显式规定 **tracker 唯一消费方是 `ralph diagnose` reporter**——event loop 决策路径（hat 选择、policy apply、execution contract）不读 tracker；stall 监控、forced task closure 等任何"读 tracker 做自动决策"的扩展明确放到 plan 之外，等待真实数据再独立评审。
+本 plan 显式规定 **tracker 唯一**读**消费方是 `ralph diagnose` reporter**——event loop 决策路径（hat 选择、policy apply、execution contract）不读 tracker；stall 监控、forced task closure 等任何"读 tracker 做自动决策"的扩展明确放到 plan 之外，等待真实数据再独立评审。
+
+> **更新记录（2026-06-10，code review P2 #24）**：U4 实施时（commit `def2855` + 后续 P1 #3 修复 `f372342` / `20dbf3c`）实际上把 tracker 的**写**消费方从单一 reporter 扩展为：
+> 1. `runner.rs:160` 在 loop 终止时调 `event_loop.hat_lifecycle_tracker().active_activations()` 落盘到 `active-activations.json`
+> 2. `runner.rs` 在 heartbeat 周期（`RALPH_ACTIVATIONS_HEARTBEAT_SEC`）内调 `write_active_activations` 持续落盘
+> 3. `reporter.rs:200` 从落盘文件读 `Vec<ActivationSnapshot>` 渲染 `## Active Hat Activations` 段
+>
+> 这些写消费方只**写**不**读**（即不基于 tracker 状态做自动决策），所以"读消费方只有 reporter"的不变量仍然成立；但"tracker 状态如何物化到 disk"这一面已经在 U4 实施过程中被拓宽。后续任何"读 tracker 做自动决策"的扩展（stall 监控、forced task closure）仍然按本 plan 显式规定放到 plan 之外。
 
 ---
 

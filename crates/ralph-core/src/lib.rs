@@ -16,7 +16,6 @@ mod config;
 pub mod diagnosis;
 pub mod diagnostics;
 pub mod drift;
-pub mod hat_lifecycle;
 mod event_logger;
 mod event_loop;
 pub mod event_origin;
@@ -28,6 +27,7 @@ pub mod execution_contract;
 pub mod file_lock;
 mod git_ops;
 mod handoff;
+pub mod hat_lifecycle;
 mod hat_registry;
 mod hatless_ralph;
 pub mod hooks;
@@ -98,10 +98,6 @@ pub use drift::{
     DeclaredEdges, DriftDetector, DriftFinding, DriftObserver, DriftWindow,
     EMIT_CADENCE_MIN_SAMPLES, EventSnapshot, RequiredFields,
 };
-pub use hat_lifecycle::{
-    ActivationKey, ActivationLifecycleTracker, ActivationSnapshot, Clock, FakeClock,
-    SystemTimeClock,
-};
 pub use event_logger::{EventHistory, EventLogger, EventRecord};
 pub use event_loop::{
     EventLoop, LoopState, ProcessedEvents, ProcessedEventsWithWaves, TerminationReason,
@@ -128,6 +124,10 @@ pub use git_ops::{
     has_uncommitted_changes, is_working_tree_clean, prune_remote_refs,
 };
 pub use handoff::{HandoffError, HandoffResult, HandoffWriter};
+pub use hat_lifecycle::{
+    ActivationKey, ActivationLifecycleTracker, ActivationSnapshot, Clock, FakeClock,
+    SystemTimeClock,
+};
 pub use hat_registry::HatRegistry;
 pub use hatless_ralph::{HatInfo, HatTopology, HatlessRalph};
 pub use hooks::{

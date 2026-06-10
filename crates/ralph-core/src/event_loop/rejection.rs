@@ -124,16 +124,17 @@ impl Rejection {
     /// Topic format rejections are **always non-retryable** — the agent
     /// emitted an unknown topic and retrying with the same topic would
     /// just hit the same rejection.  Only a recovery signal is written.
-    pub fn from_topic_format(source_hat: Option<String>, topic: String, _allowed: &[String]) -> Self {
+    pub fn from_topic_format(
+        source_hat: Option<String>,
+        topic: String,
+        _allowed: &[String],
+    ) -> Self {
         let mut s = Self {
             stage: RejectionStage::Policy,
             source_hat: source_hat.clone(),
             business_hat: source_hat.clone(),
             topic: topic.clone(),
-            violation: format!(
-                "Topic '{}' is not in the whitelist of known topics",
-                topic
-            ),
+            violation: format!("Topic '{}' is not in the whitelist of known topics", topic),
             retry_key: String::new(),
             retry_eligible: false,
             non_retryable_reason: Some(NonRetryableReason::InvalidTopicFormat),
@@ -575,23 +576,18 @@ mod tests {
         assert_eq!(r.source_hat.as_deref(), Some("executor"));
         assert_eq!(r.topic, "REVIEW_COMPLETE");
         assert!(!r.should_publish_resume());
-        assert!(r
-            .retry_key
-            .contains("invalid_topic_format"));
+        assert!(r.retry_key.contains("invalid_topic_format"));
     }
 
     #[test]
     fn from_topic_format_with_unknown_hat() {
-        let r = Rejection::from_topic_format(
-            None,
-            "BAD_TOPIC".into(),
-            &["work.done".into()],
-        );
+        let r = Rejection::from_topic_format(None, "BAD_TOPIC".into(), &["work.done".into()]);
         assert!(!r.retry_eligible);
         assert_eq!(r.source_hat, None);
         assert_eq!(r.topic, "BAD_TOPIC");
-        assert!(r
-            .retry_key
-            .contains("unknown:BAD_TOPIC:invalid_topic_format"));
+        assert!(
+            r.retry_key
+                .contains("unknown:BAD_TOPIC:invalid_topic_format")
+        );
     }
 }

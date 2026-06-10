@@ -372,8 +372,10 @@ pub fn load_session(session_dir: &Path) -> SessionData {
     let orchestration =
         read_orchestration(&session_dir.join(ORCHESTRATION_FILENAME), &mut warnings);
     let errors = read_errors(&session_dir.join(ERRORS_FILENAME), &mut warnings);
-    let active_activations =
-        read_active_activations(&session_dir.join(ACTIVE_ACTIVATIONS_FILENAME), &mut warnings);
+    let active_activations = read_active_activations(
+        &session_dir.join(ACTIVE_ACTIVATIONS_FILENAME),
+        &mut warnings,
+    );
     SessionData {
         session_path: session_dir.to_path_buf(),
         summary,
@@ -451,10 +453,7 @@ fn read_errors(path: &Path, warnings: &mut Vec<String>) -> Vec<Value> {
 /// [`ActivationSnapshot`]s written at loop termination (U4).
 /// Missing file is not a warning (the file is only present when
 /// diagnostics were enabled AND the loop terminated with activations).
-fn read_active_activations(
-    path: &Path,
-    warnings: &mut Vec<String>,
-) -> Vec<ActivationSnapshot> {
+fn read_active_activations(path: &Path, warnings: &mut Vec<String>) -> Vec<ActivationSnapshot> {
     let content = match fs::read_to_string(path) {
         Ok(c) => c,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Vec::new(),
@@ -474,9 +473,7 @@ fn read_active_activations(
         Err(err) => {
             push_warning(
                 warnings,
-                format!(
-                    "active-activations.json: malformed JSON ({err}); ignoring",
-                ),
+                format!("active-activations.json: malformed JSON ({err}); ignoring",),
             );
             Vec::new()
         }
@@ -1134,17 +1131,16 @@ fn push_active_activations_md(out: &mut String, activations: &[ActivationSnapsho
             format_system_time(a.activated_at),
             format_system_time(a.last_event_at),
             format_duration(a.duration),
-            a.linked_task_id.as_deref().unwrap_or("-"),
+            a.linked_task_id
+                .as_ref()
+                .map(|t| t.as_str())
+                .unwrap_or("-"),
         ));
     }
     out.push_str(&format!(
         "\n_{} active activation{}, sorted by duration descending._\n\n",
         activations.len(),
-        if activations.len() == 1 {
-            ""
-        } else {
-            "s"
-        },
+        if activations.len() == 1 { "" } else { "s" },
     ));
 }
 
@@ -1697,7 +1693,11 @@ mod tests {
     use crate::hat_lifecycle::{ActivationKey, ActivationSnapshot};
     use std::time::Duration;
 
-    fn make_snapshot(hat_id: &str, duration_secs: u64, task_id: Option<&str>) -> ActivationSnapshot {
+    fn make_snapshot(
+        hat_id: &str,
+        duration_secs: u64,
+        task_id: Option<&str>,
+    ) -> ActivationSnapshot {
         let now = std::time::SystemTime::now();
         ActivationSnapshot {
             hat_id: hat_id.to_string(),
@@ -1706,12 +1706,11 @@ mod tests {
             activated_at: now - Duration::from_secs(duration_secs),
             last_event_at: now - Duration::from_secs(duration_secs / 2),
             duration: Duration::from_secs(duration_secs),
-            linked_task_id: task_id.map(String::from),
+            linked_task_id: task_id.map(crate::hat_lifecycle::TaskId::from),
             key: ActivationKey {
                 loop_id: "loop-1".to_string(),
                 iteration: 1,
                 hat_id: hat_id.to_string(),
-                trigger_identity: format!("{hat_id}:trigger"),
             },
         }
     }
@@ -1808,11 +1807,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let activations = vec![make_snapshot("executor", 120, Some("task-1"))];
         let json = serde_json::to_string_pretty(&activations).unwrap();
-        fs::write(
-            tmp.path().join("active-activations.json"),
-            json.as_bytes(),
-        )
-        .unwrap();
+        fs::write(tmp.path().join("active-activations.json"), json.as_bytes()).unwrap();
         let data = load_session(tmp.path());
         assert_eq!(data.active_activations.len(), 1);
         assert_eq!(data.active_activations[0].hat_id, "executor");
@@ -1841,9 +1836,291 @@ mod tests {
         // Less than 19 chars: too short
         assert!(!looks_like_session_timestamp("2025-01-15T10-30"));
         // More than 19 chars with suffix
-        assert!(looks_like_session_timestamp("2025-01-15T10-30-00.something"));
+        assert!(looks_like_session_timestamp(
+            "2025-01-15T10-30-00.something"
+        ));
         // Non-timestamp strings
         assert!(!looks_like_session_timestamp("ralph-diagnostic"));
         assert!(!looks_like_session_timestamp("events"));
+    }
+
+    // Regression coverage for the shallow-format heuristic in
+    // `looks_like_session_timestamp`. The function intentionally checks
+    // only the first 11 byte positions (YYYY-MM-DDTH) plus the minimum
+    // 19-char length, so most of these tests pin the *current* behavior
+    // — including the documented gaps that code review finding #12
+    // (timezone suffixes, leap-second seconds component, multi-byte
+    // unicode headers, hex digits in the year) raised as edge cases.
+    //
+    // IMPORTANT: if any of these expectations flip, that means the
+    // heuristic was tightened/loosened — review the impact on
+    // `latest_session_for_root` and `resolve_explicit` first.
+
+    /// Boundary tests: minimum length, exact length, and one-past.
+    #[test]
+    fn looks_like_session_timestamp_length_boundaries() {
+        // 18 chars: one short of the 19-char minimum — must reject.
+        assert!(
+            !looks_like_session_timestamp("2025-01-15T10-30-0"),
+            "18 chars should be rejected (below min)"
+        );
+        // 19 chars: exact minimum — must accept.
+        assert!(
+            looks_like_session_timestamp("2025-01-15T10-30-00"),
+            "19 chars should be accepted"
+        );
+        // 20 chars: trailing char after the SS digits is not validated,
+        // so any non-control char is accepted.
+        assert!(
+            looks_like_session_timestamp("2025-01-15T10-30-00Z"),
+            "20-char tz 'Z' suffix slips past the shallow check"
+        );
+        assert!(
+            looks_like_session_timestamp("2025-01-15T10-30-000"),
+            "20-char digit-only suffix slips past the shallow check"
+        );
+        // 21 chars with a non-digit tail still passes (only positions
+        // 0..=10 are checked).
+        assert!(
+            looks_like_session_timestamp("2025-01-15T10-30-00!@#"),
+            "trailing garbage past position 10 is ignored"
+        );
+    }
+
+    /// First-character gate: any non-digit at position 0 must reject.
+    #[test]
+    fn looks_like_session_timestamp_first_char_must_be_digit() {
+        // Leading '-' (e.g. a negative offset, or accidental CLI flag).
+        assert!(
+            !looks_like_session_timestamp("-025-01-15T10-30-00"),
+            "leading '-' at position 0 must reject"
+        );
+        // Leading '+' (e.g. an explicit positive sign — not legal in ISO).
+        assert!(
+            !looks_like_session_timestamp("+025-01-15T10-30-00"),
+            "leading '+' at position 0 must reject"
+        );
+        // Leading letter (e.g. an env prefix or hex digit).
+        assert!(
+            !looks_like_session_timestamp("a025-01-15T10-30-00"),
+            "leading ASCII letter at position 0 must reject"
+        );
+        // Leading space (e.g. a stray-quoted CLI argument).
+        assert!(
+            !looks_like_session_timestamp(" 025-01-15T10-30-00"),
+            "leading space at position 0 must reject"
+        );
+    }
+
+    /// Hex / alphabetic characters in the year segment must reject
+    /// because the heuristic explicitly demands `is_ascii_digit` for
+    /// positions 0..=3 and 5..=6 and 8..=9.
+    #[test]
+    fn looks_like_session_timestamp_hex_or_alpha_year_rejected() {
+        // Single hex digit in position 0 (e.g. 'a').
+        assert!(
+            !looks_like_session_timestamp("a025-01-15T10-30-00"),
+            "hex digit in position 0 must reject"
+        );
+        // Hex digit in position 3 (the last year digit).
+        assert!(
+            !looks_like_session_timestamp("202a-01-15T10-30-00"),
+            "hex digit in position 3 must reject"
+        );
+        // Hex digit in month slot (position 5).
+        assert!(
+            !looks_like_session_timestamp("2025-a1-15T10-30-00"),
+            "hex digit in month must reject"
+        );
+        // Hex digit in day slot (position 8).
+        assert!(
+            !looks_like_session_timestamp("2025-01-a5T10-30-00"),
+            "hex digit in day must reject"
+        );
+    }
+
+    /// Separator slots (positions 4, 7) are hard-coded to '-'.
+    /// Any other character (or missing bytes) must reject.
+    #[test]
+    fn looks_like_session_timestamp_separator_strictness() {
+        // Slash separators instead of dashes.
+        assert!(
+            !looks_like_session_timestamp("2025/01/15T10-30-00"),
+            "'/' as year/month separator must reject"
+        );
+        // Dots as separators.
+        assert!(
+            !looks_like_session_timestamp("2025.01.15T10-30-00"),
+            "'.' as separator must reject (note: '.' splits head)"
+        );
+        // Missing separator at position 4 (digit instead).
+        assert!(
+            !looks_like_session_timestamp("20250-1-15T10-30-00"),
+            "digit instead of '-' at position 4 must reject"
+        );
+    }
+
+    /// Position 10 must be 'T' (or have the byte `b'T'`); this is the
+    /// date/time separator in ISO-8601.
+    #[test]
+    fn looks_like_session_timestamp_position_10_t_strict() {
+        // Space instead of 'T' (RFC 3339 allows this; the heuristic does not).
+        assert!(
+            !looks_like_session_timestamp("2025-01-15 10-30-00"),
+            "' ' instead of 'T' must reject"
+        );
+        // Lowercase 't'.
+        assert!(
+            !looks_like_session_timestamp("2025-01-15t10-30-00"),
+            "lowercase 't' must reject (heuristic is case-sensitive)"
+        );
+        // Underscore.
+        assert!(
+            !looks_like_session_timestamp("2025-01-15_10-30-00"),
+            "underscore at position 10 must reject"
+        );
+        // Digit at position 10 (no separator at all).
+        assert!(
+            !looks_like_session_timestamp("2025-01-1510-30-00"),
+            "digit at position 10 must reject"
+        );
+    }
+
+    /// Multi-byte UTF-8 headers must reject: `as_bytes()` will produce
+    /// >1 byte for non-ASCII leading characters, so position 0 won't
+    /// be a digit and the heuristic naturally returns false.
+    #[test]
+    fn looks_like_session_timestamp_unicode_header_rejected() {
+        // CJK leading char.
+        assert!(
+            !looks_like_session_timestamp("会话2025-01-15T10-30-00"),
+            "CJK prefix must reject (multi-byte UTF-8 misaligns positions)"
+        );
+        // Emoji-leading.
+        assert!(
+            !looks_like_session_timestamp("🦀025-01-15T10-30-00"),
+            "emoji prefix must reject"
+        );
+        // Cyrillic.
+        assert!(
+            !looks_like_session_timestamp("Год025-01-15T10-30-00"),
+            "Cyrillic prefix must reject"
+        );
+        // Accented Latin.
+        assert!(
+            !looks_like_session_timestamp("É025-01-15T10-30-00"),
+            "accented Latin prefix must reject"
+        );
+    }
+
+    /// Multi-byte UTF-8 characters at *interior* positions also break
+    /// the byte-offset heuristic — they slide the rest of the string
+    /// by their UTF-8 width, so a later position that should be '-'
+    /// will see the second byte of the multi-byte sequence instead.
+    #[test]
+    fn looks_like_session_timestamp_unicode_in_body_breaks_alignment() {
+        // '日' is 3 bytes in UTF-8; it lands at byte offset 4..=6 and
+        // displaces the year/month '-' separator from position 4 to 7.
+        assert!(
+            !looks_like_session_timestamp("2025日01-15T10-30-00"),
+            "UTF-8 char in body must reject (displaces byte offsets)"
+        );
+    }
+
+    /// Empty / whitespace-only / non-string inputs must reject.
+    #[test]
+    fn looks_like_session_timestamp_empty_and_whitespace_rejected() {
+        assert!(
+            !looks_like_session_timestamp(""),
+            "empty string must reject"
+        );
+        assert!(
+            !looks_like_session_timestamp(" "),
+            "single space must reject"
+        );
+        assert!(
+            !looks_like_session_timestamp("   "),
+            "whitespace-only must reject"
+        );
+        assert!(
+            !looks_like_session_timestamp("\t\n"),
+            "control characters must reject"
+        );
+    }
+
+    /// Timezone / sub-second suffixes: the heuristic trims at the
+    /// first `.`, then checks only 11 byte positions on the *head*.
+    /// Documented gaps from finding #12:
+    ///   - `.123` (milliseconds) → head is "2025-01-15T10-30-00",
+    ///     so it accepts even though the original had no sub-seconds.
+    ///   - `Z` (UTC marker) at the end is accepted because positions
+    ///     11.. are not validated.
+    ///   - `+0800` / `-05:00` (numeric offsets) at the end are also
+    ///     accepted.
+    /// These tests pin the *current* permissive behavior so any future
+    /// tightening is a deliberate, visible change.
+    #[test]
+    fn looks_like_session_timestamp_timezone_and_subsecond_gaps_documented() {
+        // `.123` sub-second suffix is trimmed by split('.'); the head
+        // is still a valid 19-char timestamp, so it accepts.
+        assert!(
+            looks_like_session_timestamp("2025-01-15T10-30-00.123"),
+            "millisecond suffix is trimmed and accepted (documented gap)"
+        );
+        // 'Z' UTC marker is *not* trimmed by split('.'), but the
+        // heuristic only checks positions 0..=10 — 'Z' is at position
+        // 19 and ignored. The string still passes because positions
+        // 0..=10 are all valid.
+        assert!(
+            looks_like_session_timestamp("2025-01-15T10-30-00Z"),
+            "'Z' tz marker at the tail slips past the shallow check"
+        );
+        // Numeric offset '+0800' (no ':') — same story: only position
+        // 0..=10 are validated, the tail is ignored.
+        assert!(
+            looks_like_session_timestamp("2025-01-15T10-30-00+0800"),
+            "numeric tz offset '+0800' slips past the shallow check"
+        );
+        // Numeric offset with colon '-05:00' — same story.
+        assert!(
+            looks_like_session_timestamp("2025-01-15T10-30-00-05:00"),
+            "numeric tz offset '-05:00' slips past the shallow check"
+        );
+        // Leap second: the seconds field "60" is *not* numerically
+        // validated, so this passes. (UTC allows 23:59:60.)
+        assert!(
+            looks_like_session_timestamp("2025-06-30T23-59-60"),
+            "leap-second '60' in the seconds slot is accepted (documented gap)"
+        );
+    }
+
+    /// The diagnostic collector names session dirs in `UTC` using the
+    /// format `YYYY-MM-DDTHH-MM-SS`. Pin a representative real-world
+    /// value alongside a few plausible near-misses that *should* still
+    /// be accepted (round-trip safe).
+    #[test]
+    fn looks_like_session_timestamp_realistic_session_ids() {
+        // Same instant as the original baseline test, but expressed as
+        // a real UTC timestamp without dashes in the time portion:
+        // this is the format the collector actually writes.
+        assert!(
+            looks_like_session_timestamp("2026-06-10T08-15-22"),
+            "realistic UTC session id must accept"
+        );
+        // Same instant with millisecond suffix (also a real collector
+        // variant).
+        assert!(
+            looks_like_session_timestamp("2026-06-10T08-15-22.456"),
+            "realistic UTC session id with ms suffix must accept"
+        );
+        // Midnight and end-of-day boundaries.
+        assert!(
+            looks_like_session_timestamp("2026-01-01T00-00-00"),
+            "midnight UTC must accept"
+        );
+        assert!(
+            looks_like_session_timestamp("2026-12-31T23-59-59"),
+            "end-of-year must accept"
+        );
     }
 }

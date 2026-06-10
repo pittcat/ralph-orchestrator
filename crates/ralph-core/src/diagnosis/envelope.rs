@@ -74,6 +74,10 @@ pub enum DiagnosisSource {
     /// Loop itself went stale (no progress across iterations); usually
     /// paired with `LoopState::LoopStale`.
     LoopStale,
+    /// Topic format whitelist rejected an event whose topic is not in
+    /// the registered hat publishes / system-control set (U5 / R9).
+    /// Non-retryable — only writes a recovery signal, no `task.resume`.
+    TopicFormat,
 }
 
 impl DiagnosisSource {
@@ -90,6 +94,7 @@ impl DiagnosisSource {
             DiagnosisSource::DriftMonitor => "drift_monitor",
             DiagnosisSource::HookRetry => "hook_retry",
             DiagnosisSource::LoopStale => "loop_stale",
+            DiagnosisSource::TopicFormat => "topic_format",
         }
     }
 }
@@ -667,6 +672,7 @@ mod tests {
             DiagnosisSource::DriftMonitor,
             DiagnosisSource::HookRetry,
             DiagnosisSource::LoopStale,
+            DiagnosisSource::TopicFormat,
         ] {
             let s = serde_json::to_string(&source).unwrap();
             let v: serde_json::Value = serde_json::from_str(&s).unwrap();

@@ -5,6 +5,7 @@ category: docs/solutions/test-failures
 module: ralph-api
 problem_type: test_failure
 component: testing_framework
+tags: [test, http, proxy, loopback, ci]
 symptoms:
   - "reqwest::Client::new() in tests reports: error sending request for url (http://127.0.0.1:<port>/rpc/v1) Caused by: client error (SendRequest): connection closed before message completed"
   - 所有绑定 127.0.0.1:0 的集成测试套件 100% 失败（rpc_v1_bootstrap / rpc_v1_streaming / rpc_v1_planning_config_preset_collection 等）

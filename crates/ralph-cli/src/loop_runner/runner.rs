@@ -245,6 +245,23 @@ pub async fn run_loop_impl(
     // U4: Preset static lint hard gate. Runs BEFORE any backend is spawned
     // and BEFORE process group setup. In strict mode (always on for
     // `ralph run`), any lint error is fatal with exit code 2.
+    // P1 finding #5: the failure path propagates a typed
+    // `PresetLintGateError` instead of calling `std::process::exit`.
+    // `process::exit` would skip the RAII drop chain (tracing flush,
+    // scoped guards, lock release) and is hostile to any future
+    // `TempDir` / `LockGuard` / `tracing::subscriber::with_default`
+    // added near the top of `run_loop_impl`. The outer
+    // `Result`-driven flow maps the error to exit code2 *after*
+    // drops have run; see `commands::run::run_command` and
+    // `main.rs`.
+    //
+    // Note on `active-activations` (plan U4): this gate fires BEFORE
+    // the EventLoop is constructed (`EventLoop::with_context` below),
+    // so there is no `hat_lifecycle_tracker` yet and no
+    // `## Active Hat Activations` artifact to flush. The U4
+    // post-termination write inside `finalize_recovery_diagnosis`
+    // only applies to the normal termination path; the gate
+    // failure path is correctly a no-op on that artifact.
     if let Err(lint_error) = enforce_preset_lint_gate(&config) {
         let diagnostics_dir = std::path::Path::new(".").join(".ralph").join("diagnostics");
         let _artifact_path = write_preset_lint_artifact(&diagnostics_dir, &lint_error);
@@ -253,7 +270,16 @@ pub async fn run_loop_impl(
              Fix the preset configuration and retry.",
             lint_error.error_count
         );
-        std::process::exit(EXIT_CODE_LINT_GATE);
+        // P1 finding #5: return the typed error instead of calling
+        // `std::process::exit`. Calling `process::exit` here would skip
+        // the RAII drop chain (tracing flush, scoped guards, lock
+        // release) and is hostile to any future `TempDir` /
+        // `LockGuard` / `tracing::subscriber::with_default` added near
+        // the top of `run_loop_impl`. The outer `Result`-driven flow
+        // maps `PresetLintGateError` to exit code2 *after* drops have
+        // run. See `commands::run::run_command` and `main.rs` for the
+        // exit-code mapping.
+        return Err(anyhow::Error::new(lint_error));
     }
 
     // Set up process group leadership per spec
@@ -925,6 +951,33 @@ pub async fn run_loop_impl(
     // Track consecutive fallback attempts to prevent infinite loops
     let mut consecutive_fallbacks: u32 = 0;
     const MAX_FALLBACK_ATTEMPTS: u32 = 3;
+
+    // P1 finding #3 (CR 2026-06-10): heartbeat to flush
+    // `active-activations.json` while the loop is running so
+    // `ralph diagnose --session latest` reflects live state during a
+    // stall (R14 "卡住时实时可观测"). Previously the file was only
+    // written at loop termination inside `finalize_recovery_diagnosis`,
+    // so a stuck or long-running loop never produced it. Heartbeat
+    // interval is `RALPH_ACTIVATIONS_HEARTBEAT_SEC` (default 30s); set
+    // to `0` to disable. The write itself is a cheap file I/O via
+    // `tempfile + persist` (R8 contract) and is a no-op when the
+    // diagnostics collector has no session dir.
+    let heartbeat_secs: u64 = std::env::var("RALPH_ACTIVATIONS_HEARTBEAT_SEC")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(30);
+    let mut last_activations_heartbeat: Option<std::time::Instant> = if heartbeat_secs > 0 {
+        // Force the first heartbeat to fire as soon as the main loop
+        // starts, so the file exists from iteration 1 (helpful when
+        // operators `tail -f` the session dir).
+        Some(
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(heartbeat_secs + 1))
+                .unwrap_or_else(std::time::Instant::now),
+        )
+    } else {
+        None
+    };
 
     // Initialize loop history if we have a loop context
     let loop_history = loop_context
@@ -3553,6 +3606,25 @@ pub async fn run_loop_impl(
                 "Cooldown delay before next iteration"
             );
             tokio::time::sleep(Duration::from_secs(cooldown)).await;
+        }
+
+        // P1 finding #3 (CR 2026-06-10): periodic heartbeat write of
+        // `active-activations.json` so `ralph diagnose --session latest`
+        // can render the `## Active Hat Activations` section while the
+        // loop is still running. Disabled when `heartbeat_secs == 0`
+        // (parsed from `RALPH_ACTIVATIONS_HEARTBEAT_SEC` above) and
+        // a no-op when diagnostics is disabled (the collector returns
+        // `None` from `session_id()` and `write_active_activations`
+        // early-returns on `None` session_dir).
+        if let Some(last) = last_activations_heartbeat
+            && event_loop.diagnostics().session_id().is_some()
+            && last.elapsed() >= Duration::from_secs(heartbeat_secs)
+        {
+            let activations = event_loop.hat_lifecycle_tracker().active_activations();
+            event_loop
+                .diagnostics()
+                .write_active_activations(&activations);
+            last_activations_heartbeat = Some(std::time::Instant::now());
         }
     }
 }

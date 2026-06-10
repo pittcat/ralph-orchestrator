@@ -29,13 +29,13 @@ regex.workspace = true
 uuid.workspace = true
 keyring.workspace = true
 reqwest.workspace = true
+tempfile.workspace = true
 
 # For Unix file locking (flock)
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }
 
 [dev-dependencies]
-tempfile.workspace = true
 jsonschema = { version = "0.18", features = ["draft202012"] }
 
 [[bench]]

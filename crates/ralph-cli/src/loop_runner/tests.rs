@@ -9557,6 +9557,13 @@ tasks:
 /// AE2: Config with cross-hat unauthorized publish is rejected by the
 /// lint gate in strict mode. No events file is created — the gate
 /// runs BEFORE any backend spawn or event loop initialization.
+///
+/// P0 code-review finding #2: this test previously asserted only
+/// `error_count == 1` and never touched the filesystem, so a regression
+/// where the gate started writing artifacts (violating R9 read-only)
+/// would not have been caught. We now back the "no events file created"
+/// claim with a real filesystem check inside a tempdir that mirrors the
+/// shape of `.ralph/` produced by `ralph run`.
 #[test]
 fn u6_lint_gate_rejects_unauthorized_publish() {
     // `executor` publishes `work.ready` which is owned by `coordinator`.
@@ -9584,6 +9591,31 @@ tasks:
   enabled: false
 "#;
     let config: ralph_core::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+
+    // Build a tempdir-shaped `.ralph/` that mirrors what `ralph run`
+    // would normally create. The gate must NOT create `.ralph/events.jsonl`
+    // (or any other artifact) on the failure path — R9 says the gate is
+    // read-only. We also seed a `events.jsonl` that already exists; if the
+    // gate ever opened it for write we would still see the original size
+    // (the assertion below covers the "was never opened for write" case
+    // by checking the file's size AND mtime, in addition to its existence).
+    let temp = tempfile::tempdir().expect("tempdir");
+    let ralph_dir = temp.path().join(".ralph");
+    std::fs::create_dir_all(&ralph_dir).expect("create .ralph");
+    let events_path = ralph_dir.join("events.jsonl");
+    std::fs::write(&events_path, "PRE-EXISTING\n").expect("seed events.jsonl");
+    let events_metadata_before =
+        std::fs::metadata(&events_path).expect("stat pre-existing events.jsonl");
+    let events_modified_before = events_metadata_before
+        .modified()
+        .expect("mtime pre-existing events.jsonl");
+
+    // Run the gate in a context where cwd points at the tempdir so any
+    // relative path lookup (current-events marker, etc.) resolves inside
+    // the controlled `.ralph/`. This is the only place the gate could
+    // legally write today, and we want any such write to fail loudly.
+    let _cwd_guard = CwdGuard::set(temp.path());
+
     let result = enforce_preset_lint_gate(&config);
     assert!(result.is_err(), "unauthorized publish must fail lint gate");
     let err = result.unwrap_err();
@@ -9596,9 +9628,29 @@ tasks:
         err.findings.iter().map(|f| &f.id).collect::<Vec<_>>()
     );
 
-    // Verify no events.jsonl was created — the gate runs pre-loop.
-    // The gate itself does not touch the filesystem (R9: read-only),
-    // so we verify the error type carries findings, not side effects.
+    // P0 #2: real filesystem assertion — the gate must not have created
+    // any `.ralph/` artifact, and the pre-existing `events.jsonl` must be
+    // untouched (size unchanged + mtime unchanged).
+    assert!(
+        events_path.exists(),
+        ".ralph/events.jsonl must still exist (we seeded it; gate must not delete it)"
+    );
+    let events_metadata_after =
+        std::fs::metadata(&events_path).expect("stat post-gate events.jsonl");
+    assert_eq!(
+        events_metadata_after.len(),
+        events_metadata_before.len(),
+        ".ralph/events.jsonl size must be unchanged (gate is R9 read-only)"
+    );
+    let events_modified_after = events_metadata_after
+        .modified()
+        .expect("mtime post-gate events.jsonl");
+    assert_eq!(
+        events_modified_after, events_modified_before,
+        ".ralph/events.jsonl mtime must be unchanged (gate must not write to it)"
+    );
+
+    // The exact-finding assertion remains from the original test.
     assert_eq!(
         err.error_count, 1,
         "exactly one error (the cross-hat finding)"

@@ -1166,6 +1166,19 @@ impl EventLoop {
         &self.hat_lifecycle_tracker
     }
 
+    /// Test-only: returns a mutable reference to the activation lifecycle
+    /// tracker so external integration tests can drive `activate` /
+    /// `complete` through the public API. Production code paths
+    /// (`build_prompt`, `process_events_from_jsonl`) access the field
+    /// directly — this helper exists so the test boundary does not
+    /// require `pub(crate)` on the field.
+    #[cfg(test)]
+    pub fn hat_lifecycle_tracker_mut(
+        &mut self,
+    ) -> &mut ActivationLifecycleTracker<SystemTimeClock> {
+        &mut self.hat_lifecycle_tracker
+    }
+
     /// Resets the stale-loop topic counter.
     ///
     /// Call after processing wave results — multiple events with the same topic
@@ -2024,6 +2037,94 @@ impl EventLoop {
         );
     }
 
+    /// Write a U5/R9 recovery envelope + audit event for a topic-format
+    /// rejection. The rejected event is NOT re-published — the helper
+    /// only records the diagnosis.
+    ///
+    /// `safe_target` is `false` because topic-format rejections are
+    /// non-actionable by retry: the offending topic is fixed at the
+    /// preset/agent-config level, not by re-emitting. The outcome is
+    /// `NotRetriable` so the responder does not synthesize a fake
+    /// `task.resume` and the journal entry sticks around for `ralph
+    /// diagnose` to surface to operators.
+    ///
+    /// R10 plan commitment: "non-retryable, only write recovery signal".
+    /// Before this helper, the topic-format rejection path published an
+    /// `event.topic_format.rejected` diagnostic but never wrote the
+    /// journal entry — i.e. silently dropped from the recovery stream.
+    fn log_topic_format_rejection(
+        event_loop: &mut EventLoop,
+        rejected_topic: &str,
+        source_hat: Option<&str>,
+        allowed_topics: &[String],
+    ) {
+        const REASON_CODE: &str = "invalid_topic_format";
+        let safe_target = false;
+        let allowed_preview = if allowed_topics.is_empty() {
+            "(none)".to_string()
+        } else if allowed_topics.len() <= 8 {
+            allowed_topics.join(", ")
+        } else {
+            format!(
+                "{} (+{} more)",
+                allowed_topics
+                    .iter()
+                    .take(8)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                allowed_topics.len() - 8
+            )
+        };
+        let message = format!(
+            "Topic '{}' is not in the whitelist of known topics (allowed: {})",
+            rejected_topic, allowed_preview
+        );
+        let expected_action = format!(
+            "Update the preset/hat config so '{}' is declared as a hat publish \
+             (or trigger) topic, or remove the source that emits it. \
+             This rejection is non-retryable and will not re-fire task.resume.",
+            rejected_topic
+        );
+        let mut builder = crate::diagnosis::RecoveryDiagnosisEnvelope::builder()
+            .source(crate::diagnosis::DiagnosisSource::TopicFormat)
+            .severity(crate::diagnosis::DiagnosisSeverity::Warning)
+            .iteration(event_loop.state().iteration)
+            .topic(rejected_topic.to_string())
+            .reason_code(REASON_CODE)
+            .message(message.clone())
+            .expected_action(expected_action)
+            .safe_target(safe_target)
+            .outcome(crate::diagnosis::DiagnosisOutcome::NotRetriable)
+            .evidence(crate::diagnosis::EvidenceRef {
+                kind: crate::diagnosis::EvidenceKind::Topic,
+                ref_path: rejected_topic.to_string(),
+                snippet: Some(format!("allowed_count={}", allowed_topics.len())),
+            })
+            .retry_key(
+                crate::diagnosis::RecoveryDiagnosisEnvelopeBuilder::retry_key_from_parts(
+                    crate::diagnosis::DiagnosisSource::TopicFormat,
+                    source_hat,
+                    Some(rejected_topic),
+                    REASON_CODE,
+                    None,
+                ),
+            );
+        if let Some(hat) = source_hat {
+            builder = builder.source_hat(hat);
+        }
+        if let Some(session_id) = event_loop.diagnostics().session_id() {
+            builder = builder.session_id(session_id);
+        }
+        let envelope = builder.build();
+        // Recovery journal + orchestration audit go through the same
+        // U3/U6 pipeline as every other rejection. We swallow I/O
+        // errors here: `record_recovery_envelope` already logs a warn
+        // on failure and updating the responder must never block the
+        // main loop.
+        event_loop.record_recovery_envelope(&envelope, vec![message]);
+    }
+
     /// Builds the prompt for a hat's execution.
     ///
     /// Per "Hatless Ralph" architecture:
@@ -2136,12 +2237,28 @@ impl EventLoop {
 
                 // U3: Record activation lifecycle for each active hat.
                 // For each hat activation, create an ActivationKey and activate the tracker.
-                // The trigger identity is the topic of the event that triggered this hat.
+                // The trigger topic is the first regular event whose topic matches
+                // one of this hat's configured `triggers`. This must be derived from
+                // the hat's subscription (NOT `can_publish` — trigger events are hat
+                // *inputs*, not publishes; using `can_publish` caused the activate
+                // side to fall through to the "unknown" fallback in production —
+                // P0 code-review finding #1).
                 for hat_id in &active_hat_ids {
-                    let trigger_topic = effective_regular_events
-                        .iter()
-                        .find(|e| self.registry.can_publish(hat_id, e.topic.as_str()))
-                        .map(|e| e.topic.to_string())
+                    let trigger_topic = self
+                        .registry
+                        .get_config(hat_id)
+                        .map(|config| {
+                            let trigger_topics = config.trigger_topics();
+                            effective_regular_events
+                                .iter()
+                                .find(|e| {
+                                    trigger_topics
+                                        .iter()
+                                        .any(|t| t.matches_str(e.topic.as_str()))
+                                })
+                                .map(|e| e.topic.to_string())
+                                .unwrap_or_else(|| "unknown".to_string())
+                        })
                         .unwrap_or_else(|| "unknown".to_string());
                     let key = ActivationKey {
                         loop_id: self
@@ -2152,7 +2269,6 @@ impl EventLoop {
                             .to_string(),
                         iteration: self.state.iteration,
                         hat_id: hat_id.as_str().to_string(),
-                        trigger_identity: trigger_topic.clone(),
                     };
                     self.hat_lifecycle_tracker.activate(
                         key,
@@ -3916,8 +4032,11 @@ impl EventLoop {
             && !self.config.hats.is_empty()
         {
             use std::collections::HashSet;
-            let allowed_topics: HashSet<String> =
-                crate::event_policy::build_allowed_topics(&self.config.hats, &self.config.event_loop.completion_promise, self.config.event_loop.event_policy.as_ref());
+            let allowed_topics: HashSet<String> = crate::event_policy::build_allowed_topics(
+                &self.config.hats,
+                &self.config.event_loop.completion_promise,
+                self.config.event_loop.event_policy.as_ref(),
+            );
             let (topic_format_ok, topic_format_rejections): (Vec<_>, Vec<_>) =
                 events.into_iter().partition(|event| {
                     if crate::event_policy::is_system_topic(&event.topic) {
@@ -3926,13 +4045,21 @@ impl EventLoop {
                     crate::event_policy::check_topic_format(&event.topic, &allowed_topics).is_none()
                 });
             if !topic_format_rejections.is_empty() {
+                // R10: convert each rejected event into a structured
+                // RecoveryDiagnosisEnvelope and write it to
+                // recovery.jsonl. We also still publish the legacy
+                // `event.topic_format.rejected` diagnostic event so
+                // operators reading the bus see the same signal they
+                // always have — the journal entry is the new layer on
+                // top, not a replacement.
+                let allowed_list: Vec<String> = allowed_topics.iter().cloned().collect();
                 for event in &topic_format_rejections {
                     warn!(
                         topic = %event.topic,
                         hat = ?event.hat,
                         "Topic format rejection: unknown topic not in whitelist"
                     );
-                    // Write recovery diagnostic event (R10: no retry)
+                    // Backwards-compat diagnostic event (R10: no retry).
                     let diagnostic = Event::new(
                         "event.topic_format.rejected",
                         format!(
@@ -3942,6 +4069,15 @@ impl EventLoop {
                         ),
                     );
                     self.bus.publish(diagnostic);
+                    // New: write the recovery journal entry. Without
+                    // this, R10's "only write recovery signal"
+                    // promise is silently dropped.
+                    Self::log_topic_format_rejection(
+                        self,
+                        event.topic.as_str(),
+                        event.hat.as_deref(),
+                        &allowed_list,
+                    );
                 }
             }
             events = topic_format_ok;
@@ -5006,22 +5142,24 @@ impl EventLoop {
             // U3: Update hat lifecycle tracker for accepted events.
             // Find the source hat for this event and update the tracker.
             // Terminal events call complete(); non-terminal call observe_accepted_event().
-            if let Some(source_hat_id) = event.source.as_ref().or(self.state.last_active_hat_ids.first()) {
+            //
+            // P0 code-review finding #1: the key was previously (loop_id, iteration,
+            // hat_id, trigger_identity) with trigger_identity reverse-derived via
+            // `can_publish` on `last_activation_events`. Because trigger events are
+            // hat inputs (not publishes), the reverse lookup always returned the
+            // fallback ("unknown" on activate, topic_str on complete), so the keys
+            // never matched and `complete` hit the `None` branch — every
+            // activation leaked. The key is now the (loop_id, iteration, hat_id)
+            // triple; trigger identity is a snapshot-only display field.
+            if let Some(source_hat_id) = event
+                .source
+                .as_ref()
+                .or(self.state.last_active_hat_ids.first())
+            {
                 let hat_config = self.registry.get_config(source_hat_id);
                 let topic_str = event.topic.as_str();
-                let is_terminal = hat_config.is_some_and(|config| {
-                    config.terminal_topic_set().contains(topic_str)
-                });
-                // Find the trigger topic from last_activation_events: use the event that
-                // triggered this hat's activation (not the terminal event's topic).
-                // This ensures trigger_identity matches what was stored during activate.
-                let trigger_identity = self
-                    .state
-                    .last_activation_events
-                    .iter()
-                    .find(|e| self.registry.can_publish(source_hat_id, e.topic.as_str()))
-                    .map(|e| e.topic.to_string())
-                    .unwrap_or_else(|| topic_str.to_string());
+                let is_terminal = hat_config
+                    .is_some_and(|config| config.terminal_topic_set().contains(topic_str));
                 let key = ActivationKey {
                     loop_id: self
                         .loop_context
@@ -5031,7 +5169,6 @@ impl EventLoop {
                         .to_string(),
                     iteration: self.state.iteration,
                     hat_id: source_hat_id.as_str().to_string(),
-                    trigger_identity,
                 };
                 if is_terminal {
                     self.hat_lifecycle_tracker.complete(&key, topic_str);
@@ -5162,7 +5299,11 @@ impl EventLoop {
             && !self.config.hats.is_empty()
         {
             let allowed_topics: std::collections::HashSet<String> =
-                crate::event_policy::build_allowed_topics(&self.config.hats, &self.config.event_loop.completion_promise, self.config.event_loop.event_policy.as_ref());
+                crate::event_policy::build_allowed_topics(
+                    &self.config.hats,
+                    &self.config.event_loop.completion_promise,
+                    self.config.event_loop.event_policy.as_ref(),
+                );
             let (wave_events_ok, wave_rejections): (Vec<_>, Vec<_>) =
                 wave_events.into_iter().partition(|event| {
                     if crate::event_policy::is_system_topic(&event.topic) {
@@ -5171,6 +5312,10 @@ impl EventLoop {
                     crate::event_policy::check_topic_format(&event.topic, &allowed_topics).is_none()
                 });
             if !wave_rejections.is_empty() {
+                // R10: same behavior as the regular-event path —
+                // publish the legacy diagnostic AND write a recovery
+                // journal entry so `ralph diagnose` can surface it.
+                let allowed_list: Vec<String> = allowed_topics.iter().cloned().collect();
                 for event in &wave_rejections {
                     warn!(
                         topic = %event.topic,
@@ -5186,6 +5331,12 @@ impl EventLoop {
                         ),
                     );
                     self.bus.publish(diagnostic);
+                    Self::log_topic_format_rejection(
+                        self,
+                        event.topic.as_str(),
+                        event.hat.as_deref(),
+                        &allowed_list,
+                    );
                 }
             }
             wave_events_ok

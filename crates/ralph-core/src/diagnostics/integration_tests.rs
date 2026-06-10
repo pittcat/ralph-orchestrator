@@ -773,4 +773,96 @@ mod tests {
         let collector = DiagnosticsCollector::with_options(temp.path(), &options).unwrap();
         assert!(collector.session_dir().is_none());
     }
+
+    /// P1 finding #3 (CR 2026-06-10): `active-activations.json` was only
+    /// flushed at loop termination. Now the loop runner's heartbeat also
+    /// calls `write_active_activations` while the loop is running so that
+    /// `ralph diagnose --session latest` reflects live state during a
+    /// stall (R14 "卡住时实时可观测"). This test exercises the writer
+    /// directly to make sure it overwrites an existing payload cleanly
+    /// (idempotent on re-invocation from the heartbeat path).
+    #[test]
+    fn test_write_active_activations_overwrites_on_repeated_calls() {
+        let temp = TempDir::new().unwrap();
+        let collector = DiagnosticsCollector::with_enabled(temp.path(), true).unwrap();
+        let session_dir = collector.session_dir().expect("session dir");
+
+        // First flush: one activation.
+        let first = vec![sample_activation_snapshot("executor", "work.start")];
+        collector.write_active_activations(&first);
+        let path = session_dir.join("active-activations.json");
+        let first_content = std::fs::read_to_string(&path).unwrap();
+        let first_parsed: Vec<crate::hat_lifecycle::ActivationSnapshot> =
+            serde_json::from_str(&first_content).unwrap();
+        assert_eq!(first_parsed.len(), 1);
+        assert_eq!(first_parsed[0].hat_id, "executor");
+
+        // Second flush: two activations. The file must reflect the new
+        // contents atomically (R8 contract: never a half-written JSON
+        // array on disk).
+        let second = vec![
+            sample_activation_snapshot("executor", "work.start"),
+            sample_activation_snapshot("reviewer", "review.requested"),
+        ];
+        collector.write_active_activations(&second);
+        let second_content = std::fs::read_to_string(&path).unwrap();
+        let second_parsed: Vec<crate::hat_lifecycle::ActivationSnapshot> =
+            serde_json::from_str(&second_content).unwrap();
+        assert_eq!(second_parsed.len(), 2);
+        let hats: Vec<&str> = second_parsed.iter().map(|a| a.hat_id.as_str()).collect();
+        assert!(hats.contains(&"executor"));
+        assert!(hats.contains(&"reviewer"));
+
+        // Third flush: empty (simulating the moment after the last
+        // activation completes). The file must still parse as an empty
+        // JSON array — important because `reporter::read_active_activations`
+        // falls back to `Vec::new()` on parse error.
+        collector.write_active_activations(&[]);
+        let third_content = std::fs::read_to_string(&path).unwrap();
+        let third_parsed: Vec<crate::hat_lifecycle::ActivationSnapshot> =
+            serde_json::from_str(&third_content).unwrap();
+        assert!(third_parsed.is_empty());
+    }
+
+    /// P1 finding #3 companion test: when diagnostics is disabled, the
+    /// heartbeat call must be a no-op (no file created, no panic). The
+    /// runner short-circuits via `event_loop.diagnostics().session_id()`
+    /// being `None`, but `write_active_activations` itself must also
+    /// tolerate the disabled state.
+    #[test]
+    fn test_write_active_activations_disabled_is_noop() {
+        let temp = TempDir::new().unwrap();
+        let collector = DiagnosticsCollector::with_options(
+            temp.path(),
+            &crate::diagnostics::DiagnosticsOptions::default(),
+        )
+        .unwrap();
+
+        collector.write_active_activations(&[sample_activation_snapshot("executor", "work.start")]);
+        assert!(!temp.path().join(".ralph").join("diagnostics").exists());
+    }
+
+    fn sample_activation_snapshot(
+        hat_id: &str,
+        trigger_topic: &str,
+    ) -> crate::hat_lifecycle::ActivationSnapshot {
+        use crate::hat_lifecycle::{ActivationKey, ActivationSnapshot};
+        use std::time::{Duration, SystemTime};
+        let now = SystemTime::now();
+        let key = ActivationKey {
+            loop_id: "loop-test".to_string(),
+            iteration: 1,
+            hat_id: hat_id.to_string(),
+        };
+        ActivationSnapshot {
+            hat_id: hat_id.to_string(),
+            trigger_topic: trigger_topic.to_string(),
+            trigger_identity: format!("{}-id-1", trigger_topic),
+            activated_at: now,
+            last_event_at: now,
+            duration: Duration::from_secs(2),
+            linked_task_id: None,
+            key,
+        }
+    }
 }

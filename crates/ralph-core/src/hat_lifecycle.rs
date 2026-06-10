@@ -31,6 +31,65 @@ use std::time::{Duration, SystemTime};
 use tracing::warn;
 
 // ---------------------------------------------------------------------------
+// TaskId
+// ---------------------------------------------------------------------------
+
+/// Strongly-typed task identifier.
+///
+/// P2 #23: the plan (`docs/plans/2026-06-08-004-feat-hat-lifecycle-contract-plan.md`
+/// section U2) commits to `linked_task_id: Option<TaskId>` on
+/// `ActivationSnapshot`. Using a raw `Option<String>` would let any
+/// string flow through unchecked; the newtype makes that intent
+/// explicit at the type level and lets serde (de)serialize via the
+/// same wire format that `Task.id` already produces (`task-...`).
+///
+/// `TaskId` is intentionally a minimal newtype (no validation of the
+/// `task-...` shape); the production code paths that produce these
+/// strings go through `task::Task::generate_id()` which enforces the
+/// format. The newtype is purely a type-system anchor and a clean
+/// `From<String>` conversion boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TaskId(pub String);
+
+impl TaskId {
+    /// Wraps a raw task-id string. Use this when bridging from
+    /// `task::Task::id` or any other stringly-typed source.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    /// Returns the underlying string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for TaskId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<String> for TaskId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for TaskId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+impl AsRef<str> for TaskId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Clock trait
 // ---------------------------------------------------------------------------
 
@@ -58,6 +117,13 @@ impl Clock for SystemTimeClock {
 /// Uses `Rc<Cell<>>` internally so that cloned instances share the same
 /// time state. This is critical: when the test advances the clock, the
 /// tracker's internal clock must also see the advance.
+///
+/// **Threading model (P3 #27)**: `FakeClock` is **single-threaded only**.
+/// `Rc<Cell<>>` is not `Send`/`Sync`. Do not share a `FakeClock` instance
+/// across `tokio` tasks, `std::thread::spawn` boundaries, or any
+/// concurrent context. If you need a multi-threaded test clock, build one
+/// on top of `Arc<Mutex<>>` or use a real `SystemTimeClock` (which is
+/// already used in production via [`SystemTimeClock`]).
 pub struct FakeClock {
     now: Rc<Cell<SystemTime>>,
 }
@@ -83,6 +149,17 @@ impl FakeClock {
     /// Advances the clock by the given duration.
     pub fn advance(&mut self, duration: Duration) {
         self.now.set(self.now.get() + duration);
+    }
+
+    /// Regresses the clock backwards by the given duration.
+    ///
+    /// Mirrors `advance` but subtracts time. Used by tests to simulate
+    /// clock skew (e.g. NTP correction) that pushes `now` earlier than
+    /// recorded `activated_at`. Required because `Duration::from_secs`
+    /// is unsigned, so callers cannot express a negative duration when
+    /// invoking `advance` directly.
+    pub fn regress(&mut self, duration: Duration) {
+        self.now.set(self.now.get() - duration);
     }
 }
 
@@ -114,8 +191,22 @@ impl Clock for FakeClock {
 
 /// Unique identifier for a hat activation.
 ///
-/// Composed of loop id, iteration, hat id, and trigger event identity to
-/// guarantee parallel activations never collide.
+/// Composed of loop id, iteration, and hat id — the three components that
+/// uniquely identify an activation slot in the event loop.
+///
+/// # History
+///
+/// Earlier revisions included `trigger_identity` as the fourth key field.
+/// That field was reverse-derived from the trigger event via
+/// `registry.can_publish(...)` in both `activate` and `complete` paths. The
+/// reverse lookup almost always returned the fallback string (`"unknown"`
+/// on activate, `topic_str` on complete) because trigger events are hat
+/// *inputs*, not publishes — so the activate-side and complete-side keys
+/// never matched, leaking every activation (P0 code review finding #1).
+///
+/// `trigger_identity` now lives only on [`ActivationSnapshot`] as a
+/// diagnostic display field, populated by `activate` from the resolved
+/// trigger topic and never used as a hashmap key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ActivationKey {
     /// The loop id this activation belongs to.
@@ -124,17 +215,11 @@ pub struct ActivationKey {
     pub iteration: u32,
     /// The hat id being activated.
     pub hat_id: String,
-    /// Identity of the trigger event (topic + optional instance key).
-    pub trigger_identity: String,
 }
 
 impl fmt::Display for ActivationKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}:{}:{}:{}",
-            self.loop_id, self.iteration, self.hat_id, self.trigger_identity
-        )
+        write!(f, "{}:{}:{}", self.loop_id, self.iteration, self.hat_id)
     }
 }
 
@@ -162,39 +247,18 @@ pub struct ActivationSnapshot {
     /// Duration since activation started (real-time calculated).
     pub duration: Duration,
     /// Associated task id, if any.
-    pub linked_task_id: Option<String>,
+    ///
+    /// P2 #23: typed as `Option<TaskId>` (not `Option<String>`) per
+    /// plan U2 commitment. Wire format is identical to `Task.id`
+    /// (e.g. `task-...`) because `TaskId` is `#[serde(transparent)]`.
+    /// Migration of callers that previously passed `Option<String>`
+    /// is mechanical: `Option<String>::from("...")` →
+    /// `Some(TaskId::from("..."))`, or rely on `From<String>` /
+    /// `From<&str>` impls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_task_id: Option<TaskId>,
     /// The activation key.
     pub key: ActivationKey,
-}
-
-// ---------------------------------------------------------------------------
-// ActivationState (internal)
-// ---------------------------------------------------------------------------
-
-/// Internal state of a single activation.
-#[derive(Debug, Clone)]
-enum ActivationState {
-    Active {
-        /// When the activation started.
-        activated_at: SystemTime,
-        /// Topic of the trigger event.
-        trigger_topic: String,
-        /// Identity of the trigger event.
-        trigger_identity: String,
-        /// When the last accepted event was observed.
-        last_event_at: SystemTime,
-        /// Associated task id, if any.
-        linked_task_id: Option<String>,
-        /// The hat id.
-        hat_id: String,
-    },
-    Completed {
-        /// When the activation completed.
-        #[allow(dead_code)] // Reserved for future U4 reporter use
-        completed_at: SystemTime,
-        /// The terminal topic that closed the activation.
-        terminal_topic: String,
-    },
 }
 
 // ---------------------------------------------------------------------------
@@ -205,10 +269,33 @@ enum ActivationState {
 ///
 /// Write API: `activate`, `observe_accepted_event`, `complete`.
 /// Read API: `active_activations`.
+///
+/// # Memory semantics
+///
+/// Activations live in a [`HashMap`] keyed by [`ActivationKey`]. On
+/// `complete`, the entry is **removed** from the map to avoid the long-run
+/// memory leak that the `Completed`-in-place variant previously had — a
+/// tracker that lived for thousands of iterations would otherwise grow
+/// without bound and slow every `active_activations()` call. A separate
+/// `completed_count` counter is maintained purely for diagnostic /
+/// observability purposes (so `total_count()` can still report
+/// active + closed activations).
+///
+/// The tracker has **one explicit read consumer**: the `ralph diagnose`
+/// reporter (U4). Event loop decision paths (hat selection, policy apply,
+/// execution contract) only call write APIs. Any future read consumer must
+/// be approved in a new plan to avoid implicit feedback loops.
 #[derive(Debug, Clone)]
 pub struct ActivationLifecycleTracker<C: Clock = SystemTimeClock> {
     clock: C,
-    activations: HashMap<ActivationKey, ActivationState>,
+    /// Currently active activations, keyed by [`ActivationKey`]. Entries are
+    /// inserted by `activate` and **removed** by `complete` — they never
+    /// linger after completion.
+    activations: HashMap<ActivationKey, ActivationSnapshot>,
+    /// Number of activations closed via `complete` since the tracker was
+    /// created. Debugging / observability only — not used by the event
+    /// loop decision path.
+    completed_count: usize,
 }
 
 impl Default for ActivationLifecycleTracker<SystemTimeClock> {
@@ -216,6 +303,7 @@ impl Default for ActivationLifecycleTracker<SystemTimeClock> {
         Self {
             clock: SystemTimeClock,
             activations: HashMap::new(),
+            completed_count: 0,
         }
     }
 }
@@ -233,6 +321,7 @@ impl<C: Clock> ActivationLifecycleTracker<C> {
         Self {
             clock,
             activations: HashMap::new(),
+            completed_count: 0,
         }
     }
 
@@ -240,74 +329,79 @@ impl<C: Clock> ActivationLifecycleTracker<C> {
     ///
     /// If an activation with the same key already exists and is still active,
     /// this is a no-op (the earlier activation is preserved).
+    ///
+    /// `trigger_topic` is stored both as the `trigger_topic` field and as the
+    /// snapshot's `trigger_identity` (best-available diagnostic identity;
+    /// this value is no longer part of the hashmap key — see
+    /// [`ActivationKey`] docs).
+    ///
+    /// P2 #23: `linked_task_id` is `Option<TaskId>` (not raw string).
+    /// Use `Some(TaskId::from("task-abc"))` or rely on `Into<TaskId>`
+    /// conversion via the `From<String>` / `From<&str>` impls.
     pub fn activate(
         &mut self,
         key: ActivationKey,
         trigger_topic: String,
-        linked_task_id: Option<String>,
+        linked_task_id: Option<TaskId>,
     ) {
         if self.activations.contains_key(&key) {
             // Duplicate activation — preserve existing state.
             return;
         }
         let now = self.clock.now();
-        self.activations.insert(
-            key.clone(),
-            ActivationState::Active {
-                activated_at: now,
-                trigger_topic,
-                trigger_identity: key.trigger_identity.clone(),
-                last_event_at: now,
-                linked_task_id,
-                hat_id: key.hat_id.clone(),
-            },
-        );
+        let snapshot = ActivationSnapshot {
+            hat_id: key.hat_id.clone(),
+            trigger_topic: trigger_topic.clone(),
+            trigger_identity: trigger_topic,
+            activated_at: now,
+            last_event_at: now,
+            // Duration is computed lazily by `active_activations()`; the
+            // value cached here is a placeholder overwritten on read.
+            duration: Duration::ZERO,
+            linked_task_id,
+            key: key.clone(),
+        };
+        self.activations.insert(key, snapshot);
     }
 
     /// Records an accepted (non-terminal) event for an active activation.
     ///
     /// Updates `last_event_at` to the current time. If the activation is not
-    /// found or is already completed, this is a no-op.
+    /// found or is already completed (and therefore removed), this is a
+    /// no-op.
     pub fn observe_accepted_event(&mut self, key: &ActivationKey) {
-        if let Some(ActivationState::Active {
-            last_event_at,
-            ..
-        }) = self.activations.get_mut(key)
-        {
-            *last_event_at = self.clock.now();
+        if let Some(snapshot) = self.activations.get_mut(key) {
+            snapshot.last_event_at = self.clock.now();
         }
-        // Late event for completed activation — silently ignored.
+        // Late event for completed activation — silently ignored (the
+        // entry has been removed by `complete`).
     }
 
     /// Marks an activation as completed by a terminal event.
     ///
-    /// Idempotent: calling `complete` on an already-completed activation
+    /// Removes the activation from the active map so that long-running
+    /// loops do not leak entries. The `completed_count` counter is bumped
+    /// so `total_count()` keeps reporting the closed activations.
+    ///
+    /// Idempotent: calling `complete` on an already-removed activation
     /// logs a warning and does not panic.
     pub fn complete(&mut self, key: &ActivationKey, terminal_topic: &str) {
-        match self.activations.get_mut(key) {
-            Some(ActivationState::Active { .. }) => {
-                let now = self.clock.now();
-                *self.activations.get_mut(key).unwrap() = ActivationState::Completed {
-                    completed_at: now,
-                    terminal_topic: terminal_topic.to_string(),
-                };
-            }
-            Some(ActivationState::Completed {
-                terminal_topic: prev,
-                ..
-            }) => {
-                warn!(
+        match self.activations.remove(key) {
+            Some(_snapshot) => {
+                self.completed_count = self.completed_count.saturating_add(1);
+                tracing::trace!(
                     key = %key,
-                    previous_terminal = %prev,
-                    new_terminal = %terminal_topic,
-                    "Duplicate complete call on already-completed activation"
+                    terminal_topic = %terminal_topic,
+                    completed_count = self.completed_count,
+                    "Activation closed"
                 );
             }
             None => {
                 warn!(
                     key = %key,
                     terminal_topic = %terminal_topic,
-                    "Complete called for unknown activation key"
+                    completed_count = self.completed_count,
+                    "Complete called for unknown or already-closed activation key"
                 );
             }
         }
@@ -315,63 +409,75 @@ impl<C: Clock> ActivationLifecycleTracker<C> {
 
     /// Returns snapshots of all currently active activations.
     ///
-    /// Completed activations are excluded. Results are sorted by duration
-    /// descending (longest active first).
+    /// Completed activations are not stored (they are removed by
+    /// `complete`), so this returns only live entries. Results are sorted
+    /// by duration descending (longest active first), with `hat_id`
+    /// ascending as a stable secondary key so that two activations with
+    /// equal duration always come out in the same order regardless of
+    /// `HashMap` iteration randomness (P2 #17 fix). Duration is computed
+    /// against the current clock each call — fresh on every read.
     pub fn active_activations(&self) -> Vec<ActivationSnapshot> {
         let now = self.clock.now();
         let mut snapshots: Vec<ActivationSnapshot> = self
             .activations
             .iter()
-            .filter_map(|(key, state)| match state {
-                ActivationState::Active {
-                    activated_at,
-                    trigger_topic,
-                    trigger_identity,
-                    last_event_at,
-                    linked_task_id,
-                    hat_id,
-                } => {
-                    // If clock regresses (e.g. NTP skew), Duration::ZERO is a safe
-                    // fallback — production SystemTimeClock should never trigger this.
-                    let duration = now.duration_since(*activated_at).unwrap_or(Duration::ZERO);
-                    Some(ActivationSnapshot {
-                        hat_id: hat_id.clone(),
-                        trigger_topic: trigger_topic.clone(),
-                        trigger_identity: trigger_identity.clone(),
-                        activated_at: *activated_at,
-                        last_event_at: *last_event_at,
-                        duration,
-                        linked_task_id: linked_task_id.clone(),
-                        key: key.clone(),
-                    })
+            .map(|(key, snapshot)| {
+                // If clock regresses (e.g. NTP skew), Duration::ZERO is a
+                // safe fallback — production SystemTimeClock should never
+                // trigger this.
+                let duration = now
+                    .duration_since(snapshot.activated_at)
+                    .unwrap_or(Duration::ZERO);
+                ActivationSnapshot {
+                    hat_id: snapshot.hat_id.clone(),
+                    trigger_topic: snapshot.trigger_topic.clone(),
+                    trigger_identity: snapshot.trigger_identity.clone(),
+                    activated_at: snapshot.activated_at,
+                    last_event_at: snapshot.last_event_at,
+                    duration,
+                    linked_task_id: snapshot.linked_task_id.clone(),
+                    key: key.clone(),
                 }
-                ActivationState::Completed { .. } => None,
             })
             .collect();
-        // Sort by duration descending (longest active first).
-        snapshots.sort_by_key(|s| std::cmp::Reverse(s.duration));
+        // P2 #17: sort by duration descending first, then hat_id ascending
+        // as a stable secondary key. Without the secondary key, two
+        // activations with identical duration (e.g. both activated at the
+        // same instant) would emit in HashMap iteration order — which is
+        // non-deterministic across runs and can cause flaky reporter
+        // output (and unstable test snapshots).
+        snapshots.sort_by(|a, b| {
+            b.duration
+                .cmp(&a.duration)
+                .then_with(|| a.hat_id.cmp(&b.hat_id))
+        });
         snapshots
     }
 
     /// Returns the total count of activations (active + completed).
+    ///
+    /// `active == self.activations.len()` because completed entries are
+    /// removed; the diagnostic `completed_count` counter carries the rest.
     pub fn total_count(&self) -> usize {
-        self.activations.len()
+        self.activations.len().saturating_add(self.completed_count)
     }
 
     /// Returns the count of currently active activations.
     pub fn active_count(&self) -> usize {
-        self.activations
-            .values()
-            .filter(|s| matches!(s, ActivationState::Active { .. }))
-            .count()
+        self.activations.len()
+    }
+
+    /// Returns the count of activations closed via `complete`.
+    ///
+    /// Debugging / observability only — exposed so `ralph diagnose` and
+    /// tests can verify the no-leak invariant.
+    pub fn completed_count(&self) -> usize {
+        self.completed_count
     }
 
     /// Returns whether a specific key is currently active.
     pub fn is_active(&self, key: &ActivationKey) -> bool {
-        matches!(
-            self.activations.get(key),
-            Some(ActivationState::Active { .. })
-        )
+        self.activations.contains_key(key)
     }
 }
 
@@ -384,21 +490,22 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    fn test_key(loop_id: &str, hat_id: &str, trigger: &str) -> ActivationKey {
+    fn test_key(loop_id: &str, hat_id: &str, _trigger: &str) -> ActivationKey {
+        // The 3rd argument (legacy `trigger_identity`) is no longer part of
+        // the key — retained in the signature so existing tests don't have
+        // to change. The trigger topic is recorded by `activate` directly.
         ActivationKey {
             loop_id: loop_id.to_string(),
             iteration: 1,
             hat_id: hat_id.to_string(),
-            trigger_identity: trigger.to_string(),
         }
     }
 
-    fn test_key_with_iter(loop_id: &str, hat_id: &str, trigger: &str, iter: u32) -> ActivationKey {
+    fn test_key_with_iter(loop_id: &str, hat_id: &str, _trigger: &str, iter: u32) -> ActivationKey {
         ActivationKey {
             loop_id: loop_id.to_string(),
             iteration: iter,
             hat_id: hat_id.to_string(),
-            trigger_identity: trigger.to_string(),
         }
     }
 
@@ -453,7 +560,11 @@ mod tests {
         let key_b = test_key("loop-1", "reviewer", "review.start");
 
         tracker.activate(key_a.clone(), "work.start".into(), None);
-        tracker.activate(key_b.clone(), "review.start".into(), Some("task-123".into()));
+        tracker.activate(
+            key_b.clone(),
+            "review.start".into(),
+            Some(TaskId::from("task-123")),
+        );
 
         assert_eq!(tracker.active_count(), 2);
 
@@ -467,7 +578,10 @@ mod tests {
         let snapshots = tracker.active_activations();
         assert_eq!(snapshots.len(), 1);
         assert_eq!(snapshots[0].hat_id, "reviewer");
-        assert_eq!(snapshots[0].linked_task_id.as_deref(), Some("task-123"));
+        assert_eq!(
+            snapshots[0].linked_task_id.as_ref().map(|t| t.as_str()),
+            Some("task-123")
+        );
     }
 
     // T-U2-4: 被拒 event 不调用 observe API，不进入 tracker
@@ -556,7 +670,9 @@ mod tests {
     #[test]
     fn activation_key_display() {
         let key = test_key("loop-1", "executor", "work.start");
-        assert_eq!(key.to_string(), "loop-1:1:executor:work.start");
+        // `trigger_identity` was removed from the key in P0 #1 fix — Display
+        // now uses only (loop_id, iteration, hat_id).
+        assert_eq!(key.to_string(), "loop-1:1:executor");
     }
 
     // Additional: empty tracker returns empty snapshots
@@ -575,11 +691,18 @@ mod tests {
         let mut tracker = ActivationLifecycleTracker::with_clock(clock.clone());
         let key = test_key("loop-1", "executor", "work.start");
 
-        tracker.activate(key.clone(), "work.start".into(), Some("task-abc".into()));
+        tracker.activate(
+            key.clone(),
+            "work.start".into(),
+            Some(TaskId::from("task-abc")),
+        );
 
         let snapshots = tracker.active_activations();
         assert_eq!(snapshots.len(), 1);
-        assert_eq!(snapshots[0].linked_task_id.as_deref(), Some("task-abc"));
+        assert_eq!(
+            snapshots[0].linked_task_id.as_ref().map(|t| t.as_str()),
+            Some("task-abc")
+        );
     }
 
     // Additional: activate without linked_task_id
@@ -618,6 +741,60 @@ mod tests {
         tracker.observe_accepted_event(&key);
     }
 
+    // P2 #17: equal-duration activations must sort by hat_id ascending so
+    // output is deterministic across runs (HashMap iteration order is
+    // randomized by Rust's hasher). Without the secondary key, two
+    // activations activated at the exact same instant would emit in an
+    // arbitrary order — flaky reporter output, unstable golden tests.
+    #[test]
+    fn active_activations_equal_duration_sorts_by_hat_id_ascending() {
+        let clock = FakeClock::fixed();
+        let mut tracker = ActivationLifecycleTracker::with_clock(clock);
+        // Three hats activated at the SAME instant → equal duration.
+        // hat_id ascending order must be: alpha, bravo, charlie.
+        let key_alpha = test_key("loop-1", "alpha", "event-a");
+        let key_bravo = test_key("loop-1", "bravo", "event-a");
+        let key_charlie = test_key("loop-1", "charlie", "event-a");
+
+        // Activate in deliberately non-alphabetical order to make sure
+        // the sort is driven by hat_id, not HashMap insertion order.
+        tracker.activate(key_charlie.clone(), "event-a".into(), None);
+        tracker.activate(key_alpha.clone(), "event-a".into(), None);
+        tracker.activate(key_bravo.clone(), "event-a".into(), None);
+
+        let snapshots = tracker.active_activations();
+        assert_eq!(snapshots.len(), 3);
+        assert_eq!(snapshots[0].hat_id, "alpha");
+        assert_eq!(snapshots[1].hat_id, "bravo");
+        assert_eq!(snapshots[2].hat_id, "charlie");
+    }
+
+    // P2 #17: sort must still respect duration DESC primary ordering
+    // when durations differ. This pins the contract: longest duration
+    // wins; hat_id only breaks ties.
+    #[test]
+    fn active_activations_duration_desc_with_hat_id_secondary() {
+        let mut clock = FakeClock::fixed();
+        let mut tracker = ActivationLifecycleTracker::with_clock(clock.clone());
+
+        // alpha activated first, will have longest duration.
+        let key_alpha = test_key("loop-1", "alpha", "event-a");
+        tracker.activate(key_alpha.clone(), "event-a".into(), None);
+        clock.advance(Duration::from_secs(60));
+        // bravo and charlie activated together → tie.
+        let key_bravo = test_key("loop-1", "bravo", "event-b");
+        let key_charlie = test_key("loop-1", "charlie", "event-b");
+        tracker.activate(key_bravo.clone(), "event-b".into(), None);
+        tracker.activate(key_charlie.clone(), "event-b".into(), None);
+
+        let snapshots = tracker.active_activations();
+        assert_eq!(snapshots.len(), 3);
+        // alpha first (longest), then bravo + charlie tie-broken by hat_id.
+        assert_eq!(snapshots[0].hat_id, "alpha");
+        assert_eq!(snapshots[1].hat_id, "bravo");
+        assert_eq!(snapshots[2].hat_id, "charlie");
+    }
+
     // Additional: activation ordering by duration
     #[test]
     fn active_activations_sorted_by_duration_descending() {
@@ -644,14 +821,17 @@ mod tests {
         let mut tracker = ActivationLifecycleTracker::with_clock(clock.clone());
         let key = test_key("loop-1", "executor", "work.start");
 
-        tracker.activate(key.clone(), "work.start".into(), Some("task-1".into()));
+        tracker.activate(key.clone(), "work.start".into(), Some(TaskId::from("task-1")));
         clock.advance(Duration::from_secs(30));
-        tracker.activate(key.clone(), "work.start".into(), Some("task-2".into()));
+        tracker.activate(key.clone(), "work.start".into(), Some(TaskId::from("task-2")));
 
         // Should still be active, original task id preserved.
         let snapshots = tracker.active_activations();
         assert_eq!(snapshots.len(), 1);
-        assert_eq!(snapshots[0].linked_task_id.as_deref(), Some("task-1"));
+        assert_eq!(
+            snapshots[0].linked_task_id.as_ref().map(|t| t.as_str()),
+            Some("task-1")
+        );
     }
 
     // Additional: multiple activations same hat different iterations
@@ -670,5 +850,225 @@ mod tests {
         tracker.complete(&key1, "work.done");
         assert_eq!(tracker.active_count(), 1);
         assert!(tracker.is_active(&key2));
+    }
+
+    // P1 finding #6: completed activations must be removed from the map
+    // immediately, not just re-tagged. `total_count` therefore reflects
+    // `active + completed`, with `completed_count` carrying the closed
+    // half. This test pins the no-leak invariant on the public API.
+    #[test]
+    fn complete_removes_entry_and_increments_completed_count() {
+        let clock = FakeClock::fixed();
+        let mut tracker = ActivationLifecycleTracker::with_clock(clock.clone());
+        let key = test_key("loop-1", "executor", "work.start");
+
+        tracker.activate(key.clone(), "work.start".into(), None);
+        assert_eq!(tracker.active_count(), 1);
+        assert_eq!(tracker.completed_count(), 0);
+        assert_eq!(tracker.total_count(), 1);
+
+        tracker.complete(&key, "work.done");
+
+        // Active map is empty; counter carries the closed count.
+        assert_eq!(tracker.active_count(), 0);
+        assert_eq!(tracker.completed_count(), 1);
+        // total_count still sums both halves (debugging / observability).
+        assert_eq!(tracker.total_count(), 1);
+    }
+
+    // P1 finding #6: 1000 activate/complete cycles must leave the active
+    // map at 0 entries. Without `HashMap::remove`, this would still show
+    // 1000 active entries and `active_activations()` would allocate 1000
+    // snapshots every call.
+    #[test]
+    fn long_run_does_not_leak_active_entries() {
+        let clock = FakeClock::fixed();
+        let mut tracker = ActivationLifecycleTracker::with_clock(clock.clone());
+
+        for i in 0..1000u32 {
+            let key = ActivationKey {
+                loop_id: "loop-1".into(),
+                iteration: i,
+                hat_id: "executor".into(),
+            };
+            tracker.activate(key.clone(), "work.start".into(), None);
+            assert_eq!(tracker.active_count(), 1);
+            tracker.complete(&key, "work.done");
+            assert_eq!(tracker.active_count(), 0, "iteration {i} leaked");
+        }
+
+        assert_eq!(tracker.active_count(), 0);
+        assert_eq!(tracker.completed_count(), 1000);
+        assert_eq!(tracker.total_count(), 1000);
+        assert!(tracker.active_activations().is_empty());
+    }
+
+    // P1 finding #11: `Completed` variant is gone; `complete` on an
+    // already-removed key still warns and does not panic (idempotent).
+    #[test]
+    fn duplicate_complete_on_removed_entry_warns_and_is_no_op() {
+        let clock = FakeClock::fixed();
+        let mut tracker = ActivationLifecycleTracker::with_clock(clock.clone());
+        let key = test_key("loop-1", "executor", "work.start");
+
+        tracker.activate(key.clone(), "work.start".into(), None);
+        tracker.complete(&key, "work.done");
+        assert_eq!(tracker.completed_count(), 1);
+
+        // Second complete — key has already been removed. Must not panic,
+        // must not double-count.
+        tracker.complete(&key, "work.failed");
+        assert_eq!(tracker.completed_count(), 1);
+        assert!(!tracker.is_active(&key));
+    }
+
+    // -------------------------------------------------------------------
+    // P1 finding #13: FakeClock boundary coverage
+    // -------------------------------------------------------------------
+    //
+    // The active_activations() implementation defends against clock
+    // regression with `.duration_since(activated_at).unwrap_or(Duration::ZERO)`,
+    // which is the safety net when `now` is earlier than `activated_at`
+    // (e.g. NTP skew in production). The tests below pin that boundary:
+    //
+    // - duration = 0 when activate and observe happen at the same instant.
+    // - duration = 0 when clock advances by 0 seconds.
+    // - clock regress produces Duration::ZERO, not a negative Duration
+    //   (negative Durations are unrepresentable; the fallback is the
+    //   only correct behaviour).
+    // - observe_event with regressed clock still leaves the snapshot
+    //   readable (last_event_at clamped forward correctly).
+    //
+    // These tests are TDD-style: if any of them fail after a future refactor,
+    // the regression is in the production fallback path — not in the test.
+
+    #[test]
+    fn duration_zero_when_activate_and_observe_at_same_instant() {
+        // No clock advancement between activate and observe_accepted_event.
+        // Duration must be exactly zero (not negative, not 1ns).
+        let clock = FakeClock::fixed();
+        let mut tracker = ActivationLifecycleTracker::with_clock(clock.clone());
+        let key = test_key("loop-1", "executor", "work.start");
+
+        tracker.activate(key.clone(), "work.start".into(), None);
+        tracker.observe_accepted_event(&key);
+
+        let snapshots = tracker.active_activations();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(
+            snapshots[0].duration,
+            Duration::ZERO,
+            "duration must be exactly zero when activate and observe share an instant"
+        );
+        assert_eq!(snapshots[0].activated_at, snapshots[0].last_event_at);
+    }
+
+    #[test]
+    fn duration_zero_when_clock_advances_by_zero() {
+        // Advancing the clock by Duration::ZERO is a no-op; duration must
+        // stay at zero (regression guard against accidental nanos leak).
+        let mut clock = FakeClock::fixed();
+        let mut tracker = ActivationLifecycleTracker::with_clock(clock.clone());
+        let key = test_key("loop-1", "executor", "work.start");
+
+        tracker.activate(key.clone(), "work.start".into(), None);
+        clock.advance(Duration::ZERO);
+
+        let snapshots = tracker.active_activations();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(
+            snapshots[0].duration,
+            Duration::ZERO,
+            "advancing by zero must not inflate duration"
+        );
+    }
+
+    #[test]
+    fn clock_regression_falls_back_to_zero_duration() {
+        // TDD-style: this test directly exercises the
+        // `unwrap_or(Duration::ZERO)` branch at line 336-337. If the
+        // fallback is ever removed, this test fails immediately rather
+        // than producing a panic at the call site.
+        let mut clock = FakeClock::fixed();
+        let mut tracker = ActivationLifecycleTracker::with_clock(clock.clone());
+        let key = test_key("loop-1", "executor", "work.start");
+
+        tracker.activate(key.clone(), "work.start".into(), None);
+
+        // Regress the clock by 5 minutes — the snapshot's activated_at is
+        // now in the future relative to "now".
+        clock.regress(Duration::from_secs(300));
+
+        let snapshots = tracker.active_activations();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(
+            snapshots[0].duration,
+            Duration::ZERO,
+            "clock regression must fall back to Duration::ZERO, not panic or wrap"
+        );
+        // The activation is still considered active.
+        assert!(tracker.is_active(&key));
+        assert_eq!(tracker.active_count(), 1);
+    }
+
+    #[test]
+    fn clock_regression_does_not_panic_for_multiple_activations() {
+        // Regression with multiple active entries: each independently
+        // falls back to ZERO rather than one panic poisoning the whole
+        // active_activations() call.
+        let mut clock = FakeClock::fixed();
+        let mut tracker = ActivationLifecycleTracker::with_clock(clock.clone());
+        let key_a = test_key_with_iter("loop-1", "executor", "work.start", 1);
+        let key_b = test_key_with_iter("loop-1", "reviewer", "review.start", 2);
+
+        tracker.activate(key_a.clone(), "work.start".into(), None);
+        clock.advance(Duration::from_secs(60));
+        tracker.activate(key_b.clone(), "review.start".into(), None);
+
+        // Regress far enough that BOTH activated_at values are in the future.
+        clock.regress(Duration::from_secs(3600));
+
+        let snapshots = tracker.active_activations();
+        assert_eq!(snapshots.len(), 2);
+        for s in &snapshots {
+            assert_eq!(
+                s.duration,
+                Duration::ZERO,
+                "hat {} should have ZERO duration under regression",
+                s.hat_id
+            );
+        }
+    }
+
+    #[test]
+    fn regression_after_observed_event_still_yields_zero_duration() {
+        // Combined boundary: observe_event records last_event_at at the
+        // current (forward) clock, then we regress the clock past
+        // activated_at. last_event_at is now also in the future, but
+        // duration_since(activated_at) still regresses, so the fallback
+        // must kick in.
+        let mut clock = FakeClock::fixed();
+        let mut tracker = ActivationLifecycleTracker::with_clock(clock.clone());
+        let key = test_key("loop-1", "executor", "work.start");
+
+        tracker.activate(key.clone(), "work.start".into(), None);
+        clock.advance(Duration::from_secs(120));
+        tracker.observe_accepted_event(&key);
+
+        // Verify the pre-regression state is sane.
+        let pre = tracker.active_activations();
+        assert_eq!(pre[0].duration, Duration::from_secs(120));
+
+        // Regress past activated_at.
+        clock.regress(Duration::from_secs(3600));
+
+        let post = tracker.active_activations();
+        assert_eq!(post[0].duration, Duration::ZERO);
+        // last_event_at is preserved (we only compute duration against
+        // activated_at, so this field keeps its forward-stamped value).
+        assert!(
+            post[0].last_event_at > post[0].activated_at,
+            "last_event_at should retain its forward-stamped time even under regression"
+        );
     }
 }
