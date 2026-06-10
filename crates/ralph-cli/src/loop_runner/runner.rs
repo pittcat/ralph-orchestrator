@@ -696,9 +696,7 @@ pub async fn run_loop_impl(
             let mut blocks: Vec<ralph_core::agent_doc_sync::BlockSpec> = Vec::new();
             for block_ref in &config.agent_doc_sync.blocks {
                 // Strip "builtin:" prefix to get the block ID.
-                let block_id = block_ref
-                    .strip_prefix("builtin:")
-                    .unwrap_or(block_ref);
+                let block_id = block_ref.strip_prefix("builtin:").unwrap_or(block_ref);
                 match ralph_core::agent_doc_sync::builtin::builtin_block(block_id) {
                     Some(spec) => blocks.push(spec),
                     None => {
@@ -722,9 +720,7 @@ pub async fn run_loop_impl(
             // Resolve session_dir from the diagnostics collector for
             // recovery envelope writes. When None, the persist module
             // skips the recovery envelope (no-op).
-            let session_dir = ctx
-                .prebuilt_diagnostics()
-                .and_then(|d| d.session_dir());
+            let session_dir = ctx.prebuilt_diagnostics().and_then(|d| d.session_dir());
 
             let sync_config = ralph_core::agent_doc_sync::SyncConfig {
                 skip: false,
@@ -740,11 +736,7 @@ pub async fn run_loop_impl(
             // hang the outer loop. Timeout → warning envelope;
             // `OnError::Strict` upgrades that into a hard exit.
             let timeout_secs = config.agent_doc_sync.startup_timeout_secs;
-            match run_sync_with_timeout(
-                &config.core.workspace_root,
-                &sync_config,
-                timeout_secs,
-            ) {
+            match run_sync_with_timeout(&config.core.workspace_root, &sync_config, timeout_secs) {
                 Ok(report) => {
                     tracing::debug!(
                         target: "ralph_cli::loop_runner",
@@ -754,26 +746,24 @@ pub async fn run_loop_impl(
                         "agent_doc_sync: complete"
                     );
                 }
-                Err(SyncRunError::Sync(e)) => {
-                    match config.agent_doc_sync.on_error {
-                        ralph_core::OnErrorPolicy::Strict => {
-                            tracing::error!(
-                                target: "ralph_cli::loop_runner",
-                                error = %e,
-                                "agent_doc_sync: failed (strict mode), aborting"
-                            );
-                            return Err(anyhow::anyhow!("agent_doc_sync failed in strict mode"))
-                                .context("agent doc sync strict mode");
-                        }
-                        ralph_core::OnErrorPolicy::Warn => {
-                            tracing::warn!(
-                                target: "ralph_cli::loop_runner",
-                                error = %e,
-                                "agent_doc_sync: failed; continuing"
-                            );
-                        }
+                Err(SyncRunError::Sync(e)) => match config.agent_doc_sync.on_error {
+                    ralph_core::OnErrorPolicy::Strict => {
+                        tracing::error!(
+                            target: "ralph_cli::loop_runner",
+                            error = %e,
+                            "agent_doc_sync: failed (strict mode), aborting"
+                        );
+                        return Err(anyhow::anyhow!("agent_doc_sync failed in strict mode"))
+                            .context("agent doc sync strict mode");
                     }
-                }
+                    ralph_core::OnErrorPolicy::Warn => {
+                        tracing::warn!(
+                            target: "ralph_cli::loop_runner",
+                            error = %e,
+                            "agent_doc_sync: failed; continuing"
+                        );
+                    }
+                },
                 Err(SyncRunError::Timeout { secs }) => {
                     tracing::warn!(
                         target: "ralph_cli::loop_runner",
@@ -785,9 +775,7 @@ pub async fn run_loop_impl(
                         secs,
                         config.agent_doc_sync.on_error,
                     );
-                    if config.agent_doc_sync.on_error
-                        == ralph_core::OnErrorPolicy::Strict
-                    {
+                    if config.agent_doc_sync.on_error == ralph_core::OnErrorPolicy::Strict {
                         return Err(anyhow::anyhow!(
                             "agent_doc_sync exceeded {secs}s startup timeout (strict mode)"
                         ))
@@ -3812,11 +3800,9 @@ fn run_sync_with_timeout(
     // string literals; `blocks_vec` is an owned `Vec` moved into the
     // closure.
     let target_files: &'static [&'static str] = &["CLAUDE.md", "AGENTS.md"];
-    let blocks_vec: Vec<ralph_core::agent_doc_sync::BlockSpec> =
-        sync_config.blocks.to_vec();
+    let blocks_vec: Vec<ralph_core::agent_doc_sync::BlockSpec> = sync_config.blocks.to_vec();
     let on_error = sync_config.on_error;
-    let session_dir_owned: Option<PathBuf> =
-        sync_config.session_dir.map(|p| p.to_path_buf());
+    let session_dir_owned: Option<PathBuf> = sync_config.session_dir.map(|p| p.to_path_buf());
 
     let handle = thread::Builder::new()
         .name("ralph-agent-doc-sync".to_string())

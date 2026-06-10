@@ -76,10 +76,8 @@ fn begin_marker_re(id: &str) -> regex::Regex {
 /// Regex pattern for the end marker: `<!-- ralph:end <id> -->`
 fn end_marker_re(id: &str) -> regex::Regex {
     let escaped = regex::escape(id);
-    regex::Regex::new(&format!(
-        r"^<!--\s*ralph:end\s+{escaped}\s*-->\s*$"
-    ))
-    .expect("invalid end marker regex")
+    regex::Regex::new(&format!(r"^<!--\s*ralph:end\s+{escaped}\s*-->\s*$"))
+        .expect("invalid end marker regex")
 }
 
 /// Parses the file content and determines the state of markers for `block_id`.

@@ -51,10 +51,12 @@ pub async fn execute(
     let auth_backends = auth_backend_names(&config);
     checks.push(auth_hint_check(&auth_backends, |key| env::var(key).ok()));
 
-    let diagnostics_dir = config.core.workspace_root.join(".ralph").join("diagnostics");
-    checks.push(ralph_core::agent_doc_sync::health::check_agent_doc_sync_health(
-        &diagnostics_dir,
-    ));
+    let diagnostics_dir = config
+        .core
+        .workspace_root
+        .join(".ralph")
+        .join("diagnostics");
+    checks.push(ralph_core::agent_doc_sync::health::check_agent_doc_sync_health(&diagnostics_dir));
 
     checks.extend(other_checks);
 

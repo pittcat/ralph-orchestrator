@@ -32,7 +32,10 @@ use tempfile::TempDir;
 /// Sample builtin-style block used across tests. Mirrors the pattern used
 /// in `ralph-core` unit tests (see `crates/ralph-core/src/agent_doc_sync/writer.rs`).
 fn sample_block() -> BlockSpec {
-    BlockSpec::new("hang-prevention", "Rule 1\nRule 2\nRule 3\nRule 4\nRule 5\n")
+    BlockSpec::new(
+        "hang-prevention",
+        "Rule 1\nRule 2\nRule 3\nRule 4\nRule 5\n",
+    )
 }
 
 /// Build a `SyncConfig` for one target file. Avoids repeating the boilerplate
@@ -104,11 +107,9 @@ fn sync_appends_block_when_marker_absent() {
     fs::write(&path, prefix).unwrap();
 
     let block = sample_block();
-    let report = ralph_core::agent_doc_sync::sync_all(
-        dir.path(),
-        &sync_config_for(&[block.clone()]),
-    )
-    .expect("warn mode must not propagate errors");
+    let report =
+        ralph_core::agent_doc_sync::sync_all(dir.path(), &sync_config_for(&[block.clone()]))
+            .expect("warn mode must not propagate errors");
 
     assert_eq!(report.synced, 1, "one block must be appended");
     assert_eq!(report.skipped, 0);
@@ -135,7 +136,10 @@ fn sync_appends_block_when_marker_absent() {
 
     // Sanity: exactly one begin marker (no duplicate).
     let begin_count = content.matches("<!-- ralph:begin hang-prevention").count();
-    assert_eq!(begin_count, 1, "exactly one begin marker expected, got {begin_count}");
+    assert_eq!(
+        begin_count, 1,
+        "exactly one begin marker expected, got {begin_count}"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -167,9 +171,8 @@ fn sync_skips_when_v_matches() {
     // Sleep long enough that a real write would tick the mtime past resolution.
     thread::sleep(Duration::from_millis(50));
 
-    let report =
-        ralph_core::agent_doc_sync::sync_all(dir.path(), &sync_config_for(&[block]))
-            .expect("warn mode must not propagate errors");
+    let report = ralph_core::agent_doc_sync::sync_all(dir.path(), &sync_config_for(&[block]))
+        .expect("warn mode must not propagate errors");
 
     assert_eq!(report.skipped, 1, "block must be reported as skipped");
     assert_eq!(report.synced, 0);
@@ -214,11 +217,9 @@ fn sync_replaces_in_place_on_v_mismatch() {
     );
     fs::write(&path, &existing).unwrap();
 
-    let report = ralph_core::agent_doc_sync::sync_all(
-        dir.path(),
-        &sync_config_for(&[block.clone()]),
-    )
-    .expect("warn mode must not propagate errors");
+    let report =
+        ralph_core::agent_doc_sync::sync_all(dir.path(), &sync_config_for(&[block.clone()]))
+            .expect("warn mode must not propagate errors");
 
     assert_eq!(report.synced, 1, "block must be reported as replaced");
     assert_eq!(report.skipped, 0);
@@ -260,7 +261,10 @@ fn sync_replaces_in_place_on_v_mismatch() {
 
     // Exactly one begin marker (no duplicate).
     let begin_count = content.matches("<!-- ralph:begin hang-prevention").count();
-    assert_eq!(begin_count, 1, "exactly one begin marker expected, got {begin_count}");
+    assert_eq!(
+        begin_count, 1,
+        "exactly one begin marker expected, got {begin_count}"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -280,9 +284,8 @@ fn sync_respects_user_content() {
     fs::write(&path, user_content).unwrap();
 
     let block = sample_block();
-    let report =
-        ralph_core::agent_doc_sync::sync_all(dir.path(), &sync_config_for(&[block]))
-            .expect("warn mode must not propagate errors");
+    let report = ralph_core::agent_doc_sync::sync_all(dir.path(), &sync_config_for(&[block]))
+        .expect("warn mode must not propagate errors");
 
     assert_eq!(report.synced, 1);
     assert_eq!(report.failed, 0);
@@ -336,7 +339,9 @@ fn sync_retries_lock_then_succeeds() {
 
     let holder = thread::spawn(move || {
         let lock = FileLock::new(&holder_path).unwrap();
-        let _guard = lock.exclusive().expect("holder must acquire exclusive lock");
+        let _guard = lock
+            .exclusive()
+            .expect("holder must acquire exclusive lock");
 
         // Signal the main thread that the lock is now held; then sleep long
         // enough for the first sync attempt to fail and consume ~50ms of
@@ -350,11 +355,9 @@ fn sync_retries_lock_then_succeeds() {
     // Wait until the holder has acquired the lock, then start sync.
     barrier.wait();
     let started = Instant::now();
-    let report = ralph_core::agent_doc_sync::sync_all(
-        dir.path(),
-        &sync_config_for(&[block.clone()]),
-    )
-    .expect("warn mode must not propagate errors");
+    let report =
+        ralph_core::agent_doc_sync::sync_all(dir.path(), &sync_config_for(&[block.clone()]))
+            .expect("warn mode must not propagate errors");
     let elapsed = started.elapsed();
 
     holder.join().expect("holder thread must not panic");
@@ -399,7 +402,9 @@ fn sync_returns_failed_after_3_lock_retries() {
         let holder_path = path.clone();
         move || {
             let lock = FileLock::new(&holder_path).unwrap();
-            let _guard = lock.exclusive().expect("holder must acquire exclusive lock");
+            let _guard = lock
+                .exclusive()
+                .expect("holder must acquire exclusive lock");
             thread::sleep(Duration::from_millis(500));
             drop(_guard);
         }

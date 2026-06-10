@@ -219,7 +219,9 @@ fn print_unknown_source(name: &str, use_colors: bool) {
     if use_colors {
         eprintln!(
             "{}error:{} unknown --source '{}'\navailable: stall_recovery, missing_event_gate, workflow_guard, execution_contract, payload_contract, drift_monitor, hook_retry, loop_stale, topic_format, agent_doc_sync",
-            colors::RED, colors::RESET, name
+            colors::RED,
+            colors::RESET,
+            name
         );
     } else {
         eprintln!(

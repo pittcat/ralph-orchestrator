@@ -96,10 +96,9 @@ pub fn check_agent_doc_sync_health(diagnostics_dir: &Path) -> CheckResult {
                 snapshot.synced, snapshot.skipped, snapshot.failed
             ),
         ),
-        SyncOutcome::Completed | SyncOutcome::UpToDate => CheckResult::pass(
-            CHECK_NAME,
-            "agent_doc_sync last run succeeded",
-        ),
+        SyncOutcome::Completed | SyncOutcome::UpToDate => {
+            CheckResult::pass(CHECK_NAME, "agent_doc_sync last run succeeded")
+        }
     }
 }
 

@@ -821,9 +821,17 @@ mod tests {
         let mut tracker = ActivationLifecycleTracker::with_clock(clock.clone());
         let key = test_key("loop-1", "executor", "work.start");
 
-        tracker.activate(key.clone(), "work.start".into(), Some(TaskId::from("task-1")));
+        tracker.activate(
+            key.clone(),
+            "work.start".into(),
+            Some(TaskId::from("task-1")),
+        );
         clock.advance(Duration::from_secs(30));
-        tracker.activate(key.clone(), "work.start".into(), Some(TaskId::from("task-2")));
+        tracker.activate(
+            key.clone(),
+            "work.start".into(),
+            Some(TaskId::from("task-2")),
+        );
 
         // Should still be active, original task id preserved.
         let snapshots = tracker.active_activations();

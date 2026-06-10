@@ -37,8 +37,8 @@ pub mod writer;
 use std::path::Path;
 
 pub use block::BlockSpec;
-pub use writer::{OnError, SyncError};
 use writer::FileSyncConfig;
+pub use writer::{OnError, SyncError};
 
 use tracing::{debug, info};
 
@@ -201,7 +201,10 @@ mod tests {
     use tempfile::TempDir;
 
     fn sample_block() -> BlockSpec {
-        BlockSpec::new("hang-prevention", "Rule 1\nRule 2\nRule 3\nRule 4\nRule 5\n")
+        BlockSpec::new(
+            "hang-prevention",
+            "Rule 1\nRule 2\nRule 3\nRule 4\nRule 5\n",
+        )
     }
 
     #[test]
@@ -341,7 +344,9 @@ mod tests {
 
         let content = fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
         // User content at the start is preserved
-        assert!(content.starts_with("# My Project\n\nUser notes.\n\n## Custom Section\n\nDetails.\n"));
+        assert!(
+            content.starts_with("# My Project\n\nUser notes.\n\n## Custom Section\n\nDetails.\n")
+        );
     }
 
     #[test]
@@ -530,7 +535,10 @@ mod tests {
 
         // Should contain exactly ONE begin marker
         let begin_count = content.matches("<!-- ralph:begin hang-prevention").count();
-        assert_eq!(begin_count, 1, "expected exactly 1 begin marker, found {begin_count}");
+        assert_eq!(
+            begin_count, 1,
+            "expected exactly 1 begin marker, found {begin_count}"
+        );
 
         // Should have proper markers
         assert!(content.contains("Rule 1"));
@@ -574,6 +582,9 @@ mod tests {
         assert!(content.contains("Rule 1"));
         assert!(content.contains("## Ralph Managed Blocks"));
         let begin_count = content.matches("<!-- ralph:begin hang-prevention").count();
-        assert_eq!(begin_count, 1, "expected exactly 1 begin marker, found {begin_count}");
+        assert_eq!(
+            begin_count, 1,
+            "expected exactly 1 begin marker, found {begin_count}"
+        );
     }
 }

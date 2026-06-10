@@ -10,8 +10,7 @@ use super::block::BlockSpec;
 ///
 /// Embedded from `crates/ralph-core/data/managed_blocks/hang-prevention.md`
 /// at compile time. The 5 Command Hang Prevention Rules are embedded verbatim.
-const HANG_PREVENTION_CONTENT: &str =
-    include_str!("../../data/managed_blocks/hang-prevention.md");
+const HANG_PREVENTION_CONTENT: &str = include_str!("../../data/managed_blocks/hang-prevention.md");
 
 /// Returns the [`BlockSpec`] for a builtin block by ID, or `None` if the ID
 /// is not a recognised builtin block.
@@ -44,8 +43,8 @@ const BUILTIN_IDS: &[&str] = &["hang-prevention"];
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::block::compute_sha256;
+    use super::*;
 
     #[test]
     fn hang_prevention_content_not_empty() {
@@ -67,7 +66,10 @@ mod tests {
         let block = block.unwrap();
         assert_eq!(block.id, "hang-prevention");
         assert_eq!(block.content, HANG_PREVENTION_CONTENT);
-        assert_eq!(block.content_sha256, compute_sha256(HANG_PREVENTION_CONTENT));
+        assert_eq!(
+            block.content_sha256,
+            compute_sha256(HANG_PREVENTION_CONTENT)
+        );
     }
 
     #[test]

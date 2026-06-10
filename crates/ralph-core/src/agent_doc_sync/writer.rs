@@ -39,9 +39,15 @@ pub enum SyncError {
     /// Failed to acquire file lock after retries.
     LockFailed { path: String },
     /// Failed to read the target file (non-NotFound).
-    ReadFailed { path: String, source: std::io::Error },
+    ReadFailed {
+        path: String,
+        source: std::io::Error,
+    },
     /// Failed to write the target file.
-    WriteFailed { path: String, source: std::io::Error },
+    WriteFailed {
+        path: String,
+        source: std::io::Error,
+    },
     /// Write verification failed (content mismatch or read error after persist).
     VerifyFailed { path: String, detail: String },
 }
@@ -304,9 +310,7 @@ pub(crate) fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
 ///
 /// In `OnError::Strict` mode, returns `Err` on lock, read, or write failures
 /// instead of silently tracking them in `FileSyncResult::failed`.
-pub(crate) fn sync_file(
-    config: &FileSyncConfig<'_>,
-) -> Result<FileSyncResult, SyncError> {
+pub(crate) fn sync_file(config: &FileSyncConfig<'_>) -> Result<FileSyncResult, SyncError> {
     let mut result = FileSyncResult {
         synced: 0,
         skipped: 0,
@@ -360,7 +364,10 @@ pub(crate) fn sync_file(
                     return Ok(result);
                 }
                 OnError::Strict => {
-                    return Err(SyncError::ReadFailed { path: path_str, source: e });
+                    return Err(SyncError::ReadFailed {
+                        path: path_str,
+                        source: e,
+                    });
                 }
             }
         }
@@ -853,7 +860,10 @@ mod tests {
 
         // Should contain exactly ONE begin marker (the new one)
         let begin_count = content.matches("<!-- ralph:begin hang-prevention").count();
-        assert_eq!(begin_count, 1, "expected exactly 1 begin marker, found {begin_count}");
+        assert_eq!(
+            begin_count, 1,
+            "expected exactly 1 begin marker, found {begin_count}"
+        );
 
         // Should have proper begin+end pair
         assert!(content.contains(&begin_marker("hang-prevention", &block.content_sha256)));

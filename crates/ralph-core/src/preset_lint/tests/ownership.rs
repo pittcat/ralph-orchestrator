@@ -448,7 +448,10 @@ event_loop:
         1,
         "expected exactly 1 finding for missing publisher, got {}: {:?}",
         findings.len(),
-        findings.iter().map(|f| (f.id, &f.message)).collect::<Vec<_>>()
+        findings
+            .iter()
+            .map(|f| (f.id, &f.message))
+            .collect::<Vec<_>>()
     );
     let f = &findings[0];
     assert_eq!(f.id, FINDING_MISSING_TOPIC_OWNER);

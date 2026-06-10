@@ -202,13 +202,9 @@ fn decision_path_does_not_read_tracker() {
     // they are part of the public surface. Record them too so future
     // regressions can distinguish "decision path read API" from
     // "diagnostic helpers".
-    let _ = loop_instance
-        .hat_lifecycle_tracker_mut()
-        .is_active(&key);
+    let _ = loop_instance.hat_lifecycle_tracker_mut().is_active(&key);
     calls.is_active.set(calls.is_active.get() + 1);
-    let _ = loop_instance
-        .hat_lifecycle_tracker_mut()
-        .active_count();
+    let _ = loop_instance.hat_lifecycle_tracker_mut().active_count();
     calls.active_count.set(calls.active_count.get() + 1);
 
     // === Decision-path contract enforcement ===

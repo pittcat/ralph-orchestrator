@@ -1131,10 +1131,7 @@ fn push_active_activations_md(out: &mut String, activations: &[ActivationSnapsho
             format_system_time(a.activated_at),
             format_system_time(a.last_event_at),
             format_duration(a.duration),
-            a.linked_task_id
-                .as_ref()
-                .map(|t| t.as_str())
-                .unwrap_or("-"),
+            a.linked_task_id.as_ref().map(|t| t.as_str()).unwrap_or("-"),
         ));
     }
     out.push_str(&format!(

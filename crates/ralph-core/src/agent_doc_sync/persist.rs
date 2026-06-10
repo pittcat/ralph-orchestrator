@@ -192,7 +192,8 @@ mod tests {
 
         write_snapshot(dir.path(), &report).unwrap();
 
-        let path = dir.path()
+        let path = dir
+            .path()
             .join(".ralph")
             .join("diagnostics")
             .join("agent_doc_sync.json");
@@ -214,7 +215,8 @@ mod tests {
         // First write
         write_snapshot(dir.path(), &report).unwrap();
 
-        let path = dir.path()
+        let path = dir
+            .path()
             .join(".ralph")
             .join("diagnostics")
             .join("agent_doc_sync.json");
@@ -245,7 +247,8 @@ mod tests {
 
         write_snapshot(dir.path(), &report).unwrap();
 
-        let path = dir.path()
+        let path = dir
+            .path()
             .join(".ralph")
             .join("diagnostics")
             .join("agent_doc_sync.json");
@@ -341,7 +344,8 @@ mod tests {
         append_recovery_envelope(Some(dir.path()), &report).unwrap();
 
         // Verify both exist and are independent
-        let snapshot_path = dir.path()
+        let snapshot_path = dir
+            .path()
             .join(".ralph")
             .join("diagnostics")
             .join("agent_doc_sync.json");
@@ -353,9 +357,14 @@ mod tests {
         let _: AgentDocSyncSnapshot =
             serde_json::from_str(&fs::read_to_string(&snapshot_path).unwrap()).unwrap();
         // Recovery file is valid JSONL
-        let entry: RecoveryJournalEntry =
-            serde_json::from_str(&fs::read_to_string(&recovery_path).unwrap().lines().next().unwrap())
-                .unwrap();
+        let entry: RecoveryJournalEntry = serde_json::from_str(
+            &fs::read_to_string(&recovery_path)
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(entry.envelope.source, DiagnosisSource::AgentDocSync);
     }
 }

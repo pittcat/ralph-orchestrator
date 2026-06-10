@@ -144,7 +144,9 @@ pub fn check_ownership_rules(config: &RalphConfig, strictness: LintStrictness) -
                         topic: Some(topic.clone()),
                         hat: Some(owner.clone()),
                         owner: Some(owner.clone()),
-                        action_hint: Some(format!("Add \"{topic}\" to hat \"{owner}\" publishes list")),
+                        action_hint: Some(format!(
+                            "Add \"{topic}\" to hat \"{owner}\" publishes list"
+                        )),
                     });
                 }
             }
