@@ -109,6 +109,13 @@ pub struct RunArgs {
     /// Create an isolated git worktree for this run. The worktree is created
     /// at `.worktrees/<loop-id>/` and the loop runs inside it. Use this for
     /// fully isolated execution that does not affect the main working directory.
+    ///
+    /// End-to-end isolation contract: when set, the loop's `.ralph/` directory
+    /// (events, diagnostics, current-events marker, etc.) is created inside the
+    /// worktree, not the main repo. The main repo's working tree is untouched.
+    /// The only exception is `.ralph/loops.json` (loop registry is shared
+    /// across worktrees and lives in the main repo).
+    ///
     /// Cannot be used with --exclusive.
     #[arg(long, conflicts_with = "exclusive")]
     pub worktree: bool,
@@ -907,6 +914,11 @@ pub async fn run_command(
         }
     };
 
+    // U3 (2026-06-10): workspace is now set from loop_context.workspace()
+    // after loop_context is determined. This ensures workspace is always
+    // correct regardless of which branch was taken.
+    subprocess_tui_args.workspace = loop_context.workspace().to_path_buf();
+
     // Update workspace_root in config if running in worktree
     if !loop_context.is_primary() {
         config.core.workspace_root = loop_context.workspace().to_path_buf();
@@ -1174,6 +1186,10 @@ struct SubprocessTuiArgs {
     /// would cause a duplicate worktree). Instead, the child inherits the
     /// parent's worktree path here. P1-F fix on 2026-06-10.
     pub worktree_path: Option<PathBuf>,
+    /// Workspace cwd for child: worktree path in worktree mode, main repo in
+    /// primary mode. Used as base path for parent's stderr log and as
+    /// Command::current_dir when spawning the child.
+    pub workspace: PathBuf,
     /// Config sources to forward to child process (-c args)
     pub config_sources: Vec<String>,
     /// Hats source to forward to child process (-H arg)
@@ -1182,6 +1198,8 @@ struct SubprocessTuiArgs {
 
 impl SubprocessTuiArgs {
     /// Create from RunArgs with config/hats sources from Cli.
+    /// Note: workspace is set AFTER this constructor is called, after
+    /// loop_context is determined (see line ~792).
     fn new(
         args: &RunArgs,
         config_sources: &[ConfigSource],
@@ -1205,6 +1223,7 @@ impl SubprocessTuiArgs {
             no_sync_agent_docs: args.no_sync_agent_docs,
             worktree: args.worktree,
             worktree_path: None,
+            workspace: PathBuf::new(), // Set after loop_context is determined
             config_sources: config_sources.iter().map(|s| s.to_cli_string()).collect(),
             hats_source: hats_source.map(|h| h.label()),
         }
@@ -1223,27 +1242,6 @@ async fn run_subprocess_tui(
 ) -> Result<TerminationReason> {
     use std::process::Stdio;
     use tokio::process::Command;
-
-    // P1-F (2026-06-10): when the parent created a worktree and is now
-    // spawning the child RPC, chdir into the worktree before spawn.
-    // Without this, the child inherits the parent's cwd (the main
-    // workspace) and runs the orchestration loop there — so its events,
-    // memories, and tasks all land in the main `.ralph/`, polluting the
-    // worktree isolation. The child does NOT receive `--worktree` (the
-    // boolean is cleared at the call site), so its loop_context will be
-    // primary() of whatever cwd it sees — we want cwd == worktree path.
-    if let Some(ref worktree_path) = args.worktree_path {
-        std::env::set_current_dir(worktree_path).with_context(|| {
-            format!(
-                "Failed to chdir into worktree path '{}' for child RPC process",
-                worktree_path.display()
-            )
-        })?;
-        debug!(
-            "Child RPC will run inside worktree at '{}'",
-            worktree_path.display()
-        );
-    }
 
     // Build child command: ralph [-c ...] [-H ...] run --rpc <forwarded args>
     // Note: -c and -H are global options that must come BEFORE the subcommand
@@ -1359,9 +1357,9 @@ async fn run_subprocess_tui(
     // Spawn child process.
     // Redirect stderr to a log file to prevent child tracing output from
     // corrupting the TUI display (ratatui runs in raw terminal mode).
-    let stderr_stdio = match ralph_core::diagnostics::create_log_file(
-        &std::env::current_dir().unwrap_or_default(),
-    ) {
+    // U3 (2026-06-10): use args.workspace explicitly instead of
+    // std::env::current_dir() which was fragile (relied on chdir side effect).
+    let stderr_stdio = match ralph_core::diagnostics::create_log_file(&args.workspace) {
         Ok((file, path)) => {
             info!(log_file = %path.display(), "TUI subprocess stderr redirected to log file");
             Stdio::from(file)
@@ -1369,8 +1367,13 @@ async fn run_subprocess_tui(
         Err(_) => Stdio::null(),
     };
 
+    // U3 (2026-06-10): explicitly set child's cwd to workspace (worktree path
+    // in worktree mode, main repo in primary mode). This replaces the old
+    // chdir hack and makes the child's cwd explicit rather than relying on
+    // side effects.
     let mut child = Command::new(std::env::current_exe()?)
         .args(&child_args)
+        .current_dir(&args.workspace)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(stderr_stdio)

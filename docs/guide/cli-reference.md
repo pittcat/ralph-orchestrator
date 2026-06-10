@@ -98,7 +98,7 @@ ralph run [OPTIONS]
 | `--idle-timeout <SECS>` | Interactive-mode idle timeout; `0` disables it |
 | `--autonomous-idle-timeout <SECS>` | Autonomous/RPC/worktree backend inactivity watchdog; defaults to adapter timeout, `0` disables it |
 | `--exclusive` | Wait for primary loop slot (conflicts with `--worktree`) |
-| `--worktree` | Create isolated git worktree for this run at `.worktrees/<loop-id>/`. The worktree and branch are preserved after completion for manual merge or cleanup. Conflicts with `--exclusive` |
+| `--worktree` | Create isolated git worktree for this run at `.worktrees/<loop-id>/`. **End-to-end isolation contract**: all loop artifacts (`.ralph/events.jsonl`, `.ralph/diagnostics/logs/`, `.ralph/current-events` marker) land inside the worktree, never the main repo. The only exception is `.ralph/loops.json` (the registry is shared across worktrees and lives in the main repo). The worktree and branch are preserved after completion for manual merge or cleanup. Conflicts with `--exclusive` |
 | `--no-auto-merge` | Skip automatic merge after worktree loops complete |
 | `--skip-preflight` | Skip auto preflight checks (even when `features.preflight.enabled: true`) |
 | `--record-session <FILE>` | Record session JSONL |

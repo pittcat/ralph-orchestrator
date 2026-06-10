@@ -132,3 +132,9 @@ PROMPT.md
 .playwright-cli/
 .ralph/
 .agents/
+
+# Local environment locks / MCP config
+AGENTS.md.lock
+CLAUDE.md.lock
+.mcp.json
+LEAN-CTX.md

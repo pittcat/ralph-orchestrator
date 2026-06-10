@@ -161,7 +161,7 @@ Presets define collections of hats. Located in `presets/` directory and `crates/
 | `.ralph/agent/memories.md` | Persistent learning across sessions |
 | `.ralph/agent/tasks.jsonl` | Runtime work tracking |
 | `.ralph/loop.lock` | Contains PID + prompt of primary loop |
-| `.ralph/loops.json` | Registry of all tracked loops |
+| `.ralph/loops.json` | Registry of all tracked loops. Each `LoopEntry` has `worktree_path: Option<String>` and `workspace: String`: in worktree mode both equal the worktree absolute path; in primary mode `worktree_path` is `None` and `workspace` is the main repo root. `None` vs `Some(_)` is the canonical primary-vs-worktree signal consumed by `ralph loops list`, `is_alive()` checks, and the web dashboard's domain model. The registry is shared across worktrees and always lives in the main repo (the only `.ralph/` artifact that does). |
 | `.ralph/merge-queue.jsonl` | Event-sourced merge queue |
 | `.ralph/telegram-state.json` | Telegram bot state (chat ID, pending questions) |
 | `docs/solutions/` | Documented solutions to past problems (bugs, best practices, workflow patterns), organized by category with YAML frontmatter (`module`, `tags`, `problem_type`). Relevant when implementing or debugging in documented areas. |

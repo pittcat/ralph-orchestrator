@@ -54,11 +54,16 @@ pub struct LoopEntry {
     /// The prompt/task being executed.
     pub prompt: String,
 
-    /// Path to the worktree (None if running in main workspace).
+    /// Path to the worktree (None if this is a primary loop running in the main
+    /// workspace). In worktree mode, this equals `workspace` — both point to
+    /// the worktree absolute path. The Some/None distinction is the canonical
+    /// signal used by `ralph loops list`, `is_alive()` checks, and the web
+    /// dashboard's domain model to distinguish primary vs worktree loops.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree_path: Option<String>,
 
-    /// The workspace root where the loop is running.
+    /// The workspace cwd where the loop is running: worktree path in worktree
+    /// mode, main repo root in primary mode. Always present.
     pub workspace: String,
 
     /// Hat that registered the loop, when started from an Agent context.
