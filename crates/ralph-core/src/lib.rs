@@ -13,7 +13,7 @@
 #[cfg(feature = "recording")]
 mod cli_capture;
 pub mod agent_doc_sync;
-mod config;
+pub mod config;
 pub mod diagnosis;
 pub mod diagnostics;
 pub mod drift;
@@ -86,7 +86,6 @@ pub use config::{
     ProjectionRule, RalphConfig, RuntimeDiagnosisConfig, ScratchpadConfig, SkillOverride,
     SkillsConfig, StateFileEntry, StateFileFormat, StateFilesConfig, TelemetryConfig,
     TriggerContext, TriggerPredicate, ViolationAction, WarmupConfig, obligation_satisfied,
-    should_skip,
 };
 
 // Re-export loop_name types (also available via FeaturesConfig.loop_naming)

@@ -16,6 +16,7 @@ use crate::file_lock::FileLock;
 /// On-error policy for sync failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum OnError {
     /// Log a warning and continue.
     Warn,
@@ -33,6 +34,7 @@ impl Default for OnError {
 ///
 /// Returned by [`sync_file`] and [`super::sync_all`] when `on_error` is `OnError::Strict`.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum SyncError {
     /// Failed to acquire file lock after retries.
     LockFailed { path: String },
@@ -68,8 +70,6 @@ pub(crate) struct FileSyncConfig<'a> {
     pub blocks: &'a [BlockSpec],
     /// Error policy.
     pub on_error: OnError,
-    /// Whether to skip sync entirely (from flag / env / config).
-    pub skip: bool,
 }
 
 /// Per-block outcome from syncing a single file.
@@ -307,15 +307,6 @@ pub(crate) fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
 pub(crate) fn sync_file(
     config: &FileSyncConfig<'_>,
 ) -> Result<FileSyncResult, SyncError> {
-    if config.skip {
-        return Ok(FileSyncResult {
-            synced: 0,
-            skipped: 0,
-            failed: 0,
-            block_results: Vec::new(),
-        });
-    }
-
     let mut result = FileSyncResult {
         synced: 0,
         skipped: 0,
@@ -557,7 +548,6 @@ mod tests {
             path: &path,
             blocks: &[block.clone()],
             on_error: OnError::Warn,
-            skip: false,
         })
         .unwrap();
 
@@ -583,7 +573,6 @@ mod tests {
             path: &path,
             blocks: &[block.clone()],
             on_error: OnError::Warn,
-            skip: false,
         })
         .unwrap();
 
@@ -615,7 +604,6 @@ mod tests {
             path: &path,
             blocks: &[block],
             on_error: OnError::Warn,
-            skip: false,
         })
         .unwrap();
 
@@ -652,7 +640,6 @@ mod tests {
             path: &path,
             blocks: &[block.clone()],
             on_error: OnError::Warn,
-            skip: false,
         })
         .unwrap();
 
@@ -679,7 +666,6 @@ mod tests {
             path: &path,
             blocks: &[block],
             on_error: OnError::Warn,
-            skip: false,
         })
         .unwrap();
 
@@ -699,7 +685,6 @@ mod tests {
             path: &path,
             blocks: &[block],
             on_error: OnError::Warn,
-            skip: false,
         })
         .unwrap();
 
@@ -720,7 +705,6 @@ mod tests {
             path: &path,
             blocks: &[block],
             on_error: OnError::Warn,
-            skip: false,
         })
         .unwrap();
 
@@ -745,7 +729,6 @@ mod tests {
             path: &path,
             blocks: &[block],
             on_error: OnError::Warn,
-            skip: false,
         })
         .unwrap();
 
@@ -776,7 +759,6 @@ mod tests {
             path: &path,
             blocks: &[block],
             on_error: OnError::Strict,
-            skip: false,
         })
         .unwrap_err();
 
@@ -805,7 +787,6 @@ mod tests {
             path: &path,
             blocks: &[block],
             on_error: OnError::Strict,
-            skip: false,
         })
         .unwrap_err();
 
@@ -813,26 +794,6 @@ mod tests {
             matches!(err, SyncError::LockFailed { .. }),
             "expected LockFailed, got: {err:?}"
         );
-    }
-
-    #[test]
-    fn sync_skips_entirely_when_skip_flag_set() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("CLAUDE.md");
-        let block = sample_block();
-
-        let result = sync_file(&FileSyncConfig {
-            path: &path,
-            blocks: &[block],
-            on_error: OnError::Warn,
-            skip: true,
-        })
-        .unwrap();
-
-        assert_eq!(result.synced, 0);
-        assert_eq!(result.skipped, 0);
-        assert_eq!(result.failed, 0);
-        assert!(!path.exists());
     }
 
     #[test]
@@ -846,7 +807,6 @@ mod tests {
             path: &path,
             blocks: &[block1.clone(), block2.clone()],
             on_error: OnError::Warn,
-            skip: false,
         })
         .unwrap();
 
@@ -885,7 +845,6 @@ mod tests {
             path: &path,
             blocks: &[block.clone()],
             on_error: OnError::Warn,
-            skip: false,
         })
         .unwrap();
 
@@ -922,7 +881,6 @@ mod tests {
             path: &path,
             blocks: &[block.clone()],
             on_error: OnError::Warn,
-            skip: false,
         })
         .unwrap();
 
@@ -965,7 +923,6 @@ mod tests {
             path: &path,
             blocks: &[block.clone()],
             on_error: OnError::Warn,
-            skip: false,
         })
         .unwrap();
 

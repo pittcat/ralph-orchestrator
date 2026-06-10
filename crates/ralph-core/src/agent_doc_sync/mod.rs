@@ -43,6 +43,7 @@ use tracing::{debug, info};
 
 /// Aggregated result of syncing all target files.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SyncReport {
     /// Total blocks synced (appended or replaced) across all files.
     pub synced: usize,
@@ -56,6 +57,7 @@ pub struct SyncReport {
 
 /// Result of syncing a single block into a single file.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BlockResult {
     /// Block identifier.
     pub block_id: String,
@@ -67,6 +69,7 @@ pub struct BlockResult {
 
 /// Outcome of syncing a single block.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SyncOutcome {
     /// Block was appended or replaced successfully.
     Synced,
@@ -134,7 +137,6 @@ pub fn sync_all(
             path: &path,
             blocks: config.blocks,
             on_error: config.on_error,
-            skip: false,
         })?;
 
         report.synced += file_result.synced;

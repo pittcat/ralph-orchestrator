@@ -29,15 +29,6 @@ pub fn builtin_block(id: &str) -> Option<BlockSpec> {
     }
 }
 
-/// Returns the compile-time SHA-256 hash for a builtin block.
-///
-/// This is a thin wrapper around [`builtin_block`] for callers that only
-/// need the hash (e.g. for marker version checks without constructing a
-/// full [`BlockSpec`]).
-pub fn builtin_block_hash(id: &str) -> Option<String> {
-    builtin_block(id).map(|b| b.content_sha256)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,17 +84,5 @@ mod tests {
         assert!(HANG_PREVENTION_CONTENT.contains("dmesg -w"));
         assert!(HANG_PREVENTION_CONTENT.contains("watch"));
         assert!(HANG_PREVENTION_CONTENT.contains("while true"));
-    }
-
-    #[test]
-    fn builtin_block_hash_matches_block_spec() {
-        let hash = builtin_block_hash("hang-prevention").unwrap();
-        let block = builtin_block("hang-prevention").unwrap();
-        assert_eq!(hash, block.content_sha256);
-    }
-
-    #[test]
-    fn builtin_block_hash_returns_none_for_unknown() {
-        assert!(builtin_block_hash("nope").is_none());
     }
 }

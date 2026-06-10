@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 /// `content_sha256` is always a 64-character lowercase hex string representing
 /// the SHA-256 digest of `content`.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct BlockSpec {
     /// Unique identifier for this block (e.g. `"hang-prevention"`).
     pub id: String,
@@ -35,20 +36,6 @@ impl BlockSpec {
             id: id.into(),
             content,
             content_sha256,
-        }
-    }
-
-    /// Creates a `BlockSpec` with a caller-supplied hash (for testing).
-    #[cfg(test)]
-    pub(crate) fn with_hash(
-        id: impl Into<String>,
-        content: impl Into<String>,
-        hash: impl Into<String>,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            content: content.into(),
-            content_sha256: hash.into(),
         }
     }
 }
@@ -151,7 +138,7 @@ pub(crate) fn parse_marker_state_with_version(
     match state {
         // Only upgrade to UpToDate when hash matches AND end marker exists.
         // An orphan begin (end is None) must remain Mismatched so the caller
-        // triggers Replace and补上 missing end marker.
+        // triggers Replace and appends the missing end marker.
         BlockState::Mismatched { ref found_hash }
             if found_hash == expected_hash && end.is_some() =>
         {

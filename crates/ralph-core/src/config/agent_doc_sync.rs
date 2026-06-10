@@ -51,6 +51,15 @@ impl std::fmt::Display for OnErrorPolicy {
     }
 }
 
+impl From<OnErrorPolicy> for crate::agent_doc_sync::OnError {
+    fn from(policy: OnErrorPolicy) -> Self {
+        match policy {
+            OnErrorPolicy::Warn => crate::agent_doc_sync::OnError::Warn,
+            OnErrorPolicy::Strict => crate::agent_doc_sync::OnError::Strict,
+        }
+    }
+}
+
 /// Configuration for the agent doc sync feature.
 ///
 /// Sits under `agent_doc_sync` in `ralph.yml`. When omitted, the
