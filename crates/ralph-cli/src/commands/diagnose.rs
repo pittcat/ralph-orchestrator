@@ -17,7 +17,8 @@ use crate::display::colors;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use ralph_core::diagnosis::{
-    Report, ReporterError, SessionSelector, build_report, render_json, render_markdown,
+    RankedFinding, Report, ReporterError, SessionSelector, build_report, render_json,
+    render_markdown,
 };
 use std::path::{Path, PathBuf};
 
@@ -47,6 +48,13 @@ pub struct DiagnoseArgs {
     /// `<workspace>/.ralph/diagnostics`.
     #[arg(long, value_name = "PATH")]
     pub diagnostics_root: Option<PathBuf>,
+
+    /// D7: filter the rendered report to a single `DiagnosisSource`.
+    /// Accepts the snake_case name (e.g. `agent_doc_sync`,
+    /// `payload_contract`, `drift_monitor`). Unknown names are rejected
+    /// with a list of available values.
+    #[arg(long, value_name = "SOURCE")]
+    pub source: Option<String>,
 }
 
 /// Output format for `ralph diagnose`. Mirrors
@@ -146,6 +154,23 @@ pub fn try_diagnose(
             return Err(DiagnoseExit::Io(path, err));
         }
     };
+    // D7: `--source <NAME>` filters the rendered report to a single
+    // `DiagnosisSource`. Filtering happens **after** `build_report`
+    // (so all parsing / aggregation still runs) and **before**
+    // `emit_report` (so the markdown / json output is just the
+    // matching subset).
+    let report = match args.source.as_deref() {
+        None => report,
+        Some(name) => match filter_report_by_source(report, name) {
+            Ok(filtered) => filtered,
+            Err(()) => {
+                print_unknown_source(name, use_colors);
+                return Err(DiagnoseExit::InvalidSession(PathBuf::from(format!(
+                    "--source {name}"
+                ))));
+            }
+        },
+    };
     emit_report(&report, &args, use_colors).map_err(|e| {
         DiagnoseExit::Io(
             report.session_path.clone(),
@@ -153,6 +178,54 @@ pub fn try_diagnose(
         )
     })?;
     Ok(())
+}
+
+/// D7: filter a [`Report`] to entries whose `source` matches `name`.
+///
+/// Returns `Err(())` if `name` is not a known `DiagnosisSource`
+/// snake_case name; the caller surfaces a helpful error.
+///
+/// Scope: filters `top_findings` only (the only per-source struct in
+/// the report). The `recovery_timeline` aggregates by hat and does
+/// not preserve `source` post-aggregation, so timeline rows are
+/// passed through unchanged.
+fn filter_report_by_source(mut report: Report, name: &str) -> std::result::Result<Report, ()> {
+    if !is_known_source_name(name) {
+        return Err(());
+    }
+    report.top_findings.retain(|f| f.source == name);
+    Ok(report)
+}
+
+/// D7: returns `true` when `name` matches one of the snake_case
+/// `DiagnosisSource` variants.
+fn is_known_source_name(name: &str) -> bool {
+    [
+        "stall_recovery",
+        "missing_event_gate",
+        "workflow_guard",
+        "execution_contract",
+        "payload_contract",
+        "drift_monitor",
+        "hook_retry",
+        "loop_stale",
+        "topic_format",
+        "agent_doc_sync",
+    ]
+    .contains(&name)
+}
+
+fn print_unknown_source(name: &str, use_colors: bool) {
+    if use_colors {
+        eprintln!(
+            "{}error:{} unknown --source '{}'\navailable: stall_recovery, missing_event_gate, workflow_guard, execution_contract, payload_contract, drift_monitor, hook_retry, loop_stale, topic_format, agent_doc_sync",
+            colors::RED, colors::RESET, name
+        );
+    } else {
+        eprintln!(
+            "error: unknown --source '{name}'\navailable: stall_recovery, missing_event_gate, workflow_guard, execution_contract, payload_contract, drift_monitor, hook_retry, loop_stale, topic_format, agent_doc_sync"
+        );
+    }
 }
 
 fn emit_report(report: &Report, args: &DiagnoseArgs, use_colors: bool) -> Result<()> {
@@ -265,6 +338,7 @@ mod tests {
             format: DiagnoseFormat::Markdown,
             output: None,
             diagnostics_root: Some(diagnostics_root.to_path_buf()),
+            source: None,
         }
     }
 
@@ -275,6 +349,7 @@ mod tests {
             format: DiagnoseFormat::Markdown,
             output: Some(PathBuf::new()),
             diagnostics_root: None,
+            source: None,
         };
         assert!(validate_args(&args).is_err());
         args.output = None;
@@ -319,6 +394,7 @@ mod tests {
             format: DiagnoseFormat::Markdown,
             output: Some(out.clone()),
             diagnostics_root: Some(diag),
+            source: None,
         };
         try_diagnose(ColorMode::Never, args).expect("try_diagnose should succeed");
         assert!(out.exists(), "output file should be created");
@@ -338,6 +414,7 @@ mod tests {
             format: DiagnoseFormat::Json,
             output: Some(out.clone()),
             diagnostics_root: Some(diag),
+            source: None,
         };
         try_diagnose(ColorMode::Never, args).expect("try_diagnose should succeed");
         let content = std::fs::read_to_string(&out).unwrap();
@@ -358,6 +435,7 @@ mod tests {
             format: DiagnoseFormat::Markdown,
             output: None,
             diagnostics_root: Some(diag),
+            source: None,
         };
         let result = try_diagnose(ColorMode::Never, args);
         assert!(matches!(result, Err(DiagnoseExit::InvalidSession(_))));
@@ -374,5 +452,105 @@ mod tests {
             Err(exit) => assert_eq!(exit.code(), EXIT_NO_SESSION),
             Ok(()) => panic!("expected error"),
         }
+    }
+
+    // ── D7: --source filter ────────────────────────────────────────
+
+    #[test]
+    fn is_known_source_name_accepts_all_ten_variants() {
+        for name in [
+            "stall_recovery",
+            "missing_event_gate",
+            "workflow_guard",
+            "execution_contract",
+            "payload_contract",
+            "drift_monitor",
+            "hook_retry",
+            "loop_stale",
+            "topic_format",
+            "agent_doc_sync",
+        ] {
+            assert!(is_known_source_name(name), "expected {name} known");
+        }
+    }
+
+    #[test]
+    fn is_known_source_name_rejects_unknown() {
+        assert!(!is_known_source_name("nope"));
+        assert!(!is_known_source_name(""));
+        assert!(!is_known_source_name("AgentDocSync"));
+        assert!(!is_known_source_name("agent_doc_syncs")); // trailing char
+    }
+
+    #[test]
+    fn filter_report_keeps_only_matching_source() {
+        // Build a minimal Report with two findings on different
+        // sources; the filter must keep only the matching one.
+        use ralph_core::diagnosis::{DiagnosisOutcome, DiagnosisSeverity};
+        let report = Report {
+            schema_version: "1",
+            session_path: PathBuf::from("/tmp/sess"),
+            summary: None,
+            top_findings: vec![
+                RankedFinding {
+                    retry_key: "agent_doc_sync:executor:work.done:startup_timeout:*".to_string(),
+                    severity: DiagnosisSeverity::Error,
+                    outcome: DiagnosisOutcome::Escalated,
+                    source: "agent_doc_sync".to_string(),
+                    target_hat: Some("executor".to_string()),
+                    topic: Some("work.done".to_string()),
+                    reason_code: "startup_timeout".to_string(),
+                    message: "m".to_string(),
+                    occurrences: 1,
+                    first_iteration: 1,
+                    last_iteration: 1,
+                    evidence: vec![],
+                    safe_target: false,
+                    escalated: true,
+                },
+                RankedFinding {
+                    retry_key: "payload_contract:reviewer:work.done:missing_field:*".to_string(),
+                    severity: DiagnosisSeverity::Warning,
+                    outcome: DiagnosisOutcome::Repeated,
+                    source: "payload_contract".to_string(),
+                    target_hat: Some("reviewer".to_string()),
+                    topic: Some("work.done".to_string()),
+                    reason_code: "missing_field".to_string(),
+                    message: "m".to_string(),
+                    occurrences: 1,
+                    first_iteration: 2,
+                    last_iteration: 2,
+                    evidence: vec![],
+                    safe_target: false,
+                    escalated: false,
+                },
+            ],
+            recovery_timeline: vec![],
+            drift_findings: vec![],
+            orchestration: vec![],
+            errors: vec![],
+            warnings: vec![],
+            active_activations: vec![],
+        };
+        let filtered = filter_report_by_source(report, "agent_doc_sync").unwrap();
+        assert_eq!(filtered.top_findings.len(), 1);
+        assert_eq!(filtered.top_findings[0].source, "agent_doc_sync");
+    }
+
+    #[test]
+    fn filter_report_rejects_unknown_source() {
+        let report = Report {
+            schema_version: "1",
+            session_path: PathBuf::from("/tmp/sess"),
+            summary: None,
+            top_findings: vec![],
+            recovery_timeline: vec![],
+            drift_findings: vec![],
+            orchestration: vec![],
+            errors: vec![],
+            warnings: vec![],
+            active_activations: vec![],
+        };
+        assert!(filter_report_by_source(report, "no_such_source").is_err());
     }
 }
