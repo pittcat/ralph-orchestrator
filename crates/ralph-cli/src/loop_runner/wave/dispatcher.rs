@@ -5,6 +5,10 @@ use std::time::Duration;
 use anyhow::Result;
 use futures::StreamExt;
 use ralph_adapters::CliBackend;
+use ralph_core::diagnosis::{
+    DiagnosisSeverity, DiagnosisSource, RecoveryDiagnosisEnvelope, RecoveryJournalEntry,
+};
+use ralph_core::diagnostics::DiagnosticsCollector;
 use ralph_proto::RpcEvent;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -45,6 +49,7 @@ pub async fn handle_wave_events(
     rpc_event_tx: Option<&tokio::sync::mpsc::Sender<RpcEvent>>,
     tui_state: Option<&Arc<std::sync::Mutex<ralph_tui::TuiState>>>,
     loop_id: &str,
+    diagnostics: Option<&Arc<DiagnosticsCollector>>,
 ) {
     let waves = ralph_core::detect_all_wave_events(wave_events, event_loop.registry());
     if waves.is_empty() {
@@ -144,6 +149,7 @@ pub async fn handle_wave_events(
             out.rpc_tx.cloned(),
             out.tui.map(Arc::clone),
             loop_id,
+            diagnostics,
         )
         .await;
 
@@ -248,6 +254,7 @@ pub async fn execute_wave(
     rpc_event_tx: Option<tokio::sync::mpsc::Sender<RpcEvent>>,
     tui_state: Option<Arc<std::sync::Mutex<ralph_tui::TuiState>>>,
     loop_id: &str,
+    diagnostics: Option<&Arc<DiagnosticsCollector>>,
 ) -> Result<ralph_core::CompletedWave> {
     use ralph_core::{WaveTracker, WaveWorkerContext, build_wave_worker_prompt};
 
@@ -280,7 +287,44 @@ pub async fn execute_wave(
     // Spawn workers
     let mut handles = Vec::new();
     for (index, event) in wave.events.iter().enumerate() {
-        let permit = semaphore.clone().acquire_owned().await?;
+        // U2: surface worker-spawn failures as recovery envelopes.
+        //
+        // Previously `acquire_owned().await?` propagated the semaphore error
+        // out of `execute_wave` and aborted the entire wave. From the
+        // orchestrator's perspective this looked like a 0/N `dimension.done`
+        // rate with no observable cause. Per plan U2 we now skip the
+        // affected worker, log a `WaveDispatcher` recovery envelope
+        // (when diagnostics are enabled), and let the wave proceed with
+        // the rest of the workers. The missing worker is later recorded
+        // as a synthetic failure by the "didn't report back" sweep below
+        // — so the wave still reports its full count of failures, just
+        // now with an attributable root cause in `recovery.jsonl`.
+        let permit = match semaphore.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(
+                    wave_id = %wave.wave_id,
+                    worker = index,
+                    error = %e,
+                    "Wave worker semaphore acquire failed; recording recovery envelope and skipping worker"
+                );
+                if let Some(collector) = diagnostics {
+                    let env = RecoveryDiagnosisEnvelope::builder()
+                        .source(DiagnosisSource::WaveDispatcher)
+                        .severity(DiagnosisSeverity::Error)
+                        .reason_code("worker_spawn_failed")
+                        .message(format!(
+                            "Failed to acquire wave worker permit {}: {}",
+                            index, e
+                        ))
+                        .source_hat(wave.target_hat.as_str())
+                        .safe_target(false)
+                        .build();
+                    collector.log_recovery(RecoveryJournalEntry::from_envelope(env, vec![]));
+                }
+                continue;
+            }
+        };
         let wave_id = wave.wave_id.clone();
         let index = index as u32;
         let event = event.clone();

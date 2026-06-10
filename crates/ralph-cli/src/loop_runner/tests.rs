@@ -4603,6 +4603,7 @@ async fn run_wave_for_backend_with_test_env(
         None,
         None,
         "test-loop",
+        None,
     )
     .await
     .expect("wave execution")
@@ -4641,6 +4642,7 @@ async fn run_wave_for_named_backend(name: &str, body: &str) -> ralph_core::Compl
         None,
         None,
         "test-loop",
+        None,
     )
     .await
     .expect("wave execution")
@@ -4713,6 +4715,7 @@ async fn run_wave_for_named_backend_with_capture_and_task_payload(
         None,
         None,
         "test-loop",
+        None,
     )
     .await
     .expect("wave execution");
@@ -4772,6 +4775,7 @@ async fn run_wave_for_hat_backend(
         None,
         None,
         "test-loop",
+        None,
     )
     .await
     .expect("wave execution")
@@ -4816,6 +4820,7 @@ async fn run_wave_for_hat_backend_with_capture_and_task_payload(
         None,
         None,
         "test-loop",
+        None,
     )
     .await
     .expect("wave execution");
@@ -4860,6 +4865,7 @@ async fn run_wave_for_named_acp_backend_with_capture(
         None,
         None,
         "test-loop",
+        None,
     )
     .await
     .expect("wave execution");
@@ -4916,6 +4922,7 @@ async fn run_wave_for_hat_backend_with_acp_capture_and_task_payload(
         None,
         None,
         "test-loop",
+        None,
     )
     .await
     .expect("wave execution");
@@ -6699,6 +6706,7 @@ async fn test_execute_wave_synthesizes_failure_events_for_missing_text_backend_c
         None,
         None,
         "test-loop",
+        None,
     )
     .await
     .expect("wave execution");

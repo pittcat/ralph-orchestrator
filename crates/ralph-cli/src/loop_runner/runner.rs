@@ -340,8 +340,8 @@ pub async fn run_loop_impl(
     // `main.rs`) so the EventLoop reuses the same session dir as the
     // tracing layer. When `None`, the EventLoop falls back to building
     // its own collector based on `RALPH_DIAGNOSTICS=1`.
-    if let Some(collector) = prebuilt_diagnostics {
-        ctx = ctx.with_prebuilt_diagnostics(collector);
+    if let Some(ref collector) = prebuilt_diagnostics {
+        ctx = ctx.with_prebuilt_diagnostics(Arc::clone(collector));
     }
 
     let urgent_steer_path = ctx.urgent_steer_path();
@@ -3465,6 +3465,7 @@ pub async fn run_loop_impl(
                 rpc_event_tx.as_ref(),
                 tui_state.as_ref(),
                 &loop_id,
+                prebuilt_diagnostics.as_ref(),
             )
             .await;
         }

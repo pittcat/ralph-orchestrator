@@ -100,8 +100,19 @@ event_loop:
     mode: enforce
     # U3: topic-deny rules — exact hat_id + topic match, no glob.
     # executor must never emit build.done (it is a review-synthesizer output).
+    # U4: also lock ralph (the loop-runner fallback hat) out of every
+    # workflow topic that downstream hats own. The JSONL origin guard
+    # already rejects ralph at read time, but enforcing the same
+    # deny-list at the policy layer means an event never even lands in
+    # the events file under ralph's hat. Exact match only — glob is
+    # intentionally not supported.
     topic_deny_rules:
       - {hat_id: executor, topic: build.done}
+      - {hat_id: ralph, topic: review.wave.ready}
+      - {hat_id: ralph, topic: review.passed}
+      - {hat_id: ralph, topic: queue.advance}
+      - {hat_id: ralph, topic: plan.complete}
+      - {hat_id: ralph, topic: plan.blocked}
     # U4: enable plan_name equality validation — work.done plan_name must match
     # the current_plan_name from work.ready.
     plan_name_equality_required: true
@@ -133,6 +144,15 @@ event_loop:
         # is a schema violation.
         required_fields: [plan_name, task_id, task_key, step, findings_count, fix_round, verdict, skip_reason]
         payload: json_object
+        # U4: enumerate the legal `skip_reason` values. Without this,
+        # a review-synthesizer that fabricates a string (e.g.
+        # `dimension_reviewer_no_response` or an empty string) would
+        # pass the required_fields gate. The three values below cover
+        # the only legitimate reasons to skip a full wave review:
+        # empty diff, trivial step, or aggregate timeout. `allowed_values`
+        # is enforced by the `EventSchema` validator in event_policy.rs.
+        allowed_values:
+          skip_reason: ["empty_diff", "trivial_step", "aggregate_timeout"]
       review.failed:
         required_fields: [plan_name, fix_round, safe_auto_count, gated_manual_count, findings_summary, task_id, task_key, step]
         payload: json_object
@@ -1002,6 +1022,26 @@ hats:
       ```
 
       Use the `review-output-template.md` style: pipe-delimited tables, severity-grouped sections, stable finding numbers.
+
+      ### All-Dimensions-Timeout 守则（硬规则）
+      U4: When the `wait_for_all` aggregate timeout (300s) fires before ALL
+      `review.dimension.done` events have arrived:
+        - DO NOT emit `review.passed` under any circumstance — there is no
+          full signal, so "pass" is a fabrication.
+        - DO NOT invent a `skip_reason`. Only the three values
+          `empty_diff` / `trivial_step` / `aggregate_timeout` are
+          accepted by the schema allowlist, and `aggregate_timeout` is
+          reserved for the review-coordinator's trivial-step fast path,
+          not for synthesizer partial-signal recoveries.
+        - DO NOT short-circuit the review by emitting a partial
+          `review.complete` or `review.failed` either — the missing
+          dimensions are a process failure, not a code finding.
+        - Emit `plan.blocked` with payload:
+          - `reason: "dimension_reviewers_failed_to_converge"`
+          - `details: <list of dimensions whose review.dimension.done never arrived>`
+        - This routes to `shipper` → `REVIEW_COMPLETE` with
+          `pass_or_fail: "fail"`, surfacing the failure to the manager
+          via the reporter instead of masking it as a passing loop.
 
       ### Decision Logic
       - No findings → publish `review.passed`, payload: `plan_name`, `findings_count: 0`, `changed_lines`, `task_id`, `task_key`, `step`

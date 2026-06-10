@@ -36,6 +36,12 @@ pub const RALPH_CONTROL_TOPICS: &[&str] = &[
     "human.interact",
     "human.response",
     "human.guidance",
+    // U1: keep parity with `is_jsonl_control_topic` so the ralph-pseudo-hat
+    // guard (origin guard and CLI emit guard) agrees on what `ralph` is
+    // allowed to publish. `task.resume` is the recovery signal the loop
+    // runner injects when a hat stalls — without it the loop would be
+    // unable to recover a stalled iteration.
+    "task.resume",
 ];
 
 pub(crate) fn is_jsonl_control_topic(topic: &str, cancellation_topic: &str) -> bool {

@@ -228,6 +228,30 @@ pub fn emit_command_with_root(
         }
     }
 
+    // U1: ralph-hat business-topic guard.
+    // The builtin `ralph` hat is the orchestration fallback hat. Allowing it to
+    // emit business topics (e.g. `review.passed`, `work.start`) lets a worktree
+    // loop's loop runner bypass review-synthesizer / plan-gate / coordinator and
+    // advance the workflow as `ralph` — this is the impersonation attack the
+    // P0 origin guard already rejects at JSONL read time. Reject here too so
+    // the agent gets immediate backpressure (otherwise the rejection only
+    // surfaces several seconds later when the loop runner reads the JSONL).
+    if let Some(hat_id) = hat.as_deref()
+        && hat_id == "ralph"
+        && !ralph_core::event_origin::RALPH_CONTROL_TOPICS
+            .iter()
+            .any(|t| *t == args.topic.as_str())
+    {
+        anyhow::bail!(
+            "Builtin ralph hat may only emit control topics: {:?}. \
+             Topic '{}' is a business topic and cannot be emitted by ralph. \
+             Set --hat to a registered workflow hat (e.g. coordinator, executor, \
+             review-synthesizer) instead.",
+            ralph_core::event_origin::RALPH_CONTROL_TOPICS,
+            args.topic
+        );
+    }
+
     if check_mode != PolicyCheckMode::Skip {
         let policy = match config
             .as_ref()
@@ -719,6 +743,225 @@ event_loop:
         assert_eq!(hat, None);
         assert_eq!(triggered, None);
         assert_eq!(source, None);
+    }
+
+    // U1: ralph-hat business-topic guard. Mirrors the origin guard's
+    // `ralph_control_only` rejection at the JSONL read path, but rejects
+    // here so the agent receives synchronous backpressure instead of
+    // waiting several seconds for the loop runner to surface the rejection.
+    // The guard fires regardless of --policy-check, because the issue is
+    // the impersonation, not the payload shape.
+
+    #[test]
+    fn test_emit_ralph_hat_rejects_business_topic_review_passed() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let workspace = temp_dir.path().to_path_buf();
+        std::fs::create_dir_all(workspace.join(".ralph")).expect("ralph dir");
+        let events_file = workspace.join(".ralph/events.jsonl");
+
+        let err = emit_command_with_root(
+            ColorMode::Never,
+            EmitArgs {
+                topic: "review.passed".to_string(),
+                payload: r#"{"plan_name":"p","task_id":"t","task_key":"k","step":"s","findings_count":0,"fix_round":0,"verdict":"pass","skip_reason":"empty_diff"}"#.to_string(),
+                json: true,
+                file: events_file.clone(),
+                policy_check: false,
+                no_policy_check: false,
+                hat: Some("ralph".to_string()),
+                triggered: None,
+                source: None,
+            },
+            Some(&workspace),
+        )
+        .expect_err("ralph hat must not be allowed to emit review.passed");
+
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("Builtin ralph hat may only emit control topics"),
+            "expected ralph-control guard message, got: {message}"
+        );
+        assert!(
+            message.contains("review.passed"),
+            "error should name the rejected topic, got: {message}"
+        );
+
+        // Verify nothing was written
+        assert!(!events_file.exists() || std::fs::read_to_string(&events_file).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_emit_ralph_hat_rejects_business_topic_work_start() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let workspace = temp_dir.path().to_path_buf();
+        std::fs::create_dir_all(workspace.join(".ralph")).expect("ralph dir");
+        let events_file = workspace.join(".ralph/events.jsonl");
+
+        let err = emit_command_with_root(
+            ColorMode::Never,
+            EmitArgs {
+                topic: "work.start".to_string(),
+                payload: String::new(),
+                json: false,
+                file: events_file.clone(),
+                policy_check: false,
+                no_policy_check: false,
+                hat: Some("ralph".to_string()),
+                triggered: None,
+                source: None,
+            },
+            Some(&workspace),
+        )
+        .expect_err("ralph hat must not be allowed to emit work.start");
+
+        let message = format!("{err:#}");
+        assert!(message.contains("Builtin ralph hat may only emit control topics"));
+    }
+
+    #[test]
+    fn test_emit_ralph_hat_allows_control_topic_loop_complete() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let workspace = temp_dir.path().to_path_buf();
+        std::fs::create_dir_all(workspace.join(".ralph")).expect("ralph dir");
+        let events_file = workspace.join(".ralph/events.jsonl");
+
+        emit_command_with_root(
+            ColorMode::Never,
+            EmitArgs {
+                topic: "LOOP_COMPLETE".to_string(),
+                payload: r#"{"reason":"done"}"#.to_string(),
+                json: true,
+                file: events_file.clone(),
+                policy_check: false,
+                no_policy_check: false,
+                hat: Some("ralph".to_string()),
+                triggered: None,
+                source: None,
+            },
+            Some(&workspace),
+        )
+        .expect("ralph hat must be allowed to emit LOOP_COMPLETE (control topic)");
+
+        let events = std::fs::read_to_string(&events_file).expect("read events");
+        assert!(events.contains("\"topic\":\"LOOP_COMPLETE\""));
+        assert!(events.contains("\"hat\":\"ralph\""));
+    }
+
+    #[test]
+    fn test_emit_ralph_hat_allows_control_topic_human_guidance() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let workspace = temp_dir.path().to_path_buf();
+        std::fs::create_dir_all(workspace.join(".ralph")).expect("ralph dir");
+        let events_file = workspace.join(".ralph/events.jsonl");
+
+        emit_command_with_root(
+            ColorMode::Never,
+            EmitArgs {
+                topic: "human.guidance".to_string(),
+                payload: r#"{"messages":["continue"]}"#.to_string(),
+                json: true,
+                file: events_file.clone(),
+                policy_check: false,
+                no_policy_check: false,
+                hat: Some("ralph".to_string()),
+                triggered: None,
+                source: None,
+            },
+            Some(&workspace),
+        )
+        .expect("ralph hat must be allowed to emit human.guidance (control topic)");
+
+        let events = std::fs::read_to_string(&events_file).expect("read events");
+        assert!(events.contains("human.guidance"));
+    }
+
+    #[test]
+    fn test_emit_ralph_hat_allows_task_resume() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let workspace = temp_dir.path().to_path_buf();
+        std::fs::create_dir_all(workspace.join(".ralph")).expect("ralph dir");
+        let events_file = workspace.join(".ralph/events.jsonl");
+
+        emit_command_with_root(
+            ColorMode::Never,
+            EmitArgs {
+                topic: "task.resume".to_string(),
+                payload: r#"{"reason":"recover"}"#.to_string(),
+                json: true,
+                file: events_file.clone(),
+                policy_check: false,
+                no_policy_check: false,
+                hat: Some("ralph".to_string()),
+                triggered: None,
+                source: None,
+            },
+            Some(&workspace),
+        )
+        .expect("ralph hat must be allowed to emit task.resume (control topic)");
+
+        let events = std::fs::read_to_string(&events_file).expect("read events");
+        assert!(events.contains("task.resume"));
+    }
+
+    #[test]
+    fn test_emit_executor_hat_unaffected_by_ralph_guard() {
+        // Regression: only `ralph` is restricted. Other hats (executor,
+        // coordinator, etc.) may emit business topics as before.
+        let temp_dir = TempDir::new().expect("temp dir");
+        let workspace = temp_dir.path().to_path_buf();
+        std::fs::create_dir_all(workspace.join(".ralph")).expect("ralph dir");
+        let events_file = workspace.join(".ralph/events.jsonl");
+
+        emit_command_with_root(
+            ColorMode::Never,
+            EmitArgs {
+                topic: "work.done".to_string(),
+                payload: r#"{"plan_name":"p","plan_path":"x.md","task_id":"t","task_key":"k","step":"s","commit_count":1,"changed_lines":10}"#.to_string(),
+                json: true,
+                file: events_file.clone(),
+                policy_check: false,
+                no_policy_check: false,
+                hat: Some("executor".to_string()),
+                triggered: None,
+                source: None,
+            },
+            Some(&workspace),
+        )
+        .expect("executor hat should be free to emit work.done (not restricted)");
+
+        let events = std::fs::read_to_string(&events_file).expect("read events");
+        assert!(events.contains("work.done"));
+        assert!(events.contains("\"hat\":\"executor\""));
+    }
+
+    #[test]
+    fn test_emit_no_hat_unaffected_by_ralph_guard() {
+        // No --hat means no ralph guard fires. Other guards (provenance,
+        // policy) still apply.
+        let temp_dir = TempDir::new().expect("temp dir");
+        let workspace = temp_dir.path().to_path_buf();
+        std::fs::create_dir_all(workspace.join(".ralph")).expect("ralph dir");
+        let events_file = workspace.join(".ralph/events.jsonl");
+
+        emit_command_with_root(
+            ColorMode::Never,
+            EmitArgs {
+                topic: "debug.step".to_string(),
+                payload: "task_id=demo".to_string(),
+                json: false,
+                file: events_file.clone(),
+                policy_check: false,
+                no_policy_check: false,
+                hat: None,
+                triggered: None,
+                source: None,
+            },
+            Some(&workspace),
+        )
+        .expect("no-hat emit should not be blocked by the ralph guard");
+
+        let events = std::fs::read_to_string(&events_file).expect("read events");
+        assert!(events.contains("debug.step"));
     }
 
     #[test]

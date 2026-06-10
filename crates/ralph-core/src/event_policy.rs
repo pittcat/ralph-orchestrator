@@ -1429,6 +1429,164 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // U4: review.passed skip_reason allowlist + ralph topic_deny_rules
+    // (mirrors the three edits in `presets/en/ce-executor.yml`).
+    // -------------------------------------------------------------------------
+
+    fn review_passed_allowlist_config() -> EventPolicyConfig {
+        let mut config = test_config();
+        let mut schema = EventSchema {
+            payload: Some(PayloadType::JsonObject),
+            required_fields: vec![
+                "plan_name".into(),
+                "task_id".into(),
+                "task_key".into(),
+                "step".into(),
+                "findings_count".into(),
+                "fix_round".into(),
+                "verdict".into(),
+                "skip_reason".into(),
+            ],
+            allowed_values: HashMap::new(),
+        };
+        // Mirror the ce-executor.yml U4 allowlist exactly.
+        schema.allowed_values.insert(
+            "skip_reason".to_string(),
+            vec![
+                Value::String("empty_diff".to_string()),
+                Value::String("trivial_step".to_string()),
+                Value::String("aggregate_timeout".to_string()),
+            ],
+        );
+        config.schemas.insert("review.passed".to_string(), schema);
+        config
+    }
+
+    #[test]
+    fn test_u4_review_passed_skip_reason_allowlist_accepts_legal_values() {
+        let config = review_passed_allowlist_config();
+        for legal in ["empty_diff", "trivial_step", "aggregate_timeout"] {
+            let payload = format!(
+                r#"{{"plan_name":"p","task_id":"t","task_key":"k","step":"s","findings_count":0,"fix_round":0,"verdict":"pass","skip_reason":"{legal}"}}"#
+            );
+            let mut state = PolicyRuntimeState::default();
+            let decision = validate_event("review.passed", Some(&payload), &config, &mut state);
+            assert_eq!(
+                decision,
+                PolicyDecision::Accept,
+                "skip_reason='{legal}' should be accepted by the allowlist, got {:?}",
+                decision
+            );
+        }
+    }
+
+    #[test]
+    fn test_u4_review_passed_skip_reason_allowlist_rejects_fabricated() {
+        // The P1 root cause: review-synthesizer invented
+        // `dimension_reviewer_no_response` as a skip_reason when the
+        // aggregate timeout fired. Without the allowlist this passes
+        // the required_fields gate. U4 closes that hole.
+        let config = review_passed_allowlist_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = r#"{"plan_name":"p","task_id":"t","task_key":"k","step":"s","findings_count":0,"fix_round":0,"verdict":"pass","skip_reason":"dimension_reviewer_no_response"}"#;
+        let decision = validate_event("review.passed", Some(payload), &config, &mut state);
+        assert!(
+            matches!(decision, PolicyDecision::RejectWithResume(_)),
+            "fabricated skip_reason must be rejected, got {:?}",
+            decision
+        );
+    }
+
+    #[test]
+    fn test_u4_review_passed_skip_reason_allowlist_rejects_empty_string() {
+        let config = review_passed_allowlist_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = r#"{"plan_name":"p","task_id":"t","task_key":"k","step":"s","findings_count":0,"fix_round":0,"verdict":"pass","skip_reason":""}"#;
+        let decision = validate_event("review.passed", Some(payload), &config, &mut state);
+        assert!(matches!(decision, PolicyDecision::RejectWithResume(_)));
+    }
+
+    #[test]
+    fn test_u4_topic_deny_rules_ralph_blocked_from_workflow_topics() {
+        // Mirrors the five new deny rules in ce-executor.yml:
+        //   {hat_id: ralph, topic: review.wave.ready / review.passed /
+        //    queue.advance / plan.complete / plan.blocked}
+        let config = EventPolicyConfig {
+            enabled: true,
+            mode: EventPolicyMode::Enforce,
+            on_violation: ViolationAction::Block,
+            topic_deny_rules: vec![
+                TopicDenyRule { hat_id: "ralph".to_string(), topic: "review.wave.ready".to_string() },
+                TopicDenyRule { hat_id: "ralph".to_string(), topic: "review.passed".to_string() },
+                TopicDenyRule { hat_id: "ralph".to_string(), topic: "queue.advance".to_string() },
+                TopicDenyRule { hat_id: "ralph".to_string(), topic: "plan.complete".to_string() },
+                TopicDenyRule { hat_id: "ralph".to_string(), topic: "plan.blocked".to_string() },
+            ],
+            ..Default::default()
+        };
+        for topic in [
+            "review.wave.ready",
+            "review.passed",
+            "queue.advance",
+            "plan.complete",
+            "plan.blocked",
+        ] {
+            let decision = check_topic_deny_rules(Some("ralph"), topic, &config);
+            assert!(
+                matches!(decision, Some(PolicyDecision::Block(_))),
+                "ralph must be blocked from '{topic}', got {:?}",
+                decision
+            );
+        }
+    }
+
+    #[test]
+    fn test_u4_topic_deny_rules_ralph_unchanged_for_control_topics() {
+        // Control topics (e.g. task.resume, LOOP_COMPLETE) must NOT be
+        // blocked for ralph — they are ralph's legitimate surface.
+        // The ralph deny list only covers business topics.
+        let config = EventPolicyConfig {
+            enabled: true,
+            mode: EventPolicyMode::Enforce,
+            topic_deny_rules: vec![
+                TopicDenyRule { hat_id: "ralph".to_string(), topic: "review.wave.ready".to_string() },
+                TopicDenyRule { hat_id: "ralph".to_string(), topic: "review.passed".to_string() },
+                TopicDenyRule { hat_id: "ralph".to_string(), topic: "queue.advance".to_string() },
+            ],
+            ..Default::default()
+        };
+        assert!(check_topic_deny_rules(Some("ralph"), "task.resume", &config).is_none());
+        assert!(check_topic_deny_rules(Some("ralph"), "LOOP_COMPLETE", &config).is_none());
+        assert!(check_topic_deny_rules(Some("ralph"), "human.guidance", &config).is_none());
+    }
+
+    #[test]
+    fn test_u4_topic_deny_rules_executor_build_done_preserved() {
+        // Regression: the original `executor → build.done` deny rule must
+        // still fire after the U4 additions. Otherwise a worktree-loop
+        // executor could impersonate the review-synthesizer again.
+        let config = EventPolicyConfig {
+            enabled: true,
+            mode: EventPolicyMode::Enforce,
+            on_violation: ViolationAction::Block,
+            topic_deny_rules: vec![
+                TopicDenyRule { hat_id: "executor".to_string(), topic: "build.done".to_string() },
+                TopicDenyRule { hat_id: "ralph".to_string(), topic: "review.passed".to_string() },
+            ],
+            ..Default::default()
+        };
+        assert!(matches!(
+            check_topic_deny_rules(Some("executor"), "build.done", &config),
+            Some(PolicyDecision::Block(_))
+        ));
+        // And the new ralph rule still fires.
+        assert!(matches!(
+            check_topic_deny_rules(Some("ralph"), "review.passed", &config),
+            Some(PolicyDecision::Block(_))
+        ));
+    }
+
+    // -------------------------------------------------------------------------
     // U4: plan_name equality tests
     // -------------------------------------------------------------------------
 

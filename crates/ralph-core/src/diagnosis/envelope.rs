@@ -82,6 +82,12 @@ pub enum DiagnosisSource {
     /// Agent doc sync (managed block injection into CLAUDE.md / AGENTS.md)
     /// completed or failed. Produced at the end of every sync cycle.
     AgentDocSync,
+    /// Wave dispatcher (U2): a wave worker's `tokio::spawn` or
+    /// `Semaphore::acquire_owned` failed before the worker could run.
+    /// Produced when the dispatcher cannot materialize one or more
+    /// workers (e.g. resource exhaustion) so the resulting
+    /// 0/N `dimension.done` rate is attributable instead of silent.
+    WaveDispatcher,
 }
 
 impl DiagnosisSource {
@@ -100,6 +106,7 @@ impl DiagnosisSource {
             DiagnosisSource::LoopStale => "loop_stale",
             DiagnosisSource::TopicFormat => "topic_format",
             DiagnosisSource::AgentDocSync => "agent_doc_sync",
+            DiagnosisSource::WaveDispatcher => "wave_dispatcher",
         }
     }
 }
@@ -679,6 +686,7 @@ mod tests {
             DiagnosisSource::LoopStale,
             DiagnosisSource::TopicFormat,
             DiagnosisSource::AgentDocSync,
+            DiagnosisSource::WaveDispatcher,
         ] {
             let s = serde_json::to_string(&source).unwrap();
             let v: serde_json::Value = serde_json::from_str(&s).unwrap();

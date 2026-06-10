@@ -303,6 +303,40 @@ fn add_common_task_fields(
     task
 }
 
+/// U3: enforce that a task's `owner_hat_id` is on the workspace's
+/// `tasks.coordinator_hats` allowlist.
+///
+/// This is the create-side complement to the JSONL origin guard: even if a
+/// rogue `ralph` hat somehow got into the loop, it cannot persist a task
+/// to disk that is attributed to a workflow hat. Without this check the
+/// stall-recovery path could silently create tasks under the wrong owner,
+/// corrupting plan-gate's task correlation and the merge queue.
+///
+/// When `owner_hat_id` is `None` the call is human-driven (the CLI does
+/// not stamp an owner when `ctx.current_hat_id` is unset) and the check
+/// is skipped — humans operating the CLI must not be locked out.
+///
+/// When the allowlist is empty AND the task carries an owner, the call
+/// is rejected (fail-closed): an empty allowlist is a misconfiguration
+/// and we must not let an agent bypass owner validation by being the
+/// only hat in scope.
+fn validate_owner_hat_id(task: &Task, coordinator_hats: &[String]) -> Result<()> {
+    let Some(owner) = task.owner_hat_id.as_deref() else {
+        return Ok(());
+    };
+    if coordinator_hats.iter().any(|h| h == owner) {
+        Ok(())
+    } else {
+        bail!(
+            "owner_hat_id '{owner}' is not in tasks.coordinator_hats. \
+             Allowed: {coordinator_hats:?}. \
+             The owner is set from $RALPH_CURRENT_HAT at task creation; \
+             either run the task command from a hat in coordinator_hats, \
+             or add the hat to tasks.coordinator_hats in ralph.yml."
+        )
+    }
+}
+
 fn status_matches_filter(status: TaskStatus, filter: &str) -> bool {
     let normalized = filter.to_lowercase().replace(['_', '-'], "");
     match status {
@@ -473,8 +507,7 @@ fn execute_add(
     let mut store = TaskStore::load(&path).context("Failed to load tasks")?;
     let ctx = operation_context_for(root);
 
-    add_task_with_args(&mut store, &args, &ctx, use_colors)?;
-    let _ = coordinator_hats; // reserved for future coordinator-only quota checks
+    add_task_with_args(&mut store, &args, &ctx, coordinator_hats, use_colors)?;
     Ok(())
 }
 
@@ -483,6 +516,7 @@ fn add_task_with_args(
     store: &mut TaskStore,
     args: &AddArgs,
     ctx: &OperationContext,
+    coordinator_hats: &[String],
     use_colors: bool,
 ) -> Result<()> {
     let task = add_common_task_fields(
@@ -491,6 +525,21 @@ fn add_task_with_args(
         args.description.clone(),
         args.blocked_by.clone(),
     );
+
+    // U3: owner_hat_id must come from `tasks.coordinator_hats`.
+    //
+    // The stall recovery path in the worktree loop (the ce-executor
+    // impersonation bug fixed by the P0 origin guard) let the `ralph`
+    // fallback hat silently create tasks attributed to workflow hats,
+    // polluting the merge queue and corrupting plan-gate correlation.
+    // Backing the create-side check with a `coordinator_hats` allowlist
+    // closes the gap: any hat that is not on the allowlist cannot
+    // create a task. When `owner_hat_id` is absent (human CLI usage,
+    // where `ctx.current_hat_id` is None), the check is skipped — the
+    // existing `add_common_task_fields` only stamps an owner when
+    // `ctx.current_hat_id` is set, so `None` here is a reliable signal
+    // that the call is human-driven.
+    validate_owner_hat_id(&task, coordinator_hats)?;
 
     let invalid_blockers = store.invalid_blockers(&task);
     if !invalid_blockers.is_empty() {
@@ -518,8 +567,7 @@ fn execute_ensure(
     let mut store = TaskStore::load(&path).context("Failed to load tasks")?;
     let ctx = operation_context_for(root);
 
-    ensure_task_with_args(&mut store, &args, &ctx, use_colors)?;
-    let _ = coordinator_hats; // reserved for future coordinator use
+    ensure_task_with_args(&mut store, &args, &ctx, coordinator_hats, use_colors)?;
     Ok(())
 }
 
@@ -528,6 +576,7 @@ fn ensure_task_with_args(
     store: &mut TaskStore,
     args: &EnsureArgs,
     ctx: &OperationContext,
+    coordinator_hats: &[String],
     use_colors: bool,
 ) -> Result<()> {
     let task = add_common_task_fields(
@@ -536,6 +585,7 @@ fn ensure_task_with_args(
         args.description.clone(),
         args.blocked_by.clone(),
     );
+    validate_owner_hat_id(&task, coordinator_hats)?;
     let key = task.key.clone().expect("ensure key should be set");
     let loop_id = task.loop_id.clone();
     let existed = store.get_by_key_in_loop(&key, loop_id.as_deref()).is_some();
@@ -1227,7 +1277,14 @@ mod tests {
         let ctx = ctx_for(root, Some("loop-a"), Some("executor"));
         let mut store = open_store(root);
 
-        add_task_with_args(&mut store, &add_args("Do work", None), &ctx, false).unwrap();
+        add_task_with_args(
+            &mut store,
+            &add_args("Do work", None),
+            &ctx,
+            &["executor".to_string()],
+            false,
+        )
+        .unwrap();
 
         let saved = store.all();
         assert_eq!(saved.len(), 1);
@@ -1243,11 +1300,131 @@ mod tests {
         let ctx = ctx_for(root, Some("loop-h"), None);
         let mut store = open_store(root);
 
-        add_task_with_args(&mut store, &add_args("Do work", None), &ctx, false).unwrap();
+        add_task_with_args(
+            &mut store,
+            &add_args("Do work", None),
+            &ctx,
+            &["executor".to_string()],
+            false,
+        )
+        .unwrap();
 
         let saved = store.all();
         assert_eq!(saved[0].loop_id.as_deref(), Some("loop-h"));
         assert!(saved[0].owner_hat_id.is_none());
+    }
+
+    // U3: owner_hat_id must be on tasks.coordinator_hats. The five scenarios
+    // below exercise the create-side complement to the JSONL origin guard
+    // (which already rejects ralph at the read path).
+
+    #[test]
+    fn test_task_add_allows_executor_when_in_coordinator_hats() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let root = temp_dir.path();
+        write_marker(root, "current-loop-id", "loop-a");
+        let ctx = ctx_for(root, Some("loop-a"), Some("executor"));
+        let mut store = open_store(root);
+
+        add_task_with_args(
+            &mut store,
+            &add_args("ok task", None),
+            &ctx,
+            &["coordinator".to_string(), "executor".to_string()],
+            false,
+        )
+        .expect("executor in coordinator_hats should be accepted");
+    }
+
+    #[test]
+    fn test_task_add_rejects_ralph_when_not_in_coordinator_hats() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let root = temp_dir.path();
+        write_marker(root, "current-loop-id", "loop-a");
+        let ctx = ctx_for(root, Some("loop-a"), Some("ralph"));
+        let mut store = open_store(root);
+
+        let err = add_task_with_args(
+            &mut store,
+            &add_args("rogue task", None),
+            &ctx,
+            &["coordinator".to_string(), "executor".to_string()],
+            false,
+        )
+        .expect_err("ralph must be rejected (not in coordinator_hats)");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("'ralph'") && msg.contains("not in tasks.coordinator_hats"),
+            "error should name the rejected owner and the allowlist, got: {msg}"
+        );
+
+        // And nothing was persisted.
+        assert!(store.all().is_empty());
+    }
+
+    #[test]
+    fn test_task_add_rejects_any_owner_when_coordinator_hats_empty() {
+        // Fail-closed: an empty allowlist must not let any agent persist a
+        // task. This catches the misconfigured-preset failure mode where
+        // `coordinator_hats` is unset (or accidentally cleared) and the
+        // orchestrator would otherwise default-open the gate.
+        let temp_dir = TempDir::new().expect("temp dir");
+        let root = temp_dir.path();
+        write_marker(root, "current-loop-id", "loop-a");
+        let ctx = ctx_for(root, Some("loop-a"), Some("executor"));
+        let mut store = open_store(root);
+
+        let err = add_task_with_args(
+            &mut store,
+            &add_args("anything", None),
+            &ctx,
+            &[],
+            false,
+        )
+        .expect_err("empty coordinator_hats must reject any owner (fail-closed)");
+
+        assert!(err.to_string().contains("not in tasks.coordinator_hats"));
+    }
+
+    #[test]
+    fn test_task_add_allows_human_call_without_owner() {
+        // When `ctx.current_hat_id` is None, the task has no owner and
+        // `validate_owner_hat_id` is a no-op. This is the human CLI
+        // path — operators must not be locked out by the owner check.
+        let temp_dir = TempDir::new().expect("temp dir");
+        let root = temp_dir.path();
+        write_marker(root, "current-loop-id", "loop-h");
+        let ctx = ctx_for(root, Some("loop-h"), None);
+        let mut store = open_store(root);
+
+        add_task_with_args(
+            &mut store,
+            &add_args("human task", None),
+            &ctx,
+            &[],
+            false,
+        )
+        .expect("human CLI call (no owner) must not be blocked by empty allowlist");
+    }
+
+    #[test]
+    fn test_task_ensure_rejects_off_allowlist_owner() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let root = temp_dir.path();
+        write_marker(root, "current-loop-id", "loop-a");
+        let ctx = ctx_for(root, Some("loop-a"), Some("rogue-hat"));
+        let mut store = open_store(root);
+
+        let err = ensure_task_with_args(
+            &mut store,
+            &ensure_args("x", "k:v", None),
+            &ctx,
+            &["executor".to_string()],
+            false,
+        )
+        .expect_err("ensure must also reject off-allowlist owner");
+        assert!(err.to_string().contains("not in tasks.coordinator_hats"));
     }
 
     #[test]
@@ -1407,6 +1584,7 @@ mod tests {
             &mut store,
             &ensure_args("First", "shared:task", None),
             &ctx_a,
+            &["executor".to_string()],
             false,
         )
         .unwrap();
@@ -1414,6 +1592,7 @@ mod tests {
             &mut store,
             &ensure_args("Second", "shared:task", None),
             &ctx_a,
+            &["executor".to_string()],
             false,
         )
         .unwrap();
@@ -1431,6 +1610,7 @@ mod tests {
             &mut store,
             &ensure_args("First", "shared:task", None),
             &ctx_a,
+            &["executor".to_string()],
             false,
         )
         .unwrap();
@@ -1443,6 +1623,7 @@ mod tests {
             &mut store,
             &ensure_args("Second", "shared:task", None),
             &ctx_a,
+            &["executor".to_string()],
             false,
         )
         .unwrap();
@@ -1466,6 +1647,7 @@ mod tests {
             &mut store,
             &ensure_args("First", "shared:task", None),
             &ctx_a,
+            &["executor".to_string()],
             false,
         )
         .unwrap();
@@ -1476,6 +1658,7 @@ mod tests {
             &mut store,
             &ensure_args("Second", "shared:task", None),
             &ctx_b,
+            &["executor".to_string()],
             false,
         )
         .unwrap();
@@ -1499,6 +1682,7 @@ mod tests {
             &mut store,
             &add_args("Do work", Some(&blocker_id)),
             &ctx,
+            &["executor".to_string()],
             false,
         )
         .expect_err("cross-loop blocker should be rejected");
@@ -1516,6 +1700,7 @@ mod tests {
             &mut store,
             &add_args("Do work", Some("task-9999-deadbeef")),
             &ctx,
+            &["executor".to_string()],
             false,
         )
         .expect_err("missing blocker should be rejected");
