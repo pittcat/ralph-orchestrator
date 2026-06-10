@@ -756,7 +756,10 @@ hats:
     name: "🧩 审查合成器"
     description: "合并所有维度 findings，去重，应用质量门禁，路由。"
     triggers: ["review.dimension.done"]
-    publishes: ["review.passed", "review.failed", "review.complete"]
+    # 注意：`plan.blocked` 必须出现在 publishes — 下面的 All-Dimensions-Timeout
+    # 守则在 `wait_for_all` 超时时要求发它。之前的遗漏导致超时 fallback
+    # 被 origin guard 静默拒收（P0-B 修复，2026-06-10）。
+    publishes: ["review.passed", "review.failed", "review.complete", "plan.blocked"]
     default_publishes: "review.complete"
     aggregate:
       mode: wait_for_all
@@ -776,6 +779,11 @@ hats:
 
       ### 读取输入
       - 等待所有 `review.dimension.done` 事件（aggregate `wait_for_all` 自动处理）
+      - **在统计聚合器计数前先 `ls` findings 目录** — 文件落盘是**权威**真相。如果
+        `findings-{dimension}-{task_id}.json` 存在，该维度就产出了输出；信任文件
+        而非聚合器计数器。此规则在 2026-06-10 加入，原因是 synthesizer 之前信任
+        aggregator "0/7" 计数器，发了 `verdict="fail"` 的 `review.complete`，
+        但 7/7 文件都已落盘（P0-A 修复）。
       - 读取每个 `findings-{dimension}.json` 文件
       - 读取 `.agents/scratchpad/ce-executor/{plan_name}/` 中的上下文
 
@@ -814,7 +822,7 @@ hats:
         - 读取 `fix_round`（从 fix-log.md 或默认 0）
         - 提取 safe_auto findings（排除 pre_existing）
         - safe_auto > 0 且 fix_round < 3 → `review.failed`，携带 `fix_round`、`safe_auto_count`、`gated_manual_count`、`findings_summary`、`task_id`、`task_key`、`step`
-        - safe_auto == 0 或 fix_round >= 3 → `review.complete`，携带 `plan_name`、`fix_round`、`verdict`、`residual_findings_count`、`findings_summary`、`task_id`、`task_key`、`step`
+        - safe_auto == 0 或 fix_round >= 3 → `review.complete`，携带 `plan_name`、`fix_round`、`verdict`、`residual_findings_count`、`findings_summary`、`task_id`、`task_key`、`step`, **`findings_count: <int>`**（**必填** — drift_monitor 跟踪此字段；缺失会触发 `findings_count on review.complete present in 0/1` critical 警报。2026-06-10 P1-D 修复）
       - `verdict`：`pass`（0 findings）| `pass_with_residuals`（非阻塞）| `fail`（P0 未解决或 fix 耗尽）
 
       ### Constraints

@@ -1516,11 +1516,26 @@ mod tests {
             mode: EventPolicyMode::Enforce,
             on_violation: ViolationAction::Block,
             topic_deny_rules: vec![
-                TopicDenyRule { hat_id: "ralph".to_string(), topic: "review.wave.ready".to_string() },
-                TopicDenyRule { hat_id: "ralph".to_string(), topic: "review.passed".to_string() },
-                TopicDenyRule { hat_id: "ralph".to_string(), topic: "queue.advance".to_string() },
-                TopicDenyRule { hat_id: "ralph".to_string(), topic: "plan.complete".to_string() },
-                TopicDenyRule { hat_id: "ralph".to_string(), topic: "plan.blocked".to_string() },
+                TopicDenyRule {
+                    hat_id: "ralph".to_string(),
+                    topic: "review.wave.ready".to_string(),
+                },
+                TopicDenyRule {
+                    hat_id: "ralph".to_string(),
+                    topic: "review.passed".to_string(),
+                },
+                TopicDenyRule {
+                    hat_id: "ralph".to_string(),
+                    topic: "queue.advance".to_string(),
+                },
+                TopicDenyRule {
+                    hat_id: "ralph".to_string(),
+                    topic: "plan.complete".to_string(),
+                },
+                TopicDenyRule {
+                    hat_id: "ralph".to_string(),
+                    topic: "plan.blocked".to_string(),
+                },
             ],
             ..Default::default()
         };
@@ -1549,9 +1564,18 @@ mod tests {
             enabled: true,
             mode: EventPolicyMode::Enforce,
             topic_deny_rules: vec![
-                TopicDenyRule { hat_id: "ralph".to_string(), topic: "review.wave.ready".to_string() },
-                TopicDenyRule { hat_id: "ralph".to_string(), topic: "review.passed".to_string() },
-                TopicDenyRule { hat_id: "ralph".to_string(), topic: "queue.advance".to_string() },
+                TopicDenyRule {
+                    hat_id: "ralph".to_string(),
+                    topic: "review.wave.ready".to_string(),
+                },
+                TopicDenyRule {
+                    hat_id: "ralph".to_string(),
+                    topic: "review.passed".to_string(),
+                },
+                TopicDenyRule {
+                    hat_id: "ralph".to_string(),
+                    topic: "queue.advance".to_string(),
+                },
             ],
             ..Default::default()
         };
@@ -1570,8 +1594,14 @@ mod tests {
             mode: EventPolicyMode::Enforce,
             on_violation: ViolationAction::Block,
             topic_deny_rules: vec![
-                TopicDenyRule { hat_id: "executor".to_string(), topic: "build.done".to_string() },
-                TopicDenyRule { hat_id: "ralph".to_string(), topic: "review.passed".to_string() },
+                TopicDenyRule {
+                    hat_id: "executor".to_string(),
+                    topic: "build.done".to_string(),
+                },
+                TopicDenyRule {
+                    hat_id: "ralph".to_string(),
+                    topic: "review.passed".to_string(),
+                },
             ],
             ..Default::default()
         };

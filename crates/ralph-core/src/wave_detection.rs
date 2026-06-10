@@ -190,7 +190,12 @@ pub fn detect_wave_events(events: &[Event], registry: &HatRegistry) -> Option<De
         );
     }
     let wave_events = wave_groups.remove(wave_id)?;
-    try_build_wave(wave_id, wave_events, registry, PartialWavePolicy::RequireComplete)
+    try_build_wave(
+        wave_id,
+        wave_events,
+        registry,
+        PartialWavePolicy::RequireComplete,
+    )
 }
 
 /// Detect **all** valid wave events from a set of events.
@@ -565,15 +570,16 @@ mod tests {
         assert!(waves.is_empty(), "RequireComplete must skip partial wave");
 
         // AllowPartial → wave with partial=true
-        let waves = detect_all_wave_events_with_policy(
-            &events,
-            &registry,
-            PartialWavePolicy::AllowPartial,
-        );
+        let waves =
+            detect_all_wave_events_with_policy(&events, &registry, PartialWavePolicy::AllowPartial);
         assert_eq!(waves.len(), 1);
         assert!(waves[0].partial, "partial wave must be marked");
         assert_eq!(waves[0].total, 3, "total must reflect expected count");
-        assert_eq!(waves[0].events.len(), 2, "events only contains arrived results");
+        assert_eq!(
+            waves[0].events.len(),
+            2,
+            "events only contains arrived results"
+        );
     }
 
     #[test]
@@ -583,24 +589,21 @@ mod tests {
             make_wave_event("review.file", "a", "w-full", 0, 2),
             make_wave_event("review.file", "b", "w-full", 1, 2),
         ];
-        let waves = detect_all_wave_events_with_policy(
-            &events,
-            &registry,
-            PartialWavePolicy::AllowPartial,
-        );
+        let waves =
+            detect_all_wave_events_with_policy(&events, &registry, PartialWavePolicy::AllowPartial);
         assert_eq!(waves.len(), 1);
-        assert!(!waves[0].partial, "complete wave must not be marked partial even with AllowPartial");
+        assert!(
+            !waves[0].partial,
+            "complete wave must not be marked partial even with AllowPartial"
+        );
     }
 
     #[test]
     fn test_allow_partial_zero_events_still_skipped() {
         let registry = make_registry_with_concurrent_hat();
         // No events at all — nothing to detect
-        let waves = detect_all_wave_events_with_policy(
-            &[],
-            &registry,
-            PartialWavePolicy::AllowPartial,
-        );
+        let waves =
+            detect_all_wave_events_with_policy(&[], &registry, PartialWavePolicy::AllowPartial);
         assert!(waves.is_empty());
     }
 }

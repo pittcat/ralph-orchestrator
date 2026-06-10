@@ -981,7 +981,11 @@ hats:
     name: "🧩 Review Synthesizer"
     description: "Merges all dimension findings, deduplicates, applies quality gates, and routes."
     triggers: ["review.dimension.done"]
-    publishes: ["review.passed", "review.failed", "review.complete"]
+    # NOTE: `plan.blocked` MUST be in publishes — the All-Dimensions-Timeout
+    # 守则 below requires it when `wait_for_all` times out. The previous
+    # omission caused the timeout fallback to be silently rejected by the
+    # origin guard (P0-B fix on 2026-06-10).
+    publishes: ["review.passed", "review.failed", "review.complete", "plan.blocked"]
     default_publishes: "review.complete"
     terminal_events: ["review.passed", "review.failed", "review.complete"]
     aggregate:
@@ -1005,6 +1009,7 @@ hats:
       ### Read Inputs
       - Wait for all `review.dimension.done` events (aggregate `wait_for_all` handles this)
       - Get `plan_name` from any `review.dimension.done` payload (all carry it)
+      - **BEFORE counting aggregator stats, `ls` the findings directory** — file existence on disk is the AUTHORITATIVE source of truth. If a `findings-{dimension}-{task_id}.json` exists, that dimension produced output; trust the file, not the aggregator counter. This rule was added 2026-06-10 after a bug where the synthesizer trusted an aggregator "0/7" counter and emitted `review.complete` with `verdict="fail"` even though 7/7 files were on disk (P0-A fix).
       - Read each finding file from `findings-{dimension}-{task_id}.json` paths (resolve `{plan_name}` from payload)
       - Read context from `.agents/scratchpad/ce-executor-wave/{plan_name}/`
 

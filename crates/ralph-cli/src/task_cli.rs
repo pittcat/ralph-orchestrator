@@ -1375,14 +1375,8 @@ mod tests {
         let ctx = ctx_for(root, Some("loop-a"), Some("executor"));
         let mut store = open_store(root);
 
-        let err = add_task_with_args(
-            &mut store,
-            &add_args("anything", None),
-            &ctx,
-            &[],
-            false,
-        )
-        .expect_err("empty coordinator_hats must reject any owner (fail-closed)");
+        let err = add_task_with_args(&mut store, &add_args("anything", None), &ctx, &[], false)
+            .expect_err("empty coordinator_hats must reject any owner (fail-closed)");
 
         assert!(err.to_string().contains("not in tasks.coordinator_hats"));
     }
@@ -1398,14 +1392,8 @@ mod tests {
         let ctx = ctx_for(root, Some("loop-h"), None);
         let mut store = open_store(root);
 
-        add_task_with_args(
-            &mut store,
-            &add_args("human task", None),
-            &ctx,
-            &[],
-            false,
-        )
-        .expect("human CLI call (no owner) must not be blocked by empty allowlist");
+        add_task_with_args(&mut store, &add_args("human task", None), &ctx, &[], false)
+            .expect("human CLI call (no owner) must not be blocked by empty allowlist");
     }
 
     #[test]
