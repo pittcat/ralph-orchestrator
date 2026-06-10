@@ -378,7 +378,22 @@ fn wait_for_completion(
 
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return Ok((status, false)),
+            Ok(Some(status)) => {
+                // Belt-and-suspenders: `try_wait` can return a status while
+                // the child is still in the kernel's zombie state — Linux
+                // reaps asynchronously after the wait queue is consulted,
+                // and under heavy parallel load (nextest running 1800+ tests
+                // concurrently) a brief gap can leave `status.code()` returning
+                // `None` because the exit info has not been fully read yet.
+                //
+                // Block on `child.wait()` to drain the kernel and obtain a
+                // fully-formed status. If the wait fails (e.g. the child has
+                // already been reaped and the pid is gone), fall back to the
+                // status we already have — it's still the right answer, just
+                // possibly without signal info.
+                let stable = child.wait().unwrap_or(status);
+                return Ok((stable, false));
+            }
             Ok(None) => {
                 if wait_started_at.elapsed() >= timeout {
                     let status = terminate_for_timeout(
