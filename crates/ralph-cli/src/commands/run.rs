@@ -1110,6 +1110,203 @@ pub(crate) fn run_loop_result_exit_code(err: &anyhow::Error) -> Option<i32> {
     None
 }
 
+/// Build the prompt-forwarding argv for a subprocess-TUI child invocation.
+///
+/// Precedence matches `resolve_prompt_content` in the child, so the child
+/// takes the same path it would take if it were started directly in the
+/// parent's cwd:
+///
+/// 1. `args.prompt_text` (CLI `-p`): emit `-p <text>`. Always absolute —
+///    no path resolution needed.
+/// 2. `args.prompt_file` (CLI `-P`): emit `-P <path>`. In worktree mode
+///    (`args.worktree_path` set) with a relative path, anchor it at
+///    `parent_cwd` (the main repo) so the child — whose cwd is the
+///    worktree — can still find the file. Without this, the child fails
+///    with "Prompt file 'PROMPT.md' not found" and the TUI shows
+///    "Subprocess exited before starting the orchestration loop".
+/// 3. Default `PROMPT.md` (no CLI flag): in worktree mode, anchor the
+///    default at `parent_cwd` and emit `-P <abs>` only if the file
+///    exists. Outside worktree mode, the child reads `PROMPT.md` from
+///    its own cwd and we do nothing here.
+///
+/// `parent_cwd` is passed in (rather than read from `std::env`) so the
+/// function is unit-testable without chdir side effects.
+fn forward_prompt_args(args: &SubprocessTuiArgs, parent_cwd: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(ref prompt) = args.prompt_text {
+        out.push("-p".to_string());
+        out.push(prompt.clone());
+    } else if let Some(ref prompt_file) = args.prompt_file {
+        out.push("-P".to_string());
+        if args.worktree_path.is_some() && !prompt_file.is_absolute() {
+            out.push(parent_cwd.join(prompt_file).to_string_lossy().into_owned());
+        } else {
+            out.push(prompt_file.to_string_lossy().to_string());
+        }
+    } else if args.worktree_path.is_some() {
+        // Default `PROMPT.md` lives in the main repo (parent's cwd). The
+        // child's cwd is the worktree, where the file does not exist.
+        // Forward an absolute path so the child finds it.
+        let default_prompt = PathBuf::from("PROMPT.md");
+        let abs = parent_cwd.join(&default_prompt);
+        if abs.exists() {
+            out.push("-P".to_string());
+            out.push(abs.to_string_lossy().into_owned());
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod forward_prompt_args_tests {
+    use super::*;
+    use std::fs;
+
+    fn make_args(
+        prompt_text: Option<&str>,
+        prompt_file: Option<&Path>,
+        worktree_path: Option<&Path>,
+    ) -> SubprocessTuiArgs {
+        SubprocessTuiArgs {
+            prompt_text: prompt_text.map(str::to_string),
+            prompt_file: prompt_file.map(PathBuf::from),
+            backend: None,
+            max_iterations: None,
+            completion_promise: None,
+            continue_mode: false,
+            loop_id: None,
+            idle_timeout: None,
+            verbose: false,
+            quiet: false,
+            record_session: None,
+            exclusive: false,
+            no_auto_merge: false,
+            skip_preflight: false,
+            no_sync_agent_docs: false,
+            worktree: false,
+            worktree_path: worktree_path.map(PathBuf::from),
+            workspace: PathBuf::new(),
+            config_sources: vec![],
+            hats_source: None,
+        }
+    }
+
+    /// In worktree mode with no CLI -p/-P, the default PROMPT.md (which
+    /// lives in the parent's cwd, i.e. the main repo) must be forwarded
+    /// as `-P <absolute-path>` so the child — whose cwd is the worktree
+    /// — can find it. This is the primary regression guard for the bug
+    /// "Subprocess exited before starting the orchestration loop" with
+    /// `ralph -H builtin:ce-executor run --worktree` (PROMPT.md missing
+    /// in worktree, child bails before RPC).
+    #[test]
+    fn worktree_default_prompt_resolves_to_parent_cwd_absolute_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prompt_path = tmp.path().join("PROMPT.md");
+        fs::write(&prompt_path, "implement X").unwrap();
+
+        let wt = PathBuf::from("/tmp/fake-worktree");
+        let args = make_args(None, None, Some(&wt));
+
+        let out = forward_prompt_args(&args, tmp.path());
+        assert_eq!(
+            out,
+            vec![
+                "-P".to_string(),
+                prompt_path.to_string_lossy().into_owned()
+            ],
+            "worktree mode must forward default PROMPT.md as -P <abs path under parent_cwd>"
+        );
+    }
+
+    /// In worktree mode with no CLI -p/-P and NO PROMPT.md in the parent
+    /// cwd, the function must emit nothing. The child will then fall back
+    /// to its own config defaults and fail loudly there — we must NOT
+    /// invent a path.
+    #[test]
+    fn worktree_default_prompt_absent_emits_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No PROMPT.md written
+        let wt = PathBuf::from("/tmp/fake-worktree");
+        let args = make_args(None, None, Some(&wt));
+
+        let out = forward_prompt_args(&args, tmp.path());
+        assert!(
+            out.is_empty(),
+            "with no PROMPT.md in parent cwd, must not forward a bogus -P (got: {:?})",
+            out
+        );
+    }
+
+    /// Outside worktree mode with no CLI -p/-P, we must NOT inject a
+    /// `-P` for default PROMPT.md — the child's cwd is the same as the
+    /// parent's, and `resolve_prompt_content` handles the default there.
+    /// This guards against regression: injecting `-P` here in primary
+    /// mode would change the child's prompt resolution in subtle ways.
+    #[test]
+    fn primary_mode_default_prompt_emits_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("PROMPT.md"), "x").unwrap();
+
+        let args = make_args(None, None, None);
+        let out = forward_prompt_args(&args, tmp.path());
+        assert!(out.is_empty(), "primary mode must not inject -P (got: {:?})", out);
+    }
+
+    /// `-p <inline text>` takes priority over both -P and the default.
+    /// Path resolution is irrelevant — text is forwarded verbatim.
+    #[test]
+    fn inline_prompt_takes_priority() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("PROMPT.md"), "ignored").unwrap();
+        let wt = PathBuf::from("/tmp/fake-worktree");
+
+        let args = make_args(Some("inline wins"), None, Some(&wt));
+        let out = forward_prompt_args(&args, tmp.path());
+        assert_eq!(out, vec!["-p".to_string(), "inline wins".to_string()]);
+    }
+
+    /// `-P <relative path>` in worktree mode must be anchored at the
+    /// parent's cwd. This is the case the user hits when they pass
+    /// `-P PROMPT.md` explicitly: the child would otherwise resolve it
+    /// against its own (worktree) cwd and miss.
+    #[test]
+    fn worktree_relative_prompt_file_anchored_at_parent_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prompt_path = tmp.path().join("CUSTOM.md");
+        fs::write(&prompt_path, "custom prompt").unwrap();
+        let wt = PathBuf::from("/tmp/fake-worktree");
+
+        let args = make_args(None, Some(Path::new("CUSTOM.md")), Some(&wt));
+        let out = forward_prompt_args(&args, tmp.path());
+        assert_eq!(out, vec!["-P".to_string(), prompt_path.to_string_lossy().into_owned()]);
+    }
+
+    /// `-P <absolute path>` in worktree mode is passed through as-is.
+    /// The user already gave us a resolved path; do not re-anchor.
+    #[test]
+    fn worktree_absolute_prompt_file_passed_through() {
+        let tmp = tempfile::tempdir().unwrap();
+        let abs_prompt = tmp.path().join("ABS.md");
+        fs::write(&abs_prompt, "abs").unwrap();
+        let wt = PathBuf::from("/tmp/fake-worktree");
+
+        let args = make_args(None, Some(&abs_prompt), Some(&wt));
+        let out = forward_prompt_args(&args, tmp.path());
+        assert_eq!(out, vec!["-P".to_string(), abs_prompt.to_string_lossy().into_owned()]);
+    }
+
+    /// `-P <relative path>` in PRIMARY mode (no worktree) is forwarded
+    /// verbatim — the child's cwd is the same as the parent's, so
+    /// relative resolution works. Do NOT re-anchor here, that would
+    /// break user's relative -P expectations outside worktree mode.
+    #[test]
+    fn primary_relative_prompt_file_forwarded_verbatim() {
+        let args = make_args(None, Some(Path::new("REL.md")), None);
+        let out = forward_prompt_args(&args, Path::new("/anywhere"));
+        assert_eq!(out, vec!["-P".to_string(), "REL.md".to_string()]);
+    }
+}
+
 #[cfg(test)]
 mod run_loop_result_exit_code_tests {
     use super::*;
@@ -1274,14 +1471,7 @@ async fn run_subprocess_tui(
     child_args.push("--rpc".to_string());
 
     // Forward prompt
-    if let Some(ref prompt) = args.prompt_text {
-        child_args.push("-p".to_string());
-        child_args.push(prompt.clone());
-    }
-    if let Some(ref prompt_file) = args.prompt_file {
-        child_args.push("-P".to_string());
-        child_args.push(prompt_file.to_string_lossy().to_string());
-    }
+    child_args.extend(forward_prompt_args(&args, &std::env::current_dir().unwrap_or_default()));
 
     // Forward backend
     if let Some(ref backend) = args.backend {
