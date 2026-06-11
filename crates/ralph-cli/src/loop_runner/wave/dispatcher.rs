@@ -936,6 +936,23 @@ pub(crate) async fn dispatch_wave_inner<E: WaveWorkerExecutor + ?Sized>(
                 }
             }
             _ = tokio::time::sleep_until(sleep_until) => {
+                // The sleep timer may have fired because either the
+                // partial/aggregate deadline or the runner-supplied
+                // global deadline arrived. Re-check the global
+                // deadline first; if it has passed, surface
+                // `GlobalDeadlineExceeded` so the runner can map to
+                // `TerminationReason::MaxRuntime`. (Per U4-C2 /
+                // KTD-U4-6: the global deadline is the highest
+                // priority outer bound and must preempt the inner
+                // partial/aggregate timers.)
+                if ctx
+                    .global_deadline
+                    .map(|gd| tokio::time::Instant::now() >= gd)
+                    .unwrap_or(false)
+                {
+                    finalize_global_exceeded(&mut join_set, &ctx, progress_handle).await;
+                    return WaveDispatchOutcome::GlobalDeadlineExceeded;
+                }
                 if partial_threshold_fired {
                     let completed = finalize_timeout(
                         &mut join_set,
@@ -2069,6 +2086,144 @@ hats: {}
         assert!(
             key_for_b.contains("w_b"),
             "w-B key must contain normalized w-B, got: {key_for_b}"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // U4-C1: failing integration test for runner-supplied global deadline.
+    // ---------------------------------------------------------------------
+
+    /// U4-C1 / §6 C1: a runner-supplied `global_deadline` (e.g. derived
+    /// from `loop.max_runtime_seconds`) must preempt the wave before
+    /// the partial/aggregate deadlines do, even when individual workers
+    /// would block past the deadline. The dispatcher must return
+    /// `WaveDispatchOutcome::GlobalDeadlineExceeded` AND leave zero
+    /// active workers (the existing U3 abort+drain contract still
+    /// applies).
+    ///
+    /// Uses `start_paused = true` so the 10s deadline is reached
+    /// deterministically and the worker sleep of 3600s never resolves
+    /// first.
+    #[tokio::test(start_paused = true)]
+    async fn u4_c1_global_deadline_preempts_wave() {
+        // 4 workers that would all block past the global deadline.
+        let (progress_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let requests: Vec<WorkerRequest> = (0..4u32)
+            .map(|i| make_worker_request(i, progress_tx.clone()))
+            .collect();
+        let executor = Arc::new(TestExecutor::new(Duration::from_secs(3600)));
+
+        let wave = make_wave(4, 4, 4);
+        // Use a generous aggregate (3600s) so the partial / aggregate
+        // paths CANNOT fire first; only the global deadline (10s)
+        // will win.
+        let aggregate = Duration::from_secs(3600);
+        // global_deadline = now + 10s in paused-time terms.
+        let global_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let ctx = DispatchContext::build(
+            &wave,
+            Duration::from_secs(60),
+            aggregate,
+            vec!["p0".into(), "p1".into(), "p2".into(), "p3".into()],
+            false,
+            false,
+            WaveDispatchLimits {
+                global_deadline: Some(global_deadline),
+            },
+        );
+
+        let mut tracker = ralph_core::WaveTracker::new();
+        tracker.register_wave(wave.wave_id.clone(), wave.total);
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(20),
+            dispatch_wave_inner(tracker, requests, ctx, executor.clone(), silent_progress()),
+        )
+        .await
+        .expect("dispatch_wave_inner must not hang past the global deadline");
+
+        match outcome {
+            WaveDispatchOutcome::GlobalDeadlineExceeded => {
+                // U3 contract: zero active workers after global
+                // deadline abort+drain. The `TestExecutor` is
+                // paused-time and never executes its `fetch_sub`
+                // on the in-flight counter (it only runs after the
+                // sleep), so we only assert via `started`: every
+                // spawned worker must have entered the executor
+                // (so the dispatcher's abort path actually
+                // reached them), and the JoinSet must be empty
+                // (which `dispatch_wave_inner` guarantees by the
+                // `while join_set.join_next().await.is_some() {}`
+                // drain in `finalize_global_exceeded`).
+                assert_eq!(
+                    executor.started.load(Ordering::SeqCst),
+                    4,
+                    "all 4 workers must have been spawned before global deadline"
+                );
+            }
+            other => panic!(
+                "expected GlobalDeadlineExceeded (runner-supplied 10s budget), got {other:?}"
+            ),
+        }
+    }
+
+    /// U4-C1 / §6 C1: a global deadline of `now` (i.e. already past)
+    /// must fire on the dispatch loop's first re-check rather than
+    /// waiting for the partial/aggregate timers. This is the
+    /// conservative path for the runner: when `remaining` is zero,
+    /// it must still pass `Some(now)` rather than `None`, otherwise
+    /// the wave would have NO upper bound at all.
+    #[tokio::test(start_paused = true)]
+    async fn u4_c1_zero_remaining_deadline_fires_immediately() {
+        // 2 workers, each holding for 3600s.
+        let (progress_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let requests: Vec<WorkerRequest> = (0..2u32)
+            .map(|i| make_worker_request(i, progress_tx.clone()))
+            .collect();
+        let executor = Arc::new(TestExecutor::new(Duration::from_secs(3600)));
+
+        let wave = make_wave(2, 2, 2);
+        // Aggregate far in the future; only the global deadline
+        // (= now, already past) should fire.
+        let aggregate = Duration::from_secs(3600);
+        let global_deadline = tokio::time::Instant::now();
+        let ctx = DispatchContext::build(
+            &wave,
+            Duration::from_secs(60),
+            aggregate,
+            vec!["p0".into(), "p1".into()],
+            false,
+            false,
+            WaveDispatchLimits {
+                global_deadline: Some(global_deadline),
+            },
+        );
+
+        let mut tracker = ralph_core::WaveTracker::new();
+        tracker.register_wave(wave.wave_id.clone(), wave.total);
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            dispatch_wave_inner(tracker, requests, ctx, executor.clone(), silent_progress()),
+        )
+        .await
+        .expect("dispatch_wave_inner must not hang on a zero-remaining deadline");
+
+        assert!(
+            matches!(outcome, WaveDispatchOutcome::GlobalDeadlineExceeded),
+            "expected GlobalDeadlineExceeded (zero-remaining deadline), got {outcome:?}"
+        );
+        // When `global_deadline` is in the past at loop entry, the
+        // dispatcher's loop-top `global_fired` check returns
+        // immediately, before any worker is spawned. This is the
+        // conservative path: the runner should always pass
+        // `Some(now + remaining)` (even when `remaining` is zero)
+        // so the dispatch loop gets one chance to abort cleanly.
+        // 0 started workers is the correct outcome here.
+        assert_eq!(
+            executor.started.load(Ordering::SeqCst),
+            0,
+            "zero-remaining global deadline must short-circuit before spawning workers"
         );
     }
 }
