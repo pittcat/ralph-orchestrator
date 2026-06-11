@@ -66,6 +66,19 @@ pub enum WaveDispatchOutcome {
     GlobalDeadlineExceeded,
 }
 
+/// U4-C3: outcome of `handle_wave_events` returned to the runner.
+///
+/// `global_deadline_exceeded` is true when any of the dispatched
+/// waves hit the runner-supplied outer deadline. The runner uses
+/// this to set `late_termination_reason = Some(MaxRuntime)` and
+/// skip the iteration's post-wave phases (default publishes,
+/// missing-event gate) so the existing unified termination flow
+/// can take over.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct HandleWaveOutcome {
+    pub global_deadline_exceeded: bool,
+}
+
 /// Per-worker request handed to a `WaveWorkerExecutor`.
 ///
 /// The dispatcher is responsible for assembling the request (backend
@@ -235,8 +248,12 @@ pub async fn handle_wave_events(
     // is responsible for converting that into
     // `TerminationReason::MaxRuntime` (U4-C3).
     global_deadline: Option<tokio::time::Instant>,
-) {
+) -> HandleWaveOutcome {
     let max_wave_total = event_loop.config().event_loop.max_wave_total;
+    // U4-C3: accumulator for the per-wave outcomes. Set to true
+    // when any wave hits the runner-supplied global deadline so
+    // the runner can map to `TerminationReason::MaxRuntime`.
+    let mut result = HandleWaveOutcome::default();
     let outcome = ralph_core::detect_all_wave_events_capped(
         wave_events,
         event_loop.registry(),
@@ -264,7 +281,7 @@ pub async fn handle_wave_events(
 
     let waves = outcome.accepted;
     if waves.is_empty() {
-        return;
+        return HandleWaveOutcome::default();
     }
 
     info!(
@@ -457,16 +474,31 @@ pub async fn handle_wave_events(
                 }
             }
             WaveDispatchOutcome::GlobalDeadlineExceeded => {
-                // U4-B3: Global deadline handling is the runner's job
-                // (U4-C3 will convert this into TerminationReason::MaxRuntime
-                // and write a loop-level envelope). For now we just warn —
-                // the runner does not yet pass a global_deadline, so
-                // this variant is unreachable in production today.
-                warn!(
-                    wave_id = %detected.wave_id,
-                    hat = %detected.target_hat,
-                    "Wave global deadline exceeded; runner watchdog will own this path in U4-C"
+                // U4-C3: the runner-supplied outer deadline fired.
+                // Record a loop-level recovery envelope (retry_key
+                // namespaced by `loop_runner:<loop_id>:max_runtime`,
+                // NOT wave-scoped — the deadline is a loop-level
+                // signal, see plan §6 C3) and stop processing the
+                // remaining waves. The runner uses the returned
+                // `HandleWaveOutcome` to set
+                // `late_termination_reason = MaxRuntime` and skip
+                // post-iteration phases.
+                //
+                // DiagnosisSource: `WaveDispatcher` is the closest
+                // existing variant — the wave dispatcher is what
+                // actually fires the abort. `LoopRunner` does not
+                // exist as a DiagnosisSource variant (envelope.rs
+                // has no `LoopRunner` member); using `WaveDispatcher`
+                // keeps the source stable for the responder while
+                // the retry_key (loop-level) carries the
+                // "loop" signal.
+                record_loop_max_runtime_envelope(
+                    event_loop,
+                    loop_id,
+                    &detected,
                 );
+                result.global_deadline_exceeded = true;
+                return result;
             }
         }
     }
@@ -485,6 +517,7 @@ pub async fn handle_wave_events(
             event_loop.reset_stale_topic_counter();
         }
     }
+    result
 }
 
 /// Execute a detected wave by spawning parallel backend instances.
@@ -1137,6 +1170,60 @@ async fn wait_for_progress_reporter(progress_handle: tokio::task::JoinHandle<()>
             warn!("Progress reporter did not exit within 5s after worker drain");
         }
     }
+}
+
+/// U4-C3: Record a loop-level recovery envelope when the
+/// runner-supplied `global_deadline` preempts a wave.
+///
+/// The retry key is intentionally loop-scoped (not wave-scoped) —
+/// the global deadline is a loop-level signal, so different waves
+/// that hit the same `max_runtime_seconds` budget MUST collapse
+/// into a single finding (the loop is the unit being terminated,
+/// not the wave). Format: `loop_runner:<loop_id>:max_runtime`.
+///
+/// Per plan §6 C3, we use `DiagnosisSource::WaveDispatcher` (the
+/// closest existing variant — `LoopRunner` is not in the
+/// `DiagnosisSource` enum, and the wave dispatcher is the code
+/// path that actually fires the abort). The loop-scope is carried
+/// in the retry_key, not the source.
+fn record_loop_max_runtime_envelope(
+    event_loop: &mut ralph_core::EventLoop,
+    loop_id: &str,
+    wave: &ralph_core::DetectedWave,
+) {
+    use ralph_core::diagnosis::{
+        DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, RecoveryDiagnosisEnvelope,
+    };
+
+    let topic = wave
+        .hat_config
+        .publishes
+        .first()
+        .cloned()
+        .or_else(|| wave.events.first().map(|e| e.topic.to_string()))
+        .unwrap_or_default();
+
+    let envelope = RecoveryDiagnosisEnvelope::builder()
+        .source(DiagnosisSource::WaveDispatcher)
+        .severity(DiagnosisSeverity::Error)
+        .iteration(event_loop.state().iteration)
+        .source_hat(wave.target_hat.to_string())
+        .topic(topic)
+        .reason_code("loop_max_runtime_exceeded")
+        .message(format!(
+            "Loop {} max_runtime exceeded during wave {} on hat {}",
+            loop_id, wave.wave_id, wave.target_hat
+        ))
+        .expected_action(
+            "Loop will terminate with TerminationReason::MaxRuntime. Investigate long-running wave workers."
+                .to_string(),
+        )
+        .retry_attempt(0)
+        .safe_target(false)
+        .outcome(DiagnosisOutcome::NotRetriable)
+        .retry_key(format!("loop_runner:{}:max_runtime", loop_id))
+        .build();
+    let _ = event_loop.record_recovery_envelope(&envelope, Vec::new());
 }
 
 /// U4-B3: Record a recovery envelope for a wave that finished via
@@ -2250,6 +2337,149 @@ hats: {}
             executor.started.load(Ordering::SeqCst),
             0,
             "zero-remaining global deadline must short-circuit before spawning workers"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // U4-C3: handle_wave_events outcome + recovery envelope.
+    // ---------------------------------------------------------------------
+
+    /// U4-C3 / §6 C3: the loop-level recovery envelope written when
+    /// the global deadline preempts a wave must have the exact
+    /// schema the runner relies on for `TerminationReason::MaxRuntime`:
+    /// retry_key = `loop_runner:<loop_id>:max_runtime`, source =
+    /// `WaveDispatcher` (no `LoopRunner` variant exists in
+    /// `DiagnosisSource`), reason_code = `loop_max_runtime_exceeded`,
+    /// outcome = `NotRetriable`. Verifies the journal entry lands on
+    /// disk in `recovery.jsonl`.
+    #[tokio::test]
+    async fn u4_c3_record_loop_max_runtime_envelope_writes_recovery_entry() {
+        use ralph_core::diagnostics::DiagnosticsCollector;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let diagnostics_root = temp.path().to_path_buf();
+
+        let yaml = r#"
+hats: {}
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).expect("yaml parse");
+        let diagnostics = DiagnosticsCollector::with_enabled(&diagnostics_root, true)
+            .expect("diagnostics enabled");
+        let mut el = EventLoop::with_diagnostics(config, diagnostics);
+        el.initialize("loop-abc");
+        let wave = make_wave(2, 2, 2);
+
+        record_loop_max_runtime_envelope(&mut el, "loop-abc", &wave);
+
+        // Read recovery.jsonl from the diagnostics session dir.
+        let mut session_dirs: Vec<_> = std::fs::read_dir(
+            diagnostics_root.join(".ralph/diagnostics"),
+        )
+        .expect("read diagnostics dir")
+        .filter_map(Result::ok)
+        .collect();
+        session_dirs.sort_by_key(|entry| entry.path());
+        let session_path = session_dirs
+            .last()
+            .expect("at least one diagnostics session")
+            .path();
+        let recovery_path = session_path.join("recovery.jsonl");
+        let content = std::fs::read_to_string(&recovery_path)
+            .unwrap_or_else(|e| panic!("read recovery.jsonl: {e}: {}", recovery_path.display()));
+        let entries: Vec<ralph_core::diagnosis::RecoveryJournalEntry> = content
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("parse recovery entry"))
+            .collect();
+
+        assert_eq!(
+            entries.len(),
+            1,
+            "one envelope for one global-deadline event, got {}",
+            entries.len()
+        );
+        let entry = &entries[0].envelope;
+
+        // U4-C3 retry_key contract.
+        assert_eq!(
+            entry.retry_key, "loop_runner:loop-abc:max_runtime",
+            "retry key must use the loop-scoped loop_runner:<loop_id>:max_runtime format"
+        );
+        assert_eq!(
+            entry.reason_code, "loop_max_runtime_exceeded",
+            "reason code must identify the loop-level max_runtime budget"
+        );
+        assert_eq!(
+            entry.outcome,
+            ralph_core::diagnosis::DiagnosisOutcome::NotRetriable,
+            "loop-level max_runtime finding is not auto-recoverable"
+        );
+        assert_eq!(
+            entry.source,
+            ralph_core::diagnosis::DiagnosisSource::WaveDispatcher,
+            "source must be WaveDispatcher (no LoopRunner variant in DiagnosisSource)"
+        );
+        assert_eq!(
+            entry.severity,
+            ralph_core::diagnosis::DiagnosisSeverity::Error,
+            "severity must be Error — the loop is about to terminate"
+        );
+        assert!(
+            entry.message.contains("loop-abc")
+                && entry.message.contains(&wave.wave_id),
+            "message must mention both loop_id and wave_id, got: {}",
+            entry.message
+        );
+    }
+
+    /// U4-C3: when `handle_wave_events` is called with an empty
+    /// `wave_events` slice, it must return `HandleWaveOutcome::default()`
+    /// — i.e. `global_deadline_exceeded = false` and the runner
+    /// does NOT set `late_termination_reason`. The empty-wave path
+    /// is the only `handle_wave_events` return value the runner can
+    /// trivially exercise without spawning a real backend.
+    #[tokio::test]
+    async fn u4_c3_handle_wave_events_empty_input_returns_default_outcome() {
+        let mut el = build_event_loop();
+
+        // Construct a minimal `CliBackend` and `LoopContext` to
+        // satisfy the function signature. The empty-wave path
+        // short-circuits before either is actually used.
+        let backend = CliBackend {
+            command: "echo".to_string(),
+            args: vec![],
+            prompt_mode: ralph_adapters::PromptMode::Arg,
+            prompt_flag: None,
+            output_format: ralph_adapters::OutputFormat::Text,
+            env_vars: vec![],
+        };
+        let ctx = ralph_core::LoopContext::primary(std::path::PathBuf::from("/tmp"));
+        let loop_id = "test-loop";
+
+        let outcome = handle_wave_events(
+            &[],
+            &mut el,
+            &backend,
+            &ctx,
+            false,
+            false,
+            None,
+            None,
+            loop_id,
+            None,
+            // global_deadline is irrelevant for empty input.
+            Some(tokio::time::Instant::now()),
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            HandleWaveOutcome::default(),
+            "empty wave_events must produce a default outcome"
+        );
+        assert!(
+            !outcome.global_deadline_exceeded,
+            "empty wave_events must NOT trigger the global deadline path"
         );
     }
 }

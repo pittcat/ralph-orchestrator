@@ -3462,7 +3462,7 @@ pub async fn run_loop_impl(
         }
 
         // Execute wave if wave events detected
-        if !wave_events.is_empty() {
+        let wave_outcome: Option<crate::loop_runner::wave::HandleWaveOutcome> = if !wave_events.is_empty() {
             // U4-C2 / KTD-U4-6: compute the runner-supplied global
             // deadline from the loop's remaining runtime budget.
             // When `max_runtime_seconds = 0` (the default in many
@@ -3484,7 +3484,7 @@ pub async fn run_loop_impl(
                     Some(tokio::time::Instant::now() + remaining)
                 }
             };
-            handle_wave_events(
+            let outcome = handle_wave_events(
                 &wave_events,
                 &mut event_loop,
                 &backend,
@@ -3498,6 +3498,24 @@ pub async fn run_loop_impl(
                 global_deadline,
             )
             .await;
+            Some(outcome)
+        } else {
+            None
+        };
+
+        // U4-C3 / KTD-U4-6: if the global deadline fired during the
+        // wave, set `late_termination_reason = Some(MaxRuntime)`.
+        // The existing unified termination flow (pre/post hooks,
+        // finalize_recovery_diagnosis, handle_termination) takes
+        // over from the next iteration's top check. We do NOT
+        // `break` here — the loop's iteration body must still run
+        // its TUI / hook-metadata bookkeeping for this iteration.
+        // The default_publishes and missing-event gate blocks below
+        // are guarded by an additional `late_termination_reason`
+        // check (C4 / §6 C4) so they don't run for the doomed
+        // iteration.
+        if wave_outcome.is_some_and(|o| o.global_deadline_exceeded) {
+            late_termination_reason = Some(TerminationReason::MaxRuntime);
         }
 
         // Inject default_publishes for active hats only when agent wrote no events.
