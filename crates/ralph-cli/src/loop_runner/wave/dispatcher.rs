@@ -771,5 +771,155 @@ async fn handle_wave_rejection(
     // blocked signal through EventLoop::publish_event with a
     // ralph_proto::Event once the U4 isolated-scope plumbing is in.
 
+    // KTD-4 / §6 U2: publish a structured `plan.blocked` event ONLY
+    // for `TotalExceedsCap` (the cap-overshoot path is the one that
+    // must trigger shipper/reporter escalation). Other malformed
+    // rejections are surfaced via the recovery envelope + diagnostics
+    // only — they do not block the plan, just the malformed wave.
+    if matches!(
+        rejected.reason,
+        ralph_core::WaveRejection::TotalExceedsCap { .. }
+    ) {
+        let plan_blocked_payload = structured_reason.to_string();
+        let plan_blocked_event =
+            ralph_proto::Event::new("plan.blocked", plan_blocked_payload);
+        event_loop.publish_event(plan_blocked_event);
+    }
+
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ralph_core::EventLoop;
+    use ralph_core::config::RalphConfig;
+    use std::sync::{Arc, Mutex};
+
+    fn build_event_loop() -> EventLoop {
+        let yaml = r#"
+hats: {}
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).expect("yaml parse");
+        let mut el = EventLoop::new(config);
+        el.initialize("u2-rejection-test");
+        el
+    }
+
+    fn build_outputs_silent() -> WaveOutputs<'static> {
+        // Show CLI off so the test does not pollute stderr with the
+        // human-readable rejection notice.
+        WaveOutputs {
+            use_colors: false,
+            show_cli: false,
+            rpc_tx: None,
+            tui: None,
+        }
+    }
+
+    fn make_rejected(reason: ralph_core::WaveRejection) -> ralph_core::RejectedWave {
+        ralph_core::RejectedWave {
+            wave_id: "w-test-001".to_string(),
+            topic: "review.wave.ready".to_string(),
+            actual: 335,
+            reason,
+        }
+    }
+
+    /// KTD-4 / §6 U2: when a wave is rejected for exceeding the cap,
+    /// the dispatcher MUST publish a structured `plan.blocked` event
+    /// so the shipper/reporter hat can route the failure. One event
+    /// per rejection — N events of the same wave produce one plan.blocked.
+    #[tokio::test]
+    async fn u2_total_exceeds_cap_publishes_plan_blocked() {
+        let mut el = build_event_loop();
+
+        // Observer captures everything published to the bus.
+        let captured: Arc<Mutex<Vec<ralph_proto::Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let cap_clone = Arc::clone(&captured);
+        el.add_observer(move |event: &ralph_proto::Event| {
+            cap_clone.lock().unwrap().push(event.clone());
+        });
+
+        let rejected = make_rejected(ralph_core::WaveRejection::TotalExceedsCap {
+            actual: 335,
+            cap: 64,
+        });
+        let out = build_outputs_silent();
+
+        handle_wave_rejection(&rejected, &mut el, &out, None, "test-loop", 64)
+            .await
+            .expect("rejection should not error");
+
+        let blocked_events: Vec<_> = {
+            let guard = captured.lock().unwrap();
+            guard
+                .iter()
+                .filter(|e| e.topic.as_str() == "plan.blocked")
+                .cloned()
+                .collect()
+        };
+        assert_eq!(
+            blocked_events.len(),
+            1,
+            "U2: TotalExceedsCap must publish exactly one plan.blocked, got {}",
+            blocked_events.len()
+        );
+
+        // Payload must be a structured JSON object carrying the
+        // typed reason — shipper/reporter route on these fields.
+        let payload_str = blocked_events[0].payload.as_str();
+        let payload: serde_json::Value =
+            serde_json::from_str(payload_str).expect("plan.blocked payload must be JSON object");
+        assert_eq!(payload["reason"], "wave_total_exceeds_cap");
+        assert_eq!(payload["wave_id"], "w-test-001");
+        assert_eq!(payload["topic"], "review.wave.ready");
+        assert_eq!(payload["actual"], 335);
+        assert_eq!(payload["cap"], 64);
+    }
+
+    /// KTD-4 / §6 U2: only `TotalExceedsCap` escalates to plan.blocked.
+    /// Other malformed rejections (e.g. `ZeroTotal`, `InconsistentTopic`)
+    /// only surface via the recovery envelope + diagnostics, so they
+    /// do not block unrelated workflows.
+    #[tokio::test]
+    async fn u2_non_cap_rejections_do_not_publish_plan_blocked() {
+        let cases = [
+            ("ZeroTotal", ralph_core::WaveRejection::ZeroTotal),
+            (
+                "InconsistentTopic",
+                ralph_core::WaveRejection::InconsistentTopic,
+            ),
+            (
+                "NoTargetHat",
+                ralph_core::WaveRejection::NoTargetHat,
+            ),
+        ];
+        let out = build_outputs_silent();
+
+        for (label, reason) in cases {
+            let mut el = build_event_loop();
+            let captured: Arc<Mutex<Vec<ralph_proto::Event>>> =
+                Arc::new(Mutex::new(Vec::new()));
+            let cap_clone = Arc::clone(&captured);
+            el.add_observer(move |event: &ralph_proto::Event| {
+                cap_clone.lock().unwrap().push(event.clone());
+            });
+
+            let rejected = make_rejected(reason);
+            handle_wave_rejection(&rejected, &mut el, &out, None, "test-loop", 64)
+                .await
+                .unwrap_or_else(|e| panic!("rejection for {label} errored: {e}"));
+
+            let blocked = captured
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| e.topic.as_str() == "plan.blocked");
+            assert!(
+                !blocked,
+                "U2: {label} must NOT publish plan.blocked (only TotalExceedsCap does)"
+            );
+        }
+    }
 }
