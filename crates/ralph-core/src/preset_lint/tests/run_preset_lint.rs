@@ -164,9 +164,9 @@ hats:
 fn find_multi_hat_finding<'a>(
     findings: &'a [crate::runtime_contract::RuntimeContractFinding],
 ) -> Option<&'a crate::runtime_contract::RuntimeContractFinding> {
-    findings.iter().find(|f| {
-        f.id == format!("lint.{}", FINDING_MULTI_HAT_REQUIRES_ISOLATED)
-    })
+    findings
+        .iter()
+        .find(|f| f.id == format!("lint.{}", FINDING_MULTI_HAT_REQUIRES_ISOLATED))
 }
 
 /// AE1: 3 hats with default (coordinator) mode → no multi-hat finding.
@@ -228,8 +228,8 @@ fn u1_four_hats_explicit_coordinator_run_preset_lint_matches_default() {
     let default_findings = run_preset_lint(&config_default, LintStrictness::Default);
     let explicit_findings = run_preset_lint(&config_explicit, LintStrictness::Default);
 
-    let default = find_multi_hat_finding(&default_findings)
-        .expect("default must produce multi-hat finding");
+    let default =
+        find_multi_hat_finding(&default_findings).expect("default must produce multi-hat finding");
     let explicit = find_multi_hat_finding(&explicit_findings)
         .expect("explicit coordinator must produce multi-hat finding");
 
@@ -308,10 +308,7 @@ hats:
     let finding = find_multi_hat_finding(&findings)
         .expect("8 hats default mode must produce multi-hat finding");
     assert_eq!(finding.severity, FindingSeverity::Error);
-    assert_eq!(
-        finding.details.get("actual").map(String::as_str),
-        Some("8")
-    );
+    assert_eq!(finding.details.get("actual").map(String::as_str), Some("8"));
 }
 
 /// Lint strictness must NOT downgrade the multi-hat finding. Both
@@ -357,7 +354,10 @@ fn u1_runtime_contract_finding_shape_preserved() {
     let finding = find_multi_hat_finding(&findings)
         .expect("5 hats default mode must produce multi-hat finding");
     assert_eq!(finding.source, crate::runtime_contract::FindingSource::Lint);
-    assert_eq!(finding.stage, crate::runtime_contract::FindingStage::Authoring);
+    assert_eq!(
+        finding.stage,
+        crate::runtime_contract::FindingStage::Authoring
+    );
     assert_eq!(
         finding.id,
         format!("lint.{}", FINDING_MULTI_HAT_REQUIRES_ISOLATED)

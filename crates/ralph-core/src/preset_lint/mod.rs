@@ -36,15 +36,15 @@ pub use coordinator::check_coordinator_rules;
 pub use finding_id::{
     FINDING_COORDINATOR_MISSING, FINDING_CROSS_HAT_UNAUTHORIZED_PUBLISH,
     FINDING_INVALID_TOPIC_FORMAT, FINDING_MISSING_TOPIC_OWNER, FINDING_MULTI_HAT_REQUIRES_ISOLATED,
-    FINDING_OWNER_NOT_PUBLISHER, FINDING_OWNER_UNKNOWN_HAT,
-    FINDING_TASK_PUBLISHER_NOT_COORDINATED, FINDING_WHITELIST_EXEMPT_TOPIC,
+    FINDING_OWNER_NOT_PUBLISHER, FINDING_OWNER_UNKNOWN_HAT, FINDING_TASK_PUBLISHER_NOT_COORDINATED,
+    FINDING_WHITELIST_EXEMPT_TOPIC,
 };
+pub use multi_hat::check_multi_hat_isolation;
 pub use ownership::{check_owner_references, check_ownership_rules};
 pub use topic_format::{
     TopicFormatResult, TopicOccurrence, TopicSurface, enumerate_topics, suggest_topic_fix,
     validate_all_topics, validate_topic_format,
 };
-pub use multi_hat::check_multi_hat_isolation;
 
 // ──────────────────────────────────────────────────────────────────────────
 // U2: Shared types — strictness, severity, finding

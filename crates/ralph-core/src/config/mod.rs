@@ -54,6 +54,9 @@ pub use loop_config::{
     EventLoopConfig, EventSchema, PayloadType, Phase, PhaseConfig, VerdictGateConfig, WarmupConfig,
 };
 pub use memories::{InjectMode, MemoriesConfig, MemoriesFilter};
+pub use multi_hat_policy::{
+    MULTI_HAT_ISOLATION_LIMIT, MultiHatPolicyViolation, evaluate_multi_hat_isolation,
+};
 pub use preflight_ext::{HookStage, PreflightExtensionsConfig, PreflightHook};
 pub use robot::RobotConfig;
 pub use skills::{SkillOverride, SkillsConfig};
@@ -65,9 +68,6 @@ pub use v1_adapters::{AdapterSettings, AdaptersConfig};
 pub use warning::ConfigWarning;
 pub use workflow_guards::{
     HatExecutionMode, WorkflowChain, WorkflowChainMode, WorkflowGuardsConfig,
-};
-pub use multi_hat_policy::{
-    MULTI_HAT_ISOLATION_LIMIT, MultiHatPolicyViolation, evaluate_multi_hat_isolation,
 };
 
 use serde::{Deserialize, Serialize};

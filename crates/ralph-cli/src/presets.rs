@@ -32,7 +32,10 @@ const PRESETS: &[EmbeddedPreset] = &[
     EmbeddedPreset {
         name: "ce-executor-isolated",
         description: "Isolated-mode plan-driven work execution with wave code review, auto-fix, shipping, and manager report",
-        content: include_str!(concat!(env!("OUT_DIR"), "/presets/ce-executor-isolated.yml")),
+        content: include_str!(concat!(
+            env!("OUT_DIR"),
+            "/presets/ce-executor-isolated.yml"
+        )),
         public: true,
     },
     EmbeddedPreset {

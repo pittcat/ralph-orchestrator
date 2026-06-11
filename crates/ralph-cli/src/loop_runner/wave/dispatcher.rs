@@ -69,9 +69,15 @@ pub async fn handle_wave_events(
     // U2: emit a single structured `plan.blocked` per rejected wave and
     // record a recovery envelope BEFORE any TUI / backend side-effects.
     for rejected in &outcome.rejected {
-        if let Err(err) =
-            handle_wave_rejection(rejected, event_loop, &out, diagnostics, loop_id, max_wave_total)
-                .await
+        if let Err(err) = handle_wave_rejection(
+            rejected,
+            event_loop,
+            &out,
+            diagnostics,
+            loop_id,
+            max_wave_total,
+        )
+        .await
         {
             warn!(?err, "failed to handle wave rejection");
         }
@@ -781,8 +787,7 @@ async fn handle_wave_rejection(
         ralph_core::WaveRejection::TotalExceedsCap { .. }
     ) {
         let plan_blocked_payload = structured_reason.to_string();
-        let plan_blocked_event =
-            ralph_proto::Event::new("plan.blocked", plan_blocked_payload);
+        let plan_blocked_event = ralph_proto::Event::new("plan.blocked", plan_blocked_payload);
         event_loop.publish_event(plan_blocked_event);
     }
 
@@ -890,17 +895,13 @@ hats: {}
                 "InconsistentTopic",
                 ralph_core::WaveRejection::InconsistentTopic,
             ),
-            (
-                "NoTargetHat",
-                ralph_core::WaveRejection::NoTargetHat,
-            ),
+            ("NoTargetHat", ralph_core::WaveRejection::NoTargetHat),
         ];
         let out = build_outputs_silent();
 
         for (label, reason) in cases {
             let mut el = build_event_loop();
-            let captured: Arc<Mutex<Vec<ralph_proto::Event>>> =
-                Arc::new(Mutex::new(Vec::new()));
+            let captured: Arc<Mutex<Vec<ralph_proto::Event>>> = Arc::new(Mutex::new(Vec::new()));
             let cap_clone = Arc::clone(&captured);
             el.add_observer(move |event: &ralph_proto::Event| {
                 cap_clone.lock().unwrap().push(event.clone());

@@ -156,8 +156,8 @@ fn looks_like_multiple_json_lines(payload: &str) -> bool {
 /// Parse the payload as JSON and require it to be a JSON object.
 /// Rejects numbers, strings, arrays, booleans, null, and truncated JSON.
 fn validate_single_payload_object(payload: &str) -> Result<()> {
-    let value: serde_json::Value = serde_json::from_str(payload)
-        .with_context(|| format!("invalid JSON: {payload:?}"))?;
+    let value: serde_json::Value =
+        serde_json::from_str(payload).with_context(|| format!("invalid JSON: {payload:?}"))?;
     if !value.is_object() {
         bail!(
             "expected JSON object, got {} ({})",
@@ -501,18 +501,13 @@ mod tests {
     fn test_validate_payload_shape_atomicity_first_valid_then_invalid() {
         // Caller expects: when any payload is invalid, no events are written.
         // We assert at the validate level: invalid payload means Err.
-        let payloads = vec![
-            r#"{"ok":1}"#.to_string(),
-            "not-an-object".to_string(),
-        ];
+        let payloads = vec![r#"{"ok":1}"#.to_string(), "not-an-object".to_string()];
         assert!(validate_payload_shape(&payloads).is_err());
     }
 
     #[test]
     fn test_validate_payload_shape_seven_objects_all_pass() {
-        let payloads: Vec<String> = (0..7)
-            .map(|i| format!(r#"{{"dim":"d{}"}}"#, i))
-            .collect();
+        let payloads: Vec<String> = (0..7).map(|i| format!(r#"{{"dim":"d{}"}}"#, i)).collect();
         validate_payload_shape(&payloads).unwrap();
     }
 

@@ -507,7 +507,7 @@ mod tests {
         register_wildcard(&mut bus, "beta");
 
         bus.publish(Event::new("work", "for alpha")); // routed to alpha + beta
-        bus.publish(Event::new("work", "for beta"));  // same
+        bus.publish(Event::new("work", "for beta")); // same
 
         // First selection — cursor starts at None → picks first non-empty (alpha).
         let sel1 = bus.select_next_hat_with_pending().unwrap();

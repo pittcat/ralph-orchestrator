@@ -16,9 +16,7 @@
 //! `LintFinding` struct only carries `topic` / `hat` / `owner` —
 //! re-using it would silently drop these policy-relevant fields.
 
-use crate::config::{
-    HatExecutionMode, RalphConfig, evaluate_multi_hat_isolation,
-};
+use crate::config::{HatExecutionMode, RalphConfig, evaluate_multi_hat_isolation};
 use crate::preset_lint::finding_id::FINDING_MULTI_HAT_REQUIRES_ISOLATED;
 use crate::runtime_contract::{
     FindingSeverity, FindingSource, FindingStage, RuntimeContractFinding,
@@ -59,9 +57,8 @@ fn violation_to_contract_finding(
         "preset declares {actual} hats which exceeds the coordinator limit of {limit}; \
          set `event_loop.execution_mode: isolated` to run this preset"
     );
-    let hint = format!(
-        "Set `event_loop.execution_mode: isolated` ({actual} hats > {limit} hat limit)"
-    );
+    let hint =
+        format!("Set `event_loop.execution_mode: isolated` ({actual} hats > {limit} hat limit)");
     let required_mode_label = match required_mode {
         HatExecutionMode::Coordinator => "coordinator",
         HatExecutionMode::Isolated => "isolated",
@@ -171,7 +168,10 @@ hats:
             finding.details
         );
         let msg = &finding.message;
-        assert!(msg.contains("4"), "message must include actual count: {msg}");
+        assert!(
+            msg.contains("4"),
+            "message must include actual count: {msg}"
+        );
         assert!(msg.contains("3"), "message must include limit: {msg}");
         assert!(
             finding.action_hint.is_some(),
@@ -190,10 +190,7 @@ hats:
         assert_eq!(default_findings.len(), 1);
         assert_eq!(explicit_findings.len(), 1);
         assert_eq!(default_findings[0].id, explicit_findings[0].id);
-        assert_eq!(
-            default_findings[0].severity,
-            explicit_findings[0].severity
-        );
+        assert_eq!(default_findings[0].severity, explicit_findings[0].severity);
         assert_eq!(default_findings[0].message, explicit_findings[0].message);
         assert_eq!(default_findings[0].details, explicit_findings[0].details);
     }
@@ -270,7 +267,10 @@ hats:
         let default_findings = check_multi_hat_isolation(&config);
         assert_eq!(default_findings.len(), 1, "8 hats default mode must fail");
         assert_eq!(
-            default_findings[0].details.get("actual").map(String::as_str),
+            default_findings[0]
+                .details
+                .get("actual")
+                .map(String::as_str),
             Some("8")
         );
         // Explicit isolated at 8 hats → must pass.

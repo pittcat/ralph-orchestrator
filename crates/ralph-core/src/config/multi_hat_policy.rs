@@ -141,7 +141,10 @@ mod tests {
         let err = evaluate_multi_hat_isolation(4, HatExecutionMode::Coordinator)
             .expect_err("4 hats with Coordinator must violate the policy");
         assert_eq!(err.actual, 4, "details.actual must be 4");
-        assert_eq!(err.limit, MULTI_HAT_ISOLATION_LIMIT, "details.limit must be 3");
+        assert_eq!(
+            err.limit, MULTI_HAT_ISOLATION_LIMIT,
+            "details.limit must be 3"
+        );
         assert_eq!(
             err.required_mode,
             HatExecutionMode::Isolated,
@@ -223,16 +226,25 @@ mod tests {
 
     #[test]
     fn limit_plus_one_is_first_failing_count() {
-        assert!(evaluate_multi_hat_isolation(MULTI_HAT_ISOLATION_LIMIT, HatExecutionMode::Coordinator).is_ok());
-        assert!(evaluate_multi_hat_isolation(MULTI_HAT_ISOLATION_LIMIT + 1, HatExecutionMode::Coordinator).is_err());
+        assert!(
+            evaluate_multi_hat_isolation(MULTI_HAT_ISOLATION_LIMIT, HatExecutionMode::Coordinator)
+                .is_ok()
+        );
+        assert!(
+            evaluate_multi_hat_isolation(
+                MULTI_HAT_ISOLATION_LIMIT + 1,
+                HatExecutionMode::Coordinator
+            )
+            .is_err()
+        );
     }
 
     // ── Violation shape is stable for downstream adapters ──────────
 
     #[test]
     fn violation_message_includes_actual_and_limit() {
-        let err = evaluate_multi_hat_isolation(4, HatExecutionMode::Coordinator)
-            .expect_err("must fail");
+        let err =
+            evaluate_multi_hat_isolation(4, HatExecutionMode::Coordinator).expect_err("must fail");
         let msg = err.message();
         assert!(
             msg.contains('4') && msg.contains('3'),
@@ -242,8 +254,8 @@ mod tests {
 
     #[test]
     fn violation_fix_hint_directs_to_isolated_mode() {
-        let err = evaluate_multi_hat_isolation(5, HatExecutionMode::Coordinator)
-            .expect_err("must fail");
+        let err =
+            evaluate_multi_hat_isolation(5, HatExecutionMode::Coordinator).expect_err("must fail");
         let hint = err.fix_hint();
         assert!(
             hint.contains("isolated"),

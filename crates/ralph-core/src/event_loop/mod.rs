@@ -4070,10 +4070,9 @@ impl EventLoop {
 
             for event in result.events {
                 let topic = event.topic.as_str();
-                let is_orchestrator_internal = crate::event_origin::is_orchestrator_control_topic(
-                    topic,
-                    cancellation,
-                ) || crate::event_origin::is_orchestrator_diagnostic_topic(topic);
+                let is_orchestrator_internal =
+                    crate::event_origin::is_orchestrator_control_topic(topic, cancellation)
+                        || crate::event_origin::is_orchestrator_diagnostic_topic(topic);
 
                 if is_orchestrator_internal {
                     // Loop-internal event — always accepted, does not
@@ -5416,9 +5415,7 @@ impl EventLoop {
                     || control_prefixes.iter().any(|p| topic.starts_with(p));
 
                 // INV-1: Ralph must not publish business topics
-                if !is_control
-                    && event.source.as_ref().map(|h| h.as_str()) == Some("ralph")
-                {
+                if !is_control && event.source.as_ref().map(|h| h.as_str()) == Some("ralph") {
                     self.state.invariant_violation_count += 1;
                     self.state.last_invariant_violation =
                         Some(format!("INV-1:hat=ralph,topic={}", topic));
@@ -5428,10 +5425,7 @@ impl EventLoop {
                         "ralph",
                         crate::diagnostics::OrchestrationEvent::InvariantViolation {
                             rule_id: "INV-1".to_string(),
-                            description: format!(
-                                "Ralph published business topic '{}'",
-                                topic
-                            ),
+                            description: format!("Ralph published business topic '{}'", topic),
                             topic: Some(topic.to_string()),
                             source: Some("ralph".to_string()),
                             iteration: self.state.iteration,

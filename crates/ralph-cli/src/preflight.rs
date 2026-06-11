@@ -681,7 +681,11 @@ fn merge_hats_overlay(mut core: Value, hats: Value) -> Result<Value> {
                 merged.push(token);
             }
         }
-        mapping_insert(core_mapping, "topic_format_whitelist", Value::Sequence(merged.into_iter().map(Value::String).collect()));
+        mapping_insert(
+            core_mapping,
+            "topic_format_whitelist",
+            Value::Sequence(merged.into_iter().map(Value::String).collect()),
+        );
     }
 
     Ok(core)
