@@ -285,3 +285,206 @@ hats:
         "Violation message should mention monotonicity"
     );
 }
+
+// -------------------------------------------------------------------------
+// U1 (2026-06-11-002): trivial_step semantic gate — integration tests
+//
+// These exercise the full event-loop partition path: a review.passed
+// event with skip_reason=trivial_step AND a non-trivial diff is fed
+// through the loop and the loop must (a) NOT put the event on the bus,
+// (b) publish a task.resume targeting the source hat with a recovery
+// payload that names the observed changed_lines / findings_count.
+// -------------------------------------------------------------------------
+
+fn u1_review_passed_config() -> RalphConfig {
+    let yaml = r#"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    trivial_step_max_changed_lines: 50
+    schemas:
+      review.passed:
+        payload: json_object
+        required_fields: [plan_name, task_id, task_key, step, findings_count, fix_round, verdict, skip_reason]
+        allowed_values:
+          skip_reason: ["empty_diff", "trivial_step", "aggregate_timeout"]
+hats:
+  reviewer:
+    name: "Reviewer"
+    triggers: ["review.wave.ready"]
+    publishes: ["review.passed", "review.complete", "review.failed"]
+    instructions: "Review code."
+"#;
+    serde_yaml::from_str(yaml).unwrap()
+}
+
+fn write_review_passed_event(
+    path: &std::path::Path,
+    hat: &str,
+    skip_reason: &str,
+    findings_count: u64,
+    changed_lines: u64,
+) {
+    use std::io::Write;
+    let event = serde_json::json!({
+        "topic": "review.passed",
+        "payload": format!(
+            r#"{{"plan_name":"plan-x","task_id":"t1","task_key":"k1","step":"step-01","findings_count":{},"fix_round":0,"verdict":"pass","skip_reason":"{}","changed_lines":{}}}"#,
+            findings_count, skip_reason, changed_lines
+        ),
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "hat": hat,
+    });
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap();
+    writeln!(f, "{}", event).unwrap();
+}
+
+#[test]
+fn test_u1_trivial_step_bypass_rejected_with_task_resume() {
+    // U1: review.passed with skip_reason=trivial_step + non-trivial
+    // diff is rejected and replaced with task.resume targeting the
+    // source hat.
+    let config = u1_review_passed_config();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    write_review_passed_event(&events_path, "reviewer", "trivial_step", 5, 80);
+
+    let result = event_loop.process_events_from_jsonl().unwrap();
+
+    // Rejected → validated_events is empty → no business progress
+    assert!(
+        !result.had_events,
+        "trivial_step bypass with non-trivial diff should be rejected, got had_events=true"
+    );
+
+    // task.resume is published, on the ralph hat (loop runner fallback)
+    let ralph_id = HatId::new("ralph");
+    let pending = event_loop.bus.peek_pending(&ralph_id);
+    assert!(pending.is_some(), "task.resume should be on the bus");
+    let events = pending.unwrap();
+    let resume = events
+        .iter()
+        .find(|e| e.topic.as_str() == "task.resume")
+        .expect("task.resume must be present for U1 violation");
+    let payload = &resume.payload;
+    assert!(
+        payload.contains("invalid_trivial_step_bypass"),
+        "recovery payload must name the reason code, got: {payload}"
+    );
+    assert!(
+        payload.contains("findings_count=5"),
+        "recovery payload must include observed findings_count, got: {payload}"
+    );
+    assert!(
+        payload.contains("changed_lines=80"),
+        "recovery payload must include observed changed_lines, got: {payload}"
+    );
+
+    // The bad event itself is NOT on the bus
+    assert!(
+        !events.iter().any(|e| e.topic.as_str() == "review.passed"),
+        "rejected review.passed must not be on the bus"
+    );
+}
+
+#[test]
+fn test_u1_trivial_step_legitimate_passes_through() {
+    // U1 negative case: legitimate trivial step (small diff + 0
+    // findings) goes all the way through to the bus.
+    let config = u1_review_passed_config();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    write_review_passed_event(&events_path, "reviewer", "trivial_step", 0, 5);
+
+    let result = event_loop.process_events_from_jsonl().unwrap();
+
+    assert!(
+        result.had_events,
+        "legitimate trivial_step (small diff + 0 findings) must be accepted"
+    );
+
+    // The event must reach the synthesizer (next hat in the
+    // review-synthesizer chain). The test loop is a minimal preset
+    // with no synthesizer; the ralph hat is the loop runner's
+    // catch-all. The key assertion: the event was NOT rejected.
+    let ralph_id = HatId::new("ralph");
+    let pending = event_loop.bus.peek_pending(&ralph_id);
+    if let Some(events) = pending {
+        assert!(
+            !events.iter().any(|e| e.topic.as_str() == "task.resume"),
+            "no task.resume should be emitted for legitimate trivial_step"
+        );
+    }
+}
+
+#[test]
+fn test_u1_trivial_step_gate_disabled_by_zero_threshold() {
+    // U1 escape hatch: trivial_step_max_changed_lines=0 disables the
+    // gate (kept for operators who want to opt out). Verify the
+    // configuration is honored: a review.passed event with
+    // skip_reason=trivial_step AND a non-trivial diff is accepted
+    // by the policy layer (no task.resume generated by U1).
+    let yaml = r#"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    trivial_step_max_changed_lines: 0
+    schemas:
+      review.passed:
+        payload: json_object
+        required_fields: [plan_name, task_id, task_key, step, findings_count, fix_round, verdict, skip_reason]
+        allowed_values:
+          skip_reason: ["empty_diff", "trivial_step", "aggregate_timeout"]
+hats:
+  reviewer:
+    name: "Reviewer"
+    triggers: ["review.wave.ready"]
+    publishes: ["review.passed", "review.complete", "review.failed"]
+    instructions: "Review code."
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // Pathological case: trivial_step + 1000 findings + 5000 lines.
+    // With the gate disabled, this must still pass through with no
+    // task.resume being generated by the U1 gate.
+    write_review_passed_event(&events_path, "reviewer", "trivial_step", 1000, 5000);
+
+    let _ = event_loop.process_events_from_jsonl().unwrap();
+
+    let ralph_id = HatId::new("ralph");
+    if let Some(events) = event_loop.bus.peek_pending(&ralph_id) {
+        let u1_resume = events
+            .iter()
+            .filter(|e| e.topic.as_str() == "task.resume")
+            .find(|e| e.payload.contains("invalid_trivial_step_bypass"));
+        assert!(
+            u1_resume.is_none(),
+            "U1 gate must be silent when trivial_step_max_changed_lines=0; found: {:?}",
+            u1_resume.map(|e| &e.payload)
+        );
+    }
+}

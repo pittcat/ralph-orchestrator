@@ -121,6 +121,16 @@ event_loop:
     # U4: enable plan_name equality validation — work.done plan_name must match
     # the current_plan_name from work.ready.
     plan_name_equality_required: true
+    # U1 (2026-06-11-002): trivial_step semantic gate. Mirrors the wave
+    # gate's `changed_lines_min: 50`. A `review.passed` event with
+    # `skip_reason=trivial_step` is rejected by the event policy when
+    # the payload shows `findings_count > 0` OR
+    # `changed_lines >= trivial_step_max_changed_lines`. This stops
+    # the agent from bypassing Fixer by labeling a non-trivial diff
+    # as trivial. Set to 0 to disable the gate (NOT recommended for
+    # ce-executor-isolated). The 50-line threshold matches the wave
+    # gate so the two stay synchronized.
+    trivial_step_max_changed_lines: 50
     schemas:
       work.ready:
         required_fields: [plan_name, plan_path, task_id, task_key, step, complexity]
