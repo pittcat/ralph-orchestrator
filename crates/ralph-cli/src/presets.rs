@@ -2291,6 +2291,216 @@ mod tests {
         );
     }
 
+    /// U4 (2026-06-11-002): extract executor hat instructions for U4 contract tests.
+    /// The U4 work is a text-only preset instruction contract — progress.md must be
+    /// updated on queue.advance and inside the Task Execution Loop, with the
+    /// canonical field set (Current Step / Runtime Task ID / Status: in_progress
+    /// / update time). No code paths are involved; this helper just lets the
+    /// contract tests stay DRY.
+    fn executor_instructions_from(content: &str) -> String {
+        let config = RalphConfig::parse_yaml(content)
+            .expect("ce-executor preset YAML should parse as RalphConfig");
+        config
+            .hats
+            .get("executor")
+            .expect("ce-executor preset must define an 'executor' hat")
+            .instructions
+            .clone()
+    }
+
+    #[test]
+    fn test_ce_executor_u4_progress_reconcile_queue_advance_en() {
+        // U4 (2026-06-11-002): when executor is triggered by queue.advance it
+        // must update progress.md *between* task start and the implementation
+        // step. Goal: keep progress.md's Current Step / Runtime Task ID /
+        // Status: in_progress / update time consistent with the runtime task
+        // store so a reviewer or fresh-context agent does not see "pending"
+        // while the task store is already in_progress.
+        let content = read_root_preset("ce-executor-isolated.yml");
+        let instructions = executor_instructions_from(&content);
+
+        // The queue.advance paragraph must mention progress.md and the four
+        // canonical fields. Use literal substrings (not loose word matches)
+        // to avoid false positives on unrelated prose.
+        let qa_paragraph = instructions
+            .split("### queue.advance Activation")
+            .nth(1)
+            .and_then(|s| s.split("### FIX PLAN EXECUTION MODE").next())
+            .expect("executor instructions must contain a queue.advance Activation section");
+
+        assert!(
+            qa_paragraph.contains("progress.md"),
+            "queue.advance section must mention progress.md. Section excerpt:\n{qa_paragraph}"
+        );
+        for needle in [
+            "Current Step",
+            "Runtime Task ID",
+            "Status: in_progress",
+            "update time",
+        ] {
+            assert!(
+                qa_paragraph.contains(needle),
+                "queue.advance progress.md update must reference `{}`. Section excerpt:\n{qa_paragraph}",
+                needle
+            );
+        }
+        // task start must be called before progress.md is updated so the
+        // Runtime Task ID has a real value to record.
+        let start_pos = qa_paragraph
+            .find("ralph tools task start")
+            .expect("queue.advance section must include `ralph tools task start`");
+        let progress_pos = qa_paragraph
+            .find("progress.md")
+            .expect("already asserted above");
+        assert!(
+            start_pos < progress_pos,
+            "queue.advance must `ralph tools task start` before updating progress.md so the \
+             Runtime Task ID has a real value to record. Section excerpt:\n{qa_paragraph}"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_u4_progress_reconcile_task_execution_loop_en() {
+        // U4 (2026-06-11-002): the Task Execution Loop in the executor
+        // instructions must include a "Update progress.md" step between
+        // `ralph tools task start` and the implementation step.
+        let content = read_root_preset("ce-executor-isolated.yml");
+        let instructions = executor_instructions_from(&content);
+
+        let loop_section = instructions
+            .split("### Task Execution Loop (Small/Large)")
+            .nth(1)
+            .and_then(|s| s.split("**Execution strategy").next())
+            .expect("executor instructions must contain a Task Execution Loop section");
+
+        assert!(
+            loop_section.contains("Update `progress.md`"),
+            "Task Execution Loop must include a `Update \\`progress.md\\`` step. \
+             Section excerpt:\n{loop_section}"
+        );
+        for needle in [
+            "Current Step",
+            "Runtime Task ID",
+            "Status: in_progress",
+            "update time",
+        ] {
+            assert!(
+                loop_section.contains(needle),
+                "Task Execution Loop progress.md update must reference `{}`. \
+                 Section excerpt:\n{loop_section}",
+                needle
+            );
+        }
+
+        // The step ordering must place progress.md update immediately after
+        // task start. Otherwise fresh-context agents will read stale
+        // "pending" state from progress.md while the task is in_progress.
+        let start_pos = loop_section
+            .find("ralph tools task start")
+            .expect("loop must include task start");
+        let progress_pos = loop_section
+            .find("Update `progress.md`")
+            .expect("loop must include progress.md update step");
+        assert!(
+            start_pos < progress_pos,
+            "Task Execution Loop must call `ralph tools task start` before the \
+             `Update \\`progress.md\\`` step so the Runtime Task ID is known. \
+             Section excerpt:\n{loop_section}"
+        );
+
+        // Numbered step list must use distinct integers. The previous
+        // numbering bug shipped two "3." lines in the same code block; this
+        // guard catches a regression by asserting the close-step is reached
+        // at exactly step 7 (1=start, 2=progress, 3=read, 4=implement,
+        // 5=tests, 6=close, 7=commit). We search only inside the indented
+        // code block so the "Step 6" in the warning line above does not
+        // confuse the order check.
+        let code_block = loop_section
+            .split("```")
+            .nth(1)
+            .expect("Task Execution Loop must include a fenced code block");
+        let progress_pos = code_block
+            .find("Update `progress.md`")
+            .expect("loop code block must include progress.md update step");
+        let close_pos = code_block
+            .find("ralph tools task close")
+            .expect("loop code block must include task close step");
+        let commit_pos = code_block
+            .find("Evaluate incremental commit")
+            .expect("loop code block must include evaluate commit step");
+        assert!(
+            progress_pos < close_pos && close_pos < commit_pos,
+            "Task Execution Loop code block must place progress.md update, task close, and \
+             commit evaluation in that order. Code block excerpt:\n{code_block}"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_u4_progress_reconcile_queue_advance_zh() {
+        // U4 (2026-06-11-002): Chinese preset must mirror the queue.advance
+        // progress.md update contract so zh and en stay in parity. The ZH
+        // preset historically mirrors only the schema; U4 is text-only
+        // instruction guidance, but the requirement is explicit: a ZH
+        // operator should not get a stale "pending" view either.
+        let content = read_root_preset("ce-executor-isolated-zh.yml");
+        let instructions = executor_instructions_from(&content);
+
+        let qa_paragraph = instructions
+            .split("被 `queue.advance`")
+            .nth(1)
+            .and_then(|s| s.split("### ").nth(0))
+            .unwrap_or("");
+        assert!(
+            qa_paragraph.contains("progress.md"),
+            "ce-executor-zh queue.advance section must mention progress.md. \
+             Section excerpt:\n{qa_paragraph}"
+        );
+        for needle in [
+            "Current Step",
+            "Runtime Task ID",
+            "Status: in_progress",
+        ] {
+            assert!(
+                qa_paragraph.contains(needle),
+                "ce-executor-zh queue.advance progress.md update must reference `{}`. \
+                 Section excerpt:\n{qa_paragraph}",
+                needle
+            );
+        }
+    }
+
+    #[test]
+    fn test_ce_executor_u4_progress_reconcile_task_execution_loop_zh() {
+        // U4 (2026-06-11-002): Chinese preset Task Execution Loop must also
+        // include the progress.md update step.
+        let content = read_root_preset("ce-executor-isolated-zh.yml");
+        let instructions = executor_instructions_from(&content);
+
+        let loop_section = instructions
+            .split("### 任务执行循环（Small/Large）")
+            .nth(1)
+            .and_then(|s| s.split("**执行策略**").next())
+            .expect("ce-executor-zh must contain 任务执行循环 section");
+
+        assert!(
+            loop_section.contains("更新 `progress.md`"),
+            "ce-executor-zh Task Execution Loop must include `更新 \\`progress.md\\`` step. \
+             Section excerpt:\n{loop_section}"
+        );
+        for needle in [
+            "Current Step",
+            "Runtime Task ID",
+            "Status: in_progress",
+        ] {
+            assert!(
+                loop_section.contains(needle),
+                "ce-executor-zh Task Execution Loop progress.md update must reference `{}`. \
+                 Section excerpt:\n{loop_section}",
+                needle
+            );
+        }
+    }
+
     #[test]
     fn test_ce_executor_shipper_simplify_check_gated_to_plan_complete() {
         // R16: shipper's simplify check must be gated to plan.complete only.

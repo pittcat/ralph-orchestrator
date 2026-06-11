@@ -408,18 +408,19 @@ hats:
       **Small/Large**: Enter standard task execution loop.
 
       ### Task Execution Loop (Small/Large)
-      ⚠️ HARD RULE: Step 5 (`ralph tools task close <task_id>`) is REQUIRED
+      ⚠️ HARD RULE: Step 6 (`ralph tools task close <task_id>`) is REQUIRED
       before emitting `work.done`. The execution contract will REJECT
       `work.done` if the referenced task is not in a terminal state.
 
       ```
       while (current step has uncompleted tasks):
         1. ralph tools task start <task_id>
-        2. Read task files and patterns
-        3. Implement (test-first / characterization-first per Execution note)
-        4. Run and verify tests
-        5. ralph tools task close <task_id>     ← missing → contract rejection
-        6. Evaluate incremental commit
+        2. Update `progress.md`: set `Current Step`, `Runtime Task ID`, `Status: in_progress`, update time
+        3. Read task files and patterns
+        4. Implement (test-first / characterization-first per Execution note)
+        5. Run and verify tests
+        6. ralph tools task close <task_id>     ← missing → contract rejection
+        7. Evaluate incremental commit
       ```
 
       **Execution strategy per Execution note:**
@@ -474,7 +475,9 @@ hats:
       When triggered by `queue.advance` (from `plan-gate`):
       - Read `next_step` from the payload to identify the step you must now work on.
       - Create that step's runtime tasks using `ralph tools task ensure`.
-      - Select the first uncompleted task of the current step and begin implementation.
+      - Select the first uncompleted task of the current step and `ralph tools task start <task_id>`.
+      - Update `progress.md`: set `Current Step`, `Runtime Task ID`, `Status: in_progress`, and update time.
+      - Begin implementation (follow the Task Execution Loop below).
       - Publish `work.done` when the task is complete, carrying the NEW task's `task_id` and `task_key` (not the reviewed ones).
       - Do NOT use `reviewed_task_id`/`reviewed_task_key` to read runtime tasks or publish `work.done` — they are for correlation only.
 
