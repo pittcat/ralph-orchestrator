@@ -391,9 +391,9 @@ rtk cargo clippy -p ralph-core -p ralph-cli --all-targets -- -D warnings
 - [x] 所有 Wave failure 通过 `record_recovery_envelope`。
 - [x] Partial / AggregateDeadlineExceeded 走 `record_recovery_envelope`；`GlobalDeadlineExceeded` 走 warn（U4-C 接管）。**B3 完成（2026-06-11）**
 - [x] 收敛机制在 retry_key 一致时可 Recovered；跨 wave_id 收敛不可达已固化为 B4-4 测试。**B4 完成（2026-06-11）**
-- [ ] runner 不直接操作 worker task handle。（阻塞于 U3）
-- [ ] max runtime 到达后 worker 全部结束。（阻塞于 U3）
-- [ ] watchdog 跳过 iteration 后续阶段并走统一终止流程。（阻塞于 U3）
+- [x] runner 不直接操作 worker task handle。
+- [x] max runtime 到达后 worker 全部结束。
+- [x] watchdog 跳过 iteration 后续阶段并走统一终止流程。
 - [x] 定向测试、clippy 和 `./scripts/run-tests.sh` 全部通过。（已完成部分 0 failures）
 - [x] 在文末追加实施记录和 commit hash。
 
@@ -414,8 +414,8 @@ rtk cargo clippy -p ralph-core -p ralph-cli --all-targets -- -D warnings
 ## 12. 实施记录
 
 > **实施日期**：2026-06-11
-> **分支**：`feat/u4-isolated-recovery-watchdog`
-> **状态**：Part A + B1/B2 已完成；B3/B4 + Part C 阻塞于 U3 Dispatcher Deadline 重构
+> **分支**：`pittcat-dev`
+> **状态**：全部完成（Part A + B1–B4 + C1–C4）
 
 ### 已完成单元
 
@@ -446,13 +446,14 @@ rtk cargo clippy -p ralph-core -p ralph-cli --all-targets -- -D warnings
 | `diagnosis::envelope::tests::wave_retry_*` | 3 | B1 unit |
 | `loop_runner::wave::dispatcher::tests` | 3 | B1 integration + U2 baseline |
 | `event_loop::tests::wave_recovery_timeout` | 4 | B4 (Pending 写入 / 跨 iteration Recovered / 双 wave 独立 finding / 跨 wave_id 收敛固化为文档) |
+| `loop_runner::wave::dispatcher::tests`（C 段） | 6 | C1(2) + C3(2) + C4(2) |
 
 ### B3 + B4 实施记录（2026-06-11）
 
 | 单元 | Commit | 说明 |
 |---|---|---|
-| B3 | (TBD) | 新增 `execute_wave_structured` 公开入口；`handle_wave_events` 改用它并对 `Partial` / `AggregateDeadlineExceeded` 调 `record_wave_timeout_envelope`；`execute_wave` 保留为兼容 wrapper（`#[allow(dead_code)]`）；`GlobalDeadlineExceeded` 暂走 warn（U4-C 接管） |
-| B4 | (TBD) | 4 个 B4 集成测试（`crates/ralph-core/src/event_loop/tests/wave_recovery_timeout.rs`）；其中 B4-4 明确"Responder 现有 API 不能跨 wave_id 收敛 timeout finding"，作为 responder 后续扩展项的固化文档 |
+| B3 | `b3db6c5` | 新增 `execute_wave_structured` 公开入口；`handle_wave_events` 改用它并对 `Partial` / `AggregateDeadlineExceeded` 调 `record_wave_timeout_envelope`；`execute_wave` 保留为兼容 wrapper（`#[allow(dead_code)]`）；`GlobalDeadlineExceeded` 暂走 warn（U4-C 接管） |
+| B4 | `e6beec8` | 4 个 B4 集成测试（`crates/ralph-core/src/event_loop/tests/wave_recovery_timeout.rs`）；其中 B4-4 明确"Responder 现有 API 不能跨 wave_id 收敛 timeout finding"，作为 responder 后续扩展项的固化文档 |
 
 #### B3 实施细节
 
@@ -475,7 +476,66 @@ rtk cargo clippy -p ralph-core -p ralph-cli --all-targets -- -D warnings
 - B4-4：固化"跨 wave_id 收敛不可达"——因为 `wave_retry_key` 按 `wave_id` namespaced，生产中新 wave 完成不会触发老 finding 的 `check_recovery`。本测试断言 Responder 自身 API 在 retry_key 一致时**能** Recovered（验证 API 行为），同时注释说明生产路径无法触发该条件。
 - 收敛问题的修复方向（**不**在本次范围）：responder 需要新增 `check_recovery_by_source_topic(source, topic, ...)`，跨 retry_key 找同 source+topic 的 Pending findings；KTD-U4-5 末尾已禁止直接新增 `on_converged`，但跨 key 的 source+topic 收敛是合法扩展，应另立 plan。
 
+### C0–C4 实施记录（2026-06-11）
+
+| 单元 | Commit | 说明 |
+|---|---|---|
+| C0 | （隐含在 C1） | U3 交付检查：`WaveDispatchLimits::global_deadline` + `WaveDispatchOutcome::GlobalDeadlineExceeded` 已存在；`started=0` 清理契约已用 C1 的 `started == 4` 反证；progress reporter 可退出由 U3 `wait_for_progress_reporter` 保证 |
+| C1 | `59fe6a6` | 2 个 paused-time integration test：`u4_c1_global_deadline_preempts_wave`（max_runtime=10s vs worker=3600s 验证 `GlobalDeadlineExceeded`）和 `u4_c1_zero_remaining_deadline_fires_immediately`（global_deadline=now 验证 zero-remaining 短路）。副产物：修复 dispatcher `select!` sleep 分支 bug——原实现 sleep 触发后无条件走 partial/aggregate 路径，导致 global_deadline 永远被误判为 `AggregateDeadlineExceeded`；修复为 sleep 分支先 re-check global_deadline |
+| C2 | `325878a` | `execute_wave_structured` 新增 `limits: WaveDispatchLimits` 参数；`handle_wave_events` 新增 `global_deadline: Option<tokio::time::Instant>` 参数；runner.rs 在 `handle_wave_events` 调用前计算 deadline：`max_runtime=0` 时 `None`（不限制），否则 `Some(now + max_runtime.saturating_sub(state.elapsed()))`；`execute_wave` 老 wrapper 传 `WaveDispatchLimits::default()` 保持兼容 |
+| C3 | `6ec6fe5` | 新增 `HandleWaveOutcome { global_deadline_exceeded: bool }`，`handle_wave_events` 改返回它；`record_loop_max_runtime_envelope` 写一条 `retry_key = loop_runner:<loop_id>:max_runtime` / `outcome = NotRetriable` / `severity = Error` / `source = WaveDispatcher` / `reason_code = loop_max_runtime_exceeded` 的 envelope，然后 `return result` early；runner.rs 接住 outcome，设 `late_termination_reason = Some(MaxRuntime)` 让现有 termination flow 接管 |
+| C4 | `0d609d7` | runner.rs 的 default_publishes（`runner.rs:3585`）和 missing-event gate（`runner.rs:3563`）块加 `late_termination_reason.is_none()` 守卫；2 个静态源分析测试验证守卫存在 + C3 接线未回退 |
+
+#### C2 实施细节
+
+- 签名变更 3 处：
+  - `execute_wave_structured(..., limits: WaveDispatchLimits)`（U3 已有 `WaveDispatchLimits`，C2 把 `limits.global_deadline` 透传给 `DispatchContext::build`）
+  - `handle_wave_events(..., global_deadline: Option<tokio::time::Instant>)`（runner 入口，内部构造 `WaveDispatchLimits { global_deadline }`）
+  - `runner.rs:3476-3486` 的 deadline 计算块（`max_runtime == 0` → `None`，否则 `Some(now + remaining)`，即使 `remaining=0` 也传 `Some(now)`）
+- `max_runtime_seconds=0`（多数 preset 默认）→ 走 wave 内部 partial/aggregate timer，不引入 outer deadline
+- `remaining=0`（已耗尽预算）→ 传 `Some(now)`，dispatcher 在 loop 顶部 `global_fired` check 短路返回 `GlobalDeadlineExceeded`（C1 第二个 test 覆盖此路径）
+
+#### C3 实施细节
+
+- envelope schema：
+  - `retry_key = "loop_runner:<loop_id>:max_runtime"`（loop-scope，故意 NOT wave-scoped）
+  - `source = DiagnosisSource::WaveDispatcher`（不是 `LoopRunner`，因为 `envelope.rs` 没有该变体——plan §5 B3 明确禁止为单一调用方扩大 schema；选 `WaveDispatcher` 因为 wave dispatcher 是实际触发 abort 的代码路径）
+  - `severity = DiagnosisSeverity::Error`（loop 将立即终止，必须 Error 而非 Warning）
+  - `outcome = DiagnosisOutcome::NotRetriable`（KTD-U4-5 收敛表：global timeout 不可恢复）
+  - `reason_code = "loop_max_runtime_exceeded"`
+  - `topic = wave.hat_config.publishes.first()`，空时 fallback 到 `wave.events.first().topic`
+  - `message` 含 `loop_id` 和 `wave_id`
+  - `expected_action` 提示 loop 将以 `TerminationReason::MaxRuntime` 终止
+- `HandleWaveOutcome` 设计：单一 bool 字段（`global_deadline_exceeded`），runner 只关心这个信号；其他 outcome（Completed/Partial/AggregateDeadlineExceeded）的 merge 路径在 `handle_wave_events` 内部已处理，无需透传
+- retry_key loop-scope 设计理由：`max_runtime` 是 loop 级别信号，不同 wave 命中同一 budget 必须 collapse 成单一 finding。如果用 `wave_dispatcher:<wave_id>:max_runtime`，则同一个 max_runtime budget 被 3 个 wave 先后命中会产 3 条 finding，污染 responder。loop-scope 配合 `loop_runner:<loop_id>:max_runtime` 保证 1 budget = 1 finding
+
+#### C4 实施细节 + 三层覆盖
+
+C4 要求验证 GlobalDeadlineExceeded 后：
+- default_publishes 未执行 ✓
+- missing-event gate 未执行 ✓
+- Wave result merge 未继续执行 ✓
+- termination hooks 已执行 ✓（dispatcher 不参与，runner 现有 termination flow 接管）
+- diagnosis summary 已落盘 ✓（dispatcher 写 envelope 后由 `finalize_recovery_diagnosis` 落盘）
+- active worker 数为 0 ✓（U3 清理契约）
+
+**三层覆盖策略**（plan §6 C4 接受 dispatcher-level + handle_wave_events-level + 静态分析，因为 production test 跑真 wave 不实际）：
+
+1. **dispatcher 级**（C1，`dispatcher.rs:2221-2281`）：`u4_c1_global_deadline_preempts_wave` 验证 `dispatch_wave_inner` 在 max_runtime 到达后返回 `WaveDispatchOutcome::GlobalDeadlineExceeded`，且 `executor.started == 4`（反证 dispatcher 实际 spawn 了 worker 但 abort 路径走到了所有 worker；JoinSet 在 `finalize_global_exceeded` 中 `while join_set.join_next().await.is_some() {}` 排空，故 active worker 数为 0）
+2. **handle_wave_events 级**（C3，`dispatcher.rs:476-501`）：`WaveDispatchOutcome::GlobalDeadlineExceeded` 分支 `return result` 提前结束，跳过 per-wave 的 `merge_wave_results_to_events_file` 块（`dispatcher.rs:467-474`）和循环结束后的 `process_events_from_jsonl_with_waves()`（`dispatcher.rs:510`），证明 wave merge 不会继续执行。`HandleWaveOutcome { global_deadline_exceeded: true }` 透传给 runner
+3. **runner 级**（C4 静态源分析，`dispatcher.rs:2487-2579`）：2 个测试用 `include_str!("../runner.rs")` 静态读取 runner.rs 源码：
+   - `u4_c4_runner_post_wave_gates_consult_late_termination_reason`：断言 2 个 gate 块（missing-event gate + default_publishes fallback）各带 `late_termination_reason.is_none()` 守卫
+   - `u4_c4_runner_wires_handle_wave_outcome_to_late_termination_reason`：断言 C3 接线 `wave_outcome.is_some_and(|o| o.global_deadline_exceeded)` → `late_termination_reason = Some(MaxRuntime)` 仍在源码中
+
+runner 现有 termination flow（`runner.rs:3625-3683` 的 `late_termination_reason.or_else(...)` 块）天然包含 `dispatch_pre_loop_termination_hooks` + `publish_terminate_event` + `dispatch_post_loop_termination_hooks` + `handle_termination` + `finalize_recovery_diagnosis`，所以 termination hooks 执行 + diagnosis summary 落盘靠现有代码路径保证，不需新测试。
+
+#### Plan 偏离说明
+
+- **runner.rs 改动只设 `late_termination_reason` 触发现有 termination flow，未新发明 break 路径**：C3 设计故意让 iteration body 跑完——TUI 和 hook 元数据簿记需要执行；break 路径会跳过这些簿记。`late_termination_reason.is_none()` 守卫（C4）保证 post-wave gate 块在 doomed iteration 里不产生副作用，但其他簿记（事件循环、log、状态机 tick）正常完成
+- **C3 envelope 选 `WaveDispatcher` source 而非新增 `LoopRunner` 变体**：`envelope.rs` 的 `DiagnosisSource` 枚举没有 `LoopRunner` 成员；plan §5 B3 明确禁止"为单一调用方扩大全局 envelope schema"。loop-scope 语义通过 `retry_key = "loop_runner:<loop_id>:max_runtime"` 携带，不依赖 source
+- **C4 用静态源分析代替 E2E test**：runner iteration body 跑真 wave 需 spawn 真 backend（`ProductionExecutor`），CI 不实际。dispatcher-level + handle_wave_events-level + 静态源分析三层覆盖已经把 C4 6 条断言全部归结到可测试的代码位置
+- **C2 在 `remaining=0` 时也传 `Some(now)`**：保持 dispatcher "接到 Some 就走 global 路径" 的不变量，runner 不必关心 `saturating_sub` 是否返回 0
+
 ### 阻塞项
 
-- **Part C**（Runner Watchdog）：需要 B3 已完成 + U3 全局 deadline 接入 `execute_wave_structured`（U3 已具备 `WaveDispatchLimits::default()` 通路，B3 未暴露 `limits` 参数给 runner；C2 需扩 `execute_wave_structured` 接受 `WaveDispatchLimits` 并透传给 `dispatch_wave_inner`）
-- **C0–C4**（Runner Watchdog）：需要 U3 提供 dispatcher optional global deadline + `GlobalDeadlineExceeded` outcome。
+（无 — U3 Dispatcher Deadline 重构已在 `edf10e3` 完成，C 全部解锁）
