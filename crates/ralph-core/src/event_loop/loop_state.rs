@@ -89,6 +89,15 @@ pub struct LoopState {
     /// Whether the completion event has already been honored (prevents duplicate side effects).
     pub completion_honored: bool,
 
+    /// U3 P0 fix (post-review): sticky flag tracking whether a business
+    /// event has been accepted in the current isolated-mode turn.
+    /// Reset at the start of each new turn (in `process_output`).
+    /// Read by `check_default_publishes` so a `default_publishes` injection
+    /// cannot co-exist with a JSONL business event in the same turn, and
+    /// written by `check_default_publishes` so a later JSONL business event
+    /// in the same turn still hits the boundary_violation gate.
+    pub isolated_turn_business_event_accepted: bool,
+
     /// Per-hat activation counts (used for max_activations).
     pub hat_activation_counts: HashMap<HatId, u32>,
 
@@ -203,6 +212,7 @@ impl Default for LoopState {
             consecutive_hard_gates: 0,
             completion_requested: false,
             completion_honored: false,
+            isolated_turn_business_event_accepted: false,
             hat_activation_counts: HashMap::new(),
             exhausted_hats: HashSet::new(),
             last_checkin_at: None,

@@ -757,3 +757,201 @@ hats:
         "U3 coordinator: completion must be honored in coordinator mode"
     );
 }
+
+// ---------------------------------------------------------------------------
+// U3 P0 fix (post-review) — default_publishes must NOT bypass U3 authority
+// in isolated mode. Two regressions:
+//   (a) gate 1 (publish scope): if `default_publishes` is not in `publishes`,
+//       the injection is dropped with a `{hat}.scope_violation` diagnostic
+//       and `completion_requested` must NOT be set even when the topic
+//       matches the completion promise.
+//   (b) gate 2 (per-turn budget): if a JSONL business event was already
+//       accepted in the current turn, a `default_publishes` business-topic
+//       injection must be dropped with `event.isolation.boundary_violation`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_u3_p0_default_publishes_out_of_scope_rejected_with_scope_violation() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    // executor declares `default_publishes: LOOP_COMPLETE` but its
+    // `publishes` list only contains `build.done` — the default topic
+    // is *not* in the hat's declared scope. The P0 fix must drop the
+    // injection with a scope_violation diagnostic, NOT set
+    // completion_requested.
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+  completion_promise: LOOP_COMPLETE
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["build.done"]
+    default_publishes: LOOP_COMPLETE
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // Drive isolated mode: this hat is the currently-running isolated hat.
+    event_loop.state.current_isolated_hat = Some(HatId::new("executor"));
+    let captured = capture_bus_events(&mut event_loop);
+
+    // No JSONL events written by agent — `check_default_publishes` path triggers.
+    // (process_events_from_jsonl returns Ok(false) for empty file.)
+    let result = event_loop.process_events_from_jsonl().unwrap();
+    assert!(
+        !result.had_events,
+        "no JSONL events expected for empty file"
+    );
+
+    // The P0 fix: this call must NOT silently inject completion; it must
+    // emit a scope_violation diagnostic and return without publishing.
+    event_loop.check_default_publishes(&HatId::new("executor"));
+
+    assert!(
+        !event_loop.state.completion_requested,
+        "P0 fix: completion_requested must NOT be set when default_publishes \
+         is not in the hat's publishes list (this is the U3 bypass we are closing)"
+    );
+
+    // Verify the diagnostic was published to the bus.
+    let topics: Vec<String> = captured
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|e| e.topic.to_string())
+        .collect();
+    assert!(
+        topics.iter().any(|t| t == "executor.scope_violation"),
+        "P0 fix: expected executor.scope_violation diagnostic; got topics: {topics:?}"
+    );
+    // And the default_publishes event itself must NOT have been published.
+    assert!(
+        !topics.iter().any(|t| t == "LOOP_COMPLETE"),
+        "P0 fix: LOOP_COMPLETE must NOT be published when out-of-scope; got topics: {topics:?}"
+    );
+}
+
+#[test]
+fn test_u3_p0_default_publishes_after_business_event_rejected_with_boundary_violation() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    // worker has `publishes: [work.done, LOOP_COMPLETE]` and
+    // `default_publishes: LOOP_COMPLETE`. In a normal turn the agent
+    // writes ONE business event (`work.done`); the P0 fix must prevent
+    // the default_publishes injection from being accepted as a SECOND
+    // business event in the same turn.
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+  completion_promise: LOOP_COMPLETE
+hats:
+  worker:
+    name: "Worker"
+    triggers: ["work.start"]
+    publishes: ["work.done", "LOOP_COMPLETE"]
+    default_publishes: LOOP_COMPLETE
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    event_loop.state.current_isolated_hat = Some(HatId::new("worker"));
+    let captured = capture_bus_events(&mut event_loop);
+
+    // Agent writes exactly one business event this turn.
+    write_event_with_hat_to_jsonl(&events_path, "work.done", "done", "worker");
+    let result = event_loop.process_events_from_jsonl().unwrap();
+    assert!(result.had_events, "expected one accepted business event");
+    // Sticky per-turn budget flag is set after the JSONL business event is
+    // accepted — this is the cross-call handshake with check_default_publishes.
+    assert!(
+        event_loop.state.isolated_turn_business_event_accepted,
+        "P0 fix: isolated_turn_business_event_accepted must be set after a \
+         JSONL business event is accepted in the isolated branch"
+    );
+
+    // Now the orchestrator's process_output flow would call
+    // check_default_publishes because the loop wants to ensure a default
+    // event is published when the agent has not explicitly emitted one.
+    // P0 fix: this must be rejected with a boundary_violation diagnostic.
+    event_loop.check_default_publishes(&HatId::new("worker"));
+
+    let topics: Vec<String> = captured
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|e| e.topic.to_string())
+        .collect();
+
+    assert!(
+        topics
+            .iter()
+            .any(|t| t == "event.isolation.boundary_violation"),
+        "P0 fix: expected event.isolation.boundary_violation diagnostic when \
+         default_publishes would exceed the per-turn business-event budget; \
+         got topics: {topics:?}"
+    );
+    // The default_publishes event must NOT have been injected (no LOOP_COMPLETE
+    // from the default path this turn).
+    assert!(
+        !topics.iter().any(|t| t == "LOOP_COMPLETE"),
+        "P0 fix: LOOP_COMPLETE must NOT be injected when budget is exhausted; \
+         got topics: {topics:?}"
+    );
+    // And completion_requested must remain false (no second business event
+    // means no completion honor).
+    assert!(
+        !event_loop.state.completion_requested,
+        "P0 fix: completion_requested must NOT be set when default_publishes \
+         was rejected by the per-turn budget gate"
+    );
+}
+
+#[test]
+fn test_u3_p0_default_publishes_in_scope_still_works() {
+    // Positive test: when `default_publishes` IS in `publishes` AND the
+    // per-turn budget has not been consumed, the injection proceeds
+    // exactly like baseline behavior. This protects against an
+    // over-zealous fix that would break the happy path.
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+  completion_promise: LOOP_COMPLETE
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["build.done", "LOOP_COMPLETE"]
+    default_publishes: LOOP_COMPLETE
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+
+    // No JSONL business event — budget slot is free.
+    assert!(!event_loop.state.isolated_turn_business_event_accepted);
+
+    event_loop.check_default_publishes(&HatId::new("executor"));
+
+    assert!(
+        event_loop.state.completion_requested,
+        "P0 fix: completion_requested MUST still be set when default_publishes \
+         is in scope and the budget is free (happy path preservation)"
+    );
+    assert!(
+        event_loop.state.isolated_turn_business_event_accepted,
+        "P0 fix: budget slot must be claimed so a subsequent JSONL business \
+         event in the same turn would hit the boundary gate"
+    );
+}

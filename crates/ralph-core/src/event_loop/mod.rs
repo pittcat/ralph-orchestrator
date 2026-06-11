@@ -3464,40 +3464,130 @@ impl EventLoop {
     /// so the loop can terminate. Without this, completion events injected via
     /// `default_publishes` would only be published to the bus (triggering downstream hats)
     /// but never detected by `check_completion_event`, causing an infinite loop.
+    ///
+    /// **U3 P0 fix (post-review)**: in `execution_mode: isolated`, this path
+    /// runs *outside* `process_events_from_jsonl`'s scope enforcement, so we
+    /// must mirror the same two gates that path enforces for JSONL events:
+    ///
+    /// 1. **Publish scope gate** — `default_topic` must be in the hat's
+    ///    `publishes` list. If not, drop the injection and emit
+    ///    `{hat}.scope_violation` to keep `default_publishes` from being a
+    ///    back door around the U3 can_publish check.
+    /// 2. **Per-turn single-event budget** — the default_publishes injection
+    ///    counts as a business event for the current turn. Set
+    ///    `first_business_event_accepted` so a subsequent JSONL business
+    ///    event in the same turn hits `event.isolation.boundary_violation`
+    ///    (and vice versa: if a JSONL business event was already accepted
+    ///    this turn, drop the default_publishes injection and emit
+    ///    `event.isolation.boundary_violation`).
+    ///
+    /// Coordinator mode is unchanged: there is no per-turn budget, and the
+    /// `ralph` pseudo-hat's `RALPH_CONTROL_TOPICS` allowlist (in
+    /// `event_origin.rs`) still governs what the runtime fallback hat may
+    /// publish.
     pub fn check_default_publishes(&mut self, hat_id: &HatId) {
-        if let Some(config) = self.registry.get_config(hat_id)
-            && let Some(default_topic) = &config.default_publishes
+        let Some(config) = self.registry.get_config(hat_id) else {
+            return;
+        };
+        let Some(default_topic) = config.default_publishes.as_ref() else {
+            return;
+        };
+        let default_topic = default_topic.clone();
+        let default_topic_str = default_topic.as_str();
+
+        // U3 P0 fix — Gate 1: publish scope.
+        // In isolated mode, the current hat's `publishes` list is the
+        // authoritative scope; `default_publishes` must be a subset of it.
+        if self.config.event_loop.execution_mode == HatExecutionMode::Isolated
+            && !self.registry.can_publish(hat_id, default_topic_str)
         {
-            let default_event = Event::new(default_topic.as_str(), "").with_source(hat_id.clone());
-            let verdict_topics = self.verdict_gate_topics();
-            let verdict_topics_slice = verdict_topics.as_deref();
-            self.state
-                .record_verdict_if_match(&default_event, verdict_topics_slice);
-
-            debug!(
+            warn!(
                 hat = %hat_id.as_str(),
-                topic = %default_topic,
-                "No events written by hat, injecting default_publishes event"
+                topic = %default_topic_str,
+                "Isolated mode: default_publishes not declared in hat scope — dropping injection"
             );
-
-            self.state.record_event(&default_event);
-
-            // If the default topic is the completion promise, set the flag directly.
-            // The normal path (process_events_from_jsonl) sets this when reading from
-            // JSONL, but default_publishes bypasses JSONL entirely.
-            if default_topic.as_str() == self.config.event_loop.completion_promise
-                && !self.state.completion_honored
-            {
-                info!(
-                    hat = %hat_id.as_str(),
-                    topic = %default_topic,
-                    "default_publishes matches completion_promise — requesting termination"
-                );
-                self.state.completion_requested = true;
-            }
-
-            self.bus.publish(default_event);
+            let violation_topic = format!("{}.scope_violation", hat_id.as_str());
+            let violation_payload = format!(
+                "Isolated mode: hat '{}' cannot publish default topic '{}' (not in publishes)",
+                hat_id.as_str(),
+                default_topic_str
+            );
+            self.bus
+                .publish(Event::new(violation_topic, violation_payload));
+            return;
         }
+
+        // U3 P0 fix — Gate 2: per-turn single-event budget coordination.
+        // If a JSONL business event was already accepted in this turn
+        // (isolated_turn_business_event_accepted is sticky across
+        // process_events and check_default_publishes), dropping the default
+        // injection prevents two business events from being accepted in one
+        // turn.
+        if self.config.event_loop.execution_mode == HatExecutionMode::Isolated
+            && self.state.isolated_turn_business_event_accepted
+            && !crate::event_origin::is_orchestrator_control_topic(
+                default_topic_str,
+                self.config.event_loop.cancellation_promise.as_str(),
+            )
+        {
+            warn!(
+                hat = %hat_id.as_str(),
+                topic = %default_topic_str,
+                "Isolated mode: default_publishes would exceed per-turn business-event budget — dropping"
+            );
+            let diagnostic = Event::new(
+                "event.isolation.boundary_violation",
+                format!(
+                    "Isolated mode: default_publishes '{}' on hat '{}' dropped — one business event already accepted this turn",
+                    default_topic_str,
+                    hat_id.as_str()
+                ),
+            );
+            self.bus.publish(diagnostic);
+            return;
+        }
+
+        let default_event = Event::new(default_topic_str, "").with_source(hat_id.clone());
+        let verdict_topics = self.verdict_gate_topics();
+        let verdict_topics_slice = verdict_topics.as_deref();
+        self.state
+            .record_verdict_if_match(&default_event, verdict_topics_slice);
+
+        debug!(
+            hat = %hat_id.as_str(),
+            topic = %default_topic_str,
+            "No events written by hat, injecting default_publishes event"
+        );
+
+        self.state.record_event(&default_event);
+
+        // U3 P0 fix — claim the per-turn business-event budget slot when we
+        // actually inject (so a subsequent JSONL business event in the same
+        // turn will be rejected by the boundary check).
+        if self.config.event_loop.execution_mode == HatExecutionMode::Isolated
+            && !crate::event_origin::is_orchestrator_control_topic(
+                default_topic_str,
+                self.config.event_loop.cancellation_promise.as_str(),
+            )
+        {
+            self.state.isolated_turn_business_event_accepted = true;
+        }
+
+        // If the default topic is the completion promise, set the flag directly.
+        // The normal path (process_events_from_jsonl) sets this when reading from
+        // JSONL, but default_publishes bypasses JSONL entirely.
+        if default_topic_str == self.config.event_loop.completion_promise
+            && !self.state.completion_honored
+        {
+            info!(
+                hat = %hat_id.as_str(),
+                topic = %default_topic_str,
+                "default_publishes matches completion_promise — requesting termination"
+            );
+            self.state.completion_requested = true;
+        }
+
+        self.bus.publish(default_event);
     }
 
     /// Returns a mutable reference to the event bus for direct event publishing.
@@ -3526,6 +3616,10 @@ impl EventLoop {
         } else {
             self.state.current_isolated_hat = None;
         }
+        // U3 P0 fix: reset the per-turn business-event budget at every turn
+        // boundary so `check_default_publishes` and `process_parse_result`
+        // see a consistent view of "what has been accepted this turn".
+        self.state.isolated_turn_business_event_accepted = false;
 
         // Periodic robot check-in
         if let Some(interval_secs) = self.config.robot.checkin_interval_seconds
@@ -4117,6 +4211,11 @@ impl EventLoop {
                 } else {
                     accepted.push(event);
                     first_business_event_accepted = true;
+                    // U3 P0 fix: write the sticky per-turn budget flag so
+                    // `check_default_publishes` (which runs later in the same
+                    // turn when JSONL had zero events, or earlier when JSONL
+                    // had business events) sees a consistent view.
+                    self.state.isolated_turn_business_event_accepted = true;
                 }
             }
             accepted

@@ -488,6 +488,7 @@ mod tests {
             consecutive_hard_gates: 0,
             completion_requested: false,
             completion_honored: false,
+            isolated_turn_business_event_accepted: false,
             hat_activation_counts: std::collections::HashMap::new(),
             exhausted_hats: std::collections::HashSet::new(),
             last_checkin_at: None,
