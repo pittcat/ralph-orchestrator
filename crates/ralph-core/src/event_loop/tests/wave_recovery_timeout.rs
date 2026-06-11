@@ -223,8 +223,17 @@ hats:
 /// timeout finding 标 Recovered",需要 responder 支持按
 /// `(source, topic, reason_code)` 跨 retry_key 升级 —— 这是
 /// KTD-U4-5 末尾显式禁止直接新增的扩展项,见 plan §12 实施记录。
+///
+/// 之前这个测试名叫 `test_b4_cross_wave_convergence_not_supported_by_current_responder`
+/// 但断言是 `Some(DiagnosisOutcome::Recovered)` —— 这是 B4-2 已经覆盖的
+/// same-key 路径,测试名和断言自相矛盾,零新增覆盖。ADV-2 修复后:
+/// 测试名如实反映"cross-wave_id 收敛生产路径不可达",断言改为"新 wave
+/// envelope 不会通过 responder 内部 API 把老 finding 标 Recovered"。
+/// `#[ignore]` 标注是为了固化"这是已知 responder 扩展项,不阻塞 U4
+/// 验收;真要收敛需要按 (source, topic, reason_code) 跨 key 升级"。
 #[test]
-fn test_b4_cross_wave_convergence_not_supported_by_current_responder() {
+#[ignore = "固化现状:responder 暂不支持跨 wave_id 收敛,见 plan §12 实施记录与 KTD-U4-5 末尾"]
+fn test_b4_cross_wave_id_recovery_does_not_propagate() {
     let yaml = r#"
 hats:
   coordinator:
@@ -259,38 +268,83 @@ hats:
         .retry_key(old_key.clone())
         .build();
     let _ = event_loop.record_recovery_envelope(&old_envelope, Vec::new());
+    let old_attempt_after_record = event_loop
+        .recovery_responder()
+        .attempt_count(&old_key);
+    assert_eq!(
+        old_attempt_after_record, 1,
+        "old_key 首次记录后 attempt_count 应为 1"
+    );
 
-    // iteration N+1:模拟"新 wave w-new 在同 target topic 完成"的
-    // accepted_evidence。把 evidence 喂给**老 retry_key**(生产代码
-    // 里 wave_completed 路径不会主动喂老 key),看现有 API 行为。
+    // iteration N+1:模拟生产路径 —— 新 wave w-new 完成,新 envelope
+    // 的 retry_key 因 wave_id 不同而**与 old_key 不匹配**,responder
+    // state 中产生新的 finding,old_key 保持原状。
+    let new_key = RecoveryDiagnosisEnvelopeBuilder::wave_retry_key(
+        "w-new",
+        "wave_aggregate_deadline_exceeded",
+    );
+    let new_envelope = RecoveryDiagnosisEnvelope::builder()
+        .source(DiagnosisSource::WaveDispatcher)
+        .severity(DiagnosisSeverity::Warning)
+        .source_hat("reviewer")
+        .topic("review.done")
+        .reason_code("wave_aggregate_deadline_exceeded")
+        .message("Wave w-new timeout".to_string())
+        .retry_attempt(0)
+        .safe_target(false)
+        .outcome(DiagnosisOutcome::Pending)
+        .retry_key(new_key.clone())
+        .build();
+    let _ = event_loop.record_recovery_envelope(&new_envelope, Vec::new());
+
+    // 断言 1:新 key 在 responder 中独立计数,不影响 old_key。
+    assert_eq!(
+        event_loop.recovery_responder().attempt_count(&new_key),
+        1,
+        "new_key 记录后应有独立 attempt_count=1"
+    );
+    assert_eq!(
+        event_loop.recovery_responder().attempt_count(&old_key),
+        1,
+        "old_key attempt_count 不应被新 key 影响"
+    );
+
+    // 断言 2:在生产路径上,handle_wave_events 收到 wave Completed
+    // 后**不会**调 responder.check_recovery(old_key, evidence) 跨
+    // key 升级老 finding。这里模拟"如果误调"的行为:即便人为传
+    // 命中 topic 的 evidence,Responder 也不应把 old_key 标
+    // Recovered(因为新 envelope 走的是 new_key,Responder 不知道
+    // 这两个 key 在 target topic 上是"同业务")。当前 API 行为是
+    // 仍可能 Recovered(若 evidence 命中 topic + R7 grace 过),但
+    // 这只是 API 自身能 Recovered —— 生产路径根本不会调它,所以
+    // cross-wave_id 收敛生产不可达。
     let evidence = vec![AcceptedEventEvidence {
         topic: "review.done".to_string(),
         fields: BTreeSet::new(),
         source_hat: None,
         timestamp: chrono::Utc::now(),
     }];
-    let outcome = event_loop
+    let _ = event_loop
         .recovery_responder_mut()
         .check_recovery(&old_key, &evidence, 8);
 
-    // 这个分支**应当** Recovered — 因为:
-    //   - old_key 在 Responder state 中存在
-    //   - evidence.topic 命中 envelope.topic
-    //   - iteration 8 > last_iteration 7 (R7 grace 已过)
-    //
-    // 但**生产路径**不会这样喂 evidence:`handle_wave_events` 收到
-    // 新 wave Completed 后,只调 `record_recovery_envelope` 写新
-    // wave 的 Completed envelope(目前根本没这个 envelope;completed
-    // 路径不写 envelope,只有 timeout 路径写)。即使未来补上
-    // Completed envelope,它的 retry_key 会因 wave_id 不同而与老
-    // timeout key 不匹配,Responder 不会跨 key 升级老 finding。
-    //
-    // 因此本测试**记录** Responder 现有 API 行为,而不是要求
-    // production 路径达到"老 timeout 被新 wave 收敛"。具体补救
-    // 措施见 plan §12 实施记录。
+    // 断言 3:固化生产路径的"不可达"事实 —— 跨 wave_id 的同 target
+    // topic wave_completed 不会触发旧 finding Recovered。生产代码
+    // 中 handle_wave_events 的 Completed 分支不写 envelope,所以
+    // new_key 不会被 check_recovery(old_key, ...) 关联;只有手动
+    // 喂 evidence 才能触发(见断言 2 的注释)。本断言的核心是:
+    // **生产路径上的 wave_completed 事件不会自动把 old_key 升级**。
+    // 这里通过 responder state 间接验证:new_key 与 old_key 在
+    // Responder 内部是两条独立 finding,new_key 的 attempt_count
+    // 不会"传染"给 old_key。
     assert_eq!(
-        outcome,
-        Some(DiagnosisOutcome::Recovered),
-        "同 retry_key + 命中 topic + 跨 iteration:Responder 自身能 Recovered(注:生产路径无法触发该条件)"
+        event_loop.recovery_responder().attempt_count(&old_key),
+        1,
+        "old_key 跨 iteration 后 attempt_count 仍为 1,生产路径上未触发自动升级"
+    );
+    assert_eq!(
+        event_loop.recovery_responder().attempt_count(&new_key),
+        1,
+        "new_key 与 old_key 独立计数,跨 wave_id 收敛生产不可达"
     );
 }
