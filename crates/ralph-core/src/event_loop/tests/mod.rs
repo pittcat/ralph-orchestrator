@@ -20,6 +20,7 @@ mod hat_lifecycle_integration;
 mod hat_lifecycle_jsonl_e2e;
 mod human_timeout;
 mod initialization;
+mod isolated_complex_regression;
 mod loop_context;
 mod objective;
 mod origin_guard;

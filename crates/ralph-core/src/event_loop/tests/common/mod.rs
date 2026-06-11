@@ -6,6 +6,31 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+/// P2 finding #8: shared `init_git_workspace` helper. Both
+/// `isolated_complex_regression.rs` and the ralph-cli `loop_runner`
+/// tests had near-identical copies of this routine; consolidating
+/// here avoids drift. The function takes a writable directory
+/// (typically a `tempfile::TempDir` path) and turns it into a
+/// minimal git repo with one commit, so the loop's
+/// `check_termination()` workspace-validity path returns OK.
+pub(super) fn init_git_workspace(workspace: &Path) {
+    use std::process::Command;
+    let run = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(workspace)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?} failed: {e}"))
+    };
+    run(&["init", "--initial-branch=main"]);
+    run(&["config", "user.email", "test@test.local"]);
+    run(&["config", "user.name", "Test User"]);
+    std::fs::write(workspace.join(".gitignore"), ".ralph/\n").unwrap();
+    std::fs::write(workspace.join("README.md"), "# Test\n").unwrap();
+    run(&["add", ".gitignore", "README.md"]);
+    run(&["commit", "-m", "init"]);
+}
+
 /// Helper to write an event to a JSONL file for testing.
 pub(super) fn write_event_to_jsonl(path: &std::path::Path, topic: &str, payload: &str) {
     use std::io::Write;

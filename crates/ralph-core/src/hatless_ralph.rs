@@ -325,7 +325,7 @@ impl HatlessRalph {
     ///
     /// Squashes multiple guidance messages into a numbered list format.
     /// Returns an empty string if no guidance is pending.
-    fn collect_robot_guidance(&self) -> String {
+    pub(crate) fn collect_robot_guidance(&self) -> String {
         if self.robot_guidance.is_empty() {
             return String::new();
         }

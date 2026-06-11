@@ -450,8 +450,14 @@ fn capture_bus_events(event_loop: &mut EventLoop) -> std::sync::Arc<std::sync::M
 
 /// U3.F4: an isolated hat that does NOT declare the completion promise
 /// in its `publishes` list emits `LOOP_COMPLETE` directly. The
-/// event must be rejected with a `{hat}.scope_violation` diagnostic
-/// (no business event must be accepted, no completion must be honored).
+/// event must be rejected with an `event.isolation.boundary_violation`
+/// diagnostic (no business event must be accepted, no completion
+/// must be honored).  The P1 finding #11 fix moved the topic from
+/// `{hat}.scope_violation` to the canonical orchestrator diagnostic
+/// topic `event.isolation.boundary_violation` (hat name in payload).
+/// The P1 finding #1 fix means `had_events` is true because the
+/// recovery event is admitted — we therefore assert the rejection
+/// via `completion_requested` and the diagnostic topic instead.
 #[test]
 fn test_u3_isolated_hat_undeclared_completion_rejected_with_scope_violation() {
     use tempfile::TempDir;
@@ -482,16 +488,12 @@ hats:
     // Agent emits LOOP_COMPLETE while in executor's isolated slot.
     write_event_with_hat_to_jsonl(&events_path, "LOOP_COMPLETE", "premature done", "executor");
 
-    let result = event_loop.process_events_from_jsonl().unwrap();
+    let _result = event_loop.process_events_from_jsonl().unwrap();
     assert!(
         !event_loop.state.completion_requested,
         "U3.F4: completion_requested must NOT be set when isolated hat has no publish scope over LOOP_COMPLETE"
     );
-    assert!(
-        !result.had_events,
-        "U3.F4: undeclared completion promise must not be accepted as a business event"
-    );
-    // A scope_violation diagnostic must have been published to the bus.
+    // A boundary_violation diagnostic must have been published to the bus.
     let topics: Vec<String> = captured
         .lock()
         .unwrap()
@@ -499,8 +501,10 @@ hats:
         .map(|e| e.topic.to_string())
         .collect();
     assert!(
-        topics.iter().any(|t| t == "executor.scope_violation"),
-        "U3.F4: expected executor.scope_violation diagnostic; got topics: {topics:?}"
+        topics
+            .iter()
+            .any(|t| t == "event.isolation.boundary_violation"),
+        "U3.F4: expected event.isolation.boundary_violation diagnostic; got topics: {topics:?}"
     );
 }
 

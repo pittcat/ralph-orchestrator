@@ -2055,8 +2055,11 @@ impl EventLoop {
     /// - Multi-hat mode (custom hats defined): Always returns "ralph" if ANY hat has pending events
     ///
     /// **Isolated mode** uses round-robin scheduling via
-    /// `EventBus::select_next_hat_with_pending` to guarantee starvation-free fair
-    /// selection among all pending hats.
+    /// `EventBus::select_next_hat_with_pending` to guarantee fair selection
+    /// among all pending hats. The cursor is anchored in the full
+    /// registered hat order, so a hat whose queue is drained or
+    /// deregistered does not reset the cursor to the lexicographic first
+    /// non-empty hat.
     ///
     /// **NOTE**: This method takes `&mut self` because isolated-mode round-robin
     /// advances the bus's internal cursor.
@@ -2791,6 +2794,19 @@ impl EventLoop {
                 .instruction_builder
                 .build_custom_hat(hat, &events_context);
 
+            // Inject the cached `human.guidance` text as a `## ROBOT GUIDANCE`
+            // block so isolated hats (whose `build_custom_hat` template does
+            // not read `ralph.robot_guidance` on its own) still see the
+            // guidance that was just persisted to the scratchpad. We must
+            // call this BEFORE `clear_robot_guidance()` below, otherwise the
+            // in-memory copy is gone.
+            let guidance_section = self.ralph.collect_robot_guidance();
+            let base_prompt = if guidance_section.is_empty() {
+                base_prompt
+            } else {
+                format!("{guidance_section}{base_prompt}")
+            };
+
             // Apply prepend pipeline (SAME order as coordinator path)
             self.ralph.clear_robot_guidance();
             let base_prompt = self.inject_phase_into_prompt(base_prompt);
@@ -2939,6 +2955,14 @@ impl EventLoop {
         }
 
         self.ralph.set_robot_guidance(self.robot_guidance.clone());
+        // P1 finding #4 (test isolation): clear the EventLoop-level
+        // cache after the ralph copy has been set, so a subsequent
+        // build_prompt call for a different hat does NOT re-inject
+        // the same guidance. Without this, the guidance would leak
+        // to any hat whose build_prompt is called in the same loop
+        // iteration, breaking R9. The scratchpad persistence path
+        // is independent (it writes to disk) and unaffected.
+        self.robot_guidance.clear();
     }
 
     /// Prepends auto-injected skill content to the prompt.
@@ -4370,14 +4394,129 @@ impl EventLoop {
                         topic = %event.topic,
                         "Isolated mode: event out of hat scope — dropping"
                     );
-                    let violation_topic = format!("{}.scope_violation", isolated_hat.as_str());
-                    let violation_payload = format!(
-                        "Isolated mode: hat '{}' cannot publish topic '{}'",
-                        isolated_hat.as_str(),
-                        event.topic
+                    // P1 finding #11: use the canonical orchestrator
+                    // diagnostic topic from the allowlist, embedding the
+                    // hat name in the payload. This keeps the bus surface
+                    // uniform with the rest of the diagnostic taxonomy
+                    // and ensures the entry survives the
+                    // `is_orchestrator_diagnostic_topic` allowlist check
+                    // on subsequent reads.
+                    let violation = Event::new(
+                        "event.isolation.boundary_violation",
+                        format!(
+                            "{{\"hat\":\"{}\",\"topic\":\"{}\",\"violation\":\"Isolated mode: hat '{}' cannot publish topic '{}'\"}}",
+                            isolated_hat.as_str(),
+                            event.topic,
+                            isolated_hat.as_str(),
+                            event.topic
+                        ),
                     );
-                    let violation = Event::new(violation_topic, violation_payload);
                     self.bus.publish(violation);
+                    // U2: publish a targeted `task.resume` to the
+                    // source hat so the next turn the rejected hat
+                    // gets reactivated with explicit recovery context.
+                    // Without this hook, an isolated hat that emits an
+                    // out-of-scope terminal-style topic (e.g. an
+                    // unauthorized `LOOP_COMPLETE`) would never see a
+                    // recovery signal — the loop would simply drop the
+                    // event and stay silent, breaking R8 / R11
+                    // (targeted task.resume contract).  The recovery
+                    // payload names the rejected topic and the allowed
+                    // publishes so the agent can re-emit a legal one
+                    // on its next turn.
+                    let allowed: Vec<String> = self
+                        .registry
+                        .get_config(isolated_hat)
+                        .map(|c| c.publishes.iter().map(|t| t.to_string()).collect())
+                        .unwrap_or_default();
+                    // P1 finding #6: dedup — if the target hat already
+                    // has a pending `task.resume` (with the same
+                    // `stage=isolated_scope` origin), skip injection.
+                    // Each isolated violation turn would otherwise
+                    // stack duplicate recovery events on the same
+                    // queue, causing event-storm behaviour in loops
+                    // that repeatedly re-attempt the same illegal
+                    // publish (e.g. an agent that never learns). The
+                    // dedup key is (target_hat, topic=task.resume) so
+                    // multiple distinct source-hats can still each
+                    // receive one recovery event per turn.
+                    let already_pending_recovery = self
+                        .bus
+                        .peek_pending(isolated_hat)
+                        .map(|events| {
+                            events
+                                .iter()
+                                .any(|e| e.topic.as_str() == "task.resume")
+                        })
+                        .unwrap_or(false);
+                    if !already_pending_recovery {
+                        // P1 finding #10: build the payload through the
+                        // shared helper so the format matches the
+                        // rejection pipeline and downstream consumers
+                        // (U6 responder, U5 drift) can rely on a
+                        // single schema.  The helper expects a
+                        // `Rejection` — for the U2 isolated_scope path
+                        // we construct one inline.
+                        let rejection = crate::event_loop::rejection::Rejection {
+                            stage: crate::event_loop::rejection::RejectionStage::Origin,
+                            source_hat: Some(isolated_hat.to_string()),
+                            business_hat: None,
+                            topic: event.topic.to_string(),
+                            violation: format!(
+                                "hat '{}' cannot publish '{}' in isolated mode",
+                                isolated_hat.as_str(),
+                                event.topic
+                            ),
+                            retry_key: format!(
+                                "{}:{}:isolated_scope",
+                                isolated_hat.as_str(),
+                                event.topic
+                            ),
+                            retry_eligible: true,
+                            non_retryable_reason: None,
+                            target_hat: Some(isolated_hat.to_string()),
+                        };
+                        let resume_payload = crate::event_loop::rejection::build_task_resume_payload(
+                            &rejection,
+                            &allowed,
+                            &[],
+                            None,
+                            None,
+                        );
+                        let recovery = Event::new("task.resume", resume_payload)
+                            .with_target(isolated_hat.clone());
+                        let recovery_target = recovery.target.clone();
+                        let recovery_payload = recovery.payload.clone();
+                        self.bus.publish(recovery);
+                        // P1 finding #1: also push the synthetic
+                        // `task.resume` into the local `accepted` vector
+                        // so the JSONL-derived `accepted_events` (used
+                        // downstream to compute `had_events` for the
+                        // turn) sees the recovery. Without this, a
+                        // turn that contains only a rejected out-of-scope
+                        // event would otherwise yield `had_events =
+                        // false`, causing the loop runner to treat the
+                        // turn as empty and not advance. The recovery
+                        // stays targeted to the source hat via the
+                        // bus.publish above — the `accepted` push only
+                        // ensures the turn is reported as active.
+                        //
+                        // `accepted` here is `Vec<JsonlEvent>`
+                        // (= `event_reader::Event`); we build one from
+                        // the recovery's fields.
+                        let resume_jsonl = crate::event_reader::Event {
+                            topic: "task.resume".to_string(),
+                            payload: Some(recovery_payload),
+                            ts: chrono::Utc::now().to_rfc3339(),
+                            hat: None,
+                            triggered: recovery_target.map(|t| t.to_string()),
+                            source: None,
+                            wave_id: None,
+                            wave_index: None,
+                            wave_total: None,
+                        };
+                        accepted.push(resume_jsonl);
+                    }
                     continue;
                 }
 

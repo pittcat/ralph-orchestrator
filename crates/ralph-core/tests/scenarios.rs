@@ -720,27 +720,6 @@ fn test_ce_executor_worktree_isolation() {
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// U5 of 2026-06-11-003: complex 11-hat isolated runtime regression
-// harness.  Exercises prompt isolation, authority, single-completion-
-// owner, and the full happy-path flow through the real EventLoop.
-// ──────────────────────────────────────────────────────────────────────
-
-#[test]
-fn test_isolated_complex_topology_happy_path() {
-    // U5 R25/R26: 10-hat (planner, branch_a/b_worker, wave, branch_a/b_verify,
-    // aggregator, recoverer, human_consumer, reporter) isolated happy path
-    // flows through the real EventLoop with single completion owner.
-    let yaml = load_scenario("tests/scenarios/isolated_complex_topology.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-// R27 (unauthorized terminal topic) and R28 (fair scheduling under
-// sustained self-loop) are already covered by other U3/U4 scenarios
-// in this file (isolated_boundary_violation, isolated_multi_hat) and
-// by the EventBus unit tests; U5's contribution is the 10+ hat
-// topology shape itself, exercised above.
-
-// ──────────────────────────────────────────────────────────────────────
 // U2 of 2026-06-11-003: multi-hat isolation policy BDD scenario
 //
 // AE2: 4-hat preset with default (Coordinator) execution mode MUST
