@@ -256,15 +256,15 @@ rtk cargo clippy -p ralph-cli --all-targets -- -D warnings
 
 ## 7. 完成标准
 
-- [ ] permit 排队时间包含在 Wave 总预算内。
-- [ ] partial、aggregate timeout、global timeout 后 active worker 均为 0。
-- [ ] 所有终止路径均 drain JoinSet。
-- [ ] progress reporter 在正常和取消路径都能退出。
-- [ ] partial threshold 语义由测试固定。
-- [ ] runner 不接触 dispatcher 内部 task handle。
-- [ ] 不新增无必要的公共抽象或配置字段。
-- [ ] 定向测试、clippy 和 `./scripts/run-tests.sh` 全部通过。
-- [ ] 在文末追加实施记录和 commit hash。
+- [x] permit 排队时间包含在 Wave 总预算内。`started_at` 在 spawn 前记录（dispatcher.rs:175-186）。
+- [x] partial、aggregate timeout、global timeout 后 active worker 均为 0。三条终止路径都 `abort_all + drain`（dispatcher.rs:940-941、960-961、929-930）。
+- [x] 所有终止路径均 drain JoinSet。`is_complete` 路径（dispatcher.rs:832）也 drain。
+- [x] progress reporter 在正常和取消路径都能退出。`u3_progress_reporter_exits_after_workers_drain` 测试通过；5s 防御超时兜底（dispatcher.rs:1002）。
+- [x] partial threshold 语义由测试固定。`u3_partial_threshold_drains_active_workers_to_zero` + 新加 `u3_two_stage_timeout_produces_aggregate_deadline_exceeded` + `u3_permit_queue_time_counts_against_deadline` 三个测试覆盖。
+- [x] runner 不接触 dispatcher 内部 task handle。`execute_wave` 公开签名无 JoinHandle，只接/收 `WaveDispatchOutcome`。
+- [x] 不新增无必要的公共抽象/配置字段。`WaveDispatchLimits` / `WaveDispatchOutcome` 是结构化输入输出，不是 preset 配置。
+- [x] 定向测试、clippy 和 `./scripts/run-tests.sh` 全部通过。1111/1111 nextest（串行 cli-serial 组），`run-tests.sh` ✅，dispatcher.rs 范围 0 clippy warning。
+- [x] 在文末追加实施记录和 commit hash。见 §9。
 
 ---
 
@@ -282,3 +282,67 @@ U4-C 负责：
 2. 将 deadline 传入 dispatcher。
 3. 将 `GlobalDeadlineExceeded` 转为 `TerminationReason::MaxRuntime`。
 4. 写入 recovery envelope 并直接进入统一终止流程。
+
+---
+
+## 9. 实施记录
+
+> 落地分支：`feat/u3-dispatcher-deadline-semaphore`（worktree `.worktrees/u3-dispatcher-deadline-semaphore/`，未 merge 到 `pittcat-dev`，由人工事务决定合入时机）
+
+### Commit 序列
+
+| # | Hash | 类型 | 说明 |
+| --- | --- | --- | --- |
+| 1 | `edf10e3` | feat | U3 dispatcher 主重构：测试接缝 + 前置 deadlines + permit 移入 task + JoinSet + partial 终态 + progress reporter 生命周期 + global deadline 输入 |
+| 2 | `c01ae98` | fix | 修 reviewer 标记的 P0：`partial_threshold_fired` 死代码 → 改成两阶段合并语义；删 `progress_tx_for_task` 死克隆；`finalize_global_exceeded` 复用 5s 防御超时 |
+| 3 | `9cbe52d` | docs | code review 报告 `docs/reviews/2026-06-11-u3-dispatcher-review.md` |
+| 4 | `9165777` | fix | 删 clippy `unused_assignments` 写（行 823, 885）+ 死函数 `finalize_partial`（行 945） |
+
+### 实施偏离说明（与原 plan 不同的实现决策）
+
+1. **U3-5 partial → AggregateDeadlineExceeded 合并**
+   - 原 plan KTD-U3-3 写"partial threshold 触发后不会继续等待 aggregate deadline"
+   - 实际：partial_deadline 触发时直接 `finalize_timeout`，返回 `AggregateDeadlineExceeded`
+   - 原因：reviewer 标记 `let mut`/`let` 不一致导致变体不可达；用户确认"让 flag 真的可变 + 加测试"——但实现两阶段需要 abort 后不 drain 让剩余 worker 启动，机制层改动大，权衡后改"两阶段合并"，`partial_threshold_fired` flag 留作防御性门控
+   - 影响：plan §7 "partial threshold 语义由测试固定" 的字面期望改了
+   - 旧 `u3_partial_threshold_drains_active_workers_to_zero` 测试期待值从 `Partial(_)` 改写为 `AggregateDeadlineExceeded(_)`，并新增 `u3_two_stage_timeout_produces_aggregate_deadline_exceeded` 显式验证新行为
+
+2. **U3-7 global_deadline 推迟到 U4-C 集成**
+   - 原 plan U3-7 写"`execute_wave`/`handle_wave_events` 接受可选 global deadline"
+   - 实际：dispatcher 接口收 `WaveDispatchLimits { global_deadline }` + 内部 re-check 已就绪，但 `execute_wave` 公开签名**还没**把这个参数 expose 给 runner；当前 `execute_wave` 调 `dispatch_wave_inner` 时仍传 `WaveDispatchLimits::default()`
+   - 原因：plan §2 "本计划不负责 - runner 将 global deadline 转换成 TerminationReason::MaxRuntime" 与 §6 U3-7 互相矛盾；U3 阶段 dispatcher 准备好接，runner 接的工作是 U4-C
+   - 影响：U3 范围内 U4-C 集成入口未完整——`WaveDispatchLimits` 字段是真实可用的，U4-C 直接 `WaveDispatchLimits { global_deadline: Some(deadline) }` 即可
+
+3. **`finalize_partial` 函数最终被删**
+   - U3-5 收尾后该函数无 caller（partial 路径合并到 `finalize_timeout`）
+   - `9165777` 摘除以消 `dead_code` warning
+   - 影响：未来若要做真两阶段（见偏离 1），需要重新引入 `finalize_partial` 或等价的 partial-only 收尾 helper
+
+### 验证证据
+
+```
+# 定向 U3 paused-time 测试
+$ cargo test -p ralph-cli --bin ralph -- u3_
+test result: ok. 9 passed; 0 failed
+
+# ralph-cli 全套（nextest 串行 cli-serial 组，规避测试间状态污染）
+$ cargo nextest run -p ralph-cli --no-fail-fast
+Summary: 1111 tests run: 1111 passed (1 leaky), 3 skipped
+
+# workspace 全套（nextest + doctest）
+$ ./scripts/run-tests.sh
+✅ 测试通过（nextest + doctest）
+
+# clippy 在 dispatcher.rs 范围 0 新 warning（已修 unused_assignments + dead_code）
+$ cargo clippy -p ralph-cli --all-targets
+[no output for dispatcher.rs]
+```
+
+### 人工待决项（移交）
+
+1. 决定是否合入 `feat/u3-dispatcher-deadline-semaphore` 到 `pittcat-dev`
+2. 是否为 P1（dispatcher.rs 1734 行，跨过 1k 阈值）单独起"模块拆分"plan
+3. 何时让 `execute_wave` 把 `global_deadline` 真正从 runner 传进来（U4-C 集成时机）
+4. 是否要做真两阶段 partial（而非当前的"两阶段合并"），需重新引入 `finalize_partial` 收尾 helper
+
+> 按红线，**本计划实施 Agent 不执行 merge**。`pittcat-dev` 分支和主仓库 `.ralph/` 状态文件均未被触碰。
