@@ -415,3 +415,345 @@ hats:
         "U9.4 baseline: strict event_policy does not short-circuit no-hat build.done (drift = event_policy pre-origin gate changed)"
     );
 }
+
+// ---- U3: close isolated terminal authority and turn-budget bypasses ----
+//
+// U3 spec: in isolated mode, completion promises and other agent terminal
+// topics (review verdicts, report completion) must be treated as
+// publishes, not as orchestrator control topics. They go through the
+// normal `can_publish` + single-event budget path. Only true
+// orchestrator-internal events (`task.resume`, `human.guidance`,
+// `loop.cancel`, `event.*` diagnostics) bypass the budget.
+//
+// These tests use a private observer to inspect what reaches the bus,
+// and inject an isolated hat to drive `process_parse_result` into the
+// isolated-mode branch.
+
+/// Capture all events published to the bus for inspection.
+fn capture_bus_events(event_loop: &mut EventLoop) -> std::sync::Arc<std::sync::Mutex<Vec<Event>>> {
+    use std::sync::{Arc, Mutex};
+    let captured: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let cap = captured.clone();
+    event_loop.bus.add_observer(move |event: &Event| {
+        cap.lock().unwrap().push(Event {
+            topic: event.topic.clone(),
+            payload: event.payload.clone(),
+            source: event.source.clone(),
+            target: event.target.clone(),
+            wave_id: event.wave_id.clone(),
+            wave_index: event.wave_index,
+            wave_total: event.wave_total,
+        });
+    });
+    captured
+}
+
+/// U3.F4: an isolated hat that does NOT declare the completion promise
+/// in its `publishes` list emits `LOOP_COMPLETE` directly. The
+/// event must be rejected with a `{hat}.scope_violation` diagnostic
+/// (no business event must be accepted, no completion must be honored).
+#[test]
+fn test_u3_isolated_hat_undeclared_completion_rejected_with_scope_violation() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    // executor publishes build.done but does NOT publish LOOP_COMPLETE.
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+  completion_promise: LOOP_COMPLETE
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["build.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // Drive isolated mode: set the current isolated hat to executor.
+    event_loop.state.current_isolated_hat = Some(HatId::new("executor"));
+    let captured = capture_bus_events(&mut event_loop);
+
+    // Agent emits LOOP_COMPLETE while in executor's isolated slot.
+    write_event_with_hat_to_jsonl(&events_path, "LOOP_COMPLETE", "premature done", "executor");
+
+    let result = event_loop.process_events_from_jsonl().unwrap();
+    assert!(
+        !event_loop.state.completion_requested,
+        "U3.F4: completion_requested must NOT be set when isolated hat has no publish scope over LOOP_COMPLETE"
+    );
+    assert!(
+        !result.had_events,
+        "U3.F4: undeclared completion promise must not be accepted as a business event"
+    );
+    // A scope_violation diagnostic must have been published to the bus.
+    let topics: Vec<String> = captured
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|e| e.topic.to_string())
+        .collect();
+    assert!(
+        topics.iter().any(|t| t == "executor.scope_violation"),
+        "U3.F4: expected executor.scope_violation diagnostic; got topics: {topics:?}"
+    );
+}
+
+/// U3.AE5: an isolated hat that DOES declare the completion promise
+/// in `publishes` emits `LOOP_COMPLETE`. The event enters the
+/// normal completion safety checks (completion_requested set,
+/// termination reason CompletionPromise).
+#[test]
+fn test_u3_isolated_hat_declared_completion_enters_safety_check() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    // executor DOES publish LOOP_COMPLETE — declared authority.
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+  completion_promise: LOOP_COMPLETE
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["build.done", "LOOP_COMPLETE"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    event_loop.state.current_isolated_hat = Some(HatId::new("executor"));
+
+    write_event_with_hat_to_jsonl(&events_path, "LOOP_COMPLETE", "Done", "executor");
+
+    let _ = event_loop.process_events_from_jsonl().unwrap();
+    assert!(
+        event_loop.state.completion_requested,
+        "U3.AE5: declared completion must set completion_requested"
+    );
+    let reason = event_loop.check_completion_event();
+    assert_eq!(
+        reason,
+        Some(TerminationReason::CompletionPromise),
+        "U3.AE5: declared completion must reach the existing completion safety check"
+    );
+}
+
+/// U3 boundary: an isolated hat that publishes a legal business event
+/// first, then a declared completion promise in the same turn —
+/// the completion is the second business event and must be
+/// rejected with a boundary_violation diagnostic. The first
+/// event is accepted, completion is NOT honored.
+#[test]
+fn test_u3_isolated_hat_business_then_completion_boundary_violation() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+  completion_promise: LOOP_COMPLETE
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["build.done", "LOOP_COMPLETE"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    event_loop.state.current_isolated_hat = Some(HatId::new("executor"));
+    let captured = capture_bus_events(&mut event_loop);
+
+    // Order: business first, then completion — both from executor.
+    write_event_with_hat_to_jsonl(&events_path, "build.done", "ok", "executor");
+    write_event_with_hat_to_jsonl(&events_path, "LOOP_COMPLETE", "Done", "executor");
+
+    let result = event_loop.process_events_from_jsonl().unwrap();
+    assert!(
+        result.had_events,
+        "U3 boundary: first business event must be accepted"
+    );
+    assert!(
+        !event_loop.state.completion_requested,
+        "U3 boundary: second event (completion) must be rejected — completion must NOT be honored"
+    );
+    let topics: Vec<String> = captured
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|e| e.topic.to_string())
+        .collect();
+    assert!(
+        topics
+            .iter()
+            .any(|t| t == "event.isolation.boundary_violation"),
+        "U3 boundary: expected event.isolation.boundary_violation diagnostic; got topics: {topics:?}"
+    );
+}
+
+/// U3 boundary: an isolated hat publishes a declared completion
+/// promise first, then a business event in the same turn — the
+/// completion consumes the budget, the second event must be
+/// rejected with a boundary_violation diagnostic.
+#[test]
+fn test_u3_isolated_hat_completion_then_business_boundary_violation() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    // Use a topic that is NOT `build.done` to avoid the
+    // backpressure-induced `build.blocked` synthesis that pollutes
+    // the captured topics with a successful orchestration event.
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+  completion_promise: LOOP_COMPLETE
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["experiment.ready", "LOOP_COMPLETE"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    event_loop.state.current_isolated_hat = Some(HatId::new("executor"));
+    let captured = capture_bus_events(&mut event_loop);
+
+    // Order: completion first, then business — both from executor.
+    write_event_with_hat_to_jsonl(&events_path, "LOOP_COMPLETE", "Done", "executor");
+    write_event_with_hat_to_jsonl(&events_path, "experiment.ready", "ok", "executor");
+
+    let _ = event_loop.process_events_from_jsonl().unwrap();
+    assert!(
+        event_loop.state.completion_requested,
+        "U3 boundary: completion must consume the budget and set completion_requested"
+    );
+    let topics: Vec<String> = captured
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|e| e.topic.to_string())
+        .collect();
+    assert!(
+        topics
+            .iter()
+            .any(|t| t == "event.isolation.boundary_violation"),
+        "U3 boundary: expected event.isolation.boundary_violation diagnostic for second event; got topics: {topics:?}"
+    );
+}
+
+/// U3 control: orchestrator-internal control topics must still
+/// bypass the isolated budget — `task.resume`, `human.guidance`,
+/// `loop.cancel` are produced by the orchestrator and must not be
+/// filtered out by the can_publish check.
+#[test]
+fn test_u3_isolated_control_topics_bypass_scope() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+  completion_promise: LOOP_COMPLETE
+  cancellation_promise: loop.cancel
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["build.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    event_loop.state.current_isolated_hat = Some(HatId::new("executor"));
+    let captured = capture_bus_events(&mut event_loop);
+
+    // Mix: task.resume, human.guidance, loop.cancel — all no-hat
+    // orchestrator-internal signals. None of them should produce
+    // a scope_violation diagnostic. All should reach the bus.
+    write_event_to_jsonl(&events_path, "task.resume", "{\"target\":\"executor\"}");
+    write_event_to_jsonl(&events_path, "human.guidance", "All good");
+    write_event_to_jsonl(&events_path, "loop.cancel", "stop");
+
+    let result = event_loop.process_events_from_jsonl().unwrap();
+    assert!(
+        result.had_events,
+        "U3 control: orchestrator control topics must be accepted in isolated mode"
+    );
+    let topics: Vec<String> = captured
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|e| e.topic.to_string())
+        .collect();
+    assert!(
+        !topics.iter().any(|t| t.contains("scope_violation")),
+        "U3 control: no scope_violation diagnostic should be published for control topics; got topics: {topics:?}"
+    );
+}
+
+/// U3 coordinator: in coordinator (non-isolated) mode the existing
+/// behavior must be preserved. An undeclared completion promise
+/// from a non-isolated hat must still be admitted (coordinator
+/// mode owns the can_publish check separately).
+#[test]
+fn test_u3_coordinator_mode_preserves_existing_completion_behavior() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let yaml = r#"
+event_loop:
+  execution_mode: coordinator
+  completion_promise: LOOP_COMPLETE
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["build.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // No current_isolated_hat set — coordinator mode path.
+    assert!(event_loop.state.current_isolated_hat.is_none());
+
+    write_event_to_jsonl(&events_path, "LOOP_COMPLETE", "Done");
+
+    let _ = event_loop.process_events_from_jsonl().unwrap();
+    assert!(
+        event_loop.state.completion_requested,
+        "U3 coordinator: existing completion flow must still work in coordinator mode"
+    );
+    let reason = event_loop.check_completion_event();
+    assert_eq!(
+        reason,
+        Some(TerminationReason::CompletionPromise),
+        "U3 coordinator: completion must be honored in coordinator mode"
+    );
+}

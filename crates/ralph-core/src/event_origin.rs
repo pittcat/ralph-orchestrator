@@ -45,10 +45,38 @@ pub const RALPH_CONTROL_TOPICS: &[&str] = &[
 ];
 
 pub(crate) fn is_jsonl_control_topic(topic: &str, cancellation_topic: &str) -> bool {
+    is_orchestrator_control_topic(topic, cancellation_topic)
+}
+
+/// Returns `true` when `topic` is a true orchestrator-internal control
+/// topic that is produced by Ralph itself, not by an agent.
+///
+/// These topics bypass the per-hat `can_publish` check **and** the
+/// isolated-mode single-event budget because they are *not* agent
+/// progress signals — they are orchestrator coordination primitives
+/// (recovery, human interaction, cancellation, abandonment).
+///
+/// **CRITICAL (U3)**: `completion_promise` MUST NOT be in this list.
+/// Completion is an agent progress signal (the hat declaring it owns
+/// the completion); the loop has dedicated handling downstream of
+/// the per-event budget check. Treating it as a control topic here
+/// would let any isolated hat bypass its `publishes` scope check
+/// and flood the turn with terminal events.
+pub fn is_orchestrator_control_topic(topic: &str, cancellation_topic: &str) -> bool {
     matches!(
         topic,
         "human.interact" | "human.guidance" | "task.resume" | "build.task.abandoned"
     ) || (cancellation_topic == topic && !cancellation_topic.is_empty())
+}
+
+/// Returns `true` when `topic` is an orchestrator-produced diagnostic
+/// event (`event.*` prefix) that the loop itself emits to the bus.
+///
+/// These events are observability/audit signals, not hat progress.
+/// They bypass the per-hat `can_publish` check and the isolated
+/// single-event budget because they are not agent business events.
+pub fn is_orchestrator_diagnostic_topic(topic: &str) -> bool {
+    topic.starts_with("event.")
 }
 
 /// Source identifier stamped on `human.response` events produced by the trusted

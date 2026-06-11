@@ -1,8 +1,18 @@
 # Isolated Boundary Violation: extra business events beyond the first are dropped
 # In isolated mode a single backend call may only advance one hat stage.
+#
+# U3 update: in isolated mode, the completion promise and other agent terminal
+# topics (review verdicts, report completion) are no longer treated as
+# orchestrator control topics. They go through the normal `can_publish` +
+# single-event budget path, so:
+#   - an isolated hat that has not declared the completion promise in its
+#     `publishes` list cannot terminate the loop (it would be rejected as
+#     scope_violation).
+#   - the second business event in a single turn is dropped, even when
+#     it is the completion promise.
 
 name: isolated_boundary_violation
-description: Isolated mode drops extra business events beyond the first
+description: Isolated mode drops extra business events beyond the first (U3 boundary)
 
 config:
   prompt_file: PROMPT.md
@@ -16,7 +26,11 @@ config:
         - experiment.ready
   event_loop:
     execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
 
+# Run 1: strategist writes experiment.planned (accepted) and
+# experiment.ready in the same turn. experiment.ready is dropped.
+# Strategist does NOT publish LOOP_COMPLETE.
 mock_responses:
   - |
     <event topic="experiment.planned">

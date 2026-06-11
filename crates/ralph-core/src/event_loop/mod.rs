@@ -4041,37 +4041,34 @@ impl EventLoop {
         let events = if self.config.event_loop.execution_mode == HatExecutionMode::Isolated
             && let Some(ref isolated_hat) = self.state.current_isolated_hat
         {
-            // Isolated mode: hard-enforce current hat scope + single business event boundary
+            // Isolated mode: hard-enforce current hat scope + single business event boundary.
+            // U3: orchestrator control topics and diagnostic topics bypass the budget
+            // (they are loop-internal, not agent progress). Completion promises and
+            // other agent terminal topics go through the normal `can_publish` +
+            // single-event budget path so an isolated hat cannot bypass its
+            // declared publish scope by emitting a completion-style event.
             let mut accepted = Vec::new();
             let mut first_business_event_accepted = false;
+            let cancellation = self.config.event_loop.cancellation_promise.as_str();
 
             for event in result.events {
-                // System/diagnostic events always pass through
-                let is_system_event = matches!(
-                    event.topic.as_str(),
-                    "event.malformed"
-                        | "event.scope_violation"
-                        | "event.workflow_guard_rejected"
-                        | "human.interact"
-                        | "human.response"
-                        | "human.guidance"
-                        | "human.timeout"
-                        | "loop.cancel"
-                        | "task.resume"
-                        | "build.task.abandoned"
-                ) || event.topic.as_str()
-                    == self.config.event_loop.completion_promise.as_str();
+                let topic = event.topic.as_str();
+                let is_orchestrator_internal = crate::event_origin::is_orchestrator_control_topic(
+                    topic,
+                    cancellation,
+                ) || crate::event_origin::is_orchestrator_diagnostic_topic(topic);
 
-                if is_system_event {
+                if is_orchestrator_internal {
+                    // Loop-internal event — always accepted, does not
+                    // consume the per-turn business-event budget.
                     accepted.push(event);
                     continue;
                 }
 
-                // Enforce hat scope: topic must be in isolated_hat's publishes
-                if !self
-                    .registry
-                    .can_publish(isolated_hat, event.topic.as_str())
-                {
+                // Enforce hat scope: topic must be in isolated_hat's publishes.
+                // This now also applies to completion_promise and other
+                // agent terminal topics, closing the U3 authority bypass.
+                if !self.registry.can_publish(isolated_hat, topic) {
                     warn!(
                         hat = %isolated_hat.as_str(),
                         topic = %event.topic,
