@@ -25,6 +25,7 @@ use crate::runtime_contract::{
 
 pub mod coordinator;
 pub mod finding_id;
+pub mod multi_hat;
 pub mod ownership;
 pub mod topic_format;
 
@@ -34,15 +35,16 @@ mod tests;
 pub use coordinator::check_coordinator_rules;
 pub use finding_id::{
     FINDING_COORDINATOR_MISSING, FINDING_CROSS_HAT_UNAUTHORIZED_PUBLISH,
-    FINDING_INVALID_TOPIC_FORMAT, FINDING_MISSING_TOPIC_OWNER, FINDING_OWNER_NOT_PUBLISHER,
-    FINDING_OWNER_UNKNOWN_HAT, FINDING_TASK_PUBLISHER_NOT_COORDINATED,
-    FINDING_WHITELIST_EXEMPT_TOPIC,
+    FINDING_INVALID_TOPIC_FORMAT, FINDING_MISSING_TOPIC_OWNER, FINDING_MULTI_HAT_REQUIRES_ISOLATED,
+    FINDING_OWNER_NOT_PUBLISHER, FINDING_OWNER_UNKNOWN_HAT,
+    FINDING_TASK_PUBLISHER_NOT_COORDINATED, FINDING_WHITELIST_EXEMPT_TOPIC,
 };
 pub use ownership::{check_owner_references, check_ownership_rules};
 pub use topic_format::{
     TopicFormatResult, TopicOccurrence, TopicSurface, enumerate_topics, suggest_topic_fix,
     validate_all_topics, validate_topic_format,
 };
+pub use multi_hat::check_multi_hat_isolation;
 
 // ──────────────────────────────────────────────────────────────────────────
 // U2: Shared types — strictness, severity, finding
@@ -296,6 +298,13 @@ pub fn run_preset_lint(
     // Ownership & coordinator checks (U2)
     let ownership_findings = validate_ownership_and_coordinator(config, strictness);
     findings.extend(lint_findings_to_contract_findings(&ownership_findings));
+
+    // Multi-hat isolation policy (U1 of 2026-06-11-003): always
+    // Error, never downgraded by `LintStrictness`. Produces
+    // `RuntimeContractFinding` directly because the structured
+    // details `actual` / `limit` / `required_mode` must flow
+    // through to the runtime contract aggregator's `details` map.
+    findings.extend(check_multi_hat_isolation(config));
 
     // Sort by id, then topic for deterministic output.
     findings.sort_by(|a, b| {

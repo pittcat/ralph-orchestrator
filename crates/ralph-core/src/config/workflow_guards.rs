@@ -49,7 +49,7 @@ pub enum WorkflowChainMode {
 }
 
 /// Hat execution mode.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HatExecutionMode {
     /// Default coordinator behavior: Ralph acts as a central coordinator,

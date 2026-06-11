@@ -53,3 +53,17 @@ pub const FINDING_COORDINATOR_MISSING: &str = "preset.coordinator_missing";
 ///
 /// Always `Error` severity.
 pub const FINDING_TASK_PUBLISHER_NOT_COORDINATED: &str = "preset.task_publisher_not_coordinated";
+
+// ──────────────────────────────────────────────────────────────────────────
+// U1 of 2026-06-11-003: Multi-hat isolation policy
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Preset declares more than [`crate::config::MULTI_HAT_ISOLATION_LIMIT`]
+/// hats while `event_loop.execution_mode` is `coordinator` (explicit
+/// or default). The policy requires `execution_mode: isolated` once
+/// the threshold is crossed.
+///
+/// Always `Error` severity — the rule is never downgraded by
+/// `LintStrictness` and admits no configuration, env var, test
+/// switch, or hidden compat opt-out (R1-R5).
+pub const FINDING_MULTI_HAT_REQUIRES_ISOLATED: &str = "preset.multi_hat_requires_isolated";

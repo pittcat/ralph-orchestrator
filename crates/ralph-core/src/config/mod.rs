@@ -28,6 +28,8 @@ mod v1_adapters;
 mod warning;
 pub(crate) mod workflow_guards;
 
+pub mod multi_hat_policy;
+
 pub use agent_doc_sync::{AgentDocSyncConfig, OnErrorPolicy};
 pub use cli::{CliConfig, TuiConfig};
 pub use core::{CoreConfig, ScratchpadConfig};
@@ -63,6 +65,9 @@ pub use v1_adapters::{AdapterSettings, AdaptersConfig};
 pub use warning::ConfigWarning;
 pub use workflow_guards::{
     HatExecutionMode, WorkflowChain, WorkflowChainMode, WorkflowGuardsConfig,
+};
+pub use multi_hat_policy::{
+    MULTI_HAT_ISOLATION_LIMIT, MultiHatPolicyViolation, evaluate_multi_hat_isolation,
 };
 
 use serde::{Deserialize, Serialize};
