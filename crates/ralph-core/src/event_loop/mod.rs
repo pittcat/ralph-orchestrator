@@ -1865,34 +1865,49 @@ impl EventLoop {
     ///
     /// - Solo mode (no custom hats): Returns "ralph" if Ralph has pending events
     /// - Multi-hat mode (custom hats defined): Always returns "ralph" if ANY hat has pending events
-    pub fn next_hat(&self) -> Option<&HatId> {
-        let next = self.bus.next_hat_with_pending();
-
-        // If no pending hat events but human interactions are pending, route to Ralph.
-        if next.is_none() && self.bus.has_human_pending() {
-            return self.bus.hat_ids().find(|id| id.as_str() == "ralph");
-        }
-
-        // If no pending events, return None
-        next.as_ref()?;
-
+    ///
+    /// **Isolated mode** uses round-robin scheduling via
+    /// `EventBus::select_next_hat_with_pending` to guarantee starvation-free fair
+    /// selection among all pending hats.
+    ///
+    /// **NOTE**: This method takes `&mut self` because isolated-mode round-robin
+    /// advances the bus's internal cursor.
+    pub fn next_hat(&mut self) -> Option<&HatId> {
         match self.config.event_loop.execution_mode {
             HatExecutionMode::Isolated => {
-                // Isolated mode: return the concrete hat with pending events.
-                // Solo mode (no custom hats) still returns "ralph" since it's the only hat.
-                // In multi-hat mode, return the actual pending hat so each runs independently.
-                next
+                // Isolated mode: use round-robin to select the next hat.
+                // This advances the cursor on the bus for fair scheduling.
+                if self.bus.has_human_pending() && !self.bus.has_pending_non_human() {
+                    // Only human events pending — route to ralph.
+                    return self.bus.hat_ids().find(|id| id.as_str() == "ralph");
+                }
+                // Select via round-robin. This updates last_selected.
+                // We need to return a borrowed HatId, so we select and then look it up.
+                let selected = self.bus.select_next_hat_with_pending()?;
+                // The selected hat must exist in the bus (it was found in pending).
+                self.bus.hat_ids().find(|id| *id == &selected)
             }
             HatExecutionMode::Coordinator => {
+                // Coordinator mode: peek for pending, then return ralph if any.
+                let has_pending = self.bus.peek_next_hat_with_pending().is_some();
+
+                // If no pending hat events but human interactions are pending, route to Ralph.
+                if !has_pending && self.bus.has_human_pending() {
+                    return self.bus.hat_ids().find(|id| id.as_str() == "ralph");
+                }
+
+                if !has_pending {
+                    return None;
+                }
+
                 // Coordinator mode (default): In multi-hat mode, always route to Ralph
                 // (custom hats define topology only). Ralph's prompt includes the ## HATS
                 // section for coordination awareness.
                 if self.config.hats.is_empty() {
                     // Solo mode - return the next hat (which is "ralph")
-                    next
+                    self.bus.hat_ids().find(|id| id.as_str() == "ralph")
                 } else {
                     // Return "ralph" - the constant coordinator
-                    // Find ralph in the bus's registered hats
                     self.bus.hat_ids().find(|id| id.as_str() == "ralph")
                 }
             }
@@ -1900,7 +1915,7 @@ impl EventLoop {
     }
 
     /// Returns the hat that will be triggered by the next pending event, if any.
-    pub fn triggered_hat(&self) -> Option<HatId> {
+    pub fn triggered_hat(&mut self) -> Option<HatId> {
         self.next_hat().cloned()
     }
 
@@ -1928,8 +1943,10 @@ impl EventLoop {
     ///
     /// Use this after `process_output` to detect if the LLM failed to publish an event.
     /// If false after processing, the loop will terminate on the next iteration.
+    ///
+    /// Uses peek (no side-effect) to avoid advancing the round-robin cursor.
     pub fn has_pending_events(&self) -> bool {
-        self.bus.next_hat_with_pending().is_some() || self.bus.has_human_pending()
+        self.bus.has_pending()
     }
 
     /// Checks if any pending events are human-related (human.response, human.guidance).
