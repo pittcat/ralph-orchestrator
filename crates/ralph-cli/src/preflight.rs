@@ -496,11 +496,11 @@ const ALLOWED_HATS_TOP_LEVEL: &[&str] = &[
 // Event-loop keys that a hat collection overlay is allowed to provide.
 //
 // Original 4 (workflow promises + starting event) are the historic core
-// minimum. The 3 contract keys below (`event_policy`, `verdict_gate`,
-// `execution_contracts`) are hat-driven by design: a hat collection
-// declares the payload contract and the verdict/contract gates that
-// enforce its safety properties, so they must survive overlay merge
-// for builtin presets like `ce-executor` to work end-to-end.
+// minimum. `execution_mode` and the 3 contract keys below (`event_policy`,
+// `verdict_gate`, `execution_contracts`) are hat-driven by design: a hat
+// collection declares the topology and contracts required for its safety
+// properties, so they must survive overlay merge for builtin presets like
+// `ce-executor-isolated` to work end-to-end.
 //
 // Note: resource budgets (`max_iterations`, `max_runtime_seconds`,
 // `checkpoint_interval`) and `enforce_hat_scope` are intentionally
@@ -512,6 +512,7 @@ const ALLOWED_HATS_EVENT_LOOP_OVERLAY_KEYS: &[&str] = &[
     "starting_event",
     "cancellation_promise",
     "required_events",
+    "execution_mode",
     "event_policy",
     "verdict_gate",
     "execution_contracts",
@@ -914,6 +915,46 @@ hats:
         assert_eq!(
             config.event_loop.starting_event.as_deref(),
             Some("build.start")
+        );
+    }
+
+    #[test]
+    fn merge_hats_overlay_preserves_isolated_execution_mode_required_by_topology() {
+        let core: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  max_iterations: 100
+",
+        )
+        .unwrap();
+
+        let hats: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  execution_mode: isolated
+hats:
+  coordinator: { name: Coordinator }
+  executor: { name: Executor }
+  reviewer: { name: Reviewer }
+  reporter: { name: Reporter }
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        assert_eq!(
+            config.event_loop.execution_mode,
+            ralph_core::config::HatExecutionMode::Isolated
+        );
+        assert!(
+            ralph_core::preset_lint::run_preset_lint(
+                &config,
+                ralph_core::preset_lint::LintStrictness::Strict,
+            )
+            .iter()
+            .all(|finding| finding.id != "lint.preset.multi_hat_requires_isolated")
         );
     }
 
