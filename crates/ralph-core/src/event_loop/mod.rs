@@ -1425,18 +1425,21 @@ impl EventLoop {
         events: &[crate::event_reader::Event],
     ) {
         use crate::wave_detection::WaveRejection;
-        let (reason_code, topic_label) = match rejection {
-            WaveRejection::IsolatedScopeViolation { topic, .. } => {
-                ("wave_isolated_scope_violation", topic.as_str())
-            }
-            WaveRejection::IsolatedMultipleBusinessEmissions { .. } => {
-                ("wave_isolated_multiple_business_emissions", "")
-            }
-            _ => ("wave_isolated_unknown", ""),
+        let (reason_code, topic_label, wave_id) = match rejection {
+            WaveRejection::IsolatedScopeViolation {
+                wave_id,
+                topic,
+                ..
+            } => ("wave_isolated_scope_violation", topic.as_str(), wave_id.as_str()),
+            WaveRejection::IsolatedMultipleBusinessEmissions {
+                wave_id, ..
+            } => ("wave_isolated_multiple_business_emissions", "", wave_id.as_str()),
+            _ => ("wave_isolated_unknown", "", ""),
         };
         warn!(
             hat = %isolated_hat.as_str(),
             reason = reason_code,
+            wave = wave_id,
             dropped = events.len(),
             "Isolated wave rejection — dropping whole wave"
         );
@@ -1453,6 +1456,42 @@ impl EventLoop {
         );
         self.bus
             .publish(Event::new(violation_topic, violation_payload));
+
+        // B2 / KTD-U4-4: record a recovery envelope so the responder
+        // can track the finding. Outcome is `NotRetriable` per plan §3
+        // KTD-U4-5 table — cap/structure and isolated-scope rejections
+        // do not enter automatic recovery escalation.
+        let retry_key =
+            crate::diagnosis::RecoveryDiagnosisEnvelopeBuilder::wave_retry_key(
+                wave_id,
+                reason_code,
+            );
+        let message = format!(
+            "Isolated wave {} rejected: hat '{}' cannot publish '{}'; {} event(s) dropped",
+            wave_id,
+            isolated_hat.as_str(),
+            if topic_label.is_empty() { "(multi-business)" } else { topic_label },
+            events.len(),
+        );
+        let mut builder = crate::diagnosis::RecoveryDiagnosisEnvelope::builder()
+            .source(crate::diagnosis::DiagnosisSource::WaveDispatcher)
+            .severity(crate::diagnosis::DiagnosisSeverity::Error)
+            .iteration(self.state.iteration)
+            .reason_code(reason_code)
+            .message(message)
+            .retry_attempt(0)
+            .safe_target(false)
+            .outcome(crate::diagnosis::DiagnosisOutcome::NotRetriable)
+            .retry_key(retry_key)
+            .source_hat(isolated_hat.to_string());
+        if !topic_label.is_empty() {
+            builder = builder.topic(topic_label.to_string());
+        }
+        if let Some(session_id) = self.diagnostics.session_id() {
+            builder = builder.session_id(session_id);
+        }
+        let envelope = builder.build();
+        self.record_recovery_envelope(&envelope, Vec::new());
     }
 
     /// Records hook telemetry for diagnostics.

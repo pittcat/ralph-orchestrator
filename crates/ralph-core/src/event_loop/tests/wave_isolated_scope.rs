@@ -346,3 +346,217 @@ fn test_wave_non_isolated_behavior_unchanged() {
         "no scope violation should fire in non-isolated mode"
     );
 }
+
+// ---------------------------------------------------------------------------
+// B2 / KTD-U4-4: isolated wave rejection must record a recovery envelope
+// ---------------------------------------------------------------------------
+
+/// Build an isolated-mode event loop with file-backed diagnostics
+/// so that `record_recovery_envelope` writes to `recovery.jsonl`.
+fn make_isolated_loop_with_diagnostics(
+    events_path: &std::path::Path,
+    diagnostics_root: &std::path::Path,
+) -> (EventLoop, std::path::PathBuf) {
+    use crate::diagnostics::DiagnosticsCollector;
+
+    let yaml = r#"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    terminal_topics:
+      - "review.file"
+    business_topics:
+      - "review.done"
+  execution_mode: isolated
+hats:
+  coordinator:
+    name: "Coordinator"
+    triggers: ["task.start"]
+    publishes: ["review.file"]
+  reviewer:
+    name: "Reviewer"
+    triggers: ["review.file"]
+    publishes: ["review.done"]
+    concurrency: 3
+    instructions: "Review."
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let diagnostics = DiagnosticsCollector::with_enabled(diagnostics_root, true)
+        .expect("diagnostics enabled");
+    let session_dir = diagnostics.session_dir().unwrap().to_path_buf();
+    let mut event_loop = EventLoop::with_diagnostics(config, diagnostics);
+    event_loop.initialize("B2-test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(events_path);
+    (event_loop, session_dir)
+}
+
+/// Read all `RecoveryJournalEntry` records from the session's
+/// `recovery.jsonl` file.
+fn read_recovery_journal(session_dir: &std::path::Path) -> Vec<crate::diagnosis::RecoveryJournalEntry> {
+    use std::io::Read as _;
+
+    let recovery_path = session_dir.join("recovery.jsonl");
+    let mut content = String::new();
+    std::fs::File::open(&recovery_path)
+        .unwrap_or_else(|e| panic!("open {}: {e}", recovery_path.display()))
+        .read_to_string(&mut content)
+        .expect("read recovery.jsonl");
+    content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("parse recovery entry"))
+        .collect()
+}
+
+/// B2-1: an isolated wave rejected for scope violation MUST produce a
+/// recovery envelope in `recovery.jsonl`. The envelope's `retry_key`
+/// must use the wave-scoped `wave_dispatcher:<id>:<reason>` format
+/// (from B1), and `outcome` must be `NotRetriable`.
+#[test]
+fn test_wave_isolated_scope_violation_records_recovery_envelope() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+    let diagnostics_root = temp_dir.path().to_path_buf();
+    let (mut event_loop, session_dir) =
+        make_isolated_loop_with_diagnostics(&events_path, &diagnostics_root);
+
+    // builder is not in coordinator's publishes → scope violation
+    event_loop.state.current_isolated_hat = Some(HatId::new("builder"));
+
+    write_wave_event_to_jsonl(
+        &events_path,
+        "review.file",
+        "src/main.rs",
+        "coordinator",
+        "w-001",
+        0,
+        1,
+    );
+
+    let _ = event_loop.process_events_from_jsonl_with_waves().unwrap();
+
+    let entries = read_recovery_journal(&session_dir);
+    assert_eq!(
+        entries.len(),
+        1,
+        "exactly one recovery envelope expected, got: {:?}",
+        entries
+            .iter()
+            .map(|e| &e.envelope.reason_code)
+            .collect::<Vec<_>>()
+    );
+    let env = &entries[0].envelope;
+    assert_eq!(env.source, crate::diagnosis::DiagnosisSource::WaveDispatcher);
+    assert_eq!(env.reason_code, "wave_isolated_scope_violation");
+    assert_eq!(env.outcome, crate::diagnosis::DiagnosisOutcome::NotRetriable);
+    assert!(!env.safe_target);
+    assert_eq!(env.source_hat.as_deref(), Some("builder"));
+    assert!(
+        env.retry_key.starts_with("wave_dispatcher:"),
+        "retry key must use wave namespace, got: {}",
+        env.retry_key
+    );
+    assert!(
+        env.retry_key.contains("w_001"),
+        "retry key must contain normalized wave_id, got: {}",
+        env.retry_key
+    );
+}
+
+/// B2-2: two distinct waves rejected for the same reason MUST produce
+/// two separate recovery envelopes with different `retry_key`s. This
+/// is the end-to-end validation of B1 + B2 working together.
+#[test]
+fn test_wave_isolated_two_different_waves_two_envelopes() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+    let diagnostics_root = temp_dir.path().to_path_buf();
+    let (mut event_loop, session_dir) =
+        make_isolated_loop_with_diagnostics(&events_path, &diagnostics_root);
+
+    event_loop.state.current_isolated_hat = Some(HatId::new("builder"));
+
+    // Two waves, both out-of-scope for the current isolated hat.
+    write_wave_event_to_jsonl(
+        &events_path,
+        "review.file",
+        "file-A.rs",
+        "coordinator",
+        "w-Alpha",
+        0,
+        1,
+    );
+    write_wave_event_to_jsonl(
+        &events_path,
+        "review.file",
+        "file-B.rs",
+        "coordinator",
+        "w-Beta",
+        0,
+        1,
+    );
+
+    let _ = event_loop.process_events_from_jsonl_with_waves().unwrap();
+
+    let entries = read_recovery_journal(&session_dir);
+    // The two waves are in different wave_id groups. The scope check
+    // runs on the first accepted wave (which is out of scope), and
+    // also rejects subsequent waves via IsolatedMultipleBusinessEmissions.
+    // We expect at least 2 envelopes — one per wave.
+    assert!(
+        entries.len() >= 2,
+        "at least two envelopes expected for two distinct waves, got: {:?}",
+        entries
+            .iter()
+            .map(|e| (&e.envelope.reason_code, &e.envelope.retry_key))
+            .collect::<Vec<_>>()
+    );
+    let retry_keys: std::collections::HashSet<String> = entries
+        .iter()
+        .map(|e| e.envelope.retry_key.clone())
+        .collect();
+    assert_eq!(
+        retry_keys.len(),
+        entries.len(),
+        "each wave must have a distinct retry key"
+    );
+}
+
+/// B2-3: when no isolated hat is set, no recovery envelope is recorded.
+/// This is the regression guard from A1-5, verified at the envelope level.
+#[test]
+fn test_wave_non_isolated_does_not_record_envelope() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+    let diagnostics_root = temp_dir.path().to_path_buf();
+    let (mut event_loop, session_dir) =
+        make_isolated_loop_with_diagnostics(&events_path, &diagnostics_root);
+
+    event_loop.state.current_isolated_hat = None;
+
+    write_wave_event_to_jsonl(
+        &events_path,
+        "review.file",
+        "file.rs",
+        "coordinator",
+        "w-safe",
+        0,
+        1,
+    );
+
+    let result = event_loop.process_events_from_jsonl_with_waves().unwrap();
+    assert_eq!(result.wave_events.len(), 1, "wave must be accepted");
+
+    // recovery.jsonl should not exist (no rejections).
+    let recovery_path = session_dir.join("recovery.jsonl");
+    if recovery_path.exists() {
+        // If it exists for some other reason, it must be empty.
+        let content = std::fs::read_to_string(&recovery_path).unwrap_or_default();
+        assert!(
+            content.trim().is_empty(),
+            "non-isolated runs must not produce recovery envelopes"
+        );
+    }
+}
