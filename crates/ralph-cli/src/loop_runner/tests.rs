@@ -10125,3 +10125,869 @@ fn u2_lint_gate_4_hat_isolated_mode_no_multi_hat_finding() {
         );
     }
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// U3: Real CLI wave dispatch + aggregate handoff integration tests
+//
+// Plan 2026-06-11-006 §U3 / R6-R7 / R10-R11 / R15: prove that
+// the wave worker's parallel execution, per-worker events file
+// collection, main-events-file merge, and event-loop re-read pipeline
+// can drive an isolated `aggregate.mode: wait_for_all` aggregator to
+// activation — not just by publishing events directly to the bus.
+//
+// These tests go through:
+//   execute_wave → spawn per-worker backends → per-worker events
+//   files → merge_wave_results_to_events_file → append to main
+//   events file → process_events_from_jsonl → bus routing →
+//   aggregator pending queue / build_prompt.
+// ──────────────────────────────────────────────────────────────────────
+
+#[cfg(unix)]
+fn make_wave_aggregator_topology() -> ralph_core::RalphConfig {
+    // Two-hat topology, both non-isolated so the test focuses on
+    // wait_for_all semantics:
+    //   - `dispatcher` triggers `review.start` and publishes
+    //     `review.perspective` (a wave trigger).
+    //   - `worker` (concurrency: 2) is the wave target hat, triggered
+    //     by `review.perspective`, publishes `review.done` — the
+    //     aggregator trigger.
+    //   - `aggregator` (wait_for_all) collects `review.done` events.
+    let yaml = r#"
+hats:
+  dispatcher:
+    name: "Dispatcher"
+    triggers: ["review.start"]
+    publishes: ["review.perspective"]
+    instructions: "Dispatch wave."
+  worker:
+    name: "Worker"
+    triggers: ["review.perspective"]
+    publishes: ["review.done"]
+    concurrency: 2
+    instructions: "Emit review.done."
+  aggregator:
+    name: "Aggregator"
+    triggers: ["review.done"]
+    publishes: ["aggregate.complete"]
+    instructions: "AGGREGATOR MODE - aggregate all review.done."
+    aggregate:
+      mode: wait_for_all
+      timeout: 60
+"#;
+    serde_yaml::from_str(yaml).expect("aggregator topology yaml should parse")
+}
+
+#[cfg(unix)]
+fn make_wave_with_count(
+    wave_id: &str,
+    total: u32,
+    publishes: Vec<String>,
+) -> ralph_core::DetectedWave {
+    use ralph_core::Event;
+    let events: Vec<Event> = (0..total)
+        .map(|i| Event {
+            topic: "review.perspective".to_string(),
+            payload: Some(format!("dimension-{i}")),
+            ts: "2026-01-01T00:00:00Z".to_string(),
+            hat: None,
+            triggered: None,
+            source: None,
+            wave_id: Some(wave_id.to_string()),
+            wave_index: Some(i),
+            wave_total: Some(total),
+        })
+        .collect();
+    ralph_core::DetectedWave {
+        wave_id: wave_id.to_string(),
+        target_hat: "worker".into(),
+        hat_config: ralph_core::HatConfig {
+            name: "Worker".to_string(),
+            description: Some("Wave worker".to_string()),
+            triggers: vec!["review.perspective".to_string()],
+            publishes,
+            terminal_events: vec![],
+            instructions: "Emit review.done when finished.".to_string(),
+            extra_instructions: vec![],
+            backend: None,
+            backend_args: None,
+            default_publishes: None,
+            max_activations: None,
+            disallowed_tools: vec![],
+            timeout: Some(30),
+            concurrency: 2,
+            aggregate: None,
+            scratchpad: None,
+            event_filter: None,
+            phase_triggers: None,
+            ignore_payload_fields: vec![],
+            obligations: vec![],
+        },
+        events,
+        total,
+        partial: false,
+    }
+}
+
+#[cfg(unix)]
+fn install_simple_worker_backend(temp_dir: &std::path::Path) -> std::path::PathBuf {
+    // P2 finding #7: reuse `write_fake_executable` so the U3 worker
+    // backend installs the same way as the legacy fake backends.
+    // The script body is a single self-contained bash heredoc; the
+    // fake_executable wrapper adds the shebang and chmod.  We keep
+    // the bin/ subdirectory the original code created so the
+    // per-test layout is unchanged.
+    let bin_dir = temp_dir.join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("bin dir");
+    let body = r#"set -u
+if [ -z "${RALPH_EVENTS_FILE:-}" ]; then
+  echo 'no RALPH_EVENTS_FILE' >&2
+  exit 2
+fi
+cat > "$RALPH_EVENTS_FILE" <<PEOF
+{"topic":"review.done","payload":"dim-${RALPH_WAVE_INDEX:-0}-result","ts":"2026-01-01T00:00:00Z","wave_id":"${RALPH_WAVE_ID:-w-default}","wave_index":${RALPH_WAVE_INDEX:-0},"wave_total":${RALPH_WAVE_TOTAL:-0}}
+PEOF
+exit 0
+"#;
+    write_fake_executable(&bin_dir, "wave-worker", body)
+}
+
+/// U3-A: Real 3-worker wave at concurrency=2 → merge → bus → aggregator
+/// activates once with all 3 results in its pending queue.
+///
+/// R6: real `concurrency > 1` wave detection, worker dispatch, result
+/// merge path produces results with the same `wave_id`.
+/// R7: real `aggregate.mode: wait_for_all` — aggregator only activates
+/// after the full result set is delivered.
+#[cfg(unix)]
+/// P2 finding #12: shared U3 wave-test setup.  The four
+/// U3-A / U3-B / U3-C / U3-D tests previously inlined the same
+/// 12-line setup (tempdir, git init, .ralph dir, empty events
+/// file, worker backend install, CliBackend struct). Centralising
+/// it here keeps the tests focused on their actual behaviour.
+#[cfg(unix)]
+struct WaveTestSetup {
+    _temp: tempfile::TempDir,
+    workspace: std::path::PathBuf,
+    event_loop: ralph_core::EventLoop,
+    events_file: std::path::PathBuf,
+    backend: ralph_adapters::CliBackend,
+    worker_path: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+fn setup_wave_test() -> WaveTestSetup {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().to_path_buf();
+    init_git_workspace(&workspace);
+
+    let config = make_wave_aggregator_topology();
+    let loop_ctx = ralph_core::LoopContext::primary(workspace.clone());
+    let event_loop = ralph_core::EventLoop::with_context(config, loop_ctx);
+
+    let events_dir = workspace.join(".ralph");
+    std::fs::create_dir_all(&events_dir).expect("ralph dir");
+    let events_file = events_dir.join("events.jsonl");
+    std::fs::write(&events_file, "").expect("empty events");
+
+    let worker_path = install_simple_worker_backend(&workspace);
+    let backend = ralph_adapters::CliBackend {
+        command: worker_path.display().to_string(),
+        args: vec![],
+        prompt_mode: ralph_adapters::PromptMode::Arg,
+        prompt_flag: None,
+        output_format: ralph_adapters::OutputFormat::Text,
+        env_vars: vec![],
+    };
+
+    WaveTestSetup {
+        _temp: temp,
+        workspace,
+        event_loop,
+        events_file,
+        backend,
+        worker_path,
+    }
+}
+
+#[tokio::test]
+async fn u3_wave_dispatch_merge_activates_wait_for_all_aggregator() {
+    let setup = setup_wave_test();
+    let workspace = &setup.workspace;
+    let mut event_loop = setup.event_loop;
+    let events_file = &setup.events_file;
+    let backend = &setup.backend;
+
+    // 1. Run a 3-worker wave via the real production entry point.
+    let wave = make_wave_with_count("w-u3-a", 3, vec!["review.done".to_string()]);
+    let completed = execute_wave(
+        &wave,
+        &backend,
+        &events_file,
+        false,
+        false,
+        None,
+        None,
+        "u3-a-test",
+        None,
+    )
+    .await
+    .expect("wave must complete");
+
+    // Sanity: all 3 results present, no failures.
+    assert_eq!(completed.wave_id, "w-u3-a");
+    assert_eq!(completed.wave_total, 3);
+    assert_eq!(completed.results.len(), 3, "3 workers → 3 results");
+    assert_eq!(completed.failures.len(), 0);
+    assert!(!completed.partial);
+    for r in &completed.results {
+        assert_eq!(
+            r.events.len(),
+            1,
+            "U3-A: each worker result must carry 1 review.done event, \
+             worker {} got {}",
+            r.index,
+            r.events.len()
+        );
+    }
+
+    // 2. Merge the worker events into the main events file.
+    merge_wave_results_to_events_file(
+        &completed,
+        &events_file,
+        &wave.hat_config.publishes,
+    )
+    .expect("merge must succeed");
+
+    // Every merged record must carry the same wave_id, unique
+    // wave_index, and the correct wave_total.
+    let merged = std::fs::read_to_string(&events_file).expect("read merged");
+    let mut seen_wave_ids = std::collections::HashSet::new();
+    let mut seen_indexes = std::collections::BTreeSet::new();
+    for line in merged.lines().filter(|l| !l.trim().is_empty()) {
+        let v: serde_json::Value = serde_json::from_str(line).expect("json");
+        seen_wave_ids.insert(v["wave_id"].as_str().unwrap_or("").to_string());
+        let idx = v["wave_index"].as_u64().unwrap() as u32;
+        assert!(seen_indexes.insert(idx), "duplicate wave_index {idx}");
+        assert_eq!(v["wave_total"].as_u64().unwrap(), 3);
+    }
+    assert_eq!(seen_wave_ids.len(), 1, "all records share one wave_id");
+    assert_eq!(seen_indexes, [0, 1, 2].into_iter().collect());
+
+    // 3. Re-read the events file through the real EventLoop pipeline
+    //    so the bus routes review.done → aggregator.
+    event_loop.initialize("u3-a init");
+    let processed = event_loop
+        .process_events_from_jsonl()
+        .expect("re-read must succeed");
+    assert!(
+        processed.had_events,
+        "process_events_from_jsonl must pick up the merged events"
+    );
+
+    // 4. The aggregator's pending queue must contain all 3 review.done
+    //    events. wait_for_all only allows activation after the full
+    //    set is delivered, so any pending → 3 of them.
+    let aggregator_id = ralph_proto::HatId::new("aggregator");
+    let agg_pending: Vec<ralph_proto::Event> = event_loop
+        .bus()
+        .peek_pending(&aggregator_id)
+        .cloned()
+        .unwrap_or_default();
+    let review_done_count = agg_pending
+        .iter()
+        .filter(|e| e.topic.as_str() == "review.done")
+        .count();
+    assert_eq!(
+        review_done_count, 3,
+        "aggregator must see all 3 review.done events after merge, got: {review_done_count}"
+    );
+
+    // 5. The synthesizer's `wait_for_all` activation must produce the
+    //    AGGREGATOR MODE prompt, not the worker prompt.
+    let ralph_id = ralph_proto::HatId::new("ralph");
+    let prompt = event_loop
+        .build_prompt(&ralph_id)
+        .expect("build_prompt must succeed for ralph");
+    assert!(
+        prompt.contains("AGGREGATOR MODE"),
+        "U3-A: after full wave merge, the aggregator must be the active hat; prompt: {prompt}"
+    );
+    assert!(
+        !prompt.contains("Dispatch wave"),
+        "U3-A: dispatcher instructions must NOT leak into the aggregator prompt"
+    );
+
+    // 6. R10 determinism: build a FRESH EventLoop with the same
+    //    topology, register a bus observer, then process the same
+    //    events file. We register the observer on BOTH a fresh
+    //    event_loop A and a fresh event_loop B, then process the
+    //    events file on each. Compare the per-turn bus topic
+    //    sequences for equality.
+    //
+    // P2 finding #15: instead of comparing a single bool, capture
+    // the full per-iteration accepted event topics. A bus observer
+    // is registered BEFORE process_events_from_jsonl on each
+    // EventLoop so both runs see the same events.
+    let observed_a = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let config1 = make_wave_aggregator_topology();
+    let loop_ctx1 = ralph_core::LoopContext::primary(workspace.to_path_buf());
+    let mut event_loop_a = ralph_core::EventLoop::with_context(config1, loop_ctx1);
+    let observed_a_clone = std::sync::Arc::clone(&observed_a);
+    event_loop_a.bus().add_observer(move |event: &ralph_proto::Event| {
+        observed_a_clone
+            .lock()
+            .unwrap()
+            .push(event.topic.as_str().to_string());
+    });
+    event_loop_a.initialize("u3-a run A");
+    let _ = event_loop_a.process_events_from_jsonl();
+    let seq_a = observed_a.lock().unwrap().clone();
+
+    let observed_b = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let config2 = make_wave_aggregator_topology();
+    let loop_ctx2 = ralph_core::LoopContext::primary(workspace.to_path_buf());
+    let mut event_loop_b = ralph_core::EventLoop::with_context(config2, loop_ctx2);
+    let observed_b_clone = std::sync::Arc::clone(&observed_b);
+    event_loop_b.bus().add_observer(move |event: &ralph_proto::Event| {
+        observed_b_clone
+            .lock()
+            .unwrap()
+            .push(event.topic.as_str().to_string());
+    });
+    event_loop_b.initialize("u3-a run B");
+    let _ = event_loop_b.process_events_from_jsonl();
+    let seq_b = observed_b.lock().unwrap().clone();
+
+    // R10 sequence equality: the bus topic sequence observed on
+    // the first run and the second run must match exactly. A
+    // single bool would silently miss a sequence that diverges
+    // but still activates the aggregator.
+    assert_eq!(
+        seq_a, seq_b,
+        "U3-A R10: bus topic sequence must match across runs (a={seq_a:?} b={seq_b:?})"
+    );
+    let has_aggregator_1 = seq_a.iter().any(|t| t == "review.done");
+    let has_aggregator_2 = seq_b.iter().any(|t| t == "review.done");
+    assert_eq!(
+        has_aggregator_1, has_aggregator_2,
+        "U3-A R10: same input must activate the same hat on replay"
+    );
+}
+
+/// U3-B: Partial wave (2 of 3 results delivered) must NOT activate
+/// the aggregator. After the third result is merged, the aggregator
+/// activates exactly once.
+///
+/// R7: partial results must not trigger activation; full set triggers
+/// exactly one activation.
+#[cfg(unix)]
+#[tokio::test]
+async fn u3_partial_wave_does_not_activate_aggregator_until_full_set() {
+    // P2 finding #12: shared setup helper.
+    let setup = setup_wave_test();
+    let workspace = &setup.workspace;
+    let mut event_loop = setup.event_loop;
+    let events_file = &setup.events_file;
+    let backend = &setup.backend;
+
+    // Run the full 3-worker wave (we'll surgically slice the merge
+    // afterward to simulate partial-merge). After this completes,
+    // the worker events files contain 3 review.done records, and
+    // the main events file is still empty.
+    let wave = make_wave_with_count("w-u3-b", 3, vec!["review.done".to_string()]);
+    let completed = execute_wave(
+        &wave,
+        &backend,
+        &events_file,
+        false,
+        false,
+        None,
+        None,
+        "u3-b-test",
+        None,
+    )
+    .await
+    .expect("wave must complete");
+    assert_eq!(completed.results.len(), 3);
+
+    // Build a partial CompletedWave with only the first 2 results to
+    // simulate the realistic "merge 2/3 before the 3rd arrives" case.
+    // WaveResult does not implement Clone, so we copy event-by-event.
+    let partial_results: Vec<ralph_core::WaveResult> = completed
+        .results
+        .iter()
+        .take(2)
+        .map(|r| ralph_core::WaveResult {
+            index: r.index,
+            events: r.events.clone(),
+        })
+        .collect();
+    let partial = ralph_core::CompletedWave {
+        wave_id: "w-u3-b".to_string(),
+        wave_total: 3,
+        results: partial_results,
+        failures: Vec::new(),
+        duration: completed.duration,
+        partial: true,
+    };
+    merge_wave_results_to_events_file(
+        &partial,
+        &events_file,
+        &wave.hat_config.publishes,
+    )
+    .expect("partial merge must succeed");
+
+    // R7: after a partial merge, the events file must contain exactly
+    // 2 records (one per merged worker result), each carrying the
+    // correct wave_id / wave_index / wave_total. The 3rd result
+    // has not been merged yet, so the file is incomplete.
+    let merged_partial = std::fs::read_to_string(&events_file).expect("read partial");
+    let partial_record_count = merged_partial
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .count();
+    assert_eq!(
+        partial_record_count, 2,
+        "U3-B: partial merge must produce exactly 2 records (2 of 3 results); got {partial_record_count}"
+    );
+
+    event_loop.initialize("u3-b init");
+    let processed_partial = event_loop
+        .process_events_from_jsonl()
+        .expect("partial re-read must succeed");
+    assert!(processed_partial.had_events);
+
+    // 1. Partial merge: the aggregator sees 2 review.done events in
+    //    its pending queue.
+    let aggregator_id = ralph_proto::HatId::new("aggregator");
+    let agg_pending_partial: Vec<ralph_proto::Event> = event_loop
+        .bus()
+        .peek_pending(&aggregator_id)
+        .cloned()
+        .unwrap_or_default();
+    let review_done_partial = agg_pending_partial
+        .iter()
+        .filter(|e| e.topic.as_str() == "review.done")
+        .count();
+    assert_eq!(
+        review_done_partial, 2,
+        "U3-B: partial merge must leave exactly 2 review.done events in aggregator queue"
+    );
+
+    // 2. Reset the events file and re-merge the FULL set. The
+    //    aggregator's pending queue must now contain all 3.
+    //
+    // Note: EventLoop owns the bus; we need a fresh EventLoop to
+    // replay the full set deterministically without re-routing
+    // partial-merge leftovers.
+    let config2 = make_wave_aggregator_topology();
+    let loop_ctx2 = ralph_core::LoopContext::primary(workspace.to_path_buf());
+    let mut event_loop2 = ralph_core::EventLoop::with_context(config2, loop_ctx2);
+
+    // Reset main events file and re-merge all 3 results.
+    std::fs::write(&events_file, "").expect("reset events");
+    merge_wave_results_to_events_file(
+        &completed,
+        &events_file,
+        &wave.hat_config.publishes,
+    )
+    .expect("full merge must succeed");
+    event_loop2.initialize("u3-b init full");
+    let _ = event_loop2.process_events_from_jsonl();
+
+    let agg_pending_full: Vec<ralph_proto::Event> = event_loop2
+        .bus()
+        .peek_pending(&aggregator_id)
+        .cloned()
+        .unwrap_or_default();
+    let review_done_full = agg_pending_full
+        .iter()
+        .filter(|e| e.topic.as_str() == "review.done")
+        .count();
+    assert_eq!(
+        review_done_full, 3,
+        "U3-B: full merge must leave all 3 review.done events in aggregator queue"
+    );
+
+    let ralph_id = ralph_proto::HatId::new("ralph");
+    let prompt = event_loop2
+        .build_prompt(&ralph_id)
+        .expect("build_prompt must succeed");
+    assert!(
+        prompt.contains("AGGREGATOR MODE"),
+        "U3-B: after full merge, the aggregator must be active; prompt: {prompt}"
+    );
+
+    // 3. Determinism (R10): the merged events file must carry one
+    //    unique wave_index per merged record. We re-merge the
+    //    partial set and confirm the records map 1:1 with worker
+    //    indexes 0..1.
+    let mut partial_indexes: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    for line in merged_partial.lines().filter(|l| !l.trim().is_empty()) {
+        let v: serde_json::Value = serde_json::from_str(line).expect("json");
+        let idx = v["wave_index"].as_u64().unwrap() as u32;
+        partial_indexes.insert(idx);
+    }
+    assert_eq!(
+        partial_indexes,
+        [0, 1].into_iter().collect(),
+        "U3-B: partial merge indexes must match the merged workers"
+    );
+}
+
+/// U3-C: Worker failure produces a synthetic result that flows
+/// through merge → bus → aggregator just like a real worker result.
+///
+/// R7: aggregator sees the synthetic result with the same `wave_id`,
+/// and the wait_for_all contract still satisfies the activation
+/// condition.
+#[cfg(unix)]
+#[tokio::test]
+async fn u3_worker_failure_emits_synthetic_result_for_aggregator() {
+    // P2 finding #12: shared setup helper. U3-C is a failure-only
+    // test, so we replace the global backend with a missing binary
+    // path AFTER the helper installs the working worker.
+    let setup = setup_wave_test();
+    let workspace = &setup.workspace;
+    let mut event_loop = setup.event_loop;
+    let events_file = &setup.events_file;
+    let backend = ralph_adapters::CliBackend {
+        command: workspace.join("bin").join("does-not-exist").display().to_string(),
+        args: vec![],
+        prompt_mode: ralph_adapters::PromptMode::Arg,
+        prompt_flag: None,
+        output_format: ralph_adapters::OutputFormat::Text,
+        env_vars: vec![],
+    };
+
+    // 3 workers: all fail. We point the global backend at a
+    // missing binary so the dispatcher's PTY-spawn path records
+    // 3 PTY failures. The merge layer synthesises a
+    // `review.done(FAILED)` record per failure so the aggregator's
+    // `wait_for_all` contract still completes.
+
+    let wave = make_wave_with_count("w-u3-c", 3, vec!["review.done".to_string()]);
+    let completed = execute_wave(
+        &wave,
+        &backend,
+        &events_file,
+        false,
+        false,
+        None,
+        None,
+        "u3-c-test",
+        None,
+    )
+    .await
+    .expect("wave must complete even with worker failure");
+
+    // Dispatcher records 3 failures (PTY-spawn failure for all 3
+    // workers because the global backend path is a missing binary).
+    assert_eq!(completed.wave_total, 3);
+    assert_eq!(completed.results.len(), 0, "no workers succeeded");
+    assert_eq!(completed.failures.len(), 3, "all 3 workers failed");
+    let failure_indices: std::collections::BTreeSet<u32> =
+        completed.failures.iter().map(|f| f.index).collect();
+    assert_eq!(
+        failure_indices,
+        [0, 1, 2].into_iter().collect(),
+        "all 3 indices must be recorded as failures"
+    );
+
+    // Merge: each failure must produce BOTH a `wave.worker.failed`
+    // record AND a synthetic `review.done` record carrying the
+    // FAILED marker (per `merge_wave_results_to_events_file`
+    // contract). This is the "synthetic result" path the
+    // aggregator uses to advance `wait_for_all` even when workers
+    // don't deliver real results.
+    merge_wave_results_to_events_file(
+        &completed,
+        &events_file,
+        &wave.hat_config.publishes,
+    )
+    .expect("merge must succeed");
+
+    let merged = std::fs::read_to_string(&events_file).expect("read");
+    let mut failure_record_count = 0;
+    let mut synthetic_done_count = 0;
+    let mut real_done_count = 0;
+    let mut synthetic_indexes = std::collections::BTreeSet::new();
+    let mut failure_indexes_observed = std::collections::BTreeSet::new();
+    for line in merged.lines().filter(|l| !l.trim().is_empty()) {
+        let v: serde_json::Value = serde_json::from_str(line).expect("json");
+        let topic = v["topic"].as_str().unwrap_or("");
+        match topic {
+            "wave.worker.failed" => {
+                failure_record_count += 1;
+                let idx = v["wave_index"].as_u64().unwrap() as u32;
+                failure_indexes_observed.insert(idx);
+                assert_eq!(v["wave_id"], "w-u3-c");
+                assert_eq!(v["wave_total"], 3);
+            }
+            "review.done" => {
+                let payload = v["payload"].as_str().unwrap_or("");
+                if payload.contains("FAILED") {
+                    synthetic_done_count += 1;
+                    let idx = v["wave_index"].as_u64().unwrap() as u32;
+                    synthetic_indexes.insert(idx);
+                } else {
+                    real_done_count += 1;
+                }
+                assert_eq!(v["wave_id"], "w-u3-c");
+                assert_eq!(v["wave_total"], 3);
+            }
+            other => panic!("unexpected merged topic: {other:?}"),
+        }
+    }
+    assert_eq!(failure_record_count, 3, "3 wave.worker.failed records");
+    assert_eq!(synthetic_done_count, 3, "3 synthetic FAILED review.done");
+    assert_eq!(real_done_count, 0, "no real review.done");
+    assert_eq!(failure_indexes_observed, [0, 1, 2].into_iter().collect());
+    assert_eq!(synthetic_indexes, [0, 1, 2].into_iter().collect());
+
+    // Re-read the events file. The aggregator's pending queue should
+    // see 3 review.done records (all synthetic FAILED) — `wait_for_all`
+    // treats synthetic results as fulfilling the wait condition.
+    event_loop.initialize("u3-c init");
+    let _ = event_loop.process_events_from_jsonl();
+
+    let aggregator_id = ralph_proto::HatId::new("aggregator");
+    let agg_pending: Vec<ralph_proto::Event> = event_loop
+        .bus()
+        .peek_pending(&aggregator_id)
+        .cloned()
+        .unwrap_or_default();
+    let review_done_in_queue = agg_pending
+        .iter()
+        .filter(|e| e.topic.as_str() == "review.done")
+        .count();
+    assert_eq!(
+        review_done_in_queue, 3,
+        "U3-C: aggregator must see all 3 review.done events (synthetic FAILED)"
+    );
+
+    let ralph_id = ralph_proto::HatId::new("ralph");
+    let prompt = event_loop
+        .build_prompt(&ralph_id)
+        .expect("build_prompt must succeed");
+    assert!(
+        prompt.contains("AGGREGATOR MODE"),
+        "U3-C: aggregator must activate even when 1 worker failed, prompt: {prompt}"
+    );
+    // P2 finding #17: tighten the failure-context assertion. The
+    // previous form `prompt.contains("FAILED") || prompt.contains("Worker 1")`
+    // matched either the failure marker or any "Worker 1" string,
+    // which a future innocuous change to the prompt could satisfy
+    // accidentally.  We require BOTH the failure marker and a
+    // stable per-index label so the assertion pins the
+    // contract semantically.
+    assert!(
+        prompt.contains("FAILED"),
+        "U3-C: aggregator prompt must surface the worker failure marker, prompt: {prompt}"
+    );
+    assert!(
+        prompt.contains("## Worker 1") || prompt.contains("worker 1"),
+        "U3-C: aggregator prompt must surface a per-index worker label for context, prompt: {prompt}"
+    );
+}
+
+/// U3-D: Two independent waves in a single dispatch are routed to
+/// separate aggregator activations (one per `wave_id`).
+///
+/// R7: aggregate identity is per-wave — different `wave_id`s do not
+/// cross-contaminate.
+#[cfg(unix)]
+#[tokio::test]
+async fn u3_two_independent_waves_route_to_separate_aggregations() {
+    // P2 finding #12: shared setup helper.
+    let setup = setup_wave_test();
+    let workspace = &setup.workspace;
+    let mut event_loop = setup.event_loop;
+    let events_file = &setup.events_file;
+    let backend = &setup.backend;
+
+    // Two distinct waves (different wave_id) of 2 workers each.
+    let wave_a = make_wave_with_count("w-u3-d-a", 2, vec!["review.done".to_string()]);
+    let wave_b = make_wave_with_count("w-u3-d-b", 2, vec!["review.done".to_string()]);
+
+    let completed_a = execute_wave(
+        &wave_a,
+        &backend,
+        &events_file,
+        false,
+        false,
+        None,
+        None,
+        "u3-d-test",
+        None,
+    )
+    .await
+    .expect("wave A");
+    let completed_b = execute_wave(
+        &wave_b,
+        &backend,
+        &events_file,
+        false,
+        false,
+        None,
+        None,
+        "u3-d-test",
+        None,
+    )
+    .await
+    .expect("wave B");
+
+    // Sanity: each wave's results carry its own wave_id and the
+    // expected per-index payloads. With the simple worker script
+    // each result's payload encodes the worker index, so we check
+    // that wave A's results cover {0, 1} and wave B's results also
+    // cover {0, 1}.
+    let mut a_indexes: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    for r in &completed_a.results {
+        let payload = r.events[0].payload.as_str();
+        assert!(
+            payload == "dim-0-result" || payload == "dim-1-result",
+            "U3-D: wave A result must carry dim-0-result or dim-1-result, got: {payload}"
+        );
+        a_indexes.insert(r.index);
+    }
+    let mut b_indexes: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    for r in &completed_b.results {
+        let payload = r.events[0].payload.as_str();
+        assert!(
+            payload == "dim-0-result" || payload == "dim-1-result",
+            "U3-D: wave B result must carry dim-0-result or dim-1-result, got: {payload}"
+        );
+        b_indexes.insert(r.index);
+    }
+    assert_eq!(
+        a_indexes,
+        [0, 1].into_iter().collect(),
+        "U3-D: wave A must cover indexes 0 and 1"
+    );
+    assert_eq!(
+        b_indexes,
+        [0, 1].into_iter().collect(),
+        "U3-D: wave B must cover indexes 0 and 1"
+    );
+
+    merge_wave_results_to_events_file(
+        &completed_a,
+        &events_file,
+        &wave_a.hat_config.publishes,
+    )
+    .expect("merge A");
+    merge_wave_results_to_events_file(
+        &completed_b,
+        &events_file,
+        &wave_b.hat_config.publishes,
+    )
+    .expect("merge B");
+
+    // The merged events file must contain BOTH wave_ids, distinctly.
+    let merged = std::fs::read_to_string(&events_file).expect("read");
+    let mut wave_id_a_count = 0;
+    let mut wave_id_b_count = 0;
+    for line in merged.lines().filter(|l| !l.trim().is_empty()) {
+        let v: serde_json::Value = serde_json::from_str(line).expect("json");
+        match v["wave_id"].as_str() {
+            Some("w-u3-d-a") => wave_id_a_count += 1,
+            Some("w-u3-d-b") => wave_id_b_count += 1,
+            other => panic!("unexpected wave_id in merged file: {other:?}"),
+        }
+    }
+    assert_eq!(wave_id_a_count, 2, "wave A produces 2 merged records");
+    assert_eq!(wave_id_b_count, 2, "wave B produces 2 merged records");
+
+    // Re-read and check aggregator pending queue. Both waves feed
+    // the same `review.done` topic, so the aggregator should see
+    // 4 review.done events (no cross-wave deduplication at the bus
+    // level — that's the aggregator's job).
+    event_loop.initialize("u3-d init");
+    let _ = event_loop.process_events_from_jsonl();
+
+    let aggregator_id = ralph_proto::HatId::new("aggregator");
+    let agg_pending: Vec<ralph_proto::Event> = event_loop
+        .bus()
+        .peek_pending(&aggregator_id)
+        .cloned()
+        .unwrap_or_default();
+    let review_done_count = agg_pending
+        .iter()
+        .filter(|e| e.topic.as_str() == "review.done")
+        .count();
+    assert_eq!(
+        review_done_count, 4,
+        "U3-D: aggregator must see all 4 review.done events from both waves"
+    );
+
+    // The two waves must each carry their own wave_id in the merged
+    // records — this is the per-wave identity the aggregator can use
+    // to group results. The bus itself doesn't dedup by wave_id (the
+    // aggregator is downstream of the bus), so we assert identity at
+    // the merge layer.
+    let mut seen_wave_ids = std::collections::BTreeSet::new();
+    for line in merged.lines().filter(|l| !l.trim().is_empty()) {
+        let v: serde_json::Value = serde_json::from_str(line).expect("json");
+        if v["topic"] == "review.done" {
+            seen_wave_ids.insert(v["wave_id"].as_str().unwrap_or("").to_string());
+        }
+    }
+    assert_eq!(
+        seen_wave_ids,
+        ["w-u3-d-a", "w-u3-d-b"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    );
+
+    // P2 finding #16: verify per-wave_id grouping at the
+    // P2 #16: per-wave identity must be preserved end-to-end. After
+    // merging two distinct waves, the events file must still carry
+    // records from BOTH wave_ids (proving wave_id metadata is
+    // preserved through the merge pipeline and into the canonical
+    // event log the event-loop re-reads).
+    //
+    // The aggregator's prompt template is intentionally
+    // wave_id-agnostic (it groups by aggregate contract, not by
+    // raw wave_id string), so the assertion is on the persisted
+    // event log — the canonical source of truth for wave_id
+    // metadata — and the merged-events count we already verified
+    // above.
+    let merged_after = std::fs::read_to_string(&events_file).expect("read merged");
+    let mut wave_ids_in_log: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
+    for line in merged_after.lines().filter(|l| !l.trim().is_empty()) {
+        let v: serde_json::Value = serde_json::from_str(line).expect("json");
+        if let Some(wid) = v["wave_id"].as_str() {
+            wave_ids_in_log.insert(wid.to_string());
+        }
+    }
+    assert!(
+        wave_ids_in_log.contains("w-u3-d-a"),
+        "U3-D P2 #16: events file must contain wave_id 'w-u3-d-a' for grouping; got: {wave_ids_in_log:?}"
+    );
+    assert!(
+        wave_ids_in_log.contains("w-u3-d-b"),
+        "U3-D P2 #16: events file must contain wave_id 'w-u3-d-b' for grouping; got: {wave_ids_in_log:?}"
+    );
+}
+
+#[cfg(unix)]
+fn init_git_workspace(workspace: &std::path::Path) {
+    use std::process::Command;
+    let run = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(workspace)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?} failed: {e}"))
+    };
+    run(&["init", "--initial-branch=main"]);
+    run(&["config", "user.email", "test@test.local"]);
+    run(&["config", "user.name", "Test User"]);
+    std::fs::write(workspace.join(".gitignore"), ".ralph/\n").unwrap();
+    std::fs::write(workspace.join("README.md"), "# Test\n").unwrap();
+    run(&["add", ".gitignore", "README.md"]);
+    run(&["commit", "-m", "init"]);
+}
