@@ -38,6 +38,18 @@ pub struct WaveEmitArgs {
     /// Read payloads from stdin, one per line
     #[arg(long, group = "payload_source")]
     pub payloads_stdin: bool,
+
+    /// Output format: `text` (default; wave_id on stdout) or `json`
+    /// (`{wave_id, topic, count, events_file}` for U5 machine verification).
+    #[arg(long, value_enum, default_value_t = WaveOutputFormat::Text)]
+    pub output: WaveOutputFormat,
+}
+
+/// U5: Output format for `ralph wave emit`.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaveOutputFormat {
+    Text,
+    Json,
 }
 
 /// Execute a wave command.
@@ -70,12 +82,28 @@ fn execute_emit(args: WaveEmitArgs, use_colors: bool) -> Result<()> {
 
     let events_file = resolve_events_file();
     let wave_id = write_wave_events(&args.topic, &payloads, &events_file)?;
-
-    // Print wave ID to stdout (machine-parseable)
-    println!("{}", wave_id);
-
-    // Human-readable confirmation to stderr
     let total = payloads.len();
+
+    // U5: optionally emit structured JSON for machine verification.
+    match args.output {
+        WaveOutputFormat::Text => {
+            // Print wave ID to stdout (machine-parseable)
+            println!("{}", wave_id);
+        }
+        WaveOutputFormat::Json => {
+            // `events_file` is converted to its string form for JSON friendliness.
+            let events_file_str = events_file.to_string_lossy().to_string();
+            let payload = serde_json::json!({
+                "wave_id": wave_id,
+                "topic": args.topic,
+                "count": total,
+                "events_file": events_file_str,
+            });
+            println!("{}", serde_json::to_string(&payload)?);
+        }
+    }
+
+    // Human-readable confirmation to stderr (always)
     if use_colors {
         eprintln!(
             "\x1b[32m\u{2713}\x1b[0m Wave dispatched: {} events on topic '{}' (wave {})",
@@ -496,5 +524,42 @@ mod tests {
         let payloads = read_payloads_from_reader(cursor).unwrap();
         let err = validate_payload_shape(&payloads).unwrap_err().to_string();
         assert!(err.contains("JSON object"));
+    }
+
+    // ---- U5: machine-readable --output json tests ----
+
+    #[test]
+    fn test_wave_output_format_default_is_text() {
+        // Default is `text` for backward compatibility.
+        let s = format!("{:?}", WaveOutputFormat::Text);
+        assert!(s.contains("Text"));
+    }
+
+    #[test]
+    fn test_wave_emit_args_output_default_text() {
+        // Parsing without --output should default to Text.
+        use clap::Parser;
+        let parsed = WaveEmitArgs::try_parse_from([
+            "ralph",
+            "review.wave.ready",
+            "--payloads",
+            r#"{"dim":"x"}"#,
+        ])
+        .unwrap();
+        assert_eq!(parsed.output, WaveOutputFormat::Text);
+    }
+
+    #[test]
+    fn test_wave_emit_args_output_json_parsed() {
+        use clap::Parser;
+        let parsed = WaveEmitArgs::try_parse_from([
+            "ralph",
+            "review.wave.ready",
+            "--payloads-stdin",
+            "--output",
+            "json",
+        ])
+        .unwrap();
+        assert_eq!(parsed.output, WaveOutputFormat::Json);
     }
 }

@@ -33,6 +33,7 @@ ralph wave emit [OPTIONS] <TOPIC>
 | `<TOPIC>` | string | 是 | — | 所有 wave 事件的主题（如 `review.file`） |
 | `--payloads <PAYLOADS>...` | string… | 二选一 | — | 每个 wave worker 一个 payload（`num_args = 1..`，至少 1 个） |
 | `--payloads-stdin` | flag | 二选一 | false | 从 stdin 逐行读取 payload，适合 JSON payload 列表 |
+| `--output <FMT>` | enum | 否 | `text` | 输出格式：`text`（stdout 仅 wave_id）或 `json`（stdout `{wave_id, topic, count, events_file}`，用于 U5 机器验真） |
 
 `--payloads` 与 `--payloads-stdin` 互斥，必须提供其中一个。不要把多行 JSON 列表塞进一个 shell 变量后传给 `--payloads "$PAYLOADS"`；该用法会被拒绝。多 JSON payload 使用：
 
@@ -55,21 +56,21 @@ printf '%s\n' \
 - Wave worker 的结果应通过 `ralph emit` 返回，而非 `ralph wave emit`。
 
 **反模式 / 注意事项：**
-- 🔴 ralph wave emit 没有 format 选项。
 - 🔴 不要在 wave worker 内部调用 `ralph wave emit`。
 - 🔴 不要使用 `ralph wave emit <topic> --payloads "$PAYLOADS"` 传递多行 JSON；使用 `--payloads-stdin`。
+- 🔴 不要使用 `printf '%s\n' $(cat payloads.jsonl)` 后再 pipe——IFS word splitting 会把单个 JSON object 切成多个 token，触发 U1 的 JSON object 校验失败。直接 `cat payloads.jsonl` 即可。
 
 **校验：**
 ```bash
-# 1. 确定事件文件（与 wave emit 源码一致）
-events_file="${RALPH_EVENTS_FILE:-}"
-if [ -z "$events_file" ] && [ -f .ralph/current-events ]; then
-  events_file="$(cat .ralph/current-events)"
-fi
-events_file="${events_file:-.ralph/events.jsonl}"
+# U5: 推荐用 --output json 拿 wave_id + events_file，避开 tail/grep 拼装
+wave_id=$(cat payloads.jsonl | ralph wave emit review.wave.ready --payloads-stdin --output json | jq -r .wave_id)
+events_file=$(cat .ralph/current-events)
 
-# 2. 检查 wave 事件已写入
-tail -n 3 "$events_file" | jq -s 'map(select(.topic == "YOUR_TOPIC")) | length'
+# 按 wave_id 精确验真（KTD-7），不能用 tail -n "$expected_count"
+expected_count=7
+jq -e --arg id "$wave_id" --argjson expected "$expected_count" '
+  ([. | select(.wave_id == $id)] | length) == $expected
+' "$events_file"
 ```
 
 ---
