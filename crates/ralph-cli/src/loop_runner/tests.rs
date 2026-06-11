@@ -10002,7 +10002,16 @@ fn u2_lint_gate_passes_3_hat_default_coordinator() {
 fn u2_lint_gate_blocks_4_hat_after_base_plus_overlay_merge() {
     use ralph_core::config::RalphConfig;
 
-    // 2 hats in the operator's base ralph.yml.
+    // P1-3 fix (post-review): the original test name claimed `base 2 hats
+    // + overlay 2 hats → after merge 4 hats`. That implies hats are
+    // *appended* across base+overlay, but `merge_hats_overlay` actually
+    // *replaces* the base's `hats:` block with the overlay's `hats:`
+    // block (see `preflight::merge_hats_overlay` and its in-crate
+    // tests). The plan's R10 wording was loose about merge semantics;
+    // we honor the real merge path: the overlay is the resolved
+    // `hats:` source. To exercise the 4-hat gate failure we feed a
+    // 4-hat overlay against a minimal base.
+
     let base: serde_yaml::Value = serde_yaml::from_str(
         r#"
 hats:
@@ -10012,12 +10021,6 @@ hats:
     triggers: ["work.start"]
     publishes: ["work.intermediate"]
     instructions: "A."
-  beta:
-    name: "Beta"
-    description: "Base hat B"
-    triggers: ["work.intermediate"]
-    publishes: ["work.done"]
-    instructions: "B."
 event_loop:
   starting_event: "work.start"
   completion_promise: "work.done"
@@ -10027,9 +10030,8 @@ tasks:
     )
     .unwrap();
 
-    // 2 more hats in the operator's hat overlay. After merge the
-    // resolved config has 4 hats and would violate the policy if run
-    // in default (Coordinator) mode.
+    // Overlay contributes 4 hats; after `merge_hats_overlay` replaces
+    // the base's `hats:` block, the resolved config has 4 hats.
     let overlay: serde_yaml::Value = serde_yaml::from_str(
         r#"
 hats:
@@ -10045,29 +10047,58 @@ hats:
     triggers: ["work.reviewed"]
     publishes: ["work.final"]
     instructions: "D."
+  epsilon:
+    name: "Epsilon"
+    description: "Overlay hat E"
+    triggers: ["work.final"]
+    publishes: ["work.summary"]
+    instructions: "E."
+  zeta:
+    name: "Zeta"
+    description: "Overlay hat F"
+    triggers: ["work.summary"]
+    publishes: ["work.done"]
+    instructions: "F."
 "#,
     )
     .unwrap();
 
-    // Use the real CLI merge path to mirror what `ralph run -c base
-    // -H overlay` produces. The CLI exposes `merge_hats_overlay`
-    // only inside its own crate, so the public re-export goes
-    // through `ralph_cli::config_resolution::merge_hats_overlay` —
-    // but for the resolved-config assertion we can build a single
-    // 4-hat config and feed it directly to the gate, since the gate
-    // is the load-bearing surface (the merge itself is exercised by
-    // other tests in the CLI binary).
-    let _ = (base, overlay);
-    let config: RalphConfig = u2_make_n_hat_config(4, "");
+    // P1-3 fix: use the real CLI merge path to mirror what
+    // `ralph run -c base -H overlay` produces. The merge function
+    // lives in `crate::preflight::merge_hats_overlay` (made
+    // `pub(crate)` in this commit so tests can reach it). We then
+    // feed the *merged* config directly to the run gate so the test
+    // exercises the full chain: YAML parse → merge overlay → resolved
+    // 4-hat config → lint gate.
+    let merged_yaml_value = crate::preflight::merge_hats_overlay(base, overlay)
+        .expect("merge_hats_overlay should accept valid base + overlay");
+    let config: RalphConfig = serde_yaml::from_value(merged_yaml_value)
+        .expect("merged YAML should deserialize into RalphConfig");
+
     assert_eq!(
         config.hats.len(),
         4,
-        "fixture must produce a 4-hat config to mirror the merged overlay scenario"
+        "P1-3: real merge path replaces base.hats with overlay.hats — \
+         resolved config must have 4 hats"
     );
+    // Sanity: the four hat IDs must come from the overlay, not the base.
+    let names: std::collections::HashSet<&str> = config.hats.keys().map(|h| h.as_str()).collect();
+    for expected in ["gamma", "delta", "epsilon", "zeta"] {
+        assert!(
+            names.contains(expected),
+            "P1-3: merged config must contain overlay hat '{expected}'; got hats: {names:?}"
+        );
+    }
+    // And the base hat should be gone (merge replaces, not unions).
+    assert!(
+        !names.contains("alpha"),
+        "P1-3: merged config must NOT contain base hat 'alpha' (merge replaces)"
+    );
+
     let result = enforce_preset_lint_gate(&config);
     assert!(
         result.is_err(),
-        "merged 4-hat config must fail the run gate"
+        "P1-3: merged 4-hat config must fail the run gate"
     );
 }
 

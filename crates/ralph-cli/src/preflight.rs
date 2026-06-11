@@ -575,7 +575,13 @@ fn extract_hat_overlay_from_preset(preset_value: Value) -> Result<Value> {
     Ok(Value::Mapping(overlay))
 }
 
-fn merge_hats_overlay(mut core: Value, hats: Value) -> Result<Value> {
+/// P1-3 fix (post-review): made `pub(crate)` so `loop_runner::tests` can
+/// drive the real merge path in `u2_lint_gate_blocks_4_hat_after_base_plus_overlay_merge`.
+/// The function is the same one used by `ralph run -c base -H overlay`;
+/// exposing it to crate-internal tests lets them assert that the merged
+/// 4-hat config still trips the lint gate, instead of bypassing the merge
+/// with a hand-built 4-hat fixture.
+pub(crate) fn merge_hats_overlay(mut core: Value, hats: Value) -> Result<Value> {
     let core_mapping = core
         .as_mapping_mut()
         .ok_or_else(|| anyhow::anyhow!("Core config must be a YAML mapping"))?;
