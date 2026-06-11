@@ -1,9 +1,11 @@
 ---
 title: "feat: Enforce isolated mode for complex multi-hat presets"
 type: feat
-status: active
+status: completed
 date: 2026-06-11
 origin: docs/brainstorms/2026-06-11-multi-hat-isolated-mode-requirements.md
+delivered_by:
+  - docs/plans/2026-06-11-006-fix-multi-hat-isolated-regression-gaps-plan.md
 ---
 
 # feat: Enforce isolated mode for complex multi-hat presets
@@ -280,8 +282,8 @@ flowchart TB
 - **Requirements:** R25-R28。
 - **Dependencies:** U3, U4。
 - **Files:**
-  - `crates/ralph-core/tests/scenarios/isolated_complex_topology.yml`
-  - `crates/ralph-core/tests/scenarios.rs`
+  - `crates/ralph-core/src/event_loop/tests/isolated_complex_regression.rs`
+  - `crates/ralph-core/src/event_loop/tests/mod.rs`
   - `crates/ralph-core/src/event_loop/tests/replay_light_integration.rs`
   - `crates/ralph-cli/src/loop_runner/tests.rs`
   - `crates/ralph-cli/src/loop_runner/wave/dispatcher.rs`
@@ -507,9 +509,16 @@ flowchart TB
 
 ---
 
+## Delivery Note
+
+本计划在 U1+U2+U3 主线（游标算法、机制级 core 集成、CLI wave dispatch 集成）实施后交付审查发现三处交付缺口：游标清空后回退字典序首项、复杂 fixture 未触发真实 wave/aggregate/恢复/guidance、以及 clippy `deprecated_semver` 与 zsh completion 8/9 数组漂移。补完计划 `docs/plans/2026-06-11-006-fix-multi-hat-isolated-regression-gaps-plan.md` 在不修改 3-hat coordinator 上限、终态 authority、错误文本、coordinator fallback 行为的前提下，闭环了这三项缺口并恢复了 clippy 与 completion 数组一致性自动化门禁。本计划 status 字段在补完计划 U1+U2+U3+U4 全部通过验证后由 `active` 更新为 `completed`，并通过 `delivered_by` 引用补完计划。
+
+---
+
 ## Sources And Research
 
 - `docs/brainstorms/2026-06-11-multi-hat-isolated-mode-requirements.md`
+- `docs/plans/2026-06-11-006-fix-multi-hat-isolated-regression-gaps-plan.md`
 - `crates/ralph-core/src/config/workflow_guards.rs`
 - `crates/ralph-core/src/config/ralph_config.rs`
 - `crates/ralph-core/src/preset_lint/mod.rs`

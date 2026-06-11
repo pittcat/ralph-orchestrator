@@ -76,7 +76,6 @@ _RALPH_BUILTIN_HAT_DESCRIPTIONS=(
   "Adversarial code review without making modifications"
   "Advanced end-to-end idea-to-code workflow"
   "Autonomous experiment loop: try ideas, measure, keep what works"
-  "Internal preset for loop merge operations"
 )
 
 # =============================================================================

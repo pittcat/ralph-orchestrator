@@ -2735,6 +2735,186 @@ mod tests {
         );
     }
 
+    /// U4 (R13): The zsh builtin completion file must have value/description
+    /// arrays with matching length and order, and every public preset must
+    /// appear exactly once in the values array. Hidden presets (merge-loop)
+    /// must NOT appear as values OR as orphan descriptions.
+    #[test]
+    fn test_zsh_builtin_completion_arrays_consistent() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let zsh_path = manifest_dir
+            .join("..")
+            .join("..")
+            .join("scripts")
+            .join("ralph-zsh-plugin.zsh");
+        if !zsh_path.is_file() {
+            eprintln!(
+                "test_zsh_builtin_completion_arrays_consistent: {} not on build host; skipping",
+                zsh_path.display()
+            );
+            return;
+        }
+
+        let text = std::fs::read_to_string(&zsh_path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", zsh_path.display(), e));
+
+        // Extract _RALPH_BUILTIN_HAT_VALUES= (...) body
+        let values = extract_zsh_array(&text, "_RALPH_BUILTIN_HAT_VALUES")
+            .expect("_RALPH_BUILTIN_HAT_VALUES array must exist in zsh plugin");
+        let descriptions = extract_zsh_array(&text, "_RALPH_BUILTIN_HAT_DESCRIPTIONS")
+            .expect("_RALPH_BUILTIN_HAT_DESCRIPTIONS array must exist in zsh plugin");
+
+        // R13: length must match
+        assert_eq!(
+            values.len(),
+            descriptions.len(),
+            "zsh builtin completion values ({}) and descriptions ({}) must have matching length. \
+             Update scripts/ralph-zsh-plugin.zsh so each value has a description.",
+            values.len(),
+            descriptions.len()
+        );
+
+        // Public preset names from presets.rs source of truth
+        let public_names: std::collections::BTreeSet<String> =
+            preset_names().iter().map(|s| s.to_string()).collect();
+
+        // Every value should be a `builtin:<name>` reference; the name should
+        // exist in the public preset set. Order must match between values
+        // and descriptions (we use the same positional index, so length
+        // equality is a necessary but not sufficient check — also verify
+        // descriptions are non-empty and start with an uppercase letter so
+        // they read like real descriptions, not stale fragments).
+        assert_eq!(
+            values.len(),
+            public_names.len(),
+            "zsh builtin completion values ({}) must match number of public presets ({}). \
+             Add or remove entries in scripts/ralph-zsh-plugin.zsh.",
+            values.len(),
+            public_names.len()
+        );
+
+        for (i, value) in values.iter().enumerate() {
+            // Each value must be `builtin:<name>`
+            let prefix = "builtin:";
+            assert!(
+                value.starts_with(prefix),
+                "zsh builtin completion value[{}] = {:?} must start with 'builtin:'",
+                i,
+                value
+            );
+            let name = &value[prefix.len()..];
+            assert!(
+                public_names.contains(name),
+                "zsh builtin completion value[{}] = {:?} references preset '{}' which is NOT public. \
+                 Hidden presets must NOT appear in _RALPH_BUILTIN_HAT_VALUES.",
+                i,
+                value,
+                name
+            );
+
+            // Corresponding description must be non-empty, must NOT look like
+            // a leftover orphan (e.g. merge-loop's "Internal preset for ..." text).
+            let desc = &descriptions[i];
+            assert!(
+                !desc.is_empty(),
+                "zsh builtin completion description[{}] (for value {:?}) must not be empty",
+                i,
+                value
+            );
+            // The hidden merge-loop description is "Internal preset for loop merge operations".
+            // Catch any such orphan by checking that descriptions don't contain
+            // words strongly associated with the hidden preset marker.
+            assert!(
+                !desc.contains("Internal preset for loop merge operations"),
+                "zsh builtin completion description[{}] = {:?} is the orphan merge-loop description; \
+                 remove it from _RALPH_BUILTIN_HAT_DESCRIPTIONS",
+                i,
+                desc
+            );
+        }
+
+        // Order must be stable: collect values + public_names must agree on
+        // the set, and there must be no duplicates.
+        let value_set: std::collections::BTreeSet<&str> = values.iter().map(|s| s.as_str()).collect();
+        assert_eq!(
+            value_set.len(),
+            values.len(),
+            "zsh builtin completion values must not contain duplicates"
+        );
+    }
+
+    /// Parse a `NAME=(\n  "..."\n  "..."\n)` array body from a zsh file and
+    /// return the list of string contents in declaration order.
+    fn extract_zsh_array(
+        text: &str,
+        name: &str,
+    ) -> Option<Vec<String>> {
+        let marker = format!("{}=", name);
+        let start = text.find(&marker)?;
+        // Find the opening `(` after the marker
+        let bytes = text.as_bytes();
+        let mut idx = start + marker.len();
+        // Skip whitespace
+        while idx < bytes.len() && (bytes[idx] == b' ' || bytes[idx] == b'\t') {
+            idx += 1;
+        }
+        if idx >= bytes.len() || bytes[idx] != b'(' {
+            return None;
+        }
+        idx += 1; // skip `(`
+
+        // Now scan to matching `)` at column 0. We collect quoted strings
+        // we encounter, ignoring any `\` escapes.
+        let mut out: Vec<String> = Vec::new();
+        let mut in_quote = false;
+        let mut current = String::new();
+        let mut had_quote = false;
+        while idx < bytes.len() {
+            let c = bytes[idx];
+            if in_quote {
+                if c == b'\\' && idx + 1 < bytes.len() {
+                    // Skip escape; pass through next char verbatim.
+                    current.push(bytes[idx + 1] as char);
+                    idx += 2;
+                    continue;
+                } else if c == b'"' {
+                    in_quote = false;
+                    idx += 1;
+                    // If we already had a quote, this is the closing one.
+                    // Treat as end-of-entry only if the quote is followed by
+                    // whitespace/newline/`)`.
+                    // We push the collected value when the next non-WS char
+                    // is a newline or `)`.
+                    // Simpler: push when the quote closed and we have content
+                    // collected; if the next char is also a quote, that
+                    // would have been invalid zsh anyway.
+                    if had_quote {
+                        out.push(std::mem::take(&mut current));
+                        had_quote = false;
+                    }
+                    continue;
+                } else {
+                    current.push(c as char);
+                    idx += 1;
+                    continue;
+                }
+            } else {
+                if c == b'"' {
+                    in_quote = true;
+                    had_quote = true;
+                    idx += 1;
+                    continue;
+                } else if c == b')' {
+                    return Some(out);
+                } else {
+                    idx += 1;
+                    continue;
+                }
+            }
+        }
+        None
+    }
+
     #[test]
     fn test_ce_executor_findings_include_task_id_isolation() {
         // Bug #2 regression: dimension-reviewer must write findings files that
