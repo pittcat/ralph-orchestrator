@@ -92,15 +92,23 @@ fn execute_emit(args: WaveEmitArgs, use_colors: bool) -> Result<()> {
 }
 
 /// Reject the historical footgun where agents passed one shell variable
-/// containing many newline-delimited JSON objects to `--payloads`.
+/// containing many newline-delimited JSON objects to `--payloads`, and
+/// enforce the U1 invariant: every payload must be a JSON object.
 fn validate_payload_shape(payloads: &[String]) -> Result<()> {
-    for payload in payloads {
+    for (idx, payload) in payloads.iter().enumerate() {
         if looks_like_multiple_json_lines(payload) {
             bail!(
-                "`--payloads` received one argument containing multiple JSON payload lines. \
-                 Use `--payloads-stdin` instead, e.g. `printf '%s\\n' \"$payloads\" | ralph wave emit <topic> --payloads-stdin`."
+                "`--payloads` argument {idx} contains multiple JSON payload lines. \
+                 Use `--payloads-stdin` instead, e.g. `cat payloads.jsonl | ralph wave emit <topic> --payloads-stdin`."
             );
         }
+        validate_single_payload_object(payload).with_context(|| {
+            format!(
+                "payload[{idx}] is not a JSON object: {payload:?} \
+                 (word-splitting? pass `cat payloads.jsonl` to --payloads-stdin, \
+                 not `printf '%s\\n' $(cat payloads.jsonl)`)"
+            )
+        })?;
     }
     Ok(())
 }
@@ -115,6 +123,41 @@ fn looks_like_multiple_json_lines(payload: &str) -> bool {
         .take(2)
         .count();
     json_like_lines > 1
+}
+
+/// Parse the payload as JSON and require it to be a JSON object.
+/// Rejects numbers, strings, arrays, booleans, null, and truncated JSON.
+fn validate_single_payload_object(payload: &str) -> Result<()> {
+    let value: serde_json::Value = serde_json::from_str(payload)
+        .with_context(|| format!("invalid JSON: {payload:?}"))?;
+    if !value.is_object() {
+        bail!(
+            "expected JSON object, got {} ({})",
+            value_type_name(&value),
+            short_preview(payload)
+        );
+    }
+    Ok(())
+}
+
+fn value_type_name(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+fn short_preview(payload: &str) -> String {
+    const MAX: usize = 40;
+    if payload.len() <= MAX {
+        payload.to_string()
+    } else {
+        format!("{}…", &payload[..MAX])
+    }
 }
 
 /// Read payloads from stdin, one JSON object per line.
@@ -362,5 +405,96 @@ mod tests {
             "{\n  \"dimension\": \"correctness\",\n  \"focus\": \"check behavior\"\n}".to_string(),
         ];
         validate_payload_shape(&payloads).unwrap();
+    }
+
+    // ---- U1: JSON object payload strict validation tests ----
+
+    #[test]
+    fn test_validate_payload_shape_accepts_json_object() {
+        let payloads = vec![r#"{"dimension":"correctness"}"#.to_string()];
+        validate_payload_shape(&payloads).unwrap();
+    }
+
+    #[test]
+    fn test_validate_payload_shape_rejects_number_payload() {
+        let payloads = vec!["10".to_string()];
+        let err = validate_payload_shape(&payloads).unwrap_err().to_string();
+        assert!(
+            err.contains("JSON object"),
+            "error should mention JSON object, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_payload_shape_rejects_string_payload() {
+        let payloads = vec![r#""text""#.to_string()];
+        let err = validate_payload_shape(&payloads).unwrap_err().to_string();
+        assert!(err.contains("JSON object"));
+    }
+
+    #[test]
+    fn test_validate_payload_shape_rejects_array_payload() {
+        let payloads = vec!["[]".to_string()];
+        let err = validate_payload_shape(&payloads).unwrap_err().to_string();
+        assert!(err.contains("JSON object"));
+    }
+
+    #[test]
+    fn test_validate_payload_shape_rejects_placeholder_payload() {
+        let payloads = vec!["placeholder".to_string()];
+        let err = validate_payload_shape(&payloads).unwrap_err().to_string();
+        assert!(err.contains("JSON object"));
+    }
+
+    #[test]
+    fn test_validate_payload_shape_rejects_truncated_object() {
+        let payloads = vec![r#"{"dimension":"x""#.to_string()];
+        let err = validate_payload_shape(&payloads).unwrap_err().to_string();
+        assert!(err.contains("JSON object") || err.contains("JSON"));
+    }
+
+    #[test]
+    fn test_validate_payload_shape_accepts_leading_whitespace_object() {
+        let payloads = vec!["   \n  \t{\"dim\":\"x\"}".to_string()];
+        validate_payload_shape(&payloads).unwrap();
+    }
+
+    #[test]
+    fn test_validate_payload_shape_rejects_word_split_token_sequence() {
+        // Simulates `printf '%s\n' $(cat payloads.jsonl)` IFS word splitting.
+        // Many of these tokens are bare identifiers, not JSON objects.
+        let payloads: Vec<String> = (0..10).map(|i| format!("tok{}", i)).collect();
+        let err = validate_payload_shape(&payloads).unwrap_err().to_string();
+        assert!(err.contains("JSON object"));
+    }
+
+    #[test]
+    fn test_validate_payload_shape_atomicity_first_valid_then_invalid() {
+        // Caller expects: when any payload is invalid, no events are written.
+        // We assert at the validate level: invalid payload means Err.
+        let payloads = vec![
+            r#"{"ok":1}"#.to_string(),
+            "not-an-object".to_string(),
+        ];
+        assert!(validate_payload_shape(&payloads).is_err());
+    }
+
+    #[test]
+    fn test_validate_payload_shape_seven_objects_all_pass() {
+        let payloads: Vec<String> = (0..7)
+            .map(|i| format!(r#"{{"dim":"d{}"}}"#, i))
+            .collect();
+        validate_payload_shape(&payloads).unwrap();
+    }
+
+    #[test]
+    fn test_read_payloads_from_reader_validates_object() {
+        // stdin reader must also reject non-object payloads end-to-end.
+        let input = "{\"ok\":1}\n\"not-object\"\n{\"ok\":3}\n";
+        let cursor = std::io::Cursor::new(input);
+        let payloads = read_payloads_from_reader(cursor).unwrap();
+        let err = validate_payload_shape(&payloads).unwrap_err().to_string();
+        assert!(err.contains("JSON object"));
     }
 }

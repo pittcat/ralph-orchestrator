@@ -80,7 +80,8 @@ tail -n 3 "$events_file" | jq -s 'map(select(.topic == "YOUR_TOPIC")) | length'
 |------|------|------|
 | `Cannot dispatch waves from inside a wave worker` | 在 `RALPH_WAVE_WORKER=1` 的子进程中调用 `ralph wave emit` | worker 应通过 `ralph emit` 返回结果（会写入 candidate-events） |
 | `At least one payload is required` | `--payloads` 为空或 `--payloads-stdin` 未读到非空行 | 至少提供 1 个 payload：`ralph wave emit review.file --payloads a.txt b.txt c.txt`，或用 `--payloads-stdin` |
-| ``--payloads` received one argument containing multiple JSON payload lines` | 把多行 JSON 列表作为一个 shell 参数传给了 `--payloads` | 改用 `--payloads-stdin` |
+| ``--payloads` argument <i> contains multiple JSON payload lines` | 把多行 JSON 列表作为一个 shell 参数传给了 `--payloads` | 改用 `--payloads-stdin` |
+| `payload[<i>] is not a JSON object: ...` | 输入不是合法 JSON object（数字、字符串、数组、token、截断 JSON 都拒） | 确保每个 payload 都是 `{"key": ...}` object；不要用 `printf '%s\n' $(cat file.jsonl)`（IFS word splitting 制造 token） |
 | `Failed to create directory: <path>` | 父目录无写权限或路径非法 | 检查 `.ralph/` 父目录权限；或设置 `RALPH_EVENTS_FILE` 指向可写路径 |
 | `Failed to open events file: <path>` | 事件文件路径不可写或不存在 | 确认 `RALPH_EVENTS_FILE` / marker 指向的路径可写；或 `mkdir -p .ralph` |
 | 任何命令失败 | 通用恢复 | 1. `ralph wave emit --help` 确认语法 2. 检查退出码 3. 查看错误信息 4. 重试 |
