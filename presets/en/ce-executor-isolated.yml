@@ -723,6 +723,34 @@ hats:
         - `task_id`, `task_key`, `step`: MUST be present. Copy from the triggering event payload. Do NOT omit.
       - Emit wave events then stop — do not wait for results
 
+      - **U2 — Idempotent wave emission.** Always pass an explicit
+        `--idempotency-key` to `ralph wave emit` so that retries
+        (timeouts, agent restarts, accidental re-dispatch) do NOT
+        create duplicate waves. Use the canonical key formula:
+
+        ```
+        ce-review:{plan_name}:{task_id}:{step}:round-{fix_round}
+        ```
+
+        Example:
+        ```bash
+        cat payloads.jsonl | ralph wave emit review.wave.ready \
+            --idempotency-key "ce-review:fix-null-pointer:42:implement:round-1" \
+            --payloads-stdin --output json
+        ```
+
+        Properties:
+        - First call with a key writes the wave + creates the dedup record.
+        - Subsequent calls with the same `(loop_id, hat, topic, key)` and
+          identical payloads return the same `wave_id` with
+          `deduplicated=true` in JSON output; no new events are written.
+        - Same key with different payloads is rejected with
+          `idempotency-key conflict` to prevent silently overwriting.
+        - Different `fix_round` → different key → new wave (intentional).
+        - Different `plan_name` or `task_id` → different key → new wave.
+        - Do NOT omit `--idempotency-key` for review waves; doing so
+          breaks the dedup safety net and risks double-dispatch on retry.
+
       ### Persist `last_reviewed_sha` After Terminal Event
       **Why this exists:** `last_reviewed_sha` is the incremental diff base for the NEXT review-coordinator pass. The `context.md` key-value header is the chosen persistence layer (see also `start_sha` written by Coordinator on `work.start`, and `current_fix_round` in `fix-log.md`).
       **When to run:** immediately after emitting EITHER `review.wave.ready` OR `review.passed`. Both paths mark the current HEAD as reviewed. The empty-diff `review.passed` path matters as much as the wave path: skipping a wave on empty diff does NOT mean the HEAD should be re-reviewed next time. Without this update, the next wave's `last_reviewed_sha` would point too far back and double-cover code.

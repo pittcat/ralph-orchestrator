@@ -37,6 +37,7 @@ pub mod writer;
 use std::path::Path;
 
 pub use block::BlockSpec;
+pub use block::compute_sha256_hex;
 use writer::FileSyncConfig;
 pub use writer::{OnError, SyncError};
 

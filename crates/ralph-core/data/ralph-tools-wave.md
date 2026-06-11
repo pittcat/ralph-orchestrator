@@ -34,6 +34,7 @@ ralph wave emit [OPTIONS] <TOPIC>
 | `--payloads <PAYLOADS>...` | string… | 二选一 | — | 每个 wave worker 一个 payload（`num_args = 1..`，至少 1 个） |
 | `--payloads-stdin` | flag | 二选一 | false | 从 stdin 逐行读取 payload，适合 JSON payload 列表 |
 | `--output <FMT>` | enum | 否 | `text` | 输出格式：`text`（stdout 仅 wave_id）或 `json`（stdout `{wave_id, topic, count, events_file}`，用于 U5 机器验真） |
+| `--idempotency-key <KEY>` | string | 否 | — | 幂等键（U2）。同一 `(loop_id, hat, topic, key)` 重复调用只返回首个 `wave_id` 并标 `deduplicated=true`，不写新事件。键最长 256 字节、ASCII、非空非空白。未传则行为与原版一致。 |
 
 `--payloads` 与 `--payloads-stdin` 互斥，必须提供其中一个。不要把多行 JSON 列表塞进一个 shell 变量后传给 `--payloads "$PAYLOADS"`；该用法会被拒绝。多 JSON payload 使用：
 
@@ -54,6 +55,27 @@ printf '%s\n' \
 **约束：**
 - 不能在 wave worker 内部使用（`RALPH_WAVE_WORKER=1` 时会阻止）。
 - Wave worker 的结果应通过 `ralph emit` 返回，而非 `ralph wave emit`。
+
+**幂等键（U2）：**
+
+- `--idempotency-key` 实现基于同目录下 `.wave-idempotency.jsonl` 的持久化记录。文件锁保证并发安全。
+- 推荐 review-coordinator 使用 `ce-review:{plan_name}:{task_id}:{step}:round-{fix_round}` 命名空间。
+- 第一次调用返回 `deduplicated=false`，后续同 scope 同 payload 返回 `deduplicated=true` 和原 `wave_id`。
+- 同 key 不同 payload 会报错（`idempotency-key conflict`），不静默覆盖。
+- 跨 `loop_id` / `hat` / `topic` 不去重——通过 scope_key 哈希隔离。
+- 故障恢复：如果 events 写完但 record 写失败（进程崩溃），下次同 key 调用扫 events 补 record。
+
+**幂等示例：**
+
+首次输出（`--output json`）：
+```json
+{"wave_id":"w-...","topic":"review.wave.ready","count":7,"events_file":"...","deduplicated":false}
+```
+
+重试同 key 同 payload 输出：
+```json
+{"wave_id":"w-...","topic":"review.wave.ready","count":7,"events_file":"...","deduplicated":true}
+```
 
 **反模式 / 注意事项：**
 - 🔴 不要在 wave worker 内部调用 `ralph wave emit`。
@@ -85,6 +107,12 @@ jq -e --arg id "$wave_id" --argjson expected "$expected_count" '
 | `payload[<i>] is not a JSON object: ...` | 输入不是合法 JSON object（数字、字符串、数组、token、截断 JSON 都拒） | 确保每个 payload 都是 `{"key": ...}` object；不要用 `printf '%s\n' $(cat file.jsonl)`（IFS word splitting 制造 token） |
 | `Failed to create directory: <path>` | 父目录无写权限或路径非法 | 检查 `.ralph/` 父目录权限；或设置 `RALPH_EVENTS_FILE` 指向可写路径 |
 | `Failed to open events file: <path>` | 事件文件路径不可写或不存在 | 确认 `RALPH_EVENTS_FILE` / marker 指向的路径可写；或 `mkdir -p .ralph` |
+| `--idempotency-key must not be empty` | key 为空串 | 传非空字符串（推荐 preset 公式） |
+| `--idempotency-key must not be whitespace-only` | key 全是空白 | 同上 |
+| `--idempotency-key exceeds 256 bytes` | key 过长（> 256B） | 缩短；preset 公式远小于 256 |
+| `--idempotency-key must be ASCII` | key 含非 ASCII 字节 | 改用 ASCII；如 `plan_name` 是中文，先 hash 或 percent-encode |
+| `idempotency-key conflict: ...` | 同 scope 不同 payload | 改用不同 key（`round-2` 递增或换 task） |
+| `incomplete prior wave emission: ...` | 上次 events 写了 N 行但 record 丢失，扫 events 也只找到少于 N 行 | 手工删除残留 events 行；或换新 key |
 | 任何命令失败 | 通用恢复 | 1. `ralph wave emit --help` 确认语法 2. 检查退出码 3. 查看错误信息 4. 重试 |
 
 > **wave worker 注意事项**：
