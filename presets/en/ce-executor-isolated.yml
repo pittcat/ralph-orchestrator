@@ -655,9 +655,21 @@ hats:
       ### Wave Emission
       - **HARD RULE — emit ALL selected dimensions in ONE wave call.** Collect every
         selected dimension's payload into a list, then run exactly one
-        `ralph wave emit review.wave.ready` with the full list (either
-        `ralph wave emit review.wave.ready --payloads '<json1>' '<json2>' ... '<jsonN>'`
-        or pipe via `printf '%s\n' '<json1>' ... '<jsonN>' | ralph wave emit review.wave.ready --payloads-stdin`).
+        `ralph wave emit review.wave.ready` with the full list. Two safe forms:
+
+        ```bash
+        # U7: 正确 — 整个 JSONL 文件直接 cat 到 stdin（每个 line 是一个 JSON object）
+        cat payloads.jsonl | ralph wave emit review.wave.ready --payloads-stdin --output json
+        ```
+
+        ```bash
+        # 也可显式列出 payload（适合临时手写）
+        ralph wave emit review.wave.ready --payloads-stdin <<'JSONL'
+        {"dimension":"correctness","task_id":"...","task_key":"..."}
+        {"dimension":"testing","task_id":"...","task_key":"..."}
+        JSONL
+        ```
+
         This produces ONE wave with `wave_total=N`, so `dimension-reviewer`'s
         `concurrency: 9` actually runs N workers in parallel.
       - **DO NOT call `ralph wave emit` once per dimension.** That produces N
@@ -666,6 +678,30 @@ hats:
         completely defeating `concurrency: 9`. Field trace 2026-06-09
         (worktree 2026-06-09-001): this anti-pattern turned a 9-worker
         review into ~30 minutes of sequential 1-worker waves.
+      - **DO NOT use shell word splitting on JSONL files.** These two forms
+        are field-traced 2026-06-10 to fan out as 335 workers instead of 7:
+        ```bash
+        # 🔴 错误：IFS word splitting 会把每个 JSON object 切成 N 个 token
+        printf '%s\n' $(cat payloads.jsonl) | ralph wave emit review.wave.ready --payloads-stdin
+        # 🔴 错误：$VAR 同样触发 word splitting
+        payloads=$(cat payloads.jsonl); printf '%s\n' "$payloads" | ralph wave emit ... --payloads-stdin
+        ```
+        U1 已经在 CLI 端加 JSON object 强校验来拒收 token，但 agent prompt
+        仍需主动避开这些反模式——靠 CLI 兜底不安全。
+      - **U5 verification — capture wave_id and confirm exact count.** After
+        emission, capture the machine-readable output and verify by
+        `wave_id`, not by `tail -n N` (which is the path that masked the
+        335-worker bug):
+        ```bash
+        # Capture wave_id + events_file
+        result=$(cat payloads.jsonl | ralph wave emit review.wave.ready --payloads-stdin --output json)
+        wave_id=$(echo "$result" | jq -r .wave_id)
+        events_file=$(cat .ralph/current-events)
+        # Count events whose wave_id matches the returned one
+        jq -e --arg id "$wave_id" '[. | select(.wave_id == $id)] | length == '"$expected_count" "$events_file"
+        ```
+        If the count check fails, publish `work.failed` and STOP — do not
+        proceed with a partial or unreviewed review.
       - Each payload MUST include:
         - `dimension`: string (e.g., "correctness")
         - `focus`: string (dimension focus description)
@@ -680,13 +716,27 @@ hats:
       ### Persist `last_reviewed_sha` After Terminal Event
       **Why this exists:** `last_reviewed_sha` is the incremental diff base for the NEXT review-coordinator pass. The `context.md` key-value header is the chosen persistence layer (see also `start_sha` written by Coordinator on `work.start`, and `current_fix_round` in `fix-log.md`).
       **When to run:** immediately after emitting EITHER `review.wave.ready` OR `review.passed`. Both paths mark the current HEAD as reviewed. The empty-diff `review.passed` path matters as much as the wave path: skipping a wave on empty diff does NOT mean the HEAD should be re-reviewed next time. Without this update, the next wave's `last_reviewed_sha` would point too far back and double-cover code.
-      **How to write (single atomic write, no Read+Write race):**
+      **How to write (single atomic write, no Read+Write race, with U8 read-back):**
       - Capture current HEAD: `current_sha=$(git rev-parse HEAD)`
       - Resolve the plan's `context.md` path (from `plan_name` in the trigger payload).
       - If the file already has a `last_reviewed_sha:` line, replace it in place using a single-fd sed (avoids the TOCTOU race where a concurrent writer lands between two operations): `sed -i 's|^last_reviewed_sha:.*|last_reviewed_sha: '"$current_sha"'|' <context_md_path>`. Do NOT append a duplicate line.
       - If the file does not have the line, append it once: `printf '\nlast_reviewed_sha: %s\n' "$current_sha" >> <context_md_path>`.
+      - **U8: read back and compare.** After the write, verify the new value
+        is what we just wrote: `grep '^last_reviewed_sha:' <context_md_path>
+        | awk '{print $2}'` must equal `$current_sha`. If it does not, the
+        write is considered failed even if `sed` returned 0.
+      - **U8: do not leave `.bak` files behind.** Do NOT use
+        `sed -i.bak ...` or any other platform-specific variant that
+        materializes a backup file in the workspace. Use the in-place form
+        above (no `.bak` suffix) so the workspace stays clean.
       - The key-value header format mirrors `start_sha` — agents that grep `context.md` for the field expect a single, well-formed line.
-      **If the write fails:** log it to `decisions.md` using the DEC-ID template below and proceed. The next wave will downgrade to `start_sha` (safe but redundant), so a failed update degrades gracefully — it never silently double-reviews code. This is a one-shot write — do NOT loop, retry, or attempt partial recovery.
+      **If the write or the read-back fails:** publish `work.failed` and
+      STOP. Do not emit `review.passed` / `review.complete` / wave follow-ups
+      on top of an unverified SHA — that path is what allowed the prior
+      race to silently double-review. The next wave will fall back to
+      `start_sha` (safe but redundant). Log the failure to `decisions.md`
+      using the DEC-ID template below. This is a one-shot write — do NOT
+      loop, retry, or attempt partial recovery.
 
       **DEC-ID template** for `decisions.md` failure logging — copy verbatim, do not invent your own format:
       ```
