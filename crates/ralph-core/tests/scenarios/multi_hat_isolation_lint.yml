@@ -1,0 +1,77 @@
+# Multi-hat isolation policy BDD scenario (U2 of 2026-06-11-003).
+#
+# AE2: 4-hat preset in default (Coordinator) execution mode MUST be
+# rejected by the strict preset lint aggregator. The same finding
+# shape is consumed by:
+#
+#   - `ralph preset check --strict` (CLI surface)
+#   - `ralph preflight` (U2 new "multi-hat-isolation" check)
+#   - `ralph run` hard gate (`enforce_preset_lint_gate`)
+#
+# The aggregator is the single source of truth; the scenario asserts
+# the wire-level outcome (4-hat default coordinator → 1 error finding
+# carrying actual=4, limit=3, required_mode=isolated).
+#
+# The companion test in `tests.rs`
+# (`test_multi_hat_isolation_lint_bdd_4_hat_default_fails`) loads
+# this YAML and runs the real `RuntimeContractAggregator` path.
+
+name: multi_hat_isolation_lint
+description: 4-hat default coordinator preset fails strict lint with multi_hat_requires_isolated finding
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 3
+  hats:
+    planner:
+      name: "Planner"
+      description: "Plans work"
+      triggers: ["work.start"]
+      publishes: ["work.ready"]
+      instructions: "Plan."
+      terminal_events: ["work.ready"]
+    executor:
+      name: "Executor"
+      description: "Executes work"
+      triggers: ["work.ready"]
+      publishes: ["work.done"]
+      instructions: "Execute."
+      terminal_events: ["work.done"]
+    reviewer:
+      name: "Reviewer"
+      description: "Reviews work"
+      triggers: ["work.done"]
+      publishes: ["review.passed"]
+      instructions: "Review."
+      terminal_events: ["review.passed"]
+    publisher:
+      name: "Publisher"
+      description: "Publishes results"
+      triggers: ["review.passed"]
+      publishes: ["LOOP_COMPLETE"]
+      instructions: "Publish."
+      terminal_events: ["LOOP_COMPLETE"]
+  event_loop:
+    starting_event: "work.start"
+    completion_promise: "LOOP_COMPLETE"
+  topic_owners:
+    work.ready: ["planner"]
+    work.done: ["executor"]
+    review.passed: ["reviewer"]
+    LOOP_COMPLETE: ["publisher"]
+  topic_format_whitelist:
+    - "LOOP_COMPLETE"
+  tasks:
+    enabled: false
+
+mock_responses: []
+
+# No execution is expected — the lint gate is the load-bearing surface
+# here, and the companion test in `tests.rs` exercises the real
+# `RuntimeContractAggregator` (not the event loop). `iterations: 0`
+# + `completion: false` documents that this scenario never reaches
+# a running loop.
+expected:
+  iterations: 0
+  events: []
+  completion: false

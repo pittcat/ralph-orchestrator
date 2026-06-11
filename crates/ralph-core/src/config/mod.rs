@@ -28,6 +28,8 @@ mod v1_adapters;
 mod warning;
 pub(crate) mod workflow_guards;
 
+pub mod multi_hat_policy;
+
 pub use agent_doc_sync::{AgentDocSyncConfig, OnErrorPolicy};
 pub use cli::{CliConfig, TuiConfig};
 pub use core::{CoreConfig, ScratchpadConfig};
@@ -52,6 +54,9 @@ pub use loop_config::{
     EventLoopConfig, EventSchema, PayloadType, Phase, PhaseConfig, VerdictGateConfig, WarmupConfig,
 };
 pub use memories::{InjectMode, MemoriesConfig, MemoriesFilter};
+pub use multi_hat_policy::{
+    MULTI_HAT_ISOLATION_LIMIT, MultiHatPolicyViolation, evaluate_multi_hat_isolation,
+};
 pub use preflight_ext::{HookStage, PreflightExtensionsConfig, PreflightHook};
 pub use robot::RobotConfig;
 pub use skills::{SkillOverride, SkillsConfig};

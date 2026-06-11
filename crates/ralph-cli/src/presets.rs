@@ -30,15 +30,12 @@ const PRESETS: &[EmbeddedPreset] = &[
         public: true,
     },
     EmbeddedPreset {
-        name: "ce-executor",
-        description: "Plan-driven work execution with adversarial wave code review, auto-fix loop, shipping workflow, and manager report",
-        content: include_str!(concat!(env!("OUT_DIR"), "/presets/ce-executor.yml")),
-        public: true,
-    },
-    EmbeddedPreset {
         name: "ce-executor-isolated",
         description: "Isolated-mode plan-driven work execution with wave code review, auto-fix, shipping, and manager report",
-        content: include_str!(concat!(env!("OUT_DIR"), "/presets/ce-executor-isolated.yml")),
+        content: include_str!(concat!(
+            env!("OUT_DIR"),
+            "/presets/ce-executor-isolated.yml"
+        )),
         public: true,
     },
     EmbeddedPreset {
@@ -148,7 +145,7 @@ mod tests {
     #[test]
     fn test_list_presets_returns_all() {
         let presets = list_presets();
-        assert_eq!(presets.len(), 9, "Expected 9 public presets");
+        assert_eq!(presets.len(), 8, "Expected 8 public presets");
     }
 
     #[test]
@@ -182,6 +179,54 @@ mod tests {
     fn test_get_preset_invalid_name() {
         let preset = get_preset("nonexistent-preset");
         assert!(preset.is_none(), "Nonexistent preset should return None");
+    }
+
+    /// U7 / AE7: legacy `ce-executor` must NOT be resolvable. R13–R15 require
+    /// removal of the actual YAML, manifest entry, public index, registry entry,
+    /// and shell completion — without an alias. `get_preset("ce-executor")` must
+    /// return `None` and the user-facing `preset_names()` must not list it.
+    /// The replacement is `ce-executor-isolated` (R12, the only complete CE
+    /// executor entry point).
+    #[test]
+    fn test_ce_executor_returns_unknown_after_u7_removal() {
+        // F5 / AE7: registry lookup must fail explicitly.
+        assert!(
+            get_preset("ce-executor").is_none(),
+            "U7: legacy 'ce-executor' must NOT be resolvable. \
+             R13–R15 require removal of YAML, manifest, public index, \
+             registry entry, and shell completion without aliasing to \
+             'ce-executor-isolated'."
+        );
+
+        // The replacement entry point must remain resolvable.
+        let replacement = get_preset("ce-executor-isolated")
+            .expect("ce-executor-isolated must remain the only complete CE executor entry point");
+        assert_eq!(replacement.name, "ce-executor-isolated");
+        assert!(
+            !replacement.content.is_empty(),
+            "ce-executor-isolated must still be embedded with non-empty content"
+        );
+
+        // Public listing must drop the legacy name.
+        let public_names = preset_names();
+        assert!(
+            !public_names.contains(&"ce-executor"),
+            "U7: 'ce-executor' must NOT appear in public preset_names()"
+        );
+        assert!(
+            public_names.contains(&"ce-executor-isolated"),
+            "U7: 'ce-executor-isolated' must remain in public preset_names()"
+        );
+
+        // Sibling templates (lite / wave) must be unaffected.
+        assert!(
+            !public_names.contains(&"ce-executor-lite"),
+            "ce-executor-lite is a template, not a builtin — it must NOT be in public_names()"
+        );
+        assert!(
+            public_names.contains(&"ce-executor-wave"),
+            "ce-executor-wave must remain a public builtin"
+        );
     }
 
     #[test]
@@ -222,9 +267,8 @@ mod tests {
     #[test]
     fn test_preset_names_returns_all_names() {
         let names = preset_names();
-        assert_eq!(names.len(), 9);
+        assert_eq!(names.len(), 8);
         assert!(names.contains(&"autoresearch"));
-        assert!(names.contains(&"ce-executor"));
         assert!(names.contains(&"ce-executor-isolated"));
         assert!(names.contains(&"ce-executor-wave"));
         assert!(names.contains(&"debug"));
@@ -1077,7 +1121,7 @@ mod tests {
     fn test_ce_executor_required_events_is_report_done() {
         // Verify ce-executor uses report.done as completion gate (not mutually exclusive
         // branch events review.passed + review.complete which caused infinite loops)
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         assert_eq!(
@@ -1092,22 +1136,25 @@ mod tests {
     #[test]
     fn test_ce_executor_required_events_is_report_done_for_root_preset() {
         // Mirror-drift guard: the embedded preset is loaded via `include_str!`
-        // from `$OUT_DIR/presets/ce-executor.yml` (a copy made by build.rs from
-        // `presets/en/ce-executor.yml`). If a future change edits the canonical
+        // from `$OUT_DIR/presets/ce-executor-isolated.yml` (a copy made by build.rs from
+        // `presets/en/ce-executor-isolated.yml`). If a future change edits the canonical
         // file but leaves a stale `$OUT_DIR` copy lying around, the `get_preset`
         // test above would still pass and the original infinite-loop bug would
         // silently return. Read the canonical file at test runtime so cargo test
         // fails whenever the two diverge on the completion gate.
+        // U7 (2026-06-11-003): the legacy `ce-executor.yml` was removed; this
+        // mirror-drift guard now reads the canonical `ce-executor-isolated.yml`
+        // (the only complete CE executor entry point, R12–R15).
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let root_preset_path = std::path::Path::new(manifest_dir)
             .join("..")
             .join("..")
             .join("presets")
             .join("en")
-            .join("ce-executor.yml");
+            .join("ce-executor-isolated.yml");
         let root_content = std::fs::read_to_string(&root_preset_path).unwrap_or_else(|e| {
             panic!(
-                "failed to read root ce-executor preset at {}: {}",
+                "failed to read root ce-executor-isolated preset at {}: {}",
                 root_preset_path.display(),
                 e
             )
@@ -1127,7 +1174,7 @@ mod tests {
     fn test_ce_executor_executor_has_no_default_publishes() {
         // U2: executor must NOT have default_publishes — it must explicitly emit.
         // The no-event gate (U1) handles the "forgot to emit" case instead.
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         let executor = config
@@ -1144,7 +1191,7 @@ mod tests {
     #[test]
     fn test_ce_executor_executor_has_no_default_publishes_for_root_preset() {
         // U2: root preset must match embedded preset
-        let root_content = read_root_preset("ce-executor.yml");
+        let root_content = read_root_preset("ce-executor-isolated.yml");
         let config =
             RalphConfig::parse_yaml(&root_content).expect("root ce-executor YAML should parse");
         let executor = config
@@ -1161,7 +1208,7 @@ mod tests {
     #[test]
     fn test_ce_executor_publish_chain_origin_compatible() {
         // Verify ce-executor's normal publish chain survives origin guard
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         let registry = HatRegistry::from_config(&config);
@@ -1257,7 +1304,7 @@ mod tests {
     fn test_ce_executor_zh_required_events_is_report_done() {
         // Happy-path: the Chinese ce-executor-zh preset must use "report.done"
         // as its sole completion gate, matching the English root preset.
-        let content = read_root_preset("ce-executor-zh.yml");
+        let content = read_root_preset("ce-executor-isolated-zh.yml");
         let config = RalphConfig::parse_yaml(&content).expect("ce-executor-zh YAML should parse");
         assert_eq!(
             config.event_loop.required_events,
@@ -1270,7 +1317,7 @@ mod tests {
     fn test_ce_executor_zh_reporter_publishes_report_done_and_loop_complete() {
         // Regression: the Chinese preset's reporter hat must declare both
         // "report.done" (completion gate) and "LOOP_COMPLETE" (terminal promise).
-        let content = read_root_preset("ce-executor-zh.yml");
+        let content = read_root_preset("ce-executor-isolated-zh.yml");
         let config = RalphConfig::parse_yaml(&content).expect("ce-executor-zh YAML should parse");
         let reporter = config
             .hats
@@ -1294,8 +1341,8 @@ mod tests {
     fn test_ce_executor_en_and_zh_completion_gate_consistent() {
         // Regression: English root preset, embedded mirror, and Chinese root preset
         // must all agree on the completion gate. If any diverges, the test fails.
-        let en_root = read_root_preset("ce-executor.yml");
-        let zh_root = read_root_preset("ce-executor-zh.yml");
+        let en_root = read_root_preset("ce-executor-isolated.yml");
+        let zh_root = read_root_preset("ce-executor-isolated-zh.yml");
 
         let en_config =
             RalphConfig::parse_yaml(&en_root).expect("English ce-executor YAML should parse");
@@ -1304,7 +1351,7 @@ mod tests {
 
         // Embedded mirror must match English root (sync-embedded-files.sh contract)
         let embedded_preset =
-            get_preset("ce-executor").expect("ce-executor embedded preset should exist");
+            get_preset("ce-executor-isolated").expect("ce-executor embedded preset should exist");
         let embedded_config = RalphConfig::parse_yaml(embedded_preset.content)
             .expect("embedded ce-executor YAML should parse");
 
@@ -1327,7 +1374,7 @@ mod tests {
         // that drops `report.done`), the gate event would never fire and the
         // infinite-loop bug would return even with `required_events: ["report.done"]`.
         // Reading the static config catches that case at unit-test time.
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         let reporter = config
@@ -1350,7 +1397,7 @@ mod tests {
         // before the agent activates. The agent improvising a "git checkout -b
         // feat/plan-name" or "git worktree add ..." was the original bug — see
         // git history for "fix: ce-executor 禁建分支".
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let content = preset.content;
 
         // Top-level guardrail must carry the prohibition
@@ -1458,7 +1505,7 @@ mod tests {
     #[test]
     fn test_ce_executor_dimension_reviewer_timeout_is_900() {
         // R1: dimension-reviewer must have explicit timeout to avoid default 300s.
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         let reviewer = config
@@ -1476,8 +1523,8 @@ mod tests {
     fn test_ce_executor_root_preset_matches_embedded() {
         // Single-source-of-truth guard: the canonical preset and its embedded
         // copy (made by `build.rs` from `presets/manifest.yml`) must stay in sync.
-        let root_content = read_root_preset("ce-executor.yml");
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let root_content = read_root_preset("ce-executor-isolated.yml");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         assert_eq!(
             root_content, preset.content,
             "Canonical presets/en/ce-executor.yml must match the embedded copy in $OUT_DIR/presets/. \
@@ -1488,7 +1535,7 @@ mod tests {
 
     #[test]
     fn test_ce_executor_zh_dimension_reviewer_timeout_is_900() {
-        let content = read_root_preset("ce-executor-zh.yml");
+        let content = read_root_preset("ce-executor-isolated-zh.yml");
         let config = RalphConfig::parse_yaml(&content).expect("ce-executor-zh YAML should parse");
         let reviewer = config
             .hats
@@ -1504,7 +1551,7 @@ mod tests {
     #[test]
     fn test_ce_executor_has_hard_commit_cadence() {
         // R3: executor must have hard commit cadence rule.
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let content = preset.content;
         assert!(
             content.contains("Commit Cadence (HARD RULE)"),
@@ -1519,7 +1566,7 @@ mod tests {
     #[test]
     fn test_ce_executor_has_preflight_contract() {
         // R4: executor must validate hard prerequisites before implementation.
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let content = preset.content;
         assert!(
             content.contains("Preflight Contract (HARD RULE)"),
@@ -1557,7 +1604,7 @@ mod tests {
         // `ralph wave emit` call, not once per dimension. The "for each
         // dimension" anti-pattern produces N single-worker waves that
         // serialize at the dispatcher.
-        let content = read_root_preset("ce-executor.yml");
+        let content = read_root_preset("ce-executor-isolated.yml");
         let instructions = review_coordinator_instructions_from(&content);
 
         assert!(
@@ -1586,7 +1633,7 @@ mod tests {
     #[test]
     fn test_ce_executor_zh_review_coordinator_must_batch_wave_emission() {
         // Mirror of the English contract test, for the Chinese variant.
-        let content = read_root_preset("ce-executor-zh.yml");
+        let content = read_root_preset("ce-executor-isolated-zh.yml");
         let instructions = review_coordinator_instructions_from(&content);
 
         assert!(
@@ -1637,7 +1684,7 @@ mod tests {
 
     #[test]
     fn test_ce_executor_zh_has_hard_commit_cadence() {
-        let content = read_root_preset("ce-executor-zh.yml");
+        let content = read_root_preset("ce-executor-isolated-zh.yml");
         assert!(
             content.contains("提交节奏（硬性规则）"),
             "ce-executor-zh must contain hard commit cadence rule"
@@ -1650,7 +1697,7 @@ mod tests {
 
     #[test]
     fn test_ce_executor_zh_has_preflight_contract() {
-        let content = read_root_preset("ce-executor-zh.yml");
+        let content = read_root_preset("ce-executor-isolated-zh.yml");
         assert!(
             content.contains("前置检查契约（硬性规则）"),
             "ce-executor-zh must contain preflight contract"
@@ -1668,8 +1715,8 @@ mod tests {
         // review-coordinator. Without this the ZH preset cannot
         // catch the U3/U4 failure mode (review-coordinator emits
         // review.passed for a 400-line diff, skipping the wave).
-        let en = read_root_preset("ce-executor.yml");
-        let zh = read_root_preset("ce-executor-zh.yml");
+        let en = read_root_preset("ce-executor-isolated.yml");
+        let zh = read_root_preset("ce-executor-isolated-zh.yml");
         let en_config = RalphConfig::parse_yaml(&en).expect("EN preset should parse");
         let zh_config = RalphConfig::parse_yaml(&zh).expect("ZH preset should parse");
 
@@ -1752,7 +1799,7 @@ mod tests {
         // 2026-06-04 plan U5: plan-gate must ALSO trigger on work.failed so
         // failure events from coordinator/executor route to plan.blocked
         // instead of falling back to Ralph.
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
 
@@ -1798,7 +1845,7 @@ mod tests {
     #[test]
     fn test_ce_executor_shipper_triggers_finalization_only() {
         // R6: Shipper must only trigger on finalization inputs, not directly on review.
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
 
@@ -1835,7 +1882,7 @@ mod tests {
     #[test]
     fn test_ce_executor_executor_publishes_excludes_queue_advance() {
         // KTD4: executor no longer publishes queue.advance; plan-gate owns advancement.
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
 
@@ -1856,7 +1903,7 @@ mod tests {
         // between these layers lets an agent emit a payload that passes one
         // gate and fails the other, which is exactly the false-positive
         // trap the contract is supposed to prevent.
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
 
@@ -1968,8 +2015,8 @@ mod tests {
     fn test_ce_executor_zh_work_done_field_consistency() {
         // R6/R7/R13 ZH parity: the Chinese preset must keep the same work.done
         // field set as the English preset.
-        let en = read_root_preset("ce-executor.yml");
-        let zh = read_root_preset("ce-executor-zh.yml");
+        let en = read_root_preset("ce-executor-isolated.yml");
+        let zh = read_root_preset("ce-executor-isolated-zh.yml");
         let en_config = RalphConfig::parse_yaml(&en).expect("English preset should parse");
         let zh_config = RalphConfig::parse_yaml(&zh).expect("Chinese preset should parse");
 
@@ -2038,7 +2085,7 @@ mod tests {
         // selected, so they may not have plan_name/task_id/task_key/step yet.
         // The schema must allow those failures to reach plan-gate instead of
         // rejecting them at the event policy layer.
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         let policy = config
@@ -2072,8 +2119,8 @@ mod tests {
 
     #[test]
     fn test_ce_executor_zh_failure_topics_match_en_reason_only_schema() {
-        let en = read_root_preset("ce-executor.yml");
-        let zh = read_root_preset("ce-executor-zh.yml");
+        let en = read_root_preset("ce-executor-isolated.yml");
+        let zh = read_root_preset("ce-executor-isolated-zh.yml");
         let en_config = RalphConfig::parse_yaml(&en).expect("English preset should parse");
         let zh_config = RalphConfig::parse_yaml(&zh).expect("Chinese preset should parse");
 
@@ -2113,8 +2160,8 @@ mod tests {
 
     #[test]
     fn test_ce_executor_zh_plan_gate_matches_en() {
-        let en = read_root_preset("ce-executor.yml");
-        let zh = read_root_preset("ce-executor-zh.yml");
+        let en = read_root_preset("ce-executor-isolated.yml");
+        let zh = read_root_preset("ce-executor-isolated-zh.yml");
 
         let en_config = RalphConfig::parse_yaml(&en).expect("English preset should parse");
         let zh_config = RalphConfig::parse_yaml(&zh).expect("Chinese preset should parse");
@@ -2145,7 +2192,7 @@ mod tests {
     #[test]
     fn test_ce_executor_reporter_defensive_plan_check() {
         // R8: Reporter instructions must contain a defensive plan completion check.
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let content = preset.content;
         assert!(
             content.contains("Defensive plan completion check")
@@ -2162,7 +2209,7 @@ mod tests {
     fn test_ce_executor_verdict_gate_targets_review_complete() {
         // R10: verdict_gate must check REVIEW_COMPLETE (not review.complete) because
         // REVIEW_COMPLETE carries pass_or_fail; review.complete carries verdict.
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         let gate = config
@@ -2188,7 +2235,7 @@ mod tests {
     fn test_ce_executor_dimension_reviewer_passes_through_task_correlation() {
         // R13: dimension-reviewer must read and publish task_id/task_key/step so
         // plan-gate can correlate wave results with the original task.
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let content = preset.content;
         let dim_section = content
             .split("dimension-reviewer:")
@@ -2205,7 +2252,7 @@ mod tests {
     #[test]
     fn test_ce_executor_shipper_commit_only_on_plan_complete() {
         // R14: shipper must NOT commit or mark plan completed on plan.blocked/debug.exhausted.
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let content = preset.content;
         let shipper_section = content
             .split("shipper:")
@@ -2228,7 +2275,7 @@ mod tests {
         // R15: executor must read reviewed_task_id/reviewed_task_key on queue.advance,
         // NOT task_id/task_key, to avoid confusing the reviewed step's tasks with the
         // next step's tasks.
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let content = preset.content;
         let exec_section = content
             .split("  executor:\n")
@@ -2248,7 +2295,7 @@ mod tests {
     fn test_ce_executor_shipper_simplify_check_gated_to_plan_complete() {
         // R16: shipper's simplify check must be gated to plan.complete only.
         // On plan.blocked or debug.exhausted, the state is not shippable — simplify is inappropriate.
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let content = preset.content;
         let shipper_section = content
             .split("shipper:")
@@ -2263,7 +2310,7 @@ mod tests {
 
     #[test]
     fn test_ce_executor_zh_verdict_gate_targets_review_complete() {
-        let content = read_root_preset("ce-executor-zh.yml");
+        let content = read_root_preset("ce-executor-isolated-zh.yml");
         let config = RalphConfig::parse_yaml(&content).expect("ce-executor-zh YAML should parse");
         let gate = config
             .event_loop
@@ -2278,7 +2325,7 @@ mod tests {
 
     #[test]
     fn test_ce_executor_zh_dimension_reviewer_passes_through_task_correlation() {
-        let content = read_root_preset("ce-executor-zh.yml");
+        let content = read_root_preset("ce-executor-isolated-zh.yml");
         let dim_section = content
             .split("dimension-reviewer:")
             .nth(1)
@@ -2293,7 +2340,7 @@ mod tests {
 
     #[test]
     fn test_ce_executor_zh_shipper_commit_only_on_plan_complete() {
-        let content = read_root_preset("ce-executor-zh.yml");
+        let content = read_root_preset("ce-executor-isolated-zh.yml");
         let shipper_section = content
             .split("shipper:")
             .nth(1)
@@ -2309,7 +2356,7 @@ mod tests {
     fn test_ce_executor_fixer_reads_task_correlation_fields() {
         // R17: fixer must read task_id/task_key/step from review.failed payload
         // so that fix.applied / fix.exhausted can carry them downstream.
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         let fixer = config
@@ -2342,7 +2389,7 @@ mod tests {
     fn test_ce_executor_coordinator_work_ready_includes_task_correlation() {
         // R18: coordinator must publish task_id/task_key/step in work.ready payload
         // so that executor (including trivial path) can forward them to work.done.
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let content = preset.content;
         let coord_section = content
             .split("\n  coordinator:\n")
@@ -2360,7 +2407,7 @@ mod tests {
     fn test_ce_executor_trivial_path_includes_task_correlation() {
         // R19: executor trivial path must publish task_id/task_key/step in work.done
         // so review-coordinator can correlate the review with the right task.
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let content = preset.content;
         let exec_section = content
             .split("  executor:\n")
@@ -2380,7 +2427,7 @@ mod tests {
 
     #[test]
     fn test_ce_executor_zh_fixer_reads_task_correlation_fields() {
-        let content = read_root_preset("ce-executor-zh.yml");
+        let content = read_root_preset("ce-executor-isolated-zh.yml");
         let config = RalphConfig::parse_yaml(&content).expect("ce-executor-zh YAML should parse");
         let fixer = config
             .hats
@@ -2404,7 +2451,7 @@ mod tests {
 
     #[test]
     fn test_ce_executor_zh_coordinator_work_ready_includes_task_correlation() {
-        let content = read_root_preset("ce-executor-zh.yml");
+        let content = read_root_preset("ce-executor-isolated-zh.yml");
         let coord_section = content
             .split("\n  coordinator:\n")
             .nth(1)
@@ -2419,7 +2466,7 @@ mod tests {
 
     #[test]
     fn test_ce_executor_zh_trivial_path_includes_task_correlation() {
-        let content = read_root_preset("ce-executor-zh.yml");
+        let content = read_root_preset("ce-executor-isolated-zh.yml");
         let exec_section = content
             .split("\n  executor:\n")
             .nth(1)
@@ -2438,7 +2485,7 @@ mod tests {
 
     #[test]
     fn test_ce_executor_fixer_exhausted_early_exit_keeps_task_correlation() {
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let content = preset.content;
         let fixer_section = content
             .split("fixer:")
@@ -2458,7 +2505,7 @@ mod tests {
 
     #[test]
     fn test_ce_executor_zh_fixer_exhausted_early_exit_keeps_task_correlation() {
-        let content = read_root_preset("ce-executor-zh.yml");
+        let content = read_root_preset("ce-executor-isolated-zh.yml");
         let fixer_section = content
             .split("fixer:")
             .nth(1)
@@ -2629,7 +2676,6 @@ mod tests {
         // Zsh completion values for builtin presets (from zsh plugin)
         // This must stay in sync with scripts/ralph-zsh-plugin.zsh
         let zsh_values: std::collections::BTreeSet<String> = [
-            "builtin:ce-executor",
             "builtin:ce-executor-isolated",
             "builtin:ce-executor-wave",
             "builtin:code-assist",
@@ -2693,7 +2739,7 @@ mod tests {
     fn test_ce_executor_findings_include_task_id_isolation() {
         // Bug #2 regression: dimension-reviewer must write findings files that
         // include task_id so stale files from prior steps/presets do not串扰.
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let content = preset.content;
 
         // dimension-reviewer instructions must reference task-id-scoped paths
@@ -2721,7 +2767,7 @@ mod tests {
     fn test_ce_executor_debug_resolver_exists_and_routes_correctly() {
         // U6: debug-resolver must exist, subscribe to fix.exhausted, and publish
         // fix.plan.ready / debug.exhausted / plan.blocked explicitly.
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
 
@@ -2792,7 +2838,7 @@ mod tests {
     #[test]
     fn test_ce_executor_debug_resolver_forbids_branch_creation() {
         // U6: debug-resolver must not create branches, push, or create PRs.
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         let resolver = config
@@ -2825,7 +2871,7 @@ mod tests {
     #[test]
     fn test_ce_executor_executor_accepts_fix_plan_ready() {
         // U6: executor must accept fix.plan.ready and enter fix-plan execution mode.
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
 
@@ -2862,7 +2908,7 @@ mod tests {
     #[test]
     fn test_ce_executor_shipper_handles_debug_exhausted_not_fix_exhausted() {
         // U6: shipper must trigger on debug.exhausted, not on fix.exhausted in normal topology.
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
 
@@ -2890,7 +2936,7 @@ mod tests {
     fn test_ce_executor_debug_topics_have_schemas() {
         // U6: fix.plan.ready and debug.exhausted must have event_policy schemas with the
         // documented required fields (task correlation + debug plan fields).
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         let policy = config
@@ -2943,8 +2989,8 @@ mod tests {
     #[test]
     fn test_ce_executor_zh_debug_topology_matches_en() {
         // U6: Chinese preset must stay isomorphic to English for the new debug topology.
-        let en = read_root_preset("ce-executor.yml");
-        let zh = read_root_preset("ce-executor-zh.yml");
+        let en = read_root_preset("ce-executor-isolated.yml");
+        let zh = read_root_preset("ce-executor-isolated-zh.yml");
         let en_config = RalphConfig::parse_yaml(&en).expect("English preset should parse");
         let zh_config = RalphConfig::parse_yaml(&zh).expect("Chinese preset should parse");
 
@@ -3041,7 +3087,7 @@ mod tests {
         // Strict mode: every trigger topic with payload field references in
         // instructions must have a schema, and all referenced fields must be
         // declared in the schema's required_fields.
-        let preset = get_preset("ce-executor").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         let registry = HatRegistry::from_config(&config);
@@ -3055,7 +3101,7 @@ mod tests {
 
     #[test]
     fn test_ce_executor_strict_payload_contract_is_valid_for_root_preset() {
-        let content = read_root_preset("ce-executor.yml");
+        let content = read_root_preset("ce-executor-isolated.yml");
         let config = RalphConfig::parse_yaml(&content).expect("root ce-executor YAML should parse");
         let registry = HatRegistry::from_config(&config);
         let result = validate_payload_contract(&config, &registry, true);
@@ -3068,7 +3114,7 @@ mod tests {
 
     #[test]
     fn test_ce_executor_zh_strict_payload_contract_is_valid() {
-        let content = read_root_preset("ce-executor-zh.yml");
+        let content = read_root_preset("ce-executor-isolated-zh.yml");
         let config = RalphConfig::parse_yaml(&content).expect("ce-executor-zh YAML should parse");
         let registry = HatRegistry::from_config(&config);
         let result = validate_payload_contract(&config, &registry, true);
@@ -4043,7 +4089,7 @@ mod tests {
         let wave_config = RalphConfig::parse_yaml(wave_preset.content)
             .expect("ce-executor-wave YAML should parse");
 
-        let base_preset = get_preset("ce-executor").expect("ce-executor should exist");
+        let base_preset = get_preset("ce-executor-isolated").expect("ce-executor should exist");
         let base_config =
             RalphConfig::parse_yaml(base_preset.content).expect("ce-executor YAML should parse");
 
@@ -4189,7 +4235,7 @@ mod tests {
     #[test]
     fn test_development_presets_pass_strict_contract() {
         let strict_presets = &[
-            "ce-executor",
+            "ce-executor-isolated",
             "ce-executor-wave",
             "code-assist",
             "pdd-to-code-assist",
@@ -4294,6 +4340,7 @@ mod tests {
                     continue;
                 }
             }
+            // U7: ce-executor is removed; no carve-out needed.
             failures.push(format!(
                 "'{}': {:?}",
                 preset.name,

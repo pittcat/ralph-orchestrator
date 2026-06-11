@@ -148,6 +148,7 @@ impl PreflightRunner {
         checks.push(Box::new(SpecCompletenessCheck));
         checks.push(Box::new(PresetTopologyCheck));
         checks.push(Box::new(PresetContractCheck));
+        checks.push(Box::new(MultiHatIsolationCheck));
 
         if let Some(extensions) = config.core.preflight_extensions.as_ref()
             && extensions.enabled
@@ -2382,6 +2383,106 @@ event_loop:
             check_names
         );
     }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // U2 of 2026-06-11-003: multi-hat isolation preflight check
+    // (R3, R6, R9). The check delegates to the shared
+    fn make_n_hat_config(n: usize, mode_yaml: &str) -> RalphConfig {
+        // Build a minimal valid YAML with N hats. The hats themselves
+        // are irrelevant — the policy counts them by length, not by
+        // shape — so we emit identical entries.
+        let mut hats_yaml = String::new();
+        for i in 0..n {
+            if i > 0 {
+                hats_yaml.push('\n');
+            }
+            hats_yaml.push_str(&format!(
+                "  h{i}:\n    name: \"H{i}\"\n    triggers: [\"work.start\"]\n    publishes: [\"work.done\"]"
+            ));
+        }
+        let yaml = format!(
+            r#"
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+  {mode_yaml}
+hats:
+{hats_yaml}
+"#
+        );
+        serde_yaml::from_str(&yaml).expect("parse test config")
+    }
+
+    #[tokio::test]
+    async fn multi_hat_isolation_three_hats_default_passes() {
+        // AE1: 3 hats, default (Coordinator) mode → pass.
+        let config = make_n_hat_config(3, "");
+        let result = MultiHatIsolationCheck.run(&config).await;
+        assert_eq!(result.status, CheckStatus::Pass);
+        assert_eq!(result.name, "multi-hat-isolation");
+    }
+
+    #[tokio::test]
+    async fn multi_hat_isolation_four_hats_default_fails() {
+        // AE2: 4 hats, default (Coordinator) mode → fail.
+        let config = make_n_hat_config(4, "");
+        let result = MultiHatIsolationCheck.run(&config).await;
+        assert_eq!(result.status, CheckStatus::Fail);
+        assert_eq!(result.name, "multi-hat-isolation");
+    }
+
+    #[tokio::test]
+    async fn multi_hat_isolation_four_hats_explicit_coordinator_fails() {
+        // R3: 4 hats, explicit `execution_mode: coordinator` → fail
+        // with the same shape as the default case.
+        let config = make_n_hat_config(4, "execution_mode: coordinator");
+        let result = MultiHatIsolationCheck.run(&config).await;
+        assert_eq!(result.status, CheckStatus::Fail);
+    }
+
+    #[tokio::test]
+    async fn multi_hat_isolation_four_hats_explicit_isolated_passes() {
+        // 4 hats, explicit `execution_mode: isolated` → pass.
+        let config = make_n_hat_config(4, "execution_mode: isolated");
+        let result = MultiHatIsolationCheck.run(&config).await;
+        assert_eq!(result.status, CheckStatus::Pass);
+    }
+
+    #[tokio::test]
+    async fn multi_hat_isolation_finding_includes_actual_and_limit_and_isolated_hint() {
+        // R9: failure details must include the actual hat count, the
+        // coordinator limit, and the isolated fix direction so the
+        // user gets an actionable message from human/JSON preflight
+        // output.
+        let config = make_n_hat_config(4, "");
+        let result = MultiHatIsolationCheck.run(&config).await;
+        assert_eq!(result.status, CheckStatus::Fail);
+        let label = &result.label;
+        let message = result
+            .message
+            .as_ref()
+            .expect("fail result must carry a message");
+
+        // Label (the short summary) names the policy + actual + limit.
+        assert!(
+            label.contains("4") && label.contains("3"),
+            "label must surface actual=4 and limit=3, got: {label}"
+        );
+        // Message (the structured details) names the fix direction
+        // (isolated) and the policy's required mode.
+        assert!(
+            message.contains("isolated"),
+            "message must direct the operator to isolated mode, got: {message}"
+        );
+        assert!(
+            message.contains("actual=4") && message.contains("limit=3"),
+            "message must include actual=4 and limit=3, got: {message}"
+        );
+        assert!(
+            message.contains("required_mode=isolated"),
+            "message must include required_mode=isolated, got: {message}"
+        );
+    }
 }
 
 /// Preset topology validation check.
@@ -2480,6 +2581,59 @@ impl PreflightCheck for PresetContractCheck {
                 "Preset contract validation failed",
                 error_msgs.join("; "),
             )
+        }
+    }
+}
+
+/// Multi-hat isolation policy check (U2 of 2026-06-11-003).
+///
+/// Reuses the shared [`crate::config::evaluate_multi_hat_isolation`]
+/// evaluator — the threshold, counting, and violation shape are
+/// defined exactly once in core. Lint, preflight, and the run hard
+/// gate all read from the same source of truth (R8).
+///
+/// This check is additive — it does NOT replace `preset-topology` or
+/// `preset-contract`. Users can skip it via
+/// `features.preflight.skip: ["multi-hat-isolation"]`.
+///
+/// The check has no `LintStrictness` downgrade path: R4/R5 forbid
+/// configuration, env var, test switch, or hidden compat opt-outs.
+struct MultiHatIsolationCheck;
+
+#[async_trait]
+impl PreflightCheck for MultiHatIsolationCheck {
+    fn name(&self) -> &'static str {
+        "multi-hat-isolation"
+    }
+
+    async fn run(&self, config: &RalphConfig) -> CheckResult {
+        use crate::config::evaluate_multi_hat_isolation;
+
+        let hat_count = config.hats.len();
+        let mode = config.event_loop.execution_mode.clone();
+
+        match evaluate_multi_hat_isolation(hat_count, mode) {
+            Ok(()) => CheckResult::pass(self.name(), "Hat count is within isolation policy"),
+            Err(violation) => {
+                // R9: failure message must include the actual hat count,
+                // the coordinator limit, and the isolated fix direction.
+                // The shared violation shape supplies all three; we
+                // surface the human summary as the label and the
+                // operator action hint as the structured message.
+                CheckResult::fail(
+                    self.name(),
+                    format!(
+                        "Multi-hat isolation policy violated: {}",
+                        violation.message()
+                    ),
+                    format!(
+                        "{} (actual={}, limit={}, required_mode=isolated)",
+                        violation.fix_hint(),
+                        violation.actual,
+                        violation.limit,
+                    ),
+                )
+            }
         }
     }
 }

@@ -793,11 +793,7 @@ pub async fn run_command(
             worktree_path.display(),
             loop_id
         );
-        let context = LoopContext::worktree(
-            loop_id,
-            worktree_path.clone(),
-            workspace_root.clone(),
-        );
+        let context = LoopContext::worktree(loop_id, worktree_path.clone(), workspace_root.clone());
         (context, None)
     } else if use_subprocess_tui {
         // In subprocess TUI mode, don't acquire lock here - the child RPC process will do it
@@ -1210,10 +1206,7 @@ mod forward_prompt_args_tests {
         let out = forward_prompt_args(&args, tmp.path());
         assert_eq!(
             out,
-            vec![
-                "-P".to_string(),
-                prompt_path.to_string_lossy().into_owned()
-            ],
+            vec!["-P".to_string(), prompt_path.to_string_lossy().into_owned()],
             "worktree mode must forward default PROMPT.md as -P <abs path under parent_cwd>"
         );
     }
@@ -1249,7 +1242,11 @@ mod forward_prompt_args_tests {
 
         let args = make_args(None, None, None);
         let out = forward_prompt_args(&args, tmp.path());
-        assert!(out.is_empty(), "primary mode must not inject -P (got: {:?})", out);
+        assert!(
+            out.is_empty(),
+            "primary mode must not inject -P (got: {:?})",
+            out
+        );
     }
 
     /// `-p <inline text>` takes priority over both -P and the default.
@@ -1278,7 +1275,10 @@ mod forward_prompt_args_tests {
 
         let args = make_args(None, Some(Path::new("CUSTOM.md")), Some(&wt));
         let out = forward_prompt_args(&args, tmp.path());
-        assert_eq!(out, vec!["-P".to_string(), prompt_path.to_string_lossy().into_owned()]);
+        assert_eq!(
+            out,
+            vec!["-P".to_string(), prompt_path.to_string_lossy().into_owned()]
+        );
     }
 
     /// `-P <absolute path>` in worktree mode is passed through as-is.
@@ -1292,7 +1292,10 @@ mod forward_prompt_args_tests {
 
         let args = make_args(None, Some(&abs_prompt), Some(&wt));
         let out = forward_prompt_args(&args, tmp.path());
-        assert_eq!(out, vec!["-P".to_string(), abs_prompt.to_string_lossy().into_owned()]);
+        assert_eq!(
+            out,
+            vec!["-P".to_string(), abs_prompt.to_string_lossy().into_owned()]
+        );
     }
 
     /// `-P <relative path>` in PRIMARY mode (no worktree) is forwarded
@@ -1471,7 +1474,10 @@ async fn run_subprocess_tui(
     child_args.push("--rpc".to_string());
 
     // Forward prompt
-    child_args.extend(forward_prompt_args(&args, &std::env::current_dir().unwrap_or_default()));
+    child_args.extend(forward_prompt_args(
+        &args,
+        &std::env::current_dir().unwrap_or_default(),
+    ));
 
     // Forward backend
     if let Some(ref backend) = args.backend {

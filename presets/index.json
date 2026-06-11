@@ -5,11 +5,6 @@
     "category": "optimization"
   },
   {
-    "name": "ce-executor",
-    "description": "Plan-driven work execution with adversarial code review, auto-fix loop, shipping workflow, and manager report",
-    "category": "development"
-  },
-  {
     "name": "ce-executor-isolated",
     "description": "Isolated-mode plan-driven work execution with adversarial wave code review, auto-fix, shipping, and manager report",
     "category": "development"

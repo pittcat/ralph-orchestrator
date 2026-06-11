@@ -1,5 +1,13 @@
 # Isolated Multi-Hat: strategist -> implementer -> reviewer
 # Isolated mode requires a separate backend iteration per hat stage.
+#
+# U3 update: review.complete is a legitimate terminal topic for the
+# reviewer (declared in its `publishes` list), so it passes the
+# per-hat scope check and enters the existing completion safety
+# pipeline as a normal business event. The completion promise is
+# published in a later iteration (separate turn / backend call),
+# which the U3 isolated boundary allows because it is the only
+# business event in that turn.
 
 name: isolated_multi_hat
 description: Isolated mode with 3 hats requires separate iterations
@@ -23,8 +31,10 @@ config:
         - experiment.ready
       publishes:
         - review.complete
+        - LOOP_COMPLETE
   event_loop:
     execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
 
 mock_responses:
   - |

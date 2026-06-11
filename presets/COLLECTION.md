@@ -1011,16 +1011,16 @@ still works, but the inline form is preferred for consistency.
 
 | Schema file | Referenced by | Status |
 |---|---|---|
-| `schemas/ce-executor.yml`        | `ce-executor`         | Deprecated reference copy (schemas inlined into `presets/en/ce-executor.yml`) |
+| `schemas/ce-executor-isolated.yml` | `ce-executor-isolated` | Deprecated reference copy (schemas inlined into `presets/en/ce-executor-isolated.yml`) |
 | `schemas/ce-executor-wave.yml`   | `ce-executor-wave`    | Deprecated reference copy (schemas inlined into `presets/en/ce-executor-wave.yml`) |
 | `schemas/code-assist.yml`        | `code-assist`         | Deprecated reference copy (schemas inlined into `presets/en/code-assist.yml`) |
 | `schemas/pdd-to-code-assist.yml` | `pdd-to-code-assist`  | Deprecated reference copy (schemas inlined into `presets/en/pdd-to-code-assist.yml`) |
 
-### Task Split Heuristics (ce-executor)
+### Task Split Heuristics (ce-executor-isolated)
 
-**Task Split Heuristics**: `ce-executor` coordinator 默认每 U 拆 1 张 task；
+**Task Split Heuristics**: `ce-executor-isolated` coordinator 默认每 U 拆 1 张 task；
 只有在 plan 显式列子单元、需要 wave 并行、或跨 worktree 时才拆多张。
-详见 `presets/en/ce-executor.yml` 的 coordinator "Task Split Heuristics" 段。
+详见 `presets/en/ce-executor-isolated.yml` 的 coordinator "Task Split Heuristics" 段。
 
 ### Checklist for Preset Authors (Payload Contracts)
 
@@ -1060,4 +1060,4 @@ regression matrix source.
 - [ ] Does `./scripts/validate-builtin-presets.sh --strict` pass after the change?
 - [ ] If a new finding id appears, is it documented in `docs/guide/runtime-contracts.md`?
 - [ ] For new public builtin presets, is the name added to `presets/index.json`?
-- [ ] For development presets (`ce-executor`, `ce-executor-wave`, `code-assist`, `pdd-to-code-assist`), does `ralph preset check --strict --format json` show zero findings?
+- [ ] For development presets (`ce-executor-isolated`, `ce-executor-wave`, `code-assist`, `pdd-to-code-assist`), does `ralph preset check --strict --format json` show zero findings?

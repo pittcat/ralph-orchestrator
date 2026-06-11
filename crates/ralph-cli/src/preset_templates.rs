@@ -1211,7 +1211,13 @@ impl TemplateCatalog {
                 description: "Simplified plan-driven execution without wave review".to_string(),
                 category: "development".to_string(),
                 difficulty: TemplateDifficulty::Advanced,
-                source: Some("builtin:ce-executor".to_string()),
+                // U7 (2026-06-11-003): the legacy `builtin:ce-executor` preset
+                // has been removed (R13–R15). The only complete CE executor
+                // entry point is now `builtin:ce-executor-isolated`. This
+                // lite template is therefore documented as a lightweight
+                // derivation of the isolated preset's coordinator + executor
+                // pair, not the legacy multi-hat pipeline.
+                source: Some("builtin:ce-executor-isolated".to_string()),
                 recommended_checks: CheckProfile::Strict,
                 placeholders: vec![
                     TemplatePlaceholder {

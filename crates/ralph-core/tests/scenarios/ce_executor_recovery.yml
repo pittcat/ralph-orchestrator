@@ -1,4 +1,4 @@
-# ce_executor_recovery: End-to-end recovery contract for the ce-executor preset
+# ce_executor_recovery: End-to-end recovery contract for the ce-executor-isolated preset (U7: legacy `ce-executor` removed)
 #
 # 2026-06-07 plan U7: 端到端闭环与回归验证
 #
@@ -26,7 +26,7 @@
 # asserts only the high-level event flow.
 
 name: ce_executor_recovery
-description: End-to-end recovery contract for the ce-executor preset
+description: End-to-end recovery contract for the ce-executor-isolated preset (file name kept for fixture continuity)
 
 config:
   prompt_file: PROMPT.md

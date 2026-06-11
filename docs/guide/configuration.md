@@ -220,7 +220,7 @@ Controls the orchestration loop behavior.
 | `starting_event` | string | `null` | First event (enables hat mode) |
 | `checkpoint_interval` | integer | `5` | Git checkpoint frequency |
 | `prompt_file` | string | `"PROMPT.md"` | Default prompt file |
-| `execution_mode` | string | `"coordinator"` | Hat execution mode: `coordinator` or `isolated` |
+| `execution_mode` | string | `"coordinator"` | Hat execution mode: `coordinator` or `isolated`. See [Multi-Hat Isolation Policy](#multi-hat-isolation-policy-mandatory) below for the fixed threshold that overrides the default. |
 | `workflow_guards` | object | `null` | Ordered event chain enforcement (see below) |
 | `event_policy` | object | `null` | Typed event payload validation and lifecycle enforcement (see below) |
 
@@ -228,6 +228,43 @@ Controls the orchestration loop behavior.
 |------------|------|---------|-------------|
 | `idle_timeout_secs` | integer | `30` | Interactive-mode idle timeout; `0` disables it |
 | `autonomous_idle_timeout_secs` | integer/null | `null` | Autonomous/RPC/worktree backend inactivity watchdog; `null` inherits `adapters.<backend>.timeout`, `0` disables it |
+
+#### Multi-Hat Isolation Policy (mandatory)
+
+`event_loop.execution_mode` interacts with the number of configured `hats` through a **fixed threshold** with **no exemption path**:
+
+| Hat count | Allowed `execution_mode` values | Behavior |
+|-----------|---------------------------------|----------|
+| `0`–`3` | `coordinator` (default) or `isolated` | Both modes start. The default `coordinator` runs all hats in a single prompt per iteration. |
+| `4`+ | **`isolated` only** | `coordinator` is rejected at startup with the fixed error below. The preset must declare `event_loop.execution_mode: isolated` explicitly. |
+
+The `3`-hat limit is a hard cap. Adding a 4th hat without flipping `execution_mode` to `isolated` is the most common cause of multi-hat preset failures. The lint rule `preset_lint::check_multi_hat_isolation` enforces this at `ralph preset check`, `ralph preflight`, and `ralph run` startup. Failure is fatal at every gate — the loop never enters a half-started state.
+
+**Fixed error message** (literal — tools and Skills may grep for it):
+
+```
+preset declares N hats which exceeds the coordinator limit of 3;
+set `event_loop.execution_mode: isolated` to run this preset
+```
+
+**Fix**:
+
+```yaml
+event_loop:
+  execution_mode: isolated
+  # ... rest of event_loop config ...
+hats:
+  # ≥ 4 hats declared here
+```
+
+**No exemptions.** The following are NOT supported and will not be honored if added:
+
+- Environment variables such as `RALPH_ALLOW_COORDINATOR_OVERRIDE=1`.
+- Test-only feature flags or `[dev].allow_large_coordinator` config keys.
+- Preset-name based exemptions (e.g., allowing `ce-executor*` to exceed 3 hats in coordinator mode).
+- Setting `execution_mode: coordinator` and adding a 4th hat anyway.
+
+If your workflow needs more than 3 hats, the only correct option is `execution_mode: isolated`. In that mode, additional invariants apply (see [Harness Extensions](harness-extensions.md#isolated-mode-with-extensions) for the isolated runtime contract: terminal-topic authority and round-robin fair scheduling).
 
 ### event_policy
 

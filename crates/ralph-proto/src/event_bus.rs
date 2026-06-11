@@ -11,7 +11,6 @@ use std::collections::BTreeMap;
 type Observer = Box<dyn Fn(&Event) + Send + 'static>;
 
 /// Central pub/sub hub for routing events between hats.
-#[derive(Default)]
 pub struct EventBus {
     /// Registered hats indexed by ID.
     hats: BTreeMap<HatId, Hat>,
@@ -25,6 +24,22 @@ pub struct EventBus {
     /// Observers that receive all published events.
     /// Multiple observers can be registered (e.g., session recorder + TUI).
     observers: Vec<Observer>,
+
+    /// Round-robin cursor: tracks the last selected hat ID.
+    /// Used by `select_next_hat_with_pending` to ensure fair scheduling.
+    last_selected: Option<HatId>,
+}
+
+impl Default for EventBus {
+    fn default() -> Self {
+        Self {
+            hats: BTreeMap::new(),
+            pending: BTreeMap::new(),
+            human_pending: Vec::new(),
+            observers: Vec::new(),
+            last_selected: None,
+        }
+    }
 }
 
 impl EventBus {
@@ -168,9 +183,14 @@ impl EventBus {
         &self.human_pending
     }
 
-    /// Checks if there are any pending events for any hat.
+    /// Checks if there are any pending events for any hat (including human events).
     pub fn has_pending(&self) -> bool {
         !self.human_pending.is_empty() || self.pending.values().any(|events| !events.is_empty())
+    }
+
+    /// Checks if there are any pending non-human events (i.e., hat-level queue entries).
+    pub fn has_pending_non_human(&self) -> bool {
+        self.pending.values().any(|events| !events.is_empty())
     }
 
     /// Checks if there are any pending human interaction events.
@@ -178,13 +198,74 @@ impl EventBus {
         !self.human_pending.is_empty()
     }
 
-    /// Returns the next hat with pending events.
+    /// Returns the next hat with pending events (deterministic, lexicographic first).
+    ///
+    /// This is a **peek** operation — it does not advance the round-robin cursor.
+    /// Use `select_next_hat_with_pending` for fair scheduling with cursor advancement.
+    ///
     /// BTreeMap iteration is already sorted by key.
-    pub fn next_hat_with_pending(&self) -> Option<&HatId> {
+    pub fn peek_next_hat_with_pending(&self) -> Option<&HatId> {
         self.pending
             .iter()
             .find(|(_, events)| !events.is_empty())
             .map(|(id, _)| id)
+    }
+
+    /// Deprecated: use `peek_next_hat_with_pending` (no side-effect) or
+    /// `select_next_hat_with_pending` (round-robin) instead.
+    #[deprecated(
+        since = "U4",
+        note = "Use peek_next_hat_with_pending() or select_next_hat_with_pending()"
+    )]
+    pub fn next_hat_with_pending(&self) -> Option<&HatId> {
+        self.peek_next_hat_with_pending()
+    }
+
+    /// Selects the next hat with pending events using round-robin scheduling.
+    ///
+    /// Starting from the hat *after* `last_selected` in `BTreeMap` order, scans
+    /// circularly for the first non-empty queue. If found, updates `last_selected`
+    /// and returns the owned `HatId`. If no non-empty queue exists, returns `None`
+    /// without modifying the cursor.
+    ///
+    /// This guarantees:
+    /// - **Starvation-free**: every pending hat is selected within N-1 other selections
+    ///   (where N is the number of registered hats with pending events).
+    /// - **Deterministic**: same cursor + same pending state = same result.
+    pub fn select_next_hat_with_pending(&mut self) -> Option<HatId> {
+        // Collect all non-empty pending hat IDs (stable BTreeMap order).
+        let non_empty: Vec<&HatId> = self
+            .pending
+            .iter()
+            .filter(|(_, events)| !events.is_empty())
+            .map(|(id, _)| id)
+            .collect();
+
+        if non_empty.is_empty() {
+            return None;
+        }
+
+        // Determine the starting index for the scan.
+        let start_idx = match &self.last_selected {
+            Some(cursor) => {
+                // Find the index of the cursor in non_empty, then start from the *next*.
+                match non_empty.iter().position(|id| *id == cursor) {
+                    Some(pos) => (pos + 1) % non_empty.len(),
+                    // Cursor points to a hat that no longer has pending events (or was
+                    // deregistered). Fall back to the first non-empty hat.
+                    None => 0,
+                }
+            }
+            None => 0,
+        };
+
+        // Scan from start_idx, wrapping around, and pick the first non-empty queue.
+        // Since `non_empty` already contains only non-empty entries, the first one we
+        // encounter is the winner.
+        let selected = non_empty[start_idx];
+
+        self.last_selected = Some(selected.clone());
+        Some(selected.clone())
     }
 
     /// Gets a hat by ID.
@@ -408,5 +489,189 @@ mod tests {
         // Peek after take - should be empty
         let peeked_after_take = bus.peek_pending(&hat_id);
         assert!(peeked_after_take.is_none() || peeked_after_take.unwrap().is_empty());
+    }
+
+    // ─── Round-robin scheduling tests (U4) ────────────────────────────────────
+
+    /// Helper: register a hat with wildcard subscription.
+    fn register_wildcard(bus: &mut EventBus, id: &str) {
+        bus.register(Hat::new(id, id).subscribe("*"));
+    }
+
+    /// F3 / AE6: A and B both pending; after selecting A (and consuming its
+    /// queue), the next selection must be B.
+    #[test]
+    fn two_hats_round_robin() {
+        let mut bus = EventBus::new();
+        register_wildcard(&mut bus, "alpha");
+        register_wildcard(&mut bus, "beta");
+
+        bus.publish(Event::new("work", "for alpha")); // routed to alpha + beta
+        bus.publish(Event::new("work", "for beta")); // same
+
+        // First selection — cursor starts at None → picks first non-empty (alpha).
+        let sel1 = bus.select_next_hat_with_pending().unwrap();
+        assert_eq!(sel1.as_str(), "alpha");
+
+        // Simulate the loop consuming alpha's queue.
+        bus.take_pending(&sel1);
+
+        // Second selection — cursor is now "alpha"; next after alpha is "beta".
+        let sel2 = bus.select_next_hat_with_pending().unwrap();
+        assert_eq!(sel2.as_str(), "beta");
+    }
+
+    /// A, B, C continuously pending: the selection sequence must cycle
+    /// A → B → C → A → … deterministically.
+    #[test]
+    fn three_hats_fair_rotation() {
+        let mut bus = EventBus::new();
+        register_wildcard(&mut bus, "alpha");
+        register_wildcard(&mut bus, "beta");
+        register_wildcard(&mut bus, "gamma");
+
+        // Publish enough events so queues never empty.
+        for i in 0..6 {
+            bus.publish(Event::new("work", &format!("event-{i}")));
+        }
+
+        let mut sequence = Vec::new();
+        for _ in 0..6 {
+            let sel = bus.select_next_hat_with_pending().unwrap();
+            sequence.push(sel.as_str().to_string());
+            // Do NOT consume — queues stay full (self-replenishing).
+        }
+
+        // Expected: alpha → beta → gamma → alpha → beta → gamma
+        assert_eq!(
+            sequence,
+            vec!["alpha", "beta", "gamma", "alpha", "beta", "gamma"]
+        );
+    }
+
+    /// A self-loops (gets new pending each time it's selected) — B must still
+    /// be selected within N-1 other selections (here N=2, so B is selected
+    /// immediately after A in the next round).
+    #[test]
+    fn self_looping_hat_does_not_starve() {
+        let mut bus = EventBus::new();
+        register_wildcard(&mut bus, "alpha");
+        register_wildcard(&mut bus, "beta");
+
+        // Initial publish.
+        bus.publish(Event::new("work", "seed-alpha"));
+        bus.publish(Event::new("work", "seed-beta"));
+
+        // Round 1: select alpha, consume, republish for alpha only.
+        let sel = bus.select_next_hat_with_pending().unwrap();
+        assert_eq!(sel.as_str(), "alpha");
+        bus.take_pending(&sel);
+        // Alpha self-loops: new work arrives.
+        bus.publish(Event::new("work", "alpha-loop"));
+
+        // Round 2: cursor is "alpha", so next is "beta".
+        let sel = bus.select_next_hat_with_pending().unwrap();
+        assert_eq!(sel.as_str(), "beta");
+        bus.take_pending(&sel);
+
+        // Beta should NOT starve — it was selected in round 2.
+    }
+
+    /// Only one pending hat: every selection returns the same hat, no idle.
+    #[test]
+    fn single_pending_hat_selected_every_time() {
+        let mut bus = EventBus::new();
+        register_wildcard(&mut bus, "solo");
+
+        bus.publish(Event::new("work", "item-1"));
+        bus.publish(Event::new("work", "item-2"));
+
+        for _ in 0..3 {
+            let sel = bus.select_next_hat_with_pending().unwrap();
+            assert_eq!(sel.as_str(), "solo");
+            // Don't consume — queue stays full.
+        }
+    }
+
+    /// Cursor points to a hat whose queue was cleared → scan wraps around
+    /// and picks the next non-empty queue correctly.
+    #[test]
+    fn cursor_after_cleared_queue_wraps() {
+        let mut bus = EventBus::new();
+        register_wildcard(&mut bus, "alpha");
+        register_wildcard(&mut bus, "beta");
+        register_wildcard(&mut bus, "gamma");
+
+        // Publish to all three.
+        bus.publish(Event::new("work", "a1"));
+        bus.publish(Event::new("work", "b1"));
+        bus.publish(Event::new("work", "g1"));
+
+        // Select alpha first.
+        let sel = bus.select_next_hat_with_pending().unwrap();
+        assert_eq!(sel.as_str(), "alpha");
+        bus.take_pending(&sel);
+
+        // Select beta.
+        let sel = bus.select_next_hat_with_pending().unwrap();
+        assert_eq!(sel.as_str(), "beta");
+        // Clear beta too.
+        bus.take_pending(&sel);
+
+        // Cursor is now "beta". Next should be "gamma" (the only remaining).
+        let sel = bus.select_next_hat_with_pending().unwrap();
+        assert_eq!(sel.as_str(), "gamma");
+        bus.take_pending(&sel);
+
+        // All queues empty — should return None.
+        assert!(bus.select_next_hat_with_pending().is_none());
+    }
+
+    /// peek_next_hat_with_pending must NOT advance the cursor.
+    #[test]
+    fn peek_does_not_advance_cursor() {
+        let mut bus = EventBus::new();
+        register_wildcard(&mut bus, "alpha");
+        register_wildcard(&mut bus, "beta");
+
+        bus.publish(Event::new("work", "a1"));
+        bus.publish(Event::new("work", "b1"));
+
+        // Peek multiple times — always returns the same (lexicographic first).
+        for _ in 0..5 {
+            let peeked = bus.peek_next_hat_with_pending().unwrap();
+            assert_eq!(peeked.as_str(), "alpha");
+        }
+
+        // Select after peeking — cursor was never advanced by peek.
+        let sel = bus.select_next_hat_with_pending().unwrap();
+        assert_eq!(sel.as_str(), "alpha");
+    }
+
+    /// Same registered hats, same pending queues, same initial cursor →
+    /// two independent runs produce the identical selection sequence.
+    #[test]
+    fn same_state_same_sequence() {
+        fn run_sequence() -> Vec<String> {
+            let mut bus = EventBus::new();
+            register_wildcard(&mut bus, "alpha");
+            register_wildcard(&mut bus, "beta");
+            register_wildcard(&mut bus, "gamma");
+
+            for i in 0..6 {
+                bus.publish(Event::new("work", &format!("event-{i}")));
+            }
+
+            let mut seq = Vec::new();
+            for _ in 0..6 {
+                let sel = bus.select_next_hat_with_pending().unwrap();
+                seq.push(sel.as_str().to_string());
+            }
+            seq
+        }
+
+        let seq1 = run_sequence();
+        let seq2 = run_sequence();
+        assert_eq!(seq1, seq2, "Same initial state must produce same sequence");
     }
 }

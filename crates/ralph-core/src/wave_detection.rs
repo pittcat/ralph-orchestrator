@@ -351,10 +351,7 @@ pub fn detect_wave_events_capped(
         .first()
         .map(|e| e.topic.clone())
         .unwrap_or_default();
-    let actual = wave_events
-        .first()
-        .and_then(|e| e.wave_total)
-        .unwrap_or(0);
+    let actual = wave_events.first().and_then(|e| e.wave_total).unwrap_or(0);
 
     let result = try_build_wave(
         wave_id,
@@ -388,8 +385,13 @@ pub fn detect_all_wave_events(
     registry: &HatRegistry,
     max_wave_total: u32,
 ) -> Vec<DetectedWave> {
-    detect_all_wave_events_capped(events, registry, PartialWavePolicy::RequireComplete, max_wave_total)
-        .accepted
+    detect_all_wave_events_capped(
+        events,
+        registry,
+        PartialWavePolicy::RequireComplete,
+        max_wave_total,
+    )
+    .accepted
 }
 
 /// Detect all waves with a configured partial-wave policy (legacy helper).
@@ -429,10 +431,7 @@ pub fn detect_all_wave_events_capped(
             .first()
             .map(|e| e.topic.clone())
             .unwrap_or_default();
-        let actual = wave_events
-            .first()
-            .and_then(|e| e.wave_total)
-            .unwrap_or(0);
+        let actual = wave_events.first().and_then(|e| e.wave_total).unwrap_or(0);
         let result = try_build_wave(wave_id, wave_events, registry, policy, max_wave_total);
         let (acc, rej) = partition_group(result, wave_id, &topic, actual);
         if let Some(w) = acc {
@@ -444,12 +443,8 @@ pub fn detect_all_wave_events_capped(
     }
 
     // Deterministic ordering by wave_id
-    outcome
-        .accepted
-        .sort_by(|a, b| a.wave_id.cmp(&b.wave_id));
-    outcome
-        .rejected
-        .sort_by(|a, b| a.wave_id.cmp(&b.wave_id));
+    outcome.accepted.sort_by(|a, b| a.wave_id.cmp(&b.wave_id));
+    outcome.rejected.sort_by(|a, b| a.wave_id.cmp(&b.wave_id));
     outcome
 }
 
@@ -776,8 +771,12 @@ mod tests {
         assert!(waves.is_empty(), "RequireComplete must skip partial wave");
 
         // AllowPartial → wave with partial=true
-        let waves =
-            detect_all_wave_events_with_policy(&events, &registry,  PartialWavePolicy::AllowPartial, 64);
+        let waves = detect_all_wave_events_with_policy(
+            &events,
+            &registry,
+            PartialWavePolicy::AllowPartial,
+            64,
+        );
         assert_eq!(waves.len(), 1);
         assert!(waves[0].partial, "partial wave must be marked");
         assert_eq!(waves[0].total, 3, "total must reflect expected count");
@@ -795,8 +794,12 @@ mod tests {
             make_wave_event("review.file", "a", "w-full", 0, 2),
             make_wave_event("review.file", "b", "w-full", 1, 2),
         ];
-        let waves =
-            detect_all_wave_events_with_policy(&events, &registry,  PartialWavePolicy::AllowPartial, 64);
+        let waves = detect_all_wave_events_with_policy(
+            &events,
+            &registry,
+            PartialWavePolicy::AllowPartial,
+            64,
+        );
         assert_eq!(waves.len(), 1);
         assert!(
             !waves[0].partial,
@@ -821,8 +824,12 @@ mod tests {
         let events: Vec<Event> = (0..64)
             .map(|i| make_wave_event("review.file", "p", "w-64", i, 64))
             .collect();
-        let outcome =
-            detect_all_wave_events_capped(&events, &registry, PartialWavePolicy::RequireComplete, 64);
+        let outcome = detect_all_wave_events_capped(
+            &events,
+            &registry,
+            PartialWavePolicy::RequireComplete,
+            64,
+        );
         assert!(outcome.rejected.is_empty(), "64/64 must not be rejected");
         assert_eq!(outcome.accepted.len(), 1);
         assert_eq!(outcome.accepted[0].total, 64);
@@ -834,15 +841,22 @@ mod tests {
         let events: Vec<Event> = (0..65)
             .map(|i| make_wave_event("review.file", "p", "w-65", i, 65))
             .collect();
-        let outcome =
-            detect_all_wave_events_capped(&events, &registry, PartialWavePolicy::RequireComplete, 64);
+        let outcome = detect_all_wave_events_capped(
+            &events,
+            &registry,
+            PartialWavePolicy::RequireComplete,
+            64,
+        );
         assert!(outcome.accepted.is_empty(), "65/64 must not be accepted");
         assert_eq!(outcome.rejected.len(), 1);
         assert_eq!(outcome.rejected[0].wave_id, "w-65");
         assert_eq!(outcome.rejected[0].actual, 65);
         assert_eq!(
             outcome.rejected[0].reason,
-            WaveRejection::TotalExceedsCap { actual: 65, cap: 64 }
+            WaveRejection::TotalExceedsCap {
+                actual: 65,
+                cap: 64
+            }
         );
     }
 
@@ -853,12 +867,23 @@ mod tests {
         let events: Vec<Event> = (0..335)
             .map(|i| make_wave_event("review.file", "p", "w-335", i, 335))
             .collect();
-        let outcome =
-            detect_all_wave_events_capped(&events, &registry, PartialWavePolicy::RequireComplete, 64);
-        assert_eq!(outcome.rejected.len(), 1, "335 events → 1 rejection (not 335)");
+        let outcome = detect_all_wave_events_capped(
+            &events,
+            &registry,
+            PartialWavePolicy::RequireComplete,
+            64,
+        );
+        assert_eq!(
+            outcome.rejected.len(),
+            1,
+            "335 events → 1 rejection (not 335)"
+        );
         assert_eq!(
             outcome.rejected[0].reason,
-            WaveRejection::TotalExceedsCap { actual: 335, cap: 64 }
+            WaveRejection::TotalExceedsCap {
+                actual: 335,
+                cap: 64
+            }
         );
     }
 
@@ -871,8 +896,12 @@ mod tests {
             Some(0),
             Some(u32::MAX),
         )];
-        let outcome =
-            detect_all_wave_events_capped(&events, &registry, PartialWavePolicy::RequireComplete, 64);
+        let outcome = detect_all_wave_events_capped(
+            &events,
+            &registry,
+            PartialWavePolicy::RequireComplete,
+            64,
+        );
         assert!(outcome.accepted.is_empty());
         assert_eq!(outcome.rejected.len(), 1);
         assert_eq!(
@@ -897,7 +926,10 @@ mod tests {
         assert_eq!(outcome.rejected.len(), 1);
         assert_eq!(
             outcome.rejected[0].reason,
-            WaveRejection::TotalExceedsCap { actual: 335, cap: 64 }
+            WaveRejection::TotalExceedsCap {
+                actual: 335,
+                cap: 64
+            }
         );
     }
 
@@ -910,8 +942,12 @@ mod tests {
             Some(0),
             Some(0),
         )];
-        let outcome =
-            detect_all_wave_events_capped(&events, &registry, PartialWavePolicy::RequireComplete, 64);
+        let outcome = detect_all_wave_events_capped(
+            &events,
+            &registry,
+            PartialWavePolicy::RequireComplete,
+            64,
+        );
         assert_eq!(outcome.rejected.len(), 1);
         assert_eq!(outcome.rejected[0].reason, WaveRejection::ZeroTotal);
     }
@@ -923,8 +959,12 @@ mod tests {
             make_wave_event("unknown.topic", "p", "w-unk", 0, 2),
             make_wave_event("unknown.topic", "p", "w-unk", 1, 2),
         ];
-        let outcome =
-            detect_all_wave_events_capped(&events, &registry, PartialWavePolicy::RequireComplete, 64);
+        let outcome = detect_all_wave_events_capped(
+            &events,
+            &registry,
+            PartialWavePolicy::RequireComplete,
+            64,
+        );
         assert_eq!(outcome.rejected.len(), 1);
         assert_eq!(outcome.rejected[0].reason, WaveRejection::NoTargetHat);
     }
@@ -939,8 +979,12 @@ mod tests {
         events.push(make_wave_event("review.file", "a", "w-valid", 0, 2));
         events.push(make_wave_event("review.file", "b", "w-valid", 1, 2));
 
-        let outcome =
-            detect_all_wave_events_capped(&events, &registry, PartialWavePolicy::RequireComplete, 64);
+        let outcome = detect_all_wave_events_capped(
+            &events,
+            &registry,
+            PartialWavePolicy::RequireComplete,
+            64,
+        );
 
         assert_eq!(outcome.rejected.len(), 1);
         assert_eq!(outcome.rejected[0].wave_id, "w-huge");
@@ -959,7 +1003,10 @@ mod tests {
         assert_eq!(outcome.rejected.len(), 1);
         assert_eq!(
             outcome.rejected[0].reason,
-            WaveRejection::TotalExceedsCap { actual: 100, cap: 64 }
+            WaveRejection::TotalExceedsCap {
+                actual: 100,
+                cap: 64
+            }
         );
     }
 

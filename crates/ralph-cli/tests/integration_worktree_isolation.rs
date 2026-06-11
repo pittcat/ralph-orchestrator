@@ -249,13 +249,7 @@ fn test_no_worktree_no_worktrees_dir() {
     write_minimal_config(main_repo);
 
     let _ = Command::new(env!("CARGO_BIN_EXE_ralph"))
-        .args([
-            "run",
-            "--no-tui",
-            "--skip-preflight",
-            "--prompt",
-            "test",
-        ])
+        .args(["run", "--no-tui", "--skip-preflight", "--prompt", "test"])
         .current_dir(main_repo)
         .output()
         .expect("execute ralph");

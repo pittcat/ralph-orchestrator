@@ -1383,25 +1383,19 @@ impl EventLoop {
                 // wave_id is typed as `IsolatedMultipleBusinessEmissions`
                 // — a second wave is never silently absorbed by the
                 // scope check.
-                if let Some(out_of_scope_topic) =
-                    group.iter().find_map(|e| {
-                        if self.isolated_publish_allowed(isolated_hat, e.topic.as_str()) {
-                            None
-                        } else {
-                            Some(e.topic.to_string())
-                        }
-                    })
-                {
+                if let Some(out_of_scope_topic) = group.iter().find_map(|e| {
+                    if self.isolated_publish_allowed(isolated_hat, e.topic.as_str()) {
+                        None
+                    } else {
+                        Some(e.topic.to_string())
+                    }
+                }) {
                     let rejection = WaveRejection::IsolatedScopeViolation {
                         wave_id: wave_id.clone(),
                         topic: out_of_scope_topic,
                         isolated_hat: isolated_hat.to_string(),
                     };
-                    self.publish_isolated_wave_violation(
-                        &rejection,
-                        isolated_hat,
-                        &group,
-                    );
+                    self.publish_isolated_wave_violation(&rejection, isolated_hat, &group);
                     wave_observed = true;
                     continue;
                 }
@@ -1414,11 +1408,7 @@ impl EventLoop {
                     wave_id: wave_id.clone(),
                     isolated_hat: isolated_hat.to_string(),
                 };
-                self.publish_isolated_wave_violation(
-                    &rejection,
-                    isolated_hat,
-                    &group,
-                );
+                self.publish_isolated_wave_violation(&rejection, isolated_hat, &group);
             }
         }
 
@@ -1437,14 +1427,16 @@ impl EventLoop {
     ) {
         use crate::wave_detection::WaveRejection;
         let (reason_code, topic_label, wave_id) = match rejection {
-            WaveRejection::IsolatedScopeViolation {
-                wave_id,
-                topic,
-                ..
-            } => ("wave_isolated_scope_violation", topic.as_str(), wave_id.as_str()),
-            WaveRejection::IsolatedMultipleBusinessEmissions {
-                wave_id, ..
-            } => ("wave_isolated_multiple_business_emissions", "", wave_id.as_str()),
+            WaveRejection::IsolatedScopeViolation { wave_id, topic, .. } => (
+                "wave_isolated_scope_violation",
+                topic.as_str(),
+                wave_id.as_str(),
+            ),
+            WaveRejection::IsolatedMultipleBusinessEmissions { wave_id, .. } => (
+                "wave_isolated_multiple_business_emissions",
+                "",
+                wave_id.as_str(),
+            ),
             _ => ("wave_isolated_unknown", "", ""),
         };
         warn!(
@@ -1472,16 +1464,19 @@ impl EventLoop {
         // can track the finding. Outcome is `NotRetriable` per plan §3
         // KTD-U4-5 table — cap/structure and isolated-scope rejections
         // do not enter automatic recovery escalation.
-        let retry_key =
-            crate::diagnosis::RecoveryDiagnosisEnvelopeBuilder::wave_retry_key(
-                wave_id,
-                reason_code,
-            );
+        let retry_key = crate::diagnosis::RecoveryDiagnosisEnvelopeBuilder::wave_retry_key(
+            wave_id,
+            reason_code,
+        );
         let message = format!(
             "Isolated wave {} rejected: hat '{}' cannot publish '{}'; {} event(s) dropped",
             wave_id,
             isolated_hat.as_str(),
-            if topic_label.is_empty() { "(multi-business)" } else { topic_label },
+            if topic_label.is_empty() {
+                "(multi-business)"
+            } else {
+                topic_label
+            },
             events.len(),
         );
         let mut builder = crate::diagnosis::RecoveryDiagnosisEnvelope::builder()
@@ -2058,34 +2053,49 @@ impl EventLoop {
     ///
     /// - Solo mode (no custom hats): Returns "ralph" if Ralph has pending events
     /// - Multi-hat mode (custom hats defined): Always returns "ralph" if ANY hat has pending events
-    pub fn next_hat(&self) -> Option<&HatId> {
-        let next = self.bus.next_hat_with_pending();
-
-        // If no pending hat events but human interactions are pending, route to Ralph.
-        if next.is_none() && self.bus.has_human_pending() {
-            return self.bus.hat_ids().find(|id| id.as_str() == "ralph");
-        }
-
-        // If no pending events, return None
-        next.as_ref()?;
-
+    ///
+    /// **Isolated mode** uses round-robin scheduling via
+    /// `EventBus::select_next_hat_with_pending` to guarantee starvation-free fair
+    /// selection among all pending hats.
+    ///
+    /// **NOTE**: This method takes `&mut self` because isolated-mode round-robin
+    /// advances the bus's internal cursor.
+    pub fn next_hat(&mut self) -> Option<&HatId> {
         match self.config.event_loop.execution_mode {
             HatExecutionMode::Isolated => {
-                // Isolated mode: return the concrete hat with pending events.
-                // Solo mode (no custom hats) still returns "ralph" since it's the only hat.
-                // In multi-hat mode, return the actual pending hat so each runs independently.
-                next
+                // Isolated mode: use round-robin to select the next hat.
+                // This advances the cursor on the bus for fair scheduling.
+                if self.bus.has_human_pending() && !self.bus.has_pending_non_human() {
+                    // Only human events pending — route to ralph.
+                    return self.bus.hat_ids().find(|id| id.as_str() == "ralph");
+                }
+                // Select via round-robin. This updates last_selected.
+                // We need to return a borrowed HatId, so we select and then look it up.
+                let selected = self.bus.select_next_hat_with_pending()?;
+                // The selected hat must exist in the bus (it was found in pending).
+                self.bus.hat_ids().find(|id| *id == &selected)
             }
             HatExecutionMode::Coordinator => {
+                // Coordinator mode: peek for pending, then return ralph if any.
+                let has_pending = self.bus.peek_next_hat_with_pending().is_some();
+
+                // If no pending hat events but human interactions are pending, route to Ralph.
+                if !has_pending && self.bus.has_human_pending() {
+                    return self.bus.hat_ids().find(|id| id.as_str() == "ralph");
+                }
+
+                if !has_pending {
+                    return None;
+                }
+
                 // Coordinator mode (default): In multi-hat mode, always route to Ralph
                 // (custom hats define topology only). Ralph's prompt includes the ## HATS
                 // section for coordination awareness.
                 if self.config.hats.is_empty() {
                     // Solo mode - return the next hat (which is "ralph")
-                    next
+                    self.bus.hat_ids().find(|id| id.as_str() == "ralph")
                 } else {
                     // Return "ralph" - the constant coordinator
-                    // Find ralph in the bus's registered hats
                     self.bus.hat_ids().find(|id| id.as_str() == "ralph")
                 }
             }
@@ -2093,7 +2103,7 @@ impl EventLoop {
     }
 
     /// Returns the hat that will be triggered by the next pending event, if any.
-    pub fn triggered_hat(&self) -> Option<HatId> {
+    pub fn triggered_hat(&mut self) -> Option<HatId> {
         self.next_hat().cloned()
     }
 
@@ -2121,8 +2131,10 @@ impl EventLoop {
     ///
     /// Use this after `process_output` to detect if the LLM failed to publish an event.
     /// If false after processing, the loop will terminate on the next iteration.
+    ///
+    /// Uses peek (no side-effect) to avoid advancing the round-robin cursor.
     pub fn has_pending_events(&self) -> bool {
-        self.bus.next_hat_with_pending().is_some() || self.bus.has_human_pending()
+        self.bus.has_pending()
     }
 
     /// Checks if any pending events are human-related (human.response, human.guidance).
@@ -3640,40 +3652,130 @@ impl EventLoop {
     /// so the loop can terminate. Without this, completion events injected via
     /// `default_publishes` would only be published to the bus (triggering downstream hats)
     /// but never detected by `check_completion_event`, causing an infinite loop.
+    ///
+    /// **U3 P0 fix (post-review)**: in `execution_mode: isolated`, this path
+    /// runs *outside* `process_events_from_jsonl`'s scope enforcement, so we
+    /// must mirror the same two gates that path enforces for JSONL events:
+    ///
+    /// 1. **Publish scope gate** — `default_topic` must be in the hat's
+    ///    `publishes` list. If not, drop the injection and emit
+    ///    `{hat}.scope_violation` to keep `default_publishes` from being a
+    ///    back door around the U3 can_publish check.
+    /// 2. **Per-turn single-event budget** — the default_publishes injection
+    ///    counts as a business event for the current turn. Set
+    ///    `first_business_event_accepted` so a subsequent JSONL business
+    ///    event in the same turn hits `event.isolation.boundary_violation`
+    ///    (and vice versa: if a JSONL business event was already accepted
+    ///    this turn, drop the default_publishes injection and emit
+    ///    `event.isolation.boundary_violation`).
+    ///
+    /// Coordinator mode is unchanged: there is no per-turn budget, and the
+    /// `ralph` pseudo-hat's `RALPH_CONTROL_TOPICS` allowlist (in
+    /// `event_origin.rs`) still governs what the runtime fallback hat may
+    /// publish.
     pub fn check_default_publishes(&mut self, hat_id: &HatId) {
-        if let Some(config) = self.registry.get_config(hat_id)
-            && let Some(default_topic) = &config.default_publishes
+        let Some(config) = self.registry.get_config(hat_id) else {
+            return;
+        };
+        let Some(default_topic) = config.default_publishes.as_ref() else {
+            return;
+        };
+        let default_topic = default_topic.clone();
+        let default_topic_str = default_topic.as_str();
+
+        // U3 P0 fix — Gate 1: publish scope.
+        // In isolated mode, the current hat's `publishes` list is the
+        // authoritative scope; `default_publishes` must be a subset of it.
+        if self.config.event_loop.execution_mode == HatExecutionMode::Isolated
+            && !self.registry.can_publish(hat_id, default_topic_str)
         {
-            let default_event = Event::new(default_topic.as_str(), "").with_source(hat_id.clone());
-            let verdict_topics = self.verdict_gate_topics();
-            let verdict_topics_slice = verdict_topics.as_deref();
-            self.state
-                .record_verdict_if_match(&default_event, verdict_topics_slice);
-
-            debug!(
+            warn!(
                 hat = %hat_id.as_str(),
-                topic = %default_topic,
-                "No events written by hat, injecting default_publishes event"
+                topic = %default_topic_str,
+                "Isolated mode: default_publishes not declared in hat scope — dropping injection"
             );
-
-            self.state.record_event(&default_event);
-
-            // If the default topic is the completion promise, set the flag directly.
-            // The normal path (process_events_from_jsonl) sets this when reading from
-            // JSONL, but default_publishes bypasses JSONL entirely.
-            if default_topic.as_str() == self.config.event_loop.completion_promise
-                && !self.state.completion_honored
-            {
-                info!(
-                    hat = %hat_id.as_str(),
-                    topic = %default_topic,
-                    "default_publishes matches completion_promise — requesting termination"
-                );
-                self.state.completion_requested = true;
-            }
-
-            self.bus.publish(default_event);
+            let violation_topic = format!("{}.scope_violation", hat_id.as_str());
+            let violation_payload = format!(
+                "Isolated mode: hat '{}' cannot publish default topic '{}' (not in publishes)",
+                hat_id.as_str(),
+                default_topic_str
+            );
+            self.bus
+                .publish(Event::new(violation_topic, violation_payload));
+            return;
         }
+
+        // U3 P0 fix — Gate 2: per-turn single-event budget coordination.
+        // If a JSONL business event was already accepted in this turn
+        // (isolated_turn_business_event_accepted is sticky across
+        // process_events and check_default_publishes), dropping the default
+        // injection prevents two business events from being accepted in one
+        // turn.
+        if self.config.event_loop.execution_mode == HatExecutionMode::Isolated
+            && self.state.isolated_turn_business_event_accepted
+            && !crate::event_origin::is_orchestrator_control_topic(
+                default_topic_str,
+                self.config.event_loop.cancellation_promise.as_str(),
+            )
+        {
+            warn!(
+                hat = %hat_id.as_str(),
+                topic = %default_topic_str,
+                "Isolated mode: default_publishes would exceed per-turn business-event budget — dropping"
+            );
+            let diagnostic = Event::new(
+                "event.isolation.boundary_violation",
+                format!(
+                    "Isolated mode: default_publishes '{}' on hat '{}' dropped — one business event already accepted this turn",
+                    default_topic_str,
+                    hat_id.as_str()
+                ),
+            );
+            self.bus.publish(diagnostic);
+            return;
+        }
+
+        let default_event = Event::new(default_topic_str, "").with_source(hat_id.clone());
+        let verdict_topics = self.verdict_gate_topics();
+        let verdict_topics_slice = verdict_topics.as_deref();
+        self.state
+            .record_verdict_if_match(&default_event, verdict_topics_slice);
+
+        debug!(
+            hat = %hat_id.as_str(),
+            topic = %default_topic_str,
+            "No events written by hat, injecting default_publishes event"
+        );
+
+        self.state.record_event(&default_event);
+
+        // U3 P0 fix — claim the per-turn business-event budget slot when we
+        // actually inject (so a subsequent JSONL business event in the same
+        // turn will be rejected by the boundary check).
+        if self.config.event_loop.execution_mode == HatExecutionMode::Isolated
+            && !crate::event_origin::is_orchestrator_control_topic(
+                default_topic_str,
+                self.config.event_loop.cancellation_promise.as_str(),
+            )
+        {
+            self.state.isolated_turn_business_event_accepted = true;
+        }
+
+        // If the default topic is the completion promise, set the flag directly.
+        // The normal path (process_events_from_jsonl) sets this when reading from
+        // JSONL, but default_publishes bypasses JSONL entirely.
+        if default_topic_str == self.config.event_loop.completion_promise
+            && !self.state.completion_honored
+        {
+            info!(
+                hat = %hat_id.as_str(),
+                topic = %default_topic_str,
+                "default_publishes matches completion_promise — requesting termination"
+            );
+            self.state.completion_requested = true;
+        }
+
+        self.bus.publish(default_event);
     }
 
     /// Returns a mutable reference to the event bus for direct event publishing.
@@ -3702,6 +3804,10 @@ impl EventLoop {
         } else {
             self.state.current_isolated_hat = None;
         }
+        // U3 P0 fix: reset the per-turn business-event budget at every turn
+        // boundary so `check_default_publishes` and `process_parse_result`
+        // see a consistent view of "what has been accepted this turn".
+        self.state.isolated_turn_business_event_accepted = false;
 
         // Periodic robot check-in
         if let Some(interval_secs) = self.config.robot.checkin_interval_seconds
@@ -4234,28 +4340,25 @@ impl EventLoop {
         let events = if self.config.event_loop.execution_mode == HatExecutionMode::Isolated
             && let Some(ref isolated_hat) = self.state.current_isolated_hat
         {
-            // Isolated mode: hard-enforce current hat scope + single business event boundary
+            // Isolated mode: hard-enforce current hat scope + single business event boundary.
+            // U3: orchestrator control topics and diagnostic topics bypass the budget
+            // (they are loop-internal, not agent progress). Completion promises and
+            // other agent terminal topics go through the normal `can_publish` +
+            // single-event budget path so an isolated hat cannot bypass its
+            // declared publish scope by emitting a completion-style event.
             let mut accepted = Vec::new();
             let mut first_business_event_accepted = false;
+            let cancellation = self.config.event_loop.cancellation_promise.as_str();
 
             for event in result.events {
-                // System/diagnostic events always pass through
-                let is_system_event = matches!(
-                    event.topic.as_str(),
-                    "event.malformed"
-                        | "event.scope_violation"
-                        | "event.workflow_guard_rejected"
-                        | "human.interact"
-                        | "human.response"
-                        | "human.guidance"
-                        | "human.timeout"
-                        | "loop.cancel"
-                        | "task.resume"
-                        | "build.task.abandoned"
-                ) || event.topic.as_str()
-                    == self.config.event_loop.completion_promise.as_str();
+                let topic = event.topic.as_str();
+                let is_orchestrator_internal =
+                    crate::event_origin::is_orchestrator_control_topic(topic, cancellation)
+                        || crate::event_origin::is_orchestrator_diagnostic_topic(topic);
 
-                if is_system_event {
+                if is_orchestrator_internal {
+                    // Loop-internal event — always accepted, does not
+                    // consume the per-turn business-event budget.
                     accepted.push(event);
                     continue;
                 }
@@ -4294,6 +4397,11 @@ impl EventLoop {
                 } else {
                     accepted.push(event);
                     first_business_event_accepted = true;
+                    // U3 P0 fix: write the sticky per-turn budget flag so
+                    // `check_default_publishes` (which runs later in the same
+                    // turn when JSONL had zero events, or earlier when JSONL
+                    // had business events) sees a consistent view.
+                    self.state.isolated_turn_business_event_accepted = true;
                 }
             }
             accepted
@@ -5592,9 +5700,7 @@ impl EventLoop {
                     || control_prefixes.iter().any(|p| topic.starts_with(p));
 
                 // INV-1: Ralph must not publish business topics
-                if !is_control
-                    && event.source.as_ref().map(|h| h.as_str()) == Some("ralph")
-                {
+                if !is_control && event.source.as_ref().map(|h| h.as_str()) == Some("ralph") {
                     self.state.invariant_violation_count += 1;
                     self.state.last_invariant_violation =
                         Some(format!("INV-1:hat=ralph,topic={}", topic));
@@ -5604,10 +5710,7 @@ impl EventLoop {
                         "ralph",
                         crate::diagnostics::OrchestrationEvent::InvariantViolation {
                             rule_id: "INV-1".to_string(),
-                            description: format!(
-                                "Ralph published business topic '{}'",
-                                topic
-                            ),
+                            description: format!("Ralph published business topic '{}'", topic),
                             topic: Some(topic.to_string()),
                             source: Some("ralph".to_string()),
                             iteration: self.state.iteration,
@@ -5792,8 +5895,7 @@ impl EventLoop {
         // single isolated activation may emit at most one distinct
         // `wave_id` — additional distinct wave_ids in the same read
         // batch are typed as `IsolatedMultipleBusinessEmissions`.
-        let wave_events = if self.config.event_loop.execution_mode
-            == HatExecutionMode::Isolated
+        let wave_events = if self.config.event_loop.execution_mode == HatExecutionMode::Isolated
             && let Some(isolated_hat) = self.state.current_isolated_hat.clone()
             && !wave_events.is_empty()
         {

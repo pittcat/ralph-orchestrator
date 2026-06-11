@@ -9870,22 +9870,258 @@ fn u6_all_builtin_presets_pass_lint_gate() {
         let config =
             RalphConfig::parse_yaml(preset.content).expect("embedded preset YAML should parse");
         let result = enforce_preset_lint_gate(&config);
-        if let Err(err) = result {
-            failures.push(format!(
-                "'{}': {} error(s) — {:?}",
-                preset.name,
-                err.error_count,
-                err.findings
-                    .iter()
-                    .filter(|f| f.severity == ralph_core::runtime_contract::FindingSeverity::Error)
-                    .map(|f| format!("{}: {}", f.id, f.message))
-                    .collect::<Vec<_>>()
-            ));
-        }
+        let Err(err) = result else { continue };
+        failures.push(format!(
+            "'{}': {} error(s) — {:?}",
+            preset.name,
+            err.error_count,
+            err.findings
+                .iter()
+                .filter(|f| f.severity == ralph_core::runtime_contract::FindingSeverity::Error)
+                .map(|f| format!("{}: {}", f.id, f.message))
+                .collect::<Vec<_>>()
+        ));
     }
     assert!(
         failures.is_empty(),
         "Builtins failed lint gate:\n{}",
         failures.join("\n")
     );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// U2 of 2026-06-11-003: multi-hat isolation policy run gate.
+//
+// The strict preset lint gate (`enforce_preset_lint_gate`) is the
+// hard gate `ralph run` calls BEFORE any backend is spawned. The
+// multi-hat rule is wired into the aggregator via U1, so a
+// super-threshold coordinator config must:
+//
+//   1. cause `enforce_preset_lint_gate` to return Err
+//   2. produce a stable `FINDING_MULTI_HAT_REQUIRES_ISOLATED` finding
+//   3. never spawn a backend (R7: read-only / no partial loop state)
+//
+// These tests assert the gate outcome directly; the run-loop wiring
+// in `runner.rs` is the only place that would spawn a backend, and
+// it calls the gate first.
+// ──────────────────────────────────────────────────────────────────────
+
+/// Helper: build a minimal N-hat config for run-gate tests. Mirrors
+/// the helper in `multi_hat.rs` but kept private to this test module.
+fn u2_make_n_hat_config(n: usize, mode_yaml: &str) -> ralph_core::RalphConfig {
+    let mut hats_yaml = String::new();
+    for i in 0..n {
+        if i > 0 {
+            hats_yaml.push('\n');
+        }
+        hats_yaml.push_str(&format!(
+            "  h{i}:\n    name: \"H{i}\"\n    description: \"Hat {i}\"\n    triggers: [\"work.start\"]\n    publishes: [\"work.done{i}\"]\n    instructions: \"Do hat {i}.\""
+        ));
+    }
+    let yaml = format!(
+        r#"
+hats:
+{hats_yaml}
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "work.done"
+  {mode_yaml}
+tasks:
+  enabled: false
+"#
+    );
+    serde_yaml::from_str(&yaml).expect("parse test config")
+}
+
+/// AE2: 4 hats, default (Coordinator) mode → strict lint gate fails
+/// and surfaces the multi-hat finding. The gate runs BEFORE any
+/// backend is spawned (R7: no events file is created on failure).
+#[test]
+fn u2_lint_gate_blocks_4_hat_default_coordinator() {
+    use ralph_core::preset_lint::finding_id::FINDING_MULTI_HAT_REQUIRES_ISOLATED;
+
+    let config = u2_make_n_hat_config(4, "");
+    let result = enforce_preset_lint_gate(&config);
+    let err = result.expect_err("4-hat default coordinator must fail the run gate");
+    assert!(err.error_count >= 1, "expected at least 1 error, got {err}");
+    let multi_hat_findings: Vec<_> = err
+        .findings
+        .iter()
+        .filter(|f| f.id == format!("lint.{}", FINDING_MULTI_HAT_REQUIRES_ISOLATED))
+        .collect();
+    assert_eq!(
+        multi_hat_findings.len(),
+        1,
+        "expected exactly one multi_hat_requires_isolated finding, got: {:?}",
+        err.findings
+            .iter()
+            .map(|f| (&f.id, format!("{:?}", f.severity)))
+            .collect::<Vec<_>>()
+    );
+    // Stable finding ID is part of the public contract; downstream
+    // dashboards and CI gates key off it.
+    assert_eq!(
+        multi_hat_findings[0].id,
+        format!("lint.{}", FINDING_MULTI_HAT_REQUIRES_ISOLATED)
+    );
+    // R9: actionable details — actual count and limit are present.
+    let finding = multi_hat_findings[0];
+    assert!(
+        finding.message.contains('4') && finding.message.contains('3'),
+        "finding message must include actual=4 and limit=3, got: {}",
+        finding.message
+    );
+    let hint = finding
+        .action_hint
+        .as_ref()
+        .expect("finding must carry an action_hint directing operator to isolated mode");
+    assert!(
+        hint.contains("isolated"),
+        "action_hint must direct to isolated mode, got: {hint}"
+    );
+}
+
+/// AE1: 3 hats, default (Coordinator) mode → strict lint gate passes
+/// (the policy threshold is 3).
+#[test]
+fn u2_lint_gate_passes_3_hat_default_coordinator() {
+    let config = u2_make_n_hat_config(3, "");
+    let result = enforce_preset_lint_gate(&config);
+    assert!(
+        result.is_ok(),
+        "3-hat default coordinator must pass the run gate, got: {:?}",
+        result
+    );
+}
+
+/// R8 + R10: base config 2 hats + hats overlay 2 hats → after merge
+/// the resolved config has 4 hats, which the gate must reject. The
+/// gate evaluates the *resolved* config (post-overlay), not the
+/// individual sources, so neither side can hide the violation.
+#[test]
+fn u2_lint_gate_blocks_4_hat_after_base_plus_overlay_merge() {
+    use ralph_core::config::RalphConfig;
+
+    // P1-3 fix (post-review): the original test name claimed `base 2 hats
+    // + overlay 2 hats → after merge 4 hats`. That implies hats are
+    // *appended* across base+overlay, but `merge_hats_overlay` actually
+    // *replaces* the base's `hats:` block with the overlay's `hats:`
+    // block (see `preflight::merge_hats_overlay` and its in-crate
+    // tests). The plan's R10 wording was loose about merge semantics;
+    // we honor the real merge path: the overlay is the resolved
+    // `hats:` source. To exercise the 4-hat gate failure we feed a
+    // 4-hat overlay against a minimal base.
+
+    let base: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+hats:
+  alpha:
+    name: "Alpha"
+    description: "Base hat A"
+    triggers: ["work.start"]
+    publishes: ["work.intermediate"]
+    instructions: "A."
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "work.done"
+tasks:
+  enabled: false
+"#,
+    )
+    .unwrap();
+
+    // Overlay contributes 4 hats; after `merge_hats_overlay` replaces
+    // the base's `hats:` block, the resolved config has 4 hats.
+    let overlay: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+hats:
+  gamma:
+    name: "Gamma"
+    description: "Overlay hat C"
+    triggers: ["work.intermediate"]
+    publishes: ["work.reviewed"]
+    instructions: "C."
+  delta:
+    name: "Delta"
+    description: "Overlay hat D"
+    triggers: ["work.reviewed"]
+    publishes: ["work.final"]
+    instructions: "D."
+  epsilon:
+    name: "Epsilon"
+    description: "Overlay hat E"
+    triggers: ["work.final"]
+    publishes: ["work.summary"]
+    instructions: "E."
+  zeta:
+    name: "Zeta"
+    description: "Overlay hat F"
+    triggers: ["work.summary"]
+    publishes: ["work.done"]
+    instructions: "F."
+"#,
+    )
+    .unwrap();
+
+    // P1-3 fix: use the real CLI merge path to mirror what
+    // `ralph run -c base -H overlay` produces. The merge function
+    // lives in `crate::preflight::merge_hats_overlay` (made
+    // `pub(crate)` in this commit so tests can reach it). We then
+    // feed the *merged* config directly to the run gate so the test
+    // exercises the full chain: YAML parse → merge overlay → resolved
+    // 4-hat config → lint gate.
+    let merged_yaml_value = crate::preflight::merge_hats_overlay(base, overlay)
+        .expect("merge_hats_overlay should accept valid base + overlay");
+    let config: RalphConfig = serde_yaml::from_value(merged_yaml_value)
+        .expect("merged YAML should deserialize into RalphConfig");
+
+    assert_eq!(
+        config.hats.len(),
+        4,
+        "P1-3: real merge path replaces base.hats with overlay.hats — \
+         resolved config must have 4 hats"
+    );
+    // Sanity: the four hat IDs must come from the overlay, not the base.
+    let names: std::collections::HashSet<&str> = config.hats.keys().map(|h| h.as_str()).collect();
+    for expected in ["gamma", "delta", "epsilon", "zeta"] {
+        assert!(
+            names.contains(expected),
+            "P1-3: merged config must contain overlay hat '{expected}'; got hats: {names:?}"
+        );
+    }
+    // And the base hat should be gone (merge replaces, not unions).
+    assert!(
+        !names.contains("alpha"),
+        "P1-3: merged config must NOT contain base hat 'alpha' (merge replaces)"
+    );
+
+    let result = enforce_preset_lint_gate(&config);
+    assert!(
+        result.is_err(),
+        "P1-3: merged 4-hat config must fail the run gate"
+    );
+}
+
+/// AE2 mirror: 4 hats with explicit `execution_mode: isolated` → the
+/// policy is satisfied and the gate must NOT fail on the multi-hat
+/// rule (it may still fail for unrelated reasons, but the
+/// multi_hat_requires_isolated finding must be absent).
+#[test]
+fn u2_lint_gate_4_hat_isolated_mode_no_multi_hat_finding() {
+    use ralph_core::preset_lint::finding_id::FINDING_MULTI_HAT_REQUIRES_ISOLATED;
+
+    let config = u2_make_n_hat_config(4, "execution_mode: isolated");
+    let result = enforce_preset_lint_gate(&config);
+    if let Err(err) = &result {
+        let multi_hat_findings: Vec<_> = err
+            .findings
+            .iter()
+            .filter(|f| f.id == format!("lint.{}", FINDING_MULTI_HAT_REQUIRES_ISOLATED))
+            .collect();
+        assert!(
+            multi_hat_findings.is_empty(),
+            "isolated 4-hat config must NOT produce multi_hat_requires_isolated, got: {:?}",
+            multi_hat_findings
+        );
+    }
 }

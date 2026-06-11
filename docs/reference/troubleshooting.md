@@ -232,6 +232,43 @@ hats:
      enabled: false
    ```
 
+#### Multi-Hat Isolation Policy Violation
+
+**Problem**: `ralph preset check`, `ralph preflight`, or `ralph run` fails with the
+literal error:
+
+```
+preset declares N hats which exceeds the coordinator limit of 3;
+set `event_loop.execution_mode: isolated` to run this preset
+```
+
+This is a hard cap, not a warning. Adding a 4th hat without flipping
+`execution_mode` to `isolated` is the most common cause.
+
+**Fix** (in your preset YAML):
+
+```yaml
+event_loop:
+  execution_mode: isolated
+```
+
+There is no opt-out: no environment variable, test toggle, or per-preset exemption
+can disable this rule. The `3`-hat coordinator cap is enforced by
+`preset_lint::check_multi_hat_isolation` at every entry point — `ralph preset
+check`, `ralph preflight`, and the run startup lint gate — so the loop never
+enters a half-started state.
+
+If you are migrating a preset that previously ran under the coordinator mode, you
+must also verify that each hat's terminal topics (e.g. `LOOP_COMPLETE`,
+`review.complete`, `report.done`) appear in the hat's `publishes` list. U3 closes
+the historic exemption that let any hat publish the completion promise; in
+isolated mode only the named completion owner may emit the terminal topic.
+Unauthorised attempts are rejected with `event.isolation.boundary_violation`.
+
+See the [Multi-Hat Isolation Policy](../guide/configuration.md#multi-hat-isolation-policy-mandatory)
+section in `configuration.md` for the full rule, the per-turn budget, and the
+round-robin scheduling semantics that go with isolated mode.
+
 ### Execution Issues
 
 #### Task Running Too Long
@@ -885,14 +922,14 @@ Look for `completion_rejection_signature` in the output to see what was blocking
 
 ```bash
 # Check topology
-ralph hats validate -H builtin:ce-executor
+ralph hats validate -H builtin:ce-executor-isolated
 ralph hats validate -H builtin:ce-executor-wave
 
 # Check open tasks
 ralph tools task list
 
 # Check preflight
-ralph preflight -c ralph.yml -H builtin:ce-executor
+ralph preflight -c ralph.yml -H builtin:ce-executor-isolated
 ralph preflight -c ralph.yml -H builtin:ce-executor-wave
 ```
 
