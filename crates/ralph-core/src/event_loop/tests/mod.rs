@@ -35,5 +35,6 @@ mod structured_evidence;
 mod termination;
 mod text_fallback;
 mod topic_format_recovery;
+mod wave_isolated_scope;
 mod wave_results;
 mod workflow_guard;

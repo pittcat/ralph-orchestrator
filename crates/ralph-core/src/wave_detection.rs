@@ -85,6 +85,22 @@ pub enum WaveRejection {
     NoTargetHat,
     /// Hat is registered for the topic but `concurrency <= 1`.
     SequentialTarget,
+    /// Isolated mode: a wave event targets a topic that the current
+    /// isolated hat is not allowed to publish. The whole wave is dropped.
+    /// See U4 plan §4 KTD-U4-1 / A3.
+    IsolatedScopeViolation {
+        wave_id: String,
+        topic: String,
+        isolated_hat: String,
+    },
+    /// Isolated mode: a second distinct `wave_id` was observed in the
+    /// same read batch, violating the "one business emission per
+    /// isolated activation" rule. The second wave is dropped.
+    /// See U4 plan §3 KTD-U4-2 / A3.
+    IsolatedMultipleBusinessEmissions {
+        wave_id: String,
+        isolated_hat: String,
+    },
 }
 
 /// A wave that the detector decided not to dispatch, with the reason.
