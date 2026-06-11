@@ -89,7 +89,7 @@ jq -e --arg id "$wave_id" --argjson expected "$expected_count" '
 
 > **wave worker 注意事项**：
 >
-> 1. **结果返回必须用 `ralph emit`**：在 `RALPH_WAVE_WORKER=1` 的子进程中，`ralph emit` 会将事件写入 **candidate-events**（不是 current-events），与 wave 调度器对 worker 输出的预期一致。`ralph wave emit` 本身在 worker 内被阻止（`crates/ralph-cli/src/wave.rs:51-57`）。
+> 1. **结果返回必须用 `ralph emit`**：在 `RALPH_WAVE_WORKER=1` 的子进程中，`ralph emit` 会将事件写入 **candidate-events**（不是 current-events），与 wave 调度器对 worker 输出的预期一致。`ralph wave emit` 本身在 worker 内被阻止（`crates/ralph-cli/src/wave.rs:64-69`）。
 >
 > 2. **candidate-events vs current-events 落点**：
 >    - `ralph wave emit` → 写入 **current-events**（主循环的合并目标，3 级回退：`RALPH_EVENTS_FILE` → `.ralph/current-events` → `.ralph/events.jsonl`）
