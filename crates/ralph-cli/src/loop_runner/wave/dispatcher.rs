@@ -714,6 +714,24 @@ async fn handle_wave_rejection(
                 "topic": rejected.topic,
             }),
         ),
+        ralph_core::WaveRejection::IsolatedScopeViolation { topic, isolated_hat, .. } => (
+            "wave_isolated_scope_violation",
+            serde_json::json!({
+                "reason": "wave_isolated_scope_violation",
+                "wave_id": rejected.wave_id,
+                "topic": topic,
+                "isolated_hat": isolated_hat,
+            }),
+        ),
+        ralph_core::WaveRejection::IsolatedMultipleBusinessEmissions { isolated_hat, .. } => (
+            "wave_isolated_multiple_business_emissions",
+            serde_json::json!({
+                "reason": "wave_isolated_multiple_business_emissions",
+                "wave_id": rejected.wave_id,
+                "topic": rejected.topic,
+                "isolated_hat": isolated_hat,
+            }),
+        ),
     };
 
     // Surface to CLI for dogfooding visibility.
@@ -728,12 +746,12 @@ async fn handle_wave_rejection(
     }
 
     // Build the recovery envelope so the responder can escalate.
-    let retry_key = ralph_core::diagnosis::RecoveryDiagnosisEnvelopeBuilder::retry_key_from_parts(
-        DiagnosisSource::WaveDispatcher,
-        None,
-        Some(rejected.topic.as_str()),
+    // U4-B1: the Wave-specific retry key namespaced by `wave_id` so
+    // that different rejected waves do not collapse into a single
+    // finding. See plan §3 KTD-U4-3 / §5 B1.
+    let retry_key = ralph_core::diagnosis::RecoveryDiagnosisEnvelopeBuilder::wave_retry_key(
+        &rejected.wave_id,
         reason_code,
-        None,
     );
     let envelope = ralph_core::diagnosis::RecoveryDiagnosisEnvelope::builder()
         .source(DiagnosisSource::WaveDispatcher)
@@ -921,5 +939,125 @@ hats: {}
                 "U2: {label} must NOT publish plan.blocked (only TotalExceedsCap does)"
             );
         }
+    }
+
+    /// U4-B1 / KTD-U4-3: end-to-end check that the recovery envelope
+    /// recorded by `handle_wave_rejection` actually carries a
+    /// wave-scoped retry key. Different `wave_id`s MUST produce
+    /// different keys, even when the rejection reason is identical.
+    #[tokio::test]
+    async fn u4_b1_retry_key_is_wave_scoped() {
+        use ralph_core::diagnostics::DiagnosticsCollector;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let diagnostics_root = temp.path().to_path_buf();
+
+        let yaml = r#"
+hats: {}
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).expect("yaml parse");
+        let diagnostics = DiagnosticsCollector::with_enabled(&diagnostics_root, true)
+            .expect("diagnostics enabled");
+        let mut el = EventLoop::with_diagnostics(config, diagnostics);
+        el.initialize("u4-b1-retry-key");
+        let out = build_outputs_silent();
+
+        // Two distinct waves with the SAME rejection reason.
+        let rejected_a = ralph_core::RejectedWave {
+            wave_id: "w-A".to_string(),
+            topic: "review.wave.ready".to_string(),
+            actual: 335,
+            reason: ralph_core::WaveRejection::TotalExceedsCap {
+                actual: 335,
+                cap: 64,
+            },
+        };
+        let rejected_b = ralph_core::RejectedWave {
+            wave_id: "w-B".to_string(),
+            topic: "review.wave.ready".to_string(),
+            actual: 335,
+            reason: ralph_core::WaveRejection::TotalExceedsCap {
+                actual: 335,
+                cap: 64,
+            },
+        };
+
+        handle_wave_rejection(&rejected_a, &mut el, &out, None, "test-loop", 64)
+            .await
+            .expect("rejection a");
+        handle_wave_rejection(&rejected_b, &mut el, &out, None, "test-loop", 64)
+            .await
+            .expect("rejection b");
+
+        // Read recovery.jsonl from the diagnostics session dir.
+        let mut session_dirs: Vec<_> = std::fs::read_dir(
+            diagnostics_root.join(".ralph/diagnostics"),
+        )
+        .expect("read diagnostics dir")
+        .filter_map(Result::ok)
+        .collect();
+        session_dirs.sort_by_key(|entry| entry.path());
+        let session_path = session_dirs
+            .last()
+            .expect("at least one diagnostics session")
+            .path();
+        let recovery_path = session_path.join("recovery.jsonl");
+        let content = std::fs::read_to_string(&recovery_path)
+            .unwrap_or_else(|e| panic!("read recovery.jsonl: {e}: {}", recovery_path.display()));
+        let entries: Vec<ralph_core::diagnosis::RecoveryJournalEntry> = content
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("parse recovery entry"))
+            .collect();
+
+        assert_eq!(
+            entries.len(),
+            2,
+            "two distinct rejections must produce two recovery entries"
+        );
+
+        let retry_keys: std::collections::HashSet<String> = entries
+            .iter()
+            .map(|e| e.envelope.retry_key.clone())
+            .collect();
+        assert_eq!(
+            retry_keys.len(),
+            2,
+            "different wave_ids must produce different retry keys, got {:?}",
+            retry_keys
+        );
+        for k in &retry_keys {
+            assert!(
+                k.starts_with("wave_dispatcher:"),
+                "retry key must use the wave_dispatcher namespace, got: {k}"
+            );
+            assert!(
+                k.ends_with(":wave_total_exceeds_cap"),
+                "retry key must end with the reason code, got: {k}"
+            );
+        }
+        // And each key must contain its own wave_id.
+        let key_for_a = entries
+            .iter()
+            .find(|e| e.envelope.message.contains("Wave w-A rejected"))
+            .expect("entry for w-A")
+            .envelope
+            .retry_key
+            .clone();
+        let key_for_b = entries
+            .iter()
+            .find(|e| e.envelope.message.contains("Wave w-B rejected"))
+            .expect("entry for w-B")
+            .envelope
+            .retry_key
+            .clone();
+        assert!(
+            key_for_a.contains("w_a"),
+            "w-A key must contain normalized w-A, got: {key_for_a}"
+        );
+        assert!(
+            key_for_b.contains("w_b"),
+            "w-B key must contain normalized w-B, got: {key_for_b}"
+        );
     }
 }
