@@ -389,6 +389,8 @@ rtk cargo clippy -p ralph-core -p ralph-cli --all-targets -- -D warnings
 - [x] Wave recovery key 包含 `wave_id`。
 - [x] 不重复实现 envelope、responder 或 Hard/Final 算法。
 - [x] 所有 Wave failure 通过 `record_recovery_envelope`。
+- [x] Partial / AggregateDeadlineExceeded 走 `record_recovery_envelope`；`GlobalDeadlineExceeded` 走 warn（U4-C 接管）。**B3 完成（2026-06-11）**
+- [x] 收敛机制在 retry_key 一致时可 Recovered；跨 wave_id 收敛不可达已固化为 B4-4 测试。**B4 完成（2026-06-11）**
 - [ ] runner 不直接操作 worker task handle。（阻塞于 U3）
 - [ ] max runtime 到达后 worker 全部结束。（阻塞于 U3）
 - [ ] watchdog 跳过 iteration 后续阶段并走统一终止流程。（阻塞于 U3）
@@ -443,8 +445,37 @@ rtk cargo clippy -p ralph-core -p ralph-cli --all-targets -- -D warnings
 | `event_loop::tests::wave_isolated_scope` | 8 | A1(5) + B2(3) |
 | `diagnosis::envelope::tests::wave_retry_*` | 3 | B1 unit |
 | `loop_runner::wave::dispatcher::tests` | 3 | B1 integration + U2 baseline |
+| `event_loop::tests::wave_recovery_timeout` | 4 | B4 (Pending 写入 / 跨 iteration Recovered / 双 wave 独立 finding / 跨 wave_id 收敛固化为文档) |
+
+### B3 + B4 实施记录（2026-06-11）
+
+| 单元 | Commit | 说明 |
+|---|---|---|
+| B3 | (TBD) | 新增 `execute_wave_structured` 公开入口；`handle_wave_events` 改用它并对 `Partial` / `AggregateDeadlineExceeded` 调 `record_wave_timeout_envelope`；`execute_wave` 保留为兼容 wrapper（`#[allow(dead_code)]`）；`GlobalDeadlineExceeded` 暂走 warn（U4-C 接管） |
+| B4 | (TBD) | 4 个 B4 集成测试（`crates/ralph-core/src/event_loop/tests/wave_recovery_timeout.rs`）；其中 B4-4 明确"Responder 现有 API 不能跨 wave_id 收敛 timeout finding"，作为 responder 后续扩展项的固化文档 |
+
+#### B3 实施细节
+
+- `record_wave_timeout_envelope(event_loop, &wave, &completed, reason_code)`:
+  - `source = WaveDispatcher`、`severity = Warning`（KTD-U4-5 收敛表：timeout 可恢复，故用 Warning 而非 Error）
+  - `topic` 取 `wave.hat_config.publishes.first()`，空时 fallback 到 `wave.events.first().topic`
+  - `reason_code` 字面量 `"wave_partial_threshold"` / `"wave_aggregate_deadline_exceeded"`
+  - `message` 形如 `Wave {id} timeout: {actual}/{expected} workers reported in {duration_ms}ms (reason={reason_code})`（`actual = results + failures.len()`）
+  - `retry_key = wave_retry_key(wave_id, reason_code)`（与 B1 一致）
+  - `outcome = Pending`、`safe_target = false`、`retry_attempt = 0`
+  - `source_hat = wave.target_hat.to_string()`（hat 名，便于 responder prompt 注入时筛选）
+- `execute_wave_structured` 完整透传 `WaveDispatchOutcome`（方案 A 推荐路径）
+- `handle_wave_events` 在 `WaveDispatchOutcome::Completed/Partial/AggregateDeadlineExceeded` 共享 merge 路径；只有 `Partial` / `AggregateDeadlineExceeded` 调 envelope；`Completed` 不调（无失败信号）
+
+#### B4 实施细节 + 收敛不达偏离说明
+
+- B4-1：写入 timeout envelope 后 `recovery_responder.tracked_retry_keys() == 1`，且同一 iteration 调 `check_recovery` 返回 `Pending`（R7 grace period）
+- B4-2：iteration N+1 命中 envelope 的 topic → `Recovered`（**前提：retry_key 一致**）
+- B4-3：两个不同 wave_id 各写一个 timeout → 2 个独立 retry_key（与 B1 `wave_retry_key` 设计对齐）
+- B4-4：固化"跨 wave_id 收敛不可达"——因为 `wave_retry_key` 按 `wave_id` namespaced，生产中新 wave 完成不会触发老 finding 的 `check_recovery`。本测试断言 Responder 自身 API 在 retry_key 一致时**能** Recovered（验证 API 行为），同时注释说明生产路径无法触发该条件。
+- 收敛问题的修复方向（**不**在本次范围）：responder 需要新增 `check_recovery_by_source_topic(source, topic, ...)`，跨 retry_key 找同 source+topic 的 Pending findings；KTD-U4-5 末尾已禁止直接新增 `on_converged`，但跨 key 的 source+topic 收敛是合法扩展，应另立 plan。
 
 ### 阻塞项
 
-- **B3/B4**（timeout outcome 接入 responder）：需要 U3 提供结构化 outcome（`Partial`、`AggregateDeadlineExceeded`、`GlobalDeadlineExceeded`）。
+- **Part C**（Runner Watchdog）：需要 B3 已完成 + U3 全局 deadline 接入 `execute_wave_structured`（U3 已具备 `WaveDispatchLimits::default()` 通路，B3 未暴露 `limits` 参数给 runner；C2 需扩 `execute_wave_structured` 接受 `WaveDispatchLimits` 并透传给 `dispatch_wave_inner`）
 - **C0–C4**（Runner Watchdog）：需要 U3 提供 dispatcher optional global deadline + `GlobalDeadlineExceeded` outcome。
