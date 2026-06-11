@@ -264,3 +264,151 @@ hats:
         "Batch with at least one valid event should have had_events"
     );
 }
+
+// ---- U9: build.done path characterization tests ----
+//
+// Goal (KTD-8 / plan §U9): record whether `build.done` actually reaches
+// the EventBus through 4 distinct paths, *before* any code change to
+// EventOriginGuard. If any of these reach the bus, the origin guard
+// fix path is known; if all are rejected, the bug lies elsewhere
+// (parser/active-hat attribution) and we should not touch
+// EventOriginGuard.
+//
+// These tests deliberately use the existing test helpers and do NOT
+// modify production code.
+
+/// U9 scenario 1: isolated executor writes `build.done` directly to
+/// the trusted JSONL, with explicit `hat=executor` provenance.
+#[test]
+fn test_u9_build_done_with_isolated_executor_hat() {
+    let yaml = r#"
+hats:
+  builder:
+    name: "Builder"
+    triggers: ["build.start"]
+    publishes: ["build.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    write_event_with_hat_to_jsonl(&events_path, "build.done", "ok", "builder");
+    let result = event_loop.process_events_from_jsonl().unwrap();
+    assert!(
+        result.had_events,
+        "U9.1: builder's build.done must reach the bus (sanity baseline)"
+    );
+}
+
+/// U9 scenario 2: same trusted JSONL write, but event has NO `hat` field.
+/// This is the path the original 2026-06-10 report flagged as a
+/// potential scope/origin bypass — characterize the actual behavior.
+#[test]
+fn test_u9_build_done_no_hat_field() {
+    let yaml = r#"
+hats:
+  builder:
+    name: "Builder"
+    triggers: ["build.start"]
+    publishes: ["build.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // No `hat` field — this is the "agent output parser produced a
+    // no-hat build.done" path mentioned in plan §U9 / KTD-8.
+    write_event_to_jsonl(&events_path, "build.done", "ok");
+    let result = event_loop.process_events_from_jsonl().unwrap();
+    // RECORD ONLY — do not assert pass/fail. The point of the
+    // characterization is to surface what the *current* behavior is,
+    // so a future change can re-record the baseline.
+    eprintln!(
+        "U9.2 build.done (no hat): had_events={} — characterize whether \
+         the no-hat path is currently admitted (control topics are, per \
+         test_origin_guard_control_topic_without_hat_accepted; \
+         business topics may differ).",
+        result.had_events
+    );
+}
+
+/// U9 scenario 3: a no-hat `build.done` produced by the agent output
+/// parser path (e.g. an isolated executor worker streaming a `done`
+/// marker that gets serialized without provenance). We use
+/// `write_event_to_jsonl` (no hat) plus a payload — same shape as the
+/// scenario the original report flagged.
+#[test]
+fn test_u9_build_done_no_hat_via_trusted_path() {
+    // Reuse scenario 2 setup but with a payload that looks like a
+    // real agent emitted build.done.
+    let yaml = r#"
+hats:
+  builder:
+    name: "Builder"
+    triggers: ["build.start"]
+    publishes: ["build.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    write_event_to_jsonl(
+        &events_path,
+        "build.done",
+        r#"{"status":"ok","changed_files":["src/main.rs"]}"#,
+    );
+    let result = event_loop.process_events_from_jsonl().unwrap();
+    eprintln!(
+        "U9.3 build.done (no hat, structured payload): had_events={} — \
+         characterize whether parser-shaped no-hat business events are \
+         admitted.",
+        result.had_events
+    );
+}
+
+/// U9 scenario 4: enable `event_policy` with strict mode and check
+/// whether the no-hat `build.done` is rejected at the policy layer
+/// (independent of origin guard).
+#[test]
+fn test_u9_build_done_no_hat_with_strict_event_policy() {
+    let yaml = r#"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+hats:
+  builder:
+    name: "Builder"
+    triggers: ["build.start"]
+    publishes: ["build.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    write_event_to_jsonl(&events_path, "build.done", "ok");
+    let result = event_loop.process_events_from_jsonl();
+    eprintln!(
+        "U9.4 build.done (no hat, strict policy): result_ok={}, \
+         characterize whether event_policy short-circuits the no-hat \
+         path before origin guard runs.",
+        result.is_ok()
+    );
+}
