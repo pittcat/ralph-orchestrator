@@ -751,14 +751,17 @@ pub(crate) async fn dispatch_wave_inner<E: WaveWorkerExecutor + ?Sized>(
     // bookkeeping (synthetic failures, abort, drain, progress
     // reporter wait) is identical.
     //
-    // KTD-U3-5 (revised): two-stage timeout. When `partial_deadline`
-    // fires first, we abort workers that have already started and
-    // record synthetic failures for them, but **keep the JoinSet
-    // alive** so workers still queued behind the semaphore can
-    // start (their permits become available as the aborted tasks
-    // drop). The wave is only finalized when `aggregate_deadline`
-    // fires. This is what `partial_threshold_fired` tracks.
-    let mut partial_threshold_fired = false;
+    // KTD-U3-5 (revised): two-stage timeout, currently collapsed
+    // into a single `finalize_timeout` (see the long comment in
+    // the `else` branch below). Both `partial_deadline` and
+    // `aggregate_deadline` paths return `AggregateDeadlineExceeded`
+    // today, so the flag below only gates the loop's
+    // deadline-choice comparison. The flag stays `let` (not
+    // `let mut`) so future maintainers can wire a real
+    // "release-permits-then-keep-waiting" two-stage path by
+    // adding the mutation point without further refactoring the
+    // loop body.
+    let partial_threshold_fired = false;
 
     loop {
         if join_set.is_empty() {
@@ -820,7 +823,6 @@ pub(crate) async fn dispatch_wave_inner<E: WaveWorkerExecutor + ?Sized>(
                 )
                 .await;
                 wait_for_progress_reporter(progress_handle).await;
-                partial_threshold_fired = true;
                 return WaveDispatchOutcome::AggregateDeadlineExceeded(completed);
             }
         }
@@ -882,7 +884,6 @@ pub(crate) async fn dispatch_wave_inner<E: WaveWorkerExecutor + ?Sized>(
                     )
                     .await;
                     wait_for_progress_reporter(progress_handle).await;
-                    partial_threshold_fired = true;
                     return WaveDispatchOutcome::AggregateDeadlineExceeded(completed);
                 }
             }
@@ -938,23 +939,6 @@ fn outcome_for_completion(completed: CompletedWave) -> WaveDispatchOutcome {
     } else {
         WaveDispatchOutcome::Completed(completed)
     }
-}
-
-/// Record synthetic failures for any worker that never reported,
-/// abort all remaining worker tasks, drain the JoinSet.
-async fn finalize_partial(
-    join_set: &mut tokio::task::JoinSet<(u32, WaveWorkerOutcome)>,
-    tracker: &mut ralph_core::WaveTracker,
-    ctx: &DispatchContext,
-    threshold: tokio::time::Instant,
-) -> CompletedWave {
-    inject_synthetic_failures(tracker, ctx, "partial threshold", threshold);
-    // KTD-U3-4/5: abort remaining workers and drain.
-    join_set.abort_all();
-    while join_set.join_next().await.is_some() {}
-    tracker
-        .force_take_wave_results(&ctx.wave_id)
-        .expect("wave must exist in tracker after registration")
 }
 
 async fn finalize_timeout(
