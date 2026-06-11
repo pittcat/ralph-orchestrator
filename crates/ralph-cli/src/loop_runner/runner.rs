@@ -3551,9 +3551,19 @@ pub async fn run_loop_impl(
                 topics
             })
             .unwrap_or_default();
+        // C4 (§6 C4): the post-wave gate blocks are guarded by
+        // `late_termination_reason.is_none()`. When the global
+        // deadline fires during a wave, the runner sets
+        // `late_termination_reason = Some(MaxRuntime)` above and the
+        // termination flow at the bottom of the iteration takes over;
+        // running default_publishes or missing-event gate here would
+        // either inject synthesized events into a doomed iteration or
+        // trigger hard-gate bookkeeping on a loop that's about to
+        // exit. Both must be skipped.
         if !agent_wrote_any_valid_or_rejected
             && wave_events.is_empty()
             && !hard_gate_triggered_this_iteration
+            && late_termination_reason.is_none()
             && should_gate_missing_events(&display_hat, &event_loop, &candidate_topics)
         {
             event_loop.increment_hard_gate_count();
@@ -3575,6 +3585,7 @@ pub async fn run_loop_impl(
         } else if !agent_wrote_any_valid_or_rejected
             && wave_events.is_empty()
             && !hard_gate_triggered_this_iteration
+            && late_termination_reason.is_none()
         {
             let mut fallback_hats = Vec::new();
             if display_hat.as_str() != "ralph" {

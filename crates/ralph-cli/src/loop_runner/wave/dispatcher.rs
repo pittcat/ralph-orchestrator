@@ -2482,4 +2482,98 @@ hats: {}
             "empty wave_events must NOT trigger the global deadline path"
         );
     }
+
+    // ---------------------------------------------------------------------
+    // U4-C4: runner post-wave phase skipping (static-source guard).
+    // ---------------------------------------------------------------------
+
+    /// U4-C4 / §6 C4: when the dispatcher's
+    /// `WaveDispatchOutcome::GlobalDeadlineExceeded` fires, the
+    /// runner.rs post-wave gate blocks (default_publishes inject +
+    /// missing-event gate) MUST be guarded by
+    /// `late_termination_reason.is_none()` so neither runs for the
+    /// doomed iteration. Without this guard, default_publishes
+    /// would inject synthesized events into a loop that's about to
+    /// terminate with `TerminationReason::MaxRuntime`, or the
+    /// missing-event gate would bump the hard-gate counter on a
+    /// loop about to exit.
+    ///
+    /// Full E2E coverage of the runner's iteration body is not
+    /// feasible in CI (would require spinning up a real backend),
+    /// so C4 is enforced at two layers:
+    ///   1. Dispatcher-level: C1 + the `started == 4` assertion
+    ///      confirm `GlobalDeadlineExceeded` returns with zero
+    ///      in-flight workers.
+    ///   2. `handle_wave_events` level: C3 confirms
+    ///      `HandleWaveOutcome { global_deadline_exceeded: true }`
+    ///      flows back to the runner.
+    ///   3. **Static guard (this test)**: the post-wave gate block
+    ///      in `runner.rs` must consult `late_termination_reason`.
+    ///      If the guard regresses, this test fails immediately.
+    #[test]
+    fn u4_c4_runner_post_wave_gates_consult_late_termination_reason() {
+        // Read the runner.rs source from the crate root. This
+        // test is a static-analysis gate — it catches regressions
+        // where someone removes the `late_termination_reason.is_none()`
+        // guard from the gate blocks (introduced in U4-C4) without
+        // re-reading plan §6 C4.
+        let runner_rs = include_str!("../runner.rs");
+
+        // The post-wave gate blocks (missing-event gate + the
+        // `else if` default_publishes fallback) share the
+        // distinctive marker
+        //   `wave_events.is_empty()\n            && !hard_gate_triggered_this_iteration`
+        // Assert each occurrence is followed by a
+        // `late_termination_reason.is_none()` guard.
+        let gate_marker = "wave_events.is_empty()\n            && !hard_gate_triggered_this_iteration";
+        let count = runner_rs.matches(gate_marker).count();
+        assert!(
+            count >= 2,
+            "expected at least 2 post-wave gate blocks (missing-event gate + \
+             default_publishes fallback) in runner.rs, found {count}. \
+             plan §6 C4 requires both blocks to be guarded."
+        );
+
+        // After every occurrence of the gate marker, the next
+        // logical condition MUST be `late_termination_reason.is_none()`.
+        let guarded_count = runner_rs
+            .matches("&& !hard_gate_triggered_this_iteration\n            && late_termination_reason.is_none()")
+            .count();
+        assert!(
+            guarded_count >= 2,
+            "expected late_termination_reason.is_none() guard on BOTH \
+             post-wave gate blocks (missing-event gate + default_publishes \
+             fallback), found {guarded_count}. plan §6 C4 requires both."
+        );
+    }
+
+    /// U4-C4 / §6 C4: `HandleWaveOutcome { global_deadline_exceeded }`
+    /// is the runner's only signal to set
+    /// `late_termination_reason = Some(MaxRuntime)`. The
+    /// post-wave gate guards (asserted by the static test above)
+    /// depend on this flag being set. Verify the wiring by
+    /// reading the runner.rs source for the exact assignment
+    /// pattern.
+    #[test]
+    fn u4_c4_runner_wires_handle_wave_outcome_to_late_termination_reason() {
+        let runner_rs = include_str!("../runner.rs");
+        // The C3 commit introduced the wiring:
+        //   if wave_outcome.is_some_and(|o| o.global_deadline_exceeded) {
+        //       late_termination_reason = Some(TerminationReason::MaxRuntime);
+        //   }
+        // Assert the shape so a refactor that drops the
+        // `is_some_and` check fails this test.
+        assert!(
+            runner_rs.contains("wave_outcome.is_some_and(|o| o.global_deadline_exceeded)"),
+            "runner must use `is_some_and` to read the global_deadline_exceeded \
+             flag from HandleWaveOutcome. If this assertion fails, the wiring \
+             introduced in U4-C3 has been removed."
+        );
+        assert!(
+            runner_rs.contains("late_termination_reason = Some(TerminationReason::MaxRuntime)"),
+            "runner must set late_termination_reason = Some(MaxRuntime) on \
+             global_deadline_exceeded. If this assertion fails, the C3 wiring \
+             is broken and U4-C4 static guard is meaningless."
+        );
+    }
 }
