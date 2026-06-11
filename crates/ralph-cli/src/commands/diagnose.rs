@@ -20,6 +20,7 @@ use ralph_core::diagnosis::{
     RankedFinding, Report, ReporterError, SessionSelector, build_report, render_json,
     render_markdown,
 };
+use ralph_core::loop_registry::LoopEntry;
 use std::path::{Path, PathBuf};
 
 /// Arguments for the `ralph diagnose` subcommand.
@@ -132,7 +133,7 @@ pub fn try_diagnose(
     let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let diagnostics_root = match args.diagnostics_root.as_ref() {
         Some(p) => p.clone(),
-        None => workspace_root.join(".ralph").join("diagnostics"),
+        None => resolve_diagnostics_root_via_loops(&workspace_root),
     };
     let selector = if args.session.eq_ignore_ascii_case("latest") || args.session.is_empty() {
         SessionSelector::Latest
@@ -328,6 +329,35 @@ pub fn validate_args(args: &DiagnoseArgs) -> Result<()> {
         bail!("--output must not be empty");
     }
     Ok(())
+}
+
+/// U3: Resolve the diagnostics root via `loops.json`.
+///
+/// When `--diagnostics-root` is not explicitly provided, read
+/// `<workspace_root>/.ralph/loops.json` to find the latest active
+/// loop entry and use its `workspace` field as the diagnostics root
+/// base. Falls back to `<workspace_root>/.ralph/diagnostics` when:
+/// - `loops.json` does not exist or is unreadable.
+/// - No active loop entries are found.
+/// - The resolved workspace's diagnostics dir does not exist
+///   (the caller still gets a proper `NoSession` error).
+fn resolve_diagnostics_root_via_loops(workspace_root: &Path) -> PathBuf {
+    let loops_path = workspace_root.join(".ralph").join("loops.json");
+    let entries: Vec<LoopEntry> = match std::fs::read_to_string(&loops_path) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Err(_) => return workspace_root.join(".ralph").join("diagnostics"),
+    };
+    if let Some(latest) = entries
+        .iter()
+        .max_by_key(|e| e.started)
+    {
+        let ws = PathBuf::from(&latest.workspace);
+        let diag = ws.join(".ralph").join("diagnostics");
+        if diag.exists() {
+            return diag;
+        }
+    }
+    workspace_root.join(".ralph").join("diagnostics")
 }
 
 #[cfg(test)]
@@ -554,5 +584,35 @@ mod tests {
             active_activations: vec![],
         };
         assert!(filter_report_by_source(report, "no_such_source").is_err());
+    }
+
+    #[test]
+    fn resolve_diagnostics_root_via_loops_falls_back_when_no_loops() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = resolve_diagnostics_root_via_loops(tmp.path());
+        assert_eq!(root, tmp.path().join(".ralph").join("diagnostics"));
+    }
+
+    #[test]
+    fn resolve_diagnostics_root_via_loops_uses_workspace_from_active_loop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("workspace");
+        std::fs::create_dir_all(ws.join(".ralph").join("diagnostics")).unwrap();
+        // Inject a minimal loops.json with an active loop entry
+        // pointing at our workspace. Must use the current PID so
+        // the stale-cleanup in LoopRegistry::list() does not evict it.
+        let loops_dir = tmp.path().join(".ralph");
+        std::fs::create_dir_all(&loops_dir).unwrap();
+        let entry = serde_json::json!([{
+            "id": "loop-1747016430-a1b2",
+            "pid": std::process::id(),
+            "started": "2026-06-05T10:20:30Z",
+            "prompt": "test prompt",
+            "workspace": ws.to_string_lossy(),
+        }]);
+        std::fs::write(loops_dir.join("loops.json"), serde_json::to_string(&entry).unwrap())
+            .unwrap();
+        let root = resolve_diagnostics_root_via_loops(tmp.path());
+        assert_eq!(root, ws.join(".ralph").join("diagnostics"));
     }
 }

@@ -705,10 +705,17 @@ pub fn render_markdown(report: &Report) -> String {
     if let Some(summary) = &report.summary {
         out.push_str(&format!("- session id: `{}`\n", summary.session_id));
         if let Some(started) = summary.loop_started_at {
-            out.push_str(&format!("- loop started: {started}\n"));
+            out.push_str(&format!("- loop started: {}\n", format_datetime_utc(started)));
         }
         if let Some(terminated) = summary.loop_terminated_at {
-            out.push_str(&format!("- loop terminated: {terminated}\n"));
+            out.push_str(&format!(
+                "- loop terminated: {}\n",
+                format_datetime_utc(terminated)
+            ));
+        }
+        // U3: compute loop duration from timestamps (not pre-computed).
+        if let Some(dur) = compute_duration(summary.loop_started_at, summary.loop_terminated_at) {
+            out.push_str(&format!("- loop duration: {}\n", format_duration(dur)));
         }
         if let Some(iters) = summary.total_iterations {
             out.push_str(&format!("- total iterations: {iters}\n"));
@@ -1107,12 +1114,43 @@ fn format_duration(d: std::time::Duration) -> String {
     }
 }
 
-/// Format a `SystemTime` as a local datetime string.
+/// Format a `SystemTime` as a dual-timezone string: UTC + local.
 ///
-/// Falls back to the raw debug representation if conversion fails.
+/// Example: `"2026-06-05 10:20:30 UTC / 18:20:30 CST"`.
+/// Falls back to the UTC representation if local conversion fails.
 fn format_system_time(t: std::time::SystemTime) -> String {
-    let dt: chrono::DateTime<chrono::Local> = t.into();
-    dt.format("%Y-%m-%d %H:%M:%S").to_string()
+    let dt_utc: chrono::DateTime<chrono::Utc> = t.into();
+    let dt_local: chrono::DateTime<chrono::Local> = t.into();
+    format!(
+        "{} / {}",
+        dt_utc.format("%Y-%m-%d %H:%M:%S UTC"),
+        dt_local.format("%H:%M:%S %Z"),
+    )
+}
+
+/// Format a `DateTime<Utc>` as a dual-timezone string: UTC + local.
+///
+/// Example: `"2026-06-05 10:20:30 UTC / 18:20:30 CST"`.
+fn format_datetime_utc(dt: chrono::DateTime<chrono::Utc>) -> String {
+    let dt_local: chrono::DateTime<chrono::Local> = dt.into();
+    format!(
+        "{} / {}",
+        dt.format("%Y-%m-%d %H:%M:%S UTC"),
+        dt_local.format("%H:%M:%S %Z"),
+    )
+}
+
+/// Compute the duration between two `DateTime<Utc>` values.
+///
+/// Returns `None` when `start > end` (e.g. clock skew) or when
+/// either timestamp is absent.
+fn compute_duration(
+    start: Option<chrono::DateTime<chrono::Utc>>,
+    end: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<std::time::Duration> {
+    let s = start?;
+    let e = end?;
+    e.signed_duration_since(s).to_std().ok()
 }
 
 /// Render the `## Active Hat Activations` section (U4).
@@ -1225,12 +1263,15 @@ pub fn render_json(report: &Report) -> Value {
         .collect();
 
     let summary = report.summary.as_ref().map(|s| {
+        let loop_duration_secs = compute_duration(s.loop_started_at, s.loop_terminated_at)
+            .map(|d| d.as_secs());
         json!({
             "schema_version": s.schema_version,
             "session_id": s.session_id,
             "generated_at": s.generated_at,
             "loop_started_at": s.loop_started_at,
             "loop_terminated_at": s.loop_terminated_at,
+            "loop_duration_secs": loop_duration_secs,
             "total_iterations": s.total_iterations,
             "termination_reason": s.termination_reason,
             "recovery_journal_path": s.recovery_journal_path,
@@ -1254,13 +1295,19 @@ pub fn render_json(report: &Report) -> Value {
         "errors": report.errors,
         "warnings": report.warnings,
         "active_activations": report.active_activations.iter().map(|a| {
+            // U3: duration computed from timestamps, not pre-computed field.
+            let computed_duration = a.duration.as_secs();
+            let activated_utc: chrono::DateTime<chrono::Utc> = a.activated_at.into();
+            let last_event_utc: chrono::DateTime<chrono::Utc> = a.last_event_at.into();
             json!({
                 "hat_id": a.hat_id,
                 "trigger_topic": a.trigger_topic,
                 "trigger_identity": a.trigger_identity,
-                "activated_at": format_system_time(a.activated_at),
-                "last_event_at": format_system_time(a.last_event_at),
-                "duration_secs": a.duration.as_secs(),
+                "activated_at": activated_utc.to_rfc3339(),
+                "last_event_at": last_event_utc.to_rfc3339(),
+                "activated_at_display": format_system_time(a.activated_at),
+                "last_event_at_display": format_system_time(a.last_event_at),
+                "duration_secs": computed_duration,
                 "linked_task_id": a.linked_task_id,
             })
         }).collect::<Vec<_>>(),
@@ -2118,6 +2165,53 @@ mod tests {
         assert!(
             looks_like_session_timestamp("2026-12-31T23-59-59"),
             "end-of-year must accept"
+        );
+    }
+
+    #[test]
+    fn format_datetime_utc_fallback_on_overflow() {
+        // SystemTime::from_secs(0) converts to 1970-01-01 UTC.
+        let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap();
+        let result = format_datetime_utc(dt);
+        assert!(result.contains("1970-01-01"), "got: {result}");
+    }
+
+    #[test]
+    fn compute_duration_returns_none_when_missing() {
+        assert_eq!(compute_duration(None, Some(chrono::Utc::now())), None);
+        assert_eq!(compute_duration(Some(chrono::Utc::now()), None), None);
+        assert_eq!(compute_duration(None, None), None);
+    }
+
+    #[test]
+    fn compute_duration_returns_correct_seconds() {
+        let start = chrono::DateTime::<chrono::Utc>::from_timestamp(1_800_000_000, 0).unwrap();
+        let end = chrono::DateTime::<chrono::Utc>::from_timestamp(1_800_000_120, 0).unwrap(); // +120s
+        let dur = compute_duration(Some(start), Some(end)).unwrap();
+        assert_eq!(dur.as_secs(), 120);
+    }
+
+    #[test]
+    fn compute_duration_returns_none_when_start_after_end() {
+        let start = chrono::DateTime::<chrono::Utc>::from_timestamp(1_800_000_120, 0).unwrap();
+        let end = chrono::DateTime::<chrono::Utc>::from_timestamp(1_800_000_000, 0).unwrap();
+        assert_eq!(compute_duration(Some(start), Some(end)), None);
+    }
+
+    #[test]
+    fn format_datetime_utc_shows_both_utc_and_local() {
+        // Use a reasonably recent stable timestamp.
+        let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(1_800_000_000, 0).unwrap();
+        let result = format_datetime_utc(dt);
+        // Must contain the UTC part.
+        assert!(
+            result.contains("UTC"),
+            "expected UTC time in output, got: {result}"
+        );
+        // Must contain local time (exact offset depends on TZ).
+        assert!(
+            result.contains(" / "),
+            "expected local time separator ' / ' in output, got: {result}"
         );
     }
 }
