@@ -1361,7 +1361,13 @@ impl EventLoop {
         }
 
         let mut kept: Vec<crate::event_reader::Event> = Vec::new();
-        let mut first_kept: bool = false;
+        // Tracks whether ANY distinct `wave_id` has been observed in
+        // this read batch, regardless of whether that wave was kept or
+        // dropped. KTD-U4-2: a single isolated activation allows at
+        // most one distinct `wave_id`; any further distinct wave_id is
+        // typed as `IsolatedMultipleBusinessEmissions`, even if the
+        // first wave itself was rejected for scope.
+        let mut wave_observed: bool = false;
 
         for wave_id in order {
             let group = groups.remove(&wave_id).unwrap_or_default();
@@ -1369,10 +1375,14 @@ impl EventLoop {
                 continue;
             }
 
-            if !first_kept {
+            if !wave_observed {
                 // First distinct wave: check isolated scope on every
                 // event. If any event is out of scope, the whole wave
-                // is dropped (one business emission rule).
+                // is dropped (one business emission rule). The wave
+                // is still considered "observed" so the next distinct
+                // wave_id is typed as `IsolatedMultipleBusinessEmissions`
+                // — a second wave is never silently absorbed by the
+                // scope check.
                 if let Some(out_of_scope_topic) =
                     group.iter().find_map(|e| {
                         if self.isolated_publish_allowed(isolated_hat, e.topic.as_str()) {
@@ -1392,9 +1402,10 @@ impl EventLoop {
                         isolated_hat,
                         &group,
                     );
+                    wave_observed = true;
                     continue;
                 }
-                first_kept = true;
+                wave_observed = true;
                 kept.extend(group);
             } else {
                 // Subsequent distinct wave_id in the same read batch:
