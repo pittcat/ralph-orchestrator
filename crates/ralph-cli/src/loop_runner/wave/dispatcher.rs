@@ -225,6 +225,16 @@ pub async fn handle_wave_events(
     tui_state: Option<&Arc<std::sync::Mutex<ralph_tui::TuiState>>>,
     loop_id: &str,
     diagnostics: Option<&Arc<DiagnosticsCollector>>,
+    // U4-C2: runner-supplied outer deadline. The runner computes
+    // this from `loop.max_runtime_seconds - state.elapsed()` and
+    // passes it through so the dispatcher can preempt long waves
+    // when the loop is about to hit its hard time budget
+    // (KTD-U4-6 / §6 C2). The dispatcher aborts + drains all
+    // workers when the deadline fires and returns
+    // `WaveDispatchOutcome::GlobalDeadlineExceeded`; the runner
+    // is responsible for converting that into
+    // `TerminationReason::MaxRuntime` (U4-C3).
+    global_deadline: Option<tokio::time::Instant>,
 ) {
     let max_wave_total = event_loop.config().event_loop.max_wave_total;
     let outcome = ralph_core::detect_all_wave_events_capped(
@@ -343,6 +353,10 @@ pub async fn handle_wave_events(
             out.rpc_tx.cloned(),
             out.tui.map(Arc::clone),
             loop_id,
+            // U4-C2: forward the runner-supplied global deadline
+            // (from `loop.max_runtime_seconds - state.elapsed()`)
+            // to the dispatcher so it can preempt long waves.
+            WaveDispatchLimits { global_deadline },
         )
         .await;
 
@@ -511,6 +525,10 @@ pub async fn execute_wave(
         rpc_event_tx,
         tui_state,
         loop_id,
+        // U4-C2: legacy wrapper does not have a runner-supplied
+        // global deadline; the dispatcher will fall back to the
+        // wave-internal partial/aggregate timers.
+        WaveDispatchLimits::default(),
     )
     .await;
 
@@ -543,6 +561,14 @@ pub async fn execute_wave_structured(
     rpc_event_tx: Option<tokio::sync::mpsc::Sender<RpcEvent>>,
     tui_state: Option<Arc<std::sync::Mutex<ralph_tui::TuiState>>>,
     loop_id: &str,
+    // U4-C2: runner-supplied wave dispatch limits. The runner
+    // computes `global_deadline` from its own loop runtime
+    // budget (typically `loop.max_runtime_seconds -
+    // state.elapsed()`) and passes it through here. The
+    // dispatcher is responsible for all abort + drain sequencing
+    // when the deadline fires; the runner MUST NOT touch worker
+    // handles directly (KTD-U4-6).
+    limits: WaveDispatchLimits,
 ) -> WaveDispatchOutcome {
     use ralph_core::{WaveTracker, WaveWorkerContext, build_wave_worker_prompt};
 
@@ -668,7 +694,7 @@ pub async fn execute_wave_structured(
             payload_previews,
             show_progress,
             use_colors,
-            WaveDispatchLimits::default(),
+            limits,
         ),
         executor,
         ProgressChannels {

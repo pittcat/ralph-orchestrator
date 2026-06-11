@@ -3463,6 +3463,27 @@ pub async fn run_loop_impl(
 
         // Execute wave if wave events detected
         if !wave_events.is_empty() {
+            // U4-C2 / KTD-U4-6: compute the runner-supplied global
+            // deadline from the loop's remaining runtime budget.
+            // When `max_runtime_seconds = 0` (the default in many
+            // presets, meaning "no upper bound"), the deadline is
+            // `None` and the dispatcher falls back to its
+            // wave-internal partial/aggregate timers. Otherwise we
+            // always pass `Some(now + remaining)` — even when
+            // `remaining` is zero — so the dispatcher can short-
+            // circuit the wave cleanly on the very first loop
+            // iteration instead of letting it run unbounded.
+            let global_deadline = {
+                let cfg = event_loop.config();
+                let max_runtime = cfg.event_loop.max_runtime_seconds;
+                if max_runtime == 0 {
+                    None
+                } else {
+                    let remaining = std::time::Duration::from_secs(max_runtime)
+                        .saturating_sub(event_loop.state().elapsed());
+                    Some(tokio::time::Instant::now() + remaining)
+                }
+            };
             handle_wave_events(
                 &wave_events,
                 &mut event_loop,
@@ -3474,6 +3495,7 @@ pub async fn run_loop_impl(
                 tui_state.as_ref(),
                 &loop_id,
                 prebuilt_diagnostics.as_ref(),
+                global_deadline,
             )
             .await;
         }
