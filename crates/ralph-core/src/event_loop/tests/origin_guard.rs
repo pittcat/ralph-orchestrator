@@ -328,15 +328,13 @@ hats:
     // no-hat build.done" path mentioned in plan §U9 / KTD-8.
     write_event_to_jsonl(&events_path, "build.done", "ok");
     let result = event_loop.process_events_from_jsonl().unwrap();
-    // RECORD ONLY — do not assert pass/fail. The point of the
-    // characterization is to surface what the *current* behavior is,
-    // so a future change can re-record the baseline.
-    eprintln!(
-        "U9.2 build.done (no hat): had_events={} — characterize whether \
-         the no-hat path is currently admitted (control topics are, per \
-         test_origin_guard_control_topic_without_hat_accepted; \
-         business topics may differ).",
-        result.had_events
+    // U9.2 baseline: no-hat trusted JSONL write is currently admitted
+    // (had_events=true). If this assertion ever flips, that signals a
+    // drift in the origin guard's no-hat policy — investigate before
+    // assuming the characterization has merely moved.
+    assert!(
+        result.had_events,
+        "U9.2 baseline: no-hat build.done currently accepted (drift = origin guard changed)"
     );
 }
 
@@ -370,11 +368,13 @@ hats:
         r#"{"status":"ok","changed_files":["src/main.rs"]}"#,
     );
     let result = event_loop.process_events_from_jsonl().unwrap();
-    eprintln!(
-        "U9.3 build.done (no hat, structured payload): had_events={} — \
-         characterize whether parser-shaped no-hat business events are \
-         admitted.",
-        result.had_events
+    // U9.3 baseline: parser-shaped no-hat business event (structured
+    // JSON payload) is currently admitted. If this assertion ever
+    // flips, that signals a drift in the parser-path admission policy
+    // — investigate whether event_policy or origin guard changed.
+    assert!(
+        result.had_events,
+        "U9.3 baseline: parser-shaped no-hat build.done currently accepted (drift = parser-path policy changed)"
     );
 }
 
@@ -405,10 +405,13 @@ hats:
 
     write_event_to_jsonl(&events_path, "build.done", "ok");
     let result = event_loop.process_events_from_jsonl();
-    eprintln!(
-        "U9.4 build.done (no hat, strict policy): result_ok={}, \
-         characterize whether event_policy short-circuits the no-hat \
-         path before origin guard runs.",
-        result.is_ok()
+    // U9.4 baseline: even with strict event_policy (enforce +
+    // reject_with_resume) enabled, the no-hat build.done is currently
+    // admitted (result.is_ok()=true). If this assertion ever flips,
+    // that signals a drift in the event_policy short-circuit behavior
+    // — investigate whether policy now rejects before origin guard.
+    assert!(
+        result.is_ok(),
+        "U9.4 baseline: strict event_policy does not short-circuit no-hat build.done (drift = event_policy pre-origin gate changed)"
     );
 }
