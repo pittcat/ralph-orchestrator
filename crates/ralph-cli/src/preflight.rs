@@ -479,6 +479,7 @@ const ALLOWED_HATS_TOP_LEVEL: &[&str] = &[
     "hats",
     "events",
     "event_loop",
+    "tasks",
     "name",
     "description",
     // U5 (2026-06-09) follow-up (2026-06-11): builtin presets declare
@@ -566,6 +567,7 @@ fn extract_hat_overlay_from_preset(preset_value: Value) -> Result<Value> {
         "event_loop",
         "events",
         "hats",
+        "tasks",
         "topic_format_whitelist",
     ] {
         if let Some(value) = mapping_get(mapping, key) {
@@ -596,6 +598,27 @@ pub(crate) fn merge_hats_overlay(mut core: Value, hats: Value) -> Result<Value> 
 
     if let Some(events_value) = mapping_get(hats_mapping, "events") {
         mapping_insert(core_mapping, "events", events_value.clone());
+    }
+
+    if let Some(tasks_overlay) = mapping_get(hats_mapping, "tasks") {
+        let overlay_mapping = tasks_overlay
+            .as_mapping()
+            .ok_or_else(|| anyhow::anyhow!("hats.tasks must be a mapping when provided"))?;
+        if let Some(coordinator_hats) = mapping_get(overlay_mapping, "coordinator_hats") {
+            let tasks_value = mapping_get(core_mapping, "tasks")
+                .cloned()
+                .unwrap_or_else(|| Value::Mapping(Mapping::new()));
+            let mut tasks_mapping = tasks_value
+                .as_mapping()
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("core.tasks must be a mapping when provided"))?;
+            mapping_insert(
+                &mut tasks_mapping,
+                "coordinator_hats",
+                coordinator_hats.clone(),
+            );
+            mapping_insert(core_mapping, "tasks", Value::Mapping(tasks_mapping));
+        }
     }
 
     if let Some(event_loop_overlay) = mapping_get(hats_mapping, "event_loop") {
@@ -955,6 +978,40 @@ hats:
             )
             .iter()
             .all(|finding| finding.id != "lint.preset.multi_hat_requires_isolated")
+        );
+    }
+
+    #[test]
+    fn merge_hats_overlay_preserves_preset_coordinator_hats_without_overriding_tasks_enabled() {
+        let core: Value = serde_yaml::from_str(
+            r"
+tasks:
+  enabled: false
+",
+        )
+        .unwrap();
+
+        let hats: Value = serde_yaml::from_str(
+            r"
+tasks:
+  enabled: true
+  coordinator_hats:
+    - coordinator
+    - executor
+hats:
+  coordinator: { name: Coordinator }
+  executor: { name: Executor }
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        assert!(!config.tasks.enabled);
+        assert_eq!(
+            config.tasks.coordinator_hats,
+            vec!["coordinator".to_string(), "executor".to_string()]
         );
     }
 

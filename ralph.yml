@@ -35,7 +35,7 @@ core:
     - "BDD acceptance checks must verify runtime behavior; comment-only or `Ok(())`-only evaluator passes are invalid."
     - "Confidence protocol: >80 proceed; 50-80 proceed + note in scratchpad; <50 choose safe default + note."
     - "Preserve primary sources — capture referenced code snippets with file:line attribution in scratchpad."
-    - "Run targeted tests per crate (`cargo test -p ralph-core`) during subtasks; full `cargo test --all` only at final step."
+    - "Run targeted tests per crate (`cargo test -p ralph-core`) during subtasks; full `./scripts/run-tests.sh` (nextest + doctest) only at final step."
 
 
 
@@ -49,5 +49,5 @@ backpressure:
       command: cargo clippy --all-targets --all-features -- -D warnings
       on_fail: "Clippy lint failures. Fix all warnings before proceeding."
     - name: test
-      command: cargo test --all
-      on_fail: "Tests failed. Fix failing tests before proceeding."
+      command: ./scripts/run-tests.sh
+      on_fail: "Tests failed. Run `./scripts/run-tests.sh` to see full output (nextest parallel + doctest, fallback to cargo test serial). Fix failing tests before proceeding."
