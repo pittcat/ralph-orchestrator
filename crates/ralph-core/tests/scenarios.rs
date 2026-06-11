@@ -718,3 +718,131 @@ fn test_ce_executor_worktree_isolation() {
     let yaml = load_scenario("tests/scenarios/ce-executor-worktree-isolation.yml");
     run_scenario(yaml);
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// U2 of 2026-06-11-003: multi-hat isolation policy BDD scenario
+//
+// AE2: 4-hat preset with default (Coordinator) execution mode MUST
+// be rejected by the strict preset lint aggregator with a single
+// `lint.preset.multi_hat_requires_isolated` finding. The same
+// finding shape drives the `ralph preset check` CLI surface, the
+// `ralph preflight --check multi-hat-isolation` check, and the
+// `ralph run` hard gate.
+// ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_multi_hat_isolation_lint_bdd_4_hat_default_fails() {
+    use ralph_core::HatRegistry;
+    use ralph_core::preset_lint::finding_id::FINDING_MULTI_HAT_REQUIRES_ISOLATED;
+    use ralph_core::runtime_contract::{
+        FindingSeverity, RuntimeContractAggregator, RuntimeContractStrictness,
+    };
+
+    let yaml = load_scenario("tests/scenarios/multi_hat_isolation_lint.yml");
+
+    // Build the resolved config exactly the way the lint aggregator
+    // sees it. (Mirrors the test_preset_static_lint_scenario helper.)
+    let mut config = RalphConfig::default();
+    config.max_iterations = Some(yaml.config.max_iterations);
+    config.prompt_file = Some(yaml.config.prompt_file);
+    if !yaml.config.hats.is_null() {
+        if let Ok(hat_map) = serde_yaml::from_value::<
+            std::collections::HashMap<String, serde_yaml::Value>,
+        >(yaml.config.hats.clone())
+        {
+            let mut hats = std::collections::HashMap::new();
+            for (hat_id, mut hat_value) in hat_map {
+                if let Some(map) = hat_value.as_mapping_mut()
+                    && !map.contains_key(&serde_yaml::Value::String("name".to_string()))
+                {
+                    map.insert(
+                        serde_yaml::Value::String("name".to_string()),
+                        serde_yaml::Value::String(hat_id.clone()),
+                    );
+                }
+                let hat_config: HatConfig = serde_yaml::from_value(hat_value)
+                    .unwrap_or_else(|e| panic!("Failed to parse hat '{}': {}", hat_id, e));
+                hats.insert(hat_id, hat_config);
+            }
+            config.hats = hats;
+        }
+    }
+    if !yaml.config.event_loop.is_null() {
+        config.event_loop = serde_yaml::from_value(yaml.config.event_loop).unwrap();
+    }
+    if !yaml.config.tasks.is_null() {
+        config.tasks = serde_yaml::from_value(yaml.config.tasks).unwrap();
+    }
+    if !yaml.config.topic_owners.is_null() {
+        config.topic_owners = serde_yaml::from_value(yaml.config.topic_owners).unwrap();
+    }
+    if !yaml.config.topic_format_whitelist.is_null() {
+        config.topic_format_whitelist =
+            serde_yaml::from_value(yaml.config.topic_format_whitelist).unwrap();
+    }
+
+    assert_eq!(
+        config.hats.len(),
+        4,
+        "fixture must declare 4 hats for AE2 to be meaningful"
+    );
+
+    let registry = HatRegistry::from_runtime_config(&config);
+    let strictness = RuntimeContractStrictness::preset_check_strict();
+    let report = RuntimeContractAggregator::aggregate(
+        "bdd:multi_hat_isolation_lint",
+        &config,
+        &registry,
+        strictness,
+    );
+
+    // 4 hats, default Coordinator mode → aggregator must fail.
+    assert!(
+        !report.passed,
+        "4-hat default coordinator preset MUST fail strict lint: {:?}",
+        report
+            .findings
+            .iter()
+            .map(|f| format!("[{:?}] {}: {}", f.severity, f.id, f.message))
+            .collect::<Vec<_>>()
+    );
+
+    // Exactly one multi_hat_requires_isolated error finding, with the
+    // expected details. This is the same shape the preflight check
+    // and the run gate consume.
+    let multi_hat_findings: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.id == format!("lint.{}", FINDING_MULTI_HAT_REQUIRES_ISOLATED))
+        .collect();
+    assert_eq!(
+        multi_hat_findings.len(),
+        1,
+        "expected exactly one multi_hat_requires_isolated finding, got: {:?}",
+        report
+            .findings
+            .iter()
+            .map(|f| format!("[{:?}] {}: {}", f.severity, f.id, f.message))
+            .collect::<Vec<_>>()
+    );
+    let finding = &multi_hat_findings[0];
+    assert_eq!(finding.severity, FindingSeverity::Error);
+    assert_eq!(
+        finding.details.get("actual").map(String::as_str),
+        Some("4"),
+        "details.actual must be 4: {:?}",
+        finding.details
+    );
+    assert_eq!(
+        finding.details.get("limit").map(String::as_str),
+        Some("3"),
+        "details.limit must be 3: {:?}",
+        finding.details
+    );
+    assert_eq!(
+        finding.details.get("required_mode").map(String::as_str),
+        Some("isolated"),
+        "details.required_mode must be 'isolated': {:?}",
+        finding.details
+    );
+}
