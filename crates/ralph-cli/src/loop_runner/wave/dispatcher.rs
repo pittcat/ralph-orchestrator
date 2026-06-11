@@ -334,7 +334,7 @@ pub async fn handle_wave_events(
             push_to_tui_iteration(state, header_line);
         }
 
-        let wave_result = execute_wave(
+        let wave_outcome = execute_wave_structured(
             &detected,
             backend,
             &main_events_file,
@@ -343,12 +343,41 @@ pub async fn handle_wave_events(
             out.rpc_tx.cloned(),
             out.tui.map(Arc::clone),
             loop_id,
-            diagnostics,
         )
         .await;
 
-        match wave_result {
-            Ok(completed) => {
+        // U4-B3: classify the structured outcome BEFORE we
+        // pattern-match on the carried `CompletedWave`. We need to
+        // know the reason code up front so we can record the
+        // recovery envelope for Partial / AggregateDeadlineExceeded
+        // before the wave result is merged into the main events
+        // file. (Per KTD-U4-5: timeout findings start as Pending
+        // and recover when a new wave on the same target topic
+        // completes in a later iteration.)
+        let timeout_reason: Option<&'static str> = match &wave_outcome {
+            WaveDispatchOutcome::Partial(_) => Some("wave_partial_threshold"),
+            WaveDispatchOutcome::AggregateDeadlineExceeded(_) => {
+                Some("wave_aggregate_deadline_exceeded")
+            }
+            _ => None,
+        };
+
+        // U4-B3: timeout / partial outcomes must feed the recovery
+        // responder, not just be folded into a generic Err. We
+        // dispatch on the structured `WaveDispatchOutcome` here.
+        match wave_outcome {
+            WaveDispatchOutcome::Completed(completed)
+            | WaveDispatchOutcome::Partial(completed)
+            | WaveDispatchOutcome::AggregateDeadlineExceeded(completed) => {
+                if let Some(reason_code) = timeout_reason {
+                    record_wave_timeout_envelope(
+                        event_loop,
+                        &detected,
+                        &completed,
+                        reason_code,
+                    );
+                }
+
                 any_success = true;
 
                 // Report completion to CLI / RPC / TUI
@@ -413,8 +442,17 @@ pub async fn handle_wave_events(
                     warn!(error = %e, "Failed to merge wave results to events file");
                 }
             }
-            Err(e) => {
-                warn!(error = %e, "Wave execution failed");
+            WaveDispatchOutcome::GlobalDeadlineExceeded => {
+                // U4-B3: Global deadline handling is the runner's job
+                // (U4-C3 will convert this into TerminationReason::MaxRuntime
+                // and write a loop-level envelope). For now we just warn —
+                // the runner does not yet pass a global_deadline, so
+                // this variant is unreachable in production today.
+                warn!(
+                    wave_id = %detected.wave_id,
+                    hat = %detected.target_hat,
+                    "Wave global deadline exceeded; runner watchdog will own this path in U4-C"
+                );
             }
         }
     }
@@ -441,7 +479,14 @@ pub async fn handle_wave_events(
 /// to `dispatch_wave_inner` with a `ProductionExecutor`. Returns
 /// `Result<CompletedWave>` for backwards compatibility — callers that
 /// need structured partial / aggregate / global outcomes should use
-/// the inner dispatch path directly (or wait for U4-C integration).
+/// [`Self::execute_wave_structured`] instead.
+///
+/// Kept as a thin compatibility wrapper even though
+/// `handle_wave_events` now calls `execute_wave_structured`
+/// directly: existing tests in `loop_runner/tests.rs` and any
+/// downstream consumer that still imports the legacy signature
+/// continue to work.
+#[allow(dead_code)]
 pub async fn execute_wave(
     wave: &ralph_core::DetectedWave,
     global_backend: &CliBackend,
@@ -453,11 +498,53 @@ pub async fn execute_wave(
     loop_id: &str,
     diagnostics: Option<&Arc<DiagnosticsCollector>>,
 ) -> Result<CompletedWave> {
-    use ralph_core::{WaveTracker, WaveWorkerContext, build_wave_worker_prompt};
-
     // Suppress unused-variable warnings for diagnostics in this wrapper;
     // it is kept in the public signature for API stability.
     let _ = diagnostics;
+
+    let outcome = execute_wave_structured(
+        wave,
+        global_backend,
+        main_events_file,
+        show_progress,
+        use_colors,
+        rpc_event_tx,
+        tui_state,
+        loop_id,
+    )
+    .await;
+
+    match outcome {
+        WaveDispatchOutcome::Completed(c)
+        | WaveDispatchOutcome::Partial(c)
+        | WaveDispatchOutcome::AggregateDeadlineExceeded(c) => Ok(c),
+        WaveDispatchOutcome::GlobalDeadlineExceeded => Err(anyhow::anyhow!(
+            "Wave {} global deadline exceeded",
+            wave.wave_id
+        )),
+    }
+}
+
+/// Execute a detected wave and return the structured
+/// [`WaveDispatchOutcome`].
+///
+/// U4-B3: this is the public entry point that lets the caller
+/// distinguish Completed / Partial / AggregateDeadlineExceeded /
+/// GlobalDeadlineExceeded and feed each into the recovery
+/// responder. The legacy [`Self::execute_wave`] wrapper is
+/// preserved for backwards compatibility and collapses all
+/// non-Global variants into a successful `Result<CompletedWave>`.
+pub async fn execute_wave_structured(
+    wave: &ralph_core::DetectedWave,
+    global_backend: &CliBackend,
+    main_events_file: &Path,
+    show_progress: bool,
+    use_colors: bool,
+    rpc_event_tx: Option<tokio::sync::mpsc::Sender<RpcEvent>>,
+    tui_state: Option<Arc<std::sync::Mutex<ralph_tui::TuiState>>>,
+    loop_id: &str,
+) -> WaveDispatchOutcome {
+    use ralph_core::{WaveTracker, WaveWorkerContext, build_wave_worker_prompt};
 
     let concurrency = wave.hat_config.concurrency as usize;
     let wave_timeout = Duration::from_secs(wave.timeout_secs());
@@ -571,7 +658,7 @@ pub async fn execute_wave(
 
     let executor: Arc<ProductionExecutor> = Arc::new(ProductionExecutor);
 
-    let outcome = dispatch_wave_inner(
+    dispatch_wave_inner(
         tracker,
         worker_requests,
         DispatchContext::build(
@@ -589,17 +676,7 @@ pub async fn execute_wave(
             tui_state,
         },
     )
-    .await;
-
-    match outcome {
-        WaveDispatchOutcome::Completed(c)
-        | WaveDispatchOutcome::Partial(c)
-        | WaveDispatchOutcome::AggregateDeadlineExceeded(c) => Ok(c),
-        WaveDispatchOutcome::GlobalDeadlineExceeded => Err(anyhow::anyhow!(
-            "Wave {} global deadline exceeded",
-            wave.wave_id
-        )),
-    }
+    .await
 }
 
 /// Compute the aggregate timeout from per-worker timeout and the
@@ -1017,6 +1094,69 @@ async fn wait_for_progress_reporter(progress_handle: tokio::task::JoinHandle<()>
             warn!("Progress reporter did not exit within 5s after worker drain");
         }
     }
+}
+
+/// U4-B3: Record a recovery envelope for a wave that finished via
+/// `Partial` or `AggregateDeadlineExceeded`.
+///
+/// The dispatcher keeps the structured `WaveDispatchOutcome` opaque
+/// from the responder's perspective; this helper materializes the
+/// outcome into a `RecoveryDiagnosisEnvelope` using only the existing
+/// schema fields (`topic` / `reason_code` / `message` / `retry_key`)
+/// per U4 plan §5 B3. The envelope's `outcome` is `Pending`; the
+/// responder will upgrade it to `Recovered` once a new wave on the
+/// same target topic completes in a later iteration (KTD-U4-5
+/// table). It is safe to call this for any completed wave — the
+/// caller decides which outcomes are worth recording.
+fn record_wave_timeout_envelope(
+    event_loop: &mut ralph_core::EventLoop,
+    wave: &ralph_core::DetectedWave,
+    completed: &ralph_core::CompletedWave,
+    reason_code: &'static str,
+) {
+    use ralph_core::diagnosis::{
+        DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource,
+        RecoveryDiagnosisEnvelope, RecoveryDiagnosisEnvelopeBuilder,
+    };
+
+    // Plan §5 B3: RecoveryDiagnosisEnvelope has no independent
+    // `wave_id` / `expected` / `completed` fields. We encode the
+    // wave identity via the wave-scoped `retry_key` and stash the
+    // counts in the human-readable `message` (truncated to
+    // `MAX_ENVELOPE_MESSAGE_CHARS` by `build`).
+    let topic = wave
+        .hat_config
+        .publishes
+        .first()
+        .cloned()
+        .or_else(|| wave.events.first().map(|e| e.topic.to_string()))
+        .unwrap_or_default();
+
+    let expected = completed.wave_total as usize;
+    let actual = completed.results.len() + completed.failures.len();
+    let duration_ms = completed.duration.as_millis() as u64;
+
+    let retry_key = RecoveryDiagnosisEnvelopeBuilder::wave_retry_key(&wave.wave_id, reason_code);
+    let envelope = RecoveryDiagnosisEnvelope::builder()
+        .source(DiagnosisSource::WaveDispatcher)
+        .severity(DiagnosisSeverity::Warning)
+        .source_hat(wave.target_hat.to_string())
+        .topic(topic)
+        .reason_code(reason_code)
+        .message(format!(
+            "Wave {} timeout: {}/{} workers reported in {}ms (reason={})",
+            wave.wave_id, actual, expected, duration_ms, reason_code
+        ))
+        .expected_action(
+            "Investigate the slow wave workers; a subsequent complete wave on this target topic will mark this finding Recovered."
+                .to_string(),
+        )
+        .retry_attempt(0)
+        .safe_target(false)
+        .outcome(DiagnosisOutcome::Pending)
+        .retry_key(retry_key)
+        .build();
+    let _ = event_loop.record_recovery_envelope(&envelope, Vec::new());
 }
 
 /// U2: Handle a single rejected wave.
