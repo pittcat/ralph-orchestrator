@@ -85,6 +85,28 @@ to `coordinator` mode where multiple Hats share a single prompt. In isolated mod
 each Hat's filter is applied independently, so a Hat never sees events that another
 Hat's filter would have added to the union.
 
+**Isolated terminal authority (U3)**: In isolated mode, every agent-emitted terminal
+topic — `LOOP_COMPLETE`, `review.complete`, `report.done`, `plan.blocked`, and any
+other end-of-flow topic — must be declared in the current Hat's `publishes` list.
+The `EventOriginGuard` rejects undeclared terminal publications with an
+`event.isolation.boundary_violation` diagnostic and injects a `task.resume` so the
+agent sees the failure reason. `default_publishes` fallbacks follow the same rule —
+the default topic must also appear in `publishes`, otherwise the original guard
+still rejects. The only exception is the runtime-injected `hat=ralph` pseudo-hat,
+which is granted `LOOP_COMPLETE` / `work.start` / `loop.cancel` by
+`HatRegistry::from_runtime_config()`. See the [Multi-Hat Isolation Policy section
+in `configuration.md`](./configuration.md#multi-hat-isolation-policy-mandatory) for
+the full rule.
+
+**Isolated fair scheduling (U4)**: `EventBus` selects the next isolated Hat with
+pending events using a stable round-robin cursor instead of the old
+"BTreeMap-first-key" order. After a Hat is selected, the cursor advances past it;
+on the next scheduling decision, the search resumes from that position. The
+historical "always pick the alphabetically first pending Hat" behavior is removed —
+do not rely on it in tests, prompts, or skill docs. The waiting bound for any Hat
+sharing a pending pool is `N - 1` other selections, where `N` is the number of
+Hats with non-empty pending queues.
+
 ### Validation
 
 `ralph preflight` checks that:

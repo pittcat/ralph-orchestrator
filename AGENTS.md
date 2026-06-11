@@ -112,6 +112,38 @@ Key config modules in `crates/ralph-core/src/config/`:
 - `EventProjectionConfig`: Event transformation/redaction rules
 - `FeaturesConfig`: Feature flags (memories, tasks, loop naming, urgent steer)
 
+### Multi-Hat Isolation Policy（强制）
+
+`event_loop.execution_mode` 与 hat 数量配合时遵循**固定阈值**，没有豁免路径：
+
+- **3-hat 上限（coordinator 模式）**：`hats` 数 ≤ 3 时，preset 可显式 `execution_mode: coordinator`（默认）或 `execution_mode: isolated`，任一可启动。
+- **4+ hats 必须显式 isolated**：`hats` 数 ≥ 4 时，`event_loop.execution_mode: isolated` 是**强制**配置；缺少该字段、值不是 `isolated`、或被注释掉，preset 启动即被 `preset_lint::check_multi_hat_isolation` 拒绝。
+- **错误消息固定**：`preset declares N hats which exceeds the coordinator limit of 3; set \`event_loop.execution_mode: isolated\` to run this preset`，调用方按字面匹配即可定位根因。
+- **无豁免**：环境变量（`RALPH_ALLOW_COORDINATOR_OVERRIDE` 等）、测试开关、preset 名称维护的 exemption 均**不可用**；所有 builtin 4+ hat preset 均已迁移到 isolated（见 U6 commit `2a29e24`）。
+
+#### Isolated 终态 Authority（U3）
+
+在 `execution_mode: isolated` 下，**所有 agent 终态**（completion、review verdict、report completion、plan blocked）必须在 hat 的 `publishes` 列表中显式声明：
+
+- 未在 `publishes` 中声明的终态主题（如裸 `LOOP_COMPLETE`、未声明的 `report.done`、未声明的 `review.complete`）被 `EventOriginGuard` 直接拒绝；
+- 拒绝行为 emit `event.isolation.boundary_violation` 诊断事件到 `recovery.jsonl`，并把 `task.resume` 注入事件流以便 agent 看到失败原因；
+- 同一规则适用于 `default_publishes` 兜底：兜底主题必须也在 `publishes` 中，否则被原 guard 拒绝。
+- 唯一例外是 `hat=ralph` 运行时内置 hat：它由 `HatRegistry::from_runtime_config()` 注入 `LOOP_COMPLETE` / `work.start` / `loop.cancel`，这是单一豁免。
+
+#### Isolated Fair Scheduling（U4）
+
+`EventBus` 在 isolated 模式下使用**轮转游标（round-robin cursor）**而非字典序首项来选择下一个 hat：
+
+- 同一事件后多 hat 都 pending 时，cursor 推进到当前 hat 之后，下一次从该位置继续；
+- 防止「一直先选 hat 名靠前的」造成的饥饿；
+- 字典序首项行为已**移除**，不要在文档、测试、prompt 中描述旧行为。
+
+#### 上限 + 调度 + 终态 的交互
+
+- 3-hat coordinator preset 不受 isolated 终态 authority / fair scheduling 约束（它走单 prompt 多 hat 路径）。
+- 4+ hat isolated preset **必须**同时满足：execution_mode=isolated、每个 hat 的所有终态主题在 `publishes` 中显式声明、字典序不再被依赖。
+- 任何 preset 校验失败都被 `ralph preset check` / `ralph preflight` / `ralph run` 启动硬门拦住，运行时不会进入半启动状态。
+
 ### Hook System
 
 Hooks run external commands at lifecycle points. Located in `crates/ralph-core/src/hooks/`:
@@ -143,7 +175,7 @@ Presets define collections of hats. Located in `presets/` directory and `crates/
 - **HatlessRalph** (`hatless_ralph.rs`): Hat topology, event subscription matching, hat selection algorithm
 - **HatRegistry**: Manages hat discovery, registration, subscription
 - Presets support Chinese (`*-zh.yml`) variants and chainable configurations
-- Builtin presets: `autoresearch`, `ce-executor`, `ce-executor-isolated`, `ce-executor-wave`, `code-assist`, `debug`, `merge-loop`, `pdd-to-code-assist`, `research`, `review`
+- Builtin presets: `autoresearch`, `ce-executor-isolated`, `ce-executor-lite` (template), `ce-executor-wave`, `code-assist`, `debug`, `merge-loop`, `pdd-to-code-assist`, `research`, `review`（裸 `ce-executor` 已删除：所有 plan-driven 执行请使用 `ce-executor-isolated`；仅作模板时可使用 `ce-executor-lite`）
 - `presets/index.json` is the user-facing preset manifest
 
 **`presets/manifest.yml` 是 builtin preset 的 single source of truth**（`crates/ralph-cli/build.rs` 和 `crates/ralph-cli/src/presets.rs` 都从这里读取并在不一致时 panic）。新增/重命名/删除一个 builtin preset 必须**同步改 4 处**：
