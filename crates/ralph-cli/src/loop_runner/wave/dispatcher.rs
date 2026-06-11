@@ -51,14 +51,12 @@ pub async fn handle_wave_events(
     loop_id: &str,
     diagnostics: Option<&Arc<DiagnosticsCollector>>,
 ) {
-    let waves = ralph_core::detect_all_wave_events(wave_events, event_loop.registry());
-    if waves.is_empty() {
-        return;
-    }
-
-    info!(
-        wave_count = waves.len(),
-        "Detected multiple waves in single iteration, executing all"
+    let max_wave_total = event_loop.config().event_loop.max_wave_total;
+    let outcome = ralph_core::detect_all_wave_events_capped(
+        wave_events,
+        event_loop.registry(),
+        ralph_core::PartialWavePolicy::RequireComplete,
+        max_wave_total,
     );
 
     let out = WaveOutputs {
@@ -67,6 +65,27 @@ pub async fn handle_wave_events(
         rpc_tx: rpc_event_tx,
         tui: tui_state,
     };
+
+    // U2: emit a single structured `plan.blocked` per rejected wave and
+    // record a recovery envelope BEFORE any TUI / backend side-effects.
+    for rejected in &outcome.rejected {
+        if let Err(err) =
+            handle_wave_rejection(rejected, event_loop, &out, diagnostics, loop_id, max_wave_total)
+                .await
+        {
+            warn!(?err, "failed to handle wave rejection");
+        }
+    }
+
+    let waves = outcome.accepted;
+    if waves.is_empty() {
+        return;
+    }
+
+    info!(
+        wave_count = waves.len(),
+        "Detected multiple waves in single iteration, executing all"
+    );
 
     let main_events_file =
         resolve_emit_events_path(ctx, config_state_machine_enabled(event_loop.config()));
@@ -607,4 +626,150 @@ pub async fn execute_wave(
     tracker
         .take_wave_results(&wave.wave_id)
         .ok_or_else(|| anyhow::anyhow!("Wave {} not found in tracker", wave.wave_id))
+}
+
+/// U2: Handle a single rejected wave.
+///
+/// Emits a structured `plan.blocked` event with the typed reason and
+/// records a `RecoveryDiagnosisEnvelope` so the responder can escalate
+/// after a stable retry window. **No** worker, TUI update, or backend
+/// call is performed — the wave is short-circuited before any of those
+/// side-effects.
+async fn handle_wave_rejection(
+    rejected: &ralph_core::RejectedWave,
+    event_loop: &mut ralph_core::EventLoop,
+    out: &WaveOutputs<'_>,
+    diagnostics: Option<&Arc<DiagnosticsCollector>>,
+    loop_id: &str,
+    max_wave_total: u32,
+) -> Result<()> {
+    use ralph_core::diagnosis::{DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource};
+
+    let (reason_code, structured_reason) = match &rejected.reason {
+        ralph_core::WaveRejection::TotalExceedsCap { actual, cap } => (
+            "wave_total_exceeds_cap",
+            serde_json::json!({
+                "reason": "wave_total_exceeds_cap",
+                "wave_id": rejected.wave_id,
+                "topic": rejected.topic,
+                "actual": actual,
+                "cap": cap,
+            }),
+        ),
+        ralph_core::WaveRejection::ZeroTotal => (
+            "wave_total_zero",
+            serde_json::json!({
+                "reason": "wave_total_zero",
+                "wave_id": rejected.wave_id,
+                "topic": rejected.topic,
+            }),
+        ),
+        ralph_core::WaveRejection::InconsistentTopic => (
+            "wave_inconsistent_topic",
+            serde_json::json!({
+                "reason": "wave_inconsistent_topic",
+                "wave_id": rejected.wave_id,
+                "topic": rejected.topic,
+            }),
+        ),
+        ralph_core::WaveRejection::InconsistentTotal => (
+            "wave_inconsistent_total",
+            serde_json::json!({
+                "reason": "wave_inconsistent_total",
+                "wave_id": rejected.wave_id,
+                "topic": rejected.topic,
+                "actual": rejected.actual,
+            }),
+        ),
+        ralph_core::WaveRejection::MissingIndex => (
+            "wave_missing_index",
+            serde_json::json!({
+                "reason": "wave_missing_index",
+                "wave_id": rejected.wave_id,
+                "topic": rejected.topic,
+            }),
+        ),
+        ralph_core::WaveRejection::IndexOutOfRange => (
+            "wave_index_out_of_range",
+            serde_json::json!({
+                "reason": "wave_index_out_of_range",
+                "wave_id": rejected.wave_id,
+                "topic": rejected.topic,
+                "actual": rejected.actual,
+            }),
+        ),
+        ralph_core::WaveRejection::NoTargetHat => (
+            "wave_no_target_hat",
+            serde_json::json!({
+                "reason": "wave_no_target_hat",
+                "wave_id": rejected.wave_id,
+                "topic": rejected.topic,
+            }),
+        ),
+        ralph_core::WaveRejection::SequentialTarget => (
+            "wave_sequential_target",
+            serde_json::json!({
+                "reason": "wave_sequential_target",
+                "wave_id": rejected.wave_id,
+                "topic": rejected.topic,
+            }),
+        ),
+    };
+
+    // Surface to CLI for dogfooding visibility.
+    if out.show_cli {
+        eprintln!(
+            "{} wave {} rejected ({}): {}",
+            if out.use_colors { "\x1b[31m" } else { "" },
+            rejected.wave_id,
+            reason_code,
+            structured_reason
+        );
+    }
+
+    // Build the recovery envelope so the responder can escalate.
+    let retry_key = ralph_core::diagnosis::RecoveryDiagnosisEnvelopeBuilder::retry_key_from_parts(
+        DiagnosisSource::WaveDispatcher,
+        None,
+        Some(rejected.topic.as_str()),
+        reason_code,
+        None,
+    );
+    let envelope = ralph_core::diagnosis::RecoveryDiagnosisEnvelope::builder()
+        .source(DiagnosisSource::WaveDispatcher)
+        .severity(DiagnosisSeverity::Error)
+        .reason_code(reason_code)
+        .message(format!(
+            "Wave {} rejected before dispatch: {} (topic={}, actual={})",
+            rejected.wave_id, reason_code, rejected.topic, rejected.actual
+        ))
+        .expected_action("Reduce wave fan-out or fix payload emission; see plan.blocked payload.")
+        .topic(rejected.topic.clone())
+        .retry_attempt(0)
+        .safe_target(false)
+        .outcome(DiagnosisOutcome::NotRetriable)
+        .retry_key(retry_key)
+        .build();
+    let _ = event_loop.record_recovery_envelope(&envelope, Vec::new());
+
+    if let Some(diag) = diagnostics {
+        diag.log_error(
+            event_loop.state().iteration,
+            "ralph-cli/wave-rejection",
+            ralph_core::diagnostics::DiagnosticError::BackendError {
+                backend: "ralph-cli/wave-rejection".to_string(),
+                message: format!(
+                    "wave {} rejected: {} (actual={}, cap={})",
+                    rejected.wave_id, reason_code, rejected.actual, max_wave_total
+                ),
+            },
+        );
+    }
+
+    // plan.blocked emission is deferred to U4: the recovery envelope
+    // already captures the diagnostic; a future change can route the
+    // blocked signal through EventLoop::publish_event with a
+    // ralph_proto::Event once the U4 isolated-scope plumbing is in.
+
+    Ok(())
 }

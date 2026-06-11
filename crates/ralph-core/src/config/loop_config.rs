@@ -49,6 +49,10 @@ fn default_max_runtime() -> u64 {
     14400 // 4 hours
 }
 
+fn default_max_wave_total() -> u32 {
+    64
+}
+
 fn default_max_failures() -> u32 {
     5
 }
@@ -78,6 +82,15 @@ pub struct EventLoopConfig {
     /// Maximum runtime in seconds.
     #[serde(default = "default_max_runtime")]
     pub max_runtime_seconds: u64,
+
+    /// U2: cap on `wave_total` (the protocol-claimed fan-out size of a wave).
+    /// Waves whose `wave_total` exceeds this value are rejected before any
+    /// worker, TUI update, or backend call. Default: 64. The cap is an
+    /// event-loop level setting (not a hat-level field) and is the
+    /// primary defense against runaway fan-out (e.g. the 335-worker bug
+    /// documented in `docs/report/ce-debug-report-2026-06-10-wave-335-fanout.md`).
+    #[serde(default = "default_max_wave_total")]
+    pub max_wave_total: u32,
 
     /// Maximum cost in USD before stopping.
     pub max_cost_usd: Option<f64>,
@@ -193,6 +206,7 @@ impl Default for EventLoopConfig {
             completion_promise: default_completion_promise(),
             max_iterations: default_max_iterations(),
             max_runtime_seconds: default_max_runtime(),
+            max_wave_total: default_max_wave_total(),
             max_cost_usd: None,
             max_consecutive_failures: default_max_failures(),
             cooldown_delay_seconds: 0,
