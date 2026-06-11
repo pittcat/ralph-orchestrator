@@ -62,21 +62,60 @@ pub(crate) fn is_jsonl_control_topic(topic: &str, cancellation_topic: &str) -> b
 /// the per-event budget check. Treating it as a control topic here
 /// would let any isolated hat bypass its `publishes` scope check
 /// and flood the turn with terminal events.
+///
+/// **P1-2 fix (post-review)**: case-insensitive match on the input topic
+/// — lowercase before comparing — so a hat that emits `Loop.Cancel`
+/// or `HUMAN.GUIDANCE` (case-mismatched) still falls into the
+/// correct diagnostic path (`event.isolation.boundary_violation` for
+/// the rejection, not `executor.scope_violation`). The cancellation
+/// topic comparison also lowercases `cancellation_topic` to keep the
+/// match symmetric.
 pub fn is_orchestrator_control_topic(topic: &str, cancellation_topic: &str) -> bool {
+    let topic_lc = topic.to_ascii_lowercase();
+    let cancellation_lc = cancellation_topic.to_ascii_lowercase();
     matches!(
-        topic,
+        topic_lc.as_str(),
         "human.interact" | "human.guidance" | "task.resume" | "build.task.abandoned"
-    ) || (cancellation_topic == topic && !cancellation_topic.is_empty())
+    ) || (!cancellation_lc.is_empty() && topic_lc == cancellation_lc)
 }
 
+/// Authoritative set of orchestrator-produced diagnostic topics that the
+/// loop itself emits to the bus (and which therefore bypass the per-hat
+/// `can_publish` check and the isolated single-event budget).
+///
+/// P1-1 fix (post-review): replaced the previous `topic.starts_with("event.")`
+/// prefix match with an explicit allowlist. The prefix form was
+/// defense-in-depth unsafe — it would let any hat that declared a
+/// topic with the `event.` prefix (e.g. `event.something_custom`) bypass
+/// the per-turn budget gate. The set below mirrors the topics that
+/// `loop_state::is_system_topic` already enumerates as "not agent progress".
+const ORCHESTRATOR_DIAGNOSTIC_TOPICS: &[&str] = &[
+    "event.malformed",
+    "event.scope_violation",
+    "event.workflow_guard_rejected",
+    "event.state_machine.rejected",
+    "event.state_machine.ignored",
+    "event.state_machine.diagnostic",
+    "event.policy_warning",
+    "event.completion.blocked",
+    "event.completion.ignored",
+    "event.isolation.boundary_violation",
+    "event.topic_format.rejected",
+    "event.execution_contract.rejected",
+    "event.payload_contract.rejected",
+];
+
 /// Returns `true` when `topic` is an orchestrator-produced diagnostic
-/// event (`event.*` prefix) that the loop itself emits to the bus.
+/// event that the loop itself emits to the bus.
 ///
 /// These events are observability/audit signals, not hat progress.
 /// They bypass the per-hat `can_publish` check and the isolated
 /// single-event budget because they are not agent business events.
+///
+/// P1-1 fix: explicit allowlist (see `ORCHESTRATOR_DIAGNOSTIC_TOPICS`)
+/// instead of `event.*` prefix match.
 pub fn is_orchestrator_diagnostic_topic(topic: &str) -> bool {
-    topic.starts_with("event.")
+    ORCHESTRATOR_DIAGNOSTIC_TOPICS.contains(&topic)
 }
 
 /// Source identifier stamped on `human.response` events produced by the trusted
@@ -899,5 +938,129 @@ hats:
                 reason: "ralph_control_only"
             }
         );
+    }
+
+    // -------------------------------------------------------------------
+    // P1-1 fix (post-review): `is_orchestrator_diagnostic_topic` is an
+    // explicit allowlist, not a `event.*` prefix match. Any hat-declared
+    // topic with the `event.` prefix must NOT bypass the per-turn
+    // budget gate. The known orchestrator-internal diagnostic topics
+    // must still be accepted.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_p1_1_diagnostic_allowlist_known_topics_accepted() {
+        // Each entry in ORCHESTRATOR_DIAGNOSTIC_TOPICS must return true.
+        for topic in [
+            "event.malformed",
+            "event.scope_violation",
+            "event.workflow_guard_rejected",
+            "event.state_machine.rejected",
+            "event.state_machine.ignored",
+            "event.state_machine.diagnostic",
+            "event.policy_warning",
+            "event.completion.blocked",
+            "event.completion.ignored",
+            "event.isolation.boundary_violation",
+            "event.topic_format.rejected",
+            "event.execution_contract.rejected",
+            "event.payload_contract.rejected",
+        ] {
+            assert!(
+                is_orchestrator_diagnostic_topic(topic),
+                "P1-1: {topic} must be recognised as an orchestrator diagnostic"
+            );
+        }
+    }
+
+    #[test]
+    fn test_p1_1_diagnostic_allowlist_rejects_arbitrary_event_prefix() {
+        // A hat that declares a custom `event.*` topic in its `publishes`
+        // list must NOT have it bypass the per-turn budget. The fix moves
+        // us from `starts_with("event.")` (defense-in-depth unsafe) to an
+        // explicit allowlist.
+        for topic in [
+            "event.something_custom",
+            "event.custom_diagnostic",
+            "event.user_defined",
+            "event.private",
+            // Edge case: a topic that looks like a known diagnostic but
+            // is in fact a different string.
+            "event.malformed_extra",
+            "event.isolation.boundary_violation_typo",
+        ] {
+            assert!(
+                !is_orchestrator_diagnostic_topic(topic),
+                "P1-1: {topic} must NOT bypass the per-turn budget (allowlist only)"
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // P1-2 fix (post-review): `is_orchestrator_control_topic` matches
+    // case-insensitively. A hat that emits `HUMAN.GUIDANCE` or
+    // `loop.cancel` (case-mismatched) must still be classified as a
+    // control topic so the rejection goes through the correct
+    // diagnostic (boundary_violation, not scope_violation).
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_p1_2_control_topic_case_insensitive_match() {
+        // Lowercase baseline (no change in behavior).
+        assert!(is_orchestrator_control_topic(
+            "human.interact",
+            "loop.cancel"
+        ));
+        assert!(is_orchestrator_control_topic(
+            "human.guidance",
+            "loop.cancel"
+        ));
+        assert!(is_orchestrator_control_topic("task.resume", "loop.cancel"));
+        assert!(is_orchestrator_control_topic(
+            "build.task.abandoned",
+            "loop.cancel"
+        ));
+
+        // Uppercase — same control topics, different case.
+        assert!(is_orchestrator_control_topic(
+            "HUMAN.INTERACT",
+            "loop.cancel"
+        ));
+        assert!(is_orchestrator_control_topic(
+            "Human.Guidance",
+            "loop.cancel"
+        ));
+        assert!(is_orchestrator_control_topic("TASK.RESUME", "loop.cancel"));
+        assert!(is_orchestrator_control_topic(
+            "BUILD.TASK.ABANDONED",
+            "loop.cancel"
+        ));
+
+        // Cancellation topic is also case-insensitive.
+        assert!(is_orchestrator_control_topic("LOOP.CANCEL", "loop.cancel"));
+        assert!(is_orchestrator_control_topic("Loop.Cancel", "loop.cancel"));
+    }
+
+    #[test]
+    fn test_p1_2_control_topic_does_not_match_business_topics() {
+        // Even with case variation, a business topic like loop.complete
+        // (lowercase) is NOT a control topic — it must be rejected via
+        // can_publish (scope_violation), not bypassed as control.
+        assert!(!is_orchestrator_control_topic(
+            "loop.complete",
+            "loop.cancel"
+        ));
+        assert!(!is_orchestrator_control_topic(
+            "LOOP.COMPLETE",
+            "loop.cancel"
+        ));
+        assert!(!is_orchestrator_control_topic(
+            "review.complete",
+            "loop.cancel"
+        ));
+        assert!(!is_orchestrator_control_topic(
+            "plan.blocked",
+            "loop.cancel"
+        ));
     }
 }
