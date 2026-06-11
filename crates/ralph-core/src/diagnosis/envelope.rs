@@ -566,6 +566,26 @@ impl RecoveryDiagnosisEnvelopeBuilder {
         )
     }
 
+    /// Build a Wave-specific retry key. Different waves with the same
+    /// `reason_code` MUST NOT be merged — the key is namespaced by the
+    /// `wave_id` (normalized). The fixed prefix `wave_dispatcher` is
+    /// the canonical scope marker for the wave dispatcher source, so
+    /// non-wave callers continue to use [`Self::retry_key_from_parts`].
+    ///
+    /// Format: `"wave_dispatcher:{normalized_wave_id}:{reason_code}"`.
+    /// Both parts are normalized with the same rule as
+    /// [`Self::retry_key_from_parts`].
+    ///
+    /// See U4 plan §3 KTD-U4-3 / §5 B1.
+    #[must_use]
+    pub fn wave_retry_key(wave_id: &str, reason_code: &str) -> String {
+        format!(
+            "wave_dispatcher:{}:{}",
+            normalize_part(wave_id),
+            normalize_part(reason_code),
+        )
+    }
+
     /// Finalize the builder into a [`RecoveryDiagnosisEnvelope`].
     ///
     /// Stamps `schema_version = 1`, `diagnosis_id` (fresh UUIDv4),
@@ -784,6 +804,44 @@ mod tests {
             None,
         );
         assert_eq!(key, "loop_stale:*:*:stale:*");
+    }
+
+    /// U4-B1 / KTD-U4-3: same `wave_id` + same `reason_code` MUST
+    /// produce the same retry key. A rejected wave that is re-observed
+    /// must collapse to the same finding so the responder converges.
+    #[test]
+    fn wave_retry_key_is_stable_for_same_wave() {
+        let k1 = RecoveryDiagnosisEnvelopeBuilder::wave_retry_key("w-001", "wave_total_exceeds_cap");
+        let k2 = RecoveryDiagnosisEnvelopeBuilder::wave_retry_key("w-001", "wave_total_exceeds_cap");
+        assert_eq!(k1, k2, "same wave_id + reason_code must yield same key");
+    }
+
+    /// U4-B1 / KTD-U4-3: different `wave_id`s MUST yield different keys,
+    /// even with the same `reason_code`. This is the exact property the
+    /// historical generic key builder was missing.
+    #[test]
+    fn wave_retry_key_differentiates_wave_ids() {
+        let k_a = RecoveryDiagnosisEnvelopeBuilder::wave_retry_key("w-A", "wave_total_exceeds_cap");
+        let k_b = RecoveryDiagnosisEnvelopeBuilder::wave_retry_key("w-B", "wave_total_exceeds_cap");
+        assert_ne!(
+            k_a, k_b,
+            "different wave_ids must not collapse into a single retry key"
+        );
+        // Sanity: the format is the documented 3-part shape.
+        assert!(k_a.starts_with("wave_dispatcher:"));
+        assert!(k_a.ends_with(":wave_total_exceeds_cap"));
+    }
+
+    /// U4-B1 / KTD-U4-3: non-`[a-z0-9_]` characters in `wave_id` and
+    /// `reason_code` are normalized using the same rule as
+    /// `retry_key_from_parts`.
+    #[test]
+    fn wave_retry_key_normalizes_parts() {
+        let k = RecoveryDiagnosisEnvelopeBuilder::wave_retry_key(
+            "W-001/Run.2",
+            "Wave-Total-Exceeds-Cap",
+        );
+        assert_eq!(k, "wave_dispatcher:w_001_run_2:wave_total_exceeds_cap");
     }
 
     #[test]

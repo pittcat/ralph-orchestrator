@@ -383,17 +383,17 @@ rtk cargo clippy -p ralph-core -p ralph-cli --all-targets -- -D warnings
 
 ## 10. 完成标准
 
-- [ ] Wave 与普通事件遵守等价的 isolated publish scope。
-- [ ] 合法多 event Wave 不被截断。
-- [ ] 同一 isolated activation 的第二个 Wave 被 typed rejection。
-- [ ] Wave recovery key 包含 `wave_id`。
-- [ ] 不重复实现 envelope、responder 或 Hard/Final 算法。
-- [ ] 所有 Wave failure 通过 `record_recovery_envelope`。
-- [ ] runner 不直接操作 worker task handle。
-- [ ] max runtime 到达后 worker 全部结束。
-- [ ] watchdog 跳过 iteration 后续阶段并走统一终止流程。
-- [ ] 定向测试、clippy 和 `./scripts/run-tests.sh` 全部通过。
-- [ ] 在文末追加实施记录和 commit hash。
+- [x] Wave 与普通事件遵守等价的 isolated publish scope。
+- [x] 合法多 event Wave 不被截断。
+- [x] 同一 isolated activation 的第二个 Wave 被 typed rejection。
+- [x] Wave recovery key 包含 `wave_id`。
+- [x] 不重复实现 envelope、responder 或 Hard/Final 算法。
+- [x] 所有 Wave failure 通过 `record_recovery_envelope`。
+- [ ] runner 不直接操作 worker task handle。（阻塞于 U3）
+- [ ] max runtime 到达后 worker 全部结束。（阻塞于 U3）
+- [ ] watchdog 跳过 iteration 后续阶段并走统一终止流程。（阻塞于 U3）
+- [x] 定向测试、clippy 和 `./scripts/run-tests.sh` 全部通过。（已完成部分 0 failures）
+- [x] 在文末追加实施记录和 commit hash。
 
 ---
 
@@ -406,3 +406,45 @@ rtk cargo clippy -p ralph-core -p ralph-cli --all-targets -- -D warnings
 - 修改非 Wave finding 的通用 retry key。
 - 为 Wave 专门扩大全局 recovery envelope schema。
 - 在 runner 暴露或操作 dispatcher 内部 JoinSet。
+
+---
+
+## 12. 实施记录
+
+> **实施日期**：2026-06-11
+> **分支**：`feat/u4-isolated-recovery-watchdog`
+> **状态**：Part A + B1/B2 已完成；B3/B4 + Part C 阻塞于 U3 Dispatcher Deadline 重构
+
+### 已完成单元
+
+| 单元 | Commit | 说明 |
+|---|---|---|
+| A1–A3 | `3db6427` | 新增 `wave_isolated_scope.rs` 5 个 characterization tests、`isolated_publish_allowed` helper、`WaveRejection::IsolatedScopeViolation` / `IsolatedMultipleBusinessEmissions` 变体、`enforce_wave_isolated_scope` 后置 scope check、`publish_isolated_wave_violation` 诊断事件 |
+| B1 | `82e98e2` | `RecoveryDiagnosisEnvelopeBuilder::wave_retry_key(wave_id, reason_code)` 专用 3-part 格式、`handle_wave_rejection` match 新变体 + retry key 替换、dispatcher 测试 `u4_b1_retry_key_is_wave_scoped`、envelope 3 个 unit test |
+| B2 | `1253e66` | `publish_isolated_wave_violation` 加 `record_recovery_envelope` 调用（outcome=NotRetriable）、3 个 B2 集成测试（scope violation envelope、two waves two envelopes、non-isolated no envelope） |
+
+### A4 判定
+
+`process_events_from_jsonl_with_waves()` 在每次 runner iteration 中仅被调用一次（`runner.rs:2920`），`current_isolated_hat` 在 `process_output()` 每次按"刚产生 output 的 hat"刷新。因此局部 per-batch 判定已覆盖"一次 isolated activation 一个 wave"语义。**不需要跨读取状态**（KTD-U4-2 默认假设成立）。
+
+### Plan 假设 vs 实际不符
+
+1. `WaveRejection` 原无 `OutOfScope` / `AggregateTimeout` / `Partial` / `IsolatedScopeViolation` / `IsolatedMultipleBusinessEmissions`——新增了后两个。
+2. `handle_wave_rejection` 现有路径既调 `record_recovery_envelope` 也调 `DiagnosticsCollector::log_error`——plan 提到的 `log_recovery` 不在调用栈里（`record_recovery_envelope` 内部调 `log_recovery`）。
+3. `WaveDispatchEnd::GlobalDeadlineExceeded` 返回类型、`on_converged` 回调、`fn isolated_publish_allowed` helper、`publisher_can_publish` / `is_in_publishes` 同名 API——plan 假设存在但实际不存在。新增了 `isolated_publish_allowed` 和 `wave_retry_key`。
+4. `RecoveryDiagnosisEnvelope` 无 `wave_id` / `expected` / `completed` 独立字段——按 plan §5 B3 用 `topic` / `reason_code` / `message` / `EvidenceRef` 表达。
+5. `process_events_from_jsonl_with_waves` 内不读 `current_isolated_hat`——这是 Part A 的事实基础。
+6. runner 在 `runner.rs:3466` 直接 `.await handle_wave_events(...)` 无 select/timeout——Part C 需 U3 先提供 dispatcher deadline。
+
+### 测试覆盖
+
+| 测试文件 | 测试数 | 覆盖单元 |
+|---|---|---|
+| `event_loop::tests::wave_isolated_scope` | 8 | A1(5) + B2(3) |
+| `diagnosis::envelope::tests::wave_retry_*` | 3 | B1 unit |
+| `loop_runner::wave::dispatcher::tests` | 3 | B1 integration + U2 baseline |
+
+### 阻塞项
+
+- **B3/B4**（timeout outcome 接入 responder）：需要 U3 提供结构化 outcome（`Partial`、`AggregateDeadlineExceeded`、`GlobalDeadlineExceeded`）。
+- **C0–C4**（Runner Watchdog）：需要 U3 提供 dispatcher optional global deadline + `GlobalDeadlineExceeded` outcome。

@@ -1312,6 +1312,199 @@ impl EventLoop {
         &mut self.registry
     }
 
+    /// Returns true when the given `hat` is permitted to publish the given
+    /// `topic` under the registry's publish rules.
+    ///
+    /// This is the shared isolated-scope predicate used by both the
+    /// regular event path (`process_parse_result`) and the wave partition
+    /// path (`process_events_from_jsonl_with_waves`). Centralising the
+    /// call here keeps the two paths in lock-step when scope rules change
+    /// — see U4 plan §4 KTD-U4-1 / A2.
+    pub fn isolated_publish_allowed(&self, hat: &HatId, topic: &str) -> bool {
+        self.registry.can_publish(hat, topic)
+    }
+
+    /// Enforce isolated publish scope on a batch of wave events.
+    ///
+    /// Groups events by `wave_id` (preserving first-seen order), then:
+    ///   * the first distinct `wave_id` is allowed only if every event
+    ///     in the group is in the isolated hat's `publishes` list — if
+    ///     not, the whole group is dropped as
+    ///     `WaveRejection::IsolatedScopeViolation`;
+    ///   * any subsequent distinct `wave_id` is dropped as
+    ///     `WaveRejection::IsolatedMultipleBusinessEmissions`.
+    ///
+    /// Each rejection publishes a `*.scope_violation` event to the bus
+    /// and constructs a `WaveRejection` value so that the caller's
+    /// B2 responder path can wire it to `record_recovery_envelope`.
+    ///
+    /// See U4 plan §3 KTD-U4-1, §3 KTD-U4-2, §4 A3.
+    fn enforce_wave_isolated_scope(
+        &mut self,
+        events: Vec<crate::event_reader::Event>,
+        isolated_hat: &HatId,
+    ) -> std::io::Result<Vec<crate::event_reader::Event>> {
+        use crate::wave_detection::WaveRejection;
+        use std::collections::HashMap;
+
+        // Group by wave_id, preserving first-seen order. Wave counts
+        // per read batch are bounded by `max_wave_total` (default 64),
+        // so a Vec is fine for the order book; HashMap gives O(1) lookup.
+        let mut order: Vec<String> = Vec::with_capacity(events.len());
+        let mut groups: HashMap<String, Vec<crate::event_reader::Event>> = HashMap::new();
+        for event in events {
+            let key = event.wave_id.clone().unwrap_or_default();
+            if !groups.contains_key(&key) {
+                order.push(key.clone());
+            }
+            groups.entry(key).or_default().push(event);
+        }
+
+        let mut kept: Vec<crate::event_reader::Event> = Vec::new();
+        // Tracks whether ANY distinct `wave_id` has been observed in
+        // this read batch, regardless of whether that wave was kept or
+        // dropped. KTD-U4-2: a single isolated activation allows at
+        // most one distinct `wave_id`; any further distinct wave_id is
+        // typed as `IsolatedMultipleBusinessEmissions`, even if the
+        // first wave itself was rejected for scope.
+        let mut wave_observed: bool = false;
+
+        for wave_id in order {
+            let group = groups.remove(&wave_id).unwrap_or_default();
+            if group.is_empty() {
+                continue;
+            }
+
+            if !wave_observed {
+                // First distinct wave: check isolated scope on every
+                // event. If any event is out of scope, the whole wave
+                // is dropped (one business emission rule). The wave
+                // is still considered "observed" so the next distinct
+                // wave_id is typed as `IsolatedMultipleBusinessEmissions`
+                // — a second wave is never silently absorbed by the
+                // scope check.
+                if let Some(out_of_scope_topic) =
+                    group.iter().find_map(|e| {
+                        if self.isolated_publish_allowed(isolated_hat, e.topic.as_str()) {
+                            None
+                        } else {
+                            Some(e.topic.to_string())
+                        }
+                    })
+                {
+                    let rejection = WaveRejection::IsolatedScopeViolation {
+                        wave_id: wave_id.clone(),
+                        topic: out_of_scope_topic,
+                        isolated_hat: isolated_hat.to_string(),
+                    };
+                    self.publish_isolated_wave_violation(
+                        &rejection,
+                        isolated_hat,
+                        &group,
+                    );
+                    wave_observed = true;
+                    continue;
+                }
+                wave_observed = true;
+                kept.extend(group);
+            } else {
+                // Subsequent distinct wave_id in the same read batch:
+                // typed as `IsolatedMultipleBusinessEmissions`.
+                let rejection = WaveRejection::IsolatedMultipleBusinessEmissions {
+                    wave_id: wave_id.clone(),
+                    isolated_hat: isolated_hat.to_string(),
+                };
+                self.publish_isolated_wave_violation(
+                    &rejection,
+                    isolated_hat,
+                    &group,
+                );
+            }
+        }
+
+        Ok(kept)
+    }
+
+    /// Publish a `.scope_violation` diagnostic event and log a warning
+    /// for an isolated wave rejection. The typed `WaveRejection` is
+    /// recorded as a recovery finding in B2; for now this method only
+    /// handles the diagnostic side so that A1–A3 land atomically.
+    fn publish_isolated_wave_violation(
+        &mut self,
+        rejection: &crate::wave_detection::WaveRejection,
+        isolated_hat: &HatId,
+        events: &[crate::event_reader::Event],
+    ) {
+        use crate::wave_detection::WaveRejection;
+        let (reason_code, topic_label, wave_id) = match rejection {
+            WaveRejection::IsolatedScopeViolation {
+                wave_id,
+                topic,
+                ..
+            } => ("wave_isolated_scope_violation", topic.as_str(), wave_id.as_str()),
+            WaveRejection::IsolatedMultipleBusinessEmissions {
+                wave_id, ..
+            } => ("wave_isolated_multiple_business_emissions", "", wave_id.as_str()),
+            _ => ("wave_isolated_unknown", "", ""),
+        };
+        warn!(
+            hat = %isolated_hat.as_str(),
+            reason = reason_code,
+            wave = wave_id,
+            dropped = events.len(),
+            "Isolated wave rejection — dropping whole wave"
+        );
+        let violation_topic = format!("{}.scope_violation", isolated_hat.as_str());
+        let violation_payload = format!(
+            "Isolated mode wave rejection ({reason_code}): hat '{}' dropped {} wave event(s) {}",
+            isolated_hat.as_str(),
+            events.len(),
+            if topic_label.is_empty() {
+                String::new()
+            } else {
+                format!("(out-of-scope topic '{topic_label}')")
+            }
+        );
+        self.bus
+            .publish(Event::new(violation_topic, violation_payload));
+
+        // B2 / KTD-U4-4: record a recovery envelope so the responder
+        // can track the finding. Outcome is `NotRetriable` per plan §3
+        // KTD-U4-5 table — cap/structure and isolated-scope rejections
+        // do not enter automatic recovery escalation.
+        let retry_key =
+            crate::diagnosis::RecoveryDiagnosisEnvelopeBuilder::wave_retry_key(
+                wave_id,
+                reason_code,
+            );
+        let message = format!(
+            "Isolated wave {} rejected: hat '{}' cannot publish '{}'; {} event(s) dropped",
+            wave_id,
+            isolated_hat.as_str(),
+            if topic_label.is_empty() { "(multi-business)" } else { topic_label },
+            events.len(),
+        );
+        let mut builder = crate::diagnosis::RecoveryDiagnosisEnvelope::builder()
+            .source(crate::diagnosis::DiagnosisSource::WaveDispatcher)
+            .severity(crate::diagnosis::DiagnosisSeverity::Error)
+            .iteration(self.state.iteration)
+            .reason_code(reason_code)
+            .message(message)
+            .retry_attempt(0)
+            .safe_target(false)
+            .outcome(crate::diagnosis::DiagnosisOutcome::NotRetriable)
+            .retry_key(retry_key)
+            .source_hat(isolated_hat.to_string());
+        if !topic_label.is_empty() {
+            builder = builder.topic(topic_label.to_string());
+        }
+        if let Some(session_id) = self.diagnostics.session_id() {
+            builder = builder.session_id(session_id);
+        }
+        let envelope = builder.build();
+        self.record_recovery_envelope(&envelope, Vec::new());
+    }
+
     /// Records hook telemetry for diagnostics.
     pub fn log_hook_run_telemetry(&self, entry: crate::diagnostics::HookRunTelemetryEntry) {
         self.diagnostics.log_hook_run(entry);
@@ -4068,10 +4261,7 @@ impl EventLoop {
                 }
 
                 // Enforce hat scope: topic must be in isolated_hat's publishes
-                if !self
-                    .registry
-                    .can_publish(isolated_hat, event.topic.as_str())
-                {
+                if !self.isolated_publish_allowed(isolated_hat, event.topic.as_str()) {
                     warn!(
                         hat = %isolated_hat.as_str(),
                         topic = %event.topic,
@@ -5593,6 +5783,25 @@ impl EventLoop {
                 "Partitioned wave events from regular events"
             );
         }
+
+        // --- Isolated scope enforcement for wave events (U4 / A3) ---
+        // Wave partition bypasses `process_parse_result`, so the regular
+        // isolated-scope check does not run on wave events. We re-apply
+        // it here post-partition. Per KTD-U4-1 the same
+        // `isolated_publish_allowed` predicate is used; per KTD-U4-2 a
+        // single isolated activation may emit at most one distinct
+        // `wave_id` — additional distinct wave_ids in the same read
+        // batch are typed as `IsolatedMultipleBusinessEmissions`.
+        let wave_events = if self.config.event_loop.execution_mode
+            == HatExecutionMode::Isolated
+            && let Some(isolated_hat) = self.state.current_isolated_hat.clone()
+            && !wave_events.is_empty()
+        {
+            self.enforce_wave_isolated_scope(wave_events, &isolated_hat)?
+        } else {
+            wave_events
+        };
+        // --- End isolated scope enforcement for wave events ---
 
         // Delegate regular events to the full pipeline (backpressure, scope
         // enforcement, human.interact, plan detection, etc.)
