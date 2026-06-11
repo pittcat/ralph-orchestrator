@@ -68,6 +68,13 @@ open.workspace = true
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }
 
+# `test-util` enables `Builder::start_paused`, which the U3 paused-time
+# dispatcher tests rely on. `full` (the only feature enabled in the
+# main tokio dependency above) deliberately does not include
+# `test-util`, so we add it here.
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
 [[example]]
 name = "calculator"
 path = "examples/calculator.rs"
