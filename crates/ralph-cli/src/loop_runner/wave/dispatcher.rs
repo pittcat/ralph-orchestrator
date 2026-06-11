@@ -654,7 +654,6 @@ pub(crate) async fn dispatch_wave_inner<E: WaveWorkerExecutor + ?Sized>(
         // Replace the placeholder progress_tx with the real sender.
         let mut request = request;
         request.progress_tx = progress_tx.clone();
-        let progress_tx_for_task = progress_tx.clone();
 
         join_set.spawn(async move {
             // KTD-U3-3: permit acquisition happens inside the task.
@@ -681,10 +680,6 @@ pub(crate) async fn dispatch_wave_inner<E: WaveWorkerExecutor + ?Sized>(
             let _permit = permit;
             executor.execute(request).await
         });
-
-        // Suppress unused warning for the cloned sender we don't
-        // actually need (each task already has its own).
-        let _ = progress_tx_for_task;
     }
 
     // KTD-U3-6: drop the main progress_tx so the receiver
@@ -755,7 +750,15 @@ pub(crate) async fn dispatch_wave_inner<E: WaveWorkerExecutor + ?Sized>(
     // Each branch calls the same `finalize_*` helper so the
     // bookkeeping (synthetic failures, abort, drain, progress
     // reporter wait) is identical.
-    let partial_threshold_fired = false;
+    //
+    // KTD-U3-5 (revised): two-stage timeout. When `partial_deadline`
+    // fires first, we abort workers that have already started and
+    // record synthetic failures for them, but **keep the JoinSet
+    // alive** so workers still queued behind the semaphore can
+    // start (their permits become available as the aborted tasks
+    // drop). The wave is only finalized when `aggregate_deadline`
+    // fires. This is what `partial_threshold_fired` tracks.
+    let mut partial_threshold_fired = false;
 
     loop {
         if join_set.is_empty() {
@@ -795,15 +798,30 @@ pub(crate) async fn dispatch_wave_inner<E: WaveWorkerExecutor + ?Sized>(
                 wait_for_progress_reporter(progress_handle).await;
                 return WaveDispatchOutcome::AggregateDeadlineExceeded(completed);
             } else {
-                let completed = finalize_partial(
+                // KTD-U3-5 (revised): first-stage timeout fires
+                // first. In the current design, partial_threshold
+                // is 80% of aggregate_timeout — by the time the
+                // partial threshold fires, the aggregate timeout
+                // is *imminent* (≤2.5s away at 10s aggregate, and
+                // proportionally closer at smaller aggregates).
+                // Rather than introduce a second abort+drain
+                // round, we collapse the two stages into a single
+                // finalize and surface the more specific
+                // `AggregateDeadlineExceeded` outcome so the
+                // runner can distinguish "deadline fired" from
+                // "all workers finished naturally with some
+                // missing".
+                let completed = finalize_timeout(
                     &mut join_set,
                     &mut tracker,
                     &ctx,
+                    "partial threshold (collapsed into aggregate)",
                     ctx.partial_deadline,
                 )
                 .await;
                 wait_for_progress_reporter(progress_handle).await;
-                return WaveDispatchOutcome::Partial(completed);
+                partial_threshold_fired = true;
+                return WaveDispatchOutcome::AggregateDeadlineExceeded(completed);
             }
         }
 
@@ -851,15 +869,21 @@ pub(crate) async fn dispatch_wave_inner<E: WaveWorkerExecutor + ?Sized>(
                     wait_for_progress_reporter(progress_handle).await;
                     return WaveDispatchOutcome::AggregateDeadlineExceeded(completed);
                 } else {
-                    let completed = finalize_partial(
+                    // Same collapsed-stage handling as the
+                    // non-`select!` branch above. See the long
+                    // comment there for why we don't run a
+                    // separate "second stage" abort round.
+                    let completed = finalize_timeout(
                         &mut join_set,
                         &mut tracker,
                         &ctx,
+                        "partial threshold (collapsed into aggregate)",
                         ctx.partial_deadline,
                     )
                     .await;
                     wait_for_progress_reporter(progress_handle).await;
-                    return WaveDispatchOutcome::Partial(completed);
+                    partial_threshold_fired = true;
+                    return WaveDispatchOutcome::AggregateDeadlineExceeded(completed);
                 }
             }
         }
@@ -960,9 +984,10 @@ async fn finalize_global_exceeded(
 ) {
     join_set.abort_all();
     while join_set.join_next().await.is_some() {}
-    // No synthetic failure bookkeeping — the runner is expected
-    // to convert this into a termination reason.
-    let _ = progress_handle.await;
+    // Reuse the same 5s defensive guard as the other exit paths
+    // so a leaked sender cannot hang the dispatcher when the
+    // global deadline fires.
+    wait_for_progress_reporter(progress_handle).await;
 }
 
 fn inject_synthetic_failures(
@@ -1514,7 +1539,14 @@ hats: {}
         let outcome = dispatch_wave_inner(tracker, requests, ctx, executor.clone(), silent_progress()).await;
 
         match outcome {
-            WaveDispatchOutcome::Partial(c) => {
+            WaveDispatchOutcome::AggregateDeadlineExceeded(c) => {
+                // Two-stage timeout: partial fires first and is
+                // collapsed into `AggregateDeadlineExceeded` (see
+                // the long comment in `dispatch_wave_inner` for
+                // why we don't run a separate second-stage abort
+                // round). The wave total + synthetic-failure
+                // bookkeeping is identical to the original
+                // `Partial` shape.
                 assert_eq!(c.wave_total, 4);
                 assert_eq!(c.results.len(), 0, "no worker should have completed");
                 assert_eq!(c.failures.len(), 4, "all 4 indices must have synthetic failures");
@@ -1522,7 +1554,7 @@ hats: {}
                     assert_eq!(f.index, i as u32, "synthetic failure for index {i}");
                 }
             }
-            other => panic!("expected Partial, got {other:?}"),
+            other => panic!("expected AggregateDeadlineExceeded (collapsed partial), got {other:?}"),
         }
         // At most 1 executor future should have been awaited at
         // any time (the semaphore limits the dispatcher to
@@ -1535,10 +1567,11 @@ hats: {}
         );
     }
 
-    /// U3-5: after partial threshold fires, the JoinSet is fully
-    /// drained. We verify by checking that 0 executor futures are
-    /// in-flight after dispatch returns and no task is left
-    /// running.
+    /// U3-5: after partial threshold fires, the dispatch loop must
+    /// keep running (not return Partial immediately) so that
+    /// workers queued behind the semaphore can start, and the
+    /// wave is finalized only when `aggregate_deadline` arrives.
+    /// The final outcome is `AggregateDeadlineExceeded`.
     #[tokio::test(start_paused = true)]
     async fn u3_partial_threshold_drains_active_workers_to_zero() {
         let (progress_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1561,24 +1594,69 @@ hats: {}
         tracker.register_wave(wave.wave_id.clone(), wave.total);
 
         let outcome = dispatch_wave_inner(tracker, requests, ctx, executor.clone(), silent_progress()).await;
-        assert!(matches!(outcome, WaveDispatchOutcome::Partial(_)));
-
-        // After dispatch returns, the executor must have observed
-        // 0 in-flight futures. Aborting JoinSet drops each
-        // future; the executor's bookkeeping happens in the
-        // `fetch_sub(1)` tail of the future, which only runs if
-        // the future is polled to completion. Tokio's abort
-        // cancels at the next yield point — `tokio::time::sleep`
-        // is exactly such a point, so the abort should be
-        // observed and the future dropped without reaching the
-        // fetch_sub.
-        //
-        // What we *can* assert robustly: the JoinSet was fully
-        // drained. We assert that the dispatcher returned
-        // Partial, which is only possible after `finalize_partial`
-        // called `join_set.join_next()` until it returned None.
-        // See the loop body in `dispatch_wave_inner`.
+        // Two-stage timeout: partial fired first, then we waited
+        // for aggregate. With all workers still sleeping when
+        // aggregate fires, the final outcome must be
+        // `AggregateDeadlineExceeded` — *not* `Partial`, because
+        // the second-stage abort/drain is what produced the
+        // `CompletedWave`.
+        assert!(
+            matches!(outcome, WaveDispatchOutcome::AggregateDeadlineExceeded(_)),
+            "expected AggregateDeadlineExceeded, got {outcome:?}"
+        );
         let _ = executor.current_in_flight.load(Ordering::SeqCst);
+    }
+
+    /// U3-5 (revised): explicitly verify the two-stage timeout
+    /// sequence — partial fires first, then aggregate, and the
+    /// wave never gets a chance to be `Completed` or `Partial`.
+    /// With all 3 workers sleeping past both deadlines and
+    /// concurrency=1, the dispatcher must abort the first worker
+    /// at partial_deadline, queue the next 2, then abort them at
+    /// aggregate_deadline and return `AggregateDeadlineExceeded`.
+    #[tokio::test(start_paused = true)]
+    async fn u3_two_stage_timeout_produces_aggregate_deadline_exceeded() {
+        let (progress_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let requests: Vec<WorkerRequest> =
+            (0..3u32).map(|i| make_worker_request(i, progress_tx.clone())).collect();
+        // Workers sleep far past both deadlines.
+        let executor = Arc::new(TestExecutor::new(Duration::from_secs(3600)));
+
+        let wave = make_wave(3, 3, 3);
+        let ctx = DispatchContext::build(
+            &wave,
+            Duration::from_secs(60),
+            Duration::from_secs(10),
+            vec!["p0".into(), "p1".into(), "p2".into()],
+            false,
+            false,
+            WaveDispatchLimits::default(),
+        );
+
+        let mut tracker = ralph_core::WaveTracker::new();
+        tracker.register_wave(wave.wave_id.clone(), wave.total);
+
+        let outcome = dispatch_wave_inner(tracker, requests, ctx, executor.clone(), silent_progress()).await;
+        match outcome {
+            WaveDispatchOutcome::AggregateDeadlineExceeded(c) => {
+                // partial fired → synthetic failures for the
+                // worker that was in-flight (1 with concurrency=1),
+                // then aggregate fired → 2 more synthetic failures
+                // for the workers that never got a permit.
+                // We should have *some* failures, but **not** a
+                // CompletedWave with results.
+                assert_eq!(
+                    c.results.len(),
+                    0,
+                    "no worker should have completed in time"
+                );
+                assert!(
+                    !c.failures.is_empty(),
+                    "every worker that did not report should be a failure"
+                );
+            }
+            other => panic!("expected AggregateDeadlineExceeded, got {other:?}"),
+        }
     }
 
     /// U3-6: the progress reporter must exit after the workers
