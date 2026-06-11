@@ -497,6 +497,30 @@ pub async fn handle_wave_events(
                     loop_id,
                     &detected,
                 );
+                // ADV-5: mirror the Completed branch's TUI cleanup
+                // so the header does not get stuck on a stale
+                // wave_active pointer. We intentionally do NOT
+                // emit RpcEvent::WaveCompleted — the wave did not
+                // complete, it was aborted by the outer deadline;
+                // the runner reads `result.global_deadline_exceeded`
+                // and surfaces MaxRuntime termination itself.
+                if let Some(state) = out.tui {
+                    if let Ok(mut s) = state.lock() {
+                        let wave_iter_idx = s.wave_active_iteration_idx.take();
+                        if let Some(wave) = s.wave_active.take() {
+                            let target_idx =
+                                wave_iter_idx.unwrap_or(s.iterations.len().saturating_sub(1));
+                            if let Some(buf) = s.iterations.get_mut(target_idx) {
+                                buf.wave_info = Some(wave);
+                            }
+                        }
+                    }
+                    let line = Line::from(Span::styled(
+                        "── Wave aborted: loop max_runtime exceeded ──────────────────────",
+                        Style::default().fg(Color::Red),
+                    ));
+                    push_to_tui_iteration(state, line);
+                }
                 result.global_deadline_exceeded = true;
                 return result;
             }
@@ -1186,6 +1210,18 @@ async fn wait_for_progress_reporter(progress_handle: tokio::task::JoinHandle<()>
 /// `DiagnosisSource` enum, and the wave dispatcher is the code
 /// path that actually fires the abort). The loop-scope is carried
 /// in the retry_key, not the source.
+///
+/// ADV-1 idempotency guard: `RecoveryResponder::observe()` (see
+/// `responder.rs:771`) increments `attempt_count` on every re-fire
+/// of an existing retry_key, with no de-dup. The runner may invoke
+/// this helper multiple times across iterations (e.g. iteration N
+/// triggers GlobalDeadlineExceeded but does not break out before a
+/// second wave in the same iteration also fires the outer
+/// deadline). Without a guard, each call would bump the counter
+/// toward Hard/Final escalation even though the underlying signal
+/// is unchanged. We use the existing `attempt_count` reader on
+/// the responder (no new API, no responder internals) to detect
+/// prior observations and short-circuit.
 fn record_loop_max_runtime_envelope(
     event_loop: &mut ralph_core::EventLoop,
     loop_id: &str,
@@ -1194,6 +1230,17 @@ fn record_loop_max_runtime_envelope(
     use ralph_core::diagnosis::{
         DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, RecoveryDiagnosisEnvelope,
     };
+
+    let retry_key = format!("loop_runner:{}:max_runtime", loop_id);
+    if event_loop.recovery_responder().attempt_count(&retry_key) > 0 {
+        // Already recorded this loop's max_runtime abort in an
+        // earlier wave/iteration. Skipping prevents responder
+        // attempt_count inflation toward escalation. The
+        // DiagnosticsCollector still gets the original envelope
+        // from the first call, which is what the audit log
+        // contract requires (one envelope per abort).
+        return;
+    }
 
     let topic = wave
         .hat_config
@@ -1221,7 +1268,7 @@ fn record_loop_max_runtime_envelope(
         .retry_attempt(0)
         .safe_target(false)
         .outcome(DiagnosisOutcome::NotRetriable)
-        .retry_key(format!("loop_runner:{}:max_runtime", loop_id))
+        .retry_key(retry_key)
         .build();
     let _ = event_loop.record_recovery_envelope(&envelope, Vec::new());
 }
