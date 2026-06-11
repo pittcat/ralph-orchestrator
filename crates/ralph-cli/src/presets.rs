@@ -4188,6 +4188,20 @@ mod tests {
     /// fully declared schemas.
     #[test]
     fn test_development_presets_pass_strict_contract() {
+        // U6 of 2026-06-11-003: `ce-executor` is on the U7 removal block
+        // (R13–R15) and `ce-executor-isolated` is its replacement (R12).
+        // The legacy preset's `event_loop.execution_mode` is still the
+        // pre-U6 default (coordinator), so the multi-hat-isolation rule
+        // must fire here. Carve it out of the strict contract for the
+        // U6→U7 transition window — every other strict-contract rule
+        // (schema, terminal coverage, etc.) must still apply. The actual
+        // removal is owned by U7.
+        //
+        // Plan reference: `docs/plans/2026-06-11-003-feat-multi-hat-isolated-policy-plan.md`
+        // sections "U6" and "U7" (Files list for U6 explicitly permits
+        // adjusting the strict-lint test in this file).
+        const U6_CE_EXECUTOR_REMOVAL_EXEMPT_FINDING: &str =
+            "lint.preset.multi_hat_requires_isolated";
         let strict_presets = &[
             "ce-executor",
             "ce-executor-wave",
@@ -4209,6 +4223,26 @@ mod tests {
                 &registry,
                 strictness,
             );
+            // U6 carve-out: if the only failure on `ce-executor` is the
+            // multi-hat-isolation finding, treat the strict contract as
+            // passed for the transition window. Other presets and other
+            // findings still hard-gate.
+            if preset.name == "ce-executor" {
+                let non_carve_out_failures: Vec<_> = report
+                    .findings
+                    .iter()
+                    .filter(|f| matches!(f.severity, FindingSeverity::Error))
+                    .filter(|f| f.id.as_str() != U6_CE_EXECUTOR_REMOVAL_EXEMPT_FINDING)
+                    .map(|f| format!("{}: {}", f.id, f.message))
+                    .collect();
+                if non_carve_out_failures.is_empty() {
+                    continue;
+                }
+                panic!(
+                    "Development preset '{}' failed strict contract (excluding U6 ce-executor carve-out): {:?}",
+                    preset.name, non_carve_out_failures
+                );
+            }
             assert!(
                 report.passed,
                 "Development preset '{}' failed strict contract: {:?}",
@@ -4238,6 +4272,27 @@ mod tests {
         // section "U5: built-in preset migration" (autoresearch, debug explicitly
         // deferred due to multi-branch completion topologies).
         let topology_exempt: &[&str] = &["autoresearch", "debug"];
+
+        // U6 of 2026-06-11-003: `ce-executor` is on the removal block
+        // for U7 (R13–R15: drop the actual YAML, manifest entry, public
+        // index, registry entry, and shell completion; `ce-executor-isolated`
+        // becomes the only current entry point per R12). It is still
+        // present in the embedded manifest during the U6→U7 transition
+        // window so existing user runs and tests do not break mid-plan.
+        // Skip ONLY the multi-hat-isolation finding for `ce-executor`
+        // here — every other strict-lint rule must still fire on it
+        // (schema gaps, terminal coverage, etc.). The actual removal
+        // (and the corresponding PRESETS/manifest entries) is owned by
+        // U7, not U6.
+        //
+        // Plan reference: `docs/plans/2026-06-11-003-feat-multi-hat-isolated-policy-plan.md`
+        // section "U6. Migrate All Builtin Presets At Or Above The Threshold"
+        // (Files list explicitly permits `crates/ralph-cli/src/presets.rs`
+        // for strict-lint-test adjustments) and "U7. Remove Old `ce-executor`
+        // Builtin And Migrate References" (R13).
+        let u6_ce_executor_upcoming_removal: &[&str] = &["ce-executor"];
+        const U6_CE_EXECUTOR_REMOVAL_EXEMPT_FINDING: &str =
+            "lint.preset.multi_hat_requires_isolated";
 
         // Per-preset finding-id exemptions (P2 #16 + #22).
         //
@@ -4291,6 +4346,19 @@ mod tests {
                         )
                 });
                 if all_exempt {
+                    continue;
+                }
+            }
+            // U6 ce-executor upcoming-removal carve-out: see comment at the
+            // top of the test for the plan reference. Skip ONLY the
+            // multi-hat-isolation finding for `ce-executor` so the rest
+            // of the strict-lint rule set still applies. Any other finding
+            // (schema gaps, terminal coverage, etc.) must still fire here.
+            if u6_ce_executor_upcoming_removal.contains(&preset.name) {
+                let only_multi_hat = report.findings.iter().all(|f| {
+                    f.id.as_str() == U6_CE_EXECUTOR_REMOVAL_EXEMPT_FINDING
+                });
+                if only_multi_hat {
                     continue;
                 }
             }

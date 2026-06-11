@@ -28,6 +28,7 @@ tasks:
   enabled: false
 
 event_loop:
+  execution_mode: isolated  # U6: 4 hats > 3-hat coordinator limit; per R1/R11 this preset MUST be isolated.
   prompt_file: "PROMPT.md"
   completion_promise: "LOOP_COMPLETE"
   required_events: ["review.passed"]
