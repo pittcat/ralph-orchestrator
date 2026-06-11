@@ -9865,49 +9865,12 @@ fn u6_all_builtin_presets_pass_lint_gate() {
     use crate::presets::list_presets;
     use ralph_core::RalphConfig;
 
-    // U6 of 2026-06-11-003: `ce-executor` is on the U7 removal block
-    // (R13–R15) and `ce-executor-isolated` is its replacement (R12).
-    // The legacy preset's `event_loop.execution_mode` is still the
-    // pre-U6 default (coordinator), so the multi-hat-isolation rule
-    // must fire here. Carve it out of the strict lint gate for the
-    // U6→U7 transition window — every other strict-lint rule
-    // (schema, terminal coverage, etc.) must still apply. The actual
-    // removal is owned by U7.
-    //
-    // Plan reference: `docs/plans/2026-06-11-003-feat-multi-hat-isolated-policy-plan.md`
-    // sections "U6" and "U7".
-    const U6_CE_EXECUTOR_REMOVAL_EXEMPT_FINDING: &str =
-        "lint.preset.multi_hat_requires_isolated";
-    const U6_CE_EXECUTOR_UPCOMING_REMOVAL: &str = "ce-executor";
-
     let mut failures = Vec::new();
     for preset in list_presets().iter() {
         let config =
             RalphConfig::parse_yaml(preset.content).expect("embedded preset YAML should parse");
         let result = enforce_preset_lint_gate(&config);
         let Err(err) = result else { continue };
-        // U6 carve-out: if the only error on `ce-executor` is the
-        // multi-hat-isolation finding, treat the lint gate as passed
-        // for the transition window.
-        if preset.name == U6_CE_EXECUTOR_UPCOMING_REMOVAL {
-            let non_carve_out_errors: Vec<_> = err
-                .findings
-                .iter()
-                .filter(|f| f.severity == ralph_core::runtime_contract::FindingSeverity::Error)
-                .filter(|f| f.id.as_str() != U6_CE_EXECUTOR_REMOVAL_EXEMPT_FINDING)
-                .map(|f| format!("{}: {}", f.id, f.message))
-                .collect();
-            if non_carve_out_errors.is_empty() {
-                continue;
-            }
-            failures.push(format!(
-                "'{}': {} error(s) (excluding U6 ce-executor carve-out) — {:?}",
-                preset.name,
-                non_carve_out_errors.len(),
-                non_carve_out_errors
-            ));
-            continue;
-        }
         failures.push(format!(
             "'{}': {} error(s) — {:?}",
             preset.name,

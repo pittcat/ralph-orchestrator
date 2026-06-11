@@ -4,6 +4,14 @@
 #
 # Usage:
 #   ralph preset new ce-executor-lite --name my-executor --output .ralph/hats/my-executor.yml
+#
+# U7 (2026-06-11-003): the `source` field in the catalog metadata for this
+# template historically pointed at the legacy `builtin:ce-executor` preset.
+# After U7 removal, the only complete CE executor entry point is
+# `builtin:ce-executor-isolated`, so this lite template is a lightweight
+# derivation of the isolated preset's coordinator + executor pair (not the
+# legacy multi-hat pipeline). The catalog `source` was updated in
+# `crates/ralph-cli/src/preset_templates.rs::get_manifest`.
 
 x_preset:
   schema_version: 1

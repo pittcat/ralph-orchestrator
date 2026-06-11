@@ -28,7 +28,6 @@
 
 embedded:
   - autoresearch
-  - ce-executor
   - ce-executor-isolated
   - ce-executor-wave
   - code-assist

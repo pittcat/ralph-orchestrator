@@ -57,7 +57,6 @@ unset _ralph_fn
 # `ralph preset list` does not show, breaking the discoverability
 # invariant.
 _RALPH_BUILTIN_HAT_VALUES=(
-  "builtin:ce-executor"
   "builtin:ce-executor-isolated"
   "builtin:ce-executor-wave"
   "builtin:code-assist"
@@ -69,7 +68,6 @@ _RALPH_BUILTIN_HAT_VALUES=(
 )
 
 _RALPH_BUILTIN_HAT_DESCRIPTIONS=(
-  "Plan-driven work execution with wave code review, auto-fix, shipping, and manager report"
   "Isolated-mode plan-driven work execution with wave code review, auto-fix, shipping, and manager report"
   "Wave-based parallel plan-driven execution with adversarial review, auto-fix, and shipping"
   "Default implementation workflow with TDD and adversarial validation"

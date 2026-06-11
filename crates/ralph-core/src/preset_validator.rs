@@ -780,7 +780,7 @@ event_loop:
         );
     }
 
-    // -- ce-executor topology tests ----------------------------------------
+    // -- ce-executor-isolated topology tests ----------------------------------------
 
     #[test]
     fn ce_executor_topology_is_valid() {
@@ -1189,7 +1189,7 @@ event_loop:
         );
     }
 
-    // -- ce-executor multi-step advancement regression tests ---------------
+    // -- ce-executor-isolated multi-step advancement regression tests ---------------
 
     #[test]
     fn ce_executor_queue_advance_is_reachable_from_start() {

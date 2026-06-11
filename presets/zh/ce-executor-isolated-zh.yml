@@ -1,4 +1,4 @@
-# ce-executor: 基于 Plan 驱动的开发执行工作流，含 Wave Code Review、自动修复、Debug Resolver 和 Manager 报告
+# ce-executor-isolated: 基于 Plan 驱动的开发执行工作流，含 Wave Code Review、自动修复、Debug Resolver 和 Manager 报告
 # Pattern: Plan → 执行 → Wave Review → 自动修复 → Debug Resolver → 修复计划 → 审查 → 交付 → 报告
 #
 # 10 个 Hat：
@@ -14,7 +14,7 @@
 # - Reporter（报告器）：生成面向 Manager 的完成报告
 #
 # 使用方式：
-#   ralph run -H builtin:ce-executor -p "docs/plans/my-plan.md"
+#   ralph run -H builtin:ce-executor-isolated -p "docs/plans/my-plan.md"
 #
 # Wave Review 架构：
 #   work.done → review-coordinator → review.wave.ready (wave emit N dimensions)
@@ -53,7 +53,7 @@ event_loop:
     fail_value: "fail"
     # 2026-06-09 修复：同时拦截 `report.done` 镜像的 pass_or_fail 字段。
     # 当 rogue LOOP_COMPLETE 跟在 pass_or_fail="fail" 的 report.done
-    # 之后时，verdict_gate 必须仍然触发。详见 presets/en/ce-executor.yml
+    # 之后时，verdict_gate 必须仍然触发。详见 presets/en/ce-executor-isolated.yml
     # 的同名字段 — 这是与 reporter `conditional_forbid_topics`
     # obligation 配合的双层防护。
     additional_topics: ["report.done"]
@@ -78,8 +78,8 @@ event_loop:
           mode: "optional"  # "optional" | "required_payload_field"
           payload_field: "tests"  # field name to check when mode is "required_payload_field"
   # U7: 中文 preset 与英文 preset 共用同一份 schema 契约。
-  # schemas 已内联到 `event_policy.schemas`,与 `presets/en/ce-executor.yml` 保持一致。
-  # 之前的 `schema_file: "../schemas/ce-executor.yml"` 对 builtin preset 不可解析
+  # schemas 已内联到 `event_policy.schemas`,与 `presets/en/ce-executor-isolated.yml` 保持一致。
+  # 之前的 `schema_file: "../schemas/ce-executor-isolated.yml"` 对 builtin preset 不可解析
   # (无磁盘路径),已改用内联形式。
   event_policy:
     enabled: true

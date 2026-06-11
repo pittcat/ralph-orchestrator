@@ -19,8 +19,8 @@ Templates generate **ordinary YAML** with `x_preset` metadata. They do not becom
 | Collection | Source | Best for |
 |---|---|---|
 | `autoresearch` | `presets/autoresearch.yml` | Autonomous experiment loop for any measurable improvement |
-| `ce-executor` | `presets/ce-executor.yml` | Plan-driven work execution with wave code review, auto-fix, and manager report |
-| `ce-executor-wave` | `presets/en/ce-executor-wave.yml` | Wave-based parallel variant of `ce-executor`; experimental, high-throughput for plans with multiple non-overlapping U-IDs per step |
+| `ce-executor-isolated` | `presets/en/ce-executor-isolated.yml` | Plan-driven work execution with wave code review, auto-fix, and manager report (isolated multi-hat execution) |
+| `ce-executor-wave` | `presets/en/ce-executor-wave.yml` | Wave-based parallel variant of `ce-executor-isolated`; experimental, high-throughput for plans with multiple non-overlapping U-IDs per step |
 | `code-assist` | `presets/code-assist.yml` | Default implementation workflow |
 | `debug` | `presets/debug.yml` | Investigation and fix verification |
 | `research` | `presets/research.yml` | Read-only exploration and synthesis |
@@ -73,13 +73,13 @@ Editing or creating a preset? Run the contract check before pushing:
 
 ```bash
 # Strict authoring check (recommended for CI and PR gates)
-ralph preset check -H builtin:ce-executor --strict
+ralph preset check -H builtin:ce-executor-isolated --strict
 
 # Non-strict smoke (faster, ignores warnings)
-ralph preset check -H builtin:ce-executor
+ralph preset check -H builtin:ce-executor-isolated
 
 # JSON output for diagnostics / CI
-ralph preset check -H builtin:ce-executor --strict --format json
+ralph preset check -H builtin:ce-executor-isolated --strict --format json
 ```
 
 `ralph preset check` covers four authoring concerns in one pass:
