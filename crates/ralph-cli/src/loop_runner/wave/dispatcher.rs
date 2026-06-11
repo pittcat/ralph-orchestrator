@@ -740,8 +740,8 @@ async fn handle_wave_rejection(
         .severity(DiagnosisSeverity::Error)
         .reason_code(reason_code)
         .message(format!(
-            "Wave {} rejected before dispatch: {} (topic={}, actual={})",
-            rejected.wave_id, reason_code, rejected.topic, rejected.actual
+            "Wave {} rejected before dispatch: {} (topic={}, actual={}, loop_id={})",
+            rejected.wave_id, reason_code, rejected.topic, rejected.actual, loop_id
         ))
         .expected_action("Reduce wave fan-out or fix payload emission; see plan.blocked payload.")
         .topic(rejected.topic.clone())
