@@ -1103,6 +1103,43 @@ hats:
           `pass_or_fail: "fail"`, surfacing the failure to the manager
           via the reporter instead of masking it as a passing loop.
 
+      ### U6: Completeness Check (must run BEFORE Decision Logic)
+      Before applying any Decision Logic branch, validate that this wave
+      actually received ALL the dimensions it was supposed to:
+        - The trigger that activated this synthesizer carries
+          `wave_id` and `wave_total` (set when review-coordinator emitted
+          `review.wave.ready`). Use THAT pair, NOT the count of any
+          `review.dimension.done` events in the same file. Counting the
+          whole file would be wrong if a previous review left stale
+          events behind.
+        - `received = count of review.dimension.done events whose
+          wave_id == <this wave's wave_id>`.
+        - `expected = <this wave's wave_total>` (or, when
+          `aggregate.timeout` already fired, the configured target
+          count for this trivial-step pass).
+        - If `received < expected`:
+          - DO NOT publish `review.passed` / `review.complete` /
+            `review.failed` — they would lie about completeness.
+          - DO publish `plan.blocked`:
+            - `reason: "dimension_reviewers_failed_to_converge"`
+            - `details: {"expected": <int>, "received": <int>,
+              "missing_dimensions": [<dim names from the wave's
+              payload list whose review.dimension.done never arrived>]}`
+          - STOP. Do not run Decision Logic.
+        - If `received == expected`: proceed to Decision Logic below.
+        - This is a hard gate, not a hint. It exists to prevent the
+          failure mode where the synthesizer fabricates a 7/7 verdict
+          on top of an actually-4/7 wave (the same defect that allowed
+          the prior 335-worker bug to slip through unchallenged).
+        - LIMITATION: this gate is enforced in agent instructions,
+          not in the Rust event policy. The runtime does not (yet)
+          inject expected/received/wave_id into the synthesizer prompt
+          automatically. Until that runtime metadata is added, the
+          synthesizer MUST reconstruct these numbers from the trigger
+          event payload and the events file before publishing. Do NOT
+          claim "the runtime guarantees it" — only prompt guarantees
+          it, and prompt guarantees can drift.
+
       ### Decision Logic
       - No findings → publish `review.passed`, payload: `plan_name`, `findings_count: 0`, `changed_lines`, `task_id`, `task_key`, `step`
       - Has findings:
