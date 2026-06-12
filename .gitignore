@@ -136,3 +136,4 @@ AGENTS.md.lock
 CLAUDE.md.lock
 .mcp.json
 LEAN-CTX.md
+.cursor/
