@@ -512,6 +512,10 @@ mod tests {
             invariant_violation_count: 0,
             last_invariant_violation: None,
             review_step_tracker: crate::event_loop::review_step_state::ReviewStepTracker::default(),
+            // WRC-U4: the test helper builds a default tracker; the
+            // dispatch-deadline test (in event_loop/tests/handoff_dispatch.rs)
+            // exercises a real deadline path.
+            handoff_tracker: crate::workflow_contract::HandoffTracker::new(),
             stall_recovery_counts: std::collections::HashMap::new(),
         }
     }

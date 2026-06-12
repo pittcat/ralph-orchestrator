@@ -197,6 +197,20 @@ pub struct LoopState {
     /// Per-step review terminal tracker for plan-gate hard enforcement (U1).
     pub review_step_tracker: super::review_step_state::ReviewStepTracker,
 
+    /// WRC-U4 (2026-06-12-003): per-loop handoff deadline tracker.
+    /// Records accepted handoff events for unique-consumer topics
+    /// and surfaces escalations when a consumer hat fails to
+    /// activate within `handoff_dispatch_timeout_seconds`. The
+    /// tracker is wired into the main loop's three hook points
+    /// (policy-accept, hat-activation, iteration tick) and is
+    /// no-op for coordinator mode (the consumer-of-`*-only` path
+    /// never runs in coordinator mode because the priority pass
+    /// is disabled there). `Default::default()` builds a tracker
+    /// with the documented 30s timeout (replaced from
+    /// `WorkflowContractConfig` at construction time in
+    /// `EventLoop::with_diagnostics`).
+    pub handoff_tracker: crate::workflow_contract::HandoffTracker,
+
     /// Count of consecutive stall_no_events recoveries (U5).
     pub stall_recovery_counts: HashMap<String, u32>,
 }
@@ -243,6 +257,11 @@ impl Default for LoopState {
             invariant_violation_count: 0,
             last_invariant_violation: None,
             review_step_tracker: super::review_step_state::ReviewStepTracker::default(),
+            // WRC-U4: default 30s timeout; the runtime replaces
+            // this from `WorkflowContractConfig` in
+            // `EventLoop::with_diagnostics` so the per-loop config
+            // value (clamped to 120s) takes effect.
+            handoff_tracker: crate::workflow_contract::HandoffTracker::new(),
             stall_recovery_counts: HashMap::new(),
         }
     }

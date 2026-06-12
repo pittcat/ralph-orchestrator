@@ -2298,8 +2298,9 @@ impl EventLoop {
         let payload = format!(
             "RECOVERY (AGGREGATE TIMEOUT): review wave '{}' received {}/{} \
              review.dimension.done events within {}s. Activate review-synthesizer and emit \
-             plan.blocked with reason dimension_reviewers_failed_to_converge.\n\
-             plan_name={} task_id={} step={}",
+             review.passed with skip_reason=aggregate_timeout (or review.failed if verdict \
+             is fail). Do NOT emit plan.complete or queue.advance until synthesizer terminal.\n\
+             plan_name={} task_id={} step={} wave_id={}",
             action.wave_id,
             action.received,
             action.expected,
@@ -2307,6 +2308,7 @@ impl EventLoop {
             action.plan_name,
             action.task_id,
             action.step,
+            action.wave_id,
         );
         let target = HatId::new("review-synthesizer");
         debug!(
@@ -3982,6 +3984,57 @@ impl EventLoop {
         self.state.iteration += 1;
         self.state.last_hat = Some(hat_id.clone());
 
+        // WRC-U4 (2026-06-12-003 / KTD-13 / hook 3): drain
+        // handoff deadlines that exceeded their dispatch window
+        // since the last iteration. Each escalation is converted
+        // into a `task.resume` event routed to the safe target
+        // (plan-gate or review-coordinator — see
+        // `HandoffTracker::expired`). The recovery envelope is
+        // written by the existing `RecoveryResponder` via the
+        // `event.isolation.boundary_violation` path, which already
+        // handles envelope writing and dedup. We do **not** log a
+        // recovery envelope here directly to keep the tracker
+        // side-effect-free: the runner's `process_events_from_jsonl`
+        // sees the synthesized `task.resume` event on the next
+        // pass and routes it through the normal recovery flow.
+        //
+        // Coordinator mode is a no-op because the HandoffIndex
+        // returns `None` for every consumer lookup there; the
+        // tracker's `pending` map stays empty.
+        let escalations = self
+            .state
+            .handoff_tracker
+            .expired(std::time::Instant::now());
+        for esc in escalations {
+            warn!(
+                topic = %esc.topic,
+                consumer = %esc.consumer,
+                event_id = %esc.event_id,
+                safe_target = %esc.safe_target,
+                "handoff dispatch timeout: routing task.resume to {}",
+                esc.safe_target,
+            );
+            // Synthesize the resume event into the bus so the
+            // dispatcher can route it on the next iteration. The
+            // event's `hat` is the safe_target so the
+            // `EventOriginGuard` accepts the publish (it is in the
+            // safe_target's `publishes` list per
+            // `HatRegistry::from_runtime_config`). The payload
+            // carries the full escalation metadata for the
+            // downstream hat to act on.
+            let payload = serde_json::json!({
+                "reason": "handoff_dispatch_timeout",
+                "topic": esc.topic,
+                "consumer": esc.consumer,
+                "event_id": esc.event_id,
+                "safe_target": esc.safe_target,
+                "details": esc.reason,
+            });
+            let resume_event = Event::new("task.resume", payload.to_string())
+                .with_source(HatId::from(esc.safe_target.as_str()));
+            self.bus.publish(resume_event);
+        }
+
         // Track the isolated hat for scope enforcement in process_parse_result
         if self.config.event_loop.execution_mode == HatExecutionMode::Isolated {
             self.state.current_isolated_hat = Some(hat_id.clone());
@@ -4866,6 +4919,45 @@ impl EventLoop {
                 &target_hats_by_topic,
             );
             had_policy_rejections = !policy_result.policy_rejections.is_empty();
+
+            // WRC-U4 (2026-06-12-003 / KTD-13 / F2): for every
+            // accepted event whose topic has a unique consumer in
+            // the HandoffIndex, record the handoff with the
+            // configured dispatch deadline. The tracker is a no-op
+            // in coordinator mode (`HandoffIndex::consumer_of`
+            // returns None there) and for non-handoff topics. The
+            // `Instant::now()` is captured at policy-accept time,
+            // not at bus.publish time, so a slow downstream
+            // validation step does not skew the deadline. Policy
+            // rejections (anything that did not land in
+            // `policy_result.events`) are intentionally NOT
+            // recorded — those events are dropped or held, and
+            // tracking them would create a phantom escalation.
+            //
+            // This loop runs **before** `events = policy_result.events`
+            // because that line moves the field out of the
+            // result; we still need to borrow the events vector
+            // here. The cost is one extra field access (the
+            // borrow ends at the end of this block).
+            for accepted in &policy_result.events {
+                if let Some(consumer) = self.handoff_index.consumer_of(&accepted.topic) {
+                    // JsonlEvent has no stable `id` field; use
+                    // `ts + topic` as the unique key for the
+                    // tracker's pending map. Two events on the
+                    // same topic with the same `ts` would
+                    // collide, but the JSONL reader increments
+                    // `ts` per line so the practical collision
+                    // rate is zero in normal use.
+                    let event_id = format!("{}:{}", accepted.ts, accepted.topic);
+                    self.state.handoff_tracker.on_handoff_accepted(
+                        accepted.topic.clone(),
+                        consumer.to_string(),
+                        event_id,
+                        std::time::Instant::now(),
+                    );
+                }
+            }
+
             events = policy_result.events;
 
             // Write hold artifact if policy hold was triggered
@@ -5915,6 +6007,20 @@ impl EventLoop {
                 } else {
                     self.hat_lifecycle_tracker.observe_accepted_event(&key);
                 }
+                // WRC-U4 (2026-06-12-003): clear any pending handoff
+                // deadlines for this consumer hat. The accept-time
+                // deadline for the triggering handoff is irrelevant
+                // once the hat has activated; the `on_hat_activated`
+                // call also clears siblings (e.g. a `fix.plan.ready`
+                // handoff queued behind the same `executor`).
+                // `on_hat_activated` returns the number of cleared
+                // entries which is informational here; we do not
+                // surface it because the only consumer (the
+                // diagnostic reporter) reads the pending count via
+                // `pending_count()` at stall-check time.
+                self.state
+                    .handoff_tracker
+                    .on_hat_activated(source_hat_id.as_str());
             }
 
             self.diagnostics.log_orchestration(

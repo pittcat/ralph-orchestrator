@@ -381,18 +381,16 @@ hats:
 
       ### Read State (on every activation)
       1. Determine activation source and read payload fields:
-         - `work.ready` or `work.retry`: read `task_id`, `task_key`, `plan_path`, `plan_name`, `complexity`
-         - `queue.advance`: read `plan_name`, `next_step`, `reviewed_task_id`, `reviewed_task_key`. The `reviewed_task_id`/`reviewed_task_key` are the *reviewed* step's tasks (for correlation only). Use `next_step` to identify the step you must now work on.
+         - `work.ready`: read `task_id`, `task_key`, `plan_path`, `plan_name`, `step`, `complexity`. When `reviewed_task_id` / `reviewed_task_key` / `next_step` are present (plan-gate step advance), those are the *reviewed* step's tasks for correlation only — use `task_id` / `step` for the work you must execute now.
          - `fix.plan.ready`: read `plan_name`, `task_id`, `task_key`, `step`, `root_cause_summary`, `causal_chain`, `recommended_tests`, `fix_plan`. This is a debug-resolver handoff, NOT a normal plan step.
       2. Read runtime task:
-         - For `work.ready` / `work.retry`: `ralph tools task show <task_id> --format json`
-         - For `queue.advance`: use `ralph tools task ensure` to create tasks for `next_step`, then read the first uncompleted task of that step
+         - For `work.ready`: `ralph tools task show <task_id> --format json`
          - For `fix.plan.ready`: use `ralph tools task show <task_id> --format json` to load the task for correlation; the actual work is defined by the payload's `fix_plan`
       3. Read `context.md` and `plan.md` and `progress.md`
       4. Search memories for relevant patterns
 
       ### Preflight Contract (HARD RULE)
-      If the `work.ready` or `queue.advance` payload contains `preflight_checks`:
+      If the `work.ready` payload contains `preflight_checks`:
       1. Execute each check and record results in `context.md` or `decisions.md`
       2. If any check fails and cannot be resolved this iteration:
          - Publish `work.failed` with `reason: "preflight check failed: <detail>"`
@@ -430,7 +428,7 @@ hats:
         2. Update `progress.md` (path: `.agents/scratchpad/ce-executor/{plan_name}/progress.md`): set `Current Step`, `Runtime Task ID`, `Status: in_progress`, update time. Concrete shape (replace `<...>` placeholders, do NOT wrap in nested fenced block — this section is itself a fenced block):
 
            ## Current Step
-           - <step number + title from `queue.advance` payload, e.g. `step-04 (U4 progress/task 轻量对账)`>
+           - <step number + title from `work.ready` payload `step` field, e.g. `step-04 (U4 progress/task 轻量对账)`>
 
            ## Active Task
            - Runtime Task ID: <task_id from step 1, e.g. `task-1781221021-bdf3`>
@@ -491,15 +489,13 @@ hats:
       - Publish `work.done` with `plan_name`, `plan_path`, `task_id`, `task_key`, `step`, `commit_count`, `changed_lines`
       - Do NOT publish `queue.advance` from the executor. Queue advancement is owned by `plan-gate`.
 
-      ### queue.advance Activation
-      When triggered by `queue.advance` (from `plan-gate`):
-      - Read `next_step` from the payload to identify the step you must now work on.
-      - Create that step's runtime tasks using `ralph tools task ensure`.
-      - Select the first uncompleted task of the current step and `ralph tools task start <task_id>`.
+      ### work.ready Activation (step advance from plan-gate)
+      When triggered by `work.ready` from `plan-gate` (payload includes `next_step` or `reviewed_task_id`):
+      - Use `task_id` / `step` from the payload — plan-gate already ensured runtime tasks for the next step.
+      - `ralph tools task start <task_id>` for the handed-off task.
       - Update `progress.md` (path: `.agents/scratchpad/ce-executor/{plan_name}/progress.md`): set `Current Step`, `Runtime Task ID`, `Status: in_progress`, and update time.
       - Begin implementation (follow the Task Execution Loop below).
-      - Publish `work.done` when the task is complete, carrying the NEW task's `task_id` and `task_key` (not the reviewed ones).
-      - Do NOT use `reviewed_task_id`/`reviewed_task_key` to read runtime tasks or publish `work.done` — they are for correlation only.
+      - Publish `work.done` when the task is complete, carrying this task's `task_id` and `task_key` (not `reviewed_task_id`/`reviewed_task_key`).
 
       ### FIX PLAN EXECUTION MODE (fix.plan.ready only)
       When triggered by `fix.plan.ready` (from `debug-resolver`):
@@ -1459,17 +1455,43 @@ hats:
       - If event payload, runtime task, and `progress.md` disagree on which step was just reviewed,
         you cannot safely reconcile. Publish `plan.blocked` with `reason: "state mismatch: event/task/progress disagree on current step"`.
 
+      ### Base-Layer Enforcement (2026-06-12)
+      The orchestrator **rejects** `queue.advance`, `work.ready`, and `plan.complete` until
+      review-synthesizer has emitted a pass terminal (`review.passed` or `review.complete`) for
+      the reviewed step. Do not attempt to bypass this by publishing early — the event will not
+      reach the bus.
+
+      ### Dual-Publish Handoff (HARD RULE — WAC-U4 / KTD-12)
+      When advancing to the next plan step, you **MUST publish both** events in the same iteration:
+      1. `queue.advance` — progress/audit signal (observers, timeline, `progress.md` self-loop)
+      2. `work.ready` — executor handoff with the **next step's** runtime task payload
+
+      **Never** publish `queue.advance` without `work.ready`. The executor no longer triggers on
+      `queue.advance`; omitting `work.ready` stalls the plan with no executor activation.
+
+      Before publishing `work.ready` for step advance:
+      - Run `ralph tools task ensure` for `next_step` so runtime tasks exist
+      - Select the first uncompleted task of `next_step` for the `work.ready` payload
+
       ### Decision Logic
       1. If `verdict` is `fail` → publish `plan.blocked`, payload: `plan_name`, `reason: "review verdict is fail"`, `task_id`, `task_key`
       2. Reconcile current step against `plan.md` and `progress.md`:
          - If state mismatch (event/task/progress disagree) → publish `plan.blocked`, payload: `plan_name`, `reason: "state mismatch"`, `task_id`, `task_key`
       3. If later steps remain in `plan.md` that are not in `Completed Steps`:
+         - **Dual publish (same iteration, both required):**
          - Publish `queue.advance`, payload:
            - `plan_name`
            - `completed_step`: the step just finished
            - `next_step`: the next uncompleted step number/name
            - `reviewed_task_id`: `task_id` from payload (the reviewed step's task, for correlation)
            - `reviewed_task_key`: `task_key` from payload (the reviewed step's task, for correlation)
+         - Publish `work.ready`, payload (next step's task — executor activation):
+           - `plan_name`, `plan_path` (from context or plan frontmatter)
+           - `task_id`, `task_key`: first uncompleted runtime task for `next_step` (from `task ensure`)
+           - `step`: `next_step` value
+           - `complexity`: from plan.md for that step (or `small` if unspecified)
+           - `reviewed_task_id`, `reviewed_task_key`, `completed_step`, `next_step`: mirror `queue.advance` for correlation
+           - `preflight_checks`: from plan.md step definition when present
       4. If all steps in `plan.md` are in `Completed Steps` (or this was the only step):
          - Publish `plan.complete`, payload:
            - `plan_name`
@@ -1484,7 +1506,9 @@ hats:
       - MUST reconcile and update `progress.md` before deciding.
       - MUST publish `plan.blocked` on any state inconsistency rather than guessing.
       - MUST include `task_id` and `task_key` in `plan.complete` and `plan.blocked` payloads.
-      - MUST include `reviewed_task_id` and `reviewed_task_key` in `queue.advance` payload for executor correlation.
+      - MUST include `reviewed_task_id` and `reviewed_task_key` in `queue.advance` payload for correlation.
+      - MUST dual-publish `work.ready` with the next step's `task_id`/`task_key` whenever publishing `queue.advance` for step advance.
+      - MUST NOT publish `work.ready` for step advance without the corresponding `queue.advance` audit event.
 
   shipper:
     name: "📦 Shipper"

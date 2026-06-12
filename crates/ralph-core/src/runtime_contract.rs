@@ -365,7 +365,10 @@ use crate::hat_registry::HatRegistry;
 use crate::payload_contract::{
     PayloadContractError, PayloadContractErrorKind, PayloadContractValidationResult,
 };
-use crate::preset_lint::{LintStrictness, run_preset_lint};
+use crate::preset_lint::{
+    LintStrictness, run_preset_lint,
+    workflow_activation::source_label_is_builtin_embedded,
+};
 use crate::preset_validator::{
     TopologyError, TopologyErrorKind, TopologyValidationResult, validate_preset_topology,
 };
@@ -906,12 +909,20 @@ pub fn detect_obligation_topics_not_in_publishes(
 ///    and does not run lint, topology, payload, or orphan checks. This
 ///    prevents misleading secondary findings when the config is
 ///    structurally broken (e.g. empty `completion_promise`).
-/// 2. `run_preset_lint()` — topic format, ownership, and coordinator
-///    checks produce `source=lint` findings. Lint findings are semantic
-///    (not structural) and do **not** short-circuit subsequent checks,
-///    so callers see all authoring issues in one report. When
-///    `fail_on_warnings` is true, ownership checks use `Strict`
-///    severity (warnings become errors).
+/// 2. `run_preset_lint()` — topic format, ownership, coordinator,
+///    and WAC (R2/R3/R4/R5) checks produce `source=lint` findings.
+///    Lint findings are semantic (not structural) and do **not**
+///    short-circuit subsequent checks, so callers see all authoring
+///    issues in one report. WAC is always-on (KTD-2): the
+///    aggregator calls `run_preset_lint(Strict)` unconditionally
+///    (as of WRC-U1 / 2026-06-12-003) so the WAC and ownership
+///    families always surface at their strict-mode severities.
+///    The `fail_on_warnings` axis on the report decides whether
+///    a WAC `Warn` blocks the report; a `Warn` finding produced
+///    by `run_preset_lint(Strict)` is a `lint.preset.*` finding
+///    whose severity is decided by the WAC severity rule (always
+///    `Warn` for non-builtin sources, upgraded to `Error` for
+///    builtin-embedded sources).
 /// 3. `validate_preset_topology()` — every topology error becomes a
 ///    `source=topology` error finding with a stable `topology.*` id.
 /// 4. `validate_payload_contract()` — every error becomes a
@@ -976,21 +987,46 @@ impl RuntimeContractAggregator {
             }
         }
 
-        // Step 2 (U3): preset static lint — topic format, ownership,
-        // coordinator checks. Lint findings are semantic (not structural)
-        // and do not short-circuit subsequent topology/payload/orphan
-        // checks, so callers see all authoring issues in one report.
+        // Step 2 (U3, refined by WRC-U1 / 2026-06-12-003): preset
+        // static lint — topic format, ownership, coordinator checks,
+        // AND Workflow Activation Contract (WAC) findings (R2/R3/R4/R5).
         //
-        // Only runs in strict mode (`fail_on_warnings=true`) to preserve
-        // backward compatibility: non-strict `preset check` historically
-        // did NOT run lint, and adding it would be a behavioral regression.
-        // The `ralph run` hard gate always uses strict mode, so lint is
-        // always enforced at startup.
-        if strictness.fail_on_warnings {
-            for finding in run_preset_lint(config, LintStrictness::Strict) {
-                report.add_finding(finding);
-            }
+        // WAC is **always-on** (KTD-2): the aggregator no longer
+        // gates it behind `fail_on_warnings`. The default
+        // `ralph preset check` (without `--strict`) now produces WAC
+        // warn findings, which the operator can read but which do
+        // not block the run. `--strict` and the run-time hard gate
+        // (`enforce_preset_lint_gate`) continue to escalate WAC
+        // warnings to errors via `fail_on_warnings`.
+        //
+        // The non-WAC ownership lint family is **also** always-on
+        // here — moving ownership out of the `fail_on_warnings`
+        // gate is the WRC-U1 behaviour change. The previous
+        // behaviour (lint only in strict mode) was a 2026-06-08
+        // shortcut: with WAC also always-on, the asymmetry no
+        // longer serves a purpose. The aggregator now always calls
+        // `run_preset_lint(Strict)` so every lint finding surfaces
+        // its strict-mode severity (Error for `lint.preset.*` under
+        // builtin source via the WAC severity upgrade; Warn→Error
+        // for ownership in strict mode).
+        //
+        // Findings are semantic (not structural) and do not
+        // short-circuit subsequent topology/payload/orphan checks,
+        // so callers see all authoring issues in one report.
+        let builtin_source = source_label_is_builtin_embedded(&report.source_label);
+        for finding in run_preset_lint(config, LintStrictness::Strict, builtin_source) {
+            report.add_finding(finding);
         }
+
+        // Step 2b (WRC-U3 / 2026-06-12-003 / KTD-7): the upgrade is
+        // already applied inside Step 2 (we pass
+        // `builtin_source` through `run_preset_lint`). The
+        // `source_label_is_builtin_embedded` helper is exposed
+        // for callers (notably `enforce_preset_lint_gate`) that
+        // need to make the same decision before the aggregator is
+        // in scope. We do not re-invoke WAC here — Step 2 already
+        // produced the upgraded findings, and re-invocation would
+        // duplicate them.
 
         // Step 3: topology validation. Uses the runtime-aware registry
         // so reachability is checked against the *actual* hat graph

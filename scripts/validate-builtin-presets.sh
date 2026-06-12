@@ -104,6 +104,18 @@ TOPOLOGY_EXEMPT_PRESETS=(
     "debug"
 )
 
+# WRC-U5 (2026-06-12-003) / KTD-WRC-5: Tier-0 list of builtin
+# presets for which WAC (Workflow Activation Contract) findings
+# MUST be zero in strict mode. Mirrors
+# `crates/ralph-cli/src/presets.rs::TIER_0_WAC_PRESETS` — the
+# script intentionally duplicates the list (no in-process ralph
+# binary is available to query from within this script) so the
+# two stay in lockstep by convention. When you promote a preset
+# in either place, update both.
+TIER_0_WAC_PRESETS=(
+    "ce-executor-isolated"
+)
+
 # Returns 0 (true) if every error-severity finding in $1 (a JSON report) has
 # source == "topology", or if there are no error-severity findings at all.
 # Returns 1 (false) otherwise. The exemption is only meaningful for this
@@ -136,8 +148,36 @@ no_warnings() {
     [[ "$result" == "true" ]]
 }
 
+# WRC-U5: returns 0 (true) when $1 (a JSON report) contains
+# zero WAC findings of error severity. The check is
+# `lint.preset.*` and source=lint. A non-zero count means
+# the preset has at least one WAC defect that the strict
+# gate should fail on.
+no_wac_errors() {
+    local report_json="$1"
+    local result
+    result=$(echo "$report_json" | jq -r '
+        [ (.findings // [])[]
+          | select(.severity == "error")
+          | select(.source == "lint")
+          | select(.id | startswith("lint.preset."))
+        ] | length == 0
+    ') || return 1
+    [[ "$result" == "true" ]]
+}
+
 # Returns 0 (true) if $1 is a member of $2.. (treats $2 as a list of names).
 is_exempt() {
+    local needle="$1"
+    shift
+    for item in "$@"; do
+        [[ "$item" == "$needle" ]] && return 0
+    done
+    return 1
+}
+
+# WRC-U5: returns 0 (true) if $1 is a member of the Tier-0 WAC list.
+is_tier_0() {
     local needle="$1"
     shift
     for item in "$@"; do
@@ -170,7 +210,32 @@ for preset in "${PRESETS[@]}"; do
 
     # Fast path: report passed.
     if echo "$report_json" | jq -e '.passed' >/dev/null 2>&1; then
-        echo "PASS"
+        # WRC-U5: even on the fast path, a Tier-0 preset must
+        # have zero WAC findings. A preset that passed only
+        # because it was not in --strict mode (e.g. a manual
+        # invoke) still has the WAC info; we re-check here so
+        # the script's behaviour matches the documented Tier-0
+        # contract regardless of the caller's --strict choice.
+        if is_tier_0 "$preset" "${TIER_0_WAC_PRESETS[@]}"; then
+            if no_wac_errors "$report_json"; then
+                echo "PASS"
+            else
+                wac_ids=$(echo "$report_json" | jq -r '
+                    [(.findings // [])[]
+                     | select(.severity == "error")
+                     | select(.source == "lint")
+                     | select(.id | startswith("lint.preset."))
+                     | .id]
+                     | unique
+                     | join(", ")
+                ')
+                echo "FAIL (tier-0 wac: ${wac_ids})"
+                FAILED_PRESETS+=("$preset")
+                FAILED=1
+            fi
+        else
+            echo "PASS"
+        fi
         continue
     fi
 

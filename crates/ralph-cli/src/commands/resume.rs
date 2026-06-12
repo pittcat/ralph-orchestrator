@@ -159,6 +159,7 @@ pub async fn resume_command(
         false,      // force_warmup (resume uses normal flow)
         prebuilt_diagnostics,
         false, // no_sync_agent_docs (resume uses config default)
+        false, // source_is_builtin_embedded (resume re-resolves builtin via its own path)
     )
     .await
     .map_err(|e| {

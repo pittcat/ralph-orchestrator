@@ -46,17 +46,15 @@ pub use finding_id::{
 
 // Re-export the WAC top-level entry point so callers (and the
 // WAC-U8 BDD scenarios) can invoke the rule family without
-// reaching into the module directly. The function is NOT yet
-// wired into `run_preset_lint`: per the
-// `2026-06-12-002-feat-workflow-activation-contract-plan`
-// phasing, WAC joins the public `run_preset_lint` pipeline in
-// WAC-U8 once the builtin presets have been migrated to pass
-// the WAC rules (WAC-U4). Until then the function is reachable
-// for direct callers (CLI diagnostic, BDD scenarios) but does
-// not affect the run gate.
-pub use workflow_activation::{
-    HandoffGraph, run_workflow_activation_contract,
-};
+// reaching into the module directly. As of WRC-U1 (2026-06-12-003),
+// the function is wired into `run_preset_lint`: WAC findings are
+// always produced (severity graded by `LintStrictness`), and the
+// full report surfaces through `ralph preset check` and the
+// `enforce_preset_lint_gate` startup hard gate. See plan
+// `2026-06-12-003-feat-wac-rollout-completion-plan.md` (WRC-U1) and
+// `2026-06-12-002-feat-workflow-activation-contract-plan.md`
+// (KTD-2: WAC always-on, severity by strictness).
+pub use workflow_activation::{HandoffGraph, run_workflow_activation_contract};
 pub use multi_hat::check_multi_hat_isolation;
 pub use ownership::{check_owner_references, check_ownership_rules};
 pub use topic_format::{
@@ -259,9 +257,25 @@ pub fn lint_findings_to_contract_findings(findings: &[LintFinding]) -> Vec<Runti
 ///
 /// This is the single entry point called by `RuntimeContractAggregator`.
 /// Findings are deterministic and sorted.
+///
+/// WRC-U1 (2026-06-12-003): WAC findings are appended at the end of the
+/// pipeline. WAC runs **always-on** (KTD-2) — independent of
+/// `strictness` — so callers that use the default path (`ralph preset check`
+/// without `--strict`) still see WAC findings as warnings; the
+/// aggregator's `fail_on_warnings` flag is what escalates them to
+/// blocking. The `strictness == Strict` arm here promotes WAC findings
+/// to errors directly, so callers that opt into strict mode (e.g.
+/// `enforce_preset_lint_gate`, `--strict` CLI flag) get the
+/// `lint.preset.*` blocking semantics without an extra hop.
+///
+/// WRC-U3 / KTD-7: `source_is_builtin_embedded` escalates every WAC
+/// finding to `Error` regardless of `strict`. The CLI runner passes
+/// `true` when the caller invoked `ralph run -H builtin:<name>`; the
+/// aggregator derives the same flag from the report's `source_label`.
 pub fn run_preset_lint(
     config: &RalphConfig,
     strictness: LintStrictness,
+    source_is_builtin_embedded: bool,
 ) -> Vec<RuntimeContractFinding> {
     let mut findings: Vec<RuntimeContractFinding> = Vec::new();
 
@@ -323,6 +337,21 @@ pub fn run_preset_lint(
     // details `actual` / `limit` / `required_mode` must flow
     // through to the runtime contract aggregator's `details` map.
     findings.extend(check_multi_hat_isolation(config));
+
+    // WRC-U1: WAC (Workflow Activation Contract) rule family —
+    // R2 re-emit trap, R3 activation egress, R4 handoff pairing,
+    // R5 trigger/publish asymmetry. Always-on per KTD-2:
+    // strictness only changes the severity of each finding.
+    // `source_is_builtin_embedded` is forwarded to the WAC
+    // severity rule (KTD-7) so the CLI gate and the aggregator
+    // can both upgrade builtin WAC findings to Error.
+    let wac_strict = matches!(strictness, LintStrictness::Strict);
+    let wac_findings = run_workflow_activation_contract(
+        config,
+        wac_strict,
+        source_is_builtin_embedded,
+    );
+    findings.extend(lint_findings_to_contract_findings(&wac_findings));
 
     // Sort by id, then topic for deterministic output.
     findings.sort_by(|a, b| {

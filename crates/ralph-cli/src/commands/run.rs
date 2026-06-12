@@ -997,6 +997,14 @@ pub async fn run_command(
     } else {
         // In-process mode: run_loop_impl handles everything
         let enable_tui = wants_tui && use_legacy_tui;
+        // WRC-U3: surface builtin detection to the lint gate so
+        // the WAC severity upgrade (KTD-7) fires for `ralph run
+        // -H builtin:foo`. `HatsSource::Builtin(_)` is the
+        // canonical marker from the CLI parser.
+        let source_is_builtin_embedded = matches!(
+            hats_source,
+            Some(crate::cli::shared::HatsSource::Builtin(_))
+        );
         loop_runner::run_loop_impl(
             config,
             color_mode,
@@ -1013,6 +1021,7 @@ pub async fn run_command(
             args.force_warmup,
             prebuilt_diagnostics,
             args.no_sync_agent_docs,
+            source_is_builtin_embedded,
         )
         .await
         .map_err(|e| {
@@ -1808,6 +1817,13 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let mut config = RalphConfig::default();
         config.core.workspace_root = temp_dir.path().to_path_buf();
+        // WRC-U1 (2026-06-12-003): the lint is now always-on.
+        // The default `RalphConfig` enables tasks with no
+        // coordinator_hats, which trips the
+        // `coordinator_missing` rule. Disable tasks so the
+        // contract check focuses on the hooks-skip behaviour
+        // the test was originally written to exercise.
+        config.tasks.enabled = false;
         config.features.preflight.enabled = true;
         config.cli.backend = "custom".to_string();
 
@@ -2011,6 +2027,14 @@ mod tests {
         // Skip env-only checks (git, tools) so we are left with config
         // semantic + topology + hooks checks.
         config.features.preflight.skip = vec!["git".to_string(), "tools".to_string()];
+        // WRC-U1 (2026-06-12-003): the lint is now always-on, so
+        // declare the legacy `LOOP_COMPLETE` completion promise in
+        // the format whitelist and enable tasks with a coordinator
+        // hat. Without these, the contract check fails before the
+        // topology check has a chance to run.
+        config.topic_format_whitelist = vec!["LOOP_COMPLETE".to_string()];
+        config.tasks.enabled = true;
+        config.tasks.coordinator_hats = vec!["executor".to_string()];
         // Configure a valid linear topology so preset-topology passes.
         config.event_loop.starting_event = Some("work.start".to_string());
         config.event_loop.completion_promise = "LOOP_COMPLETE".to_string();

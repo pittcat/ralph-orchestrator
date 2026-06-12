@@ -233,6 +233,7 @@ fn validate_hats<W: Write>(
         let findings = ralph_core::preset_lint::run_preset_lint(
             config,
             ralph_core::preset_lint::LintStrictness::Strict,
+            false,
         );
         for finding in findings {
             report.add_finding(finding);

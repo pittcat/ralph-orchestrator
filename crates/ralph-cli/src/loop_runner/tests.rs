@@ -9560,7 +9560,7 @@ tasks:
   enabled: false
 "#;
     let config: ralph_core::RalphConfig = serde_yaml::from_str(yaml).unwrap();
-    let result = enforce_preset_lint_gate(&config);
+    let result = enforce_preset_lint_gate(&config, false);
     assert!(
         result.is_ok(),
         "clean config must pass lint gate: {:?}",
@@ -9630,7 +9630,7 @@ tasks:
     // legally write today, and we want any such write to fail loudly.
     let _cwd_guard = CwdGuard::set(temp.path());
 
-    let result = enforce_preset_lint_gate(&config);
+    let result = enforce_preset_lint_gate(&config, false);
     assert!(result.is_err(), "unauthorized publish must fail lint gate");
     let err = result.unwrap_err();
     assert!(err.error_count > 0, "must have at least one error finding");
@@ -9698,7 +9698,7 @@ tasks:
   enabled: false
 "#;
     let config: ralph_core::RalphConfig = serde_yaml::from_str(yaml).unwrap();
-    let result = enforce_preset_lint_gate(&config);
+    let result = enforce_preset_lint_gate(&config, false);
     // REVIEW_COMPLETE is not whitelisted → lint finding (warn in default,
     // but the gate runs in strict mode, so it's still a finding).
     // The gate only fails on Error findings, and invalid_topic_format
@@ -9712,6 +9712,7 @@ tasks:
             let findings = ralph_core::preset_lint::run_preset_lint(
                 &config,
                 ralph_core::preset_lint::LintStrictness::Strict,
+                false,
             );
             assert!(
                 findings
@@ -9737,6 +9738,7 @@ tasks:
     let findings = ralph_core::preset_lint::run_preset_lint(
         &config,
         ralph_core::preset_lint::LintStrictness::Strict,
+        false,
     );
     let loop_complete_findings: Vec<_> = findings
         .iter()
@@ -9779,7 +9781,7 @@ tasks:
   coordinator_hats: []
 "#;
     let config: ralph_core::RalphConfig = serde_yaml::from_str(yaml).unwrap();
-    let result = enforce_preset_lint_gate(&config);
+    let result = enforce_preset_lint_gate(&config, false);
     assert!(result.is_err(), "missing coordinator must fail lint gate");
     let err = result.unwrap_err();
     // Should have coordinator_missing finding.
@@ -9833,7 +9835,7 @@ tasks:
     - coordinator
 "#;
     let config: ralph_core::RalphConfig = serde_yaml::from_str(yaml).unwrap();
-    let result = enforce_preset_lint_gate(&config);
+    let result = enforce_preset_lint_gate(&config, false);
     assert!(
         result.is_err(),
         "task publisher not in coordinator_hats must fail"
@@ -9869,7 +9871,7 @@ fn u6_all_builtin_presets_pass_lint_gate() {
     for preset in list_presets().iter() {
         let config =
             RalphConfig::parse_yaml(preset.content).expect("embedded preset YAML should parse");
-        let result = enforce_preset_lint_gate(&config);
+        let result = enforce_preset_lint_gate(&config, false);
         let Err(err) = result else { continue };
         failures.push(format!(
             "'{}': {} error(s) — {:?}",
@@ -9908,14 +9910,34 @@ fn u6_all_builtin_presets_pass_lint_gate() {
 
 /// Helper: build a minimal N-hat config for run-gate tests. Mirrors
 /// the helper in `multi_hat.rs` but kept private to this test module.
+///
+/// WRC-U1 (2026-06-12-003): the WAC R3 (activation egress) rule
+/// is now part of the always-on lint, so the fixture must close
+/// the workflow graph. We chain the hats linearly (hat 0
+/// publishes to hat 1's trigger, hat 1 to hat 2, ..., hat n-1
+/// to the completion promise) so every hat has a downstream
+/// path to a terminal within the WAC BFS bound.
 fn u2_make_n_hat_config(n: usize, mode_yaml: &str) -> ralph_core::RalphConfig {
     let mut hats_yaml = String::new();
     for i in 0..n {
         if i > 0 {
             hats_yaml.push('\n');
         }
+        // Last hat publishes the completion promise directly so
+        // its R3 egress closes. Earlier hats publish to the
+        // *next* hat's trigger so the chain handoff fires.
+        let publishes = if i + 1 == n {
+            "\"work.done\"".to_string()
+        } else {
+            format!("\"handoff.to.h{}\"", i + 1)
+        };
+        let triggers = if i == 0 {
+            "[\"work.start\"]".to_string()
+        } else {
+            format!("[\"handoff.to.h{i}\"]")
+        };
         hats_yaml.push_str(&format!(
-            "  h{i}:\n    name: \"H{i}\"\n    description: \"Hat {i}\"\n    triggers: [\"work.start\"]\n    publishes: [\"work.done{i}\"]\n    instructions: \"Do hat {i}.\""
+            "  h{i}:\n    name: \"H{i}\"\n    description: \"Hat {i}\"\n    triggers: {triggers}\n    publishes: [{publishes}]\n    instructions: \"Do hat {i}.\""
         ));
     }
     let yaml = format!(
@@ -9941,7 +9963,7 @@ fn u2_lint_gate_blocks_4_hat_default_coordinator() {
     use ralph_core::preset_lint::finding_id::FINDING_MULTI_HAT_REQUIRES_ISOLATED;
 
     let config = u2_make_n_hat_config(4, "");
-    let result = enforce_preset_lint_gate(&config);
+    let result = enforce_preset_lint_gate(&config, false);
     let err = result.expect_err("4-hat default coordinator must fail the run gate");
     assert!(err.error_count >= 1, "expected at least 1 error, got {err}");
     let multi_hat_findings: Vec<_> = err
@@ -9986,7 +10008,7 @@ fn u2_lint_gate_blocks_4_hat_default_coordinator() {
 #[test]
 fn u2_lint_gate_passes_3_hat_default_coordinator() {
     let config = u2_make_n_hat_config(3, "");
-    let result = enforce_preset_lint_gate(&config);
+    let result = enforce_preset_lint_gate(&config, false);
     assert!(
         result.is_ok(),
         "3-hat default coordinator must pass the run gate, got: {:?}",
@@ -10095,7 +10117,7 @@ hats:
         "P1-3: merged config must NOT contain base hat 'alpha' (merge replaces)"
     );
 
-    let result = enforce_preset_lint_gate(&config);
+    let result = enforce_preset_lint_gate(&config, false);
     assert!(
         result.is_err(),
         "P1-3: merged 4-hat config must fail the run gate"
@@ -10111,7 +10133,7 @@ fn u2_lint_gate_4_hat_isolated_mode_no_multi_hat_finding() {
     use ralph_core::preset_lint::finding_id::FINDING_MULTI_HAT_REQUIRES_ISOLATED;
 
     let config = u2_make_n_hat_config(4, "execution_mode: isolated");
-    let result = enforce_preset_lint_gate(&config);
+    let result = enforce_preset_lint_gate(&config, false);
     if let Err(err) = &result {
         let multi_hat_findings: Vec<_> = err
             .findings

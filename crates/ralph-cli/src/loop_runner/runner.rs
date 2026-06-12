@@ -225,6 +225,7 @@ pub(crate) fn adapter_timeout_duration(timeout_secs: u64) -> Option<Duration> {
 ///   (equivalent to `--no-auto-merge`). If `None`, uses `config.features.auto_merge`.
 /// * `resume_loop_id` - Explicit loop ID to use when resuming (`--loop-id`).
 ///   If `None` and `resume` is true, reuses the existing `current-loop-id` marker.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_loop_impl(
     mut config: RalphConfig,
     color_mode: ColorMode,
@@ -241,6 +242,7 @@ pub async fn run_loop_impl(
     force_warmup: bool,
     prebuilt_diagnostics: Option<Arc<ralph_core::diagnostics::DiagnosticsCollector>>,
     no_sync_agent_docs: bool,
+    source_is_builtin_embedded: bool,
 ) -> Result<TerminationReason> {
     // U5: Payload contract hard gate. Runs BEFORE any backend is spawned.
     // In strict mode (always on for `ralph run`), any payload contract
@@ -260,14 +262,12 @@ pub async fn run_loop_impl(
     // drops have run; see `commands::run::run_command` and
     // `main.rs`.
     //
-    // Note on `active-activations` (plan U4): this gate fires BEFORE
-    // the EventLoop is constructed (`EventLoop::with_context` below),
-    // so there is no `hat_lifecycle_tracker` yet and no
-    // `## Active Hat Activations` artifact to flush. The U4
-    // post-termination write inside `finalize_recovery_diagnosis`
-    // only applies to the normal termination path; the gate
-    // failure path is correctly a no-op on that artifact.
-    if let Err(lint_error) = enforce_preset_lint_gate(&config) {
+    // WRC-U3: pass `source_is_builtin_embedded` so the WAC
+    // severity upgrade (KTD-7) applies to builtin presets even
+    // outside `--strict` mode.
+    if let Err(lint_error) =
+        enforce_preset_lint_gate(&config, source_is_builtin_embedded)
+    {
         let diagnostics_dir = std::path::Path::new(".").join(".ralph").join("diagnostics");
         let _artifact_path = write_preset_lint_artifact(&diagnostics_dir, &lint_error);
         eprintln!(

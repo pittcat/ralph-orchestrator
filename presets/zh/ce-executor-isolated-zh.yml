@@ -300,18 +300,16 @@ hats:
 
       ### 读取状态（每次激活时）
       1. 根据激活来源读取 payload 字段：
-         - `work.ready` 或 `work.retry`：读取 `task_id`、`task_key`、`plan_path`、`plan_name`、`complexity`
-         - `queue.advance`：读取 `plan_name`、`next_step`、`reviewed_task_id`、`reviewed_task_key`。其中 `reviewed_task_id`/`reviewed_task_key` 是已审查步骤的任务（仅用于对账），使用 `next_step` 确定现在要执行的步骤。
+         - `work.ready`：读取 `task_id`、`task_key`、`plan_path`、`plan_name`、`step`、`complexity`。当 payload 含 `reviewed_task_id` / `reviewed_task_key` / `next_step`（plan-gate 步骤推进）时，这些仅为已审查步骤的对账字段 —— 使用 `task_id` / `step` 执行当前任务。
          - `fix.plan.ready`：读取 `plan_name`、`task_id`、`task_key`、`step`、`root_cause_summary`、`causal_chain`、`recommended_tests`、`fix_plan`。这是 debug-resolver 交接，不是正常 plan 步骤。
       2. 读取 runtime task：
-         - `work.ready` / `work.retry`：`ralph tools task show <task_id> --format json`
-         - `queue.advance`：使用 `ralph tools task ensure` 为 `next_step` 创建任务，然后读取该步骤第一个未完成任务
+         - `work.ready`：`ralph tools task show <task_id> --format json`
          - `fix.plan.ready`：使用 `ralph tools task show <task_id> --format json` 加载 task 用于对账；实际工作由 payload 的 `fix_plan` 定义
       3. 读取 `context.md`、`plan.md`、`progress.md`
       4. 搜索 memories 获取相关模式
 
       ### 前置检查契约（硬性规则）
-      如果 `work.ready` 或 `queue.advance` 的 payload 包含 `preflight_checks`：
+      如果 `work.ready` 的 payload 包含 `preflight_checks`：
       1. 执行每项检查，并将结果记录到 `context.md` 或 `decisions.md`
       2. 如有检查失败且本次迭代无法解决：
          - 发布 `work.failed`，`reason: "preflight check failed: <detail>"`
@@ -396,15 +394,13 @@ hats:
       - 发布 `work.done`，payload 携带 `plan_name`、`plan_path`、`task_id`、`task_key`、`step`、`commit_count`、`changed_lines`
       - 不得从执行器发布 `queue.advance`。队列推进由 `plan-gate` 负责。
 
-      ### queue.advance 激活
-      被 `queue.advance`（来自 `plan-gate`）触发时：
-      - 读取 payload 中的 `next_step` 来确定当前步骤。
-      - 使用该步骤创建 runtime tasks（`ralph tools task ensure`）。
-      - 选择当前步骤的第一个未完成任务并用 `ralph tools task start <task_id>` 启动它。
+      ### work.ready 激活（plan-gate 步骤推进）
+      被 `plan-gate` 发出的 `work.ready` 触发（payload 含 `next_step` 或 `reviewed_task_id`）：
+      - 使用 payload 中的 `task_id` / `step` —— plan-gate 已为下一步骤 ensure runtime tasks。
+      - 对交接任务执行 `ralph tools task start <task_id>`。
       - 更新 `progress.md`（路径：`.agents/scratchpad/ce-executor/{plan_name}/progress.md`）：设置 `Current Step`、`Runtime Task ID`、`Status: in_progress`，以及更新时间。
       - 开始实现（遵循下面的"任务执行循环"）。
-      - 任务完成后发布 `work.done`，携带 NEW task 的 `task_id` 和 `task_key`（不是 reviewed 的）。
-      - 不得使用 `reviewed_task_id`/`reviewed_task_key` 读取 runtime task 或发布 `work.done` —— 它们仅用于对账。
+      - 任务完成后发布 `work.done`，携带本任务的 `task_id` 和 `task_key`（不是 `reviewed_task_id`/`reviewed_task_key`）。
 
       ### 修复计划执行模式（FIX PLAN EXECUTION MODE，仅 fix.plan.ready）
       被 `fix.plan.ready`（来自 debug-resolver）触发时：
@@ -1090,17 +1086,42 @@ hats:
       - 如 `progress.md` 滞后（task 已 closed 但 `Completed Steps` 为空），立即更新。
       - 如事件 payload、runtime task 和 `progress.md` 对当前审查的步骤不一致，无法安全对账。发布 `plan.blocked`，payload：`plan_name`、`reason: "state mismatch: event/task/progress disagree on current step"`、`task_id`、`task_key`。
 
+      ### 基座硬门（2026-06-12）
+      编排器在 review-synthesizer 对本步骤发出 pass 终态（`review.passed` 或
+      `review.complete`）**之前**，会**拒收** `queue.advance`、`work.ready` 和
+      `plan.complete`。不要尝试提前发布 —— 事件不会进入 bus。
+
+      ### 双 publish 交接（硬性规则 — WAC-U4 / KTD-12）
+      推进到下一步时，**必须在同一迭代内发布两个事件**：
+      1. `queue.advance` — 进度/审计信号（observer、timeline、`progress.md` 自环）
+      2. `work.ready` — executor handoff，带**下一步** runtime task 的完整 payload
+
+      **禁止**只发 `queue.advance` 不发 `work.ready`。executor 已不再 trigger
+      `queue.advance`；缺少 `work.ready` 会导致 plan 卡死且无 executor 激活。
+
+      发布步骤推进的 `work.ready` 之前：
+      - 对 `next_step` 运行 `ralph tools task ensure` 确保 runtime tasks 存在
+      - 选取 `next_step` 第一个未完成任务作为 `work.ready` 的 `task_id`/`task_key`
+
       ### 决策逻辑
       1. 如 `verdict` 为 `fail` → 发布 `plan.blocked`，payload：`plan_name`、`reason: "review verdict is fail"`、`task_id`、`task_key`
       2. 对账当前步骤与 `plan.md` 和 `progress.md`：
          - 如状态不一致（event/task/progress 不一致）→ 发布 `plan.blocked`，payload：`plan_name`、`reason: "state mismatch"`、`task_id`、`task_key`
       3. 如 `plan.md` 中仍有未完成的后续步骤：
+         - **双 publish（同一迭代，两者缺一不可）：**
          - 发布 `queue.advance`，payload：
            - `plan_name`
            - `completed_step`：刚完成的步骤
            - `next_step`：下一个未完成的步骤编号/名称
            - `reviewed_task_id`：payload 中的 `task_id`（已审查步骤的任务，用于对账）
            - `reviewed_task_key`：payload 中的 `task_key`（已审查步骤的任务，用于对账）
+         - 发布 `work.ready`，payload（下一步任务 — executor 激活）：
+           - `plan_name`、`plan_path`（来自 context 或 plan frontmatter）
+           - `task_id`、`task_key`：`next_step` 第一个未完成的 runtime task（来自 task ensure）
+           - `step`：`next_step` 值
+           - `complexity`：来自 plan.md 该步骤（未指定则用 `small`）
+           - `reviewed_task_id`、`reviewed_task_key`、`completed_step`、`next_step`：与 `queue.advance` 镜像，用于对账
+           - `preflight_checks`：plan.md 步骤定义中有则带上
       4. 如 `plan.md` 中所有步骤都已在 `Completed Steps` 中（或这是唯一步骤）：
          - 发布 `plan.complete`，payload：
            - `plan_name`
@@ -1115,7 +1136,9 @@ hats:
       - 必须先对账并更新 `progress.md` 再做决定。
       - 任何状态不一致时必须发布 `plan.blocked`，不得猜测。
       - `plan.complete` 和 `plan.blocked` 的 payload 必须包含 `task_id` 和 `task_key`。
-      - `queue.advance` 的 payload 必须包含 `reviewed_task_id` 和 `reviewed_task_key`，以便执行器对账。
+      - `queue.advance` 的 payload 必须包含 `reviewed_task_id` 和 `reviewed_task_key`，用于对账。
+      - 步骤推进时发布 `queue.advance` **必须**同时发布带下一步 `task_id`/`task_key` 的 `work.ready`。
+      - **禁止**步骤推进时只发 `work.ready` 而不发对应的 `queue.advance` 审计事件。
 
   shipper:
     name: "📦 交付器"

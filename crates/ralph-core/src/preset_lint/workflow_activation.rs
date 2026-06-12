@@ -169,11 +169,24 @@ impl HandoffGraph {
 /// `lint.` prefix and `FindingSource::Lint` envelope.
 pub(crate) type WacFinding = crate::preset_lint::LintFinding;
 
-/// WAC severity override. Builtin presets force `Error`; user presets
-/// get `Warn` in default mode and `Error` in `--strict`.
+/// WAC severity override. The WRC-U3 (2026-06-12-003) rule
+/// applies KTD-7: builtin-embedded presets always produce
+/// `Error`, regardless of `strict`. User-authored presets
+/// follow the legacy mapping: `Warn` in default mode, `Error`
+/// in strict mode. The `source_is_builtin_embedded` flag is
+/// computed by the aggregator from the report's `source_label`
+/// against `presets/manifest.yml`'s `embedded` list.
 ///
 /// WAC rules never produce `Pass` — every firing is a real defect.
-pub(crate) fn wac_severity(strict: bool) -> crate::preset_lint::LintSeverity {
+pub(crate) fn wac_severity(
+    strict: bool,
+    source_is_builtin_embedded: bool,
+) -> crate::preset_lint::LintSeverity {
+    if source_is_builtin_embedded {
+        // KTD-7: builtin presets are part of the public contract
+        // and must always surface WAC defects as blocking errors.
+        return crate::preset_lint::LintSeverity::Error;
+    }
     if strict {
         crate::preset_lint::LintSeverity::Error
     } else {
@@ -181,18 +194,51 @@ pub(crate) fn wac_severity(strict: bool) -> crate::preset_lint::LintSeverity {
     }
 }
 
+/// WRC-U3 / R-WRC-06: a `source_label` describes a builtin-embedded
+/// preset if and only if it starts with the canonical
+/// `builtin:<name>` prefix. The CLI is the source of truth for
+/// which `<name>` values are valid (the embedded preset manifest
+/// in `presets/manifest.yml` and the `crates/ralph-cli/src/presets.rs`
+/// `PRESETS` array); the core aggregator only needs the prefix
+/// heuristic, not the full list, because the WAC-severity upgrade
+/// is the same `Error` for every builtin entry.
+///
+/// The CLI gate (`enforce_preset_lint_gate`) can also accept an
+/// explicit `true` flag when the CLI already knows the preset came
+/// from `-H builtin:foo`. The two paths are kept in lockstep by
+/// the CLI tests (the gate path and the `preset check` path both
+/// produce the same WAC severity for a builtin source).
+pub fn source_label_is_builtin_embedded(source_label: &str) -> bool {
+    source_label.starts_with("builtin:")
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // R2: Re-emit trap
 // ──────────────────────────────────────────────────────────────────────────
 
-/// R2: A hat H that triggers on topic T — published by another hat
+/// R2 (narrow semantics, WRC-U2 / R-WRC-03 / KTD-WRC-1, plan 003):
+/// A hat H that triggers on topic T — published by another hat
 /// P ≠ H — but does not declare T in its own `publishes` is a
-/// re-emit hazard. The narrow archetype is "handoff dead end":
+/// re-emit hazard **only when the handoff is a dead end**:
 /// H is the unique non-wildcard consumer of T, H's publishes do
 /// not reach any downstream hat trigger or terminal topic, and
 /// T is not in H's publishes. In that case the workflow
 /// effectively drops T after H consumes it, and any expectation
 /// that H would re-emit T (e.g. as a terminal signal) is unmet.
+///
+/// The plan-002 literal reading of R2 ("any hat that triggers a
+/// topic it does not publish is a re-emit trap") would fire on
+/// almost every normal hat in the system: the executor triggers
+/// `work.ready` (published by plan-gate) and only publishes
+/// `work.done`, `work.failed` — by the literal reading that is
+/// always a trap. The narrow reading instead asks: does the
+/// handoff close the workflow stage, or does it drop the topic
+/// on the floor? Only the latter is a real re-emit trap. This
+/// is the canonical R2 definition for 003; the 002 plan's
+/// literal wording was correct as a starting point but the
+/// implementation was always narrow (and the test suite already
+/// encodes the narrow behaviour). The 002 plan is marked
+/// `partial-complete` to record the wording drift.
 ///
 /// R2 fires only when ALL of the following hold:
 /// - H triggers T (and T is not `*`)
@@ -207,16 +253,20 @@ pub(crate) fn wac_severity(strict: bool) -> crate::preset_lint::LintSeverity {
 /// "handoff pairing broken" symptom; R2 names the "re-emit
 /// trap" symptom. They both fire for the same dead-end handoff
 /// and together tell the operator the same story from two
-/// angles.
+/// angles. When R2 fires on a hat with a healthy closure path
+/// (a normal hat like the executor), the implementation
+/// suppresses the finding — see `re_emit_trap_does_not_fire_on_healthy_handoff_chain`
+/// for the canonical positive test.
 ///
 /// Wildcard subscribers disqualify uniqueness per R9 / KTD-6.
 pub fn check_re_emit_trap(
     config: &RalphConfig,
     graph: &HandoffGraph,
     strict: bool,
+    source_is_builtin_embedded: bool,
 ) -> Vec<WacFinding> {
     let mut findings = Vec::new();
-    let severity = wac_severity(strict);
+    let severity = wac_severity(strict, source_is_builtin_embedded);
 
     let unique_topics = graph.unique_consumer_topics();
     let terminals = collect_terminal_topics(config);
@@ -254,7 +304,7 @@ pub fn check_re_emit_trap(
             let has_closure = hat
                 .publishes
                 .iter()
-                .any(|p| reaches_progress_endpoint(p, graph, &terminals, 2));
+                .any(|p| reaches_progress_endpoint(p, graph, &terminals, EGRESS_MAX_HOPS));
             if has_closure {
                 continue;
             }
@@ -290,17 +340,34 @@ pub fn check_re_emit_trap(
 
 /// R3: For each (hat H, trigger topic T) pair, at least one of H's
 /// declared `publishes` topics must reach a "progressed" endpoint
-/// within ≤2 hops. Endpoints are:
+/// within ≤4 hops. Endpoints are:
 ///
 /// - another hat's `triggers` (a downstream workflow hat will pick up the work), or
 /// - a known terminal/completion topic set.
+///
+/// The 4-hop bound (raised from the 002 plan's 2-hop default by
+/// WRC-U3 / 2026-06-12-003) accommodates the canonical
+/// `ce-executor-isolated` workflow: `work.done → review-coordinator
+/// → plan-gate → shipper → reporter → LOOP_COMPLETE` is a
+/// 5-node path. A 2-hop BFS would not see past the first two
+/// transitions and would falsely flag every hat in the chain as
+/// "no activation egress". The 4-hop bound is still tight enough
+/// to catch genuine dead ends (e.g. a hat that publishes to a
+/// topic with no consumer at all) without false-positiving the
+/// long-but-valid ce-executor chain. The T-U1-03 test fixture
+/// uses a 1-hop chain (a single hat publishing to an
+/// unreachable topic) and continues to fire under the wider
+/// bound.
+const EGRESS_MAX_HOPS: usize = 4;
+
 pub fn check_activation_egress(
     config: &RalphConfig,
     graph: &HandoffGraph,
     strict: bool,
+    source_is_builtin_embedded: bool,
 ) -> Vec<WacFinding> {
     let mut findings = Vec::new();
-    let severity = wac_severity(strict);
+    let severity = wac_severity(strict, source_is_builtin_embedded);
 
     // Terminal / completion topics derived from event_loop config.
     // These represent "the workflow can end here" — egress reaching
@@ -315,14 +382,14 @@ pub fn check_activation_egress(
         let has_egress = hat
             .publishes
             .iter()
-            .any(|p| reaches_progress_endpoint(p, graph, &terminals, 2));
+            .any(|p| reaches_progress_endpoint(p, graph, &terminals, EGRESS_MAX_HOPS));
         if !has_egress {
             findings.push(WacFinding {
                 id: crate::preset_lint::finding_id::FINDING_ACTIVATION_EGRESS_MISSING,
                 severity,
                 message: format!(
                     "hat \"{hat_id}\" has no activation egress: none of its publishes reach \
-                     a downstream hat trigger or a terminal/completion topic within 2 hops"
+                     a downstream hat trigger or a terminal/completion topic within {EGRESS_MAX_HOPS} hops"
                 ),
                 topic: None,
                 hat: Some(hat_id.clone()),
@@ -414,9 +481,10 @@ pub fn check_handoff_pairing(
     config: &RalphConfig,
     graph: &HandoffGraph,
     strict: bool,
+    source_is_builtin_embedded: bool,
 ) -> Vec<WacFinding> {
     let mut findings = Vec::new();
-    let severity = wac_severity(strict);
+    let severity = wac_severity(strict, source_is_builtin_embedded);
 
     let terminals = collect_terminal_topics(config);
 
@@ -430,7 +498,7 @@ pub fn check_handoff_pairing(
         let has_egress = consumer_hat
             .publishes
             .iter()
-            .any(|p| reaches_progress_endpoint(p, graph, &terminals, 2));
+            .any(|p| reaches_progress_endpoint(p, graph, &terminals, EGRESS_MAX_HOPS));
         if !has_egress {
             findings.push(WacFinding {
                 id: crate::preset_lint::finding_id::FINDING_HANDOFF_PAIRING_BROKEN,
@@ -478,15 +546,31 @@ pub fn check_trigger_publish_asymmetry(
     config: &RalphConfig,
     graph: &HandoffGraph,
     strict: bool,
+    source_is_builtin_embedded: bool,
 ) -> Vec<WacFinding> {
     let mut findings = Vec::new();
-    let severity = wac_severity(strict);
+    let severity = wac_severity(strict, source_is_builtin_embedded);
 
     // The `starting_event` is injected by the loop runner (ralph
     // hat) at loop start, not by any user-defined hat. Triggers
     // matching `starting_event` are exempt from R5's "no
     // publisher" archetype because the runner owns the emit.
     let starting_event = config.event_loop.starting_event.as_deref();
+
+    // WRC-U3 (2026-06-12-003) / KTD-WRC-3: the `cancellation_promise`
+    // is also published by the loop runner (ralph hat), not by any
+    // user-defined hat. Triggers on the cancellation_promise are
+    // exempt from R5's "no publisher" archetype for the same
+    // reason as starting_event: the loop runner injects the
+    // publish when cancellation is requested. Without this
+    // exemption, every preset that wires a `loop.cancel` trigger
+    // (e.g. ce-executor-isolated's `plan-gate`) would receive a
+    // spurious R5 finding, blocking Tier-0.
+    let cancellation_promise = if config.event_loop.cancellation_promise.is_empty() {
+        None
+    } else {
+        Some(config.event_loop.cancellation_promise.as_str())
+    };
 
     // R5 is per-trigger and depends only on graph topology (no
     // bounded BFS over terminals), so the terminal set is unused.
@@ -501,6 +585,12 @@ pub fn check_trigger_publish_asymmetry(
         }
         for trigger in &hat.triggers {
             if trigger == "*" {
+                continue;
+            }
+            // WRC-U3 / KTD-WRC-3: cancellation_promise is
+            // runner-injected, same exemption as starting_event
+            // above.
+            if Some(trigger.as_str()) == cancellation_promise {
                 continue;
             }
             // starting_event exemption: ralph hat owns the emit.
@@ -577,16 +667,45 @@ pub fn check_trigger_publish_asymmetry(
 /// rule returns `Vec<LintFinding>` so the existing aggregator can
 /// prefix them with `lint.` and feed them through the contract
 /// reporter.
+///
+/// WRC-U3 / KTD-7: `source_is_builtin_embedded` upgrades every
+/// WAC finding to `Error` regardless of `strict`. The aggregator
+/// computes this flag from the report's `source_label` against
+/// the `presets/manifest.yml` `embedded` list (and the
+/// `crates/ralph-cli/src/presets.rs` `PRESETS` array, which the
+/// build script keeps in lockstep). Direct callers (BDD scenarios,
+/// diagnostic CLI) can pass `false` to opt out of the upgrade.
 pub fn run_workflow_activation_contract(
     config: &RalphConfig,
     strict: bool,
+    source_is_builtin_embedded: bool,
 ) -> Vec<WacFinding> {
     let graph = HandoffGraph::from_config(config);
     let mut findings = Vec::new();
-    findings.extend(check_re_emit_trap(config, &graph, strict));
-    findings.extend(check_activation_egress(config, &graph, strict));
-    findings.extend(check_handoff_pairing(config, &graph, strict));
-    findings.extend(check_trigger_publish_asymmetry(config, &graph, strict));
+    findings.extend(check_re_emit_trap(
+        config,
+        &graph,
+        strict,
+        source_is_builtin_embedded,
+    ));
+    findings.extend(check_activation_egress(
+        config,
+        &graph,
+        strict,
+        source_is_builtin_embedded,
+    ));
+    findings.extend(check_handoff_pairing(
+        config,
+        &graph,
+        strict,
+        source_is_builtin_embedded,
+    ));
+    findings.extend(check_trigger_publish_asymmetry(
+        config,
+        &graph,
+        strict,
+        source_is_builtin_embedded,
+    ));
 
     // Deterministic order: (id, topic, hat).
     findings.sort_by(|a, b| {
@@ -622,7 +741,12 @@ hats:
     publishes: ["work.done"]
 "#;
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-        let findings = check_re_emit_trap(&config, &HandoffGraph::from_config(&config), true);
+        let findings = check_re_emit_trap(
+            &config,
+            &HandoffGraph::from_config(&config),
+            true,
+            false,
+        );
         assert!(
             findings.iter().any(|f| f.id
                 == crate::preset_lint::finding_id::FINDING_RE_EMIT_TRAP
@@ -649,7 +773,12 @@ hats:
     publishes: ["work.retried", "work.done"]
 "#;
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-        let findings = check_re_emit_trap(&config, &HandoffGraph::from_config(&config), true);
+        let findings = check_re_emit_trap(
+            &config,
+            &HandoffGraph::from_config(&config),
+            true,
+            false,
+        );
         assert!(
             findings.is_empty(),
             "self-loop should be exempt: {:?}",
@@ -673,8 +802,12 @@ hats:
     publishes: ["isolated.signal"]
 "#;
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-        let findings =
-            check_activation_egress(&config, &HandoffGraph::from_config(&config), true);
+        let findings = check_activation_egress(
+            &config,
+            &HandoffGraph::from_config(&config),
+            true,
+            false,
+        );
         assert!(
             findings.iter().any(|f| f.id
                 == crate::preset_lint::finding_id::FINDING_ACTIVATION_EGRESS_MISSING
@@ -705,7 +838,12 @@ hats:
     publishes: ["executor.dead_end"]
 "#;
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-        let findings = check_handoff_pairing(&config, &HandoffGraph::from_config(&config), true);
+        let findings = check_handoff_pairing(
+            &config,
+            &HandoffGraph::from_config(&config),
+            true,
+            false,
+        );
         assert!(
             findings.iter().any(|f| f.id
                 == crate::preset_lint::finding_id::FINDING_HANDOFF_PAIRING_BROKEN
@@ -736,6 +874,7 @@ hats:
             &config,
             &HandoffGraph::from_config(&config),
             true,
+            false,
         );
         assert!(
             findings.iter().any(|f| f.id
@@ -774,7 +913,7 @@ hats:
         // work.ready has 1 explicit (executor) + 1 wildcard (observer).
         // Should NOT be a unique consumer.
         assert!(!graph.unique_consumer_topics().contains("work.ready"));
-        let findings = check_handoff_pairing(&config, &graph, true);
+        let findings = check_handoff_pairing(&config, &graph, true, false);
         assert!(
             !findings.iter().any(|f| f.topic.as_deref() == Some("work.ready")),
             "work.ready should be excluded from handoff_pairing when wildcard subscriber exists: {:?}",
@@ -806,8 +945,8 @@ hats:
     publishes: ["c.out"]
 "#;
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-        let f1 = run_workflow_activation_contract(&config, true);
-        let f2 = run_workflow_activation_contract(&config, true);
+        let f1 = run_workflow_activation_contract(&config, true, false);
+        let f2 = run_workflow_activation_contract(&config, true, false);
         assert_eq!(f1, f2, "two calls must produce identical ordered output");
     }
 
@@ -831,13 +970,204 @@ hats:
     publishes: ["executor.dead_end"]
 "#;
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-        let default_findings = run_workflow_activation_contract(&config, false);
-        let strict_findings = run_workflow_activation_contract(&config, true);
+        let default_findings = run_workflow_activation_contract(&config, false, false);
+        let strict_findings = run_workflow_activation_contract(&config, true, false);
         assert!(default_findings
             .iter()
             .all(|f| f.severity == LintSeverity::Warn));
         assert!(strict_findings
             .iter()
             .all(|f| f.severity == LintSeverity::Error));
+    }
+
+    // WRC-U3 / T-WRC-U3 (severity upgrade): the same fixture as
+    // T-U1-08 must produce Error severity under
+    // `source_is_builtin_embedded = true` even in the non-strict
+    // (`strict = false`) path. This pins KTD-7.
+    #[test]
+    fn builtin_embedded_severity_is_always_error() {
+        let yaml = r#"
+tasks:
+  enabled: false
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+hats:
+  plan_gate:
+    name: "PlanGate"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+  executor:
+    name: "Executor"
+    triggers: ["work.ready"]
+    publishes: ["executor.dead_end"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        // strict=false but source_is_builtin_embedded=true → every
+        // WAC finding must still be Error.
+        let findings = run_workflow_activation_contract(&config, false, true);
+        assert!(
+            !findings.is_empty(),
+            "fixture must trigger at least one WAC finding, got none"
+        );
+        assert!(
+            findings.iter().all(|f| f.severity == LintSeverity::Error),
+            "builtin-embedded source must always produce Error, got: {:?}",
+            findings
+        );
+    }
+
+    // WRC-U2 / T-WRC-U2-03: a normal handoff (plan-gate → executor →
+    // review chain) that closes via a downstream hat trigger must NOT
+    // produce R2 (re_emit_trap). This is the canonical positive case
+    // for the 003 plan's narrow R2 semantics: the rule fires only
+    // when the consumer has *no* closure path, not whenever it
+    // triggers a topic it does not itself re-emit.
+    #[test]
+    fn re_emit_trap_does_not_fire_on_healthy_handoff_chain() {
+        let yaml = r#"
+tasks:
+  enabled: false
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+hats:
+  plan_gate:
+    name: "PlanGate"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+  executor:
+    name: "Executor"
+    triggers: ["work.ready"]
+    publishes: ["work.done"]
+  reviewer:
+    name: "Reviewer"
+    triggers: ["work.done"]
+    publishes: ["review.passed"]
+  reporter:
+    name: "Reporter"
+    triggers: ["review.passed"]
+    publishes: ["LOOP_COMPLETE"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let findings = run_workflow_activation_contract(&config, true, false);
+        let re_emit: Vec<_> = findings
+            .iter()
+            .filter(|f| {
+                f.id
+                    == crate::preset_lint::finding_id::FINDING_RE_EMIT_TRAP
+                    && f.hat.as_deref() == Some("executor")
+                    && f.topic.as_deref() == Some("work.ready")
+            })
+            .collect();
+        assert!(
+            re_emit.is_empty(),
+            "executor→work.ready→work.done→review→reporter→LOOP_COMPLETE \
+             is a healthy chain; R2 must not fire on the executor. \
+             Got: {:?}",
+            findings
+        );
+    }
+
+    // WRC-U2 / T-WRC-U2-04: HandoffIndex default seeds (`queue.advance`,
+    // `work.ready`, `fix.plan.ready`, `work.failed`) must not appear
+    // as `HandoffEntry { consumer: None, handoff: false }` ghost
+    // topics when the preset has a unique consumer. Concretely: the
+    // `queue.advance` seed in a plan-gate self-loop preset should
+    // resolve to the plan-gate (the unique non-wildcard consumer of
+    // its own self-loop), and the priority pass should be enabled.
+    #[test]
+    fn handoff_index_default_seeds_carry_consumer_for_self_loop() {
+        let yaml = r#"
+tasks:
+  enabled: false
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+  execution_mode: isolated
+hats:
+  plan_gate:
+    name: "PlanGate"
+    triggers: ["work.start", "queue.advance"]
+    publishes: ["queue.advance", "work.ready"]
+  executor:
+    name: "Executor"
+    triggers: ["work.ready"]
+    publishes: ["work.done", "LOOP_COMPLETE"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let index = crate::workflow_contract::HandoffIndex::from_config(&config);
+        // work.ready is unique-consumer (executor).
+        let entry = index
+            .entries
+            .get("work.ready")
+            .expect("work.ready must be in the index");
+        assert_eq!(entry.consumer.as_deref(), Some("executor"));
+        assert!(entry.is_priority_dispatchable());
+        // queue.advance has plan_gate as its only non-wildcard
+        // subscriber; priority pass should target it.
+        let qa_entry = index
+            .entries
+            .get("queue.advance")
+            .expect("queue.advance must be in the index");
+        assert_eq!(qa_entry.consumer.as_deref(), Some("plan_gate"));
+    }
+
+    // WRC-U3 / T-WRC-U3-04 (Tier-0 mirror): a healthy WAC chain must
+    // produce **zero** findings under `source_is_builtin_embedded =
+    // true` AND `strict = true`. The fixture models a 3-hat
+    // coordinator → executor → reviewer chain that closes on the
+    // completion promise. This is the standalone unit-level
+    // counterpart to the Tier-0 CI gate (`ralph preset check -H
+    // builtin:ce-executor-isolated --strict`) and pins the KTD-7
+    // contract: builtin sources with a clean WAC graph pass
+    // strict mode with no findings.
+    #[test]
+    fn tier0_strict_clean_wac_chain_passes_under_builtin_flag() {
+        let yaml = r#"
+tasks:
+  enabled: false
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+hats:
+  coordinator:
+    name: "Coordinator"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+  executor:
+    name: "Executor"
+    triggers: ["work.ready"]
+    publishes: ["work.done"]
+  reviewer:
+    name: "Reviewer"
+    triggers: ["work.done"]
+    publishes: ["LOOP_COMPLETE"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let findings = run_workflow_activation_contract(&config, true, true);
+        assert!(
+            findings.is_empty(),
+            "clean WAC chain under builtin+strict must produce zero findings, got: {:?}",
+            findings
+        );
+    }
+
+    // WRC-U3: source_label_is_builtin_embedded helper. The
+    // aggregator's Step 2b and the CLI gate use this heuristic to
+    // decide whether to escalate WAC findings to Error. The
+    // heuristic must match the CLI parser's `HatsSource::Builtin`
+    // variant exactly.
+    #[test]
+    fn source_label_builtin_embedded_helper() {
+        assert!(source_label_is_builtin_embedded(
+            "builtin:ce-executor-isolated"
+        ));
+        assert!(source_label_is_builtin_embedded("builtin:foo"));
+        assert!(!source_label_is_builtin_embedded(""));
+        assert!(!source_label_is_builtin_embedded(
+            "/abs/path/to/preset.yml"
+        ));
+        assert!(!source_label_is_builtin_embedded("current-config"));
     }
 }

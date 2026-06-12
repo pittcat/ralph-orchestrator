@@ -82,6 +82,35 @@ const PRESETS: &[EmbeddedPreset] = &[
     },
 ];
 
+/// WRC-U5 (2026-06-12-003) / KTD-WRC-5: Tier-0 list of builtin
+/// presets that the CI gate (`scripts/validate-builtin-presets.sh
+/// --strict`) treats as **fully WAC-strict**. The gate surfaces a
+/// WAC `lint.preset.*` error as a hard failure for every preset in
+/// this list. Adding a preset here is the commitment to keep it
+/// WAC-clean; non-Tier-0 presets get the legacy "warn-only" path
+/// and can be promoted to Tier-0 in a follow-up PR.
+///
+/// Tier-0 design rationale (KTD-WRC-5): making every builtin
+/// preset WAC-strict at once would block CI on long-known WAC
+/// issues in `ce-executor-wave` (dispatcher events outside the
+/// static graph) and `autoresearch` (multi-branch completion
+/// paths). Tier-0 keeps the gate useful without forcing a
+/// "fix-everything" commit. Promotion is incremental: each preset
+/// reaches Tier-0 once the WAC findings are zero.
+///
+/// As of the 2026-06-12-003 plan landing, only `ce-executor-isolated`
+/// is Tier-0 — the canonical plan-driven workflow that 002 and 003
+/// were authored against. `ce-executor-wave` is the planned
+/// Tier-0 follow-up.
+pub const TIER_0_WAC_PRESETS: &[&str] = &["ce-executor-isolated"];
+
+/// `true` if `preset_name` is in the Tier-0 list. Used by the CI
+/// gate and by the test suite that asserts the Tier-0 preset
+/// passes WAC strict.
+pub fn is_tier_0_wac_preset(preset_name: &str) -> bool {
+    TIER_0_WAC_PRESETS.iter().any(|n| *n == preset_name)
+}
+
 /// Returns all embedded presets.
 pub fn list_presets() -> Vec<&'static EmbeddedPreset> {
     PRESETS.iter().filter(|preset| preset.public).collect()
@@ -2310,27 +2339,21 @@ mod tests {
 
     #[test]
     fn test_ce_executor_u4_progress_reconcile_queue_advance_en() {
-        // U4 (2026-06-11-002): when executor is triggered by queue.advance it
-        // must update progress.md *between* task start and the implementation
-        // step. Goal: keep progress.md's Current Step / Runtime Task ID /
-        // Status: in_progress / update time consistent with the runtime task
-        // store so a reviewer or fresh-context agent does not see "pending"
-        // while the task store is already in_progress.
+        // U4 (2026-06-11-002) + WAC-U4 (2026-06-12): when executor is
+        // triggered by plan-gate `work.ready` (step advance) it must update
+        // progress.md *between* task start and the implementation step.
         let content = read_root_preset("ce-executor-isolated.yml");
         let instructions = executor_instructions_from(&content);
 
-        // The queue.advance paragraph must mention progress.md and the four
-        // canonical fields. Use literal substrings (not loose word matches)
-        // to avoid false positives on unrelated prose.
         let qa_paragraph = instructions
-            .split("### queue.advance Activation")
+            .split("### work.ready Activation (step advance from plan-gate)")
             .nth(1)
             .and_then(|s| s.split("### FIX PLAN EXECUTION MODE").next())
-            .expect("executor instructions must contain a queue.advance Activation section");
+            .expect("executor instructions must contain a work.ready Activation section");
 
         assert!(
             qa_paragraph.contains("progress.md"),
-            "queue.advance section must mention progress.md. Section excerpt:\n{qa_paragraph}"
+            "work.ready step-advance section must mention progress.md. Section excerpt:\n{qa_paragraph}"
         );
         for needle in [
             "Current Step",
@@ -2340,22 +2363,20 @@ mod tests {
         ] {
             assert!(
                 qa_paragraph.contains(needle),
-                "queue.advance progress.md update must reference `{}`. Section excerpt:\n{qa_paragraph}",
+                "work.ready progress.md update must reference `{}`. Section excerpt:\n{qa_paragraph}",
                 needle
             );
         }
-        // task start must be called before progress.md is updated so the
-        // Runtime Task ID has a real value to record.
         let start_pos = qa_paragraph
             .find("ralph tools task start")
-            .expect("queue.advance section must include `ralph tools task start`");
+            .expect("work.ready section must include `ralph tools task start`");
         let progress_pos = qa_paragraph
             .find("progress.md")
             .expect("already asserted above");
         assert!(
             start_pos < progress_pos,
-            "queue.advance must `ralph tools task start` before updating progress.md so the \
-             Runtime Task ID has a real value to record. Section excerpt:\n{qa_paragraph}"
+            "work.ready step advance must `ralph tools task start` before updating progress.md. \
+             Section excerpt:\n{qa_paragraph}"
         );
     }
 
@@ -2437,22 +2458,19 @@ mod tests {
 
     #[test]
     fn test_ce_executor_u4_progress_reconcile_queue_advance_zh() {
-        // U4 (2026-06-11-002): Chinese preset must mirror the queue.advance
-        // progress.md update contract so zh and en stay in parity. The ZH
-        // preset historically mirrors only the schema; U4 is text-only
-        // instruction guidance, but the requirement is explicit: a ZH
-        // operator should not get a stale "pending" view either.
+        // U4 + WAC-U4: Chinese preset must mirror the work.ready step-advance
+        // progress.md update contract so zh and en stay in parity.
         let content = read_root_preset("ce-executor-isolated-zh.yml");
         let instructions = executor_instructions_from(&content);
 
         let qa_paragraph = instructions
-            .split("被 `queue.advance`")
+            .split("### work.ready 激活（plan-gate 步骤推进）")
             .nth(1)
-            .and_then(|s| s.split("### ").nth(0))
-            .unwrap_or("");
+            .and_then(|s| s.split("### 修复计划执行模式").next())
+            .expect("executor zh instructions must contain work.ready activation section");
         assert!(
             qa_paragraph.contains("progress.md"),
-            "ce-executor-zh queue.advance section must mention progress.md. \
+            "ce-executor-zh work.ready section must mention progress.md. \
              Section excerpt:\n{qa_paragraph}"
         );
         for needle in [
@@ -2462,7 +2480,7 @@ mod tests {
         ] {
             assert!(
                 qa_paragraph.contains(needle),
-                "ce-executor-zh queue.advance progress.md update must reference `{}`. \
+                "ce-executor-zh work.ready progress.md update must reference `{}`. \
                  Section excerpt:\n{qa_paragraph}",
                 needle
             );
@@ -4832,5 +4850,84 @@ mod tests {
             "Embedded presets failed strict lint:\n{}",
             failures.join("\n")
         );
+    }
+
+    // WRC-U3 / T-WRC-U3-04 (Tier-0 contract): every preset listed in
+    // `TIER_0_WAC_PRESETS` must produce a `RuntimeContractReport`
+    // with **zero WAC `lint.preset.*` errors** when checked under
+    // `RuntimeContractStrictness::preset_check_strict()`. The
+    // aggregator (WRC-U1 / WRC-U3) passes `builtin_source = true`
+    // to WAC when the `source_label` starts with `builtin:`, so
+    // every WAC finding for a Tier-0 preset surfaces as Error.
+    //
+    // This is the in-process counterpart to the
+    // `validate-builtin-presets.sh --strict` gate. The two stay
+    // in lockstep: when a preset is promoted to Tier-0 here, the
+    // shell script's `TIER_0_WAC_PRESETS` array must also be
+    // updated (the script is intentionally a separate source of
+    // truth because the shell cannot query the ralph binary for
+    // the list at runtime).
+    //
+    // Plan Unit: WRC-U3 of `2026-06-12-003-feat-wac-rollout-completion-plan.md`.
+    #[test]
+    fn test_tier_0_wac_presets_have_no_wac_errors() {
+        for preset_name in TIER_0_WAC_PRESETS {
+            let preset = PRESETS
+                .iter()
+                .find(|p| p.name == *preset_name)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Tier-0 preset '{preset_name}' is in TIER_0_WAC_PRESETS but missing from PRESETS"
+                    )
+                });
+            let config = RalphConfig::parse_yaml(preset.content)
+                .unwrap_or_else(|e| panic!("Tier-0 preset '{preset_name}' failed to parse: {e}"));
+            let registry = HatRegistry::from_runtime_config(&config);
+            let report = RuntimeContractAggregator::aggregate(
+                &format!("builtin:{}", preset.name),
+                &config,
+                &registry,
+                RuntimeContractStrictness::preset_check_strict(),
+            );
+            let wac_errors: Vec<_> = report
+                .findings
+                .iter()
+                .filter(|f| {
+                    f.severity == ralph_core::runtime_contract::FindingSeverity::Error
+                        && f.source == ralph_core::runtime_contract::FindingSource::Lint
+                        && f.id.starts_with("lint.preset.")
+                })
+                .collect();
+            assert!(
+                wac_errors.is_empty(),
+                "Tier-0 preset '{preset_name}' has {} WAC error(s) under strict; \
+                 these block `ralph preset check --strict` and the run gate. \
+                 Either fix the preset (preferred) or move it out of \
+                 TIER_0_WAC_PRESETS in lockstep with scripts/validate-builtin-presets.sh. \
+                 Findings: {:?}",
+                wac_errors.len(),
+                wac_errors
+                    .iter()
+                    .map(|f| format!("[{}] {}: {}", f.id, f.severity.as_str(), f.message))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    // WRC-U5 / T-WRC-U5-01: the `is_tier_0_wac_preset` helper must
+    // agree with the `TIER_0_WAC_PRESETS` constant byte-for-byte.
+    // Drift between the two is the documented failure mode of the
+    // shell-side list (`scripts/validate-builtin-presets.sh`).
+    #[test]
+    fn test_is_tier_0_wac_preset_helper_matches_constant() {
+        for name in TIER_0_WAC_PRESETS {
+            assert!(
+                is_tier_0_wac_preset(name),
+                "TIER_0_WAC_PRESETS contains '{name}' but is_tier_0_wac_preset disagrees"
+            );
+        }
+        assert!(!is_tier_0_wac_preset("not-a-real-preset"));
+        assert!(!is_tier_0_wac_preset("ce-executor-wave")); // Tier-1
+        assert!(!is_tier_0_wac_preset("autoresearch")); // Tier-2
     }
 }

@@ -18,6 +18,7 @@ mod hat_backend;
 mod hat_exhaustion;
 mod hat_lifecycle_integration;
 mod hat_lifecycle_jsonl_e2e;
+mod handoff_dispatch;
 mod human_timeout;
 mod initialization;
 mod isolated_complex_regression;

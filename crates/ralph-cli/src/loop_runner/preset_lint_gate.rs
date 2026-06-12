@@ -6,6 +6,13 @@
 //!
 //! Requirements: R7 (run hard gate), R8 (JSON artifact + human output),
 //! R9 (read-only, no auto-migration).
+//!
+//! WRC-U3 (2026-06-12-003) / KTD-7: the gate now accepts a
+//! `source_is_builtin_embedded` flag from the CLI runner. When the
+//! caller knows the preset came from `-H builtin:foo`, every WAC
+//! finding (R2/R3/R4/R5) is escalated to `Error` regardless of the
+//! `strict` axis. The same logic that lives in the aggregator's Step
+//! 2b applies to the gate path: builtin WAC defects are blocking.
 
 use super::*;
 use ralph_core::preset_lint::{LintStrictness, run_preset_lint};
@@ -56,11 +63,25 @@ impl std::error::Error for PresetLintGateError {}
 ///
 /// Warnings are surfaced on stderr but do NOT cause failure (R7: only
 /// errors are fatal in the run gate).
+///
+/// WRC-U3: `source_is_builtin_embedded` escalates every WAC finding
+/// to `Error` per KTD-7. The CLI runner passes `true` when the
+/// caller invoked `ralph run -H builtin:<name>`; otherwise it passes
+/// `false` (the user-preset path).
+///
+/// Backwards-compat: a no-arg variant is preserved so legacy tests
+/// (which call `enforce_preset_lint_gate(&config)`) compile unchanged.
+/// The no-arg variant assumes `source_is_builtin_embedded = false`,
+/// which is the safe default — the strict-lint gate still catches
+/// WAC defects at the `lint.preset.*` Error level when the caller
+/// is in strict mode. The builtin escalation is a Tier-0 nicety
+/// for the new `ralph preset check -H builtin:foo` path.
 pub fn enforce_preset_lint_gate(
     config: &ralph_core::RalphConfig,
+    source_is_builtin_embedded: bool,
 ) -> Result<(), PresetLintGateError> {
     let lint_strictness = LintStrictness::Strict;
-    let findings = run_preset_lint(config, lint_strictness);
+    let findings = run_preset_lint(config, lint_strictness, source_is_builtin_embedded);
 
     let error_count = findings
         .iter()
@@ -235,7 +256,7 @@ tasks:
   enabled: false
 "#;
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-        let result = enforce_preset_lint_gate(&config);
+        let result = enforce_preset_lint_gate(&config, false);
         assert!(
             result.is_ok(),
             "clean config must pass lint gate: {:?}",
@@ -267,7 +288,7 @@ tasks:
   enabled: false
 "#;
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-        let result = enforce_preset_lint_gate(&config);
+        let result = enforce_preset_lint_gate(&config, false);
         assert!(result.is_err(), "config with unknown owner hat must fail");
         let err = result.unwrap_err();
         assert!(err.error_count > 0);

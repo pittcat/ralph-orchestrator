@@ -361,7 +361,7 @@ hats:
 "#;
     let config: ralph_core::RalphConfig =
         serde_yaml::from_str(config_yaml).expect("parse WAC AE1 fixture");
-    let findings = run_workflow_activation_contract(&config, true);
+    let findings = run_workflow_activation_contract(&config, true, false);
     let re_emit = findings
         .iter()
         .find(|f| f.id == "preset.re_emit_trap")
@@ -393,7 +393,7 @@ hats:
 "#;
     let config: ralph_core::RalphConfig =
         serde_yaml::from_str(config_yaml).expect("parse WAC AE1 handoff fixture");
-    let findings = run_workflow_activation_contract(&config, true);
+    let findings = run_workflow_activation_contract(&config, true, false);
     let finding = findings
         .iter()
         .find(|f| f.id == "preset.handoff_pairing_broken")
@@ -422,6 +422,40 @@ fn test_workflow_activation_contract_null_payload_rejected() {
         matches!(decision, PolicyDecision::RejectWithResume(_)),
         "WAC R10 must RejectWithResume null review.passed, got {:?}",
         decision
+    );
+}
+
+#[test]
+fn test_workflow_activation_contract_step_advance_handoff_chain() {
+    // P1 (R14 subset): executor is the unique consumer of work.ready and
+    // must be priority-dispatchable when plan-gate publishes the handoff.
+    // Semantic gate coverage lives in review_step_state unit tests.
+    use ralph_proto::{Event, EventBus, Hat, HatId};
+
+    let work_ready_payload = r#"{"plan_name":"p","plan_path":"docs/plans/p.md","task_id":"t2","task_key":"k2","step":"step-02","complexity":"small","reviewed_task_id":"t1","reviewed_task_key":"k1","completed_step":"step-01","next_step":"step-02"}"#;
+
+    let mut bus = EventBus::new();
+    bus.register(
+        Hat::new("plan-gate", "plan-gate").subscribe("review.*"),
+    );
+    bus.register(
+        Hat::new("executor", "executor").subscribe("work.ready"),
+    );
+    bus.register(Hat::new("review-coordinator", "rc").subscribe("work.done"));
+
+    bus.publish(
+        Event::new("work.ready", work_ready_payload)
+            .with_source(HatId::from("plan-gate")),
+    );
+
+    let priority = HatId::from("executor");
+    let selected = bus
+        .select_next_hat_with_pending(Some(&priority))
+        .expect("executor must be selectable");
+    assert_eq!(
+        selected,
+        HatId::from("executor"),
+        "handoff priority must route work.ready to executor (merry-wren dispatch gap fix)"
     );
 }
 

@@ -46,9 +46,22 @@ fn step_key_from_event(topic: &str, payload: Option<&str>) -> Option<StepKey> {
     let obj = serde_json::from_str::<Value>(p).ok()?;
     let plan_name = obj.get("plan_name")?.as_str()?.to_string();
     match topic {
-        "queue.advance" => {
-            let task_id = obj.get("reviewed_task_id")?.as_str()?.to_string();
-            let step = obj.get("completed_step")?.as_str()?.to_string();
+        "queue.advance" | "work.ready" => {
+            // Step-advance handoffs from plan-gate carry reviewed-step
+            // correlation fields; coordinator's initial work.ready does not.
+            if let Some(task_id) = obj.get("reviewed_task_id").and_then(|v| v.as_str()) {
+                let step = obj.get("completed_step")?.as_str()?.to_string();
+                return Some(StepKey {
+                    plan_name,
+                    task_id: task_id.to_string(),
+                    step,
+                });
+            }
+            if topic == "queue.advance" {
+                return None;
+            }
+            let task_id = obj.get("task_id")?.as_str()?.to_string();
+            let step = obj.get("step")?.as_str()?.to_string();
             Some(StepKey {
                 plan_name,
                 task_id,
@@ -64,6 +77,20 @@ fn step_key_from_event(topic: &str, payload: Option<&str>) -> Option<StepKey> {
                 step,
             })
         }
+    }
+}
+
+fn plan_gate_step_gate(topic: &str, state: &StepReviewState) -> Option<PolicyFinding> {
+    if state.failed_pending_fix {
+        return Some(plan_gate_finding(topic, "plan_gate_review_failed_pending_fix"));
+    }
+    let terminal_ok = state.synth_terminal.as_deref().is_some_and(|t| {
+        matches!(t, "review.passed" | "review.complete") && state.synth_pass
+    });
+    if !terminal_ok {
+        Some(plan_gate_finding(topic, "plan_gate_review_not_terminal"))
+    } else {
+        None
     }
 }
 
@@ -137,15 +164,22 @@ impl ReviewStepTracker {
             let Some(state) = self.steps.get(&key) else {
                 return Some(plan_gate_finding(topic, "plan_gate_review_not_terminal"));
             };
-            if state.failed_pending_fix {
-                return Some(plan_gate_finding(topic, "plan_gate_review_failed_pending_fix"));
+            return plan_gate_step_gate(topic, state);
+        }
+
+        if topic == "work.ready" {
+            let p = event.payload.as_deref()?;
+            let obj = serde_json::from_str::<Value>(p).ok()?;
+            // Coordinator bootstrap work.ready has no reviewed-step correlation;
+            // only step-advance handoffs from plan-gate are gated.
+            if obj.get("reviewed_task_id").and_then(|v| v.as_str()).is_none() {
+                return None;
             }
-            let terminal_ok = state.synth_terminal.as_deref().is_some_and(|t| {
-                matches!(t, "review.passed" | "review.complete") && state.synth_pass
-            });
-            if !terminal_ok {
+            let key = step_key_from_event(topic, event.payload.as_deref())?;
+            let Some(state) = self.steps.get(&key) else {
                 return Some(plan_gate_finding(topic, "plan_gate_review_not_terminal"));
-            }
+            };
+            return plan_gate_step_gate(topic, state);
         }
 
         if topic == "plan.complete" {
@@ -473,6 +507,65 @@ mod tests {
             .check_semantic_gates(&advance)
             .expect("must reject");
         assert!(finding.message.contains("plan_gate_review_not_terminal"));
+    }
+
+    #[test]
+    fn work_ready_step_advance_rejected_without_synth_terminal() {
+        let tracker = ReviewStepTracker::default();
+        let ready = jsonl(
+            "work.ready",
+            "plan-gate",
+            r#"{"plan_name":"p","plan_path":"docs/plans/p.md","task_id":"t2","task_key":"k2","step":"2","complexity":"small","reviewed_task_id":"t1","reviewed_task_key":"k1","completed_step":"1","next_step":"2"}"#,
+        );
+        let finding = tracker
+            .check_semantic_gates(&ready)
+            .expect("must reject step-advance work.ready without synth terminal");
+        assert!(finding.message.contains("plan_gate_review_not_terminal"));
+    }
+
+    #[test]
+    fn work_ready_step_advance_allowed_after_synth_terminal() {
+        let mut tracker = ReviewStepTracker::default();
+        let passed = jsonl(
+            "review.passed",
+            "review-synthesizer",
+            r#"{"plan_name":"p","task_id":"t1","task_key":"k1","step":"1","findings_count":0,"fix_round":0,"verdict":"pass","skip_reason":"empty_diff"}"#,
+        );
+        tracker.observe_accepted(&passed);
+
+        let advance = jsonl(
+            "queue.advance",
+            "plan-gate",
+            r#"{"plan_name":"p","completed_step":"1","next_step":"2","reviewed_task_id":"t1","reviewed_task_key":"k1"}"#,
+        );
+        let ready = jsonl(
+            "work.ready",
+            "plan-gate",
+            r#"{"plan_name":"p","plan_path":"docs/plans/p.md","task_id":"t2","task_key":"k2","step":"2","complexity":"small","reviewed_task_id":"t1","reviewed_task_key":"k1","completed_step":"1","next_step":"2"}"#,
+        );
+
+        assert!(
+            tracker.check_semantic_gates(&advance).is_none(),
+            "queue.advance must pass after synth terminal"
+        );
+        assert!(
+            tracker.check_semantic_gates(&ready).is_none(),
+            "work.ready handoff must pass after synth terminal (P1 / merry-wren fix)"
+        );
+    }
+
+    #[test]
+    fn coordinator_initial_work_ready_not_gated_by_review_state() {
+        let tracker = ReviewStepTracker::default();
+        let ready = jsonl(
+            "work.ready",
+            "coordinator",
+            r#"{"plan_name":"p","plan_path":"docs/plans/p.md","task_id":"t1","task_key":"k1","step":"1","complexity":"small"}"#,
+        );
+        assert!(
+            tracker.check_semantic_gates(&ready).is_none(),
+            "coordinator bootstrap work.ready must not require prior synth terminal"
+        );
     }
 
     #[test]

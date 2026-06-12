@@ -1385,25 +1385,55 @@ event_loop:
     /// Strict-orphan fixture: hat publishes a typo topic with no
     /// subscriber. Non-strict should produce a warning; strict should
     /// flip that warning into a blocking failure.
+    // WRC-U1 (2026-06-12-003): lint is now always-on in the
+    // aggregator, so the orphan-only fixture must also be WAC-clean
+    // to exercise the orphan path in isolation. We declare
+    // `topic_format_whitelist` and a `tasks.coordinator_hats` and
+    // give every hat a downstream closure path. The `sloppy` hat
+    // publishes BOTH a closure path (LOOP_COMPLETE) and a dead-end
+    // topic (orphan.typo). The orphan warning on `orphan.typo`
+    // remains the only blocking signal in non-strict mode.
     const STRICT_ORPHAN_YAML: &str = r#"
+topic_format_whitelist:
+  - LOOP_COMPLETE
+tasks:
+  enabled: true
+  coordinator_hats:
+    - a
 hats:
-  sloppy:
-    name: "Sloppy"
-    description: "Typos"
-    triggers: ["trigger.z"]
-    publishes: ["orphan.typo"]
   a:
     name: "A"
     description: "Entry"
     triggers: ["work.start"]
-    publishes: ["LOOP_COMPLETE"]
+    publishes: ["work.ready"]
+    terminal_events: ["work.ready"]
+  sloppy:
+    name: "Sloppy"
+    description: "Has a closure path but also publishes an orphan"
+    triggers: ["work.ready"]
+    publishes: ["LOOP_COMPLETE", "orphan.typo"]
+    terminal_events: ["LOOP_COMPLETE"]
 event_loop:
   starting_event: "work.start"
   completion_promise: "LOOP_COMPLETE"
 "#;
 
     /// Good fixture: linear chain. Used as a positive control.
+    // WRC-U1 (2026-06-12-003): the lint is now always-on in the
+    // aggregator path, so the GOOD_YAML fixture must declare a
+    // `topic_format_whitelist` for the legacy `LOOP_COMPLETE`
+    // completion promise (lint warns on uppercase) AND a
+    // `tasks.coordinator_hats` entry (the `coordinator_missing`
+    // check fires when `tasks.enabled = true` without a coordinator
+    // hat). The 2-hat chain itself is otherwise clean from a WAC
+    // perspective: work.start → work.ready (executor) → LOOP_COMPLETE.
     const GOOD_YAML: &str = r#"
+topic_format_whitelist:
+  - LOOP_COMPLETE
+tasks:
+  enabled: true
+  coordinator_hats:
+    - a
 hats:
   a:
     name: "A"
@@ -1425,7 +1455,17 @@ event_loop:
     /// Payload finding fixture: downstream references a payload field
     /// but the topic has no schema. Strict mode flips the warning to
     /// an error.
+    ///
+    /// WRC-U1: declares the same whitelist + coordinator_hats as
+    /// GOOD_YAML so the lint pass is clean except for the targeted
+    /// `payload.schema_missing_for_required_topic` finding.
     const PAYLOAD_FINDING_YAML: &str = r#"
+topic_format_whitelist:
+  - LOOP_COMPLETE
+tasks:
+  enabled: true
+  coordinator_hats:
+    - a
 hats:
   a:
     name: "A"
@@ -2431,8 +2471,21 @@ mod u5_check_tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("good.yml");
 
-        // A simple valid preset that should pass topology check
+        // A simple valid preset that should pass topology check.
+        // WRC-U1 (2026-06-12-003): lint is now always-on, so the
+        // fixture must declare `topic_format_whitelist` (otherwise
+        // the legacy `LOOP_COMPLETE` completion promise trips the
+        // format check) and `tasks.coordinator_hats` (otherwise
+        // the `coordinator_missing` rule fires). The chain
+        // `work.start → work.ready → LOOP_COMPLETE` itself is
+        // WAC-clean.
         let valid_yaml = r#"
+topic_format_whitelist:
+  - LOOP_COMPLETE
+tasks:
+  enabled: true
+  coordinator_hats:
+    - a
 hats:
   a:
     name: "A"
@@ -2468,7 +2521,19 @@ event_loop:
     //
     // Verifies that both `preset check` and `new --check` use the same
     // RuntimeContractAggregator, ensuring consistent results.
+    //
+    // WRC-U1 (2026-06-12-003): the lint is always-on, so the
+    // fixture must declare the legacy `LOOP_COMPLETE`
+    // completion promise in the format whitelist and provide
+    // a `tasks.coordinator_hats` entry. The 2-hat chain itself
+    // is otherwise WAC-clean.
     const GOOD_TOPOLOGY_YAML: &str = r#"
+topic_format_whitelist:
+  - LOOP_COMPLETE
+tasks:
+  enabled: true
+  coordinator_hats:
+    - a
 hats:
   a:
     name: "A"

@@ -3,7 +3,7 @@
 //! Provides `ralph wave emit` for agents to dispatch work items
 //! to wave-capable hats that execute in parallel.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use ralph_core::agent_doc_sync::compute_sha256_hex;
 use ralph_core::file_lock::FileLock;
@@ -422,6 +422,36 @@ pub fn compute_payload_digest(payloads: &[String]) -> String {
     compute_sha256_hex(&joined)
 }
 
+/// WRC-U6 (2026-06-12-003): validate a wave record before it is
+/// appended to the events JSONL. Returns `Ok(())` when the
+/// record's `wave_total` field equals the expected wave size, and
+/// `Err` otherwise. The check is intentionally narrow: it
+/// catches the documented 335-worker failure mode (a hand-written
+/// or scripted `events.jsonl` whose `wave_total` does not match
+/// the worker's expectation) without re-running the full wave
+/// pipeline. Callers that need the broader wave record
+/// validation (topic schema, payload shape, idempotency key)
+/// already have those checks in `write_wave_events_with_provenance`.
+///
+/// The function is `pub(crate)` so the test module can drive
+/// the rejection path; production callers are the JSONL
+/// append-or-write path and the BDD scenario for AE2 timing.
+pub(crate) fn validate_wave_record(
+    record: &serde_json::Value,
+    expected_wave_total: u32,
+) -> Result<()> {
+    let actual = record
+        .get("wave_total")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| anyhow!("wave record missing 'wave_total' field"))?;
+    if actual != u64::from(expected_wave_total) {
+        bail!(
+            "wave_total mismatch: record declares {actual} but the wave size is {expected_wave_total}"
+        );
+    }
+    Ok(())
+}
+
 /// U2: Derive the idempotency log path as a sibling of `events_file`.
 ///
 /// Returns `<parent>/.<basename>.idempotency.jsonl`.
@@ -828,6 +858,86 @@ mod tests {
         write_wave_events("test.topic", &payloads, &events_path).unwrap();
 
         assert!(events_path.exists());
+    }
+
+    // WRC-U6 (2026-06-12-003) / T-WRC-U6-01: `wave_total` on every
+    // emitted event MUST equal `len(payloads)`. The 002 plan
+    // already enforced this; the 003 plan pins the contract with a
+    // dedicated test that scans all emitted records. The dimension
+    // detection / wave aggregation pipeline reads
+    // `(wave_id, wave_total)` to decide how many worker
+    // activations to expect — a mismatch silently drops events
+    // or, in the 335-worker field trace, fans out far more than
+    // the operator asked for. The test scans every line of the
+    // emitted JSONL and asserts `wave_total == payloads.len()`.
+    #[test]
+    fn test_wave_total_equals_payload_count_for_all_records() {
+        let tmp = TempDir::new().unwrap();
+        let events_path = tmp.path().join("events.jsonl");
+        let payloads = vec![
+            "{\"dimension\":\"correctness\"}".to_string(),
+            "{\"dimension\":\"testing\"}".to_string(),
+            "{\"dimension\":\"maintainability\"}".to_string(),
+        ];
+        let expected_total = payloads.len() as u32;
+        write_wave_events("review.wave.ready", &payloads, &events_path).unwrap();
+        let body = std::fs::read_to_string(&events_path).unwrap();
+        let mut count = 0;
+        for line in body.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            let value: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(
+                value["wave_total"].as_u64().unwrap(),
+                u64::from(expected_total),
+                "every wave record must carry wave_total == len(payloads)={expected_total}, got: {line}",
+            );
+            count += 1;
+        }
+        assert_eq!(
+            count,
+            payloads.len(),
+            "wave emit must write exactly one JSONL line per payload"
+        );
+    }
+
+    // WRC-U6 / T-WRC-U6-02 (mismatch rejection): the JSONL
+    // append-or-write entry points reject a record whose
+    // `wave_total` field disagrees with the configured wave size.
+    // The 002 plan documented this as "internally consistent
+    // invariant"; the 003 plan promotes it to an explicit
+    // assertion. We exercise the helper directly because the CLI
+    // entry point also derives `wave_total` from `len(payloads)`,
+    // so a mismatch can only be introduced by a hand-written
+    // JSONL append (e.g. a script that builds events.jsonl out
+    // of process). The rejection closes the same failure mode
+    // the 335-worker bug exposed.
+    #[test]
+    fn test_wave_record_with_mismatched_wave_total_is_rejected() {
+        let good = serde_json::json!({
+            "topic": "review.wave.ready",
+            "payload": "{}",
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "wave_id": "w-test",
+            "wave_index": 0,
+            "wave_total": 3,
+        });
+        assert!(validate_wave_record(&good, 3).is_ok());
+        // Same shape, but wave_total=2 disagrees with declared
+        // wave size of 3.
+        let bad = serde_json::json!({
+            "topic": "review.wave.ready",
+            "payload": "{}",
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "wave_id": "w-test",
+            "wave_index": 0,
+            "wave_total": 2,
+        });
+        assert!(
+            validate_wave_record(&bad, 3).is_err(),
+            "wave_total that disagrees with the declared wave size must be rejected"
+        );
     }
 
     // ---- P6 wave record validation tests ----
