@@ -1,11 +1,11 @@
-# Ralph + Roo: PDD-to-Code-Assist Configuration
+# Ralph + Roo: Plan-Driven Execution Configuration
 # Uses Claude Opus 4.6 via Bedrock with adaptive thinking
 #
 # Usage:
 #   ralph run -c ralph.roo.yml -p "Build a feature to..."
 #
-# Or with the pdd-to-code-assist preset:
-#   ralph run -c presets/pdd-to-code-assist.yml -c ralph.roo.yml -p "Build a feature to..."
+# Or with the ce-executor-isolated preset:
+#   ralph run -c presets/en/ce-executor-isolated.yml -c ralph.roo.yml -p "Build a feature to..."
 
 cli:
   backend: "roo"

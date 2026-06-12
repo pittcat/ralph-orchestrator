@@ -45,7 +45,7 @@ case $choice in
         echo "Starting Ralph with TUI..."
         echo "Controls: Ctrl+A then ? for help"
         echo ""
-        cargo run --bin ralph -- run -i -c ralph.code-assist.yml \
+        cargo run --bin ralph -- run -i -c ralph.yml \
             -p "Run cargo test -p ralph-tui, verify all tests pass, then emit build.done"
         ;;
     3)

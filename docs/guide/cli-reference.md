@@ -55,7 +55,7 @@ The `-H` flag specifies where to load hat collections from.
 | Format | Description |
 |--------|-------------|
 | `hats/feature.yml` | Local hats file |
-| `builtin:code-assist` | Built-in hat collection |
+| `builtin:debug` | Built-in hat collection |
 | `https://example.com/hats.yml` | Remote hats file |
 
 **Examples:**
@@ -65,7 +65,7 @@ The `-H` flag specifies where to load hat collections from.
 ralph run -c ralph.yml
 
 # Core + built-in hat collection
-ralph run -c ralph.yml -H builtin:code-assist
+ralph run -c ralph.yml -H builtin:debug
 
 # Core + file hat collection
 ralph run -c ralph.yml -H hats/review.yml
@@ -220,10 +220,10 @@ ralph preset [OPTIONS] [COMMAND]
 ralph preset list
 
 # Show template details
-ralph preset show code-assist --format yaml
+ralph preset show minimal-linear --format yaml
 
 # Generate a local preset
-ralph preset new code-assist --name my-flow --output .ralph/hats/my-flow.yml
+ralph preset new minimal-linear --name my-flow --output .ralph/hats/my-flow.yml
 
 # Validate a preset
 ralph preset check -H .ralph/hats/my-flow.yml --strict

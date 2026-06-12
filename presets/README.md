@@ -18,14 +18,10 @@ Templates generate **ordinary YAML** with `x_preset` metadata. They do not becom
 
 | Collection | Source | Best for |
 |---|---|---|
-| `autoresearch` | `presets/autoresearch.yml` | Autonomous experiment loop for any measurable improvement |
+| `autoresearch` | `presets/en/autoresearch.yml` | Autonomous experiment loop for any measurable improvement |
 | `ce-executor-isolated` | `presets/en/ce-executor-isolated.yml` | Plan-driven work execution with wave code review, auto-fix, and manager report (isolated multi-hat execution) |
 | `ce-executor-wave` | `presets/en/ce-executor-wave.yml` | Wave-based parallel variant of `ce-executor-isolated`; experimental, high-throughput for plans with multiple non-overlapping U-IDs per step |
-| `code-assist` | `presets/code-assist.yml` | Default implementation workflow |
-| `debug` | `presets/debug.yml` | Investigation and fix verification |
-| `research` | `presets/research.yml` | Read-only exploration and synthesis |
-| `review` | `presets/review.yml` | Adversarial code review |
-| `pdd-to-code-assist` | `presets/pdd-to-code-assist.yml` | Advanced end-to-end idea-to-code workflow |
+| `debug` | `presets/en/debug.yml` | Investigation and fix verification |
 
 ## Internal Presets
 
@@ -35,9 +31,10 @@ These remain loadable for Ralph internals or testing, but are intentionally hidd
 
 ## Product Positioning
 
-- `code-assist` is the recommended default for implementation work.
-- `pdd-to-code-assist` is intentionally kept as an advanced, fun example. It is slower, more expensive, and less predictable than `code-assist`.
-- Other historical presets are now treated as documentation examples instead of supported builtins.
+- `ce-executor-isolated` is the recommended default for plan-driven implementation work.
+- `debug` is the dedicated preset for bug investigation and adversarial fix verification.
+- `autoresearch` and `ce-executor-wave` are specialized loops for metric-driven experimentation and wave-parallel plan execution respectively.
+- Other historical presets (e.g. `code-assist`, `research`, `review`, `pdd-to-code-assist`) are now treated as documentation examples instead of supported builtins.
 
 ## Quick Start
 
@@ -46,11 +43,8 @@ ralph init --backend claude
 ralph init --list-presets
 
 ralph run -c ralph.yml -H builtin:autoresearch -p "Improve test coverage in src/core/"
-ralph run -c ralph.yml -H builtin:code-assist -p "Add OAuth login"
+ralph run -c ralph.yml -H builtin:ce-executor-isolated -p "docs/plans/my-plan.md"
 ralph run -c ralph.yml -H builtin:debug -p "Investigate intermittent timeout"
-ralph run -c ralph.yml -H builtin:research -p "Map auth architecture"
-ralph run -c ralph.yml -H builtin:review -p "Review changes in src/api/"
-ralph run -c ralph.yml -H builtin:pdd-to-code-assist -p "Build a new import pipeline"
 ```
 
 ## Examples Instead of Builtins

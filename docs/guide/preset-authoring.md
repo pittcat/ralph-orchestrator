@@ -8,7 +8,7 @@ Ralph 有三个不同的配置层：
 
 | 层 | 来源 | 用途 | 使用方式 |
 |---|---|---|---|
-| **Builtin Preset** | Ralph 内置，通过 `-H builtin:<name>` 加载 | 产品运行面，Ralph 官方维护 | `ralph run -H builtin:code-assist -p "..."` |
+| **Builtin Preset** | Ralph 内置，通过 `-H builtin:<name>` 加载 | 产品运行面，Ralph 官方维护 | `ralph run -H builtin:debug -p "..."` |
 | **Template** | `ralph preset` 命令使用的脚手架 | 用来生成本地 preset 的起点 | `ralph preset new <template> ...` |
 | **Local Preset** | 你自己创建的 YAML 文件 | 你自己的 workflow，自己维护 | `ralph run -H .ralph/hats/my.yml -p "..."` |
 
@@ -27,7 +27,6 @@ ralph preset list
 
 # 查看模板详情
 ralph preset show minimal-linear
-ralph preset show code-assist --format yaml
 ```
 
 可用模板：
@@ -35,10 +34,7 @@ ralph preset show code-assist --format yaml
 | 模板 | 描述 | 难度 | 适合场景 |
 |---|---|---|---|
 | `minimal-linear` | 极简二 hat 线性流程 | 入门 | 学习/小工作流 |
-| `code-assist` | TDD 实现工作流 | 中级 | 默认实现任务 |
 | `debug` | 科学方法调试 | 中级 | Bug 调查和根因分析 |
-| `research` | 只读代码探索 | 入门 | 不修改代码的分析 |
-| `review` | 代码审查 | 入门 | 不修改代码的审查 |
 | `ce-executor-lite` | 简化版 plan-driven 执行 | 中级 | 串行计划执行 |
 
 ### 2. 生成本地 Preset
@@ -48,10 +44,10 @@ ralph preset show code-assist --format yaml
 ralph preset new minimal-linear --name my-flow --output .ralph/hats/my-flow.yml
 
 # 带描述
-ralph preset new code-assist --name my-code-flow --description "Team code assist workflow" --output .ralph/hats/my-code-flow.yml
+ralph preset new minimal-linear --name my-code-flow --description "Team debug workflow" --output .ralph/hats/my-code-flow.yml
 
 # 生成后自动检查（推荐）
-ralph preset new code-assist --name my-code-flow --output .ralph/hats/my-code-flow.yml --check
+ralph preset new minimal-linear --name my-code-flow --output .ralph/hats/my-code-flow.yml --check
 ```
 
 **生成的 YAML 包含 `x_preset` 元数据块：**
@@ -59,7 +55,7 @@ ralph preset new code-assist --name my-code-flow --output .ralph/hats/my-code-fl
 ```yaml
 x_preset:
   schema_version: 1
-  template: code-assist
+  template: minimal-linear
   template_version: "1.0.0"
   generated_by: "ralph preset new"
   generated_at: "2026-06-08T00:00:00Z"
@@ -130,7 +126,7 @@ ralph preset upgrade --file .ralph/hats/my-flow.yml --dry-run
 | 字段 | 类型 | 描述 |
 |---|---|---|
 | `schema_version` | 整数 | 元数据格式版本，当前为 `1` |
-| `template` | 字符串 | 模板名称，如 `code-assist` |
+| `template` | 字符串 | 模板名称，如 `minimal-linear` |
 | `template_version` | 字符串 | 模板版本，SemVer 格式 |
 | `generated_by` | 字符串 | 生成工具，如 `ralph preset new` |
 | `generated_at` | 字符串 | RFC3339 时间戳 |

@@ -270,7 +270,7 @@ describe("enqueueTask preset handling", () => {
     });
 
     // Enqueue with builtin preset
-    const result = taskBridge.enqueueTask(task, "builtin:code-assist");
+    const result = taskBridge.enqueueTask(task, "builtin:debug");
 
     // Verify enqueue succeeded
     assert.strictEqual(result.success, true, "Enqueue should succeed");
@@ -284,7 +284,7 @@ describe("enqueueTask preset handling", () => {
     assert.ok(payload.args, "Payload should have args");
     assert.deepStrictEqual(
       payload.args,
-      ["-c", "builtin:code-assist"],
+      ["-c", "builtin:debug"],
       "Args should contain full builtin:name format"
     );
   });
@@ -509,7 +509,7 @@ describe("enqueueTask preset handling", () => {
     });
 
     // Enqueue with builtin preset
-    const result = taskBridge.enqueueTask(task, "builtin:code-assist");
+    const result = taskBridge.enqueueTask(task, "builtin:debug");
 
     // Verify enqueue succeeded
     assert.strictEqual(result.success, true, "Enqueue should succeed");
@@ -519,7 +519,7 @@ describe("enqueueTask preset handling", () => {
     const payload = queuedTask.payload as { args?: string[] };
     assert.deepStrictEqual(
       payload.args,
-      ["-c", "builtin:code-assist"],
+      ["-c", "builtin:debug"],
       "Builtin preset should override default config"
     );
   });

@@ -59,22 +59,14 @@ unset _ralph_fn
 _RALPH_BUILTIN_HAT_VALUES=(
   "builtin:ce-executor-isolated"
   "builtin:ce-executor-wave"
-  "builtin:code-assist"
   "builtin:debug"
-  "builtin:research"
-  "builtin:review"
-  "builtin:pdd-to-code-assist"
   "builtin:autoresearch"
 )
 
 _RALPH_BUILTIN_HAT_DESCRIPTIONS=(
   "Isolated-mode plan-driven work execution with wave code review, auto-fix, shipping, and manager report"
   "Wave-based parallel plan-driven execution with adversarial review, auto-fix, and shipping"
-  "Default implementation workflow with TDD and adversarial validation"
   "Bug investigation, root-cause analysis, and adversarial fix verification"
-  "Read-only codebase and architecture exploration with evidence-first synthesis"
-  "Adversarial code review without making modifications"
-  "Advanced end-to-end idea-to-code workflow"
   "Autonomous experiment loop: try ideas, measure, keep what works"
 )
 
@@ -188,10 +180,7 @@ _RALPH_PRESET_CMDS=(
 # template, add it here too so `ralph preset <TAB>` still works.
 _RALPH_PRESET_TEMPLATES=(
   "minimal-linear:Beginner two-hat linear workflow"
-  "code-assist:Spec/code/verify loop for code work"
   "debug:Diagnose/fix/exit loop for debugging tasks"
-  "research:Multi-source research workflow"
-  "review:Wave-based code review"
   "ce-executor-lite:Lightweight compound-engineering executor"
 )
 

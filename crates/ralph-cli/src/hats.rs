@@ -935,9 +935,9 @@ event_loop:
     /// orphan warning. See `LOOP_RUNNER_INTERNAL_TOPICS` for the
     /// rationale and the audit checklist before adding new entries.
     ///
-    /// Regression case: code-assist and pdd-to-code-assist both have
-    /// Builder hat publishing `build.blocked` with no hat subscriber.
-    /// The loop runner's thrashing detector consumes it instead.
+    /// Regression case: a previous builtin preset had a Builder hat
+    /// publishing `build.blocked` with no hat subscriber. The loop
+    /// runner's thrashing detector consumes it instead.
     #[test]
     fn test_validate_hats_orphan_loop_runner_internal_is_exempt() {
         let mut config_registry = HatRegistry::new();

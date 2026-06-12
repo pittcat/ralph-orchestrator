@@ -30,7 +30,6 @@ embedded:
   - autoresearch
   - ce-executor-isolated
   - ce-executor-wave
-  - code-assist
   - debug
   # - hatless-baseline  # P3 #29: legacy experimental preset; kept on disk
   # for history but excluded from the embedded preset list. Listed as
@@ -38,6 +37,3 @@ embedded:
   # whether to promote it back into the public set or remove the file
   # outright. See `presets/en/hatless-baseline.yml` for contents.
   - merge-loop
-  - pdd-to-code-assist
-  - research
-  - review

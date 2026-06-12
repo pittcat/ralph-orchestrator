@@ -10,19 +10,6 @@ test_tasks:
     4. Write tests for happy path and error cases
     5. Verify all tests pass before completing
 
-  code-assist: |
-    Implement a small multi-step CLI feature and verify it adversarially.
-    Requirements:
-    1. Build a tiny runnable CLI app under `.eval-sandbox/code-assist/`
-    2. Step 1 must create a runnable scaffold with a basic happy-path command
-    3. Step 2 must implement the real requested behavior
-    4. Step 3 must add one second-wave refinement such as a `--json` mode or explicit failure-path handling
-    5. Add automated tests first for each implementation slice, then implement the change
-    6. Run full relevant tests/build/lint
-    7. Exercise the feature manually using the strongest available harness
-       (Playwright for browser flows, tmux for terminal/TUI flows, or real CLI/API commands)
-    8. Try at least one invalid or adversarial input before completing
-
   debug: |
     Debug a real intermittent Rust race in `.eval-sandbox/debug-counter/`.
 
@@ -41,40 +28,6 @@ test_tasks:
     4. Document the investigation in `.eval-sandbox/debug/counter.md`.
     5. Fix only the root cause, add a regression test, and verify with repeated stress runs plus one nearby adversarial case.
 
-  research: |
-    Research how Ralph validates and exercises real application behavior in multiple waves.
-    Specifically answer:
-    1. What browser, terminal, or E2E harnesses already exist in this repo?
-    2. Where are they used today?
-    3. What gaps remain for agentic verification?
-    4. After the first pass, do at least one follow-up wave on the highest-value verification gap you found.
-    Requirements:
-    - Cite file:line evidence
-    - Prefer direct inspection of runnable harnesses over assumptions
-    - Save findings to `.eval-sandbox/research/harness-audit.md`
-
-  review: |
-    Review a change as if you expect it to fail in production, using multiple waves.
-    Scope:
-    1. Inspect a small runnable code path under `.eval-sandbox/review/`
-    2. Look for correctness, edge-case, and security issues
-    3. Identify the single riskiest area on the first pass, then do a second deep-analysis wave on that area
-    4. If the code is runnable, exercise it with the strongest available harness
-    5. Try at least one failure-path or adversarial input
-    6. Write findings to `.eval-sandbox/review/findings.md`
-
-  pdd-to-code-assist: |
-    Start from a rough idea and push it through design, planning, step-waved tasks, implementation, and validation.
-    Idea:
-    "Build a small import status viewer with one happy-path screen, one failure state, and a second-step refinement such as filtering or alternate output."
-    Requirements:
-    1. Produce design artifacts under `.eval-sandbox/pdd/`
-    2. Include a concrete manual E2E plan with named harness choice
-    3. Implement via tasks rather than a single jump to code
-    4. The implementation must require at least two numbered waves of tasks
-    5. Validate using the real app or strongest available harness
-    6. Try at least one adversarial path before declaring success
-
 smoke_test_tasks:
   hatless-baseline: |
     Build a tiny CLI calculator in `.eval-sandbox/baseline/`.
@@ -83,15 +36,6 @@ smoke_test_tasks:
     2. Handle divide-by-zero cleanly
     3. Add tests
     4. Run the calculator manually once with a valid input and once with divide-by-zero
-
-  code-assist: |
-    Implement a tiny runnable CLI feature in `.eval-sandbox/code-assist/` using multiple waves.
-    Requirements:
-    1. Step 1: create a runnable scaffold and a trivial smoke path
-    2. Step 2: implement the requested behavior with automated tests first
-    3. Step 3: add one refinement such as `--json` output or a clear failure-path message
-    4. Run the relevant tests after each step
-    5. Exercise the result manually with one happy-path input and one invalid input
 
   debug: |
     Debug a real intermittent Rust race in `.eval-sandbox/debug-counter/`.
@@ -102,49 +46,13 @@ smoke_test_tasks:
     4. Fix only the root cause and add a regression test.
     5. Re-run repeated stress checks plus one nearby adversarial case.
 
-  research: |
-    Research how Ralph injects verification guidance and where real harness testing already exists.
-    Requirements:
-    1. Cite file:line evidence
-    2. Identify the main browser, terminal, or CLI harness options
-    3. Do at least one follow-up research wave on the highest-value verification gap
-    4. Save the answer to `.eval-sandbox/research/summary.md`
-
-  review: |
-    Review Ralph's runtime verification guidance critically using at least two waves.
-    Scope:
-    1. Inspect `crates/ralph-core/src/instructions.rs`
-    2. Inspect `crates/ralph-core/src/hatless_ralph.rs`
-    3. Inspect at least one second high-risk area you identify from the first pass
-    4. Identify any correctness or completeness gaps
-    5. Save findings to `.eval-sandbox/review/findings.md`
-
-  pdd-to-code-assist: |
-    Start from a small rough idea and carry it through design, step-waved tasks, implementation, and validation.
-    Idea:
-    "Build a tiny CLI status checker in `.eval-sandbox/pdd/` with one success case, one failure case, and one second-wave refinement such as JSON output."
-    Requirements:
-    1. Produce the PDD artifacts
-    2. Implement through task files
-    3. Use at least two numbered implementation waves
-    4. Validate with real commands
-    5. Try at least one adversarial input before completion
-
 complexity:
   hatless-baseline: medium
-  code-assist: complex
   debug: complex
-  research: medium
-  review: medium
-  pdd-to-code-assist: complex
 
 expected_iterations:
   hatless-baseline: [3, 5]
-  code-assist: [4, 8]
   debug: [4, 8]
-  research: [3, 6]
-  review: [3, 6]
-  pdd-to-code-assist: [8, 16]
 
 timeouts:
   simple: 450
@@ -153,8 +61,4 @@ timeouts:
 
 smoke_timeouts:
   hatless-baseline: 180
-  code-assist: 720
   debug: 600
-  research: 300
-  review: 360
-  pdd-to-code-assist: 900

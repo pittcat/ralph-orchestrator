@@ -15,28 +15,8 @@
     "category": "development"
   },
   {
-    "name": "code-assist",
-    "description": "Default implementation workflow with TDD and adversarial validation",
-    "category": "development"
-  },
-  {
     "name": "debug",
     "description": "Bug investigation, root-cause analysis, and adversarial fix verification",
     "category": "workflow"
-  },
-  {
-    "name": "pdd-to-code-assist",
-    "description": "Advanced end-to-end idea-to-code workflow; powerful, slower, and best treated as a fun example",
-    "category": "development"
-  },
-  {
-    "name": "research",
-    "description": "Read-only codebase and architecture exploration with evidence-first synthesis",
-    "category": "research"
-  },
-  {
-    "name": "review",
-    "description": "Adversarial code review without making modifications",
-    "category": "review"
   }
 ]

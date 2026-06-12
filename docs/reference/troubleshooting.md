@@ -130,7 +130,7 @@ chmod +x ralph
 
    ```bash
    ralph init --backend claude
-   ralph run -c ralph.yml -H builtin:code-assist
+   ralph run -c ralph.yml -H builtin:ce-executor-isolated
    ```
 
 #### Custom Backend Command

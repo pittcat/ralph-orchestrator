@@ -30,10 +30,10 @@ describe("presets.list tRPC endpoint", () => {
     const builtinPresets = result.filter((p: any) => p.source === "builtin");
     assert.ok(builtinPresets.length > 0, "Should have builtin presets");
 
-    // Check that code-assist preset is included
-    const codeAssistPreset = builtinPresets.find((p: any) => p.name === "code-assist");
-    assert.ok(codeAssistPreset, "Should include code-assist preset");
-    assert.strictEqual(codeAssistPreset.source, "builtin");
+    // Check that debug preset is included
+    const debugPreset = builtinPresets.find((p: any) => p.name === "debug");
+    assert.ok(debugPreset, "Should include debug preset");
+    assert.strictEqual(debugPreset.source, "builtin");
   });
 
   test("preset entries have required fields (id, name, source, description)", async () => {

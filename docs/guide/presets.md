@@ -8,18 +8,17 @@ Built-in hat collections are now intentionally small. Ralph ships a core working
 ralph init --backend claude
 ralph init --list-presets
 
-ralph run -c ralph.yml -H builtin:code-assist -p "Add user authentication"
+ralph run -c ralph.yml -H builtin:ce-executor-isolated -p "docs/plans/my-plan.md"
 ```
 
 ## Supported Builtins
 
 | Collection | Hats | Best for | Notes |
 |---|---|---|---|
-| `code-assist` | `planner`, `builder`, `critic`, `finalizer` | Default implementation work | Recommended default; adds fresh-eyes review and a final completion gate |
+| `autoresearch` | autonomous experiment loop | Try ideas, measure, keep what works | Optimization loop with self-scoring |
+| `ce-executor-isolated` | plan-driven work exec with wave review, auto-fix, shipping, manager report | Plan-driven implementation | Recommended default; isolated multi-hat |
+| `ce-executor-wave` | wave-parallel plan-driven exec with adversarial review, auto-fix, shipping | Plan-driven with disjoint step units | Wave-parallel variant |
 | `debug` | `investigator`, `tester`, `fixer`, `verifier` | Root-cause debugging | Strong on repro and fix verification |
-| `research` | `researcher`, `synthesizer` | Read-only analysis | No code changes |
-| `review` | `reviewer`, `analyzer` | Adversarial code review | No code changes |
-| `pdd-to-code-assist` | multi-stage design + build pipeline | Idea to code | Advanced and fun, but slower and less predictable |
 
 ## Internal Presets
 
@@ -41,7 +40,7 @@ ralph preset list
 ralph preset show minimal-linear
 
 # 3. Generate a local preset from a template
-ralph preset new code-assist --name my-flow --output .ralph/hats/my-flow.yml
+ralph preset new minimal-linear --name my-flow --output .ralph/hats/my-flow.yml
 
 # 4. Validate it
 ralph preset check -H .ralph/hats/my-flow.yml --strict
@@ -57,30 +56,26 @@ ralph run -c ralph.yml -H .ralph/hats/my-flow.yml -p "..."
 
 ## Recommended Workflow
 
-- Use `code-assist` for most implementation tasks.
-- Use `debug`, `research`, or `review` when you need a specialized mode.
-- Use `pdd-to-code-assist` when you specifically want an end-to-end exploratory workflow and are comfortable paying for extra iterations.
+- Use `ce-executor-isolated` for plan-driven implementation tasks.
+- Use `debug` for bug investigation and root-cause analysis.
 
 | Collection | Canonical source | Hats | Start event | Completion | Best for |
 |---|---|---|---|---|---|
+| `autoresearch` | `presets/en/autoresearch.yml` | experiment loop | `experiment.start` (default) | `LOOP_COMPLETE` (default) | Autonomous idea/measure/keep/discard loop |
 | `bugfix` | `presets/bugfix.yml` | `reproducer`, `fixer`, `verifier`, `committer` | `repro.start` | `LOOP_COMPLETE` (default) | Reproduce/fix/verify/commit bug workflow |
-| `code-assist` | `presets/code-assist.yml` | `planner`, `builder`, `validator`, `committer` | `build.start` | `LOOP_COMPLETE` | TDD implementation from specs/tasks/descriptions |
-| `debug` | `presets/debug.yml` | `investigator`, `tester`, `fixer`, `verifier` | `debug.start` | `DEBUG_COMPLETE` | Root-cause debugging and hypothesis testing |
+| `debug` | `presets/en/debug.yml` | `investigator`, `tester`, `fixer`, `verifier` | `debug.start` | `DEBUG_COMPLETE` | Root-cause debugging and hypothesis testing |
 | `deploy` | `presets/deploy.yml` | `builder`, `deployer`, `verifier` | `task.start` (default) | `LOOP_COMPLETE` | Deployment and release workflows |
 | `docs` | `presets/docs.yml` | `writer`, `reviewer` | `task.start` (default) | `DOCS_COMPLETE` | Documentation writing and review |
 | `feature` | `presets/feature.yml` | `builder`, `reviewer` | `task.start` (default) | `LOOP_COMPLETE` | Feature development with integrated review |
 | `fresh-eyes` | `presets/fresh-eyes.yml` | `builder`, `fresh_eyes_auditor`, `fresh_eyes_gatekeeper` | `fresh_eyes.start` | `LOOP_COMPLETE` | Enforced repeated skeptical self-review passes |
 | `gap-analysis` | `presets/gap-analysis.yml` | `analyzer`, `verifier`, `reporter` | `gap.start` | `GAP_ANALYSIS_COMPLETE` | Spec-vs-implementation auditing |
-| `merge-loop` | `crates/ralph-cli/presets/merge-loop.yml` | `merger`, `resolver`, `tester`, `cleaner`, `failure_handler` | `merge.start` | `MERGE_COMPLETE` | Internal merge/worktree automation |
-| `pdd-to-code-assist` | `presets/pdd-to-code-assist.yml` | `inquisitor`, `architect`, `design_critic`, `explorer`, `planner`, `task_writer`, `builder`, `validator`, `committer` | `design.start` | `LOOP_COMPLETE` | Full idea → plan → implementation pipeline |
+| `merge-loop` | `presets/en/merge-loop.yml` | `merger`, `resolver`, `tester`, `cleaner`, `failure_handler` | `merge.start` | `MERGE_COMPLETE` | Internal merge/worktree automation |
 | `pr-review` | `presets/pr-review.yml` | `correctness_reviewer`, `security_reviewer`, `architecture_reviewer`, `synthesizer` | `task.start` (default) | `LOOP_COMPLETE` | Multi-perspective PR review |
 | `refactor` | `presets/refactor.yml` | `refactorer`, `verifier` | `task.start` (default) | `REFACTOR_COMPLETE` | Incremental, verified refactoring |
-| `research` | `presets/research.yml` | `researcher`, `synthesizer` | `research.start` | `RESEARCH_COMPLETE` | Exploration and analysis without code changes |
-| `review` | `presets/review.yml` | `reviewer`, `analyzer` | `review.start` | `REVIEW_COMPLETE` | Review-only workflow |
 | `spec-driven` | `presets/spec-driven.yml` | `spec_writer`, `spec_reviewer`, `implementer`, `verifier` | `spec.start` | `LOOP_COMPLETE` (default) | Specification-driven implementation |
-| `wave-review` | `presets/wave-review.yml` | `coordinator`, `reviewer` (x3), `synthesizer` | `review.start` | `LOOP_COMPLETE` | Specialized parallel code review (wave-enabled) |
-| `ce-executor` | `presets/ce-executor.yml` | `coordinator`, `executor`, `review-coordinator`, `dimension-reviewer` (wave), `review-synthesizer` (aggregate), `fixer`, `plan-gate`, `shipper`, `reporter` | `work.start` | `LOOP_COMPLETE` | Plan-driven execution with wave review, auto-fix, and manager report |
-| `ce-executor-wave` | `presets/en/ce-executor-wave.yml` | `coordinator`, `execution-dispatcher`, `parallel-executor` (wave), `execution-synthesizer` (aggregate), `serial-executor`, `review-coordinator`, `dimension-reviewer` (wave), `review-synthesizer` (aggregate), `fixer`, `debug-resolver`, `plan-gate`, `shipper`, `reporter` | `work.start` | `LOOP_COMPLETE` | Wave-parallel variant of `ce-executor`; executes disjoint implementation units within a step concurrently, then aggregates and reviews |
+| `wave-review` | `presets/zh/wave-review-zh.yml` (zh-only reference) | `coordinator`, `reviewer` (x3), `synthesizer` | `review.start` | `LOOP_COMPLETE` | Specialized parallel code review (wave-enabled) |
+| `ce-executor-isolated` | `presets/en/ce-executor-isolated.yml` | `coordinator`, `executor`, `review-coordinator`, `dimension-reviewer` (wave), `review-synthesizer` (aggregate), `fixer`, `plan-gate`, `shipper`, `reporter` | `work.start` | `LOOP_COMPLETE` | Plan-driven execution with wave review, auto-fix, and manager report (isolated mode) |
+| `ce-executor-wave` | `presets/en/ce-executor-wave.yml` | `coordinator`, `execution-dispatcher`, `parallel-executor` (wave), `execution-synthesizer` (aggregate), `serial-executor`, `review-coordinator`, `dimension-reviewer` (wave), `review-synthesizer` (aggregate), `fixer`, `debug-resolver`, `plan-gate`, `shipper`, `reporter` | `work.start` | `LOOP_COMPLETE` | Wave-parallel variant of `ce-executor-isolated`; executes disjoint implementation units within a step concurrently, then aggregates and reviews |
 
 ## Why The Builtin Set Is Small
 
@@ -103,26 +98,11 @@ Historical workflow ideas such as spec-driven development, red-team review, mob 
 ## Usage Examples
 
 ```bash
-# Default implementation workflow
-ralph run -c ralph.yml -H builtin:code-assist -p "Add OAuth login"
+# Plan-driven implementation workflow
+ralph run -c ralph.yml -H builtin:ce-executor-isolated -p "docs/plans/my-plan.md"
 
 # Debugging
 ralph run -c ralph.yml -H builtin:debug -p "Investigate why login fails on mobile"
-
-# Research
-ralph run -c ralph.yml -H builtin:research -p "Map the authentication architecture"
-
-# Review
-ralph run -c ralph.yml -H builtin:review -p "Review the changes in src/api/"
-
-# Advanced/fun workflow
-ralph run -c ralph.yml -H builtin:pdd-to-code-assist -p "Build a rate limiter"
-
-# ce-executor plan-driven execution
-ralph run -c ralph.yml -H builtin:ce-executor -p "docs/plans/my-plan.md"
-
-# ce-executor with worktree isolation (recommended for parallel runs)
-ralph run -c ralph.yml -H builtin:ce-executor --worktree -p "docs/plans/my-plan.md"
 ```
 
 ### ce-executor Workflow
@@ -194,7 +174,7 @@ See [Agent Waves](../advanced/agent-waves.md) for details.
 ### 5) Extended End-to-End Orchestration
 Large multi-stage pipelines from idea through implementation.
 
-Example: `pdd-to-code-assist`
+Example: `ce-executor-isolated`
 
 ### 6) Guarded Sequential Workflows
 Workflows with mandatory phase ordering where out-of-order events could corrupt state.

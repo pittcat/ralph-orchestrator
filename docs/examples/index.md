@@ -46,7 +46,7 @@ Must handle:
 - Port numbers
 EOF
 
-ralph run -c ralph.yml -H builtin:code-assist
+ralph run -c ralph.yml -H builtin:ce-executor-isolated
 ```
 
 ### Inline Prompts
@@ -87,7 +87,7 @@ Follow existing UI patterns.
 EOF
 
 # Run Ralph with the default implementation hats
-ralph run -c ralph.yml -H builtin:code-assist
+ralph run -c ralph.yml -H builtin:ce-executor-isolated
 ```
 
 ### Bug Investigation
@@ -97,11 +97,11 @@ ralph run -c ralph.yml -H builtin:code-assist
 ralph run -c ralph.yml -H builtin:debug -p "Users report login fails on Safari. Error: 'Invalid token'. Investigate and fix."
 ```
 
-### Code Review
+### Code Review (custom hats file)
 
 ```bash
-# Use review hat collection
-ralph run -c ralph.yml -H builtin:review -p "Review the changes in src/api/auth.rs for security issues"
+# Use a project-local review hat collection
+ralph run -c ralph.yml -H .ralph/hats/review.yml -p "Review the changes in src/api/auth.rs for security issues"
 ```
 
 ## Full Examples

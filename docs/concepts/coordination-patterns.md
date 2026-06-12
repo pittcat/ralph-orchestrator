@@ -272,7 +272,7 @@ gap.start → 📊 Analyzer ←── verify.complete ────────�
 
 A bootstrapping hat detects input type and routes to the appropriate workflow.
 
-**Example: Code-Assist** (`code-assist.yml`)
+**Example: ce-executor-isolated Adaptive Entry** (`presets/en/ce-executor-isolated.yml`)
 
 ```yaml
 hats:
@@ -388,7 +388,7 @@ ralph emit "handoff" --target reviewer "Please review the changes"
 | Security review required | Adversarial | `adversarial-review` |
 | Debugging complex issues | Hypothesis-Driven | `scientific-method` |
 | Work decomposes into specialist tasks | Coordinator-Specialist | `gap-analysis` |
-| Multiple input formats | Adaptive Entry | `code-assist` |
+| Multiple input formats | Adaptive Entry | `ce-executor-isolated` |
 | Standard feature development | Basic delegation | `feature` |
 
 ## When Not to Use Hats

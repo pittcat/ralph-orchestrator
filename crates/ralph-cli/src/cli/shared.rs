@@ -162,7 +162,7 @@ impl ConfigSource {
 pub enum HatsSource {
     /// Local file path
     File(PathBuf),
-    /// Builtin hat collection name (e.g., "builtin:code-assist")
+    /// Builtin hat collection name (e.g., "builtin:debug")
     Builtin(String),
     /// Remote URL (e.g., "http://example.com/hats.yml")
     Remote(String),
@@ -235,18 +235,18 @@ mod tests {
 
     #[test]
     fn test_config_source_parse_builtin() {
-        let source = ConfigSource::parse("builtin:code-assist");
+        let source = ConfigSource::parse("builtin:debug");
         match source {
-            ConfigSource::Builtin(name) => assert_eq!(name, "code-assist"),
+            ConfigSource::Builtin(name) => assert_eq!(name, "debug"),
             _ => panic!("Expected Builtin variant"),
         }
     }
 
     #[test]
     fn test_hats_source_parse_builtin() {
-        let source = HatsSource::parse("builtin:code-assist");
+        let source = HatsSource::parse("builtin:debug");
         match source {
-            HatsSource::Builtin(name) => assert_eq!(name, "code-assist"),
+            HatsSource::Builtin(name) => assert_eq!(name, "debug"),
             _ => panic!("Expected Builtin variant"),
         }
     }
@@ -320,8 +320,8 @@ mod tests {
         assert_eq!(source.to_cli_string(), "ralph.yml");
 
         // Builtin (legacy)
-        let source = ConfigSource::Builtin("code-assist".to_string());
-        assert_eq!(source.to_cli_string(), "builtin:code-assist");
+        let source = ConfigSource::Builtin("debug".to_string());
+        assert_eq!(source.to_cli_string(), "builtin:debug");
 
         // Remote URL
         let source = ConfigSource::Remote("https://example.com/ralph.yml".to_string());

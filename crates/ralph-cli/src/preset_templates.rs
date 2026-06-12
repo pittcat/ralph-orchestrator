@@ -228,7 +228,7 @@ pub struct TemplateManifest {
     /// Human-readable description of the template.
     pub description: String,
 
-    /// Category for grouping templates (e.g., "development", "review", "research").
+    /// Category for grouping templates (e.g., "development", "debugging", "workflow").
     #[serde(default)]
     pub category: String,
 
@@ -878,9 +878,9 @@ mod yaml_quote_tests {
             "my-flow",
             "test-flow2",
             "A simple two-hat linear workflow for learning and small tasks",
-            "Team code assist workflow",
+            "Team debug workflow",
             "Planner",
-            "code-assist",
+            "debug",
         ] {
             assert!(
                 !needs_quoting(input),
@@ -1034,7 +1034,7 @@ mod yaml_quote_tests {
         // Plain-scalar inputs must still be valid YAML.
         let cases = [
             "my-flow",
-            "code-assist",
+            "debug",
             "A simple two-hat linear workflow for learning and small tasks",
         ];
         for input in cases {
@@ -1064,10 +1064,7 @@ impl TemplateCatalog {
     pub fn template_names() -> Vec<&'static str> {
         vec![
             "minimal-linear",
-            "code-assist",
             "debug",
-            "research",
-            "review",
             "ce-executor-lite",
         ]
     }
@@ -1104,33 +1101,6 @@ impl TemplateCatalog {
                 ],
                 output_notes: Some("Creates a minimal two-hat workflow: Planner → Executor".to_string()),
             }),
-            "code-assist" => Some(TemplateManifest {
-                name: "code-assist".to_string(),
-                version: "1.0.0".to_string(),
-                description: "Flexible implementation workflow following TDD principles".to_string(),
-                category: "development".to_string(),
-                difficulty: TemplateDifficulty::Intermediate,
-                source: Some("builtin:code-assist".to_string()),
-                recommended_checks: CheckProfile::Strict,
-                placeholders: vec![
-                    TemplatePlaceholder {
-                        name: "preset_name".to_string(),
-                        description: "Name of the generated preset".to_string(),
-                        default: None,
-                    },
-                    TemplatePlaceholder {
-                        name: "description".to_string(),
-                        description: "Description of the preset".to_string(),
-                        default: None,
-                    },
-                    TemplatePlaceholder {
-                        name: "generated_at".to_string(),
-                        description: "RFC3339 timestamp of generation".to_string(),
-                        default: None,
-                    },
-                ],
-                output_notes: Some("Based on builtin:code-assist. Four hats: Planner, Builder, Critic, Finalizer".to_string()),
-            }),
             "debug" => Some(TemplateManifest {
                 name: "debug".to_string(),
                 version: "1.0.0".to_string(),
@@ -1157,60 +1127,6 @@ impl TemplateCatalog {
                     },
                 ],
                 output_notes: Some("Based on builtin:debug. Four hats: Investigator, Tester, Fixer, Verifier".to_string()),
-            }),
-            "research" => Some(TemplateManifest {
-                name: "research".to_string(),
-                version: "1.0.0".to_string(),
-                description: "Deep exploration for codebase analysis without code changes".to_string(),
-                category: "research".to_string(),
-                difficulty: TemplateDifficulty::Beginner,
-                source: Some("builtin:research".to_string()),
-                recommended_checks: CheckProfile::Authoring,
-                placeholders: vec![
-                    TemplatePlaceholder {
-                        name: "preset_name".to_string(),
-                        description: "Name of the generated preset".to_string(),
-                        default: None,
-                    },
-                    TemplatePlaceholder {
-                        name: "description".to_string(),
-                        description: "Description of the preset".to_string(),
-                        default: None,
-                    },
-                    TemplatePlaceholder {
-                        name: "generated_at".to_string(),
-                        description: "RFC3339 timestamp of generation".to_string(),
-                        default: None,
-                    },
-                ],
-                output_notes: Some("Based on builtin:research. Two hats: Researcher, Synthesizer. NO code changes.".to_string()),
-            }),
-            "review" => Some(TemplateManifest {
-                name: "review".to_string(),
-                version: "1.0.0".to_string(),
-                description: "Code review without making modifications".to_string(),
-                category: "review".to_string(),
-                difficulty: TemplateDifficulty::Intermediate,
-                source: Some("builtin:review".to_string()),
-                recommended_checks: CheckProfile::Strict,
-                placeholders: vec![
-                    TemplatePlaceholder {
-                        name: "preset_name".to_string(),
-                        description: "Name of the generated preset".to_string(),
-                        default: None,
-                    },
-                    TemplatePlaceholder {
-                        name: "description".to_string(),
-                        description: "Description of the preset".to_string(),
-                        default: None,
-                    },
-                    TemplatePlaceholder {
-                        name: "generated_at".to_string(),
-                        description: "RFC3339 timestamp of generation".to_string(),
-                        default: None,
-                    },
-                ],
-                output_notes: Some("Based on builtin:review. Three hats: Reviewer, Analyzer, Closer. NO code changes.".to_string()),
             }),
             "ce-executor-lite" => Some(TemplateManifest {
                 name: "ce-executor-lite".to_string(),
@@ -1259,10 +1175,7 @@ impl TemplateCatalog {
     pub fn raw_template(name: &str) -> Option<&'static str> {
         let body: &'static str = match name {
             "minimal-linear" => include_str!("../preset-templates/minimal-linear.yml"),
-            "code-assist" => include_str!("../preset-templates/code-assist.yml"),
             "debug" => include_str!("../preset-templates/debug.yml"),
-            "research" => include_str!("../preset-templates/research.yml"),
-            "review" => include_str!("../preset-templates/review.yml"),
             "ce-executor-lite" => include_str!("../preset-templates/ce-executor-lite.yml"),
             _ => return None,
         };
@@ -1557,12 +1470,12 @@ x_preset:
         let yaml = r#"
 x_preset:
   schema_version: 1
-  template: code-assist
+  template: debug
   template_version: "1.2.0"
   generated_by: "ralph preset new"
   generated_at: "2026-06-05T12:00:00Z"
   name: team-flow
-  description: "Team code assist workflow"
+  description: "Team debug workflow"
   check_profile: strict
   ralph_compat: ">=0.2.0"
 "#;
@@ -1771,12 +1684,9 @@ x_preset:
     fn catalog_template_names() {
         let names = TemplateCatalog::template_names();
         assert!(names.contains(&"minimal-linear"));
-        assert!(names.contains(&"code-assist"));
         assert!(names.contains(&"debug"));
-        assert!(names.contains(&"research"));
-        assert!(names.contains(&"review"));
         assert!(names.contains(&"ce-executor-lite"));
-        assert_eq!(names.len(), 6);
+        assert_eq!(names.len(), 3);
     }
 
     #[test]
@@ -1815,24 +1725,6 @@ x_preset:
         assert!(!result.contains("{{generated_at}}"));
 
         // Verify it's valid YAML
-        assert!(serde_yaml::from_str::<serde_yaml::Value>(&result).is_ok());
-    }
-
-    #[test]
-    fn catalog_render_code_assist() {
-        let result = TemplateCatalog::render_template(
-            "code-assist",
-            &[
-                ("preset_name", "team-code"),
-                ("description", "Team code assist workflow"),
-                ("generated_at", "2026-06-08T00:00:00Z"),
-            ],
-        )
-        .unwrap();
-
-        assert!(result.contains("name: team-code"));
-        assert!(result.contains("description: Team code assist workflow"));
-        assert!(!result.contains("{{preset_name}}"));
         assert!(serde_yaml::from_str::<serde_yaml::Value>(&result).is_ok());
     }
 

@@ -1747,12 +1747,9 @@ mod template_tests {
     fn list_templates_shows_all_template_names() {
         let templates = TemplateCatalog::template_names();
         assert!(templates.contains(&"minimal-linear"));
-        assert!(templates.contains(&"code-assist"));
         assert!(templates.contains(&"debug"));
-        assert!(templates.contains(&"research"));
-        assert!(templates.contains(&"review"));
         assert!(templates.contains(&"ce-executor-lite"));
-        assert_eq!(templates.len(), 6);
+        assert_eq!(templates.len(), 3);
     }
 
     // ── T2: preset list human format succeeds ────────────────────────────────
@@ -1775,7 +1772,7 @@ mod template_tests {
         let json = serde_json::to_string_pretty(&manifests).unwrap();
         // Verify it's valid JSON by parsing it back
         let parsed: Vec<TemplateManifest> = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.len(), 6);
+        assert_eq!(parsed.len(), 3);
     }
 
     // ── T4: preset show known template succeeds ───────────────────────────────

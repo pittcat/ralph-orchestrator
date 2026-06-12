@@ -250,25 +250,22 @@ mod tests {
     fn test_format_preset_list() {
         let output = format_preset_list();
         assert!(output.contains("Available hat collections:"));
-        assert!(output.contains("code-assist"));
+        assert!(output.contains("ce-executor-isolated"));
         assert!(output.contains("debug"));
-        assert!(output.contains("research"));
-        assert!(output.contains("review"));
-        assert!(output.contains("pdd-to-code-assist"));
         assert!(output.contains("Usage:"));
         assert!(output.contains("-H builtin:<collection>"));
     }
 
     #[test]
-    fn test_init_from_preset_code_assist_writes_config() {
+    fn test_init_from_preset_debug_writes_config() {
         let temp_dir = TempDir::new().expect("create temp dir");
         let _cwd = CwdGuard::set(temp_dir.path());
 
-        init_from_preset("code-assist", None, false).expect("init_from_preset succeeds");
+        init_from_preset("debug", None, false).expect("init_from_preset succeeds");
 
         let content = fs::read_to_string("ralph.yml").expect("read ralph.yml");
         assert!(
-            content.contains("build.start") && content.contains("LOOP_COMPLETE"),
+            content.contains("debug.start") && content.contains("DEBUG_COMPLETE"),
             "expected event loop configuration in generated config"
         );
     }

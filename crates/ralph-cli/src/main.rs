@@ -74,7 +74,7 @@ struct Cli {
 
     /// Hat collection source: file path, builtin:name, or URL.
     ///
-    /// Example: `-H builtin:code-assist` or `-H .ralph/hats/my-workflow.yml`
+    /// Example: `-H builtin:debug` or `-H .ralph/hats/my-workflow.yml`
     #[arg(short = 'H', long, global = true)]
     hats: Option<String>,
 
@@ -496,9 +496,9 @@ mod tests {
     use tempfile::TempDir;
     #[test]
     fn test_cli_parses_global_hats_flag() {
-        let cli = Cli::try_parse_from(["ralph", "run", "-H", "builtin:code-assist"])
+        let cli = Cli::try_parse_from(["ralph", "run", "-H", "builtin:debug"])
             .expect("CLI parse failed");
-        assert_eq!(cli.hats.as_deref(), Some("builtin:code-assist"));
+        assert_eq!(cli.hats.as_deref(), Some("builtin:debug"));
     }
 
     #[test]

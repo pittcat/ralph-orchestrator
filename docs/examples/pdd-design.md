@@ -38,4 +38,4 @@ Use this when you want:
 - explicit assumptions instead of blocked human Q&A,
 - and an adversarial design gate before implementation starts.
 
-If you want the longer supported workflow that continues through implementation, use `builtin:pdd-to-code-assist` instead.
+If you want the longer supported workflow that continues through implementation, use `builtin:ce-executor-isolated` instead.

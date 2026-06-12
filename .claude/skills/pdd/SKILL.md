@@ -145,8 +145,8 @@ If yes, create a concise PROMPT.md (under 100 lines) with:
 - Reference to `specs/{task_name}/`
 
 Suggest the appropriate command:
-- Full pipeline: `ralph run --config presets/pdd-to-code-assist.yml`
-- Simpler flow: `ralph run -c ralph.yml -H builtin:code-assist`
+- Full pipeline: `ralph run --config presets/ce-executor-isolated.yml`
+- Simpler flow: `ralph run -c ralph.yml -H builtin:ce-executor-isolated`
 
 If the user declines, acknowledge and conclude the session.
 

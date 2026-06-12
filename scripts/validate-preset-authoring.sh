@@ -65,7 +65,6 @@ header "Template Catalog Render Tests"
 # verify template names and manifest completeness.
 TEMPLATE_RENDER_TESTS=(
     "catalog_render_minimal_linear"
-    "catalog_render_code_assist"
 )
 
 for test_name in "${TEMPLATE_RENDER_TESTS[@]}"; do
@@ -129,7 +128,7 @@ else
     info "Checking public preset names in index.json..."
     # Check that all public presets are in index.json
     # Public presets are those in manifest.yml that are not commented out
-    for preset in autoresearch ce-executor-wave code-assist debug pdd-to-code-assist research review; do
+    for preset in autoresearch ce-executor-isolated ce-executor-wave debug; do
         if grep -q "\"name\": \"$preset\"" "$INDEX_JSON"; then
             pass "Public preset '$preset' found in index.json"
         else
@@ -156,7 +155,7 @@ if [[ ! -f "$ZSH_PLUGIN" ]]; then
     fail "scripts/ralph-zsh-plugin.zsh not found"
 else
     info "Checking zsh completion values..."
-    for preset in autoresearch ce-executor-wave code-assist debug pdd-to-code-assist research review; do
+    for preset in autoresearch ce-executor-isolated ce-executor-wave debug; do
         if grep -q "builtin:$preset" "$ZSH_PLUGIN"; then
             pass "Preset '$preset' found in zsh completion"
         else

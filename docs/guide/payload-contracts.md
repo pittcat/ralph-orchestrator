@@ -207,8 +207,6 @@ copy of the inlined schemas:
 | Schema file | Preset that owns the schemas | Status |
 |---|---|---|
 | `ce-executor.yml`         | `ce-executor`        | Deprecated reference copy (inlined into `presets/en/ce-executor.yml`) |
-| `code-assist.yml`         | `code-assist`        | Deprecated reference copy (inlined into `presets/en/code-assist.yml`) |
-| `pdd-to-code-assist.yml`  | `pdd-to-code-assist` | Deprecated reference copy (inlined into `presets/en/pdd-to-code-assist.yml`) |
 
 When adding a new schema to a builtin preset:
 
