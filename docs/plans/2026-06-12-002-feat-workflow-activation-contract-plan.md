@@ -2,10 +2,11 @@
 date: 2026-06-12
 plan-id: 2026-06-12-002
 type: feat
-status: active
+status: partial-complete
 origin: docs/brainstorms/2026-06-12-workflow-activation-contract-requirements.md
 related:
   - docs/plans/2026-06-12-001-fix-ce-executor-isolated-closure-gaps-plan.md
+  - docs/plans/2026-06-12-003-feat-wac-rollout-completion-plan.md
   - docs/report/2026-06-12-ce-executor-isolated-dispatch-gap-diagnosis.md
 scope: Workflow Activation Contract — 静态编排护栏 + isolated 运行时 handoff 兜底 + payload/wave 硬门，以 ce-executor-isolated 为验收夹具
 ---
@@ -19,6 +20,14 @@ scope: Workflow Activation Contract — 静态编排护栏 + isolated 运行时 
 本计划与 `docs/plans/2026-06-12-001-fix-ce-executor-isolated-closure-gaps-plan.md` **互补**：001 聚焦 plan-gate 竞态、schema bypass、wave stall 补偿等**闭环缺口**；本计划聚焦**机制层 contract**，使同类编排错误在启动前不可通过、handoff 在运行时不可静默卡死。两计划可并行实施，但 **preset 同步（WAC-U4）必须在静态 contract（WAC-U1–WAC-U2）与 handoff 索引（WAC-U3）就绪后再合入**，否则 builtin strict 门会阻断 CI。
 
 **001 协调门**：001 范围声明「不迁移 `queue.advance` 接收者」；本计划 WAC-U4 将移除 executor 的 `queue.advance` trigger 并改由 plan-gate 双 publish `queue.advance` + `work.ready`。合并前须修订 001 范围或冻结 001 对 preset 拓扑的假设，并评估对 001 `ReviewStepTracker` 的影响。
+
+**003 计划修订**：本计划的 WAC-U4 完成后，`ce-executor-wave` 与
+`ce-executor-isolated` 的 plan-gate 拓扑开始分叉（`ce-executor-wave`
+的 plan-gate 没有 self-loop `queue.advance`）。该分叉是 WAC 强制
+后的必然结果——`ce-executor-wave` 的 dispatcher 路径将外部事件
+动态注入静态图，WAC 因此无法静态闭合其 plan-gate。003 计划把
+这一分叉作为已记录事实处理（KTD-WRC-8），不再维护
+`shared_tail` 字段级镜像。
 
 ### 命名空间对照
 
@@ -56,7 +65,17 @@ scope: Workflow Activation Contract — 静态编排护栏 + isolated 运行时 
 ### 静态 Workflow Activation Contract
 
 - R1. `ralph preset check` 与 preflight 必须运行 WAC 规则族，输出带稳定 finding ID、hat、topic、action hint 的报告。
-- R2. **Re-emit trap**：若 hat H 的 `triggers` 包含 topic T，且 T 由另一 hat 的 `publishes` 声明，且 T ∉ H.`publishes`，则报 error（strict）或 warn（default）；finding 必须点名 re-emit 风险。
+- R2. **Re-emit trap (narrow semantics, 003 plan / WRC-U2 / KTD-WRC-1)**:
+   若 hat H 的 `triggers` 包含 topic T，且 T 由另一 hat 的 `publishes`
+   声明，且 T ∉ H.`publishes`，**且** T 是 H 的唯一非 wildcard
+   消费者，**且** H 的 publishes 没有 ≤4-hop 闭合路径到下游 hat
+   trigger 或 terminal/completion 主题，则报 error (strict) 或 warn
+   (default)；finding 必须点名 re-emit 风险。**字面 R2**（"任何 hat
+   触发自己不发布的 topic 都是 trap"）几乎对所有正常 hat 都成立
+   （如 executor 触发 work.ready 但仅发布 work.done），因此实现
+   自 002 即为窄语义；003 计划只是把窄语义同步到 plan 文档里。
+   Self-loop 豁免：`T ∈ H.triggers ∩ H.publishes`（KTD-4）。
+   002 字面定义保留为历史记录，但 **canonical** 解释为窄语义。
 - R3. **Activation egress**：对每个 `(hat, trigger)` 对，必须存在至少一条长度 ≤2 的可达路径：从该 hat 的任一 `publishes` topic 出发，能触发至少一个其他 hat 或命中 preset 声明的 terminal/completion 链。
 - R4. **Handoff pairing**：若 hat A publish topic T 且仅 hat B trigger T（唯一消费者），则 B 的 activation egress（R3）必须能到达该 plan 的下一业务阶段。
 - R5. **Trigger/publish 不对称**：若 hat H trigger topic T 但 H 的合法响应集合（`publishes` + 允许的 terminal 路径）无法闭合 T 所代表的业务阶段，报 error。覆盖 `work.retry` 等已知缺口。
@@ -99,6 +118,7 @@ scope: Workflow Activation Contract — 静态编排护栏 + isolated 运行时 
 | KTD-11 | **Handoff 超时配置键** | 新增 `event_loop.workflow_contract.handoff_dispatch_timeout_seconds`，默认 30，max 120 |
 | KTD-12 | **Preset 修复与机制同步交付** | executor 去掉 `queue.advance` trigger；plan-gate 双 publish `queue.advance` + `work.ready`；`work.retry` 对称化或移除 trigger。修后 `queue.advance` 可能无唯一消费者——**handoff priority / timeout 仅对 `work.ready` 等仍有唯一消费者的 topic 生效**；`queue.advance` 保留为进度/审计信号（R7 seed），不参与 R8 dispatch 保证 |
 | KTD-13 | **Escalation 禁止 ralph null terminal** | stall/handoff timeout → `review.failed` / `plan.blocked` 含结构化 payload，不注入 null `review.passed` |
+| KTD-14 | **Runner-injected topics**（003 计划 / WRC-U2 修订） | `starting_event`（在 R5 内）和 `cancellation_promise`（003 加入）由 loop runner 注入，不在用户 hat 的 publishes 集合中。WAC R5 把这两个 topic 视为隐式有发布者，从而避免误报。虚拟 `ralph` publisher（KTD-WRC-3，003 计划的 完整版本）推迟到 Tier-1 扩展期。 |
 
 ---
 
@@ -296,6 +316,16 @@ review.passed → plan-gate → queue.advance + work.ready → executor → work
 - 主事件流 handoff 与 terminal topic 的 null payload 计数为 0；`review.wave.ready` string 违规计数为 0（normalize 后不计违规）
 - CI 新增 contract 回归：`cargo test` / BDD scenario 覆盖 AE1、AE3；replay fixture 覆盖 AE2 可自动化部分；`scripts/validate-builtin-presets.sh --strict` 纳入 CI（WAC-U8）
 - 同类故障复发时，操作者首选动作变为「读 preset check finding 修编排」，而非「再改一轮 instructions」
+
+**003 计划合并验收**（WRC-U7）：上述目标中 WAC 静态规则、handoff
+优先级 dispatch、payload 硬门、wave 硬门已落地。R6「builtin 违反
+WAC 必须拒绝启动」、R8「30s handoff 超时 escalation」、R13
+（preset 同步）等验收项被 003 计划（`docs/plans/2026-06-12-003`）
+承接并扩展为 Tier-0/Tier-1/Tier-2 分级门禁。R14–R15 全量
+`2026-06-10-003` 8-step dogfood 仍 deferred。**本计划 status
+标为 `partial-complete`**——WAC 机制已就位、但硬门未完全上、且
+R2 字面定义与窄语义实现存在文档漂移。后续工作见
+`docs/plans/2026-06-12-003-feat-wac-rollout-completion-plan.md`。
 
 ---
 
