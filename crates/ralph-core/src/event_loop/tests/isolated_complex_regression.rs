@@ -301,7 +301,7 @@ fn u2_real_fan_out_two_branch_hats_pending_simultaneously() {
     let hat_count = user_hat_count.max(2); // bound below 2 if registry is tiny
     let fairness_bound = hat_count * 2;
     for _ in 0..fairness_bound {
-        match event_loop.bus.select_next_hat_with_pending() {
+        match event_loop.bus.select_next_hat_with_pending(None) {
             Some(sel) => {
                 let name = sel.to_string();
                 selected_sequence.push(name);

@@ -67,3 +67,47 @@ pub const FINDING_TASK_PUBLISHER_NOT_COORDINATED: &str = "preset.task_publisher_
 /// `LintStrictness` and admits no configuration, env var, test
 /// switch, or hidden compat opt-out (R1-R5).
 pub const FINDING_MULTI_HAT_REQUIRES_ISOLATED: &str = "preset.multi_hat_requires_isolated";
+
+// ──────────────────────────────────────────────────────────────────────────
+// WAC-U1 (2026-06-12-002): Workflow Activation Contract finding IDs
+// ──────────────────────────────────────────────────────────────────────────
+
+/// R2: A hat triggers on a topic published by another hat but does
+/// not declare the topic in its own `publishes` — a re-emit hazard.
+///
+/// `Warn` in default mode, `Error` in strict. Builtin embedded
+/// presets force `Error` regardless of CLI strictness (WAC-U2 R6).
+pub const FINDING_RE_EMIT_TRAP: &str = "preset.re_emit_trap";
+
+/// R3: A hat has no activation egress — none of its publishes reach
+/// a downstream hat's trigger or a terminal/completion topic within
+/// the bounded hop count (≤2 by default).
+///
+/// `Warn` in default mode, `Error` in strict. Builtin embedded
+/// presets force `Error` (WAC-U2 R6).
+pub const FINDING_ACTIVATION_EGRESS_MISSING: &str = "preset.activation_egress_missing";
+
+/// R4: A topic with exactly one consumer (a handoff) is consumed by
+/// a hat whose own publishes lead to a dead end (no downstream hat
+/// trigger or terminal reachable within 2 hops).
+///
+/// `Warn` in default mode, `Error` in strict. Builtin embedded
+/// presets force `Error` (WAC-U2 R6).
+pub const FINDING_HANDOFF_PAIRING_BROKEN: &str = "preset.handoff_pairing_broken";
+
+/// R5: A hat triggers on a topic that has no publisher and no
+/// subscriber — the trigger can never be satisfied and the workflow
+/// stage it represents cannot close.
+///
+/// `Warn` in default mode, `Error` in strict. Builtin embedded
+/// presets force `Error` (WAC-U2 R6).
+pub const FINDING_TRIGGER_PUBLISH_ASYMMETRY: &str = "preset.trigger_publish_asymmetry";
+
+/// KTD-6: The handoff topic seed list and the auto-derived unique
+/// consumer topics conflict (a seed resolves to a multi-consumer
+/// topic in the graph, or vice versa). The derived side wins per
+/// KTD-6, and the finding surfaces the conflict for the operator.
+///
+/// `Warn` in default mode, `Error` in strict. Builtin embedded
+/// presets force `Error` (WAC-U2 R6).
+pub const FINDING_HANDOFF_SEED_DERIVED_CONFLICT: &str = "preset.handoff_seed_derived_conflict";

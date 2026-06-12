@@ -84,6 +84,11 @@ event_loop:
   event_policy:
     enabled: true
     mode: enforce
+    # WAC-U4 (2026-06-12-002): reject_with_resume 是 R10 (白名单 topic
+    # 的 null payload) 和 plan-gate / execution_contract 硬门违规的
+    # 标准处理动作。Agent 发出 null 或 string-as-object payload 时
+    # 必须看到 `task.resume` 路由,而不是静默 warn-through。
+    on_violation: reject_with_resume
     schemas:
       work.ready:
         required_fields: [plan_name, plan_path, task_id, task_key, step, complexity]
@@ -279,7 +284,11 @@ hats:
   executor:
     name: "⚙️ 执行器"
     description: "遵循 plan 内容进行 TDD 实现，每次迭代一个 runtime task。"
-    triggers: ["work.ready", "queue.advance", "work.retry", "fix.plan.ready"]
+    # WAC-U4 (2026-06-12-002): 移除 `queue.advance`(re-emit trap,
+    # plan-gate 拥有 step 推进权) 和 `work.retry`(preset 内无 publisher,
+    # 会触发 `lint.preset.trigger_publish_asymmetry`)。Fix plan 仍
+    # 通过 `fix.plan.ready`(debug-resolver handoff)消费。
+    triggers: ["work.ready", "fix.plan.ready"]
     publishes: ["work.done", "work.failed"]
     # U2: default_publishes 已移除 — 执行器必须显式 emit work.done 或 work.failed。
     # 无事件 gate (U1) 会在 agent 忘记 emit 时触发。
@@ -1041,8 +1050,16 @@ hats:
   plan-gate:
     name: "🚦 计划门控"
     description: "对账 review 结果与 plan 进度，决定 queue.advance 或 plan.complete。"
-    triggers: ["review.passed", "review.complete", "work.failed", "loop.cancel"]
-    publishes: ["queue.advance", "plan.complete", "plan.blocked"]
+    triggers: ["review.passed", "review.complete", "work.failed", "loop.cancel", "queue.advance"]
+    # WAC-U4 (2026-06-12-002): plan-gate 双 publish `queue.advance`
+    # (进度/审计信号,保留给 observer 和 timeline) 和 `work.ready`
+    # (executor 的 handoff,带完整 task payload)。Executor 永远不
+    # 再 emit `queue.advance`;priority dispatcher 在 WAC 超时内把
+    # `work.ready` 路由给它。KTD-12。`queue.advance` 也在
+    # `triggers` 中(自环,KTD-4 豁免),使 runtime contract
+    # aggregator 看到 subscriber,hat 用自环在 `progress.md` 中
+    # 记录 step 转换(按 instructions)。
+    publishes: ["queue.advance", "work.ready", "plan.complete", "plan.blocked"]
     default_publishes: "plan.blocked"
     instructions: |
       ## PLAN GATE MODE — Plan 全局进度对账与路由

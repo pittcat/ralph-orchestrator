@@ -339,6 +339,114 @@ fn test_isolated_boundary_violation() {
 }
 
 #[test]
+fn test_workflow_activation_contract_re_emit_trap() {
+    // WAC-U8 AE1 (2026-06-12-002): a hat that triggers on a
+    // topic published by another hat and does not declare that
+    // topic in its own `publishes` is a re-emit trap. The
+    // strict WAC lint must surface this as a finding.
+    use ralph_core::preset_lint::run_workflow_activation_contract;
+    let config_yaml = r#"
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+hats:
+  plan_gate:
+    name: "PlanGate"
+    triggers: ["work.start"]
+    publishes: ["queue.advance"]
+  executor:
+    name: "Executor"
+    triggers: ["queue.advance"]
+    publishes: ["work.done"]
+"#;
+    let config: ralph_core::RalphConfig =
+        serde_yaml::from_str(config_yaml).expect("parse WAC AE1 fixture");
+    let findings = run_workflow_activation_contract(&config, true);
+    let re_emit = findings
+        .iter()
+        .find(|f| f.id == "preset.re_emit_trap")
+        .expect("strict WAC must surface the re_emit_trap finding for executor+queue.advance");
+    assert_eq!(re_emit.hat.as_deref(), Some("executor"));
+    assert_eq!(re_emit.topic.as_deref(), Some("queue.advance"));
+}
+
+#[test]
+fn test_workflow_activation_contract_handoff_pairing_broken() {
+    // WAC-U8 AE1 sibling: a handoff (unique consumer) whose
+    // publishes do not reach a terminal topic is flagged by
+    // R4. The executor consumes `work.ready` uniquely and
+    // emits a topic that no other hat triggers on, so R4 fires.
+    use ralph_core::preset_lint::run_workflow_activation_contract;
+    let config_yaml = r#"
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+hats:
+  plan_gate:
+    name: "PlanGate"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+  executor:
+    name: "Executor"
+    triggers: ["work.ready"]
+    publishes: ["executor.dead_end"]
+"#;
+    let config: ralph_core::RalphConfig =
+        serde_yaml::from_str(config_yaml).expect("parse WAC AE1 handoff fixture");
+    let findings = run_workflow_activation_contract(&config, true);
+    let finding = findings
+        .iter()
+        .find(|f| f.id == "preset.handoff_pairing_broken")
+        .expect("strict WAC must surface the handoff_pairing_broken finding for work.ready+executor");
+    assert_eq!(finding.topic.as_deref(), Some("work.ready"));
+    assert_eq!(finding.hat.as_deref(), Some("executor"));
+}
+
+#[test]
+fn test_workflow_activation_contract_null_payload_rejected() {
+    // WAC-U8 AE3: a null `review.passed` payload is hard-rejected
+    // by `event_policy::validate_event` even when the policy is
+    // in Observe mode (KTD-9). The dispatcher never sees the
+    // event in the validated stream.
+    use ralph_core::config::{EventPolicyConfig, EventPolicyMode, ViolationAction};
+    use ralph_core::{PolicyDecision, PolicyRuntimeState, validate_event};
+
+    let mut config = EventPolicyConfig::default();
+    config.enabled = true;
+    config.mode = EventPolicyMode::Observe;
+    config.on_violation = ViolationAction::RejectWithResume;
+
+    let mut state = PolicyRuntimeState::default();
+    let decision = validate_event("review.passed", None, &config, &mut state);
+    assert!(
+        matches!(decision, PolicyDecision::RejectWithResume(_)),
+        "WAC R10 must RejectWithResume null review.passed, got {:?}",
+        decision
+    );
+}
+
+#[test]
+fn test_workflow_activation_contract_handoff_priority_dispatch() {
+    // WAC-U8 AE5: when the EventBus's priority pre-emption is
+    // armed and the priority hat has a non-empty pending
+    // queue, the dispatcher selects that hat immediately,
+    // skipping the round-robin scan.
+    use ralph_proto::{Event, EventBus, Hat, HatId};
+
+    let mut bus = EventBus::new();
+    for id in ["alpha", "beta", "gamma"] {
+        bus.register(Hat::new(id, id).subscribe("work.*"));
+    }
+    for (id, label) in [("alpha", "a1"), ("beta", "b1"), ("gamma", "g1")] {
+        bus.publish(Event::new("work", label).with_target(id));
+    }
+    let sel = bus
+        .select_next_hat_with_pending(Some(&HatId::from("gamma")))
+        .expect("priority pre-emption must select gamma");
+    assert_eq!(sel.as_str(), "gamma");
+}
+
+#[test]
 fn test_isolated_with_event_projection() {
     use std::io::Write;
 

@@ -28,16 +28,34 @@ pub mod finding_id;
 pub mod multi_hat;
 pub mod ownership;
 pub mod topic_format;
+pub mod workflow_activation;
 
 #[cfg(test)]
 mod tests;
 
 pub use coordinator::check_coordinator_rules;
 pub use finding_id::{
-    FINDING_COORDINATOR_MISSING, FINDING_CROSS_HAT_UNAUTHORIZED_PUBLISH,
-    FINDING_INVALID_TOPIC_FORMAT, FINDING_MISSING_TOPIC_OWNER, FINDING_MULTI_HAT_REQUIRES_ISOLATED,
-    FINDING_OWNER_NOT_PUBLISHER, FINDING_OWNER_UNKNOWN_HAT, FINDING_TASK_PUBLISHER_NOT_COORDINATED,
+    FINDING_ACTIVATION_EGRESS_MISSING, FINDING_COORDINATOR_MISSING,
+    FINDING_CROSS_HAT_UNAUTHORIZED_PUBLISH, FINDING_HANDOFF_PAIRING_BROKEN,
+    FINDING_HANDOFF_SEED_DERIVED_CONFLICT, FINDING_INVALID_TOPIC_FORMAT,
+    FINDING_MISSING_TOPIC_OWNER, FINDING_MULTI_HAT_REQUIRES_ISOLATED,
+    FINDING_OWNER_NOT_PUBLISHER, FINDING_OWNER_UNKNOWN_HAT, FINDING_RE_EMIT_TRAP,
+    FINDING_TASK_PUBLISHER_NOT_COORDINATED, FINDING_TRIGGER_PUBLISH_ASYMMETRY,
     FINDING_WHITELIST_EXEMPT_TOPIC,
+};
+
+// Re-export the WAC top-level entry point so callers (and the
+// WAC-U8 BDD scenarios) can invoke the rule family without
+// reaching into the module directly. The function is NOT yet
+// wired into `run_preset_lint`: per the
+// `2026-06-12-002-feat-workflow-activation-contract-plan`
+// phasing, WAC joins the public `run_preset_lint` pipeline in
+// WAC-U8 once the builtin presets have been migrated to pass
+// the WAC rules (WAC-U4). Until then the function is reachable
+// for direct callers (CLI diagnostic, BDD scenarios) but does
+// not affect the run gate.
+pub use workflow_activation::{
+    HandoffGraph, run_workflow_activation_contract,
 };
 pub use multi_hat::check_multi_hat_isolation;
 pub use ownership::{check_owner_references, check_ownership_rules};

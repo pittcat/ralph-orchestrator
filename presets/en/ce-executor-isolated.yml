@@ -103,6 +103,12 @@ event_loop:
   event_policy:
     enabled: true
     mode: enforce
+    # WAC-U4 (2026-06-12-002): reject_with_resume is the canonical
+    # violation action for R10 (null payload on whitelist topics)
+    # and the plan-gate / execution_contract hard gates. Agents
+    # that emit a null or string-as-object payload must see a
+    # `task.resume` routing rather than a silent warn-through.
+    on_violation: reject_with_resume
     # U3: topic-deny rules — exact hat_id + topic match, no glob.
     # executor must never emit build.done (it is a review-synthesizer output).
     # U4: also lock ralph (the loop-runner fallback hat) out of every
@@ -356,7 +362,12 @@ hats:
   executor:
     name: "⚙️ Executor"
     description: "TDD implementer following plan content, one runtime task per iteration."
-    triggers: ["work.ready", "queue.advance", "work.retry", "fix.plan.ready"]
+    # WAC-U4 (2026-06-12-002): removed `queue.advance` (re-emit
+    # trap; plan-gate owns step progression) and `work.retry` (no
+    # publisher anywhere in the preset; surfaced as
+    # `lint.preset.trigger_publish_asymmetry`). Fix plans are
+    # still consumed via `fix.plan.ready` (debug-resolver handoff).
+    triggers: ["work.ready", "fix.plan.ready"]
     publishes: ["work.done", "work.failed"]
     terminal_events: ["work.done", "work.failed"]
     # U2: default_publishes removed — executor MUST explicitly emit work.done or work.failed.
@@ -1394,8 +1405,18 @@ hats:
   plan-gate:
     name: "🚦 Plan Gate"
     description: "Reconciles review verdict against plan progress and decides queue.advance vs plan.complete."
-    triggers: ["review.passed", "review.complete", "work.failed", "loop.cancel"]
-    publishes: ["queue.advance", "plan.complete", "plan.blocked"]
+    triggers: ["review.passed", "review.complete", "work.failed", "loop.cancel", "queue.advance"]
+    # WAC-U4 (2026-06-12-002): plan-gate dual-publishes
+    # `queue.advance` (progress / audit signal, retained for
+    # observers and timeline) and `work.ready` (the executor's
+    # handoff with the full task payload). The executor never
+    # re-emits `queue.advance`; the priority dispatcher routes
+    # `work.ready` to it within the WAC timeout. KTD-12.
+    # `queue.advance` is also in `triggers` (self-loop, KTD-4
+    # exempt) so the runtime contract aggregator sees a
+    # subscriber — the hat uses the self-loop to record the
+    # step transition in `progress.md` (per instructions).
+    publishes: ["queue.advance", "work.ready", "plan.complete", "plan.blocked"]
     default_publishes: "plan.blocked"
     terminal_events: ["queue.advance", "plan.complete", "plan.blocked"]
     instructions: |

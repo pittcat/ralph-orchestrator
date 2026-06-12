@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::event_policy::EventPolicyConfig;
 use super::execution_contracts::ExecutionContractsConfig;
 use super::state_machine::StateMachineConfig;
+use super::workflow_contract::WorkflowContractConfig;
 use super::workflow_guards::{HatExecutionMode, WorkflowGuardsConfig};
 
 /// Schema for validating events of a specific topic.
@@ -196,6 +197,12 @@ pub struct EventLoopConfig {
     /// before the event can trigger downstream hats.
     #[serde(default)]
     pub execution_contracts: Option<ExecutionContractsConfig>,
+
+    /// WAC-U3 (2026-06-12-002): Workflow Activation Contract
+    /// runtime configuration. Optional; when absent the defaults
+    /// (30s dispatch timeout, R7 seed handoff topics) apply.
+    #[serde(default)]
+    pub workflow_contract: Option<WorkflowContractConfig>,
 }
 
 impl Default for EventLoopConfig {
@@ -224,6 +231,7 @@ impl Default for EventLoopConfig {
             phase_config: None,
             verdict_gate: None,
             execution_contracts: None,
+            workflow_contract: None,
         }
     }
 }

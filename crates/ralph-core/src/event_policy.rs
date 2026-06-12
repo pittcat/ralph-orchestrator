@@ -308,6 +308,27 @@ pub fn is_system_topic(topic: &str) -> bool {
     topic.starts_with("event.") || topic.starts_with("human.")
 }
 
+/// WAC-U7 (2026-06-12-002) R10: hard-reject topics for which a
+/// null payload is never acceptable. Any event whose topic is in
+/// this set and whose payload is `None` is rejected with
+/// `RejectWithResume` regardless of `EventPolicyMode::Observe`.
+/// The list is the minimum required by R10; it is intentionally
+/// not configurable so the operational contract is uniform
+/// across presets.
+pub const NULL_PAYLOAD_REJECT_TOPICS: &[&str] = &[
+    "review.passed",
+    "review.failed",
+    "review.complete",
+    "work.done",
+    "queue.advance",
+    "review.wave.ready",
+];
+
+/// Returns `true` if `topic` is in [`NULL_PAYLOAD_REJECT_TOPICS`].
+pub fn is_null_payload_rejected_topic(topic: &str) -> bool {
+    NULL_PAYLOAD_REJECT_TOPICS.contains(&topic)
+}
+
 /// Check topic-deny rules against a (hat, topic) pair.
 ///
 /// When the event policy is in `Enforce` mode and the (hat_id, topic) pair
@@ -363,6 +384,28 @@ pub fn validate_event(
 
     let mut findings = Vec::new();
 
+    // WAC-U7 R10 (2026-06-12-002): null payloads on the
+    // `NULL_PAYLOAD_REJECT_TOPICS` whitelist are hard-rejected
+    // with `RejectWithResume`, overriding any `Observe`-mode
+    // downgrades. The check is applied before schema
+    // validation so a topic without an explicit `schemas`
+    // entry still gets the R10 treatment. KTD-9.
+    if payload.is_none() && is_null_payload_rejected_topic(topic) {
+        let finding = PolicyFinding {
+            topic: topic.to_string(),
+            violation_type: ViolationType::PayloadTypeMismatch {
+                expected: "non-null payload".to_string(),
+                actual: "null".to_string(),
+            },
+            message: format!(
+                "WAC R10: null payload on whitelist topic `{}` is hard-rejected; \
+                 a structured payload is required for this topic",
+                topic
+            ),
+        };
+        return PolicyDecision::RejectWithResume(finding);
+    }
+
     // Terminal monotonicity check (read-only on state; caller applies terminal_observed)
     if state.terminal_observed && config.business_topics.contains(&topic.to_string()) {
         let terminal_topic = config.terminal_topics.first().cloned().unwrap_or_default();
@@ -398,9 +441,23 @@ pub fn validate_event(
         if let Some(expected_type) = &schema.payload
             && matches!(expected_type, PayloadType::JsonObject)
         {
+            // WAC-U7 R11 (2026-06-12-002) KTD-10: a string payload
+            // that parses to a JSON object is normalized to the
+            // serialized object form before required-field
+            // validation runs. Non-object strings fall through
+            // to the regular type-mismatch finding. The
+            // normalized string is captured in
+            // `normalized_payload` so the required-fields block
+            // below sees the object form.
+            let mut normalized_payload: Option<String> = None;
             match payload {
                 Some(p) => match serde_json::from_str::<Value>(p) {
-                    Ok(Value::Object(_)) => {}
+                    Ok(Value::Object(map)) => {
+                        normalized_payload = Some(
+                            serde_json::to_string(&Value::Object(map))
+                                .unwrap_or_else(|_| p.to_string()),
+                        );
+                    }
                     Ok(other) => {
                         findings.push(PolicyFinding {
                             topic: topic.to_string(),
@@ -410,6 +467,7 @@ pub fn validate_event(
                             },
                             message: format!("Payload must be JSON object, got {:?}", other),
                         });
+                        normalized_payload = Some(p.to_string());
                     }
                     Err(e) => {
                         findings.push(PolicyFinding {
@@ -420,6 +478,7 @@ pub fn validate_event(
                             },
                             message: format!("Payload is not valid JSON: {}", e),
                         });
+                        normalized_payload = Some(p.to_string());
                     }
                 },
                 None => {
@@ -433,34 +492,70 @@ pub fn validate_event(
                     });
                 }
             }
-        }
 
-        // Required fields
-        if !schema.required_fields.is_empty() {
-            if let Some(p) = payload {
-                if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p) {
-                    for field in &schema.required_fields {
-                        if extract_json_field(&Value::Object(obj.clone()), field).is_none() {
-                            findings.push(PolicyFinding {
-                                topic: topic.to_string(),
-                                violation_type: ViolationType::MissingRequiredField {
-                                    field: field.clone(),
-                                },
-                                message: format!("Missing required field: {}", field),
-                            });
+            // Required fields — applied AFTER normalize (KTD-10).
+            if !schema.required_fields.is_empty() {
+                let payload_for_required = normalized_payload.as_deref().or(payload);
+                if let Some(p) = payload_for_required {
+                    if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p) {
+                        for field in &schema.required_fields {
+                            if extract_json_field(&Value::Object(obj.clone()), field).is_none() {
+                                findings.push(PolicyFinding {
+                                    topic: topic.to_string(),
+                                    violation_type: ViolationType::MissingRequiredField {
+                                        field: field.clone(),
+                                    },
+                                    message: format!("Missing required field: {}", field),
+                                });
+                            }
                         }
                     }
+                } else {
+                    // Payload is missing but required fields are specified
+                    for field in &schema.required_fields {
+                        findings.push(PolicyFinding {
+                            topic: topic.to_string(),
+                            violation_type: ViolationType::MissingRequiredField {
+                                field: field.clone(),
+                            },
+                            message: format!(
+                                "Missing required field '{}' (payload is missing)",
+                                field
+                            ),
+                        });
+                    }
                 }
-            } else {
-                // Payload is missing but required fields are specified
-                for field in &schema.required_fields {
-                    findings.push(PolicyFinding {
-                        topic: topic.to_string(),
-                        violation_type: ViolationType::MissingRequiredField {
-                            field: field.clone(),
-                        },
-                        message: format!("Missing required field '{}' (payload is missing)", field),
-                    });
+            }
+        } else {
+            // Required fields (no json_object payload requirement)
+            if !schema.required_fields.is_empty() {
+                if let Some(p) = payload {
+                    if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p) {
+                        for field in &schema.required_fields {
+                            if extract_json_field(&Value::Object(obj.clone()), field).is_none() {
+                                findings.push(PolicyFinding {
+                                    topic: topic.to_string(),
+                                    violation_type: ViolationType::MissingRequiredField {
+                                        field: field.clone(),
+                                    },
+                                    message: format!("Missing required field: {}", field),
+                                });
+                            }
+                        }
+                    }
+                } else {
+                    for field in &schema.required_fields {
+                        findings.push(PolicyFinding {
+                            topic: topic.to_string(),
+                            violation_type: ViolationType::MissingRequiredField {
+                                field: field.clone(),
+                            },
+                            message: format!(
+                                "Missing required field '{}' (payload is missing)",
+                                field
+                            ),
+                        });
+                    }
                 }
             }
         }
@@ -2029,5 +2124,125 @@ mod tests {
             "U1 gate must only fire on review.passed, not other topics, got {:?}",
             decision
         );
+    }
+
+    // ── WAC-U7 (2026-06-12-002): payload hard gate ──
+
+    /// T-U7-01 / R10: null `review.passed` payload is hard-rejected
+    /// even when `EventPolicyMode::Observe` is configured.
+    #[test]
+    fn wac_r10_null_payload_on_whitelist_topic_is_rejected() {
+        let mut config = test_config_with_enforce_and_resume();
+        // Switch the policy into Observe mode to confirm the R10
+        // gate is mode-agnostic.
+        config.mode = EventPolicyMode::Observe;
+        let mut state = PolicyRuntimeState::default();
+        let decision = validate_event("review.passed", None, &config, &mut state);
+        assert!(
+            matches!(decision, PolicyDecision::RejectWithResume(_)),
+            "R10 must RejectWithResume even in Observe mode, got {:?}",
+            decision
+        );
+    }
+
+    /// R10 also covers the other whitelist topics:
+    /// `work.done`, `queue.advance`, `review.wave.ready`, etc.
+    #[test]
+    fn wac_r10_null_payload_rejects_every_whitelist_topic() {
+        let config = test_config_with_enforce_and_resume();
+        let mut state = PolicyRuntimeState::default();
+        for topic in [
+            "review.passed",
+            "review.failed",
+            "review.complete",
+            "work.done",
+            "queue.advance",
+            "review.wave.ready",
+        ] {
+            let mut s = PolicyRuntimeState::default();
+            let decision = validate_event(topic, None, &config, &mut s);
+            assert!(
+                matches!(decision, PolicyDecision::RejectWithResume(_)),
+                "R10 must reject null payload on `{topic}`, got {:?}",
+                decision
+            );
+        }
+    }
+
+    /// T-U7-02 / R11: a string payload that is a parseable JSON
+    /// object is normalized to the object form and accepted.
+    /// Required-field validation runs against the normalized
+    /// object, not the original string.
+    #[test]
+    fn wac_r11_string_payload_normalizes_to_object() {
+        let mut config = test_config_with_enforce_and_resume();
+        config.schemas.insert(
+            "review.wave.ready".to_string(),
+            EventSchema {
+                payload: Some(PayloadType::JsonObject),
+                required_fields: vec!["dimension".to_string(), "plan_name".to_string()],
+                allowed_values: HashMap::new(),
+            },
+        );
+        let mut state = PolicyRuntimeState::default();
+        // The payload is a JSON-string-of-an-object.
+        let payload = r#"{"dimension":"code-quality","plan_name":"p1"}"#;
+        let decision = validate_event("review.wave.ready", Some(payload), &config, &mut state);
+        assert!(
+            matches!(decision, PolicyDecision::Accept),
+            "string-as-object must normalize and accept, got {:?}",
+            decision
+        );
+    }
+
+    /// T-U7-03 / R11: a string payload that is NOT a valid JSON
+    /// object is rejected (cannot be normalized).
+    #[test]
+    fn wac_r11_string_payload_not_json_is_rejected() {
+        let mut config = test_config_with_enforce_and_resume();
+        config.schemas.insert(
+            "review.wave.ready".to_string(),
+            EventSchema {
+                payload: Some(PayloadType::JsonObject),
+                required_fields: vec!["dimension".to_string()],
+                allowed_values: HashMap::new(),
+            },
+        );
+        let mut state = PolicyRuntimeState::default();
+        let decision =
+            validate_event("review.wave.ready", Some("not-a-json"), &config, &mut state);
+        assert!(
+            matches!(decision, PolicyDecision::RejectWithResume(_)),
+            "non-JSON string must be rejected, got {:?}",
+            decision
+        );
+    }
+
+    /// T-U7-07: R10 hard-rejects null payloads even when the
+    /// rest of the policy is in `Observe` mode. The other
+    /// findings (terminal monotonicity, etc.) still fall through
+    /// to `Warn` per the existing behaviour, but R10 specifically
+    /// escalates to `RejectWithResume`.
+    #[test]
+    fn wac_r10_overrides_observe_mode_for_null_whitelist_payload() {
+        let mut config = test_config_with_enforce_and_resume();
+        config.mode = EventPolicyMode::Observe;
+        let mut state = PolicyRuntimeState::default();
+        let decision = validate_event("work.done", None, &config, &mut state);
+        assert!(
+            matches!(decision, PolicyDecision::RejectWithResume(_)),
+            "R10 must not downgraded by Observe mode, got {:?}",
+            decision
+        );
+    }
+
+    /// Helper: build a minimal `EventPolicyConfig` with Enforce
+    /// mode + RejectWithResume. Reused by the WAC tests above.
+    fn test_config_with_enforce_and_resume() -> EventPolicyConfig {
+        let mut config = EventPolicyConfig::default();
+        config.enabled = true;
+        config.mode = EventPolicyMode::Enforce;
+        config.on_violation = ViolationAction::RejectWithResume;
+        config
     }
 }

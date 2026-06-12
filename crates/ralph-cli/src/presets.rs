@@ -4519,9 +4519,19 @@ mod tests {
 
     #[test]
     fn test_ce_executor_wave_shared_tail_matches_ce_executor() {
-        // P1-3: The back-half pipeline (fixer → debug-resolver → plan-gate → shipper → reporter)
+        // P1-3: The back-half pipeline (fixer → debug-resolver → shipper → reporter)
         // is intentionally shared between ce-executor and ce-executor-wave. This test
-        // gates against accidental drift in triggers/publishes/default_publishes.
+        // gates against accidental drift in triggers/publishes/default_publishes for
+        // those hats.
+        //
+        // WAC-U4 (2026-06-12-002) divergence: `ce-executor-isolated`
+        // plan-gate dual-publishes `work.ready` (the executor handoff)
+        // while `ce-executor-wave` does not (its front-half uses a
+        // coordinator + parallel/serial-executor topology, where
+        // queue.advance is the dispatcher signal to the coordinator
+        // and `work.batch.ready` is the executor handoff). The
+        // plan-gate hat is therefore no longer in the shared-tail
+        // set; it is asserted separately for each preset.
         let wave_preset = get_preset("ce-executor-wave").expect("ce-executor-wave should exist");
         let wave_config = RalphConfig::parse_yaml(wave_preset.content)
             .expect("ce-executor-wave YAML should parse");
@@ -4533,7 +4543,6 @@ mod tests {
         let shared_hats = [
             "fixer",
             "debug-resolver",
-            "plan-gate",
             "shipper",
             "reporter",
         ];
@@ -4564,6 +4573,36 @@ mod tests {
                 hat_name
             );
         }
+
+        // WAC-U4: plan-gate assertions are preset-specific.
+        // `ce-executor-isolated` plan-gate must dual-publish
+        // `work.ready` (executor handoff); `ce-executor-wave`
+        // plan-gate must keep `queue.advance` as the coordinator
+        // dispatch signal (no self-loop, no `work.ready`).
+        let iso_plan_gate = base_config
+            .hats
+            .get("plan-gate")
+            .expect("ce-executor-isolated must have plan-gate");
+        assert!(
+            iso_plan_gate.publishes.iter().any(|p| p == "work.ready"),
+            "WAC-U4: ce-executor-isolated plan-gate must publish `work.ready` (executor handoff)"
+        );
+        assert!(
+            iso_plan_gate.triggers.iter().any(|p| p == "queue.advance"),
+            "WAC-U4: ce-executor-isolated plan-gate must self-trigger `queue.advance` (audit signal)"
+        );
+        let wave_plan_gate = wave_config
+            .hats
+            .get("plan-gate")
+            .expect("ce-executor-wave must have plan-gate");
+        assert!(
+            !wave_plan_gate.publishes.iter().any(|p| p == "work.ready"),
+            "WAC-U4: ce-executor-wave plan-gate must NOT publish `work.ready` (wave mode uses work.batch.ready)"
+        );
+        assert!(
+            !wave_plan_gate.triggers.iter().any(|p| p == "queue.advance"),
+            "WAC-U4: ce-executor-wave plan-gate must NOT self-trigger `queue.advance` (coordinator owns it)"
+        );
 
         // Verify both presets share the same core safety constraints in instructions
         let wave_content = wave_preset.content;

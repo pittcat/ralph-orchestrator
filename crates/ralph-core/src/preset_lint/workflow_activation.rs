@@ -1,0 +1,843 @@
+//! WAC-U1: Workflow Activation Contract (WAC) static rules.
+//!
+//! Re-emit trap (R2), activation egress (R3), handoff pairing (R4),
+//! and trigger/publish asymmetry (R5). All four rules consume a
+//! shared [`HandoffGraph`] built from [`RalphConfig::hats`] (using
+//! `publishes` only — `default_publishes` is intentionally excluded
+//! per KTD-5 / MH-U3 alignment).
+//!
+//! The WAC rule family lives next to the existing U1/U2/U3 lint
+//! modules (`topic_format`, `ownership`, `coordinator`, `multi_hat`)
+//! so it can be wired into [`run_preset_lint`](crate::preset_lint::run_preset_lint)
+//! with no change to the orchestrator's public surface.
+//!
+//! Self-loop exemption: a hat that triggers AND publishes the same
+//! topic T (`T ∈ H.triggers ∩ H.publishes`) is exempt from R2, per
+//! KTD-4 / origin Outstanding Questions default.
+//!
+//! Wildcard `*` subscribers are NOT considered unique consumers for
+//! the R4 pairing rule, per R9 / KTD-6.
+//!
+//! Plan Unit: WAC-U1 of `2026-06-12-002-feat-workflow-activation-contract-plan`.
+
+use std::collections::{HashMap, HashSet};
+
+use crate::config::RalphConfig;
+
+// ──────────────────────────────────────────────────────────────────────────
+// Handoff graph
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Topic-triggered adjacency view of `RalphConfig.hats` for the WAC rule family.
+///
+/// Constructed once per preset via [`HandoffGraph::from_config`]; shared
+/// by `check_re_emit_trap` / `check_activation_egress` /
+/// `check_handoff_pairing` / `check_trigger_publish_asymmetry` so the
+/// four rules cannot drift on what "publisher" / "subscriber" mean.
+///
+/// Per KTD-5: only `publishes` is consulted; `default_publishes` does
+/// not influence WAC findings. The graph is intentionally distinct
+/// from `preset_validator::TopologyGraph` (KTD-3) — WAC semantics
+/// differ from completion / required_events BFS, and a shared graph
+/// would conflate two purposes.
+#[derive(Debug, Clone, Default)]
+pub struct HandoffGraph {
+    /// Topics → hats that explicitly publish them.
+    pub topic_publishers: HashMap<String, Vec<String>>,
+    /// Topics → hats whose `triggers` include them. `*` (wildcard)
+    /// is recorded in `wildcard_subscribers` rather than per-topic.
+    pub topic_subscribers: HashMap<String, Vec<String>>,
+    /// Hats whose `triggers` contains the literal `*`.
+    pub wildcard_subscribers: Vec<String>,
+    /// Hat IDs in deterministic order (matches `RalphConfig.hats`).
+    pub hat_order: Vec<String>,
+    /// Side index: hat_id → topics it publishes. Used by the bounded
+    /// BFS in `reaches_progress_endpoint`. Inverted from
+    /// `topic_publishers` in [`HandoffGraph::from_config`].
+    pub hat_publishes: HashMap<String, Vec<String>>,
+}
+
+impl HandoffGraph {
+    /// Build a `HandoffGraph` from `RalphConfig::hats`.
+    ///
+    /// `triggers` are the explicit per-hat trigger list. The graph
+    /// does not consult `phase_triggers`: the WAC rules evaluate the
+    /// full surface of triggers a hat *could* receive. Hat names are
+    /// read as the hashmap keys; phases are not part of the graph.
+    pub fn from_config(config: &RalphConfig) -> Self {
+        let mut topic_publishers: HashMap<String, Vec<String>> = HashMap::new();
+        let mut topic_subscribers: HashMap<String, Vec<String>> = HashMap::new();
+        let mut wildcard_subscribers: Vec<String> = Vec::new();
+        let mut hat_publishes: HashMap<String, Vec<String>> = HashMap::new();
+        let mut hat_order: Vec<String> = config.hats.keys().cloned().collect();
+        hat_order.sort();
+
+        for (hat_id, hat) in &config.hats {
+            for topic in &hat.publishes {
+                topic_publishers
+                    .entry(topic.clone())
+                    .or_default()
+                    .push(hat_id.clone());
+                hat_publishes
+                    .entry(hat_id.clone())
+                    .or_default()
+                    .push(topic.clone());
+            }
+            for trigger in &hat.triggers {
+                if trigger == "*" {
+                    wildcard_subscribers.push(hat_id.clone());
+                } else {
+                    topic_subscribers
+                        .entry(trigger.clone())
+                        .or_default()
+                        .push(hat_id.clone());
+                }
+            }
+        }
+
+        // Sort the value vectors for deterministic test output.
+        for v in topic_publishers.values_mut() {
+            v.sort();
+            v.dedup();
+        }
+        for v in topic_subscribers.values_mut() {
+            v.sort();
+            v.dedup();
+        }
+        for v in hat_publishes.values_mut() {
+            v.sort();
+            v.dedup();
+        }
+        wildcard_subscribers.sort();
+        wildcard_subscribers.dedup();
+
+        Self {
+            topic_publishers,
+            topic_subscribers,
+            wildcard_subscribers,
+            hat_order,
+            hat_publishes,
+        }
+    }
+
+    /// Topics whose only consumers (non-wildcard) are a single hat.
+    ///
+    /// Per R9 / KTD-6: wildcard subscribers are treated as
+    /// additional consumers, so a topic with (1 explicit + 1
+    /// wildcard) consumer is **not** considered unique and will
+    /// not enable handoff priority dispatch. A topic with no
+    /// explicit subscribers at all (only wildcard) is also not
+    /// unique — wildcard alone cannot provide a deterministic
+    /// handoff target.
+    pub fn unique_consumer_topics(&self) -> HashSet<String> {
+        if !self.wildcard_subscribers.is_empty() {
+            // Any wildcard subscriber invalidates the "exactly one
+            // consumer" guarantee across the whole preset.
+            return HashSet::new();
+        }
+        self.topic_subscribers
+            .iter()
+            .filter(|(_, hats)| hats.len() == 1)
+            .map(|(topic, _)| topic.clone())
+            .collect()
+    }
+
+    /// The single non-wildcard consumer of a topic, if any.
+    pub fn unique_consumer_of(&self, topic: &str) -> Option<&str> {
+        self.topic_subscribers
+            .get(topic)
+            .and_then(|hats| if hats.len() == 1 { Some(hats[0].as_str()) } else { None })
+    }
+
+    /// Publishers of a topic in deterministic order.
+    pub fn publishers_of(&self, topic: &str) -> &[String] {
+        self.topic_publishers
+            .get(topic)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// WAC rule: LintFinding output
+// ──────────────────────────────────────────────────────────────────────────
+
+/// A WAC rule's verdict for a single (hat, topic) or `(hat, hat, topic)` shape.
+///
+/// The four rules are surfaced as `LintFinding` entries so the existing
+/// `lint_findings_to_contract_findings` adapter applies the canonical
+/// `lint.` prefix and `FindingSource::Lint` envelope.
+pub(crate) type WacFinding = crate::preset_lint::LintFinding;
+
+/// WAC severity override. Builtin presets force `Error`; user presets
+/// get `Warn` in default mode and `Error` in `--strict`.
+///
+/// WAC rules never produce `Pass` — every firing is a real defect.
+pub(crate) fn wac_severity(strict: bool) -> crate::preset_lint::LintSeverity {
+    if strict {
+        crate::preset_lint::LintSeverity::Error
+    } else {
+        crate::preset_lint::LintSeverity::Warn
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// R2: Re-emit trap
+// ──────────────────────────────────────────────────────────────────────────
+
+/// R2: A hat H that triggers on topic T — published by another hat
+/// P ≠ H — but does not declare T in its own `publishes` is a
+/// re-emit hazard. The narrow archetype is "handoff dead end":
+/// H is the unique non-wildcard consumer of T, H's publishes do
+/// not reach any downstream hat trigger or terminal topic, and
+/// T is not in H's publishes. In that case the workflow
+/// effectively drops T after H consumes it, and any expectation
+/// that H would re-emit T (e.g. as a terminal signal) is unmet.
+///
+/// R2 fires only when ALL of the following hold:
+/// - H triggers T (and T is not `*`)
+/// - T ∉ H.publishes (no self-loop)
+/// - H is the unique non-wildcard consumer of T (a handoff)
+/// - T has a publisher P ≠ H
+/// - H's publishes have no closure path (per R3's BFS): none
+///   of H's publishes reach a downstream hat trigger or
+///   terminal topic within 2 hops
+///
+/// R2 and R4 are intentional complements: R4 names the
+/// "handoff pairing broken" symptom; R2 names the "re-emit
+/// trap" symptom. They both fire for the same dead-end handoff
+/// and together tell the operator the same story from two
+/// angles.
+///
+/// Wildcard subscribers disqualify uniqueness per R9 / KTD-6.
+pub fn check_re_emit_trap(
+    config: &RalphConfig,
+    graph: &HandoffGraph,
+    strict: bool,
+) -> Vec<WacFinding> {
+    let mut findings = Vec::new();
+    let severity = wac_severity(strict);
+
+    let unique_topics = graph.unique_consumer_topics();
+    let terminals = collect_terminal_topics(config);
+
+    for (hat_id, hat) in &config.hats {
+        let publishes: HashSet<&str> = hat.publishes.iter().map(String::as_str).collect();
+        for trigger in &hat.triggers {
+            if trigger == "*" {
+                continue;
+            }
+            // Self-loop exemption.
+            if publishes.contains(trigger.as_str()) {
+                continue;
+            }
+            // H must be the unique non-wildcard consumer of T.
+            if !unique_topics.contains(trigger) {
+                continue;
+            }
+            let Some(unique_consumer) = graph.unique_consumer_of(trigger) else {
+                continue;
+            };
+            if unique_consumer != hat_id {
+                continue;
+            }
+            // And T must be published by some other hat.
+            let publishers = graph.publishers_of(trigger);
+            let has_external_publisher = publishers.iter().any(|p| p != hat_id);
+            if !has_external_publisher {
+                continue;
+            }
+            // Closure-path check: H must not have any publish
+            // that reaches a downstream hat trigger or terminal.
+            // If H does have such a path, the handoff is a normal
+            // consumption pattern and R2 does not apply.
+            let has_closure = hat
+                .publishes
+                .iter()
+                .any(|p| reaches_progress_endpoint(p, graph, &terminals, 2));
+            if has_closure {
+                continue;
+            }
+            findings.push(WacFinding {
+                id: crate::preset_lint::finding_id::FINDING_RE_EMIT_TRAP,
+                severity,
+                message: format!(
+                    "hat \"{hat_id}\" is the unique consumer of topic \"{trigger}\" \
+                     (a handoff) but does not declare \"{trigger}\" in its publishes \
+                     and none of its publishes reach a downstream hat trigger or \
+                     terminal; this is a re-emit trap — if the workflow expects \
+                     \"{hat_id}\" to re-emit \"{trigger}\" (e.g. as a terminal signal), \
+                     it cannot"
+                ),
+                topic: Some(trigger.clone()),
+                hat: Some(hat_id.clone()),
+                owner: None,
+                action_hint: Some(format!(
+                    "Add a publish topic on hat \"{hat_id}\" that reaches a downstream \
+                     hat trigger or terminal/completion topic; or, if \"{hat_id}\" \
+                     should re-emit \"{trigger}\" itself, add \"{trigger}\" to \
+                     \"{hat_id}\" publishes"
+                )),
+            });
+        }
+    }
+    findings
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// R3: Activation egress
+// ──────────────────────────────────────────────────────────────────────────
+
+/// R3: For each (hat H, trigger topic T) pair, at least one of H's
+/// declared `publishes` topics must reach a "progressed" endpoint
+/// within ≤2 hops. Endpoints are:
+///
+/// - another hat's `triggers` (a downstream workflow hat will pick up the work), or
+/// - a known terminal/completion topic set.
+pub fn check_activation_egress(
+    config: &RalphConfig,
+    graph: &HandoffGraph,
+    strict: bool,
+) -> Vec<WacFinding> {
+    let mut findings = Vec::new();
+    let severity = wac_severity(strict);
+
+    // Terminal / completion topics derived from event_loop config.
+    // These represent "the workflow can end here" — egress reaching
+    // any of them is sufficient (KTD-3 + R3 Endpoint (b)).
+    let terminals = collect_terminal_topics(config);
+
+    for (hat_id, hat) in &config.hats {
+        if hat.triggers.is_empty() {
+            // Hats with no triggers never get activated; R3 does not apply.
+            continue;
+        }
+        let has_egress = hat
+            .publishes
+            .iter()
+            .any(|p| reaches_progress_endpoint(p, graph, &terminals, 2));
+        if !has_egress {
+            findings.push(WacFinding {
+                id: crate::preset_lint::finding_id::FINDING_ACTIVATION_EGRESS_MISSING,
+                severity,
+                message: format!(
+                    "hat \"{hat_id}\" has no activation egress: none of its publishes reach \
+                     a downstream hat trigger or a terminal/completion topic within 2 hops"
+                ),
+                topic: None,
+                hat: Some(hat_id.clone()),
+                owner: None,
+                action_hint: Some(format!(
+                    "Add a publish topic on hat \"{hat_id}\" that (a) is consumed by \
+                     another hat's triggers, or (b) reaches completion_promise/required_events"
+                )),
+            });
+        }
+    }
+    findings
+}
+
+fn collect_terminal_topics(config: &RalphConfig) -> HashSet<String> {
+    let mut terminals: HashSet<String> = HashSet::new();
+    terminals.insert(config.event_loop.completion_promise.clone());
+    if !config.event_loop.cancellation_promise.is_empty() {
+        terminals.insert(config.event_loop.cancellation_promise.clone());
+    }
+    for req in &config.event_loop.required_events {
+        terminals.insert(req.clone());
+    }
+    terminals
+}
+
+/// Bounded BFS: does `start_topic` reach a terminal/completion topic
+/// or a downstream hat's trigger within `max_hops`?
+fn reaches_progress_endpoint(
+    start_topic: &str,
+    graph: &HandoffGraph,
+    terminals: &HashSet<String>,
+    max_hops: usize,
+) -> bool {
+    if terminals.contains(start_topic) {
+        return true;
+    }
+    if max_hops == 0 {
+        return false;
+    }
+    // Hop 1: from start_topic, follow subscribers to the next hat frontier.
+    let frontier: Vec<String> = graph
+        .topic_subscribers
+        .get(start_topic)
+        .cloned()
+        .unwrap_or_default();
+    if frontier.is_empty() && graph.wildcard_subscribers.is_empty() {
+        return false;
+    }
+    let next_hats: Vec<&str> = frontier
+        .iter()
+        .map(String::as_str)
+        .chain(graph.wildcard_subscribers.iter().map(String::as_str))
+        .collect();
+    // Each frontier hat's publishes (excluding start_topic itself) is
+    // the next hop frontier. We cap recursion at `max_hops - 1`.
+    // Track visited topics to break cycles deterministically.
+    let mut visited: HashSet<String> = HashSet::new();
+    visited.insert(start_topic.to_string());
+    for hat in next_hats {
+        if let Some(hat_pubs) = graph.hat_publishes.get(hat) {
+            for publish in hat_pubs {
+                if visited.contains(publish) {
+                    continue;
+                }
+                if reaches_progress_endpoint(publish, graph, terminals, max_hops - 1) {
+                    return true;
+                }
+                visited.insert(publish.clone());
+            }
+        }
+    }
+    false
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// R4: Handoff pairing
+// ──────────────────────────────────────────────────────────────────────────
+
+/// R4: When a topic T is published by hat A and has exactly one
+/// consumer hat B, B's activation egress (R3) must reach a
+/// "next business stage" endpoint. In the current scope, the
+/// business-stage endpoints are the same terminal / completion
+/// set used by R3.
+///
+/// The rule produces a finding per `(A, B, T)` triple where B is
+/// the unique consumer of T and B has no egress to a terminal.
+pub fn check_handoff_pairing(
+    config: &RalphConfig,
+    graph: &HandoffGraph,
+    strict: bool,
+) -> Vec<WacFinding> {
+    let mut findings = Vec::new();
+    let severity = wac_severity(strict);
+
+    let terminals = collect_terminal_topics(config);
+
+    for topic in graph.unique_consumer_topics() {
+        let Some(consumer) = graph.unique_consumer_of(&topic) else {
+            continue;
+        };
+        let Some(consumer_hat) = config.hats.get(consumer) else {
+            continue;
+        };
+        let has_egress = consumer_hat
+            .publishes
+            .iter()
+            .any(|p| reaches_progress_endpoint(p, graph, &terminals, 2));
+        if !has_egress {
+            findings.push(WacFinding {
+                id: crate::preset_lint::finding_id::FINDING_HANDOFF_PAIRING_BROKEN,
+                severity,
+                message: format!(
+                    "hat \"{consumer}\" is the unique consumer of topic \"{topic}\" \
+                     (a handoff), but none of its publishes reach a downstream hat \
+                     trigger or terminal/completion topic within 2 hops; the handoff \
+                     leads to a dead end"
+                ),
+                topic: Some(topic.clone()),
+                hat: Some(consumer.to_string()),
+                owner: None,
+                action_hint: Some(format!(
+                    "Add a publish topic on hat \"{consumer}\" that connects the handoff \
+                     \"{topic}\" to the next business stage (a downstream hat trigger or \
+                     completion_promise)"
+                )),
+            });
+        }
+    }
+    findings
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// R5: Trigger / publish asymmetry
+// ──────────────────────────────────────────────────────────────────────────
+
+/// R5: For each hat H and each trigger T that H consumes, the
+/// "asymmetry" rule fires when the workflow stage T represents
+/// cannot close given H's `publishes` set AND the publishers of
+/// T. Two specific archetypes trigger R5:
+///
+/// 1. T has no publisher at all (e.g. `work.retry` with nobody
+///    emitting it). H would wait forever for an event that
+///    nobody produces.
+/// 2. T has a publisher, but H's publishes do not reach any
+///    downstream hat trigger or terminal topic (H is a
+///    one-shot sink with no continuation).
+///
+/// R3 owns the per-hat "no publishes reach a terminal" umbrella
+/// case. R5 narrows to per-trigger diagnoses so the operator
+/// can see exactly which trigger is the problem.
+pub fn check_trigger_publish_asymmetry(
+    config: &RalphConfig,
+    graph: &HandoffGraph,
+    strict: bool,
+) -> Vec<WacFinding> {
+    let mut findings = Vec::new();
+    let severity = wac_severity(strict);
+
+    // The `starting_event` is injected by the loop runner (ralph
+    // hat) at loop start, not by any user-defined hat. Triggers
+    // matching `starting_event` are exempt from R5's "no
+    // publisher" archetype because the runner owns the emit.
+    let starting_event = config.event_loop.starting_event.as_deref();
+
+    // R5 is per-trigger and depends only on graph topology (no
+    // bounded BFS over terminals), so the terminal set is unused.
+    // The call is kept for symmetry with R3 / R4 and to give the
+    // compiler a forward anchor if a future revision adds terminal
+    // reachability to the asymmetry check.
+    let _terminals = collect_terminal_topics(config);
+
+    for (hat_id, hat) in &config.hats {
+        if hat.triggers.is_empty() {
+            continue;
+        }
+        for trigger in &hat.triggers {
+            if trigger == "*" {
+                continue;
+            }
+            // starting_event exemption: ralph hat owns the emit.
+            if Some(trigger.as_str()) == starting_event {
+                continue;
+            }
+            let has_publisher = !graph.publishers_of(trigger).is_empty();
+            let has_subscriber = graph
+                .topic_subscribers
+                .get(trigger)
+                .map(|s| !s.is_empty())
+                .unwrap_or(false)
+                || !graph.wildcard_subscribers.is_empty();
+
+            if has_publisher && has_subscriber {
+                // Both ends exist; the R5 narrow case does not
+                // apply. R2 would catch re-emit trap; R3 would
+                // catch the per-hat closure failure; R4 would
+                // catch handoff pairing.
+                continue;
+            }
+
+            // Archetype 1: no publisher (orphan trigger).
+            // Archetype 2: no subscriber (dead end on the consumer
+            // side, which is the asymmetry: someone publishes but
+            // nobody can pick it up).
+            let archetype = if !has_publisher {
+                "no publisher"
+            } else {
+                "no subscriber"
+            };
+
+            // R5 and R3 can both fire for the same hat — they
+            // report different problems. R3 is the umbrella
+            // "hat has no closure path" finding; R5 names the
+            // specific trigger that is an orphan or dead-end.
+            // Suppress R5 only when the trigger name is empty
+            // (defensive: should never happen because we filtered
+            // `*` above).
+            if trigger.is_empty() {
+                continue;
+            }
+
+            findings.push(WacFinding {
+                id: crate::preset_lint::finding_id::FINDING_TRIGGER_PUBLISH_ASYMMETRY,
+                severity,
+                message: format!(
+                    "hat \"{hat_id}\" triggers on topic \"{trigger}\" which has \
+                     {archetype}; the workflow stage that \"{trigger}\" represents \
+                     cannot close"
+                ),
+                topic: Some(trigger.clone()),
+                hat: Some(hat_id.clone()),
+                owner: None,
+                action_hint: Some(format!(
+                    "Add a publisher hat that emits \"{trigger}\" (if archetype is \
+                     'no publisher'), or add a subscriber hat whose triggers include \
+                     \"{trigger}\" (if archetype is 'no subscriber')"
+                )),
+            });
+        }
+    }
+    findings
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Combined WAC entry point
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Run all four WAC rules and return findings in deterministic order.
+///
+/// This is the entry point used by
+/// [`run_preset_lint`](crate::preset_lint::run_preset_lint). Each
+/// rule returns `Vec<LintFinding>` so the existing aggregator can
+/// prefix them with `lint.` and feed them through the contract
+/// reporter.
+pub fn run_workflow_activation_contract(
+    config: &RalphConfig,
+    strict: bool,
+) -> Vec<WacFinding> {
+    let graph = HandoffGraph::from_config(config);
+    let mut findings = Vec::new();
+    findings.extend(check_re_emit_trap(config, &graph, strict));
+    findings.extend(check_activation_egress(config, &graph, strict));
+    findings.extend(check_handoff_pairing(config, &graph, strict));
+    findings.extend(check_trigger_publish_asymmetry(config, &graph, strict));
+
+    // Deterministic order: (id, topic, hat).
+    findings.sort_by(|a, b| {
+        a.id.cmp(b.id)
+            .then(a.topic.cmp(&b.topic))
+            .then(a.hat.cmp(&b.hat))
+    });
+    findings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::preset_lint::LintSeverity;
+
+    // T-U1-01: re-emit trap fires on executor+queue.advance
+    #[test]
+    fn re_emit_trap_fires_when_other_hat_publishes_trigger() {
+        let yaml = r#"
+tasks:
+  enabled: false
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+hats:
+  plan_gate:
+    name: "PlanGate"
+    triggers: ["work.start"]
+    publishes: ["queue.advance"]
+  executor:
+    name: "Executor"
+    triggers: ["queue.advance"]
+    publishes: ["work.done"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let findings = check_re_emit_trap(&config, &HandoffGraph::from_config(&config), true);
+        assert!(
+            findings.iter().any(|f| f.id
+                == crate::preset_lint::finding_id::FINDING_RE_EMIT_TRAP
+                && f.topic.as_deref() == Some("queue.advance")
+                && f.hat.as_deref() == Some("executor")),
+            "expected re_emit_trap finding on executor+queue.advance, got: {:?}",
+            findings
+        );
+    }
+
+    // T-U1-02: self-loop exemption
+    #[test]
+    fn re_emit_trap_self_loop_exempt() {
+        let yaml = r#"
+tasks:
+  enabled: false
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+hats:
+  hat_a:
+    name: "HatA"
+    triggers: ["work.start", "work.retried"]
+    publishes: ["work.retried", "work.done"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let findings = check_re_emit_trap(&config, &HandoffGraph::from_config(&config), true);
+        assert!(
+            findings.is_empty(),
+            "self-loop should be exempt: {:?}",
+            findings
+        );
+    }
+
+    // T-U1-03: hat with no egress
+    #[test]
+    fn activation_egress_missing_when_no_progress_path() {
+        let yaml = r#"
+tasks:
+  enabled: false
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+hats:
+  lonely:
+    name: "Lonely"
+    triggers: ["work.start"]
+    publishes: ["isolated.signal"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let findings =
+            check_activation_egress(&config, &HandoffGraph::from_config(&config), true);
+        assert!(
+            findings.iter().any(|f| f.id
+                == crate::preset_lint::finding_id::FINDING_ACTIVATION_EGRESS_MISSING
+                && f.hat.as_deref() == Some("lonely")),
+            "expected activation_egress_missing for lonely, got: {:?}",
+            findings
+        );
+    }
+
+    // T-U1-04: plan-gate → executor handoff where executor has no
+    // path to a downstream endpoint.
+    #[test]
+    fn handoff_pairing_broken_when_consumer_has_no_egress() {
+        let yaml = r#"
+tasks:
+  enabled: false
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+hats:
+  plan_gate:
+    name: "PlanGate"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+  executor:
+    name: "Executor"
+    triggers: ["work.ready"]
+    publishes: ["executor.dead_end"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let findings = check_handoff_pairing(&config, &HandoffGraph::from_config(&config), true);
+        assert!(
+            findings.iter().any(|f| f.id
+                == crate::preset_lint::finding_id::FINDING_HANDOFF_PAIRING_BROKEN
+                && f.topic.as_deref() == Some("work.ready")
+                && f.hat.as_deref() == Some("executor")),
+            "expected handoff_pairing_broken for executor+work.ready, got: {:?}",
+            findings
+        );
+    }
+
+    // T-U1-05: work.retry trigger with no publisher at all
+    #[test]
+    fn trigger_publish_asymmetry_when_trigger_has_no_publisher() {
+        let yaml = r#"
+tasks:
+  enabled: false
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.retry"]
+    publishes: ["work.done"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let findings = check_trigger_publish_asymmetry(
+            &config,
+            &HandoffGraph::from_config(&config),
+            true,
+        );
+        assert!(
+            findings.iter().any(|f| f.id
+                == crate::preset_lint::finding_id::FINDING_TRIGGER_PUBLISH_ASYMMETRY
+                && f.topic.as_deref() == Some("work.retry")),
+            "expected trigger_publish_asymmetry for work.retry, got: {:?}",
+            findings
+        );
+    }
+
+    // T-U1-06: wildcard subscriber is not a unique consumer
+    #[test]
+    fn wildcard_subscriber_excluded_from_unique_consumer() {
+        let yaml = r#"
+tasks:
+  enabled: false
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+hats:
+  plan_gate:
+    name: "PlanGate"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+  executor:
+    name: "Executor"
+    triggers: ["work.ready"]
+    publishes: ["work.done"]
+  observer:
+    name: "Observer"
+    triggers: ["*"]
+    publishes: ["observe.tick"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let graph = HandoffGraph::from_config(&config);
+        // work.ready has 1 explicit (executor) + 1 wildcard (observer).
+        // Should NOT be a unique consumer.
+        assert!(!graph.unique_consumer_topics().contains("work.ready"));
+        let findings = check_handoff_pairing(&config, &graph, true);
+        assert!(
+            !findings.iter().any(|f| f.topic.as_deref() == Some("work.ready")),
+            "work.ready should be excluded from handoff_pairing when wildcard subscriber exists: {:?}",
+            findings
+        );
+    }
+
+    // T-U1-07: deterministic output ordering
+    #[test]
+    fn run_workflow_activation_contract_is_deterministic() {
+        let yaml = r#"
+tasks:
+  enabled: false
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+hats:
+  a:
+    name: "A"
+    triggers: ["work.start"]
+    publishes: ["a.out"]
+  b:
+    name: "B"
+    triggers: ["a.out"]
+    publishes: ["b.out"]
+  c:
+    name: "C"
+    triggers: ["a.out"]
+    publishes: ["c.out"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let f1 = run_workflow_activation_contract(&config, true);
+        let f2 = run_workflow_activation_contract(&config, true);
+        assert_eq!(f1, f2, "two calls must produce identical ordered output");
+    }
+
+    // T-U1-08: severity propagation — Default → Warn, Strict → Error.
+    #[test]
+    fn default_mode_emits_warn_strict_emits_error() {
+        let yaml = r#"
+tasks:
+  enabled: false
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+hats:
+  plan_gate:
+    name: "PlanGate"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+  executor:
+    name: "Executor"
+    triggers: ["work.ready"]
+    publishes: ["executor.dead_end"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let default_findings = run_workflow_activation_contract(&config, false);
+        let strict_findings = run_workflow_activation_contract(&config, true);
+        assert!(default_findings
+            .iter()
+            .all(|f| f.severity == LintSeverity::Warn));
+        assert!(strict_findings
+            .iter()
+            .all(|f| f.severity == LintSeverity::Error));
+    }
+}

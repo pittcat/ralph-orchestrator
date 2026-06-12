@@ -41,6 +41,11 @@ event_loop:
 #[test]
 fn run_preset_lint_whitelist_exempt_topic_is_not_error() {
     // Whitelisted topics should NOT produce any Warn/Error findings.
+    // The fixture declares a two-hat chain with a shared trigger
+    // surface so WAC R2 (re-emit trap) does not fire (multi-consumer
+    // → not a unique handoff), R3 (egress) closes via LOOP_COMPLETE,
+    // R4 (handoff pairing) does not apply (no unique consumer), and
+    // R5 (asymmetry) does not apply (work.ready has a publisher).
     let yaml = r#"
 topic_format_whitelist:
   - LOOP_COMPLETE
@@ -49,8 +54,12 @@ tasks:
 hats:
   a:
     name: "A"
-    triggers: ["work.start"]
-    publishes: ["work.ready"]
+    triggers: ["work.start", "work.ready"]
+    publishes: ["work.ready", "LOOP_COMPLETE"]
+  b:
+    name: "B"
+    triggers: ["work.ready"]
+    publishes: ["work.done", "LOOP_COMPLETE"]
 event_loop:
   starting_event: "work.start"
   completion_promise: "LOOP_COMPLETE"

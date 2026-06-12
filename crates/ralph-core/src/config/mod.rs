@@ -26,6 +26,7 @@ mod tasks;
 mod telemetry;
 mod v1_adapters;
 mod warning;
+mod workflow_contract;
 pub(crate) mod workflow_guards;
 
 pub mod multi_hat_policy;
@@ -66,6 +67,10 @@ pub use tasks::TasksConfig;
 pub use telemetry::{DriftConfig, MalformedJsonlPolicy, RuntimeDiagnosisConfig, TelemetryConfig};
 pub use v1_adapters::{AdapterSettings, AdaptersConfig};
 pub use warning::ConfigWarning;
+pub use workflow_contract::{
+    HANDOFF_DISPATCH_TIMEOUT_DEFAULT_SECONDS, HANDOFF_DISPATCH_TIMEOUT_MAX_SECONDS,
+    HANDOFF_TOPIC_SEEDS, WorkflowContractConfig,
+};
 pub use workflow_guards::{
     HatExecutionMode, WorkflowChain, WorkflowChainMode, WorkflowGuardsConfig,
 };

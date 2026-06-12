@@ -1309,6 +1309,15 @@ hats:
   plan-gate:
     name: "🚦 Plan Gate"
     description: "Reconciles review verdict against plan progress and decides queue.advance vs plan.complete."
+    # WAC-U4 (2026-06-12-002): wave-mode plan-gate keeps the
+    # original trigger set — `queue.advance` is the dispatcher
+    # signal to the coordinator (which starts the next wave
+    # batch). Unlike `ce-executor-isolated`, wave mode does NOT
+    # add `queue.advance` as a self-loop (the coordinator owns
+    # the trigger) and does NOT publish `work.ready` (the
+    # wave front-half uses `work.batch.ready` instead). The
+    # `test_ce_executor_wave_shared_tail_matches_ce_executor`
+    # test asserts both divergences explicitly.
     triggers: ["review.passed", "review.complete", "work.failed", "loop.cancel"]
     publishes: ["queue.advance", "plan.complete", "plan.blocked"]
     default_publishes: "plan.blocked"

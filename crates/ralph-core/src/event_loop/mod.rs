@@ -247,6 +247,12 @@ pub struct EventLoop {
     /// Robot service for human-in-the-loop communication.
     /// Injected externally when `human.enabled` is true and this is the primary loop.
     robot_service: Option<Box<dyn RobotService>>,
+    /// WAC-U3 / WAC-U5 (2026-06-12-002): handoff priority index,
+    /// built once at construction. The dispatcher's priority pass
+    /// consults `index.consumer_of(topic)` on every selection
+    /// tick. `None` when the config is in coordinator mode or
+    /// the index is empty (no priority-eligible handoffs).
+    handoff_index: crate::workflow_contract::HandoffIndex,
     /// U6: Recovery responder — aggregates per-`retry_key` state and
     /// decides whether the next prompt should fold a soft alert, the
     /// runner should publish a targeted `task.resume`, or the loop
@@ -1082,6 +1088,7 @@ impl EventLoop {
             loop_context: Some(context),
             skill_registry,
             robot_service: None,
+            handoff_index: crate::workflow_contract::HandoffIndex::from_config(&config),
             recovery_responder: RecoveryResponder::new(Arc::new(
                 config.telemetry.runtime_diagnosis.clone(),
             )),
@@ -1193,6 +1200,7 @@ impl EventLoop {
                 config.telemetry.runtime_diagnosis.clone(),
             )),
             hat_lifecycle_tracker: ActivationLifecycleTracker::new(),
+            handoff_index: crate::workflow_contract::HandoffIndex::from_config(&config),
         }
     }
 
@@ -2108,9 +2116,35 @@ impl EventLoop {
                     // Only human events pending — route to ralph.
                     return self.bus.hat_ids().find(|id| id.as_str() == "ralph");
                 }
+                // WAC-U5 (2026-06-12-002): handoff priority pre-emption.
+                // If the HandoffIndex has at least one priority-eligible
+                // entry (unique consumer) and that hat currently has a
+                // non-empty pending queue, the dispatcher selects it
+                // immediately and the round-robin cursor advances. The
+                // scan walks the index in BTreeMap (alphabetical topic)
+                // order for determinism. If no priority hat has pending
+                // events, we fall through to the normal round-robin
+                // pass.
+                let priority_hat: Option<HatId> = self
+                    .handoff_index
+                    .entries
+                    .values()
+                    .find_map(|entry| {
+                        let consumer = entry.consumer.as_deref()?;
+                        let has_pending = self
+                            .bus
+                            .peek_pending(&HatId::from(consumer))
+                            .map(|q| !q.is_empty())
+                            .unwrap_or(false);
+                        if has_pending {
+                            Some(HatId::from(consumer))
+                        } else {
+                            None
+                        }
+                    });
                 // Select via round-robin. This updates last_selected.
                 // We need to return a borrowed HatId, so we select and then look it up.
-                let selected = self.bus.select_next_hat_with_pending()?;
+                let selected = self.bus.select_next_hat_with_pending(priority_hat.as_ref())?;
                 // The selected hat must exist in the bus (it was found in pending).
                 self.bus.hat_ids().find(|id| *id == &selected)
             }

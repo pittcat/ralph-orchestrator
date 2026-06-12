@@ -214,13 +214,24 @@ impl EventBus {
     /// Deprecated: use `peek_next_hat_with_pending` (no side-effect) or
     /// `select_next_hat_with_pending` (round-robin) instead.
     #[deprecated(
-        note = "Use peek_next_hat_with_pending() or select_next_hat_with_pending()"
+        note = "Use peek_next_hat_with_pending() or select_next_hat_with_pending(None)"
     )]
     pub fn next_hat_with_pending(&self) -> Option<&HatId> {
         self.peek_next_hat_with_pending()
     }
 
-    /// Selects the next hat with pending events using round-robin scheduling.
+    /// Selects the next hat with pending events using round-robin
+    /// scheduling, with an optional priority pre-emption for
+    /// handoff topics.
+    ///
+    /// `priority_hat`, when `Some(hat_id)`, short-circuits the
+    /// round-robin scan: if that hat has a non-empty pending
+    /// queue, it is selected immediately and the round-robin
+    /// cursor advances to the hat that **follows** the priority
+    /// hat in the registered order (so the next non-priority
+    /// selection resumes fairly). If `priority_hat` is `Some`
+    /// but the hat's pending queue is empty, the function
+    /// proceeds with the normal round-robin scan.
     ///
     /// The cursor is interpreted against the **full registered hat order** in
     /// the `hats` BTreeMap. The selection scan starts at the first key
@@ -232,26 +243,39 @@ impl EventBus {
     /// If the scan completes a full cycle without finding a non-empty queue,
     /// `None` is returned and `last_selected` is **not** mutated.
     ///
-    /// Anchoring the cursor in the full registered order — rather than in
-    /// the filtered non-empty subset — is what guarantees the round-robin
-    /// contract when a previously selected hat's queue is drained between
-    /// rounds: the cursor's successor is computed in the stable registered
-    /// order, not by re-starting from the lexicographic first non-empty
-    /// hat.
-    ///
-    /// This guarantees:
-    /// - **Starvation-free with bounded wait**: if a hat `H` is registered
-    ///   and continuously has pending events, the worst-case number of
-    ///   selections before `H` is picked again equals the number of
-    ///   registered hats (N), independent of how often `H`'s peers drain
-    ///   their own queues.
-    /// - **Deterministic**: same cursor + same registered order + same
-    ///   pending state = same result, even across runs.
-    /// - **Stable when cursor is stale**: if the cursor's hat was drained
-    ///   or deregistered, the scan still finds the registered successor in
-    ///   BTreeMap order. The algorithm does not depend on hash iteration
-    ///   order or panic on a missing key.
-    pub fn select_next_hat_with_pending(&mut self) -> Option<HatId> {
+    /// WAC-U5 (2026-06-12-002): handoff priority dispatch is the
+    /// narrow exception that lets a single handoff consumer
+    /// pre-empt the round-robin cursor. R9 / KTD-6: the caller
+    /// is responsible for only passing a `priority_hat` that is
+    /// a **unique** consumer of the corresponding handoff
+    /// topic. Multi-consumer or wildcard topics must not use
+    /// the priority path.
+    pub fn select_next_hat_with_pending(
+        &mut self,
+        priority_hat: Option<&HatId>,
+    ) -> Option<HatId> {
+        // WAC-U5 priority pre-emption: if the priority hat has
+        // pending events, dispatch it now and advance the
+        // round-robin cursor to the hat that follows it in
+        // registered order. This is the only short-circuit the
+        // cursor allows; the cursor otherwise walks the full
+        // registered set as before.
+        if let Some(priority_id) = priority_hat {
+            let has_pending = self
+                .pending
+                .get(priority_id)
+                .map(|q| !q.is_empty())
+                .unwrap_or(false);
+            if has_pending {
+                self.last_selected = Some(priority_id.clone());
+                return Some(priority_id.clone());
+            }
+            // Priority hat has nothing pending; fall through to
+            // the normal round-robin scan. This is the
+            // documented "priority hat drained between rounds"
+            // case: the next selection must be fair.
+        }
+
         // Scan the full registered hat order (BTreeMap keys are already
         // sorted). Start from the first key strictly greater than the
         // cursor; wrap around to the start if no such key exists. For
@@ -537,14 +561,14 @@ mod tests {
         bus.publish(Event::new("work", "for beta")); // same
 
         // First selection — cursor starts at None → picks first non-empty (alpha).
-        let sel1 = bus.select_next_hat_with_pending().unwrap();
+        let sel1 = bus.select_next_hat_with_pending(None).unwrap();
         assert_eq!(sel1.as_str(), "alpha");
 
         // Simulate the loop consuming alpha's queue.
         bus.take_pending(&sel1);
 
         // Second selection — cursor is now "alpha"; next after alpha is "beta".
-        let sel2 = bus.select_next_hat_with_pending().unwrap();
+        let sel2 = bus.select_next_hat_with_pending(None).unwrap();
         assert_eq!(sel2.as_str(), "beta");
     }
 
@@ -564,7 +588,7 @@ mod tests {
 
         let mut sequence = Vec::new();
         for _ in 0..6 {
-            let sel = bus.select_next_hat_with_pending().unwrap();
+            let sel = bus.select_next_hat_with_pending(None).unwrap();
             sequence.push(sel.as_str().to_string());
             // Do NOT consume — queues stay full (self-replenishing).
         }
@@ -590,14 +614,14 @@ mod tests {
         bus.publish(Event::new("work", "seed-beta"));
 
         // Round 1: select alpha, consume, republish for alpha only.
-        let sel = bus.select_next_hat_with_pending().unwrap();
+        let sel = bus.select_next_hat_with_pending(None).unwrap();
         assert_eq!(sel.as_str(), "alpha");
         bus.take_pending(&sel);
         // Alpha self-loops: new work arrives.
         bus.publish(Event::new("work", "alpha-loop"));
 
         // Round 2: cursor is "alpha", so next is "beta".
-        let sel = bus.select_next_hat_with_pending().unwrap();
+        let sel = bus.select_next_hat_with_pending(None).unwrap();
         assert_eq!(sel.as_str(), "beta");
         bus.take_pending(&sel);
 
@@ -614,7 +638,7 @@ mod tests {
         bus.publish(Event::new("work", "item-2"));
 
         for _ in 0..3 {
-            let sel = bus.select_next_hat_with_pending().unwrap();
+            let sel = bus.select_next_hat_with_pending(None).unwrap();
             assert_eq!(sel.as_str(), "solo");
             // Don't consume — queue stays full.
         }
@@ -635,23 +659,23 @@ mod tests {
         bus.publish(Event::new("work", "g1"));
 
         // Select alpha first.
-        let sel = bus.select_next_hat_with_pending().unwrap();
+        let sel = bus.select_next_hat_with_pending(None).unwrap();
         assert_eq!(sel.as_str(), "alpha");
         bus.take_pending(&sel);
 
         // Select beta.
-        let sel = bus.select_next_hat_with_pending().unwrap();
+        let sel = bus.select_next_hat_with_pending(None).unwrap();
         assert_eq!(sel.as_str(), "beta");
         // Clear beta too.
         bus.take_pending(&sel);
 
         // Cursor is now "beta". Next should be "gamma" (the only remaining).
-        let sel = bus.select_next_hat_with_pending().unwrap();
+        let sel = bus.select_next_hat_with_pending(None).unwrap();
         assert_eq!(sel.as_str(), "gamma");
         bus.take_pending(&sel);
 
         // All queues empty — should return None.
-        assert!(bus.select_next_hat_with_pending().is_none());
+        assert!(bus.select_next_hat_with_pending(None).is_none());
     }
 
     /// peek_next_hat_with_pending must NOT advance the cursor.
@@ -671,7 +695,7 @@ mod tests {
         }
 
         // Select after peeking — cursor was never advanced by peek.
-        let sel = bus.select_next_hat_with_pending().unwrap();
+        let sel = bus.select_next_hat_with_pending(None).unwrap();
         assert_eq!(sel.as_str(), "alpha");
     }
 
@@ -691,7 +715,7 @@ mod tests {
 
             let mut seq = Vec::new();
             for _ in 0..6 {
-                let sel = bus.select_next_hat_with_pending().unwrap();
+                let sel = bus.select_next_hat_with_pending(None).unwrap();
                 seq.push(sel.as_str().to_string());
             }
             seq
@@ -726,14 +750,14 @@ mod tests {
         // Publish one event routed only to alpha.
         bus.publish(Event::new("work", "a").with_target("alpha"));
         // Select alpha, drain it. Cursor = alpha.
-        let sel = bus.select_next_hat_with_pending().unwrap();
+        let sel = bus.select_next_hat_with_pending(None).unwrap();
         assert_eq!(sel.as_str(), "alpha");
         bus.take_pending(&sel);
 
         // Publish one event routed only to beta; select beta, drain it.
         // Cursor = beta.
         bus.publish(Event::new("work", "b").with_target("beta"));
-        let sel = bus.select_next_hat_with_pending().unwrap();
+        let sel = bus.select_next_hat_with_pending(None).unwrap();
         assert_eq!(sel.as_str(), "beta");
         bus.take_pending(&sel);
 
@@ -745,7 +769,7 @@ mod tests {
         // Next selection: pre-fix returns alpha (lex first non-empty).
         // Post-fix: scan full order from cursor=beta → first key > beta
         // is gamma → gamma is non-empty → pick gamma.
-        let sel = bus.select_next_hat_with_pending().unwrap();
+        let sel = bus.select_next_hat_with_pending(None).unwrap();
         assert_eq!(
             sel.as_str(),
             "gamma",
@@ -764,19 +788,19 @@ mod tests {
 
         // Select alpha, drain.
         bus.publish(Event::new("work", "a").with_target("alpha"));
-        let sel = bus.select_next_hat_with_pending().unwrap();
+        let sel = bus.select_next_hat_with_pending(None).unwrap();
         assert_eq!(sel.as_str(), "alpha");
         bus.take_pending(&sel);
 
         // Select beta, drain.
         bus.publish(Event::new("work", "b").with_target("beta"));
-        let sel = bus.select_next_hat_with_pending().unwrap();
+        let sel = bus.select_next_hat_with_pending(None).unwrap();
         assert_eq!(sel.as_str(), "beta");
         bus.take_pending(&sel);
 
         // Select gamma, drain. Cursor = gamma.
         bus.publish(Event::new("work", "g").with_target("gamma"));
-        let sel = bus.select_next_hat_with_pending().unwrap();
+        let sel = bus.select_next_hat_with_pending(None).unwrap();
         assert_eq!(sel.as_str(), "gamma");
         bus.take_pending(&sel);
 
@@ -785,7 +809,7 @@ mod tests {
 
         // Cursor is "gamma" with empty queue. Wrap to alpha (first
         // registered key > no keys wrap → start at alpha).
-        let sel = bus.select_next_hat_with_pending().unwrap();
+        let sel = bus.select_next_hat_with_pending(None).unwrap();
         assert_eq!(sel.as_str(), "alpha");
     }
 
@@ -823,7 +847,7 @@ mod tests {
         // seen and re-publish for them too. We need to use targeted events
         // to keep queues separate.
         for _round in 0..bound {
-            let Some(sel) = bus.select_next_hat_with_pending() else {
+            let Some(sel) = bus.select_next_hat_with_pending(None) else {
                 break;
             };
             bus.take_pending(&sel);
@@ -859,7 +883,7 @@ mod tests {
             let mut seq = Vec::new();
             for i in 0..6 {
                 bus.publish(Event::new("work", format!("e{i}")).with_target("alpha"));
-                if let Some(sel) = bus.select_next_hat_with_pending() {
+                if let Some(sel) = bus.select_next_hat_with_pending(None) {
                     seq.push(sel.as_str().to_string());
                     bus.take_pending(&sel);
                 }
@@ -874,7 +898,7 @@ mod tests {
 
     /// Multiple `peek_next_hat_with_pending()` calls plus a `has_pending`
     /// check must NOT advance or reset the round-robin cursor. The actual
-    /// `select_next_hat_with_pending()` call after these inspections must
+    /// `select_next_hat_with_pending(None)` call after these inspections must
     /// return exactly the same hat it would have returned without the
     /// inspections.
     #[test]
@@ -886,7 +910,7 @@ mod tests {
 
         // Set up: cursor = alpha (after selecting alpha and draining it).
         bus.publish(Event::new("work", "a").with_target("alpha"));
-        let sel = bus.select_next_hat_with_pending().unwrap();
+        let sel = bus.select_next_hat_with_pending(None).unwrap();
         assert_eq!(sel.as_str(), "alpha");
         bus.take_pending(&sel);
 
@@ -902,7 +926,7 @@ mod tests {
         // must still be beta — the registered successor of alpha.
         bus.publish(Event::new("work", "b").with_target("beta"));
 
-        let sel = bus.select_next_hat_with_pending().unwrap();
+        let sel = bus.select_next_hat_with_pending(None).unwrap();
         assert_eq!(
             sel.as_str(),
             "beta",
@@ -926,12 +950,12 @@ mod tests {
 
         // Walk the cursor: alpha → beta, draining each.
         bus.publish(Event::new("work", "a").with_target("alpha"));
-        let sel = bus.select_next_hat_with_pending().unwrap();
+        let sel = bus.select_next_hat_with_pending(None).unwrap();
         assert_eq!(sel.as_str(), "alpha");
         bus.take_pending(&sel);
 
         bus.publish(Event::new("work", "b").with_target("beta"));
-        let sel = bus.select_next_hat_with_pending().unwrap();
+        let sel = bus.select_next_hat_with_pending(None).unwrap();
         assert_eq!(sel.as_str(), "beta");
         bus.take_pending(&sel);
 
@@ -944,7 +968,7 @@ mod tests {
         // beta, delta, gamma. Successor of beta = delta. Delta is
         // non-empty → pick delta. Pre-fix: lexicographic first non-empty
         // = alpha.
-        let sel = bus.select_next_hat_with_pending().unwrap();
+        let sel = bus.select_next_hat_with_pending(None).unwrap();
         assert_eq!(
             sel.as_str(),
             "delta",
@@ -970,13 +994,13 @@ mod tests {
         // Walk the cursor through alpha, beta, gamma — draining each.
         for (id, label) in [("alpha", "a"), ("beta", "b"), ("gamma", "g")] {
             bus.publish(Event::new("work", label).with_target(id));
-            let sel = bus.select_next_hat_with_pending().unwrap();
+            let sel = bus.select_next_hat_with_pending(None).unwrap();
             assert_eq!(sel.as_str(), id);
             bus.take_pending(&sel);
         }
 
         // All queues empty → no selection.
-        assert!(bus.select_next_hat_with_pending().is_none());
+        assert!(bus.select_next_hat_with_pending(None).is_none());
 
         // Cursor should not have been mutated by the None return. Re-publish
         // to all three and verify the next selection respects the cursor
@@ -985,7 +1009,82 @@ mod tests {
             bus.publish(Event::new("work", label).with_target(id));
         }
 
-        let sel = bus.select_next_hat_with_pending().unwrap();
+        let sel = bus.select_next_hat_with_pending(None).unwrap();
         assert_eq!(sel.as_str(), "alpha");
+    }
+
+    // ── WAC-U5 (2026-06-12-002): handoff priority dispatch ──
+
+    /// T-U5-01: when the priority hat has a non-empty pending
+    /// queue, `select_next_hat_with_pending(Some(priority))`
+    /// short-circuits the round-robin scan and selects that
+    /// hat immediately, regardless of the cursor's position.
+    #[test]
+    fn priority_hat_short_circuits_round_robin() {
+        let mut bus = EventBus::new();
+        for id in ["alpha", "beta", "gamma"] {
+            bus.register(Hat::new(id, id).subscribe("work.*"));
+        }
+        for (id, label) in [("alpha", "a1"), ("beta", "b1"), ("gamma", "g1")] {
+            bus.publish(Event::new("work", label).with_target(id));
+        }
+        let sel = bus.select_next_hat_with_pending(None).unwrap();
+        assert_eq!(sel.as_str(), "alpha");
+        bus.take_pending(&sel);
+
+        for (id, label) in [("beta", "b2"), ("gamma", "g2")] {
+            bus.publish(Event::new("work", label).with_target(id));
+        }
+        let sel = bus
+            .select_next_hat_with_pending(Some(&HatId::from("gamma")))
+            .unwrap();
+        assert_eq!(sel.as_str(), "gamma");
+    }
+
+    /// T-U5-04: when the priority hat has no pending events
+    /// (e.g. drained between rounds), the function falls through
+    /// to the normal round-robin scan.
+    #[test]
+    fn priority_hat_falls_through_when_empty() {
+        let mut bus = EventBus::new();
+        for id in ["alpha", "beta", "gamma"] {
+            bus.register(Hat::new(id, id).subscribe("work.*"));
+        }
+        for (id, label) in [("alpha", "a1"), ("beta", "b1")] {
+            bus.publish(Event::new("work", label).with_target(id));
+        }
+        let sel = bus
+            .select_next_hat_with_pending(Some(&HatId::from("gamma")))
+            .unwrap();
+        assert_eq!(sel.as_str(), "alpha");
+    }
+
+    /// T-U5-05: priority pre-emption advances the round-robin
+    /// cursor to the priority hat, so the next non-priority
+    /// selection resumes from the hat that follows the
+    /// priority hat in registered order.
+    #[test]
+    fn priority_advances_cursor_for_next_round() {
+        let mut bus = EventBus::new();
+        for id in ["alpha", "beta", "gamma"] {
+            bus.register(Hat::new(id, id).subscribe("work.*"));
+        }
+        for (id, label) in [("alpha", "a1"), ("beta", "b1"), ("gamma", "g1")] {
+            bus.publish(Event::new("work", label).with_target(id));
+        }
+        let sel = bus
+            .select_next_hat_with_pending(Some(&HatId::from("beta")))
+            .unwrap();
+        assert_eq!(sel.as_str(), "beta");
+        bus.take_pending(&sel);
+        for (id, label) in [("alpha", "a2"), ("gamma", "g2")] {
+            bus.publish(Event::new("work", label).with_target(id));
+        }
+        let sel = bus.select_next_hat_with_pending(None).unwrap();
+        assert_eq!(
+            sel.as_str(),
+            "gamma",
+            "after priority pre-emption, cursor must advance to the priority hat, so the next scan starts at its successor"
+        );
     }
 }
