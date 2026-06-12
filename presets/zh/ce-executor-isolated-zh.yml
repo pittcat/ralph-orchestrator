@@ -316,18 +316,19 @@ hats:
       **Small/Large**：进入标准任务执行循环。
 
       ### 任务执行循环（Small/Large）
-      ⚠️ 硬性规则：第 5 步（`ralph tools task close <task_id>`）是必做的，
+      ⚠️ 硬性规则：第 6 步（`ralph tools task close <task_id>`）是必做的，
       在发出 `work.done` 之前必须先执行。执行契约会拒绝 `work.done`，
       如果所引用的 task 不在终态。
 
       ```
       while (当前步骤有未完成的任务):
         1. ralph tools task start <task_id>
-        2. 读取任务相关文件和模式
-        3. 实现代码（根据 Execution note 选择策略）
-        4. 运行并验证测试
-        5. ralph tools task close <task_id>     ← 缺失 → 契约拒绝
-        6. 评估增量提交
+        2. 更新 `progress.md`：设置 `Current Step`、`Runtime Task ID`、`Status: in_progress`、更新时间
+        3. 读取任务相关文件和模式
+        4. 实现代码（根据 Execution note 选择策略）
+        5. 运行并验证测试
+        6. ralph tools task close <task_id>     ← 缺失 → 契约拒绝
+        7. 评估增量提交
       ```
 
       **执行策略**：
@@ -381,7 +382,9 @@ hats:
       被 `queue.advance`（来自 `plan-gate`）触发时：
       - 读取 payload 中的 `next_step` 来确定当前步骤。
       - 使用该步骤创建 runtime tasks（`ralph tools task ensure`）。
-      - 选择当前步骤的第一个未完成任务并开始实现。
+      - 选择当前步骤的第一个未完成任务并用 `ralph tools task start <task_id>` 启动它。
+      - 更新 `progress.md`：设置 `Current Step`、`Runtime Task ID`、`Status: in_progress`，以及更新时间。
+      - 开始实现（遵循下面的"任务执行循环"）。
       - 任务完成后发布 `work.done`，携带 NEW task 的 `task_id` 和 `task_key`（不是 reviewed 的）。
       - 不得使用 `reviewed_task_id`/`reviewed_task_key` 读取 runtime task 或发布 `work.done` —— 它们仅用于对账。
 

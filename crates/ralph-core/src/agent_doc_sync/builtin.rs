@@ -43,7 +43,7 @@ const BUILTIN_IDS: &[&str] = &["hang-prevention"];
 
 #[cfg(test)]
 mod tests {
-    use super::super::block::compute_sha256;
+    use super::super::block::compute_sha256_hex;
     use super::*;
 
     #[test]
@@ -53,8 +53,8 @@ mod tests {
 
     #[test]
     fn hang_prevention_sha256_is_stable() {
-        let hash1 = compute_sha256(HANG_PREVENTION_CONTENT);
-        let hash2 = compute_sha256(HANG_PREVENTION_CONTENT);
+        let hash1 = compute_sha256_hex(HANG_PREVENTION_CONTENT);
+        let hash2 = compute_sha256_hex(HANG_PREVENTION_CONTENT);
         assert_eq!(hash1, hash2);
         assert_eq!(hash1.len(), 64);
     }
@@ -68,7 +68,7 @@ mod tests {
         assert_eq!(block.content, HANG_PREVENTION_CONTENT);
         assert_eq!(
             block.content_sha256,
-            compute_sha256(HANG_PREVENTION_CONTENT)
+            compute_sha256_hex(HANG_PREVENTION_CONTENT)
         );
     }
 

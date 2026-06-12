@@ -5,6 +5,8 @@
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use ralph_core::agent_doc_sync::compute_sha256_hex;
+use ralph_core::file_lock::FileLock;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -43,6 +45,14 @@ pub struct WaveEmitArgs {
     /// (`{wave_id, topic, count, events_file}` for U5 machine verification).
     #[arg(long, value_enum, default_value_t = WaveOutputFormat::Text)]
     pub output: WaveOutputFormat,
+
+    /// Optional idempotency key (U2). Re-emitting with the same
+    /// (loop_id, hat, topic, key) returns the original wave_id instead of
+    /// writing a new wave. Use for review-coordinator waves that may be
+    /// retried after timeout or duplicate dispatch. Omit to keep legacy
+    /// behavior (each call generates a new wave_id).
+    #[arg(long, value_name = "KEY")]
+    pub idempotency_key: Option<String>,
 }
 
 /// U5: Output format for `ralph wave emit`.
@@ -50,6 +60,43 @@ pub struct WaveEmitArgs {
 pub enum WaveOutputFormat {
     Text,
     Json,
+}
+
+/// U2: Max length of idempotency key (bytes). Bounds log line size and
+/// prevents runaway keys from polluting `.wave-idempotency.jsonl`.
+pub const MAX_IDEMPOTENCY_KEY_BYTES: usize = 256;
+
+/// U2: One row of `.wave-idempotency.jsonl`.
+///
+/// Schema is flat (single object per line) so future fields can be added
+/// without breaking parsers that ignore unknown keys.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct IdempotencyRecord {
+    /// SHA-256 hex of `"<loop_id>|<hat>|<topic>|<key>"`. Primary dedup key.
+    pub scope_key: String,
+    /// Echo of the user-supplied key (for operator audit).
+    pub idempotency_key: String,
+    /// Wave ID returned on first emission; returned on all later dedup hits.
+    pub wave_id: String,
+    /// Topic emitted (redundant with scope but logs-friendly).
+    pub topic: String,
+    /// Hat that emitted (or "" if unset at first call).
+    pub hat: String,
+    /// SHA-256 hex of the serialized payload list.
+    pub payload_digest: String,
+    /// Number of events that should exist with this wave_id.
+    pub count: u32,
+    /// ISO-8601 UTC timestamp of first emission.
+    pub created_at: String,
+}
+
+/// U2: Outcome of `write_wave_events_with_idempotency`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdempotencyOutcome {
+    /// The wave_id (whether new or deduped).
+    pub wave_id: String,
+    /// `true` when this call was a dedup hit (no new events written).
+    pub deduplicated: bool,
 }
 
 /// Execute a wave command.
@@ -69,6 +116,11 @@ fn execute_emit(args: WaveEmitArgs, use_colors: bool) -> Result<()> {
         );
     }
 
+    // U2: Validate idempotency key shape if provided
+    if let Some(ref key) = args.idempotency_key {
+        validate_idempotency_key(key)?;
+    }
+
     let payloads = if args.payloads_stdin {
         read_payloads_from_stdin()?
     } else {
@@ -81,7 +133,20 @@ fn execute_emit(args: WaveEmitArgs, use_colors: bool) -> Result<()> {
     validate_payload_shape(&payloads)?;
 
     let events_file = resolve_events_file();
-    let wave_id = write_wave_events(&args.topic, &payloads, &events_file)?;
+
+    // U2: Branch — with idempotency key or legacy path
+    let outcome = if let Some(ref key) = args.idempotency_key {
+        write_wave_events_with_idempotency(&args.topic, &payloads, &events_file, key)?
+    } else {
+        let wave_id = write_wave_events(&args.topic, &payloads, &events_file)?;
+        IdempotencyOutcome {
+            wave_id,
+            deduplicated: false,
+        }
+    };
+
+    let wave_id = outcome.wave_id;
+    let deduplicated = outcome.deduplicated;
     let total = payloads.len();
 
     // U5: optionally emit structured JSON for machine verification.
@@ -98,21 +163,23 @@ fn execute_emit(args: WaveEmitArgs, use_colors: bool) -> Result<()> {
                 "topic": args.topic,
                 "count": total,
                 "events_file": events_file_str,
+                "deduplicated": deduplicated,
             });
             println!("{}", serde_json::to_string(&payload)?);
         }
     }
 
     // Human-readable confirmation to stderr (always)
+    let dedup_tag = if deduplicated { " (deduplicated)" } else { "" };
     if use_colors {
         eprintln!(
-            "\x1b[32m\u{2713}\x1b[0m Wave dispatched: {} events on topic '{}' (wave {})",
-            total, args.topic, wave_id
+            "\x1b[32m\u{2713}\x1b[0m Wave dispatched: {} events on topic '{}' (wave {}){}",
+            total, args.topic, wave_id, dedup_tag
         );
     } else {
         eprintln!(
-            "Wave dispatched: {} events on topic '{}' (wave {})",
-            total, args.topic, wave_id
+            "Wave dispatched: {} events on topic '{}' (wave {}){}",
+            total, args.topic, wave_id, dedup_tag
         );
     }
 
@@ -216,15 +283,21 @@ pub fn write_wave_events(topic: &str, payloads: &[String], events_file: &Path) -
     let hat = std::env::var("RALPH_CURRENT_HAT")
         .ok()
         .filter(|s| !s.is_empty());
-    write_wave_events_with_provenance(topic, payloads, events_file, hat.as_deref())
+    write_wave_events_with_provenance(topic, payloads, events_file, hat.as_deref(), None, None)
 }
 
-/// Like [`write_wave_events`] but with explicit provenance fields.
+/// Like [`write_wave_events`] but with explicit provenance and idempotency fields.
+///
+/// When `idempotency_key` and `idempotency_hash` are provided, each wave event
+/// record gets `idempotency_key` and `idempotency_hash` fields injected. This
+/// enables recovery scanning by wave_id + idempotency_key.
 pub fn write_wave_events_with_provenance(
     topic: &str,
     payloads: &[String],
     events_file: &Path,
     hat: Option<&str>,
+    idempotency_key: Option<&str>,
+    idempotency_hash: Option<&str>,
 ) -> Result<String> {
     if payloads.is_empty() {
         bail!("At least one payload is required");
@@ -262,6 +335,18 @@ pub fn write_wave_events_with_provenance(
             }
         }
 
+        // U2: Inject idempotency fields when present
+        if let Some(ik) = idempotency_key {
+            if let Some(obj) = record.as_object_mut() {
+                obj.insert("idempotency_key".to_string(), serde_json::json!(ik));
+            }
+        }
+        if let Some(ih) = idempotency_hash {
+            if let Some(obj) = record.as_object_mut() {
+                obj.insert("idempotency_hash".to_string(), serde_json::json!(ih));
+            }
+        }
+
         let json_line = serde_json::to_string(&record)?;
         lines.push_str(&json_line);
         lines.push('\n');
@@ -290,6 +375,346 @@ pub fn resolve_events_file() -> PathBuf {
     fs::read_to_string(".ralph/current-events")
         .map(|s| PathBuf::from(s.trim()))
         .unwrap_or_else(|_| PathBuf::from(".ralph/events.jsonl"))
+}
+
+// ═══════════════════════════════════════════════════════════════
+// U2: Idempotency helpers
+// ═══════════════════════════════════════════════════════════════
+
+/// U2: Resolve scope inputs (loop_id, hat) from env and marker files.
+///
+/// Order:
+/// - loop_id: `RALPH_CURRENT_LOOP_ID` env → `.ralph/current-loop-id` marker → `"unknown"`
+/// - hat: `RALPH_CURRENT_HAT` env → `""`
+fn build_scope_inputs() -> (String, String) {
+    let loop_id = std::env::var("RALPH_CURRENT_LOOP_ID")
+        .ok()
+        .or_else(|| fs::read_to_string(".ralph/current-loop-id").ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+    let hat = std::env::var("RALPH_CURRENT_HAT")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default();
+    (loop_id, hat)
+}
+
+/// U2: Compute the sha256 hex scope key from the four dedup dimensions.
+pub fn compute_scope_key(loop_id: &str, hat: &str, topic: &str, key: &str) -> String {
+    let joined = format!("{loop_id}|{hat}|{topic}|{key}");
+    compute_sha256_hex(&joined)
+}
+
+/// U2: Compute the payload digest for the whole payload list.
+///
+/// Uses `\u{1F}` (Unit Separator) as delimiter — it is forbidden in JSON
+/// strings and therefore unambiguous.
+pub fn compute_payload_digest(payloads: &[String]) -> String {
+    let mut joined = String::new();
+    for (i, p) in payloads.iter().enumerate() {
+        if i > 0 {
+            joined.push('\u{1F}');
+        }
+        joined.push_str(p);
+    }
+    compute_sha256_hex(&joined)
+}
+
+/// U2: Derive the idempotency log path as a sibling of `events_file`.
+///
+/// Returns `<parent>/.<basename>.idempotency.jsonl`.
+/// Example: `/repo/.ralph/events.jsonl` → `/repo/.ralph/.events.jsonl.idempotency.jsonl`
+fn idempotency_log_path(events_file: &Path) -> PathBuf {
+    let parent = events_file.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = events_file
+        .file_name()
+        .map(|s| s.to_string_lossy())
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed("events.jsonl"));
+    parent.join(format!(".{}.idempotency.jsonl", file_name))
+}
+
+/// U2: Read all idempotency records from the log file.
+///
+/// Parsing errors are fatal (log is self-written, not consumer-tolerant).
+fn read_idempotency_records(events_file: &Path) -> Result<Vec<IdempotencyRecord>> {
+    let path = idempotency_log_path(events_file);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("read {}", path.display()))?;
+    let mut out = Vec::new();
+    for (i, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let rec: IdempotencyRecord = serde_json::from_str(trimmed)
+            .with_context(|| format!("parse {} line {}", path.display(), i + 1))?;
+        out.push(rec);
+    }
+    Ok(out)
+}
+
+/// U2: Append one idempotency record to the log file (with fsync).
+fn append_idempotency_record(events_file: &Path, rec: &IdempotencyRecord) -> Result<()> {
+    let path = idempotency_log_path(events_file);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("Failed to open idempotency log: {}", path.display()))?;
+    let line = serde_json::to_string(rec)?;
+    writeln!(f, "{}", line)?;
+    f.sync_data()?;
+    Ok(())
+}
+
+/// U2: Count events in `events_file` whose `idempotency_key` and `wave_id` match.
+///
+/// Used by the recovery path. Tolerates malformed event lines (continue).
+fn count_recovered_events(
+    events_file: &Path,
+    expected_wave_id: &str,
+    expected_key: &str,
+) -> Result<u32> {
+    if !events_file.exists() {
+        return Ok(0);
+    }
+    let content = fs::read_to_string(events_file)
+        .with_context(|| format!("read {}", events_file.display()))?;
+    let mut count: u32 = 0;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => continue, // events file tolerates malformed lines
+        };
+        if v.get("wave_id").and_then(|x| x.as_str()) == Some(expected_wave_id)
+            && v.get("idempotency_key").and_then(|x| x.as_str()) == Some(expected_key)
+        {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// U2: Scan events file for events with matching `idempotency_key`.
+///
+/// Returns `(first_wave_id, count)` when exactly `expected_count` matching
+/// events are found. Returns `None` when no matching events exist (clean
+/// first call). Errors when partial matches exist (incomplete prior emission).
+///
+/// Uses both `idempotency_key` AND `idempotency_hash` (the scope_key) to
+/// avoid cross-scope false positive on recovery scans.
+/// Used by the recovery path when the idempotency record was lost (crash
+/// between events append and record append).
+fn try_recover_from_events(
+    events_file: &Path,
+    idempotency_key: &str,
+    scope_key: &str,
+    expected_count: usize,
+) -> Result<Option<(String, usize)>> {
+    if !events_file.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(events_file)
+        .with_context(|| format!("read {}", events_file.display()))?;
+    let mut count: usize = 0;
+    let mut first_wave_id: Option<String> = None;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if v.get("idempotency_key").and_then(|x| x.as_str()) == Some(idempotency_key)
+                && v.get("idempotency_hash").and_then(|x| x.as_str()) == Some(scope_key) {
+            count += 1;
+            if first_wave_id.is_none() {
+                first_wave_id = v
+                    .get("wave_id")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string());
+            }
+        }
+    }
+    match count {
+        0 => Ok(None),
+        n if n == expected_count => {
+            let wave_id = first_wave_id.unwrap_or_else(|| {
+                "w-recovered-unknown-wave-id".to_string()
+            });
+            Ok(Some((wave_id, count)))
+        }
+        n => {
+            bail!(
+                "incomplete prior wave emission: found {} events with idempotency_key '{}' \
+                 in events file, but expected {}. Manually clean up partial events or use a \
+                 different --idempotency-key.",
+                n,
+                idempotency_key,
+                expected_count
+            );
+        }
+    }
+}
+
+/// U2: Validate idempotency key shape.
+fn validate_idempotency_key(key: &str) -> Result<()> {
+    if key.is_empty() {
+        bail!("--idempotency-key must not be empty");
+    }
+    if key.trim().is_empty() {
+        bail!("--idempotency-key must not be whitespace-only");
+    }
+    if key.len() > MAX_IDEMPOTENCY_KEY_BYTES {
+        bail!(
+            "--idempotency-key exceeds {} bytes (got {})",
+            MAX_IDEMPOTENCY_KEY_BYTES,
+            key.len()
+        );
+    }
+    if !key.is_ascii() {
+        bail!("--idempotency-key must be ASCII (got non-ASCII bytes)");
+    }
+    Ok(())
+}
+
+/// U2: Emit wave events with idempotency enforcement.
+///
+/// On first call with a given `(loop_id, hat, topic, key)`, writes N events
+/// and one idempotency record. On subsequent calls with the same scope and
+/// payload digest, returns the original wave_id with `deduplicated=true`.
+///
+/// Uses `FileLock::exclusive()` for concurrency safety.
+pub fn write_wave_events_with_idempotency(
+    topic: &str,
+    payloads: &[String],
+    events_file: &Path,
+    idempotency_key: &str,
+) -> Result<IdempotencyOutcome> {
+    let (loop_id, hat) = build_scope_inputs();
+    write_wave_events_with_idempotency_with_scope(
+        topic, payloads, events_file, idempotency_key, &loop_id, &hat,
+    )
+}
+
+/// U2: Like [`write_wave_events_with_idempotency`] but with explicit scope params for testability.
+pub fn write_wave_events_with_idempotency_with_scope(
+    topic: &str,
+    payloads: &[String],
+    events_file: &Path,
+    idempotency_key: &str,
+    loop_id: &str,
+    hat: &str,
+) -> Result<IdempotencyOutcome> {
+    if payloads.is_empty() {
+        bail!("At least one payload is required");
+    }
+    if idempotency_key.is_empty() {
+        bail!("idempotency_key must not be empty (caller bug)");
+    }
+
+    let scope_key = compute_scope_key(loop_id, hat, topic, idempotency_key);
+    let payload_digest = compute_payload_digest(payloads);
+
+    // Acquire exclusive lock on events_file
+    let lock = FileLock::new(events_file)
+        .with_context(|| format!("create FileLock for {}", events_file.display()))?;
+    let _guard = lock
+        .exclusive()
+        .with_context(|| format!("acquire exclusive lock on {}", lock.lock_path().display()))?;
+
+    // Load existing records
+    let records = read_idempotency_records(events_file)?;
+
+    // Dedup check
+    if let Some(existing) = records.iter().find(|r| r.scope_key == scope_key) {
+        if existing.payload_digest != payload_digest {
+            bail!(
+                "idempotency-key conflict: same scope already used with a different payload. \
+                 original wave_id={}, original count={}, original created_at={}. \
+                 If the new payload is intended, use a different --idempotency-key.",
+                existing.wave_id, existing.count, existing.created_at
+            );
+        }
+        // Recovery: verify events file has the expected count
+        let count = count_recovered_events(events_file, &existing.wave_id, idempotency_key)?;
+        if count < existing.count {
+            bail!(
+                "incomplete prior wave emission: scope_key {} has record claiming \
+                 {} events but only {} found in events file. Refusing to silently re-append; \
+                 manually clean up partial events or use a new --idempotency-key.",
+                scope_key,
+                existing.count,
+                count
+            );
+        }
+        return Ok(IdempotencyOutcome {
+            wave_id: existing.wave_id.clone(),
+            deduplicated: true,
+        });
+    }
+
+    // U2: Recovery scan — record was lost but events exist with matching idempotency_key
+    let recovery = try_recover_from_events(events_file, idempotency_key, &scope_key, payloads.len())?;
+    if let Some((wave_id, count)) = recovery {
+        // Reconstruct the record from the recovered wave data
+        let rec = IdempotencyRecord {
+            scope_key: scope_key.clone(),
+            idempotency_key: idempotency_key.to_string(),
+            wave_id: wave_id.clone(),
+            topic: topic.to_string(),
+            hat: hat.to_string(),
+            payload_digest,
+            count: count as u32,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        append_idempotency_record(events_file, &rec)?;
+        return Ok(IdempotencyOutcome {
+            wave_id,
+            deduplicated: true,
+        });
+    }
+
+    // First-time: write events (with idempotency fields), then write record
+    let wave_id = write_wave_events_with_provenance(
+        topic,
+        payloads,
+        events_file,
+        (if hat.is_empty() { None } else { Some(hat) }),
+        Some(idempotency_key),
+        Some(&scope_key),
+    )?;
+
+    let rec = IdempotencyRecord {
+        scope_key: scope_key.clone(),
+        idempotency_key: idempotency_key.to_string(),
+        wave_id: wave_id.clone(),
+        topic: topic.to_string(),
+        hat: hat.to_string(),
+        payload_digest,
+        count: payloads.len() as u32,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    append_idempotency_record(events_file, &rec)?;
+
+    Ok(IdempotencyOutcome {
+        wave_id,
+        deduplicated: false,
+    })
 }
 
 /// Generate a unique wave ID.
@@ -521,7 +946,483 @@ mod tests {
         assert!(err.contains("JSON object"));
     }
 
-    // ---- U5: machine-readable --output json tests ----
+    // ---- U2 (2026-06-11-002): idempotency key tests ----
+
+    #[test]
+    fn test_idempotency_key_validation() {
+        // Empty
+        assert!(validate_idempotency_key("").is_err());
+        // Whitespace only
+        assert!(validate_idempotency_key("   ").is_err());
+        // Too long (>256 bytes)
+        let long_key = "x".repeat(257);
+        assert!(validate_idempotency_key(&long_key).is_err());
+        // Non-ASCII
+        assert!(validate_idempotency_key("中文").is_err());
+        // Valid ASCII key
+        assert!(validate_idempotency_key("ce-review:foo:1:step:round-1").is_ok());
+        // Boundary: exactly 256 bytes
+        let boundary = "x".repeat(256);
+        assert!(validate_idempotency_key(&boundary).is_ok());
+    }
+
+    #[test]
+    fn test_idempotency_log_path_derivation() {
+        let p = idempotency_log_path(Path::new("/a/b.jsonl"));
+        assert_eq!(p, Path::new("/a/.b.jsonl.idempotency.jsonl"));
+
+        let p2 = idempotency_log_path(Path::new(".ralph/events.jsonl"));
+        assert_eq!(p2, Path::new(".ralph/.events.jsonl.idempotency.jsonl"));
+    }
+
+    #[test]
+    fn test_idempotency_scope_key_distinct() {
+        let k1 = compute_scope_key("loop1", "hat1", "t1", "key1");
+        let k2 = compute_scope_key("loop2", "hat1", "t1", "key1");
+        assert_ne!(k1, k2, "different loop_id should give different scope_key");
+
+        let k3 = compute_scope_key("loop1", "hat2", "t1", "key1");
+        assert_ne!(k1, k3, "different hat should give different scope_key");
+
+        let k4 = compute_scope_key("loop1", "hat1", "t2", "key1");
+        assert_ne!(k1, k4, "different topic should give different scope_key");
+
+        let k5 = compute_scope_key("loop1", "hat1", "t1", "key2");
+        assert_ne!(k1, k5, "different key should give different scope_key");
+    }
+
+    #[test]
+    fn test_idempotency_payload_digest_distinct() {
+        let d1 = compute_payload_digest(&["a".to_string(), "b".to_string()]);
+        let d2 = compute_payload_digest(&["a".to_string(), "c".to_string()]);
+        assert_ne!(d1, d2, "different payloads should give different digest");
+
+        let d3 = compute_payload_digest(&["ab".to_string()]);
+        let d4 = compute_payload_digest(&["a".to_string(), "b".to_string()]);
+        assert_ne!(d3, d4, "different grouping should give different digest");
+    }
+
+    #[test]
+    fn test_idempotency_first_call_writes_record() {
+        let tmp = TempDir::new().unwrap();
+        let events_path = tmp.path().join("events.jsonl");
+        let payloads = vec![
+            r#"{"dim":"correctness"}"#.to_string(),
+            r#"{"dim":"testing"}"#.to_string(),
+        ];
+
+        let outcome = write_wave_events_with_idempotency_with_scope(
+            "review.wave.ready",
+            &payloads,
+            &events_path,
+            "ce-review:foo:1:step:round-1",
+            "loop-1",
+            "reviewer",
+        )
+        .unwrap();
+
+        assert!(!outcome.deduplicated, "first call should not be dedup");
+        assert!(outcome.wave_id.starts_with("w-"));
+
+        // Events file should have 2 lines
+        let content = fs::read_to_string(&events_path).unwrap();
+        assert_eq!(content.lines().count(), 2);
+
+        // Each event should have idempotency_key and idempotency_hash
+        for line in content.lines() {
+            let v: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(v["idempotency_key"], "ce-review:foo:1:step:round-1");
+            assert!(
+                v["idempotency_hash"].as_str().unwrap().len() == 64,
+                "idempotency_hash should be 64 hex chars"
+            );
+        }
+
+        // Idempotency log should have 1 line
+        let log = read_idempotency_records(&events_path).unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].idempotency_key, "ce-review:foo:1:step:round-1");
+        assert_eq!(log[0].count, 2);
+    }
+
+    #[test]
+    fn test_idempotency_dedup_returns_original_wave_id() {
+        let tmp = TempDir::new().unwrap();
+        let events_path = tmp.path().join("events.jsonl");
+        let payloads = vec![
+            r#"{"dim":"correctness"}"#.to_string(),
+            r#"{"dim":"testing"}"#.to_string(),
+        ];
+
+        // First call
+        let first = write_wave_events_with_idempotency_with_scope(
+            "review.wave.ready",
+            &payloads,
+            &events_path,
+            "ce-review:dup-test",
+            "loop-1",
+            "reviewer",
+        )
+        .unwrap();
+        assert!(!first.deduplicated);
+
+        // Second call with same key and payloads
+        let second = write_wave_events_with_idempotency_with_scope(
+            "review.wave.ready",
+            &payloads,
+            &events_path,
+            "ce-review:dup-test",
+            "loop-1",
+            "reviewer",
+        )
+        .unwrap();
+
+        assert!(second.deduplicated, "second call should be dedup");
+        assert_eq!(
+            first.wave_id, second.wave_id,
+            "second call should return same wave_id"
+        );
+
+        // Events file still has only 2 lines
+        let content = fs::read_to_string(&events_path).unwrap();
+        assert_eq!(content.lines().count(), 2);
+    }
+
+    #[test]
+    fn test_idempotency_same_key_different_payload_errors() {
+        let tmp = TempDir::new().unwrap();
+        let events_path = tmp.path().join("events.jsonl");
+        let key = "ce-review:payload-conflict";
+
+        // First call with payload set A
+        let payloads_a = vec![r#"{"dim":"correctness"}"#.to_string()];
+        write_wave_events_with_idempotency_with_scope(
+            "review.wave.ready",
+            &payloads_a,
+            &events_path,
+            key,
+            "loop-1",
+            "reviewer",
+        )
+        .unwrap();
+
+        // Second call with different payloads (same key) → should error
+        let payloads_b = vec![
+            r#"{"dim":"correctness"}"#.to_string(),
+            r#"{"dim":"testing"}"#.to_string(),
+        ];
+        let result = write_wave_events_with_idempotency_with_scope(
+            "review.wave.ready",
+            &payloads_b,
+            &events_path,
+            key,
+            "loop-1",
+            "reviewer",
+        );
+        assert!(
+            result.is_err(),
+            "same key with different payload should error"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("idempotency-key conflict"),
+            "error should mention idempotency-key conflict, got: {err}"
+        );
+
+        // Events file should still have only 1 line
+        let content = fs::read_to_string(&events_path).unwrap();
+        assert_eq!(content.lines().count(), 1);
+    }
+
+    #[test]
+    fn test_idempotency_different_keys_dont_dedup() {
+        let tmp = TempDir::new().unwrap();
+        let events_path = tmp.path().join("events.jsonl");
+        let payloads = vec![r#"{"dim":"correctness"}"#.to_string()];
+
+        // key1
+        write_wave_events_with_idempotency_with_scope(
+            "review.wave.ready",
+            &payloads,
+            &events_path,
+            "key1",
+            "loop-1",
+            "reviewer",
+        )
+        .unwrap();
+
+        // key2 → different key, should write a new wave
+        write_wave_events_with_idempotency_with_scope(
+            "review.wave.ready",
+            &payloads,
+            &events_path,
+            "key2",
+            "loop-1",
+            "reviewer",
+        )
+        .unwrap();
+
+        // Events file should have 2 lines
+        let content = fs::read_to_string(&events_path).unwrap();
+        assert_eq!(content.lines().count(), 2);
+
+        // Log should have 2 records with different wave_ids
+        let records = read_idempotency_records(&events_path).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_ne!(records[0].wave_id, records[1].wave_id);
+    }
+
+    #[test]
+    fn test_idempotency_cross_loop_id_isolated() {
+        let tmp = TempDir::new().unwrap();
+        let events_path = tmp.path().join("events.jsonl");
+        let payloads = vec![r#"{"dim":"correctness"}"#.to_string()];
+        let key = "same-key";
+
+        // loop-1
+        write_wave_events_with_idempotency_with_scope(
+            "review.wave.ready",
+            &payloads,
+            &events_path,
+            key,
+            "loop-1",
+            "reviewer",
+        )
+        .unwrap();
+
+        // loop-2, same key → should NOT dedup
+        let outcome = write_wave_events_with_idempotency_with_scope(
+            "review.wave.ready",
+            &payloads,
+            &events_path,
+            key,
+            "loop-2",
+            "reviewer",
+        )
+        .unwrap();
+        assert!(!outcome.deduplicated, "different loop_id should not dedup");
+
+        // Events file → 2 lines
+        let content = fs::read_to_string(&events_path).unwrap();
+        assert_eq!(content.lines().count(), 2);
+    }
+
+    #[test]
+    fn test_idempotency_cross_hat_isolated() {
+        let tmp = TempDir::new().unwrap();
+        let events_path = tmp.path().join("events.jsonl");
+        let payloads = vec![r#"{"dim":"correctness"}"#.to_string()];
+        let key = "same-key";
+
+        write_wave_events_with_idempotency_with_scope(
+            "review.wave.ready",
+            &payloads,
+            &events_path,
+            key,
+            "loop-1",
+            "reviewer",
+        )
+        .unwrap();
+
+        let outcome = write_wave_events_with_idempotency_with_scope(
+            "review.wave.ready",
+            &payloads,
+            &events_path,
+            key,
+            "loop-1",
+            "executor",
+        )
+        .unwrap();
+        assert!(!outcome.deduplicated, "different hat should not dedup");
+
+        let content = fs::read_to_string(&events_path).unwrap();
+        assert_eq!(content.lines().count(), 2);
+    }
+
+    #[test]
+    fn test_idempotency_cross_topic_isolated() {
+        let tmp = TempDir::new().unwrap();
+        let events_path = tmp.path().join("events.jsonl");
+        let payloads = vec![r#"{"dim":"correctness"}"#.to_string()];
+        let key = "same-key";
+
+        write_wave_events_with_idempotency_with_scope(
+            "topic.a",
+            &payloads,
+            &events_path,
+            key,
+            "loop-1",
+            "reviewer",
+        )
+        .unwrap();
+
+        let outcome = write_wave_events_with_idempotency_with_scope(
+            "topic.b",
+            &payloads,
+            &events_path,
+            key,
+            "loop-1",
+            "reviewer",
+        )
+        .unwrap();
+        assert!(!outcome.deduplicated, "different topic should not dedup");
+
+        let content = fs::read_to_string(&events_path).unwrap();
+        assert_eq!(content.lines().count(), 2);
+    }
+
+    #[test]
+    fn test_idempotency_no_key_unchanged_compat() {
+        let tmp = TempDir::new().unwrap();
+        let events_path = tmp.path().join("events.jsonl");
+        let payloads = vec![r#"{"dim":"correctness"}"#.to_string()];
+
+        // Use the regular write_wave_events path (no idempotency)
+        write_wave_events("test.topic", &payloads, &events_path).unwrap();
+
+        // Events should NOT have idempotency fields
+        let content = fs::read_to_string(&events_path).unwrap();
+        for line in content.lines() {
+            let v: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert!(
+                v.get("idempotency_key").is_none(),
+                "no-key path should not inject idempotency_key"
+            );
+        }
+
+        // Idempotency log should not exist
+        assert!(
+            !idempotency_log_path(&events_path).exists(),
+            "no-key path should not create idempotency log"
+        );
+    }
+
+    #[test]
+    fn test_idempotency_recovery_after_partial_failure() {
+        let tmp = TempDir::new().unwrap();
+        let events_path = tmp.path().join("events.jsonl");
+        let key = "ce-review:recovery-test";
+        let payloads = vec![
+            r#"{"dim":"correctness"}"#.to_string(),
+            r#"{"dim":"testing"}"#.to_string(),
+            r#"{"dim":"maintainability"}"#.to_string(),
+        ];
+        let scope_key = compute_scope_key("loop-1", "reviewer", "review.wave.ready", key);
+
+        // Simulate a successful first write without the idempotency record
+        let first_wave_id = write_wave_events_with_provenance(
+            "review.wave.ready",
+            &payloads,
+            &events_path,
+            Some("reviewer"),
+            Some(key),
+            Some(&scope_key),
+        )
+        .unwrap();
+
+        // Verify events written (3 lines)
+        let content = fs::read_to_string(&events_path).unwrap();
+        assert_eq!(content.lines().count(), 3);
+
+        // Idempotency log should NOT exist (simulating crash before record write)
+        let log_path = idempotency_log_path(&events_path);
+        assert!(!log_path.exists(), "recovery test: log_path={:?} should not exist before recovery call", log_path);
+
+        // Now call with the same key → should recover (scan events, write record, return same wave_id)
+        let outcome = write_wave_events_with_idempotency_with_scope(
+            "review.wave.ready",
+            &payloads,
+            &events_path,
+            key,
+            "loop-1",
+            "reviewer",
+        )
+        .unwrap();
+
+        // Now call with the same key → should recover (scan events, write record, return same wave_id)
+        let outcome = write_wave_events_with_idempotency_with_scope(
+            "review.wave.ready",
+            &payloads,
+            &events_path,
+            key,
+            "loop-1",
+            "reviewer",
+        )
+        .unwrap();
+
+        assert!(outcome.deduplicated, "recovery should return deduplicated=true");
+        assert_eq!(
+            outcome.wave_id, first_wave_id,
+            "recovery should return original wave_id"
+        );
+
+        // Events file should still have 3 lines
+        let content = fs::read_to_string(&events_path).unwrap();
+        assert_eq!(content.lines().count(), 3);
+
+        // Idempotency log should now exist with 1 record
+        let records = read_idempotency_records(&events_path).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].idempotency_key, key);
+        assert_eq!(records[0].wave_id, first_wave_id);
+    }
+
+    #[test]
+    fn test_idempotency_incomplete_events_errors() {
+        let tmp = TempDir::new().unwrap();
+        let events_path = tmp.path().join("events.jsonl");
+        let key = "ce-review:incomplete-test";
+
+        // Write only 2 events but not the full 7 claimed count
+        let payloads_partial = vec![
+            r#"{"dim":"correctness"}"#.to_string(),
+            r#"{"dim":"testing"}"#.to_string(),
+        ];
+        write_wave_events_with_provenance(
+            "review.wave.ready",
+            &payloads_partial,
+            &events_path,
+            Some("reviewer"),
+            Some(key),
+            Some("incomplete-scope"),
+        )
+        .unwrap();
+
+        // Manually create a record claiming 7 events (to trigger the incomplete check)
+        let rec = IdempotencyRecord {
+            scope_key: compute_scope_key("loop-1", "reviewer", "review.wave.ready", key),
+            idempotency_key: key.to_string(),
+            wave_id: "w-simulated".to_string(),
+            topic: "review.wave.ready".to_string(),
+            hat: "reviewer".to_string(),
+            payload_digest: compute_payload_digest(&payloads_partial),
+            count: 7,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        append_idempotency_record(&events_path, &rec).unwrap();
+
+        // Now call with the same key → should detect incomplete emission
+        let result = write_wave_events_with_idempotency_with_scope(
+            "review.wave.ready",
+            // same payloads as recorded in the record
+            &payloads_partial,
+            &events_path,
+            key,
+            "loop-1",
+            "reviewer",
+        );
+
+        assert!(result.is_err(), "incomplete event should error");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("incomplete prior wave emission"),
+            "should mention incomplete prior wave emission, got: {err_msg}"
+        );
+
+        // Events file should still have only 2 lines
+        let content = fs::read_to_string(&events_path).unwrap();
+        assert_eq!(content.lines().count(), 2);
+    }
 
     #[test]
     fn test_wave_output_format_default_is_text() {

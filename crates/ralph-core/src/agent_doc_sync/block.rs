@@ -31,7 +31,7 @@ impl BlockSpec {
     /// Creates a new `BlockSpec`, computing the SHA-256 hash of `content`.
     pub fn new(id: impl Into<String>, content: impl Into<String>) -> Self {
         let content = content.into();
-        let content_sha256 = compute_sha256(&content);
+        let content_sha256 = compute_sha256_hex(&content);
         Self {
             id: id.into(),
             content,
@@ -55,7 +55,7 @@ pub(crate) enum BlockState {
 }
 
 /// Computes a 64-character lowercase hex SHA-256 digest.
-pub(crate) fn compute_sha256(content: &str) -> String {
+pub fn compute_sha256_hex(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
     format!("{:x}", hasher.finalize())
@@ -164,15 +164,15 @@ mod tests {
 
     #[test]
     fn compute_sha256_is_stable() {
-        let hash1 = compute_sha256("hello world");
-        let hash2 = compute_sha256("hello world");
+        let hash1 = compute_sha256_hex("hello world");
+        let hash2 = compute_sha256_hex("hello world");
         assert_eq!(hash1, hash2);
         assert_eq!(hash1.len(), 64);
     }
 
     #[test]
     fn compute_sha256_matches_known_value() {
-        let hash = compute_sha256("hello");
+        let hash = compute_sha256_hex("hello");
         assert_eq!(
             hash,
             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
@@ -184,7 +184,7 @@ mod tests {
         let block = BlockSpec::new("test", "content");
         assert_eq!(block.id, "test");
         assert_eq!(block.content, "content");
-        assert_eq!(block.content_sha256, compute_sha256("content"));
+        assert_eq!(block.content_sha256, compute_sha256_hex("content"));
     }
 
     #[test]
@@ -221,7 +221,7 @@ mod tests {
 
     #[test]
     fn parse_marker_state_with_version_up_to_date() {
-        let hash = compute_sha256("correct content");
+        let hash = compute_sha256_hex("correct content");
         let content = build_content(
             &[
                 "# My Project",
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn parse_marker_state_with_version_orphan_begin_with_matching_hash_is_mismatched() {
-        let hash = compute_sha256("some content");
+        let hash = compute_sha256_hex("some content");
         let content = build_content(
             &[
                 "# My Project",

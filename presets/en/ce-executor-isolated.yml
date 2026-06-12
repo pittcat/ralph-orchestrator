@@ -121,6 +121,16 @@ event_loop:
     # U4: enable plan_name equality validation — work.done plan_name must match
     # the current_plan_name from work.ready.
     plan_name_equality_required: true
+    # U1 (2026-06-11-002): trivial_step semantic gate. Mirrors the wave
+    # gate's `changed_lines_min: 50`. A `review.passed` event with
+    # `skip_reason=trivial_step` is rejected by the event policy when
+    # the payload shows `findings_count > 0` OR
+    # `changed_lines >= trivial_step_max_changed_lines`. This stops
+    # the agent from bypassing Fixer by labeling a non-trivial diff
+    # as trivial. Set to 0 to disable the gate (NOT recommended for
+    # ce-executor-isolated). The 50-line threshold matches the wave
+    # gate so the two stay synchronized.
+    trivial_step_max_changed_lines: 50
     schemas:
       work.ready:
         required_fields: [plan_name, plan_path, task_id, task_key, step, complexity]
@@ -398,18 +408,19 @@ hats:
       **Small/Large**: Enter standard task execution loop.
 
       ### Task Execution Loop (Small/Large)
-      ⚠️ HARD RULE: Step 5 (`ralph tools task close <task_id>`) is REQUIRED
+      ⚠️ HARD RULE: Step 6 (`ralph tools task close <task_id>`) is REQUIRED
       before emitting `work.done`. The execution contract will REJECT
       `work.done` if the referenced task is not in a terminal state.
 
       ```
       while (current step has uncompleted tasks):
         1. ralph tools task start <task_id>
-        2. Read task files and patterns
-        3. Implement (test-first / characterization-first per Execution note)
-        4. Run and verify tests
-        5. ralph tools task close <task_id>     ← missing → contract rejection
-        6. Evaluate incremental commit
+        2. Update `progress.md`: set `Current Step`, `Runtime Task ID`, `Status: in_progress`, update time
+        3. Read task files and patterns
+        4. Implement (test-first / characterization-first per Execution note)
+        5. Run and verify tests
+        6. ralph tools task close <task_id>     ← missing → contract rejection
+        7. Evaluate incremental commit
       ```
 
       **Execution strategy per Execution note:**
@@ -464,7 +475,9 @@ hats:
       When triggered by `queue.advance` (from `plan-gate`):
       - Read `next_step` from the payload to identify the step you must now work on.
       - Create that step's runtime tasks using `ralph tools task ensure`.
-      - Select the first uncompleted task of the current step and begin implementation.
+      - Select the first uncompleted task of the current step and `ralph tools task start <task_id>`.
+      - Update `progress.md`: set `Current Step`, `Runtime Task ID`, `Status: in_progress`, and update time.
+      - Begin implementation (follow the Task Execution Loop below).
       - Publish `work.done` when the task is complete, carrying the NEW task's `task_id` and `task_key` (not the reviewed ones).
       - Do NOT use `reviewed_task_id`/`reviewed_task_key` to read runtime tasks or publish `work.done` — they are for correlation only.
 
@@ -712,6 +725,34 @@ hats:
         - `plan_name`: string
         - `task_id`, `task_key`, `step`: MUST be present. Copy from the triggering event payload. Do NOT omit.
       - Emit wave events then stop — do not wait for results
+
+      - **U2 — Idempotent wave emission.** Always pass an explicit
+        `--idempotency-key` to `ralph wave emit` so that retries
+        (timeouts, agent restarts, accidental re-dispatch) do NOT
+        create duplicate waves. Use the canonical key formula:
+
+        ```
+        ce-review:{plan_name}:{task_id}:{step}:round-{fix_round}
+        ```
+
+        Example:
+        ```bash
+        cat payloads.jsonl | ralph wave emit review.wave.ready \
+            --idempotency-key "ce-review:fix-null-pointer:42:implement:round-1" \
+            --payloads-stdin --output json
+        ```
+
+        Properties:
+        - First call with a key writes the wave + creates the dedup record.
+        - Subsequent calls with the same `(loop_id, hat, topic, key)` and
+          identical payloads return the same `wave_id` with
+          `deduplicated=true` in JSON output; no new events are written.
+        - Same key with different payloads is rejected with
+          `idempotency-key conflict` to prevent silently overwriting.
+        - Different `fix_round` → different key → new wave (intentional).
+        - Different `plan_name` or `task_id` → different key → new wave.
+        - Do NOT omit `--idempotency-key` for review waves; doing so
+          breaks the dedup safety net and risks double-dispatch on retry.
 
       ### Persist `last_reviewed_sha` After Terminal Event
       **Why this exists:** `last_reviewed_sha` is the incremental diff base for the NEXT review-coordinator pass. The `context.md` key-value header is the chosen persistence layer (see also `start_sha` written by Coordinator on `work.start`, and `current_fix_round` in `fix-log.md`).
