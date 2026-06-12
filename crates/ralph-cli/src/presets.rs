@@ -102,11 +102,13 @@ const PRESETS: &[EmbeddedPreset] = &[
 /// is Tier-0 — the canonical plan-driven workflow that 002 and 003
 /// were authored against. `ce-executor-wave` is the planned
 /// Tier-0 follow-up.
+#[allow(dead_code)] // 003 plan tiered-gates 预留：见 docs/solutions/developer-experience/wac-rollout-tiered-gates-2026-06-12.md
 pub const TIER_0_WAC_PRESETS: &[&str] = &["ce-executor-isolated"];
 
 /// `true` if `preset_name` is in the Tier-0 list. Used by the CI
 /// gate and by the test suite that asserts the Tier-0 preset
 /// passes WAC strict.
+#[allow(dead_code)] // 003 plan tiered-gates 预留：见 docs/solutions/developer-experience/wac-rollout-tiered-gates-2026-06-12.md
 pub fn is_tier_0_wac_preset(preset_name: &str) -> bool {
     TIER_0_WAC_PRESETS.iter().any(|n| *n == preset_name)
 }

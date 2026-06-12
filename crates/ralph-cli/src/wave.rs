@@ -436,6 +436,7 @@ pub fn compute_payload_digest(payloads: &[String]) -> String {
 /// The function is `pub(crate)` so the test module can drive
 /// the rejection path; production callers are the JSONL
 /// append-or-write path and the BDD scenario for AE2 timing.
+#[allow(dead_code)] // 003 plan WRC-U6 预留：手写 JSONL 入口的 wave_total 拒收点，待接线
 pub(crate) fn validate_wave_record(
     record: &serde_json::Value,
     expected_wave_total: u32,
@@ -749,7 +750,7 @@ pub fn write_wave_events_with_idempotency_with_scope(
         topic,
         payloads,
         events_file,
-        (if hat.is_empty() { None } else { Some(hat) }),
+        if hat.is_empty() { None } else { Some(hat) },
         Some(idempotency_key),
         Some(&scope_key),
     )?;

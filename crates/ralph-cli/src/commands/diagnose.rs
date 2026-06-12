@@ -18,8 +18,7 @@ use crate::operation_guard::read_loop_id_marker;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use ralph_core::diagnosis::{
-    RankedFinding, Report, ReporterError, SessionSelector, build_report, render_json,
-    render_markdown,
+    Report, ReporterError, SessionSelector, build_report, render_json, render_markdown,
 };
 use ralph_core::loop_lock::{LockStatus, LoopLock};
 use ralph_core::loop_registry::LoopEntry;
@@ -487,6 +486,7 @@ fn collect_loop_pointer_warnings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ralph_core::diagnosis::RankedFinding;
 
     fn base_args(diagnostics_root: &Path) -> DiagnoseArgs {
         DiagnoseArgs {

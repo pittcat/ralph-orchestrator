@@ -16,7 +16,7 @@
 
 use super::*;
 use ralph_core::preset_lint::{LintStrictness, run_preset_lint};
-use ralph_core::runtime_contract::{FindingSeverity, FindingSource, FindingStage};
+use ralph_core::runtime_contract::FindingSeverity;
 
 /// Exit code for preset lint gate failure (R7).
 pub const EXIT_CODE_LINT_GATE: i32 = 2;
@@ -233,6 +233,7 @@ fn print_lint_fallback(error: &PresetLintGateError) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ralph_core::runtime_contract::{FindingSource, FindingStage};
     use ralph_core::RalphConfig;
 
     #[test]
