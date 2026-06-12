@@ -50,6 +50,35 @@ pub enum ViolationType {
     },
 }
 
+impl ViolationType {
+    /// Field name that triggered the violation, when the violation
+    /// is field-scoped. Returns `None` for topic-scoped violations
+    /// (terminal-monotonicity, topic-format, topic-deny, etc.).
+    pub fn field(&self) -> Option<&str> {
+        match self {
+            Self::MissingRequiredField { field }
+            | Self::InvalidFieldValue { field, .. } => Some(field.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Stable machine-readable code for the violation type. Used as
+    /// the dedupe key in dedup-by-`(topic, field, reason_code)` and
+    /// as the `reason_code` in CLI precheck JSON output.
+    pub fn reason_code(&self) -> &'static str {
+        match self {
+            Self::MissingRequiredField { .. } => "missing_required_field",
+            Self::InvalidFieldValue { .. } => "invalid_field_value",
+            Self::PayloadTypeMismatch { .. } => "payload_type_mismatch",
+            Self::TerminalMonotonicityViolation { .. } => "terminal_monotonicity_violation",
+            Self::DuplicateTerminalEvent { .. } => "duplicate_terminal_event",
+            Self::BusinessEventAfterCompletion { .. } => "business_event_after_completion",
+            Self::InvalidTopicFormat { .. } => "invalid_topic_format",
+            Self::TopicDenied { .. } => "topic_denied",
+        }
+    }
+}
+
 /// A single policy finding.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PolicyFinding {

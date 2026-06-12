@@ -6,7 +6,6 @@
 //!
 //! - [`PolicyCheckMode`] — three-valued decision (Skip, ExplicitCheck, Enforce).
 //! - [`resolve_policy_check_mode`] — combine CLI flags + loaded config to a mode.
-//! - [`PolicyFindingRecord`] — JSON-friendly error row for `--output json`.
 //! - [`ValidationError`] — single failure (payload index + field + reason_code).
 //! - [`validate_topic_payload_against_config`] — single-payload validator.
 //! - [`validate_batch_against_config`] — batch validator; collects all violations.
@@ -78,14 +77,20 @@ pub fn resolve_policy_check_mode(
 }
 
 /// Try to load the workspace `ralph.yml` config for policy check. Returns
-/// `None` when no config exists or when loading fails (in the failure case
-/// `OnConfigError::Fail` will cause the caller to surface a hard error to
-/// the user; `Tolerate` returns `None` so the caller falls back to shape
-/// check only).
-#[allow(dead_code)] // Fail variant exposed for callers that need strict config loading.
+/// `None` when no config exists. The behavior on broken configs is
+/// selected by `on_error`:
+/// - `Tolerate` returns `Ok(None)` silently — caller falls back to shape-only checks.
+/// - `Warn` returns `Ok(None)` and prints a stderr warning naming the parse error
+///   and config path. This is the default for `ralph wave emit` so a broken
+///   `ralph.yml` cannot silently disable the L1 fail-fast guarantee.
+/// - `Fail` returns the underlying load error wrapped in context — strict
+///   callers (e.g. future ralph emit strict mode) bubble the error up.
+#[allow(dead_code)] // Tolerate and Fail are reserved for future strict callers.
 pub enum OnConfigError {
     /// Ignore load errors and proceed without policy enforcement.
     Tolerate,
+    /// Ignore load errors but warn the user on stderr.
+    Warn,
     /// Surface the load error to the user.
     Fail,
 }
@@ -93,6 +98,8 @@ pub enum OnConfigError {
 /// Attempts to load the workspace config file. The behavior on
 /// missing-or-broken files is selected by `on_error`:
 /// - `Tolerate` returns `Ok(None)` so callers fall back to shape-only checks.
+/// - `Warn` returns `Ok(None)` and prints a stderr warning naming the parse
+///   error and config path. Default for `ralph wave emit`.
 /// - `Fail` returns the underlying load error wrapped in context.
 ///
 /// We resolve the workspace root relative to the explicit `root` when
@@ -113,6 +120,14 @@ pub fn load_workspace_config(
         Ok(cfg) => Ok(Some(cfg)),
         Err(e) => match on_error {
             OnConfigError::Tolerate => Ok(None),
+            OnConfigError::Warn => {
+                eprintln!(
+                    "Warning: policy check could not parse config at {}: {}. Proceeding without policy enforcement.",
+                    config_path.display(),
+                    e
+                );
+                Ok(None)
+            }
             OnConfigError::Fail => {
                 let ctx = format!(
                     "Policy check could not load config at {}: {}",

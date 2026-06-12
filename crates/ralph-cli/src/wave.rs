@@ -70,6 +70,14 @@ pub struct WaveEmitArgs {
         conflicts_with = "policy_check"
     )]
     pub no_policy_check: bool,
+
+    /// Explicit path to a `ralph.yml` for the policy precheck (U4).
+    /// Mirrors the global `-c` flag at the top-level command. When set,
+    /// the precheck uses this path instead of the CWD-discovered
+    /// `ralph.yml`, so a `ralph run -c custom.yml` invocation can route
+    /// its nested `ralph wave emit` through the same strict policy.
+    #[arg(long = "config", short = 'c', value_name = "CONFIG", global = true)]
+    pub config: Vec<String>,
 }
 
 /// U5: Output format for `ralph wave emit`.
@@ -167,6 +175,7 @@ fn execute_emit(args: WaveEmitArgs, use_colors: bool) -> Result<()> {
         args.output,
         &payloads,
         &events_file,
+        &args.config,
     )?;
 
     // U2: Branch — with idempotency key or legacy path
@@ -192,8 +201,12 @@ fn execute_emit(args: WaveEmitArgs, use_colors: bool) -> Result<()> {
         }
         WaveOutputFormat::Json => {
             // `events_file` is converted to its string form for JSON friendliness.
+            // `ok: true` mirrors the failure-path shape `{ok: false, error, ...}`
+            // emitted by `policy_check::emit_policy_validation_failure` so agents
+            // can use a uniform `jq '.ok'` contract on both paths.
             let events_file_str = events_file.to_string_lossy().to_string();
             let payload = serde_json::json!({
+                "ok": true,
                 "wave_id": wave_id,
                 "topic": args.topic,
                 "count": total,
@@ -262,6 +275,7 @@ fn run_wave_precheck(
     output: WaveOutputFormat,
     payloads: &[String],
     events_file: &Path,
+    config_overrides: &[String],
 ) -> Result<()> {
     use crate::policy_check::{
         OnConfigError, OutputMode, PolicyCheckFlags, PolicyCheckMode, ValidationFailure,
@@ -269,11 +283,39 @@ fn run_wave_precheck(
         resolve_policy_check_mode, validate_batch_against_config,
     };
 
-    // Load workspace config (fail-open when no ralph.yml is present).
-    // We tolerate broken configs here: the loop will surface its own
-    // load error later if needed, and we don't want the CLI to refuse
-    // a wave emit on a config typo when no policy would apply anyway.
-    let config = load_workspace_config(None, OnConfigError::Tolerate)?;
+    // Load workspace config. We `Warn` on broken configs so a typo in
+    // `ralph.yml` cannot silently disable the L1 fail-fast guarantee the
+    // plan is designed to provide — the agent still sees a clear warning
+    // naming the parse error and the path. When the user supplied an
+    // explicit `-c` flag, route the source through that path directly so
+    // deployments using `ralph run -c custom.yml` route their nested
+    // `ralph wave emit` through the same strict policy.
+    let config = match config_overrides.first() {
+        Some(path_str) => {
+            let path = PathBuf::from(path_str);
+            if !path.is_file() {
+                eprintln!(
+                    "Warning: explicit --config '{}' is not a file; falling back to CWD-discovered ralph.yml.",
+                    path_str
+                );
+                load_workspace_config(None, OnConfigError::Warn)?
+            } else {
+                use crate::cli::{ConfigSource, load_config_with_overrides};
+                match load_config_with_overrides(&[ConfigSource::File(path.clone())]) {
+                    Ok(cfg) => Some(cfg),
+                    Err(e) => {
+                        eprintln!(
+                            "Warning: policy check could not parse config at {}: {}. Proceeding without policy enforcement.",
+                            path.display(),
+                            e
+                        );
+                        None
+                    }
+                }
+            }
+        }
+        None => load_workspace_config(None, OnConfigError::Warn)?,
+    };
 
     let flags = PolicyCheckFlags {
         policy_check: policy_check_flag,
@@ -297,6 +339,23 @@ fn run_wave_precheck(
     // mode is Skip here, the unsafe bypass won; honor it.
     if mode == PolicyCheckMode::Skip {
         return Ok(());
+    }
+
+    // The user asked to bypass the policy check but the config denied it
+    // (resolve_policy_check_mode returned Enforce because
+    // allow_unsafe_cli_emit: false). Surface this clearly so the agent
+    // knows the bypass flag was ignored and why — otherwise they get
+    // a generic "missing required field" error and a confused round-trip.
+    if no_policy_check_flag
+        && !matches!(mode, PolicyCheckMode::Skip)
+        && config
+            .as_ref()
+            .and_then(|c| c.event_loop.event_policy.as_ref())
+            .is_some_and(|p| p.enabled && p.require_policy_check_for_cli_emit)
+    {
+        eprintln!(
+            "Notice: --unsafe-no-policy-check was ignored: config has event_policy.allow_unsafe_cli_emit: false. Policy check is enforced."
+        );
     }
 
     let batch = validate_batch_against_config(topic, payloads, policy, events_file)?;
@@ -1967,6 +2026,7 @@ event_loop:
             WaveOutputFormat::Json,
             &payloads,
             &events,
+            &[],
         );
 
         assert!(result.is_err(), "missing-depth batch must reject");
@@ -2008,6 +2068,7 @@ event_loop:
             WaveOutputFormat::Json,
             &payloads,
             &events,
+            &[],
         );
         assert!(result.is_ok(), "valid batch should pass precheck");
 
@@ -2054,6 +2115,7 @@ event_loop:
             WaveOutputFormat::Json,
             &payloads,
             &events,
+            &[],
         );
         assert!(
             result.is_ok(),
@@ -2083,6 +2145,7 @@ event_loop:
             WaveOutputFormat::Json,
             &payloads,
             &events,
+            &[],
         );
         assert!(
             result.is_err(),
@@ -2127,6 +2190,7 @@ event_loop:
             WaveOutputFormat::Json,
             &payloads,
             &events,
+            &[],
         );
         assert!(
             result.is_ok(),

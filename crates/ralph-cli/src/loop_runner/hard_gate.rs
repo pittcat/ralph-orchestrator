@@ -575,14 +575,20 @@ pub fn inject_wave_policy_rejection_guidance(
         return;
     }
 
-    // Deduplicate findings by `topic + message` so a 7-payload batch
+    // Deduplicate findings by `(topic, field, reason_code)` so a batch
     // that fails on the same field once surfaces one bullet instead
-    // of seven. The agent only needs the unique set of schema errors
-    // to fix the next emit.
-    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    // of N copies, but two findings on the same topic with different
+    // fields stay distinct. The dedupe key also includes the violation
+    // type so message-text churn in the policy layer cannot collapse
+    // distinct schema errors. BTreeSet gives deterministic ordering
+    // (HashSet would not), which keeps prompt regression tests stable.
+    let mut seen: std::collections::BTreeSet<(String, String, &'static str)> =
+        std::collections::BTreeSet::new();
     let mut unique_findings: Vec<&PolicyRejection> = Vec::new();
     for r in rejections {
-        let key = (r.topic.clone(), r.finding.message.clone());
+        let field = r.finding.violation_type.field().unwrap_or("").to_string();
+        let reason_code = r.finding.violation_type.reason_code();
+        let key = (r.topic.clone(), field, reason_code);
         if seen.insert(key) {
             unique_findings.push(r);
         }

@@ -218,12 +218,13 @@ pub struct LoopState {
     /// iteration after a hard gate or schema-level wave recovery
     /// fires.  When set, [`EventLoop::next_hat`] overrides the
     /// round-robin / coordinator selection and activates this hat
-    /// instead, then clears the value.  The hat stays pinned for
-    /// exactly **one** activation so the loop cannot get stuck on
-    /// a single hat when the obligation is actually satisfied
-    /// (the helper clears the field on activation, and
-    /// `process_output` clears it as a belt-and-braces fallback at
-    /// every turn boundary).
+    /// instead, then clears the value via `take()` (consume-on-use).
+    /// The hat stays pinned for exactly **one** activation so the
+    /// loop cannot get stuck on a single hat when the obligation
+    /// is actually satisfied. The field is consumed by `next_hat`
+    /// and is NOT cleared at any other turn boundary — if the loop
+    /// exits before `next_hat` runs (deadline, panic, MaxIterations),
+    /// the pin persists in-memory for the lifetime of the session.
     ///
     /// Populated by:
     ///   - `inject_missing_event_hard_gate_guidance` (hard gate)

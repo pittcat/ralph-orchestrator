@@ -1,10 +1,35 @@
 use super::*;
 use ralph_core::diagnosis::TerminationHint;
+use ralph_core::{PolicyRejection, ProcessedEvents};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
+
+/// U2 (2026-06-13-001): single source of truth for the
+/// `agent_wrote_any_valid_or_rejected` boolean that drives the
+/// `missing_event_gate` decision. The regular partition reports
+/// `had_raw_events` (any line read) and `had_rejected_events`
+/// (any policy / format / origin rejection). The wave partition
+/// has a separate policy stage, so a batch of 7 events that all
+/// fail schema validation leaves the regular flags at `false`;
+/// we fold `wave_had_policy_rejections` in here so the gate
+/// sees the agent as having tried to emit.
+///
+/// Mirrored by `compute_agent_wrote_any_valid_or_rejected` in
+/// `loop_runner/tests.rs` — that helper should be deleted in
+/// favor of calling this function so the test asserts the same
+/// expression the runner uses.
+pub fn agent_wrote_any_valid_or_rejected(
+    processed_events: Option<&ProcessedEvents>,
+    wave_policy_rejections: &[PolicyRejection],
+) -> bool {
+    let regular = processed_events
+        .map(|events| events.had_raw_events || events.had_rejected_events)
+        .unwrap_or(false);
+    regular || !wave_policy_rejections.is_empty()
+}
 
 /// U8: Build the operator-facing [`ralph_core::DiagnosisHint`]
 /// and the `diagnosis-summary.json` seed for a terminating loop run.
@@ -3435,17 +3460,16 @@ pub async fn run_loop_impl(
         // pipeline, so a wave batch that is policy-rejected (e.g. 7
         // `review.wave.ready` events missing the `depth` field) would
         // leave both `had_raw_events` and `had_rejected_events` at
-        // `false` for the regular path. To keep `missing_event_gate`
-        // from mis-firing on that case, fold
+        // `false` for the regular path. `agent_wrote_any_valid_or_rejected`
+        // (pub fn at top of this module) folds
         // `wave_had_policy_rejections` into the boolean expression so
         // the gate is skipped symmetrically with the regular
         // `had_rejected_events` path.
         let wave_had_policy_rejections = !wave_policy_rejections.is_empty();
-        let agent_wrote_any_valid_or_rejected = processed_events
-            .as_ref()
-            .map(|events| events.had_raw_events || events.had_rejected_events)
-            .unwrap_or(false)
-            || wave_had_policy_rejections;
+        let agent_wrote_any_valid_or_rejected = agent_wrote_any_valid_or_rejected(
+            processed_events.as_ref(),
+            &wave_policy_rejections,
+        );
 
         let mut late_termination_reason: Option<TerminationReason> = None;
         let mut hard_gate_triggered_this_iteration = false;

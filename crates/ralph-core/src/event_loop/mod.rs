@@ -81,6 +81,22 @@ pub struct ProcessedEvents {
     pub payload_contract_violation: Option<crate::payload_contract::PayloadContractViolation>,
 }
 
+impl Default for ProcessedEvents {
+    fn default() -> Self {
+        Self {
+            had_events: false,
+            had_raw_events: false,
+            had_rejected_events: false,
+            had_plan_events: false,
+            human_interact_context: None,
+            has_orphans: false,
+            accepted_events: Vec::new(),
+            contract_rejections: Vec::new(),
+            payload_contract_violation: None,
+        }
+    }
+}
+
 /// Result of processing events from JSONL with wave events partitioned out.
 #[derive(Debug)]
 pub struct ProcessedEventsWithWaves {
@@ -2150,7 +2166,14 @@ impl EventLoop {
             if self.bus.hat_ids().any(|id| *id == pending_hat) {
                 return self.bus.hat_ids().find(|id| **id == pending_hat);
             }
-            // Hat unknown — fall through to normal selection.
+            // Hat unknown (config drift, deregistration, or worktree
+            // with a different hat set) — log so the operator can
+            // see the recovery intent was lost instead of silently
+            // routing to a different hat via round-robin.
+            tracing::warn!(
+                pending_hat = %pending_hat,
+                "pending_recovery_hat references an unregistered hat id; falling through to default selection"
+            );
         }
 
         match self.config.event_loop.execution_mode {
@@ -2686,29 +2709,40 @@ impl EventLoop {
         use crate::diagnosis::{DiagnosisSource, DiagnosisSeverity};
         use crate::event_policy::ViolationType;
 
-        // First rejection drives the message, evidence, and (when
-        // applicable) the more specific `missing_required_field`
-        // reason code. Subsequent rejections are reflected in the
-        // batch count in the message body.
-        let first = match rejections.first() {
-            Some(r) => r,
-            None => return,
-        };
-        let is_missing_field = matches!(
-            first.finding.violation_type,
-            ViolationType::MissingRequiredField { .. }
-        );
-        let reason_code = if is_missing_field {
-            "missing_required_field"
-        } else {
-            "wave_dispatch_blocked"
-        };
-        let source_hat = first.source_hat.clone();
-        let topic = first.topic.clone();
+        // Drive reason_code / message off the first rejection when any
+        // exist; otherwise fall back to a generic "wave_dispatch_blocked"
+        // — this covers the Hold-only case where the policy validator
+        // dropped events without producing a PolicyRejection row.
+        let (reason_code, topic, source_hat, first_message): (&str, String, Option<String>, String) =
+            match rejections.first() {
+                Some(r) => {
+                    let is_missing_field = matches!(
+                        r.finding.violation_type,
+                        ViolationType::MissingRequiredField { .. }
+                    );
+                    let code: &'static str = if is_missing_field {
+                        "missing_required_field"
+                    } else {
+                        "wave_dispatch_blocked"
+                    };
+                    (
+                        code,
+                        r.topic.clone(),
+                        r.source_hat.clone(),
+                        r.finding.message.clone(),
+                    )
+                }
+                None => (
+                    "wave_dispatch_blocked",
+                    "<unknown>".to_string(),
+                    None,
+                    "all wave events were dropped by event policy (no rejection row produced; likely Hold decisions)".to_string(),
+                ),
+            };
         let message = format!(
-            "Wave dispatch blocked: all {} wave events on '{}' were rejected by event policy. \
+            "Wave dispatch blocked: all {} wave events were dropped by event policy. \
              First finding: {}",
-            raw_count, topic, first.finding.message
+            raw_count, first_message
         );
         let expected_action = format!(
             "Re-emit the wave with the corrected payload schema. The required fields for '{}' \
@@ -2749,7 +2783,7 @@ impl EventLoop {
             DiagnosisSource::PayloadContract,
             source_hat.as_deref(),
             Some(topic.as_str()),
-            reason_code,
+            &reason_code,
             wave_id_field,
         );
         builder = builder.retry_key(retry_key);
@@ -6439,11 +6473,12 @@ impl EventLoop {
             // if the first rejection's violation type is `MissingRequiredField`).
             // The envelope is what `ralph diagnose` and the runner's gate
             // logic use to distinguish "agent forgot to emit" from "agent
-            // emitted a wave that policy blocked".
-            if wave_raw_count > 0
-                && policy_result.events.is_empty()
-                && !wave_policy_rejections.is_empty()
-            {
+            // emitted a wave that policy blocked". Fired on any batch
+            // where wave events entered the policy validator but none
+            // survived — covers both Reject-with-Resume and Hold (which
+            // does not produce PolicyRejection rows but still drops the
+            // event from the dispatch set).
+            if wave_raw_count > 0 && policy_result.events.is_empty() {
                 Self::log_wave_policy_blocked_envelope(
                     self,
                     &wave_policy_rejections,

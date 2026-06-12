@@ -8344,8 +8344,11 @@ hats:
     // condition is already false → it never reaches
     // `should_gate_missing_events` to even evaluate the obligation.
     let agent_wrote_any_valid_or_rejected = compute_agent_wrote_any_valid_or_rejected(
-        false, // had_raw_events: no regular events reached the contract layer
-        false, // had_rejected_events: no contract rejections
+        Some(ralph_core::ProcessedEvents {
+            had_raw_events: false,
+            had_rejected_events: false,
+            ..Default::default()
+        }),
         &wave_policy_rejections,
     );
     let wave_events_is_empty = true;
@@ -8417,8 +8420,11 @@ hats:
 
     let wave_policy_rejections: Vec<ralph_core::PolicyRejection> = Vec::new();
     let agent_wrote_any_valid_or_rejected = compute_agent_wrote_any_valid_or_rejected(
-        false, // had_raw_events
-        false, // had_rejected_events
+        Some(ralph_core::ProcessedEvents {
+            had_raw_events: false,
+            had_rejected_events: false,
+            ..Default::default()
+        }),
         &wave_policy_rejections,
     );
     // No regular events at all AND no wave policy rejections →
@@ -8473,8 +8479,11 @@ hats:
     let wave_policy_rejections: Vec<ralph_core::PolicyRejection> =
         (0..5).map(|_| wave_rejection()).collect();
     let agent_wrote_any_valid_or_rejected = compute_agent_wrote_any_valid_or_rejected(
-        true, // had_raw_events: one regular event was accepted
-        false, // had_rejected_events
+        Some(ralph_core::ProcessedEvents {
+            had_raw_events: true,
+            had_rejected_events: false,
+            ..Default::default()
+        }),
         &wave_policy_rejections,
     );
     assert!(
@@ -8502,14 +8511,15 @@ hats:
 
 /// Local helper: mirror the production expression in
 /// `runner.rs::agent_wrote_any_valid_or_rejected`. The regular-path
-/// half is `had_raw_events || had_rejected_events`; the U2 addition
-/// is `|| !wave_policy_rejections.is_empty()`.
+/// U2 (2026-06-13-001): the production boolean is
+/// `runner::agent_wrote_any_valid_or_rejected`; the test mirrors
+/// that fn directly (passing a synthetic ProcessedEvents) so the
+/// expression cannot drift between test and production.
 fn compute_agent_wrote_any_valid_or_rejected(
-    had_raw_events: bool,
-    had_rejected_events: bool,
+    processed: Option<ralph_core::ProcessedEvents>,
     wave_policy_rejections: &[ralph_core::PolicyRejection],
 ) -> bool {
-    (had_raw_events || had_rejected_events) || !wave_policy_rejections.is_empty()
+    runner::agent_wrote_any_valid_or_rejected(processed.as_ref(), wave_policy_rejections)
 }
 
 #[test]

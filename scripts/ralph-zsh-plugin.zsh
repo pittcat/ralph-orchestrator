@@ -617,6 +617,7 @@ _ralph_emit_args() {
     '-j[Parse payload as JSON]'
     '--file+[Path to events file]:file:_files'
     '--policy-check[Validate against event policy]'
+    '--unsafe-no-policy-check[Bypass the mandatory policy check (only honored if config permits)]'
     '--hat+[Hat that published this event]:hat:_default'
     '--triggered+[Target hat triggered]:hat:_default'
     '--source+[Source identifier]:source:_default'
@@ -747,6 +748,11 @@ _ralph_wave_emit_args() {
   _arguments \
     '1:Topic (e.g. review.file):_default' \
     '--payloads+[Payload items for parallel workers]:payload items:_files' \
+    '--payloads-stdin[Read payloads from stdin, one per line]' \
+    '--output+[Output format]:output:(text json)' \
+    '--idempotency-key+[Idempotency key for retry-safe re-emission]:key:_default' \
+    '--policy-check[Validate all payloads against event policy before writing]' \
+    '--unsafe-no-policy-check[Bypass the mandatory policy check (only honored if config permits)]' \
     '*:payload args:_default'
 }
 
