@@ -88,6 +88,24 @@ pub struct ProcessedEventsWithWaves {
     pub processed: ProcessedEvents,
     /// Wave events extracted before normal processing (have wave_id set).
     pub wave_events: Vec<crate::event_reader::Event>,
+    /// U1 (2026-06-13-001): policy rejections collected from the wave
+    /// partition. Every wave event that the event policy rejected
+    /// (e.g. a `review.wave.ready` missing the required `depth` field)
+    /// is exposed here so the runner can:
+    /// 1. Skip the `missing_event_gate` (the agent DID try to emit).
+    /// 2. Inject a schema-level guidance payload naming the missing
+    ///    field instead of a generic "you forgot to emit" message.
+    /// 3. Surface a recovery envelope so `ralph diagnose` can attribute
+    ///    the failed fan-out to a policy contract failure, not a missing
+    ///    emission.
+    pub wave_policy_rejections: Vec<crate::event_policy::PolicyRejection>,
+    /// U1 (2026-06-13-001): number of wave-partition events that entered
+    /// policy validation. This is the "raw" wave count after the origin
+    /// guard and topic-format check, immediately before the policy
+    /// validator. It is captured so the recovery envelope's `evidence`
+    /// can distinguish "all N rejected" from "N rejected out of M" —
+    /// critical for the `wave_dispatch_blocked` R7 envelope shape.
+    pub wave_raw_count: usize,
 }
 
 /// Reason the event loop terminated.
@@ -2616,6 +2634,112 @@ impl EventLoop {
         // errors here: `record_recovery_envelope` already logs a warn
         // on failure and updating the responder must never block the
         // main loop.
+        event_loop.record_recovery_envelope(&envelope, vec![message]);
+    }
+
+    /// U1 (2026-06-13-001): log a recovery envelope when the event policy
+    /// rejected every wave event in a single read batch. This is the
+    /// "wave dispatch blocked" signal that lets the runner skip the
+    /// `missing_event_gate` (the agent DID try to emit) and that gives
+    /// `ralph diagnose` a concrete `payload_contract` reason instead of
+    /// a silent zero-fan-out.
+    ///
+    /// - `source` is `DiagnosisSource::PayloadContract` (KTD-3) — the
+    ///   preset payload contract already covers required-field gaps.
+    /// - `reason_code` is `wave_dispatch_blocked` for a generic batch
+    ///   rejection, or `missing_required_field` when the first
+    ///   rejection's violation type is `MissingRequiredField { .. }`.
+    /// - `evidence` carries the topic, the raw wave count, and the
+    ///   source hat (if any).
+    fn log_wave_policy_blocked_envelope(
+        event_loop: &mut EventLoop,
+        rejections: &[crate::event_policy::PolicyRejection],
+        raw_count: usize,
+    ) {
+        use crate::diagnosis::{DiagnosisSource, DiagnosisSeverity};
+        use crate::event_policy::ViolationType;
+
+        // First rejection drives the message, evidence, and (when
+        // applicable) the more specific `missing_required_field`
+        // reason code. Subsequent rejections are reflected in the
+        // batch count in the message body.
+        let first = match rejections.first() {
+            Some(r) => r,
+            None => return,
+        };
+        let is_missing_field = matches!(
+            first.finding.violation_type,
+            ViolationType::MissingRequiredField { .. }
+        );
+        let reason_code = if is_missing_field {
+            "missing_required_field"
+        } else {
+            "wave_dispatch_blocked"
+        };
+        let source_hat = first.source_hat.clone();
+        let topic = first.topic.clone();
+        let message = format!(
+            "Wave dispatch blocked: all {} wave events on '{}' were rejected by event policy. \
+             First finding: {}",
+            raw_count, topic, first.finding.message
+        );
+        let expected_action = format!(
+            "Re-emit the wave with the corrected payload schema. The required fields for '{}' \
+             are defined in the preset's event_policy.schemas block.",
+            topic
+        );
+        let safe_target = true;
+
+        let mut builder = crate::diagnosis::RecoveryDiagnosisEnvelope::builder()
+            .source(DiagnosisSource::PayloadContract)
+            .severity(DiagnosisSeverity::Error)
+            .iteration(event_loop.state().iteration)
+            .topic(topic.clone())
+            .reason_code(reason_code)
+            .message(message.clone())
+            .expected_action(expected_action)
+            .safe_target(safe_target)
+            .evidence(crate::diagnosis::EvidenceRef {
+                kind: crate::diagnosis::EvidenceKind::Topic,
+                ref_path: topic.clone(),
+                snippet: Some(format!(
+                    "raw_count={} rejected_count={}",
+                    raw_count,
+                    rejections.len()
+                )),
+            });
+
+        // The `retry_key_from_parts` helper produces a stable
+        // aggregation key based on (source, target_hat, topic,
+        // reason_code, field). A follow-up emit with the same
+        // corrected payload will dedupe against this envelope in
+        // `ralph diagnose`.
+        let wave_id_field: Option<&str> = None;
+        if let Some(hat) = source_hat.as_deref() {
+            builder = builder.source_hat(hat);
+        }
+        let retry_key = crate::diagnosis::RecoveryDiagnosisEnvelopeBuilder::retry_key_from_parts(
+            DiagnosisSource::PayloadContract,
+            source_hat.as_deref(),
+            Some(topic.as_str()),
+            reason_code,
+            wave_id_field,
+        );
+        builder = builder.retry_key(retry_key);
+
+        if let Some(session_id) = event_loop.diagnostics().session_id() {
+            builder = builder.session_id(session_id);
+        }
+        let envelope = builder.build();
+
+        warn!(
+            topic = %topic,
+            raw_count = raw_count,
+            rejection_count = rejections.len(),
+            reason_code = %reason_code,
+            "Wave dispatch blocked by event policy: all wave events rejected"
+        );
+
         event_loop.record_recovery_envelope(&envelope, vec![message]);
     }
 
@@ -6239,9 +6363,23 @@ impl EventLoop {
         // --- Event policy validation for wave events ---
         // Wave dispatch events are partitioned before process_parse_result, so they
         // must undergo policy validation here to avoid bypassing schema checks.
+        //
+        // U1 (2026-06-13-001): capture the policy_rejections vector and the
+        // raw count of events that entered this validation step. These two
+        // pieces of evidence are surfaced on `ProcessedEventsWithWaves` so
+        // the runner can:
+        //   1. Avoid the false `missing_event_gate` (the agent DID try to
+        //      emit; the wave fan-out was simply blocked by a missing
+        //      required field such as `depth`).
+        //   2. Emit a recovery envelope naming the failing topic / field /
+        //      wave_id so `ralph diagnose` attributes the failure to
+        //      `payload_contract` rather than a silent missing emission.
+        let mut wave_raw_count: usize = 0;
+        let mut wave_policy_rejections: Vec<crate::event_policy::PolicyRejection> = Vec::new();
         let wave_events = if let Some(ref policy_config) = self.config.event_loop.event_policy
             && policy_config.enabled
         {
+            wave_raw_count = wave_events.len();
             let policy_state = self
                 .state
                 .policy_runtime_state
@@ -6264,6 +6402,26 @@ impl EventLoop {
                 && let Err(e) = self.write_hold_artifact(policy_result.hold_reason.as_deref())
             {
                 warn!(error = %e, "Failed to write hold artifact");
+            }
+
+            wave_policy_rejections = policy_result.policy_rejections;
+
+            // U1: when policy rejected every wave event, write a recovery
+            // envelope with `source = payload_contract` and
+            // `reason_code = wave_dispatch_blocked` (or `missing_required_field`
+            // if the first rejection's violation type is `MissingRequiredField`).
+            // The envelope is what `ralph diagnose` and the runner's gate
+            // logic use to distinguish "agent forgot to emit" from "agent
+            // emitted a wave that policy blocked".
+            if wave_raw_count > 0
+                && policy_result.events.is_empty()
+                && !wave_policy_rejections.is_empty()
+            {
+                Self::log_wave_policy_blocked_envelope(
+                    self,
+                    &wave_policy_rejections,
+                    wave_raw_count,
+                );
             }
 
             policy_result.events
@@ -6323,6 +6481,8 @@ impl EventLoop {
         Ok(ProcessedEventsWithWaves {
             processed,
             wave_events,
+            wave_policy_rejections,
+            wave_raw_count,
         })
     }
 
