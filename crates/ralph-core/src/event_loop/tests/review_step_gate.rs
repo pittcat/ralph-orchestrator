@@ -12,7 +12,7 @@ fn session_b_fixture_lines_rejected_by_policy() {
 
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/ce_executor_session_b_policy_violations.jsonl"
+        "/tests/fixtures/policy_schemas/ce_executor_session_b_policy_violations.jsonl"
     );
     let mut file = std::fs::File::open(path).expect("fixture must exist");
     let mut content = String::new();
