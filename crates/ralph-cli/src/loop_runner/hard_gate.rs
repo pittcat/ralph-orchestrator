@@ -490,6 +490,12 @@ pub fn inject_missing_event_hard_gate_guidance(
         } else {
             format!("emit one of: {}", expected_topics.join(", "))
         };
+        // U3 (2026-06-13-001 plan): pin the next iteration to the
+        // gated hat so the round-robin / coordinator selection
+        // cannot drift to `executor` (or any other hat) right after
+        // we surface the missing-event guidance.  Cleared by
+        // `EventLoop::next_hat` on the next activation.
+        event_loop.state_mut().pending_recovery_hat = Some(hat_id.clone());
         let mut builder = RecoveryDiagnosisEnvelope::builder()
             .source(DiagnosisSource::MissingEventGate)
             .severity(DiagnosisSeverity::Warning)
@@ -649,6 +655,11 @@ pub fn inject_wave_policy_rejection_guidance(
         let hat_name = hat_id.as_str();
         let iteration = event_loop.state().iteration;
         let session_id = event_loop.diagnostics().session_id();
+        // U3 (2026-06-13-001 plan): pin the next iteration to the
+        // gated hat so the round-robin selection cannot drift away
+        // from the hat that just had its wave batch rejected.
+        // `EventLoop::next_hat` consumes the pin on activation.
+        event_loop.state_mut().pending_recovery_hat = Some(hat_id.clone());
         // Anchor the envelope on the first rejected topic — there
         // can be several in a batch, but the retry_key only needs
         // one stable identifier for grouping.

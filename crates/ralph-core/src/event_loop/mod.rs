@@ -2126,6 +2126,33 @@ impl EventLoop {
     /// **NOTE**: This method takes `&mut self` because isolated-mode round-robin
     /// advances the bus's internal cursor.
     pub fn next_hat(&mut self) -> Option<&HatId> {
+        // U3 (2026-06-13-001 plan): hard-gate / wave-recovery hat pinning.
+        //
+        // When a `pending_recovery_hat` is recorded (set by the
+        // runner's `inject_missing_event_hard_gate_guidance` or
+        // `inject_wave_policy_rejection_guidance` helpers), the next
+        // iteration MUST activate that hat, not whatever the
+        // round-robin / coordinator topology would pick.  The default
+        // round-robin would otherwise drift to `executor` after a
+        // `review-coordinator` hard gate, breaking the loop.
+        //
+        // We use `take` semantics: the field is cleared on the
+        // iteration that consumes it, so the loop never gets stuck on
+        // a single hat past a single activation.  The `bus` already
+        // publishes the recovery `human.guidance` event for that hat,
+        // so the next prompt will see the schema-level / missing-
+        // event message and the obligation should be satisfied on the
+        // very next attempt.
+        if let Some(pending_hat) = self.state.pending_recovery_hat.take() {
+            // Only honor the pin when the hat is actually registered;
+            // an obsolete or test-only hat id is treated as a no-op
+            // and selection falls through to the normal algorithm.
+            if self.bus.hat_ids().any(|id| *id == pending_hat) {
+                return self.bus.hat_ids().find(|id| **id == pending_hat);
+            }
+            // Hat unknown — fall through to normal selection.
+        }
+
         match self.config.event_loop.execution_mode {
             HatExecutionMode::Isolated => {
                 // Isolated mode: use round-robin to select the next hat.

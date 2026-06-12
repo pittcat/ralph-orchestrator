@@ -213,6 +213,23 @@ pub struct LoopState {
 
     /// Count of consecutive stall_no_events recoveries (U5).
     pub stall_recovery_counts: HashMap<String, u32>,
+
+    /// U3 (2026-06-13-001 plan): hat pinning target for the next
+    /// iteration after a hard gate or schema-level wave recovery
+    /// fires.  When set, [`EventLoop::next_hat`] overrides the
+    /// round-robin / coordinator selection and activates this hat
+    /// instead, then clears the value.  The hat stays pinned for
+    /// exactly **one** activation so the loop cannot get stuck on
+    /// a single hat when the obligation is actually satisfied
+    /// (the helper clears the field on activation, and
+    /// `process_output` clears it as a belt-and-braces fallback at
+    /// every turn boundary).
+    ///
+    /// Populated by:
+    ///   - `inject_missing_event_hard_gate_guidance` (hard gate)
+    ///   - `inject_wave_policy_rejection_guidance` (schema-level
+    ///     wave recovery)
+    pub pending_recovery_hat: Option<HatId>,
 }
 
 impl Default for LoopState {
@@ -263,6 +280,7 @@ impl Default for LoopState {
             // value (clamped to 120s) takes effect.
             handoff_tracker: crate::workflow_contract::HandoffTracker::new(),
             stall_recovery_counts: HashMap::new(),
+            pending_recovery_hat: None,
         }
     }
 }

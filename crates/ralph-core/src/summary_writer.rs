@@ -517,6 +517,7 @@ mod tests {
             // exercises a real deadline path.
             handoff_tracker: crate::workflow_contract::HandoffTracker::new(),
             stall_recovery_counts: std::collections::HashMap::new(),
+            pending_recovery_hat: None,
         }
     }
 

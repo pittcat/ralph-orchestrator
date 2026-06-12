@@ -8576,6 +8576,271 @@ fn test_wave_policy_rejection_guidance_dedupes_findings() {
     );
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// 2026-06-13 plan U3: hat pinning after a hard gate or wave recovery.
+//
+// The runner's `inject_missing_event_hard_gate_guidance` and
+// `inject_wave_policy_rejection_guidance` helpers set
+// `LoopState::pending_recovery_hat` to the offending hat. The
+// next call to `EventLoop::next_hat` must:
+//   1. Return the pinned hat (NOT whatever the round-robin /
+//      coordinator default would pick).
+//   2. Clear the field so a later iteration is not stuck on the
+//      same hat when the obligation is actually satisfied.
+//
+// These tests exercise both helpers' pinning side effect and the
+// `next_hat` consumption + clear path. They do not exercise the
+// full runner main loop — that integration check belongs to U6.
+// ─────────────────────────────────────────────────────────────────────────
+
+#[cfg(unix)]
+fn u3_workspace_with_isolated_hats() -> (tempfile::TempDir, std::path::PathBuf) {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().to_path_buf();
+    let diagnostics = ralph_core::diagnostics::DiagnosticsCollector::with_enabled(&root, true)
+        .expect("create diagnostics collector");
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  review-coordinator:
+    name: "Review Coordinator"
+    triggers: ["work.done"]
+    publishes: ["review.wave.ready", "review.passed"]
+  executor:
+    name: "Executor"
+    triggers: ["task.start"]
+    publishes: ["work.done"]
+"#;
+    let mut config: ralph_core::RalphConfig = serde_yaml::from_str(yaml).expect("parse yaml");
+    config.core.workspace_root = root.clone();
+    let event_loop = ralph_core::EventLoop::with_diagnostics(config, diagnostics);
+    // We just need the workspace / event_loop pair returned;
+    // the caller constructs its own EventLoop to control state.
+    let _ = event_loop;
+    (temp, root)
+}
+
+#[test]
+fn test_u3_pending_recovery_hat_is_set_by_missing_event_guidance() {
+    // 2026-06-13 plan U3 — happy path: hard gate for
+    // `review-coordinator` sets `pending_recovery_hat` so the
+    // next iteration activates `review-coordinator`, not
+    // whatever round-robin would pick (executor in this preset).
+    let (_temp, workspace) = u3_workspace_with_isolated_hats();
+    let diagnostics = ralph_core::diagnostics::DiagnosticsCollector::with_enabled(&workspace, true)
+        .expect("create diagnostics collector");
+    let config = ralph_core::RalphConfig::default();
+    let mut event_loop = ralph_core::EventLoop::with_diagnostics(config, diagnostics);
+    event_loop.set_iteration_for_test(3);
+
+    let ctx = LoopContext::primary(workspace.clone());
+    let expected_topics = vec!["review.wave.ready".to_string(), "review.passed".to_string()];
+    let hat_id = ralph_proto::HatId::new("review-coordinator");
+
+    // Sanity: the field starts as None on a fresh event loop.
+    assert!(
+        event_loop.state().pending_recovery_hat.is_none(),
+        "pending_recovery_hat must start as None on a fresh loop"
+    );
+
+    inject_missing_event_hard_gate_guidance(
+        &ctx,
+        Some(&mut event_loop),
+        &hat_id,
+        &expected_topics,
+    );
+
+    // U3: the field is now pinned to review-coordinator so the
+    // next iteration's `next_hat` call will return it.
+    let pinned = event_loop
+        .state()
+        .pending_recovery_hat
+        .as_ref()
+        .map(|h| h.as_str().to_string());
+    assert_eq!(
+        pinned.as_deref(),
+        Some("review-coordinator"),
+        "hard gate must pin pending_recovery_hat to the gated hat"
+    );
+}
+
+#[test]
+fn test_u3_next_hat_consumes_pending_recovery_hat_and_clears() {
+    // 2026-06-13 plan U3 — error path / next-iteration shape:
+    // the `EventLoop::next_hat` method must (a) honour the pin
+    // and (b) clear it so the loop does not get stuck on a
+    // single hat.
+    use ralph_core::EventLoop;
+
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  review-coordinator:
+    name: "Review Coordinator"
+    triggers: ["work.done"]
+    publishes: ["review.wave.ready", "review.passed"]
+  executor:
+    name: "Executor"
+    triggers: ["task.start"]
+    publishes: ["work.done"]
+"#;
+    let config: ralph_core::RalphConfig = serde_yaml::from_str(yaml).expect("parse yaml");
+    let mut event_loop = EventLoop::new(config);
+
+    // Pre-condition: the bus has at least one pending event for
+    // the executor hat (the default isolated-mode round-robin
+    // would otherwise not have anything to compare against — we
+    // want a world where the round-robin would have picked
+    // something *other* than review-coordinator).
+    event_loop
+        .bus()
+        .publish(ralph_proto::Event::new("task.start", "{}").with_target("executor"));
+
+    // U3: pin the next iteration to review-coordinator.
+    event_loop.state_mut().pending_recovery_hat =
+        Some(ralph_proto::HatId::new("review-coordinator"));
+
+    // next_hat must return the pinned hat, not the round-robin
+    // pick.
+    let selected = event_loop
+        .next_hat()
+        .cloned()
+        .expect("next_hat must return Some when pin or pending is set");
+    assert_eq!(
+        selected.as_str(),
+        "review-coordinator",
+        "U3: pinned hat must take precedence over the round-robin pick"
+    );
+
+    // The field must be cleared after consumption so the next
+    // iteration can pick a different hat normally.
+    assert!(
+        event_loop.state().pending_recovery_hat.is_none(),
+        "U3: pending_recovery_hat must be cleared on consumption"
+    );
+}
+
+#[test]
+fn test_u3_next_hat_falls_through_when_pinned_hat_unknown() {
+    // 2026-06-13 plan U3 — edge case: a stale pin (e.g. a hat
+    // that has been deregistered between iterations) must NOT
+    // block hat selection. The runner cannot get stuck on a
+    // ghost hat id.
+    use ralph_core::EventLoop;
+
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["task.start"]
+    publishes: ["work.done"]
+"#;
+    let config: ralph_core::RalphConfig = serde_yaml::from_str(yaml).expect("parse yaml");
+    let mut event_loop = EventLoop::new(config);
+
+    // Pin to a hat that does NOT exist in the registry.
+    event_loop.state_mut().pending_recovery_hat =
+        Some(ralph_proto::HatId::new("ghost-hat"));
+
+    // Pin should be cleared even when the hat is unknown, so the
+    // next iteration can operate normally.
+    let _ = event_loop.next_hat();
+    assert!(
+        event_loop.state().pending_recovery_hat.is_none(),
+        "U3: stale pin must be cleared even when the hat is unregistered"
+    );
+}
+
+#[test]
+fn test_u3_wave_policy_rejection_guidance_pins_recovery_hat() {
+    // 2026-06-13 plan U3 — happy path: wave schema rejection on
+    // `review-coordinator` pins the next iteration to
+    // `review-coordinator`, not the round-robin default.
+    let (_temp, workspace) = u3_workspace_with_isolated_hats();
+    let diagnostics = ralph_core::diagnostics::DiagnosticsCollector::with_enabled(&workspace, true)
+        .expect("create diagnostics collector");
+    let config = ralph_core::RalphConfig::default();
+    let mut event_loop = ralph_core::EventLoop::with_diagnostics(config, diagnostics);
+    event_loop.set_iteration_for_test(5);
+
+    let ctx = LoopContext::primary(workspace.clone());
+    let hat_id = ralph_proto::HatId::new("review-coordinator");
+    let expected_topics = vec!["review.wave.ready".to_string()];
+
+    // Build a single-element rejection set (the helper requires
+    // at least one entry; 7 is more realistic but 1 is enough to
+    // exercise the pin side effect).
+    let rejection = ralph_core::PolicyRejection {
+        topic: "review.wave.ready".to_string(),
+        source_hat: Some("review-coordinator".to_string()),
+        finding: ralph_core::PolicyFinding {
+            topic: "review.wave.ready".to_string(),
+            violation_type: ralph_core::ViolationType::MissingRequiredField {
+                field: "depth".to_string(),
+            },
+            message: "Missing required field: depth".to_string(),
+        },
+    };
+    let rejections = vec![rejection];
+
+    inject_wave_policy_rejection_guidance(
+        &ctx,
+        Some(&mut event_loop),
+        &hat_id,
+        &rejections,
+        1,
+        &expected_topics,
+    );
+
+    let pinned = event_loop
+        .state()
+        .pending_recovery_hat
+        .as_ref()
+        .map(|h| h.as_str().to_string());
+    assert_eq!(
+        pinned.as_deref(),
+        Some("review-coordinator"),
+        "U3: wave policy rejection must pin pending_recovery_hat to the gated hat"
+    );
+}
+
+#[test]
+fn test_u3_handoff_tracker_safe_target_unchanged_when_consumer_is_review_coordinator() {
+    // 2026-06-13 plan U3 — regression guard: the
+    // `HandoffTracker::expired` path must keep `safe_target ==
+    // consumer` when the consumer is `review-coordinator` (i.e.
+    // NOT the default `plan-gate` bottleneck case). Without
+    // this guard, escalation to `review-coordinator` would
+    // itself be re-routed to the fallback and never reach
+    // `review-coordinator`.
+    use ralph_core::workflow_contract::HandoffTracker;
+    use std::time::{Duration, Instant};
+
+    let mut tracker = HandoffTracker::new();
+    let now = Instant::now();
+    // Pending handoff for review-coordinator with a 1s default
+    // timeout.
+    tracker = tracker.with_default_timeout(Duration::from_secs(1));
+    tracker.on_handoff_accepted("work.ready", "review-coordinator", "evt-1", now);
+
+    // At now + 2s the entry has expired.
+    let escalations = tracker.expired(now + Duration::from_secs(2));
+    assert_eq!(escalations.len(), 1);
+    // U3: the safe_target MUST equal the consumer, not the
+    // default plan-gate fallback.
+    assert_eq!(
+        escalations[0].safe_target, "review-coordinator",
+        "U3: review-coordinator handoff must keep safe_target == consumer; \
+         got safe_target={}",
+        escalations[0].safe_target
+    );
+    assert_eq!(escalations[0].consumer, "review-coordinator");
+}
+
 #[test]
 fn test_state_machine_emit_path_uses_candidate_events_file() {
     let temp = tempfile::tempdir().expect("tempdir");
