@@ -1,0 +1,2 @@
+{"topic":"review.passed","payload":"{\"plan_name\":\"demo-plan\",\"task_id\":\"task-session-b\",\"task_key\":\"k1\",\"step\":\"implement\",\"skip_reason\":\"empty_diff\"}","hat":"review-coordinator","ts":"2026-06-11T23:35:19Z"}
+{"topic":"review.failed","payload":"Review failed: critical security findings in auth module require fixer loop","hat":"review-synthesizer","ts":"2026-06-11T23:41:22Z"}

@@ -27,6 +27,7 @@ mod origin_guard;
 mod payload_types;
 mod persistent_mode;
 mod replay_light_integration;
+mod review_step_gate;
 mod robot_skill;
 mod scope_enforcement;
 mod scratchpad;

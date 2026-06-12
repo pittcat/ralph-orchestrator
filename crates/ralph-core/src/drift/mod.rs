@@ -83,3 +83,33 @@ pub use detector::{
 };
 pub use engine::{DriftEngine, evidence_from_jsonl_events};
 pub use window::{DriftWindow, EventSnapshot};
+
+/// Parse a payload string as a JSON object and return the set of
+/// top-level field names.
+///
+/// Shared by the EventBus observer projection (`alert.rs`) and the
+/// loop-runner evidence builder (`engine.rs`) so both layers compute
+/// the **same** field set for the `field_completeness` metric. Before
+/// this was unified the observer path saw a 0% completeness false
+/// positive on string-encoded payloads (e.g. `review.wave.ready`).
+///
+/// Behaviour:
+///
+/// - empty / whitespace-only payloads → empty set;
+/// - JSON object payload → its top-level keys;
+/// - JSON-string payload → re-parse the decoded string once, which
+///   unwraps the double-encoded payloads agents emit through the wave
+///   path (e.g. `"{\"dimension\":\"x\"}"`);
+/// - anything else (prose, numbers, arrays, parse failure) → empty
+///   set rather than panicking.
+pub(crate) fn parse_json_object_field_set(payload: &str) -> std::collections::BTreeSet<String> {
+    let trimmed = payload.trim();
+    if trimmed.is_empty() {
+        return std::collections::BTreeSet::new();
+    }
+    match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
+        Ok(serde_json::Value::String(s)) => parse_json_object_field_set(&s),
+        _ => std::collections::BTreeSet::new(),
+    }
+}

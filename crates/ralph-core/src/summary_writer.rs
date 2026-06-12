@@ -511,6 +511,8 @@ mod tests {
             rejection_last_iteration: std::collections::HashMap::new(),
             invariant_violation_count: 0,
             last_invariant_violation: None,
+            review_step_tracker: crate::event_loop::review_step_state::ReviewStepTracker::default(),
+            stall_recovery_counts: std::collections::HashMap::new(),
         }
     }
 

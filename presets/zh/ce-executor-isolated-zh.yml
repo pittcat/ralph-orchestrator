@@ -142,6 +142,15 @@ event_loop:
         # 提升为 required 字段以避免 reporter 静默发 report.done 而不带决策标记。
         required_fields: [report_path, awaiting_decision]
         payload: json_object
+    # U7: ralph hat 不得冒充业务 hat emit 终态/路由事件（与英文 preset 镜像）
+    topic_deny_rules:
+      - {hat_id: executor, topic: build.done}
+      - {hat_id: ralph, topic: review.wave.ready}
+      - {hat_id: ralph, topic: review.passed}
+      - {hat_id: ralph, topic: work.ready}
+      - {hat_id: ralph, topic: queue.advance}
+      - {hat_id: ralph, topic: plan.complete}
+      - {hat_id: ralph, topic: plan.blocked}
 
 cli:
   backend: "claude"

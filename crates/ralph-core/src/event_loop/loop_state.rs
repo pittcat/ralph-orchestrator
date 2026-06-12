@@ -193,6 +193,12 @@ pub struct LoopState {
     /// not recorded (e.g., the workspace is not a git repository, or the
     /// loop runner could not resolve HEAD at startup).
     pub loop_start_sha: Option<String>,
+
+    /// Per-step review terminal tracker for plan-gate hard enforcement (U1).
+    pub review_step_tracker: super::review_step_state::ReviewStepTracker,
+
+    /// Count of consecutive stall_no_events recoveries (U5).
+    pub stall_recovery_counts: HashMap<String, u32>,
 }
 
 impl Default for LoopState {
@@ -236,6 +242,8 @@ impl Default for LoopState {
             rejection_last_iteration: HashMap::new(),
             invariant_violation_count: 0,
             last_invariant_violation: None,
+            review_step_tracker: super::review_step_state::ReviewStepTracker::default(),
+            stall_recovery_counts: HashMap::new(),
         }
     }
 }

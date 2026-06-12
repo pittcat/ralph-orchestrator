@@ -507,7 +507,7 @@ where
         .unwrap_or_else(chrono::Utc::now);
     let mut out = Vec::new();
     for (idx, ev) in events.into_iter().enumerate() {
-        let fields = parse_json_object_field_set(&ev.payload);
+        let fields = super::parse_json_object_field_set(&ev.payload);
         // Per-event timestamp offset (one second per index)
         // keeps the cadence rule deterministic for the
         // recovery tests; the loop's iteration base keeps it
@@ -521,20 +521,6 @@ where
         });
     }
     out
-}
-
-/// Parse a JSON-object payload and return its top-level field
-/// names. Returns an empty set for non-JSON payloads.
-fn parse_json_object_field_set(payload: &str) -> std::collections::BTreeSet<String> {
-    let trimmed = payload.trim();
-    if trimmed.is_empty() {
-        return std::collections::BTreeSet::new();
-    }
-    match serde_json::from_str::<serde_json::Value>(trimmed) {
-        Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
-        Ok(serde_json::Value::String(s)) => parse_json_object_field_set(&s),
-        _ => std::collections::BTreeSet::new(),
-    }
 }
 
 /// Build [`RequiredFields`] from a `RalphConfig`'s `EventPolicyConfig`

@@ -333,29 +333,11 @@ fn project_event_to_snapshot(event: &Event, iteration: u32) -> EventSnapshot {
     // window cheap. We tolerate any payload that is not a JSON
     // object: the resulting `fields` is empty, and the
     // field_completeness metric becomes a no-op for that event.
-    let fields = parse_json_fields(&event.payload);
+    let fields = super::parse_json_object_field_set(&event.payload);
     if !fields.is_empty() {
         snap = snap.with_fields(fields);
     }
     snap
-}
-
-/// Parse a payload string as a JSON object and return the set of
-/// top-level field names. Returns an empty set for any non-object
-/// payload or parse failure.
-fn parse_json_fields(payload: &str) -> std::collections::BTreeSet<String> {
-    use std::collections::BTreeSet;
-    let trimmed = payload.trim();
-    if trimmed.is_empty() {
-        return BTreeSet::new();
-    }
-    match serde_json::from_str::<serde_json::Value>(trimmed) {
-        Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
-        // String-encoded JSON: try once more to unwrap a quoted
-        // JSON object, e.g. `"{\"a\":1}"`.
-        Ok(serde_json::Value::String(s)) => parse_json_fields(&s),
-        _ => BTreeSet::new(),
-    }
 }
 
 // Severity label used by U3's `OrchestrationEvent::DriftDetected`.

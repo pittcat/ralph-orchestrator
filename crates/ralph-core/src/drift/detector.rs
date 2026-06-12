@@ -731,3 +731,59 @@ fn count_joined(from_timestamps: &[DateTime<Utc>], to_timestamps: &[DateTime<Utc
     let earliest_from = *from_timestamps.iter().min().expect("non-empty");
     to_sorted.iter().filter(|t| **t >= earliest_from).count()
 }
+
+#[cfg(test)]
+mod parse_field_set_tests {
+    use super::super::parse_json_object_field_set;
+    use std::collections::BTreeSet;
+
+    fn set(items: &[&str]) -> BTreeSet<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn json_object_payload_yields_top_level_fields() {
+        let payload = r#"{"dimension":"x","wave_id":"w1","total":9}"#;
+        assert_eq!(
+            parse_json_object_field_set(payload),
+            set(&["dimension", "total", "wave_id"]),
+        );
+    }
+
+    #[test]
+    fn json_string_encoded_object_is_unwrapped_once() {
+        // Double-encoded payload as agents emit through the wave
+        // path: a JSON string whose contents are a JSON object.
+        let payload = serde_json::to_string(r#"{"dimension":"x","wave_id":"w1"}"#).unwrap();
+        assert_eq!(
+            parse_json_object_field_set(&payload),
+            set(&["dimension", "wave_id"]),
+        );
+    }
+
+    #[test]
+    fn prose_string_yields_empty_set() {
+        // A bare prose string is valid JSON (a JSON string) but is
+        // not an object once decoded, so it must not contribute any
+        // phantom fields.
+        let payload = serde_json::to_string("review passed, no findings").unwrap();
+        assert!(parse_json_object_field_set(&payload).is_empty());
+    }
+
+    #[test]
+    fn unquoted_prose_yields_empty_set() {
+        assert!(parse_json_object_field_set("review passed, no findings").is_empty());
+    }
+
+    #[test]
+    fn empty_and_whitespace_yield_empty_set() {
+        assert!(parse_json_object_field_set("").is_empty());
+        assert!(parse_json_object_field_set("   \n\t").is_empty());
+    }
+
+    #[test]
+    fn non_object_json_values_yield_empty_set() {
+        assert!(parse_json_object_field_set("[1, 2, 3]").is_empty());
+        assert!(parse_json_object_field_set("42").is_empty());
+    }
+}

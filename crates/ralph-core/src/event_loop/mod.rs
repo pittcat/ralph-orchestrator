@@ -3,6 +3,7 @@
 //! The event loop coordinates the execution of hats via pub/sub messaging.
 
 mod loop_state;
+pub mod review_step_state;
 pub mod rejection;
 #[cfg(test)]
 mod tests;
@@ -545,6 +546,7 @@ fn apply_event_policy_validation(
     events: Vec<JsonlEvent>,
     policy_config: &crate::config::EventPolicyConfig,
     policy_state: &mut PolicyRuntimeState,
+    review_step_tracker: &mut review_step_state::ReviewStepTracker,
     bus: &mut EventBus,
     write_diagnostic: bool,
     source_hats_by_topic: &std::collections::HashMap<String, Vec<String>>,
@@ -741,7 +743,24 @@ fn apply_event_policy_validation(
 
         match decision {
             PolicyDecision::Accept => {
-                validated_events.push(event);
+                if let Some(finding) = review_step_tracker.check_semantic_gates(&event) {
+                    capture_violation(&finding, event.payload.as_deref());
+                    policy_rejections.push(crate::event_policy::PolicyRejection {
+                        topic: event.topic.clone(),
+                        source_hat: event.hat.clone(),
+                        finding: finding.clone(),
+                    });
+                    let recovery_payload = format!(
+                        "EVENT_POLICY_REJECTED: event '{}' violates review step gate.\n{}\n\n\
+                         Wait for review-synthesizer terminal before plan-gate events.",
+                        event.topic, finding.message
+                    );
+                    let recovery_event = Event::new("task.resume", &recovery_payload);
+                    bus.publish(recovery_event);
+                } else {
+                    review_step_tracker.observe_accepted(&event);
+                    validated_events.push(event);
+                }
             }
             PolicyDecision::Warn(findings) => {
                 // In observe mode: log diagnostics but still pass the event through
@@ -752,7 +771,24 @@ fn apply_event_policy_validation(
                     );
                     bus.publish(diagnostic);
                 }
-                validated_events.push(event);
+                if let Some(finding) = review_step_tracker.check_semantic_gates(&event) {
+                    capture_violation(&finding, event.payload.as_deref());
+                    policy_rejections.push(crate::event_policy::PolicyRejection {
+                        topic: event.topic.clone(),
+                        source_hat: event.hat.clone(),
+                        finding: finding.clone(),
+                    });
+                    let recovery_payload = format!(
+                        "EVENT_POLICY_REJECTED: event '{}' violates review step gate.\n{}\n\n\
+                         Wait for review-synthesizer terminal before plan-gate events.",
+                        event.topic, finding.message
+                    );
+                    let recovery_event = Event::new("task.resume", &recovery_payload);
+                    bus.publish(recovery_event);
+                } else {
+                    review_step_tracker.observe_accepted(&event);
+                    validated_events.push(event);
+                }
             }
             PolicyDecision::RejectWithResume(finding) => {
                 capture_violation(&finding, event.payload.as_deref());
@@ -2203,6 +2239,53 @@ impl EventLoop {
             .unwrap_or_default()
     }
 
+    /// U4: When a review wave is incomplete past the synthesizer aggregate window,
+    /// route `review-synthesizer` via `task.resume` so the loop can emit
+    /// `plan.blocked` instead of stalling indefinitely.
+    pub fn inject_review_aggregate_timeouts(&mut self) -> bool {
+        use std::time::Duration;
+
+        let timeout_secs = self
+            .registry
+            .get_config(&HatId::new("review-synthesizer"))
+            .and_then(|cfg| cfg.aggregate.as_ref())
+            .map(|agg| u64::from(agg.timeout))
+            .unwrap_or(300);
+        let timeout = Duration::from_secs(timeout_secs);
+
+        let actions = self
+            .state
+            .review_step_tracker
+            .drain_expired_aggregate_timeouts(timeout);
+        let Some(action) = actions.into_iter().next() else {
+            return false;
+        };
+
+        let payload = format!(
+            "RECOVERY (AGGREGATE TIMEOUT): review wave '{}' received {}/{} \
+             review.dimension.done events within {}s. Activate review-synthesizer and emit \
+             plan.blocked with reason dimension_reviewers_failed_to_converge.\n\
+             plan_name={} task_id={} step={}",
+            action.wave_id,
+            action.received,
+            action.expected,
+            timeout_secs,
+            action.plan_name,
+            action.task_id,
+            action.step,
+        );
+        let target = HatId::new("review-synthesizer");
+        debug!(
+            wave_id = %action.wave_id,
+            received = action.received,
+            expected = action.expected,
+            "Injecting aggregate timeout recovery to review-synthesizer"
+        );
+        self.bus
+            .publish(Event::new("task.resume", payload).with_target(target));
+        true
+    }
+
     /// Injects a fallback event to recover from a stalled loop.
     ///
     /// When no hats have pending events (agent failed to publish), this method
@@ -2210,9 +2293,51 @@ impl EventLoop {
     ///
     /// Returns true if a fallback event was injected, false if recovery is not possible.
     pub fn inject_fallback_event(&mut self) -> bool {
+        if self.inject_review_aggregate_timeouts() {
+            return true;
+        }
+
+        const STALL_HARD_THRESHOLD: u32 = 3;
+        const STALL_RETRY_KEY: &str = "stall_recovery:ralph:task_resume:stall_no_events";
+
+        let stall_count = self
+            .state
+            .stall_recovery_counts
+            .entry(STALL_RETRY_KEY.to_string())
+            .and_modify(|c| *c += 1)
+            .or_insert(1);
+
+        let hard_escalation = *stall_count >= STALL_HARD_THRESHOLD;
+        let hard_target = if self.state.review_step_tracker.has_open_review_wave() {
+            HatId::new("review-coordinator")
+        } else {
+            HatId::new("review-synthesizer")
+        };
+
         // If a custom hat was last executing, target the fallback back to it
         // This preserves hat context instead of always falling back to Ralph
-        let fallback_event = match &self.state.last_hat {
+        let fallback_event = if hard_escalation {
+            let mut payload = format!(
+                "RECOVERY (HARD): {} consecutive stall_no_events iterations. \
+                 Route to `{}` to emit review terminal or re-dispatch wave.",
+                stall_count,
+                hard_target.as_str()
+            );
+            payload.push_str(&Self::format_recovery_diagnosis_block(
+                "stall_no_events",
+                hard_target.as_str(),
+                "emit review.wave.ready, review.passed, or review.failed",
+                *stall_count,
+                &[],
+            ));
+            debug!(
+                stall_count,
+                target = %hard_target.as_str(),
+                "Injecting HARD stall recovery to review hat"
+            );
+            Event::new("task.resume", payload).with_target(hard_target)
+        } else {
+            match &self.state.last_hat {
             Some(hat_id) if hat_id.as_str() != "ralph" => {
                 let publishes = self.get_hat_publishes(hat_id);
                 let mut payload = if publishes.is_empty() {
@@ -2270,6 +2395,7 @@ impl EventLoop {
                 debug!("Injecting fallback event to recover - triggering Ralph with task.resume");
                 Event::new("task.resume", payload)
             }
+        }
         };
 
         self.bus.publish(fallback_event);
@@ -4697,6 +4823,7 @@ impl EventLoop {
                 events,
                 policy_config,
                 policy_state,
+                &mut self.state.review_step_tracker,
                 &mut self.bus,
                 policy_config
                     .completion_after_terminal
@@ -5983,6 +6110,7 @@ impl EventLoop {
                 wave_events,
                 policy_config,
                 policy_state,
+                &mut self.state.review_step_tracker,
                 &mut self.bus,
                 policy_config
                     .completion_after_terminal
