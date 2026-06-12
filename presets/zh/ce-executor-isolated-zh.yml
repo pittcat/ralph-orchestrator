@@ -89,6 +89,16 @@ event_loop:
     # 标准处理动作。Agent 发出 null 或 string-as-object payload 时
     # 必须看到 `task.resume` 路由,而不是静默 warn-through。
     on_violation: reject_with_resume
+    # U5 (2026-06-13): 强制每次 `ralph emit` / `ralph wave emit` 在写入
+    # events 文件之前先按本 event_policy schema 做预检。旧默认下
+    # `--no-policy-check` 可以悄悄绕过契约 —— 这正是 2026-06-12 事故
+    # 的根因: 7 条缺 `depth` 的 review.wave.ready 写入了 jsonl,随后
+    # 在 loop 读取时被 policy 集体拒绝,runner 误触 `missing_event_gate`。
+    # 加上这两条后,CLI 会在 agent 端 fail-fast,坏 payload 永远不会
+    # 落到 jsonl。`allow_unsafe_cli_emit: false` 关闭 `--no-policy-check`
+    # 后门 —— 在本 preset 下不存在任何绕过 schema 的写入路径。
+    require_policy_check_for_cli_emit: true
+    allow_unsafe_cli_emit: false
     schemas:
       work.ready:
         required_fields: [plan_name, plan_path, task_id, task_key, step, complexity]
@@ -579,8 +589,29 @@ hats:
         现场 trace 2026-06-09（worktree 2026-06-09-001）：此反模式把 9 worker
         的 review 拖成约 30 分钟的串行 1-worker wave。
       - 每个 payload 必须包含：`dimension`、`focus`、`depth`、`diff_base`、`intent_summary`、`changed_files`、`plan_name`
+        - `depth`：取值为 `"quick" | "standard" | "deep"` —— 所有非 `adversarial` 维度
+          一律填 `"standard"`；`adversarial` 维度按上方"维度深度标定"章节选择
+          `quick` / `standard` / `deep`。在 U5 预检下,缺 `depth` 会被 CLI 拒收
+          并报 schema violation(本 preset 的 `require_policy_check_for_cli_emit: true`)。
       - `task_id`、`task_key`、`step`：必须存在。从触发事件 payload 中复制，不得省略。
       - 发射后停止 — 不等待结果
+
+      - **硬性规则 — 不要假设 `ralph wave emit` 一定成功。** 本 preset
+        (`ce-executor-isolated`) 已开启严格 CLI policy 预检（U5：
+        `event_policy.require_policy_check_for_cli_emit: true`、
+        `allow_unsafe_cli_emit: false`），因此任何缺 required 字段
+        （如 `depth`）的 wave 在写入 events 文件之前就会被拒收。若
+        CLI 退出码非 0，说明 wave 实际并未发生 —— 没有任何事件被
+        追加到 jsonl。正确做法：始终加 `--output json` 再跑一次，解析
+        `validation_errors[].field` / `payload_index` / `reason_code`
+        修 payload，再重发即可。带同样 key 的修正 payload 重发是安全的
+        （idempotency key conflict 只在 payload 与上次已接受的 wave
+        **不一致** 时才触发）。绝不能假设 wave 已成功就继续推进
+        `review.dimension.done` / `review.synthesizer`；否则 runner
+        会以 `missing_event_gate` 把这一轮硬门挡住。2026-06-12
+        事故就是因为 review-coordinator 发了 7 条 wave、CLI 当时
+        没预检、loop policy 后来把整批拒掉、误激活错误 hat 并导致
+        loop 死亡 —— 本规则正是为了防止同类问题再发。
 
       - **U2 — Idempotent wave emission（幂等 wave 发射）。** 始终为
         `ralph wave emit` 传一个显式 `--idempotency-key`，这样在重试

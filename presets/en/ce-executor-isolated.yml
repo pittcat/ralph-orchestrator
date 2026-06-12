@@ -109,6 +109,19 @@ event_loop:
     # that emit a null or string-as-object payload must see a
     # `task.resume` routing rather than a silent warn-through.
     on_violation: reject_with_resume
+    # U5 (2026-06-13): force every `ralph emit` / `ralph wave emit` to
+    # pre-validate against this event_policy schema BEFORE writing to
+    # the events file. The previous default let `--no-policy-check`
+    # silently bypass the contract — that bypass was the root cause of
+    # the 2026-06-12 incident where 7 review.wave.ready events (missing
+    # `depth`) wrote to jsonl, then were policy-rejected at loop read
+    # time, then the runner mis-fired `missing_event_gate`. With these
+    # two flags, the CLI fails fast at the agent and the bad payload
+    # never lands in jsonl. `allow_unsafe_cli_emit: false` removes the
+    # `--no-policy-check` escape hatch — there is no other way to write
+    # a non-conforming event under this preset.
+    require_policy_check_for_cli_emit: true
+    allow_unsafe_cli_emit: false
     # U3: topic-deny rules — exact hat_id + topic match, no glob.
     # executor must never emit build.done (it is a review-synthesizer output).
     # U4: also lock ralph (the loop-runner fallback hat) out of every
@@ -694,8 +707,8 @@ hats:
         ```bash
         # 也可显式列出 payload（适合临时手写）
         ralph wave emit review.wave.ready --payloads-stdin <<'JSONL'
-        {"dimension":"correctness","task_id":"...","task_key":"..."}
-        {"dimension":"testing","task_id":"...","task_key":"..."}
+        {"dimension":"correctness","task_id":"...","task_key":"...","depth":"standard"}
+        {"dimension":"testing","task_id":"...","task_key":"...","depth":"standard"}
         JSONL
         ```
 
@@ -734,13 +747,33 @@ hats:
       - Each payload MUST include:
         - `dimension`: string (e.g., "correctness")
         - `focus`: string (dimension focus description)
-        - `depth`: "quick" | "standard" | "deep" (for adversarial)
+        - `depth`: "quick" | "standard" | "deep" — set "standard" for every non-adversarial
+          dimension; use the calibrated values only for the `adversarial` dimension
+          (see Dimension Depth Calibration above). Missing `depth` is a hard schema
+          violation under this preset (U5: precheck refuses to write the event).
         - `diff_base`: string (resolved diff base)
         - `intent_summary`: string (2-3 sentence intent)
         - `changed_files`: string[] (changed file paths)
         - `plan_name`: string
         - `task_id`, `task_key`, `step`: MUST be present. Copy from the triggering event payload. Do NOT omit.
       - Emit wave events then stop — do not wait for results
+
+      - **HARD RULE — never assume `ralph wave emit` succeeded.** This preset
+        (`ce-executor-isolated`) enables strict policy precheck (U5: `event_policy.
+        require_policy_check_for_cli_emit: true`, `allow_unsafe_cli_emit: false`),
+        so a wave emission with missing required fields (e.g. `depth`) is rejected
+        BEFORE the events are written. If the CLI exits non-zero, the wave did NOT
+        happen — no events were appended to jsonl. Always re-run with
+        `--output json` and parse `validation_errors[].field` / `payload_index` /
+        `reason_code` to fix the payload. Re-emitting with the same key but a
+        corrected payload is safe (idempotency key conflict only fires when the
+        payload *differs* from the prior accepted wave). Never proceed to
+        `review.dimension.done` or `review.synthesizer` activation as if the wave
+        succeeded; the runner will hard-gate you on `missing_event_gate` instead.
+        This rule exists because the 2026-06-12 incident was triggered by
+        review-coordinator emitting 7 wave events that the CLI silently accepted
+        at the time (no precheck) but the loop policy later rejected in bulk,
+        producing the wrong hat activation and a loop death.
 
       - **U2 — Idempotent wave emission.** Always pass an explicit
         `--idempotency-key` to `ralph wave emit` so that retries
