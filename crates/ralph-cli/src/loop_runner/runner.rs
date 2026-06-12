@@ -2915,13 +2915,27 @@ pub async fn run_loop_impl(
             }
         }
 
-        // Read events from JSONL, partitioning wave events from regular events
-        let (processed_events, wave_events) =
+        // Read events from JSONL, partitioning wave events from regular events.
+        //
+        // U2 (2026-06-13-001): capture `wave_policy_rejections` (and
+        // `wave_raw_count` for envelope evidence) alongside the regular
+        // `processed` and `wave_events`. The runner uses the rejection
+        // list to (a) keep `missing_event_gate` from mis-firing when the
+        // agent DID emit a wave batch but policy rejected it for missing
+        // a required field, and (b) inject schema-level guidance in lieu
+        // of the generic "did not emit" message. U1 added the fields;
+        // this is the consumer side.
+        let (processed_events, wave_events, wave_policy_rejections, wave_raw_count) =
             match event_loop.process_events_from_jsonl_with_waves() {
-                Ok(result) => (Some(result.processed), result.wave_events),
+                Ok(result) => (
+                    Some(result.processed),
+                    result.wave_events,
+                    result.wave_policy_rejections,
+                    result.wave_raw_count,
+                ),
                 Err(e) => {
                     warn!(error = %e, "Failed to read events from JSONL");
-                    (None, Vec::new())
+                    (None, Vec::new(), Vec::new(), 0)
                 }
             };
 
@@ -3414,11 +3428,24 @@ pub async fn run_loop_impl(
             .map(|events| events.had_events)
             .unwrap_or(false);
 
-        // Agent wrote any valid or rejected events — used for missing-event gate
+        // Agent wrote any valid or rejected events — used for missing-event gate.
+        //
+        // U2 (2026-06-13-001): the wave partition is processed by event
+        // policy *before* it reaches the regular `processed_events`
+        // pipeline, so a wave batch that is policy-rejected (e.g. 7
+        // `review.wave.ready` events missing the `depth` field) would
+        // leave both `had_raw_events` and `had_rejected_events` at
+        // `false` for the regular path. To keep `missing_event_gate`
+        // from mis-firing on that case, fold
+        // `wave_had_policy_rejections` into the boolean expression so
+        // the gate is skipped symmetrically with the regular
+        // `had_rejected_events` path.
+        let wave_had_policy_rejections = !wave_policy_rejections.is_empty();
         let agent_wrote_any_valid_or_rejected = processed_events
             .as_ref()
             .map(|events| events.had_raw_events || events.had_rejected_events)
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || wave_had_policy_rejections;
 
         let mut late_termination_reason: Option<TerminationReason> = None;
         let mut hard_gate_triggered_this_iteration = false;
@@ -3529,28 +3556,55 @@ pub async fn run_loop_impl(
         // hard gate on missing events. This catches the "completely forgot" case.
         // Contract rejection does NOT trigger this gate because the agent DID try to emit.
         //
+        // U2 (2026-06-13-001): wave policy rejection follows the same
+        // shape as contract rejection. The agent DID emit a wave batch
+        // (it appears in the JSONL with `wave_id` set), but the policy
+        // layer rejected the events for missing a required field such
+        // as `depth`. Surfacing the rejected topic in `candidate_topics`
+        // means `obligation_satisfied` (which iterates
+        // `must_emit_any_of` against `candidate_topics`) treats the
+        // obligation as satisfied — a wave batch that mentions
+        // `review.wave.ready` is no longer mis-classified as a
+        // missing emit just because the fan-out could not start.
+        //
         // U4 (2026-06-07): collect the candidate topics the agent
         // emitted this iteration so the gate can call
         // `obligation_satisfied` on hats that opted into the
         // activation-level path.  An empty candidate set against a
         // hat with explicit obligations is now correctly reported as
         // a missing event instead of silently passing.
-        let candidate_topics: Vec<String> = processed_events
-            .as_ref()
-            .map(|p| {
-                let mut topics: Vec<String> = p
-                    .accepted_events
+        let candidate_topics: Vec<String> = {
+            let mut topics: Vec<String> = processed_events
+                .as_ref()
+                .map(|p| {
+                    let mut topics: Vec<String> = p
+                        .accepted_events
+                        .iter()
+                        .map(|e| e.topic.to_string())
+                        .collect();
+                    // Also surface contract-rejected topics — the agent
+                    // DID try to emit these, so they should not count as
+                    // "missing" even when the rejection kept them off the
+                    // bus.
+                    topics.extend(p.contract_rejections.iter().map(|f| f.topic.clone()));
+                    topics
+                })
+                .unwrap_or_default();
+            // U2: extend with wave-partition policy rejections (same
+            // reasoning as contract_rejections above). The agent
+            // attempted to emit a wave batch for these topics; the
+            // policy layer kept the events off the bus, but the
+            // topic itself was clearly the intended emission. Without
+            // this merge, the obligation path would still classify
+            // the obligation as unsatisfied and trigger a spurious
+            // missing-event gate.
+            topics.extend(
+                wave_policy_rejections
                     .iter()
-                    .map(|e| e.topic.to_string())
-                    .collect();
-                // Also surface contract-rejected topics — the agent
-                // DID try to emit these, so they should not count as
-                // "missing" even when the rejection kept them off the
-                // bus.
-                topics.extend(p.contract_rejections.iter().map(|f| f.topic.clone()));
-                topics
-            })
-            .unwrap_or_default();
+                    .map(|r| r.topic.clone()),
+            );
+            topics
+        };
         // C4 (§6 C4): the post-wave gate blocks are guarded by
         // `late_termination_reason.is_none()`. When the global
         // deadline fires during a wave, the runner sets
@@ -3560,7 +3614,39 @@ pub async fn run_loop_impl(
         // either inject synthesized events into a doomed iteration or
         // trigger hard-gate bookkeeping on a loop that's about to
         // exit. Both must be skipped.
-        if !agent_wrote_any_valid_or_rejected
+        //
+        // U2 (2026-06-13-001): when a wave batch was *policy-rejected*
+        // (e.g. all 7 `review.wave.ready` events missing `depth`), the
+        // agent DID emit, but policy blocked the fan-out. Surface
+        // schema-level guidance to the next iteration's prompt and
+        // skip BOTH the missing-event gate (mutually exclusive per
+        // the plan) and the default_publishes fallback (we have
+        // evidence the agent tried to emit a wave, so synthesizing a
+        // default would be misleading).
+        if wave_had_policy_rejections
+            && wave_events.is_empty()
+            && !hard_gate_triggered_this_iteration
+            && late_termination_reason.is_none()
+        {
+            // Resolve the publish list before the mutable borrow so
+            // the helper can take `&mut event_loop` (U6 recovery
+            // responder bookkeeping lives on the event loop).
+            let publishes = event_loop.get_hat_publishes(&display_hat);
+            inject_wave_policy_rejection_guidance(
+                &ctx,
+                Some(&mut event_loop),
+                &display_hat,
+                &wave_policy_rejections,
+                wave_raw_count,
+                &publishes,
+            );
+            info!(
+                hat = %display_hat.as_str(),
+                rejection_count = wave_policy_rejections.len(),
+                raw_count = wave_raw_count,
+                "Wave batch was policy-rejected; injected schema-level guidance instead of missing-event gate"
+            );
+        } else if !agent_wrote_any_valid_or_rejected
             && wave_events.is_empty()
             && !hard_gate_triggered_this_iteration
             && late_termination_reason.is_none()

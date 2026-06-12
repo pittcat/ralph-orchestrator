@@ -8260,6 +8260,322 @@ hats:
     );
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// 2026-06-13 plan U2: wave policy rejection must skip the missing-event
+// gate (mirror of the contract-rejection case above).
+//
+// The agent emits a wave batch of 7 `review.wave.ready` events, all of
+// which are policy-rejected (e.g. they lack the required `depth` field).
+// `wave_events` is empty because the dispatcher never started, but
+// `wave_policy_rejections` is non-empty. Without the U2 fix the runner
+// sees an empty `processed` AND an empty `wave_events`, concludes the
+// agent forgot to emit, and triggers `missing_event_gate` → wrong hat
+// activation → `payload_contract_violation` loop death.
+//
+// After U2:
+//   - `agent_wrote_any_valid_or_rejected` includes
+//     `wave_had_policy_rejections` so the gate is skipped.
+//   - `candidate_topics` includes the rejected topic so
+//     `obligation_satisfied` treats the obligation as satisfied.
+//   - A new `inject_wave_policy_rejection_guidance` helper writes a
+//     `human.guidance` event listing the missing field, replacing the
+//     generic "did not emit" message (mutually exclusive with the
+//     missing-event gate at the call site).
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_wave_policy_rejection_skips_missing_event_gate() {
+    // 2026-06-13 plan U2 — happy path: 7 `review.wave.ready` events
+    // missing `depth` are policy-rejected. Mirror the runner's gate
+    // decision expression and assert the gate does NOT fire.
+    let yaml = r#"
+hats:
+  review-coordinator:
+    name: "Review Coordinator"
+    triggers: ["work.done"]
+    publishes: ["review.wave.ready", "review.passed"]
+    obligations:
+      - on_trigger: "work.done"
+        must_emit_any_of: ["review.wave.ready", "review.passed"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.state_mut().last_activation_events =
+        vec![ralph_proto::Event::new("work.done", "{}")];
+    let hat = HatId::new("review-coordinator");
+
+    // Construct a `ProcessedEventsWithWaves` shape with no regular
+    // accepted/rejected events but a 7-element wave policy rejection
+    // list — the exact shape U1 surfaces from the event loop and
+    // U2 consumes in the runner.
+    let policy_rejection = || ralph_core::PolicyRejection {
+        topic: "review.wave.ready".to_string(),
+        source_hat: Some("review-coordinator".to_string()),
+        finding: ralph_core::PolicyFinding {
+            topic: "review.wave.ready".to_string(),
+            violation_type: ralph_core::ViolationType::MissingRequiredField {
+                field: "depth".to_string(),
+            },
+            message: "Missing required field: depth".to_string(),
+        },
+    };
+    let wave_policy_rejections: Vec<ralph_core::PolicyRejection> =
+        (0..7).map(|_| policy_rejection()).collect();
+    let wave_raw_count = wave_policy_rejections.len();
+
+    // The runner's gate condition uses:
+    //   1. `agent_wrote_any_valid_or_rejected` — which U2 expands to
+    //      include `wave_had_policy_rejections`.
+    //   2. `wave_events.is_empty()` — the dispatcher never started.
+    //   3. `should_gate_missing_events(display_hat, &event_loop, &candidate_topics)`
+    //      where U2 merges wave rejected topics into `candidate_topics`.
+    //
+    // The boolean expression that the gate uses is therefore:
+    //   !agent_wrote_any_valid_or_rejected
+    //   && wave_events.is_empty()
+    //   && !hard_gate_triggered_this_iteration
+    //   && late_termination_reason.is_none()
+    //   && should_gate_missing_events(...)
+    //
+    // U2 also routes to `inject_wave_policy_rejection_guidance` (a
+    // separate branch) when `wave_had_policy_rejections && wave_events.is_empty()`,
+    // which is mutually exclusive with the missing-event gate at the
+    // call site. So when wave rejections are present, the gate's first
+    // condition is already false → it never reaches
+    // `should_gate_missing_events` to even evaluate the obligation.
+    let agent_wrote_any_valid_or_rejected = compute_agent_wrote_any_valid_or_rejected(
+        false, // had_raw_events: no regular events reached the contract layer
+        false, // had_rejected_events: no contract rejections
+        &wave_policy_rejections,
+    );
+    let wave_events_is_empty = true;
+    let hard_gate_triggered_this_iteration = false;
+    let late_termination_reason: Option<ralph_core::TerminationReason> = None;
+
+    // U2 merge: candidate_topics gets the rejected topic too.
+    let candidate_topics: Vec<String> = wave_policy_rejections
+        .iter()
+        .map(|r| r.topic.clone())
+        .collect();
+
+    // Sanity: the runner's gate expression (mirrored here) must be
+    // false, meaning the gate is skipped.
+    let gate_would_fire = !agent_wrote_any_valid_or_rejected
+        && wave_events_is_empty
+        && !hard_gate_triggered_this_iteration
+        && late_termination_reason.is_none()
+        && should_gate_missing_events(&hat, &event_loop, &candidate_topics);
+    assert!(
+        !gate_would_fire,
+        "Missing-event gate MUST NOT fire when wave policy rejected a batch (U2)"
+    );
+
+    // Sanity: the runner's `should_gate_missing_events` call with the
+    // merged candidate_topics would also be satisfied, but U2's
+    // short-circuit (`agent_wrote_any_valid_or_rejected` already true)
+    // is what actually saves us in production. The merged candidate
+    // topics give us a defence-in-depth check.
+    assert!(
+        !should_gate_missing_events(&hat, &event_loop, &candidate_topics),
+        "obligation_satisfied must treat the rejected topic as satisfying the obligation"
+    );
+
+    // Sanity: when candidates is empty (the broken pre-U2 state), the
+    // gate WOULD fire — this is the regression we are guarding.
+    let empty_candidates: Vec<String> = Vec::new();
+    assert!(
+        should_gate_missing_events(&hat, &event_loop, &empty_candidates),
+        "Without U2's merge, the gate wrongly fires (this is the regression)"
+    );
+
+    // Sanity: `wave_raw_count` should match the rejection count for
+    // the recovery envelope evidence.
+    assert_eq!(wave_raw_count, 7, "wave_raw_count should match rejection count");
+}
+
+#[test]
+fn test_wave_policy_rejection_gate_still_fires_when_no_wave_attempt() {
+    // 2026-06-13 plan U2 — error path: the agent emits nothing and
+    // there are no wave rejections. The gate MUST still fire (this
+    // protects against the U2 fix accidentally disabling the
+    // missing-event gate entirely).
+    let yaml = r#"
+hats:
+  review-coordinator:
+    name: "Review Coordinator"
+    triggers: ["work.done"]
+    publishes: ["review.wave.ready", "review.passed"]
+    obligations:
+      - on_trigger: "work.done"
+        must_emit_any_of: ["review.wave.ready", "review.passed"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.state_mut().last_activation_events =
+        vec![ralph_proto::Event::new("work.done", "{}")];
+    let hat = HatId::new("review-coordinator");
+
+    let wave_policy_rejections: Vec<ralph_core::PolicyRejection> = Vec::new();
+    let agent_wrote_any_valid_or_rejected = compute_agent_wrote_any_valid_or_rejected(
+        false, // had_raw_events
+        false, // had_rejected_events
+        &wave_policy_rejections,
+    );
+    // No regular events at all AND no wave policy rejections →
+    // agent_wrote_any_valid_or_rejected = false.
+    assert!(
+        !agent_wrote_any_valid_or_rejected,
+        "agent_wrote_any_valid_or_rejected must be false when nothing was emitted"
+    );
+
+    let candidate_topics: Vec<String> = Vec::new();
+    assert!(
+        should_gate_missing_events(&hat, &event_loop, &candidate_topics),
+        "Missing-event gate MUST fire when agent emitted nothing and no wave rejections"
+    );
+}
+
+#[test]
+fn test_wave_policy_rejection_gate_skipped_with_regular_accept_too() {
+    // 2026-06-13 plan U2 — edge case: regular accept + wave reject
+    // in the same iteration. The gate must NOT fire (the agent
+    // emitted a valid event AND tried to emit a wave batch — both
+    // prove it was active).
+    let yaml = r#"
+hats:
+  review-coordinator:
+    name: "Review Coordinator"
+    triggers: ["work.done"]
+    publishes: ["review.wave.ready", "review.passed"]
+    obligations:
+      - on_trigger: "work.done"
+        must_emit_any_of: ["review.wave.ready", "review.passed"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.state_mut().last_activation_events =
+        vec![ralph_proto::Event::new("work.done", "{}")];
+    let hat = HatId::new("review-coordinator");
+
+    // Regular: had_raw_events = true (one accepted event).
+    // Wave: 5 events policy-rejected.
+    let wave_rejection = || ralph_core::PolicyRejection {
+        topic: "review.wave.ready".to_string(),
+        source_hat: Some("review-coordinator".to_string()),
+        finding: ralph_core::PolicyFinding {
+            topic: "review.wave.ready".to_string(),
+            violation_type: ralph_core::ViolationType::MissingRequiredField {
+                field: "depth".to_string(),
+            },
+            message: "Missing required field: depth".to_string(),
+        },
+    };
+    let wave_policy_rejections: Vec<ralph_core::PolicyRejection> =
+        (0..5).map(|_| wave_rejection()).collect();
+    let agent_wrote_any_valid_or_rejected = compute_agent_wrote_any_valid_or_rejected(
+        true, // had_raw_events: one regular event was accepted
+        false, // had_rejected_events
+        &wave_policy_rejections,
+    );
+    assert!(
+        agent_wrote_any_valid_or_rejected,
+        "regular accept + wave reject must satisfy any_valid_or_rejected"
+    );
+
+    // With `agent_wrote_any_valid_or_rejected = true` the gate is
+    // short-circuited at the runner call site.
+    assert!(
+        agent_wrote_any_valid_or_rejected,
+        "U2 short-circuit must skip the gate"
+    );
+
+    // Defence-in-depth: even if the short-circuit ever failed, the
+    // merged candidate_topics would still satisfy the obligation.
+    let mut candidate_topics: Vec<String> =
+        vec!["review.passed".to_string()];
+    candidate_topics.extend(wave_policy_rejections.iter().map(|r| r.topic.clone()));
+    assert!(
+        !should_gate_missing_events(&hat, &event_loop, &candidate_topics),
+        "merged candidate_topics (accepted + wave-rejected) must satisfy the obligation"
+    );
+}
+
+/// Local helper: mirror the production expression in
+/// `runner.rs::agent_wrote_any_valid_or_rejected`. The regular-path
+/// half is `had_raw_events || had_rejected_events`; the U2 addition
+/// is `|| !wave_policy_rejections.is_empty()`.
+fn compute_agent_wrote_any_valid_or_rejected(
+    had_raw_events: bool,
+    had_rejected_events: bool,
+    wave_policy_rejections: &[ralph_core::PolicyRejection],
+) -> bool {
+    (had_raw_events || had_rejected_events) || !wave_policy_rejections.is_empty()
+}
+
+#[test]
+fn test_wave_policy_rejection_guidance_dedupes_findings() {
+    // 2026-06-13 plan U2 — guidance payload must dedupe by topic +
+    // message so a 7-payload batch that fails on the same field
+    // surfaces one bullet, not seven.
+    use std::io::Read;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let ctx = LoopContext::primary(temp.path().to_path_buf());
+    std::fs::create_dir_all(ctx.ralph_dir()).expect("create .ralph");
+    let events_path = ctx.workspace().join("events.jsonl");
+    std::fs::write(&events_path, "").expect("truncate events file");
+    std::fs::write(ctx.current_events_marker(), "events.jsonl").expect("write marker");
+
+    let wave_rejection = ralph_core::PolicyRejection {
+        topic: "review.wave.ready".to_string(),
+        source_hat: Some("review-coordinator".to_string()),
+        finding: ralph_core::PolicyFinding {
+            topic: "review.wave.ready".to_string(),
+            violation_type: ralph_core::ViolationType::MissingRequiredField {
+                field: "depth".to_string(),
+            },
+            message: "Missing required field: depth".to_string(),
+        },
+    };
+    let rejections: Vec<ralph_core::PolicyRejection> = (0..7).map(|_| wave_rejection.clone()).collect();
+    let hat_id = HatId::new("review-coordinator");
+    let expected_topics = vec!["review.wave.ready".to_string()];
+
+    inject_wave_policy_rejection_guidance(
+        &ctx,
+        None, // no event_loop — focus on the human.guidance write
+        &hat_id,
+        &rejections,
+        7,
+        &expected_topics,
+    );
+
+    let mut written = String::new();
+    std::fs::File::open(&events_path)
+        .expect("open events")
+        .read_to_string(&mut written)
+        .expect("read events");
+
+    // Single line: one human.guidance event.
+    let line_count = written.lines().filter(|l| !l.trim().is_empty()).count();
+    assert_eq!(line_count, 1, "exactly one guidance event must be written");
+
+    // The dedupe should leave exactly one bullet, not seven.
+    let bullet_count = written.matches("- `review.wave.ready`").count();
+    assert_eq!(
+        bullet_count, 1,
+        "the unique-finding set must contain exactly one bullet, not {}",
+        bullet_count
+    );
+    assert!(
+        written.contains("Missing required field: depth"),
+        "the guidance payload must name the missing field"
+    );
+    assert!(
+        written.contains("of 7 event(s)"),
+        "the guidance payload must surface the raw count (7)"
+    );
+}
+
 #[test]
 fn test_state_machine_emit_path_uses_candidate_events_file() {
     let temp = tempfile::tempdir().expect("tempdir");

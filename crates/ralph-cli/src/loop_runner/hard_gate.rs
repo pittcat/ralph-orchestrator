@@ -1,6 +1,7 @@
 use super::*;
 use ralph_core::{
-    NonRetryableReason, Rejection, TerminationReason, U2_REJECTION_RETRY_LIMIT,
+    NonRetryableReason, PolicyRejection, Rejection, TerminationReason, U2_REJECTION_RETRY_LIMIT,
+    ViolationType,
     diagnosis::{
         DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, EvidenceKind, EvidenceRef,
         RecoveryDiagnosisEnvelope, RecoveryDiagnosisEnvelopeBuilder,
@@ -527,6 +528,201 @@ pub fn inject_missing_event_hard_gate_guidance(
         // safe target (the hat itself), so the responder is the right
         // place to surface them in the next prompt.
         event_loop.record_recovery_envelope(&envelope, Vec::new());
+    }
+}
+
+/// U2 (2026-06-13-001): inject a `human.guidance` event when a wave
+/// batch was *policy-rejected* but no `wave_events` reached the
+/// dispatcher.
+///
+/// This is the schema-level cousin of `inject_missing_event_hard_gate_guidance`.
+/// The agent DID emit a wave batch (it sits in the JSONL with `wave_id`
+/// set), but the event policy kept the events off the bus because
+/// required fields were missing (e.g. `depth` on `review.wave.ready`).
+/// The agent must see *which field* is missing in the next prompt,
+/// not a generic "you forgot to emit" message.
+///
+/// Behaviour, mirroring `inject_missing_event_hard_gate_guidance`:
+///   - Append a `human.guidance` line to the current events file
+///     listing each unique finding message. The guidance uses the
+///     `Missing required field: X` text from `PolicyFinding.message`
+///     so the agent can `jq` / grep the schema field directly.
+///   - When `event_loop` is provided, also write a
+///     `RecoveryDiagnosisEnvelope` (source `PayloadContract`, reason
+///     `wave_dispatch_blocked` or `missing_required_field` per the
+///     KTD-3 taxonomy in the plan) so `ralph diagnose` attributes the
+///     failure to a schema contract violation, not a missing emit.
+///
+/// Mutual exclusion with the missing-event gate is enforced at the
+/// call site: the runner routes to this helper only when
+/// `wave_had_policy_rejections && wave_events.is_empty()` is true, so
+/// the two guidance paths never write to the same iteration.
+pub fn inject_wave_policy_rejection_guidance(
+    ctx: &LoopContext,
+    event_loop: Option<&mut EventLoop>,
+    hat_id: &HatId,
+    rejections: &[PolicyRejection],
+    raw_count: usize,
+    expected_topics: &[String],
+) {
+    if rejections.is_empty() {
+        return;
+    }
+
+    // Deduplicate findings by `topic + message` so a 7-payload batch
+    // that fails on the same field once surfaces one bullet instead
+    // of seven. The agent only needs the unique set of schema errors
+    // to fix the next emit.
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    let mut unique_findings: Vec<&PolicyRejection> = Vec::new();
+    for r in rejections {
+        let key = (r.topic.clone(), r.finding.message.clone());
+        if seen.insert(key) {
+            unique_findings.push(r);
+        }
+    }
+
+    let topics_str = if expected_topics.is_empty() {
+        "(check hat configuration)".to_string()
+    } else {
+        expected_topics.join("`, `")
+    };
+
+    let findings_block = unique_findings
+        .iter()
+        .map(|r| format!("  - `{}`: {}", r.topic, r.finding.message))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let payload = format!(
+        "⚠️ WAVE BATCH REJECTED: Previous iteration by hat `{hat}` emitted a wave batch of \
+         {raw_count} event(s) for topic(s) `{topics}`, but the event policy REJECTED every event \
+         because required fields were missing or invalid. The wave dispatcher was NOT started.\n\n\
+         Schema findings (unique):\n{findings}\n\n\
+         You MUST fix the payload before re-emitting. Edit the `ralph wave emit` invocation so each \
+         payload contains every required field (e.g. add `depth`), then re-emit. Do NOT re-emit \
+         the same payload verbatim — policy will reject it again.\n\n\
+         Allowed topics for this hat: `{topics}`",
+        hat = hat_id.as_str(),
+        topics = topics_str,
+        findings = findings_block,
+    );
+
+    let events_path = resolve_current_events_path(ctx);
+
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let event = serde_json::json!({
+        "topic": "human.guidance",
+        "payload": payload,
+        "ts": timestamp,
+    });
+
+    match serde_json::to_string(&event) {
+        Ok(line) => {
+            use std::io::Write;
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&events_path);
+            match file {
+                Ok(f) => {
+                    let mut writer = std::io::BufWriter::new(f);
+                    if writeln!(writer, "{}", line).is_err() {
+                        warn!(path = ?events_path, "Failed writing wave-policy-rejection guidance event");
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, path = ?events_path, "Failed opening events file for wave-policy-rejection guidance");
+                }
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "Failed serializing wave-policy-rejection guidance event");
+        }
+    }
+
+    // U2 recovery envelope: payload_contract + wave_dispatch_blocked
+    // (KTD-3 in the plan). `safe_target` is `true` when at least one
+    // rejected topic matches a hat obligation; otherwise the agent
+    // is on its own. The display_hat is always registered.
+    if let Some(event_loop) = event_loop {
+        let hat_name = hat_id.as_str();
+        let iteration = event_loop.state().iteration;
+        let session_id = event_loop.diagnostics().session_id();
+        // Anchor the envelope on the first rejected topic — there
+        // can be several in a batch, but the retry_key only needs
+        // one stable identifier for grouping.
+        let first = unique_findings
+            .first()
+            .copied()
+            .unwrap_or_else(|| &rejections[0]);
+        let topic_for_envelope = &first.topic;
+        let reason_code = if unique_findings
+            .iter()
+            .all(|r| matches!(r.finding.violation_type, ViolationType::MissingRequiredField { .. }))
+        {
+            "missing_required_field"
+        } else {
+            "wave_dispatch_blocked"
+        };
+        let message = if rejections.len() == 1 {
+            format!(
+                "Wave batch of {} event(s) was policy-rejected on topic `{}`: {}",
+                raw_count, topic_for_envelope, first.finding.message
+            )
+        } else {
+            format!(
+                "Wave batch of {} event(s) was policy-rejected ({} unique finding(s)); first: `{}` — {}",
+                raw_count,
+                unique_findings.len(),
+                topic_for_envelope,
+                first.finding.message
+            )
+        };
+        let expected_action = "fix the schema on the wave payload (e.g. add required fields) and re-emit with `ralph wave emit`".to_string();
+        let evidence = format!(
+            "{}{}",
+            topic_for_envelope,
+            if unique_findings.len() > 1 {
+                format!(" (+{} more)", unique_findings.len() - 1)
+            } else {
+                String::new()
+            }
+        );
+        let mut builder = RecoveryDiagnosisEnvelope::builder()
+            .source(DiagnosisSource::PayloadContract)
+            .severity(DiagnosisSeverity::Error)
+            .iteration(iteration)
+            .source_hat(hat_name)
+            .target_hat(hat_name)
+            .topic(topic_for_envelope)
+            .reason_code(reason_code)
+            .message(message)
+            .expected_action(expected_action)
+            .evidence(EvidenceRef {
+                kind: EvidenceKind::Topic,
+                ref_path: evidence,
+                snippet: None,
+            })
+            .safe_target(true)
+            .outcome(DiagnosisOutcome::Pending)
+            .retry_key(RecoveryDiagnosisEnvelopeBuilder::retry_key_from_parts(
+                DiagnosisSource::PayloadContract,
+                Some(hat_name),
+                Some(topic_for_envelope),
+                reason_code,
+                None,
+            ));
+        if let Some(session_id) = session_id.as_deref() {
+            builder = builder.session_id(session_id);
+        }
+        let envelope = builder.build();
+        let notes = vec![format!(
+            "wave batch: {} raw event(s), {} unique finding(s)",
+            raw_count,
+            unique_findings.len()
+        )];
+        event_loop.record_recovery_envelope(&envelope, notes);
     }
 }
 
