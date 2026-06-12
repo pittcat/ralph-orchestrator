@@ -33,7 +33,7 @@ ralph wave emit [OPTIONS] <TOPIC>
 | `<TOPIC>` | string | 是 | — | 所有 wave 事件的主题（如 `review.file`） |
 | `--payloads <PAYLOADS>...` | string… | 二选一 | — | 每个 wave worker 一个 payload（`num_args = 1..`，至少 1 个） |
 | `--payloads-stdin` | flag | 二选一 | false | 从 stdin 逐行读取 payload，适合 JSON payload 列表 |
-| `--output <FMT>` | enum | 否 | `text` | 输出格式：`text`（stdout 仅 wave_id）或 `json`（stdout `{wave_id, topic, count, events_file}`，用于 U5 机器验真） |
+| `--output <FMT>` | enum | 否 | `text` | 输出格式：`text`（stdout 仅 wave_id）或 `json`（stdout `{wave_id, topic, count, events_file, deduplicated}`，用于 U5 机器验真） |
 | `--idempotency-key <KEY>` | string | 否 | — | 幂等键（U2）。同一 `(loop_id, hat, topic, key)` 重复调用只返回首个 `wave_id` 并标 `deduplicated=true`，不写新事件。键最长 256 字节、ASCII、非空非空白。未传则行为与原版一致。 |
 
 `--payloads` 与 `--payloads-stdin` 互斥，必须提供其中一个。不要把多行 JSON 列表塞进一个 shell 变量后传给 `--payloads "$PAYLOADS"`；该用法会被拒绝。多 JSON payload 使用：
@@ -58,7 +58,7 @@ printf '%s\n' \
 
 **幂等键（U2）：**
 
-- `--idempotency-key` 实现基于同目录下 `.wave-idempotency.jsonl` 的持久化记录。文件锁保证并发安全。
+- `--idempotency-key` 实现基于同目录下 `.<events_basename>.idempotency.jsonl` 的持久化记录（例如 `events.jsonl` → `.events.jsonl.idempotency.jsonl`）。文件锁保证并发安全。
 - 推荐 review-coordinator 使用 `ce-review:{plan_name}:{task_id}:{step}:round-{fix_round}` 命名空间。
 - 第一次调用返回 `deduplicated=false`，后续同 scope 同 payload 返回 `deduplicated=true` 和原 `wave_id`。
 - 同 key 不同 payload 会报错（`idempotency-key conflict`），不静默覆盖。
@@ -109,7 +109,7 @@ jq -e --arg id "$wave_id" --argjson expected "$expected_count" '
 | `Failed to open events file: <path>` | 事件文件路径不可写或不存在 | 确认 `RALPH_EVENTS_FILE` / marker 指向的路径可写；或 `mkdir -p .ralph` |
 | `--idempotency-key must not be empty` | key 为空串 | 传非空字符串（推荐 preset 公式） |
 | `--idempotency-key must not be whitespace-only` | key 全是空白 | 同上 |
-| `--idempotency-key exceeds 256 bytes` | key 过长（> 256B） | 缩短；preset 公式远小于 256 |
+| `--idempotency-key exceeds 256 bytes` | key 过长（> 256B，参见 `crates/ralph-cli/src/wave.rs:MAX_IDEMPOTENCY_KEY_BYTES`） | 缩短；preset 公式远小于 256 |
 | `--idempotency-key must be ASCII` | key 含非 ASCII 字节 | 改用 ASCII；如 `plan_name` 是中文，先 hash 或 percent-encode |
 | `idempotency-key conflict: ...` | 同 scope 不同 payload | 改用不同 key（`round-2` 递增或换 task） |
 | `incomplete prior wave emission: ...` | 上次 events 写了 N 行但 record 丢失，扫 events 也只找到少于 N 行 | 手工删除残留 events 行；或换新 key |
@@ -117,7 +117,7 @@ jq -e --arg id "$wave_id" --argjson expected "$expected_count" '
 
 > **wave worker 注意事项**：
 >
-> 1. **结果返回必须用 `ralph emit`**：在 `RALPH_WAVE_WORKER=1` 的子进程中，`ralph emit` 会将事件写入 **candidate-events**（不是 current-events），与 wave 调度器对 worker 输出的预期一致。`ralph wave emit` 本身在 worker 内被阻止（`crates/ralph-cli/src/wave.rs:64-69`）。
+> 1. **结果返回必须用 `ralph emit`**：在 `RALPH_WAVE_WORKER=1` 的子进程中，`ralph emit` 会将事件写入 **candidate-events**（不是 current-events），与 wave 调度器对 worker 输出的预期一致。`ralph wave emit` 本身在 worker 内被阻止（`crates/ralph-cli/src/wave.rs:113-118`）。
 >
 > 2. **candidate-events vs current-events 落点**：
 >    - `ralph wave emit` → 写入 **current-events**（主循环的合并目标，3 级回退：`RALPH_EVENTS_FILE` → `.ralph/current-events` → `.ralph/events.jsonl`）

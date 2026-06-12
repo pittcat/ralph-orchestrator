@@ -2502,6 +2502,53 @@ mod tests {
     }
 
     #[test]
+    fn test_ce_executor_u2_review_coordinator_idempotency_key_en() {
+        // U2 (2026-06-11-002): review-coordinator must emit waves with an
+        // explicit idempotency key so retries cannot double-write events.
+        let content = read_root_preset("ce-executor-isolated.yml");
+        let instructions = review_coordinator_instructions_from(&content);
+        let wave_section = instructions
+            .split("### Wave Emission")
+            .nth(1)
+            .and_then(|s| s.split("### Persist").next())
+            .expect("review-coordinator must document Wave Emission");
+
+        for needle in [
+            "--idempotency-key",
+            "ce-review:{plan_name}:{task_id}:{step}:round-{fix_round}",
+            "deduplicated",
+            "Do NOT omit `--idempotency-key`",
+        ] {
+            assert!(
+                wave_section.contains(needle),
+                "review-coordinator wave section must reference `{needle}`. Excerpt:\n{wave_section}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ce_executor_u2_review_coordinator_idempotency_key_zh() {
+        let content = read_root_preset("ce-executor-isolated-zh.yml");
+        let instructions = review_coordinator_instructions_from(&content);
+        let wave_section = instructions
+            .split("### Wave 发射")
+            .nth(1)
+            .and_then(|s| s.split("### 终端事件后持久化").next())
+            .expect("review-coordinator zh must document Wave 发射");
+
+        for needle in [
+            "--idempotency-key",
+            "ce-review:{plan_name}:{task_id}:{step}:round-{fix_round}",
+            "deduplicated",
+        ] {
+            assert!(
+                wave_section.contains(needle),
+                "review-coordinator zh wave section must reference `{needle}`. Excerpt:\n{wave_section}"
+            );
+        }
+    }
+
+    #[test]
     fn test_ce_executor_shipper_simplify_check_gated_to_plan_complete() {
         // R16: shipper's simplify check must be gated to plan.complete only.
         // On plan.blocked or debug.exhausted, the state is not shippable — simplify is inappropriate.

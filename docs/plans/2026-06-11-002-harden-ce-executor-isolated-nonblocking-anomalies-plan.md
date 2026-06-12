@@ -2,7 +2,7 @@
 date: 2026-06-11
 plan-id: 2026-06-11-002
 type: fix
-status: draft
+status: done
 preset: ce-executor-isolated
 origin: docs/report/2026-06-11-ce-executor-isolated-nonblocking-anomalies-corrected-diagnosis.md
 scope: 小范围加固 review 语义门、wave emit 幂等、诊断时区与 loop 路径解析

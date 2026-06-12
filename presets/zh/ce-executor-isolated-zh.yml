@@ -323,7 +323,7 @@ hats:
       ```
       while (当前步骤有未完成的任务):
         1. ralph tools task start <task_id>
-        2. 更新 `progress.md`：设置 `Current Step`、`Runtime Task ID`、`Status: in_progress`、更新时间
+        2. 更新 `progress.md`（路径：`.agents/scratchpad/ce-executor/{plan_name}/progress.md`）：设置 `Current Step`、`Runtime Task ID`、`Status: in_progress`、更新时间
         3. 读取任务相关文件和模式
         4. 实现代码（根据 Execution note 选择策略）
         5. 运行并验证测试
@@ -383,7 +383,7 @@ hats:
       - 读取 payload 中的 `next_step` 来确定当前步骤。
       - 使用该步骤创建 runtime tasks（`ralph tools task ensure`）。
       - 选择当前步骤的第一个未完成任务并用 `ralph tools task start <task_id>` 启动它。
-      - 更新 `progress.md`：设置 `Current Step`、`Runtime Task ID`、`Status: in_progress`，以及更新时间。
+      - 更新 `progress.md`（路径：`.agents/scratchpad/ce-executor/{plan_name}/progress.md`）：设置 `Current Step`、`Runtime Task ID`、`Status: in_progress`，以及更新时间。
       - 开始实现（遵循下面的"任务执行循环"）。
       - 任务完成后发布 `work.done`，携带 NEW task 的 `task_id` 和 `task_key`（不是 reviewed 的）。
       - 不得使用 `reviewed_task_id`/`reviewed_task_key` 读取 runtime task 或发布 `work.done` —— 它们仅用于对账。
@@ -567,6 +567,35 @@ hats:
       - 每个 payload 必须包含：`dimension`、`focus`、`depth`、`diff_base`、`intent_summary`、`changed_files`、`plan_name`
       - `task_id`、`task_key`、`step`：必须存在。从触发事件 payload 中复制，不得省略。
       - 发射后停止 — 不等待结果
+
+      - **U2 — Idempotent wave emission（幂等 wave 发射）。** 始终为
+        `ralph wave emit` 传一个显式 `--idempotency-key`，这样在重试
+        （超时、agent 重启、误重发）时**不会**产生重复 wave。规范 key 公式：
+
+        ```
+        ce-review:{plan_name}:{task_id}:{step}:round-{fix_round}
+        ```
+
+        示例：
+        ```bash
+        cat payloads.jsonl | ralph wave emit review.wave.ready \
+            --idempotency-key "ce-review:fix-null-pointer:task-1747016430-a1b2:implement:round-1" \
+            --payloads-stdin --output json
+        ```
+
+        属性：
+        - 首次带此 key 的调用会写入 wave + 创建 dedup 记录。
+        - 后续带相同 `(loop_id, hat, topic, key)` 和相同 payloads 的调用返回
+          相同的 `wave_id`，并在 JSON 输出中带 `deduplicated=true`；不会写入
+          新的 events。
+        - 相同 key 但不同 payloads 会被拒绝（错误：`idempotency-key conflict`），
+          防止静默覆盖。
+        - 不同 `fix_round` → 不同 key → 新 wave（按设计）。
+        - 不同 `plan_name` 或 `task_id` → 不同 key → 新 wave。
+        - review wave **不要**省略 `--idempotency-key`；省略会破坏 dedup
+          安全网，在重试时风险翻倍 dispatch。
+        - 如果 `plan_name` 包含非 ASCII 字符（如中文），先把 plan_name 做
+          ASCII-safe 转换（例如 percent-encode 或 hash），CLI 显式拒绝非 ASCII key。
 
       ### 终端事件后持久化 `last_reviewed_sha`
       **为什么需要这一步：** `last_reviewed_sha` 是下一次 review-coordinator pass 的增量 diff base。`context.md` 的 key-value header 是选定的持久层（参考 Coordinator 在 `work.start` 时写入的 `start_sha`、以及 `fix-log.md` 中的 `current_fix_round`）。

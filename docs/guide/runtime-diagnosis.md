@@ -324,7 +324,12 @@ Options:
           receives only the written path (Markdown) or a short summary line (JSON).
 
       --diagnostics-root <PATH>
-          Path to the diagnostics root. Defaults to `<workspace>/.ralph/diagnostics`.
+          Path to the diagnostics root. Default resolution (U3): read
+          `<workspace>/.ralph/loops.json`; take the latest active loop's
+          `workspace.workspace` field; use `<that-workspace>/.ralph/diagnostics`.
+          Falls back to `<workspace>/.ralph/diagnostics` when `loops.json`
+          is missing/empty or its latest active entry points at a dead
+          worktree. Pass `--diagnostics-root` to bypass the registry.
 
   -c, --config <CONFIG>   父命令通用参数：ralph.yml 或 core.field=value 覆盖
   -H, --hats <HATS>       父命令通用参数：hat 集合（一般 diagnose 不需要）

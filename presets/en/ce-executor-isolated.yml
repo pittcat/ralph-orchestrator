@@ -115,6 +115,7 @@ event_loop:
       - {hat_id: executor, topic: build.done}
       - {hat_id: ralph, topic: review.wave.ready}
       - {hat_id: ralph, topic: review.passed}
+      - {hat_id: ralph, topic: work.ready}
       - {hat_id: ralph, topic: queue.advance}
       - {hat_id: ralph, topic: plan.complete}
       - {hat_id: ralph, topic: plan.blocked}
@@ -415,7 +416,15 @@ hats:
       ```
       while (current step has uncompleted tasks):
         1. ralph tools task start <task_id>
-        2. Update `progress.md`: set `Current Step`, `Runtime Task ID`, `Status: in_progress`, update time
+        2. Update `progress.md` (path: `.agents/scratchpad/ce-executor/{plan_name}/progress.md`): set `Current Step`, `Runtime Task ID`, `Status: in_progress`, update time. Concrete shape (replace `<...>` placeholders, do NOT wrap in nested fenced block — this section is itself a fenced block):
+
+           ## Current Step
+           - <step number + title from `queue.advance` payload, e.g. `step-04 (U4 progress/task 轻量对账)`>
+
+           ## Active Task
+           - Runtime Task ID: <task_id from step 1, e.g. `task-1781221021-bdf3`>
+           - Status: in_progress
+           - Updated: <`date -u +%FT%TZ`>
         3. Read task files and patterns
         4. Implement (test-first / characterization-first per Execution note)
         5. Run and verify tests
@@ -476,7 +485,7 @@ hats:
       - Read `next_step` from the payload to identify the step you must now work on.
       - Create that step's runtime tasks using `ralph tools task ensure`.
       - Select the first uncompleted task of the current step and `ralph tools task start <task_id>`.
-      - Update `progress.md`: set `Current Step`, `Runtime Task ID`, `Status: in_progress`, and update time.
+      - Update `progress.md` (path: `.agents/scratchpad/ce-executor/{plan_name}/progress.md`): set `Current Step`, `Runtime Task ID`, `Status: in_progress`, and update time.
       - Begin implementation (follow the Task Execution Loop below).
       - Publish `work.done` when the task is complete, carrying the NEW task's `task_id` and `task_key` (not the reviewed ones).
       - Do NOT use `reviewed_task_id`/`reviewed_task_key` to read runtime tasks or publish `work.done` — they are for correlation only.
@@ -738,7 +747,7 @@ hats:
         Example:
         ```bash
         cat payloads.jsonl | ralph wave emit review.wave.ready \
-            --idempotency-key "ce-review:fix-null-pointer:42:implement:round-1" \
+            --idempotency-key "ce-review:fix-null-pointer:task-1747016430-a1b2:implement:round-1" \
             --payloads-stdin --output json
         ```
 

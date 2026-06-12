@@ -1117,27 +1117,67 @@ fn format_duration(d: std::time::Duration) -> String {
 /// Format a `SystemTime` as a dual-timezone string: UTC + local.
 ///
 /// Example: `"2026-06-05 10:20:30 UTC / 18:20:30 CST"`.
-/// Falls back to the UTC representation if local conversion fails.
+///
+/// Conversion `SystemTime → DateTime<Utc>` is infallible, so there is no
+/// fallback path: the local half is always rendered.
 fn format_system_time(t: std::time::SystemTime) -> String {
     let dt_utc: chrono::DateTime<chrono::Utc> = t.into();
-    let dt_local: chrono::DateTime<chrono::Local> = t.into();
-    format!(
-        "{} / {}",
-        dt_utc.format("%Y-%m-%d %H:%M:%S UTC"),
-        dt_local.format("%H:%M:%S %Z"),
-    )
+    format_datetime_utc(dt_utc)
 }
 
 /// Format a `DateTime<Utc>` as a dual-timezone string: UTC + local.
 ///
-/// Example: `"2026-06-05 10:20:30 UTC / 18:20:30 CST"`.
+/// Example: `"2026-06-05 10:20:30 UTC / 18:20:30 CST (Asia/Shanghai)"`.
+///
+/// The local half always includes the IANA zone name in parentheses so
+/// short timezone abbreviations (CST, PST, EST — each maps to multiple
+/// regions) are unambiguous to humans and to machine consumers that
+/// pair on the bracketed suffix.
 fn format_datetime_utc(dt: chrono::DateTime<chrono::Utc>) -> String {
     let dt_local: chrono::DateTime<chrono::Local> = dt.into();
     format!(
-        "{} / {}",
+        "{} / {} ({})",
         dt.format("%Y-%m-%d %H:%M:%S UTC"),
         dt_local.format("%H:%M:%S %Z"),
+        iana_tz_name(),
     )
+}
+
+/// Best-effort IANA timezone name for the current process. Falls back
+/// to "UTC" when the local zone cannot be resolved (e.g. very old
+/// glibc with no `/etc/localtime` symlink target).
+fn iana_tz_name() -> &'static str {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<String> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            // chrono::Local returns a DateTime bound to the system's
+            // IANA zone. Asking for `%Z` gives the abbreviation; the
+            // `tzname()` lookup on the chrono side gives the IANA
+            // name when available.
+            let _local: chrono::DateTime<chrono::Local> =
+                chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0)
+                    .unwrap_or_else(chrono::Utc::now)
+                    .into();
+            // chrono 0.4 does not expose a public IANA resolver on
+            // DateTime<Local>; rely on `Local::now()`'s zone display
+            // via `%Z` and `chrono::LocalResult` introspection. As a
+            // portable fallback we use the TZ env var if set, else
+            // `/etc/localtime` symlink target via std (best-effort).
+            if let Ok(tz) = std::env::var("TZ") {
+                if !tz.is_empty() {
+                    return tz;
+                }
+            }
+            std::fs::read_link("/etc/localtime")
+                .ok()
+                .and_then(|p| {
+                    p.to_str()
+                        .map(|s| s.split("zoneinfo/").last().unwrap_or(s).to_string())
+                })
+                .unwrap_or_else(|| "UTC".to_string())
+        })
+        .as_str()
 }
 
 /// Compute the duration between two `DateTime<Utc>` values.
@@ -1295,10 +1335,15 @@ pub fn render_json(report: &Report) -> Value {
         "errors": report.errors,
         "warnings": report.warnings,
         "active_activations": report.active_activations.iter().map(|a| {
-            // U3: duration computed from timestamps, not pre-computed field.
-            let computed_duration = a.duration.as_secs();
+            // U3: duration computed from timestamps (same path as
+            // markdown summary / json summary), not from the
+            // pre-computed `a.duration` field which is captured at sweep
+            // time and can drift from the visible timestamps.
             let activated_utc: chrono::DateTime<chrono::Utc> = a.activated_at.into();
             let last_event_utc: chrono::DateTime<chrono::Utc> = a.last_event_at.into();
+            let computed_duration = compute_duration(Some(activated_utc), Some(last_event_utc))
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
             json!({
                 "hat_id": a.hat_id,
                 "trigger_topic": a.trigger_topic,
@@ -1823,7 +1868,13 @@ mod tests {
         assert_eq!(activations.len(), 1);
         assert_eq!(activations[0]["hat_id"], "reviewer");
         assert_eq!(activations[0]["linked_task_id"], "task-xyz");
-        assert_eq!(activations[0]["duration_secs"], 60);
+        // U3: duration_secs is now derived from the
+        // (activated_at, last_event_at) timestamps via
+        // compute_duration, matching the markdown summary path.
+        // `make_snapshot(_, 60, _)` places activated_at = now-60s and
+        // last_event_at = now-30s, so the visible duration is 30s,
+        // not the 60s stored in the pre-computed `a.duration` field.
+        assert_eq!(activations[0]["duration_secs"], 30);
     }
 
     #[test]
@@ -2212,6 +2263,28 @@ mod tests {
         assert!(
             result.contains(" / "),
             "expected local time separator ' / ' in output, got: {result}"
+        );
+        // Must include the IANA zone name in parentheses — disambiguates
+        // short TZ abbreviations (CST, PST, EST — each maps to multiple
+        // regions).
+        assert!(
+            result.contains(" (") && result.contains(")"),
+            "expected IANA zone name in parens (e.g. '(UTC)'), got: {result}"
+        );
+    }
+
+    #[test]
+    fn format_system_time_routes_through_datetime_utc() {
+        // Pin a deterministic UTC instant via SystemTime so we can assert
+        // both halves appear with the same anchor (no time skew between
+        // UTC and local views of the same SystemTime).
+        let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(1_800_000_000, 0).unwrap();
+        let sys: std::time::SystemTime = dt.into();
+        let via_system_time = format_system_time(sys);
+        let via_datetime_utc = format_datetime_utc(dt);
+        assert_eq!(
+            via_system_time, via_datetime_utc,
+            "format_system_time must delegate to format_datetime_utc (single source of truth)"
         );
     }
 }

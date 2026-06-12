@@ -14,12 +14,14 @@
 
 use crate::cli::ColorMode;
 use crate::display::colors;
+use crate::operation_guard::read_loop_id_marker;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use ralph_core::diagnosis::{
     RankedFinding, Report, ReporterError, SessionSelector, build_report, render_json,
     render_markdown,
 };
+use ralph_core::loop_lock::{LockStatus, LoopLock};
 use ralph_core::loop_registry::LoopEntry;
 use std::path::{Path, PathBuf};
 
@@ -45,8 +47,11 @@ pub struct DiagnoseArgs {
     #[arg(long, value_name = "PATH")]
     pub output: Option<PathBuf>,
 
-    /// Path to the diagnostics root. Defaults to
-    /// `<workspace>/.ralph/diagnostics`.
+    /// Path to the diagnostics root. Defaults to: read
+    /// `<workspace>/.ralph/loops.json`, take the latest active loop's
+    /// `workspace.workspace` field, and use `<that-workspace>/.ralph/diagnostics`.
+    /// Falls back to `<workspace>/.ralph/diagnostics` when `loops.json`
+    /// is missing, empty, or its latest entry points at a dead worktree.
     #[arg(long, value_name = "PATH")]
     pub diagnostics_root: Option<PathBuf>,
 
@@ -331,7 +336,15 @@ pub fn validate_args(args: &DiagnoseArgs) -> Result<()> {
     Ok(())
 }
 
-/// U3: Resolve the diagnostics root via `loops.json`.
+/// R5/R6: workspace resolution result for `ralph diagnose`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LoopsDiagnosticsResolution {
+    diagnostics_root: PathBuf,
+    selected_loop_id: Option<String>,
+    warnings: Vec<String>,
+}
+
+/// U3/R5/R6: Resolve the diagnostics root via `loops.json`.
 ///
 /// When `--diagnostics-root` is not explicitly provided, read
 /// `<workspace_root>/.ralph/loops.json` to find the latest active
@@ -341,23 +354,134 @@ pub fn validate_args(args: &DiagnoseArgs) -> Result<()> {
 /// - No active loop entries are found.
 /// - The resolved workspace's diagnostics dir does not exist
 ///   (the caller still gets a proper `NoSession` error).
+///
+/// Emits stderr warnings (R6) when the root `.ralph/current-loop-id`
+/// marker or primary `loop.lock` disagree with the selected live loop.
 fn resolve_diagnostics_root_via_loops(workspace_root: &Path) -> PathBuf {
+    let resolution = resolve_diagnostics_root_with_warnings(workspace_root);
+    for warning in &resolution.warnings {
+        eprintln!("warning: {warning}");
+    }
+    resolution.diagnostics_root
+}
+
+fn resolve_diagnostics_root_with_warnings(
+    workspace_root: &Path,
+) -> LoopsDiagnosticsResolution {
+    let fallback = workspace_root.join(".ralph").join("diagnostics");
     let loops_path = workspace_root.join(".ralph").join("loops.json");
+    let mut warnings = Vec::new();
+
     let entries: Vec<LoopEntry> = match std::fs::read_to_string(&loops_path) {
         Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-        Err(_) => return workspace_root.join(".ralph").join("diagnostics"),
+        Err(_) => {
+            collect_loop_pointer_warnings(workspace_root, None, &[], &mut warnings);
+            return LoopsDiagnosticsResolution {
+                diagnostics_root: fallback,
+                selected_loop_id: None,
+                warnings,
+            };
+        }
     };
-    if let Some(latest) = entries
-        .iter()
-        .max_by_key(|e| e.started)
-    {
+
+    let live: Vec<&LoopEntry> = entries.iter().filter(|e| e.is_pid_alive()).collect();
+    let dead_count = entries.len().saturating_sub(live.len());
+    if dead_count > 0 {
+        warnings.push(format!(
+            "{} of {} loop entries in {} are dead; ignoring them for workspace resolution",
+            dead_count,
+            entries.len(),
+            loops_path.display()
+        ));
+    }
+
+    let selected = live.iter().max_by_key(|e| e.started).copied();
+    collect_loop_pointer_warnings(workspace_root, selected, &entries, &mut warnings);
+
+    if let Some(latest) = selected {
         let ws = PathBuf::from(&latest.workspace);
         let diag = ws.join(".ralph").join("diagnostics");
         if diag.exists() {
-            return diag;
+            return LoopsDiagnosticsResolution {
+                diagnostics_root: diag,
+                selected_loop_id: Some(latest.id.clone()),
+                warnings,
+            };
         }
     }
-    workspace_root.join(".ralph").join("diagnostics")
+
+    LoopsDiagnosticsResolution {
+        diagnostics_root: fallback,
+        selected_loop_id: selected.map(|e| e.id.clone()),
+        warnings,
+    }
+}
+
+/// R6: surface registry drift without blocking diagnose.
+fn collect_loop_pointer_warnings(
+    workspace_root: &Path,
+    selected: Option<&LoopEntry>,
+    entries: &[LoopEntry],
+    warnings: &mut Vec<String>,
+) {
+    let marker_id = read_loop_id_marker(workspace_root);
+
+    if let Some(marker) = marker_id.as_deref() {
+        match selected {
+            Some(sel) if marker != sel.id => {
+                warnings.push(format!(
+                    ".ralph/current-loop-id points to '{marker}' but diagnostics resolved to live loop '{}' (workspace: {})",
+                    sel.id, sel.workspace
+                ));
+            }
+            None => {
+                let marker_entry = entries.iter().find(|e| e.id == marker);
+                if marker_entry.is_some_and(|e| !e.is_pid_alive()) {
+                    warnings.push(format!(
+                        ".ralph/current-loop-id points to dead loop '{marker}'; no live loop selected for workspace resolution"
+                    ));
+                } else {
+                    warnings.push(format!(
+                        ".ralph/current-loop-id is '{marker}' but no live loop entry found in loops.json"
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let Some(sel) = selected else {
+        return;
+    };
+
+    // loop.lock only applies to the primary workspace; worktree loops do not hold it.
+    if sel.worktree_path.is_some() {
+        return;
+    }
+
+    match LoopLock::inspect(workspace_root) {
+        Ok(LockStatus::Active(meta)) => {
+            if meta.pid != sel.pid {
+                warnings.push(format!(
+                    ".ralph/loop.lock is held by pid {} but selected live loop '{}' has pid {}",
+                    meta.pid, sel.id, sel.pid
+                ));
+            }
+        }
+        Ok(LockStatus::Stale(meta)) => {
+            warnings.push(format!(
+                ".ralph/loop.lock is stale (pid {}); selected live loop '{}' has pid {}",
+                meta.pid, sel.id, sel.pid
+            ));
+        }
+        Ok(LockStatus::None) => {
+            warnings.push(format!(
+                "selected primary loop '{}' is live but .ralph/loop.lock is absent",
+                sel.id
+            ));
+        }
+        Err(_) => {}
+    }
 }
 
 #[cfg(test)]
@@ -614,5 +738,91 @@ mod tests {
             .unwrap();
         let root = resolve_diagnostics_root_via_loops(tmp.path());
         assert_eq!(root, ws.join(".ralph").join("diagnostics"));
+    }
+
+    #[test]
+    fn resolve_diagnostics_root_ignores_dead_loop_with_newer_started() {
+        let tmp = tempfile::tempdir().unwrap();
+        let live_ws = tmp.path().join("live-workspace");
+        std::fs::create_dir_all(live_ws.join(".ralph").join("diagnostics")).unwrap();
+        let loops_dir = tmp.path().join(".ralph");
+        std::fs::create_dir_all(&loops_dir).unwrap();
+        let entry = serde_json::json!([
+            {
+                "id": "loop-dead-newer",
+                "pid": 1,
+                "started": "2026-06-05T12:00:00Z",
+                "prompt": "dead",
+                "workspace": "/tmp/dead-workspace",
+            },
+            {
+                "id": "loop-live-older",
+                "pid": std::process::id(),
+                "started": "2026-06-05T10:00:00Z",
+                "prompt": "live",
+                "workspace": live_ws.to_string_lossy(),
+            }
+        ]);
+        std::fs::write(loops_dir.join("loops.json"), serde_json::to_string(&entry).unwrap())
+            .unwrap();
+
+        let resolution = resolve_diagnostics_root_with_warnings(tmp.path());
+        assert_eq!(
+            resolution.diagnostics_root,
+            live_ws.join(".ralph").join("diagnostics")
+        );
+        assert_eq!(resolution.selected_loop_id.as_deref(), Some("loop-live-older"));
+        assert!(
+            resolution
+                .warnings
+                .iter()
+                .any(|w| w.contains("dead") && w.contains("ignoring")),
+            "expected dead-loop warning, got: {:?}",
+            resolution.warnings
+        );
+    }
+
+    #[test]
+    fn resolve_diagnostics_root_warns_when_current_loop_id_points_at_stale_loop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let live_ws = tmp.path().join("worktree");
+        std::fs::create_dir_all(live_ws.join(".ralph").join("diagnostics")).unwrap();
+        let loops_dir = tmp.path().join(".ralph");
+        std::fs::create_dir_all(&loops_dir).unwrap();
+        std::fs::write(loops_dir.join("current-loop-id"), "loop-primary-dead").unwrap();
+        let entry = serde_json::json!([
+            {
+                "id": "loop-primary-dead",
+                "pid": 1,
+                "started": "2026-06-05T09:00:00Z",
+                "prompt": "primary dead",
+                "workspace": tmp.path().to_string_lossy(),
+            },
+            {
+                "id": "loop-worktree-live",
+                "pid": std::process::id(),
+                "started": "2026-06-05T11:00:00Z",
+                "prompt": "worktree live",
+                "workspace": live_ws.to_string_lossy(),
+                "worktree_path": live_ws.to_string_lossy(),
+            }
+        ]);
+        std::fs::write(loops_dir.join("loops.json"), serde_json::to_string(&entry).unwrap())
+            .unwrap();
+
+        let resolution = resolve_diagnostics_root_with_warnings(tmp.path());
+        assert_eq!(
+            resolution.diagnostics_root,
+            live_ws.join(".ralph").join("diagnostics")
+        );
+        assert!(
+            resolution.warnings.iter().any(|w| {
+                w.contains("current-loop-id")
+                    && w.contains("loop-primary-dead")
+                    && w.contains("loop-worktree-live")
+            }),
+            "expected stale current-loop-id warning, got: {:?}",
+            resolution.warnings
+        );
     }
 }

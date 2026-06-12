@@ -437,7 +437,11 @@ fn idempotency_log_path(events_file: &Path) -> PathBuf {
 
 /// U2: Read all idempotency records from the log file.
 ///
-/// Parsing errors are fatal (log is self-written, not consumer-tolerant).
+/// Self-healing: malformed lines are warned and skipped (not fatal). The
+/// idempotency log is append-only and self-written, but a half-line from
+/// SIGKILL / disk-full / older writer format must not permanently block
+/// subsequent `ralph wave emit` calls. A skipped line is mirrored to a
+/// `.corrupt` sidecar so an operator can inspect / truncate later.
 fn read_idempotency_records(events_file: &Path) -> Result<Vec<IdempotencyRecord>> {
     let path = idempotency_log_path(events_file);
     if !path.exists() {
@@ -446,14 +450,35 @@ fn read_idempotency_records(events_file: &Path) -> Result<Vec<IdempotencyRecord>
     let content = fs::read_to_string(&path)
         .with_context(|| format!("read {}", path.display()))?;
     let mut out = Vec::new();
+    let mut corrupt_lines: Vec<String> = Vec::new();
     for (i, line) in content.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
-        let rec: IdempotencyRecord = serde_json::from_str(trimmed)
-            .with_context(|| format!("parse {} line {}", path.display(), i + 1))?;
-        out.push(rec);
+        match serde_json::from_str::<IdempotencyRecord>(trimmed) {
+            Ok(rec) => out.push(rec),
+            Err(e) => {
+                eprintln!(
+                    "warning: ignoring malformed idempotency record at {} line {}: {}",
+                    path.display(),
+                    i + 1,
+                    e
+                );
+                corrupt_lines.push(trimmed.to_string());
+            }
+        }
+    }
+    if !corrupt_lines.is_empty() {
+        let sidecar = path.with_extension("idempotency.jsonl.corrupt");
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&sidecar)
+            .with_context(|| format!("open corrupt sidecar {}", sidecar.display()))?;
+        for line in &corrupt_lines {
+            writeln!(f, "{}", line)?;
+        }
     }
     Ok(out)
 }
@@ -1339,24 +1364,13 @@ mod tests {
         )
         .unwrap();
 
-        // Now call with the same key → should recover (scan events, write record, return same wave_id)
-        let outcome = write_wave_events_with_idempotency_with_scope(
-            "review.wave.ready",
-            &payloads,
-            &events_path,
-            key,
-            "loop-1",
-            "reviewer",
-        )
-        .unwrap();
-
         assert!(outcome.deduplicated, "recovery should return deduplicated=true");
         assert_eq!(
             outcome.wave_id, first_wave_id,
             "recovery should return original wave_id"
         );
 
-        // Events file should still have 3 lines
+        // Events file should still have 3 lines (recovery did not append)
         let content = fs::read_to_string(&events_path).unwrap();
         assert_eq!(content.lines().count(), 3);
 
@@ -1365,6 +1379,145 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].idempotency_key, key);
         assert_eq!(records[0].wave_id, first_wave_id);
+
+        // Subsequent dedup call (record now present) must also recover the
+        // original wave_id without appending events.
+        let outcome_dedup = write_wave_events_with_idempotency_with_scope(
+            "review.wave.ready",
+            &payloads,
+            &events_path,
+            key,
+            "loop-1",
+            "reviewer",
+        )
+        .unwrap();
+        assert!(outcome_dedup.deduplicated, "post-recovery dedup should also return deduplicated=true");
+        assert_eq!(
+            outcome_dedup.wave_id, first_wave_id,
+            "post-recovery dedup should return original wave_id"
+        );
+        let content = fs::read_to_string(&events_path).unwrap();
+        assert_eq!(
+            content.lines().count(),
+            3,
+            "post-recovery dedup must not append events"
+        );
+    }
+
+    #[test]
+    fn test_idempotency_concurrent_writers_serialize() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let tmp = TempDir::new().unwrap();
+        let events_path = tmp.path().join("events.jsonl");
+        let n_workers: usize = 6;
+
+        // Each worker uses a distinct --idempotency-key (otherwise the
+        // idempotency layer would correctly reject "same scope,
+        // different payload" as a conflict — that is a feature, not a
+        // race we want to exercise here). The contention we want to
+        // exercise is on the FileLock around the events-file write:
+        // N writers must serialize cleanly and produce N event lines
+        // with N unique wave_ids, without corrupting the file or the
+        // idempotency log.
+        let payloads: Vec<String> = (0..n_workers)
+            .map(|i| format!(r#"{{"worker":{i}}}"#))
+            .collect();
+
+        let barrier = Arc::new(Barrier::new(n_workers));
+        let mut handles = Vec::with_capacity(n_workers);
+        for (i, payload) in payloads.iter().cloned().enumerate() {
+            let events_path = events_path.clone();
+            let key = format!("ce-review:concurrent-writer-{i}");
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                write_wave_events_with_idempotency_with_scope(
+                    "review.wave.ready",
+                    &[payload],
+                    &events_path,
+                    &key,
+                    "loop-1",
+                    "reviewer",
+                )
+            }));
+        }
+
+        let outcomes: Vec<_> = handles
+            .into_iter()
+            .map(|h| h.join().expect("worker thread panicked").expect("wave emit failed"))
+            .collect();
+
+        // Every worker must observe a fresh, non-deduplicated wave
+        // (distinct keys, distinct records).
+        for o in &outcomes {
+            assert!(
+                !o.deduplicated,
+                "concurrent writers with distinct keys must each create a new wave"
+            );
+        }
+        // Every wave_id is unique (no FileLock contention produced
+        // collisions).
+        let unique_ids: std::collections::HashSet<_> =
+            outcomes.iter().map(|o| o.wave_id.clone()).collect();
+        assert_eq!(unique_ids.len(), n_workers, "expected n_workers distinct wave_ids");
+
+        // Events file fans in all n_workers lines, with each line
+        // containing some worker index in the (JSON-escaped) payload —
+        // proves serialization preserved per-worker payload integrity
+        // (no interleaving or overwrite). Order is non-deterministic
+        // because distinct keys mean no contention: each writer holds
+        // the lock only for its own (very short) critical section.
+        let content = fs::read_to_string(&events_path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), n_workers);
+        let mut seen_workers: std::collections::HashSet<u32> =
+            std::collections::HashSet::new();
+        for line in &lines {
+            // Each event line is a JSON object with a top-level
+            // "payload" field whose value is the original payload
+            // JSON-escaped. Pull out the inner worker index.
+            let v: serde_json::Value = serde_json::from_str(line)
+                .unwrap_or_else(|e| panic!("event line not valid JSON: {line}: {e}"));
+            let payload_str = v
+                .get("payload")
+                .and_then(|p| p.as_str())
+                .unwrap_or_else(|| panic!("event line missing payload: {line}"));
+            let inner: serde_json::Value = serde_json::from_str(payload_str)
+                .unwrap_or_else(|e| panic!("inner payload not valid JSON: {payload_str}: {e}"));
+            let worker = inner
+                .get("worker")
+                .and_then(|w| w.as_u64())
+                .unwrap_or_else(|| panic!("inner payload missing worker: {payload_str}"));
+            assert!(
+                (worker as usize) < n_workers,
+                "worker index {worker} out of range (n_workers={n_workers})"
+            );
+            assert!(
+                seen_workers.insert(worker as u32),
+                "duplicate worker {worker} — FileLock serialization must prevent overwrites"
+            );
+        }
+
+        // Idempotency log carries one record per writer, each tagged
+        // with the per-worker key.
+        let records = read_idempotency_records(&events_path).unwrap();
+        assert_eq!(records.len(), n_workers);
+        let mut seen_keys: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for r in &records {
+            assert!(
+                r.idempotency_key.starts_with("ce-review:concurrent-writer-"),
+                "unexpected key: {}",
+                r.idempotency_key
+            );
+            assert!(
+                seen_keys.insert(r.idempotency_key.clone()),
+                "duplicate key {} — IdempotencyRecord append must be serialized",
+                r.idempotency_key
+            );
+        }
     }
 
     #[test]
