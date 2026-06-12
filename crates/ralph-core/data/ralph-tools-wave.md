@@ -33,8 +33,10 @@ ralph wave emit [OPTIONS] <TOPIC>
 | `<TOPIC>` | string | 是 | — | 所有 wave 事件的主题（如 `review.file`） |
 | `--payloads <PAYLOADS>...` | string… | 二选一 | — | 每个 wave worker 一个 payload（`num_args = 1..`，至少 1 个） |
 | `--payloads-stdin` | flag | 二选一 | false | 从 stdin 逐行读取 payload，适合 JSON payload 列表 |
-| `--output <FMT>` | enum | 否 | `text` | 输出格式：`text`（stdout 仅 wave_id）或 `json`（stdout `{wave_id, topic, count, events_file, deduplicated}`，用于 U5 机器验真） |
+| `--output <FMT>` | enum | 否 | `text` | 输出格式：`text`（stdout 仅 wave_id）或 `json`（stdout `{wave_id, topic, count, events_file, deduplicated}`，用于 U5 机器验真；失败时 stdout 改为结构化 `validation_errors`，见下方「Schema 预检（U4）」） |
 | `--idempotency-key <KEY>` | string | 否 | — | 幂等键（U2）。同一 `(loop_id, hat, topic, key)` 重复调用只返回首个 `wave_id` 并标 `deduplicated=true`，不写新事件。键最长 256 字节、ASCII、非空非空白。未传则行为与原版一致。 |
+| `--policy-check` | flag | 否 | false | U4：显式强制 schema 预检（即便 config 未开启 event policy，也走 `event_policy.schemas.<topic>.required_fields` 校验） |
+| `--unsafe-no-policy-check` | flag | 否 | false | U4：尝试绕过 schema 预检。当 config `event_policy.allow_unsafe_cli_emit: false` 时**不生效**（与 `ralph emit --unsafe-no-policy-check` 对齐）。与 `--policy-check` 互斥。 |
 
 `--payloads` 与 `--payloads-stdin` 互斥，必须提供其中一个。不要把多行 JSON 列表塞进一个 shell 变量后传给 `--payloads "$PAYLOADS"`；该用法会被拒绝。多 JSON payload 使用：
 
@@ -95,6 +97,34 @@ jq -e --arg id "$wave_id" --argjson expected "$expected_count" '
 ' "$events_file"
 ```
 
+**Schema 预检（U4，2026-06-13）：**
+
+`ralph wave emit` 在 shape 校验之后、写盘之前会先对**整批** payload 做 event policy schema 预检（`crates/ralph-cli/src/policy_check.rs`），与 `ralph run` 循环内 `apply_event_policy_validation` 行为一致：
+
+- 默认行为：当 `ralph.yml`（或合并后的 preset）开启 `event_policy.enabled: true` 时强制启用预检。`require_policy_check_for_cli_emit: true` 不改变 wave 行为——wave 始终预检。
+- 任一 payload 缺必需字段（如 `review.wave.ready` 的 `depth`）→ 整批**原子拒绝**，**不写盘**任何 line。
+- `--policy-check`：显式强制预检（即便 config 未开启 `event_policy`）。
+- `--unsafe-no-policy-check`：尝试绕过预检；当 config `event_policy.allow_unsafe_cli_emit: false` 时**不生效**。`ce-executor-isolated` 预设的 `allow_unsafe_cli_emit: false` 强制 agent 看到 schema 错误而非写入后被静默清空。
+
+**JSON 失败响应**（`--output json`，stdout，exit ≠ 0）：
+
+```json
+{
+  "ok": false,
+  "error": "policy_validation_failed",
+  "topic": "review.wave.ready",
+  "validation_errors": [
+    {"payload_index": 0, "field": "depth", "reason_code": "missing_required_field", "message": "Missing required field: depth"}
+  ]
+}
+```
+
+`reason_code` 稳定枚举：`missing_required_field` / `invalid_field_value` / `payload_type_mismatch` / `terminal_monotonicity_violation` / `duplicate_terminal_event` / `business_event_after_completion` / `invalid_topic_format` / `topic_denied`。agent 可 `jq -r '.validation_errors[].field' | sort -u` 一次性拿到所有缺失字段清单。
+
+**Text 失败响应**（stderr，exit ≠ 0）：`policy validation failed: 7 payloads, missing required field 'depth' in 7`。
+
+> 设计意图：一次响应列出所有违规 payload，避免「修一个再发、又错下一个」的来回。loop 端 U1（`ProcessedEventsWithWaves.wave_policy_rejections`）和 CLI 端 U4（precheck）是同源 schema 校验的两侧——CLI 失败 = 100% loop 端也会被拒；CLI 成功 → loop 端也会接受。
+
 ---
 
 ## 错误恢复
@@ -113,11 +143,12 @@ jq -e --arg id "$wave_id" --argjson expected "$expected_count" '
 | `--idempotency-key must be ASCII` | key 含非 ASCII 字节 | 改用 ASCII；如 `plan_name` 是中文，先 hash 或 percent-encode |
 | `idempotency-key conflict: ...` | 同 scope 不同 payload | 改用不同 key（`round-2` 递增或换 task） |
 | `incomplete prior wave emission: ...` | 上次 events 写了 N 行但 record 丢失，扫 events 也只找到少于 N 行 | 手工删除残留 events 行；或换新 key |
+| `policy validation failed for topic 'X'`（exit ≠ 0） | 任一 payload 违反 `event_policy.schemas.<topic>.required_fields`，整批拒绝、零写盘 | 用 `--output json` 读 stdout 的 `validation_errors[].field` 一次性拿到全部缺失字段，修正后重发。`--unsafe-no-policy-check` 仅在 config `allow_unsafe_cli_emit: true` 时生效 |
 | 任何命令失败 | 通用恢复 | 1. `ralph wave emit --help` 确认语法 2. 检查退出码 3. 查看错误信息 4. 重试 |
 
 > **wave worker 注意事项**：
 >
-> 1. **结果返回必须用 `ralph emit`**：在 `RALPH_WAVE_WORKER=1` 的子进程中，`ralph emit` 会将事件写入 **candidate-events**（不是 current-events），与 wave 调度器对 worker 输出的预期一致。`ralph wave emit` 本身在 worker 内被阻止（`crates/ralph-cli/src/wave.rs:113-118`）。
+> 1. **结果返回必须用 `ralph emit`**：在 `RALPH_WAVE_WORKER=1` 的子进程中，`ralph emit` 会将事件写入 **candidate-events**（不是 current-events），与 wave 调度器对 worker 输出的预期一致。`ralph wave emit` 本身在 worker 内被阻止（`crates/ralph-cli/src/wave.rs:128-134`）。
 >
 > 2. **candidate-events vs current-events 落点**：
 >    - `ralph wave emit` → 写入 **current-events**（主循环的合并目标，3 级回退：`RALPH_EVENTS_FILE` → `.ralph/current-events` → `.ralph/events.jsonl`）

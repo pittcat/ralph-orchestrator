@@ -4,6 +4,7 @@ use crate::cli::{
 };
 use crate::config_resolution;
 use crate::display::colors;
+use crate::policy_check::{PolicyCheckFlags, resolve_policy_check_mode};
 use anyhow::{Context, Result};
 use clap::Parser;
 use ralph_core::{RalphConfig, UrgentSteerStore};
@@ -74,41 +75,22 @@ where
     (hat, triggered, source)
 }
 
-/// Determines whether and how a CLI emit should undergo policy validation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PolicyCheckMode {
-    /// Skip policy check entirely.
-    Skip,
-    /// User explicitly requested `--policy-check`.
-    ExplicitCheck,
-    /// Config mandates policy check for CLI emit (`require_policy_check_for_cli_emit`).
-    Enforce,
-}
+/// Re-exported from [`crate::policy_check`] so existing callers
+/// keep their `crate::commands::emit::PolicyCheckMode` import path.
+pub use crate::policy_check::PolicyCheckMode;
 
 /// Decides the policy-check mode based on CLI arguments and loaded config.
 ///
-/// If `--unsafe-no-policy-check` is passed but the config disallows unsafe
-/// bypasses, this returns `Enforce` so the caller can reject the flag.
+/// Thin wrapper over [`crate::policy_check::resolve_policy_check_mode`]
+/// that bridges `EmitArgs` → `PolicyCheckFlags` for symmetry with the
+/// shared helper. Preserved for backward compatibility with existing
+/// callers and tests.
 pub fn should_policy_check_emit(args: &EmitArgs, config: Option<&RalphConfig>) -> PolicyCheckMode {
-    if args.policy_check {
-        return PolicyCheckMode::ExplicitCheck;
-    }
-
-    if let Some(config) = config {
-        if let Some(policy) = config.event_loop.event_policy.as_ref() {
-            let strict = policy.enabled && policy.require_policy_check_for_cli_emit;
-            if strict {
-                if args.no_policy_check && policy.allow_unsafe_cli_emit {
-                    return PolicyCheckMode::Skip;
-                }
-                return PolicyCheckMode::Enforce;
-            }
-        }
-    }
-
-    // When no config is loaded and no explicit flags were given, skip.
-    // `--unsafe-no-policy-check` without strict config is a no-op.
-    PolicyCheckMode::Skip
+    let flags = PolicyCheckFlags {
+        policy_check: args.policy_check,
+        no_policy_check: args.no_policy_check,
+    };
+    resolve_policy_check_mode(&flags, config)
 }
 
 /// Emit an event to the current run's events file with proper JSON formatting.
@@ -417,7 +399,6 @@ pub fn emit_command_with_root(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ralph_core::{PolicyDecision, PolicyRuntimeState, validate_event};
     use std::path::PathBuf;
     use tempfile::TempDir;
     #[test]

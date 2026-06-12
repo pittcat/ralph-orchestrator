@@ -53,6 +53,23 @@ pub struct WaveEmitArgs {
     /// behavior (each call generates a new wave_id).
     #[arg(long, value_name = "KEY")]
     pub idempotency_key: Option<String>,
+
+    /// U4: Validate all payloads against the active event policy
+    /// (in `ralph.yml` or merged preset) before writing the JSONL.
+    /// Combined with `--output json` the failure response carries a
+    /// structured `validation_errors` array.
+    #[arg(long)]
+    pub policy_check: bool,
+
+    /// U4: Bypass the mandatory policy check. Only honored when the
+    /// config has `event_policy.allow_unsafe_cli_emit: true`; otherwise
+    /// the check is still enforced. This mirrors `ralph emit
+    /// --unsafe-no-policy-check` semantics.
+    #[arg(
+        long = "unsafe-no-policy-check",
+        conflicts_with = "policy_check"
+    )]
+    pub no_policy_check: bool,
 }
 
 /// U5: Output format for `ralph wave emit`.
@@ -132,7 +149,25 @@ fn execute_emit(args: WaveEmitArgs, use_colors: bool) -> Result<()> {
     }
     validate_payload_shape(&payloads)?;
 
+    // U4: Resolve events file first (precheck needs to know where to
+    // replay from for terminal-monotonicity / duplicate-terminal
+    // checks). `resolve_events_file` follows the same env / marker /
+    // default priority as the write path.
     let events_file = resolve_events_file();
+
+    // U4: Schema precheck — load workspace ralph.yml (or preset) and
+    // validate every payload against the active event policy BEFORE
+    // any line is written. Failures are atomic: when any payload
+    // violates policy, no events are written, and the operator / agent
+    // receives a structured failure response.
+    run_wave_precheck(
+        &args.topic,
+        args.policy_check,
+        args.no_policy_check,
+        args.output,
+        &payloads,
+        &events_file,
+    )?;
 
     // U2: Branch — with idempotency key or legacy path
     let outcome = if let Some(ref key) = args.idempotency_key {
@@ -206,6 +241,78 @@ fn validate_payload_shape(payloads: &[String]) -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════
+// U4: schema precheck helpers
+// ═══════════════════════════════════════════════════════════════
+
+/// U4: Run the workspace-config policy precheck for a wave batch.
+///
+/// Mirrors `ralph emit`'s strict-mode logic but applies it to the
+/// whole payload batch atomically: if any payload fails, the entire
+/// batch is rejected before any line is written to the JSONL. The
+/// output mode is mapped to the shared [`policy_check::OutputMode`]
+/// so the failure response (text vs JSON) is uniform with `ralph emit`.
+#[allow(clippy::too_many_arguments)]
+fn run_wave_precheck(
+    topic: &str,
+    policy_check_flag: bool,
+    no_policy_check_flag: bool,
+    output: WaveOutputFormat,
+    payloads: &[String],
+    events_file: &Path,
+) -> Result<()> {
+    use crate::policy_check::{
+        OnConfigError, OutputMode, PolicyCheckFlags, PolicyCheckMode, ValidationFailure,
+        emit_policy_validation_failure, enabled_event_policy, load_workspace_config,
+        resolve_policy_check_mode, validate_batch_against_config,
+    };
+
+    // Load workspace config (fail-open when no ralph.yml is present).
+    // We tolerate broken configs here: the loop will surface its own
+    // load error later if needed, and we don't want the CLI to refuse
+    // a wave emit on a config typo when no policy would apply anyway.
+    let config = load_workspace_config(None, OnConfigError::Tolerate)?;
+
+    let flags = PolicyCheckFlags {
+        policy_check: policy_check_flag,
+        no_policy_check: no_policy_check_flag,
+    };
+    let mode = resolve_policy_check_mode(&flags, config.as_ref());
+
+    // No policy in play → only the JSON-object shape check ran
+    // already in `validate_payload_shape`. Nothing more to do.
+    let Some(policy) = enabled_event_policy(config.as_ref()) else {
+        if mode == PolicyCheckMode::ExplicitCheck {
+            eprintln!(
+                "Warning: --policy-check was requested but no event policy is configured or enabled."
+            );
+        }
+        return Ok(());
+    };
+
+    // The user explicitly opted out AND the config permits it
+    // (resolve_policy_check_mode returns Skip in that case). If
+    // mode is Skip here, the unsafe bypass won; honor it.
+    if mode == PolicyCheckMode::Skip {
+        return Ok(());
+    }
+
+    let batch = validate_batch_against_config(topic, payloads, policy, events_file)?;
+    if batch.is_ok() {
+        return Ok(());
+    }
+
+    // Build the structured failure payload and emit it in the
+    // requested output mode. This always exits non-zero (the helper
+    // returns Err) so the agent sees a clear failure.
+    let failure = ValidationFailure::from_batch(topic, batch);
+    let out_mode = match output {
+        WaveOutputFormat::Text => OutputMode::Text,
+        WaveOutputFormat::Json => OutputMode::Json,
+    };
+    emit_policy_validation_failure(&failure, out_mode)
 }
 
 fn looks_like_multiple_json_lines(payload: &str) -> bool {
@@ -793,6 +900,7 @@ fn generate_wave_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::policy_check::{ValidationFailure, validate_batch_against_config};
     use tempfile::TempDir;
 
     #[test]
@@ -1721,5 +1829,308 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(parsed.output, WaveOutputFormat::Json);
+    }
+
+    // ---- U4 (2026-06-13-001): schema precheck + structured JSON error ----
+
+    /// Helper: build a 7-payload batch on `review.wave.ready`, with or
+    /// without the required `depth` field. Mirrors the U1 incident:
+    /// 7 wave events, optionally missing a required field, are
+    /// exactly the input the precheck must reject atomically.
+    fn build_u4_payloads(with_depth: bool) -> Vec<String> {
+        (0..7)
+            .map(|i| {
+                if with_depth {
+                    format!(r#"{{"dim":"d{i}","depth":"standard"}}"#)
+                } else {
+                    format!(r#"{{"dim":"d{i}"}}"#)
+                }
+            })
+            .collect()
+    }
+
+    /// Helper: write a strict `ralph.yml` (with `require_policy_check_for_cli_emit: true`,
+    /// `allow_unsafe_cli_emit: false`, and `schemas.review.wave.ready.required_fields: [depth]`)
+    /// to `workspace`. Returns the path to a fresh events file.
+    fn setup_strict_u4_workspace(workspace: &Path) -> PathBuf {
+        let yaml = r#"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    require_policy_check_for_cli_emit: true
+    allow_unsafe_cli_emit: false
+    schemas:
+      review.wave.ready:
+        required_fields:
+          - depth
+"#;
+        std::fs::create_dir_all(workspace.join(".ralph")).unwrap();
+        std::fs::write(workspace.join("ralph.yml"), yaml).unwrap();
+        workspace.join(".ralph/events.jsonl")
+    }
+
+    /// U4 / T-WAVE-PRECHECK-01: with strict `ralph.yml` and
+    /// `--output json`, the wave precheck must return a structured
+    /// `ValidationFailure` with 7 `validation_errors` (one per
+    /// payload index 0..6) and `topic=review.wave.ready`. This is
+    /// the agent's primary contract: one response, every offending
+    /// payload named.
+    #[test]
+    fn test_wave_emit_json_reports_all_missing_depth_violations() {
+        use ralph_core::{EventPolicyConfig, RalphConfig};
+
+        let tmp = TempDir::new().unwrap();
+        let workspace = tmp.path();
+        let events = setup_strict_u4_workspace(workspace);
+
+        let cfg_yaml = std::fs::read_to_string(workspace.join("ralph.yml")).unwrap();
+        let cfg: RalphConfig = serde_yaml::from_str(&cfg_yaml).unwrap();
+        let policy: &EventPolicyConfig = cfg.event_loop.event_policy.as_ref().unwrap();
+
+        // All 7 payloads lack `depth`.
+        let payloads = build_u4_payloads(false);
+
+        let batch = validate_batch_against_config("review.wave.ready", &payloads, policy, &events)
+            .unwrap();
+        assert_eq!(batch.errors.len(), 7);
+
+        // Build the failure payload and verify the JSON shape
+        // matches the U4 spec.
+        let failure = ValidationFailure::from_batch("review.wave.ready", batch);
+        let json = serde_json::to_string(&failure).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed["ok"], false);
+        assert_eq!(parsed["error"], "policy_validation_failed");
+        assert_eq!(parsed["topic"], "review.wave.ready");
+        let errs = parsed["validation_errors"].as_array().expect("array");
+        assert_eq!(errs.len(), 7);
+
+        // Indices 0..6 must all be present (atomicity: every
+        // offending payload is named, agent can fix all in one
+        // shot).
+        let mut seen_indices: std::collections::BTreeSet<usize> =
+            std::collections::BTreeSet::new();
+        let mut fields: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        for e in errs {
+            let idx = e["payload_index"].as_u64().unwrap() as usize;
+            seen_indices.insert(idx);
+            fields.insert(e["field"].as_str().unwrap().to_string());
+            assert_eq!(e["reason_code"], "missing_required_field");
+            assert!(e["message"].as_str().unwrap().contains("depth"));
+        }
+        for i in 0..7 {
+            assert!(seen_indices.contains(&i), "missing payload_index {i}");
+        }
+        // The unique field set should be exactly `{ "depth" }`.
+        assert_eq!(fields.len(), 1);
+        assert!(fields.contains("depth"));
+    }
+
+    /// U4 / T-WAVE-PRECHECK-02: when the precheck fails, the
+    /// events file MUST be unchanged (atomic reject). This is the
+    /// primary invariant that closes the U1 incident chain: a
+    /// bad batch must never half-write into the JSONL.
+    ///
+    /// We exercise the integration path by calling `run_wave_precheck`
+    /// directly with an empty events file (so terminal-monotonicity
+    /// is a no-op) and assert the events file is still empty
+    /// afterwards.
+    #[test]
+    fn test_wave_emit_rejects_missing_depth_before_write() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = tmp.path();
+        let events = setup_strict_u4_workspace(workspace);
+
+        // Pre-seed with a known-valid line to confirm the
+        // precheck doesn't even touch the file.
+        std::fs::write(
+            &events,
+            "{\"topic\":\"prior.event\",\"ts\":\"2024-01-01T00:00:00Z\"}\n",
+        )
+        .unwrap();
+        let before = std::fs::read_to_string(&events).unwrap();
+
+        let payloads = build_u4_payloads(false);
+
+        // Drive the precheck from the workspace CWD so the config
+        // load picks up the ralph.yml we just wrote. We use
+        // CwdGuard (test_support) for the lifetime of the call.
+        let _cwd = crate::test_support::CwdGuard::set(workspace);
+        let result = run_wave_precheck(
+            "review.wave.ready",
+            true, // explicit --policy-check
+            false,
+            WaveOutputFormat::Json,
+            &payloads,
+            &events,
+        );
+
+        assert!(result.is_err(), "missing-depth batch must reject");
+
+        // Events file MUST be unchanged — no half-written JSONL.
+        let after = std::fs::read_to_string(&events).unwrap();
+        assert_eq!(before, after, "precheck must not write to events file");
+
+        // Sanity: still has exactly the one pre-seeded line.
+        assert_eq!(after.lines().count(), 1);
+    }
+
+    /// U4 / T-WAVE-PRECHECK-03: when the precheck PASSES, the
+    /// events file MUST be unchanged by the precheck itself (only
+    /// the subsequent write call appends). This guards against
+    /// accidentally writing twice or partial-failing.
+    #[test]
+    fn test_wave_emit_precheck_pass_leaves_events_file_untouched() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = tmp.path();
+        let events = setup_strict_u4_workspace(workspace);
+
+        // Pre-seed with a known-valid line to confirm the
+        // precheck doesn't even touch the file.
+        std::fs::write(
+            &events,
+            "{\"topic\":\"prior.event\",\"ts\":\"2024-01-01T00:00:00Z\"}\n",
+        )
+        .unwrap();
+        let before = std::fs::read_to_string(&events).unwrap();
+
+        // All 7 payloads include `depth` → precheck should pass.
+        let payloads = build_u4_payloads(true);
+        let _cwd = crate::test_support::CwdGuard::set(workspace);
+        let result = run_wave_precheck(
+            "review.wave.ready",
+            true,
+            false,
+            WaveOutputFormat::Json,
+            &payloads,
+            &events,
+        );
+        assert!(result.is_ok(), "valid batch should pass precheck");
+
+        // Events file MUST still be unchanged (precheck never writes).
+        let after = std::fs::read_to_string(&events).unwrap();
+        assert_eq!(before, after, "passing precheck must not write");
+    }
+
+    /// U4 / T-WAVE-PRECHECK-04: when `event_policy.enabled=false`,
+    /// the precheck must not engage — only the JSON-object shape
+    /// check (already done by `validate_payload_shape`) applies.
+    /// This mirrors the existing `ralph emit` semantics for
+    /// non-strict configs and prevents accidental lockouts when a
+    /// user adds a config without opting into event policy.
+    #[test]
+    fn test_wave_emit_no_strict_config_skips_precheck() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = tmp.path();
+        std::fs::create_dir_all(workspace.join(".ralph")).unwrap();
+        // Config has event_policy but it's NOT enabled.
+        let yaml = r#"
+event_loop:
+  event_policy:
+    enabled: false
+    mode: enforce
+    on_violation: reject_with_resume
+    schemas:
+      review.wave.ready:
+        required_fields:
+          - depth
+"#;
+        std::fs::write(workspace.join("ralph.yml"), yaml).unwrap();
+        let events = workspace.join(".ralph/events.jsonl");
+
+        // Payloads lack `depth`, but with `enabled: false` the
+        // precheck must NOT reject. This is the same behavior
+        // `ralph emit` has for non-strict configs.
+        let payloads = build_u4_payloads(false);
+        let _cwd = crate::test_support::CwdGuard::set(workspace);
+        let result = run_wave_precheck(
+            "review.wave.ready",
+            false, // no explicit --policy-check
+            false,
+            WaveOutputFormat::Json,
+            &payloads,
+            &events,
+        );
+        assert!(
+            result.is_ok(),
+            "non-strict (event_policy.enabled=false) config must skip precheck, got: {result:?}"
+        );
+    }
+
+    /// U4 / T-WAVE-PRECHECK-05: with strict config
+    /// (`allow_unsafe_cli_emit: false`), the `--unsafe-no-policy-check`
+    /// flag MUST be ignored — the precheck still runs. This
+    /// closes the bypass that would otherwise let agents skip
+    /// schema validation on a `ce-executor-isolated` preset.
+    #[test]
+    fn test_wave_emit_unsafe_bypass_blocked_when_config_denies() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = tmp.path();
+        let events = setup_strict_u4_workspace(workspace);
+
+        // Payloads lack `depth`; the user requested bypass but
+        // the config disallows it.
+        let payloads = build_u4_payloads(false);
+        let _cwd = crate::test_support::CwdGuard::set(workspace);
+        let result = run_wave_precheck(
+            "review.wave.ready",
+            false, // no explicit --policy-check
+            true,  // but --unsafe-no-policy-check
+            WaveOutputFormat::Json,
+            &payloads,
+            &events,
+        );
+        assert!(
+            result.is_err(),
+            "unsafe-bypass must not work when config denies it"
+        );
+    }
+
+    /// U4 / T-WAVE-PRECHECK-06: with strict config AND
+    /// `allow_unsafe_cli_emit: true`, the `--unsafe-no-policy-check`
+    /// flag MUST work — the precheck is skipped and the wave
+    /// emit writes through. This is the documented escape hatch
+    /// for non-`ce-executor-isolated` presets.
+    #[test]
+    fn test_wave_emit_unsafe_bypass_allowed_when_config_permits() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = tmp.path();
+        std::fs::create_dir_all(workspace.join(".ralph")).unwrap();
+        // Strict but allows the bypass.
+        let yaml = r#"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    require_policy_check_for_cli_emit: true
+    allow_unsafe_cli_emit: true
+    schemas:
+      review.wave.ready:
+        required_fields:
+          - depth
+"#;
+        std::fs::write(workspace.join("ralph.yml"), yaml).unwrap();
+        let events = workspace.join(".ralph/events.jsonl");
+
+        // Payloads lack `depth`, but the bypass is honored.
+        let payloads = build_u4_payloads(false);
+        let _cwd = crate::test_support::CwdGuard::set(workspace);
+        let result = run_wave_precheck(
+            "review.wave.ready",
+            false,
+            true, // --unsafe-no-policy-check
+            WaveOutputFormat::Json,
+            &payloads,
+            &events,
+        );
+        assert!(
+            result.is_ok(),
+            "unsafe-bypass must work when config permits it, got: {result:?}"
+        );
     }
 }

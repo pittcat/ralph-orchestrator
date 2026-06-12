@@ -29,6 +29,7 @@ mod loops;
 mod mcp;
 mod memory;
 mod operation_guard;
+mod policy_check;
 mod preflight;
 mod preset_templates;
 mod presets;

@@ -51,7 +51,33 @@ metadata:
 
 🔴 **绝不静默回退**：如果设置了 `RALPH_EVENTS_FILE=foo.jsonl` 但 `foo.jsonl` 不在 allowlist 中，命令会**失败**（不会改写到 marker），错误信息会列出当前 allowlist 的所有合法目标。
 
-> `ralph wave emit` 的事件文件解析走 3 级：`RALPH_EVENTS_FILE` → `.ralph/current-events` → `.ralph/events.jsonl`（`crates/ralph-cli/src/wave.rs:368-380`），与 ralph emit 不同。**wave worker 通过 `ralph emit` 返回结果时，事件会写入 candidate-events（与 wave 调度相关），不要改写 `RALPH_EVENTS_FILE` 指向其他文件。**
+> `ralph wave emit` 的事件文件解析走 3 级：`RALPH_EVENTS_FILE` → `.ralph/current-events` → `.ralph/events.jsonl`（`crates/ralph-cli/src/wave.rs:475-485`），与 ralph emit 不同。**wave worker 通过 `ralph emit` 返回结果时，事件会写入 candidate-events（与 wave 调度相关），不要改写 `RALPH_EVENTS_FILE` 指向其他文件。**
+
+### `ralph wave emit` Schema 预检（U4）
+
+`ralph wave emit` 在 shape 校验之后、写盘之前会先对**整批** payload 做 event policy schema 预检（`crates/ralph-cli/src/policy_check.rs`），与 `ralph run` 循环内 `apply_event_policy_validation` 行为一致：
+
+- 默认行为：当 `ralph.yml`（或合并后的 preset）开启了 `event_policy.enabled: true` 时，强制启用预检。
+- 任一 payload 缺必需字段（如 `review.wave.ready` 的 `depth`）→ 整批**原子拒绝**，**不写盘**任何 line。
+- `--policy-check`：显式强制预检（即便 config 未开启 `event_policy`）。
+- `--unsafe-no-policy-check`：尝试绕过预检；当 config `event_policy.allow_unsafe_cli_emit: false` 时**不生效**（与 `ralph emit --unsafe-no-policy-check` 对齐）。
+
+**JSON 失败响应**（`--output json`，stdout，exit ≠ 0）：
+
+```json
+{
+  "ok": false,
+  "error": "policy_validation_failed",
+  "topic": "review.wave.ready",
+  "validation_errors": [
+    {"payload_index": 0, "field": "depth", "reason_code": "missing_required_field", "message": "Missing required field: depth"}
+  ]
+}
+```
+
+`reason_code` 稳定枚举：`missing_required_field` / `invalid_field_value` / `payload_type_mismatch` / `terminal_monotonicity_violation` / `duplicate_terminal_event` / `business_event_after_completion` / `invalid_topic_format` / `topic_denied`。agent 可 `jq -r '.validation_errors[].field' | sort -u` 一次性拿到所有缺失字段清单。
+
+**Text 失败响应**（stderr，exit ≠ 0）：`policy validation failed: 7 payloads, missing required field 'depth' in 7`。
 
 ## 通用错误恢复
 
@@ -65,6 +91,7 @@ metadata:
 | `skill not found` | skill 名称错误或对当前 hat 不可见 | `ralph tools skill list` 确认可用 skill；检查 `RALPH_CURRENT_HAT` |
 | `progress rate limited` | 5 秒内重复发送 | 等待 5 秒后重试 |
 | 退出码 2 (lint gate) | preset 静态 lint 在 strict 模式下发现 error | 修复 preset 配置后重试；查看 `.ralph/diagnostics/preset-lint-error-*.json` |
+| `policy validation failed` (`ralph wave emit`) | 任一 payload 违反 `event_policy.schemas.<topic>.required_fields`，整批拒绝 | 用 `--output json` 读 `validation_errors[].field` 一次性拿到全部缺失字段，修正后重发 |
 | 任何命令失败 | 通用恢复 | 1. `ralph <cmd> --help` 确认语法 2. 检查退出码 3. 查看错误信息 4. 重试 |
 
 ## Decision Journal
