@@ -39,6 +39,16 @@ tasks:
 
 event_loop:
   prompt_file: "PROMPT.md"
+  # 2026-06-13-004 U11：默认开启运行时诊断，让生产 worktree 自动把
+  # session / recovery / drift 证据落到 .ralph/diagnostics/<session>/。
+  # 不开的话 2026-06-13 事故的 recovery.jsonl 会一直空着，synthesizer
+  # 不 fire 的根因对 ralph diagnose 不可见。运营方仍可在项目 ralph.yml
+  # 显式覆盖 `telemetry.runtime_diagnosis.enabled: false` 关闭。
+  telemetry:
+    runtime_diagnosis:
+      enabled: true
+      write_artifacts: true
+      prompt_injection_enabled: true
   completion_promise: "LOOP_COMPLETE"
   required_events: ["report.done"]
   starting_event: "work.start"
@@ -307,6 +317,26 @@ hats:
 
       你负责实现。遵循现有模式，持续测试，交付完整功能。
       你不得在此 preset 中使用 `[Tool] Agent` 或任何并行 subagent 工具。
+
+      ### 2026-06-13-004 U11 硬性规则（P1-1、P2-2）
+
+      - **绝对不要 emit `build.done` / `test.done` / `lint.done`** —
+        这些 topic 不在你的 `publishes` 列表里，会被 isolated scope
+        守卫拒绝。把验证结果（build / test / lint 摘要）放进
+        `work.done` payload（例如
+        `verification: { build_ok, test_ok, lint_ok }`），让
+        review-coordinator 从一个 event 里读全部信息。发零散
+        topic 会触发 `task.resume` 重试循环，是 2026-06-13 事故
+        6 次 scope-drop 模式的前兆。
+      - **先 commit 再 emit `work.done`。** `work.done` payload
+        的 `commit_count` 和 `changed_lines` 字段来自上一次
+        task HEAD 与当前 HEAD 之间的 diff。如果在 `git commit`
+        之前就 emit `work.done`，执行合约会按 payload mismatch
+        拒绝，loop 卡住。
+      - **同步更新 `progress.md` 复选框**。plan-gate 读
+        `progress.md` 决定 `queue.advance` vs `plan.complete`；
+        如果 commit 后复选框仍不勾，会被强制多跑一轮
+        review-synthesizer。
 
       ### 读取状态（每次激活时）
       1. 根据激活来源读取 payload 字段：
@@ -667,6 +697,19 @@ hats:
       - 必须按上述 HARD RULE（commit_count / changed_lines / untracked / diff 状态）决定 wave vs pass，**不能**根据 intent 或对 executor 的信任
       - 每个 `review.passed` payload 必须包含 `skip_reason: "empty_diff"`（审计字段 — 缺失是硬 schema 违规）
       - 必须根据实际 diff 内容选择 conditional dimensions
+
+      ### 2026-06-13-004 U11 Wave 进度跟踪（P1-3）
+
+      - 每次 wave 发射前（紧接 `ralph wave emit review.wave.ready --payloads ...`），
+        把 `.agents/scratchpad/<plan>/progress.md` 中的
+        `Active Wave: <wave_id> (N dimensions)` 更新好，让运营方
+        和下游 hat 看到在飞的 wave。
+      - synthesizer 触发后（`review.passed` / `review.failed` /
+        `plan.blocked`），在同一处 `progress.md` 编辑里把这一行
+        清回 `Active Wave: (none)`。
+      - 2026-06-13 事故里 progress.md 留下 `Active Wave: 空`，
+        根因是 synthesizer 没有 fire；这个小小的台账让
+        diagnose 报告与人类可见的 progress 文件一致。
 
   dimension-reviewer:
     name: "🔬 维度审查器"

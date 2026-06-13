@@ -678,3 +678,4 @@ Overall average: **60-90% token reduction** on common development operations.
 5. Every external command that may block must have timeout.
 
 <!-- ralph:end hang-prevention -->
+

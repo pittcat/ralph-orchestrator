@@ -1,0 +1,42 @@
+# 2026-06-13-004 U6: incident fixture regression test
+#
+# Anonymized 8 `review.dimension.done` JSONL events extracted from the
+# 2026-06-13 ce-executor-isolated incident (worktree
+# `.ralph/events-20260613-012231.jsonl`). The 8 rows are the ones
+# that were dropped by the isolated scope check before U1+U2 fixed
+# it: each carries `hat=dimension-reviewer` (correct worker
+# provenance, written by the wave worker), `topic=review.dimension.done`,
+# and `wave_id=w-2026-06-13-001` (anonymized).
+#
+# The test below wires this fixture into a minimal isolated-mode
+# topology with both `dimension-reviewer` (worker) and
+# `review-coordinator` (the currently-isolated hat). It then re-reads
+# the events and asserts:
+#   1. all 8 events are accepted (U1 + U2 fix the wave-hat attribution)
+#   2. none of them are dropped by the isolated scope (U2: scope uses
+#      `event.hat` for the scope anchor, so `dimension-reviewer` is
+#      accepted even when `current_isolated_hat=review-coordinator`)
+#   3. the aggregator's pending queue sees all 8 (U3: same-wave
+#      result batch is exempt from the per-turn business-event budget)
+
+# Minimal topology for the incident fixture: a `review-coordinator`
+# currently in isolated mode + a `dimension-reviewer` worker whose
+# publishes include `review.dimension.done`. The aggregator hat
+# subscribes to `review.dimension.done` and waits for the wave.
+hats:
+  review-coordinator:
+    name: "Review Coordinator"
+    triggers: ["plan.review.requested"]
+    publishes: ["review.coordinator.done"]
+  dimension-reviewer:
+    name: "Dimension Reviewer"
+    triggers: ["review.coordinator.done"]
+    publishes: ["review.dimension.done"]
+    concurrency: 8
+  aggregator:
+    name: "Aggregator"
+    triggers: ["review.dimension.done"]
+    publishes: ["synthesize.complete"]
+    aggregate:
+      mode: wait_for_all
+      timeout: 60

@@ -973,6 +973,17 @@ impl EventLoop {
         })
     }
 
+    /// Test-only getter for the cached robot_guidance vec.
+    /// Used by `guidance_dedup.rs` to assert KTD-7 in-memory dedup
+    /// without going through the full `process_events_from_jsonl`
+    /// pipeline. `pub(crate)` so the sibling test modules under
+    /// `event_loop::tests` can see it; gated by `#[cfg(test)]` so
+    /// the symbol does not leak into release builds.
+    #[cfg(test)]
+    pub(crate) fn robot_guidance_for_test(&self) -> Vec<String> {
+        self.robot_guidance.clone()
+    }
+
     /// Creates a new event loop from configuration.
     pub fn new(config: RalphConfig) -> Self {
         // Try to create diagnostics collector, but fall back to disabled if it fails
@@ -2818,6 +2829,30 @@ impl EventLoop {
     /// primed memories to the prompt context. If a scratchpad file exists and is
     /// non-empty, its content is also prepended (before memories).
     pub fn build_prompt(&mut self, hat_id: &HatId) -> Option<String> {
+        // 2026-06-13-004 U8 (P1-2): clear any pending handoff
+        // deadlines for this hat. The hat is now actually
+        // *building* a prompt — about to invoke the LLM — so
+        // the deadline race that produced the 17m / 4m false
+        // handoff timeouts in the 2026-06-13 incident is over.
+        // KTD-6 explicitly forbids moving this clear to
+        // `process_output` (L4223 `current_isolated_hat`): that
+        // site records the *completed* hat, not the *about-to-
+        // activate* hat. The build_prompt entry point is the
+        // earliest moment the hat is unambiguously "live".
+        // Safe in coordinator mode too — `on_hat_activated`
+        // is a no-op when the tracker's `pending` map is empty
+        // (and in coordinator mode the tracker is always empty).
+        //
+        // 2026-06-13 review fix (reliability F2): the "ralph"
+        // hat is the constant coordinator sentinel, never a
+        // handoff *consumer* — passing it through here would
+        // spuriously clear real consumer pending entries whose
+        // hat_id happens to match (or be a prefix of) "ralph".
+        // Skip the clear for ralph; downstream ralph prompt
+        // building still proceeds normally below.
+        if hat_id.as_str() != "ralph" {
+            self.state.handoff_tracker.on_hat_activated(hat_id.as_str());
+        }
         // Handle "ralph" hat - the constant coordinator
         // Per spec: "Hatless Ralph is constant — Cannot be replaced, overwritten, or configured away"
         if hat_id.as_str() == "ralph" {
@@ -3226,8 +3261,38 @@ impl EventLoop {
         // Persist new guidance to scratchpad before caching
         self.persist_guidance_to_scratchpad(&guidance_events);
 
-        self.robot_guidance
-            .extend(guidance_events.into_iter().map(|e| e.payload));
+        // 2026-06-13-004 review fix (correctness F2, KTD-7 two-layer
+        // dedup): the in-memory `robot_guidance` vec is the source
+        // for the next `apply_robot_guidance` → prompt injection.
+        // A redelivered or duplicated `human.guidance` event would
+        // otherwise add the same payload twice to the prompt.
+        // Dedup against the existing vec and within the current
+        // batch; persist layer has already dedup'd against disk.
+        let mut seen_in_batch: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for event in guidance_events {
+            // Move the payload out so we can dedup by owned String
+            // without fighting the borrow checker. `payload` is
+            // moved into `robot_guidance` when it survives the
+            // dedup check; otherwise dropped.
+            let payload = event.payload;
+            if seen_in_batch.insert(payload.clone()) {
+                let already = self.robot_guidance.iter().any(|p| p == &payload);
+                if !already {
+                    self.robot_guidance.push(payload);
+                } else {
+                    debug!(
+                        payload_len = payload.len(),
+                        "U9 (KTD-7 in-memory layer): skipping guidance payload already cached for prompt"
+                    );
+                }
+            } else {
+                debug!(
+                    payload_len = payload.len(),
+                    "U9 (KTD-7 in-memory layer): skipping duplicate guidance payload in current batch"
+                );
+            }
+        }
     }
 
     /// Appends human guidance entries to the scratchpad file for durability.
@@ -3279,7 +3344,86 @@ impl EventLoop {
         };
 
         let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
+        // 2026-06-13-004 U9 (P1-4): de-duplicate guidance payloads
+        // against the on-disk scratchpad tail. The 2026-06-13
+        // incident saw `Focus on error handling` written twice and
+        // `Keep this in mind` written three times because
+        // `persist_guidance_to_scratchpad` unconditionally appended.
+        //
+        // 2026-06-13 review fixes:
+        //   - correctness F1: replaced `skip_while`+`filter` with a
+        //     proper state machine so lines from sections AFTER
+        //     the last `### HUMAN GUIDANCE` block are NOT
+        //     collected as "existing payloads" (a line of text in
+        //     `## NOTES` would otherwise be matched as a duplicate
+        //     against a new guidance event with the same text).
+        //   - reliability F5: extracted the 16 KB window size to
+        //     a named constant with a comment explaining the
+        //     capacity budget.
+        //   - maintainability #20 (P2): the window is byte-bounded
+        //     via `split_at` on bytes (UTF-8 safe via the byte
+        //     check before the split). Char-based slicing would
+        //     inflate to 64 KB worst-case for 4-byte CJK.
+        const GUIDANCE_DEDUP_TAIL_BYTES: usize = 16 * 1024;
+        let existing_payloads: std::collections::HashSet<String> = if resolved_path.exists() {
+            std::fs::read_to_string(&resolved_path)
+                .ok()
+                .map(|content| {
+                    // Byte-bounded tail; snap to a char boundary so
+                    // the resulting &str is valid UTF-8 (no panic
+                    // when the cut falls inside a multi-byte char).
+                    let start = content.len().saturating_sub(GUIDANCE_DEDUP_TAIL_BYTES);
+                    let tail_start =
+                        crate::text::floor_char_boundary(&content, start);
+                    let tail = &content[tail_start..];
+                    // State machine: collect body lines only while
+                    // inside a `### HUMAN GUIDANCE` block. Stop at
+                    // the next `### ` or `## ` header (any new
+                    // section marker ends the current guidance
+                    // block; `## NOTES` is the most common offender
+                    // that would otherwise leak into the dedup
+                    // HashSet). The block also ends at end-of-file.
+                    let mut in_guidance = false;
+                    let mut payloads = std::collections::HashSet::new();
+                    for line in tail.lines() {
+                        if line.starts_with("### HUMAN GUIDANCE") {
+                            in_guidance = true;
+                            continue;
+                        }
+                        if in_guidance
+                            && (line.starts_with("### ") || line.starts_with("## "))
+                        {
+                            in_guidance = false;
+                            continue;
+                        }
+                        if in_guidance && !line.is_empty() {
+                            payloads.insert(line.trim().to_string());
+                        }
+                    }
+                    payloads
+                })
+                .unwrap_or_default()
+        } else {
+            std::collections::HashSet::new()
+        };
+        // 2026-06-13-004 review fix (F2 KTD-7): also dedup within
+        // the current batch so a single persist call with two
+        // identical payloads (e.g. a redelivered `human.guidance`
+        // event) only writes the first one.
+        let mut seen_in_batch: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         for event in guidance_events {
+            let payload = event.payload.as_str();
+            if payload.is_empty() {
+                continue;
+            }
+            if existing_payloads.contains(payload) || !seen_in_batch.insert(payload.to_string()) {
+                debug!(
+                    payload_len = payload.len(),
+                    "U9: skipping duplicate guidance payload (already in scratchpad or in this batch)"
+                );
+                continue;
+            }
             let entry = format!(
                 "\n### HUMAN GUIDANCE ({})\n\n{}\n",
                 timestamp, event.payload
@@ -4218,6 +4362,66 @@ impl EventLoop {
             let resume_event = Event::new("task.resume", payload.to_string())
                 .with_source(HatId::from(esc.safe_target.as_str()));
             self.bus.publish(resume_event);
+            // 2026-06-13-004 U7 (P2-4): write a recovery envelope
+            // for the handoff escalation so the responder can
+            // surface this stall in the next prompt. The bus
+            // `task.resume` event above is the visible-to-agent
+            // signal; the envelope is the diagnose / journal
+            // surface. KTD-5 locks the source to `StallRecovery`
+            // and the outcome to `Escalated`. The two streams
+            // (bus + journal) are kept in lockstep so operators
+            // can correlate them in `ralph diagnose` and the
+            // orchestration log.
+            let reason_code = "handoff_dispatch_timeout";
+            let env_source_hat = esc.consumer.clone();
+            let env_target_hat = esc.safe_target.clone();
+            let env_topic = esc.topic.clone();
+            let mut env_builder = crate::diagnosis::RecoveryDiagnosisEnvelope::builder()
+                .source(crate::diagnosis::DiagnosisSource::StallRecovery)
+                .severity(crate::diagnosis::DiagnosisSeverity::Warning)
+                .iteration(self.state.iteration)
+                .topic(env_topic.clone())
+                .source_hat(&env_source_hat)
+                .target_hat(&env_target_hat)
+                .reason_code(reason_code)
+                .message(format!(
+                    "handoff deadline exceeded: consumer '{}' did not activate within timeout",
+                    env_source_hat
+                ))
+                .expected_action(format!(
+                    "Consumer hat '{}' must activate before the next iteration. \
+                     A `task.resume` has been routed to the safe target '{}' \
+                     to keep the loop moving.",
+                    env_source_hat, env_target_hat
+                ))
+                .safe_target(true)
+                .outcome(crate::diagnosis::DiagnosisOutcome::Escalated)
+                .evidence(crate::diagnosis::EvidenceRef {
+                    kind: crate::diagnosis::EvidenceKind::Topic,
+                    ref_path: env_topic.clone(),
+                    snippet: Some(format!(
+                        "event_id={} details={}",
+                        esc.event_id,
+                        esc.reason
+                    )),
+                })
+                .retry_key(
+                    crate::diagnosis::RecoveryDiagnosisEnvelopeBuilder::retry_key_from_parts(
+                        crate::diagnosis::DiagnosisSource::StallRecovery,
+                        Some(&env_source_hat),
+                        Some(&env_topic),
+                        reason_code,
+                        None,
+                    ),
+                );
+            if let Some(session_id) = self.diagnostics().session_id() {
+                env_builder = env_builder.session_id(session_id);
+            }
+            let envelope = env_builder.build();
+            self.record_recovery_envelope(&envelope, vec![format!(
+                "handoff_escalation consumer={} topic={} event_id={} safe_target={}",
+                env_source_hat, env_topic, esc.event_id, env_target_hat
+            )]);
         }
 
         // Track the isolated hat for scope enforcement in process_parse_result
@@ -4759,8 +4963,21 @@ impl EventLoop {
         }
 
         // --- Scope enforcement ---
+        // 2026-06-13-004 U7: copy out `current_isolated_hat` and the
+        // `cancellation_promise` (as owned `String`) so the
+        // immutable borrows of `self.state` / `self.config` end
+        // before the loop body needs to take a mutable borrow of
+        // `self` (e.g. via `record_recovery_envelope`). The
+        // `&& let Some(ref …)` form would hold an immutable borrow
+        // of `self.state` for the entire `if` block, blocking any
+        // `&mut self` call inside it (E0502). Cloning is cheap
+        // (a one-time allocation per turn) and lets the body freely
+        // call `record_recovery_envelope` / `bus.publish` etc.
+        let isolated_hat_owned: Option<ralph_proto::HatId> =
+            self.state.current_isolated_hat.clone();
+        let cancellation_owned: String = self.config.event_loop.cancellation_promise.clone();
         let events = if self.config.event_loop.execution_mode == HatExecutionMode::Isolated
-            && let Some(ref isolated_hat) = self.state.current_isolated_hat
+            && let Some(ref isolated_hat) = isolated_hat_owned
         {
             // Isolated mode: hard-enforce current hat scope + single business event boundary.
             // U3: orchestrator control topics and diagnostic topics bypass the budget
@@ -4770,7 +4987,30 @@ impl EventLoop {
             // declared publish scope by emitting a completion-style event.
             let mut accepted = Vec::new();
             let mut first_business_event_accepted = false;
-            let cancellation = self.config.event_loop.cancellation_promise.as_str();
+            // 2026-06-13-004 U3: track the first wave_id admitted in
+            // this turn so subsequent events with the same wave_id
+            // are exempt from the per-turn business-event budget.
+            // The inner type is `Option<Option<String>>`:
+            // outer `None` = no business event yet; inner `Some(None)`
+            // = first business event had no wave_id (regular emit);
+            // inner `Some(Some(wid))` = first business event was a
+            // wave result with that wave_id.
+            let mut first_wave_id_accepted: Option<Option<String>> = None;
+            // 2026-06-13-004 P0 #4 review fix (U7 envelope disk
+            // storm): per-turn dedup set for scope_drop retry_keys.
+            // Multiple identical scope drops in the same
+            // turn collapse to a single envelope write (the bus
+            // `event.isolation.boundary_violation` event still
+            // fires for each, preserving operator visibility —
+            // only the recovery journal is dedup'd). This
+            // protects `recovery.jsonl` from an 8x scope-drop
+            // storm in long-running waves while still letting
+            // ADV-1's retry_key namespace distinguish different
+            // scope drops (different wave_id / scope_hat / topic
+            // → different key → different envelope).
+            let mut envelopes_written_this_turn: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            let cancellation = cancellation_owned.as_str();
 
             for event in result.events {
                 let topic = event.topic.as_str();
@@ -4785,8 +5025,23 @@ impl EventLoop {
                     continue;
                 }
 
-                // Enforce hat scope: topic must be in isolated_hat's publishes
-                if !self.isolated_publish_allowed(isolated_hat, event.topic.as_str()) {
+                // 2026-06-13-004 U2 (P0-1): prefer the event's own
+                // `hat` field as the scope-anchor. The wave merge
+                // layer (see `merge_wave_results_to_events_file`)
+                // writes each record with `hat` set to the worker
+                // provenance, so a re-published `review.dimension.done`
+                // from `dimension-reviewer` is now attributed to
+                // `dimension-reviewer`, not to the orchestrator
+                // `current_isolated_hat` (e.g. `review-coordinator`).
+                // When the event lacks `hat` (e.g. legacy hand-written
+                // records, malformed agents), we fall back to
+                // `isolated_hat` — the original behaviour.
+                let scope_hat = event
+                    .hat
+                    .as_deref()
+                    .map(|h| ralph_proto::HatId::new(h))
+                    .unwrap_or_else(|| isolated_hat.clone());
+                if !self.isolated_publish_allowed(&scope_hat, event.topic.as_str()) {
                     warn!(
                         hat = %isolated_hat.as_str(),
                         topic = %event.topic,
@@ -4810,7 +5065,149 @@ impl EventLoop {
                         ),
                     );
                     self.bus.publish(violation);
-                    // U2: publish a targeted `task.resume` to the
+                    // 2026-06-13-004 U7 (P0-2 / P2-4): also write a
+                    // recovery envelope to `recovery.jsonl` so the
+                    // responder can surface this scope drop in the
+                    // next prompt. Without this, the boundary
+                    // violation is only visible in
+                    // `orchestration.jsonl` (where bus events are
+                    // recorded) — `recovery.jsonl` is the journal
+                    // `ralph diagnose` reads, so a missing entry
+                    // here means a missing signal. The bus event
+                    // above is preserved for backward compatibility
+                    // with existing log scrapers. KTD-5 locks the
+                    // source to `WorkflowGuard` and the outcome to
+                    // `Escalated` (not retryable — the agent has to
+                    // fix its scope, not just retry).
+                    let reason_code = "isolated_scope_violation";
+                    // 2026-06-13-004 review fix (ce-code-review ADV-1):
+                    // namespace the retry_key by `wave_id` AND
+                    // `wave_index` when the event is part of a
+                    // wave so 8 dimensions of the same wave
+                    // produce 8 distinct journal entries
+                    // (otherwise the responder's dedup collapses
+                    // them into 1, re-creating the original
+                    // "invisible failure" bug at the recovery
+                    // layer). Non-wave events keep the original
+                    // tuple-based key.
+                    // 2026-06-13-004 P0 #2 + P0 #3 review fix
+                    // (ADV-1 '?' fallback + ADV-3 normalize bypass):
+                    // route wave events through
+                    // `retry_key_from_parts` so `normalize_part`
+                    // applies (lowercase + ASCII-only). Without
+                    // this, `Reviewer` vs `reviewer` produced
+                    // distinct retry_keys and bypassed the U5
+                    // responder dedup. The wave_id + wave_index
+                    // parts go through the normalizer together
+                    // with `scope_hat` + `topic` + `reason_code`,
+                    // keeping the format consistent with the
+                    // non-wave branch and ensuring every
+                    // collision case (case-difference, special
+                    // chars, length) is normalized uniformly.
+                    let scope_drop_retry_key = match event.wave_id.as_deref() {
+                        Some(wid) => {
+                            let widx = event
+                                .wave_index
+                                .map(|i| i.to_string())
+                                .unwrap_or_else(|| format!("ts-{}", event.ts));
+                            crate::diagnosis::RecoveryDiagnosisEnvelopeBuilder::retry_key_from_parts(
+                                crate::diagnosis::DiagnosisSource::WorkflowGuard,
+                                Some(scope_hat.as_str()),
+                                Some(event.topic.as_str()),
+                                // Embed wave_id + wave_index in the
+                                // `reason_code` slot so the namespace
+                                // is preserved end-to-end.
+                                &format!("{reason_code}/{wid}/{widx}"),
+                                None,
+                            )
+                        }
+                        None => crate::diagnosis::RecoveryDiagnosisEnvelopeBuilder::retry_key_from_parts(
+                            crate::diagnosis::DiagnosisSource::WorkflowGuard,
+                            Some(scope_hat.as_str()),
+                            Some(event.topic.as_str()),
+                            reason_code,
+                            None,
+                        ),
+                    };
+                    let mut env_builder = crate::diagnosis::RecoveryDiagnosisEnvelope::builder()
+                        .source(crate::diagnosis::DiagnosisSource::WorkflowGuard)
+                        .severity(crate::diagnosis::DiagnosisSeverity::Warning)
+                        .iteration(self.state.iteration)
+                        .topic(event.topic.to_string())
+                        .source_hat(scope_hat.as_str())
+                        .target_hat(scope_hat.as_str())
+                        .reason_code(reason_code)
+                        .message(format!(
+                            "isolated mode: hat '{}' cannot publish topic '{}'",
+                            scope_hat.as_str(),
+                            event.topic
+                        ))
+                        .expected_action(format!(
+                            "Hat '{}' must declare '{}' in its `publishes` list (or stop emitting it). \
+                             This scope drop is not retryable — re-emit a topic the hat is allowed to publish.",
+                            scope_hat.as_str(),
+                            event.topic
+                        ))
+                        .safe_target(false)
+                        .outcome(crate::diagnosis::DiagnosisOutcome::Escalated)
+                        .evidence(crate::diagnosis::EvidenceRef {
+                            kind: crate::diagnosis::EvidenceKind::Topic,
+                            ref_path: event.topic.to_string(),
+                            snippet: Some(format!(
+                                "isolated_hat={} event_hat={}",
+                                isolated_hat.as_str(),
+                                scope_hat.as_str()
+                            )),
+                        })
+                        // 2026-06-13-004 P0 #4: clone the retry_key
+                        // here so we can both dedup it against
+                        // `envelopes_written_this_turn` AND move
+                        // it into `env_builder` below.
+                        .retry_key(scope_drop_retry_key.clone());
+                    if let Some(session_id) = self.diagnostics().session_id() {
+                        env_builder = env_builder.session_id(session_id);
+                    }
+                    let envelope = env_builder.build();
+                    // 2026-06-13-004 P0 #4 review fix (U7 envelope
+                    // disk storm): per-turn dedup of the retry_key
+                    // so multiple identical scope drops in the
+                    // same `process_parse_result` call collapse to
+                    // a single envelope write. The bus
+                    // `event.isolation.boundary_violation` event
+                    // (emitted earlier in this branch) still
+                    // fires for each, so operators see every
+                    // occurrence in `orchestration.jsonl`; the
+                    // dedup only shields `recovery.jsonl` from
+                    // the 8x write rate that wave-batches
+                    // produce. Distinct scope drops (different
+                    // wave_id / topic / scope_hat) produce
+                    // distinct retry_keys and still write
+                    // distinct envelopes, so ADV-1's
+                    // namespace fix is preserved.
+                    if !envelopes_written_this_turn.insert(scope_drop_retry_key.clone()) {
+                        debug!(
+                            retry_key = %scope_drop_retry_key,
+                            topic = %event.topic,
+                            "U7: per-turn dedup dropped identical scope-drop envelope"
+                        );
+                        continue;
+                    }
+                    // 2026-06-13-004 U7: copy out the immutable
+                    // borrow of `isolated_hat` before we take a
+                    // mutable borrow of `self` to record the
+                    // envelope. E0502 would otherwise block the
+                    // call (Rust cannot prove the immutable
+                    // borrow ends before the mutable one starts
+                    // when both go through `self`).
+                    let isolated_hat_str = isolated_hat.as_str().to_string();
+                    let scope_hat_str = scope_hat.as_str().to_string();
+                    let topic_str = event.topic.to_string();
+                    self.record_recovery_envelope(&envelope, vec![format!(
+                        "scope_drop hat={} topic={} current_isolated_hat={}",
+                        scope_hat_str,
+                        topic_str,
+                        isolated_hat_str
+                    )]);
                     // source hat so the next turn the rejected hat
                     // gets reactivated with explicit recovery context.
                     // Without this hook, an isolated hat that emits an
@@ -4918,7 +5315,32 @@ impl EventLoop {
                     continue;
                 }
 
-                if first_business_event_accepted {
+                // 2026-06-13-004 U3: a `wave_id` group of result
+                // events is ONE business emission, not N. The merge
+                // layer (see `merge_wave_results_to_events_file`)
+                // stamps every record with the originating `wave_id`,
+                // so a batch of N `review.dimension.done` from
+                // workers in the same wave must be admitted in full
+                // even after the first business event was already
+                // accepted in the same turn. Without this carve-out
+                // the 8/8 wave result would be reduced to 1/8 by the
+                // per-turn budget, which is the upstream cause of
+                // the 2026-06-13 incident. We track the *set* of
+                // wave_ids already accepted in this turn so a
+                // distinct second wave still gets rejected (one
+                // business emission per turn) but a continuation of
+                // the same wave does not.
+                let same_wave_continuation = event
+                    .wave_id
+                    .as_deref()
+                    .is_some_and(|wid| {
+                        first_wave_id_accepted
+                            .as_ref()
+                            .and_then(|inner| inner.as_deref())
+                            == Some(wid)
+                    });
+
+                if first_business_event_accepted && !same_wave_continuation {
                     warn!(
                         topic = %event.topic,
                         "Isolated mode: extra business event dropped — only one per turn"
@@ -4932,8 +5354,19 @@ impl EventLoop {
                     );
                     self.bus.publish(diagnostic);
                 } else {
+                    // 2026-06-13-004 U3: capture the wave_id *before*
+                    // the event is moved into `accepted`, so we can
+                    // remember the first wave's identity to
+                    // discriminate continuations from distinct
+                    // second waves.
+                    let wave_id_to_record = event.wave_id.clone();
                     accepted.push(event);
-                    first_business_event_accepted = true;
+                    if !first_business_event_accepted {
+                        first_business_event_accepted = true;
+                    }
+                    if first_wave_id_accepted.is_none() {
+                        first_wave_id_accepted = Some(wave_id_to_record);
+                    }
                     // U3 P0 fix: write the sticky per-turn budget flag so
                     // `check_default_publishes` (which runs later in the same
                     // turn when JSONL had zero events, or earlier when JSONL
@@ -6203,9 +6636,22 @@ impl EventLoop {
                 // surface it because the only consumer (the
                 // diagnostic reporter) reads the pending count via
                 // `pending_count()` at stall-check time.
-                self.state
-                    .handoff_tracker
-                    .on_hat_activated(source_hat_id.as_str());
+                // 2026-06-13-004 P0 #5 review fix (F2 ralph
+                // guard symmetry): mirror the build_prompt
+                // guard. The "ralph" hat is the constant
+                // coordinator sentinel, never a handoff
+                // consumer — passing it through here would
+                // spuriously clear real consumer pending
+                // entries whose hat_id happens to match (or
+                // be a prefix of) "ralph". Round 2 added
+                // this guard at L2853 (build_prompt); this
+                // closes the asymmetry at the process_output
+                // handoff-clear site.
+                if source_hat_id.as_str() != "ralph" {
+                    self.state
+                        .handoff_tracker
+                        .on_hat_activated(source_hat_id.as_str());
+                }
             }
 
             self.diagnostics.log_orchestration(

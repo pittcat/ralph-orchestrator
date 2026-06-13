@@ -3,7 +3,7 @@
 //! Tracks active waves, records results and failures, and determines
 //! when all workers have reported back.
 
-use ralph_proto::Event;
+use ralph_proto::{Event, HatId};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -21,6 +21,9 @@ pub(crate) struct WaveState {
     results: Vec<WaveResult>,
     failures: Vec<WaveFailure>,
     started_at: Instant,
+    /// Hat the dispatcher expects each worker's `event.source` to
+    /// carry. `None` skips the merge-layer check.
+    expected_source_hat: Option<HatId>,
 }
 
 /// A successful result from a wave instance.
@@ -53,6 +56,16 @@ pub struct CompletedWave {
     /// When true, the aggregator should note that some workers did not
     /// report back and list missing dimensions in Coverage.
     pub partial: bool,
+    /// The hat the dispatcher promised the per-worker env
+    /// (`inject_hat_execution_env` sets `target_hat` on each
+    /// worker). The merge layer uses this to reject worker-written
+    /// `event.source` that does not match, defending against
+    /// ADV-2 (hat-spoofing via per-worker JSONL). `None` for
+    /// waves dispatched before the field was added (legacy
+    /// records); the merge layer treats `None` as
+    /// "unverified" and falls back to `default_source_hat` (so
+    /// the fix is non-breaking for old fixtures).
+    pub expected_source_hat: Option<HatId>,
 }
 
 /// Progress indicator returned by `record_result`.
@@ -93,10 +106,18 @@ impl WaveTracker {
         }
     }
 
-    /// Register a new wave.
-    ///
-    /// Warns and overwrites if a wave with the same ID is already active.
-    pub fn register_wave(&mut self, wave_id: String, expected_total: u32) {
+    /// Register a new wave with the dispatcher-expected source hat.
+    /// The merge layer uses `expected_source_hat` to reject
+    /// worker-written `event.source` that does not match,
+    /// defending against ADV-2 (hat-spoofing). `None` skips
+    /// the check (used by waves whose workers cannot be
+    /// attributed, e.g. smoke fixtures).
+    pub fn register_wave_with_source(
+        &mut self,
+        wave_id: String,
+        expected_total: u32,
+        expected_source_hat: Option<HatId>,
+    ) {
         if self.active_waves.contains_key(&wave_id) {
             tracing::warn!(wave_id, "Overwriting existing active wave state");
         }
@@ -106,8 +127,16 @@ impl WaveTracker {
             results: Vec::new(),
             failures: Vec::new(),
             started_at: Instant::now(),
+            expected_source_hat,
         };
         self.active_waves.insert(wave_id, state);
+    }
+
+    /// Register a new wave (back-compat: skips source-hat check).
+    ///
+    /// Warns and overwrites if a wave with the same ID is already active.
+    pub fn register_wave(&mut self, wave_id: String, expected_total: u32) {
+        self.register_wave_with_source(wave_id, expected_total, None);
     }
 
     /// Record result events for a wave instance.
@@ -190,6 +219,7 @@ impl WaveTracker {
             failures: state.failures,
             duration: state.started_at.elapsed(),
             partial,
+            expected_source_hat: state.expected_source_hat,
         })
     }
 
@@ -211,6 +241,7 @@ impl WaveTracker {
             failures: state.failures,
             duration: state.started_at.elapsed(),
             partial,
+            expected_source_hat: state.expected_source_hat,
         })
     }
 

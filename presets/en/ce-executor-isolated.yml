@@ -48,6 +48,19 @@ tasks:
 event_loop:
   execution_mode: isolated
   prompt_file: "PROMPT.md"
+  # 2026-06-13-004 U11: runtime diagnosis on by default for this
+  # preset so production worktrees drop session/recovery/drift
+  # evidence into .ralph/diagnostics/<session>/ automatically.
+  # Without this, the 2026-06-13 incident's recovery.jsonl would
+  # have stayed empty and the synthesize-no-fire root cause would
+  # have been invisible to ralph diagnose. Operators can still
+  # opt out by overriding `telemetry.runtime_diagnosis.enabled`
+  # in their project ralph.yml.
+  telemetry:
+    runtime_diagnosis:
+      enabled: true
+      write_artifacts: true
+      prompt_injection_enabled: true
   completion_promise: "LOOP_COMPLETE"
   required_events: ["report.done"]
   starting_event: "work.start"
@@ -391,6 +404,30 @@ hats:
 
       You own implementation. Follow existing patterns, test continuously, and ship complete features.
       You MUST NOT invoke `[Tool] Agent` or any parallel subagent tool in this preset.
+
+      ### 2026-06-13-004 U11 HARD RULES (P1-1, P2-2)
+
+      - **NEVER emit `build.done` / `test.done` / `lint.done`** —
+        those topics are not in your `publishes` list and will be
+        rejected by the isolated scope guard. Put verification
+        results (build / test / lint summaries) into the
+        `work.done` payload (e.g. as
+        `verification: { build_ok, test_ok, lint_ok }`) so the
+        review-coordinator can read them from a single event.
+        Emitting partial topics triggers a `task.resume` retry
+        loop and is a leading indicator of the 2026-06-13
+        incident's 6x scope-drop pattern.
+      - **Commit BEFORE you emit `work.done`.** The
+        `work.done` payload's `commit_count` and `changed_lines`
+        fields are derived from the diff between the previous
+        task's HEAD and the current HEAD. If you emit
+        `work.done` before `git commit`, the contract rejects
+        the event as a payload mismatch and the loop stalls.
+      - **Update `progress.md` checkboxes** for the step you
+        just completed. The plan-gate reads `progress.md` to
+        decide `queue.advance` vs `plan.complete`; a stale
+        checkbox (left unchecked after the work is committed)
+        forces an unnecessary review-synthesizer round.
 
       ### Read State (on every activation)
       1. Determine activation source and read payload fields:
@@ -842,6 +879,21 @@ hats:
       - MUST decide wave vs pass per the HARD RULE above (commit_count / changed_lines / untracked / diff state), NOT based on intent or trust in the executor
       - MUST include `skip_reason: "empty_diff"` in every `review.passed` payload (audit field — missing it is a hard schema violation)
       - MUST select conditional dimensions based on actual diff content
+
+      ### 2026-06-13-004 U11 Wave progress tracking (P1-3)
+
+      - At the start of every wave dispatch (right before
+        `ralph wave emit review.wave.ready --payloads ...`),
+        update `.agents/scratchpad/<plan>/progress.md` with
+        `Active Wave: <wave_id> (N dimensions)` so operators
+        and downstream hats can see the in-flight wave.
+      - After the synthesizer fires (`review.passed` /
+        `review.failed` / `plan.blocked`), clear the line back
+        to `Active Wave: (none)` in the same progress.md edit.
+      - The 2026-06-13 incident left `Active Wave: 空` in
+        progress.md because the synthesizer never fired; this
+        small bookkeeping is what makes the diagnose report
+        and the human-visible progress file agree.
 
   dimension-reviewer:
     name: "🔬 Dimension Reviewer"

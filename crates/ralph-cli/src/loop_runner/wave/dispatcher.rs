@@ -471,10 +471,21 @@ pub async fn handle_wave_events(
                 );
 
                 // Merge result events into main events file so aggregator hat picks them up
+                // 2026-06-13-004 U1 (P0-1): pass `detected.target_hat`
+                // as `default_source_hat` so each merged record carries a
+                // provenance attribution. The merge layer prefers the
+                // worker's own `event.source` when present (i.e. the
+                // worker hat name like `dimension-reviewer`); when the
+                // worker did not populate `source`, we fall back to
+                // `detected.target_hat` (e.g. `review-coordinator`). The
+                // resulting `hat` field is what the isolated scope
+                // check in `process_parse_result` reads to decide
+                // whether the re-published event is in-scope.
                 if let Err(e) = merge_wave_results_to_events_file(
                     &completed,
                     &main_events_file,
                     &detected.hat_config.publishes,
+                    detected.target_hat.as_str(),
                 ) {
                     warn!(error = %e, "Failed to merge wave results to events file");
                 }
@@ -640,7 +651,7 @@ pub async fn execute_wave_structured(
 
     // Register wave in tracker
     let mut tracker = WaveTracker::new();
-    tracker.register_wave(wave.wave_id.clone(), wave.total);
+    tracker.register_wave_with_source(wave.wave_id.clone(), wave.total, Some(wave.target_hat.clone()));
 
     // Resolve per-worker events directory
     let wave_dir = main_events_file
@@ -1854,7 +1865,7 @@ hats: {}
         );
 
         let mut tracker = ralph_core::WaveTracker::new();
-        tracker.register_wave(wave.wave_id.clone(), wave.total);
+        tracker.register_wave_with_source(wave.wave_id.clone(), wave.total, Some(wave.target_hat.clone()));
 
         let outcome = dispatch_wave_inner(tracker, requests, ctx, executor.clone(), silent_progress()).await;
 
@@ -1911,7 +1922,7 @@ hats: {}
         );
 
         let mut tracker = ralph_core::WaveTracker::new();
-        tracker.register_wave(wave.wave_id.clone(), wave.total);
+        tracker.register_wave_with_source(wave.wave_id.clone(), wave.total, Some(wave.target_hat.clone()));
 
         let outcome = dispatch_wave_inner(tracker, requests, ctx, executor.clone(), silent_progress()).await;
         // Two-stage timeout: partial fired first, then we waited
@@ -1954,7 +1965,7 @@ hats: {}
         );
 
         let mut tracker = ralph_core::WaveTracker::new();
-        tracker.register_wave(wave.wave_id.clone(), wave.total);
+        tracker.register_wave_with_source(wave.wave_id.clone(), wave.total, Some(wave.target_hat.clone()));
 
         let outcome = dispatch_wave_inner(tracker, requests, ctx, executor.clone(), silent_progress()).await;
         match outcome {
@@ -2016,7 +2027,7 @@ hats: {}
         );
 
         let mut tracker = ralph_core::WaveTracker::new();
-        tracker.register_wave(wave.wave_id.clone(), wave.total);
+        tracker.register_wave_with_source(wave.wave_id.clone(), wave.total, Some(wave.target_hat.clone()));
 
         let outcome =
             tokio::time::timeout(Duration::from_secs(2), dispatch_wave_inner(tracker, requests, ctx, executor, silent_progress()))
@@ -2057,7 +2068,7 @@ hats: {}
         );
 
         let mut tracker = ralph_core::WaveTracker::new();
-        tracker.register_wave(wave.wave_id.clone(), wave.total);
+        tracker.register_wave_with_source(wave.wave_id.clone(), wave.total, Some(wave.target_hat.clone()));
 
         let outcome = dispatch_wave_inner(tracker, requests, ctx, executor.clone(), silent_progress()).await;
         match outcome {
@@ -2103,7 +2114,7 @@ hats: {}
         );
 
         let mut tracker = ralph_core::WaveTracker::new();
-        tracker.register_wave(wave.wave_id.clone(), wave.total);
+        tracker.register_wave_with_source(wave.wave_id.clone(), wave.total, Some(wave.target_hat.clone()));
 
         let outcome = dispatch_wave_inner(tracker, requests, ctx, executor.clone(), silent_progress()).await;
         match outcome {
@@ -2294,7 +2305,7 @@ hats: {}
         );
 
         let mut tracker = ralph_core::WaveTracker::new();
-        tracker.register_wave(wave.wave_id.clone(), wave.total);
+        tracker.register_wave_with_source(wave.wave_id.clone(), wave.total, Some(wave.target_hat.clone()));
 
         let outcome = tokio::time::timeout(
             Duration::from_secs(20),
@@ -2361,7 +2372,7 @@ hats: {}
         );
 
         let mut tracker = ralph_core::WaveTracker::new();
-        tracker.register_wave(wave.wave_id.clone(), wave.total);
+        tracker.register_wave_with_source(wave.wave_id.clone(), wave.total, Some(wave.target_hat.clone()));
 
         let outcome = tokio::time::timeout(
             Duration::from_secs(5),

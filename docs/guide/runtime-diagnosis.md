@@ -331,6 +331,30 @@ Options:
           is missing/empty or its latest active entry points at a dead
           worktree. Pass `--diagnostics-root` to bypass the registry.
 
+### Worktree loops（2026-06-13-004 U10）
+
+When you run a loop inside a git worktree, the diagnostics files
+land in the **worktree's** `.ralph/diagnostics/<session>/`, not the
+main repo's. The default resolution above (`loops.json` →
+`workspace.workspace`) handles this transparently: as long as the
+worktree loop registered itself in the main repo's
+`.ralph/loops.json` (the default for `ralph run` and parallel
+loops), `ralph diagnose --session latest` from either the main
+repo or the worktree will pick up the correct session.
+
+If `ralph diagnose` cannot find the loop in `loops.json` (e.g. the
+worktree was deleted without unregistering), pass
+`--diagnostics-root <worktree>/.ralph/diagnostics` to point at the
+session directory directly.
+
+EventLoop construction (`EventLoop::with_context`) uses
+`LoopContext::workspace()` to build the `DiagnosticsCollector`, so
+the collector's session directory matches the worktree's
+`.ralph/diagnostics/` automatically. No preset or config change
+is required to opt a worktree loop into runtime diagnosis — set
+`RALPH_DIAGNOSTICS=1` (or `telemetry.runtime_diagnosis.enabled: true`)
+in the usual way.
+
   -c, --config <CONFIG>   父命令通用参数：ralph.yml 或 core.field=value 覆盖
   -H, --hats <HATS>       父命令通用参数：hat 集合（一般 diagnose 不需要）
   -v, --verbose           父命令通用参数

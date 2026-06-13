@@ -235,10 +235,21 @@ pub fn read_worker_events_with_retry(path: &Path, timeout: Duration) -> Vec<ralp
 /// (its `RALPH_EVENTS_FILE` env var points at a per-worker file), so
 /// any record missing these fields is a bypass attempt or a stale
 /// hand-written file from a historical run.
+///
+/// 2026-06-13-004 U1 (P0-1): every record MUST also carry `hat` (and
+/// the canonical `source` mirror) so the re-published event survives
+/// the isolated scope check in `process_parse_result`. The merge
+/// layer is the only path that sees the original worker hat identity
+/// — the worker's per-worker events file never reaches the main bus
+/// directly. If `event.source` is empty (e.g. synthetic record from a
+/// worker that failed to populate provenance), we fall back to
+/// `default_source_hat` (the wave's target hat) so the line still
+/// survives the origin guard.
 pub fn merge_wave_results_to_events_file(
     completed: &ralph_core::CompletedWave,
     events_file: &Path,
     publish_topics: &[String],
+    default_source_hat: &str,
 ) -> Result<()> {
     use std::io::Write;
 
@@ -264,6 +275,54 @@ pub fn merge_wave_results_to_events_file(
             merged_indexes.push(result.index);
         }
         for event in &result.events {
+            // 2026-06-13-004 review fix (P0 #1 / ADV-2): reject
+            // worker-written `event.source` that does not match the
+            // dispatcher-expected `expected_source_hat`. Without
+            // this, a malicious worker can claim any hat name
+            // (e.g. `review-coordinator`) in its per-worker JSONL
+            // and bypass the isolated scope check in
+            // `process_parse_result` (U2). When
+            // `expected_source_hat` is `None` (legacy wave or
+            // smoke fixture), the check is skipped so the fix is
+            // non-breaking.
+            if let Some(expected) = completed.expected_source_hat.as_ref() {
+                match event.source.as_ref() {
+                    Some(s) if s == expected => {}
+                    Some(s) => {
+                        tracing::warn!(
+                            wave_id = %completed.wave_id,
+                            worker_index = result.index,
+                            expected_hat = %expected.as_str(),
+                            claimed_hat = %s.as_str(),
+                            topic = %event.topic,
+                            "ADV-2 hat-spoofing rejected: worker's `source` does not match dispatcher's `expected_source_hat`; dropping event"
+                        );
+                        continue;
+                    }
+                    None => {
+                        tracing::warn!(
+                            wave_id = %completed.wave_id,
+                            worker_index = result.index,
+                            expected_hat = %expected.as_str(),
+                            topic = %event.topic,
+                            "ADV-2 hat-spoofing rejected: worker omitted `source`; dropping event"
+                        );
+                        continue;
+                    }
+                }
+            }
+            // U1 (P0-1): preserve worker hat provenance. Prefer the
+            // event's own `source` (set by the worker process); fall
+            // back to `default_source_hat` (the wave's target hat)
+            // for synthetic or under-provisioned worker records. We
+            // write BOTH `hat` and `source` so downstream readers
+            // (EventRecordRaw, isolated scope, origin guard) all see
+            // the same attribution without ambiguity.
+            let hat = event
+                .source
+                .as_ref()
+                .map(ralph_proto::HatId::as_str)
+                .unwrap_or(default_source_hat);
             let record = serde_json::json!({
                 "topic": event.topic.as_str(),
                 "payload": event.payload,
@@ -271,6 +330,8 @@ pub fn merge_wave_results_to_events_file(
                 "wave_id": completed.wave_id,
                 "wave_index": result.index,
                 "wave_total": completed.wave_total,
+                "hat": hat,
+                "source": hat,
             });
             buf.push_str(&serde_json::to_string(&record)?);
             buf.push('\n');
@@ -279,6 +340,11 @@ pub fn merge_wave_results_to_events_file(
 
     // Also write failure events so the aggregator knows about partial results
     for failure in &completed.failures {
+        // U1: synthetic failure records use `default_source_hat` as
+        // the provenance — they are emitted by the dispatcher, not
+        // a worker, so the wave's target hat is the only safe
+        // attribution. This still survives the origin guard because
+        // `publish_topics` is constrained by the preset.
         let record = serde_json::json!({
             "topic": "wave.worker.failed",
             "payload": format!("Worker {} failed: {}", failure.index, failure.error),
@@ -286,6 +352,8 @@ pub fn merge_wave_results_to_events_file(
             "wave_id": completed.wave_id,
             "wave_index": failure.index,
             "wave_total": completed.wave_total,
+            "hat": default_source_hat,
+            "source": default_source_hat,
         });
         buf.push_str(&serde_json::to_string(&record)?);
         buf.push('\n');
@@ -303,6 +371,8 @@ pub fn merge_wave_results_to_events_file(
                 "wave_id": completed.wave_id,
                 "wave_index": failure.index,
                 "wave_total": completed.wave_total,
+                "hat": default_source_hat,
+                "source": default_source_hat,
             });
             buf.push_str(&serde_json::to_string(&record)?);
             buf.push('\n');

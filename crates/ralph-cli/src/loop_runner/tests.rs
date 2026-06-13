@@ -4952,8 +4952,8 @@ fn make_worker_event(topic: &str, payload: &str) -> ralph_core::Event {
 fn text_backend_body(payload: &str) -> String {
     format!(
         r#"printf 'plain text from worker\n'
-cat <<'EOF' > "$RALPH_EVENTS_FILE"
-{{"topic":"review.done","payload":"{payload}","ts":"2026-01-01T00:00:00Z"}}
+cat <<EOF > "$RALPH_EVENTS_FILE"
+{{"topic":"review.done","payload":"{payload}","ts":"2026-01-01T00:00:00Z","hat":"${{RALPH_CURRENT_HAT:-}}","source":"${{RALPH_CURRENT_HAT:-}}"}}
 EOF"#,
     )
 }
@@ -4964,8 +4964,8 @@ fn claude_backend_body(payload: &str) -> String {
         r#"printf '%s\n' \
 '{{"type":"assistant","message":{{"content":[{{"type":"text","text":"hello from named claude"}}]}}}}' \
 '{{"type":"result","duration_ms":1,"total_cost_usd":0.0,"num_turns":1,"is_error":false}}'
-cat <<'EOF' > "$RALPH_EVENTS_FILE"
-{{"topic":"review.done","payload":"{payload}","ts":"2026-01-01T00:00:00Z"}}
+cat <<EOF > "$RALPH_EVENTS_FILE"
+{{"topic":"review.done","payload":"{payload}","ts":"2026-01-01T00:00:00Z","hat":"${{RALPH_CURRENT_HAT:-}}","source":"${{RALPH_CURRENT_HAT:-}}"}}
 EOF"#,
     )
 }
@@ -4977,8 +4977,8 @@ fn pi_backend_body(payload: &str) -> String {
 '{{"type":"message_update","assistantMessageEvent":{{"type":"text_delta","contentIndex":0,"delta":"hello from named pi"}}}}' \
 '{{"type":"tool_execution_start","toolCallId":"toolu_1","toolName":"bash","args":{{"command":"echo hi"}}}}' \
 '{{"type":"tool_execution_end","toolCallId":"toolu_1","toolName":"bash","result":{{"content":[{{"type":"text","text":"hi\n"}}]}},"isError":false}}'
-cat <<'EOF' > "$RALPH_EVENTS_FILE"
-{{"topic":"review.done","payload":"{payload}","ts":"2026-01-01T00:00:00Z"}}
+cat <<EOF > "$RALPH_EVENTS_FILE"
+{{"topic":"review.done","payload":"{payload}","ts":"2026-01-01T00:00:00Z","hat":"${{RALPH_CURRENT_HAT:-}}","source":"${{RALPH_CURRENT_HAT:-}}"}}
 EOF"#,
     )
 }
@@ -5318,6 +5318,7 @@ fn assert_single_failure_with_synthetic_events_marked(
         completed,
         &merged_events_path,
         &["review.done".to_string(), "review.audit".to_string()],
+        "reviewer",
     )
     .expect("merge wave failure results");
 
@@ -5372,7 +5373,7 @@ fn assert_partial_timeout_events_visible_marked(
 
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let merged_events_path = temp_dir.path().join("events.jsonl");
-    merge_wave_results_to_events_file(completed, &merged_events_path, &["review.done".to_string()])
+    merge_wave_results_to_events_file(completed, &merged_events_path, &["review.done".to_string()], "reviewer")
         .expect("merge partial-timeout results");
 
     let merged = std::fs::read_to_string(&merged_events_path).expect("read merged events");
@@ -6845,12 +6846,14 @@ async fn test_run_wave_worker_acp_timeout_with_partial_events_keeps_events_visib
         failures: vec![],
         duration: Duration::from_millis(1),
         partial: false,
+        expected_source_hat: None,
     };
 
     merge_wave_results_to_events_file(
         &completed,
         &merged_events_path,
         &["review.done".to_string()],
+        "reviewer",
     )
     .expect("merge partial ACP results");
 
@@ -7005,12 +7008,14 @@ fn test_merge_wave_results_to_events_file_synthesizes_failure_events() {
         }],
         duration: Duration::from_secs(1),
         partial: false,
+        expected_source_hat: None,
     };
 
     merge_wave_results_to_events_file(
         &completed,
         &events_file,
         &["review.done".to_string(), "review.audit".to_string()],
+        "reviewer",
     )
     .expect("merge wave results");
 
@@ -9987,13 +9992,14 @@ fn u3_wave_merge_stamps_wave_total_on_every_record() {
         failures: Vec::new(),
         duration: Duration::from_millis(1234),
         partial: false,
+        expected_source_hat: None,
     };
 
     let tmp = tempfile::TempDir::new().unwrap();
     let events_path = tmp.path().join("events.jsonl");
     std::fs::write(&events_path, "").unwrap();
 
-    merge_wave_results_to_events_file(&completed, &events_path, &["review.dimension.done".into()])
+    merge_wave_results_to_events_file(&completed, &events_path, &["review.dimension.done".into()], "reviewer")
         .expect("merge must succeed");
 
     let raw = std::fs::read_to_string(&events_path).unwrap();
@@ -10007,6 +10013,21 @@ fn u3_wave_merge_stamps_wave_total_on_every_record() {
         assert!(v["wave_index"].is_number(), "line {i} missing wave_index");
         assert_eq!(v["wave_total"], 8, "line {i} wrong wave_total");
         assert!(v["ts"].is_string(), "line {i} missing ts");
+        // 2026-06-13-004 U1 + review fix (T-P1-1): every merged
+        // record must carry the `hat` field so the downstream
+        // `process_parse_result` scope check (U2) can read it.
+        // Pre-fix this only checked wave_id/index/total/ts.
+        assert_eq!(
+            v["hat"], "reviewer",
+            "line {i} missing or wrong 'hat' field (U1 provenance)"
+        );
+        // U1 also mirrors the provenance into `source` so any
+        // legacy `EventRecordRaw` consumer (which reads `source`
+        // not `hat`) still sees the worker identity.
+        assert_eq!(
+            v["source"], "reviewer",
+            "line {i} missing or wrong 'source' field (U1 provenance mirror)"
+        );
         let idx = v["wave_index"].as_u64().unwrap() as u32;
         assert!(seen_indexes.insert(idx), "duplicate wave_index {idx}");
     }
@@ -10041,12 +10062,13 @@ fn u3_wave_merge_emits_synthetic_events_on_failure_with_wave_total() {
         ],
         duration: Duration::from_millis(500),
         partial: false,
+        expected_source_hat: None,
     };
     let tmp = tempfile::TempDir::new().unwrap();
     let events_path = tmp.path().join("events.jsonl");
     std::fs::write(&events_path, "").unwrap();
 
-    merge_wave_results_to_events_file(&completed, &events_path, &["review.dimension.done".into()])
+    merge_wave_results_to_events_file(&completed, &events_path, &["review.dimension.done".into()], "reviewer")
         .expect("merge must succeed");
 
     let raw = std::fs::read_to_string(&events_path).unwrap();
@@ -10101,12 +10123,13 @@ fn u3_wave_merge_handles_duplicate_indexes_without_panicking() {
         failures: Vec::new(),
         duration: Duration::from_millis(100),
         partial: false,
+        expected_source_hat: None,
     };
     let tmp = tempfile::TempDir::new().unwrap();
     let events_path = tmp.path().join("events.jsonl");
     std::fs::write(&events_path, "").unwrap();
 
-    merge_wave_results_to_events_file(&completed, &events_path, &["review.dimension.done".into()])
+    merge_wave_results_to_events_file(&completed, &events_path, &["review.dimension.done".into()], "reviewer")
         .expect("merge must succeed");
     let raw = std::fs::read_to_string(&events_path).unwrap();
     let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
@@ -10857,7 +10880,7 @@ if [ -z "${RALPH_EVENTS_FILE:-}" ]; then
   exit 2
 fi
 cat > "$RALPH_EVENTS_FILE" <<PEOF
-{"topic":"review.done","payload":"dim-${RALPH_WAVE_INDEX:-0}-result","ts":"2026-01-01T00:00:00Z","wave_id":"${RALPH_WAVE_ID:-w-default}","wave_index":${RALPH_WAVE_INDEX:-0},"wave_total":${RALPH_WAVE_TOTAL:-0}}
+{"topic":"review.done","payload":"dim-${RALPH_WAVE_INDEX:-0}-result","ts":"2026-01-01T00:00:00Z","wave_id":"${RALPH_WAVE_ID:-w-default}","wave_index":${RALPH_WAVE_INDEX:-0},"wave_total":${RALPH_WAVE_TOTAL:-0},"hat":"${RALPH_CURRENT_HAT:-}","source":"${RALPH_CURRENT_HAT:-}"}
 PEOF
 exit 0
 "#;
@@ -10968,6 +10991,7 @@ async fn u3_wave_dispatch_merge_activates_wait_for_all_aggregator() {
         &completed,
         &events_file,
         &wave.hat_config.publishes,
+        wave.target_hat.as_str(),
     )
     .expect("merge must succeed");
 
@@ -11142,11 +11166,13 @@ async fn u3_partial_wave_does_not_activate_aggregator_until_full_set() {
         failures: Vec::new(),
         duration: completed.duration,
         partial: true,
+        expected_source_hat: None,
     };
     merge_wave_results_to_events_file(
         &partial,
         &events_file,
         &wave.hat_config.publishes,
+        wave.target_hat.as_str(),
     )
     .expect("partial merge must succeed");
 
@@ -11203,6 +11229,7 @@ async fn u3_partial_wave_does_not_activate_aggregator_until_full_set() {
         &completed,
         &events_file,
         &wave.hat_config.publishes,
+        wave.target_hat.as_str(),
     )
     .expect("full merge must succeed");
     event_loop2.initialize("u3-b init full");
@@ -11317,6 +11344,7 @@ async fn u3_worker_failure_emits_synthetic_result_for_aggregator() {
         &completed,
         &events_file,
         &wave.hat_config.publishes,
+        wave.target_hat.as_str(),
     )
     .expect("merge must succeed");
 
@@ -11488,12 +11516,14 @@ async fn u3_two_independent_waves_route_to_separate_aggregations() {
         &completed_a,
         &events_file,
         &wave_a.hat_config.publishes,
+        wave_a.target_hat.as_str(),
     )
     .expect("merge A");
     merge_wave_results_to_events_file(
         &completed_b,
         &events_file,
         &wave_b.hat_config.publishes,
+        wave_b.target_hat.as_str(),
     )
     .expect("merge B");
 
@@ -11603,4 +11633,140 @@ fn init_git_workspace(workspace: &std::path::Path) {
     std::fs::write(workspace.join("README.md"), "# Test\n").unwrap();
     run(&["add", ".gitignore", "README.md"]);
     run(&["commit", "-m", "init"]);
+}
+
+// 2026-06-13-004 P0 #1 ADV-2 hat-spoofing defense tests.
+//
+// These tests exercise the merge-layer `expected_source_hat`
+// check at the production entry point
+// (`merge_wave_results_to_events_file`). Without the
+// `expected_source_hat` field on `CompletedWave` and the
+// `event.source == expected` check, a worker writing
+// `hat=review-coordinator` in its per-worker JSONL passes
+// the merge layer and then uses U2's `scope_hat = event.hat`
+// as the scope anchor — bypassing the entire isolated
+// scope provenance chain. Round-1 review flagged this as
+// P0 follow-up; round-2 closed ADV-1 but not ADV-2; these
+// tests pin the round-3 fix.
+
+/// P0 #1 ADV-2: a worker that claims a different hat name in
+/// its per-worker JSONL must be rejected at the merge layer
+/// (not later at the runtime isolated scope check). The
+/// legitimate event in the same wave must still be admitted.
+#[test]
+fn test_adv2_hat_spoofing_rejected_at_merge_layer() {
+    use crate::loop_runner::wave::merge_wave_results_to_events_file;
+    use ralph_core::{CompletedWave, WaveResult};
+    use ralph_proto::Event;
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().unwrap();
+    let events_path = temp.path().join("events.jsonl");
+    std::fs::write(&events_path, "").unwrap();
+
+    // Build a `CompletedWave` with
+    // `expected_source_hat = Some("worker")` (the dispatcher's
+    // promised hat) and two events: one legitimate
+    // (`source = Some("worker")`) and one spoofed
+    // (`source = Some("review-coordinator")`).
+    let mut event_legit = Event::new("review.dimension.done", "{\"i\":0}");
+    event_legit = event_legit.with_source(ralph_proto::HatId::new("worker"));
+    let mut event_spoofed = Event::new("review.dimension.done", "{\"i\":1}");
+    event_spoofed = event_spoofed.with_source(ralph_proto::HatId::new("review-coordinator"));
+    let completed = CompletedWave {
+        wave_id: "w-attack".to_string(),
+        wave_total: 2,
+        results: vec![WaveResult {
+            index: 0,
+            events: vec![event_legit, event_spoofed],
+        }],
+        failures: Vec::new(),
+        duration: Duration::from_millis(10),
+        partial: false,
+        expected_source_hat: Some(ralph_proto::HatId::new("worker")),
+    };
+
+    merge_wave_results_to_events_file(
+        &completed,
+        &events_path,
+        &["review.dimension.done".to_string()],
+        "worker",
+    )
+    .expect("merge must succeed (legitimate event should be admitted)");
+
+    let raw = std::fs::read_to_string(&events_path).expect("read merged");
+    let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "ADV-2: spoofed event must be dropped; only the legitimate event should be merged; got {} lines: {:?}",
+        lines.len(),
+        lines
+    );
+    let v: serde_json::Value = serde_json::from_str(lines[0]).expect("json");
+    assert_eq!(
+        v["hat"], "worker",
+        "ADV-2: merged record's hat must equal the dispatcher's expected_source_hat"
+    );
+    assert_eq!(
+        v["source"], "worker",
+        "ADV-2: merged record's source must equal the dispatcher's expected_source_hat"
+    );
+    assert!(
+        !raw.contains("review-coordinator"),
+        "ADV-2: spoofed hat name must not appear in merged file"
+    );
+}
+
+/// P0 #1 ADV-2: when the worker omits `source` (None), the
+/// merge layer must still drop the event (rather than fall
+/// back to `default_source_hat`). This is the defense against
+/// the "I forgot to set source" attack path that round 1's
+/// `hat = event.source.unwrap_or(default_source_hat)`
+/// enabled.
+#[test]
+fn test_adv2_hat_spoofing_omitted_source_rejected_at_merge_layer() {
+    use crate::loop_runner::wave::merge_wave_results_to_events_file;
+    use ralph_core::{CompletedWave, WaveResult};
+    use ralph_proto::Event;
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().unwrap();
+    let events_path = temp.path().join("events.jsonl");
+    std::fs::write(&events_path, "").unwrap();
+
+    // Worker omitted `source` entirely (None). Even if the
+    // round-1 fallback would have passed it through, the
+    // new check must drop it.
+    let event_no_source = Event::new("review.dimension.done", "{\"i\":0}");
+    let completed = CompletedWave {
+        wave_id: "w-omitted".to_string(),
+        wave_total: 1,
+        results: vec![WaveResult {
+            index: 0,
+            events: vec![event_no_source],
+        }],
+        failures: Vec::new(),
+        duration: Duration::from_millis(10),
+        partial: false,
+        expected_source_hat: Some(ralph_proto::HatId::new("worker")),
+    };
+
+    merge_wave_results_to_events_file(
+        &completed,
+        &events_path,
+        &["review.dimension.done".to_string()],
+        "worker",
+    )
+    .expect("merge must succeed");
+
+    let raw = std::fs::read_to_string(&events_path).expect("read merged");
+    let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(
+        lines.len(),
+        0,
+        "ADV-2 omitted-source: event with source=None must be dropped; got {} lines: {:?}",
+        lines.len(),
+        lines
+    );
 }
