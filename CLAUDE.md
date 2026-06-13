@@ -6,32 +6,53 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Build & Test
 
-```bash
-# Recommended parallel path (requires cargo-nextest; install once via `just nextest-install`).
-# ralph-cli tests run serially via the cli-serial test group in .config/nextest.toml;
-# every other package runs in parallel. Doctest is covered by a separate cargo test --doc step.
-./scripts/run-tests.sh                                # nextest run + cargo test --doc, with fallback to cargo test
-just test-parallel                                    # alias for scripts/run-tests.sh
-cargo nextest run --workspace --exclude ralph-e2e     # non-doctest tests, parallel (requires nextest)
-cargo test --workspace --exclude ralph-e2e --doc      # doctest coverage (nextest does not run doctest)
+> **⚠️ HARD RULE 1: 测试入口必须用 `cargo nextest run` 系列**(`./scripts/run-tests.sh` / `just test-parallel` / `cargo nextest run -p <pkg> --bin <bin> -- <subset>`)。**禁止**裸跑 `cargo test -p ralph-cli` 或 `cargo test -p ralph-cli --bin ralph`——根因是 `crates/ralph-cli/src/loop_runner/tests.rs:14-49` 的 4 个 process-global Mutex + 时间敏感测试(`std::thread::sleep(500ms)`)。Nextest 的 process-per-test 隔离 Mutex 是第一道保险。允许的例外:① `cargo test --doc` 跑 doctest(nextest 不跑);② nextest 不可用时的最后兜底 `cargo test --workspace --exclude ralph-e2e -- --test-threads=1`;③ `crates/ralph-core/data/ralph-tools*.md` 这类**仅文档用途**的 cargo test 引用。详见 `docs/solutions/developer-experience/ralph-cli-loop-runner-tests-must-run-serial.md`。
+>
+> **⚠️ HARD RULE 2: 默认走并发,确需串行时显式配置**。**能用并行的必须用并行**(快是默认值,不是可选优化)。具体分级见下方「并行 vs 串行分级表」。
 
-# Fallback path (no nextest required; same semantics as the historical CI gate).
+### 并行 vs 串行分级表(实际跑过的事实)
+
+| 范围 | 并行 / 串行 | 触发机制 | 根因(若需串行) |
+|---|---|---|---|
+| **`ralph-cli` 整个包**(`loop_runner` 二进制) | **串行** | `.config/nextest.toml:17-18, 20-22` `cli-serial = { max-threads = 1 }` + `[[profile.default.overrides]] filter = 'package(ralph-cli)'` | `loop_runner/tests.rs:14-49` 4 个 process-global Mutex **+ 时间敏感测试**(500ms sleep 等待子进程 flush,并行 CPU 抢占下 sleep 不够)。**两类风险都要保护**,process-per-test 只能解第一类(Mutex),解不了第二类(CPU 抢占) |
+| **`ralph-cli` 之外所有包**(`ralph-proto` / `ralph-core` / `ralph-adapters` / `ralph-telegram` / `ralph-tui` / `ralph-api` / `ralph-bench` / `ralph-e2e`) | **并行** | nextest 默认 `test-threads = num-cpus`,`[profile.default]` 无 group 限制 | 无 process-global Mutex,无时间敏感共享 TempDir |
+| **单包内单测**(`cargo nextest run -p ralph-core -- test_name`) | **走包级规则** | 继承所在包的 group 配置 | 同上 |
+| **Doctest** | 单独跑,`cargo test --doc` | `cargo test --doc`(nextest 不支持 doctest) | 不存在并发问题,但 doctest 的 `--test-threads=1` 仍是合理兜底 |
+| **E2E**(`ralph-e2e` 包) | 走其包默认;`cargo run -p ralph-e2e -- --mock` 是单进程 CLI | 不是 nextest 测试,无 nextest 配置 | 单次 mock run 顺序跑 scenario |
+| **Smoke / replay**(`smoke_runner` 集成测试) | 顺序跑 | `cargo nextest run -p ralph-core --features recording --test smoke_runner` | `smoke_runner.rs` 第 1 行 `#![cfg(feature = "recording")]`,必须开 `recording` feature 才编译 |
+| **BDD scenarios**(`scenarios` 集成测试) | 顺序跑 | `cargo nextest run -p ralph-core --test scenarios` | 集成测试 binary,走 `--test` 形式不是 `-- <substring>` 形式 |
+
+**为什么不放开 ralph-cli 并发**:已验证(2026-06-13,见 `docs/brainstorms/2026-06-13-ralph-cli-test-concurrency-via-nextest-requirements.md`)——删 `cli-serial` 配置后 3 跑 3 失败,根因是 500ms sleep 在 CPU 抢占下超时。**两件事必须同时改**(sleep 改为事件驱动等待 + 4 个静态量改 per-test 隔离)才能放开,不在本轮范围。
+
+```bash
+# 全 workspace 并行(ralph-cli 串行,其他 7 包并行)——CI 推荐入口
+./scripts/run-tests.sh
+
+# 等价手写
+cargo nextest run --workspace --exclude ralph-e2e
+cargo test --workspace --exclude ralph-e2e --doc
+
+# 子集(全部走 nextest,继承包级并行/串行规则)
+cargo nextest run -p ralph-cli --bin ralph -- <substring>          # 串行(cli-serial)
+cargo nextest run -p ralph-core -- <substring>                     # 并行
+cargo nextest run -p ralph-api --test <integration_test_name>     # 并行,集成测试走 --test 形式
+cargo nextest run -p ralph-core --test scenarios                   # BDD scenarios 集成测试
+cargo nextest run -p ralph-core --features recording --test smoke_runner  # Smoke 集成测试,需 recording feature
+cargo nextest run -p ralph-e2e --list 2>/dev/null || cargo run -p ralph-e2e -- --list  # E2E 不是 nextest,走 CLI
+
+# Last-resort fallback ONLY when nextest is unavailable; same semantics as the historical CI gate.
 cargo test --workspace --exclude ralph-e2e -- --test-threads=1 --skip acp_executor::tests::test_create_terminal_and_output
 just test-serial                                      # alias for the single-threaded slow path
 
 # Other build, lint and test commands.
 cargo build
-cargo test -p ralph-core test_name           # Run single test
-cargo test -p ralph-core smoke_runner        # Smoke tests (replay-based)
-cargo test -p ralph-core scenarios           # BDD scenario integration tests
-cargo run -p ralph-e2e -- --mock             # E2E tests (CI-safe)
 cargo clippy                                 # Lint (pedantic configured in workspace)
 cargo fmt                                    # Format
 cargo doc --no-deps                          # Documentation
 ./scripts/setup-hooks.sh                     # Install pre-commit hooks (once)
 ```
 
-**IMPORTANT**: Run `cargo test` (or `./scripts/run-tests.sh` if nextest is installed) before declaring any task done. Smoke test after code changes.
+**IMPORTANT**: Run `cargo nextest run` (or `./scripts/run-tests.sh` if nextest is installed) before declaring any task done. Smoke test after code changes.
 
 ### Web Dashboard
 
@@ -368,7 +389,7 @@ ralph wave emit review.file --payloads "src/main.rs" "src/lib.rs" "src/config.rs
 
 ## Smoke Tests (Replay-Based)
 
-Use the `smoke_runner` entry point from Build & Test above. Per-backend filters are passed as test name substrings, e.g. `cargo test -p ralph-core -- kiro`.
+Use the `smoke_runner` entry point from Build & Test above. Per-backend filters are passed as test name substrings, e.g. `cargo nextest run -p ralph-core -- kiro` (走 ralph-core 包内默认并发,见「Build & Test」段分级表)。
 
 **Fixtures location:** `crates/ralph-core/tests/fixtures/`
 
@@ -459,7 +480,7 @@ Runtime Diagnosis（U0–U8）是在上述 TUI / full diagnostics 之上的**可
 > **以下规则优先级最高，请在动手写任何代码前先完整读完本段。** 任何「先看了某段就开始写」的冲动都应当先回头对照本段。
 
 - 讨论 ralph-orchestrator 的任何功能、架构、行为时，必须先去读源码确认，不允许凭记忆或猜测讨论
-- Run `cargo test` before declaring any task done
+- Run `cargo nextest run`(或 `./scripts/run-tests.sh`)before declaring any task done——绝对不要用裸 `cargo test` 跑 `ralph-cli` 测试,会触发 loop_runner 的 process-global Mutex 中毒 flake(参见本文档「Build & Test」段 HARD RULE 1)。**默认走并发**(ralph-cli 除外,见分级表)
 - Backwards compatibility doesn't matter — it adds clutter for no reason
 - Prefer replay-based smoke tests over live API calls for CI
 - BDD/Cucumber tests MUST exercise real runtime code paths via integration tests (not placeholder/source-only assertions)
@@ -475,6 +496,10 @@ Runtime Diagnosis（U0–U8）是在上述 TUI / full diagnostics 之上的**可
 - **不要手动编辑 `.ralph/` 下的运行时状态文件**（`loop.lock` / `events.jsonl` / `agent/memories.md` / `agent/tasks.jsonl` / `loops.json` / `merge-queue.jsonl` / `telegram-state.json` / `diagnostics/`）。这些由 loop 自己维护；手工改动会与 in-flight 状态错位。确实需要重置时，先停掉所有相关 loop 再用对应 CLI（如 `ralph loops clean`）清理。
 - **所有中文输出规则**：无论使用哪个 skill 进行操作，所有面向人类的输出——包括但不限于计划文档、设计文档、需求文档、实施计划、任务文件、报告、总结、注释说明、代码 review 意见、PR 描述等——都必须使用中文撰写。不影响：文件名、代码中的字符串字面量、代码注释中的技术标识符（如变量名、函数名、crate 名）、命令行输出块。这条规则优先于任何 skill 内置的语言默认值。
 - **CLAUDE.md 与 AGENTS.md 同步规则**：这两个文件必须保持内容完全一致。修改其中一个时，必须同步更新另一个（推荐 `cp CLAUDE.md AGENTS.md`），确保不会出现差异。
+- **测试入口强制 nextest(HARD RULE 1 + 2)**:
+  - **HARD RULE 1**:本项目所有测试入口必须是 `cargo nextest run` 系列(`./scripts/run-tests.sh` / `just test-parallel` / `cargo nextest run -p <pkg> --bin <bin> -- <subset>`),**禁止**裸跑 `cargo test -p ralph-cli` 或 `cargo test -p ralph-cli --bin ralph`。根因是 `crates/ralph-cli/src/loop_runner/tests.rs:14-49` 的 4 个 process-global Mutex + 时间敏感测试。允许的例外:① `cargo test --doc` 跑 doctest(nextest 不跑);② nextest 不可用时的最后兜底 `cargo test --workspace --exclude ralph-e2e -- --test-threads=1`;③ `crates/ralph-core/data/ralph-tools*.md` 这类**仅文档用途**的 cargo test 引用。
+  - **HARD RULE 2**:默认走并发,确需串行时显式配置。**能用并行的必须用并行**(快是默认值,不是可选优化)。具体分级见「Build & Test」段「并行 vs 串行分级表」——`ralph-cli` 整个包走 cli-serial 串行(根因:Mutex + sleep CPU 抢占,2026-06-13 已验证不能放开);其他 7 个包全部走 nextest 默认并发(`test-threads = num-cpus`)。
+  - **修改任一规则须先确认所有 IDE/hook/CI 入口已切到 nextest**,并跑 3+1 验证(ralph-cli 子集 3 跑 + 全 workspace 1 跑)。
 
 <!-- rtk-instructions v2 -->
 # RTK (Rust Token Killer) - Token-Optimized Commands
