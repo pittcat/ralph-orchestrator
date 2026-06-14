@@ -1769,6 +1769,61 @@ fn write_cleanup_diagnostic(
     Ok(path)
 }
 
+/// Remove the loop lock file if it was left behind by a killed or crashed
+/// subprocess-TUI child.
+///
+/// In subprocess TUI mode the parent intentionally does not hold the loop
+/// lock; the child RPC process acquires it.  When the child is killed by a
+/// signal (SIGINT/SIGTERM) it cannot drop its `LockGuard`, so the lock file
+/// is left on disk with a dead PID.  This helper inspects the lock and
+/// removes it only when it is stale (no flock held) so we do not disturb an
+/// active loop that started after this child exited.
+fn cleanup_subprocess_loop_lock(workspace: &Path, child_id: Option<u32>) {
+    use ralph_core::{LockStatus, LoopLock};
+
+    let lock_path = workspace.join(LoopLock::LOCK_FILE);
+    if !lock_path.exists() {
+        return;
+    }
+
+    match LoopLock::inspect(workspace) {
+        Ok(LockStatus::None) => {}
+        Ok(LockStatus::Stale(_)) => {
+            if let Err(e) = std::fs::remove_file(&lock_path) {
+                warn!(
+                    error = %e,
+                    path = %lock_path.display(),
+                    "Failed to remove stale loop lock left by subprocess TUI child"
+                );
+            } else {
+                info!(
+                    path = %lock_path.display(),
+                    "Removed stale loop lock left by subprocess TUI child"
+                );
+            }
+        }
+        Ok(LockStatus::Active(metadata)) => {
+            if Some(metadata.pid) == child_id {
+                // Metadata still points to our child but the flock is held.
+                // This is unexpected after child.wait(); do not remove an
+                // active lock that may now belong to another process.
+                warn!(
+                    child_id = ?child_id,
+                    lock_pid = metadata.pid,
+                    "Loop lock metadata matches child but flock is still held; leaving lock in place"
+                );
+            }
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                path = %lock_path.display(),
+                "Failed to inspect loop lock during subprocess TUI cleanup"
+            );
+        }
+    }
+}
+
 /// Run the orchestration loop as a subprocess with TUI attached.
 ///
 /// This spawns `ralph run --rpc` as a child process and attaches the TUI
@@ -2097,6 +2152,12 @@ async fn run_subprocess_tui(
     if child.id().is_some() {
         let _ = child.wait().await;
     }
+
+    // R13: the child RPC process held the loop lock.  If we killed it (or it
+    // crashed) the LockGuard was never dropped, leaving a stale lock file.
+    // Inspect the lock and remove it only when no other process holds the
+    // flock, so a concurrently-started loop is not disturbed.
+    cleanup_subprocess_loop_lock(&args.workspace, child_id);
 
     let cleanup_elapsed = cleanup_start.elapsed();
     info!(
@@ -2989,6 +3050,43 @@ hats:
         assert_eq!(value["signal"], "SIGINT");
         assert!(value["pid"].is_number());
         assert!(value["timestamp"].is_string());
+    }
+
+    // ── R13: subprocess TUI loop-lock cleanup ───────────────────────────────
+
+    #[test]
+    fn cleanup_subprocess_loop_lock_no_op_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No lock file exists - should not panic or create anything.
+        cleanup_subprocess_loop_lock(tmp.path(), Some(12345));
+        assert!(!tmp.path().join(".ralph/loop.lock").exists());
+    }
+
+    #[test]
+    fn cleanup_subprocess_loop_lock_removes_stale_lock() {
+        use ralph_core::LockMetadata;
+        use std::fs;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ralph_dir = tmp.path().join(".ralph");
+        fs::create_dir_all(&ralph_dir).unwrap();
+        let lock_path = ralph_dir.join("loop.lock");
+
+        // Write lock metadata without holding the flock -> stale lock.
+        let metadata = LockMetadata {
+            pid: 99999,
+            started: chrono::Utc::now(),
+            prompt: "stale".to_string(),
+        };
+        fs::write(&lock_path, serde_json::to_string(&metadata).unwrap()).unwrap();
+        assert!(lock_path.exists());
+
+        cleanup_subprocess_loop_lock(tmp.path(), Some(99999));
+
+        assert!(
+            !lock_path.exists(),
+            "stale loop lock should be removed after subprocess TUI cleanup"
+        );
     }
 
     #[tokio::test]
