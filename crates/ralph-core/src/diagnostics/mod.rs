@@ -394,28 +394,38 @@ impl DiagnosticsCollector {
     /// Writes a session pointer to
     /// `<main_repo>/.ralph/diagnostics-session-pointer.json` pointing
     /// back at this collector's session directory. Only call this when
-    /// the collector is running inside a worktree (i.e.
-    /// `main_repo != session_dir`'s workspace). The pointer lets
-    /// `ralph diagnose` find the worktree session after the loop ends
-    /// and `loops.json` no longer carries an alive entry for it
-    /// (U4, 2026-06-14).
+    /// the collector is running inside a worktree — pass
+    /// `worktree_path` (the worktree's absolute path, e.g. via
+    /// `loop_context.workspace()`) so the function can detect that the
+    /// session lives *inside* the worktree, not in main_repo. The
+    /// pointer lets `ralph diagnose` find the worktree session after
+    /// the loop ends and `loops.json` no longer carries an alive
+    /// entry for it (U4, 2026-06-14; fix on 2026-06-14: previous
+    /// `session_dir.starts_with(main_repo)` guard was inverted for
+    /// the production worktree layout `<main_repo>/.worktrees/<id>/`
+    /// where the worktree is a subpath of main_repo).
     ///
-    /// Returns `Ok(false)` when this is a primary (non-worktree)
-    /// session, so the caller can log or no-op without checking the
-    /// return value's "did it write" semantics.
-    pub fn write_session_pointer(&self, main_repo: &Path) -> std::io::Result<bool> {
+    /// Returns `Ok(false)` when the session is not inside the
+    /// given worktree (i.e. a primary session), so the caller can
+    /// log or no-op without checking the return value's "did it
+    /// write" semantics.
+    pub fn write_session_pointer(
+        &self,
+        main_repo: &Path,
+        worktree_path: &Path,
+    ) -> std::io::Result<bool> {
         let session_dir = match self.session_dir() {
             Some(d) => d,
             None => return Ok(false),
         };
         // Only emit a pointer when the session dir lives inside the
-        // worktree, not in the main repo. The canonical signal is:
-        // session_dir does not start with main_repo's `.ralph/`.
-        // Simplest robust check: if the session dir is *not* under
-        // main_repo, treat it as a worktree session. The caller
-        // (`run_loop_impl`) only invokes us on non-primary contexts,
-        // but we double-check here defensively.
-        if session_dir.starts_with(main_repo) {
+        // explicit worktree path. The caller (`run_loop_impl`) only
+        // invokes us on non-primary contexts and passes the
+        // LoopContext::workspace() value, so this check is the
+        // canonical signal — not a fragile lexical prefix match
+        // against main_repo (which would be inverted for the
+        // production worktree layout).
+        if !session_dir.starts_with(worktree_path) {
             return Ok(false);
         }
         let pointer_path = main_repo
@@ -1229,7 +1239,7 @@ mod tests {
         assert_eq!(collector.session_dir().unwrap(), session_dir);
 
         let wrote = collector
-            .write_session_pointer(&main_repo)
+            .write_session_pointer(&main_repo, &worktree)
             .expect("write ok");
         assert!(wrote, "expected pointer to be written for worktree session");
 
@@ -1246,27 +1256,79 @@ mod tests {
         assert!(payload.get("written_at").is_some());
     }
 
+    /// Regression test for the production worktree layout
+    /// (`<main_repo>/.worktrees/<id>/` — worktree is a SUBPATH of
+    /// main_repo). The original `starts_with(main_repo)` guard was
+    /// inverted and never wrote the pointer in production (ce-code-
+    /// review P0, 2026-06-14). The fix passes the explicit worktree
+    /// path so the comparison is unambiguous.
+    #[test]
+    fn test_write_session_pointer_for_production_subpath_worktree() {
+        let temp = TempDir::new().unwrap();
+        // Production layout: worktree lives under main_repo/.worktrees/<id>
+        let main_repo = temp.path();
+        let worktree = main_repo.join(".worktrees").join("loop-1234");
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        let session_dir = worktree
+            .join(".ralph")
+            .join("diagnostics")
+            .join("2026-06-14T10-20-30");
+        std::fs::create_dir_all(&session_dir).unwrap();
+
+        let options = DiagnosticsOptions {
+            full_diagnostics: true,
+            session_dir: Some(session_dir.clone()),
+            ..DiagnosticsOptions::default()
+        };
+        let collector = DiagnosticsCollector::with_options(&worktree, &options).unwrap();
+        assert_eq!(collector.session_dir().unwrap(), session_dir);
+
+        // Pre-fix code (starts_with(main_repo)) would return Ok(false)
+        // here because the worktree IS under main_repo. The fix
+        // accepts the worktree path explicitly and writes the pointer.
+        let wrote = collector
+            .write_session_pointer(main_repo, &worktree)
+            .expect("write ok");
+        assert!(wrote, "P0: production worktree subpath must write pointer");
+
+        let pointer_path = main_repo
+            .join(".ralph")
+            .join("diagnostics-session-pointer.json");
+        assert!(pointer_path.exists(), "pointer file must be created");
+        let payload: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&pointer_path).unwrap()).unwrap();
+        assert_eq!(
+            payload.get("session_path").and_then(|v| v.as_str()),
+            Some(session_dir.to_str().unwrap())
+        );
+    }
+
     #[test]
     fn test_write_session_pointer_skipped_for_primary_session() {
         // When the session is in the main repo (primary mode), we
         // MUST NOT write a pointer — the diagnose path already finds
         // primary sessions via loops.json / fallback to .ralph/diagnostics.
+        // Pass a *different* worktree_path that the session does NOT
+        // live under; the function must no-op.
         let temp = TempDir::new().unwrap();
         let options = DiagnosticsOptions {
             full_diagnostics: true,
             ..DiagnosticsOptions::default()
         };
         let collector = DiagnosticsCollector::with_options(temp.path(), &options).unwrap();
-        let session_dir = collector.session_dir().unwrap().to_path_buf();
+        let _session_dir = collector.session_dir().unwrap().to_path_buf();
 
-        // session_dir starts with main_repo, so the call must no-op.
+        // Pretend the worktree is a sibling of main_repo (not a subpath).
+        // session_dir starts with temp.path() but NOT with this sibling.
+        let fake_worktree = temp.path().join("..").join("sibling-worktree");
         let wrote = collector
-            .write_session_pointer(temp.path())
+            .write_session_pointer(temp.path(), &fake_worktree)
             .expect("write ok");
         assert!(!wrote, "primary session must not write a pointer");
 
         // Sanity: session dir is indeed under main_repo.
-        assert!(session_dir.starts_with(temp.path()));
+        assert!(_session_dir.starts_with(temp.path()));
     }
 
     #[test]
@@ -1280,8 +1342,10 @@ mod tests {
             DiagnosticsCollector::with_options(temp.path(), &DiagnosticsOptions::default())
                 .unwrap();
         assert!(!collector.is_enabled());
+        // Pass any worktree_path; the disabled collector's session_dir
+        // is None, so the function returns Ok(false) before comparing.
         let wrote = collector
-            .write_session_pointer(&main_repo)
+            .write_session_pointer(&main_repo, &main_repo)
             .expect("disabled write ok");
         assert!(!wrote);
         assert!(

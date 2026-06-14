@@ -486,7 +486,7 @@ async fn run_loop_impl_inner(
         && let Some(collector) = prebuilt_diagnostics.as_ref()
         && collector.is_enabled()
     {
-        match collector.write_session_pointer(ctx.repo_root()) {
+        match collector.write_session_pointer(ctx.repo_root(), ctx.workspace()) {
             Ok(true) => {
                 debug!(
                     target: "ralph_cli::loop_runner",
