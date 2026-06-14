@@ -884,4 +884,22 @@ mod tests {
             "RALPH_WORKSPACE_ROOT should be set by inject_ralph_runtime_env: {stdout}"
         );
     }
+
+    /// U4 (2026-06-14-002): Verify inject_ralph_runtime_env can be called with any path.
+    /// This is a regression guard for the fix that ensures RALPH_WORKSPACE_ROOT
+    /// is properly injected into child processes for worktree isolation.
+    #[test]
+    fn test_inject_ralph_runtime_env_accepts_any_path() {
+        use std::path::Path;
+        let paths = vec![
+            Path::new("/tmp/workspace"),
+            Path::new("/Users/test/.worktrees/loop-123"),
+            Path::new("."),
+        ];
+        for path in paths {
+            let mut cmd = tokio::process::Command::new("echo");
+            // Should not panic or error
+            inject_ralph_runtime_env(&mut cmd, path);
+        }
+    }
 }

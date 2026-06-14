@@ -1404,6 +1404,53 @@ mod forward_prompt_args_tests {
         let out = forward_prompt_args(&args, Path::new("/anywhere"));
         assert_eq!(out, vec!["-P".to_string(), "REL.md".to_string()]);
     }
+
+    // ── U4: sync_prompt_to_worktree regression tests ───────────────────────
+
+    /// U4 (2026-06-14-002): Happy path — copies PROMPT.md to worktree when source exists.
+    #[test]
+    fn sync_prompt_copies_to_worktree_when_source_exists() {
+        let repo = tempfile::tempdir().unwrap();
+        let wt = tempfile::tempdir().unwrap();
+        fs::write(repo.path().join("PROMPT.md"), "test prompt content").unwrap();
+
+        sync_prompt_to_worktree(repo.path(), wt.path());
+
+        let copied = wt.path().join("PROMPT.md");
+        assert!(copied.exists(), "PROMPT.md should be copied to worktree");
+        assert_eq!(
+            fs::read_to_string(&copied).unwrap(),
+            "test prompt content"
+        );
+    }
+
+    /// U4: Silently skips when source PROMPT.md doesn't exist.
+    #[test]
+    fn sync_prompt_skips_when_source_missing() {
+        let repo = tempfile::tempdir().unwrap();
+        let wt = tempfile::tempdir().unwrap();
+
+        sync_prompt_to_worktree(repo.path(), wt.path());
+
+        assert!(!wt.path().join("PROMPT.md").exists());
+    }
+
+    /// U4: Silently skips when worktree already has PROMPT.md.
+    #[test]
+    fn sync_prompt_skips_when_worktree_has_it() {
+        let repo = tempfile::tempdir().unwrap();
+        let wt = tempfile::tempdir().unwrap();
+        fs::write(repo.path().join("PROMPT.md"), "repo version").unwrap();
+        fs::write(wt.path().join("PROMPT.md"), "worktree version").unwrap();
+
+        sync_prompt_to_worktree(repo.path(), wt.path());
+
+        // Should NOT overwrite existing file in worktree
+        assert_eq!(
+            fs::read_to_string(wt.path().join("PROMPT.md")).unwrap(),
+            "worktree version"
+        );
+    }
 }
 
 #[cfg(test)]
