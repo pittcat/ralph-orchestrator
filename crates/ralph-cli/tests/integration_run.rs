@@ -673,12 +673,12 @@ tasks:
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !output.status.success(),
-        "expected non-zero exit for payload contract violation\nstdout: {stdout}\nstderr: {stderr}"
+        "expected non-zero exit for loop termination\nstdout: {stdout}\nstderr: {stderr}"
     );
     assert_eq!(
         output.status.code(),
         Some(2),
-        "expected exit code 2 for PayloadContractViolation\nstdout: {stdout}\nstderr: {stderr}"
+        "expected exit code 2\nstdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
         elapsed < Duration::from_secs(10),
@@ -761,12 +761,12 @@ tasks:
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !output.status.success(),
-        "expected non-zero exit for RPC payload contract violation\nstdout: {stdout}\nstderr: {stderr}"
+        "expected non-zero exit for RPC loop termination\nstdout: {stdout}\nstderr: {stderr}"
     );
     assert_eq!(
         output.status.code(),
         Some(2),
-        "expected exit code 2 for PayloadContractViolation in RPC mode\nstdout: {stdout}\nstderr: {stderr}"
+        "expected exit code 2 in RPC mode\nstdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
         elapsed < Duration::from_secs(10),

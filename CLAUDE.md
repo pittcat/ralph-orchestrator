@@ -679,3 +679,9 @@ Overall average: **60-90% token reduction** on common development operations.
 
 <!-- ralph:end hang-prevention -->
 
+OUTPUT STYLE: concise
+- Bullet points over paragraphs
+- Skip filler words and hedging ("I think", "probably", "it seems")
+- 1-sentence explanations max, then code/action
+- No repeating what the user said
+

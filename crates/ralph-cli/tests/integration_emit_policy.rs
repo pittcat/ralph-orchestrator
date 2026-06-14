@@ -60,6 +60,64 @@ fn test_emit_with_builtin_preset_accepts_valid_work_done() {
     );
 }
 
+/// Error path: a JSON object missing required fields for `work.done` is
+/// rejected and leaves a recovery envelope.
+#[test]
+fn test_emit_with_builtin_preset_rejects_missing_required_fields() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    let output = ralph_emit(
+        temp_path,
+        &[
+            "-H",
+            "builtin:ce-executor-isolated",
+            "emit",
+            "work.done",
+            "--json",
+            r#"{"ok":true}"#,
+            "--hat",
+            "executor",
+        ],
+    );
+
+    assert!(
+        !output.status.success(),
+        "emit should fail for work.done payload missing required fields"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("missing") || stderr.contains("required"),
+        "stderr should explain missing required fields: {}",
+        stderr
+    );
+
+    let events_file = temp_path.join(".ralph/events.jsonl");
+    assert!(
+        !events_file.exists()
+            || std::fs::read_to_string(&events_file)
+                .unwrap()
+                .trim()
+                .is_empty(),
+        "rejected event must not be written to events file"
+    );
+
+    let recovery_file = temp_path.join(".ralph/recovery.jsonl");
+    assert!(recovery_file.exists(), "recovery.jsonl should be written");
+    let recovery = std::fs::read_to_string(&recovery_file).unwrap();
+    let entry: serde_json::Value = recovery
+        .lines()
+        .next()
+        .expect("recovery.jsonl should have at least one line")
+        .parse()
+        .expect("recovery line should be valid JSON");
+    assert_eq!(entry["envelope"]["source"], "cli_emit");
+    assert_eq!(entry["envelope"]["topic"], "work.done");
+    assert_eq!(entry["envelope"]["source_hat"], "executor");
+}
+
 /// Error path: a string payload for `work.done` is rejected and leaves a
 /// recovery envelope.
 #[test]
