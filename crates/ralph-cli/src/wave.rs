@@ -65,10 +65,7 @@ pub struct WaveEmitArgs {
     /// config has `event_policy.allow_unsafe_cli_emit: true`; otherwise
     /// the check is still enforced. This mirrors `ralph emit
     /// --unsafe-no-policy-check` semantics.
-    #[arg(
-        long = "unsafe-no-policy-check",
-        conflicts_with = "policy_check"
-    )]
+    #[arg(long = "unsafe-no-policy-check", conflicts_with = "policy_check")]
     pub no_policy_check: bool,
 
     /// Explicit path to a `ralph.yml` for the policy precheck (U4).
@@ -644,8 +641,7 @@ fn read_idempotency_records(events_file: &Path) -> Result<Vec<IdempotencyRecord>
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let content = fs::read_to_string(&path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let content = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
     let mut out = Vec::new();
     let mut corrupt_lines: Vec<String> = Vec::new();
     for (i, line) in content.lines().enumerate() {
@@ -762,7 +758,8 @@ fn try_recover_from_events(
             Err(_) => continue,
         };
         if v.get("idempotency_key").and_then(|x| x.as_str()) == Some(idempotency_key)
-                && v.get("idempotency_hash").and_then(|x| x.as_str()) == Some(scope_key) {
+            && v.get("idempotency_hash").and_then(|x| x.as_str()) == Some(scope_key)
+        {
             count += 1;
             if first_wave_id.is_none() {
                 first_wave_id = v
@@ -775,9 +772,8 @@ fn try_recover_from_events(
     match count {
         0 => Ok(None),
         n if n == expected_count => {
-            let wave_id = first_wave_id.unwrap_or_else(|| {
-                "w-recovered-unknown-wave-id".to_string()
-            });
+            let wave_id =
+                first_wave_id.unwrap_or_else(|| "w-recovered-unknown-wave-id".to_string());
             Ok(Some((wave_id, count)))
         }
         n => {
@@ -829,7 +825,12 @@ pub fn write_wave_events_with_idempotency(
 ) -> Result<IdempotencyOutcome> {
     let (loop_id, hat) = build_scope_inputs();
     write_wave_events_with_idempotency_with_scope(
-        topic, payloads, events_file, idempotency_key, &loop_id, &hat,
+        topic,
+        payloads,
+        events_file,
+        idempotency_key,
+        &loop_id,
+        &hat,
     )
 }
 
@@ -869,7 +870,9 @@ pub fn write_wave_events_with_idempotency_with_scope(
                 "idempotency-key conflict: same scope already used with a different payload. \
                  original wave_id={}, original count={}, original created_at={}. \
                  If the new payload is intended, use a different --idempotency-key.",
-                existing.wave_id, existing.count, existing.created_at
+                existing.wave_id,
+                existing.count,
+                existing.created_at
             );
         }
         // Recovery: verify events file has the expected count
@@ -891,7 +894,8 @@ pub fn write_wave_events_with_idempotency_with_scope(
     }
 
     // U2: Recovery scan — record was lost but events exist with matching idempotency_key
-    let recovery = try_recover_from_events(events_file, idempotency_key, &scope_key, payloads.len())?;
+    let recovery =
+        try_recover_from_events(events_file, idempotency_key, &scope_key, payloads.len())?;
     if let Some((wave_id, count)) = recovery {
         // Reconstruct the record from the recovered wave data
         let rec = IdempotencyRecord {
@@ -1629,7 +1633,11 @@ mod tests {
 
         // Idempotency log should NOT exist (simulating crash before record write)
         let log_path = idempotency_log_path(&events_path);
-        assert!(!log_path.exists(), "recovery test: log_path={:?} should not exist before recovery call", log_path);
+        assert!(
+            !log_path.exists(),
+            "recovery test: log_path={:?} should not exist before recovery call",
+            log_path
+        );
 
         // Now call with the same key → should recover (scan events, write record, return same wave_id)
         let outcome = write_wave_events_with_idempotency_with_scope(
@@ -1642,7 +1650,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(outcome.deduplicated, "recovery should return deduplicated=true");
+        assert!(
+            outcome.deduplicated,
+            "recovery should return deduplicated=true"
+        );
         assert_eq!(
             outcome.wave_id, first_wave_id,
             "recovery should return original wave_id"
@@ -1669,7 +1680,10 @@ mod tests {
             "reviewer",
         )
         .unwrap();
-        assert!(outcome_dedup.deduplicated, "post-recovery dedup should also return deduplicated=true");
+        assert!(
+            outcome_dedup.deduplicated,
+            "post-recovery dedup should also return deduplicated=true"
+        );
         assert_eq!(
             outcome_dedup.wave_id, first_wave_id,
             "post-recovery dedup should return original wave_id"
@@ -1724,7 +1738,11 @@ mod tests {
 
         let outcomes: Vec<_> = handles
             .into_iter()
-            .map(|h| h.join().expect("worker thread panicked").expect("wave emit failed"))
+            .map(|h| {
+                h.join()
+                    .expect("worker thread panicked")
+                    .expect("wave emit failed")
+            })
             .collect();
 
         // Every worker must observe a fresh, non-deduplicated wave
@@ -1739,7 +1757,11 @@ mod tests {
         // collisions).
         let unique_ids: std::collections::HashSet<_> =
             outcomes.iter().map(|o| o.wave_id.clone()).collect();
-        assert_eq!(unique_ids.len(), n_workers, "expected n_workers distinct wave_ids");
+        assert_eq!(
+            unique_ids.len(),
+            n_workers,
+            "expected n_workers distinct wave_ids"
+        );
 
         // Events file fans in all n_workers lines, with each line
         // containing some worker index in the (JSON-escaped) payload —
@@ -1750,8 +1772,7 @@ mod tests {
         let content = fs::read_to_string(&events_path).unwrap();
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), n_workers);
-        let mut seen_workers: std::collections::HashSet<u32> =
-            std::collections::HashSet::new();
+        let mut seen_workers: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for line in &lines {
             // Each event line is a JSON object with a top-level
             // "payload" field whose value is the original payload
@@ -1782,11 +1803,11 @@ mod tests {
         // with the per-worker key.
         let records = read_idempotency_records(&events_path).unwrap();
         assert_eq!(records.len(), n_workers);
-        let mut seen_keys: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut seen_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
         for r in &records {
             assert!(
-                r.idempotency_key.starts_with("ce-review:concurrent-writer-"),
+                r.idempotency_key
+                    .starts_with("ce-review:concurrent-writer-"),
                 "unexpected key: {}",
                 r.idempotency_key
             );
@@ -1951,8 +1972,8 @@ event_loop:
         // All 7 payloads lack `depth`.
         let payloads = build_u4_payloads(false);
 
-        let batch = validate_batch_against_config("review.wave.ready", &payloads, policy, &events)
-            .unwrap();
+        let batch =
+            validate_batch_against_config("review.wave.ready", &payloads, policy, &events).unwrap();
         assert_eq!(batch.errors.len(), 7);
 
         // Build the failure payload and verify the JSON shape
@@ -1970,10 +1991,8 @@ event_loop:
         // Indices 0..6 must all be present (atomicity: every
         // offending payload is named, agent can fix all in one
         // shot).
-        let mut seen_indices: std::collections::BTreeSet<usize> =
-            std::collections::BTreeSet::new();
-        let mut fields: std::collections::BTreeSet<String> =
-            std::collections::BTreeSet::new();
+        let mut seen_indices: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+        let mut fields: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for e in errs {
             let idx = e["payload_index"].as_u64().unwrap() as usize;
             seen_indices.insert(idx);

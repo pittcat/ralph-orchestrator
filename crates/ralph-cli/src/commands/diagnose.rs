@@ -364,9 +364,7 @@ fn resolve_diagnostics_root_via_loops(workspace_root: &Path) -> PathBuf {
     resolution.diagnostics_root
 }
 
-fn resolve_diagnostics_root_with_warnings(
-    workspace_root: &Path,
-) -> LoopsDiagnosticsResolution {
+fn resolve_diagnostics_root_with_warnings(workspace_root: &Path) -> LoopsDiagnosticsResolution {
     let fallback = workspace_root.join(".ralph").join("diagnostics");
     let loops_path = workspace_root.join(".ralph").join("loops.json");
     let mut warnings = Vec::new();
@@ -734,8 +732,11 @@ mod tests {
             "prompt": "test prompt",
             "workspace": ws.to_string_lossy(),
         }]);
-        std::fs::write(loops_dir.join("loops.json"), serde_json::to_string(&entry).unwrap())
-            .unwrap();
+        std::fs::write(
+            loops_dir.join("loops.json"),
+            serde_json::to_string(&entry).unwrap(),
+        )
+        .unwrap();
         let root = resolve_diagnostics_root_via_loops(tmp.path());
         assert_eq!(root, ws.join(".ralph").join("diagnostics"));
     }
@@ -763,15 +764,21 @@ mod tests {
                 "workspace": live_ws.to_string_lossy(),
             }
         ]);
-        std::fs::write(loops_dir.join("loops.json"), serde_json::to_string(&entry).unwrap())
-            .unwrap();
+        std::fs::write(
+            loops_dir.join("loops.json"),
+            serde_json::to_string(&entry).unwrap(),
+        )
+        .unwrap();
 
         let resolution = resolve_diagnostics_root_with_warnings(tmp.path());
         assert_eq!(
             resolution.diagnostics_root,
             live_ws.join(".ralph").join("diagnostics")
         );
-        assert_eq!(resolution.selected_loop_id.as_deref(), Some("loop-live-older"));
+        assert_eq!(
+            resolution.selected_loop_id.as_deref(),
+            Some("loop-live-older")
+        );
         assert!(
             resolution
                 .warnings
@@ -807,8 +814,11 @@ mod tests {
                 "worktree_path": live_ws.to_string_lossy(),
             }
         ]);
-        std::fs::write(loops_dir.join("loops.json"), serde_json::to_string(&entry).unwrap())
-            .unwrap();
+        std::fs::write(
+            loops_dir.join("loops.json"),
+            serde_json::to_string(&entry).unwrap(),
+        )
+        .unwrap();
 
         let resolution = resolve_diagnostics_root_with_warnings(tmp.path());
         assert_eq!(

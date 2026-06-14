@@ -387,7 +387,9 @@ async fn main() -> Result<()> {
         Some(Commands::Clean(args)) => {
             commands::clean::clean_command(&config_sources, cli.color, args)
         }
-        Some(Commands::Emit(args)) => commands::emit::emit_command(cli.color, args),
+        Some(Commands::Emit(args)) => {
+            commands::emit::emit_command(cli.color, args, hats_source.as_ref())
+        }
         Some(Commands::Plan(args)) => {
             commands::plan::plan_command(&config_sources, hats_source.as_ref(), cli.color, args)
                 .await
@@ -497,8 +499,8 @@ mod tests {
     use tempfile::TempDir;
     #[test]
     fn test_cli_parses_global_hats_flag() {
-        let cli = Cli::try_parse_from(["ralph", "run", "-H", "builtin:debug"])
-            .expect("CLI parse failed");
+        let cli =
+            Cli::try_parse_from(["ralph", "run", "-H", "builtin:debug"]).expect("CLI parse failed");
         assert_eq!(cli.hats.as_deref(), Some("builtin:debug"));
     }
 

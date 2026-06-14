@@ -1062,11 +1062,7 @@ pub struct TemplateCatalog;
 impl TemplateCatalog {
     /// Get the list of available template names.
     pub fn template_names() -> Vec<&'static str> {
-        vec![
-            "minimal-linear",
-            "debug",
-            "ce-executor-lite",
-        ]
+        vec!["minimal-linear", "debug", "ce-executor-lite"]
     }
 
     /// Get a template manifest by name.
@@ -1077,7 +1073,8 @@ impl TemplateCatalog {
             "minimal-linear" => Some(TemplateManifest {
                 name: "minimal-linear".to_string(),
                 version: "1.0.0".to_string(),
-                description: "A simple two-hat linear workflow for learning and small tasks".to_string(),
+                description: "A simple two-hat linear workflow for learning and small tasks"
+                    .to_string(),
                 category: "development".to_string(),
                 difficulty: TemplateDifficulty::Beginner,
                 source: None,
@@ -1099,12 +1096,16 @@ impl TemplateCatalog {
                         default: None,
                     },
                 ],
-                output_notes: Some("Creates a minimal two-hat workflow: Planner → Executor".to_string()),
+                output_notes: Some(
+                    "Creates a minimal two-hat workflow: Planner → Executor".to_string(),
+                ),
             }),
             "debug" => Some(TemplateManifest {
                 name: "debug".to_string(),
                 version: "1.0.0".to_string(),
-                description: "Bug investigation and root cause analysis following scientific method".to_string(),
+                description:
+                    "Bug investigation and root cause analysis following scientific method"
+                        .to_string(),
                 category: "debugging".to_string(),
                 difficulty: TemplateDifficulty::Intermediate,
                 source: Some("builtin:debug".to_string()),
@@ -1126,7 +1127,10 @@ impl TemplateCatalog {
                         default: None,
                     },
                 ],
-                output_notes: Some("Based on builtin:debug. Four hats: Investigator, Tester, Fixer, Verifier".to_string()),
+                output_notes: Some(
+                    "Based on builtin:debug. Four hats: Investigator, Tester, Fixer, Verifier"
+                        .to_string(),
+                ),
             }),
             "ce-executor-lite" => Some(TemplateManifest {
                 name: "ce-executor-lite".to_string(),
@@ -1159,7 +1163,10 @@ impl TemplateCatalog {
                         default: None,
                     },
                 ],
-                output_notes: Some("Simplified ce-executor. Two hats: Coordinator, Executor. No wave review.".to_string()),
+                output_notes: Some(
+                    "Simplified ce-executor. Two hats: Coordinator, Executor. No wave review."
+                        .to_string(),
+                ),
             }),
             _ => None,
         }

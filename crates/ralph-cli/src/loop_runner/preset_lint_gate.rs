@@ -233,8 +233,8 @@ fn print_lint_fallback(error: &PresetLintGateError) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ralph_core::runtime_contract::{FindingSource, FindingStage};
     use ralph_core::RalphConfig;
+    use ralph_core::runtime_contract::{FindingSource, FindingStage};
 
     #[test]
     fn gate_passes_on_clean_config() {

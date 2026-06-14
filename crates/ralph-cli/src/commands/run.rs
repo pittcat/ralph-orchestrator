@@ -14,6 +14,8 @@ use ralph_core::{
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, duplex};
 use tracing::{debug, info, warn};
 
 /// Arguments for the run subcommand.
@@ -1069,9 +1071,10 @@ pub async fn run_command(
         }
     }
 
-    let exit_code = reason.exit_code();
+    let exit_code = parent_exit_code_for_reason(&reason);
 
-    // Use explicit exit for non-zero codes to ensure proper exit status
+    // U3: use explicit exit for non-zero codes so the parent process does not
+    // hang or return 0 after a non-clean loop termination.
     if exit_code != 0 {
         std::process::exit(exit_code);
     }
@@ -1113,6 +1116,64 @@ pub(crate) fn run_loop_result_exit_code(err: &anyhow::Error) -> Option<i32> {
         }
     }
     None
+}
+
+/// U3: exit code used by the `ralph run` parent process for a loop
+/// termination reason. Distinct from [`TerminationReason::exit_code`] so the
+/// parent can document stable, reason-specific codes without changing the
+/// broader event-loop semantics.
+///
+/// Documented exit codes:
+/// - 0: clean completion (`CompletionPromise`, `Cancelled`)
+/// - 1: generic failure (`ConsecutiveFailures`, `LoopThrashing`, `LoopStale`,
+///      `ValidationFailure`, `Stopped`, `WorkspaceGone`, `RecoveryExhausted`,
+///      `ReviewFailed`, and any unrecognized reason)
+/// - 2: payload contract violation (`PayloadContractViolation`)
+/// - 3: max iterations exceeded (`MaxIterations`)
+/// - 4: max runtime exceeded (`MaxRuntime`)
+/// - 5: max cost exceeded (`MaxCost`)
+/// - 6: restart requested (`RestartRequested`)
+/// - 130: interrupted by signal (`Interrupted`)
+pub(crate) fn parent_exit_code_for_reason(reason: &TerminationReason) -> i32 {
+    match reason {
+        TerminationReason::CompletionPromise | TerminationReason::Cancelled => 0,
+        TerminationReason::PayloadContractViolation => 2,
+        TerminationReason::MaxIterations => 3,
+        TerminationReason::MaxRuntime => 4,
+        TerminationReason::MaxCost => 5,
+        TerminationReason::RestartRequested => 6,
+        TerminationReason::Interrupted => 130,
+        _ => 1,
+    }
+}
+
+/// U3: read the termination reason sentinel written by the loop runner child.
+/// Returns `None` when the sentinel is missing or cannot be parsed.
+fn read_termination_sentinel(workspace: &Path) -> Option<TerminationReason> {
+    let path = workspace.join(".ralph/loop-termination-reason.json");
+    let content = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+/// U3: resolve the termination reason for a subprocess-TUI child from the
+/// sentinel first, falling back to coarse exit-code mapping when the sentinel
+/// is unavailable.
+fn resolve_subprocess_termination_reason(
+    workspace: &Path,
+    exit_status: &std::process::ExitStatus,
+) -> TerminationReason {
+    if exit_status.success() {
+        return TerminationReason::CompletionPromise;
+    }
+    if let Some(reason) = read_termination_sentinel(workspace) {
+        return reason;
+    }
+    // No sentinel means the child exited through an error path rather than a
+    // typed non-success reason. Treat unknown non-zero codes as a generic stop.
+    match exit_status.code() {
+        Some(130) => TerminationReason::Interrupted,
+        _ => TerminationReason::Stopped,
+    }
 }
 
 /// Build the prompt-forwarding argv for a subprocess-TUI child invocation.
@@ -1611,47 +1672,97 @@ async fn run_subprocess_tui(
     // Create RPC writer for sending commands
     let rpc_writer = ralph_tui::RpcWriter::new(stdin);
 
+    // U3: tee the child's RPC stdout into the TUI reader so the parent can
+    // detect a fatal LoopTerminated event and break the TUI out of its input
+    // loop instead of waiting for the user to press 'q'.
+    let (tui_reader, mut tui_writer) = duplex(64 * 1024);
+
+    let forward_handle = {
+        let mut cancel_rx = terminated_rx.clone();
+        tokio::spawn(async move {
+            let mut child_lines = BufReader::new(stdout).lines();
+            loop {
+                tokio::select! {
+                    _ = cancel_rx.changed() => {
+                        if *cancel_rx.borrow() {
+                            break;
+                        }
+                    }
+                    line = child_lines.next_line() => {
+                        match line {
+                            Ok(Some(line)) => {
+                                if tui_writer.write_all(line.as_bytes()).await.is_err() {
+                                    break;
+                                }
+                                if tui_writer.write_all(b"\n").await.is_err() {
+                                    break;
+                                }
+                                if tui_writer.flush().await.is_err() {
+                                    break;
+                                }
+                            }
+                            _ => break,
+                        }
+                    }
+                }
+            }
+        })
+    };
+
     // Spawn the event reader as a background task
     let reader_state = std::sync::Arc::clone(&state);
     let cancel_rx = terminated_rx.clone();
     let reader_handle = tokio::spawn(async move {
-        ralph_tui::run_rpc_event_reader(stdout, reader_state, cancel_rx).await;
+        ralph_tui::run_rpc_event_reader(tui_reader, reader_state, cancel_rx).await;
     });
 
     info!("TUI running in subprocess RPC mode");
 
-    // Run the TUI render/input loop with subprocess support
+    // Run the TUI render/input loop with subprocess support concurrently with
+    // the child process. If the child exits with a non-success status, signal
+    // the TUI to exit immediately rather than waiting for the user.
     let app = ralph_tui::App::new_subprocess(
         std::sync::Arc::clone(&state),
-        terminated_rx,
+        terminated_rx.clone(),
         rpc_writer.clone(),
     );
-    let tui_result = app.run().await;
+    let mut app_fut = std::pin::pin!(app.run());
+    let mut child_wait = std::pin::pin!(child.wait());
 
-    // Signal cancellation
-    let _ = terminated_tx.send(true);
-
-    // Send abort to subprocess and close stdin
-    let _ = rpc_writer.send_abort().await;
-    let _ = rpc_writer.close().await;
-
-    // Wait for reader to finish
-    let _ = reader_handle.await;
-
-    // Wait for subprocess to exit and get exit status
-    let exit_status = child.wait().await?;
-
-    // Map exit status to termination reason
-    // Exit codes: 0=success, 1=max_iterations, 130=interrupted (SIGINT)
-    let reason = if exit_status.success() {
-        TerminationReason::CompletionPromise
-    } else {
-        match exit_status.code() {
-            Some(1) => TerminationReason::MaxIterations,
-            Some(130) => TerminationReason::Interrupted,
-            _ => TerminationReason::Stopped,
+    let (tui_result, exit_status) = tokio::select! {
+        status = child_wait.as_mut() => {
+            let status = status.context("Failed to wait for ralph subprocess")?;
+            if !status.success() {
+                let _ = terminated_tx.send(true);
+            }
+            let tui_result = tokio::time::timeout(Duration::from_secs(5), app_fut)
+                .await
+                .unwrap_or_else(|_| {
+                    warn!("TUI did not exit within 5s after child termination; forcing return");
+                    Ok(())
+                });
+            (tui_result, status)
+        }
+        result = app_fut.as_mut() => {
+            let tui_result = result;
+            // App exited (e.g., user pressed 'q'); wait for the child.
+            let status = child_wait
+                .await
+                .context("Failed to wait for ralph subprocess")?;
+            (tui_result, status)
         }
     };
+
+    // Signal cancellation to the reader/forward tasks and clean up the child.
+    let _ = terminated_tx.send(true);
+    let _ = rpc_writer.send_abort().await;
+    let _ = rpc_writer.close().await;
+    let _ = reader_handle.await;
+    let _ = forward_handle.await;
+
+    // Resolve the exact termination reason from the runner sentinel when the
+    // child did not exit cleanly; fall back to coarse exit-code mapping.
+    let reason = resolve_subprocess_termination_reason(&args.workspace, &exit_status);
 
     // Return TUI result if it failed, otherwise the termination reason
     tui_result.map(|_| reason)

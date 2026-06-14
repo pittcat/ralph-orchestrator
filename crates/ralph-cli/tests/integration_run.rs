@@ -597,3 +597,179 @@ fn test_run_continue_requires_scratchpad() {
         "stderr: {stderr}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn test_run_payload_contract_violation_exits_with_reason_code() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    let backend_script = temp_path.join("emit-bad-work-done.sh");
+
+    std::fs::write(
+        &backend_script,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\n\"{}\" emit work.start --payload '{{}}'\n\"{}\" emit work.done --payload \"not an object\"\n",
+            env!("CARGO_BIN_EXE_ralph"),
+            env!("CARGO_BIN_EXE_ralph")
+        ),
+    )
+    .expect("write backend script");
+
+    let mut permissions = std::fs::metadata(&backend_script)
+        .expect("metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&backend_script, permissions).expect("set executable permissions");
+
+    std::fs::write(
+        temp_path.join("ralph.yml"),
+        r#"
+cli:
+  backend: custom
+  command: "./emit-bad-work-done.sh"
+  prompt_mode: stdin
+event_loop:
+  max_iterations: 3
+  max_runtime_seconds: 30
+  event_policy:
+    enabled: true
+    mode: enforce
+    schemas:
+      work.done:
+        payload: json_object
+hats:
+  executor:
+    name: Executor
+    description: "Emits work.done events."
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+    instructions: "Emit work.done."
+topic_format_whitelist:
+  - work.start
+  - work.done
+tasks:
+  enabled: false
+"#,
+    )
+    .expect("write config");
+
+    let started = Instant::now();
+    let output = run_ralph(
+        temp_path,
+        &[
+            "run",
+            "--no-tui",
+            "--skip-preflight",
+            "--prompt",
+            "payload contract violation test",
+        ],
+    );
+    let elapsed = started.elapsed();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "expected non-zero exit for payload contract violation\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "expected exit code 2 for PayloadContractViolation\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "parent process should not hang after fatal loop termination; elapsed={elapsed:?}\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_run_rpc_payload_contract_violation_exits_with_reason_code() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    let backend_script = temp_path.join("emit-bad-work-done-rpc.sh");
+
+    std::fs::write(
+        &backend_script,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\n\"{}\" emit work.start --payload '{{}}'\n\"{}\" emit work.done --payload \"not an object\"\n",
+            env!("CARGO_BIN_EXE_ralph"),
+            env!("CARGO_BIN_EXE_ralph")
+        ),
+    )
+    .expect("write backend script");
+
+    let mut permissions = std::fs::metadata(&backend_script)
+        .expect("metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&backend_script, permissions).expect("set executable permissions");
+
+    std::fs::write(
+        temp_path.join("ralph.yml"),
+        r#"
+cli:
+  backend: custom
+  command: "./emit-bad-work-done-rpc.sh"
+  prompt_mode: stdin
+event_loop:
+  max_iterations: 3
+  max_runtime_seconds: 30
+  event_policy:
+    enabled: true
+    mode: enforce
+    schemas:
+      work.done:
+        payload: json_object
+hats:
+  executor:
+    name: Executor
+    description: "Emits work.done events."
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+    instructions: "Emit work.done."
+topic_format_whitelist:
+  - work.start
+  - work.done
+tasks:
+  enabled: false
+"#,
+    )
+    .expect("write config");
+
+    let started = Instant::now();
+    let output = run_ralph(
+        temp_path,
+        &[
+            "run",
+            "--rpc",
+            "--skip-preflight",
+            "--prompt",
+            "rpc payload contract violation test",
+        ],
+    );
+    let elapsed = started.elapsed();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "expected non-zero exit for RPC payload contract violation\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "expected exit code 2 for PayloadContractViolation in RPC mode\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "RPC parent process should not hang after fatal loop termination; elapsed={elapsed:?}\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}

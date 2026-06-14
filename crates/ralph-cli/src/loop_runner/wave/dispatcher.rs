@@ -186,17 +186,14 @@ impl DispatchContext {
         limits: WaveDispatchLimits,
     ) -> Self {
         let started_at = tokio::time::Instant::now();
-        let partial_threshold =
-            Duration::from_secs((aggregate_timeout.as_secs() * 8).div_ceil(10));
+        let partial_threshold = Duration::from_secs((aggregate_timeout.as_secs() * 8).div_ceil(10));
         let partial_deadline = started_at + partial_threshold;
         let aggregate_deadline = started_at + aggregate_timeout;
         // Clamp global_deadline to never exceed aggregate_deadline —
         // we only re-check global inside the loop body, so an
         // aggregate_fired outcome naturally wins once both have
         // passed.
-        let global_deadline = limits
-            .global_deadline
-            .map(|d| d.min(aggregate_deadline));
+        let global_deadline = limits.global_deadline.map(|d| d.min(aggregate_deadline));
 
         // Suppress unused-variable warnings for worker_timeout in cfg
         // configurations that don't use it.
@@ -407,12 +404,7 @@ pub async fn handle_wave_events(
             | WaveDispatchOutcome::Partial(completed)
             | WaveDispatchOutcome::AggregateDeadlineExceeded(completed) => {
                 if let Some(reason_code) = timeout_reason {
-                    record_wave_timeout_envelope(
-                        event_loop,
-                        &detected,
-                        &completed,
-                        reason_code,
-                    );
+                    record_wave_timeout_envelope(event_loop, &detected, &completed, reason_code);
                 }
 
                 any_success = true;
@@ -509,11 +501,7 @@ pub async fn handle_wave_events(
                 // keeps the source stable for the responder while
                 // the retry_key (loop-level) carries the
                 // "loop" signal.
-                record_loop_max_runtime_envelope(
-                    event_loop,
-                    loop_id,
-                    &detected,
-                );
+                record_loop_max_runtime_envelope(event_loop, loop_id, &detected);
                 // ADV-5: mirror the Completed branch's TUI cleanup
                 // so the header does not get stuck on a stale
                 // wave_active pointer. We intentionally do NOT
@@ -651,7 +639,11 @@ pub async fn execute_wave_structured(
 
     // Register wave in tracker
     let mut tracker = WaveTracker::new();
-    tracker.register_wave_with_source(wave.wave_id.clone(), wave.total, Some(wave.target_hat.clone()));
+    tracker.register_wave_with_source(
+        wave.wave_id.clone(),
+        wave.total,
+        Some(wave.target_hat.clone()),
+    );
 
     // Resolve per-worker events directory
     let wave_dir = main_events_file
@@ -793,8 +785,7 @@ fn aggregate_timeout_for(
     let events_count = events_count.max(1) as u64;
     let concurrency = concurrency.max(1) as u64;
     let batches = events_count.div_ceil(concurrency);
-    Duration::from_secs(wave_timeout.as_secs().saturating_mul(batches))
-        + Duration::from_secs(30)
+    Duration::from_secs(wave_timeout.as_secs().saturating_mul(batches)) + Duration::from_secs(30)
 }
 
 /// Core dispatch loop. Shared by the public `execute_wave` wrapper
@@ -822,8 +813,7 @@ pub(crate) async fn dispatch_wave_inner<E: WaveWorkerExecutor + ?Sized>(
         tokio::sync::mpsc::unbounded_channel::<(u32, bool, Duration)>();
 
     // Spawn workers.
-    let mut join_set: tokio::task::JoinSet<(u32, WaveWorkerOutcome)> =
-        tokio::task::JoinSet::new();
+    let mut join_set: tokio::task::JoinSet<(u32, WaveWorkerOutcome)> = tokio::task::JoinSet::new();
     for request in worker_requests {
         let semaphore = Arc::clone(&semaphore);
         let executor = Arc::clone(&executor);
@@ -843,10 +833,7 @@ pub(crate) async fn dispatch_wave_inner<E: WaveWorkerExecutor + ?Sized>(
                 Err(e) => {
                     return (
                         request_index,
-                        Err((
-                            format!("permit acquire failed: {e}"),
-                            Duration::ZERO,
-                        )),
+                        Err((format!("permit acquire failed: {e}"), Duration::ZERO)),
                     );
                 }
             };
@@ -1309,8 +1296,8 @@ fn record_wave_timeout_envelope(
     reason_code: &'static str,
 ) {
     use ralph_core::diagnosis::{
-        DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource,
-        RecoveryDiagnosisEnvelope, RecoveryDiagnosisEnvelopeBuilder,
+        DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, RecoveryDiagnosisEnvelope,
+        RecoveryDiagnosisEnvelopeBuilder,
     };
 
     // Plan §5 B3: RecoveryDiagnosisEnvelope has no independent
@@ -1439,7 +1426,11 @@ async fn handle_wave_rejection(
                 "topic": rejected.topic,
             }),
         ),
-        ralph_core::WaveRejection::IsolatedScopeViolation { topic, isolated_hat, .. } => (
+        ralph_core::WaveRejection::IsolatedScopeViolation {
+            topic,
+            isolated_hat,
+            ..
+        } => (
             "wave_isolated_scope_violation",
             serde_json::json!({
                 "reason": "wave_isolated_scope_violation",
@@ -1779,12 +1770,7 @@ hats: {}
                 // Bump max if observed higher.
                 let mut cur_max = max.load(Ordering::SeqCst);
                 while now > cur_max {
-                    match max.compare_exchange(
-                        cur_max,
-                        now,
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                    ) {
+                    match max.compare_exchange(cur_max, now, Ordering::SeqCst, Ordering::SeqCst) {
                         Ok(_) => break,
                         Err(observed) => cur_max = observed,
                     }
@@ -1801,11 +1787,7 @@ hats: {}
                 let _ = request.worker_rpc_tx.take();
                 let _ = request.worker_tui_state.take();
                 let outcome = if success {
-                    Ok((
-                        vec![core_event("review.done", "ok")],
-                        hold_for,
-                        success,
-                    ))
+                    Ok((vec![core_event("review.done", "ok")], hold_for, success))
                 } else {
                     Err(("forced failure".to_string(), hold_for))
                 };
@@ -1847,7 +1829,9 @@ hats: {}
         // Build 4 worker requests, concurrency=1. Each executor
         // future blocks forever (until cancelled).
         let (progress_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let requests: Vec<WorkerRequest> = (0..4u32).map(|i| make_worker_request(i, progress_tx.clone())).collect();
+        let requests: Vec<WorkerRequest> = (0..4u32)
+            .map(|i| make_worker_request(i, progress_tx.clone()))
+            .collect();
         let executor = Arc::new(TestExecutor::new(Duration::from_secs(3600)));
 
         let wave = make_wave(4, 4, 1);
@@ -1865,9 +1849,14 @@ hats: {}
         );
 
         let mut tracker = ralph_core::WaveTracker::new();
-        tracker.register_wave_with_source(wave.wave_id.clone(), wave.total, Some(wave.target_hat.clone()));
+        tracker.register_wave_with_source(
+            wave.wave_id.clone(),
+            wave.total,
+            Some(wave.target_hat.clone()),
+        );
 
-        let outcome = dispatch_wave_inner(tracker, requests, ctx, executor.clone(), silent_progress()).await;
+        let outcome =
+            dispatch_wave_inner(tracker, requests, ctx, executor.clone(), silent_progress()).await;
 
         match outcome {
             WaveDispatchOutcome::AggregateDeadlineExceeded(c) => {
@@ -1880,12 +1869,18 @@ hats: {}
                 // `Partial` shape.
                 assert_eq!(c.wave_total, 4);
                 assert_eq!(c.results.len(), 0, "no worker should have completed");
-                assert_eq!(c.failures.len(), 4, "all 4 indices must have synthetic failures");
+                assert_eq!(
+                    c.failures.len(),
+                    4,
+                    "all 4 indices must have synthetic failures"
+                );
                 for (i, f) in c.failures.iter().enumerate() {
                     assert_eq!(f.index, i as u32, "synthetic failure for index {i}");
                 }
             }
-            other => panic!("expected AggregateDeadlineExceeded (collapsed partial), got {other:?}"),
+            other => {
+                panic!("expected AggregateDeadlineExceeded (collapsed partial), got {other:?}")
+            }
         }
         // At most 1 executor future should have been awaited at
         // any time (the semaphore limits the dispatcher to
@@ -1906,8 +1901,9 @@ hats: {}
     #[tokio::test(start_paused = true)]
     async fn u3_partial_threshold_drains_active_workers_to_zero() {
         let (progress_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let requests: Vec<WorkerRequest> =
-            (0..3u32).map(|i| make_worker_request(i, progress_tx.clone())).collect();
+        let requests: Vec<WorkerRequest> = (0..3u32)
+            .map(|i| make_worker_request(i, progress_tx.clone()))
+            .collect();
         let executor = Arc::new(TestExecutor::new(Duration::from_secs(3600)));
 
         let wave = make_wave(3, 3, 3);
@@ -1922,9 +1918,14 @@ hats: {}
         );
 
         let mut tracker = ralph_core::WaveTracker::new();
-        tracker.register_wave_with_source(wave.wave_id.clone(), wave.total, Some(wave.target_hat.clone()));
+        tracker.register_wave_with_source(
+            wave.wave_id.clone(),
+            wave.total,
+            Some(wave.target_hat.clone()),
+        );
 
-        let outcome = dispatch_wave_inner(tracker, requests, ctx, executor.clone(), silent_progress()).await;
+        let outcome =
+            dispatch_wave_inner(tracker, requests, ctx, executor.clone(), silent_progress()).await;
         // Two-stage timeout: partial fired first, then we waited
         // for aggregate. With all workers still sleeping when
         // aggregate fires, the final outcome must be
@@ -1948,8 +1949,9 @@ hats: {}
     #[tokio::test(start_paused = true)]
     async fn u3_two_stage_timeout_produces_aggregate_deadline_exceeded() {
         let (progress_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let requests: Vec<WorkerRequest> =
-            (0..3u32).map(|i| make_worker_request(i, progress_tx.clone())).collect();
+        let requests: Vec<WorkerRequest> = (0..3u32)
+            .map(|i| make_worker_request(i, progress_tx.clone()))
+            .collect();
         // Workers sleep far past both deadlines.
         let executor = Arc::new(TestExecutor::new(Duration::from_secs(3600)));
 
@@ -1965,9 +1967,14 @@ hats: {}
         );
 
         let mut tracker = ralph_core::WaveTracker::new();
-        tracker.register_wave_with_source(wave.wave_id.clone(), wave.total, Some(wave.target_hat.clone()));
+        tracker.register_wave_with_source(
+            wave.wave_id.clone(),
+            wave.total,
+            Some(wave.target_hat.clone()),
+        );
 
-        let outcome = dispatch_wave_inner(tracker, requests, ctx, executor.clone(), silent_progress()).await;
+        let outcome =
+            dispatch_wave_inner(tracker, requests, ctx, executor.clone(), silent_progress()).await;
         match outcome {
             WaveDispatchOutcome::AggregateDeadlineExceeded(c) => {
                 // partial fired → synthetic failures for the
@@ -2027,12 +2034,18 @@ hats: {}
         );
 
         let mut tracker = ralph_core::WaveTracker::new();
-        tracker.register_wave_with_source(wave.wave_id.clone(), wave.total, Some(wave.target_hat.clone()));
+        tracker.register_wave_with_source(
+            wave.wave_id.clone(),
+            wave.total,
+            Some(wave.target_hat.clone()),
+        );
 
-        let outcome =
-            tokio::time::timeout(Duration::from_secs(2), dispatch_wave_inner(tracker, requests, ctx, executor, silent_progress()))
-                .await
-                .expect("dispatch must not hang waiting for the progress reporter");
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(2),
+            dispatch_wave_inner(tracker, requests, ctx, executor, silent_progress()),
+        )
+        .await
+        .expect("dispatch must not hang waiting for the progress reporter");
 
         match outcome {
             WaveDispatchOutcome::Completed(c) => {
@@ -2068,9 +2081,14 @@ hats: {}
         );
 
         let mut tracker = ralph_core::WaveTracker::new();
-        tracker.register_wave_with_source(wave.wave_id.clone(), wave.total, Some(wave.target_hat.clone()));
+        tracker.register_wave_with_source(
+            wave.wave_id.clone(),
+            wave.total,
+            Some(wave.target_hat.clone()),
+        );
 
-        let outcome = dispatch_wave_inner(tracker, requests, ctx, executor.clone(), silent_progress()).await;
+        let outcome =
+            dispatch_wave_inner(tracker, requests, ctx, executor.clone(), silent_progress()).await;
         match outcome {
             WaveDispatchOutcome::Completed(c) => {
                 assert_eq!(c.results.len(), 4);
@@ -2114,9 +2132,14 @@ hats: {}
         );
 
         let mut tracker = ralph_core::WaveTracker::new();
-        tracker.register_wave_with_source(wave.wave_id.clone(), wave.total, Some(wave.target_hat.clone()));
+        tracker.register_wave_with_source(
+            wave.wave_id.clone(),
+            wave.total,
+            Some(wave.target_hat.clone()),
+        );
 
-        let outcome = dispatch_wave_inner(tracker, requests, ctx, executor.clone(), silent_progress()).await;
+        let outcome =
+            dispatch_wave_inner(tracker, requests, ctx, executor.clone(), silent_progress()).await;
         match outcome {
             WaveDispatchOutcome::Completed(c) | WaveDispatchOutcome::Partial(c) => {
                 assert_eq!(c.wave_total, 5);
@@ -2190,12 +2213,11 @@ hats: {}
             .expect("rejection b");
 
         // Read recovery.jsonl from the diagnostics session dir.
-        let mut session_dirs: Vec<_> = std::fs::read_dir(
-            diagnostics_root.join(".ralph/diagnostics"),
-        )
-        .expect("read diagnostics dir")
-        .filter_map(Result::ok)
-        .collect();
+        let mut session_dirs: Vec<_> =
+            std::fs::read_dir(diagnostics_root.join(".ralph/diagnostics"))
+                .expect("read diagnostics dir")
+                .filter_map(Result::ok)
+                .collect();
         session_dirs.sort_by_key(|entry| entry.path());
         let session_path = session_dirs
             .last()
@@ -2305,7 +2327,11 @@ hats: {}
         );
 
         let mut tracker = ralph_core::WaveTracker::new();
-        tracker.register_wave_with_source(wave.wave_id.clone(), wave.total, Some(wave.target_hat.clone()));
+        tracker.register_wave_with_source(
+            wave.wave_id.clone(),
+            wave.total,
+            Some(wave.target_hat.clone()),
+        );
 
         let outcome = tokio::time::timeout(
             Duration::from_secs(20),
@@ -2372,7 +2398,11 @@ hats: {}
         );
 
         let mut tracker = ralph_core::WaveTracker::new();
-        tracker.register_wave_with_source(wave.wave_id.clone(), wave.total, Some(wave.target_hat.clone()));
+        tracker.register_wave_with_source(
+            wave.wave_id.clone(),
+            wave.total,
+            Some(wave.target_hat.clone()),
+        );
 
         let outcome = tokio::time::timeout(
             Duration::from_secs(5),
@@ -2431,12 +2461,11 @@ hats: {}
         record_loop_max_runtime_envelope(&mut el, "loop-abc", &wave);
 
         // Read recovery.jsonl from the diagnostics session dir.
-        let mut session_dirs: Vec<_> = std::fs::read_dir(
-            diagnostics_root.join(".ralph/diagnostics"),
-        )
-        .expect("read diagnostics dir")
-        .filter_map(Result::ok)
-        .collect();
+        let mut session_dirs: Vec<_> =
+            std::fs::read_dir(diagnostics_root.join(".ralph/diagnostics"))
+                .expect("read diagnostics dir")
+                .filter_map(Result::ok)
+                .collect();
         session_dirs.sort_by_key(|entry| entry.path());
         let session_path = session_dirs
             .last()
@@ -2484,8 +2513,7 @@ hats: {}
             "severity must be Error — the loop is about to terminate"
         );
         assert!(
-            entry.message.contains("loop-abc")
-                && entry.message.contains(&wave.wave_id),
+            entry.message.contains("loop-abc") && entry.message.contains(&wave.wave_id),
             "message must mention both loop_id and wave_id, got: {}",
             entry.message
         );
@@ -2584,7 +2612,8 @@ hats: {}
         //   `wave_events.is_empty()\n            && !hard_gate_triggered_this_iteration`
         // Assert each occurrence is followed by a
         // `late_termination_reason.is_none()` guard.
-        let gate_marker = "wave_events.is_empty()\n            && !hard_gate_triggered_this_iteration";
+        let gate_marker =
+            "wave_events.is_empty()\n            && !hard_gate_triggered_this_iteration";
         let count = runner_rs.matches(gate_marker).count();
         assert!(
             count >= 2,

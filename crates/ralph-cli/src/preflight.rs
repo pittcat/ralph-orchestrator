@@ -250,6 +250,68 @@ pub(crate) async fn load_config_for_preflight(
     Ok(config)
 }
 
+/// Synchronous variant of [`load_config_for_preflight`] for callers that
+/// cannot easily enter an async context (e.g. `ralph emit`).
+///
+/// Remote config/hats sources are **not** supported and produce a clear
+/// error. File and builtin presets work exactly like the async path,
+/// including user-layer merging, hats overlay, schema resolution, and
+/// CLI override application.
+pub(crate) fn load_config_for_preflight_sync(
+    config_sources: &[ConfigSource],
+    hats_source: Option<&HatsSource>,
+    workspace_root: &std::path::Path,
+) -> Result<RalphConfig> {
+    let (mut core_value, overrides, core_label) = load_core_value_sync(config_sources)?;
+
+    validate_core_config_shape(&core_value, &core_label)?;
+
+    if let Some(source) = hats_source {
+        if let Some(mapping) = core_value.as_mapping()
+            && (mapping_get(mapping, "hats").is_some() || mapping_get(mapping, "events").is_some())
+        {
+            warn!(
+                "Core config '{}' contains hats/events and hats source '{}' was provided; hats source takes precedence for hats/events",
+                core_label,
+                source.label()
+            );
+        }
+
+        let hats_value = load_hats_value_sync(source)?;
+        validate_hats_config_shape(&hats_value, &source.label())?;
+        core_value = merge_hats_overlay(core_value, hats_value)?;
+    }
+
+    let mut config: RalphConfig = serde_yaml::from_value(core_value)
+        .with_context(|| format!("Failed to parse merged core config from {}", core_label))?;
+
+    config.normalize();
+    config.core.workspace_root = workspace_root.to_path_buf();
+
+    // Record the primary config file path for template substitution in hooks.
+    config.config_path = config_sources
+        .iter()
+        .find(|s| matches!(s, ConfigSource::File(_)))
+        .and_then(|s| match s {
+            ConfigSource::File(path) => Some(path.clone()),
+            _ => None,
+        });
+
+    // Resolve external schema files referenced in event_policy.schema_file.
+    let schema_base_path = config
+        .config_path
+        .as_ref()
+        .and_then(|p| p.parent().map(PathBuf::from))
+        .unwrap_or_else(|| config.core.workspace_root.clone());
+    if let Err(e) = config.resolve_schema_files(&schema_base_path) {
+        anyhow::bail!("Failed to resolve schema files: {}", e);
+    }
+
+    crate::apply_config_overrides(&mut config, &overrides)?;
+
+    Ok(config)
+}
+
 pub(crate) fn config_source_label(
     config_sources: &[ConfigSource],
     hats_source: Option<&HatsSource>,
@@ -405,6 +467,118 @@ async fn load_hats_value(source: &HatsSource) -> Result<Value> {
 
             let value = config_resolution::parse_yaml_value(&content, url)?;
             normalize_hats_source_value(value, url)
+        }
+        HatsSource::Builtin(name) => {
+            let preset = presets::get_preset(name).ok_or_else(|| {
+                let available = presets::preset_names().join(", ");
+                anyhow::anyhow!(
+                    "Unknown hat collection '{}'. Available builtins: {}",
+                    name,
+                    available
+                )
+            })?;
+
+            let preset_value =
+                config_resolution::parse_yaml_value(preset.content, &format!("builtin:{}", name))?;
+            extract_hat_overlay_from_preset(preset_value)
+        }
+    }
+}
+
+/// Synchronous counterpart of [`load_core_value`]. Remote sources are not
+/// supported; callers that need remote core configs must use the async path.
+fn load_core_value_sync(
+    config_sources: &[ConfigSource],
+) -> Result<(Value, Vec<ConfigSource>, String)> {
+    let (primary_sources, overrides) = config_resolution::split_config_sources(config_sources);
+
+    if primary_sources.len() > 1 {
+        warn!("Multiple config sources specified, using first one. Others ignored.");
+    }
+
+    let user_layer = config_resolution::load_optional_user_config_value()?;
+
+    let (primary_value, primary_label, primary_uses_defaults) = if let Some(source) =
+        primary_sources.first()
+    {
+        match source {
+            ConfigSource::File(path) => {
+                if path.exists() {
+                    let label = path.display().to_string();
+                    let content = std::fs::read_to_string(path)
+                        .with_context(|| format!("Failed to load config from {}", label))?;
+                    let value = config_resolution::parse_yaml_value(&content, &label)?;
+                    (Some(value), label, false)
+                } else {
+                    warn!("Config file {:?} not found, using defaults", path);
+                    (None, path.display().to_string(), false)
+                }
+            }
+            ConfigSource::Builtin(name) => {
+                anyhow::bail!(
+                    "`-c builtin:{name}` is no longer supported.\n\nBuiltin presets are now hat collections.\nUse:\n  ralph run -c ralph.yml -H builtin:{name}\n\nOr for preflight:\n  ralph preflight -c ralph.yml -H builtin:{name}"
+                );
+            }
+            ConfigSource::Remote(url) => {
+                anyhow::bail!(
+                    "Remote core config sources are not supported for this command: {}",
+                    url
+                );
+            }
+            ConfigSource::Override { .. } => unreachable!("Partitioned out overrides"),
+        }
+    } else {
+        let default_path = crate::default_config_path();
+        if default_path.exists() {
+            let label = default_path.display().to_string();
+            let content = std::fs::read_to_string(&default_path)
+                .with_context(|| format!("Failed to load config from {}", label))?;
+            let value = config_resolution::parse_yaml_value(&content, &label)?;
+            (Some(value), label, false)
+        } else {
+            warn!(
+                "Config file {} not found, using defaults",
+                default_path.display()
+            );
+            (None, default_path.display().to_string(), true)
+        }
+    };
+
+    let mut merged = config_resolution::default_core_value()?;
+    if let Some((user_value, _)) = &user_layer {
+        merged = config_resolution::merge_yaml_values(merged, user_value.clone())?;
+    }
+    if let Some(primary_value) = primary_value {
+        merged = config_resolution::merge_yaml_values(merged, primary_value)?;
+    }
+
+    let merged_label = config_resolution::compose_core_label(
+        user_layer.as_ref().map(|(_, label)| label.as_str()),
+        &primary_label,
+        primary_uses_defaults,
+    );
+
+    Ok((merged, overrides, merged_label))
+}
+
+/// Synchronous counterpart of [`load_hats_value`]. Remote hats sources are not
+/// supported; callers that need remote hats must use the async path.
+fn load_hats_value_sync(source: &HatsSource) -> Result<Value> {
+    match source {
+        HatsSource::File(path) => {
+            if !path.exists() {
+                anyhow::bail!("Hats file not found: {}", path.display());
+            }
+            let content = std::fs::read_to_string(path)
+                .with_context(|| format!("Failed to load hats from {:?}", path))?;
+            let value = config_resolution::parse_yaml_value(&content, &path.display().to_string())?;
+            normalize_hats_source_value(value, &path.display().to_string())
+        }
+        HatsSource::Remote(url) => {
+            anyhow::bail!(
+                "Remote hats sources are not supported for this command: {}",
+                url
+            );
         }
         HatsSource::Builtin(name) => {
             let preset = presets::get_preset(name).ok_or_else(|| {

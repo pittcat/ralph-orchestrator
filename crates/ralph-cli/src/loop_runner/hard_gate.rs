@@ -674,10 +674,12 @@ pub fn inject_wave_policy_rejection_guidance(
             .copied()
             .unwrap_or_else(|| &rejections[0]);
         let topic_for_envelope = &first.topic;
-        let reason_code = if unique_findings
-            .iter()
-            .all(|r| matches!(r.finding.violation_type, ViolationType::MissingRequiredField { .. }))
-        {
+        let reason_code = if unique_findings.iter().all(|r| {
+            matches!(
+                r.finding.violation_type,
+                ViolationType::MissingRequiredField { .. }
+            )
+        }) {
             "missing_required_field"
         } else {
             "wave_dispatch_blocked"

@@ -5373,8 +5373,13 @@ fn assert_partial_timeout_events_visible_marked(
 
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let merged_events_path = temp_dir.path().join("events.jsonl");
-    merge_wave_results_to_events_file(completed, &merged_events_path, &["review.done".to_string()], "reviewer")
-        .expect("merge partial-timeout results");
+    merge_wave_results_to_events_file(
+        completed,
+        &merged_events_path,
+        &["review.done".to_string()],
+        "reviewer",
+    )
+    .expect("merge partial-timeout results");
 
     let merged = std::fs::read_to_string(&merged_events_path).expect("read merged events");
     let records: Vec<serde_json::Value> = merged
@@ -8398,7 +8403,10 @@ hats:
 
     // Sanity: `wave_raw_count` should match the rejection count for
     // the recovery envelope evidence.
-    assert_eq!(wave_raw_count, 7, "wave_raw_count should match rejection count");
+    assert_eq!(
+        wave_raw_count, 7,
+        "wave_raw_count should match rejection count"
+    );
 }
 
 #[test]
@@ -8505,8 +8513,7 @@ hats:
 
     // Defence-in-depth: even if the short-circuit ever failed, the
     // merged candidate_topics would still satisfy the obligation.
-    let mut candidate_topics: Vec<String> =
-        vec!["review.passed".to_string()];
+    let mut candidate_topics: Vec<String> = vec!["review.passed".to_string()];
     candidate_topics.extend(wave_policy_rejections.iter().map(|r| r.topic.clone()));
     assert!(
         !should_gate_missing_events(&hat, &event_loop, &candidate_topics),
@@ -8551,7 +8558,8 @@ fn test_wave_policy_rejection_guidance_dedupes_findings() {
             message: "Missing required field: depth".to_string(),
         },
     };
-    let rejections: Vec<ralph_core::PolicyRejection> = (0..7).map(|_| wave_rejection.clone()).collect();
+    let rejections: Vec<ralph_core::PolicyRejection> =
+        (0..7).map(|_| wave_rejection.clone()).collect();
     let hat_id = HatId::new("review-coordinator");
     let expected_topics = vec!["review.wave.ready".to_string()];
 
@@ -8659,12 +8667,7 @@ fn test_u3_pending_recovery_hat_is_set_by_missing_event_guidance() {
         "pending_recovery_hat must start as None on a fresh loop"
     );
 
-    inject_missing_event_hard_gate_guidance(
-        &ctx,
-        Some(&mut event_loop),
-        &hat_id,
-        &expected_topics,
-    );
+    inject_missing_event_hard_gate_guidance(&ctx, Some(&mut event_loop), &hat_id, &expected_topics);
 
     // U3: the field is now pinned to review-coordinator so the
     // next iteration's `next_hat` call will return it.
@@ -8758,8 +8761,7 @@ hats:
     let mut event_loop = EventLoop::new(config);
 
     // Pin to a hat that does NOT exist in the registry.
-    event_loop.state_mut().pending_recovery_hat =
-        Some(ralph_proto::HatId::new("ghost-hat"));
+    event_loop.state_mut().pending_recovery_hat = Some(ralph_proto::HatId::new("ghost-hat"));
 
     // Pin should be cleared even when the hat is unknown, so the
     // next iteration can operate normally.
@@ -9999,8 +10001,13 @@ fn u3_wave_merge_stamps_wave_total_on_every_record() {
     let events_path = tmp.path().join("events.jsonl");
     std::fs::write(&events_path, "").unwrap();
 
-    merge_wave_results_to_events_file(&completed, &events_path, &["review.dimension.done".into()], "reviewer")
-        .expect("merge must succeed");
+    merge_wave_results_to_events_file(
+        &completed,
+        &events_path,
+        &["review.dimension.done".into()],
+        "reviewer",
+    )
+    .expect("merge must succeed");
 
     let raw = std::fs::read_to_string(&events_path).unwrap();
     let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
@@ -10068,8 +10075,13 @@ fn u3_wave_merge_emits_synthetic_events_on_failure_with_wave_total() {
     let events_path = tmp.path().join("events.jsonl");
     std::fs::write(&events_path, "").unwrap();
 
-    merge_wave_results_to_events_file(&completed, &events_path, &["review.dimension.done".into()], "reviewer")
-        .expect("merge must succeed");
+    merge_wave_results_to_events_file(
+        &completed,
+        &events_path,
+        &["review.dimension.done".into()],
+        "reviewer",
+    )
+    .expect("merge must succeed");
 
     let raw = std::fs::read_to_string(&events_path).unwrap();
     let mut success_count = 0;
@@ -10129,8 +10141,13 @@ fn u3_wave_merge_handles_duplicate_indexes_without_panicking() {
     let events_path = tmp.path().join("events.jsonl");
     std::fs::write(&events_path, "").unwrap();
 
-    merge_wave_results_to_events_file(&completed, &events_path, &["review.dimension.done".into()], "reviewer")
-        .expect("merge must succeed");
+    merge_wave_results_to_events_file(
+        &completed,
+        &events_path,
+        &["review.dimension.done".into()],
+        "reviewer",
+    )
+    .expect("merge must succeed");
     let raw = std::fs::read_to_string(&events_path).unwrap();
     let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
     assert_eq!(lines.len(), 4, "all 4 result events appended");
@@ -11070,12 +11087,14 @@ async fn u3_wave_dispatch_merge_activates_wait_for_all_aggregator() {
     let loop_ctx1 = ralph_core::LoopContext::primary(workspace.to_path_buf());
     let mut event_loop_a = ralph_core::EventLoop::with_context(config1, loop_ctx1);
     let observed_a_clone = std::sync::Arc::clone(&observed_a);
-    event_loop_a.bus().add_observer(move |event: &ralph_proto::Event| {
-        observed_a_clone
-            .lock()
-            .unwrap()
-            .push(event.topic.as_str().to_string());
-    });
+    event_loop_a
+        .bus()
+        .add_observer(move |event: &ralph_proto::Event| {
+            observed_a_clone
+                .lock()
+                .unwrap()
+                .push(event.topic.as_str().to_string());
+        });
     event_loop_a.initialize("u3-a run A");
     let _ = event_loop_a.process_events_from_jsonl();
     let seq_a = observed_a.lock().unwrap().clone();
@@ -11085,12 +11104,14 @@ async fn u3_wave_dispatch_merge_activates_wait_for_all_aggregator() {
     let loop_ctx2 = ralph_core::LoopContext::primary(workspace.to_path_buf());
     let mut event_loop_b = ralph_core::EventLoop::with_context(config2, loop_ctx2);
     let observed_b_clone = std::sync::Arc::clone(&observed_b);
-    event_loop_b.bus().add_observer(move |event: &ralph_proto::Event| {
-        observed_b_clone
-            .lock()
-            .unwrap()
-            .push(event.topic.as_str().to_string());
-    });
+    event_loop_b
+        .bus()
+        .add_observer(move |event: &ralph_proto::Event| {
+            observed_b_clone
+                .lock()
+                .unwrap()
+                .push(event.topic.as_str().to_string());
+        });
     event_loop_b.initialize("u3-a run B");
     let _ = event_loop_b.process_events_from_jsonl();
     let seq_b = observed_b.lock().unwrap().clone();
@@ -11292,7 +11313,11 @@ async fn u3_worker_failure_emits_synthetic_result_for_aggregator() {
     let mut event_loop = setup.event_loop;
     let events_file = &setup.events_file;
     let backend = ralph_adapters::CliBackend {
-        command: workspace.join("bin").join("does-not-exist").display().to_string(),
+        command: workspace
+            .join("bin")
+            .join("does-not-exist")
+            .display()
+            .to_string(),
         args: vec![],
         prompt_mode: ralph_adapters::PromptMode::Arg,
         prompt_flag: None,
@@ -11598,8 +11623,7 @@ async fn u3_two_independent_waves_route_to_separate_aggregations() {
     // metadata — and the merged-events count we already verified
     // above.
     let merged_after = std::fs::read_to_string(&events_file).expect("read merged");
-    let mut wave_ids_in_log: std::collections::BTreeSet<String> =
-        std::collections::BTreeSet::new();
+    let mut wave_ids_in_log: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for line in merged_after.lines().filter(|l| !l.trim().is_empty()) {
         let v: serde_json::Value = serde_json::from_str(line).expect("json");
         if let Some(wid) = v["wave_id"].as_str() {

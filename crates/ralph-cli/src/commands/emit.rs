@@ -1,5 +1,5 @@
 use crate::cli::{
-    ColorMode, ConfigSource, load_config_with_overrides, resolve_emit_path, resolve_marker_target,
+    ColorMode, ConfigSource, HatsSource, resolve_emit_path, resolve_marker_target,
     resolve_workspace_root, urgent_steer_path_from_workspace,
 };
 use crate::config_resolution;
@@ -7,10 +7,16 @@ use crate::display::colors;
 use crate::policy_check::{PolicyCheckFlags, resolve_policy_check_mode};
 use anyhow::{Context, Result};
 use clap::Parser;
-use ralph_core::{RalphConfig, UrgentSteerStore};
+use ralph_core::{
+    RalphConfig, UrgentSteerStore,
+    diagnosis::{
+        DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, EvidenceKind, EvidenceRef,
+        RecoveryDiagnosisEnvelope, RecoveryJournalEntry,
+    },
+};
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Arguments for the emit subcommand.
 #[derive(Parser, Debug)]
@@ -112,14 +118,91 @@ pub fn looks_like_json(payload: &str) -> bool {
     trimmed.starts_with('{') || trimmed.starts_with('[')
 }
 
-pub fn emit_command(color_mode: ColorMode, args: EmitArgs) -> Result<()> {
-    emit_command_with_root(color_mode, args, None)
+/// Write a recovery envelope to `.ralph/recovery.jsonl` when the CLI
+/// emit precheck rejects an event. The envelope captures the rejected
+/// topic, the offending hat (if known), and the policy finding so
+/// operators and `ralph diagnose` have an audit trace.
+///
+/// Errors are returned but expected to be logged (not propagated) by
+/// the caller: the original validation error must still reach the user.
+fn write_cli_emit_recovery_envelope(
+    workspace_root: &Path,
+    topic: &str,
+    source_hat: Option<&str>,
+    finding: &ralph_core::PolicyFinding,
+) -> Result<()> {
+    let recovery_path = workspace_root.join(".ralph/recovery.jsonl");
+    if let Some(parent) = recovery_path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!("Failed to create recovery directory: {}", parent.display())
+        })?;
+    }
+
+    let (severity, outcome, reason_code) = match &finding.violation_type {
+        ralph_core::ViolationType::PayloadTypeMismatch { .. } => (
+            DiagnosisSeverity::Critical,
+            DiagnosisOutcome::NotRetriable,
+            "payload_contract_violation".to_string(),
+        ),
+        _ => (
+            DiagnosisSeverity::Error,
+            DiagnosisOutcome::Failed,
+            finding.violation_type.reason_code().to_string(),
+        ),
+    };
+
+    let mut builder = RecoveryDiagnosisEnvelope::builder()
+        .source(DiagnosisSource::CliEmit)
+        .severity(severity)
+        .topic(topic)
+        .reason_code(reason_code)
+        .message(finding.message.clone())
+        .outcome(outcome)
+        .safe_target(false);
+
+    if let Some(hat) = source_hat {
+        builder = builder.source_hat(hat);
+    }
+
+    if let Some(field) = finding.violation_type.field() {
+        builder = builder.evidence(EvidenceRef::new(EvidenceKind::Field, field, None));
+    }
+
+    let envelope = builder.build();
+    let entry = RecoveryJournalEntry::from_envelope(envelope, Vec::new());
+
+    let line = serde_json::to_string(&entry)?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&recovery_path)
+        .with_context(|| format!("Failed to open recovery file: {}", recovery_path.display()))?;
+    writeln!(file, "{}", line)?;
+    Ok(())
 }
 
+pub fn emit_command(
+    color_mode: ColorMode,
+    args: EmitArgs,
+    hats_source: Option<&HatsSource>,
+) -> Result<()> {
+    emit_command_with_root_and_hats(color_mode, args, None, hats_source)
+}
+
+#[cfg(test)]
 pub fn emit_command_with_root(
     color_mode: ColorMode,
     args: EmitArgs,
     root: Option<&PathBuf>,
+) -> Result<()> {
+    emit_command_with_root_and_hats(color_mode, args, root, None)
+}
+
+fn emit_command_with_root_and_hats(
+    color_mode: ColorMode,
+    args: EmitArgs,
+    root: Option<&PathBuf>,
+    hats_source: Option<&HatsSource>,
 ) -> Result<()> {
     let use_colors = color_mode.should_use_colors();
     let workspace_root = resolve_workspace_root(root);
@@ -160,7 +243,11 @@ pub fn emit_command_with_root(
         let config_path = config_resolution::find_workspace_config_path(&workspace_root)
             .unwrap_or_else(|| workspace_root.join("ralph.yml"));
         let config_sources = vec![ConfigSource::File(config_path.clone())];
-        match load_config_with_overrides(&config_sources) {
+        match crate::preflight::load_config_for_preflight_sync(
+            &config_sources,
+            hats_source,
+            &workspace_root,
+        ) {
             Ok(cfg) => Some(cfg),
             Err(_e) => {
                 if args.policy_check {
@@ -270,32 +357,27 @@ pub fn emit_command_with_root(
                         eprintln!("Policy warning: {}", finding.message);
                     }
                 }
-                ralph_core::PolicyDecision::RejectWithResume(finding) => {
+                ralph_core::PolicyDecision::RejectWithResume(finding)
+                | ralph_core::PolicyDecision::Hold(finding)
+                | ralph_core::PolicyDecision::Block(finding)
+                | ralph_core::PolicyDecision::Ignore(finding) => {
+                    if let Err(e) = write_cli_emit_recovery_envelope(
+                        &workspace_root,
+                        &args.topic,
+                        hat.as_deref(),
+                        &finding,
+                    ) {
+                        tracing::warn!("Failed to write CLI emit recovery envelope: {:#}", e);
+                    }
                     anyhow::bail!(
                         "Event rejected by policy: {}. Fix the issue before emitting.",
                         finding.message
                     );
                 }
-                ralph_core::PolicyDecision::Hold(finding) => {
-                    anyhow::bail!(
-                        "Event held by policy: {}. Fix the issue before emitting.",
-                        finding.message
-                    );
-                }
-                ralph_core::PolicyDecision::Block(finding) => {
-                    anyhow::bail!(
-                        "Event blocked by policy: {}. Fix the issue before emitting.",
-                        finding.message
-                    );
-                }
-                ralph_core::PolicyDecision::Ignore(finding) => {
-                    anyhow::bail!(
-                        "Event ignored by policy: {}. Fix the issue before emitting.",
-                        finding.message
-                    );
-                }
             }
         }
+    } else if check_mode == PolicyCheckMode::Skip {
+        tracing::info!("cli emit policy check skipped: no event_policy in resolved config");
     }
 
     // Generate timestamp internally — agents cannot forge timestamps
@@ -399,6 +481,7 @@ pub fn emit_command_with_root(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::load_config_with_overrides;
     use std::path::PathBuf;
     use tempfile::TempDir;
     #[test]

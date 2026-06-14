@@ -1842,11 +1842,7 @@ mod tests {
             "ce-executor-zh work.ready section must mention progress.md. \
              Section excerpt:\n{qa_paragraph}"
         );
-        for needle in [
-            "Current Step",
-            "Runtime Task ID",
-            "Status: in_progress",
-        ] {
+        for needle in ["Current Step", "Runtime Task ID", "Status: in_progress"] {
             assert!(
                 qa_paragraph.contains(needle),
                 "ce-executor-zh work.ready progress.md update must reference `{}`. \
@@ -1874,11 +1870,7 @@ mod tests {
             "ce-executor-zh Task Execution Loop must include `更新 \\`progress.md\\`` step. \
              Section excerpt:\n{loop_section}"
         );
-        for needle in [
-            "Current Step",
-            "Runtime Task ID",
-            "Status: in_progress",
-        ] {
+        for needle in ["Current Step", "Runtime Task ID", "Status: in_progress"] {
             assert!(
                 loop_section.contains(needle),
                 "ce-executor-zh Task Execution Loop progress.md update must reference `{}`. \
@@ -2474,7 +2466,8 @@ mod tests {
 
         // Order must be stable: collect values + public_names must agree on
         // the set, and there must be no duplicates.
-        let value_set: std::collections::BTreeSet<&str> = values.iter().map(|s| s.as_str()).collect();
+        let value_set: std::collections::BTreeSet<&str> =
+            values.iter().map(|s| s.as_str()).collect();
         assert_eq!(
             value_set.len(),
             values.len(),
@@ -2484,10 +2477,7 @@ mod tests {
 
     /// Parse a `NAME=(\n  "..."\n  "..."\n)` array body from a zsh file and
     /// return the list of string contents in declaration order.
-    fn extract_zsh_array(
-        text: &str,
-        name: &str,
-    ) -> Option<Vec<String>> {
+    fn extract_zsh_array(text: &str, name: &str) -> Option<Vec<String>> {
         let marker = format!("{}=", name);
         let start = text.find(&marker)?;
         // Find the opening `(` after the marker
@@ -3922,12 +3912,7 @@ mod tests {
         let base_config =
             RalphConfig::parse_yaml(base_preset.content).expect("ce-executor YAML should parse");
 
-        let shared_hats = [
-            "fixer",
-            "debug-resolver",
-            "shipper",
-            "reporter",
-        ];
+        let shared_hats = ["fixer", "debug-resolver", "shipper", "reporter"];
 
         for hat_name in &shared_hats {
             let wave_hat = wave_config

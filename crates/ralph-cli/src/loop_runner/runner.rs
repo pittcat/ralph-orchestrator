@@ -239,7 +239,69 @@ pub(crate) fn adapter_timeout_duration(timeout_secs: u64) -> Option<Duration> {
     (timeout_secs > 0).then(|| Duration::from_secs(timeout_secs))
 }
 
+/// U3: path to the lightweight termination sentinel written by the loop
+/// runner before returning a non-success [`TerminationReason`]. The parent
+/// `ralph run` process (stdio or TUI) reads this file after the child exits
+/// to recover the exact reason without relying on coarse exit-code mapping.
+fn loop_termination_sentinel_path(loop_context: &Option<LoopContext>) -> PathBuf {
+    loop_context
+        .as_ref()
+        .map(|ctx| ctx.ralph_dir().join("loop-termination-reason.json"))
+        .unwrap_or_else(|| PathBuf::from(".ralph/loop-termination-reason.json"))
+}
+
+/// U3: remove any stale termination sentinel at loop start so a successful
+/// run cannot be misclassified by an artifact from a previous run.
+fn remove_loop_termination_sentinel(loop_context: &Option<LoopContext>) {
+    let path = loop_termination_sentinel_path(loop_context);
+    if path.exists() {
+        let _ = fs::remove_file(&path);
+    }
+}
+
+/// U3: write the termination reason sentinel so the parent process can
+/// recover the exact reason after the loop runner exits.
+fn write_loop_termination_sentinel(loop_context: &Option<LoopContext>, reason: &TerminationReason) {
+    let path = loop_termination_sentinel_path(loop_context);
+    if let Some(parent) = path.parent() {
+        if let Err(e) = fs::create_dir_all(parent) {
+            warn!(
+                target: "ralph_cli::loop_runner",
+                error = %e,
+                path = %path.display(),
+                "Failed to create termination sentinel parent directory"
+            );
+            return;
+        }
+    }
+    match serde_json::to_string(reason) {
+        Ok(json) => {
+            if let Err(e) = fs::write(&path, json) {
+                warn!(
+                    target: "ralph_cli::loop_runner",
+                    error = %e,
+                    path = %path.display(),
+                    "Failed to write termination sentinel"
+                );
+            }
+        }
+        Err(e) => {
+            warn!(
+                target: "ralph_cli::loop_runner",
+                error = %e,
+                "Failed to serialize termination reason sentinel"
+            );
+        }
+    }
+}
+
 /// Core loop implementation supporting both fresh start and continue modes.
+///
+/// This public wrapper exists so U3 can write a termination sentinel for
+/// every non-success return without threading sentinel logic through the
+/// huge `run_loop_impl_inner` body. The inner function performs all real work
+/// and returns the typed reason; the wrapper then persists the sentinel and
+/// forwards the result unchanged.
 ///
 /// # Arguments
 ///
@@ -252,6 +314,53 @@ pub(crate) fn adapter_timeout_duration(timeout_secs: u64) -> Option<Duration> {
 ///   If `None` and `resume` is true, reuses the existing `current-loop-id` marker.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_loop_impl(
+    config: RalphConfig,
+    color_mode: ColorMode,
+    resume: bool,
+    enable_tui: bool,
+    enable_rpc: bool,
+    verbosity: Verbosity,
+    record_session: Option<PathBuf>,
+    loop_context: Option<LoopContext>,
+    custom_args: Vec<String>,
+    auto_merge_override: Option<bool>,
+    resume_loop_id: Option<String>,
+    warmup_only: bool,
+    force_warmup: bool,
+    prebuilt_diagnostics: Option<Arc<ralph_core::diagnostics::DiagnosticsCollector>>,
+    no_sync_agent_docs: bool,
+    source_is_builtin_embedded: bool,
+) -> Result<TerminationReason> {
+    remove_loop_termination_sentinel(&loop_context);
+    let result = run_loop_impl_inner(
+        config,
+        color_mode,
+        resume,
+        enable_tui,
+        enable_rpc,
+        verbosity,
+        record_session,
+        loop_context.clone(),
+        custom_args,
+        auto_merge_override,
+        resume_loop_id,
+        warmup_only,
+        force_warmup,
+        prebuilt_diagnostics,
+        no_sync_agent_docs,
+        source_is_builtin_embedded,
+    )
+    .await;
+    if let Ok(ref reason) = result {
+        if !reason.is_success() {
+            write_loop_termination_sentinel(&loop_context, reason);
+        }
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_loop_impl_inner(
     mut config: RalphConfig,
     color_mode: ColorMode,
     resume: bool,
@@ -290,9 +399,7 @@ pub async fn run_loop_impl(
     // WRC-U3: pass `source_is_builtin_embedded` so the WAC
     // severity upgrade (KTD-7) applies to builtin presets even
     // outside `--strict` mode.
-    if let Err(lint_error) =
-        enforce_preset_lint_gate(&config, source_is_builtin_embedded)
-    {
+    if let Err(lint_error) = enforce_preset_lint_gate(&config, source_is_builtin_embedded) {
         let diagnostics_dir = std::path::Path::new(".").join(".ralph").join("diagnostics");
         let _artifact_path = write_preset_lint_artifact(&diagnostics_dir, &lint_error);
         eprintln!(
@@ -3466,10 +3573,8 @@ pub async fn run_loop_impl(
         // the gate is skipped symmetrically with the regular
         // `had_rejected_events` path.
         let wave_had_policy_rejections = !wave_policy_rejections.is_empty();
-        let agent_wrote_any_valid_or_rejected = agent_wrote_any_valid_or_rejected(
-            processed_events.as_ref(),
-            &wave_policy_rejections,
-        );
+        let agent_wrote_any_valid_or_rejected =
+            agent_wrote_any_valid_or_rejected(processed_events.as_ref(), &wave_policy_rejections);
 
         let mut late_termination_reason: Option<TerminationReason> = None;
         let mut hard_gate_triggered_this_iteration = false;
@@ -3513,46 +3618,47 @@ pub async fn run_loop_impl(
         }
 
         // Execute wave if wave events detected
-        let wave_outcome: Option<crate::loop_runner::wave::HandleWaveOutcome> = if !wave_events.is_empty() {
-            // U4-C2 / KTD-U4-6: compute the runner-supplied global
-            // deadline from the loop's remaining runtime budget.
-            // When `max_runtime_seconds = 0` (the default in many
-            // presets, meaning "no upper bound"), the deadline is
-            // `None` and the dispatcher falls back to its
-            // wave-internal partial/aggregate timers. Otherwise we
-            // always pass `Some(now + remaining)` — even when
-            // `remaining` is zero — so the dispatcher can short-
-            // circuit the wave cleanly on the very first loop
-            // iteration instead of letting it run unbounded.
-            let global_deadline = {
-                let cfg = event_loop.config();
-                let max_runtime = cfg.event_loop.max_runtime_seconds;
-                if max_runtime == 0 {
-                    None
-                } else {
-                    let remaining = std::time::Duration::from_secs(max_runtime)
-                        .saturating_sub(event_loop.state().elapsed());
-                    Some(tokio::time::Instant::now() + remaining)
-                }
+        let wave_outcome: Option<crate::loop_runner::wave::HandleWaveOutcome> =
+            if !wave_events.is_empty() {
+                // U4-C2 / KTD-U4-6: compute the runner-supplied global
+                // deadline from the loop's remaining runtime budget.
+                // When `max_runtime_seconds = 0` (the default in many
+                // presets, meaning "no upper bound"), the deadline is
+                // `None` and the dispatcher falls back to its
+                // wave-internal partial/aggregate timers. Otherwise we
+                // always pass `Some(now + remaining)` — even when
+                // `remaining` is zero — so the dispatcher can short-
+                // circuit the wave cleanly on the very first loop
+                // iteration instead of letting it run unbounded.
+                let global_deadline = {
+                    let cfg = event_loop.config();
+                    let max_runtime = cfg.event_loop.max_runtime_seconds;
+                    if max_runtime == 0 {
+                        None
+                    } else {
+                        let remaining = std::time::Duration::from_secs(max_runtime)
+                            .saturating_sub(event_loop.state().elapsed());
+                        Some(tokio::time::Instant::now() + remaining)
+                    }
+                };
+                let outcome = handle_wave_events(
+                    &wave_events,
+                    &mut event_loop,
+                    &backend,
+                    &ctx,
+                    use_colors,
+                    enable_rpc,
+                    rpc_event_tx.as_ref(),
+                    tui_state.as_ref(),
+                    &loop_id,
+                    prebuilt_diagnostics.as_ref(),
+                    global_deadline,
+                )
+                .await;
+                Some(outcome)
+            } else {
+                None
             };
-            let outcome = handle_wave_events(
-                &wave_events,
-                &mut event_loop,
-                &backend,
-                &ctx,
-                use_colors,
-                enable_rpc,
-                rpc_event_tx.as_ref(),
-                tui_state.as_ref(),
-                &loop_id,
-                prebuilt_diagnostics.as_ref(),
-                global_deadline,
-            )
-            .await;
-            Some(outcome)
-        } else {
-            None
-        };
 
         // U4-C3 / KTD-U4-6: if the global deadline fired during the
         // wave, set `late_termination_reason = Some(MaxRuntime)`.
@@ -3622,11 +3728,7 @@ pub async fn run_loop_impl(
             // this merge, the obligation path would still classify
             // the obligation as unsatisfied and trigger a spurious
             // missing-event gate.
-            topics.extend(
-                wave_policy_rejections
-                    .iter()
-                    .map(|r| r.topic.clone()),
-            );
+            topics.extend(wave_policy_rejections.iter().map(|r| r.topic.clone()));
             topics
         };
         // C4 (§6 C4): the post-wave gate blocks are guarded by

@@ -48,6 +48,7 @@ use crate::skill_registry::SkillRegistry;
 use crate::state_machine::{StateMachineDecision, StateMachineRuntimeState};
 use crate::text::floor_char_boundary;
 use ralph_proto::{CheckinContext, Event, EventBus, Hat, HatId, RobotService};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -125,7 +126,8 @@ pub struct ProcessedEventsWithWaves {
 }
 
 /// Reason the event loop terminated.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TerminationReason {
     /// Completion promise was detected in output.
     CompletionPromise,

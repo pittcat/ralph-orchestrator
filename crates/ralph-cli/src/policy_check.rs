@@ -25,7 +25,8 @@ use std::path::{Path, PathBuf};
 use crate::cli::{ConfigSource, load_config_with_overrides, resolve_workspace_root};
 use crate::config_resolution;
 use ralph_core::{
-    EventPolicyConfig, PolicyDecision, PolicyRuntimeState, RalphConfig, ViolationType, validate_event,
+    EventPolicyConfig, PolicyDecision, PolicyRuntimeState, RalphConfig, ViolationType,
+    validate_event,
 };
 
 /// Determines whether and how a CLI emit should undergo policy validation.
@@ -145,11 +146,7 @@ pub fn load_workspace_config(
 /// callers treat this as "no policy check applies".
 pub fn enabled_event_policy(config: Option<&RalphConfig>) -> Option<&EventPolicyConfig> {
     let policy = config.and_then(|c| c.event_loop.event_policy.as_ref())?;
-    if policy.enabled {
-        Some(policy)
-    } else {
-        None
-    }
+    if policy.enabled { Some(policy) } else { None }
 }
 
 /// Holds the events file path used to bootstrap [`PolicyRuntimeState`].
@@ -266,19 +263,17 @@ pub fn validate_batch_against_config(
     let mut state = build_policy_state(policy, &ctx);
     let mut errors = Vec::new();
     for (index, payload) in payloads.iter().enumerate() {
-        if let Some(err) =
-            validate_topic_payload_with_state(topic, payload, policy, &mut state)?
-        {
-            errors.push(ValidationError { payload_index: index, ..err });
+        if let Some(err) = validate_topic_payload_with_state(topic, payload, policy, &mut state)? {
+            errors.push(ValidationError {
+                payload_index: index,
+                ..err
+            });
         }
     }
     Ok(BatchValidation { errors })
 }
 
-fn finding_to_validation_error(
-    decision: &PolicyDecision,
-    topic: &str,
-) -> Option<ValidationError> {
+fn finding_to_validation_error(decision: &PolicyDecision, topic: &str) -> Option<ValidationError> {
     let finding = match decision {
         PolicyDecision::Accept => return None,
         PolicyDecision::Warn(findings) => {
@@ -315,17 +310,15 @@ fn finding_record(finding: &ralph_core::PolicyFinding) -> ValidationError {
         ViolationType::PayloadTypeMismatch { .. } => {
             (String::new(), "payload_type_mismatch".to_string())
         }
-        ViolationType::TerminalMonotonicityViolation { .. } => (
-            String::new(),
-            "terminal_monotonicity_violation".to_string(),
-        ),
+        ViolationType::TerminalMonotonicityViolation { .. } => {
+            (String::new(), "terminal_monotonicity_violation".to_string())
+        }
         ViolationType::DuplicateTerminalEvent { .. } => {
             (String::new(), "duplicate_terminal_event".to_string())
         }
-        ViolationType::BusinessEventAfterCompletion { .. } => (
-            String::new(),
-            "business_event_after_completion".to_string(),
-        ),
+        ViolationType::BusinessEventAfterCompletion { .. } => {
+            (String::new(), "business_event_after_completion".to_string())
+        }
         ViolationType::InvalidTopicFormat { .. } => {
             (String::new(), "invalid_topic_format".to_string())
         }
@@ -399,9 +392,7 @@ pub fn emit_policy_validation_failure(
             } else if total > 0 {
                 format!(
                     "{}",
-                    failure.validation_errors[0]
-                        .reason_code
-                        .replace('_', " ")
+                    failure.validation_errors[0].reason_code.replace('_', " ")
                 )
             } else {
                 "policy check".to_string()
@@ -558,13 +549,8 @@ event_loop:
         let events = tmp.path().join("events.jsonl");
         // All 7 payloads lack `depth` → expect 7 errors, one per index.
         let payloads: Vec<String> = (0..7).map(|i| format!(r#"{{"dim":"d{i}"}}"#)).collect();
-        let batch = validate_batch_against_config(
-            "review.wave.ready",
-            &payloads,
-            &policy,
-            &events,
-        )
-        .unwrap();
+        let batch = validate_batch_against_config("review.wave.ready", &payloads, &policy, &events)
+            .unwrap();
         assert_eq!(batch.errors.len(), 7);
         for (i, err) in batch.errors.iter().enumerate() {
             assert_eq!(err.payload_index, i);
@@ -582,13 +568,8 @@ event_loop:
         let payloads: Vec<String> = (0..3)
             .map(|i| format!(r#"{{"dim":"d{i}","depth":"standard"}}"#))
             .collect();
-        let batch = validate_batch_against_config(
-            "review.wave.ready",
-            &payloads,
-            &policy,
-            &events,
-        )
-        .unwrap();
+        let batch = validate_batch_against_config("review.wave.ready", &payloads, &policy, &events)
+            .unwrap();
         assert!(batch.is_ok(), "valid payloads should produce empty errors");
     }
 
@@ -603,18 +584,15 @@ event_loop:
             .map(|i| format!(r#"{{"dim":"d{i}","depth":"standard"}}"#))
             .collect();
         payloads[3] = r#"{"dim":"d3"}"#.to_string();
-        let batch = validate_batch_against_config(
-            "review.wave.ready",
-            &payloads,
-            &policy,
-            &events,
-        )
-        .unwrap();
+        let batch = validate_batch_against_config("review.wave.ready", &payloads, &policy, &events)
+            .unwrap();
         assert!(!batch.is_ok());
-        assert!(batch
-            .errors
-            .iter()
-            .any(|e| e.payload_index == 3 && e.field == "depth"));
+        assert!(
+            batch
+                .errors
+                .iter()
+                .any(|e| e.payload_index == 3 && e.field == "depth")
+        );
     }
 
     #[test]
@@ -693,10 +671,7 @@ event_loop:
         // capture). Verify the field aggregation logic by inspecting
         // the validation_errors directly.
         assert_eq!(failure.validation_errors.len(), 7);
-        let all_depth = failure
-            .validation_errors
-            .iter()
-            .all(|e| e.field == "depth");
+        let all_depth = failure.validation_errors.iter().all(|e| e.field == "depth");
         assert!(all_depth);
     }
 
@@ -758,20 +733,18 @@ event_loop:
         .unwrap();
 
         let payloads = vec![r#"{"task_key":"x"}"#.to_string()];
-        let batch = validate_batch_against_config(
-            "experiment.planned",
-            &payloads,
-            &policy,
-            &events,
-        )
-        .unwrap();
+        let batch =
+            validate_batch_against_config("experiment.planned", &payloads, &policy, &events)
+                .unwrap();
         assert!(!batch.is_ok(), "business event after terminal must reject");
-        assert!(batch
-            .errors
-            .iter()
-            .any(|e| e.reason_code == "terminal_monotonicity_violation"
-                || e.reason_code == "business_event_after_completion"
-                || e.reason_code == "duplicate_terminal_event"));
+        assert!(
+            batch
+                .errors
+                .iter()
+                .any(|e| e.reason_code == "terminal_monotonicity_violation"
+                    || e.reason_code == "business_event_after_completion"
+                    || e.reason_code == "duplicate_terminal_event")
+        );
     }
 
     #[test]

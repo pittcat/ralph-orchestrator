@@ -429,6 +429,31 @@ hats:
         checkbox (left unchecked after the work is committed)
         forces an unnecessary review-synthesizer round.
 
+      ### PAYLOAD SCHEMA CHECKLIST (U4)
+
+      Before emitting `work.done`, verify all seven required fields are present
+      and are the correct types (strings for identifiers, integers for counts):
+
+      - `plan_name` — filename of the plan without extension
+      - `plan_path` — relative path to the plan file
+      - `task_id` — the runtime task ID from `ralph tools task show`
+      - `task_key` — the corresponding task key
+      - `step` — step identifier, e.g. `step-01` or `trivial`
+      - `commit_count` — integer, number of commits produced this iteration
+      - `changed_lines` — integer, insertions + deletions since the diff base
+
+      Copy-pasteable example (replace the placeholders, then run verbatim):
+
+      ```bash
+      ralph emit work.done --json '{"plan_name":"my-plan","plan_path":"docs/plans/my-plan.md","task_id":"task-1747016430-a1b2","task_key":"ce-executor:my-plan:step-01:u0-impl","step":"step-01","commit_count":1,"changed_lines":42}'
+      ```
+
+      - `build.done` is **prohibited** for the executor hat. The preset's
+        `topic_deny_rules` already rejects `executor → build.done`; emitting it
+        will trigger a `task.resume` retry loop. Put build / test / lint
+        summaries into the `work.done` payload (for example under a
+        `verification` object) instead of emitting separate progress topics.
+
       ### Read State (on every activation)
       1. Determine activation source and read payload fields:
          - `work.ready`: read `task_id`, `task_key`, `plan_path`, `plan_name`, `step`, `complexity`. When `reviewed_task_id` / `reviewed_task_key` / `next_step` are present (plan-gate step advance), those are the *reviewed* step's tasks for correlation only — use `task_id` / `step` for the work you must execute now.

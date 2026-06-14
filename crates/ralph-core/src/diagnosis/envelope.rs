@@ -88,6 +88,9 @@ pub enum DiagnosisSource {
     /// workers (e.g. resource exhaustion) so the resulting
     /// 0/N `dimension.done` rate is attributable instead of silent.
     WaveDispatcher,
+    /// CLI `ralph emit` precheck rejected an event before it landed
+    /// in the trusted events file. Added in U1/U2 (2026-06-14).
+    CliEmit,
 }
 
 impl DiagnosisSource {
@@ -107,6 +110,7 @@ impl DiagnosisSource {
             DiagnosisSource::TopicFormat => "topic_format",
             DiagnosisSource::AgentDocSync => "agent_doc_sync",
             DiagnosisSource::WaveDispatcher => "wave_dispatcher",
+            DiagnosisSource::CliEmit => "cli_emit",
         }
     }
 }
@@ -707,6 +711,7 @@ mod tests {
             DiagnosisSource::TopicFormat,
             DiagnosisSource::AgentDocSync,
             DiagnosisSource::WaveDispatcher,
+            DiagnosisSource::CliEmit,
         ] {
             let s = serde_json::to_string(&source).unwrap();
             let v: serde_json::Value = serde_json::from_str(&s).unwrap();
@@ -811,8 +816,10 @@ mod tests {
     /// must collapse to the same finding so the responder converges.
     #[test]
     fn wave_retry_key_is_stable_for_same_wave() {
-        let k1 = RecoveryDiagnosisEnvelopeBuilder::wave_retry_key("w-001", "wave_total_exceeds_cap");
-        let k2 = RecoveryDiagnosisEnvelopeBuilder::wave_retry_key("w-001", "wave_total_exceeds_cap");
+        let k1 =
+            RecoveryDiagnosisEnvelopeBuilder::wave_retry_key("w-001", "wave_total_exceeds_cap");
+        let k2 =
+            RecoveryDiagnosisEnvelopeBuilder::wave_retry_key("w-001", "wave_total_exceeds_cap");
         assert_eq!(k1, k2, "same wave_id + reason_code must yield same key");
     }
 
