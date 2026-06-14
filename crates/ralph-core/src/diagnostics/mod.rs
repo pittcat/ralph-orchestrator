@@ -87,12 +87,32 @@ pub struct DiagnosticsOptions {
     /// Used by `main.rs` to share the dir between the tracing layer and the
     /// `EventLoop`. When `None`, a new timestamped dir is created lazily.
     pub session_dir: Option<PathBuf>,
+
+    /// `trace_only=true` makes the collector create the session dir for the
+    /// tracing layer and TUI stderr log, but skip ALL loop-level loggers
+    /// (recovery/drift/orchestration/performance/errors/hook-runs/agent-output/
+    /// prompt-log). Used by the subprocess TUI parent in `main.rs` so it
+    /// does not leave an empty shell in the main repo while the child RPC
+    /// process writes real data into the worktree (U1, 2026-06-14).
+    ///
+    /// `full_diagnostics=true` wins: when both are set, the full logger set
+    /// is created (matches the existing
+    /// `runtime_diagnosis_artifacts`-vs-full precedence contract).
+    pub trace_only: bool,
 }
 
 impl DiagnosticsOptions {
     /// Returns true when any diagnostic capture is active.
     pub fn is_enabled(&self) -> bool {
-        self.full_diagnostics || self.runtime_diagnosis_artifacts
+        self.full_diagnostics || self.runtime_diagnosis_artifacts || self.trace_only
+    }
+
+    /// Returns true when the trace-only mode is requested. This is a
+    /// request signal, not a final state — the actual logger set still
+    /// depends on `full_diagnostics` winning when both are set. Use
+    /// [`DiagnosticsCollector::is_trace_only`] for the effective state.
+    pub fn wants_trace_only(&self) -> bool {
+        self.trace_only && !self.full_diagnostics
     }
 
     /// Resolves the activation matrix entry based on env and (optionally)
@@ -104,6 +124,7 @@ impl DiagnosticsOptions {
         Self {
             full_diagnostics,
             runtime_diagnosis_artifacts: false,
+            trace_only: false,
             session_dir,
         }
     }
@@ -128,6 +149,7 @@ impl DiagnosticsOptions {
         Self {
             full_diagnostics,
             runtime_diagnosis_artifacts: write_artifacts,
+            trace_only: false,
             session_dir,
         }
     }
@@ -147,6 +169,7 @@ pub struct DiagnosticsCollector {
     enabled: bool,
     full_diagnostics: bool,
     runtime_diagnosis_artifacts: bool,
+    trace_only: bool,
     session_dir: Option<PathBuf>,
     orchestration_logger: Option<Arc<Mutex<orchestration::OrchestrationLogger>>>,
     performance_logger: Option<Arc<Mutex<performance::PerformanceLogger>>>,
@@ -165,6 +188,7 @@ impl std::fmt::Debug for DiagnosticsCollector {
                 "runtime_diagnosis_artifacts",
                 &self.runtime_diagnosis_artifacts,
             )
+            .field("trace_only", &self.trace_only)
             .field("session_dir", &self.session_dir)
             .field(
                 "has_orchestration_logger",
@@ -204,10 +228,16 @@ impl DiagnosticsCollector {
 
     /// Canonical constructor.
     ///
-    /// Drives the activation matrix in [`DiagnosticsOptions`]. When both
+    /// Drives the activation matrix in [`DiagnosticsOptions`]. When all
     /// flags are false, returns a no-op disabled collector with no I/O.
     /// When enabled, creates (or reuses) a timestamped session directory
     /// and instantiates the appropriate logger set.
+    ///
+    /// `trace_only=true` (with `full_diagnostics=false`) creates the
+    /// session dir for the tracing layer but skips every loop-level
+    /// logger (recovery/drift/orchestration/performance/errors/hook-runs/
+    /// agent-output/prompt-log). `full_diagnostics=true` always wins
+    /// (U1, 2026-06-14).
     pub fn with_options(base_path: &Path, options: &DiagnosticsOptions) -> std::io::Result<Self> {
         if !options.is_enabled() {
             return Ok(Self::disabled());
@@ -230,11 +260,20 @@ impl DiagnosticsCollector {
             }
         };
 
+        // Effective mode: full_diagnostics wins, otherwise honor
+        // runtime_diagnosis_artifacts, otherwise honor trace_only.
+        // trace_only is request-only — the actual logger set is determined
+        // by the resolved `effective_*` booleans below.
+        let effective_full = options.full_diagnostics;
+        let effective_runtime = options.runtime_diagnosis_artifacts && !options.full_diagnostics;
+        let effective_trace_only = options.wants_trace_only();
+
         // Historical loggers are tied to full_diagnostics. The minimal
         // runtime-diagnosis session deliberately skips them so we don't
-        // create files nobody asked for.
+        // create files nobody asked for. trace_only skips them too —
+        // the parent TUI only needs the session dir, not loop-level files.
         let (orchestration_logger, performance_logger, error_logger, hook_run_logger) =
-            if options.full_diagnostics {
+            if effective_full {
                 let orch_logger = orchestration::OrchestrationLogger::new(&session_dir)?;
                 let perf_logger = performance::PerformanceLogger::new(&session_dir)?;
                 let err_logger = errors::ErrorLogger::new(&session_dir)?;
@@ -254,7 +293,10 @@ impl DiagnosticsCollector {
         // session, because the diagnosis pipeline is the whole point of
         // telemetry. They do NOT pull in agent-output / prompt-log.
         // The session dir is already guaranteed to exist at this point.
-        let recovery_logger = if options.is_enabled() {
+        //
+        // trace_only skips these too: parent TUI has no loop events to
+        // record, only trace/log.
+        let recovery_logger = if effective_full || effective_runtime {
             match recovery::RecoveryLogger::new(&session_dir) {
                 Ok(logger) => Some(Arc::new(Mutex::new(logger))),
                 Err(err) => {
@@ -271,7 +313,7 @@ impl DiagnosticsCollector {
             None
         };
 
-        let drift_logger = if options.is_enabled() {
+        let drift_logger = if effective_full || effective_runtime {
             match drift::DriftLogger::new(&session_dir) {
                 Ok(logger) => Some(Arc::new(Mutex::new(logger))),
                 Err(err) => {
@@ -290,8 +332,9 @@ impl DiagnosticsCollector {
 
         Ok(Self {
             enabled: true,
-            full_diagnostics: options.full_diagnostics,
-            runtime_diagnosis_artifacts: options.runtime_diagnosis_artifacts,
+            full_diagnostics: effective_full,
+            runtime_diagnosis_artifacts: effective_runtime,
+            trace_only: effective_trace_only,
             session_dir: Some(session_dir),
             orchestration_logger,
             performance_logger,
@@ -308,6 +351,7 @@ impl DiagnosticsCollector {
             enabled: false,
             full_diagnostics: false,
             runtime_diagnosis_artifacts: false,
+            trace_only: false,
             session_dir: None,
             orchestration_logger: None,
             performance_logger: None,
@@ -333,9 +377,66 @@ impl DiagnosticsCollector {
         self.runtime_diagnosis_artifacts
     }
 
+    /// Returns true if the collector is in trace-only mode (parent TUI):
+    /// session dir is created for the tracing layer, but no loop-level
+    /// loggers (recovery/drift/etc.) are instantiated. Effective state —
+    /// if `full_diagnostics` is also true this returns `false` because
+    /// full wins. (U1, 2026-06-14)
+    pub fn is_trace_only(&self) -> bool {
+        self.trace_only
+    }
+
     /// Returns the session directory if diagnostics are enabled.
     pub fn session_dir(&self) -> Option<&Path> {
         self.session_dir.as_deref()
+    }
+
+    /// Writes a session pointer to
+    /// `<main_repo>/.ralph/diagnostics-session-pointer.json` pointing
+    /// back at this collector's session directory. Only call this when
+    /// the collector is running inside a worktree — pass
+    /// `worktree_path` (the worktree's absolute path, e.g. via
+    /// `loop_context.workspace()`) so the function can detect that the
+    /// session lives *inside* the worktree, not in main_repo. The
+    /// pointer lets `ralph diagnose` find the worktree session after
+    /// the loop ends and `loops.json` no longer carries an alive
+    /// entry for it (U4, 2026-06-14; fix on 2026-06-14: previous
+    /// `session_dir.starts_with(main_repo)` guard was inverted for
+    /// the production worktree layout `<main_repo>/.worktrees/<id>/`
+    /// where the worktree is a subpath of main_repo).
+    ///
+    /// Returns `Ok(false)` when the session is not inside the
+    /// given worktree (i.e. a primary session), so the caller can
+    /// log or no-op without checking the return value's "did it
+    /// write" semantics.
+    pub fn write_session_pointer(
+        &self,
+        main_repo: &Path,
+        worktree_path: &Path,
+    ) -> std::io::Result<bool> {
+        let session_dir = match self.session_dir() {
+            Some(d) => d,
+            None => return Ok(false),
+        };
+        // Only emit a pointer when the session dir lives inside the
+        // explicit worktree path. The caller (`run_loop_impl`) only
+        // invokes us on non-primary contexts and passes the
+        // LoopContext::workspace() value, so this check is the
+        // canonical signal — not a fragile lexical prefix match
+        // against main_repo (which would be inverted for the
+        // production worktree layout).
+        if !session_dir.starts_with(worktree_path) {
+            return Ok(false);
+        }
+        let pointer_path = main_repo
+            .join(".ralph")
+            .join("diagnostics-session-pointer.json");
+        let payload = serde_json::json!({
+            "session_path": session_dir,
+            "written_at": Utc::now().to_rfc3339(),
+        });
+        write_session_pointer_file(&pointer_path, &payload)?;
+        Ok(true)
     }
 
     /// Wraps a stream handler with diagnostic logging.
@@ -726,6 +827,40 @@ impl DiagnosisSummary {
     }
 }
 
+/// Atomic write helper for the session pointer file
+/// `<main-repo>/.ralph/diagnostics-session-pointer.json`.
+///
+/// The child RPC process writes this pointer when a worktree loop starts
+/// so that `ralph diagnose` can find the worktree's diagnostics root
+/// after the loop ends and `loops.json` is no longer carrying an alive
+/// entry for it (U4, 2026-06-14). The writer follows the same
+/// `NamedTempFile::persist` pattern as `write_diagnosis_summary_seed`
+/// and `write_active_activations` — the destination is only renamed
+/// into place after the JSON payload is fully serialized, so readers
+/// never see a half-written file.
+///
+/// Errors are surfaced as `io::Error` so the caller can decide whether
+/// to log and continue (the loop should not block on a best-effort
+/// pointer write).
+pub fn write_session_pointer_file(
+    pointer_path: &Path,
+    payload: &serde_json::Value,
+) -> std::io::Result<()> {
+    if let Some(parent) = pointer_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = NamedTempFile::new_in(
+        pointer_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(".")),
+    )?;
+    if let Err(err) = serde_json::to_writer_pretty(tmp.as_file(), payload) {
+        return Err(std::io::Error::new(std::io::ErrorKind::Other, err));
+    }
+    tmp.persist(pointer_path).map_err(|e| e.error)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -948,6 +1083,7 @@ mod tests {
             full_diagnostics: false,
             runtime_diagnosis_artifacts: true,
             session_dir: Some(preset_dir.clone()),
+            ..DiagnosticsOptions::default()
         };
         let collector = DiagnosticsCollector::with_options(temp.path(), &options).unwrap();
 
@@ -969,6 +1105,254 @@ mod tests {
             result.is_err(),
             "expected io::Error, got {:?}",
             result.is_ok()
+        );
+    }
+
+    // ── trace_only mode (U1, 2026-06-14) ─────────────────────────────────
+    // The subprocess TUI parent must create a session dir for the tracing
+    // layer and TUI stderr log, but MUST NOT instantiate loop-level loggers
+    // (recovery/drift/orchestration/performance/errors/hook-runs/agent-output/
+    // prompt-log) — otherwise the parent leaves empty shells in the main repo
+    // while the child RPC process writes the real data into the worktree.
+
+    #[test]
+    fn test_trace_only_creates_session_dir_without_loop_loggers() {
+        let temp = TempDir::new().unwrap();
+        let options = DiagnosticsOptions {
+            full_diagnostics: false,
+            runtime_diagnosis_artifacts: false,
+            trace_only: true,
+            ..DiagnosticsOptions::default()
+        };
+        let collector = DiagnosticsCollector::with_options(temp.path(), &options).unwrap();
+
+        // Session dir must exist (parent TUI needs it for the trace layer).
+        assert!(collector.is_enabled());
+        assert!(collector.is_trace_only());
+        assert!(!collector.is_full_diagnostics());
+        assert!(!collector.has_runtime_diagnosis_artifacts());
+        let session_dir = collector.session_dir().expect("session dir must exist");
+        assert!(session_dir.exists());
+
+        // No loop-level files: the parent's empty shell problem.
+        for name in [
+            "recovery.jsonl",
+            "drift.jsonl",
+            "orchestration.jsonl",
+            "performance.jsonl",
+            "errors.jsonl",
+            "hook-runs.jsonl",
+            "agent-output.jsonl",
+            "prompt-log.md",
+        ] {
+            assert!(
+                !session_dir.join(name).exists(),
+                "trace_only must not create {name}"
+            );
+        }
+
+        // The session dir is created under .ralph/diagnostics/<timestamp>/
+        // just like the full / minimal modes. trace_only only differs by
+        // skipping the loop-level loggers; the directory shape is
+        // identical so downstream tooling (TUI, trace layer) sees the
+        // same path layout.
+        assert!(session_dir.starts_with(temp.path().join(".ralph").join("diagnostics")));
+    }
+
+    #[test]
+    fn test_trace_only_full_diagnostics_priority_wins() {
+        let temp = TempDir::new().unwrap();
+        let options = DiagnosticsOptions {
+            full_diagnostics: true,
+            runtime_diagnosis_artifacts: false,
+            trace_only: true,
+            ..DiagnosticsOptions::default()
+        };
+        let collector = DiagnosticsCollector::with_options(temp.path(), &options).unwrap();
+
+        // full_diagnostics wins: trace_only is ignored, full logger set
+        // is created. This mirrors the existing
+        // runtime_diagnosis_artifacts-vs-full precedence contract.
+        assert!(!collector.is_trace_only());
+        assert!(collector.is_full_diagnostics());
+        let session_dir = collector.session_dir().expect("session dir must exist");
+        assert!(session_dir.exists());
+        assert!(session_dir.join("orchestration.jsonl").exists());
+        assert!(session_dir.join("performance.jsonl").exists());
+    }
+
+    #[test]
+    fn test_trace_only_query_method_default_false() {
+        // Default (no flags set) must NOT be trace_only: backwards compat.
+        let temp = TempDir::new().unwrap();
+        let collector =
+            DiagnosticsCollector::with_options(temp.path(), &DiagnosticsOptions::default())
+                .unwrap();
+        assert!(!collector.is_trace_only());
+        assert!(!collector.is_enabled());
+    }
+
+    #[test]
+    fn test_trace_only_reuses_preset_session_dir() {
+        // Mirrors the existing session_dir reuse contract: if the caller
+        // pins session_dir, we do not create a timestamped subdir.
+        let temp = TempDir::new().unwrap();
+        let preset_dir = temp.path().join("parent-trace-session");
+        std::fs::create_dir_all(&preset_dir).unwrap();
+        let options = DiagnosticsOptions {
+            full_diagnostics: false,
+            runtime_diagnosis_artifacts: false,
+            trace_only: true,
+            session_dir: Some(preset_dir.clone()),
+        };
+        let collector = DiagnosticsCollector::with_options(temp.path(), &options).unwrap();
+        assert!(collector.is_trace_only());
+        assert_eq!(collector.session_dir().unwrap(), preset_dir);
+        assert!(!temp.path().join(".ralph").join("diagnostics").exists());
+    }
+
+    // ── U4 (2026-06-14): session pointer file for worktree loop resolve ──
+
+    #[test]
+    fn test_write_session_pointer_for_worktree_session() {
+        // Simulate a worktree loop: session lives under the worktree,
+        // main_repo is somewhere else entirely. write_session_pointer
+        // must emit a pointer in main_repo's .ralph/.
+        let temp = TempDir::new().unwrap();
+        let worktree = temp.path().join("worktree");
+        let main_repo = temp.path().join("main-repo");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&main_repo).unwrap();
+
+        let session_dir = worktree
+            .join(".ralph")
+            .join("diagnostics")
+            .join("2026-06-14T10-20-30");
+        std::fs::create_dir_all(&session_dir).unwrap();
+
+        let options = DiagnosticsOptions {
+            full_diagnostics: true,
+            session_dir: Some(session_dir.clone()),
+            ..DiagnosticsOptions::default()
+        };
+        let collector = DiagnosticsCollector::with_options(&worktree, &options).unwrap();
+        assert_eq!(collector.session_dir().unwrap(), session_dir);
+
+        let wrote = collector
+            .write_session_pointer(&main_repo, &worktree)
+            .expect("write ok");
+        assert!(wrote, "expected pointer to be written for worktree session");
+
+        let pointer_path = main_repo
+            .join(".ralph")
+            .join("diagnostics-session-pointer.json");
+        assert!(pointer_path.exists());
+        let payload: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&pointer_path).unwrap()).unwrap();
+        assert_eq!(
+            payload.get("session_path").and_then(|v| v.as_str()),
+            Some(session_dir.to_str().unwrap())
+        );
+        assert!(payload.get("written_at").is_some());
+    }
+
+    /// Regression test for the production worktree layout
+    /// (`<main_repo>/.worktrees/<id>/` — worktree is a SUBPATH of
+    /// main_repo). The original `starts_with(main_repo)` guard was
+    /// inverted and never wrote the pointer in production (ce-code-
+    /// review P0, 2026-06-14). The fix passes the explicit worktree
+    /// path so the comparison is unambiguous.
+    #[test]
+    fn test_write_session_pointer_for_production_subpath_worktree() {
+        let temp = TempDir::new().unwrap();
+        // Production layout: worktree lives under main_repo/.worktrees/<id>
+        let main_repo = temp.path();
+        let worktree = main_repo.join(".worktrees").join("loop-1234");
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        let session_dir = worktree
+            .join(".ralph")
+            .join("diagnostics")
+            .join("2026-06-14T10-20-30");
+        std::fs::create_dir_all(&session_dir).unwrap();
+
+        let options = DiagnosticsOptions {
+            full_diagnostics: true,
+            session_dir: Some(session_dir.clone()),
+            ..DiagnosticsOptions::default()
+        };
+        let collector = DiagnosticsCollector::with_options(&worktree, &options).unwrap();
+        assert_eq!(collector.session_dir().unwrap(), session_dir);
+
+        // Pre-fix code (starts_with(main_repo)) would return Ok(false)
+        // here because the worktree IS under main_repo. The fix
+        // accepts the worktree path explicitly and writes the pointer.
+        let wrote = collector
+            .write_session_pointer(main_repo, &worktree)
+            .expect("write ok");
+        assert!(wrote, "P0: production worktree subpath must write pointer");
+
+        let pointer_path = main_repo
+            .join(".ralph")
+            .join("diagnostics-session-pointer.json");
+        assert!(pointer_path.exists(), "pointer file must be created");
+        let payload: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&pointer_path).unwrap()).unwrap();
+        assert_eq!(
+            payload.get("session_path").and_then(|v| v.as_str()),
+            Some(session_dir.to_str().unwrap())
+        );
+    }
+
+    #[test]
+    fn test_write_session_pointer_skipped_for_primary_session() {
+        // When the session is in the main repo (primary mode), we
+        // MUST NOT write a pointer — the diagnose path already finds
+        // primary sessions via loops.json / fallback to .ralph/diagnostics.
+        // Pass a *different* worktree_path that the session does NOT
+        // live under; the function must no-op.
+        let temp = TempDir::new().unwrap();
+        let options = DiagnosticsOptions {
+            full_diagnostics: true,
+            ..DiagnosticsOptions::default()
+        };
+        let collector = DiagnosticsCollector::with_options(temp.path(), &options).unwrap();
+        let _session_dir = collector.session_dir().unwrap().to_path_buf();
+
+        // Pretend the worktree is a sibling of main_repo (not a subpath).
+        // session_dir starts with temp.path() but NOT with this sibling.
+        let fake_worktree = temp.path().join("..").join("sibling-worktree");
+        let wrote = collector
+            .write_session_pointer(temp.path(), &fake_worktree)
+            .expect("write ok");
+        assert!(!wrote, "primary session must not write a pointer");
+
+        // Sanity: session dir is indeed under main_repo.
+        assert!(_session_dir.starts_with(temp.path()));
+    }
+
+    #[test]
+    fn test_write_session_pointer_disabled_collector_returns_false() {
+        // A disabled collector has no session_dir → write_session_pointer
+        // must be a no-op and return Ok(false), not error.
+        let temp = TempDir::new().unwrap();
+        let main_repo = temp.path().join("main-repo");
+        std::fs::create_dir_all(&main_repo).unwrap();
+        let collector =
+            DiagnosticsCollector::with_options(temp.path(), &DiagnosticsOptions::default())
+                .unwrap();
+        assert!(!collector.is_enabled());
+        // Pass any worktree_path; the disabled collector's session_dir
+        // is None, so the function returns Ok(false) before comparing.
+        let wrote = collector
+            .write_session_pointer(&main_repo, &main_repo)
+            .expect("disabled write ok");
+        assert!(!wrote);
+        assert!(
+            !main_repo
+                .join(".ralph")
+                .join("diagnostics-session-pointer.json")
+                .exists()
         );
     }
 }

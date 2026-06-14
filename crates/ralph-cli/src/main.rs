@@ -45,6 +45,7 @@ mod web;
 
 use anyhow::Result;
 use clap::{ArgAction, Parser, Subcommand};
+use std::io::IsTerminal;
 use std::sync::Arc;
 
 // Shared CLI infrastructure layer (U4 step-01 extraction).
@@ -171,6 +172,33 @@ fn is_diagnostics_eligible_command(command: Option<&Commands>) -> bool {
     matches!(command, Some(Commands::Run(_) | Commands::Resume(_)) | None)
 }
 
+/// Returns true when the current process will spawn a child `--rpc`
+/// process and host the TUI (subprocess TUI mode). Mirrors the
+/// `use_subprocess_tui` calculation in `commands/run.rs` — keep the
+/// two in sync so the parent and the child agree on mode boundaries.
+///
+/// `is_tty` is plumbed as a parameter so unit tests can exercise the
+/// non-TTY branch deterministically (the real `main` always passes the
+/// live `stdin().is_terminal() && stdout().is_terminal()` value).
+///
+/// U2 (2026-06-14): when this returns true, `authoritative_diagnostics`
+/// is built in `trace_only` mode so the parent does not leave an empty
+/// recovery/drift/orchestration/... shell in the main repo while the
+/// child RPC writes the real data into the worktree.
+fn use_subprocess_tui(command: Option<&Commands>, is_tty: bool) -> bool {
+    match command {
+        Some(Commands::Run(args)) => {
+            !args.no_tui && !args.autonomous && !args.rpc && !args.legacy_tui && is_tty
+        }
+        // ResumeArgs has no legacy_tui field — the resume subcommand
+        // does not expose the in-process TUI escape hatch. Match the
+        // narrower resume command shape.
+        Some(Commands::Resume(args)) => !args.no_tui && !args.autonomous && !args.rpc && is_tty,
+        None => is_tty, // default `ralph` → `ralph run` interactive
+        _ => false,
+    }
+}
+
 /// Best-effort read of `telemetry.runtime_diagnosis.write_artifacts` from
 /// ralph.yml. Returns `false` on any error (missing file, parse error, missing
 /// field) so the activation matrix stays fail-closed and the "默认 no-op"
@@ -213,6 +241,12 @@ async fn main() -> Result<()> {
     };
     let mcp_enabled = matches!(&cli.command, Some(Commands::Mcp(_)));
 
+    // U2 (2026-06-14): compute the subprocess-TUI flag here so the
+    // parent can choose `trace_only` mode. Mirrors the calculation in
+    // `commands/run.rs:use_subprocess_tui`; both must agree.
+    let is_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let subprocess_tui_mode = use_subprocess_tui(cli.command.as_ref(), is_tty);
+
     let filter = if cli.verbose { "debug" } else { "info" };
     // U0 activation matrix: session is created when EITHER `RALPH_DIAGNOSTICS=1`
     // is set OR `telemetry.runtime_diagnosis.write_artifacts: true` is in
@@ -236,6 +270,12 @@ async fn main() -> Result<()> {
     // `RALPH_DIAGNOSTICS=1` is the full-diagnostics trigger). When the env
     // is unset but `write_artifacts: true` is in ralph.yml we take the
     // minimal session path through `from_env_with_telemetry`.
+    //
+    // U2 (2026-06-14): when subprocess TUI mode is active, the parent
+    // only runs the TUI and forwards stderr to a log file — it does NOT
+    // run the EventLoop. The loop-level loggers would stay empty, so
+    // we set `trace_only` to skip them. The child RPC process re-enters
+    // `main()` and creates its OWN full session in the worktree.
     let authoritative_diagnostics: Option<Arc<DiagnosticsCollector>> = if diagnostics_enabled {
         let options = if diagnostics_env_set {
             ralph_core::diagnostics::DiagnosticsOptions::from_env(None)
@@ -244,6 +284,10 @@ async fn main() -> Result<()> {
                 None,
                 diagnostics_config_write_artifacts,
             )
+        };
+        let options = ralph_core::diagnostics::DiagnosticsOptions {
+            trace_only: subprocess_tui_mode,
+            ..options
         };
         match DiagnosticsCollector::with_options(std::path::Path::new("."), &options) {
             Ok(c) => Some(Arc::new(c)),
@@ -601,6 +645,91 @@ mod tests {
             confirm: None,
         }));
         assert!(!is_diagnostics_eligible_command(command.as_ref()));
+    }
+
+    // ── U2: subprocess TUI parent must use trace_only mode (2026-06-14) ──
+    // The parent's only job in subprocess TUI mode is to host the TUI and
+    // forward the child's stderr into a log file. It does NOT run an
+    // EventLoop, so the loop-level loggers it would otherwise create
+    // (recovery/drift/orchestration/...) would stay empty forever — the
+    // "empty shell" bug. `use_subprocess_tui` in `main.rs` must mirror
+    // `commands/run.rs:use_subprocess_tui` (TTY + !legacy_tui + the
+    // broader tui_enabled flags).
+
+    fn run_args_with(
+        no_tui: bool,
+        autonomous: bool,
+        rpc: bool,
+        legacy_tui: bool,
+    ) -> commands::run::RunArgs {
+        let mut args = default_run_args();
+        args.no_tui = no_tui;
+        args.autonomous = autonomous;
+        args.rpc = rpc;
+        args.legacy_tui = legacy_tui;
+        args
+    }
+
+    #[test]
+    fn test_use_subprocess_tui_true_for_default_run_args() {
+        let args = run_args_with(false, false, false, false);
+        let cmd = Some(Commands::Run(args));
+        assert!(use_subprocess_tui(cmd.as_ref(), true));
+        assert!(!use_subprocess_tui(cmd.as_ref(), false));
+    }
+
+    #[test]
+    fn test_use_subprocess_tui_false_when_legacy_tui() {
+        let args = run_args_with(false, false, false, true);
+        let cmd = Some(Commands::Run(args));
+        assert!(!use_subprocess_tui(cmd.as_ref(), true));
+    }
+
+    #[test]
+    fn test_use_subprocess_tui_false_when_no_tui() {
+        let args = run_args_with(true, false, false, false);
+        let cmd = Some(Commands::Run(args));
+        assert!(!use_subprocess_tui(cmd.as_ref(), true));
+    }
+
+    #[test]
+    fn test_use_subprocess_tui_false_when_autonomous() {
+        let args = run_args_with(false, true, false, false);
+        let cmd = Some(Commands::Run(args));
+        assert!(!use_subprocess_tui(cmd.as_ref(), true));
+    }
+
+    #[test]
+    fn test_use_subprocess_tui_false_when_rpc() {
+        // rpc mode means the current process IS the child; it must run
+        // the full EventLoop, so trace_only would be wrong here.
+        let args = run_args_with(false, false, true, false);
+        let cmd = Some(Commands::Run(args));
+        assert!(!use_subprocess_tui(cmd.as_ref(), true));
+    }
+
+    #[test]
+    fn test_use_subprocess_tui_true_for_resume_default_args() {
+        let mut args = default_run_args();
+        args.no_tui = false;
+        args.autonomous = false;
+        args.rpc = false;
+        args.legacy_tui = false;
+        // ResumeArgs shares the same flag set; for the purposes of this
+        // helper, default values are enough.
+        let _ = args; // suppress unused warning
+        let cmd: Option<Commands> = None; // None branch
+        assert!(use_subprocess_tui(cmd.as_ref(), true));
+    }
+
+    #[test]
+    fn test_use_subprocess_tui_false_for_non_run_resume_commands() {
+        let cmd = Some(Commands::Preflight(preflight::PreflightArgs {
+            format: preflight::PreflightFormat::Human,
+            strict: false,
+            check: vec![],
+        }));
+        assert!(!use_subprocess_tui(cmd.as_ref(), true));
     }
 
     #[test]

@@ -2436,4 +2436,137 @@ hats:
         .await
         .expect("combined config should be accepted");
     }
+
+    // ── U3 (2026-06-14): subprocess TUI + worktree diagnostics layout ──
+    // Verifies the cross-process contract:
+    //   1. Parent in main repo uses trace_only → no loop-level files.
+    //   2. Child RPC re-enters main() in worktree cwd → full session.
+    //   3. Worktree session contains real recovery/drift/etc. data.
+    // This is the integration that closes the "empty shell" bug.
+
+    fn init_test_git_repo(repo_root: &std::path::Path) {
+        use std::process::Command;
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo_root)
+            .status()
+            .expect("git init");
+        Command::new("git")
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=t@e.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+                "-q",
+            ])
+            .current_dir(repo_root)
+            .status()
+            .expect("git commit");
+    }
+
+    #[test]
+    fn parent_trace_only_leaves_no_loop_level_files_in_main_repo() {
+        // Simulate the parent: cwd is the main repo, subprocess TUI mode
+        // is on, so trace_only=true. Assert: no recovery/drift/...
+        // files anywhere under .ralph/diagnostics/ in the main repo.
+        let temp = tempfile::TempDir::new().unwrap();
+        init_test_git_repo(temp.path());
+
+        let options = ralph_core::diagnostics::DiagnosticsOptions {
+            full_diagnostics: false,
+            runtime_diagnosis_artifacts: false,
+            trace_only: true,
+            ..Default::default()
+        };
+        let collector =
+            ralph_core::diagnostics::DiagnosticsCollector::with_options(temp.path(), &options)
+                .unwrap();
+
+        // Session dir is created for the trace layer / TUI stderr log.
+        let session_dir = collector
+            .session_dir()
+            .expect("trace_only creates session_dir");
+        assert!(session_dir.exists());
+
+        // No loop-level files: this is the bug fix.
+        for name in [
+            "recovery.jsonl",
+            "drift.jsonl",
+            "orchestration.jsonl",
+            "performance.jsonl",
+            "errors.jsonl",
+            "hook-runs.jsonl",
+            "agent-output.jsonl",
+            "prompt-log.md",
+        ] {
+            assert!(
+                !session_dir.join(name).exists(),
+                "trace_only must not create {name} (empty shell bug)"
+            );
+        }
+    }
+
+    #[test]
+    fn child_rpc_creates_full_session_in_worktree_cwd() {
+        // Simulate the child RPC: cwd is the worktree, full_diagnostics
+        // is on (or runtime_diagnosis_artifacts). Assert: full session
+        // is created under worktree's .ralph/diagnostics/<ts>/, and the
+        // main repo under the same timestamp contains no recovery.jsonl
+        // because the parent never ran with cwd=main repo.
+        use std::process::Command;
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo_root = temp.path();
+        init_test_git_repo(repo_root);
+
+        // Create a worktree.
+        let worktree_path = repo_root.join(".worktrees").join("test-loop");
+        std::fs::create_dir_all(worktree_path.parent().unwrap()).unwrap();
+        Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "test-loop",
+                worktree_path.to_str().unwrap(),
+            ])
+            .current_dir(repo_root)
+            .status()
+            .expect("git worktree add");
+
+        // Parent: trace_only, cwd=main repo. No loop-level files.
+        let parent_options = ralph_core::diagnostics::DiagnosticsOptions {
+            full_diagnostics: false,
+            runtime_diagnosis_artifacts: false,
+            trace_only: true,
+            ..Default::default()
+        };
+        let parent_collector =
+            ralph_core::diagnostics::DiagnosticsCollector::with_options(repo_root, &parent_options)
+                .unwrap();
+        let parent_session = parent_collector.session_dir().unwrap();
+        assert!(!parent_session.join("recovery.jsonl").exists());
+
+        // Child: cwd=worktree, full diagnostics. Real session created.
+        let child_options = ralph_core::diagnostics::DiagnosticsOptions {
+            full_diagnostics: true,
+            ..Default::default()
+        };
+        let child_collector = ralph_core::diagnostics::DiagnosticsCollector::with_options(
+            &worktree_path,
+            &child_options,
+        )
+        .unwrap();
+        let child_session = child_collector.session_dir().unwrap();
+        assert!(child_session.exists());
+        // Full mode creates the historical loggers.
+        assert!(child_session.join("orchestration.jsonl").exists());
+        assert!(child_session.join("performance.jsonl").exists());
+
+        // Sanity: child session is in the worktree, not the main repo.
+        assert!(child_session.starts_with(&worktree_path));
+    }
 }
