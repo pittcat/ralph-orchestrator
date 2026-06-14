@@ -382,6 +382,10 @@ fn inject_ralph_runtime_env(command: &mut Command, workspace_root: &std::path::P
     }
     command.env("RALPH_BIN", &current_exe);
     command.env("RALPH_WORKSPACE_ROOT", workspace_root);
+    // U1 (2026-06-14-002): keep PWD in sync with the actual working directory.
+    // This protects non-TTY worktree runs and any tool that resolves paths via
+    // the PWD environment variable.
+    command.env("PWD", workspace_root);
 
     // Propagate RALPH_EVENTS_FILE so `ralph emit` from any CWD writes to the correct events file
     let marker = workspace_root.join(".ralph/current-events");
@@ -882,6 +886,14 @@ mod tests {
         assert!(
             stdout.contains("RALPH_WORKSPACE_ROOT="),
             "RALPH_WORKSPACE_ROOT should be set by inject_ralph_runtime_env: {stdout}"
+        );
+
+        // U1 (2026-06-14-002): PWD must be synchronized with the actual working
+        // directory so agent bash tools resolve paths correctly.
+        let expected_pwd = std::env::current_dir().unwrap().to_string_lossy().to_string();
+        assert!(
+            stdout.contains(&format!("PWD={expected_pwd}")),
+            "PWD should match cwd ({expected_pwd}): {stdout}"
         );
     }
 

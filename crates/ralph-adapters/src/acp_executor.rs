@@ -566,6 +566,8 @@ async fn run_acp_lifecycle_inner(
         cmd.env("RALPH_BIN", &current_exe);
     }
     cmd.env("RALPH_WORKSPACE_ROOT", workspace_root);
+    // U1 (2026-06-14-002): keep PWD in sync with the actual working directory.
+    cmd.env("PWD", workspace_root);
     let marker = workspace_root.join(".ralph/current-events");
     if let Ok(relative) = std::fs::read_to_string(&marker) {
         let abs = workspace_root.join(relative.trim());

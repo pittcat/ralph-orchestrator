@@ -1720,9 +1720,15 @@ async fn run_subprocess_tui(
     // in worktree mode, main repo in primary mode). This replaces the old
     // chdir hack and makes the child's cwd explicit rather than relying on
     // side effects.
+    //
+    // U1 (2026-06-14-002): also synchronize PWD env var with the real cwd.
+    // Shells and agent bash tools rely on PWD; without this, a worktree child
+    // inherits the parent's PWD (main repo) and writes end up in the wrong
+    // directory.
     let mut child = Command::new(std::env::current_exe()?)
         .args(&child_args)
         .current_dir(&args.workspace)
+        .env("PWD", &args.workspace)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(stderr_stdio)
