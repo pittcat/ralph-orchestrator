@@ -32,6 +32,7 @@ ralph-tui.workspace = true
 ralph-api.workspace = true
 
 tokio.workspace = true
+tokio-util.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
 anyhow.workspace = true
@@ -47,7 +48,7 @@ futures.workspace = true
 regex.workspace = true
 keyring.workspace = true
 
-# For raw mode handling in PTY mode
+# For raw mode handling in PTY mode / terminal restore
 crossterm.workspace = true
 scopeguard.workspace = true
 

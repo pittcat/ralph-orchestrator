@@ -16,7 +16,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, duplex};
+use tokio::task::JoinHandle;
+use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+
+#[cfg(unix)]
+use nix::sys::signal::{Signal, kill};
+#[cfg(unix)]
+use nix::unistd::Pid;
 
 /// Arguments for the run subcommand.
 #[derive(Parser, Debug)]
@@ -1418,10 +1426,7 @@ mod forward_prompt_args_tests {
 
         let copied = wt.path().join("PROMPT.md");
         assert!(copied.exists(), "PROMPT.md should be copied to worktree");
-        assert_eq!(
-            fs::read_to_string(&copied).unwrap(),
-            "test prompt content"
-        );
+        assert_eq!(fs::read_to_string(&copied).unwrap(), "test prompt content");
     }
 
     /// U4: Silently skips when source PROMPT.md doesn't exist.
@@ -1583,6 +1588,187 @@ impl SubprocessTuiArgs {
     }
 }
 
+/// Restore the terminal to a usable state.
+///
+/// Idempotent: safe to call multiple times and when the terminal was never
+/// switched into TUI raw mode. This is the global safety net for subprocess
+/// TUI mode (R8).
+fn restore_terminal() {
+    use crossterm::cursor::Show;
+    use crossterm::execute;
+    use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
+
+    let mut stdout = std::io::stdout();
+    let _ = disable_raw_mode();
+    let _ = execute!(stdout, LeaveAlternateScreen, Show);
+}
+
+/// RAII guard that restores the terminal when dropped.
+///
+/// Installed around the TUI run so that any panic or early return in
+/// `run_subprocess_tui` leaves the shell in a usable state (R8).
+struct TerminalRestoreGuard;
+
+impl TerminalRestoreGuard {
+    fn new() -> Self {
+        Self
+    }
+}
+
+impl Drop for TerminalRestoreGuard {
+    fn drop(&mut self) {
+        restore_terminal();
+    }
+}
+
+/// Wait for a termination signal (SIGINT/SIGTERM on Unix, Ctrl-C elsewhere).
+///
+/// Returns the signal name that was received.
+#[cfg(unix)]
+async fn wait_for_termination_signal() -> Option<&'static str> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut sigint = signal(SignalKind::interrupt()).ok()?;
+    let mut sigterm = signal(SignalKind::terminate()).ok()?;
+    tokio::select! {
+        _ = sigint.recv() => Some("SIGINT"),
+        _ = sigterm.recv() => Some("SIGTERM"),
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_termination_signal() -> Option<&'static str> {
+    tokio::signal::ctrl_c().await.ok().map(|_| "SIGINT")
+}
+
+/// Send a signal to a child process by PID.
+#[cfg(unix)]
+fn send_child_signal(child_id: Option<u32>, signal: Signal) {
+    if let Some(id) = child_id {
+        let _ = kill(Pid::from_raw(id as i32), signal);
+    }
+}
+
+#[cfg(not(unix))]
+fn send_child_signal(_child_id: Option<u32>, _signal: &'static str) {
+    // No-op on non-Unix; callers use `child.kill().await` directly.
+}
+
+/// Gracefully terminate a child: SIGTERM, wait, then SIGKILL if still alive.
+///
+/// Returns the final exit status if the child could be reaped.
+async fn graceful_terminate_child(
+    child: &mut tokio::process::Child,
+    child_id: Option<u32>,
+) -> Option<std::process::ExitStatus> {
+    #[cfg(unix)]
+    {
+        send_child_signal(child_id, Signal::SIGTERM);
+        let term_timeout = Duration::from_secs(5);
+        match timeout(term_timeout, child.wait()).await {
+            Ok(Ok(status)) => return Some(status),
+            Ok(Err(e)) => {
+                warn!(error = %e, "Failed to wait for child after SIGTERM");
+            }
+            Err(_) => {
+                warn!(
+                    child_id = ?child_id,
+                    "Child did not exit after SIGTERM; sending SIGKILL"
+                );
+                send_child_signal(child_id, Signal::SIGKILL);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill().await;
+    }
+    child.wait().await.ok()
+}
+
+/// Wait for a `JoinHandle` with a timeout; abort if it does not finish.
+///
+/// Returns `(Some(result), false)` on clean completion, `(None, true)` on timeout.
+async fn wait_for_task_with_timeout<T>(
+    mut handle: JoinHandle<T>,
+    name: &'static str,
+    timeout_duration: Duration,
+) -> (Option<T>, bool) {
+    match timeout(timeout_duration, &mut handle).await {
+        Ok(Ok(result)) => {
+            debug!(task = name, "I/O task finished cleanly");
+            (Some(result), false)
+        }
+        Ok(Err(join_err)) => {
+            debug!(task = name, error = %join_err, "I/O task joined with error");
+            (None, false)
+        }
+        Err(_) => {
+            warn!(
+                task = name,
+                timeout_secs = timeout_duration.as_secs(),
+                "I/O task did not finish in time; aborting"
+            );
+            handle.abort();
+            (None, true)
+        }
+    }
+}
+
+/// Wait for a child to exit, or gracefully terminate it after a timeout.
+async fn wait_or_terminate_child(
+    child: &mut tokio::process::Child,
+    child_id: Option<u32>,
+    timeout_duration: Duration,
+    context: &'static str,
+) -> Option<std::process::ExitStatus> {
+    match timeout(timeout_duration, child.wait()).await {
+        Ok(Ok(status)) => Some(status),
+        Ok(Err(e)) => {
+            warn!(error = %e, context, "Failed to wait for child");
+            None
+        }
+        Err(_) => {
+            warn!(
+                context,
+                timeout_secs = timeout_duration.as_secs(),
+                "Child did not exit within timeout; terminating"
+            );
+            graceful_terminate_child(child, child_id).await
+        }
+    }
+}
+
+/// Write a structured JSONL cleanup diagnostic when I/O tasks had to be
+/// forcefully aborted (R12).
+fn write_cleanup_diagnostic(
+    workspace: &Path,
+    reader_timed_out: bool,
+    forward_timed_out: bool,
+    elapsed: std::time::Duration,
+    signal: Option<&str>,
+) -> Result<PathBuf> {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    let diagnostics_dir = workspace.join(".ralph").join("diagnostics");
+    std::fs::create_dir_all(&diagnostics_dir)?;
+    let path = diagnostics_dir.join("cleanup-events.jsonl");
+
+    let entry = serde_json::json!({
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "pid": std::process::id(),
+        "reader_timed_out": reader_timed_out,
+        "forward_timed_out": forward_timed_out,
+        "cleanup_elapsed_ms": elapsed.as_millis(),
+        "signal": signal,
+    });
+
+    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    writeln!(file, "{}", entry)?;
+    Ok(path)
+}
+
 /// Run the orchestration loop as a subprocess with TUI attached.
 ///
 /// This spawns `ralph run --rpc` as a child process and attaches the TUI
@@ -1716,6 +1902,11 @@ async fn run_subprocess_tui(
         Err(_) => Stdio::null(),
     };
 
+    // R8: install the global terminal restore guard BEFORE the TUI can switch
+    // the terminal into raw mode. The guard restores the terminal on any
+    // return, panic, or signal-triggered cleanup path.
+    let _terminal_guard = TerminalRestoreGuard::new();
+
     // U3 (2026-06-10): explicitly set child's cwd to workspace (worktree path
     // in worktree mode, main repo in primary mode). This replaces the old
     // chdir hack and makes the child's cwd explicit rather than relying on
@@ -1735,6 +1926,9 @@ async fn run_subprocess_tui(
         .spawn()
         .context("Failed to spawn ralph subprocess for TUI")?;
 
+    // R6: if spawn fails the guard above is dropped and restores the terminal.
+    let child_id = child.id();
+
     let stdin = child
         .stdin
         .take()
@@ -1744,11 +1938,16 @@ async fn run_subprocess_tui(
         .take()
         .context("Failed to capture subprocess stdout")?;
 
-    // Create TUI state and start event reader
+    // R1: stdin/stdout have been taken from the Child. Dropping our handles
+    // (rpc_writer wraps stdin; forward_handle owns stdout) will close the
+    // pipes and unblock any I/O tasks waiting on EOF.
+
+    // Create TUI state and cancellation token.
     let state = std::sync::Arc::new(std::sync::Mutex::new(ralph_tui::TuiState::new()));
+    let cancel_token = CancellationToken::new();
     let (terminated_tx, terminated_rx) = tokio::sync::watch::channel(false);
 
-    // Create RPC writer for sending commands
+    // Create RPC writer for sending commands.
     let rpc_writer = ralph_tui::RpcWriter::new(stdin);
 
     // U3: tee the child's RPC stdout into the TUI reader so the parent can
@@ -1756,20 +1955,21 @@ async fn run_subprocess_tui(
     // loop instead of waiting for the user to press 'q'.
     let (tui_reader, mut tui_writer) = duplex(64 * 1024);
 
+    // Forward task: child stdout -> duplex writer. Cancelled via CancellationToken (R4).
     let forward_handle = {
-        let mut cancel_rx = terminated_rx.clone();
+        let cancel = cancel_token.child_token();
         tokio::spawn(async move {
             let mut child_lines = BufReader::new(stdout).lines();
             loop {
                 tokio::select! {
-                    _ = cancel_rx.changed() => {
-                        if *cancel_rx.borrow() {
-                            break;
-                        }
+                    _ = cancel.cancelled() => {
+                        debug!("Forward task cancelled");
+                        break;
                     }
                     line = child_lines.next_line() => {
                         match line {
                             Ok(Some(line)) => {
+                                // R5: any write/flush failure breaks immediately.
                                 if tui_writer.write_all(line.as_bytes()).await.is_err() {
                                     break;
                                 }
@@ -1788,60 +1988,153 @@ async fn run_subprocess_tui(
         })
     };
 
-    // Spawn the event reader as a background task
+    // Reader task: duplex reader -> TUI state. Wrapped so it also listens to
+    // the CancellationToken (R4) while keeping the watch receiver for the
+    // internal EOF path.
     let reader_state = std::sync::Arc::clone(&state);
+    let reader_cancel = cancel_token.child_token();
     let cancel_rx = terminated_rx.clone();
     let reader_handle = tokio::spawn(async move {
-        ralph_tui::run_rpc_event_reader(tui_reader, reader_state, cancel_rx).await;
+        tokio::select! {
+            _ = reader_cancel.cancelled() => {
+                debug!("Reader task cancelled");
+            }
+            _ = ralph_tui::run_rpc_event_reader(tui_reader, reader_state, cancel_rx) => {}
+        }
     });
 
     info!("TUI running in subprocess RPC mode");
 
-    // Run the TUI render/input loop with subprocess support concurrently with
-    // the child process. If the child exits with a non-success status, signal
-    // the TUI to exit immediately rather than waiting for the user.
+    // R9: register SIGINT/SIGTERM handler so the parent can restore the terminal
+    // and forward the signal to the child.
+    let signal_handle = tokio::spawn(wait_for_termination_signal());
+
+    // Run the TUI render/input loop concurrently with the child process and
+    // signal handler.
     let app = ralph_tui::App::new_subprocess(
         std::sync::Arc::clone(&state),
         terminated_rx.clone(),
         rpc_writer.clone(),
     );
     let mut app_fut = std::pin::pin!(app.run());
-    let mut child_wait = std::pin::pin!(child.wait());
+    let mut signal_fut = std::pin::pin!(signal_handle);
 
-    let (tui_result, exit_status) = tokio::select! {
-        status = child_wait.as_mut() => {
+    let cleanup_start = std::time::Instant::now();
+
+    // The child.wait() future is NOT pinned ahead of time. Each select branch
+    // that needs it creates its own borrow, so the other branches can still
+    // mutate `child` (e.g., to send signals) without fighting a long-lived
+    // mutable borrow.
+    let (tui_result, exit_status, received_signal) = tokio::select! {
+        status = child.wait() => {
             let status = status.context("Failed to wait for ralph subprocess")?;
             if !status.success() {
                 let _ = terminated_tx.send(true);
             }
-            let tui_result = tokio::time::timeout(Duration::from_secs(5), app_fut)
+            let tui_result = timeout(Duration::from_secs(5), app_fut)
                 .await
                 .unwrap_or_else(|_| {
                     warn!("TUI did not exit within 5s after child termination; forcing return");
                     Ok(())
                 });
-            (tui_result, status)
+            // No longer need the signal handler.
+            signal_fut.abort();
+            (tui_result, Some(status), None)
         }
         result = app_fut.as_mut() => {
             let tui_result = result;
             // App exited (e.g., user pressed 'q'); wait for the child.
-            let status = child_wait
-                .await
-                .context("Failed to wait for ralph subprocess")?;
-            (tui_result, status)
+            // R3: if the child does not exit promptly, terminate it.
+            let status = wait_or_terminate_child(
+                &mut child,
+                child_id,
+                Duration::from_secs(5),
+                "tui_quit",
+            )
+            .await;
+            signal_fut.abort();
+            (tui_result, status, None)
+        }
+        signal = signal_fut.as_mut() => {
+            let signal_name = match signal {
+                Ok(Some(name)) => name,
+                Ok(None) | Err(_) => "unknown",
+            };
+            warn!(
+                signal = signal_name,
+                "Received termination signal; restoring terminal and terminating child"
+            );
+            // R8/R9: restore terminal BEFORE killing child.
+            restore_terminal();
+            // R9: terminate child and reap it.
+            let status = graceful_terminate_child(&mut child, child_id).await;
+            (Ok(()), status, Some(signal_name))
         }
     };
 
-    // Signal cancellation to the reader/forward tasks and clean up the child.
+    // Cleanup phase: cancel I/O tasks, close pipes, wait with timeouts (R1, R2, R4).
+    info!(
+        child_exit_status = ?exit_status,
+        signal = ?received_signal,
+        "Subprocess TUI entering cleanup phase"
+    );
+    cancel_token.cancel();
     let _ = terminated_tx.send(true);
     let _ = rpc_writer.send_abort().await;
     let _ = rpc_writer.close().await;
-    let _ = reader_handle.await;
-    let _ = forward_handle.await;
 
-    // Resolve the exact termination reason from the runner sentinel when the
-    // child did not exit cleanly; fall back to coarse exit-code mapping.
-    let reason = resolve_subprocess_termination_reason(&args.workspace, &exit_status);
+    // R1: drop the stdin wrapper to close the child's stdin pipe.
+    drop(rpc_writer);
+
+    // R2: wait for I/O tasks with explicit timeouts; abort on timeout.
+    let task_timeout = Duration::from_secs(3);
+    let (_, reader_timed_out) =
+        wait_for_task_with_timeout(reader_handle, "reader", task_timeout).await;
+    let (_, forward_timed_out) =
+        wait_for_task_with_timeout(forward_handle, "forward", task_timeout).await;
+
+    // Ensure the child is reaped in case a branch above left it alive.
+    if child.id().is_some() {
+        let _ = child.wait().await;
+    }
+
+    let cleanup_elapsed = cleanup_start.elapsed();
+    info!(
+        child_exit_status = ?exit_status,
+        reader_timed_out,
+        forward_timed_out,
+        signal = ?received_signal,
+        cleanup_elapsed_ms = cleanup_elapsed.as_millis(),
+        "Subprocess TUI cleanup complete"
+    );
+
+    // R12: if cleanup required forceful abort, write a structured diagnostic note.
+    if reader_timed_out || forward_timed_out {
+        if let Ok(cleanup_path) = write_cleanup_diagnostic(
+            &args.workspace,
+            reader_timed_out,
+            forward_timed_out,
+            cleanup_elapsed,
+            received_signal,
+        ) {
+            warn!(
+                diagnostic_path = %cleanup_path.display(),
+                "Wrote cleanup diagnostic for timed-out I/O tasks"
+            );
+        }
+    }
+
+    let reason = if let Some(signal) = received_signal {
+        info!(signal, "Subprocess TUI returning Interrupted due to signal");
+        TerminationReason::Interrupted
+    } else if let Some(status) = exit_status {
+        // Resolve the exact termination reason from the runner sentinel when the
+        // child did not exit cleanly; fall back to coarse exit-code mapping.
+        resolve_subprocess_termination_reason(&args.workspace, &status)
+    } else {
+        warn!("Subprocess TUI could not determine child exit status; returning Stopped");
+        TerminationReason::Stopped
+    };
 
     // Return TUI result if it failed, otherwise the termination reason
     tui_result.map(|_| reason)
@@ -2647,5 +2940,68 @@ hats:
 
         // Sanity: child session is in the worktree, not the main repo.
         assert!(child_session.starts_with(&worktree_path));
+    }
+
+    // ── R2 / R4 / SC6: cleanup timeout + abort for stuck I/O tasks ──────────
+
+    #[tokio::test]
+    async fn wait_for_task_with_timeout_returns_result_when_task_finishes() {
+        let handle = tokio::spawn(async { 42 });
+        let (result, timed_out) =
+            wait_for_task_with_timeout(handle, "finishes", Duration::from_secs(1)).await;
+        assert!(!timed_out);
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn wait_for_task_with_timeout_aborts_stuck_task() {
+        tokio::time::pause();
+        let handle = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+            }
+        });
+        tokio::time::advance(Duration::from_millis(50)).await;
+        let (_, timed_out) =
+            wait_for_task_with_timeout(handle, "stuck", Duration::from_millis(10)).await;
+        assert!(timed_out, "stuck task should be reported as timed out");
+    }
+
+    #[test]
+    fn write_cleanup_diagnostic_appends_jsonl() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_cleanup_diagnostic(
+            tmp.path(),
+            true,
+            false,
+            Duration::from_millis(2500),
+            Some("SIGINT"),
+        )
+        .unwrap();
+
+        assert!(path.exists());
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let line = contents.lines().next().unwrap();
+        let value: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(value["reader_timed_out"], true);
+        assert_eq!(value["forward_timed_out"], false);
+        assert_eq!(value["cleanup_elapsed_ms"], 2500);
+        assert_eq!(value["signal"], "SIGINT");
+        assert!(value["pid"].is_number());
+        assert!(value["timestamp"].is_string());
+    }
+
+    #[tokio::test]
+    async fn wait_or_terminate_child_returns_status_when_child_exits_quickly() {
+        let mut child = tokio::process::Command::new("echo")
+            .arg("hello")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let child_id = child.id();
+        let status =
+            wait_or_terminate_child(&mut child, child_id, Duration::from_secs(5), "quick_exit")
+                .await;
+        assert!(status.expect("child should exit").success());
     }
 }
