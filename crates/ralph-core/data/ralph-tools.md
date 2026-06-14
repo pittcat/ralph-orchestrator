@@ -94,6 +94,68 @@ metadata:
 | `policy validation failed` (`ralph wave emit`) | 任一 payload 违反 `event_policy.schemas.<topic>.required_fields`，整批拒绝 | 用 `--output json` 读 `validation_errors[].field` 一次性拿到全部缺失字段，修正后重发 |
 | 任何命令失败 | 通用恢复 | 1. `ralph <cmd> --help` 确认语法 2. 检查退出码 3. 查看错误信息 4. 重试 |
 
+## Agent Output Governance（2026-06-14 计划 003 — `ce-executor-isolated` only）
+
+`ce-executor-isolated` preset 在四个卡点上加硬规则。agent 可能遇到如下机制 — 当以下块 / 变量 / 行为出现时，按对应说明处理。
+
+### `## WAVE CONTEXT` Block（R1 — review-synthesizer only）
+
+当 `review-synthesizer` hat 被激活时，runner 在 prompt 顶部注入固定格式块：
+
+```text
+## WAVE CONTEXT
+The following wave metadata is injected by the runner. Do not count events manually — use this context.
+
+```json
+{
+  "wave_id": "w-abc",
+  "wave_total": 7,
+  "received_count": 7,
+  "expected_dimensions": ["correctness", "testing", "..."],
+  "missing_dimensions": [],
+  "ALL_DIMENSIONS_RECEIVED": true,
+  "AGGREGATE_TIMEOUT": false
+}
+```
+```
+
+- 不要重新数 `events.jsonl` — 使用此上下文。`received_count` 已经包含 dimension done 事件的最新计数。
+- 当 `ALL_DIMENSIONS_RECEIVED: true` 且 `AGGREGATE_TIMEOUT: false` 时，直接 emit `review.passed`。
+- 当 `AGGREGATE_TIMEOUT: true` 时，list 中维度未齐，按 plan 的 `skip_reason=aggregate_timeout` 走。
+- 当 `missing_dimensions` 非空时，复核是否还有未收的 worker。
+
+**等效 env var**：`RALPH_WAVE_CONTEXT`（JSON 字符串，可 `echo $RALPH_WAVE_CONTEXT | jq`）。
+
+### `## EPHEMERAL RELOCATED` Block（R3 — review-synthesizer / executor / fixer / shipper）
+
+当 agent 在源码树下写了 `scratchpad.md` / `notes.md` / `tmp*.md` / `*.bak` 等运行时产物时，runner 在下一轮 prompt 顶部注入：
+
+```text
+## EPHEMERAL RELOCATED
+The following runtime artefacts were moved out of the source tree by the runner. Do NOT recreate these files inside the source tree; write runtime notes to `.ralph/agent/` instead.
+
+- `crates/ralph-core/scratchpad.md` → `.ralph/agent/scratchpad-{loop_id}.md` (1234 bytes appended)
+```
+
+- 已经迁移的内容在 `.ralph/agent/scratchpad-{loop_id}.md`（按 loop_id 命名空间，多 loop 不冲突）。`cat .ralph/agent/scratchpad-*.md` 可读。
+- 不要再在源码树下重建这些文件（触发 review wave + P0 finding）。
+- 该块被首次读取后消费（`std::mem::take`），后续 hat activation 看不到 — 这是设计。
+
+### `ralph tools task ensure` 与 R4 Single-U 契约
+
+**默认关闭**。当 `ce-executor-isolated` preset 启动后，`ralph run` 写 `.ralph/agent/.ralph-enforce-current-unit` marker，子进程 `ralph tools task ensure` 检测后激活契约。standalone CLI 用户可设环境变量 `RALPH_ENFORCE_CURRENT_UNIT=1`。
+
+**契约**：
+
+- key 形如 `ce-executor:{plan}:step-XX:uN-impl`（N 是数字）才被 gate。
+- 同一 `(loop_id, plan_name, step)` 下如果已 open U1 task，再 ensure `u2-impl` 时：
+  - CLI 退出非零，stderr 输出 `rejected by R4 single-U contract: ...`
+  - ensure 返回已存在的 U1 task。
+- 同一 U 的 sub-units（`u1a-impl` / `u1b-impl`）允许并存 — 都塌缩到 `u1`。
+- 旧 key / 非 `uN-` 形状（`step-99-impl` / `review-bug-impl` 等）不被 gate，可共存 — 这是已知边界。
+- 同 key 重复 ensure 是幂等的，返回同一 task。
+- 失败时不要重试同一 key — 切换到下一 U 或关闭冲突 task。
+
 ## Decision Journal
 
 使用 `.ralph/agent/decisions.md` 记录重大决策及其置信度评分。按文件顶部模板填写，ID 保持顺序（DEC-001、DEC-002、...）。

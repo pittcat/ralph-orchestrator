@@ -165,6 +165,19 @@ Key config modules in `crates/ralph-core/src/config/`:
 - 4+ hat isolated preset **必须**同时满足：execution_mode=isolated、每个 hat 的所有终态主题在 `publishes` 中显式声明、字典序不再被依赖。
 - 任何 preset 校验失败都被 `ralph preset check` / `ralph preflight` / `ralph run` 启动硬门拦住，运行时不会进入半启动状态。
 
+#### Agent Output Governance（2026-06-14 计划 003 — `ce-executor-isolated` only）
+
+`ce-executor-isolated` preset 在四个卡点上加硬规则（机制优先于编排补丁；默认关闭，preset 显式开启）：
+
+- **R1 — Wave context 注入（review-synthesizer）**：当 `review-synthesizer` 被激活时，runner 从 events.jsonl 末尾 2000 行解析 `review.wave.ready` / `review.dimension.done`，构造 `## WAVE CONTEXT` 块注入 prompt 顶部（`wave_id` / `wave_total` / `received_count` / `expected_dimensions` / `missing_dimensions` / `ALL_DIMENSIONS_RECEIVED` / `AGGREGATE_TIMEOUT`）。同一 JSON 也通过 `RALPH_WAVE_CONTEXT` 环境变量暴露给 agent 的 bash tool。代码：`crates/ralph-core/src/wave_context.rs`、`event_loop/mod.rs::build_wave_context_for_synthesizer`。
+- **R3 — Ephemeral 文件隔离**：每个 `process_output` 迭代扫描 `git ls-files --others --exclude-standard`，把匹配 `scratchpad.md` / `notes.md` / `tmp*.md` / `*.tmp.md` / `*.bak` / `*agent-notes.md` 模式且在源码树（`crates/`、`src/`、`backend/`、`frontend/`、`examples/`、`docs/`）下的文件先追加到 `.ralph/agent/scratchpad-{loop_id}.md` 再删除原文件。下一轮 prompt 顶部注入 `## EPHEMERAL RELOCATED` 块告知 agent 路径迁移。`event_loop.ephemeral_isolation: true` 开启。代码：`crates/ralph-core/src/ephemeral_isolation.rs`、`event_loop/mod.rs::run_ephemeral_isolation`。
+- **R4 — Single-U 契约（coordinator 单 U 原则）**：`TaskStore::ensure` 检测同 `(loop_id, plan_name, step)` 下已 open 但 unit 不同的任务并拒绝，unit 形如 `uN-` / `uNa-`（N 是数字）。同一 U 的 sub-units（`u1a` / `u1b`）塌缩到 base `u1` 允许并存。`ralph run` 在 bootstrap 时写 `.ralph/agent/.ralph-enforce-current-unit` marker（env var `RALPH_ENFORCE_CURRENT_UNIT` 被 workspace `forbid(unsafe_code)` 阻挡），子进程 `ralph tools task ensure` 读取 marker 后激活契约；同 key 的 ensure 触发时 CLI 退出非零。`event_loop.enforce_current_unit: true` 开启。代码：`crates/ralph-core/src/task_store.rs::find_unit_collision_idx`、`crates/ralph-cli/src/task_cli.rs::execute_ensure`。
+- **R5 — Hard-gate hat 路由稳定性**：policy / workflow guard / execution contract / isolated scope 的 rejection 产生 `task.resume` 时，`Event::with_target(event.hat)` 路由到源 hat（不再漂到字典序首项 hat）。rejection payload 同时带 `wave_id` / `wave_index` / `wave_total`（当 source event 是 wave record）。`build_wave_context_for_synthesizer` 在 `review-synthesizer` 被 `inject_review_aggregate_timeouts` 唤醒时设置 `pending_synthesizer_timeout` pin，第一次读取时 `.take()` 消费，避免跨 wave 泄漏。代码：`crates/ralph-core/src/event_loop/mod.rs::publish_policy_rejection_resume`、`rejection.rs::build_task_resume_payload`。
+
+`R1` / `R3` 默认关闭（需 preset 显式开启 `ephemeral_isolation: true` / 注入逻辑由 `ce-executor-isolated` preset 显式激活）；`R4` / `R5` 同样。`ce-executor-lite` / `autoresearch` / `debug` / `merge-loop` 等其他 preset 不受影响。
+
+**R2 (CLI 写入前 enforce `topic_deny_rules`) 由 `2026-06-14-001` 计划覆盖，本节不重复。**
+
 ### Hook System
 
 Hooks run external commands at lifecycle points. Located in `crates/ralph-core/src/hooks/`:

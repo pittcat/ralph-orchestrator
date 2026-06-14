@@ -56,8 +56,9 @@ impl ViolationType {
     /// (terminal-monotonicity, topic-format, topic-deny, etc.).
     pub fn field(&self) -> Option<&str> {
         match self {
-            Self::MissingRequiredField { field }
-            | Self::InvalidFieldValue { field, .. } => Some(field.as_str()),
+            Self::MissingRequiredField { field } | Self::InvalidFieldValue { field, .. } => {
+                Some(field.as_str())
+            }
             _ => None,
         }
     }
@@ -663,7 +664,8 @@ pub fn validate_event(
         let findings_count = obj.get("findings_count").and_then(|v| v.as_u64());
         let changed_lines = obj.get("changed_lines").and_then(|v| v.as_u64());
         let findings_violated = matches!(findings_count, Some(n) if n > 0);
-        let diff_violated = matches!(changed_lines, Some(n) if n >= config.trivial_step_max_changed_lines);
+        let diff_violated =
+            matches!(changed_lines, Some(n) if n >= config.trivial_step_max_changed_lines);
         if findings_violated || diff_violated {
             findings.push(PolicyFinding {
                 topic: topic.to_string(),
@@ -2145,7 +2147,8 @@ mod tests {
         );
         config.schemas.insert("work.done".to_string(), schema);
         let mut state = PolicyRuntimeState::default();
-        let payload = r#"{"findings_count": 20, "skip_reason": "trivial_step", "changed_lines": 80}"#;
+        let payload =
+            r#"{"findings_count": 20, "skip_reason": "trivial_step", "changed_lines": 80}"#;
         let decision = validate_event("work.done", Some(payload), &config, &mut state);
         assert_eq!(
             decision,
@@ -2238,8 +2241,7 @@ mod tests {
             },
         );
         let mut state = PolicyRuntimeState::default();
-        let decision =
-            validate_event("review.wave.ready", Some("not-a-json"), &config, &mut state);
+        let decision = validate_event("review.wave.ready", Some("not-a-json"), &config, &mut state);
         assert!(
             matches!(decision, PolicyDecision::RejectWithResume(_)),
             "non-JSON string must be rejected, got {:?}",

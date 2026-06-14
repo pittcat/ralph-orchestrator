@@ -69,6 +69,22 @@ points to a real loop), the following rules apply:
   for diagnostics; a warning is printed when the target task's
   `loop_id` differs from the current marker.
 
+### Single-U Contract（2026-06-14 计划 003 R4 — `ce-executor-isolated` only）
+
+**默认关闭**。当 `ce-executor-isolated` preset 启动后，`ralph run` 写 `.ralph/agent/.ralph-enforce-current-unit` marker，子进程 `ralph tools task ensure` 检测后激活契约。standalone CLI 用户可设 `RALPH_ENFORCE_CURRENT_UNIT=1` 强制开启。
+
+**契约规则**：
+
+- key 形如 `ce-executor:{plan}:step-XX:uN-impl`（N 是数字）才被 gate。`u1a-impl` / `u1b-impl` 塌缩到 `u1`，允许并存。
+- 同一 `(loop_id, plan_name, step)` 下已 open U1 task，再 ensure `u2-impl` 时：
+  - CLI 退出非零，stderr 输出 `rejected by R4 single-U contract: ...`。
+  - ensure 返回已存在的 U1 task（id 与 requested key 不一致）。
+- 同 key 重复 ensure 是幂等的（plan 5.3.2 § "R4.5"） — 返回同一 task。
+- 旧 key / 非 `uN-` 形状（`step-99-impl`、`review-bug-impl` 等）**不被 gate** — 这是已知边界，**不要**依赖 R4 保护非 canonical keys。
+- 失败时不要重试同一 key — 切换到下一 U 或关闭冲突 task。
+
+**当前已知 gap（2026-06-14 评估）**：`ralph run` 通过 marker 文件传递契约信号（env var `RALPH_ENFORCE_CURRENT_UNIT` 被 workspace `forbid(unsafe_code)` 阻挡）。在 `ralph run` 启动时 marker 被写入 `.ralph/agent/.ralph-enforce-current-unit`；子进程 `task_cli::execute_ensure` 读 marker 后激活契约。
+
 Configure coordinator hats globally:
 
 ```yaml
