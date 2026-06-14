@@ -2452,7 +2452,17 @@ hats:
             .status()
             .expect("git init");
         Command::new("git")
-            .args(["-c", "user.name=Test", "-c", "user.email=t@e.com", "commit", "--allow-empty", "-m", "init", "-q"])
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=t@e.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+                "-q",
+            ])
             .current_dir(repo_root)
             .status()
             .expect("git commit");
@@ -2477,7 +2487,9 @@ hats:
                 .unwrap();
 
         // Session dir is created for the trace layer / TUI stderr log.
-        let session_dir = collector.session_dir().expect("trace_only creates session_dir");
+        let session_dir = collector
+            .session_dir()
+            .expect("trace_only creates session_dir");
         assert!(session_dir.exists());
 
         // No loop-level files: this is the bug fix.

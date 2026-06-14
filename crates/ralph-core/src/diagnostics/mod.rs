@@ -403,10 +403,7 @@ impl DiagnosticsCollector {
     /// Returns `Ok(false)` when this is a primary (non-worktree)
     /// session, so the caller can log or no-op without checking the
     /// return value's "did it write" semantics.
-    pub fn write_session_pointer(
-        &self,
-        main_repo: &Path,
-    ) -> std::io::Result<bool> {
+    pub fn write_session_pointer(&self, main_repo: &Path) -> std::io::Result<bool> {
         let session_dir = match self.session_dir() {
             Some(d) => d,
             None => return Ok(false),
@@ -1217,7 +1214,10 @@ mod tests {
         std::fs::create_dir_all(&worktree).unwrap();
         std::fs::create_dir_all(&main_repo).unwrap();
 
-        let session_dir = worktree.join(".ralph").join("diagnostics").join("2026-06-14T10-20-30");
+        let session_dir = worktree
+            .join(".ralph")
+            .join("diagnostics")
+            .join("2026-06-14T10-20-30");
         std::fs::create_dir_all(&session_dir).unwrap();
 
         let options = DiagnosticsOptions {
@@ -1228,7 +1228,9 @@ mod tests {
         let collector = DiagnosticsCollector::with_options(&worktree, &options).unwrap();
         assert_eq!(collector.session_dir().unwrap(), session_dir);
 
-        let wrote = collector.write_session_pointer(&main_repo).expect("write ok");
+        let wrote = collector
+            .write_session_pointer(&main_repo)
+            .expect("write ok");
         assert!(wrote, "expected pointer to be written for worktree session");
 
         let pointer_path = main_repo
@@ -1258,7 +1260,9 @@ mod tests {
         let session_dir = collector.session_dir().unwrap().to_path_buf();
 
         // session_dir starts with main_repo, so the call must no-op.
-        let wrote = collector.write_session_pointer(temp.path()).expect("write ok");
+        let wrote = collector
+            .write_session_pointer(temp.path())
+            .expect("write ok");
         assert!(!wrote, "primary session must not write a pointer");
 
         // Sanity: session dir is indeed under main_repo.
@@ -1272,19 +1276,19 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let main_repo = temp.path().join("main-repo");
         std::fs::create_dir_all(&main_repo).unwrap();
-        let collector = DiagnosticsCollector::with_options(
-            temp.path(),
-            &DiagnosticsOptions::default(),
-        )
-        .unwrap();
+        let collector =
+            DiagnosticsCollector::with_options(temp.path(), &DiagnosticsOptions::default())
+                .unwrap();
         assert!(!collector.is_enabled());
         let wrote = collector
             .write_session_pointer(&main_repo)
             .expect("disabled write ok");
         assert!(!wrote);
-        assert!(!main_repo
-            .join(".ralph")
-            .join("diagnostics-session-pointer.json")
-            .exists());
+        assert!(
+            !main_repo
+                .join(".ralph")
+                .join("diagnostics-session-pointer.json")
+                .exists()
+        );
     }
 }

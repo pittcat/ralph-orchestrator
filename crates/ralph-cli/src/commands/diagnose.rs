@@ -896,7 +896,11 @@ mod tests {
         // No alive loop in loops.json. Pointer file points at a worktree
         // session dir that exists. We must use the pointer.
         let tmp = tempfile::tempdir().unwrap();
-        let worktree_session = tmp.path().join("worktree").join(".ralph").join("diagnostics");
+        let worktree_session = tmp
+            .path()
+            .join("worktree")
+            .join(".ralph")
+            .join("diagnostics");
         std::fs::create_dir_all(&worktree_session).unwrap();
         write_session_pointer(tmp.path(), &worktree_session);
 
@@ -913,7 +917,11 @@ mod tests {
         // Pointer exists but the target dir was deleted. Fall back to
         // main repo's `.ralph/diagnostics`.
         let tmp = tempfile::tempdir().unwrap();
-        let missing = tmp.path().join("deleted").join(".ralph").join("diagnostics");
+        let missing = tmp
+            .path()
+            .join("deleted")
+            .join(".ralph")
+            .join("diagnostics");
         write_session_pointer(tmp.path(), &missing);
         let ralph_dir = tmp.path().join(".ralph");
         std::fs::write(ralph_dir.join("loops.json"), "[]").unwrap();
@@ -942,8 +950,11 @@ mod tests {
             "prompt": "live",
             "workspace": tmp.path().join("live").to_string_lossy(),
         }]);
-        std::fs::write(ralph_dir.join("loops.json"), serde_json::to_string(&entry).unwrap())
-            .unwrap();
+        std::fs::write(
+            ralph_dir.join("loops.json"),
+            serde_json::to_string(&entry).unwrap(),
+        )
+        .unwrap();
 
         let root = resolve_diagnostics_root_via_loops(tmp.path());
         assert_eq!(root, live_session);
@@ -957,7 +968,11 @@ mod tests {
         // it indirectly here by verifying the resolution helper still
         // honors the pointer for a different scenario.
         let tmp = tempfile::tempdir().unwrap();
-        let worktree_session = tmp.path().join("worktree").join(".ralph").join("diagnostics");
+        let worktree_session = tmp
+            .path()
+            .join("worktree")
+            .join(".ralph")
+            .join("diagnostics");
         std::fs::create_dir_all(&worktree_session).unwrap();
         write_session_pointer(tmp.path(), &worktree_session);
         let ralph_dir = tmp.path().join(".ralph");

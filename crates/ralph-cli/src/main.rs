@@ -193,9 +193,7 @@ fn use_subprocess_tui(command: Option<&Commands>, is_tty: bool) -> bool {
         // ResumeArgs has no legacy_tui field — the resume subcommand
         // does not expose the in-process TUI escape hatch. Match the
         // narrower resume command shape.
-        Some(Commands::Resume(args)) => {
-            !args.no_tui && !args.autonomous && !args.rpc && is_tty
-        }
+        Some(Commands::Resume(args)) => !args.no_tui && !args.autonomous && !args.rpc && is_tty,
         None => is_tty, // default `ralph` → `ralph run` interactive
         _ => false,
     }
