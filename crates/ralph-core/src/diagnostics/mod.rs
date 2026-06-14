@@ -87,12 +87,32 @@ pub struct DiagnosticsOptions {
     /// Used by `main.rs` to share the dir between the tracing layer and the
     /// `EventLoop`. When `None`, a new timestamped dir is created lazily.
     pub session_dir: Option<PathBuf>,
+
+    /// `trace_only=true` makes the collector create the session dir for the
+    /// tracing layer and TUI stderr log, but skip ALL loop-level loggers
+    /// (recovery/drift/orchestration/performance/errors/hook-runs/agent-output/
+    /// prompt-log). Used by the subprocess TUI parent in `main.rs` so it
+    /// does not leave an empty shell in the main repo while the child RPC
+    /// process writes real data into the worktree (U1, 2026-06-14).
+    ///
+    /// `full_diagnostics=true` wins: when both are set, the full logger set
+    /// is created (matches the existing
+    /// `runtime_diagnosis_artifacts`-vs-full precedence contract).
+    pub trace_only: bool,
 }
 
 impl DiagnosticsOptions {
     /// Returns true when any diagnostic capture is active.
     pub fn is_enabled(&self) -> bool {
-        self.full_diagnostics || self.runtime_diagnosis_artifacts
+        self.full_diagnostics || self.runtime_diagnosis_artifacts || self.trace_only
+    }
+
+    /// Returns true when the trace-only mode is requested. This is a
+    /// request signal, not a final state — the actual logger set still
+    /// depends on `full_diagnostics` winning when both are set. Use
+    /// [`DiagnosticsCollector::is_trace_only`] for the effective state.
+    pub fn wants_trace_only(&self) -> bool {
+        self.trace_only && !self.full_diagnostics
     }
 
     /// Resolves the activation matrix entry based on env and (optionally)
@@ -104,6 +124,7 @@ impl DiagnosticsOptions {
         Self {
             full_diagnostics,
             runtime_diagnosis_artifacts: false,
+            trace_only: false,
             session_dir,
         }
     }
@@ -128,6 +149,7 @@ impl DiagnosticsOptions {
         Self {
             full_diagnostics,
             runtime_diagnosis_artifacts: write_artifacts,
+            trace_only: false,
             session_dir,
         }
     }
@@ -147,6 +169,7 @@ pub struct DiagnosticsCollector {
     enabled: bool,
     full_diagnostics: bool,
     runtime_diagnosis_artifacts: bool,
+    trace_only: bool,
     session_dir: Option<PathBuf>,
     orchestration_logger: Option<Arc<Mutex<orchestration::OrchestrationLogger>>>,
     performance_logger: Option<Arc<Mutex<performance::PerformanceLogger>>>,
@@ -165,6 +188,7 @@ impl std::fmt::Debug for DiagnosticsCollector {
                 "runtime_diagnosis_artifacts",
                 &self.runtime_diagnosis_artifacts,
             )
+            .field("trace_only", &self.trace_only)
             .field("session_dir", &self.session_dir)
             .field(
                 "has_orchestration_logger",
@@ -204,10 +228,16 @@ impl DiagnosticsCollector {
 
     /// Canonical constructor.
     ///
-    /// Drives the activation matrix in [`DiagnosticsOptions`]. When both
+    /// Drives the activation matrix in [`DiagnosticsOptions`]. When all
     /// flags are false, returns a no-op disabled collector with no I/O.
     /// When enabled, creates (or reuses) a timestamped session directory
     /// and instantiates the appropriate logger set.
+    ///
+    /// `trace_only=true` (with `full_diagnostics=false`) creates the
+    /// session dir for the tracing layer but skips every loop-level
+    /// logger (recovery/drift/orchestration/performance/errors/hook-runs/
+    /// agent-output/prompt-log). `full_diagnostics=true` always wins
+    /// (U1, 2026-06-14).
     pub fn with_options(base_path: &Path, options: &DiagnosticsOptions) -> std::io::Result<Self> {
         if !options.is_enabled() {
             return Ok(Self::disabled());
@@ -230,11 +260,20 @@ impl DiagnosticsCollector {
             }
         };
 
+        // Effective mode: full_diagnostics wins, otherwise honor
+        // runtime_diagnosis_artifacts, otherwise honor trace_only.
+        // trace_only is request-only — the actual logger set is determined
+        // by the resolved `effective_*` booleans below.
+        let effective_full = options.full_diagnostics;
+        let effective_runtime = options.runtime_diagnosis_artifacts && !options.full_diagnostics;
+        let effective_trace_only = options.wants_trace_only();
+
         // Historical loggers are tied to full_diagnostics. The minimal
         // runtime-diagnosis session deliberately skips them so we don't
-        // create files nobody asked for.
+        // create files nobody asked for. trace_only skips them too —
+        // the parent TUI only needs the session dir, not loop-level files.
         let (orchestration_logger, performance_logger, error_logger, hook_run_logger) =
-            if options.full_diagnostics {
+            if effective_full {
                 let orch_logger = orchestration::OrchestrationLogger::new(&session_dir)?;
                 let perf_logger = performance::PerformanceLogger::new(&session_dir)?;
                 let err_logger = errors::ErrorLogger::new(&session_dir)?;
@@ -254,7 +293,10 @@ impl DiagnosticsCollector {
         // session, because the diagnosis pipeline is the whole point of
         // telemetry. They do NOT pull in agent-output / prompt-log.
         // The session dir is already guaranteed to exist at this point.
-        let recovery_logger = if options.is_enabled() {
+        //
+        // trace_only skips these too: parent TUI has no loop events to
+        // record, only trace/log.
+        let recovery_logger = if effective_full || effective_runtime {
             match recovery::RecoveryLogger::new(&session_dir) {
                 Ok(logger) => Some(Arc::new(Mutex::new(logger))),
                 Err(err) => {
@@ -271,7 +313,7 @@ impl DiagnosticsCollector {
             None
         };
 
-        let drift_logger = if options.is_enabled() {
+        let drift_logger = if effective_full || effective_runtime {
             match drift::DriftLogger::new(&session_dir) {
                 Ok(logger) => Some(Arc::new(Mutex::new(logger))),
                 Err(err) => {
@@ -290,8 +332,9 @@ impl DiagnosticsCollector {
 
         Ok(Self {
             enabled: true,
-            full_diagnostics: options.full_diagnostics,
-            runtime_diagnosis_artifacts: options.runtime_diagnosis_artifacts,
+            full_diagnostics: effective_full,
+            runtime_diagnosis_artifacts: effective_runtime,
+            trace_only: effective_trace_only,
             session_dir: Some(session_dir),
             orchestration_logger,
             performance_logger,
@@ -308,6 +351,7 @@ impl DiagnosticsCollector {
             enabled: false,
             full_diagnostics: false,
             runtime_diagnosis_artifacts: false,
+            trace_only: false,
             session_dir: None,
             orchestration_logger: None,
             performance_logger: None,
@@ -331,6 +375,15 @@ impl DiagnosticsCollector {
     /// Returns true if the minimal runtime-diagnosis session is active.
     pub fn has_runtime_diagnosis_artifacts(&self) -> bool {
         self.runtime_diagnosis_artifacts
+    }
+
+    /// Returns true if the collector is in trace-only mode (parent TUI):
+    /// session dir is created for the tracing layer, but no loop-level
+    /// loggers (recovery/drift/etc.) are instantiated. Effective state —
+    /// if `full_diagnostics` is also true this returns `false` because
+    /// full wins. (U1, 2026-06-14)
+    pub fn is_trace_only(&self) -> bool {
+        self.trace_only
     }
 
     /// Returns the session directory if diagnostics are enabled.
@@ -948,6 +1001,7 @@ mod tests {
             full_diagnostics: false,
             runtime_diagnosis_artifacts: true,
             session_dir: Some(preset_dir.clone()),
+            ..DiagnosticsOptions::default()
         };
         let collector = DiagnosticsCollector::with_options(temp.path(), &options).unwrap();
 
@@ -970,5 +1024,108 @@ mod tests {
             "expected io::Error, got {:?}",
             result.is_ok()
         );
+    }
+
+    // ── trace_only mode (U1, 2026-06-14) ─────────────────────────────────
+    // The subprocess TUI parent must create a session dir for the tracing
+    // layer and TUI stderr log, but MUST NOT instantiate loop-level loggers
+    // (recovery/drift/orchestration/performance/errors/hook-runs/agent-output/
+    // prompt-log) — otherwise the parent leaves empty shells in the main repo
+    // while the child RPC process writes the real data into the worktree.
+
+    #[test]
+    fn test_trace_only_creates_session_dir_without_loop_loggers() {
+        let temp = TempDir::new().unwrap();
+        let options = DiagnosticsOptions {
+            full_diagnostics: false,
+            runtime_diagnosis_artifacts: false,
+            trace_only: true,
+            ..DiagnosticsOptions::default()
+        };
+        let collector = DiagnosticsCollector::with_options(temp.path(), &options).unwrap();
+
+        // Session dir must exist (parent TUI needs it for the trace layer).
+        assert!(collector.is_enabled());
+        assert!(collector.is_trace_only());
+        assert!(!collector.is_full_diagnostics());
+        assert!(!collector.has_runtime_diagnosis_artifacts());
+        let session_dir = collector.session_dir().expect("session dir must exist");
+        assert!(session_dir.exists());
+
+        // No loop-level files: the parent's empty shell problem.
+        for name in [
+            "recovery.jsonl",
+            "drift.jsonl",
+            "orchestration.jsonl",
+            "performance.jsonl",
+            "errors.jsonl",
+            "hook-runs.jsonl",
+            "agent-output.jsonl",
+            "prompt-log.md",
+        ] {
+            assert!(
+                !session_dir.join(name).exists(),
+                "trace_only must not create {name}"
+            );
+        }
+
+        // The session dir is created under .ralph/diagnostics/<timestamp>/
+        // just like the full / minimal modes. trace_only only differs by
+        // skipping the loop-level loggers; the directory shape is
+        // identical so downstream tooling (TUI, trace layer) sees the
+        // same path layout.
+        assert!(session_dir.starts_with(temp.path().join(".ralph").join("diagnostics")));
+    }
+
+    #[test]
+    fn test_trace_only_full_diagnostics_priority_wins() {
+        let temp = TempDir::new().unwrap();
+        let options = DiagnosticsOptions {
+            full_diagnostics: true,
+            runtime_diagnosis_artifacts: false,
+            trace_only: true,
+            ..DiagnosticsOptions::default()
+        };
+        let collector = DiagnosticsCollector::with_options(temp.path(), &options).unwrap();
+
+        // full_diagnostics wins: trace_only is ignored, full logger set
+        // is created. This mirrors the existing
+        // runtime_diagnosis_artifacts-vs-full precedence contract.
+        assert!(!collector.is_trace_only());
+        assert!(collector.is_full_diagnostics());
+        let session_dir = collector.session_dir().expect("session dir must exist");
+        assert!(session_dir.exists());
+        assert!(session_dir.join("orchestration.jsonl").exists());
+        assert!(session_dir.join("performance.jsonl").exists());
+    }
+
+    #[test]
+    fn test_trace_only_query_method_default_false() {
+        // Default (no flags set) must NOT be trace_only: backwards compat.
+        let temp = TempDir::new().unwrap();
+        let collector =
+            DiagnosticsCollector::with_options(temp.path(), &DiagnosticsOptions::default())
+                .unwrap();
+        assert!(!collector.is_trace_only());
+        assert!(!collector.is_enabled());
+    }
+
+    #[test]
+    fn test_trace_only_reuses_preset_session_dir() {
+        // Mirrors the existing session_dir reuse contract: if the caller
+        // pins session_dir, we do not create a timestamped subdir.
+        let temp = TempDir::new().unwrap();
+        let preset_dir = temp.path().join("parent-trace-session");
+        std::fs::create_dir_all(&preset_dir).unwrap();
+        let options = DiagnosticsOptions {
+            full_diagnostics: false,
+            runtime_diagnosis_artifacts: false,
+            trace_only: true,
+            session_dir: Some(preset_dir.clone()),
+        };
+        let collector = DiagnosticsCollector::with_options(temp.path(), &options).unwrap();
+        assert!(collector.is_trace_only());
+        assert_eq!(collector.session_dir().unwrap(), preset_dir);
+        assert!(!temp.path().join(".ralph").join("diagnostics").exists());
     }
 }

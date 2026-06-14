@@ -132,6 +132,7 @@ impl TelemetryConfig {
         DiagnosticsOptions {
             full_diagnostics,
             runtime_diagnosis_artifacts,
+            trace_only: false,
             session_dir: None,
         }
     }
