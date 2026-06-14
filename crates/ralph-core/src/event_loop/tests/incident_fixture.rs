@@ -19,8 +19,7 @@ use ralph_proto::HatId;
 use crate::event_loop::EventLoop;
 
 /// Anonymized fixture path.
-const INCIDENT_FIXTURE: &str =
-    "tests/fixtures/wave-isolated-dimension-done/8-dimension-done.jsonl";
+const INCIDENT_FIXTURE: &str = "tests/fixtures/wave-isolated-dimension-done/8-dimension-done.jsonl";
 
 /// The fixture's wave_id (anonymized from the original
 /// `wave_id=w-2026-06-13-001`).
@@ -116,8 +115,7 @@ fn u6_incident_fixture_without_hat_field_drops_all_eight() {
     let fixture = std::fs::read_to_string(INCIDENT_FIXTURE).expect("read incident fixture");
     let mut out = std::fs::File::create(&staged).expect("create staged");
     for line in fixture.lines() {
-        let mut value: serde_json::Value =
-            serde_json::from_str(line).expect("parse line");
+        let mut value: serde_json::Value = serde_json::from_str(line).expect("parse line");
         if let Some(obj) = value.as_object_mut() {
             obj.remove("hat");
         }

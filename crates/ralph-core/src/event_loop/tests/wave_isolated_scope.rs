@@ -383,8 +383,8 @@ hats:
     instructions: "Review."
 "#;
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-    let diagnostics = DiagnosticsCollector::with_enabled(diagnostics_root, true)
-        .expect("diagnostics enabled");
+    let diagnostics =
+        DiagnosticsCollector::with_enabled(diagnostics_root, true).expect("diagnostics enabled");
     let session_dir = diagnostics.session_dir().unwrap().to_path_buf();
     let mut event_loop = EventLoop::with_diagnostics(config, diagnostics);
     event_loop.initialize("B2-test");
@@ -394,7 +394,9 @@ hats:
 
 /// Read all `RecoveryJournalEntry` records from the session's
 /// `recovery.jsonl` file.
-fn read_recovery_journal(session_dir: &std::path::Path) -> Vec<crate::diagnosis::RecoveryJournalEntry> {
+fn read_recovery_journal(
+    session_dir: &std::path::Path,
+) -> Vec<crate::diagnosis::RecoveryJournalEntry> {
     use std::io::Read as _;
 
     let recovery_path = session_dir.join("recovery.jsonl");
@@ -448,9 +450,15 @@ fn test_wave_isolated_scope_violation_records_recovery_envelope() {
             .collect::<Vec<_>>()
     );
     let env = &entries[0].envelope;
-    assert_eq!(env.source, crate::diagnosis::DiagnosisSource::WaveDispatcher);
+    assert_eq!(
+        env.source,
+        crate::diagnosis::DiagnosisSource::WaveDispatcher
+    );
     assert_eq!(env.reason_code, "wave_isolated_scope_violation");
-    assert_eq!(env.outcome, crate::diagnosis::DiagnosisOutcome::NotRetriable);
+    assert_eq!(
+        env.outcome,
+        crate::diagnosis::DiagnosisOutcome::NotRetriable
+    );
     assert!(!env.safe_target);
     assert_eq!(env.source_hat.as_deref(), Some("builder"));
     assert!(

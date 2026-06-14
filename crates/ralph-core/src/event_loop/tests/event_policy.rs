@@ -368,15 +368,28 @@ fn test_u1_trivial_step_bypass_rejected_with_task_resume() {
         "trivial_step bypass with non-trivial diff should be rejected, got had_events=true"
     );
 
-    // task.resume is published, on the ralph hat (loop runner fallback)
-    let ralph_id = HatId::new("ralph");
-    let pending = event_loop.bus.peek_pending(&ralph_id);
-    assert!(pending.is_some(), "task.resume should be on the bus");
+    // R5 (2026-06-14-003 plan): task.resume is targeted at the
+    // source hat (`reviewer`), not `ralph` — the source hat is
+    // the one that needs to fix the bypass attempt.  Pre-R5 the
+    // resume was published without a target so it fell through
+    // to `ralph`; the test previously asserted that path.  R5
+    // makes the routing explicit and load-bearing.
+    let reviewer_id = HatId::new("reviewer");
+    let pending = event_loop.bus.peek_pending(&reviewer_id);
+    assert!(
+        pending.is_some(),
+        "task.resume should be on the bus for reviewer"
+    );
     let events = pending.unwrap();
     let resume = events
         .iter()
         .find(|e| e.topic.as_str() == "task.resume")
         .expect("task.resume must be present for U1 violation");
+    assert_eq!(
+        resume.target.as_ref().map(|h| h.as_str()),
+        Some("reviewer"),
+        "R5 must route task.resume to the source hat"
+    );
     let payload = &resume.payload;
     assert!(
         payload.contains("invalid_trivial_step_bypass"),

@@ -83,12 +83,7 @@ hats:
     // the event (worker publishes the topic) and no
     // envelope would fire. The negative test is what
     // locks in the U7 contract.
-    write_event_with_hat_to_jsonl(
-        &events_path,
-        "review.file",
-        r#"{"x":1}"#,
-        "phantom-worker",
-    );
+    write_event_with_hat_to_jsonl(&events_path, "review.file", r#"{"x":1}"#, "phantom-worker");
     let _ = event_loop
         .process_events_from_jsonl()
         .expect("process_events_from_jsonl should not error on scope drop");
@@ -286,10 +281,12 @@ hats:
     // The tracker's `expired()` will return it on the next
     // `process_output` call.
     let t0 = std::time::Instant::now() - std::time::Duration::from_secs(120);
-    event_loop
-        .state
-        .handoff_tracker
-        .on_handoff_accepted("work.ready", "executor", "evt-stale-1", t0);
+    event_loop.state.handoff_tracker.on_handoff_accepted(
+        "work.ready",
+        "executor",
+        "evt-stale-1",
+        t0,
+    );
     // Force the deadline into the past with the smallest
     // possible configuration: a 1-second default timeout
     // that we already exceeded by 120 seconds.

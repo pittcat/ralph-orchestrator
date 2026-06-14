@@ -119,10 +119,8 @@ hats:
     let mut event_loop = EventLoop::new(config);
     event_loop.set_iteration_for_test(3);
 
-    let retry_key = RecoveryDiagnosisEnvelopeBuilder::wave_retry_key(
-        "w-timeout-B",
-        "wave_partial_threshold",
-    );
+    let retry_key =
+        RecoveryDiagnosisEnvelopeBuilder::wave_retry_key("w-timeout-B", "wave_partial_threshold");
     let envelope = RecoveryDiagnosisEnvelope::builder()
         .source(DiagnosisSource::WaveDispatcher)
         .severity(DiagnosisSeverity::Warning)
@@ -268,9 +266,7 @@ hats:
         .retry_key(old_key.clone())
         .build();
     let _ = event_loop.record_recovery_envelope(&old_envelope, Vec::new());
-    let old_attempt_after_record = event_loop
-        .recovery_responder()
-        .attempt_count(&old_key);
+    let old_attempt_after_record = event_loop.recovery_responder().attempt_count(&old_key);
     assert_eq!(
         old_attempt_after_record, 1,
         "old_key 首次记录后 attempt_count 应为 1"

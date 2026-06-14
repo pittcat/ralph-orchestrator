@@ -49,7 +49,10 @@ fn guidance_event(payload: &str) -> Event {
 /// following unrelated section, and (optionally) some bytes
 /// after the last guidance. Returns the absolute scratchpad
 /// path.
-fn write_scratchpad_with_sections(workspace: &std::path::Path, sections: &[&str]) -> std::path::PathBuf {
+fn write_scratchpad_with_sections(
+    workspace: &std::path::Path,
+    sections: &[&str],
+) -> std::path::PathBuf {
     let path = workspace.join("scratchpad.md");
     let mut f = std::fs::File::create(&path).unwrap();
     for s in sections {

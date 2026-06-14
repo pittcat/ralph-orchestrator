@@ -44,15 +44,9 @@ fn handoff_tracker_field_in_loop_state_starts_empty() {
 /// WRC-U8 follow-up.
 #[test]
 fn accepted_handoff_records_pending_entry() {
-    let mut tracker = HandoffTracker::new()
-        .with_default_timeout(Duration::from_secs(30));
+    let mut tracker = HandoffTracker::new().with_default_timeout(Duration::from_secs(30));
     let t0 = Instant::now();
-    tracker.on_handoff_accepted(
-        "work.ready",
-        "executor",
-        "evt-1",
-        t0,
-    );
+    tracker.on_handoff_accepted("work.ready", "executor", "evt-1", t0);
     assert_eq!(tracker.pending_count(), 1);
     // At t0+10s the entry is not yet expired (deadline = t0+30s).
     let escalations = tracker.expired(t0 + Duration::from_secs(10));
@@ -97,8 +91,7 @@ fn policy_rejection_leaves_tracker_empty() {
 /// uses to synthesize the `task.resume` event.
 #[test]
 fn escalation_payload_shape() {
-    let mut tracker = HandoffTracker::new()
-        .with_fallback_safe_target("plan-gate");
+    let mut tracker = HandoffTracker::new().with_fallback_safe_target("plan-gate");
     tracker.on_handoff_accepted("work.ready", "executor", "evt-1", Instant::now());
     let escalations: Vec<HandoffEscalation> =
         tracker.expired(Instant::now() + Duration::from_secs(60));

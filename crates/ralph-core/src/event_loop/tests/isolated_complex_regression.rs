@@ -270,13 +270,19 @@ fn u2_real_fan_out_two_branch_hats_pending_simultaneously() {
         a_pending.iter().any(|e| e.topic.as_str() == "plan.created"),
         "branch_a_worker must have plan.created pending (real fan-out). \
          got: {:?}",
-        a_pending.iter().map(|e| e.topic.to_string()).collect::<Vec<_>>()
+        a_pending
+            .iter()
+            .map(|e| e.topic.to_string())
+            .collect::<Vec<_>>()
     );
     assert!(
         b_pending.iter().any(|e| e.topic.as_str() == "b.impl.done"),
         "branch_b_worker must have b.impl.done pending (real self-return). \
          got: {:?}",
-        b_pending.iter().map(|e| e.topic.to_string()).collect::<Vec<_>>()
+        b_pending
+            .iter()
+            .map(|e| e.topic.to_string())
+            .collect::<Vec<_>>()
     );
 
     // P2 finding #13: R5 fairness — drive a multi-round
@@ -310,12 +316,8 @@ fn u2_real_fan_out_two_branch_hats_pending_simultaneously() {
             None => break,
         }
     }
-    let saw_a = selected_sequence
-        .iter()
-        .any(|h| h == "branch_a_worker");
-    let saw_b = selected_sequence
-        .iter()
-        .any(|h| h == "branch_b_worker");
+    let saw_a = selected_sequence.iter().any(|h| h == "branch_a_worker");
+    let saw_b = selected_sequence.iter().any(|h| h == "branch_b_worker");
     assert!(
         saw_a,
         "R5: branch_a_worker must be selected within {fairness_bound} rounds; \
@@ -376,9 +378,8 @@ fn u2_aggregate_wait_for_all_activates_only_on_full_set() {
     let total = 3;
     // Send the first 1 of 3 wave results.
     for index in 0..1 {
-        let payload = format!(
-            r#"{{"wave_id":"{wave_id}","wave_index":{index},"wave_total":{total}}}"#
-        );
+        let payload =
+            format!(r#"{{"wave_id":"{wave_id}","wave_index":{index},"wave_total":{total}}}"#);
         let outcome = run_isolated_turn(
             &mut event_loop,
             &events_path,
@@ -427,9 +428,8 @@ fn u2_aggregate_wait_for_all_activates_only_on_full_set() {
 
     // Drive 2/3 and 3/3 with the same wave_id.
     for index in 1..total {
-        let payload = format!(
-            r#"{{"wave_id":"{wave_id}","wave_index":{index},"wave_total":{total}}}"#
-        );
+        let payload =
+            format!(r#"{{"wave_id":"{wave_id}","wave_index":{index},"wave_total":{total}}}"#);
         let outcome = run_isolated_turn(
             &mut event_loop,
             &events_path,
@@ -461,9 +461,8 @@ fn u2_aggregate_wait_for_all_activates_only_on_full_set() {
     // first wave's events without merging.
     let wave_id_2 = "u2-wait-for-all-2";
     for index in 0..total {
-        let payload = format!(
-            r#"{{"wave_id":"{wave_id_2}","wave_index":{index},"wave_total":{total}}}"#
-        );
+        let payload =
+            format!(r#"{{"wave_id":"{wave_id_2}","wave_index":{index},"wave_total":{total}}}"#);
         let outcome = run_isolated_turn(
             &mut event_loop,
             &events_path,
@@ -480,15 +479,11 @@ fn u2_aggregate_wait_for_all_activates_only_on_full_set() {
         .unwrap_or_default();
     let wave1_count = agg_pending_both
         .iter()
-        .filter(|e| {
-            e.payload.contains(&format!("\"wave_id\":\"{wave_id}\""))
-        })
+        .filter(|e| e.payload.contains(&format!("\"wave_id\":\"{wave_id}\"")))
         .count();
     let wave2_count = agg_pending_both
         .iter()
-        .filter(|e| {
-            e.payload.contains(&format!("\"wave_id\":\"{wave_id_2}\""))
-        })
+        .filter(|e| e.payload.contains(&format!("\"wave_id\":\"{wave_id_2}\"")))
         .count();
     assert_eq!(
         wave1_count, 3,
@@ -592,7 +587,10 @@ fn u2_unauthorized_terminal_rejected_with_targeted_recovery() {
          Pending: {:?}",
         a_pending
             .iter()
-            .map(|e| (e.topic.to_string(), e.target.as_ref().map(|t| t.to_string())))
+            .map(|e| (
+                e.topic.to_string(),
+                e.target.as_ref().map(|t| t.to_string())
+            ))
             .collect::<Vec<_>>()
     );
 
@@ -677,11 +675,7 @@ fn u2_human_guidance_reaches_target_prompt_without_publisher_authority() {
     // section is delivered only to the target hat, not to
     // peers. We assert the absence of the canonical section
     // marker in the build_prompt output for non-target hats.
-    let isolation_check_hats = [
-        "branch_b_worker",
-        "reporter",
-        "aggregator",
-    ];
+    let isolation_check_hats = ["branch_b_worker", "reporter", "aggregator"];
     for hat_name in isolation_check_hats {
         let hat_id = HatId::new(hat_name);
         let other_prompt = event_loop
@@ -820,8 +814,7 @@ fn u2_replay_determinism_same_sequence_for_same_input() {
             // Drive a turn: run_isolated_turn admits the event under
             // the script's hat attribution; consume_prompt consumes
             // it from the bus into the hat's pending queue.
-            let outcome =
-                run_isolated_turn(&mut event_loop, &events_path, hat, topic, payload);
+            let outcome = run_isolated_turn(&mut event_loop, &events_path, hat, topic, payload);
             let hat_id = HatId::new(*hat);
             let _ = consume_prompt(&mut event_loop, &hat_id);
 

@@ -5,7 +5,9 @@ use super::*;
 
 #[test]
 fn session_b_fixture_lines_rejected_by_policy() {
-    use crate::config::{EventPolicyConfig, EventPolicyMode, EventSchema, PayloadType, ViolationAction};
+    use crate::config::{
+        EventPolicyConfig, EventPolicyMode, EventSchema, PayloadType, ViolationAction,
+    };
     use crate::event_policy::{PolicyDecision, PolicyRuntimeState, validate_event};
     use std::collections::HashMap;
     use std::io::Read;
@@ -63,12 +65,7 @@ fn session_b_fixture_lines_rejected_by_policy() {
     let mut state = PolicyRuntimeState::default();
     for line in content.lines().filter(|l| !l.trim().is_empty()) {
         let event: crate::event_reader::Event = serde_json::from_str(line).unwrap();
-        let decision = validate_event(
-            &event.topic,
-            event.payload.as_deref(),
-            &config,
-            &mut state,
-        );
+        let decision = validate_event(&event.topic, event.payload.as_deref(), &config, &mut state);
         assert!(
             matches!(decision, PolicyDecision::RejectWithResume(_)),
             "fixture line for {} must be rejected, got {:?}",
