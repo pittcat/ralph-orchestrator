@@ -39,16 +39,10 @@ tasks:
 
 event_loop:
   prompt_file: "PROMPT.md"
-  # 2026-06-13-004 U11：默认开启运行时诊断，让生产 worktree 自动把
-  # session / recovery / drift 证据落到 .ralph/diagnostics/<session>/。
-  # 不开的话 2026-06-13 事故的 recovery.jsonl 会一直空着，synthesizer
-  # 不 fire 的根因对 ralph diagnose 不可见。运营方仍可在项目 ralph.yml
-  # 显式覆盖 `telemetry.runtime_diagnosis.enabled: false` 关闭。
-  telemetry:
-    runtime_diagnosis:
-      enabled: true
-      write_artifacts: true
-      prompt_injection_enabled: true
+  # U11：此处不声明运行时诊断。
+  # telemetry 属于 operator 控制（受 operator/hat-collection 安全边界保护），
+  # hat collection 不能越权开启诊断、写 artifact 或注入 prompt。需要在项目
+  # ralph.yml 的顶层 `telemetry:` 段显式开启，或设置 RALPH_DIAGNOSTICS=1。
   completion_promise: "LOOP_COMPLETE"
   required_events: ["report.done"]
   starting_event: "work.start"

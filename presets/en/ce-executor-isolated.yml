@@ -48,19 +48,12 @@ tasks:
 event_loop:
   execution_mode: isolated
   prompt_file: "PROMPT.md"
-  # 2026-06-13-004 U11: runtime diagnosis on by default for this
-  # preset so production worktrees drop session/recovery/drift
-  # evidence into .ralph/diagnostics/<session>/ automatically.
-  # Without this, the 2026-06-13 incident's recovery.jsonl would
-  # have stayed empty and the synthesize-no-fire root cause would
-  # have been invisible to ralph diagnose. Operators can still
-  # opt out by overriding `telemetry.runtime_diagnosis.enabled`
-  # in their project ralph.yml.
-  telemetry:
-    runtime_diagnosis:
-      enabled: true
-      write_artifacts: true
-      prompt_injection_enabled: true
+  # U11: runtime diagnosis is intentionally NOT declared in this preset.
+  # Telemetry is operator-controlled (not hat-collection-controlled) due
+  # to the operator/hat-collection security boundary. Hat collections
+  # cannot silently enable diagnostics, artifact writes, or prompt
+  # injection. Operators must enable it in their project ralph.yml under
+  # the top-level `telemetry:` key, or set RALPH_DIAGNOSTICS=1.
   completion_promise: "LOOP_COMPLETE"
   required_events: ["report.done"]
   starting_event: "work.start"
