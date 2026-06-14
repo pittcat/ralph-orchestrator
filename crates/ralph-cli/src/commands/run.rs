@@ -333,6 +333,33 @@ fn print_preflight_summary(
     }
 }
 
+/// U2 (2026-06-14-002): sync default PROMPT.md to worktree root.
+/// Copies PROMPT.md from main repo to worktree so Agent reads from worktree.
+/// Silently skips if source doesn't exist or copy fails (doesn't block startup).
+fn sync_prompt_to_worktree(repo_root: &Path, worktree_path: &Path) {
+    let prompt_in_repo = repo_root.join("PROMPT.md");
+    if !prompt_in_repo.exists() {
+        debug!("No PROMPT.md in main repo, skipping sync to worktree");
+        return;
+    }
+    let prompt_in_wt = worktree_path.join("PROMPT.md");
+    if prompt_in_wt.exists() {
+        debug!("PROMPT.md already exists in worktree, skipping sync");
+        return;
+    }
+    match std::fs::copy(&prompt_in_repo, &prompt_in_wt) {
+        Ok(bytes) => info!(
+            "Synced PROMPT.md ({} bytes) to worktree: {}",
+            bytes,
+            prompt_in_wt.display()
+        ),
+        Err(e) => warn!(
+            "Failed to copy PROMPT.md to worktree: {} (continuing without sync)",
+            e
+        ),
+    }
+}
+
 /// Spawn a new loop in a git worktree.
 ///
 /// This extracts the worktree creation logic from `handle_active_lock` so it can
@@ -384,6 +411,11 @@ fn spawn_worktree_loop(
     context
         .setup_worktree_symlinks()
         .context("Failed to create symlinks in worktree")?;
+
+    // U2 (2026-06-14-002): sync default PROMPT.md to worktree root.
+    // This ensures the Agent reads its prompt from the worktree (relative path),
+    // avoiding context anchoring to the main repo.
+    sync_prompt_to_worktree(workspace_root, &worktree.path);
 
     // Generate context file with worktree metadata
     context
@@ -1190,10 +1222,11 @@ fn resolve_subprocess_termination_reason(
 ///    worktree — can still find the file. Without this, the child fails
 ///    with "Prompt file 'PROMPT.md' not found" and the TUI shows
 ///    "Subprocess exited before starting the orchestration loop".
-/// 3. Default `PROMPT.md` (no CLI flag): in worktree mode, anchor the
-///    default at `parent_cwd` and emit `-P <abs>` only if the file
-///    exists. Outside worktree mode, the child reads `PROMPT.md` from
-///    its own cwd and we do nothing here.
+/// 3. Default `PROMPT.md` (no CLI flag): U2 (2026-06-14-002) changed this.
+///    In worktree mode, the parent now syncs PROMPT.md to the worktree root,
+///    so we forward a relative path (`PROMPT.md`) for the child to read from
+///    its own cwd (which is the worktree). Outside worktree mode, the child
+///    reads `PROMPT.md` from its own cwd and we do nothing here.
 ///
 /// `parent_cwd` is passed in (rather than read from `std::env`) so the
 /// function is unit-testable without chdir side effects.
@@ -1210,15 +1243,12 @@ fn forward_prompt_args(args: &SubprocessTuiArgs, parent_cwd: &Path) -> Vec<Strin
             out.push(prompt_file.to_string_lossy().to_string());
         }
     } else if args.worktree_path.is_some() {
-        // Default `PROMPT.md` lives in the main repo (parent's cwd). The
-        // child's cwd is the worktree, where the file does not exist.
-        // Forward an absolute path so the child finds it.
-        let default_prompt = PathBuf::from("PROMPT.md");
-        let abs = parent_cwd.join(&default_prompt);
-        if abs.exists() {
-            out.push("-P".to_string());
-            out.push(abs.to_string_lossy().into_owned());
-        }
+        // U2 (2026-06-14-002): Default PROMPT.md has been synced to worktree root.
+        // Forward a relative path so the child reads from its own cwd (worktree).
+        // No existence check here — if sync failed, we warn in spawn_worktree_loop
+        // but still forward the path; the child will fail loudly if file missing.
+        out.push("-P".to_string());
+        out.push("PROMPT.md".to_string());
     }
     out
 }
@@ -1257,46 +1287,42 @@ mod forward_prompt_args_tests {
         }
     }
 
-    /// In worktree mode with no CLI -p/-P, the default PROMPT.md (which
-    /// lives in the parent's cwd, i.e. the main repo) must be forwarded
-    /// as `-P <absolute-path>` so the child — whose cwd is the worktree
-    /// — can find it. This is the primary regression guard for the bug
-    /// "Subprocess exited before starting the orchestration loop" with
-    /// `ralph -H builtin:ce-executor run --worktree` (PROMPT.md missing
-    /// in worktree, child bails before RPC).
+    /// U2 (2026-06-14-002): In worktree mode with no CLI -p/-P, the function
+    /// now forwards a relative `PROMPT.md` path. This is correct because:
+    /// 1. The parent syncs PROMPT.md to the worktree root during spawn.
+    /// 2. The child's cwd is the worktree, so relative resolution works.
+    /// 3. No need to anchor at parent_cwd — the file is already in worktree.
     #[test]
-    fn worktree_default_prompt_resolves_to_parent_cwd_absolute_path() {
+    fn worktree_default_prompt_forwards_relative_path() {
         let tmp = tempfile::tempdir().unwrap();
-        let prompt_path = tmp.path().join("PROMPT.md");
-        fs::write(&prompt_path, "implement X").unwrap();
-
+        // No PROMPT.md needed in parent cwd — sync happens in spawn_worktree_loop
         let wt = PathBuf::from("/tmp/fake-worktree");
         let args = make_args(None, None, Some(&wt));
 
         let out = forward_prompt_args(&args, tmp.path());
         assert_eq!(
             out,
-            vec!["-P".to_string(), prompt_path.to_string_lossy().into_owned()],
-            "worktree mode must forward default PROMPT.md as -P <abs path under parent_cwd>"
+            vec!["-P".to_string(), "PROMPT.md".to_string()],
+            "worktree mode must forward relative PROMPT.md (U2: file synced to worktree root)"
         );
     }
 
-    /// In worktree mode with no CLI -p/-P and NO PROMPT.md in the parent
-    /// cwd, the function must emit nothing. The child will then fall back
-    /// to its own config defaults and fail loudly there — we must NOT
-    /// invent a path.
+    /// U2 (2026-06-14-002): In worktree mode with no CLI -p/-P, we always
+    /// forward `PROMPT.md` (no existence check). If sync failed, the child
+    /// will fail loudly when it can't read the file — that's the correct
+    /// behavior (fail fast, not silently fall back).
     #[test]
-    fn worktree_default_prompt_absent_emits_nothing() {
+    fn worktree_default_prompt_always_forwards_regardless_of_parent_cwd_existence() {
         let tmp = tempfile::tempdir().unwrap();
-        // No PROMPT.md written
+        // No PROMPT.md in parent cwd — simulating sync failure
         let wt = PathBuf::from("/tmp/fake-worktree");
         let args = make_args(None, None, Some(&wt));
 
         let out = forward_prompt_args(&args, tmp.path());
-        assert!(
-            out.is_empty(),
-            "with no PROMPT.md in parent cwd, must not forward a bogus -P (got: {:?})",
-            out
+        assert_eq!(
+            out,
+            vec!["-P".to_string(), "PROMPT.md".to_string()],
+            "must forward PROMPT.md even if it doesn't exist in parent cwd (U2)"
         );
     }
 

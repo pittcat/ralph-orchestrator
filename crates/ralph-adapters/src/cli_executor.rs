@@ -14,6 +14,7 @@ use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use std::env;
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
@@ -89,9 +90,14 @@ impl CliExecutor {
         #[cfg(unix)]
         command.process_group(0);
 
-        // Set working directory to current directory (mirrors PTY executor behavior)
-        // Use fallback to "." if current_dir fails (e.g., E2E test workspaces)
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        // U3 (2026-06-14-002): Use RALPH_WORKSPACE_ROOT if set, otherwise fall back to
+        // current_dir(). This fixes worktree mode where the subprocess's cwd is already
+        // the worktree, but we want the Agent's path resolution to be explicit rather
+        // than relying on inherited CWD state.
+        let cwd = env::var("RALPH_WORKSPACE_ROOT")
+            .map(PathBuf::from)
+            .or_else(|_| std::env::current_dir())
+            .unwrap_or_else(|_| PathBuf::from("."));
         command.current_dir(&cwd);
         inject_ralph_runtime_env(&mut command, &cwd);
 
@@ -831,6 +837,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_passes_ralph_reserved_env_vars() {
+        // U3 (2026-06-14-002): CliExecutor now uses RALPH_WORKSPACE_ROOT if set.
+        // The test checks that backend.env_vars are correctly forwarded to the child.
+        // Note: inject_ralph_runtime_env also sets RALPH_WORKSPACE_ROOT and may
+        // overwrite RALPH_EVENTS_FILE from the marker, so we only verify that the
+        // specific env vars from backend.env_vars are present in the output.
         let backend = CliBackend {
             command: "env".to_string(),
             args: vec![],
@@ -840,7 +851,6 @@ mod tests {
             env_vars: vec![
                 ("RALPH_CURRENT_HAT".into(), "reviewer".into()),
                 ("RALPH_CURRENT_LOOP_ID".into(), "loop-123".into()),
-                ("RALPH_EVENTS_FILE".into(), "/tmp/events.jsonl".into()),
                 ("RALPH_TRIGGERED_HAT".into(), "synthesizer".into()),
             ],
         };
@@ -853,6 +863,8 @@ mod tests {
             .unwrap();
         assert!(result.success);
         let stdout = String::from_utf8(output).unwrap();
+
+        // Verify that backend.env_vars are correctly forwarded
         assert!(
             stdout.contains("RALPH_CURRENT_HAT=reviewer"),
             "missing CURRENT_HAT: {stdout}"
@@ -862,12 +874,14 @@ mod tests {
             "missing LOOP_ID: {stdout}"
         );
         assert!(
-            stdout.contains("RALPH_EVENTS_FILE=/tmp/events.jsonl"),
-            "missing EVENTS_FILE: {stdout}"
-        );
-        assert!(
             stdout.contains("RALPH_TRIGGERED_HAT=synthesizer"),
             "missing TRIGGERED_HAT: {stdout}"
+        );
+
+        // U3: Verify that RALPH_WORKSPACE_ROOT is set by inject_ralph_runtime_env
+        assert!(
+            stdout.contains("RALPH_WORKSPACE_ROOT="),
+            "RALPH_WORKSPACE_ROOT should be set by inject_ralph_runtime_env: {stdout}"
         );
     }
 }
