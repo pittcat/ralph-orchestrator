@@ -395,6 +395,7 @@ fn u2_executor_missing_field_rejection_classifies_as_retryable() {
         &["plan_path".into()],
         Some("work.ready"),
         executor_work_done.payload.as_deref(),
+        None,
     );
     let v: serde_json::Value = serde_json::from_str(&payload_str).unwrap();
     assert_eq!(v["stage"], "execution_contract");

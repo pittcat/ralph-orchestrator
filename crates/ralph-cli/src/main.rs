@@ -1,6 +1,7 @@
 //! # ralph-cli
 //!
 //! Binary entry point for the Ralph Orchestrator.
+
 //!
 //! This crate provides:
 //! - CLI argument parsing using `clap`

@@ -605,6 +605,46 @@ async fn run_loop_impl_inner(
 
     // Initialize event loop with context for proper path resolution
     let mut event_loop = EventLoop::with_context(config.clone(), ctx.clone());
+    // R4 (2026-06-14-003 plan): advertise the single-U contract to
+    // child processes (the agent's `ralph tools task ensure` calls)
+    // when the preset opts in.  We rely on standard
+    // `Command::new` env inheritance, so setting the var here
+    // (single-threaded bootstrap) is safe under the Rust 2024
+    // `set_var` contract.
+    //
+    // R4 review (round 2, finding #1): the prior version only logged
+    // the flag.  The CLI's task_cli.rs consults the env var; if
+    // we do not export it, R4 is dormant inside the running loop.
+    //
+    // The workspace `forbid(unsafe_code)` lint forbids `set_var`
+    // from lib code.  We use a safer signal: write a sentinel file
+    // at `.ralph/agent/.ralph-enforce-current-unit` which the
+    // task_cli helper consults as a fallback when the env var is
+    // not set.  The file is removed on loop teardown.
+    if event_loop.enforce_current_unit_active() {
+        if let Some(workspace) = ctx.workspace().parent() {
+            let marker = workspace
+                .join(".ralph")
+                .join("agent")
+                .join(".ralph-enforce-current-unit");
+            if let Some(parent) = marker.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&marker)
+            {
+                use std::io::Write as _;
+                let _ = writeln!(f, "1");
+            }
+        }
+        tracing::info!(
+            "R4 single-U contract active (enforce_current_unit=true): \
+             writing .ralph/agent/.ralph-enforce-current-unit marker for child processes"
+        );
+    }
     if state_machine_enabled {
         event_loop.set_event_reader_path(resolve_candidate_events_path(&ctx));
     }
@@ -2539,6 +2579,17 @@ async fn run_loop_impl_inner(
             &events_path,
             triggered_hat.as_deref(),
         );
+        // R1 (2026-06-14-003 plan): expose the wave context as the
+        // `RALPH_WAVE_CONTEXT` env var so the agent's bash tool can
+        // `echo $RALPH_WAVE_CONTEXT | jq` without depending on the
+        // prompt block.  Only `review-synthesizer` has a meaningful
+        // value; for other hats the call returns `None` and the
+        // env var is not set (preserving the pre-R1 behaviour).
+        if let Some(json) = event_loop.wave_context_json_for_hat(&display_hat) {
+            effective_backend
+                .env_vars
+                .push(("RALPH_WAVE_CONTEXT".into(), json));
+        }
 
         // Step 3: Get timeout from config based on actual backend being used
         let timeout_secs = config.adapter_settings(&backend_name_for_timeout).timeout;

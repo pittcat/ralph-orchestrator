@@ -565,6 +565,27 @@ fn execute_ensure(
 ) -> Result<()> {
     let path = get_tasks_path(root);
     let mut store = TaskStore::load(&path).context("Failed to load tasks")?;
+    // R4 (2026-06-14-003 plan): opt into the single-U contract.
+    // Two signals are accepted (env var takes precedence; the
+    // marker file is the safe fallback for `ralph run` because the
+    // workspace `forbid(unsafe_code)` lint forbids `set_var` from
+    // lib code):
+    //   1. `RALPH_ENFORCE_CURRENT_UNIT` env var (set by operators
+    //      for standalone CLI use).
+    //   2. `<workspace>/.ralph/agent/.ralph-enforce-current-unit`
+    //      marker file (written by `ralph run`'s bootstrap when the
+    //      preset opts in).
+    if std::env::var_os("RALPH_ENFORCE_CURRENT_UNIT").is_some() {
+        store.set_enforce_current_unit(true);
+    } else if let Some(workspace) = root {
+        let marker = workspace
+            .join(".ralph")
+            .join("agent")
+            .join(".ralph-enforce-current-unit");
+        if marker.exists() {
+            store.set_enforce_current_unit(true);
+        }
+    }
     let ctx = operation_context_for(root);
 
     ensure_task_with_args(&mut store, &args, &ctx, coordinator_hats, use_colors)?;
@@ -601,6 +622,24 @@ fn ensure_task_with_args(
     let ensured = store
         .with_exclusive_lock(|s| s.ensure(task).clone())
         .context("Failed to ensure task")?;
+
+    // R4 (2026-06-14-003 plan): when the single-U contract is active
+    // and the requested key differs from the ensured task's key, the
+    // contract rejected the new unit in favour of an open sibling
+    // task.  Surface the collision via a non-zero exit + stderr so
+    // the agent's `ralph tools task ensure` invocation is not a
+    // silent surprise.  Without this check the CLI prints
+    // 'Ensured task <existing> <uM-...>' for the new uN- key and
+    // exits 0, which masks the rejection.
+    if store.enforce_current_unit() && ensured.key.as_deref() != Some(&key) {
+        bail!(
+            "rejected by R4 single-U contract: ensure key '{key}' conflicts with \
+             existing task id={} key={} (only one open task per (loop_id, plan, step) \
+             is allowed). Close the existing task first or use a non-uN- key suffix.",
+            ensured.id,
+            ensured.key.as_deref().unwrap_or("?"),
+        );
+    }
 
     print_ensured_task(&ensured, &key, existed, args.format, use_colors);
     Ok(())
