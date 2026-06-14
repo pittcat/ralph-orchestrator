@@ -82,11 +82,15 @@ fn step_key_from_event(topic: &str, payload: Option<&str>) -> Option<StepKey> {
 
 fn plan_gate_step_gate(topic: &str, state: &StepReviewState) -> Option<PolicyFinding> {
     if state.failed_pending_fix {
-        return Some(plan_gate_finding(topic, "plan_gate_review_failed_pending_fix"));
+        return Some(plan_gate_finding(
+            topic,
+            "plan_gate_review_failed_pending_fix",
+        ));
     }
-    let terminal_ok = state.synth_terminal.as_deref().is_some_and(|t| {
-        matches!(t, "review.passed" | "review.complete") && state.synth_pass
-    });
+    let terminal_ok = state
+        .synth_terminal
+        .as_deref()
+        .is_some_and(|t| matches!(t, "review.passed" | "review.complete") && state.synth_pass);
     if !terminal_ok {
         Some(plan_gate_finding(topic, "plan_gate_review_not_terminal"))
     } else {
@@ -172,7 +176,11 @@ impl ReviewStepTracker {
             let obj = serde_json::from_str::<Value>(p).ok()?;
             // Coordinator bootstrap work.ready has no reviewed-step correlation;
             // only step-advance handoffs from plan-gate are gated.
-            if obj.get("reviewed_task_id").and_then(|v| v.as_str()).is_none() {
+            if obj
+                .get("reviewed_task_id")
+                .and_then(|v| v.as_str())
+                .is_none()
+            {
                 return None;
             }
             let key = step_key_from_event(topic, event.payload.as_deref())?;
@@ -196,7 +204,10 @@ impl ReviewStepTracker {
                 return Some(plan_gate_finding(topic, "plan_gate_review_not_terminal"));
             }
             if matching.iter().any(|(_, s)| s.failed_pending_fix) {
-                return Some(plan_gate_finding(topic, "plan_gate_review_failed_pending_fix"));
+                return Some(plan_gate_finding(
+                    topic,
+                    "plan_gate_review_failed_pending_fix",
+                ));
             }
             let terminal_ok = matching.iter().all(|(_, s)| {
                 s.synth_terminal.as_deref().is_some_and(|t| {
@@ -330,7 +341,8 @@ impl ReviewStepTracker {
             step: step.to_string(),
         };
         if let Some(state) = self.steps.get_mut(&key) {
-            state.wave_started_at = Some(Instant::now().checked_sub(ago).unwrap_or_else(Instant::now));
+            state.wave_started_at =
+                Some(Instant::now().checked_sub(ago).unwrap_or_else(Instant::now));
         }
     }
 }
@@ -338,7 +350,9 @@ impl ReviewStepTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{EventPolicyConfig, EventPolicyMode, EventSchema, PayloadType, ViolationAction};
+    use crate::config::{
+        EventPolicyConfig, EventPolicyMode, EventSchema, PayloadType, ViolationAction,
+    };
     use crate::event_policy::{PolicyDecision, PolicyRuntimeState, validate_event};
     use std::collections::HashMap;
 
@@ -492,7 +506,11 @@ mod tests {
         let finding = tracker
             .check_semantic_gates(&plan_complete)
             .expect("must reject");
-        assert!(finding.message.contains("plan_gate_review_failed_pending_fix"));
+        assert!(
+            finding
+                .message
+                .contains("plan_gate_review_failed_pending_fix")
+        );
     }
 
     #[test]
@@ -503,9 +521,7 @@ mod tests {
             "plan-gate",
             r#"{"plan_name":"p","completed_step":"1","next_step":"2","reviewed_task_id":"t1","reviewed_task_key":"k1"}"#,
         );
-        let finding = tracker
-            .check_semantic_gates(&advance)
-            .expect("must reject");
+        let finding = tracker.check_semantic_gates(&advance).expect("must reject");
         assert!(finding.message.contains("plan_gate_review_not_terminal"));
     }
 

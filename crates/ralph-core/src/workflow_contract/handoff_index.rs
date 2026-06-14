@@ -135,8 +135,10 @@ impl HandoffIndex {
         // but every consumer lookup is forced to `None` — the
         // priority pass is a no-op (R8: coordinator mode does
         // not enable handoff priority).
-        let coordinator_mode =
-            !matches!(config.event_loop.execution_mode, crate::config::HatExecutionMode::Isolated);
+        let coordinator_mode = !matches!(
+            config.event_loop.execution_mode,
+            crate::config::HatExecutionMode::Isolated
+        );
 
         let mut entries: HandoffIndexMap = BTreeMap::new();
         let mut conflicts: Vec<HandoffConflict> = Vec::new();
@@ -178,13 +180,7 @@ impl HandoffIndex {
                     kind: ConflictKind::SeedWithoutUniqueConsumer,
                 });
             }
-            entries.insert(
-                seed.clone(),
-                HandoffEntry {
-                    source,
-                    consumer,
-                },
-            );
+            entries.insert(seed.clone(), HandoffEntry { source, consumer });
         }
 
         // Walk graph-derived unique topics that are not already
@@ -410,7 +406,10 @@ hats:
     publishes: ["work.done"]
 "#;
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.event_loop.execution_mode, HatExecutionMode::Coordinator);
+        assert_eq!(
+            config.event_loop.execution_mode,
+            HatExecutionMode::Coordinator
+        );
         let index = HandoffIndex::from_config(&config);
         // Index builds, but the priority pass target is None
         // because the runtime mode is coordinator.

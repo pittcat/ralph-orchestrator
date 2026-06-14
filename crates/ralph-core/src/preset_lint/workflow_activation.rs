@@ -144,9 +144,13 @@ impl HandoffGraph {
 
     /// The single non-wildcard consumer of a topic, if any.
     pub fn unique_consumer_of(&self, topic: &str) -> Option<&str> {
-        self.topic_subscribers
-            .get(topic)
-            .and_then(|hats| if hats.len() == 1 { Some(hats[0].as_str()) } else { None })
+        self.topic_subscribers.get(topic).and_then(|hats| {
+            if hats.len() == 1 {
+                Some(hats[0].as_str())
+            } else {
+                None
+            }
+        })
     }
 
     /// Publishers of a topic in deterministic order.
@@ -741,17 +745,14 @@ hats:
     publishes: ["work.done"]
 "#;
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-        let findings = check_re_emit_trap(
-            &config,
-            &HandoffGraph::from_config(&config),
-            true,
-            false,
-        );
+        let findings =
+            check_re_emit_trap(&config, &HandoffGraph::from_config(&config), true, false);
         assert!(
-            findings.iter().any(|f| f.id
-                == crate::preset_lint::finding_id::FINDING_RE_EMIT_TRAP
-                && f.topic.as_deref() == Some("queue.advance")
-                && f.hat.as_deref() == Some("executor")),
+            findings.iter().any(
+                |f| f.id == crate::preset_lint::finding_id::FINDING_RE_EMIT_TRAP
+                    && f.topic.as_deref() == Some("queue.advance")
+                    && f.hat.as_deref() == Some("executor")
+            ),
             "expected re_emit_trap finding on executor+queue.advance, got: {:?}",
             findings
         );
@@ -773,12 +774,8 @@ hats:
     publishes: ["work.retried", "work.done"]
 "#;
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-        let findings = check_re_emit_trap(
-            &config,
-            &HandoffGraph::from_config(&config),
-            true,
-            false,
-        );
+        let findings =
+            check_re_emit_trap(&config, &HandoffGraph::from_config(&config), true, false);
         assert!(
             findings.is_empty(),
             "self-loop should be exempt: {:?}",
@@ -802,12 +799,8 @@ hats:
     publishes: ["isolated.signal"]
 "#;
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-        let findings = check_activation_egress(
-            &config,
-            &HandoffGraph::from_config(&config),
-            true,
-            false,
-        );
+        let findings =
+            check_activation_egress(&config, &HandoffGraph::from_config(&config), true, false);
         assert!(
             findings.iter().any(|f| f.id
                 == crate::preset_lint::finding_id::FINDING_ACTIVATION_EGRESS_MISSING
@@ -838,12 +831,8 @@ hats:
     publishes: ["executor.dead_end"]
 "#;
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-        let findings = check_handoff_pairing(
-            &config,
-            &HandoffGraph::from_config(&config),
-            true,
-            false,
-        );
+        let findings =
+            check_handoff_pairing(&config, &HandoffGraph::from_config(&config), true, false);
         assert!(
             findings.iter().any(|f| f.id
                 == crate::preset_lint::finding_id::FINDING_HANDOFF_PAIRING_BROKEN
@@ -915,7 +904,9 @@ hats:
         assert!(!graph.unique_consumer_topics().contains("work.ready"));
         let findings = check_handoff_pairing(&config, &graph, true, false);
         assert!(
-            !findings.iter().any(|f| f.topic.as_deref() == Some("work.ready")),
+            !findings
+                .iter()
+                .any(|f| f.topic.as_deref() == Some("work.ready")),
             "work.ready should be excluded from handoff_pairing when wildcard subscriber exists: {:?}",
             findings
         );
@@ -972,12 +963,16 @@ hats:
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
         let default_findings = run_workflow_activation_contract(&config, false, false);
         let strict_findings = run_workflow_activation_contract(&config, true, false);
-        assert!(default_findings
-            .iter()
-            .all(|f| f.severity == LintSeverity::Warn));
-        assert!(strict_findings
-            .iter()
-            .all(|f| f.severity == LintSeverity::Error));
+        assert!(
+            default_findings
+                .iter()
+                .all(|f| f.severity == LintSeverity::Warn)
+        );
+        assert!(
+            strict_findings
+                .iter()
+                .all(|f| f.severity == LintSeverity::Error)
+        );
     }
 
     // WRC-U3 / T-WRC-U3 (severity upgrade): the same fixture as
@@ -1054,8 +1049,7 @@ hats:
         let re_emit: Vec<_> = findings
             .iter()
             .filter(|f| {
-                f.id
-                    == crate::preset_lint::finding_id::FINDING_RE_EMIT_TRAP
+                f.id == crate::preset_lint::finding_id::FINDING_RE_EMIT_TRAP
                     && f.hat.as_deref() == Some("executor")
                     && f.topic.as_deref() == Some("work.ready")
             })
@@ -1165,9 +1159,7 @@ hats:
         ));
         assert!(source_label_is_builtin_embedded("builtin:foo"));
         assert!(!source_label_is_builtin_embedded(""));
-        assert!(!source_label_is_builtin_embedded(
-            "/abs/path/to/preset.yml"
-        ));
+        assert!(!source_label_is_builtin_embedded("/abs/path/to/preset.yml"));
         assert!(!source_label_is_builtin_embedded("current-config"));
     }
 }

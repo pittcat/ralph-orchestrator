@@ -87,7 +87,10 @@ fn default_handoff_dispatch_timeout_seconds() -> u64 {
 }
 
 fn default_handoff_topic_seeds() -> Vec<String> {
-    HANDOFF_TOPIC_SEEDS.iter().map(|s| (*s).to_string()).collect()
+    HANDOFF_TOPIC_SEEDS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
 }
 
 impl WorkflowContractConfig {
@@ -135,7 +138,10 @@ mod tests {
             handoff_dispatch_timeout_seconds: 600,
             handoff_topic_seeds: vec![],
         };
-        assert_eq!(cfg.effective_timeout_seconds(), HANDOFF_DISPATCH_TIMEOUT_MAX_SECONDS);
+        assert_eq!(
+            cfg.effective_timeout_seconds(),
+            HANDOFF_DISPATCH_TIMEOUT_MAX_SECONDS
+        );
     }
 
     #[test]

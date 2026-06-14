@@ -366,8 +366,7 @@ use crate::payload_contract::{
     PayloadContractError, PayloadContractErrorKind, PayloadContractValidationResult,
 };
 use crate::preset_lint::{
-    LintStrictness, run_preset_lint,
-    workflow_activation::source_label_is_builtin_embedded,
+    LintStrictness, run_preset_lint, workflow_activation::source_label_is_builtin_embedded,
 };
 use crate::preset_validator::{
     TopologyError, TopologyErrorKind, TopologyValidationResult, validate_preset_topology,

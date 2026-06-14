@@ -266,10 +266,8 @@ mod tests {
         assert_eq!(escalations.len(), 2);
         // Each escalation names the original consumer as the
         // safe_target (executor / fixer are not the fallback).
-        let by_topic: std::collections::HashMap<_, _> = escalations
-            .iter()
-            .map(|e| (e.topic.clone(), e))
-            .collect();
+        let by_topic: std::collections::HashMap<_, _> =
+            escalations.iter().map(|e| (e.topic.clone(), e)).collect();
         assert_eq!(by_topic["work.ready"].safe_target, "executor");
         assert_eq!(by_topic["work.failed"].safe_target, "fixer");
         // Pending is empty after escalations are taken.

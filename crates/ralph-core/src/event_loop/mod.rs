@@ -3,8 +3,8 @@
 //! The event loop coordinates the execution of hats via pub/sub messaging.
 
 mod loop_state;
-pub mod review_step_state;
 pub mod rejection;
+pub mod review_step_state;
 #[cfg(test)]
 mod tests;
 
@@ -302,6 +302,52 @@ pub struct EventLoop {
     /// by the `ralph diagnose` reporter (U4). Decision paths must NOT read
     /// the tracker to avoid implicit feedback loops.
     hat_lifecycle_tracker: ActivationLifecycleTracker<SystemTimeClock>,
+
+    /// R3 (2026-06-14-003 plan): ephemeral file isolation engine.
+    /// Used by `process_output` to relocate agent-written runtime
+    /// artefacts (scratchpad.md / tmp*.md) out of source trees into
+    /// `.ralph/agent/scratchpad-{loop_id}.md`.  The engine is
+    /// opt-in: callers must enable `EventLoopConfig.ephemeral_isolation`
+    /// for it to fire.  The field is owned by `EventLoop` so the
+    /// per-iteration cache (mtime/size sentinel) survives across calls.
+    ephemeral_isolation: crate::ephemeral_isolation::EphemeralIsolation,
+}
+
+/// Publish a `task.resume` event in response to a policy rejection.
+/// R5 (2026-06-14-003 plan): the resume event's `target` is the
+/// source hat (so the next activation lands on the offending hat,
+/// not the alphabetically-first hat) and the payload carries
+/// `wave_id` / `wave_index` / `wave_total` when the source event
+/// was a wave record.  Falls back to an un-targeted publish when
+/// the source hat is unknown (preserves the pre-R5 behaviour of
+/// letting `Ralph` recover).
+fn publish_policy_rejection_resume(bus: &mut EventBus, event: &JsonlEvent, payload: String) {
+    let payload = enrich_payload_with_wave(&payload, event);
+    let mut resume = Event::new("task.resume", payload);
+    if let Some(hat) = event.hat.as_deref() {
+        if !hat.is_empty() {
+            resume = resume.with_target(HatId::new(hat.to_string()));
+        }
+    }
+    bus.publish(resume);
+}
+
+/// Append a `<!-- wave_id=... wave_index=... wave_total=... -->`
+/// HTML-comment block to the payload when the source event carries
+/// wave metadata.  The block is intentionally machine-greppable
+/// (so downstream tooling can recover the wave without parsing
+/// the entire payload) and harmless to human readers.
+fn enrich_payload_with_wave(payload: &str, event: &JsonlEvent) -> String {
+    let Some(wave_id) = event.wave_id.as_deref() else {
+        return payload.to_string();
+    };
+    let block = match (event.wave_index, event.wave_total) {
+        (Some(i), Some(t)) => {
+            format!("\n\n<!-- wave_id={wave_id} wave_index={i} wave_total={t} -->")
+        }
+        _ => format!("\n\n<!-- wave_id={wave_id} -->"),
+    };
+    format!("{payload}{block}")
 }
 
 /// Result of extracting a correlation key from an event payload.
@@ -516,8 +562,7 @@ fn apply_workflow_guard_validation(
                 event.topic,
                 rejection_details.join("\n")
             );
-            let recovery_event = Event::new("task.resume", &recovery_payload);
-            bus.publish(recovery_event);
+            publish_policy_rejection_resume(bus, &event, recovery_payload);
 
             // U4: surface the rejection metadata to the caller. The
             // helper itself stays free of diagnostics dependencies;
@@ -665,8 +710,7 @@ fn apply_event_policy_validation(
                          The loop will continue to allow recovery.",
                         event.topic, finding.message
                     );
-                    let recovery_event = Event::new("task.resume", &recovery_payload);
-                    bus.publish(recovery_event);
+                    publish_policy_rejection_resume(bus, &event, recovery_payload);
                 }
                 PolicyDecision::Hold(finding) => {
                     hold_triggered = true;
@@ -682,8 +726,7 @@ fn apply_event_policy_validation(
                          Loop held due to completion guard violation. Use resume to continue.",
                         event.topic, finding.message
                     );
-                    let recovery_event = Event::new("task.resume", &recovery_payload);
-                    bus.publish(recovery_event);
+                    publish_policy_rejection_resume(bus, &event, recovery_payload);
                 }
                 PolicyDecision::Block(finding) => {
                     if write_diagnostic {
@@ -747,8 +790,7 @@ fn apply_event_policy_validation(
                          This hat is not allowed to publish this topic.",
                         event.topic, finding.message
                     );
-                    let recovery_event = Event::new("task.resume", &recovery_payload);
-                    bus.publish(recovery_event);
+                    publish_policy_rejection_resume(bus, &event, recovery_payload);
                 }
                 PolicyDecision::Hold(finding) => {
                     hold_triggered = true;
@@ -763,8 +805,7 @@ fn apply_event_policy_validation(
                          Loop held due to topic-deny rule. Use resume to continue.",
                         event.topic, finding.message
                     );
-                    let recovery_event = Event::new("task.resume", &recovery_payload);
-                    bus.publish(recovery_event);
+                    publish_policy_rejection_resume(bus, &event, recovery_payload);
                 }
                 PolicyDecision::Block(_finding) => {
                     // Silently drop the event
@@ -797,8 +838,7 @@ fn apply_event_policy_validation(
                          Wait for review-synthesizer terminal before plan-gate events.",
                         event.topic, finding.message
                     );
-                    let recovery_event = Event::new("task.resume", &recovery_payload);
-                    bus.publish(recovery_event);
+                    publish_policy_rejection_resume(bus, &event, recovery_payload);
                 } else {
                     review_step_tracker.observe_accepted(&event);
                     validated_events.push(event);
@@ -825,8 +865,7 @@ fn apply_event_policy_validation(
                          Wait for review-synthesizer terminal before plan-gate events.",
                         event.topic, finding.message
                     );
-                    let recovery_event = Event::new("task.resume", &recovery_payload);
-                    bus.publish(recovery_event);
+                    publish_policy_rejection_resume(bus, &event, recovery_payload);
                 } else {
                     review_step_tracker.observe_accepted(&event);
                     validated_events.push(event);
@@ -846,8 +885,7 @@ fn apply_event_policy_validation(
                      The loop will continue to allow recovery.",
                     event.topic, finding.message
                 );
-                let recovery_event = Event::new("task.resume", &recovery_payload);
-                bus.publish(recovery_event);
+                publish_policy_rejection_resume(bus, &event, recovery_payload);
                 // Do NOT record the rejected event
             }
             PolicyDecision::Hold(finding) => {
@@ -865,8 +903,7 @@ fn apply_event_policy_validation(
                      Loop held due to policy violation. Use resume to continue.",
                     event.topic, finding.message
                 );
-                let recovery_event = Event::new("task.resume", &recovery_payload);
-                bus.publish(recovery_event);
+                publish_policy_rejection_resume(bus, &event, recovery_payload);
             }
             PolicyDecision::Block(_finding) => {
                 // Silently drop the event without publishing recovery or hold artifacts
@@ -1140,7 +1177,20 @@ impl EventLoop {
                 config.telemetry.runtime_diagnosis.clone(),
             )),
             hat_lifecycle_tracker: ActivationLifecycleTracker::new(),
+            ephemeral_isolation: crate::ephemeral_isolation::EphemeralIsolation::new(),
         }
+    }
+
+    /// R4 (2026-06-14-003 plan): explicit accessor returning
+    /// whether the preset's `event_loop.enforce_current_unit` is
+    /// active.  The CLI uses this to surface the value in
+    /// diagnostics; the actual contract is enforced inside
+    /// `TaskStore::ensure` after `ralph-cli`'s `task_cli` enables
+    /// the contract unconditionally (the contract is opt-in at the
+    /// *key* level — only `uN-` slugs are gated — so legacy keys
+    /// are unaffected).
+    pub fn enforce_current_unit_active(&self) -> bool {
+        self.config.event_loop.enforce_current_unit
     }
 
     /// Creates a new event loop with explicit diagnostics collector (for testing).
@@ -1247,6 +1297,7 @@ impl EventLoop {
                 config.telemetry.runtime_diagnosis.clone(),
             )),
             hat_lifecycle_tracker: ActivationLifecycleTracker::new(),
+            ephemeral_isolation: crate::ephemeral_isolation::EphemeralIsolation::new(),
             handoff_index: crate::workflow_contract::HandoffIndex::from_config(&config),
         }
     }
@@ -2206,11 +2257,8 @@ impl EventLoop {
                 // order for determinism. If no priority hat has pending
                 // events, we fall through to the normal round-robin
                 // pass.
-                let priority_hat: Option<HatId> = self
-                    .handoff_index
-                    .entries
-                    .values()
-                    .find_map(|entry| {
+                let priority_hat: Option<HatId> =
+                    self.handoff_index.entries.values().find_map(|entry| {
                         let consumer = entry.consumer.as_deref()?;
                         let has_pending = self
                             .bus
@@ -2225,7 +2273,9 @@ impl EventLoop {
                     });
                 // Select via round-robin. This updates last_selected.
                 // We need to return a borrowed HatId, so we select and then look it up.
-                let selected = self.bus.select_next_hat_with_pending(priority_hat.as_ref())?;
+                let selected = self
+                    .bus
+                    .select_next_hat_with_pending(priority_hat.as_ref())?;
                 // The selected hat must exist in the bus (it was found in pending).
                 self.bus.hat_ids().find(|id| *id == &selected)
             }
@@ -2398,6 +2448,14 @@ impl EventLoop {
             expected = action.expected,
             "Injecting aggregate timeout recovery to review-synthesizer"
         );
+        // R1 (2026-06-14-003 plan): pin the wave_id so the next
+        // `build_prompt` for `review-synthesizer` injects
+        // `AGGREGATE_TIMEOUT: true` in the `## WAVE CONTEXT` block.
+        // The pin is consumed (`.take()`) on first read — the
+        // aggregate-timeout signal does not leak across waves.
+        // See `LoopState::pending_synthesizer_timeout` for the
+        // full rationale.
+        self.state.pending_synthesizer_timeout = Some(action.wave_id.clone());
         self.bus
             .publish(Event::new("task.resume", payload).with_target(target));
         true
@@ -2455,64 +2513,66 @@ impl EventLoop {
             Event::new("task.resume", payload).with_target(hard_target)
         } else {
             match &self.state.last_hat {
-            Some(hat_id) if hat_id.as_str() != "ralph" => {
-                let publishes = self.get_hat_publishes(hat_id);
-                let mut payload = if publishes.is_empty() {
-                    format!(
-                        "RECOVERY: Previous iteration by hat `{}` did not publish an event. \
+                Some(hat_id) if hat_id.as_str() != "ralph" => {
+                    let publishes = self.get_hat_publishes(hat_id);
+                    let mut payload = if publishes.is_empty() {
+                        format!(
+                            "RECOVERY: Previous iteration by hat `{}` did not publish an event. \
                          Emit exactly one valid next event via `ralph emit`, or stop only after \
                          publishing the configured completion event.",
-                        hat_id.as_str()
-                    )
-                } else {
-                    format!(
-                        "RECOVERY: Previous iteration by hat `{}` did not publish an event. \
+                            hat_id.as_str()
+                        )
+                    } else {
+                        format!(
+                            "RECOVERY: Previous iteration by hat `{}` did not publish an event. \
                          This failed because no event was emitted. Emit exactly ONE valid next \
                          event via `ralph emit`. Allowed topics: `{}`. Do not only write prose \
                          or update files. Stop immediately after emitting.\n\n\
                          If you attempted to emit an event in the previous turn but it was not \
                          recorded, you must use the bash tool to execute `ralph emit` — \
                          prose mentions are not sufficient.",
+                            hat_id.as_str(),
+                            publishes.join("`, `")
+                        )
+                    };
+
+                    // U4: enrich the task.resume payload with a structured
+                    // "## Recovery Diagnosis" block so the agent can act on
+                    // the failure reason, not just the prose recovery hint.
+                    payload.push_str(&Self::format_recovery_diagnosis_block(
+                        "stall_no_events",
                         hat_id.as_str(),
-                        publishes.join("`, `")
-                    )
-                };
+                        "emit a regular event",
+                        0,
+                        &[],
+                    ));
 
-                // U4: enrich the task.resume payload with a structured
-                // "## Recovery Diagnosis" block so the agent can act on
-                // the failure reason, not just the prose recovery hint.
-                payload.push_str(&Self::format_recovery_diagnosis_block(
-                    "stall_no_events",
-                    hat_id.as_str(),
-                    "emit a regular event",
-                    0,
-                    &[],
-                ));
-
-                debug!(
-                    hat = %hat_id.as_str(),
-                    "Injecting fallback event to recover - targeting last hat with task.resume"
-                );
-                Event::new("task.resume", payload).with_target(hat_id.clone())
-            }
-            _ => {
-                let mut payload = String::from(
-                    "RECOVERY: Previous iteration did not publish an event. \
+                    debug!(
+                        hat = %hat_id.as_str(),
+                        "Injecting fallback event to recover - targeting last hat with task.resume"
+                    );
+                    Event::new("task.resume", payload).with_target(hat_id.clone())
+                }
+                _ => {
+                    let mut payload = String::from(
+                        "RECOVERY: Previous iteration did not publish an event. \
                      Review the scratchpad and either dispatch the next task or complete the loop.",
-                );
-                // U4: enrich the Ralph fallback payload with a structured
-                // "## Recovery Diagnosis" block.
-                payload.push_str(&Self::format_recovery_diagnosis_block(
-                    "stall_no_events",
-                    "ralph",
-                    "emit a regular event",
-                    0,
-                    &[],
-                ));
-                debug!("Injecting fallback event to recover - triggering Ralph with task.resume");
-                Event::new("task.resume", payload)
+                    );
+                    // U4: enrich the Ralph fallback payload with a structured
+                    // "## Recovery Diagnosis" block.
+                    payload.push_str(&Self::format_recovery_diagnosis_block(
+                        "stall_no_events",
+                        "ralph",
+                        "emit a regular event",
+                        0,
+                        &[],
+                    ));
+                    debug!(
+                        "Injecting fallback event to recover - triggering Ralph with task.resume"
+                    );
+                    Event::new("task.resume", payload)
+                }
             }
-        }
         };
 
         self.bus.publish(fallback_event);
@@ -2719,7 +2779,7 @@ impl EventLoop {
         rejections: &[crate::event_policy::PolicyRejection],
         raw_count: usize,
     ) {
-        use crate::diagnosis::{DiagnosisSource, DiagnosisSeverity};
+        use crate::diagnosis::{DiagnosisSeverity, DiagnosisSource};
         use crate::event_policy::ViolationType;
 
         // Drive reason_code / message off the first rejection when any
@@ -3193,6 +3253,13 @@ impl EventLoop {
 
             // Apply prepend pipeline (SAME order as coordinator path)
             self.ralph.clear_robot_guidance();
+            // R1: `## WAVE CONTEXT` block lives at the very top of the
+            // prompt for `review-synthesizer` so the agent cannot miss
+            // it.  The block is a no-op for any other hat.
+            let base_prompt = self.prepend_wave_context(base_prompt, hat_id);
+            // R3: surface ephemeral relocations so the agent stops
+            // recreating runtime artefacts inside the source tree.
+            let base_prompt = self.prepend_ephemeral_relocations(base_prompt);
             let base_prompt = self.inject_phase_into_prompt(base_prompt);
             // U6: in isolated mode the helper filters findings to
             // those whose target/source hat matches `hat_id`. The
@@ -3270,8 +3337,7 @@ impl EventLoop {
         // otherwise add the same payload twice to the prompt.
         // Dedup against the existing vec and within the current
         // batch; persist layer has already dedup'd against disk.
-        let mut seen_in_batch: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut seen_in_batch: std::collections::HashSet<String> = std::collections::HashSet::new();
         for event in guidance_events {
             // Move the payload out so we can dedup by owned String
             // without fighting the borrow checker. `payload` is
@@ -3375,8 +3441,7 @@ impl EventLoop {
                     // the resulting &str is valid UTF-8 (no panic
                     // when the cut falls inside a multi-byte char).
                     let start = content.len().saturating_sub(GUIDANCE_DEDUP_TAIL_BYTES);
-                    let tail_start =
-                        crate::text::floor_char_boundary(&content, start);
+                    let tail_start = crate::text::floor_char_boundary(&content, start);
                     let tail = &content[tail_start..];
                     // State machine: collect body lines only while
                     // inside a `### HUMAN GUIDANCE` block. Stop at
@@ -3392,9 +3457,7 @@ impl EventLoop {
                             in_guidance = true;
                             continue;
                         }
-                        if in_guidance
-                            && (line.starts_with("### ") || line.starts_with("## "))
-                        {
+                        if in_guidance && (line.starts_with("### ") || line.starts_with("## ")) {
                             in_guidance = false;
                             continue;
                         }
@@ -3412,8 +3475,7 @@ impl EventLoop {
         // the current batch so a single persist call with two
         // identical payloads (e.g. a redelivered `human.guidance`
         // event) only writes the first one.
-        let mut seen_in_batch: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut seen_in_batch: std::collections::HashSet<String> = std::collections::HashSet::new();
         for event in guidance_events {
             let payload = event.payload.as_str();
             if payload.is_empty() {
@@ -3964,6 +4026,154 @@ impl EventLoop {
         self.ralph.build_prompt(prompt_content, &[], &[])
     }
 
+    /// R1 (2026-06-14-003 plan): resolve the current wave context for
+    /// the `review-synthesizer` aggregate hat.  Returns `None` when no
+    /// relevant wave events are present so the caller can fall back to
+    /// the pre-R1 behaviour (synthesizer activates without wave
+    /// metadata — typical for non-wave presets).
+    ///
+    /// `pending_synthesizer_timeout` is `true` when the synthesizer was
+    /// woken up by `inject_review_aggregate_timeouts`.  The field is
+    /// **consumed (taken)** on this call so the AGGREGATE_TIMEOUT
+    /// signal does not leak across waves: a wave-1 timeout must not
+    /// mark wave-2's synthesizer activation as timed-out.  This
+    /// matches the calm-oak failure mode the plan §5.1.4 calls out
+    /// (the original loop saw stale wave context across waves).
+    pub fn build_wave_context_for_synthesizer(
+        &mut self,
+    ) -> Option<crate::wave_context::WaveContext> {
+        let events_path = self.events_path_for_wave_context()?;
+        let aggregate_timeout = self.state.pending_synthesizer_timeout.take().is_some();
+        crate::wave_context::resolve_wave_context_for_synthesizer_with_aggregate_timeout(
+            &events_path,
+            2000,
+            aggregate_timeout,
+        )
+    }
+
+    /// R1: best-effort events file path lookup for the wave context
+    /// resolver.  Returns `None` when no loop context is attached
+    /// (CLI helpers that build prompts out of band) — the resolver
+    /// then no-ops and the caller falls back to the legacy prompt.
+    fn events_path_for_wave_context(&self) -> Option<std::path::PathBuf> {
+        self.loop_context.as_ref().map(|ctx| ctx.events_path())
+    }
+
+    /// R1: render the `## WAVE CONTEXT` block for the given hat and
+    /// prepend it to the prompt.  For hats other than
+    /// `review-synthesizer` this is a no-op — the wave context is only
+    /// meaningful for the synthesizer aggregate.
+    fn prepend_wave_context(&mut self, prompt: String, hat_id: &HatId) -> String {
+        let Some(ctx) = self.build_wave_context_for_synthesizer_if_match(hat_id) else {
+            return prompt;
+        };
+        format!("{}{prompt}", ctx.to_prompt_block())
+    }
+
+    /// R3 (2026-06-14-003 plan): invoke the ephemeral isolation engine
+    /// when the preset opts in.  The records are stored on
+    /// `LoopState.last_ephemeral_relocations` and consumed by the
+    /// next `build_prompt` call.  Best-effort: a git failure or
+    /// missing workspace never aborts the loop.
+    pub(crate) fn run_ephemeral_isolation(&mut self) {
+        if !self.config.event_loop.ephemeral_isolation {
+            return;
+        }
+        if self.config.event_loop.execution_mode != crate::config::HatExecutionMode::Isolated {
+            return;
+        }
+        let workspace: std::path::PathBuf =
+            if self.config.core.workspace_root.as_os_str().is_empty() {
+                self.loop_context
+                    .as_ref()
+                    .map(|c| c.workspace().to_path_buf())
+                    .unwrap_or_default()
+            } else {
+                self.config.core.workspace_root.clone()
+            };
+        if workspace.as_os_str().is_empty() {
+            return;
+        }
+        let loop_id = self
+            .loop_context
+            .as_ref()
+            .and_then(|c| c.loop_id().map(str::to_string));
+        let records = self
+            .ephemeral_isolation
+            .scan_and_relocate(&workspace, loop_id.as_deref());
+        if records.is_empty() {
+            return;
+        }
+        tracing::info!(
+            count = records.len(),
+            workspace = %workspace.display(),
+            "ephemeral_isolation: relocated runtime artefacts to .ralph/agent/"
+        );
+        self.state.last_ephemeral_relocations = records;
+    }
+
+    /// R3: render the `## EPHEMERAL RELOCATED` block for the prompt
+    /// when the most recent `process_output` produced relocation
+    /// records.  Empty / missing records short-circuit to a no-op so
+    /// the prepend pipeline stays cheap.  Records are consumed (taken)
+    /// on read so the block does not re-appear in subsequent
+    /// iterations.
+    pub(crate) fn prepend_ephemeral_relocations(&mut self, prompt: String) -> String {
+        if self.state.last_ephemeral_relocations.is_empty() {
+            return prompt;
+        }
+        let records = std::mem::take(&mut self.state.last_ephemeral_relocations);
+        let mut section = String::from(
+            "## EPHEMERAL RELOCATED\n\
+             The following runtime artefacts were moved out of the source tree by the runner. \
+             Do NOT recreate these files inside the source tree; write runtime notes to \
+             `.ralph/agent/` instead.\n\n",
+        );
+        for rec in &records {
+            section.push_str(&format!(
+                "- `{}` -> `{}` ({} bytes appended)\n",
+                rec.from, rec.to, rec.size_bytes
+            ));
+        }
+        section.push('\n');
+        format!("{section}{prompt}")
+    }
+
+    /// R1: helper that consults the resolver only when the hat is the
+    /// synthesizer.  Returning `Option<WaveContext>` keeps the prepend
+    /// helper a one-liner.
+    fn build_wave_context_for_synthesizer_if_match(
+        &mut self,
+        hat_id: &HatId,
+    ) -> Option<crate::wave_context::WaveContext> {
+        if hat_id.as_str() != "review-synthesizer" {
+            return None;
+        }
+        self.build_wave_context_for_synthesizer()
+    }
+
+    /// Test-only accessor that mirrors
+    /// [`Self::build_wave_context_for_synthesizer_if_match`].  Exposed
+    /// at `pub(crate)` for the integration tests under
+    /// `event_loop::tests` so they can assert the resolved context
+    /// without wiring up the full multi-hat `build_prompt` machinery.
+    /// Production code should call the prepend helper or
+    /// `wave_context_json_for_hat`.
+    pub(crate) fn build_wave_context_for_synthesizer_if_match_for_test(
+        &mut self,
+        hat_id: &HatId,
+    ) -> Option<crate::wave_context::WaveContext> {
+        self.build_wave_context_for_synthesizer_if_match(hat_id)
+    }
+
+    /// R1: serialized wave context for the given hat, suitable for
+    /// `RALPH_WAVE_CONTEXT` env var.  Returns `None` for hats other
+    /// than `review-synthesizer` and when no wave events are present.
+    pub fn wave_context_json_for_hat(&mut self, hat_id: &HatId) -> Option<String> {
+        let ctx = self.build_wave_context_for_synthesizer_if_match(hat_id)?;
+        serde_json::to_string(&ctx.to_json()).ok()
+    }
+
     /// Determines which hats should be active based on pending events.
     /// Returns list of Hat references that are triggered by any pending event.
     fn determine_active_hats(&self, events: &[Event]) -> Vec<&Hat> {
@@ -4401,11 +4611,7 @@ impl EventLoop {
                 .evidence(crate::diagnosis::EvidenceRef {
                     kind: crate::diagnosis::EvidenceKind::Topic,
                     ref_path: env_topic.clone(),
-                    snippet: Some(format!(
-                        "event_id={} details={}",
-                        esc.event_id,
-                        esc.reason
-                    )),
+                    snippet: Some(format!("event_id={} details={}", esc.event_id, esc.reason)),
                 })
                 .retry_key(
                     crate::diagnosis::RecoveryDiagnosisEnvelopeBuilder::retry_key_from_parts(
@@ -4420,10 +4626,13 @@ impl EventLoop {
                 env_builder = env_builder.session_id(session_id);
             }
             let envelope = env_builder.build();
-            self.record_recovery_envelope(&envelope, vec![format!(
-                "handoff_escalation consumer={} topic={} event_id={} safe_target={}",
-                env_source_hat, env_topic, esc.event_id, env_target_hat
-            )]);
+            self.record_recovery_envelope(
+                &envelope,
+                vec![format!(
+                    "handoff_escalation consumer={} topic={} event_id={} safe_target={}",
+                    env_source_hat, env_topic, esc.event_id, env_target_hat
+                )],
+            );
         }
 
         // Track the isolated hat for scope enforcement in process_parse_result
@@ -4492,6 +4701,18 @@ impl EventLoop {
         // File-modification audit: detect when a hat with disallowed Edit/Write tools
         // modified files. This is hard enforcement — emits a scope_violation event.
         self.audit_file_modifications(hat_id);
+
+        // R3 (2026-06-14-003 plan): ephemeral file isolation.  When the
+        // preset opts in via `event_loop.ephemeral_isolation: true` and
+        // the loop is in isolated mode, scan the workspace for
+        // runtime artefacts (`scratchpad.md`, `tmp*.md`, `*.bak`) that
+        // landed in source trees and relocate them to
+        // `.ralph/agent/scratchpad-{loop_id}.md`.  The records are
+        // saved on `LoopState` so the next `build_prompt` can include
+        // a `## EPHEMERAL RELOCATED` block.  The engine is best-
+        // effort — a git failure, a read-only FS, or an unrecognised
+        // layout does not interrupt the loop.
+        self.run_ephemeral_isolation();
 
         // Events are ONLY read from the JSONL file written by `ralph emit`.
         // This enforces tool use and prevents confabulation (agent claiming to emit without actually doing so).
@@ -5123,13 +5344,15 @@ impl EventLoop {
                                 None,
                             )
                         }
-                        None => crate::diagnosis::RecoveryDiagnosisEnvelopeBuilder::retry_key_from_parts(
-                            crate::diagnosis::DiagnosisSource::WorkflowGuard,
-                            Some(scope_hat.as_str()),
-                            Some(event.topic.as_str()),
-                            reason_code,
-                            None,
-                        ),
+                        None => {
+                            crate::diagnosis::RecoveryDiagnosisEnvelopeBuilder::retry_key_from_parts(
+                                crate::diagnosis::DiagnosisSource::WorkflowGuard,
+                                Some(scope_hat.as_str()),
+                                Some(event.topic.as_str()),
+                                reason_code,
+                                None,
+                            )
+                        }
                     };
                     let mut env_builder = crate::diagnosis::RecoveryDiagnosisEnvelope::builder()
                         .source(crate::diagnosis::DiagnosisSource::WorkflowGuard)
@@ -5204,12 +5427,13 @@ impl EventLoop {
                     let isolated_hat_str = isolated_hat.as_str().to_string();
                     let scope_hat_str = scope_hat.as_str().to_string();
                     let topic_str = event.topic.to_string();
-                    self.record_recovery_envelope(&envelope, vec![format!(
-                        "scope_drop hat={} topic={} current_isolated_hat={}",
-                        scope_hat_str,
-                        topic_str,
-                        isolated_hat_str
-                    )]);
+                    self.record_recovery_envelope(
+                        &envelope,
+                        vec![format!(
+                            "scope_drop hat={} topic={} current_isolated_hat={}",
+                            scope_hat_str, topic_str, isolated_hat_str
+                        )],
+                    );
                     // source hat so the next turn the rejected hat
                     // gets reactivated with explicit recovery context.
                     // Without this hook, an isolated hat that emits an
@@ -5240,11 +5464,7 @@ impl EventLoop {
                     let already_pending_recovery = self
                         .bus
                         .peek_pending(isolated_hat)
-                        .map(|events| {
-                            events
-                                .iter()
-                                .any(|e| e.topic.as_str() == "task.resume")
-                        })
+                        .map(|events| events.iter().any(|e| e.topic.as_str() == "task.resume"))
                         .unwrap_or(false);
                     if !already_pending_recovery {
                         // P1 finding #10: build the payload through the
@@ -5273,13 +5493,26 @@ impl EventLoop {
                             non_retryable_reason: None,
                             target_hat: Some(isolated_hat.to_string()),
                         };
-                        let resume_payload = crate::event_loop::rejection::build_task_resume_payload(
-                            &rejection,
-                            &allowed,
-                            &[],
-                            None,
-                            None,
-                        );
+                        // R5 (2026-06-14-003 plan): carry the wave
+                        // metadata (when present) so the resumed hat
+                        // can recover the wave context.  Plan AC7
+                        // requires the resume payload to include
+                        // `wave_id` / `wave_index` / `wave_total` for
+                        // wave events; this branch was previously
+                        // dropping them by passing `None`.
+                        let wc =
+                            crate::event_loop::rejection::WaveContextForResume::from_reader_event(
+                                &event,
+                            );
+                        let resume_payload =
+                            crate::event_loop::rejection::build_task_resume_payload(
+                                &rejection,
+                                &allowed,
+                                &[],
+                                None,
+                                None,
+                                wc.as_ref(),
+                            );
                         let recovery = Event::new("task.resume", resume_payload)
                             .with_target(isolated_hat.clone());
                         let recovery_target = recovery.target.clone();
@@ -5332,15 +5565,12 @@ impl EventLoop {
                 // distinct second wave still gets rejected (one
                 // business emission per turn) but a continuation of
                 // the same wave does not.
-                let same_wave_continuation = event
-                    .wave_id
-                    .as_deref()
-                    .is_some_and(|wid| {
-                        first_wave_id_accepted
-                            .as_ref()
-                            .and_then(|inner| inner.as_deref())
-                            == Some(wid)
-                    });
+                let same_wave_continuation = event.wave_id.as_deref().is_some_and(|wid| {
+                    first_wave_id_accepted
+                        .as_ref()
+                        .and_then(|inner| inner.as_deref())
+                        == Some(wid)
+                });
 
                 if first_business_event_accepted && !same_wave_continuation {
                     warn!(

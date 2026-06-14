@@ -213,9 +213,7 @@ impl EventBus {
 
     /// Deprecated: use `peek_next_hat_with_pending` (no side-effect) or
     /// `select_next_hat_with_pending` (round-robin) instead.
-    #[deprecated(
-        note = "Use peek_next_hat_with_pending() or select_next_hat_with_pending(None)"
-    )]
+    #[deprecated(note = "Use peek_next_hat_with_pending() or select_next_hat_with_pending(None)")]
     pub fn next_hat_with_pending(&self) -> Option<&HatId> {
         self.peek_next_hat_with_pending()
     }
@@ -250,10 +248,7 @@ impl EventBus {
     /// a **unique** consumer of the corresponding handoff
     /// topic. Multi-consumer or wildcard topics must not use
     /// the priority path.
-    pub fn select_next_hat_with_pending(
-        &mut self,
-        priority_hat: Option<&HatId>,
-    ) -> Option<HatId> {
+    pub fn select_next_hat_with_pending(&mut self, priority_hat: Option<&HatId>) -> Option<HatId> {
         // WAC-U5 priority pre-emption: if the priority hat has
         // pending events, dispatch it now and advance the
         // round-robin cursor to the hat that follows it in
@@ -295,10 +290,7 @@ impl EventBus {
         // BTreeMap (drained/never set), or no greater key exists, we
         // start the circular scan at index 0.
         let start_idx = match &self.last_selected {
-            Some(cursor) => keys
-                .iter()
-                .position(|k| **k > *cursor)
-                .unwrap_or(0), // no greater key → wrap to start
+            Some(cursor) => keys.iter().position(|k| **k > *cursor).unwrap_or(0), // no greater key → wrap to start
             None => 0,
         };
 

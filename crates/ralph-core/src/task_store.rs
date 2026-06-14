@@ -25,6 +25,14 @@ pub struct TaskStore {
     path: std::path::PathBuf,
     tasks: Vec<Task>,
     lock: FileLock,
+    /// R4 (2026-06-14-003 plan): when `true`, `ensure` enforces the
+    /// "current U principle": a task whose key slug matches the
+    /// `uN-` / `uNa-` shape must not collide with an open task for
+    /// a different `uN` within the same `(loop_id, plan_name, step)`.
+    /// Defaults to `false` for backward compatibility; the
+    /// `ce-executor-isolated` preset opts in via
+    /// `EventLoopConfig.enforce_current_unit`.
+    enforce_current_unit: bool,
 }
 
 /// Parses a JSONL line into a Task, logging a warning on failure.
@@ -68,6 +76,7 @@ impl TaskStore {
             path: path.to_path_buf(),
             tasks,
             lock,
+            enforce_current_unit: false,
         })
     }
 
@@ -295,10 +304,136 @@ impl TaskStore {
             }
         }
 
+        // R4 (2026-06-14-003 plan): single-U contract.  When the
+        // contract is enabled and the candidate's key slug matches the
+        // `uN-` shape, refuse to push the task if the same step
+        // already has an open task for a *different* unit.  Returns
+        // the existing task so the caller can detect the collision
+        // (and the agent can react by inspecting the existing
+        // task's `unit` field).  Sub-units (`u1a` / `u1b` from
+        // multi-unit splits) collapse to the same base `u1` and
+        // are therefore allowed to coexist — that matches the
+        // plan's "单 U 拆 sub-unit" carve-out.
+        if self.enforce_current_unit {
+            if let Some(collision_idx) = self.find_unit_collision_idx(&task) {
+                return &self.tasks[collision_idx];
+            }
+        }
+
         self.tasks.push(task);
         self.tasks.last().unwrap()
     }
 
+    /// Enable or disable the R4 single-U contract.  Idempotent; safe
+    /// to call from the CLI / event loop bootstrap path.
+    pub fn set_enforce_current_unit(&mut self, enabled: bool) {
+        self.enforce_current_unit = enabled;
+    }
+
+    /// Returns true when the R4 contract is active.
+    pub fn enforce_current_unit(&self) -> bool {
+        self.enforce_current_unit
+    }
+
+    /// Look for an open task in the same `(loop_id, plan_name, step)`
+    /// whose unit differs from `candidate`'s.  Returns the index of
+    /// the existing task when found (caller should NOT push the
+    /// candidate).  Returns `None` when the contract does not apply
+    /// (no slug, legacy keys, or the same unit is already open).
+    ///
+    /// The function returns an index (not a reference) so the caller
+    /// can hold the answer across the eventual `Vec::push` without
+    /// tripping the borrow checker.
+    fn find_unit_collision_idx(&self, candidate: &Task) -> Option<usize> {
+        let candidate_key = candidate.key.as_deref()?;
+        let candidate_unit = unit_from_key(candidate_key)?;
+        let candidate_locus = task_locus(candidate_key)?;
+        let candidate_loop = candidate.loop_id.as_deref();
+        self.tasks.iter().position(|existing| {
+            if existing.id == candidate.id {
+                return false;
+            }
+            if existing.status.is_terminal() {
+                return false;
+            }
+            if existing.loop_id.as_deref() != candidate_loop {
+                return false;
+            }
+            let existing_key = match existing.key.as_deref() {
+                Some(k) => k,
+                None => return false,
+            };
+            let existing_unit = match unit_from_key(existing_key) {
+                Some(u) => u,
+                None => return false,
+            };
+            if existing_unit == candidate_unit {
+                return false;
+            }
+            let existing_locus = match task_locus(existing_key) {
+                Some(l) => l,
+                None => return false,
+            };
+            existing_locus == candidate_locus
+        })
+    }
+}
+
+/// R4 (2026-06-14-003 plan): extract the unit identifier from a task
+/// key's final slug.  Returns `None` when the slug does not match the
+/// `uN-` shape so the contract silently falls through for legacy /
+/// human-CLI keys.  Trailing letters (sub-units `u1a`, `u1b`) are
+/// collapsed to the base unit so sub-units of the same parent unit
+/// can coexist.  Examples:
+///   `u1-impl` -> `u1`
+///   `u1a-impl` -> `u1`
+///   `u1b-impl` -> `u1`
+///   `u10-impl` -> `u10`
+///   `step-01-impl` -> `None`
+fn unit_from_key(key: &str) -> Option<String> {
+    let slug = key.rsplit(':').next()?;
+    let bytes = slug.as_bytes();
+    if bytes.first() != Some(&b'u') {
+        return None;
+    }
+    let mut idx = 1;
+    while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+        idx += 1;
+    }
+    if idx == 1 {
+        // `u` followed by no digits is not a valid unit.
+        return None;
+    }
+    // We intentionally drop a trailing letter so `u1a` and `u1b`
+    // both collapse to `u1`; the contract only enforces the
+    // parent-unit boundary, not the sub-unit boundary.
+    Some(slug[..idx].to_string())
+}
+
+/// R4: derive the "step locus" from a task key.  Two keys with the
+/// same locus are considered to belong to the same step.  The locus
+/// is the `{plan_name}:step-XX` middle portion of the canonical key
+/// shape.  Keys that do not match the canonical 4-segment shape
+/// return `None` (the contract falls through to the legacy behaviour).
+fn task_locus(key: &str) -> Option<String> {
+    let mut parts = key.split(':');
+    // Drop the prefix segment (`ce-executor`).
+    let _ = parts.next()?;
+    let plan = parts.next()?;
+    let step = parts.next()?;
+    // Canonical key has a 4th `:slug` segment.  Anything beyond that
+    // is malformed for our contract — fall through to the legacy
+    // behaviour so we never misclassify a foreign key.
+    if parts.next().is_none() {
+        return None;
+    }
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(format!("{plan}:{step}"))
+}
+
+impl TaskStore {
     /// Returns all tasks as a slice.
     pub fn all(&self) -> &[Task] {
         &self.tasks
@@ -504,6 +639,116 @@ mod tests {
         assert_eq!(deduped_id, id);
         assert_eq!(deduped.title, "Second");
         assert_eq!(deduped.priority, 3);
+    }
+
+    #[test]
+    fn test_ensure_current_unit_rejects_precreation() {
+        // R4 (2026-06-14-003 plan): when the single-U contract is
+        // active and the candidate's key slug matches `uN-`, an
+        // attempt to ensure a sibling unit in the same step must
+        // NOT create a new task — `ensure` returns the existing
+        // task so the caller can see why nothing was pushed.
+        let mut store = TaskStore::load(std::path::Path::new("/tmp/r4-test.jsonl")).unwrap();
+        store.set_enforce_current_unit(true);
+
+        let u1 = Task::new("U1".into(), 1)
+            .with_key(Some("ce-executor:my-plan:step-01:u1-impl".to_string()));
+        let first = store.ensure(u1).id.clone();
+        assert_eq!(store.all().len(), 1, "first ensure must create one row");
+
+        let u2 = Task::new("U2".into(), 1)
+            .with_key(Some("ce-executor:my-plan:step-01:u2-impl".to_string()));
+        let rejected = store.ensure(u2);
+        assert_eq!(rejected.id, first, "u2 must be rejected; u1 returned");
+        assert_eq!(
+            store.all().len(),
+            1,
+            "u2 row must NOT be created when u1 is open in the same step"
+        );
+    }
+
+    #[test]
+    fn test_ensure_same_unit_is_idempotent() {
+        // R4.5: repeated `ensure` for the same `(loop_id, plan, step, unit)`
+        // must collapse to a single row.
+        let mut store = TaskStore::load(std::path::Path::new("/tmp/r4-test-idem.jsonl")).unwrap();
+        store.set_enforce_current_unit(true);
+
+        let key = "ce-executor:my-plan:step-01:u1-impl".to_string();
+        let first = store
+            .ensure(Task::new("U1".into(), 1).with_key(Some(key.clone())))
+            .id
+            .clone();
+        let second = store
+            .ensure(Task::new("U1 again".into(), 1).with_key(Some(key)))
+            .id
+            .clone();
+        assert_eq!(first, second);
+        assert_eq!(store.all().len(), 1);
+    }
+
+    #[test]
+    fn test_ensure_subunit_allowed_in_same_u() {
+        // R4 carve-out: sub-units (`u1a` / `u1b`) collapse to the
+        // same base unit `u1` and are allowed to coexist.
+        let mut store = TaskStore::load(std::path::Path::new("/tmp/r4-test-sub.jsonl")).unwrap();
+        store.set_enforce_current_unit(true);
+
+        let u1a = Task::new("U1a".into(), 1)
+            .with_key(Some("ce-executor:my-plan:step-01:u1a-impl".to_string()));
+        store.ensure(u1a);
+        let u1b = Task::new("U1b".into(), 1)
+            .with_key(Some("ce-executor:my-plan:step-01:u1b-impl".to_string()));
+        let ok = store.ensure(u1b);
+        assert_eq!(ok.title, "U1b");
+        assert_eq!(store.all().len(), 2);
+    }
+
+    #[test]
+    fn test_ensure_legacy_key_falls_through() {
+        let mut store = TaskStore::load(std::path::Path::new("/tmp/r4-test-legacy.jsonl")).unwrap();
+        store.set_enforce_current_unit(true);
+
+        let a = Task::new("A".into(), 1).with_key(Some("step-01-impl".to_string()));
+        let b = Task::new("B".into(), 1).with_key(Some("step-01-other".to_string()));
+        store.ensure(a);
+        store.ensure(b);
+        assert_eq!(store.all().len(), 2);
+    }
+
+    #[test]
+    fn test_unit_from_key_extracts_u_shapes() {
+        assert_eq!(
+            unit_from_key("ce-executor:p:step-01:u1-impl"),
+            Some("u1".into())
+        );
+        // sub-units collapse to the base unit
+        assert_eq!(
+            unit_from_key("ce-executor:p:step-01:u1a-impl"),
+            Some("u1".into())
+        );
+        assert_eq!(
+            unit_from_key("ce-executor:p:step-01:u1b-impl"),
+            Some("u1".into())
+        );
+        assert_eq!(
+            unit_from_key("ce-executor:p:step-01:u10-impl"),
+            Some("u10".into())
+        );
+        assert_eq!(unit_from_key("ce-executor:p:step-01:step-01-impl"), None);
+        assert_eq!(unit_from_key("u1-impl"), Some("u1".into()));
+        assert_eq!(unit_from_key("u-impl"), None);
+        assert_eq!(unit_from_key(""), None);
+    }
+
+    #[test]
+    fn test_task_locus_extraction() {
+        assert_eq!(
+            task_locus("ce-executor:my-plan:step-01:u1-impl"),
+            Some("my-plan:step-01".into())
+        );
+        assert_eq!(task_locus("legacy-key"), None);
+        assert_eq!(task_locus("a:b"), None);
     }
 
     #[test]

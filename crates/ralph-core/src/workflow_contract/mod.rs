@@ -10,4 +10,3 @@ pub use handoff_index::{
     ConflictKind, HandoffConflict, HandoffEntry, HandoffIndex, HandoffIndexMap, HandoffSource,
 };
 pub use handoff_tracker::{HandoffEscalation, HandoffTracker, PendingHandoff};
-

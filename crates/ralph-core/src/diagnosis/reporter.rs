@@ -705,7 +705,10 @@ pub fn render_markdown(report: &Report) -> String {
     if let Some(summary) = &report.summary {
         out.push_str(&format!("- session id: `{}`\n", summary.session_id));
         if let Some(started) = summary.loop_started_at {
-            out.push_str(&format!("- loop started: {}\n", format_datetime_utc(started)));
+            out.push_str(&format!(
+                "- loop started: {}\n",
+                format_datetime_utc(started)
+            ));
         }
         if let Some(terminated) = summary.loop_terminated_at {
             out.push_str(&format!(
@@ -1303,8 +1306,8 @@ pub fn render_json(report: &Report) -> Value {
         .collect();
 
     let summary = report.summary.as_ref().map(|s| {
-        let loop_duration_secs = compute_duration(s.loop_started_at, s.loop_terminated_at)
-            .map(|d| d.as_secs());
+        let loop_duration_secs =
+            compute_duration(s.loop_started_at, s.loop_terminated_at).map(|d| d.as_secs());
         json!({
             "schema_version": s.schema_version,
             "session_id": s.session_id,

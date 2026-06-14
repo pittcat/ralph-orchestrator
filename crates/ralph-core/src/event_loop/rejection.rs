@@ -313,12 +313,21 @@ pub fn rejection_with_key(
 /// event that originally activated the source hat (typically
 /// `work.ready` for an executor) so the resumed hat sees the same
 /// context it saw on the first dispatch.
+///
+/// `wave_context` is `Some` when the rejection is wave-related (the
+/// source hat emitted a `review.*` event tagged with a `wave_id`).
+/// When present the payload gains `wave_id`, `wave_index`, and
+/// `wave_total` fields so the resumed hat can re-derive the wave
+/// context the runner injects for `review-synthesizer` (R1+R5).  The
+/// `original_hat` field is always written when the rejection has a
+/// `source_hat`, mirroring the resume event's `.target` field.
 pub fn build_task_resume_payload(
     rejection: &Rejection,
     allowed_topics: &[String],
     required_fields: &[String],
     original_trigger_topic: Option<&str>,
     original_trigger_payload: Option<&str>,
+    wave_context: Option<&WaveContextForResume>,
 ) -> String {
     let mut payload = serde_json::Map::new();
     payload.insert(
@@ -367,7 +376,64 @@ pub fn build_task_resume_payload(
         "retry_key".into(),
         serde_json::Value::String(rejection.retry_key.clone()),
     );
+    if let Some(hat) = rejection.source_hat.as_deref() {
+        payload.insert(
+            "original_hat".into(),
+            serde_json::Value::String(hat.to_string()),
+        );
+    }
+    if let Some(wc) = wave_context {
+        payload.insert(
+            "wave_id".into(),
+            serde_json::Value::String(wc.wave_id.clone()),
+        );
+        if let Some(idx) = wc.wave_index {
+            payload.insert("wave_index".into(), serde_json::Value::Number(idx.into()));
+        }
+        if let Some(total) = wc.wave_total {
+            payload.insert("wave_total".into(), serde_json::Value::Number(total.into()));
+        }
+    }
     serde_json::Value::Object(payload).to_string()
+}
+
+/// Minimal wave metadata carried into a `task.resume` payload by the
+/// R5 policy/workflow rejection paths.  The fields mirror the wire
+/// shape of `Event::wave_id` / `wave_index` / `wave_total` so the
+/// resumed hat can recover the wave it was working on.
+#[derive(Debug, Clone, Default)]
+pub struct WaveContextForResume {
+    pub wave_id: String,
+    pub wave_index: Option<u32>,
+    pub wave_total: Option<u32>,
+}
+
+impl WaveContextForResume {
+    /// Build a resume-context from the source event.  Returns `None`
+    /// when the source event carries no `wave_id` (the caller
+    /// should fall back to the pre-R5 behaviour of an un-targeted
+    /// payload).
+    pub fn from_event(event: &ralph_proto::Event) -> Option<Self> {
+        let wave_id = event.wave_id.clone()?;
+        Some(Self {
+            wave_id,
+            wave_index: event.wave_index,
+            wave_total: event.wave_total,
+        })
+    }
+
+    /// Same as [`Self::from_event`] but accepts the wire shape
+    /// used by the in-loop rejection paths
+    /// (`crate::event_reader::Event`).  The two structs share the
+    /// same `wave_id` / `wave_index` / `wave_total` fields.
+    pub fn from_reader_event(event: &crate::event_reader::Event) -> Option<Self> {
+        let wave_id = event.wave_id.clone()?;
+        Some(Self {
+            wave_id,
+            wave_index: event.wave_index,
+            wave_total: event.wave_total,
+        })
+    }
 }
 
 /// Compute the target hat for a rejection.  Prefers the explicit
@@ -499,6 +565,7 @@ mod tests {
             &["plan_path".into()],
             Some("work.ready"),
             Some("{\"task_id\":\"task-x\"}"),
+            None,
         );
         let v: serde_json::Value = serde_json::from_str(&payload_str).unwrap();
         assert_eq!(v["stage"], "execution_contract");
@@ -508,6 +575,43 @@ mod tests {
         assert_eq!(v["original_trigger_topic"], "work.ready");
         assert_eq!(v["original_trigger_payload"]["task_id"], "task-x");
         assert!(v["retry_key"].as_str().unwrap().contains("executor"));
+    }
+
+    #[test]
+    fn build_task_resume_payload_includes_wave_context() {
+        // R5: when a wave event is policy-rejected, the resume
+        // payload must carry `wave_id` / `wave_index` / `wave_total`
+        // so the resumed hat can recover the wave context.
+        let r = Rejection::from_execution_contract(
+            &ExecutionContractFinding {
+                topic: "review.dimension.done".into(),
+                kind: ExecutionContractViolationKind::MissingPayloadField {
+                    field: "findings_file".into(),
+                },
+                message: "missing findings_file".into(),
+                source_hat: None,
+            },
+            Some("dimension-reviewer".into()),
+            Some("dimension-reviewer".into()),
+        );
+        let wc = WaveContextForResume {
+            wave_id: "w-abc".into(),
+            wave_index: Some(3),
+            wave_total: Some(7),
+        };
+        let payload_str = build_task_resume_payload(
+            &r,
+            &["review.dimension.done".into()],
+            &["findings_file".into()],
+            None,
+            None,
+            Some(&wc),
+        );
+        let v: serde_json::Value = serde_json::from_str(&payload_str).unwrap();
+        assert_eq!(v["wave_id"], "w-abc");
+        assert_eq!(v["wave_index"], 3);
+        assert_eq!(v["wave_total"], 7);
+        assert_eq!(v["original_hat"], "dimension-reviewer");
     }
 
     #[test]

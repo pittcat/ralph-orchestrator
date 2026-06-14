@@ -397,7 +397,9 @@ hats:
     let finding = findings
         .iter()
         .find(|f| f.id == "preset.handoff_pairing_broken")
-        .expect("strict WAC must surface the handoff_pairing_broken finding for work.ready+executor");
+        .expect(
+            "strict WAC must surface the handoff_pairing_broken finding for work.ready+executor",
+        );
     assert_eq!(finding.topic.as_deref(), Some("work.ready"));
     assert_eq!(finding.hat.as_deref(), Some("executor"));
 }
@@ -435,18 +437,11 @@ fn test_workflow_activation_contract_step_advance_handoff_chain() {
     let work_ready_payload = r#"{"plan_name":"p","plan_path":"docs/plans/p.md","task_id":"t2","task_key":"k2","step":"step-02","complexity":"small","reviewed_task_id":"t1","reviewed_task_key":"k1","completed_step":"step-01","next_step":"step-02"}"#;
 
     let mut bus = EventBus::new();
-    bus.register(
-        Hat::new("plan-gate", "plan-gate").subscribe("review.*"),
-    );
-    bus.register(
-        Hat::new("executor", "executor").subscribe("work.ready"),
-    );
+    bus.register(Hat::new("plan-gate", "plan-gate").subscribe("review.*"));
+    bus.register(Hat::new("executor", "executor").subscribe("work.ready"));
     bus.register(Hat::new("review-coordinator", "rc").subscribe("work.done"));
 
-    bus.publish(
-        Event::new("work.ready", work_ready_payload)
-            .with_source(HatId::from("plan-gate")),
-    );
+    bus.publish(Event::new("work.ready", work_ready_payload).with_source(HatId::from("plan-gate")));
 
     let priority = HatId::from("executor");
     let selected = bus

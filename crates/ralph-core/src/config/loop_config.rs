@@ -203,6 +203,28 @@ pub struct EventLoopConfig {
     /// (30s dispatch timeout, R7 seed handoff topics) apply.
     #[serde(default)]
     pub workflow_contract: Option<WorkflowContractConfig>,
+
+    /// R3 (2026-06-14-003 plan): enable the ephemeral file isolation
+    /// engine.  When `true` and `execution_mode == isolated`, the
+    /// runtime scans the workspace for `scratchpad.md` /
+    /// `tmp*.md` / `*.bak` artefacts that landed in source trees
+    /// (`crates/`, `src/`, `backend/`, etc.) and relocates them to
+    /// `.ralph/agent/scratchpad-{loop_id}.md`.  Defaults to `false`
+    /// so non-isolated presets are unaffected; the
+    /// `ce-executor-isolated` preset opts in.
+    #[serde(default)]
+    pub ephemeral_isolation: bool,
+
+    /// R4 (2026-06-14-003 plan): enable the per-step single-U
+    /// coordinator task contract.  When `true` and
+    /// `execution_mode == isolated`, `TaskStore::ensure` rejects
+    /// keys that mix units within the same `(loop_id, plan_name,
+    /// step)`.  The contract is enforced only for keys whose last
+    /// slug matches the `uN-` / `uNa-` shape; legacy or
+    /// non-conforming keys fall through to the legacy behaviour.
+    /// Defaults to `false`; `ce-executor-isolated` opts in.
+    #[serde(default)]
+    pub enforce_current_unit: bool,
 }
 
 impl Default for EventLoopConfig {
@@ -232,6 +254,8 @@ impl Default for EventLoopConfig {
             verdict_gate: None,
             execution_contracts: None,
             workflow_contract: None,
+            ephemeral_isolation: false,
+            enforce_current_unit: false,
         }
     }
 }

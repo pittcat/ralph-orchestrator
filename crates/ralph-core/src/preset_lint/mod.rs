@@ -38,10 +38,9 @@ pub use finding_id::{
     FINDING_ACTIVATION_EGRESS_MISSING, FINDING_COORDINATOR_MISSING,
     FINDING_CROSS_HAT_UNAUTHORIZED_PUBLISH, FINDING_HANDOFF_PAIRING_BROKEN,
     FINDING_HANDOFF_SEED_DERIVED_CONFLICT, FINDING_INVALID_TOPIC_FORMAT,
-    FINDING_MISSING_TOPIC_OWNER, FINDING_MULTI_HAT_REQUIRES_ISOLATED,
-    FINDING_OWNER_NOT_PUBLISHER, FINDING_OWNER_UNKNOWN_HAT, FINDING_RE_EMIT_TRAP,
-    FINDING_TASK_PUBLISHER_NOT_COORDINATED, FINDING_TRIGGER_PUBLISH_ASYMMETRY,
-    FINDING_WHITELIST_EXEMPT_TOPIC,
+    FINDING_MISSING_TOPIC_OWNER, FINDING_MULTI_HAT_REQUIRES_ISOLATED, FINDING_OWNER_NOT_PUBLISHER,
+    FINDING_OWNER_UNKNOWN_HAT, FINDING_RE_EMIT_TRAP, FINDING_TASK_PUBLISHER_NOT_COORDINATED,
+    FINDING_TRIGGER_PUBLISH_ASYMMETRY, FINDING_WHITELIST_EXEMPT_TOPIC,
 };
 
 // Re-export the WAC top-level entry point so callers (and the
@@ -54,13 +53,13 @@ pub use finding_id::{
 // `2026-06-12-003-feat-wac-rollout-completion-plan.md` (WRC-U1) and
 // `2026-06-12-002-feat-workflow-activation-contract-plan.md`
 // (KTD-2: WAC always-on, severity by strictness).
-pub use workflow_activation::{HandoffGraph, run_workflow_activation_contract};
 pub use multi_hat::check_multi_hat_isolation;
 pub use ownership::{check_owner_references, check_ownership_rules};
 pub use topic_format::{
     TopicFormatResult, TopicOccurrence, TopicSurface, enumerate_topics, suggest_topic_fix,
     validate_all_topics, validate_topic_format,
 };
+pub use workflow_activation::{HandoffGraph, run_workflow_activation_contract};
 
 // ──────────────────────────────────────────────────────────────────────────
 // U2: Shared types — strictness, severity, finding
@@ -346,11 +345,8 @@ pub fn run_preset_lint(
     // severity rule (KTD-7) so the CLI gate and the aggregator
     // can both upgrade builtin WAC findings to Error.
     let wac_strict = matches!(strictness, LintStrictness::Strict);
-    let wac_findings = run_workflow_activation_contract(
-        config,
-        wac_strict,
-        source_is_builtin_embedded,
-    );
+    let wac_findings =
+        run_workflow_activation_contract(config, wac_strict, source_is_builtin_embedded);
     findings.extend(lint_findings_to_contract_findings(&wac_findings));
 
     // Sort by id, then topic for deterministic output.

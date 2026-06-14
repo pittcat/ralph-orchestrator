@@ -518,6 +518,8 @@ mod tests {
             handoff_tracker: crate::workflow_contract::HandoffTracker::new(),
             stall_recovery_counts: std::collections::HashMap::new(),
             pending_recovery_hat: None,
+            pending_synthesizer_timeout: None,
+            last_ephemeral_relocations: Vec::new(),
         }
     }
 

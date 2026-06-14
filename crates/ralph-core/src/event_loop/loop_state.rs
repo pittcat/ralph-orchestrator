@@ -231,8 +231,29 @@ pub struct LoopState {
     ///   - `inject_wave_policy_rejection_guidance` (schema-level
     ///     wave recovery)
     pub pending_recovery_hat: Option<HatId>,
-}
 
+    /// R1 (2026-06-14-003 plan): when `review-synthesizer` is woken up
+    /// by an aggregate timeout (`inject_review_aggregate_timeouts`),
+    /// the loop pins the wave_id here so the next `build_prompt` can
+    /// mark the injected `WaveContext` with `AGGREGATE_TIMEOUT: true`.
+    ///
+    /// The pin is read with `.take()` on first read so the
+    /// `AGGREGATE_TIMEOUT` signal does not leak across waves: a
+    /// wave-1 timeout must not mark wave-2's synthesizer activation
+    /// as timed-out.  After the first read, the pin is `None` until
+    /// a new aggregate timeout sets it.  This matches the prior
+    /// round's fix for the adversarial S9 scenario (stale wave
+    /// context bleeding across waves).
+    pub pending_synthesizer_timeout: Option<String>,
+
+    /// R3 (2026-06-14-003 plan): ephemeral files relocated by
+    /// `EphemeralIsolation::scan_and_relocate` during the most recent
+    /// `process_output` iteration.  Surfaced as a `## EPHEMERAL RELOCATED`
+    /// block in the next `build_prompt` so the agent learns the file
+    /// has been moved and stops recreating it.  Cleared on `build_prompt`
+    /// (consume-on-read).
+    pub last_ephemeral_relocations: Vec<crate::ephemeral_isolation::RelocationRecord>,
+}
 impl Default for LoopState {
     fn default() -> Self {
         Self {
@@ -282,6 +303,8 @@ impl Default for LoopState {
             handoff_tracker: crate::workflow_contract::HandoffTracker::new(),
             stall_recovery_counts: HashMap::new(),
             pending_recovery_hat: None,
+            pending_synthesizer_timeout: None,
+            last_ephemeral_relocations: Vec::new(),
         }
     }
 }
