@@ -60,6 +60,15 @@ event_loop:
   max_iterations: 50
   max_runtime_seconds: 28800  # 8 hours
   enforce_hat_scope: true
+  # 2026-06-14-003 plan R3: enable ephemeral file isolation so
+  # runtime artefacts (`scratchpad.md`, `tmp*.md`, `*.bak`) that
+  # land in source trees are auto-relocated to
+  # `.ralph/agent/scratchpad-{loop_id}.md` between iterations.
+  ephemeral_isolation: true
+  # 2026-06-14-003 plan R4: enable the per-step single-U contract
+  # so `TaskStore::ensure` rejects sibling unit tasks in the same
+  # step (the original `calm-oak` failure mode).
+  enforce_current_unit: true
   verdict_gate:
     # Reject LOOP_COMPLETE if the most recent REVIEW_COMPLETE event has
     # pass_or_fail == "fail". Backstops the shipper+reporter chain when
@@ -311,6 +320,20 @@ hats:
         - `ce-executor:{plan_name}:step-02:{slug}`
       - Each task description includes: Goal, Files, Approach, Execution note, Verification
       - Only create current step's tasks (do not pre-create future steps)
+      - **R4 (2026-06-14-003 plan) — Current U Principle (HARD RULE)**:
+        a single Step often lists multiple Implementation Units
+        (`U1, U2, U3...`).  You MUST only call `ralph tools task
+        ensure` for the *current* U (the one the executor is about
+        to start).  Do NOT pre-create tasks for U2, U3, etc. — the
+        runtime will reject the sibling `ensure` and surface a
+        `task.resume` so the failure is loud, not silent.  When U1
+        closes, plan-gate will dispatch a new `work.ready` and the
+        next coordinator activation will create U2's task.
+      - **R4 carve-out — sub-units**: when a plan explicitly splits
+        a U into sub-units (`U1a / U1b / U1c`), use keys
+        `...:u1a-impl`, `...:u1b-impl`, `...:u1c-impl`.  The runtime
+        collapses these to the same base unit so they coexist
+        alongside the parent `U1` task when needed.
       - **Trivial mode**: create one summary task, key `ce-executor:{plan_name}:trivial`
 
       ### Task Split Heuristics
