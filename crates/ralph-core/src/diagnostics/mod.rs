@@ -391,6 +391,47 @@ impl DiagnosticsCollector {
         self.session_dir.as_deref()
     }
 
+    /// Writes a session pointer to
+    /// `<main_repo>/.ralph/diagnostics-session-pointer.json` pointing
+    /// back at this collector's session directory. Only call this when
+    /// the collector is running inside a worktree (i.e.
+    /// `main_repo != session_dir`'s workspace). The pointer lets
+    /// `ralph diagnose` find the worktree session after the loop ends
+    /// and `loops.json` no longer carries an alive entry for it
+    /// (U4, 2026-06-14).
+    ///
+    /// Returns `Ok(false)` when this is a primary (non-worktree)
+    /// session, so the caller can log or no-op without checking the
+    /// return value's "did it write" semantics.
+    pub fn write_session_pointer(
+        &self,
+        main_repo: &Path,
+    ) -> std::io::Result<bool> {
+        let session_dir = match self.session_dir() {
+            Some(d) => d,
+            None => return Ok(false),
+        };
+        // Only emit a pointer when the session dir lives inside the
+        // worktree, not in the main repo. The canonical signal is:
+        // session_dir does not start with main_repo's `.ralph/`.
+        // Simplest robust check: if the session dir is *not* under
+        // main_repo, treat it as a worktree session. The caller
+        // (`run_loop_impl`) only invokes us on non-primary contexts,
+        // but we double-check here defensively.
+        if session_dir.starts_with(main_repo) {
+            return Ok(false);
+        }
+        let pointer_path = main_repo
+            .join(".ralph")
+            .join("diagnostics-session-pointer.json");
+        let payload = serde_json::json!({
+            "session_path": session_dir,
+            "written_at": Utc::now().to_rfc3339(),
+        });
+        write_session_pointer_file(&pointer_path, &payload)?;
+        Ok(true)
+    }
+
     /// Wraps a stream handler with diagnostic logging.
     ///
     /// Returns the original handler if diagnostics are disabled.
@@ -779,6 +820,40 @@ impl DiagnosisSummary {
     }
 }
 
+/// Atomic write helper for the session pointer file
+/// `<main-repo>/.ralph/diagnostics-session-pointer.json`.
+///
+/// The child RPC process writes this pointer when a worktree loop starts
+/// so that `ralph diagnose` can find the worktree's diagnostics root
+/// after the loop ends and `loops.json` is no longer carrying an alive
+/// entry for it (U4, 2026-06-14). The writer follows the same
+/// `NamedTempFile::persist` pattern as `write_diagnosis_summary_seed`
+/// and `write_active_activations` — the destination is only renamed
+/// into place after the JSON payload is fully serialized, so readers
+/// never see a half-written file.
+///
+/// Errors are surfaced as `io::Error` so the caller can decide whether
+/// to log and continue (the loop should not block on a best-effort
+/// pointer write).
+pub fn write_session_pointer_file(
+    pointer_path: &Path,
+    payload: &serde_json::Value,
+) -> std::io::Result<()> {
+    if let Some(parent) = pointer_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = NamedTempFile::new_in(
+        pointer_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(".")),
+    )?;
+    if let Err(err) = serde_json::to_writer_pretty(tmp.as_file(), payload) {
+        return Err(std::io::Error::new(std::io::ErrorKind::Other, err));
+    }
+    tmp.persist(pointer_path).map_err(|e| e.error)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1127,5 +1202,89 @@ mod tests {
         assert!(collector.is_trace_only());
         assert_eq!(collector.session_dir().unwrap(), preset_dir);
         assert!(!temp.path().join(".ralph").join("diagnostics").exists());
+    }
+
+    // ── U4 (2026-06-14): session pointer file for worktree loop resolve ──
+
+    #[test]
+    fn test_write_session_pointer_for_worktree_session() {
+        // Simulate a worktree loop: session lives under the worktree,
+        // main_repo is somewhere else entirely. write_session_pointer
+        // must emit a pointer in main_repo's .ralph/.
+        let temp = TempDir::new().unwrap();
+        let worktree = temp.path().join("worktree");
+        let main_repo = temp.path().join("main-repo");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&main_repo).unwrap();
+
+        let session_dir = worktree.join(".ralph").join("diagnostics").join("2026-06-14T10-20-30");
+        std::fs::create_dir_all(&session_dir).unwrap();
+
+        let options = DiagnosticsOptions {
+            full_diagnostics: true,
+            session_dir: Some(session_dir.clone()),
+            ..DiagnosticsOptions::default()
+        };
+        let collector = DiagnosticsCollector::with_options(&worktree, &options).unwrap();
+        assert_eq!(collector.session_dir().unwrap(), session_dir);
+
+        let wrote = collector.write_session_pointer(&main_repo).expect("write ok");
+        assert!(wrote, "expected pointer to be written for worktree session");
+
+        let pointer_path = main_repo
+            .join(".ralph")
+            .join("diagnostics-session-pointer.json");
+        assert!(pointer_path.exists());
+        let payload: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&pointer_path).unwrap()).unwrap();
+        assert_eq!(
+            payload.get("session_path").and_then(|v| v.as_str()),
+            Some(session_dir.to_str().unwrap())
+        );
+        assert!(payload.get("written_at").is_some());
+    }
+
+    #[test]
+    fn test_write_session_pointer_skipped_for_primary_session() {
+        // When the session is in the main repo (primary mode), we
+        // MUST NOT write a pointer — the diagnose path already finds
+        // primary sessions via loops.json / fallback to .ralph/diagnostics.
+        let temp = TempDir::new().unwrap();
+        let options = DiagnosticsOptions {
+            full_diagnostics: true,
+            ..DiagnosticsOptions::default()
+        };
+        let collector = DiagnosticsCollector::with_options(temp.path(), &options).unwrap();
+        let session_dir = collector.session_dir().unwrap().to_path_buf();
+
+        // session_dir starts with main_repo, so the call must no-op.
+        let wrote = collector.write_session_pointer(temp.path()).expect("write ok");
+        assert!(!wrote, "primary session must not write a pointer");
+
+        // Sanity: session dir is indeed under main_repo.
+        assert!(session_dir.starts_with(temp.path()));
+    }
+
+    #[test]
+    fn test_write_session_pointer_disabled_collector_returns_false() {
+        // A disabled collector has no session_dir → write_session_pointer
+        // must be a no-op and return Ok(false), not error.
+        let temp = TempDir::new().unwrap();
+        let main_repo = temp.path().join("main-repo");
+        std::fs::create_dir_all(&main_repo).unwrap();
+        let collector = DiagnosticsCollector::with_options(
+            temp.path(),
+            &DiagnosticsOptions::default(),
+        )
+        .unwrap();
+        assert!(!collector.is_enabled());
+        let wrote = collector
+            .write_session_pointer(&main_repo)
+            .expect("disabled write ok");
+        assert!(!wrote);
+        assert!(!main_repo
+            .join(".ralph")
+            .join("diagnostics-session-pointer.json")
+            .exists());
     }
 }

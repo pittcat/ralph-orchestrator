@@ -476,6 +476,41 @@ async fn run_loop_impl_inner(
         ctx = ctx.with_prebuilt_diagnostics(Arc::clone(collector));
     }
 
+    // U4 (2026-06-14): if this is a worktree loop and diagnostics are
+    // enabled, write a session pointer to the main repo's
+    // `.ralph/diagnostics-session-pointer.json` so `ralph diagnose` can
+    // find the worktree session after the loop ends and `loops.json`
+    // no longer carries an alive entry for it. Best-effort: a write
+    // failure is logged but does not block the loop.
+    if !ctx.is_primary()
+        && let Some(collector) = prebuilt_diagnostics.as_ref()
+        && collector.is_enabled()
+    {
+        match collector.write_session_pointer(ctx.repo_root()) {
+            Ok(true) => {
+                debug!(
+                    target: "ralph_cli::loop_runner",
+                    session_dir = %collector.session_dir().map(|p| p.display().to_string()).unwrap_or_default(),
+                    main_repo = %ctx.repo_root().display(),
+                    "wrote session pointer for worktree diagnostics",
+                );
+            }
+            Ok(false) => {
+                // write_session_pointer returned false: primary session
+                // (shouldn't happen given the guard) or session_dir is
+                // inside main_repo. No-op.
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: "ralph_cli::loop_runner",
+                    main_repo = %ctx.repo_root().display(),
+                    error = %err,
+                    "failed to write session pointer; ralph diagnose may not find this worktree session after the loop ends",
+                );
+            }
+        }
+    }
+
     let urgent_steer_path = ctx.urgent_steer_path();
     let urgent_steer_store = UrgentSteerStore::new(urgent_steer_path.clone());
     urgent_steer_store
