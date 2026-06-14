@@ -33,12 +33,48 @@ use tokio::sync::watch;
 use tokio::time::{Duration, interval};
 use tracing::info;
 
+/// Notifies the backend subprocess (or in-process main loop) that the user
+/// requested quit, before the TUI exits.
+///
+/// Symmetric with the Ctrl+C abort branch in `App::run` (app.rs:238-254).
+/// The RPC writer path is preferred when both are available (subprocess mode);
+/// the watch channel is the in-process fallback. If neither is set (e.g. a
+/// test harness), the call is a no-op so the loop can still exit cleanly.
+///
+/// This function is fire-and-forget: the RPC variant spawns the abort send
+/// as a tokio task; the channel variant is synchronous. Either way the
+/// caller should `break` out of the event loop right after, and the
+/// `defer!` terminal cleanup guard runs on the way out.
+pub(crate) fn notify_backend_quit<W: AsyncWrite + Unpin + Send + 'static>(
+    rpc_writer: Option<&RpcWriter<W>>,
+    interrupt_tx: Option<&watch::Sender<bool>>,
+) {
+    if let Some(writer) = rpc_writer {
+        let writer = writer.clone();
+        tokio::spawn(async move {
+            let _ = writer.send_abort().await;
+        });
+    } else if let Some(tx) = interrupt_tx {
+        let _ = tx.send(true);
+    }
+}
+
 /// Dispatches an action to the TuiState.
 ///
 /// Returns `true` if the action signals to quit the application.
+///
+/// **Note:** `Action::Quit` is intentionally NOT handled here. The `App::run`
+/// input loop intercepts Quit before calling this function so it can call
+/// `notify_backend_quit` (sending the abort RPC / interrupt signal) before
+/// breaking. If Quit were dispatched here, the loop would break silently and
+/// the parent CLI would hang on `child_wait.await` waiting for the orphaned
+/// backend subprocess. See the regression test
+/// `dispatch_action_quit_is_no_longer_handled_by_dispatcher` and the bug
+/// report referenced in the test module.
 pub fn dispatch_action(action: Action, state: &mut TuiState, viewport_height: usize) -> bool {
     match action {
-        Action::Quit => return true,
+        // Quit is owned by App::run, not by the dispatcher. Do not match.
+        Action::Quit => {}
         Action::ScrollDown => {
             if state.wave_view_active {
                 if let Some(buffer) = state.current_wave_worker_buffer_mut() {
@@ -343,8 +379,33 @@ impl<W: AsyncWrite + Unpin + Send + 'static> App<W> {
                                         }
                                     }
 
-                                    // Map key to action and dispatch
+                                    // Map key to action and dispatch.
+                                    //
+                                    // Quit is intercepted BEFORE dispatch_action so
+                                    // we can notify the backend subprocess via
+                                    // notify_backend_quit before breaking the loop.
+                                    // Without this, the parent CLI blocks on
+                                    // child_wait.await and the user perceives the
+                                    // exit as "stuck" while the backend keeps
+                                    // running orphaned. Symmetric with the Ctrl+C
+                                    // handler above (app.rs:238-254).
                                     let action = map_key(key);
+                                    if action == Action::Quit {
+                                        if let Some(ref writer) = self.rpc_writer {
+                                            notify_backend_quit(
+                                                Some(writer),
+                                                None,
+                                            );
+                                        } else if let Some(ref tx) = self.interrupt_tx {
+                                            notify_backend_quit::<
+                                                tokio::process::ChildStdin,
+                                            >(
+                                                None,
+                                                Some(tx),
+                                            );
+                                        }
+                                        break;
+                                    }
                                     let mut state = self.state.lock().unwrap();
                                     let mouse_capture_enabled_before = state.mouse_capture_enabled;
                                     if dispatch_action(action, &mut state, viewport_height) {
@@ -631,14 +692,92 @@ mod tests {
     }
 
     // =========================================================================
-    // AC5: Quit Returns True to Exit Loop
+    // AC5: Quit Signals Backend Abort (not just local exit)
     // =========================================================================
+    //
+    // Regression test for: pressing 'q' in the TUI exited the TUI render loop
+    // but did NOT notify the backend subprocess. The parent CLI would then
+    // block on child_wait.await forever (run.rs:1749), making the user
+    // perceive the exit as "stuck" while the backend kept running orphaned.
+    //
+    // The fix moves Quit handling out of dispatch_action (which only has
+    // state-level access) and into the App::run input loop, symmetric with
+    // the Ctrl+C handler. The abort-sending logic is extracted into a small
+    // helper `notify_backend_quit` so it can be tested in isolation.
+
+    #[tokio::test]
+    async fn notify_backend_quit_sends_abort_via_rpc_writer() {
+        // Given an RPC writer bound to an in-memory duplex stream
+        let (client, mut server) = tokio::io::duplex(64);
+        let writer = RpcWriter::new(client);
+
+        // When notify_backend_quit is called with the writer
+        notify_backend_quit(Some(&writer), None);
+
+        // Then the backend (server side) receives a well-formed Abort command.
+        //
+        // Allow the spawned send task to make progress.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(writer); // close our end so server read can finish
+
+        let mut buf = Vec::new();
+        use tokio::io::AsyncReadExt;
+        let _ = tokio::time::timeout(
+            Duration::from_millis(200),
+            server.read_to_end(&mut buf),
+        )
+        .await;
+
+        let line = std::str::from_utf8(&buf)
+            .expect("rpc writer should send utf-8 JSON")
+            .trim();
+        assert!(
+            !line.is_empty(),
+            "rpc writer should have written an abort line, got empty buffer",
+        );
+        let cmd: serde_json::Value = serde_json::from_str(line)
+            .expect("rpc writer should send a JSON line");
+        assert_eq!(
+            cmd.get("type").and_then(|v| v.as_str()),
+            Some("abort"),
+            "Quit must signal the backend via the abort RPC command, not silently exit",
+        );
+    }
+
+    #[tokio::test]
+    async fn notify_backend_quit_signals_interrupt_channel_when_no_rpc() {
+        // Given an interrupt watch channel (in-process mode)
+        let (tx, mut rx) = watch::channel(false);
+
+        // When notify_backend_quit is called with no rpc_writer
+        notify_backend_quit::<tokio::io::DuplexStream>(None, Some(&tx));
+
+        // Then the channel flips to true
+        assert!(
+            *rx.borrow_and_update(),
+            "Quit must flip interrupt_tx to true so the main loop can abort",
+        );
+    }
 
     #[test]
-    fn dispatch_action_quit_returns_true() {
+    fn notify_backend_quit_noop_when_both_none() {
+        // Should not panic when no backend channel exists (e.g. test harness).
+        notify_backend_quit::<tokio::io::DuplexStream>(None, None);
+    }
+
+    #[test]
+    fn dispatch_action_quit_is_no_longer_handled_by_dispatcher() {
+        // Quit is intentionally NOT in dispatch_action: the App::run loop
+        // intercepts Action::Quit before dispatch so it can notify the
+        // backend via notify_backend_quit. If Quit were handled here, the
+        // loop would break without sending abort and the parent would
+        // hang on child_wait (the original bug).
         let mut state = TuiState::new();
         let should_quit = dispatch_action(Action::Quit, &mut state, 10);
-        assert!(should_quit, "Quit action should return true to signal exit");
+        assert!(
+            !should_quit,
+            "dispatch_action must NOT exit on Quit; the loop owns Quit so it can call notify_backend_quit first",
+        );
     }
 
     #[test]
