@@ -1437,6 +1437,9 @@ async fn run_loop_impl_inner(
                     TerminationReason::PayloadContractViolation => "payload_contract_violation",
                     TerminationReason::RecoveryExhausted { .. } => "recovery_exhausted",
                     TerminationReason::ReviewFailed { .. } => "review_failed",
+                    TerminationReason::ScopeViolationCircuitBreakerTripped { .. } => {
+                        "scope_violation_circuit_breaker_tripped"
+                    }
                 };
 
                 if matches!(reason, TerminationReason::Interrupted) {
@@ -1518,6 +1521,9 @@ async fn run_loop_impl_inner(
                             // terminus. Surface a human-readable reason
                             // string for the merge-queue needs-review record.
                             "review verdict failed (verdict gate propagation)"
+                        }
+                        TerminationReason::ScopeViolationCircuitBreakerTripped { .. } => {
+                            "isolated scope violation circuit breaker tripped"
                         }
                     };
                     if let Err(e) = queue.mark_needs_review(loop_id, reason_str) {

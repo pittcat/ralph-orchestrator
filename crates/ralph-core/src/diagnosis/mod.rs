@@ -39,6 +39,7 @@ mod responder;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use envelope::normalize_part;
 pub use envelope::{
     DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, EvidenceKind, EvidenceRef,
     RecoveryDiagnosisEnvelope, RecoveryDiagnosisEnvelopeBuilder,

@@ -151,7 +151,7 @@ fn test_stop_requested_termination_clears_signal() {
     let temp_dir = tempdir().unwrap();
     let mut config = RalphConfig::default();
     config.core.workspace_root = temp_dir.path().to_path_buf();
-    let event_loop = EventLoop::new(config);
+    let mut event_loop = EventLoop::new(config);
 
     let stop_path = temp_dir.path().join(".ralph/stop-requested");
     std::fs::create_dir_all(stop_path.parent().unwrap()).unwrap();

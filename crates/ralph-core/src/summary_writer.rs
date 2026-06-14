@@ -385,6 +385,9 @@ impl SummaryWriter {
             TerminationReason::ReviewFailed { .. } => {
                 "Failed: review verdict failed and propagated to final mirror"
             }
+            TerminationReason::ScopeViolationCircuitBreakerTripped { .. } => {
+                "Failed: isolated scope violation circuit breaker tripped"
+            }
         }
     }
 
@@ -508,6 +511,7 @@ mod tests {
             last_rejection_fingerprint: 0,
             loop_start_sha: None,
             rejection_retry_counts: std::collections::HashMap::new(),
+            scope_violation_circuit_breaker_tripped: None,
             rejection_last_iteration: std::collections::HashMap::new(),
             invariant_violation_count: 0,
             last_invariant_violation: None,

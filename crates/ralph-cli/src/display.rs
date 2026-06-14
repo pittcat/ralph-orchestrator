@@ -154,9 +154,12 @@ fn resume_hint_for(reason: &TerminationReason, loop_id: &str) -> Option<String> 
         | TerminationReason::WorkspaceGone
         | TerminationReason::Cancelled
         | TerminationReason::RestartRequested => None,
-        TerminationReason::ReviewFailed { .. } => {
+        TerminationReason::ReviewFailed { .. }
+        | TerminationReason::ScopeViolationCircuitBreakerTripped { .. } => {
             // P0-C: a failing review is a final verdict — no resume
             // hint, the operator must fix the underlying issue first.
+            // 2026-06-14-004: scope violation circuit breaker is likewise
+            // a hard stop; the hat must be fixed before continuing.
             None
         }
         _ => Some(format!("ralph run --continue --loop-id {loop_id}")),
@@ -263,6 +266,9 @@ pub fn print_termination(
         }
         TerminationReason::ReviewFailed { .. } => {
             (RED, "✗", "Review verdict failed (verdict gate propagation)")
+        }
+        TerminationReason::ScopeViolationCircuitBreakerTripped { .. } => {
+            (RED, "✗", "Isolated scope violation circuit breaker tripped")
         }
     };
 

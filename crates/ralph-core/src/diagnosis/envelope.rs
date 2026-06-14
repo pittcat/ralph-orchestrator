@@ -669,7 +669,7 @@ fn truncate_evidence_snippet(s: &str) -> String {
 }
 
 /// Normalize a `retry_key` part to lowercase snake_case.
-fn normalize_part(s: &str) -> String {
+pub(crate) fn normalize_part(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut prev_underscore = false;
     for c in s.chars() {

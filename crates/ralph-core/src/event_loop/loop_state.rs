@@ -9,6 +9,8 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::{Duration, Instant};
 
+use super::TerminationReason;
+
 /// Maximum number of times the same rejection key may be retried
 /// before the runner stops attempting targeted `task.resume` and
 /// escalates to a fail-closed terminal reason.  Chosen to match
@@ -129,6 +131,13 @@ pub struct LoopState {
     /// emits a fail-closed `NonRetryableReason::RetryBudgetExhausted`
     /// so the runner can terminate or escalate.
     pub rejection_retry_counts: HashMap<String, u32>,
+
+    /// 2026-06-14-004 U2: when the isolated-scope circuit breaker trips,
+    /// the original (non-normalized) termination reason is stored here so
+    /// `check_termination()` can return it with clear diagnostics.
+    /// Set in the isolated-scope rejection branch when
+    /// `rejection_key_is_exhausted` becomes true; consumed by the runner.
+    pub scope_violation_circuit_breaker_tripped: Option<TerminationReason>,
 
     /// Iteration at which each rejection key was last seen, used by
     /// the recovery responder (U6) to de-duplicate recovery envelopes
@@ -292,6 +301,7 @@ impl Default for LoopState {
             last_rejection_fingerprint: 0,
             loop_start_sha: None,
             rejection_retry_counts: HashMap::new(),
+            scope_violation_circuit_breaker_tripped: None,
             rejection_last_iteration: HashMap::new(),
             invariant_violation_count: 0,
             last_invariant_violation: None,
@@ -478,6 +488,16 @@ impl LoopState {
     /// last retry attempt.
     pub fn rejection_key_is_exhausted(&self, key: &str) -> bool {
         self.rejection_retry_count(key) > U2_REJECTION_RETRY_LIMIT
+    }
+
+    /// 2026-06-14-004 U2: clear all rejection retry counts whose key
+    /// belongs to `hat`.  Called when the hat successfully publishes a
+    /// legal event, so a single recovery does not leave stale counts
+    /// that trigger a premature fuse on a later, unrelated violation.
+    pub fn clear_rejection_keys_for_hat(&mut self, hat: &str) {
+        let normalized = crate::diagnosis::normalize_part(hat);
+        self.rejection_retry_counts
+            .retain(|key, _| key.split(':').nth(1) != Some(&normalized));
     }
 
     fn event_counts_toward_stale_loop(event: &Event) -> bool {

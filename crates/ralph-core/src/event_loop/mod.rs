@@ -191,6 +191,22 @@ pub enum TerminationReason {
         /// Surfaced in `loop.terminate` payload for operators.
         topic: String,
     },
+    /// 2026-06-14-004 plan U2: isolated-scope circuit breaker.
+    /// Triggered when the same (hat, topic) pair crosses the
+    /// `U2_REJECTION_RETRY_LIMIT` threshold (4th attempt), meaning
+    /// the hat keeps emitting an out-of-scope topic despite receiving
+    /// `task.resume` guidance 3 times already.  This is a hard stop
+    /// that prevents the loop from spiraling forever.
+    ScopeViolationCircuitBreakerTripped {
+        /// The hat that keeps emitting out-of-scope events.
+        hat: String,
+        /// The topic the hat is not allowed to publish.
+        topic: String,
+        /// The violation count (how many times this (hat, topic) was rejected).
+        violation_count: u32,
+        /// Topics the hat IS allowed to publish (from registry config).
+        allowed_topics: Vec<String>,
+    },
 }
 
 impl TerminationReason {
@@ -212,7 +228,8 @@ impl TerminationReason {
             | TerminationReason::WorkspaceGone
             | TerminationReason::PayloadContractViolation
             | TerminationReason::RecoveryExhausted { .. }
-            | TerminationReason::ReviewFailed { .. } => 1,
+            | TerminationReason::ReviewFailed { .. }
+            | TerminationReason::ScopeViolationCircuitBreakerTripped { .. } => 1,
             TerminationReason::MaxIterations
             | TerminationReason::MaxRuntime
             | TerminationReason::MaxCost => 2,
@@ -246,6 +263,9 @@ impl TerminationReason {
             TerminationReason::PayloadContractViolation => "payload_contract_violation",
             TerminationReason::RecoveryExhausted { .. } => "recovery_exhausted",
             TerminationReason::ReviewFailed { .. } => "review_failed",
+            TerminationReason::ScopeViolationCircuitBreakerTripped { .. } => {
+                "scope_violation_circuit_breaker_tripped"
+            }
         }
     }
 
@@ -1686,7 +1706,7 @@ impl EventLoop {
     }
 
     /// Checks if any termination condition is met.
-    pub fn check_termination(&self) -> Option<TerminationReason> {
+    pub fn check_termination(&mut self) -> Option<TerminationReason> {
         let cfg = &self.config.event_loop;
 
         if self.state.iteration >= cfg.max_iterations {
@@ -1780,6 +1800,28 @@ impl EventLoop {
                     topic: topic.to_string(),
                 });
             }
+        }
+
+        // 2026-06-14-004 U2: isolated-scope circuit breaker check.
+        // If the rejection branch tripped the breaker, the original
+        // (non-normalized) termination reason is stored in LoopState.
+        // This path does not depend on telemetry.runtime_diagnosis.
+        if let Some(reason) = self.state.scope_violation_circuit_breaker_tripped.take() {
+            if let TerminationReason::ScopeViolationCircuitBreakerTripped {
+                ref hat,
+                ref topic,
+                violation_count,
+                ..
+            } = reason
+            {
+                warn!(
+                    hat = %hat,
+                    topic = %topic,
+                    violation_count = violation_count,
+                    "Scope violation circuit breaker tripped: terminating loop"
+                );
+            }
+            return Some(reason);
         }
 
         // Check for stop signal from Telegram /stop or CLI stop-requested
@@ -5467,6 +5509,49 @@ impl EventLoop {
                         .map(|events| events.iter().any(|e| e.topic.as_str() == "task.resume"))
                         .unwrap_or(false);
                     if !already_pending_recovery {
+                        // 2026-06-14-004 U2: record the rejection key and check circuit breaker.
+                        // We record BEFORE checking exhaustion so the count includes this attempt.
+                        // The key includes wave_id/wave_index for wave events (distinguishes
+                        // 8 different wave workers), so exhaustion means the SAME worker keeps
+                        // hitting the same violation across iterations.
+                        let count = self.state.record_rejection_key(&scope_drop_retry_key);
+                        if self.state.rejection_key_is_exhausted(&scope_drop_retry_key) {
+                            // Circuit breaker tripped: do NOT inject task.resume.
+                            // The hat has exceeded U2_REJECTION_RETRY_LIMIT retries.
+                            // Store the original termination reason in LoopState so
+                            // `check_termination()` can return it with non-normalized
+                            // hat/topic for clear diagnostics (R-C).
+                            warn!(
+                                key = %scope_drop_retry_key,
+                                hat = %isolated_hat.as_str(),
+                                topic = %event.topic,
+                                count = count,
+                                "Scope violation circuit breaker: no more task.resume injections for key '{}'",
+                                scope_drop_retry_key
+                            );
+                            self.state.scope_violation_circuit_breaker_tripped =
+                                Some(TerminationReason::ScopeViolationCircuitBreakerTripped {
+                                    hat: isolated_hat.as_str().to_string(),
+                                    topic: event.topic.to_string(),
+                                    violation_count: count,
+                                    allowed_topics: allowed.clone(),
+                                });
+                            // Publish a terminal diagnostic event so operators and
+                            // `ralph diagnose` see what happened.
+                            let breaker_event = Event::new(
+                                "loop.terminate",
+                                format!(
+                                    "{{\"reason\":\"scope_violation_circuit_breaker_tripped\",\"hat\":\"{}\",\"topic\":\"{}\",\"violation_count\":{},\"allowed_topics\":{:?}}}",
+                                    isolated_hat.as_str(),
+                                    event.topic,
+                                    count,
+                                    allowed
+                                ),
+                            )
+                            .with_target(isolated_hat.clone());
+                            self.bus.publish(breaker_event);
+                            continue;
+                        }
                         // P1 finding #10: build the payload through the
                         // shared helper so the format matches the
                         // rejection pipeline and downstream consumers
@@ -6833,12 +6918,13 @@ impl EventLoop {
             // never matched and `complete` hit the `None` branch — every
             // activation leaked. The key is now the (loop_id, iteration, hat_id)
             // triple; trigger identity is a snapshot-only display field.
-            if let Some(source_hat_id) = event
+            let source_hat_id = event
                 .source
                 .as_ref()
                 .or(self.state.last_active_hat_ids.first())
-            {
-                let hat_config = self.registry.get_config(source_hat_id);
+                .cloned();
+            if let Some(source_hat_id) = source_hat_id {
+                let hat_config = self.registry.get_config(&source_hat_id);
                 let topic_str = event.topic.as_str();
                 let is_terminal = hat_config
                     .is_some_and(|config| config.terminal_topic_set().contains(topic_str));
@@ -6884,6 +6970,12 @@ impl EventLoop {
                         .handoff_tracker
                         .on_hat_activated(source_hat_id.as_str());
                 }
+                // 2026-06-14-004 U2: when a hat successfully publishes a
+                // legal event, clear its rejection retry counts so a prior
+                // scope violation does not cause a premature fuse on a
+                // later, unrelated violation.
+                self.state
+                    .clear_rejection_keys_for_hat(source_hat_id.as_str());
             }
 
             self.diagnostics.log_orchestration(
@@ -7396,6 +7488,9 @@ fn termination_status_text(reason: &TerminationReason) -> &'static str {
         }
         TerminationReason::ReviewFailed { .. } => {
             "Review verdict failed and propagated to final mirror - loop terminated."
+        }
+        TerminationReason::ScopeViolationCircuitBreakerTripped { .. } => {
+            "Isolated scope violation circuit breaker tripped - loop terminated."
         }
     }
 }

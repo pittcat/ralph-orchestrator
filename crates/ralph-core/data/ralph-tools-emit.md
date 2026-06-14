@@ -24,7 +24,9 @@ ralph emit [OPTIONS] <TOPIC> [PAYLOAD]
 
 | 参数 | 类型 | 必需 | 默认值 | 说明 |
 |------|------|------|--------|------|
-| `<TOPIC>` | string | 是 | — | 事件主题，如 `build.done`、`review.complete` |
+| `<TOPIC>` | string | 是 | — | 事件主题，如 `task.completed`、`my-event` |
+
+> ⚠️ **Hat 作用域规则（Isolated 模式）**：在 `execution_mode: isolated` 下，每个 hat 只能发布其 `publishes` 列表中声明的 topic。发布未声明的 topic 会被 `EventOriginGuard` 拒绝，并触发指向该 hat 的 `task.resume`。连续 4 次越权将触发熔断终止。上例中的 `task.completed` 和 `my-event` 仅为通用占位符，实际可发布的 topic 以当前 hat 的 `publishes` 配置为准。
 | `[PAYLOAD]` | string/json | 否 | `""` | 事件负载；配合 `-j` 可解析为 JSON 对象 |
 | `-j, --json` | flag | 否 | — | 将 payload 按 JSON 对象解析而非普通字符串 |
 | `--file <FILE>` | path | 否 | `.ralph/events.jsonl` | 目标事件文件路径 |
@@ -51,6 +53,7 @@ ralph emit [OPTIONS] <TOPIC> [PAYLOAD]
 
 **反模式 / 注意事项：**
 - 🔴 **不要**在 wave worker 内部使用 `ralph emit` 发射 wave 事件；worker 应直接通过标准输出或 `ralph emit` 返回结果，而不是触发新 wave。
+- 🔴 **发射前确认 hat 作用域**：在 isolated 模式下，发射 topic 前必须确认当前 hat 的 `publishes` 列表包含该 topic。越权 topic 会被拒绝并触发 `task.resume`，连续 4 次越权将触发熔断终止 loop。运行 `ralph hats list` 查看当前 preset 各 hat 的 publishes。
 - 🔴 `--unsafe-no-policy-check` 仅在配置显式允许时可用，否则会导致校验失败。
 - 🔴 `ralph emit` **没有** `format` 选项。
 - 🔴 试图通过 `RALPH_EVENTS_FILE` 或 `--file` 写入其他 worktree 的 events 文件会被 `ralph emit` 拒绝；错误信息会列出当前 allowlist。

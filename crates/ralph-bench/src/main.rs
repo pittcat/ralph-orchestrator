@@ -536,6 +536,9 @@ fn format_termination_reason(reason: &TerminationReason) -> String {
         TerminationReason::PayloadContractViolation => "PayloadContractViolation".to_string(),
         TerminationReason::RecoveryExhausted { .. } => "RecoveryExhausted".to_string(),
         TerminationReason::ReviewFailed { .. } => "ReviewFailed".to_string(),
+        TerminationReason::ScopeViolationCircuitBreakerTripped { .. } => {
+            "ScopeViolationCircuitBreakerTripped".to_string()
+        }
     }
 }
 

@@ -556,6 +556,16 @@ fn test_termination_reason_strings_and_flags() {
             "restart_requested",
             false,
         ),
+        (
+            TerminationReason::ScopeViolationCircuitBreakerTripped {
+                hat: "coordinator".to_string(),
+                topic: "build.done".to_string(),
+                violation_count: 4,
+                allowed_topics: vec!["work.ready".to_string(), "work.failed".to_string()],
+            },
+            "scope_violation_circuit_breaker_tripped",
+            false,
+        ),
     ];
 
     for (reason, expected_str, is_success) in cases {
@@ -566,4 +576,151 @@ fn test_termination_reason_strings_and_flags() {
             "{reason:?} success mismatch"
         );
     }
+}
+
+/// 2026-06-14-004 U2: when the isolated-scope rejection branch stores
+/// a `ScopeViolationCircuitBreakerTripped` reason in LoopState,
+/// `check_termination` must return it and consume the field.
+#[test]
+fn test_scope_violation_circuit_breaker_termination() {
+    let config = RalphConfig::default();
+    let mut event_loop = EventLoop::new(config);
+
+    let expected = TerminationReason::ScopeViolationCircuitBreakerTripped {
+        hat: "coordinator".to_string(),
+        topic: "build.done".to_string(),
+        violation_count: 4,
+        allowed_topics: vec!["work.ready".to_string(), "work.failed".to_string()],
+    };
+    event_loop.state.scope_violation_circuit_breaker_tripped = Some(expected.clone());
+
+    let result = event_loop.check_termination();
+    match result {
+        Some(TerminationReason::ScopeViolationCircuitBreakerTripped {
+            hat,
+            topic,
+            violation_count,
+            allowed_topics,
+        }) => {
+            assert_eq!(hat, "coordinator");
+            assert_eq!(topic, "build.done");
+            assert_eq!(violation_count, 4);
+            assert_eq!(allowed_topics, vec!["work.ready", "work.failed"]);
+        }
+        other => panic!("expected ScopeViolationCircuitBreakerTripped, got {other:?}"),
+    }
+
+    // The field is consumed (take()) so a second call does not return it again.
+    assert!(
+        !matches!(
+            event_loop.check_termination(),
+            Some(TerminationReason::ScopeViolationCircuitBreakerTripped { .. })
+        ),
+        "check_termination must consume the circuit-breaker field"
+    );
+}
+
+/// 2026-06-14-004 U2: rejection counter exhaustion alone does not terminate;
+/// only the circuit-breaker field set by the rejection branch does.
+#[test]
+fn test_scope_violation_below_limit_no_termination() {
+    let config = RalphConfig::default();
+    let mut event_loop = EventLoop::new(config);
+
+    // Record 3 times (at the limit, but NOT exhausted)
+    for _ in 1..=3 {
+        event_loop
+            .state
+            .record_rejection_key("coordinator:build.done:isolated_scope");
+    }
+    assert!(
+        !event_loop
+            .state
+            .rejection_key_is_exhausted("coordinator:build.done:isolated_scope")
+    );
+
+    let result = event_loop.check_termination();
+    assert!(
+        !matches!(
+            result,
+            Some(TerminationReason::ScopeViolationCircuitBreakerTripped { .. })
+        ),
+        "Circuit breaker should not trip when only the counter is below limit, got {result:?}"
+    );
+}
+
+/// 2026-06-14-004 U2: counter exhaustion without the circuit-breaker field
+/// does not terminate. This mirrors the real flow: the rejection branch
+/// increments the counter and, only on the exhausting attempt, sets the field.
+#[test]
+fn test_scope_violation_counter_exhaustion_alone_does_not_terminate() {
+    let config = RalphConfig::default();
+    let mut event_loop = EventLoop::new(config);
+
+    // Exhaust one key and partially record another.
+    for _ in 1..=4 {
+        event_loop
+            .state
+            .record_rejection_key("coordinator:build.done:isolated_scope");
+    }
+    event_loop
+        .state
+        .record_rejection_key("coordinator:review.complete:isolated_scope");
+
+    assert!(
+        event_loop
+            .state
+            .rejection_key_is_exhausted("coordinator:build.done:isolated_scope")
+    );
+    assert!(
+        !event_loop
+            .state
+            .rejection_key_is_exhausted("coordinator:review.complete:isolated_scope")
+    );
+
+    // Without the rejection branch setting `scope_violation_circuit_breaker_tripped`,
+    // check_termination must not fabricate a termination reason.
+    let result = event_loop.check_termination();
+    assert!(
+        !matches!(
+            result,
+            Some(TerminationReason::ScopeViolationCircuitBreakerTripped { .. })
+        ),
+        "Exhausted counter alone must not trigger termination, got {result:?}"
+    );
+}
+
+/// 2026-06-14-004 U2: when a hat successfully publishes a legal event,
+/// its rejection retry counts must be cleared so old violations do not
+/// cause a premature fuse on later, unrelated violations.
+#[test]
+fn test_scope_violation_counter_reset_on_accepted_event() {
+    let mut state = LoopState::new();
+
+    // Exhaust coordinator:build.done
+    for _ in 1..=4 {
+        state.record_rejection_key(
+            "workflow_guard:coordinator:build_done:isolated_scope_violation:*",
+        );
+    }
+    assert!(state.rejection_key_is_exhausted(
+        "workflow_guard:coordinator:build_done:isolated_scope_violation:*"
+    ));
+
+    // Simulate coordinator publishing a legal event.
+    state.clear_rejection_keys_for_hat("coordinator");
+
+    // The exhausted key is gone; a new violation starts from count 1.
+    assert_eq!(
+        state.rejection_retry_count(
+            "workflow_guard:coordinator:build_done:isolated_scope_violation:*"
+        ),
+        0
+    );
+    let count = state
+        .record_rejection_key("workflow_guard:coordinator:build_done:isolated_scope_violation:*");
+    assert_eq!(count, 1);
+    assert!(!state.rejection_key_is_exhausted(
+        "workflow_guard:coordinator:build_done:isolated_scope_violation:*"
+    ));
 }
