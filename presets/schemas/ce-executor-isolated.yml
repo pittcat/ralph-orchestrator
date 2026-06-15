@@ -208,6 +208,11 @@ loop.cancel:
     - reason
   payload: json_object
 
+LOOP_COMPLETE:
+  required_fields:
+    - reason
+  payload: json_object
+
 REVIEW_COMPLETE:
   required_fields:
     - plan_name

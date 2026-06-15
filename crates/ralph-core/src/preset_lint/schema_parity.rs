@@ -12,7 +12,7 @@
 //! to flag drift in CI without depending on the Rust test binary.
 
 use crate::config::RalphConfig;
-use crate::preset_lint::{LintFinding, LintSeverity};
+use crate::preset_lint::{LintFinding, LintSeverity, LintStrictness};
 use crate::preset_lint::finding_id::{
     FINDING_PUBLISHES_MISSING_SCHEMA, FINDING_SCHEMA_REFERENCE_PARITY,
 };
@@ -78,14 +78,6 @@ fn schema_missing_finding(
             "Add a `{topic}` block under event_policy.schemas in the preset, \
              or remove the topic from hat \"{hat_id}\".publishes"
         ))
-}
-
-/// Lint strictness — mirrors `crate::preset_lint::LintStrictness` so this
-/// module stays self-contained without a circular import.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LintStrictness {
-    Default,
-    Strict,
 }
 
 /// Plan 001 §4.5 R2: surface drift between inline schemas and the
@@ -212,7 +204,7 @@ fn prune_empty_mappings(value: &serde_yaml::Value) -> serde_yaml::Value {
             let mut out = serde_yaml::Mapping::new();
             for (k, v) in m.iter() {
                 let pv = prune_empty_mappings(v);
-                if is_empty_mapping(&pv) {
+                if is_empty_mapping(&pv) || is_empty_sequence(&pv) {
                     continue;
                 }
                 out.insert(k.clone(), pv);
@@ -228,6 +220,10 @@ fn prune_empty_mappings(value: &serde_yaml::Value) -> serde_yaml::Value {
 
 fn is_empty_mapping(value: &serde_yaml::Value) -> bool {
     matches!(value, serde_yaml::Value::Mapping(m) if m.is_empty())
+}
+
+fn is_empty_sequence(value: &serde_yaml::Value) -> bool {
+    matches!(value, serde_yaml::Value::Sequence(s) if s.is_empty())
 }
 
 fn yaml_key_cmp(a: &serde_yaml::Value, b: &serde_yaml::Value) -> std::cmp::Ordering {
@@ -366,5 +362,39 @@ mod tests {
         let findings =
             check_schema_reference_parity(&config, "test-preset.yml", None);
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn parity_check_treats_empty_sequence_as_absent() {
+        // Plan 001 P1-4: `required_fields: []` inline vs absent in
+        // reference must canonicalise to the same value. Without the
+        // empty-sequence prune, the parity check would falsely flag a
+        // real divergence.
+        let mut config = RalphConfig::default();
+        let mut schemas = HashMap::new();
+        schemas.insert(
+            "work.ready".to_string(),
+            EventSchema {
+                payload: Some(PayloadType::JsonObject),
+                required_fields: vec![], // empty list — canonicalised to absent
+                allowed_values: HashMap::new(),
+                hat_allowed_values: HashMap::new(),
+            },
+        );
+        config.event_loop.event_policy = Some(EventPolicyConfig {
+            enabled: true,
+            schemas,
+            ..EventPolicyConfig::default()
+        });
+        let reference = "work.ready:\n  payload: json_object\n";
+        let findings = check_schema_reference_parity(
+            &config,
+            "test-preset.yml",
+            Some(reference),
+        );
+        assert!(
+            findings.is_empty(),
+            "inline required_fields: [] should canonicalise as absent: {findings:?}"
+        );
     }
 }

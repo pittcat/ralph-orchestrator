@@ -350,6 +350,20 @@ pub fn run_preset_lint(
         run_workflow_activation_contract(config, wac_strict, source_is_builtin_embedded);
     findings.extend(lint_findings_to_contract_findings(&wac_findings));
 
+    // Plan 001 §4.5 R1: every hat `publishes` topic must have a schema
+    // entry under `event_policy.schemas`. Without this gate, the CLI
+    // pre-publish check has nothing to validate against for the topic.
+    //
+    // Note: `check_schema_reference_parity` is intentionally NOT wired
+    // here. It requires a sibling `presets/schemas/<name>.yml` reference
+    // file whose path is only known at compile time (see
+    // `crates/ralph-cli/src/presets.rs::test_ce_executor_isolated_reference_schema_matches_inline_schema`).
+    // That byte-equality test is the authoritative CI gate; `ralph preset check`
+    // relies on `check_publishes_have_schema` for runtime surfacing.
+    let schema_parity_findings =
+        schema_parity::check_publishes_have_schema(config, strictness);
+    findings.extend(lint_findings_to_contract_findings(&schema_parity_findings));
+
     // Sort by id, then topic for deterministic output.
     findings.sort_by(|a, b| {
         a.id.cmp(&b.id)

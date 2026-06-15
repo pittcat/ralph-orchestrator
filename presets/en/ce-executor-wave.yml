@@ -161,6 +161,14 @@ event_loop:
       plan.blocked:
         required_fields: [reason]
         payload: json_object
+      LOOP_COMPLETE:
+        # LOOP_COMPLETE is the orchestrator's terminal event. The reporter
+        # hat emits it after the verdict gate passes. Define an explicit
+        # schema so Plan 001 §4.5 R1 (`check_publishes_have_schema`) is
+        # satisfied — the orchestrator forwards the standard terminal
+        # payload shape used by `LoopCompletionHandler`.
+        required_fields: [reason]
+        payload: json_object
       REVIEW_COMPLETE:
         required_fields: [plan_name, verdict, pass_or_fail, residual_findings_summary]
         payload: json_object
