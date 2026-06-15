@@ -1740,12 +1740,16 @@ async fn run_loop_impl_inner(
                 use nix::unistd::getpgrp;
                 let pgid = getpgrp();
                 let our_pid = nix::unistd::Pid::this();
+                let our_pid_u32 = u32::try_from(our_pid.as_raw()).unwrap_or(0);
                 warn!(
                     target: "ralph_cli::loop_runner",
                     pid = %our_pid,
                     pgid = %pgid,
                     "Interrupt detected at loop start, sending SIGTERM to process group"
                 );
+                // Fallback: kill descendant processes that live outside the
+                // orchestrator's process group (e.g. PTY-session backends).
+                crate::cli::process_tree::kill_process_tree(our_pid_u32, false);
                 let _ = killpg(pgid, Signal::SIGTERM);
                 tokio::time::sleep(Duration::from_millis(250)).await;
                 warn!(
@@ -2700,12 +2704,16 @@ async fn run_loop_impl_inner(
                     use nix::unistd::getpgrp;
                     let pgid = getpgrp();
                     let our_pid = nix::unistd::Pid::this();
+                    let our_pid_u32 = u32::try_from(our_pid.as_raw()).unwrap_or(0);
                     warn!(
                         target: "ralph_cli::loop_runner",
                         pid = %our_pid,
                         pgid = %pgid,
                         "Runtime interrupt received, sending SIGTERM to process group"
                     );
+                    // Fallback: kill descendant processes that live outside the
+                    // orchestrator's process group (e.g. PTY-session backends).
+                    crate::cli::process_tree::kill_process_tree(our_pid_u32, false);
                     let _ = killpg(pgid, Signal::SIGTERM);
 
                     // Wait briefly for graceful exit, then SIGKILL

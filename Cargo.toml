@@ -144,6 +144,9 @@ vt100 = "0.15"
 scopeguard = "1"
 strip-ansi-escapes = "0.2"
 
+# Cross-platform process tree enumeration for reliable cleanup
+sysinfo = "0.33"
+
 # Internal crates (version required for crates.io publishing)
 ralph-proto = { version = "0.1.0", path = "crates/ralph-proto" }
 ralph-core = { version = "0.1.0", path = "crates/ralph-core", features = ["recording"] }

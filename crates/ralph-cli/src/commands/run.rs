@@ -1784,6 +1784,11 @@ async fn graceful_terminate_child(
             child_id = ?child_id,
             "graceful_terminate_child starting"
         );
+        // Fallback: kill the entire process tree so that backends spawned in
+        // separate PTY sessions cannot survive after the child is reaped.
+        if let Some(id) = child_id {
+            crate::cli::process_tree::kill_process_tree(id, true);
+        }
         send_child_signal(child_id, Signal::SIGTERM);
         let term_timeout = Duration::from_secs(5);
         match timeout(term_timeout, child.wait()).await {
@@ -2245,6 +2250,11 @@ async fn run_subprocess_tui(
             let tui_result = result;
             // App exited (e.g., user pressed 'q'); wait for the child.
             // R3: if the child does not exit promptly, terminate it.
+            // Fallback: kill the whole process tree before waiting so that
+            // PTY-session backends cannot outlive the child.
+            if let Some(id) = child_id {
+                crate::cli::process_tree::kill_process_tree(id, true);
+            }
             let status = wait_or_terminate_child(
                 &mut child,
                 child_id,

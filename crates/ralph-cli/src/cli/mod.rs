@@ -22,6 +22,7 @@ pub mod config_loader;
 pub mod emit_path;
 pub mod panic_hook;
 pub mod process_management;
+pub mod process_tree;
 pub mod shared;
 
 pub(crate) use config_loader::{

@@ -65,6 +65,9 @@ tempfile.workspace = true
 # For opening URLs in the default browser
 open.workspace = true
 
+# Cross-platform process tree enumeration for reliable cleanup on TUI quit
+sysinfo.workspace = true
+
 # For Unix process group and signal handling
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }
