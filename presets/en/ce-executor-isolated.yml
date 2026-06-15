@@ -403,6 +403,7 @@ hats:
         - `preflight_checks`: list of hard prerequisites the executor must verify before implementation
       - Stop — do not continue to other work
       - **发布 work.ready 后立即停止**——不得继续执行任何其他工作，包括模拟其他 hat 的行为或发其他事件
+      - MUST NOT append or write to `.ralph/events.jsonl` directly; use `ralph emit work.ready --json '{...}'` only. Direct shell writes bypass the schema precheck and the loop will reject the event with `payload_contract_violation` (likely terminating the loop with `not_retriable`).
 
       ### Constraints
       - MUST NOT implement code
@@ -474,6 +475,8 @@ hats:
       ```bash
       ralph emit work.done --json '{"plan_name":"my-plan","plan_path":"docs/plans/my-plan.md","task_id":"task-1747016430-a1b2","task_key":"ce-executor:my-plan:step-01:u0-impl","step":"step-01","commit_count":1,"changed_lines":42}'
       ```
+
+      MUST NOT append or write to `.ralph/events.jsonl` directly; use `ralph emit` only. Direct shell writes bypass the schema precheck and the loop will reject the event with `payload_contract_violation` (likely terminating the loop with `not_retriable`).
 
       - `build.done` is **prohibited** for the executor hat. The preset's
         `topic_deny_rules` already rejects `executor → build.done`; emitting it
@@ -1017,6 +1020,7 @@ hats:
       ### Event Publishing
       - Use the bash tool to execute: `ralph emit review.dimension.done --json '<payload>'`
       - Do NOT just write "I emit review.dimension.done" in prose — the command must actually run and the event must appear in the events file
+      - MUST NOT append or write to `.ralph/events.jsonl` directly; use `ralph emit` (or `ralph wave emit` for batch results) only. Direct shell writes bypass the schema precheck and the loop will reject the event with `payload_contract_violation` (likely terminating the loop with `not_retriable`).
       - **HARD RULE — Hat Identity**: Emit with top-level hat provenance `dimension-reviewer` (`--hat dimension-reviewer` or the runner-provided `RALPH_CURRENT_HAT`).
         Do NOT put `hat` inside the JSON payload, and do NOT change your hat name to `reviewer-standards`, `standards-reviewer`, or any variant.
         Origin guard rejects unknown top-level hats, which voids the entire review result.
@@ -1750,6 +1754,9 @@ hats:
       - Include `task_id`, `task_key`, and `step` when present so the failure report preserves task correlation.
       - Do NOT伪装为 pass.
 
+      ### Event Publishing guardrail
+      - MUST NOT append or write to `.ralph/events.jsonl` directly; use `ralph emit REVIEW_COMPLETE --json '{...}'` only. Direct shell writes bypass the schema precheck and the loop will reject the event with `payload_contract_violation` (likely terminating the loop with `not_retriable`).
+
       ### Constraints
       - MUST NOT modify code (except simplify on plan.complete, which must re-validate)
       - MUST NOT silently pass when final validation fails
@@ -1938,6 +1945,7 @@ hats:
         ```json
         {"report_path": "docs/report/.../r.md", "awaiting_decision": true, "pass_or_fail": "fail", "verdict": "fail"}
         ```
+      - MUST NOT append or write to `.ralph/events.jsonl` directly; use `ralph emit report.done --json '{...}'` (or `ralph emit LOOP_COMPLETE --json '{...}'`) only. Direct shell writes bypass the schema precheck and the loop will reject the event with `payload_contract_violation` (likely terminating the loop with `not_retriable`).
       - **HARD RULE — pass_or_fail="fail"**: If `pass_or_fail` from the `REVIEW_COMPLETE` payload is `"fail"`, the reporter MUST:
         1. NOT publish `LOOP_COMPLETE` — this is a hard gate, not advisory
         2. Write the report with an explicit "Awaiting decision" section
