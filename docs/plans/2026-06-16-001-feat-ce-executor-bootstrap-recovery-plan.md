@@ -1,12 +1,15 @@
 ---
 title: feat: ce-executor-isolated 起跑恢复（bootstrap recovery）
 type: feat
-status: active
+status: superseded
 date: 2026-06-16
 origin: docs/brainstorms/2026-06-16-ce-executor-bootstrap-recovery-requirements.md
+superseded_by: docs/plans/2026-06-16-002-feat-ce-executor-loop-stability-plan.md
 ---
 
 # feat: ce-executor-isolated 起跑恢复（bootstrap recovery）
+
+> **Superseded** by [docs/plans/2026-06-16-002-feat-ce-executor-loop-stability-plan.md](2026-06-16-002-feat-ce-executor-loop-stability-plan.md)（统一 SSOT + 全 hat 恢复 + 诊断闭环）。勿按本计划实施。
 
 ## Overview
 
