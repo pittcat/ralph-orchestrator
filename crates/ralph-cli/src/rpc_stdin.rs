@@ -179,9 +179,21 @@ where
             }
 
             RpcCommand::Abort { reason, .. } => {
-                debug!(reason = ?reason, "Received abort command");
+                warn!(
+                    target: "ralph_cli::rpc_stdin",
+                    reason = ?reason,
+                    our_pid = std::process::id(),
+                    "RpcDispatcher received Abort command, sending interrupt_tx=true"
+                );
                 match self.interrupt_tx.send(true) {
-                    Ok(()) => RpcEvent::success_response(cmd_type, id, None),
+                    Ok(()) => {
+                        info!(
+                            target: "ralph_cli::rpc_stdin",
+                            our_pid = std::process::id(),
+                            "interrupt_tx=true sent successfully"
+                        );
+                        RpcEvent::success_response(cmd_type, id, None)
+                    }
                     Err(_) => RpcEvent::error_response(cmd_type, id, "interrupt channel closed"),
                 }
             }

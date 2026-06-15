@@ -1750,7 +1750,14 @@ async fn wait_for_termination_signal() -> Option<&'static str> {
 #[cfg(unix)]
 fn send_child_signal(child_id: Option<u32>, signal: Signal) {
     if let Some(id) = child_id {
-        let _ = kill(Pid::from_raw(id as i32), signal);
+        let pid = Pid::from_raw(id as i32);
+        warn!(
+            target: "ralph_cli::commands::run",
+            child_pid = %pid,
+            ?signal,
+            "send_child_signal sending signal to child PID only"
+        );
+        let _ = kill(pid, signal);
     }
 }
 
@@ -1768,10 +1775,27 @@ async fn graceful_terminate_child(
 ) -> Option<std::process::ExitStatus> {
     #[cfg(unix)]
     {
+        let our_pid = std::process::id();
+        let our_pgid = nix::unistd::getpgrp();
+        warn!(
+            target: "ralph_cli::commands::run",
+            our_pid,
+            our_pgid = %our_pgid,
+            child_id = ?child_id,
+            "graceful_terminate_child starting"
+        );
         send_child_signal(child_id, Signal::SIGTERM);
         let term_timeout = Duration::from_secs(5);
         match timeout(term_timeout, child.wait()).await {
-            Ok(Ok(status)) => return Some(status),
+            Ok(Ok(status)) => {
+                warn!(
+                    target: "ralph_cli::commands::run",
+                    child_id = ?child_id,
+                    ?status,
+                    "Child exited cleanly after SIGTERM"
+                );
+                return Some(status);
+            }
             Ok(Err(e)) => {
                 warn!(error = %e, "Failed to wait for child after SIGTERM");
             }
@@ -2088,6 +2112,22 @@ async fn run_subprocess_tui(
 
     // R6: if spawn fails the guard above is dropped and restores the terminal.
     let child_id = child.id();
+    #[cfg(unix)]
+    {
+        use nix::unistd::getpgid;
+        let pgid = child_id
+            .and_then(|id| getpgid(Some(nix::unistd::Pid::from_raw(id as i32))).ok())
+            .map(|p| p.as_raw())
+            .unwrap_or(-1);
+        warn!(
+            target: "ralph_cli::commands::run",
+            child_id = ?child_id,
+            child_pgid = pgid,
+            our_pid = std::process::id(),
+            our_pgid = %nix::unistd::getpgrp(),
+            "run_subprocess_tui spawned child"
+        );
+    }
 
     let stdin = child
         .stdin

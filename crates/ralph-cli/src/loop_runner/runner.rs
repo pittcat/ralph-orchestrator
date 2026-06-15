@@ -1739,12 +1739,21 @@ async fn run_loop_impl_inner(
                 use nix::sys::signal::{Signal, killpg};
                 use nix::unistd::getpgrp;
                 let pgid = getpgrp();
-                debug!(
-                    "Interrupt detected at loop start, sending SIGTERM to process group {}",
-                    pgid
+                let our_pid = nix::unistd::Pid::this();
+                warn!(
+                    target: "ralph_cli::loop_runner",
+                    pid = %our_pid,
+                    pgid = %pgid,
+                    "Interrupt detected at loop start, sending SIGTERM to process group"
                 );
                 let _ = killpg(pgid, Signal::SIGTERM);
                 tokio::time::sleep(Duration::from_millis(250)).await;
+                warn!(
+                    target: "ralph_cli::loop_runner",
+                    pid = %our_pid,
+                    pgid = %pgid,
+                    "Sending SIGKILL to process group after grace period"
+                );
                 let _ = killpg(pgid, Signal::SIGKILL);
             }
             let reason = dispatch_pre_loop_termination_hooks(
@@ -2690,11 +2699,23 @@ async fn run_loop_impl_inner(
                     use nix::sys::signal::{killpg, Signal};
                     use nix::unistd::getpgrp;
                     let pgid = getpgrp();
-                    debug!("Sending SIGTERM to process group {}", pgid);
+                    let our_pid = nix::unistd::Pid::this();
+                    warn!(
+                        target: "ralph_cli::loop_runner",
+                        pid = %our_pid,
+                        pgid = %pgid,
+                        "Runtime interrupt received, sending SIGTERM to process group"
+                    );
                     let _ = killpg(pgid, Signal::SIGTERM);
 
                     // Wait briefly for graceful exit, then SIGKILL
                     tokio::time::sleep(Duration::from_millis(250)).await;
+                    warn!(
+                        target: "ralph_cli::loop_runner",
+                        pid = %our_pid,
+                        pgid = %pgid,
+                        "Sending SIGKILL to process group after grace period"
+                    );
                     let _ = killpg(pgid, Signal::SIGKILL);
                 }
 

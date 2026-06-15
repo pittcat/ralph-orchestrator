@@ -338,6 +338,14 @@ impl PtyExecutor {
             .spawn_command(cmd_builder)
             .map_err(|e| io::Error::other(e.to_string()))?;
 
+        let child_pid = child.process_id();
+        info!(
+            target: "ralph_adapters::pty_executor",
+            child_pid = ?child_pid,
+            backend_cmd = %cmd,
+            "PtyExecutor spawned backend in new PTY session"
+        );
+
         // Return stdin_input so callers can write it after taking the writer
         Ok((pair, child, stdin_input, temp_file))
     }
@@ -1776,7 +1784,11 @@ impl PtyExecutor {
         };
 
         if graceful {
-            debug!(pid = %pid, "Sending SIGTERM");
+            warn!(
+                target: "ralph_adapters::pty_executor",
+                pid = %pid,
+                "terminate_child sending SIGTERM to PTY backend PID only"
+            );
             let _ = kill(pid, Signal::SIGTERM);
 
             // Wait up to 5 seconds for graceful exit (reduced from 5s for better UX)
@@ -1796,10 +1808,19 @@ impl PtyExecutor {
             }
 
             // Still running after grace period - force kill
-            debug!(pid = %pid, "Grace period expired, sending SIGKILL");
+            warn!(
+                target: "ralph_adapters::pty_executor",
+                pid = %pid,
+                "Grace period expired, sending SIGKILL to PTY backend PID only"
+            );
+        } else {
+            warn!(
+                target: "ralph_adapters::pty_executor",
+                pid = %pid,
+                "terminate_child sending SIGKILL to PTY backend PID only"
+            );
         }
 
-        debug!(pid = %pid, "Sending SIGKILL");
         let _ = kill(pid, Signal::SIGKILL);
         Ok(())
     }

@@ -19,7 +19,7 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 const POST_EVENT_GRACE_TIMEOUT: Duration = Duration::from_secs(5);
 const TERMINATION_GRACE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -116,6 +116,23 @@ impl CliExecutor {
         }
 
         let mut child = command.spawn()?;
+
+        #[cfg(unix)]
+        {
+            use nix::unistd::getpgid;
+            let child_pid = child.id();
+            let pgid = child_pid
+                .and_then(|id| getpgid(Some(nix::unistd::Pid::from_raw(id as i32))).ok())
+                .map(|p| p.as_raw())
+                .unwrap_or(-1);
+            info!(
+                target: "ralph_adapters::cli_executor",
+                child_pid = ?child_pid,
+                child_pgid = pgid,
+                backend_cmd = %cmd,
+                "CliExecutor spawned backend"
+            );
+        }
 
         // Write to stdin if needed. Some short-lived commands can exit before
         // consuming stdin, which surfaces as BrokenPipe. Treat that as benign
@@ -293,12 +310,22 @@ impl CliExecutor {
             #[allow(clippy::cast_possible_wrap)]
             let pid = Pid::from_raw(pid as i32);
             let pgid = Pid::from_raw(-pid.as_raw());
-            debug!(%pid, "Sending SIGTERM to child process group");
+            warn!(
+                target: "ralph_adapters::cli_executor",
+                %pid,
+                pgid = %pgid,
+                "terminate_child_and_wait sending SIGTERM to backend process group"
+            );
             let _ = kill(pgid, Signal::SIGTERM);
             match tokio::time::timeout(TERMINATION_GRACE_TIMEOUT, child.wait()).await {
                 Ok(status) => status,
                 Err(_) => {
-                    warn!(%pid, "Child process ignored SIGTERM, sending SIGKILL");
+                    warn!(
+                        target: "ralph_adapters::cli_executor",
+                        %pid,
+                        pgid = %pgid,
+                        "Child process ignored SIGTERM, sending SIGKILL"
+                    );
                     let _ = kill(pgid, Signal::SIGKILL);
                     child.wait().await
                 }

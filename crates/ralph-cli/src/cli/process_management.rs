@@ -14,7 +14,7 @@
 mod unix {
     use nix::unistd::{Pid, getpgrp, setpgid, tcgetpgrp};
     use std::io::{IsTerminal, stdin, stdout};
-    use tracing::debug;
+    use tracing::{debug, info};
 
     /// Sets up process group leadership.
     ///
@@ -27,6 +27,14 @@ mod unix {
         // group can drop us out of the foreground TTY group and break TUI input.
         let pid = Pid::this();
         let pgrp = getpgrp();
+        let is_fg = is_foreground_tty_group(pgrp);
+        info!(
+            target: "ralph_cli::process_management",
+            pid = %pid,
+            pgrp = %pgrp,
+            is_foreground_tty = is_fg,
+            "setup_process_group() called"
+        );
         if pgrp == pid {
             debug!("Already process group leader: PID {}", pid);
             return;
@@ -49,7 +57,13 @@ mod unix {
                 );
             }
         }
-        debug!("Process group initialized: PID {}", pid);
+        let pgrp_after = getpgrp();
+        info!(
+            target: "ralph_cli::process_management",
+            pid = %pid,
+            pgrp_after = %pgrp_after,
+            "Process group initialized"
+        );
     }
 
     fn is_foreground_tty_group(current_pgrp: Pid) -> bool {

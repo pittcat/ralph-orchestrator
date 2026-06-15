@@ -49,12 +49,29 @@ pub(crate) fn notify_backend_quit<W: AsyncWrite + Unpin + Send + 'static>(
     rpc_writer: Option<&RpcWriter<W>>,
     interrupt_tx: Option<&watch::Sender<bool>>,
 ) {
+    info!(
+        target: "ralph_tui::app",
+        has_rpc_writer = rpc_writer.is_some(),
+        has_interrupt_tx = interrupt_tx.is_some(),
+        our_pid = std::process::id(),
+        "notify_backend_quit() called"
+    );
     if let Some(writer) = rpc_writer {
         let writer = writer.clone();
         tokio::spawn(async move {
+            info!(
+                target: "ralph_tui::app",
+                our_pid = std::process::id(),
+                "notify_backend_quit sending Abort via RPC"
+            );
             let _ = writer.send_abort().await;
         });
     } else if let Some(tx) = interrupt_tx {
+        info!(
+            target: "ralph_tui::app",
+            our_pid = std::process::id(),
+            "notify_backend_quit sending interrupt via watch channel"
+        );
         let _ = tx.send(true);
     }
 }
@@ -391,6 +408,13 @@ impl<W: AsyncWrite + Unpin + Send + 'static> App<W> {
                                     // handler above (app.rs:238-254).
                                     let action = map_key(key);
                                     if action == Action::Quit {
+                                        info!(
+                                            target: "ralph_tui::app",
+                                            our_pid = std::process::id(),
+                                            has_rpc_writer = self.rpc_writer.is_some(),
+                                            has_interrupt_tx = self.interrupt_tx.is_some(),
+                                            "Action::Quit intercepted; notifying backend before breaking"
+                                        );
                                         if let Some(ref writer) = self.rpc_writer {
                                             notify_backend_quit(
                                                 Some(writer),
