@@ -101,19 +101,28 @@ fn collect_descendants(root_pid: u32, include_root: bool) -> Vec<u32> {
     }
 
     // Protect the caller and all of its ancestors from accidental suicide.
+    //
+    // Note: `parent_map` above maps parent → children (for BFS), so we cannot
+    // use it to walk ancestors. Instead, query `process.parent()` directly
+    // via sysinfo — that gives us the real parent PID for the current PID.
     let caller_pid = std::process::id();
     let mut protected: HashSet<u32> = HashSet::new();
     protected.insert(caller_pid);
     let mut current = caller_pid;
-    while let Some(parents) = parent_map.get(&current) {
-        if parents.is_empty() {
+    // Bound the walk to PID_MAX (typically 2^22 on Linux); anything beyond is
+    // a kernel-internal ancestor that we don't care about for self-protection.
+    for _ in 0..64 {
+        let Some(parent) = sys
+            .process(sysinfo::Pid::from(current as usize))
+            .and_then(|p| p.parent())
+        else {
+            break;
+        };
+        let parent_u32 = parent.as_u32();
+        if !protected.insert(parent_u32) {
             break;
         }
-        let parent = parents[0];
-        if !protected.insert(parent) {
-            break;
-        }
-        current = parent;
+        current = parent_u32;
     }
 
     // BFS descendants, skipping protected PIDs (should never include root_pid
@@ -160,6 +169,36 @@ mod tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt;
     use std::process::{Command, Stdio};
+    use std::time::Instant;
+
+    /// Poll `child.try_wait()` until the child exits or `timeout` elapses.
+    /// Returns the exit status if the child reaped in time, otherwise panics
+    /// with a clear diagnostic instead of letting the test hang for the full
+    /// 120s sleep window.
+    fn reap_within(child: &mut std::process::Child, timeout: Duration) -> std::process::ExitStatus {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return status,
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let pid = child.id();
+                        // Last-ditch kill so the test binary doesn't leak the
+                        // sleep subprocess. Use SIGKILL to bypass any handler.
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        panic!(
+                            "child pid={pid} did not exit within {:?} after kill_process_tree; \
+                             kill_process_tree likely failed to signal the root",
+                            timeout
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => panic!("try_wait failed: {e}"),
+            }
+        }
+    }
 
     #[test]
     #[cfg(unix)]
@@ -180,8 +219,10 @@ mod tests {
 
         kill_process_tree(pid, true);
 
-        // Reap the child; it should already be dead.
-        let status = child.wait().expect("wait should succeed");
+        // Reap with a tight timeout so a regression surfaces in seconds, not
+        // 120s. kill_process_tree does SIGTERM + 800ms + SIGKILL internally,
+        // so 5s is plenty for a healthy path.
+        let status = reap_within(&mut child, Duration::from_secs(5));
         assert!(
             !status.success() || status.signal() == Some(9) || status.signal() == Some(15),
             "child should have been terminated by SIGTERM or SIGKILL, got {:?}",
@@ -207,7 +248,7 @@ mod tests {
 
         kill_process_tree(pid, true);
 
-        let status = child.wait().expect("wait should succeed");
+        let status = reap_within(&mut child, Duration::from_secs(5));
         assert!(
             !status.success() || status.signal() == Some(9) || status.signal() == Some(15),
             "child shell should have been terminated, got {:?}",
