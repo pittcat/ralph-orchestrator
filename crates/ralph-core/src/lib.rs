@@ -33,6 +33,7 @@ pub mod hat_lifecycle;
 mod hat_registry;
 mod hatless_ralph;
 pub mod hooks;
+mod emit_schema_hint;
 mod instructions;
 mod landing;
 pub mod loop_authorization;
