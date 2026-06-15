@@ -291,6 +291,12 @@ fn run_wave_precheck(
     // Plan 001 §4.3 C1/C5: `load_policy_config_for_cli_emit` additionally
     // honours `RALPH_HATS_SOURCE` so wave workers spawned by the
     // dispatcher pick up the loop's preset policy without re-passing `-H`.
+    // Plan 001 §4.3 C5: in both the explicit `--config` and the
+    // default-discovery branches, thread `RALPH_HATS_SOURCE` through
+    // `load_policy_config_for_cli_emit` so wave workers spawned by the
+    // dispatcher pick up the loop's preset policy without re-passing `-H`.
+    // The explicit `--config` branch falls through to the default
+    // loader when the file is missing so the env var still applies.
     let config = match config_overrides.first() {
         Some(path_str) => {
             let path = PathBuf::from(path_str);
@@ -301,8 +307,17 @@ fn run_wave_precheck(
                 );
                 load_policy_config_for_cli_emit(None, OnConfigError::Warn)?
             } else {
-                use crate::cli::{ConfigSource, load_config_with_overrides};
-                match load_config_with_overrides(&[ConfigSource::File(path.clone())]) {
+                use crate::preflight::load_config_for_preflight_sync;
+                let workspace_root = std::env::current_dir().unwrap_or_default();
+                let hats_source = std::env::var("RALPH_HATS_SOURCE")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| crate::cli::HatsSource::parse(&s));
+                match load_config_for_preflight_sync(
+                    &[crate::cli::ConfigSource::File(path.clone())],
+                    hats_source.as_ref(),
+                    &workspace_root,
+                ) {
                     Ok(cfg) => Some(cfg),
                     Err(e) => {
                         eprintln!(

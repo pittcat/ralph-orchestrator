@@ -108,7 +108,7 @@ fn format_fix_hint(
         publishes,
         instructions: String::new(),
     };
-    fix_hint_for_hat_topic(hat_id, &hat, topic, schema).unwrap_or_default()
+    fix_hint_for_hat_topic(&hat, topic, schema).unwrap_or_default()
 }
 
 /// Resolve provenance values for an emitted event.
@@ -135,6 +135,25 @@ where
     (hat, triggered, source)
 }
 
+/// Plan 001 §4.3 P1-8: log + surface to stderr when the recovery
+/// envelope write fails, so operators have a chance to fix the
+/// underlying disk/permissions issue. The user-facing bail still
+/// fires — only the audit trace is at risk.
+fn record_cli_emit_rejection(
+    workspace_root: &Path,
+    topic: &str,
+    hat: Option<&str>,
+    finding: &ralph_core::PolicyFinding,
+) {
+    if let Err(e) = write_cli_emit_recovery_envelope(workspace_root, topic, hat, finding) {
+        tracing::warn!("Failed to write CLI emit recovery envelope: {:#}", e);
+        eprintln!(
+            "note: could not record rejection audit to .ralph/recovery.jsonl — \
+             check disk permissions. Underlying error: {e}"
+        );
+    }
+}
+
 /// Re-exported from [`crate::policy_check`] so existing callers
 /// keep their `crate::commands::emit::PolicyCheckMode` import path.
 pub use crate::policy_check::PolicyCheckMode;
@@ -151,12 +170,6 @@ pub fn should_policy_check_emit(args: &EmitArgs, config: Option<&RalphConfig>) -
         no_policy_check: args.no_policy_check,
     };
     resolve_policy_check_mode(&flags, config)
-}
-
-/// Plan 001 §4.3 C1: clone a `HatsSource` so we can hold it on the
-/// function stack and re-borrow it past the `env::var` temporary.
-fn clone_hats_source(src: &HatsSource) -> HatsSource {
-    src.clone()
 }
 
 /// Emit an event to the current run's events file with proper JSON formatting.
@@ -276,7 +289,7 @@ fn emit_command_with_root_and_hats(
     let hats_source: Option<&HatsSource> = match (hats_source, env_source.as_ref()) {
         (Some(s), _) => Some(s),
         (None, Some(env)) => {
-            hats_source_owned = Some(clone_hats_source(env));
+            hats_source_owned = Some(env.clone());
             hats_source_owned.as_ref()
         }
         (None, None) => None,
@@ -335,11 +348,14 @@ fn emit_command_with_root_and_hats(
                         _e
                     );
                 }
-                // If a config file exists but is broken, fail closed for safety:
-                // we cannot tell whether the workspace intends strict enforcement.
-                if config_path.exists() {
+                // Plan 001 §4.3 C4 row 2: bail closed when a loop
+                // context exists (`.ralph/` present), even if no
+                // `ralph.yml` was found — the absence of ralph.yml
+                // is itself a malformed-config condition under a
+                // strict preset.
+                if config_path.exists() || workspace_root.join(".ralph").is_dir() {
                     anyhow::bail!(
-                        "Config file exists but could not be loaded: {}. \
+                        "Config file exists or loop context detected but config could not be loaded: {}. \
                          Fix the config, use --policy-check with a valid config, \
                          or use --unsafe-no-policy-check to bypass (if permitted).",
                         _e
@@ -475,14 +491,12 @@ fn emit_command_with_root_and_hats(
                     | ralph_core::PolicyDecision::Hold(finding)
                     | ralph_core::PolicyDecision::Block(finding)
                     | ralph_core::PolicyDecision::Ignore(finding) => {
-                        if let Err(e) = write_cli_emit_recovery_envelope(
+                        record_cli_emit_rejection(
                             &workspace_root,
                             &args.topic,
                             hat.as_deref(),
                             &finding,
-                        ) {
-                            tracing::warn!("Failed to write CLI emit recovery envelope: {:#}", e);
-                        }
+                        );
                         anyhow::bail!(
                             "Event rejected by policy: {}. Fix the issue before emitting.\n\n{}",
                             finding.message,
@@ -511,14 +525,12 @@ fn emit_command_with_root_and_hats(
                 | ralph_core::PolicyDecision::Hold(finding)
                 | ralph_core::PolicyDecision::Block(finding)
                 | ralph_core::PolicyDecision::Ignore(finding) => {
-                    if let Err(e) = write_cli_emit_recovery_envelope(
+                    record_cli_emit_rejection(
                         &workspace_root,
                         &args.topic,
                         hat.as_deref(),
                         &finding,
-                    ) {
-                        tracing::warn!("Failed to write CLI emit recovery envelope: {:#}", e);
-                    }
+                    );
                     anyhow::bail!(
                         "Event rejected by policy: {}. Fix the issue before emitting.\n\n{}",
                         finding.message,

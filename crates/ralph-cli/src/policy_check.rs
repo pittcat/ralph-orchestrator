@@ -339,7 +339,7 @@ pub fn validate_batch_against_config(
     Ok(BatchValidation { errors })
 }
 
-fn finding_to_validation_error(decision: &PolicyDecision, topic: &str) -> Option<ValidationError> {
+fn finding_to_validation_error(decision: &PolicyDecision, _topic: &str) -> Option<ValidationError> {
     let finding = match decision {
         PolicyDecision::Accept => return None,
         PolicyDecision::Warn(findings) => {
@@ -347,14 +347,11 @@ fn finding_to_validation_error(decision: &PolicyDecision, topic: &str) -> Option
             // accept the payload. Surfacing warns as errors here
             // would change CLI behavior compared to the loop
             // (loop writes the event + logs the warning). We follow
-            // the loop's behavior: skip the warning.
-            if let Some(first) = findings.first() {
-                // Treat Warn as a non-blocking diagnostic. We
-                // intentionally do NOT add it to validation_errors
-                // because that would reject the batch and break
-                // parity with the loop (which accepts Warn events).
-                let _ = (first, topic);
-            }
+            // the loop's behavior: skip the warning. The findings
+            // are logged via the loop's normal warning path; CLI
+            // callers can inspect the events file for the warning
+            // field if they need to surface it.
+            let _ = findings; // intentionally not propagated as errors
             return None;
         }
         PolicyDecision::RejectWithResume(f)
