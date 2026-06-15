@@ -372,6 +372,15 @@ fn test_emit_with_env_hats_source_rejects_string_payload_for_work_ready() {
         "stderr should explain rejection: {}",
         stderr
     );
+    // Plan 001 AC-4 / §4.3 C3: stderr should expose a copy-pasteable
+    // `ralph emit work.ready --json ...` example restricted to topics
+    // the active hat may publish. The legacy bare rejection would NOT
+    // contain the example line, so this assertion also catches drift.
+    assert!(
+        stderr.contains("ralph emit work.ready --json"),
+        "stderr should expose the schema-aware fix hint: {}",
+        stderr
+    );
 
     let events_file = temp_path.join(".ralph/events.jsonl");
     if events_file.exists() {
@@ -490,4 +499,47 @@ fn test_wave_emit_with_env_hats_source_rejects_missing_required_field() {
             contents
         );
     }
+}
+
+/// AC-4: when an executor-hat child process tries to emit a topic it has
+/// no authority for (e.g. `work.ready`, which only `coordinator`/`plan-gate`
+/// may publish), the rejection hint must NOT leak the unauthorised
+/// payload example. This is the hat-scoping rule from plan 001 §4.1.
+#[test]
+fn test_emit_rejection_hint_excludes_unauthorised_topics() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "emit",
+            "work.ready",
+            "garbage",
+            "--hat",
+            // executor is not in the work.ready authorised set
+            "executor",
+        ])
+        .current_dir(temp_path)
+        .env("RALPH_HATS_SOURCE", "builtin:ce-executor-isolated")
+        .env("RALPH_CURRENT_HAT", "executor")
+        .env("RALPH_EVENTS_FILE", temp_path.join(".ralph/events.jsonl"))
+        .output()
+        .expect("failed to execute ralph emit");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "executor must not be allowed to emit work.ready: stderr={}",
+        stderr
+    );
+    // When fix_hint_for_hat_topic returns None (the hat cannot publish
+    // the topic), the rejection message must not leak the example
+    // `ralph emit work.ready --json '{...}'` form — that would teach
+    // the agent to bypass provenance.
+    assert!(
+        !stderr.contains("ralph emit work.ready --json"),
+        "fix hint must not surface an unauthorised-topic payload example: {}",
+        stderr
+    );
 }

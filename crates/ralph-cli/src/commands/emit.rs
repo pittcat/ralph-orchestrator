@@ -8,13 +8,15 @@ use crate::policy_check::{PolicyCheckFlags, resolve_policy_check_mode};
 use anyhow::{Context, Result};
 use clap::Parser;
 use ralph_core::config::HatExecutionMode;
+use ralph_core::emit_schema_hint::fix_hint_for_hat_topic;
 use ralph_core::{
-    RalphConfig, UrgentSteerStore,
+    EventPolicyConfig, RalphConfig, UrgentSteerStore,
     diagnosis::{
         DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, EvidenceKind, EvidenceRef,
         RecoveryDiagnosisEnvelope, RecoveryJournalEntry,
     },
 };
+use ralph_proto::{Hat, HatId, Topic};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -56,6 +58,57 @@ pub struct EmitArgs {
     /// Source identifier for this event (falls back to $RALPH_EVENT_SOURCE)
     #[arg(long)]
     pub source: Option<String>,
+}
+
+/// Plan 001 §4.3 C3: build the hat-scoped fix hint shown to the agent when
+/// a pre-publish check rejects the event. The hat's authorised topics are
+/// looked up via the loaded `RalphConfig::hats`. When the hat is unknown,
+/// or not authorised for the topic, only the bare policy message is shown
+/// — we never leak another hat's payload shape.
+fn format_fix_hint(
+    config: &RalphConfig,
+    hat_id: Option<&str>,
+    topic: &str,
+) -> String {
+    let Some(hat_id) = hat_id else {
+        return "Set --hat <your-hat-id> (or RALPH_CURRENT_HAT) so the CLI can \
+                suggest a fix."
+            .to_string();
+    };
+
+    let Some(hat_config) = config.hats.get(hat_id) else {
+        return format!(
+            "Hat `{hat_id}` is not registered in the loaded preset; \
+             pass --hat to one of the preset's registered hats."
+        );
+    };
+
+    // Build a minimal `Hat` from the preset's `HatConfig`. Only the
+    // `publishes` list matters for `fix_hint_for_hat_topic`; the rest
+    // is dropped on the floor inside that helper.
+    let publishes: Vec<Topic> = hat_config
+        .publishes
+        .iter()
+        .map(|t| Topic::new(t.clone()))
+        .collect();
+    let schema = match config
+        .event_loop
+        .event_policy
+        .as_ref()
+        .and_then(|p| p.schemas.get(topic))
+    {
+        Some(s) => s,
+        None => return String::new(),
+    };
+    let hat = Hat {
+        id: HatId::new(hat_id),
+        name: hat_config.name.clone(),
+        description: String::new(),
+        subscriptions: vec![],
+        publishes,
+        instructions: String::new(),
+    };
+    fix_hint_for_hat_topic(hat_id, &hat, topic, schema).unwrap_or_default()
 }
 
 /// Resolve provenance values for an emitted event.
@@ -431,8 +484,9 @@ fn emit_command_with_root_and_hats(
                             tracing::warn!("Failed to write CLI emit recovery envelope: {:#}", e);
                         }
                         anyhow::bail!(
-                            "Event rejected by policy: {}. Fix the issue before emitting.",
-                            finding.message
+                            "Event rejected by policy: {}. Fix the issue before emitting.\n\n{}",
+                            finding.message,
+                            format_fix_hint(config.as_ref().unwrap(), hat.as_deref(), &args.topic)
                         );
                     }
                 }
@@ -466,8 +520,9 @@ fn emit_command_with_root_and_hats(
                         tracing::warn!("Failed to write CLI emit recovery envelope: {:#}", e);
                     }
                     anyhow::bail!(
-                        "Event rejected by policy: {}. Fix the issue before emitting.",
-                        finding.message
+                        "Event rejected by policy: {}. Fix the issue before emitting.\n\n{}",
+                        finding.message,
+                        format_fix_hint(config.as_ref().unwrap(), hat.as_deref(), &args.topic)
                     );
                 }
             }
