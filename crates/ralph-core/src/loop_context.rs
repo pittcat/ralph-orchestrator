@@ -590,25 +590,40 @@ impl LoopContext {
 
 - **Loop ID**: {}
 - **Workspace**: {}
-- **Main Repo**: {}
 - **Branch**: {}
 - **Created**: {}
 - **Prompt**: "{}"
 
+## CRITICAL — Workspace Isolation
+
+This is a worktree-based parallel loop. All file operations (reads, writes,
+edits, deletes, and any tool that touches the filesystem) **MUST** be performed
+within the **Workspace** path above. Do **NOT** write files to any other path —
+especially not the main repository checkout that lives outside the worktree.
+
+- Use the **Workspace** path above (or the `RALPH_WORKSPACE_ROOT` environment
+  variable) as the root for all relative paths and tool operations.
+- Treat the main repository as read-only context only. If a tool reports a
+  path that resolves outside the Workspace, reject it and re-anchor to the
+  Workspace before proceeding.
+- Shared metadata (`.ralph/agent/memories.md`, `.ralph/specs/`,
+  `.ralph/tasks/`) is accessed through symlinks that resolve inside the
+  Workspace; do not chase those symlinks back to the main repository.
+
 ## Notes
 
-This is a worktree-based parallel loop. The following resources are symlinked
-to the main repository:
+The following resources are symlinked to the main repository and resolve
+inside the Workspace:
 
 - `.ralph/agent/memories.md` → shared memories
 - `.ralph/specs/` → shared specifications
 - `.ralph/tasks/` → shared code task files
 
-Local state (scratchpad, runtime tasks, events) is isolated to this worktree.
+Local state (scratchpad, runtime tasks, events, this `context.md`) is isolated
+to this worktree.
 "#,
             loop_id,
             self.workspace.display(),
-            self.repo_root.display(),
             branch,
             created,
             prompt_preview
@@ -1079,6 +1094,72 @@ mod tests {
             .generate_context_file("ralph/loop-1234", "Add footer")
             .unwrap();
         assert!(!created_again);
+    }
+
+    /// Regression test for the worktree-context main-repo leak fix
+    /// (plan 2026-06-15-002). The agent-visible `context.md` must NOT
+    /// contain the main repository absolute path, and it MUST instruct
+    /// the agent that all file operations stay inside the workspace.
+    #[test]
+    fn test_generate_context_file_worktree_hides_main_repo_path() {
+        let temp = TempDir::new().unwrap();
+        let repo_root = temp.path().to_path_buf();
+        let worktree_path = repo_root.join(".worktrees/loop-isolation");
+
+        let ctx = LoopContext::worktree(
+            "loop-isolation",
+            worktree_path.clone(),
+            repo_root.clone(),
+        );
+
+        ctx.ensure_agent_dir().unwrap();
+        ctx.generate_context_file("ralph/loop-isolation", "noop")
+            .unwrap();
+
+        let content = std::fs::read_to_string(ctx.context_path()).unwrap();
+        let repo_root_str = repo_root.to_string_lossy().into_owned();
+
+        // R1: the `**Main Repo**` metadata field must be gone. This is
+        // the canonical leak surface — every agent that previously read
+        // `context.md` could pluck the path straight off the bullet list.
+        assert!(
+            !content.contains("**Main Repo**"),
+            "context.md still contains the **Main Repo** metadata field; this is the leak surface"
+        );
+
+        // R1 (stronger): outside the **Workspace** line, the repo
+        // root must not appear as a standalone value. The workspace
+        // path is a parent directory of the worktree, so a naive
+        // `contains` check would always match the workspace line —
+        // drop that line and assert the rest of the file is clean.
+        let content_minus_workspace: String = content
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("- **Workspace**:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !content_minus_workspace.contains(&repo_root_str),
+            "context.md leaked the main repo path outside the **Workspace** line: {repo_root_str}\n--- content (workspace line removed) ---\n{content_minus_workspace}"
+        );
+
+        // R2: the workspace-only isolation rule must be present, and it
+        // must reference the canonical RALPH_WORKSPACE_ROOT env var.
+        assert!(
+            content.contains("## CRITICAL — Workspace Isolation"),
+            "context.md is missing the CRITICAL workspace isolation block"
+        );
+        assert!(
+            content.contains("Workspace"),
+            "context.md must mention the workspace path"
+        );
+        assert!(
+            content.contains("RALPH_WORKSPACE_ROOT"),
+            "context.md must reference RALPH_WORKSPACE_ROOT"
+        );
+        assert!(
+            content.contains("MUST"),
+            "context.md must use strong language to constrain file ops"
+        );
     }
 
     #[cfg(unix)]
