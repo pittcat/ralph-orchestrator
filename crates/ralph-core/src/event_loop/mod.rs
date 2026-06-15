@@ -1527,6 +1527,14 @@ impl EventLoop {
         use crate::wave_detection::WaveRejection;
         use std::collections::HashMap;
 
+        // DEBUG: 添加入口日志
+        let input_event_count = events.len();
+        tracing::debug!(
+            isolated_hat = %isolated_hat.as_str(),
+            input_event_count = input_event_count,
+            "enforce_wave_isolated_scope entry"
+        );
+
         // Group by wave_id, preserving first-seen order. Wave counts
         // per read batch are bounded by `max_wave_total` (default 64),
         // so a Vec is fine for the order book; HashMap gives O(1) lookup.
@@ -1539,6 +1547,13 @@ impl EventLoop {
             }
             groups.entry(key).or_default().push(event);
         }
+
+        // DEBUG: 记录分组结果
+        tracing::debug!(
+            wave_groups = order.len(),
+            total_events = input_event_count,
+            "wave grouping result"
+        );
 
         let mut kept: Vec<crate::event_reader::Event> = Vec::new();
         // Tracks whether ANY distinct `wave_id` has been observed in
@@ -1564,7 +1579,16 @@ impl EventLoop {
                 // — a second wave is never silently absorbed by the
                 // scope check.
                 if let Some(out_of_scope_topic) = group.iter().find_map(|e| {
-                    if self.isolated_publish_allowed(isolated_hat, e.topic.as_str()) {
+                    // DEBUG: 添加调试日志追踪每个事件的 scope 检查
+                    let allowed = self.isolated_publish_allowed(isolated_hat, e.topic.as_str());
+                    tracing::debug!(
+                        wave_id = %wave_id,
+                        event_hat = ?e.hat.as_deref(),
+                        topic = %e.topic,
+                        allowed = %allowed,
+                        "isolated scope check for wave event"
+                    );
+                    if allowed {
                         None
                     } else {
                         Some(e.topic.to_string())
@@ -5203,6 +5227,26 @@ impl EventLoop {
         &mut self,
         result: crate::event_reader::ParseResult,
     ) -> std::io::Result<ProcessedEvents> {
+        // DEBUG: 添加入口日志记录所有输入事件
+        let event_count = result.events.len();
+        let malformed_count = result.malformed.len();
+        tracing::debug!(
+            iteration = self.state.iteration,
+            valid_events = event_count,
+            malformed_events = malformed_count,
+            "process_parse_result entry - events received"
+        );
+        // DEBUG: 记录前几个事件的详情用于调试
+        for (i, evt) in result.events.iter().take(5).enumerate() {
+            tracing::debug!(
+                index = i,
+                hat = ?evt.hat.as_deref(),
+                topic = %evt.topic,
+                ts = %evt.ts,
+                "event detail"
+            );
+        }
+
         // U6: capture payload contract violation produced by event policy
         // validation. The loop runner will read this and pause with a
         // diagnostic.
