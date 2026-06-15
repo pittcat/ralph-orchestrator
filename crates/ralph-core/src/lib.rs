@@ -210,7 +210,8 @@ pub use workspace::{
     WorkspaceManager,
 };
 pub use worktree::{
-    SyncStats, Worktree, WorktreeConfig, WorktreeError, create_worktree, ensure_gitignore,
+    ReusableWorktree, SyncStats, Worktree, WorktreeConfig, WorktreeError,
+    clean_worktree_runtime_artifacts, create_worktree, ensure_gitignore, find_reusable_worktree,
     list_ralph_worktrees, list_worktrees, remove_worktree, sync_working_directory_to_worktree,
     worktree_exists,
 };

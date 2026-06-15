@@ -512,6 +512,7 @@ async fn main() -> Result<()> {
                 no_auto_merge: false,
                 worktree: false,
                 worktree_path: None,
+                reuse_worktree: false,
                 skip_preflight: false,
                 no_sync_agent_docs: false,
                 verbose: false,

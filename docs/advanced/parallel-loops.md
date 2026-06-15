@@ -45,6 +45,14 @@ ralph run --exclusive -p "Task that needs main workspace"
 
 # Skip auto-merge (keep worktree for manual handling)
 ralph run --no-auto-merge -p "Experimental feature"
+
+# Reuse an existing completed worktree for the same prompt/plan
+# instead of creating a new one. The previous worktree's branch and
+# code state are preserved; only its runtime artifacts (events,
+# scratchpad, tasks, summary, handoff, diagnostics) are cleaned before
+# the new loop starts. If no matching worktree is found, the run
+# falls back to creating a new one.
+ralph run --worktree --reuse-worktree -P "fix-header.md"
 ```
 
 ## Loop States

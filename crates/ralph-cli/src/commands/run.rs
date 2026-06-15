@@ -9,7 +9,10 @@ use ralph_core::{
     CheckStatus, LockError, LockGuard, LockMetadata, LockStatus, LoopContext, LoopEntry, LoopLock,
     LoopRegistry, PreflightReport, PreflightRunner, RalphConfig, TerminationReason,
     truncate_with_ellipsis,
-    worktree::{WorktreeConfig, create_worktree, ensure_gitignore, remove_worktree},
+    worktree::{
+        WorktreeConfig, clean_worktree_runtime_artifacts, create_worktree, ensure_gitignore,
+        find_reusable_worktree, remove_worktree,
+    },
 };
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -135,6 +138,27 @@ pub struct RunArgs {
     /// Not intended for direct user use.
     #[arg(long, hide = true)]
     pub worktree_path: Option<PathBuf>,
+
+    /// Reuse an existing, completed worktree for this run instead of
+    /// creating a new one. Only valid with `--worktree`.
+    ///
+    /// When the prompt-derived loop name prefix matches a previously
+    /// completed worktree listed in `.ralph/loops.json`, that
+    /// worktree's directory is reused (preserving its branch and code
+    /// state) and only its runtime artifacts (events, scratchpad,
+    /// tasks, summary, handoff, diagnostics) are cleaned up before
+    /// the new loop starts.
+    ///
+    /// If no matching worktree is found, the run falls back to the
+    /// default behavior of creating a new worktree and prints a
+    /// notice explaining why. A worktree whose loop is still running
+    /// is never reused; the runner always spawns a fresh worktree
+    /// for it.
+    ///
+    /// Cannot be used with `--exclusive` (the two flags address
+    /// different concurrency regimes).
+    #[arg(long, requires = "worktree", conflicts_with = "exclusive")]
+    pub reuse_worktree: bool,
 
     // ─────────────────────────────────────────────────────────────────────────
     // Phase Options (Warmup/Production Two-Phase Loop)
@@ -786,28 +810,109 @@ pub async fn run_command(
     let (loop_context, _lock_guard) = if args.worktree {
         // Explicit --worktree flag: create worktree directly without acquiring lock
         // Worktree mode does not hold .ralph/loop.lock - it's fully isolated
-        debug!("Creating worktree for explicit --worktree mode");
-        let (wt_ctx, _wt_guard) = spawn_worktree_loop(
-            workspace_root,
-            &prompt_summary,
-            worktree_file_name_prefix.as_deref(),
-            &config.features.loop_naming,
-            &mut pending_worktree_registration,
-        )?;
-        // P1-F (2026-06-10): when the parent itself creates the worktree
-        // and then spawns a child RPC, the child MUST NOT receive
-        // `--worktree` (it would create a *second* worktree inside the
-        // parent's). Pass the worktree path instead so the child
-        // chdir's into the parent's worktree and runs there. Without
-        // this, the child sees `--worktree`, hits the same `args.worktree`
-        // branch, and spawns a nested worktree — the parent loop_context
-        // points at the first worktree (orphaned), the child runs in the
-        // second (different path), and LoopRegistry registers the first
-        // (inconsistent). See findings-correctness-task-*.json for the
-        // full causal chain.
-        subprocess_tui_args.worktree = false;
-        subprocess_tui_args.worktree_path = Some(wt_ctx.workspace().to_path_buf());
-        (wt_ctx, None)
+        //
+        // 2026-06-14-001: when `--reuse-worktree` is also set, look up an
+        // existing completed worktree for this prompt prefix. If we
+        // find one, clean its runtime artifacts and reuse its
+        // directory. Otherwise fall through to the existing
+        // "create new worktree" path so the user is not blocked.
+        if args.reuse_worktree {
+            debug!("Reusing worktree for explicit --worktree --reuse-worktree mode");
+            let reuse_result = find_reusable_worktree(workspace_root, worktree_file_name_prefix.as_deref().unwrap_or(""));
+            match reuse_result {
+                Ok(Some(reusable)) => {
+                    info!(
+                        "Reusing worktree at {} (loop_id={})",
+                        reusable.path.display(),
+                        reusable.loop_id
+                    );
+                    clean_worktree_runtime_artifacts(&reusable.path)
+                        .context("Failed to clean runtime artifacts in reused worktree")?;
+                    info!("Cleaned runtime artifacts in reused worktree");
+
+                    // Re-create the worktree's symlinks (in case the
+                    // previous loop removed them) and refresh the
+                    // context file metadata. setup_worktree_symlinks
+                    // is idempotent — it skips existing symlinks.
+                    let reused_ctx = LoopContext::worktree(
+                        reusable.loop_id.clone(),
+                        reusable.path.clone(),
+                        workspace_root.clone(),
+                    );
+                    reused_ctx
+                        .setup_worktree_symlinks()
+                        .context("Failed to refresh symlinks in reused worktree")?;
+                    reused_ctx
+                        .generate_context_file(&reusable.branch, &prompt_summary)
+                        .context("Failed to refresh context file in reused worktree")?;
+                    // PROMPT.md sync (mirrors the create path) so
+                    // the agent reads its prompt from the worktree.
+                    sync_prompt_to_worktree(workspace_root, &reusable.path);
+
+                    // Register a new loop entry pointing at the same
+                    // worktree. The previous (dead-PID) entry is
+                    // replaced by register's same-PID guard or
+                    // simply ages out via the registry's own cleanup.
+                    let entry = LoopEntry::with_id(
+                        &reusable.loop_id,
+                        &prompt_summary,
+                        Some(reusable.path.to_string_lossy().to_string()),
+                        reusable.path.to_string_lossy().to_string(),
+                    );
+                    *&mut pending_worktree_registration = Some(entry);
+
+                    // Hand the reused context to the rest of the
+                    // pipeline exactly like a freshly-created one.
+                    subprocess_tui_args.worktree = false;
+                    subprocess_tui_args.worktree_path = Some(reused_ctx.workspace().to_path_buf());
+                    (reused_ctx, None)
+                }
+                Ok(None) => {
+                    info!(
+                        "No reusable worktree found for prefix '{}', creating new worktree",
+                        worktree_file_name_prefix.as_deref().unwrap_or("")
+                    );
+                    let (wt_ctx, _wt_guard) = spawn_worktree_loop(
+                        workspace_root,
+                        &prompt_summary,
+                        worktree_file_name_prefix.as_deref(),
+                        &config.features.loop_naming,
+                        &mut pending_worktree_registration,
+                    )?;
+                    subprocess_tui_args.worktree = false;
+                    subprocess_tui_args.worktree_path = Some(wt_ctx.workspace().to_path_buf());
+                    (wt_ctx, None)
+                }
+                Err(e) => {
+                    return Err(anyhow::Error::new(e).context(
+                        "Failed to look up reusable worktree; aborting to avoid stale state",
+                    ));
+                }
+            }
+        } else {
+            debug!("Creating worktree for explicit --worktree mode");
+            let (wt_ctx, _wt_guard) = spawn_worktree_loop(
+                workspace_root,
+                &prompt_summary,
+                worktree_file_name_prefix.as_deref(),
+                &config.features.loop_naming,
+                &mut pending_worktree_registration,
+            )?;
+            // P1-F (2026-06-10): when the parent itself creates the worktree
+            // and then spawns a child RPC, the child MUST NOT receive
+            // `--worktree` (it would create a *second* worktree inside the
+            // parent's). Pass the worktree path instead so the child
+            // chdir's into the parent's worktree and runs there. Without
+            // this, the child sees `--worktree`, hits the same `args.worktree`
+            // branch, and spawns a nested worktree — the parent loop_context
+            // points at the first worktree (orphaned), the child runs in the
+            // second (different path), and LoopRegistry registers the first
+            // (inconsistent). See findings-correctness-task-*.json for the
+            // full causal chain.
+            subprocess_tui_args.worktree = false;
+            subprocess_tui_args.worktree_path = Some(wt_ctx.workspace().to_path_buf());
+            (wt_ctx, None)
+        }
     } else if args.worktree_path.is_some() {
         // U2 (2026-06-10): child received --worktree-path from parent: the worktree
         // was already created by the parent, so we skip spawn_worktree_loop and
@@ -2222,6 +2327,7 @@ pub(crate) fn default_run_args() -> RunArgs {
         no_auto_merge: false,
         worktree: false,
         worktree_path: None,
+        reuse_worktree: false,
         skip_preflight: true,
         no_sync_agent_docs: false,
         verbose: false,
