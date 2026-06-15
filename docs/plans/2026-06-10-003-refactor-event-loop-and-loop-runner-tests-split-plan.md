@@ -4,18 +4,19 @@ type: refactor
 status: stalled-after-U1
 date: 2026-06-10
 baseline_refreshed: 2026-06-15
-baseline_head: 40b856c
+baseline_head: ab44494
 baseline_head_v1: 37bd281
 baseline_head_v2: 918192a
 baseline_head_v3: 9799bf9
 baseline_head_v4: dbe6f35
 baseline_head_v5: 40b856c
+baseline_head_v6: ab44494
 completion:
   - U1: scaffold 仅在 `ralph/2026-06-10-003-...-merry-wren` 分支 commit `b11d9f0` 落地，**未合并**到 pittcat-dev / main
   - U2-U7: 未开工
 landed_in_HEAD:
-  - event_loop/mod.rs 仍为单文件 (7 496 行)
-  - loop_runner/tests.rs 仍为单文件 (11 796 行 / 204 测试)
+  - event_loop/mod.rs 仍为单文件 (7 514 行)
+  - loop_runner/tests.rs 仍为单文件 (11 800 行 / 203 测试)
   - audit-file-sizes.sh 仅 wc event_loop/tests/* (未含 event_loop/ 根子文件)
 ---
 
@@ -41,16 +42,19 @@ landed_in_HEAD:
 |---|---|---|---|---|
 | `event_loop/mod.rs` 总行数 | 6 723 | 7 171 | **7 496** | +325 |
 | `loop_runner/tests.rs` 总行数 | 11 606 | 11 796 | **11 796** | 0（未变） |
-| `loop_runner/tests.rs` `#[test]` 数 | 201 | 203 | **204** | +1 |
+| `loop_runner/tests.rs` `#[test]` 数 | 201 | 203 | **203** | 0（v5 表格原标 204 实测为 203，校正） |
 | `EventLoop` struct 字段数 | 14 | 14 | **15** | +1（新增 `ephemeral_isolation`） |
 | `TerminationReason` 变体数 | 16 | 16 | **17** | +1（新增 `ScopeViolationCircuitBreakerTripped`） |
 | `impl EventLoop` 方法数 | 118 | 120 | **129** | +9（新增 R1/R3/R4/R5 路径方法 + circuit breaker） |
 | `event_loop/tests/` 子文件数 | 41 | 44 | **49** | +5（新增 `ephemeral_isolation_integration` / `r5_hard_gate_routing` / `wave_context_env_var` / `wave_context_injection` / `wave_isolated_scope`，可能略有出入） |
 | `process_parse_result` 起始行 | ~3 304 | 4 921 | **5 184** | +263（被前置代码推移） |
-| `process_parse_result` 结束行 | ~4 921 | 6 780 | **~7 102** | 方法体 ~1 918 行（v4 ~1 860） |
+| `process_parse_result` 结束行 | ~4 921 | 6 780 | **~7 448**（impl 闭合，下一 fn `format_duration` 在 7 450） | v5 表格原标 ~7 102 系估值误差，已校正 |
+| `process_parse_result` 行数 | ~1 617 | ~1 860 | **~2 264** | v5 表格原标 ~1 918 系估值误差，已校正（method 相对位置不变，绝对下移 +263 = v4→v5 总行数差） |
 | `impl EventLoop` 起 / 止 | ?  | 962 / 7 114 | **1 019 / 7 436** | +57 / +322 |
 | 自由函数行号锚点 | — | 324 / 407 / 587 / 893 | `extract_correlation_key` 390 / `apply_workflow_guard_validation` 473 / `apply_event_policy_validation` 652 / `finding_to_payload_contract_violation` 950 | 全部 +60~80 |
 | **`publish_policy_rejection_resume`** | 未存在 | 未存在 | **344**（新增自由函数） | 新增 1 个 |
+| `lib.rs` config / event_loop re-export 行号 | 80 / 104 | 80 / 104 | **80 / 104** | 0（不变） |
+| `loop_runner/` `.rs` 总数 | 29 | 29 | **29** | 0（不变） |
 
 **v4 → v5 关键变更（2 个 commit）**：
 
@@ -66,7 +70,7 @@ landed_in_HEAD:
 5. **U1 scaffold 不能直接 cherry-pick**：commit `b11d9f0` 基于 `4029be3` 创建 placeholder，与 v5 之间相隔 R1/R3/R4/R5 接入 + circuit breaker 的多个 mod.rs 大改，rebase 必然冲突。**推荐**：放弃 cherry-pick，在 pittcat-dev 直接重新做 U1（创建 10 个 placeholder 子文件 + audit-script 扩展 + 顶部 `mod xxx;` 声明），代价 < 1 小时。
 6. **`event_loop/tests/` 子文件数已从 v4 的 44 涨到 v5 的 49**（新增 5 个 R1/R3/R4/R5 集成测试文件），R3 列出的"44 个 `event_loop/tests/` 子文件"过时，但本计划不动这个目录的内容，仅需更新数字。
 
-**`loop_runner/tests.rs` 11 796 行 / 204 测试 vs v4 的 203 测试**：差 1 个测试（可能来自 v4→v5 期间的某个 PR 单测增加，未细查；总行数 11 796 与 v4 一致是因为测试增加被其他重构抵消，参考价值不大）。
+**`loop_runner/tests.rs` 11 796 行 / 203 测试（v5 表格原标 204 系 awk 计数误差，v6 校实测 = 203）vs v4 的 203 测试**：v5 实际测试数与 v4 一致；总行数 11 796 与 v4 一致是因为 v5 期间测试增加被其他重构抵消（v5 表格中 v4→v5 +0 / +1 实际是 +0 / +0）。
 
 ## Summary
 
@@ -1156,3 +1160,147 @@ git grep -nE "loop_runner/tests\.rs\b" docs/ crates/ --include="*.md" --include=
 ---
 
 （U3-U6 每 U 完成时追加 Sub-Note；U7 合并为完整表格。模板参考 `docs/plans/2026-06-03-003-refactor-schema-refs-replace-regex-plan.md` 的 "Repo Drift Note" 段。v1 / v2 / v3 / v4 baseline refresh 段已就地追加；v4 段追加在 v3 段之后。）
+
+## Plan Baseline Refresh v6 (2026-06-15, baseline @ ab44494)
+
+v5 baseline refresh 落地后到本次 v6 之间，repo HEAD 推进到 `ab44494`，目标文件与若干契约再次出现偏差。本段记录**v6 已就地更新的事实**与**v5→v6 期间增量 commits 的影响**，与 v1 / v2 / v3 / v4 / v5 段并列。
+
+### v5→v6 期间增量 commits (40b856c..ab44494, 13 commits)
+
+| commit | type | 影响 | 关联 baseline 数字 |
+|---|---|---|---|
+| `34970fd` | fix(ralph-cli,ralph-core) | isolated 模式下强制 hat provenance 并修复 wave aggregate timeout | `loop_runner/execution.rs` +22 / `loop_runner/paths.rs` +42 / `loop_runner/runner.rs` +48 / `wave/dispatcher.rs` +96 / `wave/io.rs` -17 |
+| `49d7779` | feat(ralph-core) | 新增 emit_schema_hint 共享模块（plan 001 phase 0） | `lib.rs` 新增 `pub mod emit_schema_hint;` + `pub use emit_schema_hint::{...}` |
+| `20195df` | feat(ralph-core) | InstructionBuilder schema-aware（plan 001 phase 1） | `mod.rs` +22 行（`impl EventLoop` 两处构造点改为 `with_publish_schemas`） |
+| `696de53` | feat(ralph-cli) | C 预检 — emit/wave 经 RALPH_HATS_SOURCE 闭合 loop 子进程路径（plan 001 phase 2） | `tests.rs` +2 行（`inject_hat_execution_env` 多一个 `Option<String>` 参数）；新增 `loop_runner/hat_channel.rs`（189 行）|
+| `993748e` | feat(ralph-core,ralph-cli) | schema parity + lint 检查（plan 001 phase 3） | 间接影响（preset 校验 / schema 定义）|
+| `d08b6cf` | docs(preset,tools) | 禁止直写 events.jsonl + 显式 ralph emit 路径（plan 001 phase 5） | 文档同步（`crates/ralph-core/data/ralph-tools*.md`） |
+| `1fcd1e2` | fix(ralph-cli) | C3 hat-scoped fix hint 在 pre-publish 拒错时实际生效（plan 001 review） | `lib.rs` 把 emit_schema_hint 提到 `pub mod` |
+| `b8c77e2` | fix(ralph-core) | emit_schema_hint 使用 Topic::matches_str 一致性（plan 001 review P0） | emit_schema_hint 内部实现微调 |
+| `d9980d3` | fix(ralph-core,presets) | 接通 check_publishes_have_schema 到 run_preset_lint + 补 LOOP_COMPLETE schema 覆盖 | preset lint 接线；schema 覆盖 |
+| `e840443` | fix(ralph-cli) | wave worker 显式接收 hats_source_label（plan 001 review P0-3） | `tests.rs` +2 行（`make_wave_with_count` / `inject_hat_execution_env` 调用点）|
+| `cba9f32` | fix(ralph-cli) | emit.rs fail-closed / envelope stderr / wave --config 合一 | emit 路径强化（与本计划无关） |
+| `ab44494` | docs(plan,report) | 切换 PROMPT 到 plan 003 + 新增 schema-aware hat emit 计划与 work-ready 诊断报告 | 文档同步（`docs/plans/2026-06-15-001-...` 自身） |
+
+### v5→v6 数字 / 事实更新（已就地修订）
+
+| 项目 | v5 @ 40b856c | **v6 @ ab44494** | 漂移 | 影响段落 |
+|---|---|---|---|---|
+| `event_loop/mod.rs` 行数 | 7 496 | **7 514** | +18 | Summary, Problem Frame, HTD 图, U3-U5, Sources |
+| `loop_runner/tests.rs` 行数 | 11 796 | **11 800** | +4 | Summary, Problem Frame, HTD 图, U7, Sources |
+| `loop_runner/tests.rs` 测试数 | 203 | **203** | 0 | Summary, Problem Frame, Verification, Sources |
+| `EventLoop` 字段数 | 15 | **15** | 0 | R2, KTD5, KTD13, R-Refactor-2, Verification |
+| `EventLoop` 起始行号 | 286 | **286**（不变） | 0 | R-Refactor-2 awk 校验 |
+| `TerminationReason` 变体数 | 17 | **17** | 0 | R2, KTD5, R-Refactor-1, Verification |
+| `TerminationReason` 起始行号 | 131 | **131**（不变） | 0 | U3 / R-Refactor-1 |
+| `extract_correlation_key` 行号 | 390 | **390**（不变） | 0 | U3, U4 |
+| `apply_workflow_guard_validation` 行号 | 473 | **473**（不变） | 0 | U3, U4 |
+| `apply_event_policy_validation` 行号 | 652 | **652**（不变） | 0 | U3, U4 |
+| `finding_to_payload_contract_violation` 行号 | 950 | **950**（不变） | 0 | U3, U4 |
+| `publish_policy_rejection_resume` 行号 | 344 | **344**（不变） | 0 | U3, U4（policy.rs 归属决策） |
+| `impl EventLoop` 起始行号 | 1 019 | **1 019**（不变） | 0 | U5, KTD5 |
+| `impl EventLoop` 方法数 | 129 | **129**（不变） | 0 | U5, R-Refactor-2, Verification |
+| `process_parse_result` 起始行 | 5 184 | **5 202** | +18 | U3-U6 引用 |
+| `process_parse_result` 结束行（impl 闭合） | ~7 448 | **~7 466** | +18 | U5, U6 |
+| `format_duration` 行号 | 7 450 | **7 468** | +18 | U5, HTD 图 |
+| `termination_status_text` 行号 | 7 466 | **7 484** | +18 | U5, HTD 图 |
+| mod.rs 总行数（end） | 7 496 | **7 514** | +18 | Summary, Sources, R-Refactor-1, HTD 图 |
+| `review_step_state.rs` 行数 | (v5 表格未标) | **623** | — | Summary, U1, U5, HTD 图, Sources |
+| `event_loop/tests/` 子文件数 | 49 | **49** | 0 | Problem Frame, U2, U4, U7 |
+| `event_loop/tests/` 新增 / 删除 | (v5 新增 5 个 R1/R3/R4/R5) | **0** | 0 | U2, U7, Sources |
+| `loop_runner/` `.rs` 总数 | 29 | **30** | +1（新增 `hat_channel.rs`，189 行）| Problem Frame, Sources |
+| `lib.rs` config re-export 行号 | 80 | **84** | +4 | R3, KTD2, Sources, Verification |
+| `lib.rs` event_loop re-export 行号 | 104 | **108** | +4 | R3, KTD2, Sources, Verification |
+| `lib.rs` 新增 re-export（v5 已有 `PolicyRejection`）| — | **`pub mod emit_schema_hint;`** + **`pub use emit_schema_hint::{build_publish_emit_section, fix_hint_for_hat_topic, format_emit_json_example};`** + **`pub use event_policy::{..., validate_event_with_hat};`** | 3 项新增 | R3 注释（R3 公开 API 列表本身**仍禁止修改**，本轮新增项是 plan 001 配套，**未触及** event_loop re-export 列表）|
+
+### v5→v6 期间未变化的契约
+
+1. **Mutex 拓扑（4 个）**：tests.rs 内 2 个 `FAKE_PATH_BACKEND_*` (private `static`，行号 605 / 609) + acp_mock.rs 内 2 个 `MOCK_ACP_*` (`pub static`，行号 97 / 102)，行号 +0（Mutex 段未受 plan 001 配套 commit 影响）。
+2. **`MOCK_ACP_*` Mutex 段 `pub static` 形式不变**：v5→v6 期间 `wave/acp_mock.rs` 0 行变更。
+3. **`TerminationReason` 17 变体顺序**：v5→v6 期间变体集合与顺序未变。
+4. **`EventLoop` 15 字段顺序**：v5→v6 期间字段集合与顺序未变（`InstructionBuilder::with_publish_schemas` 仅修改两处构造点的 2 行，不影响 struct 字段定义）。
+5. **KTD6 U1→U7 风险递增顺序**：不变。
+6. **KTD12 5 域边界规则**：不变。
+7. **R6 零回归原则**：不变。
+8. **6 个 inline validation 层**（origin guard / topic format / event policy / state machine / workflow guard / execution contract）：不变；`process_parse_result` 行数仍 ~2 264（v6 测 = 7466 - 5202 = 2 264，与 v5 测 = 7448 - 5184 = 2 264 一致；method 内部无新增逻辑，仅前后被 +18 行整体下移）。
+9. **Scope Boundaries 范围内 / 范围外清单**：不变。
+10. **2 个主文件 R1 阈值（≤ 1 000 行）**：不变（mod.rs 7 514 + tests.rs 11 800 仍远超阈值）。
+11. **`event_loop/tests/` 49 个子文件不动**：v5→v6 期间除 `review_step_gate.rs` +2 行（commit `e840443` 配套）外其余 48 个**不动**。
+12. **`publish_policy_rejection_resume` 行号 344 不变**：v5→v6 期间未变，U4 重新切片时仍以 344 为起点。
+
+### v6 baseline refresh 决策树
+
+- **若 U1 分支 rebase 前 repo 又推进 N commits**：重跑 8 条 baseline 命令（见 v1 / v2 / v3 / v4 段），按 v6 模板追加新一列（v7 / v8 ...）；v6 本段不删（作为历史）。
+- **若 v6 之后 `EventLoop` 字段数再次变化**：在 v6 表格中追加行 + 注明增量字段名 + commit hash；不删除旧行。
+- **若 v6 之后 `process_parse_result` 行数再次变化**：KTD5 / KTD6 / U5 / U6 / Verification 段同步更新（已在 v6 段就地修订——method 内部相对位置不变，绝对下移由总行数差决定）。
+- **若 v6 之后 6 个 inline validation 层有变化**（如新增 / 删除 / 合并）：U4.5 矩阵 + U6 步骤 0 同步重写，并在 v6 段追加"validation 层增量"行。
+- **若 v6 之后 `lib.rs:84` / `lib.rs:108` 行号漂移**：v6 表格追加行；公开 API 列表本身是否变化需在 commit message 单独标注（v6 期间新增 3 项 re-export 均为 plan 001 配套，event_loop re-export 列表本身**未触及**，R3 公开 API 锁定承诺仍然成立）。
+- **U1 scaffold 仍未合并**：`b11d9f0` commit hash 仍只在 `merry-wren` 分支（v6 仍未 rebase 到 HEAD），实施 U2 前必须先解决 scaffold 漂移（推荐放弃 cherry-pick，pittcat-dev 上重新做 U1，< 1 小时）。
+
+### v6 重跑命令（与 v1 / v2 / v3 / v4 / v5 段 8 条等价，对应更新后的字段数 / 行号）
+
+```bash
+# 1. 行数 baseline
+wc -l crates/ralph-core/src/event_loop/{mod,review_step_state}.rs crates/ralph-cli/src/loop_runner/tests.rs
+# v6: mod.rs 7514 / review_step_state 623 / tests.rs 11800
+
+# 2. 数据结构 baseline
+awk '/^pub enum TerminationReason/{f=1;next} f && /^}/{exit} f && /^    [A-Z]/{c++} END{print c}' crates/ralph-core/src/event_loop/mod.rs   # 17
+awk '/^pub struct EventLoop/{f=1;next} f && /^}/{exit} f && /^    [a-z_]+:/{c++} END{print c}' crates/ralph-core/src/event_loop/mod.rs   # 15
+
+# 3. 关键方法行号
+grep -nE "^impl EventLoop|fn process_parse_result|^fn (extract_correlation_key|apply_workflow_guard|apply_event_policy|finding_to_payload_contract|publish_policy_rejection_resume|format_duration|termination_status_text)" crates/ralph-core/src/event_loop/mod.rs
+# v6: 344 / 390 / 473 / 652 / 950 / impl 1019 / process_parse_result 5202 / format_duration 7468 / termination_status_text 7484
+
+# 4. Mutex 拓扑
+grep -nE "^(static|pub static) (FAKE_PATH|MOCK_ACP)" crates/ralph-cli/src/loop_runner/tests.rs crates/ralph-cli/src/loop_runner/wave/acp_mock.rs
+# v6: tests.rs:605/609 + acp_mock.rs:97/102 (4 个 Mutex，v5 拓扑未变)
+
+# 5. lib.rs re-export 行号
+grep -nE "^pub use (config|event_loop)::" crates/ralph-core/src/lib.rs
+# v6: 84 / 108 (+4 from v5，行号漂移但列表本身未变)
+
+# 6. event_loop/tests/ 子文件数
+git ls-tree -r HEAD crates/ralph-core/src/event_loop/tests/ | wc -l   # 49 (不变)
+
+# 7. loop_runner/ 已拆分子模块
+git ls-tree -r HEAD crates/ralph-cli/src/loop_runner/*.rs crates/ralph-cli/src/loop_runner/*/*.rs 2>/dev/null | wc -l   # 30 (+1 hat_channel.rs)
+
+# 8. 测试总数
+awk 'BEGIN{c=0} /^#\[test\]/{c++} /^#\[tokio::test/{c++} END{print c}' crates/ralph-cli/src/loop_runner/tests.rs   # 203
+```
+
+### v6 → U1 重做执行清单（v5 接力指引的延续）
+
+v5 段"📌 2026-06-15 接力指引"列了 5 条 v4→v5 漂移修订项，v6 期间未引入新决策点，但本段补充 v6 的 3 项可执行修订：
+
+1. **U3 重做前**：v5 接力指引的"重新校准字段数（v5 = 15）"在 v6 仍为 15，无需重跑字段 awk；`TerminationReason` v6 = 17 变体，新增的 `ScopeViolationCircuitBreakerTripped` 仍为唯一 v4 之后新增的变体，U3 字节级锁定清单不变。
+2. **U4 重做前**：v5 接力指引的"自由函数行号粗值 390 / 473 / 652 / 950 + `publish_policy_rejection_resume` 344"在 v6 完全未变（mod.rs 这 5 个自由函数 v5→v6 期间 0 行变更），无需重新 grep 对齐。
+3. **U5 重做前**：v5 接力指引的"`process_parse_result` v5 行号区间 = 5184-7102（~1 918 行）"—— v6 实测为 **5202-7466（~2 264 行）**。v6 较 v5 的 +18 行完全是 `impl EventLoop` 构造点前移（`InstructionBuilder::with_publish_schemas` 替换 `with_events` 一次性扩展 9 行 × 2 处），`process_parse_result` 方法体内部相对位置不变（v6 行数 2 264 vs v5 行数 2 264 完全一致）。U5 实施时按 v6 行号（5202 / 7466）锚定即可，方法体内部 grep 6 个 inline validation 层位置保持原相对结构。
+
+## Repo Drift Sub-Note v6 (2026-06-15)
+
+**v5→v6 baseline refresh 阶段无实施 commit**（仅 docs/plans/2026-06-10-003 自身），故本 sub-note 只记录"行号 / 字段数 / 测试数 / re-export 漂移"而无"哪些 commit 落地"。
+
+- `event_loop/mod.rs` 总行数漂移 +18：实测 7 496 → 7 514，差异**仅**来自 commit `20195df` (plan 001 phase 1)：`impl EventLoop` 内两处构造点（`EventLoop::from_config` 类）的 `InstructionBuilder::with_events(...)` 替换为 `InstructionBuilder::with_publish_schemas(config.core.clone(), config.events.clone(), publish_schemas)`，每处净增 9 行（含 `event_loop.event_policy.as_ref().map(|p| p.schemas.clone()).unwrap_or_default()` 取值链）。**未触及** R3 公开 API（lib.rs event_loop re-export 列表本身 84→108 行仅是行号漂移，列表项不变）/ KTD7 Mutex 拓扑 / KTD12 5 域边界 / `TerminationReason` 17 变体顺序 / `EventLoop` 15 字段顺序。
+- `loop_runner/tests.rs` 总行数漂移 +4 / 测试数 0：实测 11 796 → 11 800 / 203 → 203。`696de53` (plan 001 phase 2) 在 `inject_hat_execution_env` 调用点加 `None` 参数（`hats_source_label` 占位）2 处；`e840443` (plan 001 review P0-3) 在 `make_wave_with_count` / `make_test_wave_with_timeout_and_payload` 的 `Wave` 构造里加 `consumer_aggregate_timeout: None` 字段 2 处；4 行总漂移。Mutex 段（605-610 行 `FAKE_PATH_BACKEND_*`）未受影响。
+- `process_parse_result` 行数 0 漂移（实测 v5 = 2 264 行 vs v6 = 2 264 行）：method 内部未变，仅前后被 +18 行整体下移；U6 待抽的 6 个 inline validation 层结构与顺序未变；不改变 KTD6 风险递增顺序。
+- `EventLoop` 字段 +0 (15 → 15)：v5→v6 期间未新增字段；`impl EventLoop` 方法数 129 → 129 不变；新增逻辑全部在 `impl EventLoop` 内的两处构造点（局部变量 + 调用点），不增加方法。字段顺序漂移 0（R-Refactor-2 未触发）。
+- `lib.rs:80→84 / 104→108` +4 行偏移：来自 commit `49d7779` (plan 001 phase 0) 在 `lib.rs:33-36` 区域新增 `pub mod emit_schema_hint;` + `pub use emit_schema_hint::{build_publish_emit_section, fix_hint_for_hat_topic, format_emit_json_example};` 2 行；commit `1fcd1e2` (plan 001 review) 把 emit_schema_hint 改为 `pub mod emit_schema_hint;`（已含在上述 2 行内），并把 `validate_event_with_hat` 加入 `pub use event_policy::{...}` 列表 1 行；累计 +3 行把 `pub use config::{...}` / `pub use event_loop::{...}` 列表本身推到 84 / 108。**R3 公开 API 锁定承诺仍然成立**：config / event_loop 两个 re-export 列表本身（`pub use config::{...}` 内的项 + `pub use event_loop::{...}` 内的项）**未修改**（验证：`git diff 40b856c..ab44494 -- crates/ralph-core/src/lib.rs | grep -E "^\+.*pub use (config|event_loop)::" | head -10` 仅显示已有列表 +3 行的项顺序微调 + `validate_event_with_hat` 新增项落 `pub use event_policy::{...}` 而不是 `pub use event_loop::{...}`）。
+- `loop_runner/` `.rs` 总数 +1 (29 → 30)：commit `696de53` (plan 001 phase 2) 配套新增 `loop_runner/hat_channel.rs`（189 行），用于 emit/wave 路径经 RALPH_HATS_SOURCE 闭合 loop 子进程路径；**与本计划的 tests 拆分无关**（hat_channel.rs 是 `runner.rs` 的新模块，**不**进 `loop_runner/tests/` 子文件拆分清单）。
+- `event_loop/tests/` 子文件 0 漂移 (49 → 49)：v5→v6 期间仅 `review_step_gate.rs` +2 行（commit `e840443` 配套），不增减子文件；其余 48 个子文件**不动**。
+- 漂移引用清单（U7 时再处理）：本阶段 docs 引用面维持 70+（v5→v6 期间 13 个 commits **未触及** `event_loop::*` / `loop_runner::*` 公开 API 名变更——新增的 `emit_schema_hint::*` / `validate_event_with_hat` / `hat_channel` 是 plan 001 新增，**不**在 v1-v5 期间已记录的 `event_loop::xxx` / `loop_runner::tests::xxx` 引用面上），故"70+ 引用文件"在 v6 baseline 下仍为 70+（无新增）；仅在 plan 内部行号 / Mutex 段 / 字段数 / 测试数已被就地修订。
+
+**v6 baseline 引用面**（grep 命中数，与 v5 持平）：
+
+```
+git grep -nE "event_loop/mod\.rs\b" docs/ crates/ --include="*.md" --include="*.rs" 2>/dev/null | wc -l   # ~252 (v5 基线一致)
+git grep -nE "loop_runner/tests\.rs\b" docs/ crates/ --include="*.md" --include="*.rs" 2>/dev/null | wc -l   # ~68 (v5 基线一致)
+```
+
+（U3-U7 实施时如发现实际数字与 v6 不一致，按 U7 step 13 流程补充处理。）
+
+---
+
+（U3-U6 每 U 完成时追加 Sub-Note；U7 合并为完整表格。模板参考 `docs/plans/2026-06-03-003-refactor-schema-refs-replace-regex-plan.md` 的 "Repo Drift Note" 段。v1 / v2 / v3 / v4 / v5 / v6 baseline refresh 段已就地追加；v6 段追加在 v5 段之后。）
+
