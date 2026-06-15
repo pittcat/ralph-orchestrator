@@ -100,6 +100,12 @@ pub fn should_policy_check_emit(args: &EmitArgs, config: Option<&RalphConfig>) -
     resolve_policy_check_mode(&flags, config)
 }
 
+/// Plan 001 §4.3 C1: clone a `HatsSource` so we can hold it on the
+/// function stack and re-borrow it past the `env::var` temporary.
+fn clone_hats_source(src: &HatsSource) -> HatsSource {
+    src.clone()
+}
+
 /// Emit an event to the current run's events file with proper JSON formatting.
 ///
 /// This command provides a deterministic way for agents to emit events without
@@ -205,6 +211,23 @@ fn emit_command_with_root_and_hats(
     root: Option<&PathBuf>,
     hats_source: Option<&HatsSource>,
 ) -> Result<()> {
+    // Plan 001 §4.3 C1: when no `-H` is passed but the parent loop set
+    // `RALPH_HATS_SOURCE` (so a backend agent can emit without the explicit
+    // flag), synthesise a `HatsSource` from the env so the rest of the
+    // pipeline loads the right preset's `event_policy.schemas`.
+    let env_source = std::env::var("RALPH_HATS_SOURCE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(|s| HatsSource::parse(&s));
+    let hats_source_owned: Option<HatsSource>;
+    let hats_source: Option<&HatsSource> = match (hats_source, env_source.as_ref()) {
+        (Some(s), _) => Some(s),
+        (None, Some(env)) => {
+            hats_source_owned = Some(clone_hats_source(env));
+            hats_source_owned.as_ref()
+        }
+        (None, None) => None,
+    };
     let use_colors = color_mode.should_use_colors();
     let workspace_root = resolve_workspace_root(root);
     let current_events_marker = workspace_root.join(".ralph/current-events");

@@ -160,6 +160,7 @@ pub async fn resume_command(
         prebuilt_diagnostics,
         false, // no_sync_agent_docs (resume uses config default)
         false, // source_is_builtin_embedded (resume re-resolves builtin via its own path)
+        None,  // hats_source_label (resume re-resolves builtin via its own path)
     )
     .await
     .map_err(|e| {

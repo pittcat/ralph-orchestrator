@@ -89,6 +89,7 @@ pub async fn start_loop(
         None,               // U0: no prebuilt diagnostics; EventLoop builds its own
         false,              // no_sync_agent_docs (daemon uses config default)
         false, // source_is_builtin_embedded (daemon re-resolves builtin via its own path)
+        None,  // hats_source_label (daemon re-resolves builtin via its own path)
     )
     .await
     .map_err(|e| {

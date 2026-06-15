@@ -1169,6 +1169,7 @@ pub async fn run_command(
             prebuilt_diagnostics,
             args.no_sync_agent_docs,
             source_is_builtin_embedded,
+            hats_source.map(|h| h.label()),
         )
         .await
         .map_err(|e| {

@@ -43,13 +43,29 @@ pub(crate) struct ExecutionOutcome {
 }
 /// Injects Ralph hat execution context environment variables into a backend.
 /// Overwrites any existing Ralph reserved variables.
+///
+/// `hats_source_label` carries the preset label (e.g. `builtin:ce-executor-isolated`)
+/// that the loop was started with. We propagate it as `RALPH_HATS_SOURCE` so that
+/// any in-process CLI invocation (notably `ralph emit` and `ralph wave emit`)
+/// inherits the same `event_policy.schemas` the loop runner sees, even when the
+/// agent never passes `-H builtin:...`. Plan 001 §4.3 C1.
+///
+/// When `None`, the function falls back to `RALPH_HATS_SOURCE` from the parent
+/// process env so call sites that don't yet thread the explicit label still
+/// forward whatever the launcher set. Call sites with the explicit value
+/// always win.
 pub fn inject_hat_execution_env(
     backend: &mut CliBackend,
     current_hat: &str,
     loop_id: &str,
     events_file: &std::path::Path,
     triggered_hat: Option<&str>,
+    hats_source_label: Option<&str>,
 ) {
+    let resolved_label = hats_source_label
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("RALPH_HATS_SOURCE").ok())
+        .filter(|s| !s.is_empty());
     backend.env_vars.retain(|(k, _)| {
         !matches!(
             k.as_str(),
@@ -57,6 +73,7 @@ pub fn inject_hat_execution_env(
                 | "RALPH_CURRENT_LOOP_ID"
                 | "RALPH_EVENTS_FILE"
                 | "RALPH_TRIGGERED_HAT"
+                | "RALPH_HATS_SOURCE"
         )
     });
     backend
@@ -73,6 +90,11 @@ pub fn inject_hat_execution_env(
         backend
             .env_vars
             .push(("RALPH_TRIGGERED_HAT".into(), triggered.into()));
+    }
+    if let Some(label) = resolved_label {
+        backend
+            .env_vars
+            .push(("RALPH_HATS_SOURCE".into(), label));
     }
 }
 

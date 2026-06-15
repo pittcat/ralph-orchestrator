@@ -330,6 +330,7 @@ pub async fn run_loop_impl(
     prebuilt_diagnostics: Option<Arc<ralph_core::diagnostics::DiagnosticsCollector>>,
     no_sync_agent_docs: bool,
     source_is_builtin_embedded: bool,
+    hats_source_label: Option<String>,
 ) -> Result<TerminationReason> {
     remove_loop_termination_sentinel(&loop_context);
     let result = run_loop_impl_inner(
@@ -349,6 +350,7 @@ pub async fn run_loop_impl(
         prebuilt_diagnostics,
         no_sync_agent_docs,
         source_is_builtin_embedded,
+        hats_source_label,
     )
     .await;
     if let Ok(ref reason) = result {
@@ -377,6 +379,7 @@ async fn run_loop_impl_inner(
     prebuilt_diagnostics: Option<Arc<ralph_core::diagnostics::DiagnosticsCollector>>,
     no_sync_agent_docs: bool,
     source_is_builtin_embedded: bool,
+    hats_source_label: Option<String>,
 ) -> Result<TerminationReason> {
     // U5: Payload contract hard gate. Runs BEFORE any backend is spawned.
     // In strict mode (always on for `ralph run`), any payload contract
@@ -2613,6 +2616,7 @@ async fn run_loop_impl_inner(
             &loop_id,
             &events_path,
             triggered_hat.as_deref(),
+            hats_source_label.as_deref(),
         );
         // R1 (2026-06-14-003 plan): expose the wave context as the
         // `RALPH_WAVE_CONTEXT` env var so the agent's bash tool can

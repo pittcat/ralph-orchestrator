@@ -276,7 +276,7 @@ fn run_wave_precheck(
 ) -> Result<()> {
     use crate::policy_check::{
         OnConfigError, OutputMode, PolicyCheckFlags, PolicyCheckMode, ValidationFailure,
-        emit_policy_validation_failure, enabled_event_policy, load_workspace_config,
+        emit_policy_validation_failure, enabled_event_policy, load_policy_config_for_cli_emit,
         resolve_policy_check_mode, validate_batch_against_config,
     };
 
@@ -287,6 +287,10 @@ fn run_wave_precheck(
     // explicit `-c` flag, route the source through that path directly so
     // deployments using `ralph run -c custom.yml` route their nested
     // `ralph wave emit` through the same strict policy.
+    //
+    // Plan 001 §4.3 C1/C5: `load_policy_config_for_cli_emit` additionally
+    // honours `RALPH_HATS_SOURCE` so wave workers spawned by the
+    // dispatcher pick up the loop's preset policy without re-passing `-H`.
     let config = match config_overrides.first() {
         Some(path_str) => {
             let path = PathBuf::from(path_str);
@@ -295,7 +299,7 @@ fn run_wave_precheck(
                     "Warning: explicit --config '{}' is not a file; falling back to CWD-discovered ralph.yml.",
                     path_str
                 );
-                load_workspace_config(None, OnConfigError::Warn)?
+                load_policy_config_for_cli_emit(None, OnConfigError::Warn)?
             } else {
                 use crate::cli::{ConfigSource, load_config_with_overrides};
                 match load_config_with_overrides(&[ConfigSource::File(path.clone())]) {
@@ -311,7 +315,7 @@ fn run_wave_precheck(
                 }
             }
         }
-        None => load_workspace_config(None, OnConfigError::Warn)?,
+        None => load_policy_config_for_cli_emit(None, OnConfigError::Warn)?,
     };
 
     let flags = PolicyCheckFlags {

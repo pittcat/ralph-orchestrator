@@ -141,6 +141,72 @@ pub fn load_workspace_config(
     }
 }
 
+/// Load the workspace config and, when `RALPH_HATS_SOURCE` is set in
+/// the environment, merge the matching preset's `event_policy` on top
+/// of the workspace config. This is the C1 path that closes the
+/// loop-subprocess precheck hole described in plan 001 §4.3: an agent
+/// running inside `ralph run -H builtin:ce-executor-isolated` can call
+/// `ralph emit` / `ralph wave emit` without re-passing `-H`, and the
+/// CLI still gets the same `event_policy.schemas` the loop sees.
+///
+/// Failure modes (plan 001 §4.3 C4 fail-closed rules):
+/// - `RALPH_HATS_SOURCE` is malformed → `bail!` (never Skip).
+/// - Preset load fails and a workspace config exists → `bail!`.
+/// - Preset load fails and no workspace config exists → `Ok(None)`,
+///   matching the no-config default.
+pub fn load_policy_config_for_cli_emit(
+    root: Option<&PathBuf>,
+    on_error: OnConfigError,
+) -> Result<Option<RalphConfig>> {
+    use crate::cli::{ConfigSource, HatsSource};
+    use crate::preflight::load_config_for_preflight_sync;
+    let env_label = std::env::var("RALPH_HATS_SOURCE")
+        .ok()
+        .filter(|s| !s.is_empty());
+
+    let base = load_workspace_config(root, on_error)?;
+
+    let Some(label) = env_label else {
+        return Ok(base);
+    };
+
+    // Parse the label into a HatsSource so the existing merger can be
+    // reused. Unknown shapes (e.g. plain file paths) are still honoured —
+    // load_config_for_preflight_sync handles the File / Builtin / Remote
+    // variants the same way.
+    let parsed = Some(HatsSource::parse(&label));
+    let workspace_root = resolve_workspace_root(root);
+    let config_path = config_resolution::find_workspace_config_path(&workspace_root)
+        .unwrap_or_else(|| workspace_root.join("ralph.yml"));
+    let sources: Vec<ConfigSource> = if config_path.exists() {
+        vec![ConfigSource::File(config_path)]
+    } else {
+        vec![]
+    };
+
+    let merged = load_config_for_preflight_sync(&sources, parsed.as_ref(), &workspace_root);
+    match merged {
+        Ok(cfg) => Ok(Some(cfg)),
+        Err(e) => {
+            // C4 fail-closed: if the env advertised a preset but we
+            // cannot honour it AND a workspace config exists, refuse to
+            // silently fall back. If no workspace config exists, the
+            // caller had nothing to enforce anyway, so returning Ok(None)
+            // matches the no-strict-config semantics.
+            if !sources.is_empty() {
+                anyhow::bail!(
+                    "Pre-publish policy check could not honour RALPH_HATS_SOURCE='{label}': {e}. \
+                     Fix the preset reference, unset RALPH_HATS_SOURCE, or omit policy enforcement."
+                );
+            }
+            tracing::info!(
+                "RALPH_HATS_SOURCE='{label}' could not be loaded ({e}); no workspace config found, proceeding without policy enforcement"
+            );
+            Ok(None)
+        }
+    }
+}
+
 /// Looks up the active `EventPolicyConfig` for the loaded config. Returns
 /// `None` when the config has no event policy or the policy is disabled —
 /// callers treat this as "no policy check applies".

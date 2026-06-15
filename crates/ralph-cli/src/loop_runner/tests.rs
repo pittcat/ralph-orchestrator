@@ -8116,6 +8116,7 @@ fn test_inject_hat_execution_env_sets_reserved_and_preserves_user_vars() {
         "loop-42",
         std::path::Path::new("/tmp/events.jsonl"),
         Some("synthesizer"),
+        None,
     );
     let map: std::collections::HashMap<_, _> = backend.env_vars.into_iter().collect();
     assert_eq!(map.get("USER_VAR").unwrap(), "keep");
@@ -8140,6 +8141,7 @@ fn test_inject_hat_execution_env_omits_triggered_when_none() {
         "ralph",
         "loop-1",
         std::path::Path::new(".ralph/events.jsonl"),
+        None,
         None,
     );
     let keys: Vec<_> = backend.env_vars.iter().map(|(k, _)| k.as_str()).collect();

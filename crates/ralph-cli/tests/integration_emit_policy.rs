@@ -332,3 +332,162 @@ fn test_emit_isolated_mode_allows_matching_hat() {
     let events = std::fs::read_to_string(&events_file).unwrap();
     assert!(events.contains("\"hat\":\"review-synthesizer\""));
 }
+
+// -------------------------------------------------------------------------
+// Plan 001 §4.3 C1/C4/C5: RALPH_HATS_SOURCE env routes pre-publish check.
+// -------------------------------------------------------------------------
+
+/// Run `ralph emit` with an explicit env var, no `-H` flag. The CLI must
+/// pick up the preset advertised by `RALPH_HATS_SOURCE`, enforce its
+/// `event_policy.schemas`, and refuse to write a string payload for a
+/// topic that requires a JSON object (AC-2).
+#[test]
+fn test_emit_with_env_hats_source_rejects_string_payload_for_work_ready() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "emit",
+            "work.ready",
+            "中文长字符串 payload",
+            "--hat",
+            "coordinator",
+        ])
+        .current_dir(temp_path)
+        .env("RALPH_HATS_SOURCE", "builtin:ce-executor-isolated")
+        .env("RALPH_CURRENT_HAT", "coordinator")
+        .env("RALPH_EVENTS_FILE", temp_path.join(".ralph/events.jsonl"))
+        .output()
+        .expect("failed to execute ralph emit");
+
+    assert!(
+        !output.status.success(),
+        "string payload must be rejected when RALPH_HATS_SOURCE preset requires json_object"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("rejected") || stderr.contains("policy") || stderr.contains("required"),
+        "stderr should explain rejection: {}",
+        stderr
+    );
+
+    let events_file = temp_path.join(".ralph/events.jsonl");
+    if events_file.exists() {
+        let events = std::fs::read_to_string(&events_file).unwrap_or_default();
+        assert!(
+            !events.contains("中文长字符串"),
+            "rejected payload MUST NOT land on disk: {}",
+            events
+        );
+    }
+}
+
+/// AC-3: with RALPH_HATS_SOURCE, a properly-formed JSON payload is
+/// accepted and written to the events file.
+#[test]
+fn test_emit_with_env_hats_source_accepts_valid_json_payload() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "emit",
+            "work.ready",
+            "--json",
+            r#"{"plan_name":"p","plan_path":"/tmp/p","task_id":"t","task_key":"k","step":"s","complexity":3}"#,
+            "--hat",
+            "coordinator",
+        ])
+        .current_dir(temp_path)
+        .env("RALPH_HATS_SOURCE", "builtin:ce-executor-isolated")
+        .env("RALPH_CURRENT_HAT", "coordinator")
+        .env("RALPH_EVENTS_FILE", temp_path.join(".ralph/events.jsonl"))
+        .output()
+        .expect("failed to execute ralph emit");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "valid payload must succeed when RALPH_HATS_SOURCE preset is honoured: stderr={}",
+        stderr
+    );
+    let events = std::fs::read_to_string(temp_path.join(".ralph/events.jsonl")).unwrap();
+    assert!(events.contains("\"topic\":\"work.ready\""));
+    assert!(events.contains("\"plan_name\":\"p\""));
+}
+
+/// AC-8: malformed RALPH_HATS_SOURCE (no such preset) with a workspace
+/// config present must fail closed — never silently Skip.
+#[test]
+fn test_emit_with_malformed_hats_source_fails_closed() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+    // Create a workspace ralph.yml so fail-closed engages.
+    std::fs::write(temp_path.join("ralph.yml"), "agent: claude\n").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args(["emit", "work.ready", "--json", "{}", "--hat", "coordinator"])
+        .current_dir(temp_path)
+        .env("RALPH_HATS_SOURCE", "builtin:not-a-real-preset")
+        .env("RALPH_CURRENT_HAT", "coordinator")
+        .env("RALPH_EVENTS_FILE", temp_path.join(".ralph/events.jsonl"))
+        .output()
+        .expect("failed to execute ralph emit");
+
+    assert!(
+        !output.status.success(),
+        "malformed RALPH_HATS_SOURCE + workspace config must fail closed"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not-a-real-preset") || stderr.contains("Pre-publish"),
+        "stderr should explain the fail-closed reason: {}",
+        stderr
+    );
+}
+
+/// AC-7: `ralph wave emit` honours RALPH_HATS_SOURCE — a batch with a
+/// missing required field is rejected and no candidate events are
+/// written.
+#[test]
+fn test_wave_emit_with_env_hats_source_rejects_missing_required_field() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "wave", "emit", "review.wave.ready",
+            "--payloads", r#"{"dim":"d1"}"#, r#"{"dim":"d2"}"#,
+        ])
+        .current_dir(temp_path)
+        .env("RALPH_HATS_SOURCE", "builtin:ce-executor-wave")
+        .env("RALPH_CURRENT_HAT", "dimension-reviewer")
+        .env("RALPH_WAVE_WORKER", "1")
+        .env("RALPH_EVENTS_FILE", temp_path.join(".ralph/events.jsonl"))
+        .output()
+        .expect("failed to execute ralph wave emit");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !output.status.success(),
+        "missing required field in batch must reject: stderr={} stdout={}",
+        stderr,
+        stdout
+    );
+
+    let candidate = temp_path.join(".ralph/candidate-events.jsonl");
+    if candidate.exists() {
+        let contents = std::fs::read_to_string(&candidate).unwrap_or_default();
+        assert!(
+            contents.trim().is_empty(),
+            "rejected batch must NOT write candidate-events: {}",
+            contents
+        );
+    }
+}

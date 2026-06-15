@@ -727,6 +727,7 @@ pub async fn execute_wave_structured(
             loop_id,
             &worker_events_file,
             None,
+            None,
         );
 
         // Apply hat backend args
