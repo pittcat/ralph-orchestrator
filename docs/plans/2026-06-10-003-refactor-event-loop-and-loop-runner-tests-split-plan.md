@@ -1,15 +1,72 @@
 ---
 title: 拆分 event_loop/mod.rs 与 loop_runner/tests.rs（零回归分模块）
 type: refactor
-status: active
+status: stalled-after-U1
 date: 2026-06-10
-baseline_refreshed: 2026-06-14
-baseline_head: dbe6f35
+baseline_refreshed: 2026-06-15
+baseline_head: 40b856c
 baseline_head_v1: 37bd281
 baseline_head_v2: 918192a
 baseline_head_v3: 9799bf9
 baseline_head_v4: dbe6f35
+baseline_head_v5: 40b856c
+completion:
+  - U1: scaffold 仅在 `ralph/2026-06-10-003-...-merry-wren` 分支 commit `b11d9f0` 落地，**未合并**到 pittcat-dev / main
+  - U2-U7: 未开工
+landed_in_HEAD:
+  - event_loop/mod.rs 仍为单文件 (7 496 行)
+  - loop_runner/tests.rs 仍为单文件 (11 796 行 / 204 测试)
+  - audit-file-sizes.sh 仅 wc event_loop/tests/* (未含 event_loop/ 根子文件)
 ---
+
+> ⚠️ **2026-06-15 状态确认**：
+>
+> 1. **U1 scaffold 未进 HEAD**：`git merge-base --is-ancestor b11d9f0 HEAD` → false；
+>    commit `b11d9f0` 只活在分支 `ralph/2026-06-10-003-refactor-event-loop-and-loop-runner-tests-split-plan-merry-wren`，
+>    没有 rebase / merge 到 `pittcat-dev`。早期文档（baseline v3 之前）写的
+>    "U1 scaffold 已在分支 `lucky-reed` 落地" 也是历史分支命名，**当前实际分支是 `merry-wren`**。
+> 2. **U2-U7 全部未启动**：当前 HEAD `40b856c` 上
+>    `crates/ralph-core/src/event_loop/` 只有 `loop_state.rs / mod.rs / rejection.rs / review_step_state.rs / tests/`，
+>    没有任何新的 placeholder 子文件（`types.rs / workflow_guard.rs / policy.rs / ...` 全部不存在）。
+>    `crates/ralph-cli/src/loop_runner/tests.rs` 仍是单文件 11 796 行。
+> 3. **baseline 已漂到 v5（HEAD = `40b856c`）**：v4 → v5 期间新增 2 个关键变更，
+>    本计划的 enum / struct / 行号锚点全部需要重新校准（详见下面 v5 baseline 段）。
+
+## v5 Baseline 实测数据（2026-06-15，HEAD = `40b856c`）
+
+> 本段是 2026-06-15 重新校准的事实数据，**取代**下面 Summary / Problem Frame / Requirements 段中所有 v0-v4 baseline 数字。
+> 凡正文与本段冲突的数字（行号 / 测试数 / 字段数 / 变体数 / 行号区间）一律以本段为准；正文未更新部分保留作为 v4 历史快照供 diff 参考。
+
+| 指标 | v3 (9799bf9) | v4 (dbe6f35) | **v5 (40b856c)** | v4→v5 增量 |
+|---|---|---|---|---|
+| `event_loop/mod.rs` 总行数 | 6 723 | 7 171 | **7 496** | +325 |
+| `loop_runner/tests.rs` 总行数 | 11 606 | 11 796 | **11 796** | 0（未变） |
+| `loop_runner/tests.rs` `#[test]` 数 | 201 | 203 | **204** | +1 |
+| `EventLoop` struct 字段数 | 14 | 14 | **15** | +1（新增 `ephemeral_isolation`） |
+| `TerminationReason` 变体数 | 16 | 16 | **17** | +1（新增 `ScopeViolationCircuitBreakerTripped`） |
+| `impl EventLoop` 方法数 | 118 | 120 | **129** | +9（新增 R1/R3/R4/R5 路径方法 + circuit breaker） |
+| `event_loop/tests/` 子文件数 | 41 | 44 | **49** | +5（新增 `ephemeral_isolation_integration` / `r5_hard_gate_routing` / `wave_context_env_var` / `wave_context_injection` / `wave_isolated_scope`，可能略有出入） |
+| `process_parse_result` 起始行 | ~3 304 | 4 921 | **5 184** | +263（被前置代码推移） |
+| `process_parse_result` 结束行 | ~4 921 | 6 780 | **~7 102** | 方法体 ~1 918 行（v4 ~1 860） |
+| `impl EventLoop` 起 / 止 | ?  | 962 / 7 114 | **1 019 / 7 436** | +57 / +322 |
+| 自由函数行号锚点 | — | 324 / 407 / 587 / 893 | `extract_correlation_key` 390 / `apply_workflow_guard_validation` 473 / `apply_event_policy_validation` 652 / `finding_to_payload_contract_violation` 950 | 全部 +60~80 |
+| **`publish_policy_rejection_resume`** | 未存在 | 未存在 | **344**（新增自由函数） | 新增 1 个 |
+
+**v4 → v5 关键变更（2 个 commit）**：
+
+- `5929fcd feat(ralph-core): 接入 R1/R3/R4/R5 机制到 event loop` — +R1 wave context、+R3 ephemeral isolation、+R4 enforce_current_unit、+R5 hard-gate 路由稳定性。新增字段 `ephemeral_isolation`、新增方法（wave context build / ephemeral isolation run / 多个 publish_policy_rejection_resume 路由点）。
+- `6b03b92 fix(ce-executor-isolated): U1 docs + U2 circuit breaker for isolated scope violations` — 新增 `TerminationReason::ScopeViolationCircuitBreakerTripped` 变体 + 配套 circuit breaker 路径。
+
+**对原计划的核心影响**：
+
+1. **R2 字节级锁定的 enum/struct 已变**：`TerminationReason` 16→17 变体（新增 `ScopeViolationCircuitBreakerTripped`，体积大、含多个字段），3 处 `match` 表达式（`exit_code` / `as_str` / `is_success`）行号 + 变体覆盖列表全部变化。`EventLoop` 14→15 字段，顺序末尾追加 `ephemeral_isolation`。
+2. **R7 行数审计脚本未升级**：`scripts/audit-file-sizes.sh` 仍只 wc `event_loop/tests/*.rs` 不含 `event_loop/*.rs`（U1 计划要做的覆盖范围扩展未落地）。
+3. **U3 / U4 行号区间需重新切片**：types 段从 v4 的 59-323 推到 v5 的 ~131-389（粗估）；4 个自由函数行号全部 +60~80。U3 / U4 实施前**必须** `grep -nE "^pub (enum|struct)|^fn (extract|apply|finding)" crates/ralph-core/src/event_loop/mod.rs` 重新对齐。
+4. **U5 `process_parse_result` 行号区间已变**：5184-7102（~1918 行）；KTD12 归属规则不变，但 v5 因 R5 hard-gate 在内增加了 `publish_policy_rejection_resume` 大量调用点（grep 显示 mod.rs 中 ~9 处），需要确认这些调用是否要随 `process_parse_result` 整段进 `prompt.rs`，还是把 `publish_policy_rejection_resume` 独立放 `event_loop/diagnostics.rs`。
+5. **U1 scaffold 不能直接 cherry-pick**：commit `b11d9f0` 基于 `4029be3` 创建 placeholder，与 v5 之间相隔 R1/R3/R4/R5 接入 + circuit breaker 的多个 mod.rs 大改，rebase 必然冲突。**推荐**：放弃 cherry-pick，在 pittcat-dev 直接重新做 U1（创建 10 个 placeholder 子文件 + audit-script 扩展 + 顶部 `mod xxx;` 声明），代价 < 1 小时。
+6. **`event_loop/tests/` 子文件数已从 v4 的 44 涨到 v5 的 49**（新增 5 个 R1/R3/R4/R5 集成测试文件），R3 列出的"44 个 `event_loop/tests/` 子文件"过时，但本计划不动这个目录的内容，仅需更新数字。
+
+**`loop_runner/tests.rs` 11 796 行 / 204 测试 vs v4 的 203 测试**：差 1 个测试（可能来自 v4→v5 期间的某个 PR 单测增加，未细查；总行数 11 796 与 v4 一致是因为测试增加被其他重构抵消，参考价值不大）。
 
 ## Summary
 
@@ -197,6 +254,26 @@ flowchart LR
 ```
 
 ## Implementation Units
+
+> 📌 **2026-06-15 接力指引**（在 v5 baseline 之上重启时必读）：
+>
+> - **U1 必须重做**：`b11d9f0` 不能直接 cherry-pick（与 R1/R3/R4/R5 接入 commit `5929fcd`/`6b03b92` 冲突）。
+>   直接在 pittcat-dev 上重新 scaffold 10 个 placeholder + audit-script 扩展 + `mod xxx;` 声明即可（< 1 小时）。
+> - **U3 重做前**：用 `awk '/^pub struct EventLoop/{f=1;next} f && /^}/{exit} f && /^    [a-z_]+:/{c++} END{print c}' crates/ralph-core/src/event_loop/mod.rs`
+>   重新校准字段数（v5 = **15**），并把 `TerminationReason` v5 = **17** 变体的新 variant `ScopeViolationCircuitBreakerTripped` 加入字节级锁定清单。
+> - **U4 重做前**：`grep -nE "^fn (extract_correlation_key|apply_workflow_guard|apply_event_policy|finding_to_payload_contract|publish_policy_rejection_resume)"`
+>   重新对齐 v5 行号（粗值：390 / 473 / 652 / 950 + **新增** `publish_policy_rejection_resume` 在 344）。
+>   **新决策点**：`publish_policy_rejection_resume` 应归 `policy.rs` 还是 `diagnostics.rs`？根据 KTD12 主副作用规则
+>   （写 `task.resume` 到 bus + 路由到源 hat），建议归 `policy.rs`（与 `apply_event_policy_validation` 同域）。
+> - **U5 重做前**：`process_parse_result` v5 行号区间 = **5184-7102（~1918 行）**；v5 因 R5 在内多了 ~9 处
+>   `publish_policy_rejection_resume(...)` 调用点，确认这些调用是否随方法整段进 `prompt.rs`（建议：随，符合 KTD10）。
+> - **U6 仍保留**：`run_ephemeral_isolation` / `inject_review_aggregate_timeouts` 等 R1/R3 方法在 v5 新增，
+>   按 KTD12 应归 **diagnostics**（telemetry + 副作用是写 `.ralph/agent/scratchpad-{loop_id}.md` + 注入 `## EPHEMERAL RELOCATED` prompt 块，
+>   主副作用属于 diagnostics + prompt 跨域，按 KTD12 主副作用归 diagnostics）。
+>
+> 上面 5 条只是 v4 → v5 baseline 漂移引起的局部修订，**KTD1-KTD13 / R1-R10 全部主体仍然有效**，本次重启不需要重新设计架构。
+
+## Implementation Units（细则）
 
 ### U1. 公共基础设施：建立拆分脚手架 + 全套测试基线
 
