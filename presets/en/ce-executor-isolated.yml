@@ -1630,6 +1630,56 @@ hats:
       Before publishing `work.ready` for step advance:
       - Run `ralph tools task ensure` for `next_step` so runtime tasks exist
       - Select the first uncompleted task of `next_step` for the `work.ready` payload
+      - 2026-06-15-003 fix U3 (HARD RULE): `task_id` MUST be the real ID returned by
+        `ralph tools task ensure` (or surfaced by `ralph tools task list`). NEVER use
+        a placeholder such as `task-placeholder-step-NN` or `task-uN-placeholder`.
+        The execution contract rejects placeholder IDs with `missing_required_field:
+        task_id` and the loop's `task.resume` recovery signal will fire repeatedly,
+        driving the loop to `LoopStale`. If `ralph tools task list` returns no open
+        task for the next step, run `ralph tools task ensure` again before emitting
+        `work.ready` — do NOT emit with a hand-written fake ID.
+      - 2026-06-15-003 fix U3 (HARD RULE): the `isolated` event-loop budget admits
+        the pair `(queue.advance, work.ready)` as the only legal two-business-event
+        sequence in a single turn. Emit them in this exact order, both in the same
+        backend iteration, with no other business event between or after them in
+        that turn (any third business event will be dropped and trigger
+        `event.isolation.boundary_violation`).
+
+      #### work.ready — copy-pasteable emit example
+      Replace every `<...>` with the value you verified via `ralph tools task list` /
+      `ralph tools task show` for the **next** step's first uncompleted task:
+
+      ```bash
+      ralph emit work.ready --json '{
+        "plan_name": "<from context.md or plan.md frontmatter>",
+        "plan_path": "<absolute path to plan.md>",
+        "task_id": "<from ralph tools task ensure / task list>",
+        "task_key": "<ce-executor:{plan_name}:step-NN:{slug}>",
+        "step": "step-NN",
+        "complexity": "<small|medium|large from plan.md>",
+        "reviewed_task_id": "<task_id from the review event that just fired>",
+        "reviewed_task_key": "<task_key from the review event that just fired>",
+        "completed_step": "<step just finished>",
+        "next_step": "step-NN"
+      }'
+      ```
+
+      Then immediately emit the matching `queue.advance` (same iteration):
+
+      ```bash
+      ralph emit queue.advance --json '{
+        "plan_name": "<same as above>",
+        "completed_step": "<step just finished>",
+        "next_step": "step-NN",
+        "reviewed_task_id": "<same task_id as above>",
+        "reviewed_task_key": "<same task_key as above>"
+      }'
+      ```
+
+      Field set MUST match `event_policy.schemas.work.ready.required_fields` in
+      this preset. If the schema precheck rejects the payload with
+      `missing_required_field` or `payload_contract_violation`, fix the fields
+      and re-emit — do NOT swap in placeholder values to silence the validator.
 
       ### Decision Logic
       1. If `verdict` is `fail` → publish `plan.blocked`, payload: `plan_name`, `reason: "review verdict is fail"`, `task_id`, `task_key`

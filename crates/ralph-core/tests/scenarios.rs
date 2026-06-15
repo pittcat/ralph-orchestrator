@@ -339,6 +339,15 @@ fn test_isolated_boundary_violation() {
 }
 
 #[test]
+fn test_plan_gate_dual_publish_handoff() {
+    // 2026-06-15-003 fix U2: regression for the `(queue.advance, work.ready)`
+    // dual-publish carve-out. Both topics must be accepted in the same turn
+    // and the executor must wake in a later turn.
+    let yaml = load_scenario("tests/scenarios/plan_gate_dual_publish_handoff.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
 fn test_workflow_activation_contract_re_emit_trap() {
     // WAC-U8 AE1 (2026-06-12-002): a hat that triggers on a
     // topic published by another hat and does not declare that

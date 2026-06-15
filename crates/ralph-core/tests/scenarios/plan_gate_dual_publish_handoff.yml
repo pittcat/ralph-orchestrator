@@ -1,0 +1,76 @@
+# Plan-Gate Dual-Publish Handoff: queue.advance + work.ready both accepted in isolated mode
+#
+# 2026-06-15-003 fix U2: in isolated mode the per-turn single-business-event
+# budget used to drop the second event of a `(queue.advance, work.ready)`
+# pair emitted by `plan-gate`. Without the second event, `executor` was
+# never scheduled, the loop repeated the same pair three times, and
+# `consecutive_same_signature >= 3` terminated the loop as `LoopStale`.
+#
+# This scenario pins the carve-out: both events are accepted in the same
+# turn, the executor runs in a later turn, and the loop completes normally.
+#
+# Reference:
+#   docs/plans/2026-06-15-003-fix-plan-gate-dual-publish-isolated-budget-plan.md
+#   docs/report/2026-06-15-plan-gate-dual-publish-blocking-diagnosis.md
+
+name: plan_gate_dual_publish_handoff
+description: Isolated mode accepts the (queue.advance, work.ready) dual-publish pair in a single turn
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 10
+  hats:
+    plan-gate:
+      subscribes_to:
+        - task.start
+        - work.done
+      publishes:
+        - queue.advance
+        - work.ready
+        - LOOP_COMPLETE
+    executor:
+      subscribes_to:
+        - work.ready
+        - queue.advance
+      publishes:
+        - work.done
+  event_loop:
+    execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
+
+# Run 1: plan-gate dual-publishes `queue.advance` + `work.ready` in a
+# single turn. Both must be accepted (pre-fix: work.ready was dropped).
+# Run 2: executor wakes on work.ready and emits work.done.
+# Run 3: plan-gate wakes on work.done and emits LOOP_COMPLETE to terminate
+# the loop. (In a real ce-executor-isolated run, a separate `ralph` hat
+# would own LOOP_COMPLETE; here we collapse it onto plan-gate to keep the
+# scenario minimal.)
+mock_responses:
+  - |
+    <event topic="queue.advance">
+    step: "step-02"
+    </event>
+    <event topic="work.ready">
+    task_id: "task-real-001"
+    plan_name: "demo"
+    plan_path: "/tmp/demo.md"
+    task_key: "step-02"
+    step: "step-02"
+    complexity: "medium"
+    </event>
+  - |
+    <event topic="work.done">
+    task_id: "task-real-001"
+    </event>
+  - |
+    <event topic="LOOP_COMPLETE">
+    Done.
+    </event>
+
+expected:
+  iterations: 3
+  events:
+    - topic: queue.advance
+    - topic: work.ready
+    - topic: work.done
+  completion: true

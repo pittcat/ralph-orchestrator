@@ -5675,7 +5675,29 @@ impl EventLoop {
                         == Some(wid)
                 });
 
-                if first_business_event_accepted && !same_wave_continuation {
+                // 2026-06-15-003 fix U1: `plan-gate` Path A dual-publish.
+                // `queue.advance` followed by `work.ready` is the only
+                // legitimate two-business-event sequence in isolated mode
+                // — `queue.advance` advances the step counter, `work.ready`
+                // carries the execution context that wakes the executor.
+                // Without this carve-out the second event is dropped, the
+                // executor is never scheduled, and the loop eventually
+                // hits `consecutive_same_signature >= 3` → LoopStale.
+                // See docs/plans/2026-06-15-003-...-plan.md and
+                // docs/report/2026-06-15-plan-gate-dual-publish-...-diagnosis.md.
+                // Scope is intentionally narrow: ordered pair, exact topics,
+                // and only ONE extra event — the third business event in
+                // the same turn is still dropped (sticky budget).
+                let is_dual_publish_step_handoff = event.topic.as_str() == "work.ready"
+                    && accepted
+                        .last()
+                        .map(|prev| prev.topic.as_str() == "queue.advance")
+                        .unwrap_or(false);
+
+                if first_business_event_accepted
+                    && !same_wave_continuation
+                    && !is_dual_publish_step_handoff
+                {
                     warn!(
                         topic = %event.topic,
                         "Isolated mode: extra business event dropped — only one per turn"

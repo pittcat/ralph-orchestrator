@@ -1170,6 +1170,55 @@ hats:
       发布步骤推进的 `work.ready` 之前：
       - 对 `next_step` 运行 `ralph tools task ensure` 确保 runtime tasks 存在
       - 选取 `next_step` 第一个未完成任务作为 `work.ready` 的 `task_id`/`task_key`
+      - 2026-06-15-003 修复 U3（硬性规则）：`task_id` **必须**是
+        `ralph tools task ensure` 返回（或 `ralph tools task list` 列出）的真实
+        ID。**禁止**使用任何占位符，如 `task-placeholder-step-NN` 或
+        `task-uN-placeholder`。execution contract 会以 `missing_required_field:
+        task_id` 拒收占位符，loop 反复触发 `task.resume` 恢复信号，
+        最终会因 `consecutive_same_signature >= 3` 终止于 `LoopStale`。如果
+        `ralph tools task list` 找不到下一步的 open task，重新跑
+        `ralph tools task ensure`，**不要**用手写假 ID 蒙混。
+      - 2026-06-15-003 修复 U3（硬性规则）：`isolated` 模式的事件循环预算
+        只放行 `(queue.advance, work.ready)` 这一个有序对作为同一轮里合法的
+        双 business event。必须严格按此顺序、同一个后端迭代内连续发布，
+        中间与之后**不得**插入任何其他 business event —— 第三个 business
+        event 会被丢弃并触发 `event.isolation.boundary_violation`。
+
+      #### work.ready — 可直接复制的 emit 示例
+      把每个 `<...>` 替换成你用 `ralph tools task list` / `ralph tools task show`
+      在**下一步**第一个未完成 task 上核实的值：
+
+      ```bash
+      ralph emit work.ready --json '{
+        "plan_name": "<来自 context.md 或 plan.md frontmatter>",
+        "plan_path": "<plan.md 的绝对路径>",
+        "task_id": "<来自 ralph tools task ensure / task list>",
+        "task_key": "<ce-executor:{plan_name}:step-NN:{slug}>",
+        "step": "step-NN",
+        "complexity": "<small|medium|large 来自 plan.md>",
+        "reviewed_task_id": "<刚触发的 review 事件中的 task_id>",
+        "reviewed_task_key": "<刚触发的 review 事件中的 task_key>",
+        "completed_step": "<刚完成的步骤>",
+        "next_step": "step-NN"
+      }'
+      ```
+
+      然后在同一迭代内紧跟着发对应的 `queue.advance`：
+
+      ```bash
+      ralph emit queue.advance --json '{
+        "plan_name": "<同上>",
+        "completed_step": "<刚完成的步骤>",
+        "next_step": "step-NN",
+        "reviewed_task_id": "<同上的 task_id>",
+        "reviewed_task_key": "<同上的 task_key>"
+      }'
+      ```
+
+      字段集合**必须**与本 preset 的 `event_policy.schemas.work.ready.required_fields`
+      一致。如果 schema 预检以 `missing_required_field` 或
+      `payload_contract_violation` 拒收，修正字段后重发 —— **不要**用占位符
+      值去骗过校验。
 
       ### 决策逻辑
       1. 如 `verdict` 为 `fail` → 发布 `plan.blocked`，payload：`plan_name`、`reason: "review verdict is fail"`、`task_id`、`task_key`
