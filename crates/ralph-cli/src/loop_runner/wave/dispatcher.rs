@@ -26,6 +26,11 @@ pub struct WaveOutputs<'a> {
     pub show_cli: bool,
     pub rpc_tx: Option<&'a tokio::sync::mpsc::Sender<RpcEvent>>,
     pub tui: Option<&'a Arc<std::sync::Mutex<ralph_tui::TuiState>>>,
+    /// Plan 001 §4.3 C1: explicit preset label forwarded to each
+    /// wave worker so its in-process `ralph emit` / `ralph wave emit`
+    /// inherits the loop's `event_policy.schemas` via `RALPH_HATS_SOURCE`.
+    /// When `None`, the dispatcher falls back to the parent process env.
+    pub hats_source_label: Option<&'a str>,
 }
 
 /// Optional limits a runner can impose on a wave dispatch.
@@ -245,6 +250,10 @@ pub async fn handle_wave_events(
     // is responsible for converting that into
     // `TerminationReason::MaxRuntime` (U4-C3).
     global_deadline: Option<tokio::time::Instant>,
+    // Plan 001 §4.3 C1: explicit preset label forwarded to each
+    // wave worker so its in-process `ralph emit` / `ralph wave emit`
+    // inherits the loop's `event_policy.schemas` via `RALPH_HATS_SOURCE`.
+    hats_source_label: Option<&str>,
 ) -> HandleWaveOutcome {
     let max_wave_total = event_loop.config().event_loop.max_wave_total;
     // U4-C3: accumulator for the per-wave outcomes. Set to true
@@ -263,6 +272,7 @@ pub async fn handle_wave_events(
         show_cli: tui_state.is_none() && !enable_rpc,
         rpc_tx: rpc_event_tx,
         tui: tui_state,
+        hats_source_label,
     };
 
     // U2: emit a single structured `plan.blocked` per rejected wave and
@@ -377,6 +387,10 @@ pub async fn handle_wave_events(
             // (from `loop.max_runtime_seconds - state.elapsed()`)
             // to the dispatcher so it can preempt long waves.
             WaveDispatchLimits { global_deadline },
+            // Plan 001 §4.3 C1: forward the explicit preset label so
+            // each wave worker's `ralph emit` / `ralph wave emit`
+            // inherits the loop's `event_policy.schemas`.
+            out.hats_source_label.as_deref(),
         )
         .await;
 
@@ -591,6 +605,9 @@ pub async fn execute_wave(
         // global deadline; the dispatcher will fall back to the
         // wave-internal partial/aggregate timers.
         WaveDispatchLimits::default(),
+        // Legacy wrapper has no runner-supplied hat-source label;
+        // the dispatcher falls back to the parent process env var.
+        None,
     )
     .await;
 
@@ -631,6 +648,13 @@ pub async fn execute_wave_structured(
     // when the deadline fires; the runner MUST NOT touch worker
     // handles directly (KTD-U4-6).
     limits: WaveDispatchLimits,
+    // Plan 001 §4.3 C1: explicit preset label forwarded to each
+    // wave worker so its in-process `ralph emit` / `ralph wave emit`
+    // invocations pick up the loop's `event_policy.schemas` via
+    // `RALPH_HATS_SOURCE`. When `None`, the dispatcher falls back to
+    // the parent process env var — this preserves the legacy wrapper
+    // path for callers that have not yet threaded the label.
+    hats_source_label: Option<&str>,
 ) -> WaveDispatchOutcome {
     use ralph_core::{WaveTracker, WaveWorkerContext, build_wave_worker_prompt};
 
@@ -720,14 +744,17 @@ pub async fn execute_wave_structured(
             ),
         ]);
 
-        // Inject hat execution context for wave worker
+        // Inject hat execution context for wave worker. Plan 001 C1:
+        // forward `hats_source_label` explicitly when available so the
+        // worker inherits the loop's preset (and its event_policy.schemas)
+        // rather than relying on parent env propagation.
         inject_hat_execution_env(
             &mut worker_backend,
             wave.target_hat.as_str(),
             loop_id,
             &worker_events_file,
             None,
-            None,
+            hats_source_label,
         );
 
         // Apply hat backend args
@@ -1588,6 +1615,10 @@ hats: {}
             show_cli: false,
             rpc_tx: None,
             tui: None,
+            // Plan 001 §4.3 C1: tests don't exercise the env-var
+            // propagation path; leave the label None to fall back to
+            // the parent process env.
+            hats_source_label: None,
         }
     }
 
@@ -2568,6 +2599,9 @@ hats: {}
             None,
             // global_deadline is irrelevant for empty input.
             Some(tokio::time::Instant::now()),
+            // Plan 001 §4.3 C1: hats_source_label is irrelevant for
+            // empty input but is now part of the signature.
+            None,
         )
         .await;
 

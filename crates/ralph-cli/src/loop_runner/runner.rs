@@ -3812,6 +3812,12 @@ async fn run_loop_impl_inner(
                     &loop_id,
                     prebuilt_diagnostics.as_ref(),
                     global_deadline,
+                    // Plan 001 §4.3 C1: forward the loop's preset
+                    // label to wave workers so their in-process
+                    // `ralph emit` / `ralph wave emit` inherits
+                    // `event_policy.schemas` even when the parent
+                    // process env does not carry RALPH_HATS_SOURCE.
+                    hats_source_label.as_deref(),
                 )
                 .await;
                 Some(outcome)
