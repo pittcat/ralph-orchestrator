@@ -406,6 +406,21 @@ pub fn validate_event(
     config: &EventPolicyConfig,
     state: &mut PolicyRuntimeState,
 ) -> PolicyDecision {
+    validate_event_with_hat(topic, payload, config, state, None)
+}
+
+/// Validates an event against the event policy with hat-aware checks.
+///
+/// `hat` is the emitting hat id (if known). When provided, it enables
+/// hat-specific schema restrictions such as per-hat allowed values and
+/// topic-deny rules. When omitted, only hat-agnostic checks run.
+pub fn validate_event_with_hat(
+    topic: &str,
+    payload: Option<&str>,
+    config: &EventPolicyConfig,
+    state: &mut PolicyRuntimeState,
+    hat: Option<&str>,
+) -> PolicyDecision {
     if !config.enabled {
         return PolicyDecision::Accept;
     }
@@ -590,7 +605,7 @@ pub fn validate_event(
             }
         }
 
-        // Allowed values
+        // Allowed values (hat-agnostic)
         for (field_path, allowed) in &schema.allowed_values {
             if let Some(p) = payload
                 && let Ok(value) = serde_json::from_str::<Value>(p)
@@ -608,6 +623,33 @@ pub fn validate_event(
                         field_path, field_value, allowed
                     ),
                 });
+            }
+        }
+
+        // Hat-aware allowed values.
+        // Only enforce when the emitting hat is known; this lets CLI emit
+        // reject cross-hat impersonation before the event reaches jsonl.
+        if let Some(hat_id) = hat {
+            for (field_path, per_hat_rules) in &schema.hat_allowed_values {
+                if let Some(rule) = per_hat_rules.iter().find(|r| r.hat_id == hat_id) {
+                    if let Some(p) = payload
+                        && let Ok(value) = serde_json::from_str::<Value>(p)
+                        && let Some(field_value) = extract_json_field(&value, field_path)
+                        && !rule.values.contains(&field_value)
+                    {
+                        findings.push(PolicyFinding {
+                            topic: topic.to_string(),
+                            violation_type: ViolationType::InvalidFieldValue {
+                                field: field_path.clone(),
+                                value: field_value.clone(),
+                            },
+                            message: format!(
+                                "Hat '{}' may not use value {:?} for field '{}'. Allowed for this hat: {:?}",
+                                hat_id, field_value, field_path, rule.values
+                            ),
+                        });
+                    }
+                }
             }
         }
     }
@@ -725,7 +767,7 @@ fn extract_json_field(value: &Value, path: &str) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{EventSchema, TopicDenyRule};
+    use crate::config::{EventSchema, HatAllowedValues, TopicDenyRule};
     use std::collections::HashMap;
     use std::io::Write;
     use tempfile::NamedTempFile;
@@ -759,6 +801,7 @@ mod tests {
             required_fields: vec![],
 
             allowed_values: HashMap::new(),
+            hat_allowed_values: HashMap::new(),
         };
         config.schemas.insert("test".to_string(), schema);
         let mut state = PolicyRuntimeState::default();
@@ -774,6 +817,7 @@ mod tests {
             required_fields: vec![],
 
             allowed_values: HashMap::new(),
+            hat_allowed_values: HashMap::new(),
         };
         config.schemas.insert("test".to_string(), schema);
         let mut state = PolicyRuntimeState::default();
@@ -789,6 +833,7 @@ mod tests {
             required_fields: vec!["task_key".to_string()],
 
             allowed_values: HashMap::new(),
+            hat_allowed_values: HashMap::new(),
         };
         config.schemas.insert("test".to_string(), schema);
         let mut state = PolicyRuntimeState::default();
@@ -804,6 +849,7 @@ mod tests {
             required_fields: vec![],
 
             allowed_values: HashMap::new(),
+            hat_allowed_values: HashMap::new(),
         };
         schema.allowed_values.insert(
             "decision".to_string(),
@@ -843,6 +889,7 @@ mod tests {
             required_fields: vec![],
 
             allowed_values: HashMap::new(),
+            hat_allowed_values: HashMap::new(),
         };
         config.schemas.insert("test".to_string(), schema);
         let mut state = PolicyRuntimeState::default();
@@ -858,6 +905,7 @@ mod tests {
             required_fields: vec![],
 
             allowed_values: HashMap::new(),
+            hat_allowed_values: HashMap::new(),
         };
         config.schemas.insert("test".to_string(), schema);
         let mut state = PolicyRuntimeState::default();
@@ -895,6 +943,7 @@ mod tests {
             payload: None,
             required_fields: vec!["task_key".to_string()],
             allowed_values: HashMap::new(),
+            hat_allowed_values: HashMap::new(),
         };
         config.schemas.insert("test".to_string(), schema);
         let mut state = PolicyRuntimeState::default();
@@ -912,6 +961,7 @@ mod tests {
             payload: Some(PayloadType::JsonObject),
             required_fields: vec![],
             allowed_values: HashMap::new(),
+            hat_allowed_values: HashMap::new(),
         };
         schema.allowed_values.insert(
             "evaluation.decision".to_string(),
@@ -1212,6 +1262,7 @@ mod tests {
                 "falsification_condition".to_string(),
             ],
             allowed_values: HashMap::new(),
+            hat_allowed_values: HashMap::new(),
         };
         config
             .schemas
@@ -1623,6 +1674,7 @@ mod tests {
                 "skip_reason".into(),
             ],
             allowed_values: HashMap::new(),
+            hat_allowed_values: HashMap::new(),
         };
         // Mirror the ce-executor.yml U4 allowlist exactly.
         schema.allowed_values.insert(
@@ -1631,6 +1683,20 @@ mod tests {
                 Value::String("empty_diff".to_string()),
                 Value::String("trivial_step".to_string()),
                 Value::String("aggregate_timeout".to_string()),
+            ],
+        );
+        // U8: hat-aware restrictions mirror the preset.
+        schema.hat_allowed_values.insert(
+            "skip_reason".to_string(),
+            vec![
+                HatAllowedValues {
+                    hat_id: "review-coordinator".to_string(),
+                    values: vec![Value::String("empty_diff".to_string())],
+                },
+                HatAllowedValues {
+                    hat_id: "review-synthesizer".to_string(),
+                    values: vec![Value::String("aggregate_timeout".to_string())],
+                },
             ],
         );
         config.schemas.insert("review.passed".to_string(), schema);
@@ -1679,6 +1745,52 @@ mod tests {
         let payload = r#"{"plan_name":"p","task_id":"t","task_key":"k","step":"s","findings_count":0,"fix_round":0,"verdict":"pass","skip_reason":""}"#;
         let decision = validate_event("review.passed", Some(payload), &config, &mut state);
         assert!(matches!(decision, PolicyDecision::RejectWithResume(_)));
+    }
+
+    #[test]
+    fn test_u8_review_passed_hat_aware_allowed_values() {
+        let config = review_passed_allowlist_config();
+        let payload = r#"{"plan_name":"p","task_id":"t","task_key":"k","step":"s","findings_count":0,"fix_round":0,"verdict":"pass","skip_reason":"aggregate_timeout"}"#;
+
+        // review-coordinator may only use skip_reason='empty_diff'.
+        let mut state = PolicyRuntimeState::default();
+        let decision = validate_event_with_hat(
+            "review.passed",
+            Some(payload),
+            &config,
+            &mut state,
+            Some("review-coordinator"),
+        );
+        assert!(
+            matches!(decision, PolicyDecision::RejectWithResume(_)),
+            "review-coordinator emitting review.passed(skip_reason=aggregate_timeout) must be rejected, got {:?}",
+            decision
+        );
+
+        // review-synthesizer may use skip_reason='aggregate_timeout'.
+        let mut state = PolicyRuntimeState::default();
+        let decision = validate_event_with_hat(
+            "review.passed",
+            Some(payload),
+            &config,
+            &mut state,
+            Some("review-synthesizer"),
+        );
+        assert_eq!(
+            decision,
+            PolicyDecision::Accept,
+            "review-synthesizer emitting review.passed(skip_reason=aggregate_timeout) must be accepted, got {:?}",
+            decision
+        );
+
+        // No hat provided → hat-aware check is skipped, regular allowlist applies.
+        let mut state = PolicyRuntimeState::default();
+        let decision = validate_event("review.passed", Some(payload), &config, &mut state);
+        assert_eq!(
+            decision,
+            PolicyDecision::Accept,
+            "aggregate_timeout must remain in the global allowlist"
+        );
     }
 
     #[test]
@@ -1896,6 +2008,7 @@ mod tests {
                 "skip_reason".into(),
             ],
             allowed_values: HashMap::new(),
+            hat_allowed_values: HashMap::new(),
         };
         schema.allowed_values.insert(
             "skip_reason".to_string(),
@@ -2140,6 +2253,7 @@ mod tests {
             payload: Some(PayloadType::JsonObject),
             required_fields: vec!["findings_count".into()],
             allowed_values: HashMap::new(),
+            hat_allowed_values: HashMap::new(),
         };
         schema.allowed_values.insert(
             "skip_reason".to_string(),
@@ -2214,6 +2328,7 @@ mod tests {
                 payload: Some(PayloadType::JsonObject),
                 required_fields: vec!["dimension".to_string(), "plan_name".to_string()],
                 allowed_values: HashMap::new(),
+                hat_allowed_values: HashMap::new(),
             },
         );
         let mut state = PolicyRuntimeState::default();
@@ -2238,6 +2353,7 @@ mod tests {
                 payload: Some(PayloadType::JsonObject),
                 required_fields: vec!["dimension".to_string()],
                 allowed_values: HashMap::new(),
+                hat_allowed_values: HashMap::new(),
             },
         );
         let mut state = PolicyRuntimeState::default();

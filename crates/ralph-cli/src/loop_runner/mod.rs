@@ -8,6 +8,7 @@ mod event_logging;
 mod execution;
 mod exit_conditions;
 mod hard_gate;
+mod hat_channel;
 mod hooks;
 mod late_events;
 mod loop_owner;

@@ -204,3 +204,131 @@ fn test_emit_without_policy_logs_skip_info() {
         stderr
     );
 }
+
+/// Phase 2: in isolated mode, an agent that tries to override its hat via
+/// `--hat` while `RALPH_CURRENT_HAT` points to a different hat is rejected.
+#[test]
+fn test_emit_isolated_mode_rejects_conflicting_hat_override() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "-H",
+            "builtin:ce-executor-isolated",
+            "emit",
+            "debug.step",
+            "task_id=demo",
+            "--hat",
+            "review-coordinator",
+        ])
+        .env("RALPH_CURRENT_HAT", "review-synthesizer")
+        .current_dir(temp_path)
+        .output()
+        .expect("Failed to execute ralph emit command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "emit should reject conflicting --hat in isolated mode: stderr={}",
+        stderr
+    );
+    assert!(
+        stderr.contains("Isolated mode hat mismatch"),
+        "expected isolated-mode mismatch error, got: {}",
+        stderr
+    );
+
+    // The event must not be written anywhere.
+    let events_file = temp_path.join(".ralph/events.jsonl");
+    assert!(
+        !events_file.exists()
+            || std::fs::read_to_string(&events_file)
+                .unwrap()
+                .trim()
+                .is_empty(),
+        "rejected event must not be written"
+    );
+}
+
+/// Phase 3: hat-aware allowed values reject review-coordinator emitting
+/// review.passed(skip_reason=aggregate_timeout) before it reaches jsonl.
+#[test]
+fn test_emit_isolated_mode_rejects_coordinator_aggregate_timeout() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "-H",
+            "builtin:ce-executor-isolated",
+            "emit",
+            "review.passed",
+            "--json",
+            r#"{"plan_name":"p","task_id":"t","task_key":"k","step":"s","findings_count":0,"fix_round":0,"verdict":"pass","skip_reason":"aggregate_timeout"}"#,
+            "--hat",
+            "review-coordinator",
+        ])
+        .current_dir(temp_path)
+        .output()
+        .expect("Failed to execute ralph emit command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "emit should reject review-coordinator + aggregate_timeout: stderr={}",
+        stderr
+    );
+    assert!(
+        stderr.contains("review-coordinator") && stderr.contains("aggregate_timeout"),
+        "expected hat-aware rejection message, got: {}",
+        stderr
+    );
+
+    let events_file = temp_path.join(".ralph/events.jsonl");
+    assert!(
+        !events_file.exists()
+            || std::fs::read_to_string(&events_file)
+                .unwrap()
+                .trim()
+                .is_empty(),
+        "rejected event must not be written"
+    );
+}
+
+/// Phase 2: in isolated mode, when --hat agrees with RALPH_CURRENT_HAT the
+/// emit proceeds normally.
+#[test]
+fn test_emit_isolated_mode_allows_matching_hat() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "-H",
+            "builtin:ce-executor-isolated",
+            "emit",
+            "debug.step",
+            "task_id=demo",
+            "--hat",
+            "review-synthesizer",
+        ])
+        .env("RALPH_CURRENT_HAT", "review-synthesizer")
+        .current_dir(temp_path)
+        .output()
+        .expect("Failed to execute ralph emit command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "emit should succeed when --hat matches env: stderr={}",
+        stderr
+    );
+
+    let events_file = temp_path.join(".ralph/events.jsonl");
+    let events = std::fs::read_to_string(&events_file).unwrap();
+    assert!(events.contains("\"hat\":\"review-synthesizer\""));
+}

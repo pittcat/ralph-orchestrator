@@ -311,18 +311,14 @@ pub fn merge_wave_results_to_events_file(
                     }
                 }
             }
-            // U1 (P0-1): preserve worker hat provenance. Prefer the
-            // event's own `source` (set by the worker process); fall
-            // back to `default_source_hat` (the wave's target hat)
-            // for synthetic or under-provisioned worker records. We
-            // write BOTH `hat` and `source` so downstream readers
-            // (EventRecordRaw, isolated scope, origin guard) all see
-            // the same attribution without ambiguity.
-            let hat = event
-                .source
-                .as_ref()
-                .map(ralph_proto::HatId::as_str)
-                .unwrap_or(default_source_hat);
+            // Phase 2: in isolated mode provenance is a property of the
+            // worker channel, not the self-declared `hat`/`source` fields.
+            // The dispatcher stamps every merged record with the wave's
+            // target hat, overriding any value written by the worker. The
+            // ADV-2 check above still drops records whose `source` claims
+            // a different hat (when the dispatcher told the worker what to
+            // set).
+            let hat = default_source_hat;
             let record = serde_json::json!({
                 "topic": event.topic.as_str(),
                 "payload": event.payload,

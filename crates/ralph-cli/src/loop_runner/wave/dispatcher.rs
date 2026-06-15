@@ -635,7 +635,17 @@ pub async fn execute_wave_structured(
     use ralph_core::{WaveTracker, WaveWorkerContext, build_wave_worker_prompt};
 
     let concurrency = wave.hat_config.concurrency as usize;
-    let wave_timeout = Duration::from_secs(wave.timeout_secs());
+    let wave_timeout = Duration::from_secs(wave.per_worker_timeout_secs());
+    // Use an explicitly-configured aggregate timeout (worker or consumer)
+    // directly.  Only fall back to the per-worker-timeout × batches formula
+    // when no aggregate timeout is available.
+    let aggregate_timeout = if wave.has_explicit_aggregate_timeout()
+        || wave.consumer_aggregate_timeout.is_some()
+    {
+        Duration::from_secs(wave.aggregate_timeout_secs())
+    } else {
+        aggregate_timeout_for(wave_timeout, wave.events.len(), concurrency)
+    };
 
     // Register wave in tracker
     let mut tracker = WaveTracker::new();
@@ -756,7 +766,7 @@ pub async fn execute_wave_structured(
         DispatchContext::build(
             wave,
             wave_timeout,
-            aggregate_timeout_for(wave_timeout, wave.events.len(), concurrency),
+            aggregate_timeout,
             payload_previews,
             show_progress,
             use_colors,
@@ -1706,6 +1716,7 @@ hats: {}
             events,
             total,
             partial: events_count < total,
+            consumer_aggregate_timeout: None,
         }
     }
 
@@ -2662,6 +2673,50 @@ hats: {}
             "runner must set late_termination_reason = Some(MaxRuntime) on \
              global_deadline_exceeded. If this assertion fails, the C3 wiring \
              is broken and U4-C4 static guard is meaningless."
+        );
+    }
+
+    /// Phase 2: `merge_wave_results_to_events_file` must stamp every merged
+    /// record with the wave's target hat, overriding any self-declared
+    /// provenance from the worker.
+    #[test]
+    fn test_merge_wave_results_stamps_target_hat() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let events_file = tmp.path().join("events.jsonl");
+
+        let event = ralph_proto::Event::new("review.dimension.done", "{\"file\":\"src/lib.rs\"}")
+            .with_source(ralph_proto::HatId::new("dimension-reviewer"));
+        let completed = ralph_core::CompletedWave {
+            wave_id: "w-stamp-001".to_string(),
+            wave_total: 1,
+            results: vec![ralph_core::WaveResult {
+                index: 0,
+                events: vec![event],
+            }],
+            failures: vec![],
+            duration: std::time::Duration::ZERO,
+            partial: false,
+            expected_source_hat: Some(ralph_proto::HatId::new("dimension-reviewer")),
+        };
+
+        merge_wave_results_to_events_file(
+            &completed,
+            &events_file,
+            &["review.dimension.done".to_string()],
+            "dimension-reviewer",
+        )
+        .unwrap();
+
+        let merged = std::fs::read_to_string(&events_file).unwrap();
+        assert!(
+            merged.contains("\"hat\":\"dimension-reviewer\""),
+            "merged record must be stamped with target hat: {}",
+            merged
+        );
+        assert!(
+            merged.contains("\"source\":\"dimension-reviewer\""),
+            "merged record must mirror source to target hat: {}",
+            merged
         );
     }
 }

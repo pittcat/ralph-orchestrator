@@ -4548,6 +4548,7 @@ fn make_test_wave_with_timeout_and_payload(
         events: vec![event],
         total: 1,
         partial: false,
+        consumer_aggregate_timeout: None,
     }
 }
 
@@ -10878,6 +10879,7 @@ fn make_wave_with_count(
         events,
         total,
         partial: false,
+        consumer_aggregate_timeout: None,
     }
 }
 

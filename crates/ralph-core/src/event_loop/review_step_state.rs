@@ -393,6 +393,7 @@ mod tests {
                     "skip_reason".into(),
                 ],
                 allowed_values: HashMap::new(),
+                hat_allowed_values: HashMap::new(),
             },
         );
         config.schemas.insert(
@@ -410,6 +411,7 @@ mod tests {
                     "step".into(),
                 ],
                 allowed_values: HashMap::new(),
+                hat_allowed_values: HashMap::new(),
             },
         );
         config

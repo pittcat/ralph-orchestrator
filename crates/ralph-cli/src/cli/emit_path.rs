@@ -53,6 +53,7 @@ pub(crate) fn resolve_emit_path(
     let ralph_dir = workspace_root.join(".ralph");
     let candidate_marker = ralph_dir.join("current-candidate-events");
     let current_marker = ralph_dir.join("current-events");
+    let current_hat_marker = ralph_dir.join("current-hat-events");
     let default_path = ralph_dir.join("events.jsonl");
 
     // Build the allowlist of legitimate targets.
@@ -64,6 +65,15 @@ pub(crate) fn resolve_emit_path(
         }
     }
     if let Ok(value) = fs::read_to_string(&current_marker) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            allowed.push(resolve_marker_target(workspace_root, trimmed));
+        }
+    }
+    // Phase 2: per-hat write channel marker (isolated mode only). The
+    // event loop never reads from this file; the runner merges it back
+    // to the main events file after the backend exits.
+    if let Ok(value) = fs::read_to_string(&current_hat_marker) {
         let trimmed = value.trim();
         if !trimmed.is_empty() {
             allowed.push(resolve_marker_target(workspace_root, trimmed));

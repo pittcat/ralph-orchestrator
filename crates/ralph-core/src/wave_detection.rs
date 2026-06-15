@@ -38,23 +38,61 @@ pub struct DetectedWave {
     /// When true, the aggregator should note that some workers did not
     /// report back and list missing dimensions in Coverage.
     pub partial: bool,
+    /// Aggregate timeout of the consumer hat(s) that subscribe to the
+    /// worker hat's published topics.  Used by the dispatcher as the
+    /// wave-level deadline so a worker hat does not need to carry its
+    /// own `aggregate` block (which is reserved for aggregator hats).
+    pub consumer_aggregate_timeout: Option<u64>,
 }
 
 impl DetectedWave {
-    /// Returns the effective timeout in seconds for wave workers.
+    /// Returns the effective **per-worker** timeout in seconds.
     ///
-    /// Priority: hat.timeout > hat.aggregate.timeout > 300s default.
-    pub fn timeout_secs(&self) -> u64 {
+    /// This governs how long a single wave worker may run before the
+    /// dispatcher aborts it.  It is derived from `hat.timeout`.
+    ///
+    /// Default: 300s.
+    pub fn per_worker_timeout_secs(&self) -> u64 {
+        self.hat_config.timeout.map(u64::from).unwrap_or(300)
+    }
+
+    /// Returns the effective **wave-level aggregate** timeout in seconds.
+    ///
+    /// This governs how long the dispatcher waits for the whole wave
+    /// (all workers / all batches) to finish before declaring an
+    /// aggregate deadline exceeded.
+    ///
+    /// Priority:
+    ///   1. `hat.aggregate.timeout` if explicitly configured on the worker hat.
+    ///   2. `consumer_aggregate_timeout` inherited from the aggregator hat
+    ///      that consumes the worker hat's output (e.g. review-synthesizer:300).
+    ///   3. Per-worker timeout (`per_worker_timeout_secs`) as a fallback,
+    ///      scaled by the dispatcher's batch calculation.
+    ///
+    /// Default fallback: 300s.
+    pub fn aggregate_timeout_secs(&self) -> u64 {
         self.hat_config
-            .timeout
-            .map(u64::from)
-            .or_else(|| {
-                self.hat_config
-                    .aggregate
-                    .as_ref()
-                    .map(|a| u64::from(a.timeout))
-            })
-            .unwrap_or(300)
+            .aggregate
+            .as_ref()
+            .map(|a| u64::from(a.timeout))
+            .or(self.consumer_aggregate_timeout)
+            .unwrap_or_else(|| self.per_worker_timeout_secs())
+    }
+
+    /// Returns true when the hat config explicitly sets an aggregate
+    /// timeout, distinguishing "I want a wave-level cap" from "fall back
+    /// to per-worker scaling".
+    pub fn has_explicit_aggregate_timeout(&self) -> bool {
+        self.hat_config.aggregate.is_some()
+    }
+
+    /// Backwards-compatible alias for `per_worker_timeout_secs`.
+    ///
+    /// Display / RPC code that reports "worker timeout" should use this;
+    /// dispatch deadline code should use `per_worker_timeout_secs` and
+    /// `aggregate_timeout_secs` explicitly.
+    pub fn timeout_secs(&self) -> u64 {
+        self.per_worker_timeout_secs()
     }
 }
 
@@ -251,6 +289,13 @@ fn try_build_wave(
     let mut sorted_events: Vec<Event> = wave_events.into_iter().cloned().collect();
     sorted_events.sort_by_key(|e| e.wave_index.unwrap_or(0));
 
+    // Inherit the aggregate timeout from the consumer hat(s) that subscribe
+    // to the worker hat's published topics.  This lets the dispatcher cap
+    // the wave wait to the aggregator's patience (e.g. review-synthesizer's
+    // 300s aggregate window) without forcing the worker hat to carry an
+    // `aggregate` block, which is reserved for aggregator hats.
+    let consumer_aggregate_timeout = consumer_aggregate_timeout_for(&hat_config, registry);
+
     Ok(DetectedWave {
         wave_id: wave_id.to_string(),
         target_hat: target_hat_id.clone(),
@@ -258,7 +303,26 @@ fn try_build_wave(
         events: sorted_events,
         total: wave_total,
         partial: is_partial,
+        consumer_aggregate_timeout,
     })
+}
+
+/// Look at the hats that subscribe to each topic the worker hat publishes,
+/// and return the smallest explicit aggregate timeout among those consumers.
+///
+/// Returns `None` when no consumer has an explicit aggregate timeout.
+fn consumer_aggregate_timeout_for(hat_config: &HatConfig, registry: &HatRegistry) -> Option<u64> {
+    hat_config
+        .publishes
+        .iter()
+        .filter_map(|topic| {
+            registry
+                .find_by_trigger(topic)
+                .and_then(|consumer_id| registry.get_config(&consumer_id))
+                .and_then(|cfg| cfg.aggregate.as_ref())
+                .map(|agg| u64::from(agg.timeout))
+        })
+        .min()
 }
 
 /// Convert a `Result<DetectedWave, WaveRejection>` into the

@@ -203,6 +203,17 @@ event_loop:
         # is enforced by the `EventSchema` validator in event_policy.rs.
         allowed_values:
           skip_reason: ["empty_diff", "trivial_step", "aggregate_timeout"]
+        # U8 (2026-06-15): hat-aware allowed values. Each hat may only use
+        # the skip_reason values that match its role. This prevents
+        # review-coordinator from bypassing the synthesizer by emitting
+        # review.passed(skip_reason=aggregate_timeout) when dimensions
+        # time out.
+        hat_allowed_values:
+          skip_reason:
+            - hat_id: review-coordinator
+              values: ["empty_diff"]
+            - hat_id: review-synthesizer
+              values: ["aggregate_timeout"]
       review.failed:
         required_fields: [plan_name, fix_round, safe_auto_count, gated_manual_count, findings_summary, task_id, task_key, step]
         payload: json_object
@@ -943,6 +954,11 @@ hats:
     publishes: ["review.dimension.done"]
     terminal_events: ["review.dimension.done"]
     concurrency: 9
+    # Per-worker hard limit: a single dimension reviewer may run up to 30 min.
+    # The wave dispatcher derives the wave aggregate deadline from the consumer
+    # hat's aggregate timeout (review-synthesizer.aggregate.timeout: 300), so
+    # stuck waves fail fast; the worker hat itself must not carry an `aggregate`
+    # block because that is reserved for aggregator hats.
     timeout: 1800
     instructions: |
       ## DIMENSION REVIEWER MODE — Focused {dimension} Review
@@ -1139,9 +1155,13 @@ hats:
     terminal_events: ["review.passed", "review.failed", "review.complete"]
     aggregate:
       mode: wait_for_all
-      # NOTE: This timeout controls how long the synthesizer waits for ALL dimension
-      # results to arrive. It does NOT control individual wave worker timeout.
-      # Worker timeout is governed by dimension-reviewer.timeout (above).
+      # NOTE: This timeout is used in TWO places:
+      #   1. The EventLoop wakes the synthesizer with an aggregate-timeout signal
+      #      when not all review.dimension.done events arrive within 300s.
+      #   2. The wave dispatcher uses it as the wave aggregate deadline for the
+      #      dimension-reviewer workers, so a stuck wave is surfaced as partial /
+      #      aggregate-timeout instead of waiting for each worker's 30min cap.
+      # It does NOT control individual wave worker timeout (dimension-reviewer.timeout).
       timeout: 300
     instructions: |
       ## REVIEW SYNTHESIZER MODE — Merge, Deduplicate, Calibrate, Validate, and Route

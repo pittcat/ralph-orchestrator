@@ -7,6 +7,7 @@ use crate::display::colors;
 use crate::policy_check::{PolicyCheckFlags, resolve_policy_check_mode};
 use anyhow::{Context, Result};
 use clap::Parser;
+use ralph_core::config::HatExecutionMode;
 use ralph_core::{
     RalphConfig, UrgentSteerStore,
     diagnosis::{
@@ -237,6 +238,7 @@ fn emit_command_with_root_and_hats(
     let should_load_config = args.policy_check
         || args.no_policy_check
         || args.hat.is_none()
+        || std::env::var("RALPH_CURRENT_HAT").is_ok()
         || workspace_root.join(".ralph").is_dir();
 
     let config = if should_load_config {
@@ -279,9 +281,40 @@ fn emit_command_with_root_and_hats(
 
     // Resolve provenance values: CLI flag > env var > empty
     let (hat, triggered, source) =
-        resolve_provenance(args.hat, args.triggered, args.source, |key| {
+        resolve_provenance(args.hat.clone(), args.triggered, args.source, |key| {
             std::env::var(key).ok()
         });
+
+    // Phase 2: in isolated mode the runner controls hat provenance. When the
+    // agent is running inside a hat context (RALPH_CURRENT_HAT is set), the
+    // CLI flag --hat is ignored and must not disagree with the environment.
+    let env_hat = std::env::var("RALPH_CURRENT_HAT")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let hat = if config
+        .as_ref()
+        .is_some_and(|c| c.event_loop.execution_mode == HatExecutionMode::Isolated)
+    {
+        if let Some(ref env_hat) = env_hat {
+            if let Some(ref cli_hat) = args.hat {
+                if cli_hat != env_hat {
+                    anyhow::bail!(
+                        "Isolated mode hat mismatch: --hat '{}' conflicts with \
+                         RALPH_CURRENT_HAT '{}'. In isolated mode the runner \
+                         controls provenance; emit as '{}'.",
+                        cli_hat,
+                        env_hat,
+                        env_hat
+                    );
+                }
+            }
+            Some(env_hat.clone())
+        } else {
+            hat
+        }
+    } else {
+        hat
+    };
 
     // Enforce provenance requirements when hat is missing.
     if hat.is_none() {
@@ -337,7 +370,9 @@ fn emit_command_with_root_and_hats(
             }
         };
         if let Some(policy) = policy {
-            use ralph_core::{PolicyRuntimeState, validate_event};
+            use ralph_core::{
+                PolicyRuntimeState, check_topic_deny_rules, validate_event_with_hat,
+            };
             let events_path = fs::read_to_string(&current_events_marker)
                 .map(|s| resolve_marker_target(&workspace_root, &s))
                 .unwrap_or_else(|_| args.file.clone());
@@ -349,7 +384,45 @@ fn emit_command_with_root_and_hats(
                     );
                     PolicyRuntimeState::default()
                 });
-            let decision = validate_event(&args.topic, Some(&args.payload), policy, &mut state);
+
+            // Enforce topic-deny rules at CLI emit time so a forbidden
+            // (hat, topic) pair never reaches the events file.
+            if let Some(decision) = check_topic_deny_rules(hat.as_deref(), &args.topic, policy) {
+                match decision {
+                    ralph_core::PolicyDecision::Accept => {}
+                    ralph_core::PolicyDecision::Warn(findings) => {
+                        for finding in findings {
+                            eprintln!("Policy warning: {}", finding.message);
+                        }
+                    }
+                    ralph_core::PolicyDecision::RejectWithResume(finding)
+                    | ralph_core::PolicyDecision::Hold(finding)
+                    | ralph_core::PolicyDecision::Block(finding)
+                    | ralph_core::PolicyDecision::Ignore(finding) => {
+                        if let Err(e) = write_cli_emit_recovery_envelope(
+                            &workspace_root,
+                            &args.topic,
+                            hat.as_deref(),
+                            &finding,
+                        ) {
+                            tracing::warn!("Failed to write CLI emit recovery envelope: {:#}", e);
+                        }
+                        anyhow::bail!(
+                            "Event rejected by policy: {}. Fix the issue before emitting.",
+                            finding.message
+                        );
+                    }
+                }
+            }
+
+            // Run schema validation with hat-aware restrictions.
+            let decision = validate_event_with_hat(
+                &args.topic,
+                Some(&args.payload),
+                policy,
+                &mut state,
+                hat.as_deref(),
+            );
             match decision {
                 ralph_core::PolicyDecision::Accept => {}
                 ralph_core::PolicyDecision::Warn(findings) => {

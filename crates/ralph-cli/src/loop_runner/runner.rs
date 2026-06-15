@@ -2588,8 +2588,24 @@ async fn run_loop_impl_inner(
             effective_backend.args.extend(args);
         }
 
-        // Inject hat execution context into backend environment
-        let events_path = resolve_emit_events_path(&ctx, state_machine_enabled);
+        // Phase 2: in isolated mode each hat gets its own write channel so
+        // provenance is a property of the channel, not the self-declared `hat`
+        // field. The runner stamps every record when merging back to the main
+        // events file.
+        let isolated_mode = crate::loop_runner::paths::is_isolated_mode(&config);
+        let hat_channel_path = if isolated_mode {
+            Some(crate::loop_runner::hat_channel::prepare_hat_channel(
+                &ctx,
+                display_hat.as_str(),
+                &loop_id,
+                iteration,
+            )?)
+        } else {
+            None
+        };
+        let events_path = hat_channel_path
+            .clone()
+            .unwrap_or_else(|| resolve_emit_events_path(&ctx, state_machine_enabled));
         let triggered_hat = event_loop.triggered_hat().map(|h| h.as_str().to_string());
         inject_hat_execution_env(
             &mut effective_backend,
@@ -2903,6 +2919,24 @@ async fn run_loop_impl_inner(
             event_loop.registry(),
             raw_output_logging_enabled,
         );
+
+        // Phase 2: merge the isolated hat channel back into the main events
+        // file before the event loop reads it. This stamps every record with
+        // the authoritative hat of the channel.
+        if isolated_mode {
+            let target_events_path = resolve_emit_events_path(&ctx, state_machine_enabled);
+            if let Err(e) = crate::loop_runner::hat_channel::merge_hat_channel(
+                &ctx,
+                &target_events_path,
+                display_hat.as_str(),
+            ) {
+                warn!(
+                    error = %e,
+                    hat = %display_hat.as_str(),
+                    "Failed to merge isolated hat channel; events may be lost"
+                );
+            }
+        }
 
         // Process output
         if let Some(reason) = event_loop.process_output(&output_hat_id, &output, success) {

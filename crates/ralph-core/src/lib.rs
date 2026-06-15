@@ -118,7 +118,7 @@ pub use event_origin::{
 pub use event_parser::EventParser;
 pub use event_policy::{
     PolicyDecision, PolicyFinding, PolicyRejection, PolicyRuntimeState, ViolationType,
-    check_topic_deny_rules, validate_event,
+    check_topic_deny_rules, validate_event, validate_event_with_hat,
 };
 pub use event_projection::apply_projection;
 pub use event_reader::{Event, EventReader, MalformedLine, ParseResult};

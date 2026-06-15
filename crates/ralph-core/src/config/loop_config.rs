@@ -10,6 +10,17 @@ use super::state_machine::StateMachineConfig;
 use super::workflow_contract::WorkflowContractConfig;
 use super::workflow_guards::{HatExecutionMode, WorkflowGuardsConfig};
 
+/// Hat-specific allowed values for a field within an event schema.
+///
+/// When a field has hat-aware restrictions, only the hats listed here may
+/// use the associated values. Values that are legal for one hat but illegal
+/// for another are rejected at CLI emit time instead of killing the loop.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HatAllowedValues {
+    pub hat_id: String,
+    pub values: Vec<serde_json::Value>,
+}
+
 /// Schema for validating events of a specific topic.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventSchema {
@@ -20,8 +31,16 @@ pub struct EventSchema {
     #[serde(default)]
     pub required_fields: Vec<String>,
     /// Allowed values for specific fields (dot-notation path -> allowed values).
+    /// These apply regardless of which hat emits the event.
     #[serde(default)]
     pub allowed_values: HashMap<String, Vec<serde_json::Value>>,
+    /// Hat-aware allowed values. Keys are dot-notation field paths; values are
+    /// per-hat allowed-value lists. When the emitting hat matches a rule, the
+    /// field value must be in that rule's list. This lets the policy express
+    /// e.g. "review-coordinator may only use skip_reason='empty_diff', while
+    /// review-synthesizer may use 'aggregate_timeout'".
+    #[serde(default)]
+    pub hat_allowed_values: HashMap<String, Vec<HatAllowedValues>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
