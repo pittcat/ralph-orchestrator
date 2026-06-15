@@ -13,7 +13,7 @@
 //! See docs/plans/2026-06-10-001-fix-ce-executor-worktree-isolation-plan.md
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 
@@ -430,4 +430,285 @@ fn test_stderr_log_in_worktree_not_main_repo() {
             ralph_log_count
         );
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 2026-06-14-001: --reuse-worktree integration scenarios
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Write a `.ralph/loops.json` entry that points at a real, on-disk
+/// worktree and uses a non-existent PID (>= PID_MAX_LIMIT). This mimics
+/// a "previously completed worktree loop" the way the real CLI would
+/// leave the registry when a run finishes normally. The PID sentinel
+/// is chosen so that `kill(pid, None)` returns ESRCH and `is_alive()`
+/// reports the entry as dead (see ralph-core/src/loop_registry.rs).
+fn write_completed_worktree_entry(
+    main_repo: &Path,
+    loop_id: &str,
+    worktree_path: &Path,
+) {
+    use chrono::Utc;
+    let ralph_dir = main_repo.join(".ralph");
+    fs::create_dir_all(&ralph_dir).unwrap();
+    let registry_path = ralph_dir.join("loops.json");
+
+    let entry = serde_json::json!({
+        "id": loop_id,
+        "pid": 4_194_305_u32, // PID_MAX_LIMIT + 1 ⇒ dead PID sentinel
+        "started": Utc::now(),
+        "prompt": "previous prompt",
+        "worktree_path": worktree_path.to_string_lossy(),
+        "workspace": worktree_path.to_string_lossy(),
+    });
+    let body = serde_json::json!({ "loops": [entry] });
+    fs::write(&registry_path, serde_json::to_string_pretty(&body).unwrap()).unwrap();
+}
+
+/// Pre-create a worktree via `git worktree add` (so it is "real" from
+/// git's point of view) and then drop a `.ralph/events.jsonl` plus a
+/// `.ralph/agent/tasks.jsonl` so we can later verify that the reuse
+/// path cleared them.
+///
+/// Note: we use `git worktree add` *first* (which creates the
+/// directory as part of the worktree) and only afterwards write the
+/// runtime artifacts. Doing the reverse (mkdir + git worktree add) is
+/// rejected by git because the target path already exists.
+fn precreate_worktree_with_artifacts(main_repo: &Path, loop_id: &str) -> PathBuf {
+    let worktree_path = main_repo.join(".worktrees").join(loop_id);
+
+    let status = Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            "--detach",
+            worktree_path.to_str().unwrap(),
+            "HEAD",
+        ])
+        .current_dir(main_repo)
+        .status()
+        .expect("git worktree add");
+    assert!(status.success(), "git worktree add must succeed for test setup");
+
+    // Now seed the runtime artifacts the prior loop "left behind".
+    let ralph_dir = worktree_path.join(".ralph");
+    let agent_dir = ralph_dir.join("agent");
+    fs::create_dir_all(&agent_dir).unwrap();
+    fs::write(ralph_dir.join("events.jsonl"), "{\"type\":\"legacy\"}\n").unwrap();
+    fs::write(agent_dir.join("tasks.jsonl"), "{\"id\":\"old\"}\n").unwrap();
+
+    worktree_path
+}
+
+/// AE1 (happy path): a second `ralph run --worktree --reuse-worktree`
+/// reuses the existing worktree directory instead of creating a new
+/// one. The worktree count stays at 1, and the stale runtime artifacts
+/// (events.jsonl, tasks.jsonl) that the prior loop left behind are
+/// cleared.
+///
+/// The reuse lookup keys off the loop-name prefix derived from the
+/// prompt file (a plan-style filename), so we run the CLI with
+/// `--prompt-file` pointing at a file whose stem matches the
+/// `loop_id` we pre-staged.
+#[test]
+fn test_reuse_worktree_reuses_existing_dir_and_clears_artifacts() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let main_repo = temp_dir.path();
+    setup_git_repo(main_repo);
+    write_minimal_config(main_repo);
+
+    // Drop a plan file in the main repo so the CLI derives a
+    // recognizable prefix from its stem. We name it
+    // `fix-header-swift-peacock.md` so the prefix matches the
+    // pre-staged worktree's loop_id verbatim.
+    let plan_path = main_repo.join("fix-header-swift-peacock.md");
+    fs::write(&plan_path, "# plan body\n").unwrap();
+
+    // Pre-stage a completed worktree that the CLI should be able to
+    // find by prefix.
+    let loop_id = "fix-header-swift-peacock";
+    let worktree_path = precreate_worktree_with_artifacts(main_repo, loop_id);
+    write_completed_worktree_entry(main_repo, loop_id, &worktree_path);
+
+    // Sanity: the staged worktree carries the artifacts we expect
+    // cleanup to remove.
+    assert!(worktree_path.join(".ralph/events.jsonl").exists());
+    assert!(worktree_path.join(".ralph/agent/tasks.jsonl").exists());
+
+    // Run with --reuse-worktree. The plan file's stem
+    // (`fix-header-swift-peacock`) drives the loop-name prefix.
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "run",
+            "--worktree",
+            "--reuse-worktree",
+            "--no-tui",
+            "--skip-preflight",
+            "--prompt-file",
+            plan_path.to_str().unwrap(),
+        ])
+        .current_dir(main_repo)
+        .output()
+        .expect("execute ralph");
+    eprintln!("reuse stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    // Worktree count stays at 1 (reuse did not create a new one).
+    let wt_count = count_worktrees(main_repo);
+    assert_eq!(
+        wt_count, 1,
+        "--reuse-worktree should not create an additional worktree, found {}",
+        wt_count
+    );
+
+    // The staged worktree's stale events.jsonl is gone (cleanup ran).
+    assert!(
+        !worktree_path.join(".ralph/events.jsonl").exists(),
+        "events.jsonl should be cleared by the reuse cleanup"
+    );
+    assert!(
+        !worktree_path.join(".ralph/agent/tasks.jsonl").exists(),
+        "tasks.jsonl should be cleared by the reuse cleanup"
+    );
+
+    // The .ralph/ and .ralph/agent/ directories still exist (parent
+    // directories are not nuked, just their contents).
+    assert!(worktree_path.join(".ralph").is_dir());
+    assert!(worktree_path.join(".ralph/agent").is_dir());
+}
+
+/// AE2 (fallback): running `--reuse-worktree` on a clean repo with no
+/// prior worktree history must transparently fall back to creating a
+/// new worktree, not error out. This is the "no match → new" path
+/// described in R3.
+#[test]
+fn test_reuse_worktree_falls_back_to_create_on_clean_repo() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let main_repo = temp_dir.path();
+    setup_git_repo(main_repo);
+    write_minimal_config(main_repo);
+
+    // Plan file drives the loop-name prefix lookup.
+    let plan_path = main_repo.join("fresh-test.md");
+    fs::write(&plan_path, "# plan body\n").unwrap();
+
+    // No prior worktree, no registry entry — nothing to reuse.
+    let _ = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "run",
+            "--worktree",
+            "--reuse-worktree",
+            "--no-tui",
+            "--skip-preflight",
+            "--prompt-file",
+            plan_path.to_str().unwrap(),
+        ])
+        .current_dir(main_repo)
+        .output()
+        .expect("execute ralph");
+
+    // A new worktree must have been created (the fallback worked).
+    let wt_count = count_worktrees(main_repo);
+    assert_eq!(
+        wt_count, 1,
+        "Without prior worktree, --reuse-worktree should fall back to creating one. found {}",
+        wt_count
+    );
+}
+
+/// Edge case: a still-running worktree (PID alive) must NOT be
+/// reused; the runner should fall back to creating a fresh worktree.
+/// We mirror the live-LoopEntry contract by writing an entry with the
+/// current process's PID.
+#[test]
+fn test_reuse_worktree_skips_live_entry_and_creates_new() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let main_repo = temp_dir.path();
+    setup_git_repo(main_repo);
+    write_minimal_config(main_repo);
+
+    let loop_id = "fix-header-lively-pid";
+    let worktree_path = precreate_worktree_with_artifacts(main_repo, loop_id);
+
+    // Use the test process's own PID so the entry is "alive" and must
+    // be excluded by find_reusable_worktree.
+    let ralph_dir = main_repo.join(".ralph");
+    fs::create_dir_all(&ralph_dir).unwrap();
+    let registry_path = ralph_dir.join("loops.json");
+    let entry = serde_json::json!({
+        "id": loop_id,
+        "pid": std::process::id(),
+        "started": chrono::Utc::now(),
+        "prompt": "running",
+        "worktree_path": worktree_path.to_str().unwrap(),
+        "workspace": worktree_path.to_str().unwrap(),
+    });
+    let body = serde_json::json!({ "loops": [entry] });
+    fs::write(&registry_path, serde_json::to_string_pretty(&body).unwrap()).unwrap();
+
+    // Plan file drives the loop-name prefix lookup.
+    let plan_path = main_repo.join("fix-header-bright-falcon.md");
+    fs::write(&plan_path, "# plan body\n").unwrap();
+
+    let _ = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "run",
+            "--worktree",
+            "--reuse-worktree",
+            "--no-tui",
+            "--skip-preflight",
+            "--prompt-file",
+            plan_path.to_str().unwrap(),
+        ])
+        .current_dir(main_repo)
+        .output()
+        .expect("execute ralph");
+
+    // Two worktrees: the staged one was *not* reused, the new one is
+    // a fresh creation. (This guards against the "reuse a running
+    // worktree" bug.)
+    let wt_count = count_worktrees(main_repo);
+    assert_eq!(
+        wt_count, 2,
+        "A still-running worktree must not be reused. Expected 1 staged + 1 new = 2, found {}",
+        wt_count
+    );
+}
+
+/// Integration: `--reuse-worktree` is orthogonal to `--no-auto-merge`
+/// (R11). Both flags must be settable together without the reuse
+/// path breaking the auto-merge behavior, which the existing
+/// `args.no_auto_merge || args.worktree` short-circuit already
+/// guarantees. We just verify both flags are accepted and the run
+/// completes (exit status 0 is not required — the backend may be
+/// missing in CI — but the invocation must not clap-parse-error).
+#[test]
+fn test_reuse_worktree_with_no_auto_merge_accepted() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let main_repo = temp_dir.path();
+    setup_git_repo(main_repo);
+    write_minimal_config(main_repo);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "run",
+            "--worktree",
+            "--reuse-worktree",
+            "--no-auto-merge",
+            "--no-tui",
+            "--skip-preflight",
+            "--prompt",
+            "test prompt",
+        ])
+        .current_dir(main_repo)
+        .output()
+        .expect("execute ralph");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("unexpected argument"),
+        "clap must accept --reuse-worktree together with --no-auto-merge. stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("cannot be used with"),
+        "clap must not flag --reuse-worktree/--no-auto-merge as mutually exclusive. stderr: {stderr}"
+    );
 }
