@@ -74,7 +74,6 @@ pub fn build_publish_emit_section(
 /// hat has no authority for the topic, `None` is returned so the caller
 /// refuses to leak another hat's payload shape into the error output.
 pub fn fix_hint_for_hat_topic(
-    _hat_id: &str,
     hat: &Hat,
     topic: &str,
     schema: &EventSchema,
@@ -82,7 +81,7 @@ pub fn fix_hint_for_hat_topic(
     let authorised = hat
         .publishes
         .iter()
-        .any(|t| t.as_str() == topic || topic_matches_pattern(t.as_str(), topic));
+        .any(|t| t.matches_str(topic));
 
     if !authorised {
         return None;
@@ -138,17 +137,11 @@ fn example_json_object(schema: &EventSchema) -> String {
     }
 }
 
-/// Match a single concrete topic against a declared publish pattern.
-///
-/// Supports the same wildcard rules as `Topic::matches_str`: a trailing
-/// `*` matches any suffix; exact strings match themselves. Returns false
-/// for inputs that are neither exact matches nor wildcard patterns.
-fn topic_matches_pattern(pattern: &str, topic: &str) -> bool {
-    if let Some(prefix) = pattern.strip_suffix('*') {
-        return topic.starts_with(prefix);
-    }
-    pattern == topic
-}
+/// `Topic::matches_str` per-segment glob semantics are inherited from
+/// the runtime subscription matcher (see `Topic::matches_str` in
+/// `ralph-proto/src/topic.rs`), so a hat publishing `review.*` will not
+/// authorise `review.sub.done` in the CLI hint path — matching the
+/// behaviour the loop will actually enforce.
 
 #[cfg(test)]
 mod tests {
@@ -243,7 +236,7 @@ mod tests {
             &["work.ready", "work.failed"],
         );
 
-        let hint = fix_hint_for_hat_topic("coordinator", &hat, "work.ready", &schema)
+        let hint = fix_hint_for_hat_topic(&hat, "work.ready", &schema)
             .expect("coordinator is authorised to publish work.ready");
 
         assert!(hint.contains("Your hat `coordinator` may publish"));
@@ -263,7 +256,7 @@ mod tests {
         );
 
         assert!(
-            fix_hint_for_hat_topic("coordinator", &hat, "work.done", &schema).is_none(),
+            fix_hint_for_hat_topic(&hat, "work.done", &schema).is_none(),
             "coordinator is not authorised to publish work.done"
         );
     }
@@ -276,15 +269,31 @@ mod tests {
             .with_publishes(vec![Topic::new("review.*")]);
 
         let hint =
-            fix_hint_for_hat_topic("reviewer", &hat, "review.done", &schema).expect("wildcard");
+            fix_hint_for_hat_topic(&hat, "review.done", &schema).expect("wildcard");
         assert!(hint.contains("review.done"));
+    }
+
+    #[test]
+    fn fix_hint_rejects_multi_segment_wildcard_mismatch() {
+        // Plan 001 §4.1 P0: a hat publishing `review.*` must NOT authorise
+        // `review.sub.done` in the CLI hint path. Topic::matches_str uses
+        // per-segment globbing, so multi-segment topics are rejected.
+        let schema = schema_with_required(&["x"]);
+        let hat = Hat::new("reviewer", "Reviewer")
+            .with_description("")
+            .with_publishes(vec![Topic::new("review.*")]);
+
+        assert!(
+            fix_hint_for_hat_topic(&hat, "review.sub.done", &schema).is_none(),
+            "review.* must not match review.sub.done (per-segment glob)"
+        );
     }
 
     #[test]
     fn fix_hint_omits_required_fields_line_when_empty() {
         let schema = schema_with_required(&[]);
         let hat = hat_with_publishes("a", "A", &["work.ready"]);
-        let hint = fix_hint_for_hat_topic("a", &hat, "work.ready", &schema).unwrap();
+        let hint = fix_hint_for_hat_topic(&hat, "work.ready", &schema).unwrap();
         assert!(!hint.contains("Required fields:"));
     }
 
