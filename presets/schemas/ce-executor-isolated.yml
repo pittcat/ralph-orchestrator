@@ -91,7 +91,21 @@ review.passed:
     - findings_count
     - fix_round
     - verdict
+    - skip_reason
   payload: json_object
+  allowed_values:
+    skip_reason:
+      - empty_diff
+      - trivial_step
+      - aggregate_timeout
+  hat_allowed_values:
+    skip_reason:
+      - hat_id: review-coordinator
+        values:
+          - empty_diff
+      - hat_id: review-synthesizer
+        values:
+          - aggregate_timeout
 
 review.failed:
   required_fields:
@@ -185,6 +199,11 @@ plan.complete:
   payload: json_object
 
 plan.blocked:
+  required_fields:
+    - reason
+  payload: json_object
+
+loop.cancel:
   required_fields:
     - reason
   payload: json_object

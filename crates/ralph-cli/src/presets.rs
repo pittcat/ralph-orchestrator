@@ -3743,6 +3743,45 @@ mod tests {
         );
     }
 
+    /// Plan 001 §4.5 AC-9: `presets/schemas/ce-executor-isolated.yml`
+    /// must stay byte-locked with the preset's inline `event_policy.schemas`
+    /// block. Editing only one of the two would silently leave the runtime
+    /// and the reference in disagreement.
+    #[test]
+    fn test_ce_executor_isolated_reference_schema_matches_inline_schema() {
+        let preset =
+            get_preset("ce-executor-isolated").expect("ce-executor-isolated preset should exist");
+        let inline_yaml: serde_yaml::Value =
+            serde_yaml::from_str(preset.content).expect("ce-executor-isolated YAML should parse");
+        let inline_schemas = inline_yaml
+            .get("event_loop")
+            .and_then(|value| value.get("event_policy"))
+            .and_then(|value| value.get("schemas"))
+            .expect("ce-executor-isolated inline schemas should exist")
+            .clone();
+
+        let reference_content = read_root_schema("ce-executor-isolated.yml");
+        let reference_schemas: serde_yaml::Value = serde_yaml::from_str(&reference_content)
+            .expect("reference schema YAML should parse");
+
+        // The inline form uses flow sequences (`[a, b, c]`) while the
+        // reference uses block sequences (`- a\n- b\n- c`). Round-tripping
+        // through `serde_yaml::to_string` gives both sides a canonical
+        // shape, which is what we actually care about: same topic
+        // coverage, same required-field sets, same allowed/hat values.
+        let canonical_inline = canonicalize_schemas(&inline_schemas);
+        let canonical_reference = canonicalize_schemas(&reference_schemas);
+
+        assert_eq!(
+            canonical_inline, canonical_reference,
+            "presets/schemas/ce-executor-isolated.yml must match inline event_policy.schemas"
+        );
+    }
+
+    fn canonicalize_schemas(value: &serde_yaml::Value) -> String {
+        serde_yaml::to_string(value).expect("schemas should re-serialise")
+    }
+
     #[test]
     fn test_ce_executor_wave_synthesizer_aggregate_timeout() {
         let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");

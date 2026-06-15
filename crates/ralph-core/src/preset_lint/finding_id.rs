@@ -111,3 +111,20 @@ pub const FINDING_TRIGGER_PUBLISH_ASYMMETRY: &str = "preset.trigger_publish_asym
 /// `Warn` in default mode, `Error` in strict. Builtin embedded
 /// presets force `Error` (WAC-U2 R6).
 pub const FINDING_HANDOFF_SEED_DERIVED_CONFLICT: &str = "preset.handoff_seed_derived_conflict";
+
+// ──────────────────────────────────────────────────────────────────────────
+// Plan 001 §4.5 (2026-06-15-001): Schema parity finding IDs
+// ──────────────────────────────────────────────────────────────────────────
+
+/// A hat declares a topic in `publishes` but `event_policy.schemas` has no
+/// entry for that topic. The CLI pre-publish check would have nothing to
+/// validate against; the agent's payload contract is undefined for this
+/// topic. Always `Error` in strict mode.
+pub const FINDING_PUBLISHES_MISSING_SCHEMA: &str = "preset.publishes_missing_schema";
+
+/// `presets/schemas/<preset>.yml` does not structurally match the inline
+/// `event_policy.schemas` block. Editing only one of the two would
+/// silently leave the runtime and the reference in disagreement. Always
+/// `Error` — checked by the `ce_executor_*_reference_schema_matches_inline`
+/// tests in `crates/ralph-cli/src/presets.rs`.
+pub const FINDING_SCHEMA_REFERENCE_PARITY: &str = "preset.schema_reference_parity";

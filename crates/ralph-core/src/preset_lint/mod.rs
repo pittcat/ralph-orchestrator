@@ -27,6 +27,7 @@ pub mod coordinator;
 pub mod finding_id;
 pub mod multi_hat;
 pub mod ownership;
+pub mod schema_parity;
 pub mod topic_format;
 pub mod workflow_activation;
 
