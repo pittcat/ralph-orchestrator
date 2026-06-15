@@ -712,3 +712,98 @@ fn test_reuse_worktree_with_no_auto_merge_accepted() {
         "clap must not flag --reuse-worktree/--no-auto-merge as mutually exclusive. stderr: {stderr}"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// 2026-06-15-002: worktree context.md must not leak the main repo path
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Find the single on-disk worktree directory created by `--worktree`.
+/// Returns `None` if `.worktrees/` does not exist or has no entries.
+fn first_worktree_dir(main_repo: &Path) -> Option<PathBuf> {
+    let worktrees_dir = main_repo.join(".worktrees");
+    fs::read_dir(&worktrees_dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.is_dir())
+}
+
+/// Integration regression test for the worktree context leak fix
+/// (plan 2026-06-15-002). After `ralph run --worktree` creates a
+/// worktree, the `context.md` it seeds for the agent MUST NOT contain
+/// the main repository's absolute path, and MUST instruct the agent
+/// that all file operations stay inside the workspace.
+///
+/// We do not assert on the prompt/branch formatting — only on the
+/// isolation contract (R1/R2). This makes the test robust against
+/// unrelated template tweaks.
+#[test]
+fn test_worktree_context_md_does_not_expose_main_repo() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let main_repo = temp_dir.path();
+    setup_git_repo(main_repo);
+    write_minimal_config(main_repo);
+
+    let _ = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "run",
+            "--worktree",
+            "--no-tui",
+            "--skip-preflight",
+            "--prompt",
+            "context isolation test",
+        ])
+        .current_dir(main_repo)
+        .output()
+        .expect("execute ralph");
+
+    // The CLI must have created exactly one worktree. Without that we
+    // cannot make any claim about its `context.md`.
+    let worktree = first_worktree_dir(main_repo).expect(
+        "--worktree should have created .worktrees/<id>/, but none was found",
+    );
+
+    let context_path = worktree.join(".ralph/agent/context.md");
+    assert!(
+        context_path.exists(),
+        "expected context.md at {:?}, but it was not created",
+        context_path
+    );
+
+    let content = fs::read_to_string(&context_path).expect("read context.md");
+    let main_repo_str = main_repo.to_string_lossy().into_owned();
+
+    // R1: the `**Main Repo**` metadata field must be gone — that is
+    // the canonical leak surface removed by plan 2026-06-15-002.
+    assert!(
+        !content.contains("**Main Repo**"),
+        "context.md still contains the **Main Repo** metadata field"
+    );
+
+    // R1 (stronger): outside the **Workspace** line, the main repo
+    // path must not appear. On macOS the temp dir can be exposed via
+    // both `/var/folders/...` and `/private/var/folders/...` (the
+    // latter is the canonical path), so we cannot rely on a single
+    // string equality of the **Workspace** line. Instead, drop the
+    // whole **Workspace** bullet line and assert the remainder is clean.
+    let content_minus_workspace: String = content
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("- **Workspace**:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !content_minus_workspace.contains(&main_repo_str),
+        "context.md leaked the main repo path outside the **Workspace** line: {main_repo_str}\n--- context.md (workspace line removed) ---\n{content_minus_workspace}"
+    );
+
+    // R2: the workspace-only isolation rule must be present, and must
+    // reference the canonical RALPH_WORKSPACE_ROOT env var.
+    assert!(
+        content.contains("CRITICAL"),
+        "context.md must contain a CRITICAL isolation block; got:\n{content}"
+    );
+    assert!(
+        content.contains("RALPH_WORKSPACE_ROOT"),
+        "context.md must reference RALPH_WORKSPACE_ROOT; got:\n{content}"
+    );
+}
