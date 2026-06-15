@@ -50,6 +50,42 @@ pub(crate) fn resolve_emit_path(
         out
     }
 
+    // Two paths are equivalent when their lexical forms match (after
+    // dropping `.` / resolving `..`) OR when both canonicalize to the same
+    // real path. The canonicalize branch exists for macOS, where `/var` is
+    // a symlink to `/private/var`: an env var like `RALPH_EVENTS_FILE`
+    // set by the parent process can land here as `/var/...` while the
+    // loop's `workspace_root` (resolved from `current_dir()`) is
+    // canonicalized to `/private/var/...`. Both strings point at the same
+    // file; rejecting them as "not in the allowlist" would break every
+    // macOS caller. Canonicalize may fail when the target file does not
+    // exist yet; in that case we fall back to lexical comparison only.
+    fn paths_equivalent(a: &Path, b: &Path) -> bool {
+        if normalize_path(a) == normalize_path(b) {
+            return true;
+        }
+        // Canonicalize may fail when the target file does not exist yet
+        // (e.g. the first `ralph emit` call before events.jsonl is
+        // created). Fall back to canonicalizing each path's existing
+        // prefix (parent dir) and stitching the file name back on, so
+        // macOS /var → /private/var symlinks resolve to the same real
+        // path regardless of which form the caller used.
+        fn canon_with_existing_parent(p: &Path) -> std::io::Result<PathBuf> {
+            let file_name = p.file_name().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "no file name")
+            })?;
+            let parent = p.parent().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "no parent")
+            })?;
+            let canon_parent = parent.canonicalize()?;
+            Ok(canon_parent.join(file_name))
+        }
+        match (canon_with_existing_parent(a), canon_with_existing_parent(b)) {
+            (Ok(ca), Ok(cb)) => ca == cb,
+            _ => false,
+        }
+    }
+
     let ralph_dir = workspace_root.join(".ralph");
     let candidate_marker = ralph_dir.join("current-candidate-events");
     let current_marker = ralph_dir.join("current-events");
@@ -110,7 +146,7 @@ pub(crate) fn resolve_emit_path(
         let normalized_explicit = normalize_path(&explicit_target);
         if allowed
             .iter()
-            .any(|entry| normalize_path(entry) == normalized_explicit)
+            .any(|entry| paths_equivalent(entry, &normalized_explicit))
         {
             explicit_target
         } else {
@@ -157,7 +193,7 @@ pub(crate) fn resolve_emit_path(
     // if it matches an allowlist entry, which by construction points back
     // into the workspace).
     for entry in &allowed {
-        if normalize_path(entry) == normalized {
+        if paths_equivalent(entry, &normalized) {
             // Refuse to honor symlinks that alias the allowlist target to
             // an outside file: if the canonical target differs from the
             // normalized target, check whether the real path is still
