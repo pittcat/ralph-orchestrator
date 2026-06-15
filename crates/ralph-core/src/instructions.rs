@@ -5,7 +5,8 @@
 //! - 1, 2, 3: Workflow phases
 //! - 999+: Guardrails (higher = more important)
 
-use crate::config::{CoreConfig, EventMetadata};
+use crate::config::{CoreConfig, EventMetadata, EventSchema};
+use crate::emit_schema_hint::build_publish_emit_section;
 use ralph_proto::Hat;
 use std::collections::HashMap;
 
@@ -18,6 +19,11 @@ pub struct InstructionBuilder {
     core: CoreConfig,
     /// Event metadata for deriving instructions from pub/sub contracts.
     events: HashMap<String, EventMetadata>,
+    /// Schema for events the agent may publish. When non-empty and a hat
+    /// publishes a topic with a registered schema, the §3 REPORT block
+    /// is rendered from `build_publish_emit_section` instead of the
+    /// legacy `<summary>` template. See plan 001 §4.2.
+    publish_schemas: HashMap<String, EventSchema>,
 }
 
 impl InstructionBuilder {
@@ -26,12 +32,39 @@ impl InstructionBuilder {
         Self {
             core,
             events: HashMap::new(),
+            publish_schemas: HashMap::new(),
         }
     }
 
     /// Creates a new instruction builder with event metadata for custom hats.
     pub fn with_events(core: CoreConfig, events: HashMap<String, EventMetadata>) -> Self {
-        Self { core, events }
+        Self {
+            core,
+            events,
+            publish_schemas: HashMap::new(),
+        }
+    }
+
+    /// Creates a new instruction builder with event metadata and publish schemas.
+    ///
+    /// `publish_schemas` is the merged map of `event_policy.schemas` from the
+    /// active preset. When non-empty, hats whose publishes have a registered
+    /// schema receive a §3 REPORT block with copy-pasteable `--json` examples.
+    pub fn with_publish_schemas(
+        core: CoreConfig,
+        events: HashMap<String, EventMetadata>,
+        publish_schemas: HashMap<String, EventSchema>,
+    ) -> Self {
+        Self {
+            core,
+            events,
+            publish_schemas,
+        }
+    }
+
+    /// Returns the publish schemas registered on this builder.
+    pub fn publish_schemas(&self) -> &HashMap<String, EventSchema> {
+        &self.publish_schemas
     }
 
     /// Derives instructions from a hat's pub/sub contract and event metadata.
@@ -154,16 +187,28 @@ impl InstructionBuilder {
         } else {
             let topics: Vec<&str> = hat.publishes.iter().map(|t| t.as_str()).collect();
             let topics_list = topics.join(", ");
-            let topics_backticked = format!("`{}`", topics.join("`, `"));
-            let example_topic = topics.first().copied().unwrap_or("event.name");
 
-            (
-                format!("You publish to: {}", topics_list),
-                format!(
-                    "\n\nYou MUST emit exactly ONE of these events via `ralph emit \"<topic>\" \"<summary>\"`: {}\nUse `ralph emit \"{}\" \"<summary>\"` as the pattern.\nPlain-language summaries do NOT count as event publication.\nYou MUST stop immediately after emitting.\nYou MUST NOT end the iteration without publishing because this will terminate the loop.",
-                    topics_backticked, example_topic
-                ),
-            )
+            // Plan 001 §4.2: when publish schemas are registered, replace the
+            // legacy <summary> template with copy-pasteable --json examples.
+            // Falls back to the old behaviour when no schema matches any of
+            // the hat's declared publish topics.
+            let schema_aware = build_publish_emit_section(hat, &self.publish_schemas);
+            if !schema_aware.is_empty() {
+                (
+                    format!("You publish to: {}", topics_list),
+                    format!("\n\n{schema_aware}"),
+                )
+            } else {
+                let topics_backticked = format!("`{}`", topics.join("`, `"));
+                let example_topic = topics.first().copied().unwrap_or("event.name");
+                (
+                    format!("You publish to: {}", topics_list),
+                    format!(
+                        "\n\nYou MUST emit exactly ONE of these events via `ralph emit \"<topic>\" \"<summary>\"`: {}\nUse `ralph emit \"{}\" \"<summary>\"` as the pattern.\nPlain-language summaries do NOT count as event publication.\nYou MUST stop immediately after emitting.\nYou MUST NOT end the iteration without publishing because this will terminate the loop.",
+                        topics_backticked, example_topic
+                    ),
+                )
+            }
         };
 
         format!(
@@ -367,5 +412,69 @@ mod tests {
         // Should derive behaviors from pub/sub contract
         assert!(instructions.contains("Derived Behaviors"));
         assert!(instructions.contains("build.task"));
+    }
+
+    #[test]
+    fn schema_aware_publish_block_only_lists_published_topics() {
+        use ralph_proto::Topic;
+        let mut schemas = HashMap::new();
+        schemas.insert(
+            "work.ready".to_string(),
+            crate::config::EventSchema {
+                payload: Some(crate::config::PayloadType::JsonObject),
+                required_fields: vec!["plan_name".to_string(), "task_id".to_string()],
+                allowed_values: HashMap::new(),
+                hat_allowed_values: HashMap::new(),
+            },
+        );
+        schemas.insert(
+            "work.failed".to_string(),
+            crate::config::EventSchema {
+                payload: Some(crate::config::PayloadType::String),
+                required_fields: vec![],
+                allowed_values: HashMap::new(),
+                hat_allowed_values: HashMap::new(),
+            },
+        );
+
+        let builder = InstructionBuilder::with_publish_schemas(
+            CoreConfig::default(),
+            HashMap::new(),
+            schemas,
+        );
+        let hat = Hat::new("coordinator", "Coordinator")
+            .with_publishes(vec![Topic::new("work.ready"), Topic::new("work.failed")]);
+
+        let instructions = builder.build_custom_hat(&hat, "plan loaded");
+
+        // AC-1: only work.ready / work.failed examples are present
+        assert!(instructions.contains("ralph emit work.ready --json '{"));
+        assert!(instructions.contains("ralph emit work.failed --json '<summary text>'"));
+        assert!(instructions.contains("\"plan_name\": \"<plan_name>\""));
+        assert!(instructions.contains("\"task_id\": \"<task_id>\""));
+        // Plan 001 §4.6: agents MUST NOT bypass ralph emit by direct jsonl writes
+        assert!(instructions.contains("MUST NOT append or write to events.jsonl directly"));
+        // Legacy template phrases should not appear alongside the schema-aware block
+        assert!(
+            !instructions.contains("You MUST emit exactly ONE of these events via `ralph emit"),
+            "legacy summary template should be replaced by the schema-aware block"
+        );
+    }
+
+    #[test]
+    fn schema_aware_falls_back_when_no_schemas_match_publishes() {
+        use ralph_proto::Topic;
+        let builder = InstructionBuilder::with_publish_schemas(
+            CoreConfig::default(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let hat = Hat::new("solo", "Solo").with_publishes(vec![Topic::new("work.ready")]);
+
+        let instructions = builder.build_custom_hat(&hat, "");
+
+        // AC-5: when no schema matches the hat's publishes, fall back to the legacy template
+        assert!(instructions.contains("You MUST emit exactly ONE of these events via `ralph emit"));
+        assert!(!instructions.contains("ralph emit work.ready --json '{"));
     }
 }

@@ -1104,8 +1104,17 @@ impl EventLoop {
         }
 
         let registry = HatRegistry::from_runtime_config(&config);
-        let instruction_builder =
-            InstructionBuilder::with_events(config.core.clone(), config.events.clone());
+        let publish_schemas = config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .map(|p| p.schemas.clone())
+            .unwrap_or_default();
+        let instruction_builder = InstructionBuilder::with_publish_schemas(
+            config.core.clone(),
+            config.events.clone(),
+            publish_schemas,
+        );
 
         let mut bus = EventBus::new();
 
@@ -1228,8 +1237,17 @@ impl EventLoop {
         }
 
         let registry = HatRegistry::from_runtime_config(&config);
-        let instruction_builder =
-            InstructionBuilder::with_events(config.core.clone(), config.events.clone());
+        let publish_schemas = config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .map(|p| p.schemas.clone())
+            .unwrap_or_default();
+        let instruction_builder = InstructionBuilder::with_publish_schemas(
+            config.core.clone(),
+            config.events.clone(),
+            publish_schemas,
+        );
 
         let mut bus = EventBus::new();
 
