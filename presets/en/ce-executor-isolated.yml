@@ -967,7 +967,7 @@ hats:
     concurrency: 9
     # Per-worker hard limit: a single dimension reviewer may run up to 30 min.
     # The wave dispatcher derives the wave aggregate deadline from the consumer
-    # hat's aggregate timeout (review-synthesizer.aggregate.timeout: 300), so
+    # hat's aggregate timeout (review-synthesizer.aggregate.timeout: 1800), so
     # stuck waves fail fast; the worker hat itself must not carry an `aggregate`
     # block because that is reserved for aggregator hats.
     timeout: 1800
@@ -1174,7 +1174,7 @@ hats:
       #      dimension-reviewer workers, so a stuck wave is surfaced as partial /
       #      aggregate-timeout instead of waiting for each worker's 30min cap.
       # It does NOT control individual wave worker timeout (dimension-reviewer.timeout).
-      timeout: 300
+      timeout: 1800
     instructions: |
       ## REVIEW SYNTHESIZER MODE — Merge, Deduplicate, Calibrate, Validate, and Route
 
