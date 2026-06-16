@@ -33,10 +33,7 @@ pub fn format_emit_json_example(topic: &str, schema: &EventSchema) -> String {
 /// If the hat publishes nothing, or no schema is registered for any of
 /// the hat's publish topics, an empty string is returned so the caller
 /// can fall back to the legacy `<summary>` template.
-pub fn build_publish_emit_section(
-    hat: &Hat,
-    schemas: &HashMap<String, EventSchema>,
-) -> String {
+pub fn build_publish_emit_section(hat: &Hat, schemas: &HashMap<String, EventSchema>) -> String {
     let mut sections: Vec<String> = Vec::new();
 
     for topic in &hat.publishes {
@@ -73,15 +70,8 @@ pub fn build_publish_emit_section(
 /// topic in question (i.e. the topic appears in `hat.publishes`). If the
 /// hat has no authority for the topic, `None` is returned so the caller
 /// refuses to leak another hat's payload shape into the error output.
-pub fn fix_hint_for_hat_topic(
-    hat: &Hat,
-    topic: &str,
-    schema: &EventSchema,
-) -> Option<String> {
-    let authorised = hat
-        .publishes
-        .iter()
-        .any(|t| t.matches_str(topic));
+pub fn fix_hint_for_hat_topic(hat: &Hat, topic: &str, schema: &EventSchema) -> Option<String> {
+    let authorised = hat.publishes.iter().any(|t| t.matches_str(topic));
 
     if !authorised {
         return None;
@@ -199,11 +189,11 @@ mod tests {
     #[test]
     fn build_publish_emit_section_only_lists_schemas_topics() {
         let mut schemas = HashMap::new();
-        schemas.insert("work.ready".to_string(), schema_with_required(&["plan_name"]));
         schemas.insert(
-            "work.failed".to_string(),
-            schema_with_required(&["reason"]),
+            "work.ready".to_string(),
+            schema_with_required(&["plan_name"]),
         );
+        schemas.insert("work.failed".to_string(), schema_with_required(&["reason"]));
         // work.done has no schema registered — must be skipped.
         let hat = hat_with_publishes(
             "coordinator",
@@ -230,11 +220,7 @@ mod tests {
     #[test]
     fn fix_hint_returns_some_for_authorised_topic() {
         let schema = schema_with_required(&["plan_name", "plan_path"]);
-        let hat = hat_with_publishes(
-            "coordinator",
-            "Coordinator",
-            &["work.ready", "work.failed"],
-        );
+        let hat = hat_with_publishes("coordinator", "Coordinator", &["work.ready", "work.failed"]);
 
         let hint = fix_hint_for_hat_topic(&hat, "work.ready", &schema)
             .expect("coordinator is authorised to publish work.ready");
@@ -249,11 +235,7 @@ mod tests {
     #[test]
     fn fix_hint_returns_none_for_unauthorised_topic() {
         let schema = schema_with_required(&["task_id"]);
-        let hat = hat_with_publishes(
-            "coordinator",
-            "Coordinator",
-            &["work.ready", "work.failed"],
-        );
+        let hat = hat_with_publishes("coordinator", "Coordinator", &["work.ready", "work.failed"]);
 
         assert!(
             fix_hint_for_hat_topic(&hat, "work.done", &schema).is_none(),
@@ -268,8 +250,7 @@ mod tests {
             .with_description("")
             .with_publishes(vec![Topic::new("review.*")]);
 
-        let hint =
-            fix_hint_for_hat_topic(&hat, "review.done", &schema).expect("wildcard");
+        let hint = fix_hint_for_hat_topic(&hat, "review.done", &schema).expect("wildcard");
         assert!(hint.contains("review.done"));
     }
 

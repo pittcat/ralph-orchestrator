@@ -311,7 +311,6 @@ pub struct LoopState {
     /// (the pruning fires on step boundaries, not on every
     /// `review.failed`).
     pub work_done_seen_tasks: HashSet<String>,
-
 }
 impl Default for LoopState {
     fn default() -> Self {
@@ -1048,16 +1047,10 @@ mod tests {
         state.prune_work_done_bucket("p1", "step-01");
 
         // step-01 bucket is gone
-        assert!(!state
-            .work_done_seen_tasks
-            .contains("p1::step-01::t1"));
-        assert!(!state
-            .work_done_seen_tasks
-            .contains("p1::step-01::t2"));
+        assert!(!state.work_done_seen_tasks.contains("p1::step-01::t1"));
+        assert!(!state.work_done_seen_tasks.contains("p1::step-01::t2"));
         // step-02 bucket is preserved (different step key)
-        assert!(state
-            .work_done_seen_tasks
-            .contains("p1::step-02::t1"));
+        assert!(state.work_done_seen_tasks.contains("p1::step-02::t1"));
     }
 
     #[test]

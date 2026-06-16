@@ -442,11 +442,7 @@ fn test_stderr_log_in_worktree_not_main_repo() {
 /// leave the registry when a run finishes normally. The PID sentinel
 /// is chosen so that `kill(pid, None)` returns ESRCH and `is_alive()`
 /// reports the entry as dead (see ralph-core/src/loop_registry.rs).
-fn write_completed_worktree_entry(
-    main_repo: &Path,
-    loop_id: &str,
-    worktree_path: &Path,
-) {
+fn write_completed_worktree_entry(main_repo: &Path, loop_id: &str, worktree_path: &Path) {
     use chrono::Utc;
     let ralph_dir = main_repo.join(".ralph");
     fs::create_dir_all(&ralph_dir).unwrap();
@@ -487,7 +483,10 @@ fn precreate_worktree_with_artifacts(main_repo: &Path, loop_id: &str) -> PathBuf
         .current_dir(main_repo)
         .status()
         .expect("git worktree add");
-    assert!(status.success(), "git worktree add must succeed for test setup");
+    assert!(
+        status.success(),
+        "git worktree add must succeed for test setup"
+    );
 
     // Now seed the runtime artifacts the prior loop "left behind".
     let ralph_dir = worktree_path.join(".ralph");
@@ -759,9 +758,8 @@ fn test_worktree_context_md_does_not_expose_main_repo() {
 
     // The CLI must have created exactly one worktree. Without that we
     // cannot make any claim about its `context.md`.
-    let worktree = first_worktree_dir(main_repo).expect(
-        "--worktree should have created .worktrees/<id>/, but none was found",
-    );
+    let worktree = first_worktree_dir(main_repo)
+        .expect("--worktree should have created .worktrees/<id>/, but none was found");
 
     let context_path = worktree.join(".ralph/agent/context.md");
     assert!(

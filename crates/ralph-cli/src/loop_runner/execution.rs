@@ -92,9 +92,7 @@ pub fn inject_hat_execution_env(
             .push(("RALPH_TRIGGERED_HAT".into(), triggered.into()));
     }
     if let Some(label) = resolved_label {
-        backend
-            .env_vars
-            .push(("RALPH_HATS_SOURCE".into(), label));
+        backend.env_vars.push(("RALPH_HATS_SOURCE".into(), label));
     }
 }
 

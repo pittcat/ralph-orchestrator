@@ -17,8 +17,8 @@ pub mod config;
 pub mod diagnosis;
 pub mod diagnostics;
 pub mod drift;
+pub mod emit_schema_hint;
 pub mod ephemeral_isolation;
-pub mod flow_lifecycle;
 mod event_logger;
 pub mod event_loop;
 pub mod event_origin;
@@ -28,14 +28,16 @@ mod event_projection;
 mod event_reader;
 pub mod execution_contract;
 pub mod file_lock;
+pub mod flow_lifecycle;
 mod git_ops;
 mod handoff;
 pub mod hat_lifecycle;
 mod hat_registry;
 mod hatless_ralph;
 pub mod hooks;
-pub mod emit_schema_hint;
-pub use emit_schema_hint::{build_publish_emit_section, fix_hint_for_hat_topic, format_emit_json_example};
+pub use emit_schema_hint::{
+    build_publish_emit_section, fix_hint_for_hat_topic, format_emit_json_example,
+};
 mod instructions;
 mod landing;
 pub mod loop_authorization;
@@ -127,8 +129,8 @@ pub use event_projection::apply_projection;
 pub use event_reader::{Event, EventReader, MalformedLine, ParseResult};
 pub use file_lock::{FileLock, LockGuard as FileLockGuard, LockedFile};
 pub use flow_lifecycle::{
-    FlowLifecycleRecord, FlowLifecycleRegistry, FlowPhase, WaveDeadlines,
-    effective_wave_deadlines, reconcile_wave_timeouts,
+    FlowLifecycleRecord, FlowLifecycleRegistry, FlowPhase, WaveDeadlines, effective_wave_deadlines,
+    reconcile_wave_timeouts,
 };
 pub use git_ops::{
     AutoCommitResult, GitOpsError, auto_commit_changes, clean_stashes, get_changed_files_between,

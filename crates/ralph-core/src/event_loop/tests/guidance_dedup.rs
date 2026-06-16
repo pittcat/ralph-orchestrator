@@ -326,9 +326,10 @@ fn test_bootstrap_window_strips_human_guidance_from_coordinator_prompt() {
     // Push a `human.guidance` event on the bus so the
     // `build_prompt` guidance path has something to (not)
     // inject.
-    event_loop
-        .bus
-        .publish(Event::new("human.guidance", "Stale guidance: do not listen to humans"));
+    event_loop.bus.publish(Event::new(
+        "human.guidance",
+        "Stale guidance: do not listen to humans",
+    ));
     // Build the coordinator prompt.
     let coordinator_id = HatId::new("coordinator");
     let prompt = event_loop
@@ -414,9 +415,10 @@ fn test_guidance_flows_normally_after_bootstrap_complete() {
         ],
     );
     // Push a fresh `human.guidance` event too.
-    event_loop
-        .bus
-        .publish(Event::new("human.guidance", "Post-bootstrap guidance: pay attention to A"));
+    event_loop.bus.publish(Event::new(
+        "human.guidance",
+        "Post-bootstrap guidance: pay attention to A",
+    ));
     let prompt = event_loop
         .build_prompt(&HatId::new("coordinator"))
         .expect("coordinator prompt must build");
@@ -448,4 +450,3 @@ fn test_coordinator_work_failed_marks_bootstrap_failed() {
     assert!(!event_loop.in_bootstrap_phase());
     assert!(!event_loop.coordinator_bootstrap_gate_closed(&HatId::new("coordinator")));
 }
-

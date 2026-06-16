@@ -731,13 +731,12 @@ pub async fn execute_wave_structured(
     // Use an explicitly-configured aggregate timeout (worker or consumer)
     // directly.  Only fall back to the per-worker-timeout × batches formula
     // when no aggregate timeout is available.
-    let aggregate_timeout = if wave.has_explicit_aggregate_timeout()
-        || wave.consumer_aggregate_timeout.is_some()
-    {
-        Duration::from_secs(wave.aggregate_timeout_secs())
-    } else {
-        aggregate_timeout_for(wave_timeout, wave.events.len(), concurrency)
-    };
+    let aggregate_timeout =
+        if wave.has_explicit_aggregate_timeout() || wave.consumer_aggregate_timeout.is_some() {
+            Duration::from_secs(wave.aggregate_timeout_secs())
+        } else {
+            aggregate_timeout_for(wave_timeout, wave.events.len(), concurrency)
+        };
 
     // Register wave in tracker
     let mut tracker = WaveTracker::new();
@@ -2452,9 +2451,7 @@ hats: {}
                 assert_eq!(expected_count, 3, "wave has 3 events");
             }
             other => {
-                panic!(
-                    "expected SpawnFailed when fewer workers spawn than events, got {other:?}"
-                );
+                panic!("expected SpawnFailed when fewer workers spawn than events, got {other:?}");
             }
         }
         // Note: we CANNOT assert on executor.started here because SpawnFailed

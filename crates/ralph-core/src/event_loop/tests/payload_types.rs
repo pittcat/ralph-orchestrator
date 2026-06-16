@@ -180,10 +180,7 @@ hats:
 
     assert!(result.had_events);
     assert!(
-        event_loop
-            .state()
-            .seen_topics
-            .contains("queue.advance"),
+        event_loop.state().seen_topics.contains("queue.advance"),
         "queue.advance (first business event) should be accepted"
     );
     assert!(
@@ -309,12 +306,7 @@ hats:
 
     // queue.advance → work.done is NOT a white-listed pair. work.done is dropped.
     write_event_with_hat_to_jsonl(&events_path, "queue.advance", "step-02", "plan-gate");
-    write_event_with_hat_to_jsonl(
-        &events_path,
-        "work.done",
-        r#"{"ok":true}"#,
-        "plan-gate",
-    );
+    write_event_with_hat_to_jsonl(&events_path, "work.done", r#"{"ok":true}"#, "plan-gate");
 
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
     let _ = event_loop.process_events_from_jsonl().unwrap();
@@ -399,12 +391,7 @@ hats:
         r#"{"task_id":"task-real-003"}"#,
         "plan-gate",
     );
-    write_event_with_hat_to_jsonl(
-        &events_path,
-        "work.done",
-        r#"{"ok":true}"#,
-        "plan-gate",
-    );
+    write_event_with_hat_to_jsonl(&events_path, "work.done", r#"{"ok":true}"#, "plan-gate");
 
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
     let _ = event_loop.process_events_from_jsonl().unwrap();

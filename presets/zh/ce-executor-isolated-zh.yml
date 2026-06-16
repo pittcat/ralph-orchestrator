@@ -49,6 +49,13 @@ event_loop:
   max_iterations: 50
   max_runtime_seconds: 28800  # 8 hours
   enforce_hat_scope: true
+  # 2026-06-17-003 plan U2: 启用 incomplete-wave gate，
+  # 当 review wave 在 aggregate timeout 的 80% 窗口内仍未收齐维度时，
+  # 由机制层 emit `plan.blocked(reason=dimension_reviewers_failed_to_converge)`
+  # 收尾，避免无限循环或 empty_diff bypass 致命错误。
+  workflow_contract:
+    incomplete_wave_gate:
+      enabled: true
   verdict_gate:
     # 如果最近一次 REVIEW_COMPLETE 事件携带 pass_or_fail == "fail"，则拒绝 LOOP_COMPLETE。
     # 作为 shipper+reporter 链的兜底，防止任一 hat 将 P0 残留误判为通过。
@@ -675,7 +682,10 @@ hats:
 
       ### 终端事件后持久化 `last_reviewed_sha`
       **为什么需要这一步：** `last_reviewed_sha` 是下一次 review-coordinator pass 的增量 diff base。`context.md` 的 key-value header 是选定的持久层（参考 Coordinator 在 `work.start` 时写入的 `start_sha`、以及 `fix-log.md` 中的 `current_fix_round`）。
-      **何时执行：** 立即在发出 `review.wave.ready` 或 `review.passed` 之后。两条路径都把当前 HEAD 标记为已 review。空 diff 的 `review.passed` 路径与 wave 路径同等重要：跳过 wave 不代表 HEAD 应该在下次被重新 review。如果不更新，下次 wave 的 `last_reviewed_sha` 会指得更早，造成重复覆盖。
+      **何时执行（R-F5 / 003-U5 —— wave-closed gate）：** 仅当以下至少一条为真时才允许执行 persist：
+      - 你正在 emit 一个 verdict 终端事件：`review.passed`、`review.complete` 或 `review.failed`。这些是合法关闭 review cycle 的唯一事件。
+      - 本 step 的 review wave 已 FULLY closed：所有预期维度都已收到（received == wave_total）且 tracker 已清空 `open_wave_id`。用 agent 侧语言说：你已观察到 wave 中每个维度都 emit 了 `review.dimension.done`，且下一个你要 emit 的事件是终端事件（synthesizer 路径）。
+      **何时 NOT 执行：** 如果你即将 emit 或刚刚 emit 了 `review.wave.ready` 但 wave 仍 open（例如只收到 4/11 维度），则**不要**写 `last_reviewed_sha`。这会杀死 DEC-002 empty_diff fast-path——半写的 SHA 会让下一轮 coordinator 在 wave 从未闭合的情况下声称空 diff。如果 wave stall，让机制层 emit `plan.blocked`；不要抢跑写 SHA。
       **如何写入（单次原子写，无 Read+Write 竞态）：**
       - 抓取当前 HEAD：`current_sha=$(git rev-parse HEAD)`
       - 从触发事件 payload 的 `plan_name` 解析出本 plan 的 `context.md` 路径。

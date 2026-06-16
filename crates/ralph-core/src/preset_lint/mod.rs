@@ -360,8 +360,7 @@ pub fn run_preset_lint(
     // `crates/ralph-cli/src/presets.rs::test_ce_executor_isolated_reference_schema_matches_inline_schema`).
     // That byte-equality test is the authoritative CI gate; `ralph preset check`
     // relies on `check_publishes_have_schema` for runtime surfacing.
-    let schema_parity_findings =
-        schema_parity::check_publishes_have_schema(config, strictness);
+    let schema_parity_findings = schema_parity::check_publishes_have_schema(config, strictness);
     findings.extend(lint_findings_to_contract_findings(&schema_parity_findings));
 
     // Sort by id, then topic for deterministic output.

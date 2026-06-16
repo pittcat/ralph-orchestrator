@@ -9,7 +9,6 @@
 ///
 /// The calling process and all of its ancestors are explicitly protected so
 /// that the cleanup never commits suicide.
-
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
@@ -45,7 +44,10 @@ pub fn kill_process_tree(root_pid: u32, include_root: bool) {
     );
 
     for pid in &victims {
-        let _ = kill(Pid::from_raw(i32::try_from(*pid).unwrap_or(-1)), Signal::SIGTERM);
+        let _ = kill(
+            Pid::from_raw(i32::try_from(*pid).unwrap_or(-1)),
+            Signal::SIGTERM,
+        );
     }
 
     std::thread::sleep(Duration::from_millis(800));
@@ -64,7 +66,10 @@ pub fn kill_process_tree(root_pid: u32, include_root: bool) {
             "Sending SIGKILL to surviving processes"
         );
         for pid in &survivors {
-            let _ = kill(Pid::from_raw(i32::try_from(*pid).unwrap_or(-1)), Signal::SIGKILL);
+            let _ = kill(
+                Pid::from_raw(i32::try_from(*pid).unwrap_or(-1)),
+                Signal::SIGKILL,
+            );
         }
     }
 }
@@ -83,20 +88,13 @@ fn collect_descendants(root_pid: u32, include_root: bool) -> Vec<u32> {
     let mut sys = System::new_with_specifics(
         RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing()),
     );
-    sys.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        false,
-        ProcessRefreshKind::nothing(),
-    );
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, false, ProcessRefreshKind::nothing());
 
     let mut parent_map: HashMap<u32, Vec<u32>> = HashMap::new();
     for (pid, process) in sys.processes() {
         let pid_u32 = pid.as_u32();
         if let Some(parent) = process.parent() {
-            parent_map
-                .entry(parent.as_u32())
-                .or_default()
-                .push(pid_u32);
+            parent_map.entry(parent.as_u32()).or_default().push(pid_u32);
         }
     }
 
@@ -156,11 +154,7 @@ fn process_is_alive(pid: u32) -> bool {
     let mut sys = System::new_with_specifics(
         RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing()),
     );
-    sys.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        false,
-        ProcessRefreshKind::nothing(),
-    );
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, false, ProcessRefreshKind::nothing());
     sys.process(sysinfo::Pid::from(pid as usize)).is_some()
 }
 

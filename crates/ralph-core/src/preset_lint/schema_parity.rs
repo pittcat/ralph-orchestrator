@@ -12,10 +12,10 @@
 //! to flag drift in CI without depending on the Rust test binary.
 
 use crate::config::RalphConfig;
-use crate::preset_lint::{LintFinding, LintSeverity, LintStrictness};
 use crate::preset_lint::finding_id::{
     FINDING_PUBLISHES_MISSING_SCHEMA, FINDING_SCHEMA_REFERENCE_PARITY,
 };
+use crate::preset_lint::{LintFinding, LintSeverity, LintStrictness};
 
 /// Plan 001 §4.5 R1: every hat `publishes` topic must have a schema.
 ///
@@ -37,11 +37,7 @@ pub fn check_publishes_have_schema(
     for (hat_id, hat_config) in &config.hats {
         for topic in &hat_config.publishes {
             if !schemas.contains_key(topic) {
-                findings.push(schema_missing_finding(
-                    hat_id,
-                    topic,
-                    strictness,
-                ));
+                findings.push(schema_missing_finding(hat_id, topic, strictness));
             }
         }
     }
@@ -49,11 +45,7 @@ pub fn check_publishes_have_schema(
     findings
 }
 
-fn schema_missing_finding(
-    hat_id: &str,
-    topic: &str,
-    strictness: LintStrictness,
-) -> LintFinding {
+fn schema_missing_finding(hat_id: &str, topic: &str, strictness: LintStrictness) -> LintFinding {
     let message = format!(
         "hat \"{hat_id}\" publishes topic \"{topic}\" but \
          event_policy.schemas has no entry for it"
@@ -125,9 +117,7 @@ pub fn check_schema_reference_parity(
             findings.push(
                 LintFinding::error(
                     FINDING_SCHEMA_REFERENCE_PARITY,
-                    format!(
-                        "Could not parse presets/schemas/{preset_name}.yml: {e}"
-                    ),
+                    format!("Could not parse presets/schemas/{preset_name}.yml: {e}"),
                 )
                 .with_action_hint(format!(
                     "Run `git diff presets/schemas/{preset_name}.yml` to inspect"
@@ -149,9 +139,7 @@ pub fn check_schema_reference_parity(
         findings.push(
             LintFinding::error(
                 FINDING_SCHEMA_REFERENCE_PARITY,
-                format!(
-                    "Inline event_policy.schemas differs from presets/schemas/{preset_name}"
-                ),
+                format!("Inline event_policy.schemas differs from presets/schemas/{preset_name}"),
             )
             // Plan 2026-06-16-002 Unit 1: with the build.rs SSOT
             // merge, drift between the inline block and the SSOT file
@@ -287,8 +275,7 @@ mod tests {
             "coordinator".to_string(),
             hat_publishing("coordinator", "work.ready"),
         );
-        let findings =
-            check_publishes_have_schema(&config, LintStrictness::Default);
+        let findings = check_publishes_have_schema(&config, LintStrictness::Default);
         assert!(
             findings.is_empty(),
             "publishes with schema must not be flagged: {findings:?}"
@@ -303,8 +290,7 @@ mod tests {
             "orphan".to_string(),
             hat_publishing("orphan", "work.unknown"),
         );
-        let findings =
-            check_publishes_have_schema(&config, LintStrictness::Default);
+        let findings = check_publishes_have_schema(&config, LintStrictness::Default);
         assert_eq!(findings.len(), 1);
         let f = &findings[0];
         assert_eq!(f.id, FINDING_PUBLISHES_MISSING_SCHEMA);
@@ -320,16 +306,14 @@ mod tests {
             "orphan".to_string(),
             hat_publishing("orphan", "work.unknown"),
         );
-        let findings =
-            check_publishes_have_schema(&config, LintStrictness::Strict);
+        let findings = check_publishes_have_schema(&config, LintStrictness::Strict);
         assert_eq!(findings[0].severity, LintSeverity::Error);
     }
 
     #[test]
     fn no_policy_means_no_findings() {
         let config = RalphConfig::default();
-        let findings =
-            check_publishes_have_schema(&config, LintStrictness::Default);
+        let findings = check_publishes_have_schema(&config, LintStrictness::Default);
         assert!(findings.is_empty());
     }
 
@@ -338,11 +322,7 @@ mod tests {
         let mut config = RalphConfig::default();
         config.event_loop.event_policy = Some(policy_with_schemas());
         let reference = "work.ready:\n  required_fields: [other]\n  payload: json_object\n";
-        let findings = check_schema_reference_parity(
-            &config,
-            "test-preset.yml",
-            Some(reference),
-        );
+        let findings = check_schema_reference_parity(&config, "test-preset.yml", Some(reference));
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].id, FINDING_SCHEMA_REFERENCE_PARITY);
     }
@@ -352,11 +332,7 @@ mod tests {
         let mut config = RalphConfig::default();
         config.event_loop.event_policy = Some(policy_with_schemas());
         let reference = "work.ready:\n  required_fields:\n  - plan_name\n  payload: json_object\n";
-        let findings = check_schema_reference_parity(
-            &config,
-            "test-preset.yml",
-            Some(reference),
-        );
+        let findings = check_schema_reference_parity(&config, "test-preset.yml", Some(reference));
         assert!(
             findings.is_empty(),
             "canonicalised match should produce no findings: {findings:?}"
@@ -367,8 +343,7 @@ mod tests {
     fn parity_check_returns_empty_without_reference() {
         let mut config = RalphConfig::default();
         config.event_loop.event_policy = Some(policy_with_schemas());
-        let findings =
-            check_schema_reference_parity(&config, "test-preset.yml", None);
+        let findings = check_schema_reference_parity(&config, "test-preset.yml", None);
         assert!(findings.is_empty());
     }
 
@@ -395,11 +370,7 @@ mod tests {
             ..EventPolicyConfig::default()
         });
         let reference = "work.ready:\n  payload: json_object\n";
-        let findings = check_schema_reference_parity(
-            &config,
-            "test-preset.yml",
-            Some(reference),
-        );
+        let findings = check_schema_reference_parity(&config, "test-preset.yml", Some(reference));
         assert!(
             findings.is_empty(),
             "inline required_fields: [] should canonicalise as absent: {findings:?}"

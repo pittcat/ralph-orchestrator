@@ -818,7 +818,10 @@ pub async fn run_command(
         // "create new worktree" path so the user is not blocked.
         if args.reuse_worktree {
             debug!("Reusing worktree for explicit --worktree --reuse-worktree mode");
-            let reuse_result = find_reusable_worktree(workspace_root, worktree_file_name_prefix.as_deref().unwrap_or(""));
+            let reuse_result = find_reusable_worktree(
+                workspace_root,
+                worktree_file_name_prefix.as_deref().unwrap_or(""),
+            );
             match reuse_result {
                 Ok(Some(reusable)) => {
                     info!(

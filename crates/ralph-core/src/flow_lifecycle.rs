@@ -401,11 +401,7 @@ impl FlowLifecycleRegistry {
     /// should pass an empty slice when they want the pure
     /// "any-active-wave-for-this-hat" semantics.
     #[must_use]
-    pub fn is_obligation_pending_for_hat(
-        &self,
-        target_hat: &str,
-        trigger_topics: &[&str],
-    ) -> bool {
+    pub fn is_obligation_pending_for_hat(&self, target_hat: &str, trigger_topics: &[&str]) -> bool {
         self.records.values().any(|r| {
             if r.phase.is_terminal() || r.target_hat != target_hat {
                 return false;
@@ -821,8 +817,14 @@ mod tests {
         // transition, and Degraded itself is terminal so this
         // returns Ok(Degraded) but no further transitions are
         // allowed.
-        reg.transition("wf-1", FlowPhase::Degraded, 1, Some("aggregate_timeout"), None)
-            .unwrap();
+        reg.transition(
+            "wf-1",
+            FlowPhase::Degraded,
+            1,
+            Some("aggregate_timeout"),
+            None,
+        )
+        .unwrap();
         let err = reg.transition("wf-1", FlowPhase::Closed, 1, None, None);
         assert!(err.is_err(), "Closed from Degraded must be rejected");
     }
@@ -873,7 +875,10 @@ mod tests {
         // record_progress must NOT queue any envelope
         reg.record_progress("wf-1", 5, vec![5, 6]).unwrap();
         let pending_after = reg.drain_pending_envelopes().len();
-        assert_eq!(pending_after, 0, "record_progress must not enqueue envelopes");
+        assert_eq!(
+            pending_after, 0,
+            "record_progress must not enqueue envelopes"
+        );
         let record = reg.get("wf-1").unwrap();
         assert_eq!(record.received_count, 5);
         assert_eq!(record.missing_indices, vec![5, 6]);
@@ -972,16 +977,10 @@ mod tests {
         assert!(reg.is_obligation_pending_for_hat("review-coordinator", &[]));
 
         // Filter that matches rec_a.source_topic -> true.
-        assert!(reg.is_obligation_pending_for_hat(
-            "review-coordinator",
-            &[&"review.wave.ready"],
-        ));
+        assert!(reg.is_obligation_pending_for_hat("review-coordinator", &[&"review.wave.ready"],));
 
         // Filter for an unrelated topic -> false.
-        assert!(!reg.is_obligation_pending_for_hat(
-            "review-coordinator",
-            &[&"unrelated.topic"],
-        ));
+        assert!(!reg.is_obligation_pending_for_hat("review-coordinator", &[&"unrelated.topic"],));
     }
 
     #[test]
@@ -1005,7 +1004,14 @@ mod tests {
     fn timeout_reconciler_within_tolerance_writes_no_envelope() {
         let deadlines = WaveDeadlines::new(60, 1800);
         let actual = Duration::from_millis(1_750_000); // 1750s, within 10% of 1800s
-        let r = reconcile_wave_timeouts("wf-1", "review.wave.ready", "review-coordinator", &deadlines, actual, 7);
+        let r = reconcile_wave_timeouts(
+            "wf-1",
+            "review.wave.ready",
+            "review-coordinator",
+            &deadlines,
+            actual,
+            7,
+        );
         assert_eq!(r.configured_aggregate_ms, 1_800_000);
         assert_eq!(r.actual_wait_ms, 1_750_000);
         assert_eq!(r.delta_ms, -50_000);
@@ -1017,7 +1023,14 @@ mod tests {
     fn timeout_reconciler_over_budget_writes_drift_envelope() {
         let deadlines = WaveDeadlines::new(60, 1800);
         let actual = Duration::from_millis(1_990_000); // 1990s > 1800*1.10=1980s
-        let r = reconcile_wave_timeouts("wf-1", "review.wave.ready", "review-coordinator", &deadlines, actual, 7);
+        let r = reconcile_wave_timeouts(
+            "wf-1",
+            "review.wave.ready",
+            "review-coordinator",
+            &deadlines,
+            actual,
+            7,
+        );
         assert!(r.drift_envelope.is_some());
         let env = r.drift_envelope.unwrap();
         assert_eq!(env.reason_code, timeout_reasons::WAVE_TIMEOUT_DRIFT);
@@ -1028,7 +1041,14 @@ mod tests {
     fn timeout_reconciler_early_firing_writes_envelope() {
         let deadlines = WaveDeadlines::new(60, 1800);
         let actual = Duration::from_millis(100_000); // 100s, well under 900s half-budget
-        let r = reconcile_wave_timeouts("wf-1", "review.wave.ready", "review-coordinator", &deadlines, actual, 7);
+        let r = reconcile_wave_timeouts(
+            "wf-1",
+            "review.wave.ready",
+            "review-coordinator",
+            &deadlines,
+            actual,
+            7,
+        );
         assert!(r.drift_envelope.is_some());
         let env = r.drift_envelope.unwrap();
         assert_eq!(env.reason_code, timeout_reasons::WAVE_TIMEOUT_EARLY);
@@ -1042,7 +1062,14 @@ mod tests {
         // call us without panicking.
         let deadlines = WaveDeadlines::new(60, 0);
         let actual = Duration::from_millis(99_999_999);
-        let r = reconcile_wave_timeouts("wf-1", "review.wave.ready", "review-coordinator", &deadlines, actual, 7);
+        let r = reconcile_wave_timeouts(
+            "wf-1",
+            "review.wave.ready",
+            "review-coordinator",
+            &deadlines,
+            actual,
+            7,
+        );
         assert_eq!(r.configured_aggregate_ms, 0);
         assert!(r.drift_envelope.is_none());
     }
@@ -1054,7 +1081,14 @@ mod tests {
         // path must agree: configured_aggregate_ms == u32::MAX * 1000.
         let deadlines = WaveDeadlines::new(60, u32::MAX as u64);
         let actual = Duration::from_millis(0);
-        let r = reconcile_wave_timeouts("wf-1", "review.wave.ready", "review-coordinator", &deadlines, actual, 1);
+        let r = reconcile_wave_timeouts(
+            "wf-1",
+            "review.wave.ready",
+            "review-coordinator",
+            &deadlines,
+            actual,
+            1,
+        );
         assert_eq!(r.configured_aggregate_ms, u32::MAX as u64 * 1000);
         // With actual_wait=0 and configured huge, the early-firing
         // branch (actual < configured/2) should fire.

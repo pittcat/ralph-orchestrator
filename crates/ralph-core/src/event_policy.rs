@@ -50,7 +50,7 @@ pub enum ViolationType {
         rule_hat: String,
         rule_topic: String,
     },
-/// U1 (2026-06-17-003 plan): semantic gate violation. The event
+    /// U1 (2026-06-17-003 plan): semantic gate violation. The event
     /// passed schema validation but violates an orchestrator-level
     /// invariant (e.g. `review.passed` while a review wave is still
     /// open). Distinct from `InvalidFieldValue` because the payload
@@ -547,7 +547,9 @@ pub fn check_topic_deny_rules(
                     EventPolicyMode::Observe => PolicyDecision::Warn(vec![finding]),
                     EventPolicyMode::Enforce => match config.on_violation {
                         ViolationAction::Warn => PolicyDecision::Warn(vec![finding]),
-                        ViolationAction::RejectWithResume => PolicyDecision::RejectWithResume(finding),
+                        ViolationAction::RejectWithResume => {
+                            PolicyDecision::RejectWithResume(finding)
+                        }
                         ViolationAction::Hold => PolicyDecision::Hold(finding),
                         ViolationAction::Block => PolicyDecision::Block(finding),
                     },
@@ -2428,7 +2430,6 @@ mod tests {
         );
     }
 
-
     // -------------------------------------------------------------------------
     // U1 (2026-06-11-002): trivial_step semantic gate
     //
@@ -2874,8 +2875,14 @@ mod tests {
     // `SemanticGateViolation` to the enum must not shift them.
     #[test]
     fn u1_semantic_gate_violation_does_not_perturb_other_buckets() {
-        assert_eq!(ReasonClass::PayloadTypeMismatch.as_str(), "payload_type_mismatch");
-        assert_eq!(ReasonClass::MissingRequiredField.as_str(), "missing_required_field");
+        assert_eq!(
+            ReasonClass::PayloadTypeMismatch.as_str(),
+            "payload_type_mismatch"
+        );
+        assert_eq!(
+            ReasonClass::MissingRequiredField.as_str(),
+            "missing_required_field"
+        );
         assert_eq!(ReasonClass::TopicDenied.as_str(), "topic_denied");
         // And the non-recoverable ones stay non-recoverable.
         let finding = PolicyFinding {

@@ -716,10 +716,7 @@ mod tests {
         })
     }
 
-    fn merge_preset_with_schema_yaml(
-        preset_text: &str,
-        ssot_text: &str,
-    ) -> Result<String, String> {
+    fn merge_preset_with_schema_yaml(preset_text: &str, ssot_text: &str) -> Result<String, String> {
         let mut preset: serde_yaml::Value =
             serde_yaml::from_str(preset_text).map_err(|e| format!("preset YAML: {e}"))?;
         let ssot: serde_yaml::Value =
@@ -771,9 +768,7 @@ mod tests {
                     serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
                 );
             }
-            current = entry
-                .get_mut(&key_value)
-                .expect("key just inserted above");
+            current = entry.get_mut(&key_value).expect("key just inserted above");
         }
         if !current.is_mapping() {
             return Err(format!(
@@ -1040,7 +1035,8 @@ mod tests {
         // (canonical preset, schema SSOT) — i.e. the build pipeline
         // produced what the SSOT prescribes.
         let merged = merge_root_with_ssot("ce-executor-isolated");
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor-isolated preset should exist");
+        let preset =
+            get_preset("ce-executor-isolated").expect("ce-executor-isolated preset should exist");
         assert_eq!(
             merged, preset.content,
             "Embedded ce-executor-isolated must equal merge(canonical preset, schema SSOT). \
@@ -3904,8 +3900,8 @@ mod tests {
             .expect("ce-executor-isolated embedded schemas should exist after build.rs merge");
 
         let reference_content = read_root_schema("ce-executor-isolated.yml");
-        let reference_schemas: serde_yaml::Value = serde_yaml::from_str(&reference_content)
-            .expect("reference schema YAML should parse");
+        let reference_schemas: serde_yaml::Value =
+            serde_yaml::from_str(&reference_content).expect("reference schema YAML should parse");
 
         let canonical_merged = canonicalize_schemas(merged_schemas);
         let canonical_reference = canonicalize_schemas(&reference_schemas);

@@ -746,11 +746,8 @@ mod tests {
 
         let mut buf = Vec::new();
         use tokio::io::AsyncReadExt;
-        let _ = tokio::time::timeout(
-            Duration::from_millis(200),
-            server.read_to_end(&mut buf),
-        )
-        .await;
+        let _ =
+            tokio::time::timeout(Duration::from_millis(200), server.read_to_end(&mut buf)).await;
 
         let line = std::str::from_utf8(&buf)
             .expect("rpc writer should send utf-8 JSON")
@@ -759,8 +756,8 @@ mod tests {
             !line.is_empty(),
             "rpc writer should have written an abort line, got empty buffer",
         );
-        let cmd: serde_json::Value = serde_json::from_str(line)
-            .expect("rpc writer should send a JSON line");
+        let cmd: serde_json::Value =
+            serde_json::from_str(line).expect("rpc writer should send a JSON line");
         assert_eq!(
             cmd.get("type").and_then(|v| v.as_str()),
             Some("abort"),

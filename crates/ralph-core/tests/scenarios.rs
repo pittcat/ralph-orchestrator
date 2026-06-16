@@ -50,6 +50,10 @@ struct ExpectedYaml {
     events: Vec<EventYaml>,
     #[serde(default)]
     workflow_progress: Vec<WorkflowProgressYaml>,
+    /// Events that must NOT have been accepted by the event loop.
+    /// Used to assert that semantic gates drop bypass attempts.
+    #[serde(default)]
+    absent_events: Vec<EventYaml>,
     completion: bool,
 }
 
@@ -66,6 +70,11 @@ struct CheckpointYaml {
     workflow_progress: Vec<WorkflowProgressYaml>,
     #[serde(default)]
     completion_rejected: bool,
+    /// Sleep this many milliseconds after evaluating the checkpoint.
+    /// Used by flow-reliability scenarios that need real wall-clock
+    /// staleness to trigger the incomplete-wave gate.
+    #[serde(default)]
+    sleep_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -190,6 +199,7 @@ fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
         let _result = event_loop.process_events_from_jsonl();
 
         // Evaluate checkpoints tied to this response index (1-based in YAML)
+        let mut sleep_after_response = 0u64;
         for checkpoint in &yaml.checkpoints {
             if checkpoint.after_response == idx + 1 {
                 for progress in &checkpoint.workflow_progress {
@@ -220,7 +230,15 @@ fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
                         reason
                     );
                 }
+
+                if checkpoint.sleep_ms > sleep_after_response {
+                    sleep_after_response = checkpoint.sleep_ms;
+                }
             }
+        }
+
+        if sleep_after_response > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(sleep_after_response));
         }
     }
 
@@ -234,6 +252,16 @@ fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
             "{}: Expected event '{}' to be seen (accepted), but it was not recorded",
             yaml.name,
             expected_event.topic
+        );
+    }
+
+    // Verify explicitly absent events were NOT accepted by the event loop
+    for absent_event in &yaml.expected.absent_events {
+        assert!(
+            !event_loop.state().seen_topics.contains(&absent_event.topic),
+            "{}: Expected event '{}' to be rejected/dropped, but it was accepted",
+            yaml.name,
+            absent_event.topic
         );
     }
 
@@ -335,6 +363,18 @@ fn test_isolated_multi_hat() {
 #[test]
 fn test_isolated_boundary_violation() {
     let yaml = load_scenario("tests/scenarios/isolated_boundary_violation.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_review_passed_while_wave_open() {
+    let yaml = load_scenario("tests/scenarios/flow_reliability/review_passed_while_wave_open.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_incomplete_wave_plan_blocked() {
+    let yaml = load_scenario("tests/scenarios/flow_reliability/incomplete_wave_plan_blocked.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -567,6 +607,7 @@ fn test_isolated_with_event_projection() {
         let _result = event_loop.process_events_from_jsonl();
 
         // Evaluate checkpoints tied to this response index (1-based in YAML)
+        let mut sleep_after_response = 0u64;
         for checkpoint in &yaml.checkpoints {
             if checkpoint.after_response == idx + 1 {
                 for progress in &checkpoint.workflow_progress {
@@ -597,7 +638,15 @@ fn test_isolated_with_event_projection() {
                         reason
                     );
                 }
+
+                if checkpoint.sleep_ms > sleep_after_response {
+                    sleep_after_response = checkpoint.sleep_ms;
+                }
             }
+        }
+
+        if sleep_after_response > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(sleep_after_response));
         }
     }
 
@@ -611,6 +660,16 @@ fn test_isolated_with_event_projection() {
             "{}: Expected event '{}' to be seen (accepted), but it was not recorded",
             yaml.name,
             expected_event.topic
+        );
+    }
+
+    // Verify explicitly absent events were NOT accepted by the event loop
+    for absent_event in &yaml.expected.absent_events {
+        assert!(
+            !event_loop.state().seen_topics.contains(&absent_event.topic),
+            "{}: Expected event '{}' to be rejected/dropped, but it was accepted",
+            yaml.name,
+            absent_event.topic
         );
     }
 
@@ -1054,12 +1113,12 @@ fn test_u6_incomplete_wave_plan_blocked_mechanism() {
     //    the candidate when the wave is stalled.
     // 2. `IncompleteWaveGate::evaluate` returns the correct payload
     //    shape (reason, missing_dimensions, routing).
-    use ralph_core::event_loop::review_step_state::ReviewStepTracker;
     use ralph_core::Event as JsonlEvt;
+    use ralph_core::event_loop::review_step_state::ReviewStepTracker;
+    use ralph_core::flow_lifecycle::FlowLifecycleRegistry;
     use ralph_core::flow_lifecycle::incomplete_wave_gate::{
         IncompleteWaveGate, IncompleteWaveGateConfig,
     };
-    use ralph_core::flow_lifecycle::FlowLifecycleRegistry;
     use std::thread::sleep;
     use std::time::Duration;
 
@@ -1124,9 +1183,7 @@ fn test_u6_incomplete_wave_plan_blocked_mechanism() {
         staleness_ratio: 0.8,
     });
     let registry = FlowLifecycleRegistry::default();
-    let last_dim_secs_ago = candidate
-        .last_dimension_at
-        .map(|t| t.elapsed().as_secs());
+    let last_dim_secs_ago = candidate.last_dimension_at.map(|t| t.elapsed().as_secs());
     let payload = gate
         .evaluate(
             &registry,
@@ -1166,8 +1223,8 @@ fn test_u6_incomplete_wave_plan_blocked_mechanism() {
 
 #[test]
 fn test_u6_zippy_sparrow_replay_fixture() {
-    use ralph_core::event_loop::review_step_state::ReviewStepTracker;
     use ralph_core::Event as JsonlEvt;
+    use ralph_core::event_loop::review_step_state::ReviewStepTracker;
 
     // 1) Load and validate the fixture file itself: it must contain
     //    the recorded `recovery_envelope` (semantic_gate_violation)
@@ -1181,16 +1238,22 @@ fn test_u6_zippy_sparrow_replay_fixture() {
         if line.trim().is_empty() {
             continue;
         }
-        let parsed: serde_json::Value = serde_json::from_str(line)
-            .expect("U6-P1: every fixture line must be valid JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(line).expect("U6-P1: every fixture line must be valid JSON");
         if parsed.get("type") == Some(&serde_json::Value::String("recovery_envelope".into())) {
-            let reason_code = parsed.get("reason_code").and_then(|v| v.as_str()).unwrap_or("");
+            let reason_code = parsed
+                .get("reason_code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if reason_code == "semantic_gate_violation" {
                 found_semantic_gate_envelope = true;
                 // The post-fix envelope must reference the
                 // canonical gate name and identify the source hat
                 // as `review-coordinator` (zippy-sparrow actor).
-                let source_hat = parsed.get("source_hat").and_then(|v| v.as_str()).unwrap_or("");
+                let source_hat = parsed
+                    .get("source_hat")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 assert_eq!(
                     source_hat, "review-coordinator",
                     "U6-P1: semantic_gate_violation envelope must originate from review-coordinator"
@@ -1242,8 +1305,16 @@ fn test_u6_zippy_sparrow_replay_fixture() {
         if v.get("type") != Some(&serde_json::Value::String("event".into())) {
             continue;
         }
-        let hat = v.get("hat").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let topic = v.get("topic").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let hat = v
+            .get("hat")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let topic = v
+            .get("topic")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
         let original_payload = v.get("payload").and_then(|x| x.as_str()).map(String::from);
         // For wave-related events, replace the YAML payload
         // with the JSON-encoded triplet the tracker needs.
@@ -1286,7 +1357,10 @@ fn test_u6_zippy_sparrow_replay_fixture() {
             original_payload
         };
         let wave_id = v.get("wave_id").and_then(|x| x.as_str()).map(String::from);
-        let wave_total = v.get("wave_total").and_then(|x| x.as_u64()).map(|n| n as u32);
+        let wave_total = v
+            .get("wave_total")
+            .and_then(|x| x.as_u64())
+            .map(|n| n as u32);
         let evt = JsonlEvt {
             topic: topic.clone(),
             payload,
@@ -1352,5 +1426,3 @@ fn test_u6_zippy_sparrow_replay_fixture() {
          (U5 gate query is consistent with the U1 gate's precondition)"
     );
 }
-
-

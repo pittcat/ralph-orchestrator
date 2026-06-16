@@ -482,10 +482,7 @@ fn scan_recent_non_empty_sessions(workspace_root: &Path) -> Option<ScannedSessio
         }
         let recovery = path.join("recovery.jsonl");
         let summary = path.join("diagnosis-summary.json");
-        let recovery_non_empty = recovery
-            .metadata()
-            .map(|m| m.len() > 0)
-            .unwrap_or(false);
+        let recovery_non_empty = recovery.metadata().map(|m| m.len() > 0).unwrap_or(false);
         let has_summary = summary.exists();
         if !recovery_non_empty && !has_summary {
             continue;
@@ -1220,7 +1217,10 @@ mod tests {
         let resolution = resolve_diagnostics_root_with_warnings(tmp.path());
         assert_eq!(resolution.diagnostics_root, worktree_session);
         assert!(
-            !resolution.warnings.iter().any(|w| w.contains("most recent non-empty session")),
+            !resolution
+                .warnings
+                .iter()
+                .any(|w| w.contains("most recent non-empty session")),
             "scan fallback should not run when the pointer is valid"
         );
     }

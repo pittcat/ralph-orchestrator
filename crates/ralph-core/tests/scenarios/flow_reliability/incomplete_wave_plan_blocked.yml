@@ -95,8 +95,11 @@ mock_responses:
     </event>
 
 checkpoints:
-  - after_response: 7
+  - after_response: 6
     workflow_progress: []
+    sleep_ms: 5000
+  - after_response: 7
+    completion_rejected: true
 
 expected:
   iterations: 7
@@ -107,5 +110,8 @@ expected:
     - topic: review.dimension.done
     - topic: review.dimension.done
     - topic: review.dimension.done
-    - topic: plan.blocked
-  completion: true
+  workflow_progress: []
+  absent_events:
+    - topic: review.passed
+    - topic: LOOP_COMPLETE
+  completion: false

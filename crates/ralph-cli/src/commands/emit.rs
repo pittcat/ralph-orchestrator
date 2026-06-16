@@ -65,11 +65,7 @@ pub struct EmitArgs {
 /// looked up via the loaded `RalphConfig::hats`. When the hat is unknown,
 /// or not authorised for the topic, only the bare policy message is shown
 /// — we never leak another hat's payload shape.
-fn format_fix_hint(
-    config: &RalphConfig,
-    hat_id: Option<&str>,
-    topic: &str,
-) -> String {
+fn format_fix_hint(config: &RalphConfig, hat_id: Option<&str>, topic: &str) -> String {
     let Some(hat_id) = hat_id else {
         return "Set --hat <your-hat-id> (or RALPH_CURRENT_HAT) so the CLI can \
                 suggest a fix."
@@ -462,9 +458,7 @@ fn emit_command_with_root_and_hats(
             }
         };
         if let Some(policy) = policy {
-            use ralph_core::{
-                PolicyRuntimeState, check_topic_deny_rules, validate_event_with_hat,
-            };
+            use ralph_core::{PolicyRuntimeState, check_topic_deny_rules, validate_event_with_hat};
             let events_path = fs::read_to_string(&current_events_marker)
                 .map(|s| resolve_marker_target(&workspace_root, &s))
                 .unwrap_or_else(|_| args.file.clone());

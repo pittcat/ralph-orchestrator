@@ -449,10 +449,7 @@ impl ReviewStepTracker {
     /// `aggregate_timeout_dispatched` flag pattern or an external
     /// ledger) so this is a pure observation — emitting is the
     /// caller's job.
-    pub fn open_waves_needing_intervention(
-        &self,
-        staleness_secs: u64,
-    ) -> Vec<IncompleteWaveInfo> {
+    pub fn open_waves_needing_intervention(&self, staleness_secs: u64) -> Vec<IncompleteWaveInfo> {
         let now = Instant::now();
         let staleness = std::time::Duration::from_secs(staleness_secs);
         let mut out = Vec::new();
@@ -745,7 +742,7 @@ mod tests {
     /// `InvalidFieldValue` arm remains unchanged.
     #[test]
     fn real_skip_reason_allowed_value_mismatch_stays_fatal() {
-        use crate::event_policy::{is_recoverable_policy_finding, ViolationType};
+        use crate::event_policy::{ViolationType, is_recoverable_policy_finding};
         let finding = PolicyFinding {
             topic: "review.passed".to_string(),
             violation_type: ViolationType::InvalidFieldValue {

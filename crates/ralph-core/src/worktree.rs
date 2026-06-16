@@ -1580,7 +1580,8 @@ branch refs/heads/ralph/loop-1
     /// dead. A value with the high bit set (e.g. `0x7fff_ffff`) would
     /// wrap into a negative `i32` and be interpreted by `kill(2)` as
     /// "send to process group -1", which falsely succeeds.
-    const DEAD_PID_SENTINEL: u32 = 4_194_305;    fn register_completed_entry(
+    const DEAD_PID_SENTINEL: u32 = 4_194_305;
+    fn register_completed_entry(
         repo_root: &Path,
         loop_id: &str,
         worktree_path: &Path,
@@ -1617,8 +1618,8 @@ branch refs/heads/ralph/loop-1
 
         // Create a real worktree (git knows about it)
         let config = WorktreeConfig::default();
-        let worktree = create_worktree(temp_dir.path(), "fix-header-swift-peacock", &config)
-            .unwrap();
+        let worktree =
+            create_worktree(temp_dir.path(), "fix-header-swift-peacock", &config).unwrap();
 
         // Register a completed entry pointing at that worktree
         register_completed_entry(
@@ -1653,10 +1654,8 @@ branch refs/heads/ralph/loop-1
         init_git_repo(temp_dir.path());
 
         let config = WorktreeConfig::default();
-        let older = create_worktree(temp_dir.path(), "fix-header-swift-peacock", &config)
-            .unwrap();
-        let newer = create_worktree(temp_dir.path(), "fix-header-bright-falcon", &config)
-            .unwrap();
+        let older = create_worktree(temp_dir.path(), "fix-header-swift-peacock", &config).unwrap();
+        let newer = create_worktree(temp_dir.path(), "fix-header-bright-falcon", &config).unwrap();
 
         let older_started = Utc::now() - chrono::Duration::seconds(120);
         let newer_started = Utc::now() - chrono::Duration::seconds(10);
@@ -1691,8 +1690,8 @@ branch refs/heads/ralph/loop-1
         init_git_repo(temp_dir.path());
 
         let config = WorktreeConfig::default();
-        let worktree = create_worktree(temp_dir.path(), "fix-header-swift-peacock", &config)
-            .unwrap();
+        let worktree =
+            create_worktree(temp_dir.path(), "fix-header-swift-peacock", &config).unwrap();
 
         let registry = crate::loop_registry::LoopRegistry::new(temp_dir.path());
         let entry = crate::loop_registry::LoopEntry::with_id(
@@ -1790,15 +1789,27 @@ branch refs/heads/ralph/loop-1
 
         // Removable runtime artifacts
         fs::write(ralph_dir.join("events.jsonl"), "{\"x\":1}\n").unwrap();
-        fs::write(ralph_dir.join("events-20250101-120000.jsonl"), "{\"y\":2}\n").unwrap();
+        fs::write(
+            ralph_dir.join("events-20250101-120000.jsonl"),
+            "{\"y\":2}\n",
+        )
+        .unwrap();
         fs::write(ralph_dir.join("current-events"), ".ralph/events.jsonl\n").unwrap();
         fs::write(ralph_dir.join("history.jsonl"), "{\"h\":1}\n").unwrap();
-        fs::write(ralph_dir.join("history-20250101-120000.jsonl"), "{\"h\":2}\n").unwrap();
+        fs::write(
+            ralph_dir.join("history-20250101-120000.jsonl"),
+            "{\"h\":2}\n",
+        )
+        .unwrap();
         fs::write(ralph_dir.join("diagnostics/log.jsonl"), "{\"d\":1}\n").unwrap();
         fs::write(ralph_dir.join("urgent-steer.json"), "{}").unwrap();
         fs::write(ralph_dir.join("current-loop-id"), "clean-test-loop\n").unwrap();
         fs::write(agent_dir.join("scratchpad.md"), "# scratch\n").unwrap();
-        fs::write(agent_dir.join("scratchpad-clean-test-loop.md"), "# scratch-loop\n").unwrap();
+        fs::write(
+            agent_dir.join("scratchpad-clean-test-loop.md"),
+            "# scratch-loop\n",
+        )
+        .unwrap();
         fs::write(agent_dir.join("tasks.jsonl"), "{}\n").unwrap();
         fs::write(agent_dir.join("summary.md"), "# summary\n").unwrap();
         fs::write(agent_dir.join("handoff.md"), "# handoff\n").unwrap();
@@ -1864,7 +1875,11 @@ branch refs/heads/ralph/loop-1
         // Create main-repo memories/specs/tasks so the symlinks have
         // real targets to point at.
         fs::create_dir_all(temp_dir.path().join(".ralph/agent")).unwrap();
-        fs::write(temp_dir.path().join(".ralph/agent/memories.md"), "# main memories\n").unwrap();
+        fs::write(
+            temp_dir.path().join(".ralph/agent/memories.md"),
+            "# main memories\n",
+        )
+        .unwrap();
         fs::create_dir_all(temp_dir.path().join(".ralph/specs")).unwrap();
         fs::create_dir_all(temp_dir.path().join(".ralph/tasks")).unwrap();
 

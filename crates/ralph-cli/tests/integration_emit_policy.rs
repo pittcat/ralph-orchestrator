@@ -470,8 +470,12 @@ fn test_wave_emit_with_env_hats_source_rejects_missing_required_field() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
         .args([
-            "wave", "emit", "review.wave.ready",
-            "--payloads", r#"{"dim":"d1"}"#, r#"{"dim":"d2"}"#,
+            "wave",
+            "emit",
+            "review.wave.ready",
+            "--payloads",
+            r#"{"dim":"d1"}"#,
+            r#"{"dim":"d2"}"#,
         ])
         .current_dir(temp_path)
         .env("RALPH_HATS_SOURCE", "builtin:ce-executor-wave")

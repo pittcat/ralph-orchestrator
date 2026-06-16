@@ -1106,11 +1106,7 @@ mod tests {
         let repo_root = temp.path().to_path_buf();
         let worktree_path = repo_root.join(".worktrees/loop-isolation");
 
-        let ctx = LoopContext::worktree(
-            "loop-isolation",
-            worktree_path.clone(),
-            repo_root.clone(),
-        );
+        let ctx = LoopContext::worktree("loop-isolation", worktree_path.clone(), repo_root.clone());
 
         ctx.ensure_agent_dir().unwrap();
         ctx.generate_context_file("ralph/loop-isolation", "noop")

@@ -155,11 +155,7 @@ fn main() {
         let merged_text = if ssot_path.is_file() {
             println!("cargo:rerun-if-changed={}", ssot_path.display());
             let preset_text = fs::read_to_string(&src).unwrap_or_else(|e| {
-                panic!(
-                    "build.rs: failed to read preset {}: {}",
-                    src.display(),
-                    e
-                )
+                panic!("build.rs: failed to read preset {}: {}", src.display(), e)
             });
             let ssot_text = fs::read_to_string(&ssot_path).unwrap_or_else(|e| {
                 panic!(
@@ -185,20 +181,12 @@ fn main() {
             // working without any change in behaviour.
             match fs::read_to_string(&src) {
                 Ok(s) => s,
-                Err(e) => panic!(
-                    "build.rs: failed to read preset {}: {}",
-                    src.display(),
-                    e
-                ),
+                Err(e) => panic!("build.rs: failed to read preset {}: {}", src.display(), e),
             }
         };
 
         if let Err(e) = fs::write(&dest_file, merged_text.as_bytes()) {
-            panic!(
-                "build.rs: failed to write {}: {}",
-                dest_file.display(),
-                e
-            );
+            panic!("build.rs: failed to write {}: {}", dest_file.display(), e);
         }
         copied += 1;
     }
@@ -343,7 +331,8 @@ fn merge_preset_with_schema(
         serde_yaml::Value::Mapping(merged),
     );
 
-    serde_yaml::to_string(&preset).map_err(|e| format!("re-serialise merged preset `{preset_name}`: {e}"))
+    serde_yaml::to_string(&preset)
+        .map_err(|e| format!("re-serialise merged preset `{preset_name}`: {e}"))
 }
 
 /// Walk `path` from `root` creating empty mappings as needed, returning
@@ -362,11 +351,12 @@ fn ensure_mapping<'a>(
             .ok_or_else(|| format!("`{key}` parent is not a mapping"))?;
         let key_value = serde_yaml::Value::String((*key).to_string());
         if !entry.contains_key(&key_value) {
-            entry.insert(key_value.clone(), serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+            entry.insert(
+                key_value.clone(),
+                serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+            );
         }
-        current = entry
-            .get_mut(&key_value)
-            .expect("key just inserted above");
+        current = entry.get_mut(&key_value).expect("key just inserted above");
     }
     if !current.is_mapping() {
         return Err(format!(
@@ -392,9 +382,7 @@ fn merge_schema_mappings(
     // Apply override keys on top.
     for (k, override_v) in override_ {
         match (out.get(k), override_v) {
-            (Some(existing), serde_yaml::Value::Mapping(override_map))
-                if existing.is_mapping() =>
-            {
+            (Some(existing), serde_yaml::Value::Mapping(override_map)) if existing.is_mapping() => {
                 let merged = merge_schema_mappings(
                     existing.as_mapping().expect("checked is_mapping above"),
                     override_map,

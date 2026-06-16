@@ -553,11 +553,7 @@ hats:
 /// an explicit hat field.  Mirrors `write_event_with_hat_to_jsonl`
 /// from `common::` but kept inline so the Unit 2 tests stay
 /// self-contained.
-fn u2_write_string_event(
-    path: &std::path::Path,
-    topic: &str,
-    hat: &str,
-) {
+fn u2_write_string_event(path: &std::path::Path, topic: &str, hat: &str) {
     use std::io::Write;
     let event = serde_json::json!({
         "topic": topic,
@@ -692,7 +688,10 @@ hats:
         .iter()
         .filter(|e| e.topic.as_str() == "task.resume")
         .count();
-    assert_eq!(resume_count, 3, "3 attempts should produce 3 task.resume events");
+    assert_eq!(
+        resume_count, 3,
+        "3 attempts should produce 3 task.resume events"
+    );
 }
 
 #[test]
@@ -946,6 +945,9 @@ fn test_u2_fourth_recoverable_attempt_pushes_recoverable_exhaustion() {
     // `message`; this assertion is the contract pin.
     let _ = format!(
         "hat={} topic={} reason_class={} count={}",
-        entry.hat, entry.topic, entry.reason_class.as_str(), entry.count
+        entry.hat,
+        entry.topic,
+        entry.reason_class.as_str(),
+        entry.count
     );
 }

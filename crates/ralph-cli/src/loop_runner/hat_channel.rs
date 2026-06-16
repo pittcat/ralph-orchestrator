@@ -22,7 +22,8 @@ pub fn prepare_hat_channel(
     loop_id: &str,
     iteration: u32,
 ) -> Result<PathBuf> {
-    let channel_path = crate::loop_runner::paths::hat_channel_events_path(ctx, hat_id, loop_id, iteration);
+    let channel_path =
+        crate::loop_runner::paths::hat_channel_events_path(ctx, hat_id, loop_id, iteration);
     let relative_path = channel_path
         .strip_prefix(ctx.workspace())
         .map(|p| p.to_path_buf())
@@ -30,12 +31,20 @@ pub fn prepare_hat_channel(
 
     fs::create_dir_all(ctx.agent_dir())
         .with_context(|| format!("Failed to create agent dir: {}", ctx.agent_dir().display()))?;
-    fs::File::create(&channel_path)
-        .with_context(|| format!("Failed to create hat channel file: {}", channel_path.display()))?;
+    fs::File::create(&channel_path).with_context(|| {
+        format!(
+            "Failed to create hat channel file: {}",
+            channel_path.display()
+        )
+    })?;
 
     let marker = crate::loop_runner::paths::current_hat_events_marker(ctx);
-    fs::write(&marker, relative_path.to_string_lossy().as_bytes())
-        .with_context(|| format!("Failed to write current-hat-events marker: {}", marker.display()))?;
+    fs::write(&marker, relative_path.to_string_lossy().as_bytes()).with_context(|| {
+        format!(
+            "Failed to write current-hat-events marker: {}",
+            marker.display()
+        )
+    })?;
 
     Ok(channel_path)
 }
@@ -64,14 +73,23 @@ pub fn merge_hat_channel(
 
     if !content.trim().is_empty() {
         if let Some(parent) = target_file.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create target events directory: {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "Failed to create target events directory: {}",
+                    parent.display()
+                )
+            })?;
         }
         let mut file = fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(target_file)
-            .with_context(|| format!("Failed to open target events file: {}", target_file.display()))?;
+            .with_context(|| {
+                format!(
+                    "Failed to open target events file: {}",
+                    target_file.display()
+                )
+            })?;
 
         for line in content.lines() {
             if line.trim().is_empty() {
@@ -80,8 +98,14 @@ pub fn merge_hat_channel(
             let stamped = match serde_json::from_str::<serde_json::Value>(line) {
                 Ok(mut value) => {
                     if let Some(obj) = value.as_object_mut() {
-                        obj.insert("hat".to_string(), serde_json::Value::String(authoritative_hat.to_string()));
-                        obj.insert("source".to_string(), serde_json::Value::String(authoritative_hat.to_string()));
+                        obj.insert(
+                            "hat".to_string(),
+                            serde_json::Value::String(authoritative_hat.to_string()),
+                        );
+                        obj.insert(
+                            "source".to_string(),
+                            serde_json::Value::String(authoritative_hat.to_string()),
+                        );
                     }
                     serde_json::to_string(&value)?
                 }
@@ -91,13 +115,21 @@ pub fn merge_hat_channel(
                     line.to_string()
                 }
             };
-            writeln!(file, "{}", stamped)
-                .with_context(|| format!("Failed to append to target events file: {}", target_file.display()))?;
+            writeln!(file, "{}", stamped).with_context(|| {
+                format!(
+                    "Failed to append to target events file: {}",
+                    target_file.display()
+                )
+            })?;
         }
     }
 
-    fs::remove_file(&channel_path)
-        .with_context(|| format!("Failed to remove hat channel file: {}", channel_path.display()))?;
+    fs::remove_file(&channel_path).with_context(|| {
+        format!(
+            "Failed to remove hat channel file: {}",
+            channel_path.display()
+        )
+    })?;
     let _ = fs::remove_file(crate::loop_runner::paths::current_hat_events_marker(ctx));
 
     Ok(())
@@ -119,7 +151,11 @@ mod tests {
 
         let path = prepare_hat_channel(&ctx, "review-coordinator", "primary-001", 3).unwrap();
         assert!(path.exists(), "channel file should exist");
-        assert_eq!(path, ctx.agent_dir().join("events-hat-review-coordinator-primary-001-3.jsonl"));
+        assert_eq!(
+            path,
+            ctx.agent_dir()
+                .join("events-hat-review-coordinator-primary-001-3.jsonl")
+        );
 
         let marker = ctx.ralph_dir().join("current-hat-events");
         assert!(marker.exists(), "current-hat-events marker should exist");
@@ -153,8 +189,14 @@ mod tests {
         assert!(!merged.contains("\"hat\":\"review-coordinator\""));
         assert!(!merged.contains("\"source\":\"review-coordinator\""));
 
-        assert!(!channel.exists(), "channel file should be removed after merge");
-        assert!(!ctx.ralph_dir().join("current-hat-events").exists(), "marker should be removed after merge");
+        assert!(
+            !channel.exists(),
+            "channel file should be removed after merge"
+        );
+        assert!(
+            !ctx.ralph_dir().join("current-hat-events").exists(),
+            "marker should be removed after merge"
+        );
     }
 
     #[test]

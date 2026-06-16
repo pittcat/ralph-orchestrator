@@ -1,7 +1,7 @@
 use super::*;
 use crate::test_support::CwdGuard;
-use ralph_core::planning_session::{ConversationEntry, ConversationType};
 use ralph_core::HatRegistry;
+use ralph_core::planning_session::{ConversationEntry, ConversationType};
 use ralph_proto::{Hat, Topic};
 use std::ffi::OsStr;
 use std::sync::Arc;
@@ -2542,12 +2542,16 @@ exit 0"#
             .collect::<Vec<_>>(),
         vec![1, 2, 3]
     );
-    assert!(telemetry_entries
-        .iter()
-        .all(|entry| entry.retry_max_attempts == 4));
-    assert!(telemetry_entries
-        .iter()
-        .all(|entry| entry.suspend_mode == HookSuspendMode::RetryBackoff));
+    assert!(
+        telemetry_entries
+            .iter()
+            .all(|entry| entry.retry_max_attempts == 4)
+    );
+    assert!(
+        telemetry_entries
+            .iter()
+            .all(|entry| entry.suspend_mode == HookSuspendMode::RetryBackoff)
+    );
     assert_eq!(
         telemetry_entries
             .iter()
@@ -2815,12 +2819,16 @@ exit 0"#
             .collect::<Vec<_>>(),
         vec![1, 2]
     );
-    assert!(telemetry_entries
-        .iter()
-        .all(|entry| entry.retry_max_attempts == 2));
-    assert!(telemetry_entries
-        .iter()
-        .all(|entry| entry.suspend_mode == HookSuspendMode::WaitThenRetry));
+    assert!(
+        telemetry_entries
+            .iter()
+            .all(|entry| entry.retry_max_attempts == 2)
+    );
+    assert!(
+        telemetry_entries
+            .iter()
+            .all(|entry| entry.suspend_mode == HookSuspendMode::WaitThenRetry)
+    );
     assert_eq!(
         telemetry_entries
             .iter()
@@ -7949,8 +7957,8 @@ hats:
 
 #[test]
 fn test_u6_does_not_gate_while_wave_obligation_pending() {
-    use ralph_core::flow_lifecycle::{FlowLifecycleRecord, FlowLifecycleRegistry, FlowPhase};
     use ralph_core::RalphConfig;
+    use ralph_core::flow_lifecycle::{FlowLifecycleRecord, FlowLifecycleRegistry, FlowPhase};
     let yaml = r#"
 hats:
   review-coordinator:
@@ -8007,10 +8015,12 @@ hats:
     );
     // Pin the registry state explicitly so a refactor that flips the
     // return value without touching the registry still fails.
-    assert!(event_loop
-        .state()
-        .flow_lifecycle
-        .is_obligation_pending("wave-1"));
+    assert!(
+        event_loop
+            .state()
+            .flow_lifecycle
+            .is_obligation_pending("wave-1")
+    );
     assert_eq!(
         event_loop
             .state()
@@ -8024,8 +8034,8 @@ hats:
 
 #[test]
 fn test_u6_gates_again_after_wave_reaches_terminal() {
-    use ralph_core::flow_lifecycle::{FlowLifecycleRecord, FlowLifecycleRegistry, FlowPhase};
     use ralph_core::RalphConfig;
+    use ralph_core::flow_lifecycle::{FlowLifecycleRecord, FlowLifecycleRegistry, FlowPhase};
     let yaml = r#"
 hats:
   review-coordinator:
@@ -9605,11 +9615,11 @@ fn u4_handle_execution_contract_rejections_writes_envelope_for_safe_target() {
     // U4: a rejected contract event with a safe retry target writes
     // a recovery envelope with `safe_target = true` and
     // `target_hat = <retry target>`.
+    use ralph_core::ProcessedEvents;
     use ralph_core::diagnosis::{DiagnosisSeverity, DiagnosisSource};
     use ralph_core::execution_contract::{
         ExecutionContractFinding, ExecutionContractViolationKind,
     };
-    use ralph_core::ProcessedEvents;
 
     let (_temp, workspace) = u4_workspace();
     let diagnostics = ralph_core::diagnostics::DiagnosticsCollector::with_enabled(&workspace, true)
@@ -9728,12 +9738,12 @@ fn u4_handle_execution_contract_rejections_writes_envelope_when_no_safe_target()
     // not be honored) and a "failed-closed" / "retry budget exhausted"
     // note.  Pre-2026-06-07, this test asserted the no-task-resume-on-bus
     // case; normal publication is owned by EventLoop.
+    use ralph_core::ProcessedEvents;
+    use ralph_core::U2_REJECTION_RETRY_LIMIT;
     use ralph_core::diagnosis::DiagnosisSource;
     use ralph_core::execution_contract::{
         ExecutionContractFinding, ExecutionContractViolationKind,
     };
-    use ralph_core::ProcessedEvents;
-    use ralph_core::U2_REJECTION_RETRY_LIMIT;
 
     let (_temp, workspace) = u4_workspace();
     let diagnostics = ralph_core::diagnostics::DiagnosticsCollector::with_enabled(&workspace, true)
@@ -11968,8 +11978,8 @@ fn test_adv2_hat_spoofing_omitted_source_rejected_at_merge_layer() {
 
 #[test]
 fn test_u5_r5_last_reviewed_sha_written_when_wave_fully_closed_and_passed() {
-    use ralph_core::event_loop::review_step_state::ReviewStepTracker;
     use ralph_core::Event as JsonlEvent;
+    use ralph_core::event_loop::review_step_state::ReviewStepTracker;
 
     // Happy path: wave fully closed + review.passed → SHA write allowed.
     let mut tracker = ReviewStepTracker::default();
@@ -12026,8 +12036,8 @@ fn test_u5_r5_last_reviewed_sha_written_when_wave_fully_closed_and_passed() {
 
 #[test]
 fn test_u5_r5_last_reviewed_sha_blocked_when_wave_open_4_of_11() {
-    use ralph_core::event_loop::review_step_state::ReviewStepTracker;
     use ralph_core::Event as JsonlEvent;
+    use ralph_core::event_loop::review_step_state::ReviewStepTracker;
 
     // Error path: wave ready + only 4/11 dimensions → SHA write MUST be blocked.
     // This is the zippy-sparrow stall scenario: a premature SHA would let

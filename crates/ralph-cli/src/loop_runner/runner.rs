@@ -1992,8 +1992,7 @@ async fn run_loop_impl_inner(
         // `check_termination_hint` Error/Critical branch is
         // intentionally NOT gated so a misbehaving coordinator
         // can still be caught early.
-        let guidance_published =
-            drift_engine.check_final_human_guidance(&mut event_loop);
+        let guidance_published = drift_engine.check_final_human_guidance(&mut event_loop);
         if guidance_published {
             tracing::info!(
                 iteration = event_loop.state().iteration,
@@ -3530,7 +3529,8 @@ async fn run_loop_impl_inner(
             // sort here just makes the promoted entry stable
             // for `ralph diagnose` joins.
             exhausted.sort_by(|a, b| {
-                a.hat.cmp(&b.hat)
+                a.hat
+                    .cmp(&b.hat)
                     .then_with(|| a.topic.cmp(&b.topic))
                     .then_with(|| a.reason_class.as_str().cmp(b.reason_class.as_str()))
                     .then_with(|| a.count.cmp(&b.count))

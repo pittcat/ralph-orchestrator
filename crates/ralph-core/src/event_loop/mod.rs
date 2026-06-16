@@ -254,7 +254,7 @@ impl TerminationReason {
             | TerminationReason::RecoveryExhausted { .. }
             | TerminationReason::ReviewFailed { .. }
             | TerminationReason::ScopeViolationCircuitBreakerTripped { .. } => 1,
-            | TerminationReason::RecoverablePayloadExhausted { .. } => 1,
+            TerminationReason::RecoverablePayloadExhausted { .. } => 1,
             TerminationReason::MaxIterations
             | TerminationReason::MaxRuntime
             | TerminationReason::MaxCost => 2,
@@ -430,8 +430,7 @@ fn enrich_payload_with_wave_open_hint(
          - open_wave_id: {wave_id}\n\
          - received: {received}/{expected}\n\
          - prohibition: do NOT emit `review.passed(empty_diff)` while a wave is open — semantic gate rejects with `review_passed_while_wave_open` (recoverable, not fatal); do NOT re-emit `work.done` either (U4 dedup blocks it).\n\
-         - fallback: let the wave close naturally, or wait for mechanism `plan.blocked` via U2 staleness if the wave stalls past the aggregate window.\n"
-        ,
+         - fallback: let the wave close naturally, or wait for mechanism `plan.blocked` via U2 staleness if the wave stalls past the aggregate window.\n",
         wave_id = snapshot.wave_id,
         received = snapshot.received,
         expected = snapshot.expected,
@@ -669,7 +668,12 @@ fn apply_workflow_guard_validation(
                 event.topic,
                 rejection_details.join("\n")
             );
-            publish_policy_rejection_resume(bus, &event, recovery_payload, Some(review_step_tracker));
+            publish_policy_rejection_resume(
+                bus,
+                &event,
+                recovery_payload,
+                Some(review_step_tracker),
+            );
 
             // U4: surface the rejection metadata to the caller. The
             // helper itself stays free of diagnostics dependencies;
@@ -1009,7 +1013,12 @@ fn apply_event_policy_validation(
                          The loop will continue to allow recovery.",
                         event.topic, finding.message
                     );
-                    publish_policy_rejection_resume(bus, &event, recovery_payload, Some(review_step_tracker));
+                    publish_policy_rejection_resume(
+                        bus,
+                        &event,
+                        recovery_payload,
+                        Some(review_step_tracker),
+                    );
                 }
                 PolicyDecision::Hold(finding) => {
                     hold_triggered = true;
@@ -1026,7 +1035,12 @@ fn apply_event_policy_validation(
                          Loop held due to completion guard violation. Use resume to continue.",
                         event.topic, finding.message
                     );
-                    publish_policy_rejection_resume(bus, &event, recovery_payload, Some(review_step_tracker));
+                    publish_policy_rejection_resume(
+                        bus,
+                        &event,
+                        recovery_payload,
+                        Some(review_step_tracker),
+                    );
                 }
                 PolicyDecision::Block(finding) => {
                     if write_diagnostic {
@@ -1088,8 +1102,7 @@ fn apply_event_policy_validation(
                         reason_class,
                     });
                     if let Some(rc) = reason_class {
-                        let hat_for_counter =
-                            event.hat.as_deref().unwrap_or("unknown");
+                        let hat_for_counter = event.hat.as_deref().unwrap_or("unknown");
                         recoverable_candidates.push(RecoverableExhaustionCandidate {
                             hat: hat_for_counter.to_string(),
                             topic: event.topic.clone(),
@@ -1107,7 +1120,12 @@ fn apply_event_policy_validation(
                         event.hat.as_deref(),
                         registry,
                     );
-                    publish_policy_rejection_resume(bus, &event, recovery_payload, Some(review_step_tracker));
+                    publish_policy_rejection_resume(
+                        bus,
+                        &event,
+                        recovery_payload,
+                        Some(review_step_tracker),
+                    );
                 }
                 PolicyDecision::Hold(finding) => {
                     hold_triggered = true;
@@ -1123,7 +1141,12 @@ fn apply_event_policy_validation(
                          Loop held due to topic-deny rule. Use resume to continue.",
                         event.topic, finding.message
                     );
-                    publish_policy_rejection_resume(bus, &event, recovery_payload, Some(review_step_tracker));
+                    publish_policy_rejection_resume(
+                        bus,
+                        &event,
+                        recovery_payload,
+                        Some(review_step_tracker),
+                    );
                 }
                 PolicyDecision::Block(_finding) => {
                     // Silently drop the event
@@ -1167,7 +1190,12 @@ fn apply_event_policy_validation(
                          Wait for review-synthesizer terminal before plan-gate events.",
                         event.topic, finding.message
                     );
-                    publish_policy_rejection_resume(bus, &event, recovery_payload, Some(review_step_tracker));
+                    publish_policy_rejection_resume(
+                        bus,
+                        &event,
+                        recovery_payload,
+                        Some(review_step_tracker),
+                    );
                 } else {
                     review_step_tracker.observe_accepted(&event);
                     validated_events.push(event);
@@ -1199,7 +1227,12 @@ fn apply_event_policy_validation(
                          Wait for review-synthesizer terminal before plan-gate events.",
                         event.topic, finding.message
                     );
-                    publish_policy_rejection_resume(bus, &event, recovery_payload, Some(review_step_tracker));
+                    publish_policy_rejection_resume(
+                        bus,
+                        &event,
+                        recovery_payload,
+                        Some(review_step_tracker),
+                    );
                 } else {
                     review_step_tracker.observe_accepted(&event);
                     validated_events.push(event);
@@ -1215,8 +1248,10 @@ fn apply_event_policy_validation(
                 // so the recovery message warns the agent against
                 // bypassing a stalled review cycle. Also include
                 // the wave_id in the message for diagnostics.
-                if let ViolationType::DuplicateWorkDone { ref mut hint, ref key } =
-                    finding.violation_type
+                if let ViolationType::DuplicateWorkDone {
+                    ref mut hint,
+                    ref key,
+                } = finding.violation_type
                 {
                     if event.wave_id.is_some() {
                         *hint = DuplicateWorkDoneHint::DuplicateStallBypass;
@@ -1253,8 +1288,7 @@ fn apply_event_policy_validation(
                     reason_class,
                 });
                 if let Some(rc) = reason_class {
-                    let hat_for_counter =
-                        event.hat.as_deref().unwrap_or("unknown");
+                    let hat_for_counter = event.hat.as_deref().unwrap_or("unknown");
                     // U1 (2026-06-17-003 plan): `SemanticGateViolation`
                     // is in the recoverable set so the event is not
                     // fatal, but it is intentionally **not** pushed
@@ -1294,7 +1328,12 @@ fn apply_event_policy_validation(
                     policy_config,
                     registry,
                 );
-                publish_policy_rejection_resume(bus, &event, recovery_payload, Some(review_step_tracker));
+                publish_policy_rejection_resume(
+                    bus,
+                    &event,
+                    recovery_payload,
+                    Some(review_step_tracker),
+                );
                 // Do NOT record the rejected event
             }
             PolicyDecision::Hold(finding) => {
@@ -1322,7 +1361,12 @@ fn apply_event_policy_validation(
                     policy_config,
                     registry,
                 );
-                publish_policy_rejection_resume(bus, &event, recovery_payload, Some(review_step_tracker));
+                publish_policy_rejection_resume(
+                    bus,
+                    &event,
+                    recovery_payload,
+                    Some(review_step_tracker),
+                );
             }
             PolicyDecision::Block(_finding) => {
                 // Silently drop the event without publishing recovery or hold artifacts
@@ -2969,11 +3013,14 @@ impl EventLoop {
     /// None`) so the gate does not re-fire on the next
     /// iteration.
     ///
-    /// Called **before** [`Self::inject_review_aggregate_timeouts`]
-    /// (per plan §U2 fixed order: incomplete-wave gate →
-    /// handoff-expired → process JSONL → policy validation).
-    /// When this method emits a `plan.blocked`, the U4 path is
-    /// not consulted in the same iteration.
+    /// Called once per iteration inside [`Self::process_output`],
+    /// after handoff escalations and before new JSONL events are
+    /// processed. This matches the plan §U2 fixed order:
+    /// incomplete-wave gate → handoff-expired → process JSONL →
+    /// policy validation. It is also invoked from the stall ladder
+    /// in [`Self::inject_fallback_event`] as a hard-escalation
+    /// fallback. When this method emits a `plan.blocked`, the U4
+    /// aggregate-timeout path is not consulted in the same iteration.
     ///
     /// Returns `true` if a `plan.blocked` was emitted.
     pub fn maybe_emit_incomplete_wave_blocked(&mut self) -> bool {
@@ -3131,10 +3178,7 @@ impl EventLoop {
         // Unit 7 (2026-06-17-001): wave merge complete — register handoff
         // obligation for the synthesizer so HandoffTracker can detect if it
         // fails to activate within the configured aggregate timeout.
-        let handoff_event_id = format!(
-            "sla:review.dimension.done:{}",
-            action.wave_id
-        );
+        let handoff_event_id = format!("sla:review.dimension.done:{}", action.wave_id);
         self.state.handoff_tracker.on_handoff_accepted(
             "review.dimension.done",
             "review-synthesizer",
@@ -5517,13 +5561,14 @@ impl EventLoop {
                     // This keeps the envelope useful when the
                     // event_id naming diverges (e.g. legacy `sla:*`
                     // keys) while remaining deterministic.
-                    let candidates: Vec<&crate::flow_lifecycle::FlowLifecycleRecord> =
-                        self.state.flow_lifecycle.active_records()
-                            .filter(|r| r.target_hat == esc.consumer)
-                            .collect();
-                    if let Some(active) = candidates
-                        .into_iter()
-                        .max_by_key(|r| r.last_transition_at)
+                    let candidates: Vec<&crate::flow_lifecycle::FlowLifecycleRecord> = self
+                        .state
+                        .flow_lifecycle
+                        .active_records()
+                        .filter(|r| r.target_hat == esc.consumer)
+                        .collect();
+                    if let Some(active) =
+                        candidates.into_iter().max_by_key(|r| r.last_transition_at)
                     {
                         flow_context = Some(serde_json::json!({
                             "wave_id": active.flow_unit_id,
@@ -5587,6 +5632,13 @@ impl EventLoop {
                 )],
             );
         }
+
+        // U2 (2026-06-17-003 plan): per-iteration incomplete-wave scan.
+        // Run after handoff escalations and before processing new JSONL events
+        // so a stalled wave can be closed by the mechanism before the active hat
+        // tries to bypass with empty_diff. When the gate is disabled (default)
+        // this is a cheap no-op.
+        let _ = self.maybe_emit_incomplete_wave_blocked();
 
         // Track the isolated hat for scope enforcement in process_parse_result
         if self.config.event_loop.execution_mode == HatExecutionMode::Isolated {
@@ -6603,12 +6655,11 @@ impl EventLoop {
                 // the same turn is still dropped (sticky budget).
                 // Hat check prevents cross-hat false positives: executor's
                 // queue.advance does not豁免 coordinator's work.ready and vice versa.
-                let is_dual_publish_step_handoff =
-                    event.topic.as_str() == "work.ready"
-                        && accepted.last().is_some_and(|prev| {
-                            prev.topic.as_str() == "queue.advance"
-                                && prev.hat.as_ref() == event.hat.as_ref()
-                        });
+                let is_dual_publish_step_handoff = event.topic.as_str() == "work.ready"
+                    && accepted.last().is_some_and(|prev| {
+                        prev.topic.as_str() == "queue.advance"
+                            && prev.hat.as_ref() == event.hat.as_ref()
+                    });
 
                 if first_business_event_accepted
                     && !same_wave_continuation
@@ -6783,11 +6834,8 @@ impl EventLoop {
             // put it back.  This keeps the borrow checker happy and
             // also matches the original (pre-Unit-2) call site's
             // borrow pattern.
-            let mut policy_state: PolicyRuntimeState = self
-                .state
-                .policy_runtime_state
-                .take()
-                .unwrap_or_default();
+            let mut policy_state: PolicyRuntimeState =
+                self.state.policy_runtime_state.take().unwrap_or_default();
             // U6: build source/target hat indexes for payload contract
             // violation attribution.
             let mut source_hats_by_topic: std::collections::HashMap<String, Vec<String>> =
@@ -6816,8 +6864,7 @@ impl EventLoop {
             // recognizes the disjoint field as borrowable because
             // the `&mut LoopState` parameter was removed (the
             // counter bookkeeping moved to the caller).
-            let mut review_step_tracker =
-                std::mem::take(&mut self.state.review_step_tracker);
+            let mut review_step_tracker = std::mem::take(&mut self.state.review_step_tracker);
             let mut policy_result = apply_event_policy_validation(
                 events,
                 policy_config,
@@ -6845,13 +6892,11 @@ impl EventLoop {
             // push a `RecoverableExhaustion` into the buffer
             // when the post-increment count crosses the budget.
             for candidate in policy_result.recoverable_candidates.drain(..) {
-                let (count, exhausted) = self
-                    .state
-                    .record_recoverable_rejection_key(
-                        &candidate.hat,
-                        &candidate.topic,
-                        candidate.reason_class.as_str(),
-                    );
+                let (count, exhausted) = self.state.record_recoverable_rejection_key(
+                    &candidate.hat,
+                    &candidate.topic,
+                    candidate.reason_class.as_str(),
+                );
                 if exhausted {
                     self.state
                         .recoverable_exhaustion_buffer
@@ -8287,11 +8332,8 @@ impl EventLoop {
             // `review_step_tracker` internally, so we only need to
             // move `policy_runtime_state` out of `self.state` for
             // the call.
-            let mut policy_state: PolicyRuntimeState = self
-                .state
-                .policy_runtime_state
-                .take()
-                .unwrap_or_default();
+            let mut policy_state: PolicyRuntimeState =
+                self.state.policy_runtime_state.take().unwrap_or_default();
             // Unit 2 (2026-06-16-002 plan) take-3: same pattern
             // as the regular partition.  Move the
             // `review_step_tracker` and `policy_runtime_state`
@@ -8299,8 +8341,7 @@ impl EventLoop {
             // does **not** take `&mut LoopState` anymore), then
             // restore them and post-process the recoverable
             // candidates.
-            let mut review_step_tracker =
-                std::mem::take(&mut self.state.review_step_tracker);
+            let mut review_step_tracker = std::mem::take(&mut self.state.review_step_tracker);
             let policy_result = apply_event_policy_validation(
                 wave_events,
                 policy_config,
@@ -8329,13 +8370,11 @@ impl EventLoop {
             // the recoverable candidates — same loop as the
             // regular partition, just extending the same buffer.
             for candidate in policy_result.recoverable_candidates.into_iter() {
-                let (count, exhausted) = self
-                    .state
-                    .record_recoverable_rejection_key(
-                        &candidate.hat,
-                        &candidate.topic,
-                        candidate.reason_class.as_str(),
-                    );
+                let (count, exhausted) = self.state.record_recoverable_rejection_key(
+                    &candidate.hat,
+                    &candidate.topic,
+                    candidate.reason_class.as_str(),
+                );
                 if exhausted {
                     self.state
                         .recoverable_exhaustion_buffer

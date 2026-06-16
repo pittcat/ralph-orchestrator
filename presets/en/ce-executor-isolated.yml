@@ -69,6 +69,14 @@ event_loop:
   # so `TaskStore::ensure` rejects sibling unit tasks in the same
   # step (the original `calm-oak` failure mode).
   enforce_current_unit: true
+  # 2026-06-17-003 plan U2: enable the incomplete-wave gate so a
+  # stalled review wave (received < wave_total past 80% of the
+  # aggregate timeout) is closed by the mechanism with
+  # `plan.blocked(reason=dimension_reviewers_failed_to_converge)`
+  # instead of looping forever or fataling on an empty_diff bypass.
+  workflow_contract:
+    incomplete_wave_gate:
+      enabled: true
   verdict_gate:
     # Reject LOOP_COMPLETE if the most recent REVIEW_COMPLETE event has
     # pass_or_fail == "fail". Backstops the shipper+reporter chain when

@@ -118,7 +118,7 @@ checkpoints:
   - after_response: 4
     workflow_progress: []
   - after_response: 5
-    completion_rejected: false
+    completion_rejected: true
 
 expected:
   iterations: 6
@@ -128,4 +128,7 @@ expected:
     - topic: review.dimension.done
     - topic: review.dimension.done
   workflow_progress: []
-  completion: true
+  absent_events:
+    - topic: review.passed
+    - topic: LOOP_COMPLETE
+  completion: false

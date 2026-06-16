@@ -917,7 +917,10 @@ mod tests {
 
         // U1 (2026-06-14-002): PWD must be synchronized with the actual working
         // directory so agent bash tools resolve paths correctly.
-        let expected_pwd = std::env::current_dir().unwrap().to_string_lossy().to_string();
+        let expected_pwd = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         assert!(
             stdout.contains(&format!("PWD={expected_pwd}")),
             "PWD should match cwd ({expected_pwd}): {stdout}"
