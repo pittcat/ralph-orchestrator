@@ -348,6 +348,27 @@ fn test_plan_gate_dual_publish_handoff() {
 }
 
 #[test]
+fn test_plan_gate_dual_publish_inverse_rejected() {
+    // 2026-06-17-002 U3 regression: the dual-publish carve-out is an
+    // *ordered* pair. Inverse order `(work.ready, queue.advance)` must
+    // NOT admit the second event — only the first business event
+    // (`work.ready`) is accepted; `queue.advance` is dropped.
+    let yaml =
+        load_scenario("tests/scenarios/plan_gate_dual_publish_inverse_rejected.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_plan_gate_dual_publish_third_blocked() {
+    // 2026-06-17-002 U3 regression: the dual-publish carve-out is
+    // *sticky* — a third business event in the same turn is dropped
+    // by the per-turn budget. The carve-out has a single +1 window,
+    // not unlimited.
+    let yaml = load_scenario("tests/scenarios/plan_gate_dual_publish_third_blocked.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
 fn test_workflow_activation_contract_re_emit_trap() {
     // WAC-U8 AE1 (2026-06-12-002): a hat that triggers on a
     // topic published by another hat and does not declare that

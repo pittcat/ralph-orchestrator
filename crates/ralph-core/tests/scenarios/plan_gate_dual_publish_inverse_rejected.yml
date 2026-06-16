@@ -1,0 +1,78 @@
+# Plan-Gate Dual-Publish Handoff — Inverse Order Rejected
+#
+# 2026-06-17-002 feat-ce-executor-step-handoff U3 (regression):
+# `is_dual_publish_step_handoff` is an *ordered* pair — it only fires
+# when `queue.advance` arrives first and `work.ready` arrives second.
+# Emitting the pair in inverse order `(work.ready, queue.advance)` must
+# NOT grant the second event the carve-out: `queue.advance` is dropped
+# and the per-turn sticky budget is consumed by `work.ready` only.
+#
+# This scenario pins that boundary: only `work.ready` is accepted in
+# turn 1, the executor is never woken (no `queue.advance` to bridge),
+# and the loop ends in non-completion because the plan-gate never gets
+# a follow-up path.
+#
+# Reference:
+#   crates/ralph-core/src/event_loop/mod.rs:6322
+#     is_dual_publish_step_handoff (ordered pair, exact topics)
+#   docs/plans/2026-06-17-002-feat-ce-executor-step-handoff-plan.md U3
+
+name: plan_gate_dual_publish_inverse_rejected
+description: |
+  Isolated mode does NOT grant the dual-publish carve-out when the pair
+  is emitted in inverse order — only the first business event
+  (`work.ready`) is accepted, `queue.advance` is dropped.
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 10
+  hats:
+    plan-gate:
+      subscribes_to:
+        - task.start
+        - work.done
+      publishes:
+        - queue.advance
+        - work.ready
+        - LOOP_COMPLETE
+    executor:
+      subscribes_to:
+        - work.ready
+        - queue.advance
+      publishes:
+        - work.done
+        - LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
+
+# Run 1: plan-gate emits the pair in INVERSE order
+# (work.ready, queue.advance). Only work.ready is accepted; queue.advance
+# is dropped because the carve-out requires queue.advance → work.ready.
+# Run 2: no executor wake happens (queue.advance was the bridge). Loop
+# does not complete via the normal plan-gate path. We use LOOP_COMPLETE
+# as a no-op terminator to keep the iteration count deterministic; the
+# real assertion is that work.ready is seen and queue.advance is NOT.
+mock_responses:
+  - |
+    <event topic="work.ready">
+    task_id: "task-inverse-001"
+    plan_name: "demo"
+    plan_path: "/tmp/demo.md"
+    task_key: "step-01"
+    step: "step-01"
+    complexity: "low"
+    </event>
+    <event topic="queue.advance">
+    step: "step-01"
+    </event>
+  - |
+    <event topic="LOOP_COMPLETE">
+    Done.
+    </event>
+
+expected:
+  iterations: 2
+  events:
+    - topic: work.ready
+  completion: true
