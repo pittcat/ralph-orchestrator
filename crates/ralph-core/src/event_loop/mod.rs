@@ -5226,19 +5226,28 @@ impl EventLoop {
                         "received_count": record.received_count,
                         "flow_phase": record.phase.as_str(),
                     }));
-                } else if let Some(active) =
-                    self.state.flow_lifecycle.active_records().next()
-                {
-                    // No record keyed by event_id — fall back to
-                    // the most recent active record. This keeps the
-                    // envelope useful when the event_id naming
-                    // diverges (e.g. legacy `sla:*` keys).
-                    flow_context = Some(serde_json::json!({
-                        "wave_id": active.flow_unit_id,
-                        "wave_total": active.wave_total,
-                        "received_count": active.received_count,
-                        "flow_phase": active.phase.as_str(),
-                    }));
+                } else {
+                    // No record keyed by event_id — fall back to a
+                    // record whose target_hat matches the consumer,
+                    // picking the most recently transitioned one.
+                    // This keeps the envelope useful when the
+                    // event_id naming diverges (e.g. legacy `sla:*`
+                    // keys) while remaining deterministic.
+                    let candidates: Vec<&crate::flow_lifecycle::FlowLifecycleRecord> =
+                        self.state.flow_lifecycle.active_records()
+                            .filter(|r| r.target_hat == esc.consumer)
+                            .collect();
+                    if let Some(active) = candidates
+                        .into_iter()
+                        .max_by_key(|r| r.last_transition_at)
+                    {
+                        flow_context = Some(serde_json::json!({
+                            "wave_id": active.flow_unit_id,
+                            "wave_total": active.wave_total,
+                            "received_count": active.received_count,
+                            "flow_phase": active.phase.as_str(),
+                        }));
+                    }
                 }
             }
             let mut env_builder = crate::diagnosis::RecoveryDiagnosisEnvelope::builder()

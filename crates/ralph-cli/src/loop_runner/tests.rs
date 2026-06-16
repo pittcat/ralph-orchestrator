@@ -8018,6 +8018,10 @@ hats:
         !post,
         "wave obligation pending → gate must NOT fire (Unit 6 GateWaveMutex)"
     );
+    // Pin the registry state explicitly so a refactor that flips the
+    // return value without touching the registry still fails.
+    assert!(event_loop.state().flow_lifecycle.is_obligation_pending("wave-1"));
+    assert_eq!(event_loop.state().flow_lifecycle.get("wave-1").unwrap().phase, FlowPhase::WorkersActive);
 }
 
 #[test]

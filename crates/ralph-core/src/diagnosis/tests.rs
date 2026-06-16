@@ -28,6 +28,7 @@ fn every_source_variant_round_trips_through_serde() {
         DiagnosisSource::TopicFormat,
         DiagnosisSource::AgentDocSync,
         DiagnosisSource::CliEmit,
+        DiagnosisSource::FlowLifecycle,
     ];
     for source in sources {
         let json = serde_json::to_string(&source).unwrap();

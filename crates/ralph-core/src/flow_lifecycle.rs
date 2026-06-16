@@ -32,12 +32,24 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::diagnosis::{
     DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, EvidenceKind, EvidenceRef,
     RecoveryDiagnosisEnvelope, RecoveryDiagnosisEnvelopeBuilder,
 };
 use crate::wave_detection::DetectedWave;
+
+/// Hard cap on `wave_total` stored in a [`FlowLifecycleRecord`]. Set to
+/// 65 536 so the registry can never be the source of an OOM if a
+/// dispatcher emits a wave with a `u32::MAX` total. The cap is applied
+/// in [`FlowLifecycleRecord::new`].
+pub const MAX_FLOW_RECORDS: u32 = 65_536;
+
+/// Hard cap on the length of `flow_unit_id` stored in a
+/// [`FlowLifecycleRecord`]. Anything longer is truncated to this many
+/// Unicode scalar values.
+pub const MAX_FLOW_UNIT_ID_CHARS: usize = 256;
 
 /// Lifecycle phase of one parallel flow unit.
 ///
@@ -137,6 +149,11 @@ pub struct FlowLifecycleRecord {
 
 impl FlowLifecycleRecord {
     /// Build a new record in [`FlowPhase::Detected`].
+    ///
+    /// `wave_total` is capped to [`MAX_FLOW_RECORDS`] to keep the
+    /// registry bounded. `flow_unit_id` is truncated to
+    /// [`MAX_FLOW_UNIT_ID_CHARS`] characters. A warning is logged
+    /// when either cap fires.
     #[must_use]
     pub fn new(
         flow_unit_id: impl Into<String>,
@@ -145,8 +162,30 @@ impl FlowLifecycleRecord {
         wave_total: u32,
     ) -> Self {
         let now = Instant::now();
+        let flow_unit_id = {
+            let raw = flow_unit_id.into();
+            let truncated: String = raw.chars().take(MAX_FLOW_UNIT_ID_CHARS).collect();
+            if raw.chars().count() > MAX_FLOW_UNIT_ID_CHARS {
+                warn!(
+                    original_len = raw.chars().count(),
+                    cap = MAX_FLOW_UNIT_ID_CHARS,
+                    "flow_unit_id exceeded MAX_FLOW_UNIT_ID_CHARS; truncating"
+                );
+            }
+            truncated
+        };
+        let wave_total = if wave_total > MAX_FLOW_RECORDS {
+            warn!(
+                original = wave_total,
+                cap = MAX_FLOW_RECORDS,
+                "wave_total exceeded MAX_FLOW_RECORDS; capping"
+            );
+            MAX_FLOW_RECORDS
+        } else {
+            wave_total
+        };
         Self {
-            flow_unit_id: flow_unit_id.into(),
+            flow_unit_id,
             target_hat: target_hat.into(),
             source_topic: source_topic.into(),
             wave_total,
@@ -202,11 +241,32 @@ impl FlowLifecycleRegistry {
     /// wave batch with the same `wave_id` must not blow away the
     /// in-flight record.
     ///
-    /// Returns `&Self` so the caller can chain the
-    /// [`Self::transition`] calls without touching the map twice.
+    /// When the new record has the same `flow_unit_id` as an
+    /// existing one but differs in `wave_total` or `source_topic`,
+    /// a `tracing::warn!` is emitted so operators can detect
+    /// dispatcher bugs that re-register a wave under a different
+    /// shape. The existing record is always preserved.
+    ///
+    /// Returns a reference to the inserted (or existing) record
+    /// so the caller can chain the [`Self::transition`] calls
+    /// without touching the map twice.
     pub fn register(&mut self, record: FlowLifecycleRecord) -> &FlowLifecycleRecord {
         let id = record.flow_unit_id.clone();
-        self.records.entry(id.clone()).or_insert(record);
+        let new_wave_total = record.wave_total;
+        let new_source_topic = record.source_topic.clone();
+        let entry = self.records.entry(id.clone()).or_insert(record);
+        if entry.flow_unit_id == id
+            && (entry.wave_total != new_wave_total || entry.source_topic != new_source_topic)
+        {
+            warn!(
+                flow_unit_id = %id,
+                existing_wave_total = entry.wave_total,
+                new_wave_total,
+                existing_source_topic = %entry.source_topic,
+                new_source_topic = %new_source_topic,
+                "register() called with same flow_unit_id but different shape; keeping existing record"
+            );
+        }
         self.records
             .get(id.as_str())
             .expect("record was just inserted")
@@ -235,10 +295,15 @@ impl FlowLifecycleRegistry {
                 .ok_or_else(|| format!("flow unit '{flow_unit_id}' not registered"))?;
             let current = record.phase;
             if !is_legal_transition(current, next) {
+                let legal: Vec<String> = legal_successors(current)
+                    .iter()
+                    .map(|p| p.as_str().to_string())
+                    .collect();
                 return Err(format!(
-                    "illegal transition for '{flow_unit_id}': {} -> {}",
+                    "illegal transition for '{flow_unit_id}': {} -> {}; legal successors: [{}]",
                     current.as_str(),
-                    next.as_str()
+                    next.as_str(),
+                    legal.join(", "),
                 ));
             }
             record.phase = next;
@@ -276,6 +341,11 @@ impl FlowLifecycleRegistry {
     /// in-flight flow. Does **not** write a transition envelope —
     /// progress updates are bulk-appended to the existing record
     /// and only surface as envelope fields when the next
+    /// transition fires.
+    ///
+    /// **Behavior:** does NOT enqueue transition envelopes —
+    /// progress updates are bulk-appended to the existing record
+    /// and surface as envelope fields only when the next
     /// transition fires.
     pub fn record_progress(
         &mut self,
@@ -378,6 +448,26 @@ impl FlowLifecycleRegistry {
                 true
             }
         });
+    }
+}
+
+/// Returns the legal successor phases for `current`.
+///
+/// Used to surface a remediation hint in [`FlowLifecycleRegistry::transition`]
+/// error messages. Terminal phases return an empty slice.
+#[must_use]
+pub fn legal_successors(phase: FlowPhase) -> &'static [FlowPhase] {
+    use FlowPhase::{
+        Aggregating, Closed, Degraded, Detected, Failed, PartialClosed, Spawning, WorkersActive,
+    };
+    match phase {
+        Detected => &[Spawning, Failed],
+        Spawning => &[WorkersActive, Failed],
+        WorkersActive => &[Aggregating, PartialClosed, Failed],
+        Aggregating => &[Closed, Degraded],
+        PartialClosed => &[Degraded],
+        Failed => &[Degraded],
+        Closed | Degraded => &[],
     }
 }
 
@@ -598,9 +688,14 @@ pub fn reconcile_wave_timeouts(
     let mut escalated = false;
 
     if configured.aggregate > 0 {
-        let threshold_ms = (f64::from(u32::try_from(configured.aggregate).unwrap_or(u32::MAX))
-            * 1000.0
-            * WAVE_TIMEOUT_DRIFT_TOLERANCE) as u64;
+        // Integer arithmetic to avoid `u32::try_from` truncation for
+        // large aggregate values. Compute (aggregate * 110 / 100) * 1000
+        // using u128 to hold the intermediate without overflow.
+        let threshold_ms = ((configured.aggregate as u128)
+            .saturating_mul(110)
+            .saturating_div(100)
+            .saturating_mul(1000)
+            .min(u64::MAX as u128)) as u64;
         if actual_wait_ms > threshold_ms {
             drift_envelope = Some(build_drift_envelope(
                 flow_unit_id,
@@ -659,9 +754,18 @@ fn build_drift_envelope(
         .retry_key(format!("flow_lifecycle:{flow_unit_id}:timeout_drift"))
         .outcome(DiagnosisOutcome::Pending)
         .safe_target(false)
-        .expected_action(
-            "Inspect dispatcher deadline path: actual wait diverged from configured budget.".to_string(),
-        )
+        .expected_action(match reason_code {
+            timeout_reasons::WAVE_TIMEOUT_EARLY => {
+                "Aggregate deadline fired before the configured budget. Inspect the dispatcher deadline path; this is a defensive alarm, not a worker fault."
+                    .to_string()
+            }
+            timeout_reasons::WAVE_TIMEOUT_DRIFT => {
+                "Wave actual wait exceeded configured budget. Increase `aggregate.timeout` or reduce per-worker count for the next wave."
+                    .to_string()
+            }
+            _ => "Inspect dispatcher deadline path: actual wait diverged from configured budget."
+                .to_string(),
+        })
         .evidence(EvidenceRef {
             kind: EvidenceKind::Field,
             ref_path: "flow.timeout".to_string(),
@@ -730,6 +834,25 @@ mod tests {
         // Detected -> Aggregating is not legal.
         let err = reg.transition("wf-1", FlowPhase::Aggregating, 1, None, None);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn transition_error_message_includes_legal_successors() {
+        let mut reg = FlowLifecycleRegistry::new();
+        reg.register(rec());
+        // Detected -> Aggregating is illegal. Legal successors from
+        // Detected are [Spawning, Failed].
+        let err = reg
+            .transition("wf-1", FlowPhase::Aggregating, 1, None, None)
+            .expect_err("must be rejected");
+        assert!(
+            err.contains("legal successors:"),
+            "error must include remediation hint: {err}"
+        );
+        assert!(
+            err.contains("spawning") && err.contains("failed"),
+            "error must list legal successors: {err}"
+        );
     }
 
     #[test]
@@ -810,6 +933,70 @@ mod tests {
         assert_eq!(v.as_str().unwrap(), "partial_closed");
     }
 
+    #[test]
+    fn flow_lifecycle_record_caps_wave_total_and_id_length() {
+        // Cap wave_total
+        let big_wave = FlowLifecycleRecord::new("wf-cap", "h", "t", 100_000_000);
+        assert_eq!(big_wave.wave_total, MAX_FLOW_RECORDS);
+        assert_eq!(big_wave.missing_indices.len(), MAX_FLOW_RECORDS as usize);
+
+        // Cap flow_unit_id (10_000 char string -> truncated to 256)
+        let long_id: String = "x".repeat(10_000);
+        let rec = FlowLifecycleRecord::new(long_id.as_str(), "h", "t", 3);
+        assert_eq!(rec.flow_unit_id.chars().count(), MAX_FLOW_UNIT_ID_CHARS);
+    }
+
+    #[test]
+    fn transition_to_same_phase_is_rejected() {
+        let mut reg = FlowLifecycleRegistry::new();
+        reg.register(rec());
+        reg.transition("wf-1", FlowPhase::Spawning, 1, None, None)
+            .unwrap();
+        reg.transition("wf-1", FlowPhase::WorkersActive, 1, None, None)
+            .unwrap();
+        // Now try transitioning WorkersActive -> WorkersActive.
+        let err = reg.transition("wf-1", FlowPhase::WorkersActive, 2, None, None);
+        assert!(err.is_err(), "same-phase transition must be rejected");
+    }
+
+    #[test]
+    fn is_obligation_pending_for_hat_topic_filter_branches() {
+        let mut reg = FlowLifecycleRegistry::new();
+        // Two records on the same hat with different source_topics.
+        let rec_a = FlowLifecycleRecord::new("wf-a", "review-coordinator", "review.wave.ready", 3);
+        let rec_b = FlowLifecycleRecord::new("wf-b", "review-coordinator", "other.topic", 3);
+        reg.register(rec_a);
+        reg.register(rec_b);
+
+        // Empty filter -> "any active wave for this hat" -> true.
+        assert!(reg.is_obligation_pending_for_hat("review-coordinator", &[]));
+
+        // Filter that matches rec_a.source_topic -> true.
+        assert!(reg.is_obligation_pending_for_hat(
+            "review-coordinator",
+            &[&"review.wave.ready"],
+        ));
+
+        // Filter for an unrelated topic -> false.
+        assert!(!reg.is_obligation_pending_for_hat(
+            "review-coordinator",
+            &[&"unrelated.topic"],
+        ));
+    }
+
+    #[test]
+    fn register_warns_on_duplicate_with_different_fields() {
+        let mut reg = FlowLifecycleRegistry::new();
+        reg.register(FlowLifecycleRecord::new("wf-dup", "h1", "t1", 5));
+        // Same id, different wave_total. The original record must
+        // be kept; the warn is emitted but we do not assert on it
+        // (no tracing subscriber installed).
+        reg.register(FlowLifecycleRecord::new("wf-dup", "h1", "t1", 99));
+        let r = reg.get("wf-dup").unwrap();
+        assert_eq!(r.wave_total, 5, "existing record must be preserved");
+        assert_eq!(r.phase, FlowPhase::Detected);
+    }
+
     // -----------------------------------------------------------------
     // TimeoutReconciler (Unit 3)
     // -----------------------------------------------------------------
@@ -858,6 +1045,20 @@ mod tests {
         let r = reconcile_wave_timeouts("wf-1", "review.wave.ready", "review-coordinator", &deadlines, actual, 7);
         assert_eq!(r.configured_aggregate_ms, 0);
         assert!(r.drift_envelope.is_none());
+    }
+
+    #[test]
+    fn reconcile_wave_timeouts_handles_large_aggregate_without_overflow() {
+        // u32::MAX as the configured aggregate. The old f64 path
+        // truncated this to u32::MAX anyway, so the new integer
+        // path must agree: configured_aggregate_ms == u32::MAX * 1000.
+        let deadlines = WaveDeadlines::new(60, u32::MAX as u64);
+        let actual = Duration::from_millis(0);
+        let r = reconcile_wave_timeouts("wf-1", "review.wave.ready", "review-coordinator", &deadlines, actual, 1);
+        assert_eq!(r.configured_aggregate_ms, u32::MAX as u64 * 1000);
+        // With actual_wait=0 and configured huge, the early-firing
+        // branch (actual < configured/2) should fire.
+        assert!(r.drift_envelope.is_some());
     }
 
     #[test]

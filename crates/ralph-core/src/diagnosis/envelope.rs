@@ -721,6 +721,7 @@ mod tests {
             DiagnosisSource::AgentDocSync,
             DiagnosisSource::WaveDispatcher,
             DiagnosisSource::CliEmit,
+            DiagnosisSource::FlowLifecycle,
         ] {
             let s = serde_json::to_string(&source).unwrap();
             let v: serde_json::Value = serde_json::from_str(&s).unwrap();

@@ -1060,6 +1060,28 @@ fn suggested_actions_for_finding(f: &RankedFinding) -> Vec<String> {
                     .to_string(),
             );
         }
+        "flow_lifecycle" => match f.reason_code.as_str() {
+            "wave_spawn_failed" | "phase_transition" => {
+                out.push(format!(
+                    "Inspect the flow registry state for {}; phase {} indicates a transition that may need a forced close.",
+                    f.topic.as_deref().unwrap_or("?"),
+                    f.reason_code,
+                ));
+            }
+            "wave_timeout_drift" => {
+                out.push(format!(
+                    "Wave {} actual wait diverged from configured aggregate budget; tune `aggregate.timeout` or check per-worker timeout cascade.",
+                    f.topic.as_deref().unwrap_or("?"),
+                ));
+            }
+            "wave_timeout_early" => {
+                out.push(format!(
+                    "Wave {} fired its aggregate deadline early; this is a dispatcher timing bug, not a worker issue.",
+                    f.topic.as_deref().unwrap_or("?"),
+                ));
+            }
+            _ => {}
+        },
         _ => {
             out.push(format!(
                 "复现 retry_key `{}` 并查 hat `{}` 的 instructions",

@@ -101,7 +101,7 @@ telemetry:
 
 ## 4. Recovery Diagnosis Envelope 模型
 
-U2 的 `RecoveryDiagnosisEnvelope`（schema_version=1）是 9 个 `source` × 4 个 `severity` × 6 个 `outcome` 的笛卡尔积，外加一个稳定的 `retry_key` 用来跨迭代聚合。
+U2 的 `RecoveryDiagnosisEnvelope`（schema_version=1）是 13 个 `source` × 4 个 `severity` × 6 个 `outcome` 的笛卡尔积，外加一个稳定的 `retry_key` 用来跨迭代聚合。
 
 ### 13 个 `source`（诊断源）
 
@@ -163,15 +163,17 @@ U2 的 `RecoveryDiagnosisEnvelope`（schema_version=1）是 9 个 `source` × 4 
 
 ### Flow Lifecycle Envelope（flow_lifecycle source）
 
-`flow_lifecycle` 是 2026-06-17-001 计划（U2/U9）引入的第十个诊断 source，专门追踪 wave / parallel-flow 的生命周期状态转换。每条 envelope 记录一次状态转移，写入 `recovery.jsonl`。
+`flow_lifecycle` 是 2026-06-17-001 计划（U2/U9）引入的第十三个诊断 source，专门追踪 wave / parallel-flow 的生命周期状态转换。每条 envelope 记录一次状态转移，写入 `recovery.jsonl`。
 
 **状态机**（`FlowPhase`）：
 
 ```
-Detected → Spawning → WorkersActive → Aggregating → Closed
-                                                   ↘ PartialClosed
-                           ↘ Failed（spawn 失败或 isolated scope 拒绝）
-                           ↘ Degraded（mechanism 发出 degraded terminal）
+Detected → Spawning
+Spawning → WorkersActive
+WorkersActive → Aggregating | PartialClosed | Failed
+Aggregating → Closed | Degraded
+PartialClosed → Degraded
+Failed → Degraded
 ```
 
 **Envelope 字段：**

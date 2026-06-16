@@ -205,7 +205,7 @@ fn filter_report_by_source(mut report: Report, name: &str) -> std::result::Resul
 /// D7: returns `true` when `name` matches one of the snake_case
 /// `DiagnosisSource` variants.
 fn is_known_source_name(name: &str) -> bool {
-    [
+    static KNOWN_SOURCES: &[&str] = &[
         "stall_recovery",
         "missing_event_gate",
         "workflow_guard",
@@ -216,21 +216,24 @@ fn is_known_source_name(name: &str) -> bool {
         "loop_stale",
         "topic_format",
         "agent_doc_sync",
-    ]
-    .contains(&name)
+        "wave_dispatcher",
+        "cli_emit",
+        "flow_lifecycle",
+    ];
+    KNOWN_SOURCES.contains(&name)
 }
 
 fn print_unknown_source(name: &str, use_colors: bool) {
     if use_colors {
         eprintln!(
-            "{}error:{} unknown --source '{}'\navailable: stall_recovery, missing_event_gate, workflow_guard, execution_contract, payload_contract, drift_monitor, hook_retry, loop_stale, topic_format, agent_doc_sync",
+            "{}error:{} unknown --source '{}'\navailable: stall_recovery, missing_event_gate, workflow_guard, execution_contract, payload_contract, drift_monitor, hook_retry, loop_stale, topic_format, agent_doc_sync, wave_dispatcher, cli_emit, flow_lifecycle",
             colors::RED,
             colors::RESET,
             name
         );
     } else {
         eprintln!(
-            "error: unknown --source '{name}'\navailable: stall_recovery, missing_event_gate, workflow_guard, execution_contract, payload_contract, drift_monitor, hook_retry, loop_stale, topic_format, agent_doc_sync"
+            "error: unknown --source '{name}'\navailable: stall_recovery, missing_event_gate, workflow_guard, execution_contract, payload_contract, drift_monitor, hook_retry, loop_stale, topic_format, agent_doc_sync, wave_dispatcher, cli_emit, flow_lifecycle"
         );
     }
 }
@@ -735,6 +738,9 @@ mod tests {
             "loop_stale",
             "topic_format",
             "agent_doc_sync",
+            "wave_dispatcher",
+            "cli_emit",
+            "flow_lifecycle",
         ] {
             assert!(is_known_source_name(name), "expected {name} known");
         }
