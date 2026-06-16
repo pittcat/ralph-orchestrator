@@ -1,0 +1,118 @@
+# review-coordinator 发 review.passed(empty_diff) while wave open → recoverable
+# 模拟 zippy-sparrow 失败模式:review-synthesizer 永不 fire,4/11 维 stall 后
+# review-coordinator 走 DEC-002 fast-path 试图用 empty_diff 收尾。
+#
+# U1 semantic_gate 修复后,check_semantic_gates 必须 emit
+# ViolationType::SemanticGateViolation { gate: "review_passed_while_wave_open" },
+# 不再误标为 InvalidFieldValue { field: "skip_reason" }。
+#
+# 期望:
+# - review.passed 事件不进入 bus(被 semantic gate 拒收)
+# - 无 TerminationReason::PayloadContractViolation
+# - task.resume 被路由到 review-coordinator 带 hint
+# - loop 继续,可后续 emit plan.blocked
+
+name: review_passed_while_wave_open
+description: review-coordinator 发 empty_diff while wave open → semantic gate recoverable 路径
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 7
+  hats:
+    review-coordinator:
+      subscribes_to:
+        - work.done
+      publishes:
+        - review.wave.ready
+        - review.passed
+      default_publishes: review.wave.ready
+    dimension-reviewer:
+      subscribes_to:
+        - review.wave.ready
+      publishes:
+        - review.dimension.done
+      default_publishes: review.dimension.done
+    review-synthesizer:
+      subscribes_to:
+        - review.dimension.done
+      publishes:
+        - review.complete
+        - plan.blocked
+      default_publishes: review.complete
+    shipper:
+      subscribes_to:
+        - plan.complete
+        - plan.blocked
+        - debug.exhausted
+      publishes:
+        - LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    workflow_contract:
+      incomplete_wave_gate:
+        enabled: true
+        staleness_fraction: 0.8
+
+mock_responses:
+  - |
+    <event topic="work.done">
+    plan_name: "u6-bdd"
+    plan_path: "docs/plans/u6-bdd.md"
+    task_id: "u6-bdd-task"
+    task_key: "u6-bdd-key"
+    step: "step-01"
+    complexity: "large"
+    commit_count: 1
+    changed_lines: 1475
+    </event>
+  - |
+    派发 review wave (11 维)...
+    <event topic="review.wave.ready">
+    wave_id: "w-u6bdd-0001"
+    wave_total: 11
+    expected_dimensions: ["d1","d2","d3","d4","d5","d6","d7","d8","d9","d10","d11"]
+    aggregate_timeout_secs: 5
+    </event>
+  - |
+    <event topic="review.dimension.done">
+    wave_id: "w-u6bdd-0001"
+    dimension: "d1"
+    verdict: ok
+    </event>
+  - |
+    <event topic="review.dimension.done">
+    wave_id: "w-u6bdd-0001"
+    dimension: "d2"
+    verdict: ok
+    </event>
+  - |
+    DEC-002 决策:走 empty_diff fast-path
+    <event topic="review.passed">
+    plan_name: "u6-bdd"
+    step: "step-01"
+    task_id: "u6-bdd-task"
+    task_key: "u6-bdd-key"
+    verdict: "pass"
+    findings_count: 0
+    skip_reason: "empty_diff"
+    </event>
+  - |
+    <event topic="LOOP_COMPLETE">
+    cycle continues.
+    </event>
+
+checkpoints:
+  - after_response: 4
+    workflow_progress: []
+  - after_response: 5
+    completion_rejected: false
+
+expected:
+  iterations: 6
+  events:
+    - topic: work.done
+    - topic: review.wave.ready
+    - topic: review.dimension.done
+    - topic: review.dimension.done
+  workflow_progress: []
+  completion: true
