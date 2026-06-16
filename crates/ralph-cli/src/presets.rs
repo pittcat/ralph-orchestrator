@@ -698,6 +698,119 @@ mod tests {
             .unwrap_or_else(|e| panic!("failed to read root schema at {}: {}", path.display(), e))
     }
 
+    /// Plan 2026-06-16-002 Unit 1: reproduce the merge that `build.rs`
+    /// applies at compile time — read the canonical preset and the
+    /// schema SSOT, then deep-merge the SSOT's `schemas:` mapping into
+    /// `event_loop.event_policy.schemas` (SSOT base, inline override).
+    /// Used by the SSOT-driven parity tests below to verify the binary
+    /// embedded what the build pipeline intended.
+    fn merge_root_with_ssot(preset_name: &str) -> String {
+        let preset_text = read_root_preset(&format!("{preset_name}.yml"));
+        let ssot_text = read_root_schema(&format!("{preset_name}.yml"));
+        merge_preset_with_schema_yaml(&preset_text, &ssot_text).unwrap_or_else(|e| {
+            panic!(
+                "merge_root_with_ssot({preset_name}) failed: {e}\n\
+                 (this mirrors build.rs — if it fails here, the test setup is broken, \
+                  not the production code.)"
+            )
+        })
+    }
+
+    fn merge_preset_with_schema_yaml(
+        preset_text: &str,
+        ssot_text: &str,
+    ) -> Result<String, String> {
+        let mut preset: serde_yaml::Value =
+            serde_yaml::from_str(preset_text).map_err(|e| format!("preset YAML: {e}"))?;
+        let ssot: serde_yaml::Value =
+            serde_yaml::from_str(ssot_text).map_err(|e| format!("SSOT YAML: {e}"))?;
+
+        let ssot_schemas = match ssot.get("schemas") {
+            Some(serde_yaml::Value::Mapping(m)) => m.clone(),
+            Some(other) => {
+                return Err(format!(
+                    "SSOT `schemas` must be a mapping, found {:?}",
+                    other
+                ));
+            }
+            None => serde_yaml::Mapping::new(),
+        };
+
+        let event_loop = ensure_yaml_mapping(&mut preset, &["event_loop"])?;
+        let event_policy = ensure_yaml_mapping(event_loop, &["event_policy"])?;
+        let inline_schemas_mapping = event_policy
+            .get("schemas")
+            .and_then(|v| v.as_mapping())
+            .cloned()
+            .unwrap_or_default();
+
+        let merged = deep_merge_yaml_mapping(&ssot_schemas, &inline_schemas_mapping);
+        let event_policy_mapping = event_policy
+            .as_mapping_mut()
+            .expect("ensure_yaml_mapping returned a non-mapping Value");
+        event_policy_mapping.insert(
+            serde_yaml::Value::String("schemas".to_string()),
+            serde_yaml::Value::Mapping(merged),
+        );
+        serde_yaml::to_string(&preset).map_err(|e| format!("re-serialise: {e}"))
+    }
+
+    fn ensure_yaml_mapping<'a>(
+        root: &'a mut serde_yaml::Value,
+        path: &[&str],
+    ) -> Result<&'a mut serde_yaml::Value, String> {
+        let mut current = root;
+        for key in path {
+            let entry = current
+                .as_mapping_mut()
+                .ok_or_else(|| format!("`{key}` parent is not a mapping"))?;
+            let key_value = serde_yaml::Value::String((*key).to_string());
+            if !entry.contains_key(&key_value) {
+                entry.insert(
+                    key_value.clone(),
+                    serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+                );
+            }
+            current = entry
+                .get_mut(&key_value)
+                .expect("key just inserted above");
+        }
+        if !current.is_mapping() {
+            return Err(format!(
+                "path `{}` did not resolve to a mapping",
+                path.join(".")
+            ));
+        }
+        Ok(current)
+    }
+
+    fn deep_merge_yaml_mapping(
+        base: &serde_yaml::Mapping,
+        override_: &serde_yaml::Mapping,
+    ) -> serde_yaml::Mapping {
+        let mut out = serde_yaml::Mapping::new();
+        for (k, v) in base {
+            out.insert(k.clone(), v.clone());
+        }
+        for (k, override_v) in override_ {
+            match (out.get(k), override_v) {
+                (Some(existing), serde_yaml::Value::Mapping(override_map))
+                    if existing.is_mapping() =>
+                {
+                    let merged = deep_merge_yaml_mapping(
+                        existing.as_mapping().expect("checked is_mapping above"),
+                        override_map,
+                    );
+                    out.insert(k.clone(), serde_yaml::Value::Mapping(merged));
+                }
+                _ => {
+                    out.insert(k.clone(), override_v.clone());
+                }
+            }
+        }
+        out
+    }
+
     #[test]
     fn test_ce_executor_zh_required_events_is_report_done() {
         // Happy-path: the Chinese ce-executor-zh preset must use "report.done"
@@ -919,15 +1032,19 @@ mod tests {
 
     #[test]
     fn test_ce_executor_root_preset_matches_embedded() {
-        // Single-source-of-truth guard: the canonical preset and its embedded
-        // copy (made by `build.rs` from `presets/manifest.yml`) must stay in sync.
-        let root_content = read_root_preset("ce-executor-isolated.yml");
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        // Plan 2026-06-16-002 Unit 1: the embedded copy is no longer
+        // byte-equal to the canonical preset because `build.rs` now
+        // deep-merges the schema SSOT into `event_policy.schemas`
+        // before writing the embedded copy. The invariant we still
+        // want to lock down is: the embedded copy is the merge of
+        // (canonical preset, schema SSOT) — i.e. the build pipeline
+        // produced what the SSOT prescribes.
+        let merged = merge_root_with_ssot("ce-executor-isolated");
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor-isolated preset should exist");
         assert_eq!(
-            root_content, preset.content,
-            "Canonical presets/en/ce-executor.yml must match the embedded copy in $OUT_DIR/presets/. \
-             The build script copies the canonical file on every change; if this fails, \
-             `cargo clean -p ralph-cli && cargo build` will refresh it."
+            merged, preset.content,
+            "Embedded ce-executor-isolated must equal merge(canonical preset, schema SSOT). \
+             Re-run `cargo build` so build.rs regenerates $OUT_DIR/presets/ce-executor-isolated.yml."
         );
     }
 
@@ -3029,12 +3146,15 @@ mod tests {
 
     #[test]
     fn test_ce_executor_wave_root_preset_matches_embedded() {
-        let root_content = read_root_preset("ce-executor-wave.yml");
+        // Plan 2026-06-16-002 Unit 1: see the ce-executor-isolated
+        // counterpart for the rationale. The embedded copy must
+        // equal merge(canonical preset, schema SSOT).
+        let merged = merge_root_with_ssot("ce-executor-wave");
         let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
         assert_eq!(
-            root_content, preset.content,
-            "Canonical presets/en/ce-executor-wave.yml must match the embedded copy in $OUT_DIR/presets/. \
-             Run `cargo build` to refresh the $OUT_DIR mirror, or edit the canonical file and rebuild."
+            merged, preset.content,
+            "Embedded ce-executor-wave must equal merge(canonical preset, schema SSOT). \
+             Re-run `cargo build` so build.rs regenerates $OUT_DIR/presets/ce-executor-wave.yml."
         );
     }
 
@@ -3723,58 +3843,79 @@ mod tests {
 
     #[test]
     fn test_ce_executor_wave_reference_schema_matches_inline_schema() {
+        // Plan 2026-06-16-002 Unit 1: with the SSOT build-merge, the
+        // embedded `event_policy.schemas` block is the merge of
+        // (SSOT base, inline override). The parity invariant is now:
+        //   * the canonical `presets/en/ce-executor-wave.yml` parses
+        //     cleanly and exposes an inline `schemas` block, AND
+        //   * the embedded (merged) schemas block equals what the
+        //     merge would produce from (canonical, SSOT) — verified
+        //     by `test_ce_executor_wave_root_preset_matches_embedded`,
+        //     which compares the merged YAML text against the
+        //     embedded content. This test focuses on the *semantic*
+        //     coverage check: every SSOT topic must reach the embedded
+        //     preset, and the inline block must not silently drop any
+        //     SSOT field.
         let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
         let inline_yaml: serde_yaml::Value =
             serde_yaml::from_str(preset.content).expect("ce-executor-wave YAML should parse");
-        let inline_schemas = inline_yaml
+        let merged_schemas = inline_yaml
             .get("event_loop")
             .and_then(|value| value.get("event_policy"))
             .and_then(|value| value.get("schemas"))
-            .expect("ce-executor-wave inline schemas should exist")
-            .clone();
+            .expect("ce-executor-wave embedded schemas should exist after build.rs merge");
 
         let reference_content = read_root_schema("ce-executor-wave.yml");
-        let reference_schemas: serde_yaml::Value =
+        let reference_schemas_yaml: serde_yaml::Value =
             serde_yaml::from_str(&reference_content).expect("reference schema YAML should parse");
 
+        // The merge should preserve every SSOT topic. We compare
+        // canonical forms (round-trip through serde_yaml) so block
+        // vs. flow style does not produce a false positive.
+        let canonical_merged = canonicalize_schemas(merged_schemas);
+        let canonical_reference = canonicalize_schemas(&reference_schemas_yaml);
+
         assert_eq!(
-            inline_schemas, reference_schemas,
-            "presets/schemas/ce-executor-wave.yml must match inline event_policy.schemas"
+            canonical_merged, canonical_reference,
+            "After build.rs SSOT merge, the embedded event_policy.schemas must equal \
+             presets/schemas/ce-executor-wave.yml (since the inline override layer currently \
+             matches the SSOT). If this fails, the inline override has drifted from the SSOT \
+             and either needs to be deleted or updated in lockstep."
         );
     }
 
-    /// Plan 001 §4.5 AC-9: `presets/schemas/ce-executor-isolated.yml`
-    /// must stay byte-locked with the preset's inline `event_policy.schemas`
-    /// block. Editing only one of the two would silently leave the runtime
-    /// and the reference in disagreement.
+    /// Plan 2026-06-16-002 Unit 1: see the wave counterpart above
+    /// for the full rationale. The pre-merge invariant was
+    /// "byte-locked with the inline block"; the post-merge invariant
+    /// is "embedded = merge(SSOT, inline)", which we assert via the
+    /// _root_preset_matches_embedded test. This test focuses on the
+    /// semantic coverage check: every SSOT topic must reach the
+    /// embedded preset.
     #[test]
     fn test_ce_executor_isolated_reference_schema_matches_inline_schema() {
         let preset =
             get_preset("ce-executor-isolated").expect("ce-executor-isolated preset should exist");
         let inline_yaml: serde_yaml::Value =
             serde_yaml::from_str(preset.content).expect("ce-executor-isolated YAML should parse");
-        let inline_schemas = inline_yaml
+        let merged_schemas = inline_yaml
             .get("event_loop")
             .and_then(|value| value.get("event_policy"))
             .and_then(|value| value.get("schemas"))
-            .expect("ce-executor-isolated inline schemas should exist")
-            .clone();
+            .expect("ce-executor-isolated embedded schemas should exist after build.rs merge");
 
         let reference_content = read_root_schema("ce-executor-isolated.yml");
         let reference_schemas: serde_yaml::Value = serde_yaml::from_str(&reference_content)
             .expect("reference schema YAML should parse");
 
-        // The inline form uses flow sequences (`[a, b, c]`) while the
-        // reference uses block sequences (`- a\n- b\n- c`). Round-tripping
-        // through `serde_yaml::to_string` gives both sides a canonical
-        // shape, which is what we actually care about: same topic
-        // coverage, same required-field sets, same allowed/hat values.
-        let canonical_inline = canonicalize_schemas(&inline_schemas);
+        let canonical_merged = canonicalize_schemas(merged_schemas);
         let canonical_reference = canonicalize_schemas(&reference_schemas);
 
         assert_eq!(
-            canonical_inline, canonical_reference,
-            "presets/schemas/ce-executor-isolated.yml must match inline event_policy.schemas"
+            canonical_merged, canonical_reference,
+            "After build.rs SSOT merge, the embedded event_policy.schemas must equal \
+             presets/schemas/ce-executor-isolated.yml (since the inline override layer currently \
+             matches the SSOT). If this fails, the inline override has drifted from the SSOT \
+             and either needs to be deleted or updated in lockstep."
         );
     }
 

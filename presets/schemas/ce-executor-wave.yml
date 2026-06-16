@@ -1,10 +1,17 @@
-# Payload schemas for ce-executor-wave.
+# Authoring SSOT for `ce-executor-wave` `event_policy.schemas`.
+# `build.rs` merges this file's top-level `schemas:` mapping into
+# `$OUT_DIR/presets/ce-executor-wave.yml` at compile time (plan
+# 2026-06-16-002 Unit 1). Edit ONLY this file when changing payload
+# contract requirements for any hat below; the next `cargo build`
+# propagates the change to the CLI precheck, the loop gate, the drift
+# engine, and the prompt builder — they all read the embedded copy,
+# so a single source eliminates the previous inline-vs-reference drift.
 #
-# STATUS: DEPRECATED REFERENCE COPY. The active schemas are inlined into
-# `presets/en/ce-executor-wave.yml` under `event_policy.schemas`.
-# Builtin presets cannot reliably resolve relative `schema_file` paths, so this
-# file is kept only as a diff-able reference. Keep it in lockstep with the
-# inline schemas.
+# The inline `event_policy.schemas:` block in `presets/en/ce-executor-wave.yml`
+# is kept as a per-field override layer during the transition. Any
+# topic listed there with explicit values will overwrite the SSOT
+# value for that topic after the merge; topics absent from the inline
+# block come straight from this file.
 #
 # Coverage:
 #   coordinator            -> work.batch.ready / work.failed

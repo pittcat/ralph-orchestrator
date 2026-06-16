@@ -8,6 +8,7 @@ use anyhow::Result;
 use ralph_adapters::CliBackend;
 use ralph_core::CompletedWave;
 use ralph_core::diagnostics::DiagnosticsCollector;
+
 use ralph_proto::RpcEvent;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -69,6 +70,16 @@ pub enum WaveDispatchOutcome {
     /// The runner is expected to convert this into a termination
     /// reason; U3 does not perform that conversion.
     GlobalDeadlineExceeded,
+    /// U2 (Unit 2 of 2026-06-17-001 plan): Spawn guarantee violation.
+    /// Fewer workers were spawned than there were wave events.
+    /// The runner is expected to write a `wave_spawn_failed`
+    /// RecoveryDiagnosisEnvelope and continue with any partial results.
+    SpawnFailed {
+        /// Number of workers that were actually spawned.
+        spawned_count: u32,
+        /// Number of wave events (expected workers).
+        expected_count: u32,
+    },
 }
 
 /// U4-C3: outcome of `handle_wave_events` returned to the runner.
@@ -173,7 +184,11 @@ pub(crate) struct DispatchContext {
     aggregate_deadline: tokio::time::Instant,
     global_deadline: Option<tokio::time::Instant>,
     concurrency: usize,
+    /// The declared wave total (may exceed events.len() in malformed partial waves).
     expected_total: u32,
+    /// U2: actual number of events in this wave. Used for the spawn guarantee
+    /// check — we must spawn exactly `events_len` workers, not `expected_total`.
+    events_len: u32,
     wave_id: String,
     payload_previews: Vec<String>,
     show_progress: bool,
@@ -211,6 +226,7 @@ impl DispatchContext {
             global_deadline,
             concurrency: wave.hat_config.concurrency as usize,
             expected_total: wave.total,
+            events_len: wave.events.len() as u32,
             wave_id: wave.wave_id.clone(),
             payload_previews,
             show_progress,
@@ -543,6 +559,49 @@ pub async fn handle_wave_events(
                 result.global_deadline_exceeded = true;
                 return result;
             }
+            WaveDispatchOutcome::SpawnFailed {
+                spawned_count,
+                expected_count,
+            } => {
+                // U2: spawn guarantee violated — fewer workers were spawned
+                // than there were wave events. Write a recovery envelope
+                // so the diagnosis system can observe the failure, but
+                // continue processing remaining waves. There are no results
+                // to merge for this wave.
+                warn!(
+                    wave_id = %detected.wave_id,
+                    spawned_count,
+                    expected_count,
+                    "Wave spawn guarantee violated"
+                );
+                record_wave_spawn_failed_envelope(
+                    event_loop,
+                    loop_id,
+                    &detected,
+                    spawned_count,
+                    expected_count,
+                );
+                if let Some(state) = out.tui {
+                    if let Ok(mut s) = state.lock() {
+                        let wave_iter_idx = s.wave_active_iteration_idx.take();
+                        if let Some(wave) = s.wave_active.take() {
+                            let target_idx =
+                                wave_iter_idx.unwrap_or(s.iterations.len().saturating_sub(1));
+                            if let Some(buf) = s.iterations.get_mut(target_idx) {
+                                buf.wave_info = Some(wave);
+                            }
+                        }
+                    }
+                    let line = Line::from(Span::styled(
+                        format!(
+                            "── Wave spawn FAILED: {}/{} workers spawned ──────────────────────",
+                            spawned_count, expected_count
+                        ),
+                        Style::default().fg(Color::Red),
+                    ));
+                    push_to_tui_iteration(state, line);
+                }
+            }
         }
     }
 
@@ -618,6 +677,15 @@ pub async fn execute_wave(
         WaveDispatchOutcome::GlobalDeadlineExceeded => Err(anyhow::anyhow!(
             "Wave {} global deadline exceeded",
             wave.wave_id
+        )),
+        WaveDispatchOutcome::SpawnFailed {
+            spawned_count,
+            expected_count,
+        } => Err(anyhow::anyhow!(
+            "Wave {} spawn guarantee violated: only {}/{} workers spawned",
+            wave.wave_id,
+            spawned_count,
+            expected_count
         )),
     }
 }
@@ -851,7 +919,12 @@ pub(crate) async fn dispatch_wave_inner<E: WaveWorkerExecutor + ?Sized>(
         tokio::sync::mpsc::unbounded_channel::<(u32, bool, Duration)>();
 
     // Spawn workers.
+    // U2 (Unit 2 of 2026-06-17-001 plan): spawn guarantee — every
+    // wave event MUST produce a worker task. Track the count so we can
+    // assert after the loop and return SpawnFailed if any requests were
+    // silently dropped.
     let mut join_set: tokio::task::JoinSet<(u32, WaveWorkerOutcome)> = tokio::task::JoinSet::new();
+    let mut spawned_count = 0u32;
     for request in worker_requests {
         let semaphore = Arc::clone(&semaphore);
         let executor = Arc::clone(&executor);
@@ -882,6 +955,24 @@ pub(crate) async fn dispatch_wave_inner<E: WaveWorkerExecutor + ?Sized>(
             let _permit = permit;
             executor.execute(request).await
         });
+        spawned_count += 1;
+    }
+
+    // U2: spawn guarantee — 0-worker silent is forbidden.
+    // We spawn one worker per event (worker_requests.len() = events.len()).
+    // Use events_len, not expected_total, because in malformed partial waves
+    // total > events.len() and only events.len() workers are created.
+    if spawned_count < ctx.events_len {
+        warn!(
+            wave_id = %ctx.wave_id,
+            spawned_count,
+            expected_count = ctx.events_len,
+            "wave_spawn_failed: fewer workers spawned than wave events"
+        );
+        return WaveDispatchOutcome::SpawnFailed {
+            spawned_count,
+            expected_count: ctx.events_len,
+        };
     }
 
     // KTD-U3-6: drop the main progress_tx so the receiver
@@ -1373,6 +1464,55 @@ fn record_wave_timeout_envelope(
         .retry_attempt(0)
         .safe_target(false)
         .outcome(DiagnosisOutcome::Pending)
+        .retry_key(retry_key)
+        .build();
+    let _ = event_loop.record_recovery_envelope(&envelope, Vec::new());
+}
+
+/// U2 (Unit 2 of 2026-06-17-001 plan): Record a recovery envelope
+/// for a wave that violated the spawn guarantee (fewer workers spawned
+/// than wave events received).
+///
+/// The envelope uses `DiagnosisOutcome::NotRetriable` — the failure
+/// is at the spawn layer, not recoverable by retrying the same wave.
+fn record_wave_spawn_failed_envelope(
+    event_loop: &mut ralph_core::EventLoop,
+    loop_id: &str,
+    wave: &ralph_core::DetectedWave,
+    spawned_count: u32,
+    expected_count: u32,
+) {
+    use ralph_core::diagnosis::{
+        DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, RecoveryDiagnosisEnvelope,
+        RecoveryDiagnosisEnvelopeBuilder,
+    };
+
+    let topic = wave
+        .hat_config
+        .publishes
+        .first()
+        .cloned()
+        .unwrap_or_default();
+
+    let retry_key =
+        RecoveryDiagnosisEnvelopeBuilder::wave_retry_key(&wave.wave_id, "wave_spawn_failed");
+    let envelope = RecoveryDiagnosisEnvelope::builder()
+        .source(DiagnosisSource::WaveDispatcher)
+        .severity(DiagnosisSeverity::Error)
+        .source_hat(wave.target_hat.to_string())
+        .topic(topic)
+        .reason_code("wave_spawn_failed")
+        .message(format!(
+            "Wave {} spawn guarantee violated: only {}/{} workers spawned (loop={})",
+            wave.wave_id, spawned_count, expected_count, loop_id
+        ))
+        .expected_action(
+            "Investigate why workers failed to spawn. This may indicate a system resource issue or dispatcher bug."
+                .to_string(),
+        )
+        .retry_attempt(0)
+        .safe_target(false)
+        .outcome(DiagnosisOutcome::NotRetriable)
         .retry_key(retry_key)
         .build();
     let _ = event_loop.record_recovery_envelope(&envelope, Vec::new());
@@ -2205,6 +2345,123 @@ hats: {}
             2,
             "only 2 executor futures should have been spawned"
         );
+    }
+
+    /// U2 (Unit 2 of 2026-06-17-001 plan): spawn guarantee — when all
+    /// requests are spawned, `SpawnFailed` must NOT fire.
+    #[tokio::test(start_paused = true)]
+    async fn u2_spawn_guarantee_passes_when_all_workers_spawn() {
+        let (progress_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        // 3 requests matching 3 events in the wave.
+        let requests: Vec<WorkerRequest> = (0..3u32)
+            .map(|i| make_worker_request(i, progress_tx.clone()))
+            .collect();
+        let executor = Arc::new(TestExecutor::new(Duration::from_millis(50)));
+
+        let wave = make_wave(3, 3, 3);
+        let ctx = DispatchContext::build(
+            &wave,
+            Duration::from_secs(60),
+            Duration::from_secs(30),
+            vec!["p0".into(), "p1".into(), "p2".into()],
+            false,
+            false,
+            WaveDispatchLimits::default(),
+        );
+
+        let mut tracker = ralph_core::WaveTracker::new();
+        tracker.register_wave_with_source(
+            wave.wave_id.clone(),
+            wave.total,
+            Some(wave.target_hat.clone()),
+        );
+
+        let outcome =
+            dispatch_wave_inner(tracker, requests, ctx, executor.clone(), silent_progress()).await;
+
+        // Must NOT be SpawnFailed — all 3 requests were spawned.
+        match &outcome {
+            WaveDispatchOutcome::SpawnFailed { .. } => {
+                panic!("SpawnFailed must NOT fire when all workers spawned: {outcome:?}")
+            }
+            _ => {}
+        }
+        // Otherwise should be Completed or Partial.
+        match outcome {
+            WaveDispatchOutcome::Completed(c) | WaveDispatchOutcome::Partial(c) => {
+                assert_eq!(c.results.len(), 3, "all 3 workers should succeed");
+            }
+            WaveDispatchOutcome::SpawnFailed { .. } => unreachable!(),
+            WaveDispatchOutcome::AggregateDeadlineExceeded(c) => {
+                // Aggregate deadline could fire in the paused-time test depending
+                // on the short sleep; that's fine — the key invariant is we
+                // did NOT silently return SpawnFailed with 0 spawned.
+                assert!(
+                    c.results.len() <= 3,
+                    "at most 3 results: {}/{}",
+                    c.results.len(),
+                    3
+                );
+            }
+            WaveDispatchOutcome::GlobalDeadlineExceeded => {
+                // Also acceptable — deadline could fire first.
+            }
+        }
+    }
+
+    /// U2 (Unit 2 of 2026-06-17-001 plan): spawn guarantee — when fewer
+    /// workers are spawned than there are wave events, `SpawnFailed` must
+    /// fire with the correct counts.
+    #[tokio::test(start_paused = true)]
+    async fn u2_spawn_guarantee_fires_when_fewer_workers_spawn() {
+        let (progress_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        // Only 2 requests even though the wave has 3 events.
+        // This simulates the case where some events failed to produce requests.
+        let requests: Vec<WorkerRequest> = (0..2u32)
+            .map(|i| make_worker_request(i, progress_tx.clone()))
+            .collect();
+        let executor = Arc::new(TestExecutor::new(Duration::from_secs(3600)));
+
+        let wave = make_wave(3, 3, 3); // 3 events, total=3
+        let ctx = DispatchContext::build(
+            &wave,
+            Duration::from_secs(60),
+            Duration::from_secs(30),
+            vec!["p0".into(), "p1".into(), "p2".into()],
+            false,
+            false,
+            WaveDispatchLimits::default(),
+        );
+
+        let mut tracker = ralph_core::WaveTracker::new();
+        tracker.register_wave_with_source(
+            wave.wave_id.clone(),
+            wave.total,
+            Some(wave.target_hat.clone()),
+        );
+
+        let outcome =
+            dispatch_wave_inner(tracker, requests, ctx, executor.clone(), silent_progress()).await;
+
+        match outcome {
+            WaveDispatchOutcome::SpawnFailed {
+                spawned_count,
+                expected_count,
+            } => {
+                assert_eq!(spawned_count, 2, "only 2 workers were spawned");
+                assert_eq!(expected_count, 3, "wave has 3 events");
+            }
+            other => {
+                panic!(
+                    "expected SpawnFailed when fewer workers spawn than events, got {other:?}"
+                );
+            }
+        }
+        // Note: we CANNOT assert on executor.started here because SpawnFailed
+        // is returned immediately after the spawn loop — the spawned tasks have
+        // been added to the JoinSet but have not been polled yet, so
+        // `execute()` has not been called. The important invariant is the
+        // outcome is SpawnFailed with the correct counts.
     }
 
     /// U4-B1 / KTD-U4-3: end-to-end check that the recovery envelope

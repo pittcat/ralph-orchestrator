@@ -4,6 +4,8 @@
 //! CLI emit commands, and API layers.
 
 use crate::event_reader::EventReader;
+use ralph_proto::Topic;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
 
@@ -112,6 +114,68 @@ pub struct PolicyRejection {
     pub source_hat: Option<String>,
     /// The policy finding describing the violation.
     pub finding: PolicyFinding,
+    /// Unit 2 (2026-06-16-002 plan) recoverable-bucket. `Some(_)` means
+    /// the rejection is in the **recoverable** set (R-B1) and the
+    /// runner should publish a `task.resume` with `fix_hint` rather
+    /// than the U6 fast-fail. `None` means the rejection is
+    /// non-recoverable (R-B2): the existing U6
+    /// `payload_contract_violation` path still applies.
+    pub reason_class: Option<ReasonClass>,
+}
+
+/// Unit 2 (2026-06-16-002 plan): the **bucket** used to separate
+/// recoverable policy rejections from non-recoverable ones, and the
+/// per-key dimension for the bounded-retry counter at the loop
+/// level.
+///
+/// Bucketing follows the plan's R-B1 / R-B2 table:
+///
+/// | Recoverable                              | Non-recoverable
+/// |------------------------------------------|----------------------------------
+/// | `PayloadTypeMismatch` (incl. non-JSON string) | `plan_name` / task key mismatch
+/// | `MissingRequiredField`                   | duplicate terminal / completion guard
+/// | `TopicDenied` (deny rules + isolated scope)   | `InvalidFieldValue` / `AllowedValueMismatch` (deferred)
+/// | ---                                      | 4th attempt on the same (hat, reason_class)
+///
+/// The bucket is the last segment of the loop's
+/// `record_rejection_key` counter so two distinct buckets on the
+/// same `(hat, topic)` keep **independent** counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasonClass {
+    /// `PayloadTypeMismatch` — agent emitted a payload that does not
+    /// match the schema's declared type. Recoverable on first 3 attempts.
+    PayloadTypeMismatch,
+    /// `MissingRequiredField` — agent omitted a required field.
+    /// Recoverable on first 3 attempts.
+    MissingRequiredField,
+    /// `TopicDenied` — the (hat, topic) pair matched a deny rule.
+    /// Recoverable on first 3 attempts.
+    TopicDenied,
+}
+
+impl ReasonClass {
+    /// Stable snake_case label used in retry-key construction and
+    /// operator-facing logs.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ReasonClass::PayloadTypeMismatch => "payload_type_mismatch",
+            ReasonClass::MissingRequiredField => "missing_required_field",
+            ReasonClass::TopicDenied => "topic_denied",
+        }
+    }
+}
+
+/// Unit 2: pure mapping from a [`PolicyFinding`] to a recoverable
+/// [`ReasonClass`]. Returns `Some(class)` when the finding is in the
+/// recoverable set (R-B1), `None` otherwise.
+pub fn is_recoverable_policy_finding(finding: &PolicyFinding) -> Option<ReasonClass> {
+    match &finding.violation_type {
+        ViolationType::PayloadTypeMismatch { .. } => Some(ReasonClass::PayloadTypeMismatch),
+        ViolationType::MissingRequiredField { .. } => Some(ReasonClass::MissingRequiredField),
+        ViolationType::TopicDenied { .. } => Some(ReasonClass::TopicDenied),
+        _ => None,
+    }
 }
 
 /// Runtime state for policy validation across events.
@@ -366,6 +430,11 @@ pub fn is_null_payload_rejected_topic(topic: &str) -> bool {
 /// with reason `"topic_denied"`.  Otherwise returns `None`.
 ///
 /// In `Observe` mode, matching a deny rule produces a `Warn` decision instead.
+///
+/// Topic matching supports glob patterns:
+/// - Exact match: `build.done` matches `build.done`
+/// - Segment wildcard: `debug.*` matches `debug.step`, `debug.done`, etc.
+/// - Global wildcard: `*` matches any topic
 pub fn check_topic_deny_rules(
     hat: Option<&str>,
     topic: &str,
@@ -373,27 +442,34 @@ pub fn check_topic_deny_rules(
 ) -> Option<PolicyDecision> {
     let hat_id = hat.unwrap_or("");
     for rule in &config.topic_deny_rules {
-        if rule.hat_id == hat_id && rule.topic == topic {
-            let finding = PolicyFinding {
-                topic: topic.to_string(),
-                violation_type: ViolationType::TopicDenied {
-                    rule_hat: rule.hat_id.clone(),
-                    rule_topic: rule.topic.clone(),
-                },
-                message: format!(
-                    "Hat '{}' is denied from publishing topic '{}'",
-                    rule.hat_id, rule.topic
-                ),
+        if rule.hat_id == hat_id {
+            let matches = if rule.topic.contains('*') {
+                Topic::new(&rule.topic).matches_str(topic)
+            } else {
+                rule.topic == topic
             };
-            return Some(match config.mode {
-                EventPolicyMode::Observe => PolicyDecision::Warn(vec![finding]),
-                EventPolicyMode::Enforce => match config.on_violation {
-                    ViolationAction::Warn => PolicyDecision::Warn(vec![finding]),
-                    ViolationAction::RejectWithResume => PolicyDecision::RejectWithResume(finding),
-                    ViolationAction::Hold => PolicyDecision::Hold(finding),
-                    ViolationAction::Block => PolicyDecision::Block(finding),
-                },
-            });
+            if matches {
+                let finding = PolicyFinding {
+                    topic: topic.to_string(),
+                    violation_type: ViolationType::TopicDenied {
+                        rule_hat: rule.hat_id.clone(),
+                        rule_topic: rule.topic.clone(),
+                    },
+                    message: format!(
+                        "Hat '{}' is denied from publishing topic '{}'",
+                        rule.hat_id, rule.topic
+                    ),
+                };
+                return Some(match config.mode {
+                    EventPolicyMode::Observe => PolicyDecision::Warn(vec![finding]),
+                    EventPolicyMode::Enforce => match config.on_violation {
+                        ViolationAction::Warn => PolicyDecision::Warn(vec![finding]),
+                        ViolationAction::RejectWithResume => PolicyDecision::RejectWithResume(finding),
+                        ViolationAction::Hold => PolicyDecision::Hold(finding),
+                        ViolationAction::Block => PolicyDecision::Block(finding),
+                    },
+                });
+            }
         }
     }
     None
@@ -1901,6 +1977,59 @@ mod tests {
             check_topic_deny_rules(Some("ralph"), "review.passed", &config),
             Some(PolicyDecision::Block(_))
         ));
+    }
+
+    #[test]
+    fn test_topic_deny_rules_glob_pattern_matches() {
+        // Glob pattern `debug.*` matches `debug.step`, `debug.done`, etc.
+        let config = EventPolicyConfig {
+            enabled: true,
+            mode: EventPolicyMode::Enforce,
+            on_violation: ViolationAction::RejectWithResume,
+            topic_deny_rules: vec![TopicDenyRule {
+                hat_id: "coordinator".to_string(),
+                topic: "debug.*".to_string(),
+            }],
+            ..Default::default()
+        };
+        // Segment wildcard matches
+        assert!(matches!(
+            check_topic_deny_rules(Some("coordinator"), "debug.step", &config),
+            Some(PolicyDecision::RejectWithResume(_))
+        ));
+        assert!(matches!(
+            check_topic_deny_rules(Some("coordinator"), "debug.done", &config),
+            Some(PolicyDecision::RejectWithResume(_))
+        ));
+        // Non-matching topic not matched
+        assert!(check_topic_deny_rules(Some("coordinator"), "debug", &config).is_none());
+        // Non-matching hat not matched
+        assert!(check_topic_deny_rules(Some("executor"), "debug.step", &config).is_none());
+    }
+
+    #[test]
+    fn test_topic_deny_rules_glob_exact_overlap() {
+        // When glob and exact rule both exist for same hat, first match wins.
+        // Exact rule for `build.done` and glob rule for `debug.*` on coordinator.
+        let config = EventPolicyConfig {
+            enabled: true,
+            mode: EventPolicyMode::Enforce,
+            on_violation: ViolationAction::Block,
+            topic_deny_rules: vec![
+                TopicDenyRule {
+                    hat_id: "coordinator".to_string(),
+                    topic: "build.done".to_string(),
+                },
+                TopicDenyRule {
+                    hat_id: "coordinator".to_string(),
+                    topic: "debug.*".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        let decision = check_topic_deny_rules(Some("coordinator"), "build.done", &config);
+        // Exact match found first (Block, not RejectWithResume from glob)
+        assert!(matches!(decision, Some(PolicyDecision::Block(_))));
     }
 
     // -------------------------------------------------------------------------

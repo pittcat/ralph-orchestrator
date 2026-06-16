@@ -19,6 +19,7 @@ pub use rejection::{
 };
 
 use crate::config::{HatBackend, HatExecutionMode, InjectMode, RalphConfig, ScratchpadConfig};
+
 use crate::diagnosis::{
     RUNTIME_DIAGNOSIS_ALERT_HEADER, RecoveryDiagnosisEnvelope, RecoveryJournalEntry,
     RecoveryResponder,
@@ -31,7 +32,8 @@ use crate::event_parser::{
 };
 use crate::event_policy::{
     PolicyDecision, PolicyFinding, PolicyRuntimeState, check_completion_guard,
-    check_completion_honored, check_topic_deny_rules, validate_event,
+    check_completion_honored, check_topic_deny_rules, is_recoverable_policy_finding,
+    validate_event,
 };
 use crate::event_reader::{Event as JsonlEvent, EventReader};
 use crate::execution_contract::{
@@ -207,6 +209,28 @@ pub enum TerminationReason {
         /// Topics the hat IS allowed to publish (from registry config).
         allowed_topics: Vec<String>,
     },
+    /// Unit 2 (2026-06-16-002 plan) recoverable-payload budget
+    /// exhausted.  Distinct from `PayloadContractViolation` (which
+    /// terminates the loop on the **first** non-recoverable contract
+    /// violation) and from `ScopeViolationCircuitBreakerTripped`
+    /// (which only fires for the isolated-scope sub-path).  This
+    /// variant fires when the recoverable set
+    /// (`PayloadTypeMismatch` / `MissingRequiredField` /
+    /// `TopicDenied`) has been retried past the bounded budget for
+    /// the SAME `(hat, topic, reason_class)` triple (the 4th
+    /// attempt).
+    RecoverablePayloadExhausted {
+        /// Hat that kept emitting the bad payload past the budget.
+        hat: String,
+        /// Topic the hat was emitting.
+        topic: String,
+        /// Reason class the budget was burned on
+        /// (`payload_type_mismatch` / `missing_required_field` /
+        /// `topic_denied`).
+        reason_class: String,
+        /// Post-increment count (always `> U2_REJECTION_RETRY_LIMIT`).
+        count: u32,
+    },
 }
 
 impl TerminationReason {
@@ -230,6 +254,7 @@ impl TerminationReason {
             | TerminationReason::RecoveryExhausted { .. }
             | TerminationReason::ReviewFailed { .. }
             | TerminationReason::ScopeViolationCircuitBreakerTripped { .. } => 1,
+            | TerminationReason::RecoverablePayloadExhausted { .. } => 1,
             TerminationReason::MaxIterations
             | TerminationReason::MaxRuntime
             | TerminationReason::MaxCost => 2,
@@ -265,6 +290,9 @@ impl TerminationReason {
             TerminationReason::ReviewFailed { .. } => "review_failed",
             TerminationReason::ScopeViolationCircuitBreakerTripped { .. } => {
                 "scope_violation_circuit_breaker_tripped"
+            }
+            TerminationReason::RecoverablePayloadExhausted { .. } => {
+                "recoverable_payload_exhausted"
             }
         }
     }
@@ -643,10 +671,163 @@ struct PolicyValidationResult {
     hold_reason: Option<String>,
     /// U6: payload contract violation captured during policy validation
     /// (if any). When set, the loop should pause and emit a diagnostic.
+    /// Unit 2 (2026-06-16-002 plan) R-B1/R-B2: this field is ONLY
+    /// populated for **non-recoverable** violations so the U6
+    /// `NotRetriable` fast-fail does not trigger on the recoverable
+    /// set.
     payload_contract_violation: Option<crate::payload_contract::PayloadContractViolation>,
     /// Origin/policy/payload rejections collected during validation.
     /// Used by the CLI runner to produce unified recovery diagnostics.
+    /// Each entry carries an optional `reason_class` — when `Some`,
+    /// the rejection is in the recoverable bucket.
     policy_rejections: Vec<crate::event_policy::PolicyRejection>,
+    /// Unit 2 (2026-06-16-002 plan) recoverable-bucket budget
+    /// exhaustions. Each entry represents a (hat, topic,
+    /// DEPRECATED by `recoverable_candidates` (Unit 2 take-3):
+    /// the function no longer takes `&mut LoopState`, so the
+    /// actual counter bookkeeping happens in the caller.  The
+    /// field is kept for back-compat with diagnostic snapshots
+    /// but is no longer populated — the caller merges candidates
+    /// into `state.recoverable_exhaustion_buffer` instead.
+    /// The `#[allow(dead_code)]` is required because the field
+    /// is now always written as `Vec::new()` from the validator
+    /// and never read; the validator still constructs it for
+    /// shape compatibility.
+    #[allow(dead_code)]
+    recoverable_exhausted: Vec<RecoverableExhaustion>,
+    /// Unit 2 (2026-06-16-002 plan) take-3: candidates the
+    /// caller still needs to record against the recoverable
+    /// budget.  Each entry is a `(hat, topic, reason_class)`
+    /// triple produced by a recoverable rejection in this
+    /// pass.  The caller is responsible for calling
+    /// `state.record_recoverable_rejection_key(...)` for each
+    /// entry and pushing the exhausted ones into
+    /// `state.recoverable_exhaustion_buffer`.
+    recoverable_candidates: Vec<RecoverableExhaustionCandidate>,
+}
+
+/// Unit 2 (2026-06-16-002 plan) recoverable-bucket budget exhaustion.
+/// The runner turns each of these into a
+/// `RecoverablePayloadExhausted` termination reason (or, when the
+/// iteration can still proceed, a `DiagnosisOutcome::Failed`
+/// recovery envelope).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoverableExhaustion {
+    /// Hat that emitted the (hat, topic) pair whose budget just
+    /// crossed the limit.
+    pub hat: String,
+    /// Topic the hat kept emitting despite the `task.resume` guidance.
+    pub topic: String,
+    /// Reason class the budget was burned on.
+    pub reason_class: crate::event_policy::ReasonClass,
+    /// Post-increment count (always `> U2_REJECTION_RETRY_LIMIT`).
+    pub count: u32,
+}
+
+/// Unit 2 (2026-06-16-002 plan) take-3: a single recoverable
+/// rejection surfaced from the policy validator.  The validator
+/// does **not** call `state.record_recoverable_rejection_key`
+/// itself (it does not own `&mut LoopState`); it just records
+/// the candidate `(hat, topic, reason_class)` triple.  The
+/// caller is responsible for the counter bookkeeping and the
+/// promotion into a `RecoverableExhaustion` if the budget
+/// crosses the limit.  This split keeps the validator
+/// borrow-checkable under NLL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoverableExhaustionCandidate {
+    /// Hat that emitted the rejection.
+    pub hat: String,
+    /// Topic the hat was emitting.
+    pub topic: String,
+    /// Reason class the rejection belongs to.
+    pub reason_class: crate::event_policy::ReasonClass,
+}
+
+/// Unit 3 (2026-06-16-002 plan): strip `### HUMAN GUIDANCE` blocks
+/// from a scratchpad snapshot.  Mirrors the state machine used by
+/// `persist_guidance_to_scratchpad` to detect guidance blocks
+/// (a `### HUMAN GUIDANCE` header followed by body lines, ending
+/// at the next `### ` / `## ` section header or EOF) so a line in
+/// `## NOTES` that happens to mention guidance is NOT stripped.
+///
+/// The filtered output preserves the surrounding section structure
+/// — a guidance block is replaced with a single blank line so the
+/// surrounding content keeps its line numbers in tools that index
+/// by line.
+fn filter_human_guidance_blocks(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut in_guidance = false;
+    for line in content.lines() {
+        if line.starts_with("### HUMAN GUIDANCE") {
+            // Drop the entire guidance block (header + body).
+            // Replace with a single blank line so subsequent
+            // sections keep their line numbering stable.
+            in_guidance = true;
+            out.push('\n');
+            continue;
+        }
+        if in_guidance && (line.starts_with("### ") || line.starts_with("## ")) {
+            // New section starts after a guidance block — exit
+            // the guidance state and emit the new section header
+            // normally.
+            in_guidance = false;
+        }
+        if !in_guidance {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Unit 2 (2026-06-16-002 plan R-B3): append a schema-aware fix hint to a
+/// recoverable policy rejection payload when the source hat is authorised
+/// to publish the topic and a schema is configured. Returns `payload`
+/// unchanged if no hint can be generated.
+fn append_fix_hint_if_recoverable(
+    payload: &str,
+    hat_id: Option<&str>,
+    topic: &str,
+    policy_config: &crate::config::EventPolicyConfig,
+    registry: &crate::hat_registry::HatRegistry,
+) -> String {
+    let Some(hat_id) = hat_id else {
+        return payload.to_string();
+    };
+    let Some(schema) = policy_config.schemas.get(topic) else {
+        return payload.to_string();
+    };
+    let hat = match registry.get(&ralph_proto::HatId::new(hat_id)) {
+        Some(h) => h,
+        None => return payload.to_string(),
+    };
+    match crate::emit_schema_hint::fix_hint_for_hat_topic(hat, topic, schema) {
+        Some(hint) => format!("{}\n\n{}", payload, hint),
+        None => payload.to_string(),
+    }
+}
+
+/// When a hat hits a topic-deny rule, list its declared `publishes`
+/// topics so the agent can recover without guessing.
+fn append_hat_publishes_hint(
+    payload: &str,
+    hat_id: Option<&str>,
+    registry: &crate::hat_registry::HatRegistry,
+) -> String {
+    let Some(hat_id) = hat_id else {
+        return payload.to_string();
+    };
+    let Some(hat) = registry.get(&ralph_proto::HatId::new(hat_id)) else {
+        return payload.to_string();
+    };
+    if hat.publishes.is_empty() {
+        return payload.to_string();
+    }
+    let topics: Vec<&str> = hat.publishes.iter().map(|t| t.as_str()).collect();
+    format!(
+        "{payload}\n\nAllowed publish topics for hat '{hat_id}': {}",
+        topics.join(", ")
+    )
 }
 
 fn apply_event_policy_validation(
@@ -658,12 +839,28 @@ fn apply_event_policy_validation(
     write_diagnostic: bool,
     source_hats_by_topic: &std::collections::HashMap<String, Vec<String>>,
     target_hats_by_topic: &std::collections::HashMap<String, Vec<String>>,
+    registry: &crate::hat_registry::HatRegistry,
 ) -> PolicyValidationResult {
+    // Unit 2 (2026-06-16-002 plan) take-3: the validator does NOT
+    // take `&mut LoopState` directly.  It returns a list of
+    // `RecoverableExhaustionCandidate` and the **caller** is
+    // responsible for calling `state.record_recoverable_rejection_key`
+    // for each entry.  This split avoids the borrow-checker conflict
+    // between `&mut LoopState` and `&mut ReviewStepTracker` (the
+    // latter is a field of the former) at the call site.
     let mut payload_contract_violation: Option<crate::payload_contract::PayloadContractViolation> =
         None;
+    // Unit 2 (2026-06-16-002 plan): `capture_violation` now ONLY fires
+    // for **non-recoverable** findings.  The recoverable set
+    // (`PayloadTypeMismatch`, `MissingRequiredField`, `TopicDenied`)
+    // bypasses this closure entirely so the U6 fast-fail is not
+    // triggered on a recoverable first attempt.
     let mut capture_violation = |finding: &PolicyFinding, payload: Option<&str>| {
         if payload_contract_violation.is_some() {
             return; // capture only the first
+        }
+        if is_recoverable_policy_finding(finding).is_some() {
+            return; // recoverable: never feed into U6 fast-fail
         }
         let source_hats = source_hats_by_topic
             .get(&finding.topic)
@@ -693,6 +890,16 @@ fn apply_event_policy_validation(
     let mut hold_triggered = false;
     let mut hold_reason = None;
     let mut policy_rejections: Vec<crate::event_policy::PolicyRejection> = Vec::new();
+    // Unit 2 (2026-06-16-002 plan): this function no longer takes
+    // `&mut LoopState`.  It only collects **candidates** for
+    // recoverable budget exhaustion.  The caller is responsible
+    // for calling `state.record_recoverable_rejection_key(...)`
+    // for each candidate and pushing the exhausted entries into
+    // `state.recoverable_exhaustion_buffer`.  We emit the
+    // `(hat, topic, reason_class)` triple plus a
+    // `payload_excerpt` (for diagnostics) for the caller to
+    // consume.
+    let mut recoverable_candidates: Vec<RecoverableExhaustionCandidate> = Vec::new();
 
     for event in events {
         // Completion-honored guard takes precedence: after a completion promise
@@ -723,6 +930,7 @@ fn apply_event_policy_validation(
                         topic: event.topic.clone(),
                         source_hat: event.hat.clone(),
                         finding: finding.clone(),
+                        reason_class: None,
                     });
                     let recovery_payload = format!(
                         "EVENT_POLICY_REJECTED: event '{}' violates completion guard.\n{}\n\n\
@@ -740,6 +948,7 @@ fn apply_event_policy_validation(
                         topic: event.topic.clone(),
                         source_hat: event.hat.clone(),
                         finding: finding.clone(),
+                        reason_class: None,
                     });
                     let recovery_payload = format!(
                         "EVENT_POLICY_HOLD: event '{}' violates completion guard.\n{}\n\n\
@@ -800,15 +1009,32 @@ fn apply_event_policy_validation(
                     validated_events.push(event);
                 }
                 PolicyDecision::RejectWithResume(finding) => {
+                    let reason_class = is_recoverable_policy_finding(&finding);
                     policy_rejections.push(crate::event_policy::PolicyRejection {
                         topic: event.topic.clone(),
                         source_hat: event.hat.clone(),
                         finding: finding.clone(),
+                        reason_class,
                     });
+                    if let Some(rc) = reason_class {
+                        let hat_for_counter =
+                            event.hat.as_deref().unwrap_or("unknown");
+                        recoverable_candidates.push(RecoverableExhaustionCandidate {
+                            hat: hat_for_counter.to_string(),
+                            topic: event.topic.clone(),
+                            reason_class: rc,
+                        });
+                    }
                     let recovery_payload = format!(
                         "EVENT_POLICY_REJECTED: event '{}' matches topic-deny rule.\n{}\n\n\
-                         This hat is not allowed to publish this topic.",
+                         This hat is not allowed to publish this topic. \
+                         Emit one of the hat's declared `publishes` topics instead.",
                         event.topic, finding.message
+                    );
+                    let recovery_payload = append_hat_publishes_hint(
+                        &recovery_payload,
+                        event.hat.as_deref(),
+                        registry,
                     );
                     publish_policy_rejection_resume(bus, &event, recovery_payload);
                 }
@@ -819,6 +1045,7 @@ fn apply_event_policy_validation(
                         topic: event.topic.clone(),
                         source_hat: event.hat.clone(),
                         finding: finding.clone(),
+                        reason_class: None,
                     });
                     let recovery_payload = format!(
                         "EVENT_POLICY_HOLD: event '{}' matches topic-deny rule.\n{}\n\n\
@@ -852,6 +1079,7 @@ fn apply_event_policy_validation(
                         topic: event.topic.clone(),
                         source_hat: event.hat.clone(),
                         finding: finding.clone(),
+                        reason_class: None,
                     });
                     let recovery_payload = format!(
                         "EVENT_POLICY_REJECTED: event '{}' violates review step gate.\n{}\n\n\
@@ -879,6 +1107,7 @@ fn apply_event_policy_validation(
                         topic: event.topic.clone(),
                         source_hat: event.hat.clone(),
                         finding: finding.clone(),
+                        reason_class: None,
                     });
                     let recovery_payload = format!(
                         "EVENT_POLICY_REJECTED: event '{}' violates review step gate.\n{}\n\n\
@@ -892,36 +1121,92 @@ fn apply_event_policy_validation(
                 }
             }
             PolicyDecision::RejectWithResume(finding) => {
-                capture_violation(&finding, event.payload.as_deref());
-                // Collect for unified rejection handler (Task #21)
+                let reason_class = is_recoverable_policy_finding(&finding);
+                if reason_class.is_none() {
+                    // Non-recoverable: capture the violation
+                    // for the U6 fast-fail path.  We still
+                    // publish a `task.resume` so the U1 R5
+                    // routing (semantic-gate and
+                    // review-step-gate violations targeted at
+                    // the source hat) keeps working — the
+                    // runner's "fast-fail" happens at the U6
+                    // `PayloadContractViolation` branch, not
+                    // here.  The U2 plan §3 "R-B2" semantic
+                    // (non-recoverable → no resume) is reserved
+                    // for the future `plan_name`/task-key
+                    // mismatch path (U3), not the existing U1
+                    // semantic-gate `InvalidFieldValue` path.
+                    capture_violation(&finding, event.payload.as_deref());
+                }
                 policy_rejections.push(crate::event_policy::PolicyRejection {
                     topic: event.topic.clone(),
                     source_hat: event.hat.clone(),
                     finding: finding.clone(),
+                    reason_class,
                 });
+                if let Some(rc) = reason_class {
+                    let hat_for_counter =
+                        event.hat.as_deref().unwrap_or("unknown");
+                    // Unit 2 (2026-06-16-002 plan) take-3: the
+                    // actual `state.record_recoverable_rejection_key`
+                    // call lives in the caller.  We just
+                    // surface the candidate `(hat, topic,
+                    // reason_class)` triple; the caller bumps
+                    // the counter and decides whether to push a
+                    // `RecoverableExhaustion` into the runner's
+                    // buffer.
+                    recoverable_candidates.push(RecoverableExhaustionCandidate {
+                        hat: hat_for_counter.to_string(),
+                        topic: event.topic.clone(),
+                        reason_class: rc,
+                    });
+                    // NOTE: do not `continue` here — we still
+                    // want to publish a `task.resume` (the
+                    // recoverable path's contract).  The caller
+                    // will check the post-call counter and, if
+                    // exhausted, the runner will terminate the
+                    // loop on the next iteration pass.
+                }
                 let recovery_payload = format!(
                     "EVENT_POLICY_REJECTED: event '{}' violates policy.\n{}\n\n\
                      Wait for the correct event schema before emitting this event. \
                      The loop will continue to allow recovery.",
                     event.topic, finding.message
                 );
+                let recovery_payload = append_fix_hint_if_recoverable(
+                    &recovery_payload,
+                    event.hat.as_deref(),
+                    &event.topic,
+                    policy_config,
+                    registry,
+                );
                 publish_policy_rejection_resume(bus, &event, recovery_payload);
                 // Do NOT record the rejected event
             }
             PolicyDecision::Hold(finding) => {
-                capture_violation(&finding, event.payload.as_deref());
+                let reason_class = is_recoverable_policy_finding(&finding);
+                if reason_class.is_none() {
+                    capture_violation(&finding, event.payload.as_deref());
+                }
                 hold_triggered = true;
                 hold_reason = Some(finding.message.clone());
-                // Collect for unified rejection handler (Task #21)
                 policy_rejections.push(crate::event_policy::PolicyRejection {
                     topic: event.topic.clone(),
                     source_hat: event.hat.clone(),
                     finding: finding.clone(),
+                    reason_class,
                 });
                 let recovery_payload = format!(
                     "EVENT_POLICY_HOLD: event '{}' violates policy.\n{}\n\n\
                      Loop held due to policy violation. Use resume to continue.",
                     event.topic, finding.message
+                );
+                let recovery_payload = append_fix_hint_if_recoverable(
+                    &recovery_payload,
+                    event.hat.as_deref(),
+                    &event.topic,
+                    policy_config,
+                    registry,
                 );
                 publish_policy_rejection_resume(bus, &event, recovery_payload);
             }
@@ -940,6 +1225,16 @@ fn apply_event_policy_validation(
         hold_reason,
         payload_contract_violation,
         policy_rejections,
+        // Unit 2 (2026-06-16-002 plan) take-3: the validator no
+        // longer calls `record_recoverable_rejection_key` itself.
+        // The `recoverable_exhausted` field is left empty; the
+        // caller consumes `recoverable_candidates` and
+        // post-increments the counter itself.  We keep the
+        // field for back-compat with the
+        // `PolicyValidationResult` shape (existing call sites
+        // destructure it).
+        recoverable_exhausted: Vec::new(),
+        recoverable_candidates,
     }
 }
 
@@ -1456,6 +1751,40 @@ impl EventLoop {
     /// Increment the hard-gate counter when an agent claims emit but writes no event.
     pub fn increment_hard_gate_count(&mut self) {
         self.state.consecutive_hard_gates += 1;
+    }
+
+    /// Unit 3 (2026-06-16-002 plan): `true` while the loop is
+    /// still in the bootstrap window — i.e. between the
+    /// `work.start` publication and the first legal
+    /// `coordinator work.ready` (without `reviewed_task_id`).
+    ///
+    /// During this window the `build_prompt` paths skip
+    /// injecting `human.guidance` into the coordinator's
+    /// prompt so the coordinator's first action is not
+    /// derailed by stale human input.  Once
+    /// `bootstrap_complete` flips to `true`, the gate opens
+    /// and guidance flows normally.
+    pub fn in_bootstrap_phase(&self) -> bool {
+        !self.state.bootstrap_complete && !self.state.bootstrap_failed
+    }
+
+    /// Unit 3 (2026-06-16-002 plan): `true` when `hat_id ==
+    /// "coordinator"` AND the loop is still in the bootstrap
+    /// window.  The gate only applies to the `coordinator`
+    /// hat (not the `ralph` solo hat and not the
+    /// `review-synthesizer` / `executor` / other downstream
+    /// hats).  When the gate is closed, the build_prompt
+    /// paths must skip:
+    ///   - `update_robot_guidance` (no `human.guidance`
+    ///     caching for the prompt)
+    ///   - `apply_robot_guidance` (no `ralph.robot_guidance`
+    ///     push)
+    ///   - `collect_robot_guidance` (isolated-path
+    ///     `## ROBOT GUIDANCE` block)
+    ///   - scratchpad `### HUMAN GUIDANCE` block inclusion
+    ///     (handled in `prepend_scratchpad`).
+    pub fn coordinator_bootstrap_gate_closed(&self, hat_id: &HatId) -> bool {
+        hat_id.as_str() == "coordinator" && self.in_bootstrap_phase()
     }
 
     /// Reset the hard-gate counter when an agent successfully emits an event.
@@ -2222,6 +2551,9 @@ impl EventLoop {
     pub fn initialize_resume(&mut self, prompt_content: &str) {
         // Resume always uses task.resume regardless of starting_event config
         self.initialize_with_topic("task.resume", prompt_content);
+        // Unit 3: rebuild bootstrap gate from recorded events so resume
+        // does not re-open the guidance-suppression window mid-loop.
+        self.rebuild_bootstrap_flags_from_recorded_events();
     }
 
     /// Common initialization logic with configurable topic.
@@ -2230,6 +2562,14 @@ impl EventLoop {
         // After iteration 1, bus.take_pending() consumes the start event,
         // so without this the objective would be invisible to later hats.
         self.ralph.set_objective(prompt_content.to_string());
+
+        // Unit 3 (2026-06-16-002 plan): reset the bootstrap gate only on
+        // a fresh loop start — not on `task.resume` (resume rebuilds from
+        // events.jsonl immediately after).
+        if topic == "work.start" || topic == "task.start" {
+            self.state.bootstrap_complete = false;
+            self.state.bootstrap_failed = false;
+        }
 
         let start_event = Event::new(topic, prompt_content);
         self.bus.publish(start_event);
@@ -2540,9 +2880,33 @@ impl EventLoop {
         // See `LoopState::pending_synthesizer_timeout` for the
         // full rationale.
         self.state.pending_synthesizer_timeout = Some(action.wave_id.clone());
+
+        // Unit 7 (2026-06-17-001): wave merge complete — register handoff
+        // obligation for the synthesizer so HandoffTracker can detect if it
+        // fails to activate within the configured aggregate timeout.
+        let handoff_event_id = format!(
+            "sla:review.dimension.done:{}",
+            action.wave_id
+        );
+        self.state.handoff_tracker.on_handoff_accepted(
+            "review.dimension.done",
+            "review-synthesizer",
+            handoff_event_id,
+            std::time::Instant::now(),
+        );
+
         self.bus
             .publish(Event::new("task.resume", payload).with_target(target));
         true
+    }
+
+    /// Unit 8 (2026-06-17-001): Returns true if `hat` is one of the
+    /// wave-related hats that use a dedicated stall recovery counter.
+    fn is_wave_hat(hat: &HatId) -> bool {
+        matches!(
+            hat.as_str(),
+            "review-coordinator" | "review-synthesizer" | "dimension-reviewer"
+        )
     }
 
     /// Injects a fallback event to recover from a stalled loop.
@@ -2557,18 +2921,34 @@ impl EventLoop {
         }
 
         const STALL_HARD_THRESHOLD: u32 = 3;
-        const STALL_RETRY_KEY: &str = "stall_recovery:ralph:task_resume:stall_no_events";
+        // Unit 8 (2026-06-17-001): use a per-last-hat stall key so wave hats
+        // accumulate their own retry budget separate from ralph's global counter.
+        let stall_key = if let Some(last_hat) = &self.state.last_hat {
+            if Self::is_wave_hat(last_hat) {
+                format!("flow:review-synthesizer")
+            } else {
+                format!("stall:{}", last_hat.as_str())
+            }
+        } else {
+            "stall:ralph".to_string()
+        };
 
         let stall_count = self
             .state
             .stall_recovery_counts
-            .entry(STALL_RETRY_KEY.to_string())
+            .entry(stall_key.clone())
             .and_modify(|c| *c += 1)
             .or_insert(1);
 
         let hard_escalation = *stall_count >= STALL_HARD_THRESHOLD;
-        let hard_target = if self.state.review_step_tracker.has_open_review_wave() {
-            HatId::new("review-coordinator")
+        // Unit 8: wave stall escalation — route to review-coordinator when
+        // a wave hat is the last to execute and it has stalled.
+        let hard_target = if let Some(last_hat) = &self.state.last_hat {
+            if Self::is_wave_hat(last_hat) {
+                HatId::new("review-coordinator")
+            } else {
+                HatId::new("review-synthesizer")
+            }
         } else {
             HatId::new("review-synthesizer")
         };
@@ -2576,14 +2956,20 @@ impl EventLoop {
         // If a custom hat was last executing, target the fallback back to it
         // This preserves hat context instead of always falling back to Ralph
         let fallback_event = if hard_escalation {
+            let reason_str = if stall_key.starts_with("flow:") {
+                "wave_stall_exhausted"
+            } else {
+                "stall_no_events"
+            };
             let mut payload = format!(
-                "RECOVERY (HARD): {} consecutive stall_no_events iterations. \
+                "RECOVERY (HARD): {} consecutive stall iterations (key=`{}`). \
                  Route to `{}` to emit review terminal or re-dispatch wave.",
                 stall_count,
+                stall_key,
                 hard_target.as_str()
             );
             payload.push_str(&Self::format_recovery_diagnosis_block(
-                "stall_no_events",
+                reason_str,
                 hard_target.as_str(),
                 "emit review.wave.ready, review.passed, or review.failed",
                 *stall_count,
@@ -3024,9 +3410,27 @@ impl EventLoop {
                     .set_active_scratchpad(self.config.core.scratchpad.clone());
                 self.ralph.set_iteration(self.state.iteration);
 
-                // Persist and inject human guidance into prompt if present
-                self.update_robot_guidance(guidance_events);
-                self.apply_robot_guidance();
+                // Unit 3 (2026-06-16-002 plan): during the
+                // coordinator bootstrap window we MUST NOT inject
+                // human guidance into the prompt — the agent's
+                // first action should be the legal bootstrap
+                // handoff, not a response to stale human input.
+                // The gate fires for `hat_id == "coordinator"`
+                // and `in_bootstrap_phase() == true`; in solo mode
+                // `hat_id == "ralph"` so the guard is a no-op
+                // (kept here for symmetry with the multi-hat /
+                // isolated paths and as a safety net).
+                if self.coordinator_bootstrap_gate_closed(hat_id) {
+                    // Bootstrap window: drop pending guidance events
+                    // (they are still on the bus and will be
+                    // redelivered on the next iteration once
+                    // `bootstrap_complete` flips to `true`).
+                    drop(guidance_events);
+                } else {
+                    // Persist and inject human guidance into prompt if present
+                    self.update_robot_guidance(guidance_events);
+                    self.apply_robot_guidance();
+                }
 
                 // Build base prompt and prepend memories + scratchpad + ready tasks
                 let base_prompt = self.ralph.build_prompt(&events_context, &[], &[]);
@@ -3039,7 +3443,7 @@ impl EventLoop {
                 // alert text.
                 let base_prompt = self.apply_runtime_diagnosis_prompt(base_prompt, hat_id);
                 let with_skills = self.prepend_auto_inject_skills(base_prompt);
-                let with_scratchpad = self.prepend_scratchpad(with_skills);
+                let with_scratchpad = self.prepend_scratchpad(with_skills, Some(hat_id));
                 let with_state_files = self.prepend_state_files(with_scratchpad);
                 let final_prompt = self.prepend_ready_tasks(with_state_files);
 
@@ -3155,10 +3559,23 @@ impl EventLoop {
                 self.ralph.set_active_scratchpad(resolved_scratchpad);
                 self.ralph.set_iteration(self.state.iteration);
 
-                // Persist and inject human guidance after scratchpad resolution
-                // (must also happen before immutable borrows from determine_active_hats)
-                self.update_robot_guidance(guidance_events);
-                self.apply_robot_guidance();
+                // Unit 3 (2026-06-16-002 plan): in multi-hat mode
+                // `hat_id == "ralph"` (we are in this branch
+                // because the ralph hat requested a prompt), so
+                // the `coordinator_bootstrap_gate_closed` check
+                // is a no-op.  Still, keep the guard for parity
+                // with the isolated path — a future preset that
+                // routes the multi-hat path through a hat named
+                // "coordinator" will inherit the bootstrap
+                // suppression automatically.
+                if self.coordinator_bootstrap_gate_closed(hat_id) {
+                    drop(guidance_events);
+                } else {
+                    // Persist and inject human guidance after scratchpad resolution
+                    // (must also happen before immutable borrows from determine_active_hats)
+                    self.update_robot_guidance(guidance_events);
+                    self.apply_robot_guidance();
+                }
 
                 let active_hats = self.determine_active_hats(&regular_events);
 
@@ -3241,7 +3658,7 @@ impl EventLoop {
                 // coordinator sees every hat's alerts.
                 let base_prompt = self.apply_runtime_diagnosis_prompt(base_prompt, hat_id);
                 let with_skills = self.prepend_auto_inject_skills(base_prompt);
-                let with_scratchpad = self.prepend_scratchpad(with_skills);
+                let with_scratchpad = self.prepend_scratchpad(with_skills, Some(hat_id));
                 let with_state_files = self.prepend_state_files(with_scratchpad);
                 let final_prompt = self.prepend_ready_tasks(with_state_files);
 
@@ -3299,9 +3716,25 @@ impl EventLoop {
             self.ralph.set_active_scratchpad(resolved_scratchpad);
             self.ralph.set_iteration(self.state.iteration);
 
-            // Handle guidance
-            self.update_robot_guidance(guidance_events);
-            self.apply_robot_guidance();
+            // Unit 3 (2026-06-16-002 plan): the isolated path is
+            // the **only** path where the gate can actually fire
+            // (the active `hat_id` is a real hat, not the
+            // constant `ralph` sentinel).  When the active hat
+            // is the `coordinator` and the loop is still in
+            // bootstrap, drop the pending `human.guidance` events
+            // and skip both `update_robot_guidance` /
+            // `apply_robot_guidance` AND the
+            // `collect_robot_guidance` block below — none of the
+            // cached guidance should reach the coordinator's
+            // first prompt.
+            let skip_guidance = self.coordinator_bootstrap_gate_closed(hat_id);
+            if !skip_guidance {
+                // Handle guidance
+                self.update_robot_guidance(guidance_events);
+                self.apply_robot_guidance();
+            } else {
+                drop(guidance_events);
+            }
 
             // Build base prompt
             let hat = self.registry.get(hat_id)?;
@@ -3328,6 +3761,14 @@ impl EventLoop {
             // guidance that was just persisted to the scratchpad. We must
             // call this BEFORE `clear_robot_guidance()` below, otherwise the
             // in-memory copy is gone.
+            //
+            // Unit 3 (2026-06-16-002 plan): when the gate is
+            // closed we did NOT call `update_robot_guidance` /
+            // `apply_robot_guidance` above, so the in-memory
+            // guidance cache is empty; `collect_robot_guidance`
+            // returns an empty string and the conditional below
+            // leaves `base_prompt` unchanged.  We still call
+            // the helper for symmetry / future-proofing.
             let guidance_section = self.ralph.collect_robot_guidance();
             let base_prompt = if guidance_section.is_empty() {
                 base_prompt
@@ -3351,7 +3792,7 @@ impl EventLoop {
             // contract is enforced inside `apply_runtime_diagnosis_prompt`.
             let base_prompt = self.apply_runtime_diagnosis_prompt(base_prompt, hat_id);
             let with_skills = self.prepend_auto_inject_skills(base_prompt);
-            let with_scratchpad = self.prepend_scratchpad(with_skills);
+            let with_scratchpad = self.prepend_scratchpad(with_skills, Some(hat_id));
             let with_state_files = self.prepend_state_files(with_scratchpad);
             let final_prompt = self.prepend_ready_tasks(with_state_files);
 
@@ -3399,6 +3840,77 @@ impl EventLoop {
         // injection for this branch.
         let _ = RUNTIME_DIAGNOSIS_ALERT_HEADER; // silence unused-import lint
         Some(with_diagnosis)
+    }
+
+    /// Inspect a batch of policy-accepted events and flip the
+    /// `bootstrap_complete` / `bootstrap_failed` flags when the
+    /// coordinator produces a terminal bootstrap handoff.
+    ///
+    /// Unit 3 (2026-06-16-002 plan) contract:
+    /// - `coordinator` `work.ready` **without** a
+    ///   `reviewed_task_id` field is the bootstrap handoff. It
+    ///   marks `bootstrap_complete = true`.
+    /// - `coordinator` `work.failed` is the explicit bootstrap
+    ///   failure. It marks `bootstrap_failed = true` so the
+    ///   runner can surface a precise reason rather than hang on
+    ///   a missing `work.ready`.
+    /// - Plan-gate `work.ready` (carrying `reviewed_task_id`) is
+    ///   NOT a bootstrap event; the flag stays `false` so
+    ///   step-advance handoffs from `review-synthesizer` keep
+    ///   behaving as today.
+    ///
+    /// Both flags are reset to `false` in `initialize_with_topic`
+    /// so a fresh `work.start` starts a new bootstrap window.
+    /// Detection runs in the *accept* path so a rejected
+    /// `work.ready` (e.g. payload contract violation) does NOT
+    /// promote the flag — only events the runner actually
+    /// processes count.
+    fn update_bootstrap_flags_from_accepted(&mut self, accepted: &[JsonlEvent]) {
+        self.apply_bootstrap_flags_from_events(accepted);
+    }
+
+    /// Derive bootstrap gate state from a chronological event batch
+    /// (accepted events or full events.jsonl replay on resume).
+    fn apply_bootstrap_flags_from_events(&mut self, events: &[JsonlEvent]) {
+        for event in events {
+            let hat = event.hat.as_deref().unwrap_or("");
+            if hat != "coordinator" {
+                continue;
+            }
+            if event.topic == "work.ready" && !self.state.bootstrap_complete {
+                let is_bootstrap = event
+                    .payload
+                    .as_deref()
+                    .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+                    .and_then(|v| v.get("reviewed_task_id").cloned())
+                    .is_none();
+                if is_bootstrap {
+                    self.state.bootstrap_complete = true;
+                }
+            } else if event.topic == "work.failed" && !self.state.bootstrap_failed {
+                self.state.bootstrap_failed = true;
+            }
+        }
+    }
+
+    /// Rebuild bootstrap flags after `task.resume` by scanning the loop's
+    /// events file so guidance suppression does not leak across resume.
+    fn rebuild_bootstrap_flags_from_recorded_events(&mut self) {
+        let path = self
+            .loop_context
+            .as_ref()
+            .map(|ctx| ctx.events_path())
+            .unwrap_or_else(|| self.event_reader.path().to_path_buf());
+        if !path.exists() {
+            return;
+        }
+        let mut reader = EventReader::new(&path);
+        reader.reset();
+        if let Ok(result) = reader.read_new_events() {
+            self.state.bootstrap_complete = false;
+            self.state.bootstrap_failed = false;
+            self.apply_bootstrap_flags_from_events(&result.events);
+        }
     }
 
     /// Stores guidance payloads, persists them to scratchpad, and prepares them for prompt injection.
@@ -3902,7 +4414,11 @@ impl EventLoop {
     /// The scratchpad is the agent's working memory for the current objective.
     /// Auto-injecting saves one tool call per iteration.
     /// When the file exceeds the budget, the TAIL is kept (most recent entries).
-    fn prepend_scratchpad(&self, prompt: String) -> String {
+    fn prepend_scratchpad(
+        &self,
+        prompt: String,
+        active_hat_id_for_filter: Option<&HatId>,
+    ) -> String {
         // Skip injection when scratchpad is disabled for the current hat
         if !self.ralph.active_scratchpad().enabled {
             return prompt;
@@ -3934,6 +4450,26 @@ impl EventLoop {
 
         if content.trim().is_empty() {
             debug!("Scratchpad is empty, skipping injection");
+            return prompt;
+        }
+
+        // Unit 3 (2026-06-16-002 plan): when the active hat is the
+        // `coordinator` and the loop is still in the bootstrap
+        // window, strip `### HUMAN GUIDANCE` blocks from the
+        // scratchpad snapshot.  We use the same state-machine
+        // header detection as `persist_guidance_to_scratchpad` so
+        // a line in `## NOTES` that happens to look like a
+        // guidance block is not falsely stripped.
+        let gate_closed = active_hat_id_for_filter
+            .map(|hat| self.coordinator_bootstrap_gate_closed(hat))
+            .unwrap_or(false);
+        let content = if gate_closed {
+            filter_human_guidance_blocks(&content)
+        } else {
+            content
+        };
+        if content.trim().is_empty() {
+            debug!("Scratchpad empty after bootstrap filter, skipping injection");
             return prompt;
         }
 
@@ -4243,6 +4779,7 @@ impl EventLoop {
     /// without wiring up the full multi-hat `build_prompt` machinery.
     /// Production code should call the prepend helper or
     /// `wave_context_json_for_hat`.
+    #[cfg(test)]
     pub(crate) fn build_wave_context_for_synthesizer_if_match_for_test(
         &mut self,
         hat_id: &HatId,
@@ -5730,13 +6267,16 @@ impl EventLoop {
                 // See docs/plans/2026-06-15-003-...-plan.md and
                 // docs/report/2026-06-15-plan-gate-dual-publish-...-diagnosis.md.
                 // Scope is intentionally narrow: ordered pair, exact topics,
-                // and only ONE extra event — the third business event in
+                // same hat, and only ONE extra event — the third business event in
                 // the same turn is still dropped (sticky budget).
-                let is_dual_publish_step_handoff = event.topic.as_str() == "work.ready"
-                    && accepted
-                        .last()
-                        .map(|prev| prev.topic.as_str() == "queue.advance")
-                        .unwrap_or(false);
+                // Hat check prevents cross-hat false positives: executor's
+                // queue.advance does not豁免 coordinator's work.ready and vice versa.
+                let is_dual_publish_step_handoff =
+                    event.topic.as_str() == "work.ready"
+                        && accepted.last().is_some_and(|prev| {
+                            prev.topic.as_str() == "queue.advance"
+                                && prev.hat.as_ref() == event.hat.as_ref()
+                        });
 
                 if first_business_event_accepted
                     && !same_wave_continuation
@@ -5901,10 +6441,21 @@ impl EventLoop {
         if let Some(ref policy_config) = self.config.event_loop.event_policy
             && policy_config.enabled
         {
-            let policy_state = self
+            // Unit 2 (2026-06-16-002 plan): `apply_event_policy_validation`
+            // now requires `&mut LoopState` (to drive the recoverable
+            // budget counters and to surface exhaustions to the
+            // runner).  To avoid a double `&mut self.state` borrow
+            // (the `policy_runtime_state` slot is **inside**
+            // `self.state`), we **take** the `Option<PolicyRuntimeState>`
+            // out of `self.state` for the duration of the call, then
+            // put it back.  This keeps the borrow checker happy and
+            // also matches the original (pre-Unit-2) call site's
+            // borrow pattern.
+            let mut policy_state: PolicyRuntimeState = self
                 .state
                 .policy_runtime_state
-                .get_or_insert_with(PolicyRuntimeState::default);
+                .take()
+                .unwrap_or_default();
             // U6: build source/target hat indexes for payload contract
             // violation attribution.
             let mut source_hats_by_topic: std::collections::HashMap<String, Vec<String>> =
@@ -5925,19 +6476,61 @@ impl EventLoop {
                         .push(hat_id.clone());
                 }
             }
-            let policy_result = apply_event_policy_validation(
+            // Unit 2 (2026-06-16-002 plan) take-3: the policy
+            // validator no longer takes `&mut LoopState`; it
+            // borrows `review_step_tracker` from `self.state` via
+            // a `&mut self.state.review_step_tracker` field
+            // reborrow that lives only for the call.  NLL
+            // recognizes the disjoint field as borrowable because
+            // the `&mut LoopState` parameter was removed (the
+            // counter bookkeeping moved to the caller).
+            let mut review_step_tracker =
+                std::mem::take(&mut self.state.review_step_tracker);
+            let mut policy_result = apply_event_policy_validation(
                 events,
                 policy_config,
-                policy_state,
-                &mut self.state.review_step_tracker,
+                &mut policy_state,
+                &mut review_step_tracker,
                 &mut self.bus,
                 policy_config
                     .completion_after_terminal
                     .write_diagnostic_event,
                 &source_hats_by_topic,
                 &target_hats_by_topic,
+                &self.registry,
             );
+            // Restore the `ReviewStepTracker` and put the
+            // `PolicyRuntimeState` back so the next call sees the
+            // same counters.
+            self.state.review_step_tracker = review_step_tracker;
+            self.state.policy_runtime_state = Some(policy_state);
             had_policy_rejections = !policy_result.policy_rejections.is_empty();
+            // Unit 2 (2026-06-16-002 plan) take-3: process the
+            // recoverable candidates ourselves.  The validator
+            // did not call `record_recoverable_rejection_key`
+            // because it does not own `&mut LoopState`.  For
+            // each candidate we (a) bump the counter and (b)
+            // push a `RecoverableExhaustion` into the buffer
+            // when the post-increment count crosses the budget.
+            for candidate in policy_result.recoverable_candidates.drain(..) {
+                let (count, exhausted) = self
+                    .state
+                    .record_recoverable_rejection_key(
+                        &candidate.hat,
+                        &candidate.topic,
+                        candidate.reason_class.as_str(),
+                    );
+                if exhausted {
+                    self.state
+                        .recoverable_exhaustion_buffer
+                        .push(RecoverableExhaustion {
+                            hat: candidate.hat,
+                            topic: candidate.topic,
+                            reason_class: candidate.reason_class,
+                            count,
+                        });
+                }
+            }
 
             // WRC-U4 (2026-06-12-003 / KTD-13 / F2): for every
             // accepted event whose topic has a unique consumer in
@@ -5976,6 +6569,18 @@ impl EventLoop {
                     );
                 }
             }
+
+            // Unit 3 (2026-06-16-002 plan): flip the bootstrap
+            // gate when the coordinator hands off a terminal
+            // bootstrap event.  `policy_result.events` carries
+            // every policy-accepted event, including those
+            // routed through topic-deny and review-step gates
+            // (the `Accept` arm of `PolicyDecision`).  Plan-gate
+            // `work.ready` (with `reviewed_task_id`) is filtered
+            // out by the helper, matching the
+            // `ReviewStepTracker::check_semantic_gates` rule at
+            // `review_step_state.rs:174-191`.
+            self.update_bootstrap_flags_from_accepted(&policy_result.events);
 
             events = policy_result.events;
 
@@ -7295,22 +7900,42 @@ impl EventLoop {
             && policy_config.enabled
         {
             wave_raw_count = wave_events.len();
-            let policy_state = self
+            // Unit 2 (2026-06-16-002 plan): same `take()`/put-back
+            // pattern as the regular partition — see the long
+            // comment block above for the borrow-checker rationale.
+            // The function now takes `&mut LoopState` and reborrows
+            // `review_step_tracker` internally, so we only need to
+            // move `policy_runtime_state` out of `self.state` for
+            // the call.
+            let mut policy_state: PolicyRuntimeState = self
                 .state
                 .policy_runtime_state
-                .get_or_insert_with(PolicyRuntimeState::default);
+                .take()
+                .unwrap_or_default();
+            // Unit 2 (2026-06-16-002 plan) take-3: same pattern
+            // as the regular partition.  Move the
+            // `review_step_tracker` and `policy_runtime_state`
+            // out of `self.state` for the call (the validator
+            // does **not** take `&mut LoopState` anymore), then
+            // restore them and post-process the recoverable
+            // candidates.
+            let mut review_step_tracker =
+                std::mem::take(&mut self.state.review_step_tracker);
             let policy_result = apply_event_policy_validation(
                 wave_events,
                 policy_config,
-                policy_state,
-                &mut self.state.review_step_tracker,
+                &mut policy_state,
+                &mut review_step_tracker,
                 &mut self.bus,
                 policy_config
                     .completion_after_terminal
                     .write_diagnostic_event,
                 &std::collections::HashMap::new(),
                 &std::collections::HashMap::new(),
+                &self.registry,
             );
+            self.state.review_step_tracker = review_step_tracker;
+            self.state.policy_runtime_state = Some(policy_state);
 
             // Write hold artifact if policy hold was triggered
             if policy_result.hold_triggered
@@ -7320,6 +7945,28 @@ impl EventLoop {
             }
 
             wave_policy_rejections = policy_result.policy_rejections;
+            // Unit 2 (2026-06-16-002 plan) take-3: post-process
+            // the recoverable candidates — same loop as the
+            // regular partition, just extending the same buffer.
+            for candidate in policy_result.recoverable_candidates.into_iter() {
+                let (count, exhausted) = self
+                    .state
+                    .record_recoverable_rejection_key(
+                        &candidate.hat,
+                        &candidate.topic,
+                        candidate.reason_class.as_str(),
+                    );
+                if exhausted {
+                    self.state
+                        .recoverable_exhaustion_buffer
+                        .push(RecoverableExhaustion {
+                            hat: candidate.hat,
+                            topic: candidate.topic,
+                            reason_class: candidate.reason_class,
+                            count,
+                        });
+                }
+            }
 
             // U1: when policy rejected every wave event, write a recovery
             // envelope with `source = payload_contract` and
@@ -7575,6 +8222,9 @@ fn termination_status_text(reason: &TerminationReason) -> &'static str {
         }
         TerminationReason::ScopeViolationCircuitBreakerTripped { .. } => {
             "Isolated scope violation circuit breaker tripped - loop terminated."
+        }
+        TerminationReason::RecoverablePayloadExhausted { .. } => {
+            "Recoverable-payload budget exhausted - loop terminated."
         }
     }
 }

@@ -330,6 +330,155 @@ hats:
 }
 
 #[test]
+fn test_isolated_mode_drops_queue_advance_after_work_ready() {
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  plan-gate:
+    name: "Plan Gate"
+    description: "Advances plan steps"
+    triggers: ["work.failed"]
+    publishes: ["queue.advance", "work.ready"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+
+    event_loop.process_output(&HatId::new("plan-gate"), "output", true);
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    write_event_with_hat_to_jsonl(
+        &events_path,
+        "work.ready",
+        r#"{"task_id":"task-real-002"}"#,
+        "plan-gate",
+    );
+    write_event_with_hat_to_jsonl(&events_path, "queue.advance", "step-02", "plan-gate");
+
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+    let _ = event_loop.process_events_from_jsonl().unwrap();
+
+    assert!(
+        event_loop.state().seen_topics.contains("work.ready"),
+        "First business event (work.ready) should be accepted"
+    );
+    assert!(
+        !event_loop.state().seen_topics.contains("queue.advance"),
+        "Second business event (queue.advance) should be dropped — ordered pair required"
+    );
+}
+
+#[test]
+fn test_isolated_mode_drops_third_event_after_dual_publish_pair() {
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  plan-gate:
+    name: "Plan Gate"
+    description: "Advances plan steps"
+    triggers: ["work.failed"]
+    publishes: ["queue.advance", "work.ready", "work.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+
+    event_loop.process_output(&HatId::new("plan-gate"), "output", true);
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    write_event_with_hat_to_jsonl(&events_path, "queue.advance", "step-02", "plan-gate");
+    write_event_with_hat_to_jsonl(
+        &events_path,
+        "work.ready",
+        r#"{"task_id":"task-real-003"}"#,
+        "plan-gate",
+    );
+    write_event_with_hat_to_jsonl(
+        &events_path,
+        "work.done",
+        r#"{"ok":true}"#,
+        "plan-gate",
+    );
+
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+    let _ = event_loop.process_events_from_jsonl().unwrap();
+
+    assert!(
+        event_loop.state().seen_topics.contains("queue.advance"),
+        "queue.advance (first) should be accepted"
+    );
+    assert!(
+        event_loop.state().seen_topics.contains("work.ready"),
+        "work.ready (second in pair) should be accepted"
+    );
+    assert!(
+        !event_loop.state().seen_topics.contains("work.done"),
+        "Third business event (work.done) must be dropped — budget is exactly 2 events"
+    );
+}
+
+#[test]
+fn test_isolated_mode_dual_publish_not_cross_hat() {
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  coordinator:
+    name: "Coordinator"
+    description: "Coordinates"
+    triggers: ["task.start"]
+    publishes: ["work.ready"]
+  executor:
+    name: "Executor"
+    description: "Executes"
+    triggers: ["work.ready"]
+    publishes: ["queue.advance", "work.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+
+    // Establish an isolated turn so the per-turn business-event budget is enforced.
+    // The active hat is arbitrary for this test; event.hat is authoritative for scope.
+    event_loop.process_output(&HatId::new("coordinator"), "output", true);
+
+    // Simulate: executor emits queue.advance first, then coordinator emits work.ready
+    // in the same turn. The coordinator's work.ready should NOT be豁免 by executor's
+    // queue.advance (different hat), so it gets dropped as the second business event.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    // executor: queue.advance first (business event #1 — accepted)
+    write_event_with_hat_to_jsonl(&events_path, "queue.advance", "step-02", "executor");
+    // coordinator: work.ready second (business event #2 — should be dropped,
+    // not豁免 by executor's queue.advance which is a different hat)
+    write_event_with_hat_to_jsonl(
+        &events_path,
+        "work.ready",
+        r#"{"task_id":"task-real-001"}"#,
+        "coordinator",
+    );
+
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+    let _ = event_loop.process_events_from_jsonl().unwrap();
+
+    assert!(
+        event_loop.state().seen_topics.contains("queue.advance"),
+        "queue.advance from executor (first business event) should be accepted"
+    );
+    assert!(
+        !event_loop.state().seen_topics.contains("work.ready"),
+        "work.ready from coordinator must be dropped — different hat does not豁免"
+    );
+}
+
+#[test]
 fn test_string_payload_events_pass_through_normally() {
     let config = RalphConfig::default();
     let mut event_loop = EventLoop::new(config);

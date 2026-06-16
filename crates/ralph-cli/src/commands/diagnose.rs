@@ -424,11 +424,87 @@ fn resolve_diagnostics_root_with_warnings(workspace_root: &Path) -> LoopsDiagnos
         ));
     }
 
+    // D2 (2026-06-16, plan 002 Unit 5): if the pointer is missing or
+    // stale (e.g. reuse-worktree cleared the worktree diagnostics, the
+    // worktree was deleted, or the loop terminated before refreshing
+    // the pointer), scan the main repo's `.ralph/diagnostics/*/`
+    // directories and pick the most recently modified session whose
+    // `recovery.jsonl` is non-empty or `diagnosis-summary.json` is
+    // present. This gives operators a non-empty report without
+    // requiring them to pass `--diagnostics-root` explicitly.
+    if let Some(scanned) = scan_recent_non_empty_sessions(workspace_root) {
+        if let Some(message) = scanned.warning {
+            warnings.push(message);
+        }
+        return LoopsDiagnosticsResolution {
+            diagnostics_root: scanned.root,
+            selected_loop_id: selected.map(|e| e.id.clone()),
+            warnings,
+        };
+    }
+
     LoopsDiagnosticsResolution {
         diagnostics_root: fallback,
         selected_loop_id: selected.map(|e| e.id.clone()),
         warnings,
     }
+}
+
+/// D2 (2026-06-16, plan 002 Unit 5): result of scanning the main repo
+/// for the most recently modified non-empty diagnostics session.
+#[derive(Debug)]
+struct ScannedSession {
+    root: PathBuf,
+    warning: Option<String>,
+}
+
+/// D2 (2026-06-16, plan 002 Unit 5): scan
+/// `<workspace_root>/.ralph/diagnostics/*/` and return the most
+/// recently modified session directory whose `recovery.jsonl` is
+/// non-empty or `diagnosis-summary.json` is present. Returns `None`
+/// when the diagnostics root does not exist or has no qualifying
+/// session, so the caller can fall through to the main-repo default.
+fn scan_recent_non_empty_sessions(workspace_root: &Path) -> Option<ScannedSession> {
+    let diag_root = workspace_root.join(".ralph").join("diagnostics");
+    let entries = match std::fs::read_dir(&diag_root) {
+        Ok(it) => it,
+        Err(_) => return None,
+    };
+    // (path, mtime_secs)
+    let mut best: Option<(PathBuf, std::time::SystemTime)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let recovery = path.join("recovery.jsonl");
+        let summary = path.join("diagnosis-summary.json");
+        let recovery_non_empty = recovery
+            .metadata()
+            .map(|m| m.len() > 0)
+            .unwrap_or(false);
+        let has_summary = summary.exists();
+        if !recovery_non_empty && !has_summary {
+            continue;
+        }
+        let mtime = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        match &best {
+            Some((_, best_mtime)) if mtime <= *best_mtime => {}
+            _ => best = Some((path, mtime)),
+        }
+    }
+    let (path, _) = best?;
+    let warning = format!(
+        "session pointer and live loops both unavailable; using most recent non-empty session at {}",
+        path.display()
+    );
+    Some(ScannedSession {
+        root: path,
+        warning: Some(warning),
+    })
 }
 
 /// Reads the session pointer file
@@ -1002,6 +1078,144 @@ mod tests {
         assert_eq!(
             parsed.get("session_path").and_then(|v| v.as_str()),
             Some(target.to_string_lossy().as_ref())
+        );
+    }
+
+    // ── D2 (2026-06-16, plan 002 Unit 5): non-empty session scan fallback ──
+    // When both the live `loops.json` lookup and the session pointer
+    // come up empty (e.g. the worktree was deleted, or the operator
+    // used `--diagnostics-root` pointing at a non-existent path),
+    // `resolve_diagnostics_root_with_warnings` should fall back to the
+    // most recently modified non-empty session under
+    // `<workspace>/.ralph/diagnostics/`.
+
+    fn write_recovery(session: &Path, body: &str) {
+        std::fs::write(session.join("recovery.jsonl"), body).unwrap();
+    }
+
+    fn write_diagnosis_summary(session: &Path) {
+        std::fs::write(
+            session.join("diagnosis-summary.json"),
+            "{\"schema_version\":1}",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn scan_recent_non_empty_sessions_picks_most_recent_non_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let diag = tmp.path().join(".ralph").join("diagnostics");
+        // Older empty session — must be skipped.
+        let old_empty = diag.join("2026-06-05T10-00-00");
+        std::fs::create_dir_all(&old_empty).unwrap();
+        // Older session with a non-empty recovery.jsonl.
+        let old_filled = diag.join("2026-06-05T11-00-00");
+        std::fs::create_dir_all(&old_filled).unwrap();
+        write_recovery(&old_filled, "{\"envelope\":{}}\n");
+        // Newer session, also non-empty.
+        let new_filled = diag.join("2026-06-05T12-00-00");
+        std::fs::create_dir_all(&new_filled).unwrap();
+        write_recovery(&new_filled, "{\"envelope\":{}}\n");
+
+        let scanned = scan_recent_non_empty_sessions(tmp.path()).expect("scanned");
+        // Tie-break goes to whichever directory mtime the FS reports
+        // last; both old_filled and new_filled qualify, so accept any
+        // of them, but never old_empty.
+        assert!(
+            scanned.root == old_filled || scanned.root == new_filled,
+            "unexpected pick: {}",
+            scanned.root.display()
+        );
+        assert!(scanned.warning.is_some());
+    }
+
+    #[test]
+    fn scan_recent_non_empty_sessions_skips_empty_sessions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let diag = tmp.path().join(".ralph").join("diagnostics");
+        let empty = diag.join("2026-06-05T10-00-00");
+        std::fs::create_dir_all(&empty).unwrap();
+        // recovery.jsonl does not exist → skip.
+        let result = scan_recent_non_empty_sessions(tmp.path());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn scan_recent_non_empty_sessions_treats_zero_byte_recovery_as_empty() {
+        // recovery.jsonl exists but is zero bytes — counted as empty,
+        // but a sibling diagnosis-summary.json qualifies it.
+        let tmp = tempfile::tempdir().unwrap();
+        let diag = tmp.path().join(".ralph").join("diagnostics");
+        let sess = diag.join("2026-06-05T10-00-00");
+        std::fs::create_dir_all(&sess).unwrap();
+        write_recovery(&sess, "");
+        write_diagnosis_summary(&sess);
+        let scanned = scan_recent_non_empty_sessions(tmp.path()).expect("scanned");
+        assert_eq!(scanned.root, sess);
+    }
+
+    #[test]
+    fn scan_recent_non_empty_sessions_returns_none_when_no_diag_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = scan_recent_non_empty_sessions(tmp.path());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn resolve_diagnostics_root_falls_back_to_recent_non_empty_session() {
+        // No live loop, no session pointer. The main repo has a
+        // diagnostics dir with a non-empty session. We must pick it
+        // and surface a warning explaining the fallback.
+        let tmp = tempfile::tempdir().unwrap();
+        let diag = tmp.path().join(".ralph").join("diagnostics");
+        let session = diag.join("2026-06-05T10-00-00");
+        std::fs::create_dir_all(&session).unwrap();
+        write_recovery(&session, "{\"envelope\":{}}\n");
+        let ralph_dir = tmp.path().join(".ralph");
+        std::fs::write(ralph_dir.join("loops.json"), "[]").unwrap();
+
+        let resolution = resolve_diagnostics_root_with_warnings(tmp.path());
+        assert_eq!(resolution.diagnostics_root, session);
+        assert!(
+            resolution.warnings.iter().any(|w| {
+                w.contains("session pointer and live loops both unavailable")
+                    && w.contains("most recent non-empty session")
+            }),
+            "expected fallback warning, got: {:?}",
+            resolution.warnings
+        );
+    }
+
+    #[test]
+    fn resolve_diagnostics_root_prefers_pointer_over_scan_fallback() {
+        // When both the pointer and a non-empty session exist, the
+        // pointer still wins (it carries richer provenance than the
+        // fallback scan). This protects the live-loop contract: a
+        // freshly-rewritten pointer is more authoritative than a
+        // older file recovered from disk.
+        let tmp = tempfile::tempdir().unwrap();
+        let worktree_session = tmp
+            .path()
+            .join("worktree")
+            .join(".ralph")
+            .join("diagnostics");
+        std::fs::create_dir_all(&worktree_session).unwrap();
+        let stale_session = tmp
+            .path()
+            .join(".ralph")
+            .join("diagnostics")
+            .join("2026-06-05T10-00-00");
+        std::fs::create_dir_all(&stale_session).unwrap();
+        write_recovery(&stale_session, "{\"envelope\":{}}\n");
+        write_session_pointer(tmp.path(), &worktree_session);
+        let ralph_dir = tmp.path().join(".ralph");
+        std::fs::write(ralph_dir.join("loops.json"), "[]").unwrap();
+
+        let resolution = resolve_diagnostics_root_with_warnings(tmp.path());
+        assert_eq!(resolution.diagnostics_root, worktree_session);
+        assert!(
+            !resolution.warnings.iter().any(|w| w.contains("most recent non-empty session")),
+            "scan fallback should not run when the pointer is valid"
         );
     }
 }

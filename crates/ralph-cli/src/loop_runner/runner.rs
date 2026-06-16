@@ -191,11 +191,67 @@ fn finalize_recovery_diagnosis(
         .diagnostics()
         .write_active_activations(&activations);
 
+    // D1 (2026-06-16, plan 002 Unit 5): refresh the session pointer on
+    // every termination path so `ralph diagnose --session latest` finds
+    // the **final** session after the loop ends. The startup path
+    // (run_loop_impl, before handle_termination) writes the pointer once,
+    // but if the loop completes or is terminated after writing recovery
+    // envelopes, the pointer needs to point at the same session the
+    // envelopes live in. Best-effort: a write failure is logged but does
+    // not block the loop's normal return. The pointer file path is
+    // last-write-wins when concurrent worktrees race; this is documented
+    // as the expected behavior in the runtime-diagnosis guide.
+    finalize_session_pointer(event_loop.diagnostics(), ctx.as_ref());
+
     // Suppress the unused-import lint when the function is the only
     // user of `TerminationHint`. The type is re-exported in case the
     // diagnostic report pipeline (U7) wants to introspect the hint
     // structure directly.
     let _ = std::marker::PhantomData::<TerminationHint>;
+}
+
+/// D1 (2026-06-16, plan 002 Unit 5): rewrite the session pointer at
+/// loop termination so `ralph diagnose` can find the worktree's
+/// diagnostics root after the loop ends and `loops.json` no longer
+/// carries an alive entry. Mirrors the startup-time pointer write at
+/// [`run_loop_impl`] (line ~488): best-effort, never blocks the loop
+/// runner's normal return. No-op for primary sessions (the pointer
+/// file format and the main-repo diagnostic root are unchanged for
+/// those) and for runs without an enabled diagnostics collector.
+fn finalize_session_pointer(
+    diagnostics: &ralph_core::diagnostics::DiagnosticsCollector,
+    ctx: Option<&ralph_core::LoopContext>,
+) {
+    let Some(ctx) = ctx else {
+        return;
+    };
+    if ctx.is_primary() {
+        return;
+    }
+    if !diagnostics.is_enabled() {
+        return;
+    }
+    match diagnostics.write_session_pointer(ctx.repo_root(), ctx.workspace()) {
+        Ok(true) => {
+            debug!(
+                target: "ralph_cli::loop_runner",
+                main_repo = %ctx.repo_root().display(),
+                "refreshed session pointer on loop termination",
+            );
+        }
+        Ok(false) => {
+            // Session dir is not inside workspace; nothing to do.
+        }
+        Err(err) => {
+            tracing::warn!(
+                target: "ralph_cli::loop_runner",
+                main_repo = %ctx.repo_root().display(),
+                error = %err,
+                "failed to refresh session pointer on loop termination; \
+                 ralph diagnose may not find this worktree session after the loop ends",
+            );
+        }
+    }
 }
 
 pub struct RpcSharedState {
@@ -1443,6 +1499,13 @@ async fn run_loop_impl_inner(
                     TerminationReason::ScopeViolationCircuitBreakerTripped { .. } => {
                         "scope_violation_circuit_breaker_tripped"
                     }
+                    // Unit 2 (2026-06-16-002 plan) take-3:
+                    // surfaced on the loop history record.  The
+                    // snake_case label matches the JSON
+                    // `as_str()` value so the two records align.
+                    TerminationReason::RecoverablePayloadExhausted { .. } => {
+                        "recoverable_payload_exhausted"
+                    }
                 };
 
                 if matches!(reason, TerminationReason::Interrupted) {
@@ -1527,6 +1590,14 @@ async fn run_loop_impl_inner(
                         }
                         TerminationReason::ScopeViolationCircuitBreakerTripped { .. } => {
                             "isolated scope violation circuit breaker tripped"
+                        }
+                        // Unit 2 (2026-06-16-002 plan) take-3:
+                        // surfaced on the merge-queue
+                        // `needs-review` record.  Free-form
+                        // human-readable label, mirror of the
+                        // snake_case label on the history record.
+                        TerminationReason::RecoverablePayloadExhausted { .. } => {
+                            "recoverable payload budget exhausted"
                         }
                     };
                     if let Err(e) = queue.mark_needs_review(loop_id, reason_str) {
@@ -1903,7 +1974,26 @@ async fn run_loop_impl_inner(
         // operator supervision. We do that check inline here so
         // the operator gets a chance to intervene before the
         // next hat dispatch.
-        let guidance_published = drift_engine.check_final_human_guidance(&mut event_loop);
+        //
+        // Unit 3 (2026-06-16-002 plan): pass the loop's
+        // `bootstrap_complete` flag.  While the loop is still
+        // in the bootstrap window (work.start → first legal
+        // coordinator work.ready) the engine MUST NOT publish
+        // a `human.guidance` — the coordinator's first prompt
+        // must not be derailed by recovery noise.  The Error /
+        // Critical branch (`check_termination_hint`) is
+        // intentionally NOT gated so a misbehaving coordinator
+        // can still be caught early.
+        // Unit 3 (2026-06-16-002 plan) bootstrap gate: the
+        // engine reads `bootstrap_complete` from `event_loop`
+        // internally so the caller no longer needs to pass it
+        // (the function's signature dropped the parameter to
+        // avoid a double `&mut self.state` borrow).  The
+        // `check_termination_hint` Error/Critical branch is
+        // intentionally NOT gated so a misbehaving coordinator
+        // can still be caught early.
+        let guidance_published =
+            drift_engine.check_final_human_guidance(&mut event_loop);
         if guidance_published {
             tracing::info!(
                 iteration = event_loop.state().iteration,
@@ -3408,6 +3498,120 @@ async fn run_loop_impl_inner(
                 Some(&payload_violation_report_relpath),
             );
             return Ok(TerminationReason::PayloadContractViolation);
+        }
+
+        // ── Unit 2 (2026-06-16-002 plan) recoverable-budget
+        //    exhaustion — drain the buffer and terminate ────────
+        // The recoverable set (`PayloadTypeMismatch` /
+        // `MissingRequiredField` / `TopicDenied`) is allowed to
+        // retry for `U2_REJECTION_RETRY_LIMIT` attempts.  When
+        // the (hat, topic, reason_class) bucket crosses the
+        // limit, `apply_event_policy_validation` pushes a
+        // `RecoverableExhaustion` into
+        // `event_loop.state.recoverable_exhaustion_buffer`.  The
+        // runner promotes the **first** entry into a
+        // `TerminationReason::RecoverablePayloadExhausted` and
+        // writes a `payload_contract`-shaped recovery envelope
+        // with `outcome = Failed` so `ralph diagnose` can
+        // attribute the failure to the right hat and reason
+        // class.  Subsequent entries in the same batch collapse
+        // — only the first retry_key is carried so the operator
+        // can grep `recovery.jsonl` for the cause.
+        if !event_loop.state().recoverable_exhaustion_buffer.is_empty() {
+            // Move the buffer out so we can release the
+            // `event_loop.state()` borrow before calling the
+            // other helpers.
+            let mut exhausted: Vec<ralph_core::event_loop::RecoverableExhaustion> =
+                std::mem::take(&mut event_loop.state_mut().recoverable_exhaustion_buffer);
+            // Sort by `(hat, topic, count)` for deterministic
+            // ordering when the buffer has multiple entries.
+            // Unit 2 plan §3 "split by (hat, reason_class)" is
+            // enforced by `is_recoverable_policy_finding`; the
+            // sort here just makes the promoted entry stable
+            // for `ralph diagnose` joins.
+            exhausted.sort_by(|a, b| {
+                a.hat.cmp(&b.hat)
+                    .then_with(|| a.topic.cmp(&b.topic))
+                    .then_with(|| a.reason_class.as_str().cmp(b.reason_class.as_str()))
+                    .then_with(|| a.count.cmp(&b.count))
+            });
+            let first = exhausted.into_iter().next().expect("checked is_empty");
+            let reason = TerminationReason::RecoverablePayloadExhausted {
+                hat: first.hat.clone(),
+                topic: first.topic.clone(),
+                reason_class: first.reason_class.as_str().to_string(),
+                count: first.count,
+            };
+
+            // Build a recovery envelope mirroring the
+            // `payload_contract` shape so the existing
+            // diagnosis plumbing picks it up.  We do NOT call
+            // `write_payload_contract_violation_report` here —
+            // the on-disk shape is "recovery envelope, not
+            // payload contract report" (the two are different
+            // failure modes).
+            let reason_code = format!(
+                "recoverable_payload_exhausted:{}",
+                first.reason_class.as_str()
+            );
+            let mut u2_builder = ralph_core::diagnosis::RecoveryDiagnosisEnvelope::builder()
+                .source(ralph_core::diagnosis::DiagnosisSource::PayloadContract)
+                .severity(ralph_core::diagnosis::DiagnosisSeverity::Critical)
+                .iteration(event_loop.state().iteration)
+                .source_hat(first.hat.as_str())
+                .topic(first.topic.as_str())
+                .reason_code(reason_code.clone())
+                .message(format!(
+                    "Recoverable payload budget exhausted on hat '{}' topic '{}' (reason_class={}, count={})",
+                    first.hat, first.topic, first.reason_class.as_str(), first.count
+                ))
+                .expected_action(
+                    "fix the payload schema or the hat's emit call — the same (hat, topic, reason_class) \
+                     was rejected 4 times in a row"
+                )
+                .safe_target(false)
+                .outcome(ralph_core::diagnosis::DiagnosisOutcome::Failed)
+                .retry_key(
+                    ralph_core::diagnosis::RecoveryDiagnosisEnvelopeBuilder::retry_key_from_parts(
+                        ralph_core::diagnosis::DiagnosisSource::PayloadContract,
+                        Some(first.hat.as_str()),
+                        Some(first.topic.as_str()),
+                        &reason_code,
+                        None,
+                    ),
+                );
+            if let Some(session_id) = event_loop.diagnostics().session_id() {
+                u2_builder = u2_builder.session_id(session_id);
+            }
+            let u2_envelope = u2_builder.build();
+            event_loop.record_recovery_envelope(
+                &u2_envelope,
+                vec![format!(
+                    "budget exhausted (count > {})",
+                    ralph_core::event_loop::U2_REJECTION_RETRY_LIMIT
+                )],
+            );
+
+            // U8: route the recoverable-exhausted termination
+            // through the unified termination pipeline so
+            // summary.md, history, deregister, RPC events, and
+            // the `## Diagnostics` hint all land in the same
+            // place they would for any other termination.
+            handle_termination(
+                &reason,
+                event_loop.state(),
+                &config.core.scratchpad.path,
+                &loop_history,
+                &loop_context,
+                auto_merge,
+                &prompt_content,
+                None,
+            );
+            if let Some(handle) = tui_handle.take() {
+                let _ = handle.await;
+            }
+            finalize_recovery_diagnosis(&mut event_loop, &loop_context, None);
+            return Ok(reason);
         }
 
         // ── PhaseWatcher: Check for experiment.evaluated during warmup ───────

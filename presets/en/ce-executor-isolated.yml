@@ -108,13 +108,12 @@ event_loop:
         require_test_evidence:
           mode: "optional"  # "optional" | "required_payload_field"
           payload_field: "tests"  # field name to check when mode is "required_payload_field"
-  # U7: Payload contract schemas (work.ready, work.done, review.*, plan.*, etc.)
-  # are inlined below as `event_policy.schemas`. The previous
-  # `schema_file: "../schemas/ce-executor.yml"` approach was broken for
-  # builtin presets (no on-disk preset file for `resolve_schema_files`
-  # to anchor the relative path against) and has been folded in.
-  # Mirror in `presets/schemas/ce-executor.yml` is kept as a reference
-  # copy only; do not reintroduce `schema_file` here.
+  # Plan 2026-06-16-002 Unit 1: `presets/schemas/ce-executor-isolated.yml`
+  # is the authoring SSOT for `event_policy.schemas`; `build.rs` deep-merges
+  # it into the embedded preset at compile time. The inline `schemas:` block
+  # below is a per-topic override layer during transition — prefer editing
+  # the SSOT file and clearing matching inline entries. Do not reintroduce
+  # `schema_file` here (broken for builtin presets without on-disk anchor).
   event_policy:
     enabled: true
     mode: enforce
@@ -137,16 +136,19 @@ event_loop:
     # a non-conforming event under this preset.
     require_policy_check_for_cli_emit: true
     allow_unsafe_cli_emit: false
-    # U3: topic-deny rules — exact hat_id + topic match, no glob.
+    # Unit 4: topic-deny rules with glob support.
     # executor must never emit build.done (it is a review-synthesizer output).
-    # U4: also lock ralph (the loop-runner fallback hat) out of every
+    # coordinator must never emit build.done or any debug.* topic.
+    # ralph (the loop-runner fallback hat) is locked out of every
     # workflow topic that downstream hats own. The JSONL origin guard
     # already rejects ralph at read time, but enforcing the same
     # deny-list at the policy layer means an event never even lands in
-    # the events file under ralph's hat. Exact match only — glob is
-    # intentionally not supported.
+    # the events file under ralph's hat.
+    # The `debug.*` glob uses Topic::matches_str for segment wildcard matching.
     topic_deny_rules:
       - {hat_id: executor, topic: build.done}
+      - {hat_id: coordinator, topic: build.done}
+      - {hat_id: coordinator, topic: 'debug.*'}
       - {hat_id: ralph, topic: review.wave.ready}
       - {hat_id: ralph, topic: review.passed}
       - {hat_id: ralph, topic: work.ready}
@@ -166,6 +168,15 @@ event_loop:
     # ce-executor-isolated). The 50-line threshold matches the wave
     # gate so the two stay synchronized.
     trivial_step_max_changed_lines: 50
+    # NOTE: schemas below are merged from
+    # `presets/schemas/ce-executor-isolated.yml` by `build.rs` at compile
+    # time (plan 2026-06-16-002 Unit 1). That file is the authoring
+    # single source of truth; the entries here are kept as a per-field
+    # override layer during the transition. For stable topics, prefer
+    # editing the SSOT file and clearing the matching inline entry here
+    # so the merge is trivially auditable. Do not reintroduce
+    # `schema_file` — `resolve_schema_files` cannot anchor a relative
+    # path on a builtin preset.
     schemas:
       work.ready:
         required_fields: [plan_name, plan_path, task_id, task_key, step, complexity]

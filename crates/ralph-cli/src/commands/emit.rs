@@ -10,7 +10,7 @@ use clap::Parser;
 use ralph_core::config::HatExecutionMode;
 use ralph_core::emit_schema_hint::fix_hint_for_hat_topic;
 use ralph_core::{
-    EventPolicyConfig, RalphConfig, UrgentSteerStore,
+    RalphConfig, UrgentSteerStore,
     diagnosis::{
         DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, EvidenceKind, EvidenceRef,
         RecoveryDiagnosisEnvelope, RecoveryJournalEntry,

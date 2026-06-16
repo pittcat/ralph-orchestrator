@@ -162,6 +162,13 @@ fn resume_hint_for(reason: &TerminationReason, loop_id: &str) -> Option<String> 
             // a hard stop; the hat must be fixed before continuing.
             None
         }
+        // Unit 2 (2026-06-16-002 plan) take-3: a recoverable
+        // bucket burned past its 4-attempt budget.  This is a
+        // fail-closed terminal state — the operator must fix
+        // the payload schema (or the hat's emit call) before
+        // the loop can be resumed safely, so we suppress the
+        // resume hint and point at `ralph diagnose` instead.
+        TerminationReason::RecoverablePayloadExhausted { .. } => None,
         _ => Some(format!("ralph run --continue --loop-id {loop_id}")),
     }
 }
@@ -269,6 +276,17 @@ pub fn print_termination(
         }
         TerminationReason::ScopeViolationCircuitBreakerTripped { .. } => {
             (RED, "✗", "Isolated scope violation circuit breaker tripped")
+        }
+        // Unit 2 (2026-06-16-002 plan) take-3: a recoverable
+        // bucket burned past its bounded budget (4th attempt).
+        // Operator-facing icon and label mirror the related
+        // `PayloadContractViolation` shape; the marker character
+        // is `⏸` (loop paused) to match the existing
+        // `PayloadContractViolation` and `RecoveryExhausted`
+        // rows so the operator's eye does not have to learn
+        // a new glyph.
+        TerminationReason::RecoverablePayloadExhausted { .. } => {
+            (RED, "⏸", "Recoverable payload budget exhausted")
         }
     };
 

@@ -539,6 +539,13 @@ fn format_termination_reason(reason: &TerminationReason) -> String {
         TerminationReason::ScopeViolationCircuitBreakerTripped { .. } => {
             "ScopeViolationCircuitBreakerTripped".to_string()
         }
+        // Unit 2 (2026-06-16-002 plan) take-3: surfaced on
+        // the bench report's `termination_reason` column.  The
+        // literal matches the variant name so existing bench
+        // dashboards keep parsing it.
+        TerminationReason::RecoverablePayloadExhausted { .. } => {
+            "RecoverablePayloadExhausted".to_string()
+        }
     }
 }
 

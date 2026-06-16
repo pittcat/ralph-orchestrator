@@ -1,0 +1,84 @@
+# ce_executor_bootstrap_recovery: Bootstrap recovery contract
+#
+# 2026-06-16-002 plan U6: 端到端场景与文档收尾
+#
+# This BDD scenario exercises the bootstrap recovery contract
+# introduced in Unit 1 (recoverable payload contract):
+#
+#   - iteration 0: coordinator parses the plan and emits a valid
+#     `work.start`.  The `## WAVE CONTEXT` / `bootstrap_complete` flag
+#     is set on the first `work.ready` to anchor the executor.
+#   - iteration 1: the coordinator's first `work.ready` attempt
+#     omits `reviewed_task_id` and `completed_step`, but those are
+#     bootstrap-only fields — Unit 1's `bootstrap_complete` carve-out
+#     lets the plain `work.ready` pass origin + policy + execution
+#     contract.  The event must reach the executor hat.
+#   - iteration 2: executor emits `work.done` (with all required
+#     fields).  Origin + policy accept; routes to review-coordinator.
+#   - iteration 3: review-coordinator dispatches a wave.
+#   - iteration 4: aggregator completes the loop with LOOP_COMPLETE.
+#
+# The wire-level event flow is mirrored by ce_executor_recovery.yml;
+# this scenario pinpoints the bootstrap carve-out specifically
+# (no `reviewed_task_id` on the first `work.ready`).
+
+name: ce_executor_bootstrap_recovery
+description: Bootstrap recovery contract — first work.ready omits reviewed_task_id and is accepted (U1 carve-out)
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 6
+  hats:
+    coordinator:
+      subscribes_to:
+        - work.start
+      publishes:
+        - work.ready
+        - work.failed
+    executor:
+      subscribes_to:
+        - work.ready
+      publishes:
+        - work.done
+        - work.failed
+    review-coordinator:
+      subscribes_to:
+        - work.done
+      publishes:
+        - review.wave.ready
+        - review.passed
+
+# 5 mock responses.  Iter 0 = plan parsed (work.start).  Iter 1 =
+# first work.ready WITHOUT reviewed_task_id (bootstrap carve-out).
+# Iter 2 = work.done.  Iter 3 = review.wave.ready.  Iter 4 = LOOP_COMPLETE.
+mock_responses:
+  - |
+    <event topic="work.start" plan_name="plan-b" plan_path="docs/plans/b.md" task_id="t1" task_key="k1" step="step-01">
+    Plan parsed.
+    </event>
+  - |
+    <event topic="work.ready" plan_name="plan-b" plan_path="docs/plans/b.md" task_id="t1" task_key="k1" step="step-01" complexity="small">
+    Work ready (bootstrap, no reviewed_task_id).
+    </event>
+  - |
+    <event topic="work.done" plan_name="plan-b" plan_path="docs/plans/b.md" task_id="t1" task_key="k1" step="step-01" commit_count="1" changed_lines="10">
+    Implementation done.
+    </event>
+  - |
+    <event topic="review.wave.ready" plan_name="plan-b" plan_path="docs/plans/b.md" task_id="t1" task_key="k1" step="step-01">
+    Reviewing.
+    </event>
+  - |
+    <event topic="LOOP_COMPLETE" plan_name="plan-b" plan_path="docs/plans/b.md" task_id="t1" task_key="k1" step="step-01">
+    Done.
+    </event>
+
+expected:
+  iterations: 5
+  events:
+    - topic: work.start
+    - topic: work.ready
+    - topic: work.done
+    - topic: review.wave.ready
+    - topic: LOOP_COMPLETE
+  completion: true

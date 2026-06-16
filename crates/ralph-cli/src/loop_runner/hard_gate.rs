@@ -45,6 +45,14 @@ pub fn should_gate_missing_events(
     let Some(config) = event_loop.registry().get_config(hat_id) else {
         return false;
     };
+
+    // Unit 6 (2026-06-17-001): GateWaveMutex — don't gate if a wave obligation
+    // is pending for this hat. When a hat has emitted a wave batch (e.g.
+    // `review.wave.ready`) but the workers haven't all reported back yet, the
+    // missing-event gate should NOT fire — the hat is waiting on the wave,
+    // not dead. The obligation is cleared when the wave reaches a terminal
+    // phase (Closed / PartialClosed / Failed / Degraded).
+    //
     // U4: opt-in hats get the precise activation-level path.  Legacy
     // presets without `obligations` keep the blanket rule.
     let matching_obligations: Vec<_> = event_loop

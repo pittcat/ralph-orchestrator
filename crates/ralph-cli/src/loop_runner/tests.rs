@@ -7950,6 +7950,9 @@ hats:
     );
 }
 
+// 2026-06-17-001 Unit 6 tests removed: they depended on the
+// `flow_lifecycle` registry which is not part of the 2026-06-16-002 plan.
+
 #[test]
 fn test_p1_conditional_obligation_gates_when_commit_count_positive() {
     // 2026-06-08 fix (P1): when a hat declares
@@ -8331,6 +8334,7 @@ hats:
             },
             message: "Missing required field: depth".to_string(),
         },
+        reason_class: None,
     };
     let wave_policy_rejections: Vec<ralph_core::PolicyRejection> =
         (0..7).map(|_| policy_rejection()).collect();
@@ -8491,6 +8495,7 @@ hats:
             },
             message: "Missing required field: depth".to_string(),
         },
+        reason_class: None,
     };
     let wave_policy_rejections: Vec<ralph_core::PolicyRejection> =
         (0..5).map(|_| wave_rejection()).collect();
@@ -8560,6 +8565,7 @@ fn test_wave_policy_rejection_guidance_dedupes_findings() {
             },
             message: "Missing required field: depth".to_string(),
         },
+        reason_class: None,
     };
     let rejections: Vec<ralph_core::PolicyRejection> =
         (0..7).map(|_| wave_rejection.clone()).collect();
@@ -8804,6 +8810,7 @@ fn test_u3_wave_policy_rejection_guidance_pins_recovery_hat() {
             },
             message: "Missing required field: depth".to_string(),
         },
+        reason_class: None,
     };
     let rejections = vec![rejection];
 
@@ -10928,7 +10935,6 @@ struct WaveTestSetup {
     event_loop: ralph_core::EventLoop,
     events_file: std::path::PathBuf,
     backend: ralph_adapters::CliBackend,
-    worker_path: std::path::PathBuf,
 }
 
 #[cfg(unix)]
@@ -10962,7 +10968,6 @@ fn setup_wave_test() -> WaveTestSetup {
         event_loop,
         events_file,
         backend,
-        worker_path,
     }
 }
 
@@ -11471,7 +11476,6 @@ async fn u3_worker_failure_emits_synthetic_result_for_aggregator() {
 async fn u3_two_independent_waves_route_to_separate_aggregations() {
     // P2 finding #12: shared setup helper.
     let setup = setup_wave_test();
-    let workspace = &setup.workspace;
     let mut event_loop = setup.event_loop;
     let events_file = &setup.events_file;
     let backend = &setup.backend;

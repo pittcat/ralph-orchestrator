@@ -429,6 +429,7 @@ fn chrono_like_now() -> String {
 /// invocation will re-encounter it, so the cache is not load-bearing
 /// for correctness.  `mtime` + `size` catches the practical case of
 /// "nothing on disk changed since the last iteration".
+#[cfg(test)]
 fn file_mtime_sentinel(paths: &[PathBuf]) -> (u64, u64) {
     use std::time::{SystemTime, UNIX_EPOCH};
     let now_unix = SystemTime::now()

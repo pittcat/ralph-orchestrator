@@ -153,9 +153,18 @@ pub fn check_schema_reference_parity(
                     "Inline event_policy.schemas differs from presets/schemas/{preset_name}"
                 ),
             )
+            // Plan 2026-06-16-002 Unit 1: with the build.rs SSOT
+            // merge, drift between the inline block and the SSOT file
+            // is the **authoring-time** signal that the operator
+            // needs to either (a) align the two, or (b) rebuild so
+            // the merged preset picks up the SSOT changes. Rebuilding
+            // without aligning will not fix the drift because the
+            // inline override still wins per-key — but it will at
+            // least surface the divergence here.
             .with_action_hint(format!(
-                "Edit either the inline block or presets/schemas/{preset_name} \
-                 so the two match, then rerun `ralph preset check`."
+                "Rebuild to apply SSOT (`cargo build -p ralph-cli`), then either align \
+                 presets/schemas/{preset_name} with the inline block, or remove the inline \
+                 entries that override SSOT defaults. Rerun `ralph preset check` to confirm."
             )),
         );
     }
@@ -240,7 +249,6 @@ fn yaml_key_cmp(a: &serde_yaml::Value, b: &serde_yaml::Value) -> std::cmp::Order
 mod tests {
     use super::*;
     use crate::config::{EventPolicyConfig, EventSchema, HatConfig, PayloadType};
-    use ralph_proto::Topic;
     use std::collections::HashMap;
 
     fn policy_with_schemas() -> EventPolicyConfig {

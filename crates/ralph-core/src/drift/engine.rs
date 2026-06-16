@@ -365,6 +365,18 @@ impl DriftEngine {
         if !self.config.enabled {
             return false;
         }
+        // Unit 3 (2026-06-16-002 plan): during the coordinator
+        // bootstrap window we must NOT publish any
+        // `human.guidance` event.  The build_prompt guard already
+        // drops the events on the consumer side, but emitting
+        // them at all would (a) be visible to RObot / Telegram
+        // and (b) inflate the bus for downstream readers.  Skip
+        // the call entirely while `in_bootstrap_phase()` is
+        // true; the Warning hint stays in the responder and
+        // will fire naturally once `bootstrap_complete` flips.
+        if event_loop.in_bootstrap_phase() {
+            return false;
+        }
         let Some(hint) = event_loop.recovery_responder().peek_termination_hint() else {
             return false;
         };
@@ -864,6 +876,11 @@ mod tests {
         );
         engine.begin_iteration(&mut event_loop, 1);
         event_loop.set_iteration_for_test(1);
+        // Unit 3 (2026-06-16-002 plan): `check_final_human_guidance`
+        // short-circuits while `in_bootstrap_phase()` is true so the
+        // bootstrap window is human-guidance free.  Flip the gate
+        // here so the test exercises the post-bootstrap path.
+        event_loop.state_mut().bootstrap_complete = true;
 
         let env = envelope_for(
             "k:ralph:*:stall:*",
@@ -887,6 +904,52 @@ mod tests {
         // the bus is not spammed.
         let published2 = engine.check_final_human_guidance(&mut event_loop);
         assert!(!published2, "same iteration must not re-publish");
+    }
+
+    /// Unit 3 (2026-06-16-002 plan) companion test:
+    /// `check_final_human_guidance` MUST return `false` while
+    /// the loop is still in the bootstrap window.  The Warning
+    /// hint stays in the responder (and the operator will see
+    /// it once `bootstrap_complete` flips on the next iteration),
+    /// but we MUST NOT publish a `human.guidance` event into
+    /// the bus during the bootstrap window — the coordinator's
+    /// first prompt is supposed to be guidance-free so the
+    /// first legal handoff wins over stale human input.
+    #[test]
+    fn lifecycle_final_warning_suppressed_during_bootstrap() {
+        let diag = diagnosis_config(true, 1, 1);
+        let config = make_config_with_diagnosis(Arc::clone(&diag));
+        let mut event_loop = crate::event_loop::EventLoop::new(config);
+        event_loop.initialize("lifecycle_final_warning_bootstrap");
+        // Sanity: we ARE in the bootstrap window — no need to
+        // flip any flag here.
+        assert!(event_loop.in_bootstrap_phase());
+        let mut engine = DriftEngine::enabled(
+            Arc::clone(&diag),
+            RequiredFields::new(),
+            DeclaredEdges::new(),
+        );
+        engine.begin_iteration(&mut event_loop, 1);
+        event_loop.set_iteration_for_test(1);
+
+        let env = envelope_for(
+            "k:ralph:*:stall:*",
+            1,
+            DiagnosisSeverity::Warning,
+            false,
+            None,
+            DiagnosisSource::StallRecovery,
+        );
+        let _ = event_loop.recovery_responder_mut().record_finding(&env, 1);
+        // The bootstrap gate MUST suppress the warning
+        // publication.  The Warning hint stays in the
+        // responder; we only check that nothing has been
+        // published to the bus.
+        let published = engine.check_final_human_guidance(&mut event_loop);
+        assert!(
+            !published,
+            "bootstrap window MUST suppress drift Warning -> human.guidance; got published={published}"
+        );
     }
 
     /// Lifecycle 4: RECOVERED.

@@ -103,6 +103,15 @@ event_loop:
   event_policy:
     enabled: true
     mode: enforce
+    # NOTE: schemas below are merged from
+    # `presets/schemas/ce-executor-wave.yml` by `build.rs` at compile
+    # time (plan 2026-06-16-002 Unit 1). That file is the authoring
+    # single source of truth; the entries here are kept as a per-field
+    # override layer during the transition. For stable topics, prefer
+    # editing the SSOT file and clearing the matching inline entry here
+    # so the merge is trivially auditable. Do not reintroduce
+    # `schema_file` — `resolve_schema_files` cannot anchor a relative
+    # path on a builtin preset.
     schemas:
       work.batch.ready:
         required_fields: [plan_name, plan_path, step, task_ids, task_keys, parallel_mode]

@@ -708,6 +708,30 @@ fn test_ce_executor_recovery_scenario() {
 }
 
 // ──────────────────────────────────────────────────────────────────────
+// 2026-06-16-002 plan U6: bootstrap recovery contract
+// ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_ce_executor_bootstrap_recovery_scenario() {
+    // First work.ready omits bootstrap-only reviewed_task_id and is accepted,
+    // then executor work.done, review wave, and LOOP_COMPLETE complete the loop.
+    let yaml = load_scenario("tests/scenarios/ce_executor_bootstrap_recovery.yml");
+    run_scenario(yaml);
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 2026-06-16-002 plan U6: coordinator build.deny deny rule
+// ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_u6_coordinator_build_done_deny_scenario() {
+    // Coordinator cannot emit build.done; the event is rejected and the loop
+    // terminates without completion.
+    let yaml = load_scenario("tests/scenarios/u6_coordinator_build_done_deny.yml");
+    run_scenario(yaml);
+}
+
+// ──────────────────────────────────────────────────────────────────────
 // 2026-06-09: O3 regression — verdict_gate keeps loop open on fail
 // ──────────────────────────────────────────────────────────────────────
 

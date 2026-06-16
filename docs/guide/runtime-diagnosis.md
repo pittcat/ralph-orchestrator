@@ -101,7 +101,7 @@ telemetry:
 
 ## 4. Recovery Diagnosis Envelope 模型
 
-U2 的 `RecoveryDiagnosisEnvelope`（schema_version=1）是 8 个 `source` × 4 个 `severity` × 6 个 `outcome` 的笛卡尔积，外加一个稳定的 `retry_key` 用来跨迭代聚合。
+U2 的 `RecoveryDiagnosisEnvelope`（schema_version=1）是 9 个 `source` × 4 个 `severity` × 6 个 `outcome` 的笛卡尔积，外加一个稳定的 `retry_key` 用来跨迭代聚合。
 
 ### 9 个 `source`（诊断源）
 
@@ -116,6 +116,7 @@ U2 的 `RecoveryDiagnosisEnvelope`（schema_version=1）是 8 个 `source` × 4 
 | `hook_retry` | pre/post agent hook 被重试 | `hook_timeout`, `hook_nonzero` |
 | `loop_stale` | 整个 loop 跨迭代无进展 | `stale` |
 | `agent_doc_sync` | `ralph run` 启动时同步 managed doc blocks 失败或降级 | `sync_failed`, `sync_completed`, `sync_up_to_date` |
+| `flow_lifecycle` | wave / parallel-flow 生命周期状态转换（U2/U9） | `wave_spawn_failed`, `aggregate_timeout`, `partial_threshold`, `all_workers_reported` |
 
 ### 6 个 `outcome`（终态）
 
@@ -156,6 +157,49 @@ U2 的 `RecoveryDiagnosisEnvelope`（schema_version=1）是 8 个 `source` × 4 
 ```
 
 `retry_key` 格式：`"{source}:{target_or_*}:{topic_or_*}:{reason_code}:{field_or_*}"`，5 段都是 snake_case + 大小写归一化。`ralph diagnose` 用它做跨迭代聚合，因此**改 source 枚举名 / 改 reason_code 字符串是 breaking change**。
+
+### Flow Lifecycle Envelope（flow_lifecycle source）
+
+`flow_lifecycle` 是 2026-06-17-001 计划（U2/U9）引入的第十个诊断 source，专门追踪 wave / parallel-flow 的生命周期状态转换。每条 envelope 记录一次状态转移，写入 `recovery.jsonl`。
+
+**状态机**（`FlowPhase`）：
+
+```
+Detected → Spawning → WorkersActive → Aggregating → Closed
+                                                   ↘ PartialClosed
+                           ↘ Failed（spawn 失败或 isolated scope 拒绝）
+                           ↘ Degraded（mechanism 发出 degraded terminal）
+```
+
+**Envelope 字段：**
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `flow_unit_id` | string | wave 唯一标识（首版即 `wave_id`），也是 `retry_key` 的第一段 |
+| `target_hat` | string | owning hat id |
+| `wave_total` | u32 | `wave_total`，声明的 worker 总数 |
+| `received_count` | u32 | 已上报结果的 worker 数量 |
+| `missing_indices` | [u32] | 未上报的 worker 索引（如 `PartialClosed` 时填充） |
+| `phase` | string | 当前 `FlowPhase.label()`（`detected` / `spawning` / `workers_active` / `aggregating` / `closed` / `partial_closed` / `failed` / `degraded`） |
+| `reason_code` | string? | 仅终态填充，典型值：`wave_spawn_failed` / `aggregate_timeout` / `partial_threshold` / `all_workers_reported` |
+| `reason_message` | string? | 人类可读原因描述 |
+| `configured_aggregate_secs` | u64 | 该 wave 配置的聚合超时秒数 |
+| `configured_worker_secs` | u64 | 该 wave 配置的单 worker 超时秒数 |
+| `started_at` | string | RFC3339 时间戳，记录 wave 首次检测时间 |
+| `last_transition_at` | string | RFC3339 时间戳，最近一次状态转换时间 |
+
+**典型 reason_code 映射：**
+
+| 触发条件 | reason_code | 对应 phase |
+|---|---|---|
+| dispatcher 发出 spawn 请求 | `spawn_requested` | `spawning` |
+| 所有 worker 成功 spawn | `workers_spawned` | `workers_active` |
+| spawn 失败或全被 isolated scope 拒绝 | `wave_spawn_failed` | `failed` |
+| 所有 worker 均已上报 | `all_workers_reported` | `closed` |
+| 部分上报且达到 partial 阈值 | `partial_threshold` | `partial_closed` |
+| mechanism 发出 degraded terminal | `aggregate_timeout` / `escalation` | `degraded` |
+
+> `flow_lifecycle` envelope 是只读的观测信号，不影响 `WaveDispatchOutcome` 或 `PartialWavePolicy` 的内部行为。它通过 `FlowLifecycleRegistry`（`crates/ralph-core/src/flow_lifecycle.rs`）写入，供 `ralph diagnose` 渲染 wave 健康状态。
 
 ---
 
@@ -256,6 +300,7 @@ U2 的 `RecoveryDiagnosisEnvelope`（schema_version=1）是 8 个 `source` × 4 
 | `hook_retry` | 检查 `pre_agent` / `post_agent` hook 是否有超时或非零退出码 |
 | `loop_stale` | 运行 `ralph loops` 确认是否有并行 loop 在 hold state |
 | `agent_doc_sync` | 检查 `ralph.yml` 中 `agent_doc_sync.on_error` 设置；如为 `warn`，sync 失败不阻塞启动但会记录；如为 `strict`，进程已退出 78。确认目标文件（`CLAUDE.md` / `AGENTS.md`）可写且文件锁无竞争。详见 [Managed Agent Doc Blocks](managed-blocks.md) |
+| `flow_lifecycle` | 查看 `recovery.jsonl` 中 `flow_lifecycle` 条目的 `phase` 与 `reason_code`：若为 `failed` 说明 spawn 失败或被 isolated scope 全量拒绝；若为 `degraded` 说明 mechanism 触发了 degraded 路径；若 `received_count < wave_total` 且 `phase=workers_active` 说明 worker 还在运行或部分卡住 |
 
 如果某个 finding 已经 `escalated`，会附加一句"retry_key `<X>` 已 escalation N 次（first→last），建议人工介入或调高 `telemetry.runtime_diagnosis.max_repeated_recoveries`"。
 
@@ -354,6 +399,22 @@ the collector's session directory matches the worktree's
 is required to opt a worktree loop into runtime diagnosis — set
 `RALPH_DIAGNOSTICS=1` (or `telemetry.runtime_diagnosis.enabled: true`)
 in the usual way.
+
+### Session pointer 回退（2026-06-16-002 Unit 5）
+
+Loop 启动时会在**主仓**写入 `.ralph/diagnostics-session-pointer.json`
+（`{"session_path","written_at"}`），指向当前 workspace 的诊断 session。
+Loop **正常结束 / TUI 退出 / 可恢复终止** 时会再次回写，指向最终 session。
+
+`ralph diagnose --session latest` 解析顺序：
+
+1. `loops.json` 里最新 active loop 的 workspace
+2. 主仓 `diagnostics-session-pointer.json`
+3. 扫描主仓 `.ralph/diagnostics/*/`，取最近修改且 `recovery.jsonl` 非空（或存在 `diagnosis-summary.json`）的 session
+4. 回退到 `<cwd>/.ralph/diagnostics`
+
+并发 worktree 时 pointer 为 **last-write-wins**（最后完成的 loop 覆盖）。
+需要精确 session 时用 `--diagnostics-root <worktree>/.ralph/diagnostics`。
 
   -c, --config <CONFIG>   父命令通用参数：ralph.yml 或 core.field=value 覆盖
   -H, --hats <HATS>       父命令通用参数：hat 集合（一般 diagnose 不需要）

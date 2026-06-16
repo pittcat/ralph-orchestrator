@@ -18,18 +18,27 @@
 //
 // Authoring rules live at the top of `presets/manifest.yml`.
 //
+// Schema SSOT merge (plan 2026-06-16-002 Unit 1):
+// For every preset listed in the manifest, this script ALSO consults
+// `presets/schemas/<name>.yml` if present. That file is the authoring
+// single source of truth (SSOT) for `event_policy.schemas`. The script
+// deep-merges the SSOT `schemas` block into the preset YAML's
+// `event_loop.event_policy.schemas` block, with SSOT providing the base
+// and any inline `schemas` block in the preset acting as a per-key
+// override layer (kept during the transition so a curated override can
+// hotfix a topic without round-tripping through SSOT). The merged YAML
+// is what the binary actually embeds — the four consumer chains
+// (CLI precheck, loop gate, drift engine, prompt builder) read the
+// embedded copy and therefore see one canonical schema set. When the
+// `presets/schemas/` file is absent, the merge is skipped and the
+// preset YAML is copied verbatim (preserves the historical behaviour
+// for presets that have no SSOT file).
+//
 // Directories that are NEVER read by this script:
 //   * `presets/zh/`         — Chinese reference copies, not embedded.
 //   * `presets/extras/`     — Orphan / demo files, not embedded.
 //   * `presets/minimal/`    — Used by the smoke-test fixture loader,
 //                              read from the canonical path at runtime.
-//   * `presets/schemas/`    — Reference copies of payload schemas that
-//                              USED to be loaded at runtime via
-//                              `event_policy.schema_file`. That path is
-//                              now broken (see audit fix 2026-06-03 in
-//                              commit history) and the schemas are
-//                              inlined into `presets/en/*.yml` instead.
-//                              Kept here for diff-able reference only.
 
 use std::fs;
 use std::path::PathBuf;
@@ -60,9 +69,21 @@ fn main() {
         .join("..")
         .join("presets")
         .join("en");
+    let schemas_dir = PathBuf::from(&manifest_dir)
+        .join("..")
+        .join("..")
+        .join("presets")
+        .join("schemas");
     let dest = PathBuf::from(&out_dir).join("presets");
 
     println!("cargo:rerun-if-changed={}", manifest_path.display());
+    // Rerun when any schemas/ file changes: a new SSOT file should
+    // re-trigger the merge without the operator having to touch a
+    // preset or the manifest. The directory itself is also rerun-if-
+    // changed so adding new files is picked up on the next build.
+    if schemas_dir.is_dir() {
+        println!("cargo:rerun-if-changed={}", schemas_dir.display());
+    }
 
     let manifest_text = match fs::read_to_string(&manifest_path) {
         Ok(t) => t,
@@ -122,16 +143,64 @@ fn main() {
                 src.display()
             );
         }
-        if let Err(e) = fs::copy(&src, &dest_file) {
+        println!("cargo:rerun-if-changed={}", src.display());
+
+        // Schema SSOT merge (plan 2026-06-16-002 Unit 1). When a
+        // matching `presets/schemas/<name>.yml` exists, deep-merge its
+        // top-level `schemas` mapping into `event_loop.event_policy.schemas`
+        // (SSOT base, inline override). Without SSOT, copy verbatim —
+        // preserves the historical behaviour for presets that have no
+        // SSOT file yet.
+        let ssot_path = schemas_dir.join(format!("{}.yml", name));
+        let merged_text = if ssot_path.is_file() {
+            println!("cargo:rerun-if-changed={}", ssot_path.display());
+            let preset_text = fs::read_to_string(&src).unwrap_or_else(|e| {
+                panic!(
+                    "build.rs: failed to read preset {}: {}",
+                    src.display(),
+                    e
+                )
+            });
+            let ssot_text = fs::read_to_string(&ssot_path).unwrap_or_else(|e| {
+                panic!(
+                    "build.rs: failed to read schema SSOT {}: {}",
+                    ssot_path.display(),
+                    e
+                )
+            });
+            match merge_preset_with_schema(&preset_text, &ssot_text, name) {
+                Ok(s) => s,
+                Err(e) => panic!(
+                    "build.rs: failed to merge schema SSOT into preset `{}`: {} \
+                     (preset={}, ssot={})",
+                    name,
+                    e,
+                    src.display(),
+                    ssot_path.display()
+                ),
+            }
+        } else {
+            // No SSOT file: fall back to byte-identical copy. This
+            // keeps every preset that has no `presets/schemas/<n>.yml`
+            // working without any change in behaviour.
+            match fs::read_to_string(&src) {
+                Ok(s) => s,
+                Err(e) => panic!(
+                    "build.rs: failed to read preset {}: {}",
+                    src.display(),
+                    e
+                ),
+            }
+        };
+
+        if let Err(e) = fs::write(&dest_file, merged_text.as_bytes()) {
             panic!(
-                "build.rs: failed to copy {} -> {}: {}",
-                src.display(),
+                "build.rs: failed to write {}: {}",
                 dest_file.display(),
                 e
             );
         }
         copied += 1;
-        println!("cargo:rerun-if-changed={}", src.display());
     }
 
     eprintln!(
@@ -207,4 +276,147 @@ fn parse_embedded_names(text: &str) -> Result<Vec<String>, String> {
         return Err("no `embedded:` key found".to_string());
     }
     Ok(names)
+}
+
+/// Deep-merge a `presets/schemas/<name>.yml` (SSOT) into a
+/// `presets/en/<name>.yml` (preset) and return the merged YAML text.
+///
+/// Merge semantics (plan 2026-06-16-002 Unit 1):
+///   * Parse both files as `serde_yaml::Value`.
+///   * Read the SSOT's top-level `schemas` mapping and the preset's
+///     `event_loop.event_policy.schemas` mapping.
+///   * Build a merged mapping where SSOT is the base; for each topic
+///     present in the preset's inline block, deep-merge the SSOT
+///     entry with the inline entry (inline values win per-field).
+///   * Replace the preset's `event_loop.event_policy.schemas` with the
+///     merged mapping (or insert it if absent). Other preset sections
+///     are left untouched.
+///   * Re-emit the YAML using `serde_yaml::to_string`. Block/flow
+///     style is not preserved — the output uses serde_yaml defaults.
+///     This is acceptable because the embedded YAML is consumed by
+///     serde_yaml on read; downstream comparison goes through
+///     `serde_yaml::Value` (see `canonicalize_schemas` in presets.rs).
+fn merge_preset_with_schema(
+    preset_text: &str,
+    ssot_text: &str,
+    preset_name: &str,
+) -> Result<String, String> {
+    let mut preset: serde_yaml::Value =
+        serde_yaml::from_str(preset_text).map_err(|e| format!("preset YAML: {e}"))?;
+    let ssot: serde_yaml::Value =
+        serde_yaml::from_str(ssot_text).map_err(|e| format!("SSOT YAML: {e}"))?;
+
+    // Extract SSOT schemas (top-level mapping under SSOT file). A missing
+    // or non-mapping `schemas` block is treated as "no SSOT override",
+    // which is unusual for a SSOT file but we tolerate it gracefully.
+    let ssot_schemas = match ssot.get("schemas") {
+        Some(serde_yaml::Value::Mapping(m)) => m.clone(),
+        Some(other) => {
+            return Err(format!(
+                "SSOT `schemas` must be a mapping of topic → schema, found {}",
+                yaml_value_kind(other)
+            ));
+        }
+        None => serde_yaml::Mapping::new(),
+    };
+
+    // Locate `event_loop.event_policy` in the preset. If absent or
+    // `event_policy` is not a mapping, we synthesise the minimum
+    // structure to host the merged schemas. This matches
+    // `EventPolicyConfig`'s deserialisation defaults.
+    let event_loop = ensure_mapping(&mut preset, &["event_loop"])?;
+    let event_policy = ensure_mapping(event_loop, &["event_policy"])?;
+    let inline_schemas_mapping = event_policy
+        .get("schemas")
+        .and_then(|v| v.as_mapping())
+        .cloned()
+        .unwrap_or_default();
+
+    // Deep-merge: SSOT base, inline overrides per-key.
+    let merged: serde_yaml::Mapping = merge_schema_mappings(&ssot_schemas, &inline_schemas_mapping);
+
+    let event_policy_mapping = event_policy
+        .as_mapping_mut()
+        .expect("ensure_yaml_mapping returned a non-mapping Value");
+    event_policy_mapping.insert(
+        serde_yaml::Value::String("schemas".to_string()),
+        serde_yaml::Value::Mapping(merged),
+    );
+
+    serde_yaml::to_string(&preset).map_err(|e| format!("re-serialise merged preset `{preset_name}`: {e}"))
+}
+
+/// Walk `path` from `root` creating empty mappings as needed, returning
+/// the final `Value` (which is guaranteed to be a `Value::Mapping`).
+/// Returning `&mut Value` rather than `&mut Mapping` keeps the borrow
+/// checker happy when this helper is chained — callers can keep
+/// re-entering the path with a fresh `&mut Value` for each level.
+fn ensure_mapping<'a>(
+    root: &'a mut serde_yaml::Value,
+    path: &[&str],
+) -> Result<&'a mut serde_yaml::Value, String> {
+    let mut current = root;
+    for key in path {
+        let entry = current
+            .as_mapping_mut()
+            .ok_or_else(|| format!("`{key}` parent is not a mapping"))?;
+        let key_value = serde_yaml::Value::String((*key).to_string());
+        if !entry.contains_key(&key_value) {
+            entry.insert(key_value.clone(), serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+        }
+        current = entry
+            .get_mut(&key_value)
+            .expect("key just inserted above");
+    }
+    if !current.is_mapping() {
+        return Err(format!(
+            "path `{}` did not resolve to a mapping",
+            path.join(".")
+        ));
+    }
+    Ok(current)
+}
+
+/// Deep-merge two `serde_yaml::Mapping`s. `base` provides default
+/// values; `override_` replaces values per-key, recursing into nested
+/// mappings. Non-mapping values are replaced wholesale.
+fn merge_schema_mappings(
+    base: &serde_yaml::Mapping,
+    override_: &serde_yaml::Mapping,
+) -> serde_yaml::Mapping {
+    let mut out = serde_yaml::Mapping::new();
+    // Insert base keys first.
+    for (k, v) in base {
+        out.insert(k.clone(), v.clone());
+    }
+    // Apply override keys on top.
+    for (k, override_v) in override_ {
+        match (out.get(k), override_v) {
+            (Some(existing), serde_yaml::Value::Mapping(override_map))
+                if existing.is_mapping() =>
+            {
+                let merged = merge_schema_mappings(
+                    existing.as_mapping().expect("checked is_mapping above"),
+                    override_map,
+                );
+                out.insert(k.clone(), serde_yaml::Value::Mapping(merged));
+            }
+            _ => {
+                out.insert(k.clone(), override_v.clone());
+            }
+        }
+    }
+    out
+}
+
+fn yaml_value_kind(value: &serde_yaml::Value) -> &'static str {
+    match value {
+        serde_yaml::Value::Null => "null",
+        serde_yaml::Value::Bool(_) => "bool",
+        serde_yaml::Value::Number(_) => "number",
+        serde_yaml::Value::String(_) => "string",
+        serde_yaml::Value::Sequence(_) => "sequence",
+        serde_yaml::Value::Mapping(_) => "mapping",
+        serde_yaml::Value::Tagged(_) => "tagged",
+    }
 }

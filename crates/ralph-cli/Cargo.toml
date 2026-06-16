@@ -16,6 +16,13 @@ dist = true
 # without the crate owning a `presets/` mirror directory.
 build = "build.rs"
 
+# `build.rs` deep-merges `presets/schemas/<name>.yml` (schema SSOT)
+# into `presets/en/<name>.yml` before writing the merged copy to
+# `$OUT_DIR/presets/`. `serde_yaml` is therefore needed at build time
+# in addition to the regular dependency (plan 2026-06-16-002 Unit 1).
+[build-dependencies]
+serde_yaml = { workspace = true }
+
 [lints]
 workspace = true
 

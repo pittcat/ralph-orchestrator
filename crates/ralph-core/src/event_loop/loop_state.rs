@@ -262,6 +262,35 @@ pub struct LoopState {
     /// has been moved and stops recreating it.  Cleared on `build_prompt`
     /// (consume-on-read).
     pub last_ephemeral_relocations: Vec<crate::ephemeral_isolation::RelocationRecord>,
+
+    /// Unit 3 (2026-06-16-002 plan): `true` once the coordinator has
+    /// emitted its first legal bootstrap `work.ready` event
+    /// (no `reviewed_task_id` correlation).  While `false`, the
+    /// `build_prompt` paths skip injecting `human.guidance` into the
+    /// coordinator's prompt and `prepend_scratchpad` strips any
+    /// `### HUMAN GUIDANCE` blocks from the scratchpad snapshot.
+    /// Reset to `false` whenever `work.start` / `task.start` is
+    /// published, mirroring the RObot guidance lifecycle.
+    pub bootstrap_complete: bool,
+
+    /// Unit 3 (2026-06-16-002 plan): `true` once the coordinator has
+    /// emitted a terminal `work.failed` event after bootstrap.  This
+    /// is a *distinct* signal from `bootstrap_complete`: the loop
+    /// is no longer waiting on a coordinator handoff, but the
+    /// bootstrap explicitly failed rather than succeeding.  The
+    /// runner should use this flag to surface an explicit failure
+    /// reason instead of letting the loop hang on a missing
+    /// `work.ready`.  Reset to `false` together with
+    /// `bootstrap_complete` on `work.start` / `task.start`.
+    pub bootstrap_failed: bool,
+
+    /// Unit 2 (2026-06-16-002 plan) recoverable-bucket budget
+    /// exhaustions produced by the most recent policy validation
+    /// pass.  The runner drains the buffer at the U6 guard and
+    /// promotes the first entry into a
+    /// `TerminationReason::RecoverablePayloadExhausted`.
+    pub recoverable_exhaustion_buffer: Vec<crate::event_loop::RecoverableExhaustion>,
+
 }
 impl Default for LoopState {
     fn default() -> Self {
@@ -315,6 +344,9 @@ impl Default for LoopState {
             pending_recovery_hat: None,
             pending_synthesizer_timeout: None,
             last_ephemeral_relocations: Vec::new(),
+            bootstrap_complete: false,
+            bootstrap_failed: false,
+            recoverable_exhaustion_buffer: Vec::new(),
         }
     }
 }
@@ -466,6 +498,25 @@ impl LoopState {
             .or_insert(0);
         *entry = entry.saturating_add(1);
         *entry
+    }
+
+    /// Unit 2 (2026-06-16-002 plan) recoverable-payload variant of
+    /// [`Self::record_rejection_key`].  The key shape is fixed to
+    /// `"policy:{hat}:{topic}:{reason_class}"` so the bucket is the
+    /// last segment — two distinct reason classes on the same
+    /// `(hat, topic)` keep **independent** counters.
+    ///
+    /// Returns `(count, exhausted)`.  `count` is the post-increment
+    /// value; `exhausted` is `true` iff `count > U2_REJECTION_RETRY_LIMIT`.
+    pub fn record_recoverable_rejection_key(
+        &mut self,
+        hat: &str,
+        topic: &str,
+        reason_class: &str,
+    ) -> (u32, bool) {
+        let key = format!("policy:{hat}:{topic}:{reason_class}");
+        let count = self.record_rejection_key(&key);
+        (count, self.rejection_key_is_exhausted(&key))
     }
 
     /// Current count of retries observed for a given rejection key.

@@ -388,6 +388,9 @@ impl SummaryWriter {
             TerminationReason::ScopeViolationCircuitBreakerTripped { .. } => {
                 "Failed: isolated scope violation circuit breaker tripped"
             }
+            TerminationReason::RecoverablePayloadExhausted { .. } => {
+                "Failed: recoverable-payload budget exhausted"
+            }
         }
     }
 
@@ -524,6 +527,11 @@ mod tests {
             pending_recovery_hat: None,
             pending_synthesizer_timeout: None,
             last_ephemeral_relocations: Vec::new(),
+            // Unit 3 (2026-06-16-002 plan) bootstrap gate flags.
+            bootstrap_complete: false,
+            bootstrap_failed: false,
+            // Unit 2 (2026-06-16-002 plan) recoverable budget buffer.
+            recoverable_exhaustion_buffer: Vec::new(),
         }
     }
 

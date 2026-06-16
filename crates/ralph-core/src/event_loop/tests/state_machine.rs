@@ -281,3 +281,53 @@ fn test_no_verdict_gate_config_preserves_completion_behavior() {
         "without verdict_gate configured, LOOP_COMPLETE should be honored as before"
     );
 }
+
+/// Verifies the ce-executor-isolated gate: REVIEW_COMPLETE + additional_topics: ["report.done"].
+/// When `report.done` carries pass_or_fail="fail", the verdict gate must block LOOP_COMPLETE
+/// even if the upstream REVIEW_COMPLETE topic itself would match.
+#[test]
+fn test_verdict_gate_additional_topic_blocks_loop_complete_on_fail() {
+    use crate::config::VerdictGateConfig;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let mut config = RalphConfig::default();
+    // Mirror ce-executor-isolated preset: REVIEW_COMPLETE is upstream,
+    // report.done is the final downstream mirror.
+    config.event_loop.verdict_gate = Some(VerdictGateConfig {
+        topic: "REVIEW_COMPLETE".to_string(),
+        fail_field: "pass_or_fail".to_string(),
+        fail_value: "fail".to_string(),
+        additional_topics: vec!["report.done".to_string()],
+    });
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+
+    let events_path = temp_dir.path().join("events.jsonl");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // Upstream REVIEW_COMPLETE first (establishes propagation chain).
+    write_event_to_jsonl(
+        &events_path,
+        "REVIEW_COMPLETE",
+        r#"{"pass_or_fail":"fail","verdict":"fail","final_findings_count":2}"#,
+    );
+    // Final mirror: report.done with pass_or_fail=fail.
+    write_event_to_jsonl(
+        &events_path,
+        "report.done",
+        r#"{"pass_or_fail":"fail","verdict":"fail"}"#,
+    );
+    write_event_to_jsonl(&events_path, "LOOP_COMPLETE", "Done");
+
+    let _ = event_loop.process_events_from_jsonl();
+    let reason = event_loop.check_completion_event();
+    assert_eq!(
+        reason, None,
+        "verdict gate should reject LOOP_COMPLETE when report.done carries pass_or_fail=fail"
+    );
+    assert!(
+        event_loop.has_pending_events(),
+        "Rejecting completion should inject task.resume so the loop continues"
+    );
+}
