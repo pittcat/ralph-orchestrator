@@ -243,6 +243,59 @@ mod tests {
         );
     }
 
+    /// Plan 002 Unit 7: handoff topic `queue.advance` fix_hint coverage.
+    /// The plan-gate hat publishes `queue.advance`; the CLI precheck
+    /// rejection path must surface a copy-pasteable `--json` example
+    /// matching the SSOT schema's required_fields.
+    #[test]
+    fn fix_hint_covers_handoff_topic_queue_advance() {
+        let schema = schema_with_required(&[
+            "plan_name",
+            "completed_step",
+            "next_step",
+            "reviewed_task_id",
+            "reviewed_task_key",
+        ]);
+        let hat = hat_with_publishes("plan-gate", "Plan Gate", &["queue.advance"]);
+
+        let hint = fix_hint_for_hat_topic(&hat, "queue.advance", &schema)
+            .expect("plan-gate is authorised to publish queue.advance");
+
+        assert!(hint.contains("queue.advance"));
+        assert!(hint.contains("ralph emit queue.advance --json"));
+        assert!(hint.contains("Required fields: plan_name, completed_step"));
+    }
+
+    /// Plan 002 Unit 7: handoff topic `review.passed` fix_hint coverage.
+    /// The review-synthesizer hat publishes `review.passed`; the CLI
+    /// precheck rejection path must surface a copy-pasteable `--json`
+    /// example matching the SSOT schema's required_fields.
+    #[test]
+    fn fix_hint_covers_handoff_topic_review_passed() {
+        let schema = schema_with_required(&[
+            "plan_name",
+            "task_id",
+            "task_key",
+            "step",
+            "findings_count",
+            "fix_round",
+            "verdict",
+            "skip_reason",
+        ]);
+        let hat = hat_with_publishes(
+            "review-synthesizer",
+            "Review Synthesizer",
+            &["review.passed", "review.failed", "review.complete"],
+        );
+
+        let hint = fix_hint_for_hat_topic(&hat, "review.passed", &schema)
+            .expect("review-synthesizer is authorised to publish review.passed");
+
+        assert!(hint.contains("review.passed"));
+        assert!(hint.contains("ralph emit review.passed --json"));
+        assert!(hint.contains("Required fields: plan_name, task_id"));
+    }
+
     #[test]
     fn fix_hint_honours_wildcard_publish_pattern() {
         let schema = schema_with_required(&["x"]);

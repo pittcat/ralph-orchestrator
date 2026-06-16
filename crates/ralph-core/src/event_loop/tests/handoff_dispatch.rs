@@ -119,3 +119,106 @@ fn task_resume_event_for_safe_target() {
     assert_eq!(ev.topic.as_str(), "task.resume");
     assert_eq!(ev.source, Some(ralph_proto::HatId::from("plan-gate")));
 }
+
+// ----------------------------------------------------------------
+// U2 (2026-06-17-002) acceptance tests: priority dispatch + 30s
+// dispatch window. These pin the "single Hard escalation" contract
+// from `HandoffTracker`'s module docs. They do NOT depend on
+// `EventLoop` wiring — they exercise the tracker + EventBus
+// priority contract directly, the same way the wire-up in
+// `event_loop/mod.rs:5140-5212` does.
+// ----------------------------------------------------------------
+
+/// T-U2-01 (happy path): a `work.ready` handoff with
+/// `consumer=executor` that activates within the 30s window must
+/// produce **no** escalation. Mirrors the SC1 latency SLO.
+#[test]
+fn u2_happy_path_work_ready_activates_within_30s() {
+    let mut tracker = HandoffTracker::new().with_default_timeout(Duration::from_secs(30));
+    let t0 = Instant::now();
+    tracker.on_handoff_accepted("work.ready", "executor", "evt-u2-1", t0);
+
+    // Simulate the executor hat activating at t0+29s — well
+    // inside the 30s dispatch window.
+    let at_29s = t0 + Duration::from_secs(29);
+    let cleared = tracker.on_hat_activated("executor");
+    assert_eq!(cleared, 1);
+
+    // Now the iteration tick at t0+29s should see zero
+    // escalations (the entry was just cleared).
+    let escalations = tracker.expired(at_29s);
+    assert!(
+        escalations.is_empty(),
+        "executor activated at 29s must not produce an escalation: got {escalations:?}"
+    );
+    assert_eq!(tracker.pending_count(), 0);
+}
+
+/// T-U2-02 (error path): 31s without activation must yield exactly
+/// one `HandoffEscalation` whose `safe_target` is the original
+/// consumer (`executor`), and whose `reason` mentions the 30s
+/// timeout. The wire-up in `event_loop/mod.rs:5187-5197` reads
+/// these fields to build the `task.resume` payload.
+#[test]
+fn u2_error_path_31s_without_activation_yields_escalation() {
+    let mut tracker = HandoffTracker::new().with_default_timeout(Duration::from_secs(30));
+    let t0 = Instant::now();
+    tracker.on_handoff_accepted("work.ready", "executor", "evt-u2-2", t0);
+
+    // 31s later: no activation happened.
+    let at_31s = t0 + Duration::from_secs(31);
+    let escalations = tracker.expired(at_31s);
+    assert_eq!(escalations.len(), 1, "exactly one escalation expected");
+    let esc = &escalations[0];
+    assert_eq!(esc.topic, "work.ready");
+    assert_eq!(esc.consumer, "executor");
+    assert_eq!(esc.event_id, "evt-u2-2");
+    // Single Hard escalation: safe_target == original consumer
+    // (executor is not the fallback safe target).
+    assert_eq!(esc.safe_target, "executor");
+    assert!(
+        esc.reason.contains("30"),
+        "reason must reference the 30s timeout: {}",
+        esc.reason
+    );
+    // Entry is removed after the escalation.
+    assert_eq!(tracker.pending_count(), 0);
+}
+
+/// T-U2-03 (regression AE5): the EventBus priority pre-emption at
+/// `event_bus.rs:251` must NOT be used for multi-consumer topics.
+/// The caller (`HandoffIndex::consumer_of`) returns `None` for
+/// those topics; this test pins the EventBus contract that
+/// `priority_hat = None` does not pre-empt the round-robin scan.
+///
+/// Mirrors the spirit of `test_workflow_activation_contract_handoff_priority_dispatch`
+/// in `tests/scenarios.rs:487-506` but asserts the negative case.
+#[test]
+fn u2_regression_multi_consumer_topic_does_not_pre_empt() {
+    use ralph_proto::{Event, EventBus, Hat, HatId};
+
+    let mut bus = EventBus::new();
+    for id in ["alpha", "beta", "gamma"] {
+        bus.register(Hat::new(id, id).subscribe("work.ready"));
+    }
+    for (id, label) in [("alpha", "a1"), ("beta", "b1"), ("gamma", "g1")] {
+        bus.publish(Event::new("work.ready", label).with_target(id));
+    }
+    // HandoffIndex would return None for "work.ready" (3
+    // consumers); caller passes `None` to the bus. Round-robin
+    // then selects the first registered hat with a non-empty
+    // queue — which is `alpha` (BTreeMap key order).
+    let sel = bus
+        .select_next_hat_with_pending(None)
+        .expect("round-robin must select a hat");
+    assert_eq!(
+        sel.as_str(),
+        "alpha",
+        "with priority_hat=None, round-robin must pick the first registered hat"
+    );
+    // The fact that calling with `None` is the ONLY safe path
+    // for multi-consumer topics is the regression contract.
+    // The pre-emption path (Some(_)) is reserved for unique
+    // consumers only.
+    let _: HatId = sel;
+}

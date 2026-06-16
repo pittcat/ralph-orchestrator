@@ -48,6 +48,7 @@ use crate::loop_context::LoopContext;
 use crate::memory_store::{MarkdownMemoryStore, format_memories_as_markdown, truncate_to_budget};
 use crate::skill_registry::SkillRegistry;
 use crate::state_machine::{StateMachineDecision, StateMachineRuntimeState};
+use crate::step_handoff::progress_task_gate::{GateDecision, check_progress_task_alignment};
 use crate::text::floor_char_boundary;
 use ralph_proto::{CheckinContext, Event, EventBus, Hat, HatId, RobotService};
 use serde::{Deserialize, Serialize};
@@ -891,6 +892,149 @@ fn append_hat_publishes_hint(
         "{payload}\n\nAllowed publish topics for hat '{hat_id}': {}",
         topics.join(", ")
     )
+}
+
+/// U4 (2026-06-17-002 plan): Step Handoff pre-handoff hard gate.
+///
+/// For each event with topic in `progress_task_gate::GATED_TOPICS`,
+/// check that `.ralph/agent/progress.md` is consistent with
+/// `.ralph/agent/tasks.jsonl`. Mismatched events are rejected (not
+/// appended to the return vector) and a `plan.blocked` event is
+/// published to the bus with the mismatch reason as its payload —
+/// so `plan-gate` can read it on the next iteration and remediate.
+///
+/// Topics not in `GATED_TOPICS` are passed through untouched. This
+/// keeps the gate narrow: the hard fail is reserved for the two
+/// topics that mutate the step counter / finalize the plan.
+///
+/// Review fix #4 (code-review-2026-06-17-002): the second return
+/// value carries a `RecoveryDiagnosisEnvelope` per rejection so the
+/// caller can persist it via `EventLoop::record_recovery_envelope`
+/// (writes `recovery.jsonl` for `ralph diagnose`). The gate itself
+/// cannot call `record_recovery_envelope` because that requires
+/// `&mut EventLoop`, not the `&mut EventBus` signature below.
+fn apply_step_handoff_gate(
+    events: Vec<JsonlEvent>,
+    workspace_root: &str,
+    bus: &mut EventBus,
+) -> (Vec<JsonlEvent>, Vec<crate::diagnosis::RecoveryDiagnosisEnvelope>) {
+    use crate::step_handoff::progress_task_gate;
+
+    let workspace = std::path::Path::new(workspace_root);
+    let mut accepted: Vec<JsonlEvent> = Vec::with_capacity(events.len());
+    let mut envelopes: Vec<crate::diagnosis::RecoveryDiagnosisEnvelope> = Vec::new();
+
+    for event in events {
+        if !progress_task_gate::is_gated_topic(event.topic.as_str()) {
+            accepted.push(event);
+            continue;
+        }
+
+        let (step, task_id) = extract_step_and_task_id(&event);
+        let decision = check_progress_task_alignment(
+            event.topic.as_str(),
+            step.as_deref(),
+            task_id.as_deref(),
+            workspace,
+        );
+
+        match decision {
+            GateDecision::Inert | GateDecision::Aligned => {
+                accepted.push(event);
+            }
+            GateDecision::Mismatch(mismatch) => {
+                // Reject the gated event and publish `plan.blocked`
+                // with the mismatch reason. The plan-gate hat is the
+                // canonical consumer (it owns `plan.blocked` in
+                // ce-executor-isolated).
+                //
+                // Review fix #1 (code-review-2026-06-17-002): hardcode
+                // the source hat to `plan-gate` rather than copying
+                // `event.hat`. Rationale: any non-plan-gate hat that
+                // emits a gated topic will fail the EventOriginGuard's
+                // publish-scope check when its source claims authorship
+                // of `plan.blocked`. The orchestrator synthesizes
+                // `plan.blocked` and must own the source.
+                let blocked_payload = format!(
+                    "PROGRESS_TASK_GATE_REJECTED: topic='{}' rejected by step_handoff gate.\n\
+                     reason={}\n\
+                     detail={}\n\
+                     step={:?}\n\
+                     task_id={:?}",
+                    event.topic, mismatch.reason, mismatch.detail, mismatch.step, mismatch.task_id,
+                );
+                let source_hat = HatId::from("plan-gate");
+                let blocked = Event::new("plan.blocked", blocked_payload)
+                    .with_source(source_hat);
+                bus.publish(blocked);
+                // Diagnostic on the bus for operators reading
+                // orchestration logs. The main signal is the
+                // `plan.blocked` event above.
+                let diagnostic = Event::new(
+                    "event.step_handoff.gate_rejected",
+                    format!(
+                        "step_handoff gate rejected topic='{}' reason={}",
+                        event.topic, mismatch.reason
+                    ),
+                );
+                bus.publish(diagnostic);
+                // Review fix #4 (code-review-2026-06-17-002):
+                // accumulate a recovery envelope so the caller can
+                // persist via `record_recovery_envelope`. This makes
+                // the rejection visible to `ralph diagnose --session
+                // latest` and to the responder ladder. The envelope is
+                // a builder-stamped payload; `iteration` and
+                // `retry_attempt` are patched in by the caller from
+                // the live EventLoop state.
+                let envelope = crate::diagnosis::RecoveryDiagnosisEnvelope::builder()
+                    .source(crate::diagnosis::DiagnosisSource::PayloadContract)
+                    .severity(crate::diagnosis::DiagnosisSeverity::Warning)
+                    .source_hat("plan-gate")
+                    .target_hat("plan-gate")
+                    .topic(event.topic.clone())
+                    .reason_code("progress_task_mismatch")
+                    .message(format!(
+                        "step_handoff gate rejected topic='{}' reason={} detail={}",
+                        event.topic, mismatch.reason, mismatch.detail
+                    ))
+                    .safe_target(true)
+                    .build();
+                envelopes.push(envelope);
+                // Reject the original event: do NOT push it to
+                // `accepted`. The next iteration's `plan-gate`
+                // activation will see `plan.blocked` and emit a
+                // corrected `queue.advance` / `plan.complete`.
+            }
+        }
+    }
+
+    (accepted, envelopes)
+}
+
+/// Extract `step` and `task_id` fields from a JSON event payload.
+///
+/// Both fields are best-effort: a missing field is fine and means
+/// the gate will skip the corresponding check. This mirrors how
+/// plan-gate / executor emit payloads today — fields are optional
+/// and the schema is enforced by the policy layer (not by the gate).
+fn extract_step_and_task_id(event: &JsonlEvent) -> (Option<String>, Option<String>) {
+    let payload = match event.payload.as_deref() {
+        Some(p) if !p.is_empty() => p,
+        _ => return (None, None),
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(_) => return (None, None),
+    };
+    let step = parsed
+        .get("step")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let task_id = parsed
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    (step, task_id)
 }
 
 fn apply_event_policy_validation(
@@ -7083,6 +7227,36 @@ impl EventLoop {
             events = accepted;
         }
         // --- End state machine validation ---
+
+        // --- Step handoff gate (U4 of 2026-06-17-002 plan): ---
+        // pre-handoff consistency check for `progress.md` ↔
+        // `tasks.jsonl`. Rejects `queue.advance` / `plan.complete`
+        // when the two ledgers disagree, and injects `plan.blocked`
+        // so `plan-gate` can recover on the next iteration. Gate
+        // is opt-in via `workflow_contract.step_handoff.progress_task_gate`
+        // (default `false`); non-tier-0 presets are unaffected.
+        if self
+            .config
+            .event_loop
+            .workflow_contract
+            .as_ref()
+            .is_some_and(|wc| wc.step_handoff.progress_task_gate)
+        {
+            let (accepted_events, gate_envelopes) = apply_step_handoff_gate(
+                events,
+                self.config.core.workspace_root.to_str().unwrap_or("."),
+                &mut self.bus,
+            );
+            events = accepted_events;
+            // Review fix #4 (code-review-2026-06-17-002): persist
+            // each gate rejection as a recovery envelope so
+            // `ralph diagnose --session latest` and the responder
+            // ladder see the gate failure.
+            for envelope in gate_envelopes {
+                self.record_recovery_envelope(&envelope, Vec::new());
+            }
+        }
+        // --- End step handoff gate ---
 
         // --- Workflow guard validation: reject out-of-order events ---
         // Legacy linear guards run after the state machine. When the state machine

@@ -36,7 +36,7 @@ related:
 | Dual-publish carve-out | `crates/ralph-core/src/event_loop/mod.rs:6322-6327` | ✅ 已实现 |
 | `review_step_state` synth terminal gate | `crates/ralph-core/src/event_loop/review_step_state.rs` | ✅ 已实现 |
 | `verdict_gate`（含 `additional_topics`） | `crates/ralph-core/src/event_loop/mod.rs:1315`, `2150`, `2316`, `2785`, `5087` | ✅ 已实现 |
-| `NULL_PAYLOAD_REJECT_TOPICS` | `crates/ralph-core/src/event_policy.rs:412` | ✅ 已实现，列表待审视 |
+| `NULL_PAYLOAD_REJECT_TOPICS` | `crates/ralph-core/src/event_policy.rs:495` | ✅ 已实现，列表已扩展至 9 topic |
 
 运行验证（当前已通过）：
 - `cargo nextest run -p ralph-core -- workflow_activation` → 18/18 PASS
@@ -292,10 +292,10 @@ flowchart TB
 - Test: 新 `step_handoff/null_review_passed_blocked.yml`
 
 **Approach:**
-- 当前 `NULL_PAYLOAD_REJECT_TOPICS`（`crates/ralph-core/src/event_policy.rs:412`）包含：`review.passed`, `review.failed`, `review.complete`, `work.done`, `queue.advance`, `review.wave.ready`。
+- 当前 `NULL_PAYLOAD_REJECT_TOPICS`（`crates/ralph-core/src/event_policy.rs:495`）包含 9 topic：`review.passed`, `review.failed`, `review.complete`, `work.done`, `queue.advance`, `review.wave.ready`, `work.ready`, `plan.complete`, `plan.blocked`。
 - 未直接包含 `work.ready`, `plan.complete`, `plan.blocked`，但这三个 topic 在 `ce-executor-isolated` 的 `event_policy.schemas` 中已强制 `payload: json_object` + `required_fields`，null payload 会在 schema 层被 `RejectWithResume`，实际效果等价。
 - 是否扩展 `NULL_PAYLOAD_REJECT_TOPICS` 需由执行者决定：
-  - **选项 A（推荐）**：把 `work.ready`, `plan.complete`, `plan.blocked` 加入 `NULL_PAYLOAD_REJECT_TOPICS`，使 R10 统一覆盖所有 handoff/terminal  topic，避免依赖 schema 层的副作用。
+  - **选项 A（推荐，已执行）**：把 `work.ready`, `plan.complete`, `plan.blocked` 加入 `NULL_PAYLOAD_REJECT_TOPICS`，使 R10 统一覆盖所有 handoff/terminal  topic，避免依赖 schema 层的副作用。当前总数 9 个 topic。
   - **选项 B**：保持现状，依赖 schema 层，但要在验收中证明 null 被 schema 拒绝。
 - `review.passed` null → 不进入主 events；不置 `synth_terminal`；plan-gate 不被假阳性触发（当前已实现）。
 - string→object normalize 保持（WAC R11）。
@@ -362,6 +362,50 @@ flowchart TB
 - Integration: SSOT 增字段 → 四链一致（002 SC3 子集）。
 
 **Verification:** 002 merge 后本单元绿；未 merge 时 skip 标记 CI optional。
+
+**四链抽样（handoff topic SSOT 同源验证）**
+
+> 四个 handoff topic（`work.ready` / `queue.advance` / `work.done` / `review.passed`）
+> 在以下四处的引用 file:line —— 002 plan R-A3 在 handoff 子集的证明。
+> 改 SSOT 必填字段后四处必须同步变化（002 plan 覆盖）；本单元仅做基线抽样。
+
+| Topic | Chain 1 Prompt | Chain 2 Precheck | Chain 3 Loop gate | Chain 4 Drift |
+|-------|----------------|------------------|-------------------|---------------|
+| `work.ready` | `emit_schema_hint.rs:36` (`build_publish_emit_section`) | `commands/emit.rs:11,87,111` (`fix_hint_for_hat_topic`) | `event_policy.rs:412` (`NULL_PAYLOAD_REJECT_TOPICS` 不含) / `event_policy.rs:561-668` (schema required_fields) | `drift/engine.rs:546-574` (`required_fields_from_config`) → `drift/detector.rs:381-426` (`check_field_completeness`) |
+| `queue.advance` | 同上 `emit_schema_hint.rs:36` | 同上 `commands/emit.rs:11,87,111` | `event_policy.rs:417` (`NULL_PAYLOAD_REJECT_TOPICS` 含) / `event_policy.rs:561-668` | 同上 `drift/engine.rs:546-574` → `drift/detector.rs:381-426` |
+| `work.done` | 同上 | 同上 | `event_policy.rs:416` (`NULL_PAYLOAD_REJECT_TOPICS` 含) / `event_policy.rs:561-668` | 同上 |
+| `review.passed` | 同上 | 同上 | `event_policy.rs:413` (`NULL_PAYLOAD_REJECT_TOPICS` 含) / `event_policy.rs:561-668` | 同上 |
+
+**SSOT 入口（`build.rs` 嵌入）：**
+- `presets/schemas/ce-executor-isolated.yml:37` (`work.ready`)
+- `presets/schemas/ce-executor-isolated.yml:47` (`work.done`)
+- `presets/schemas/ce-executor-isolated.yml:88` (`review.passed`)
+- `presets/schemas/ce-executor-isolated.yml:186` (`queue.advance`)
+
+**验收命令：**
+```bash
+# 1. 编译通过
+cargo check -p ralph-core -p ralph-cli
+
+# 2. 四链抽样测试（6 个 test，全部 PASS）
+cargo nextest run -p ralph-cli --test policy_check_handoff
+
+# 3. WAC strict 基线不破
+cargo nextest run -p ralph-core -- workflow_activation
+```
+
+**抽样测试覆盖（`crates/ralph-cli/tests/policy_check_handoff.rs`）：**
+- `chain_1_prompt_lists_every_required_field_per_topic`：prompt builder 必须列出每个 topic 的所有 SSOT 必填字段
+- `chain_2_precheck_rejects_missing_required_field_per_topic`：`ralph emit --json` 必须拒缺字段
+- `chain_3_loop_gate_rejects_missing_required_field_per_topic`：`validate_event_with_hat` 必须产出 `MissingRequiredField` finding
+- `chain_4_drift_detector_records_missing_required_field_per_topic`：`DriftDetector` 必须产出 `FieldCompleteness` finding
+- `cross_chain_required_fields_are_uniformly_tracked`：四个 chain 的必填字段必须完全一致
+- `cross_chain_required_fields_match_across_chains`：SSOT 字段必须在 prompt/drift 两侧同时被追踪
+
+**SSOT follow-up（如有）：**
+- 002 plan 未 merge，本单元仅跑 inline schema 基线；SSOT 实现本身（`presets/schemas/ce-executor-isolated.yml`）归属 002 plan。
+- `presets/zh/ce-executor-isolated-zh.yml` 镜像同步（plan L69-110 含 `work.ready/work.done/review.passed/queue.advance`）需在 002 merge 时一并合入。
+- 计划 L454 评审发现：`event_policy.rs:412` `NULL_PAYLOAD_REJECT_TOPICS` 当前**未**包含 `work.ready`、`plan.complete`、`plan.blocked`，待 Unit 5 决策。
 
 ---
 

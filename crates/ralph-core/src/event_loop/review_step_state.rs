@@ -899,6 +899,88 @@ mod tests {
         );
     }
 
+    /// Step-handoff (2026-06-17-002) U5: a null `review.passed`
+    /// payload is hard-rejected by `validate_event_with_hat` with
+    /// `RejectWithResume` and a WAC R10 finding. The state machine
+    /// never sees this event, so `synth_terminal` stays unset and
+    /// any subsequent `plan.complete` stays blocked. This test
+    /// pins the end-to-end hard gate at the policy boundary.
+    #[test]
+    fn step_handoff_u5_review_passed_null_rejected_by_policy() {
+        let config = ce_executor_schemas();
+        let mut state = PolicyRuntimeState::default();
+        let decision = validate_event("review.passed", None, &config, &mut state);
+        match decision {
+            PolicyDecision::RejectWithResume(finding) => {
+                assert!(
+                    finding.message.contains("WAC R10")
+                        || finding.message.contains("null payload"),
+                    "review.passed null must be flagged with WAC R10 finding, got: {}",
+                    finding.message
+                );
+            }
+            other => panic!(
+                "review.passed null must RejectWithResume, got {:?}",
+                other
+            ),
+        }
+    }
+
+    /// Step-handoff U5: `observe_accepted` is a no-op when the
+    /// payload is missing or unparseable (step_key_from_event
+    /// returns None). So even if a null `review.passed` ever
+    /// leaks past the policy gate, the state machine cannot
+    /// accidentally set `synth_terminal` from it.
+    #[test]
+    fn step_handoff_u5_review_passed_null_does_not_set_synth_terminal() {
+        let mut tracker = ReviewStepTracker::default();
+
+        // (1) A null-payload review.passed routed into the state
+        // machine must be a no-op (no step_key, no state mutation).
+        let null_passed = JsonlEvent {
+            topic: "review.passed".to_string(),
+            payload: None,
+            ts: String::new(),
+            hat: Some("review-synthesizer".to_string()),
+            triggered: None,
+            source: None,
+            wave_id: None,
+            wave_index: None,
+            wave_total: None,
+        };
+        tracker.observe_accepted(&null_passed);
+
+        // (2) After the no-op, plan.complete is still blocked
+        // because synth_terminal was never set.
+        let plan_complete_blocked = jsonl(
+            "plan.complete",
+            "plan-gate",
+            r#"{"plan_name":"p","completed_steps":1,"task_id":"t1","task_key":"k1","verdict":"pass"}"#,
+        );
+        let finding = tracker
+            .check_semantic_gates(&plan_complete_blocked)
+            .expect("plan.complete must stay blocked when synth_terminal was never set");
+        assert!(
+            finding.message.contains("plan_gate_review_not_terminal"),
+            "expected plan_gate_review_not_terminal, got: {}",
+            finding.message
+        );
+
+        // (3) A subsequent well-formed review.passed unlocks the
+        // gate cleanly — the no-op did not corrupt state.
+        let passed = jsonl(
+            "review.passed",
+            "review-synthesizer",
+            r#"{"plan_name":"p","task_id":"t1","task_key":"k1","step":"1","findings_count":0,"fix_round":0,"verdict":"pass","skip_reason":"empty_diff"}"#,
+        );
+        tracker.observe_accepted(&passed);
+        assert!(
+            tracker.check_semantic_gates(&plan_complete_blocked).is_none(),
+            "synth_terminal must be set after a well-formed review.passed, \
+             so plan.complete must pass the gate"
+        );
+    }
+
     /// U2 (2026-06-17-003 plan): an open wave with at least one
     /// `dimension.done` arrival but no progress past the staleness
     /// window must surface in `open_waves_needing_intervention`.

@@ -492,6 +492,13 @@ pub fn is_system_topic(topic: &str) -> bool {
 /// The list is the minimum required by R10; it is intentionally
 /// not configurable so the operational contract is uniform
 /// across presets.
+///
+/// Step-handoff (2026-06-17-002) U5: extended with `work.ready`,
+/// `plan.complete`, `plan.blocked` so the hard gate uniformly
+/// covers every handoff/terminal topic in the ce-executor step
+/// chain — independent of whether the preset ships a
+/// `payload: json_object` schema for that topic (Observe mode
+/// would otherwise let null payloads slip past the schema layer).
 pub const NULL_PAYLOAD_REJECT_TOPICS: &[&str] = &[
     "review.passed",
     "review.failed",
@@ -499,6 +506,9 @@ pub const NULL_PAYLOAD_REJECT_TOPICS: &[&str] = &[
     "work.done",
     "queue.advance",
     "review.wave.ready",
+    "work.ready",
+    "plan.complete",
+    "plan.blocked",
 ];
 
 /// Returns `true` if `topic` is in [`NULL_PAYLOAD_REJECT_TOPICS`].
@@ -2742,6 +2752,10 @@ mod tests {
 
     /// R10 also covers the other whitelist topics:
     /// `work.done`, `queue.advance`, `review.wave.ready`, etc.
+    /// Step-handoff (2026-06-17-002) U5 extends the whitelist with
+    /// the handoff/terminal topics `work.ready`, `plan.complete`,
+    /// `plan.blocked` so the hard gate uniformly covers every
+    /// handoff/terminal topic in the ce-executor step chain.
     #[test]
     fn wac_r10_null_payload_rejects_every_whitelist_topic() {
         let config = test_config_with_enforce_and_resume();
@@ -2751,8 +2765,11 @@ mod tests {
             "review.failed",
             "review.complete",
             "work.done",
+            "work.ready",
             "queue.advance",
             "review.wave.ready",
+            "plan.complete",
+            "plan.blocked",
         ] {
             let mut s = PolicyRuntimeState::default();
             let decision = validate_event(topic, None, &config, &mut s);
@@ -2762,6 +2779,80 @@ mod tests {
                 decision
             );
         }
+    }
+
+    /// Step-handoff (2026-06-17-002) U5: `is_null_payload_rejected_topic` is the
+    /// single source of truth for the whitelist. Pin the exact
+    /// membership (original 6 + 3 U5 additions appended in place) so
+    /// future edits cannot silently drop a topic from the hard gate.
+    #[test]
+    fn step_handoff_u5_whitelist_membership_pinned() {
+        let expected = [
+            "review.passed",
+            "review.failed",
+            "review.complete",
+            "work.done",
+            "queue.advance",
+            "review.wave.ready",
+            "work.ready",
+            "plan.complete",
+            "plan.blocked",
+        ];
+        assert_eq!(NULL_PAYLOAD_REJECT_TOPICS, expected);
+        for topic in expected {
+            assert!(
+                is_null_payload_rejected_topic(topic),
+                "is_null_payload_rejected_topic must accept `{topic}`"
+            );
+        }
+        // A non-whitelist topic is unaffected.
+        assert!(!is_null_payload_rejected_topic("human.guidance"));
+    }
+
+    /// Step-handoff U5: a null `work.ready` payload is
+    /// hard-rejected even in Observe mode. This is the per-topic
+    /// pin for `work.ready` after the list extension.
+    #[test]
+    fn step_handoff_u5_work_ready_null_payload_is_rejected() {
+        let mut config = test_config_with_enforce_and_resume();
+        config.mode = EventPolicyMode::Observe;
+        let mut state = PolicyRuntimeState::default();
+        let decision = validate_event("work.ready", None, &config, &mut state);
+        assert!(
+            matches!(decision, PolicyDecision::RejectWithResume(_)),
+            "U5: null work.ready must RejectWithResume even in Observe, got {:?}",
+            decision
+        );
+    }
+
+    /// Step-handoff U5: a null `plan.complete` payload is
+    /// hard-rejected even in Observe mode.
+    #[test]
+    fn step_handoff_u5_plan_complete_null_payload_is_rejected() {
+        let mut config = test_config_with_enforce_and_resume();
+        config.mode = EventPolicyMode::Observe;
+        let mut state = PolicyRuntimeState::default();
+        let decision = validate_event("plan.complete", None, &config, &mut state);
+        assert!(
+            matches!(decision, PolicyDecision::RejectWithResume(_)),
+            "U5: null plan.complete must RejectWithResume even in Observe, got {:?}",
+            decision
+        );
+    }
+
+    /// Step-handoff U5: a null `plan.blocked` payload is
+    /// hard-rejected even in Observe mode.
+    #[test]
+    fn step_handoff_u5_plan_blocked_null_payload_is_rejected() {
+        let mut config = test_config_with_enforce_and_resume();
+        config.mode = EventPolicyMode::Observe;
+        let mut state = PolicyRuntimeState::default();
+        let decision = validate_event("plan.blocked", None, &config, &mut state);
+        assert!(
+            matches!(decision, PolicyDecision::RejectWithResume(_)),
+            "U5: null plan.blocked must RejectWithResume even in Observe, got {:?}",
+            decision
+        );
     }
 
     /// T-U7-02 / R11: a string payload that is a parseable JSON

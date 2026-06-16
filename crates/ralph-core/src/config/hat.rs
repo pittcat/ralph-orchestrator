@@ -506,6 +506,20 @@ pub struct HatConfig {
     #[serde(default)]
     pub phase_triggers: Option<HashMap<String, Vec<String>>>,
 
+    /// Topics explicitly allowed to be claimed by multiple hats.
+    ///
+    /// Used for design-level multi-consumer topics (e.g. `fix.exhausted` /
+    /// `debug.exhausted` consumed by both `plan-gate` and
+    /// `debug-resolver`/`shipper`). When ALL hats subscribed to a given
+    /// trigger list that trigger in their `trigger_multi_consumer_topics`,
+    /// `validate_ambiguous_routing` skips the strict 1:1 check for that
+    /// trigger. All consumer hats must opt in — a single missing entry
+    /// triggers the standard AmbiguousRouting error.
+    ///
+    /// Empty (the default) means "use the legacy strict 1:1 mapping".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trigger_multi_consumer_topics: Vec<String>,
+
     /// Fields to ignore when extracting payload field references from instructions.
     ///
     /// Used by the static payload contract validator to exclude false positives.
@@ -583,6 +597,7 @@ impl Default for HatConfig {
             phase_triggers: None,
             ignore_payload_fields: Vec::new(),
             obligations: Vec::new(),
+            trigger_multi_consumer_topics: Vec::new(),
         }
     }
 }
@@ -768,6 +783,7 @@ mod tests {
             phase_triggers: None,
             ignore_payload_fields: Vec::new(),
             obligations,
+            trigger_multi_consumer_topics: Vec::new(),
         }
     }
 

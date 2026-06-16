@@ -66,6 +66,7 @@ pub mod skill;
 pub mod skill_registry;
 mod state_file_injector;
 mod state_machine;
+pub mod step_handoff;
 mod summary_writer;
 pub mod task;
 pub mod task_definition;
@@ -92,8 +93,8 @@ pub use config::{
     MalformedJsonlPolicy, MemoriesConfig, MemoriesFilter, OnErrorPolicy, PayloadType, Phase,
     PhaseConfig, PreflightExtensionsConfig, PreflightHook, ProjectionMode, ProjectionRule,
     RalphConfig, RuntimeDiagnosisConfig, ScratchpadConfig, SkillOverride, SkillsConfig,
-    StateFileEntry, StateFileFormat, StateFilesConfig, TelemetryConfig, TriggerContext,
-    TriggerPredicate, ViolationAction, WarmupConfig, obligation_satisfied,
+    StateFileEntry, StateFileFormat, StateFilesConfig, StepHandoffConfig, TelemetryConfig,
+    TriggerContext, TriggerPredicate, ViolationAction, WarmupConfig, obligation_satisfied,
 };
 
 // Re-export loop_name types (also available via FeaturesConfig.loop_naming)

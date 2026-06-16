@@ -4,7 +4,8 @@
 //! `event_loop.workflow_contract` so operators can tune the
 //! runtime handoff dispatch behaviour without touching code.
 //!
-//! Plan Unit: WAC-U3 of `2026-06-12-002-feat-workflow-activation-contract-plan`.
+//! Plan Unit: WAC-U3 of `2026-06-12-002-feat-workflow-activation-contract-plan`
+//! and U4 of `2026-06-17-002-feat-ce-executor-step-handoff-plan`.
 //!
 //! See [`crate::preset_lint::workflow_activation`] for the
 //! matching static-rule family. The two modules share the
@@ -12,6 +13,26 @@
 //! so the static and runtime views cannot drift.
 
 use serde::{Deserialize, Serialize};
+
+/// Step handoff sub-configuration for `workflow_contract.step_handoff`.
+///
+/// Plan Unit: U4 of `2026-06-17-002-feat-ce-executor-step-handoff-plan`.
+///
+/// The block is optional; when absent the defaults
+/// (`progress_task_gate = false`) apply so non-tier-0 presets are
+/// unaffected. Tier-0 presets (`ce-executor-isolated` and its
+/// Chinese mirror) opt in.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StepHandoffConfig {
+    /// Enable the pre-handoff gate that validates
+    /// `progress.md` ↔ `tasks.jsonl` consistency before
+    /// `queue.advance` / `plan.complete` is admitted.
+    ///
+    /// Defaults to `false` so non-tier-0 presets do not regress.
+    /// `ce-executor-isolated` and its Chinese mirror opt in.
+    #[serde(default)]
+    pub progress_task_gate: bool,
+}
 
 /// Maximum allowed `handoff_dispatch_timeout_seconds`.
 ///
@@ -45,6 +66,27 @@ pub const HANDOFF_TOPIC_SEEDS: &[&str] = &[
     "fix.plan.ready",
     "work.failed",
 ];
+
+/// U2 (2026-06-17-003 plan): incomplete-wave gate configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IncompleteWaveGateConfig {
+    /// Whether the gate is active. Defaults to `false`
+    /// (presets opt in). When `true`, the EventLoop checks
+    /// every iteration for stalled review waves and emits
+    /// `plan.blocked` on the hat `review-synthesizer` with
+    /// target `shipper`.
+    pub enabled: bool,
+}
+
+impl Default for IncompleteWaveGateConfig {
+    fn default() -> Self {
+        Self { enabled: false }
+    }
+}
+
+fn default_incomplete_wave_gate() -> IncompleteWaveGateConfig {
+    IncompleteWaveGateConfig::default()
+}
 
 /// Workflow Activation Contract runtime configuration.
 ///
@@ -81,27 +123,12 @@ pub struct WorkflowContractConfig {
     /// `enabled = true` via the `preset_enforce` path.
     #[serde(default = "default_incomplete_wave_gate")]
     pub incomplete_wave_gate: IncompleteWaveGateConfig,
-}
 
-/// U2 (2026-06-17-003 plan): incomplete-wave gate configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct IncompleteWaveGateConfig {
-    /// Whether the gate is active. Defaults to `false`
-    /// (presets opt in). When `true`, the EventLoop checks
-    /// every iteration for stalled review waves and emits
-    /// `plan.blocked` on the hat `review-synthesizer` with
-    /// target `shipper`.
-    pub enabled: bool,
-}
-
-impl Default for IncompleteWaveGateConfig {
-    fn default() -> Self {
-        Self { enabled: false }
-    }
-}
-
-fn default_incomplete_wave_gate() -> IncompleteWaveGateConfig {
-    IncompleteWaveGateConfig::default()
+    /// Step-handoff sub-configuration (U4 of
+    /// `2026-06-17-002-feat-ce-executor-step-handoff-plan`).
+    /// Optional; defaults to a `false` `progress_task_gate`.
+    #[serde(default)]
+    pub step_handoff: StepHandoffConfig,
 }
 
 impl Default for WorkflowContractConfig {
@@ -110,6 +137,7 @@ impl Default for WorkflowContractConfig {
             handoff_dispatch_timeout_seconds: default_handoff_dispatch_timeout_seconds(),
             handoff_topic_seeds: default_handoff_topic_seeds(),
             incomplete_wave_gate: default_incomplete_wave_gate(),
+            step_handoff: StepHandoffConfig::default(),
         }
     }
 }
@@ -170,6 +198,7 @@ mod tests {
             handoff_dispatch_timeout_seconds: 600,
             handoff_topic_seeds: vec![],
             incomplete_wave_gate: Default::default(),
+            step_handoff: StepHandoffConfig::default(),
         };
         assert_eq!(
             cfg.effective_timeout_seconds(),
@@ -183,6 +212,7 @@ mod tests {
             handoff_dispatch_timeout_seconds: HANDOFF_DISPATCH_TIMEOUT_MAX_SECONDS,
             handoff_topic_seeds: vec![],
             incomplete_wave_gate: Default::default(),
+            step_handoff: StepHandoffConfig::default(),
         };
         assert_eq!(
             cfg.effective_timeout_seconds(),
@@ -201,5 +231,33 @@ handoff_topic_seeds:
         let cfg: WorkflowContractConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.handoff_dispatch_timeout_seconds, 45);
         assert_eq!(cfg.handoff_topic_seeds, vec!["queue.advance", "work.ready"]);
+        // U2: incomplete_wave_gate defaults to disabled when absent.
+        assert!(!cfg.incomplete_wave_gate.enabled);
+        // U4: step_handoff defaults to disabled when absent.
+        assert!(!cfg.step_handoff.progress_task_gate);
+    }
+
+    #[test]
+    fn step_handoff_block_round_trips_through_yaml() {
+        let yaml = r#"
+handoff_dispatch_timeout_seconds: 30
+handoff_topic_seeds: []
+step_handoff:
+  progress_task_gate: true
+"#;
+        let cfg: WorkflowContractConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(cfg.step_handoff.progress_task_gate);
+    }
+
+    #[test]
+    fn step_handoff_block_absent_yields_default_false() {
+        let cfg = WorkflowContractConfig::default();
+        assert!(!cfg.step_handoff.progress_task_gate);
+    }
+
+    #[test]
+    fn incomplete_wave_gate_block_absent_yields_default_false() {
+        let cfg = WorkflowContractConfig::default();
+        assert!(!cfg.incomplete_wave_gate.enabled);
     }
 }

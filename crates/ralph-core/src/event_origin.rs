@@ -103,6 +103,7 @@ const ORCHESTRATOR_DIAGNOSTIC_TOPICS: &[&str] = &[
     "event.topic_format.rejected",
     "event.execution_contract.rejected",
     "event.payload_contract.rejected",
+    "event.step_handoff.gate_rejected",
 ];
 
 /// Returns `true` when `topic` is an orchestrator-produced diagnostic

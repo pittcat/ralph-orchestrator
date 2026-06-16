@@ -1,0 +1,94 @@
+# debug.exhausted reaches plan-gate + shipper (multi-consumer U1 path)
+#
+# 2026-06-17-002 feat-ce-executor-step-handoff U8 (multi-step E2E):
+# After U1 added plan-gate to the multi-consumer whitelist for
+# `debug.exhausted` (alongside shipper), the orchestration must route
+# `debug.exhausted` to BOTH shipper (primary consumer — drives the
+# manager report) AND plan-gate (U1 escalation consumer — translates
+# into plan.blocked for the same finalization chain).
+#
+# This scenario pins the wire flow with the minimal topology:
+#   debug-resolver --(debug.exhausted)--> plan-gate + shipper
+# Both downstream hats MUST see the event and react:
+#   - shipper accepts the event directly (its primary trigger path)
+#   - plan-gate emits `plan.blocked` for redundancy with the manager
+#     report chain
+#
+# Reference:
+#   docs/plans/2026-06-17-002-feat-ce-executor-step-handoff-plan.md U1 / U8
+#   crates/ralph-cli/src/presets.rs:1310 test_ce_executor_plan_gate_exists_and_routes_correctly
+
+name: debug_exhausted_reaches_plan_gate
+description: |
+  debug.exhausted reaches BOTH shipper (primary) and plan-gate
+  (U1 multi-consumer escalation) and plan-gate emits plan.blocked
+  for the manager report chain.
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 10
+  hats:
+    debug-resolver:
+      # task.start is the default starting_event — debug-resolver listens
+      # for it so the scenario can boot without an extra coordinator hat.
+      subscribes_to:
+        - task.start
+        - fix.exhausted
+      publishes:
+        - debug.exhausted
+        - LOOP_COMPLETE
+    shipper:
+      # Multi-consumer whitelisted trigger: both shipper and plan-gate
+      # opt in via trigger_multi_consumer_topics.
+      subscribes_to:
+        - debug.exhausted
+      publishes:
+        - LOOP_COMPLETE
+    plan-gate:
+      subscribes_to:
+        - debug.exhausted
+      publishes:
+        - plan.blocked
+        - LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
+
+# Iter 1: debug-resolver emits `debug.exhausted` after the causal
+# chain gate fails (root cause unconfirmed or environmental boundary).
+# Both shipper AND plan-gate must receive it (multi-consumer
+# whitelist from U1).
+# Iter 2: plan-gate translates the escalation into `plan.blocked`
+# to feed the manager report chain redundantly with shipper's
+# REVIEW_COMPLETE path. Events are split across iterations because
+# isolated mode drops extra business events from distinct hats within
+# the same turn (per-turn sticky budget).
+# Iter 3: terminate via LOOP_COMPLETE.
+mock_responses:
+  - |
+    <event topic="debug.exhausted">
+    plan_name: "demo"
+    task_id: "task-debug-001"
+    task_key: "step-01"
+    step: "step-01"
+    reason: "root cause unconfirmed"
+    </event>
+  - |
+    <event topic="plan.blocked">
+    plan_name: "demo"
+    reason: "debug.exhausted: root cause unconfirmed"
+    task_id: "task-debug-001"
+    task_key: "step-01"
+    step: "step-01"
+    </event>
+  - |
+    <event topic="LOOP_COMPLETE">
+    Done.
+    </event>
+
+expected:
+  iterations: 3
+  events:
+    - topic: debug.exhausted
+    - topic: plan.blocked
+  completion: true

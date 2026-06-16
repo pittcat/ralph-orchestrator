@@ -1,0 +1,79 @@
+# Plan-Gate Dual-Publish Handoff — Third Business Event Blocked
+#
+# 2026-06-17-002 feat-ce-executor-step-handoff U3 (regression):
+# The dual-publish carve-out is sticky — once `(queue.advance, work.ready)`
+# is accepted, a *third* business event in the same turn must still be
+# dropped. The per-turn single-business-event budget has a single
+# `+1 carve-out` window; it does not become unlimited.
+#
+# This scenario pins that ceiling: `(queue.advance, work.ready, work.done)`
+# emits three business events; only the first two are accepted; `work.done`
+# is dropped with `event.isolation.boundary_violation`.
+#
+# Reference:
+#   crates/ralph-core/src/event_loop/mod.rs:6317-6319
+#     "the third business event in the same turn is still dropped
+#      (sticky budget)"
+#   docs/plans/2026-06-17-002-feat-ce-executor-step-handoff-plan.md U3
+
+name: plan_gate_dual_publish_third_blocked
+description: |
+  Isolated mode admits the (queue.advance, work.ready) carve-out but
+  drops a third business event in the same turn (sticky budget).
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 10
+  hats:
+    plan-gate:
+      subscribes_to:
+        - task.start
+        - work.done
+      publishes:
+        - queue.advance
+        - work.ready
+        - work.done
+        - LOOP_COMPLETE
+    executor:
+      subscribes_to:
+        - work.ready
+        - queue.advance
+      publishes:
+        - work.done
+        - LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
+
+# Run 1: plan-gate emits THREE business events in one turn:
+# (queue.advance, work.ready, work.done). The first two are accepted
+# (dual-publish carve-out); the third (work.done) is dropped because
+# the per-turn sticky budget has been consumed.
+# Run 2: termination via LOOP_COMPLETE.
+mock_responses:
+  - |
+    <event topic="queue.advance">
+    step: "step-03"
+    </event>
+    <event topic="work.ready">
+    task_id: "task-three-001"
+    plan_name: "demo"
+    plan_path: "/tmp/demo.md"
+    task_key: "step-03"
+    step: "step-03"
+    complexity: "low"
+    </event>
+    <event topic="work.done">
+    task_id: "task-three-001"
+    </event>
+  - |
+    <event topic="LOOP_COMPLETE">
+    Done.
+    </event>
+
+expected:
+  iterations: 2
+  events:
+    - topic: queue.advance
+    - topic: work.ready
+  completion: true

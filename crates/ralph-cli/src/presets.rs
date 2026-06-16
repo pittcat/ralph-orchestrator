@@ -1330,6 +1330,33 @@ mod tests {
             plan_gate.triggers.contains(&"work.failed".to_string()),
             "plan-gate must trigger on work.failed so failures route to plan.blocked (U5)"
         );
+        // U1 (2026-06-17-002): plan-gate must also subscribe to the
+        // multi-consumer whitelisted topics `fix.exhausted` (also
+        // consumed by `debug-resolver`) and `debug.exhausted` (also
+        // consumed by `shipper`). All three hats opt in via
+        // `trigger_multi_consumer_topics`. Without these, the
+        // exhausted paths cannot surface as `plan.blocked` and the
+        // loop can stall.
+        assert!(
+            plan_gate.triggers.contains(&"fix.exhausted".to_string()),
+            "plan-gate must trigger on fix.exhausted (U1, 2026-06-17-002)"
+        );
+        assert!(
+            plan_gate.triggers.contains(&"debug.exhausted".to_string()),
+            "plan-gate must trigger on debug.exhausted (U1, 2026-06-17-002)"
+        );
+        assert!(
+            plan_gate
+                .trigger_multi_consumer_topics
+                .contains(&"fix.exhausted".to_string()),
+            "plan-gate must whitelist fix.exhausted as a multi-consumer topic"
+        );
+        assert!(
+            plan_gate
+                .trigger_multi_consumer_topics
+                .contains(&"debug.exhausted".to_string()),
+            "plan-gate must whitelist debug.exhausted as a multi-consumer topic"
+        );
         assert!(
             plan_gate.publishes.contains(&"queue.advance".to_string()),
             "plan-gate must publish queue.advance"
@@ -1405,6 +1432,32 @@ mod tests {
             !executor.publishes.contains(&"queue.advance".to_string()),
             "executor must NOT publish queue.advance; plan-gate owns queue advancement"
         );
+    }
+
+    /// U1 (2026-06-17-002): the full `ce-executor-isolated` preset must
+    /// pass `RalphConfig::validate` end-to-end, including the new
+    /// `trigger_multi_consumer_topics` whitelist for `fix.exhausted`
+    /// and `debug.exhausted`. This is the KTD regression: if any
+    /// consumer hat forgets to opt in, the preset's
+    /// `validate_ambiguous_routing` rejects it on first run, not just
+    /// in unit tests.
+    #[test]
+    fn test_ce_executor_isolated_preset_validates_ambiguous_routing() {
+        let en = get_preset("ce-executor-isolated")
+            .expect("ce-executor-isolated must be embedded with non-empty content");
+        let zh = read_root_preset("ce-executor-isolated-zh.yml");
+        let en_yaml: &str = en.content.as_ref();
+        let cases: &[(&str, &str)] = &[
+            ("ce-executor-isolated", en_yaml),
+            ("ce-executor-isolated-zh", zh.as_str()),
+        ];
+        for (name, yaml) in cases {
+            let config = RalphConfig::parse_yaml(yaml)
+                .unwrap_or_else(|e| panic!("{name} must parse: {e}"));
+            config
+                .validate()
+                .unwrap_or_else(|e| panic!("{name} must validate (U1 whitelist): {e}"));
+        }
     }
 
     #[test]
@@ -1697,6 +1750,10 @@ mod tests {
         assert_eq!(
             en_gate.default_publishes, zh_gate.default_publishes,
             "plan-gate default_publishes must match between EN and ZH"
+        );
+        assert_eq!(
+            en_gate.trigger_multi_consumer_topics, zh_gate.trigger_multi_consumer_topics,
+            "plan-gate trigger_multi_consumer_topics must match between EN and ZH (U1)"
         );
     }
 
@@ -4449,5 +4506,197 @@ mod tests {
         assert!(!is_tier_0_wac_preset("not-a-real-preset"));
         assert!(!is_tier_0_wac_preset("ce-executor-wave")); // Tier-1
         assert!(!is_tier_0_wac_preset("autoresearch")); // Tier-2
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // 2026-06-17-002 plan U8: end-to-end step-handoff topology coverage
+    //
+    // Pins the multi-consumer handoff invariants from U1/U4/U5/U7 in
+    // one place so future edits to ce-executor-isolated's hat
+    // triggers / trigger_multi_consumer_topics / publishes can't
+    // silently break the manager-report chain.
+    //
+    // Topology (10-hat ce-executor-isolated):
+    //   plan-gate       --(queue.advance, work.ready)-->  executor
+    //   plan-gate       --(plan.complete, plan.blocked)--> shipper
+    //   executor        --(work.done, work.failed)-------> plan-gate / review-coord
+    //   fixer           --(fix.exhausted)----------------> debug-resolver (primary)
+    //   fixer           --(fix.exhausted)----------------> plan-gate     (U1 multi)
+    //   debug-resolver  --(debug.exhausted)--------------> shipper       (primary)
+    //   debug-resolver  --(debug.exhausted)--------------> plan-gate     (U1 multi)
+    //   plan-gate       --(plan.blocked)-----------------> shipper
+    //
+    // The assertions cover the topology *shape* (which hat produces
+    // and consumes what), not the runtime dispatch. The runtime side
+    // is pinned by the BDD scenarios under
+    // crates/ralph-core/tests/scenarios/step_handoff/.
+    // ──────────────────────────────────────────────────────────────────
+    #[test]
+    fn test_e2e_step_handoff_topology_complete() {
+        use std::collections::HashMap;
+
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
+
+        // All five handoff hats must exist with non-empty
+        // triggers and publishes — an empty triggers list means the
+        // hat is unreachable; an empty publishes list means it can't
+        // hand off anything downstream.
+        for hat_id in [
+            "plan-gate",
+            "executor",
+            "fixer",
+            "debug-resolver",
+            "shipper",
+        ] {
+            let hat = config
+                .hats
+                .get(hat_id)
+                .unwrap_or_else(|| panic!("ce-executor-isolated must define '{hat_id}' hat"));
+            assert!(
+                !hat.triggers.is_empty(),
+                "'{hat_id}' must subscribe to at least one trigger"
+            );
+            assert!(
+                !hat.publishes.is_empty(),
+                "'{hat_id}' must publish at least one topic"
+            );
+        }
+
+        // Build consumer map for cross-hat topology assertions.
+        // For each (consumer_hat, topic) pair, record that consumer.
+        // Multi-consumer topics appear under multiple hats.
+        let mut consumers: HashMap<&str, Vec<&str>> = HashMap::new();
+        for (hat_id, hat) in &config.hats {
+            for topic in &hat.triggers {
+                consumers
+                    .entry(topic.as_str())
+                    .or_default()
+                    .push(hat_id.as_str());
+            }
+        }
+
+        // Helper: assert that exactly the expected hats consume a topic
+        // (multi-consumer whitelist preserves the union).
+        let assert_consumers = |topic: &str, expected: &[&str], label: &str| {
+            let actual = consumers
+                .get(topic)
+                .cloned()
+                .unwrap_or_default();
+            // Note: builtin ralph hat is the universal bus destination
+            // (`subscribe("*")`), but is excluded from
+            // select_for_topic_excluding_ralph. We filter it from
+            // the actual set so the assertion matches user-facing
+            // topology.
+            let actual_filtered: Vec<&str> = actual
+                .into_iter()
+                .filter(|h| *h != "ralph")
+                .collect();
+            let mut actual_sorted = actual_filtered.clone();
+            actual_sorted.sort_unstable();
+            let mut expected_sorted = expected.to_vec();
+            expected_sorted.sort_unstable();
+            assert_eq!(
+                actual_sorted, expected_sorted,
+                "{label}: topic '{topic}' consumers must be {expected_sorted:?}, got {actual_sorted:?}"
+            );
+        };
+
+        // U1 multi-consumer routes — fix.exhausted and debug.exhausted
+        // must each reach BOTH the primary resolver/consumer AND
+        // plan-gate (the U1 escalation consumer).
+        assert_consumers(
+            "fix.exhausted",
+            &["debug-resolver", "plan-gate"],
+            "U1 multi-consumer whitelist",
+        );
+        assert_consumers(
+            "debug.exhausted",
+            &["plan-gate", "shipper"],
+            "U1 multi-consumer whitelist",
+        );
+
+        // Single-consumer handoff routes — executor is the unique
+        // consumer of work.ready (WAC-U4 dual-publish wake).
+        assert_consumers(
+            "work.ready",
+            &["executor"],
+            "executor is the unique work.ready consumer",
+        );
+
+        // queue.advance is consumed only by plan-gate (self-loop
+        // for progress.md bookkeeping, KTD-4 exempt). Executor no
+        // longer triggers on queue.advance — that was the
+        // re-emit trap removed in WAC-U4 (2026-06-12-002). The
+        // executor now wakes via work.ready priority dispatch
+        // instead (KTD-12).
+        let queue_advance_consumers = consumers
+            .get("queue.advance")
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|h| *h != "ralph")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            queue_advance_consumers,
+            vec!["plan-gate"],
+            "queue.advance must be consumed only by plan-gate (self-loop); \
+             executor must NOT trigger on it (WAC-U4 re-emit trap removed), got {:?}",
+            queue_advance_consumers
+        );
+
+        // Manager-report chain — shipper receives plan.complete,
+        // plan.blocked, and (via U1) debug.exhausted. All three
+        // routes feed REVIEW_COMPLETE → reporter → LOOP_COMPLETE.
+        for topic in ["plan.complete", "plan.blocked", "debug.exhausted"] {
+            let shipper_consumers = consumers
+                .get(topic)
+                .cloned()
+                .unwrap_or_default();
+            assert!(
+                shipper_consumers.contains(&"shipper"),
+                "shipper must consume '{topic}' to drive the manager report chain, got {:?}",
+                shipper_consumers
+            );
+        }
+
+        // producer → consumer sanity for the U1 escalation paths.
+        // (Topic exists in some hat's publishes → hat triggers on it.)
+        for (producer, produced) in [
+            ("fixer", "fix.exhausted"),
+            ("debug-resolver", "debug.exhausted"),
+            ("debug-resolver", "fix.plan.ready"),
+            ("executor", "work.done"),
+            ("plan-gate", "queue.advance"),
+            ("plan-gate", "work.ready"),
+            ("plan-gate", "plan.complete"),
+            ("plan-gate", "plan.blocked"),
+        ] {
+            let producer_hat = &config.hats[producer];
+            assert!(
+                producer_hat.publishes.contains(&produced.to_string()),
+                "producer '{producer}' must publish '{produced}'"
+            );
+        }
+
+        // trigger_multi_consumer_topics must be uniformly declared
+        // across all consumers of the whitelisted multi-consumer
+        // topics. Without the union declaration, strict WAC rejects
+        // the preset with `validate_ambiguous_routing`.
+        for topic in ["fix.exhausted", "debug.exhausted"] {
+            for hat_id in consumers.get(topic).cloned().unwrap_or_default() {
+                if hat_id == "ralph" {
+                    continue;
+                }
+                let hat = &config.hats[hat_id];
+                assert!(
+                    hat.trigger_multi_consumer_topics
+                        .contains(&topic.to_string()),
+                    "consumer '{hat_id}' of multi-consumer topic '{topic}' must declare \
+                     it in trigger_multi_consumer_topics so strict WAC accepts the preset"
+                );
+            }
+        }
     }
 }
