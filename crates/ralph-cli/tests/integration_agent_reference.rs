@@ -262,3 +262,80 @@ fn test_agent_reference_hat_filter_does_not_block_builtins() {
         "executor hat must see ralph-tools-emit; got: {stdout}"
     );
 }
+
+// ---- plan 004 U6: handoff skill + ralph-tools R0 anchors (Tier 1 content anchors) ----
+
+#[test]
+fn test_agent_reference_skill_list_contains_handoff() {
+    // plan 004 U3 / U6 Tier 1: ralph-tools-handoff must be listable
+    // (registered as a builtin) so the agent can `ralph tools skill load` it.
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+
+    let stdout = ralph_skill_ok(temp_path, &["list", "--format", "quiet"]);
+    assert!(
+        stdout.lines().any(|l| l == "ralph-tools-handoff"),
+        "skill list must contain ralph-tools-handoff (U3 builtin); got: {stdout}"
+    );
+}
+
+#[test]
+fn test_agent_reference_skill_load_handoff_shows_progress_task_mismatch() {
+    // plan 004 U3 / AE3 / SC4: load ralph-tools-handoff must surface the
+    // progress_task_mismatch / plan.blocked / review_passed_while_wave_open
+    // references (handoff deep reference content anchors).
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+
+    let stdout = ralph_skill_ok(temp_path, &["load", "ralph-tools-handoff"]);
+    assert!(
+        stdout.contains("progress_task_mismatch"),
+        "ralph-tools-handoff must mention progress_task_mismatch; got: {stdout}"
+    );
+    assert!(
+        stdout.contains("plan.blocked"),
+        "ralph-tools-handoff must mention plan.blocked; got: {stdout}"
+    );
+    assert!(
+        stdout.contains("handoff_dispatch_timeout"),
+        "ralph-tools-handoff must mention handoff_dispatch_timeout; got: {stdout}"
+    );
+    assert!(
+        stdout.contains("review_passed_while_wave_open"),
+        "ralph-tools-handoff must mention review_passed_while_wave_open; got: {stdout}"
+    );
+    // Document-header anchor: first line of the section that tells agents
+    // "read auto-injected R0 first, this is the on-demand deep reference".
+    assert!(
+        stdout.contains("先读自动注入 R0") || stdout.contains("自动注入 R0"),
+        "ralph-tools-handoff must point at auto-injected R0 as the first stop; got: {stdout}"
+    );
+}
+
+#[test]
+fn test_agent_reference_skill_load_ralph_tools_contains_task_resume_anchor() {
+    // plan 004 U1 / AE0 / SC1: ralph-tools (auto-injected) must carry
+    // the R0 anchor strings (收到 task.resume 时, required_fields,
+    // --policy-check) and must NOT steer agents toward --unsafe-no-policy-check
+    // as a recommended fix.
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+
+    let stdout = ralph_skill_ok(temp_path, &["load", "ralph-tools"]);
+    assert!(
+        stdout.contains("收到 `task.resume` 时"),
+        "ralph-tools must include the R0 section header '收到 task.resume 时'"
+    );
+    assert!(
+        stdout.contains("required_fields"),
+        "ralph-tools R0 must mention required_fields"
+    );
+    assert!(
+        stdout.contains("--policy-check"),
+        "ralph-tools R0 must mention --policy-check"
+    );
+    assert!(
+        !stdout.contains("确认配置允许 `--unsafe-no-policy-check`"),
+        "ralph-tools R0b fix: must NOT recommend --unsafe-no-policy-check as a default recovery"
+    );
+}

@@ -377,3 +377,140 @@ hats:
         "Objective content should be visible"
     );
 }
+
+// --- plan 004 U6 Tier 2: ralph-tools skill R0 anchors must be auto-injected ---
+
+#[test]
+fn test_build_prompt_injects_ralph_tools_skill_r0_block() {
+    // Given: a minimal isolated-mode config with memories.enabled = true
+    // When: build_prompt for the isolated hat (so the isolated branch
+    //   in `EventLoop::build_prompt` runs `prepend_auto_inject_skills` —
+    //   the backward-compat custom-hat path explicitly skips skill
+    //   injection per `mod.rs:4371-4374`)
+    // Then: the prompt contains <ralph-tools-skill> with the R0
+    //   "收到 task.resume 时" anchor (plan 004 U6 Tier 2)
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  builder:
+    name: "Builder"
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+memories:
+  enabled: true
+  inject: auto
+tasks:
+  enabled: true
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Inject anchor test");
+
+    let hat_id = HatId::new("builder");
+    let prompt = event_loop.build_prompt(&hat_id).unwrap();
+
+    // R0 anchor: the section title "收到 task.resume 时" must appear in the
+    // auto-injected <ralph-tools-skill> block. This guarantees the
+    // Tier 2 contract: file content == injected content == visible to agent.
+    assert!(
+        prompt.contains("<ralph-tools-skill>"),
+        "build_prompt must wrap ralph-tools.md in <ralph-tools-skill>; got prompt:\n{}",
+        &prompt[..prompt.len().min(3000)]
+    );
+    assert!(
+        prompt.contains("收到 `task.resume` 时"),
+        "R0 anchor '收到 task.resume 时' must be in the auto-injected ralph-tools block"
+    );
+    assert!(
+        prompt.contains("required_fields"),
+        "R0 anchor 'required_fields' must be in the auto-injected ralph-tools block"
+    );
+    assert!(
+        prompt.contains("--policy-check"),
+        "R0 anchor '--policy-check' must be in the auto-injected ralph-tools block"
+    );
+
+    // Negative anchor: the legacy unsafe-bypass suggestion must NOT appear as a
+    // recommended path. The phrasing in §通用错误恢复 was rewritten to
+    // explicitly steer agents away from `--unsafe-no-policy-check` as a
+    // first choice.
+    assert!(
+        !prompt.contains("确认配置允许 `--unsafe-no-policy-check`"),
+        "R0b: ralph-tools.md must NOT recommend `--unsafe-no-policy-check` as a default fix"
+    );
+}
+
+#[test]
+fn test_build_prompt_injects_ralph_tools_via_tasks_only() {
+    // Branch coverage: ralph-tools is injected when EITHER memories.enabled
+    // OR tasks.enabled is true (event_loop/mod.rs:4862-4873).
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  builder:
+    name: "Builder"
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+memories:
+  enabled: false
+tasks:
+  enabled: true
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Tasks-only injection test");
+
+    let prompt = event_loop.build_prompt(&HatId::new("builder")).unwrap();
+    assert!(
+        prompt.contains("<ralph-tools-skill>") && prompt.contains("收到 `task.resume` 时"),
+        "ralph-tools must be injected when tasks.enabled = true (even with memories off)"
+    );
+}
+
+#[test]
+fn test_handoff_skill_indexed_but_not_auto_injected() {
+    // Plan 004 U3 KTD3 + AE3: ralph-tools-handoff is registered & listed
+    // by `build_index` (the `## SKILLS` table the loop surfaces), but must
+    // NOT appear in the auto-injected prompt. The agent must opt in via
+    // `ralph tools skill load ralph-tools-handoff`.
+    //
+    // We assert via the public `build_prompt` output: the prompt must
+    // contain the `## SKILLS` table that points at handoff (so the agent
+    // knows the load command), but must NOT contain a `<ralph-tools-handoff-skill>`
+    // block (auto-injection).
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  builder:
+    name: "Builder"
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+memories:
+  enabled: true
+  inject: auto
+tasks:
+  enabled: true
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("handoff not auto-injected test");
+
+    let prompt = event_loop.build_prompt(&HatId::new("builder")).unwrap();
+
+    // Positive: the prompt's skill table (built from SkillRegistry::build_index)
+    // must surface ralph-tools-handoff as an on-demand option.
+    assert!(
+        prompt.contains("ralph-tools-handoff"),
+        "skill index must list ralph-tools-handoff; got prompt head: {}",
+        prompt.lines().take(40).collect::<Vec<_>>().join("\n")
+    );
+
+    // Negative: handoff is NOT auto-injected — its XML wrapper must be absent.
+    assert!(
+        !prompt.contains("<ralph-tools-handoff-skill>"),
+        "ralph-tools-handoff must NOT be auto-injected; auto_inject_skills contract violated"
+    );
+}
