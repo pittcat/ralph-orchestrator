@@ -31,6 +31,9 @@ const RALPH_TOOLS_WAVE_SKILL_RAW: &str = include_str!("../data/ralph-tools-wave.
 /// Built-in ralph-tools-cmdref skill content (skill/interact/run/other-commands reference).
 const RALPH_TOOLS_CMDREF_SKILL_RAW: &str = include_str!("../data/ralph-tools-cmdref.md");
 
+/// Built-in ralph-tools-handoff skill content (ce-executor step handoff deep reference).
+const RALPH_TOOLS_HANDOFF_SKILL_RAW: &str = include_str!("../data/ralph-tools-handoff.md");
+
 /// Registry of all available skills for the current loop.
 pub struct SkillRegistry {
     /// All skills indexed by name.
@@ -74,16 +77,18 @@ impl SkillRegistry {
     }
 
     /// Register built-in skills (ralph-tools, ralph-tools-tasks, ralph-tools-memories, robot-interaction,
-    /// ralph-tools-emit, ralph-tools-wave, ralph-tools-cmdref).
+    /// ralph-tools-emit, ralph-tools-wave, ralph-tools-cmdref, ralph-tools-handoff).
     fn register_builtins(&mut self) -> Result<()> {
         self.register_builtin("ralph-tools", RALPH_TOOLS_SKILL_RAW)?;
         self.register_builtin("ralph-tools-tasks", RALPH_TOOLS_TASKS_SKILL_RAW)?;
         self.register_builtin("ralph-tools-memories", RALPH_TOOLS_MEMORIES_SKILL_RAW)?;
         self.register_builtin("robot-interaction", ROBOT_INTERACTION_SKILL_RAW)?;
-        // 按需加载: emit / wave / cmdref 由 ralph-tools.md 速查表链接引导加载 (plan U5)
+        // 按需加载: emit / wave / cmdref / handoff 由 ralph-tools.md 速查表链接引导加载
+        // (plan 004 U3; handoff 仅按需，不入 auto-inject 白名单)
         self.register_builtin("ralph-tools-emit", RALPH_TOOLS_EMIT_SKILL_RAW)?;
         self.register_builtin("ralph-tools-wave", RALPH_TOOLS_WAVE_SKILL_RAW)?;
         self.register_builtin("ralph-tools-cmdref", RALPH_TOOLS_CMDREF_SKILL_RAW)?;
+        self.register_builtin("ralph-tools-handoff", RALPH_TOOLS_HANDOFF_SKILL_RAW)?;
         Ok(())
     }
 
@@ -371,6 +376,25 @@ mod tests {
         assert!(registry.get("ralph-tools-tasks").is_some());
         assert!(registry.get("ralph-tools-memories").is_some());
         assert!(registry.get("robot-interaction").is_some());
+        assert!(registry.get("ralph-tools-emit").is_some());
+        assert!(registry.get("ralph-tools-wave").is_some());
+        assert!(registry.get("ralph-tools-cmdref").is_some());
+        assert!(registry.get("ralph-tools-handoff").is_some());
+    }
+
+    #[test]
+    fn test_handoff_skill_is_not_auto_injected_by_default() {
+        // plan 004 U3 KTD3: ralph-tools-handoff is on-demand only, must NOT
+        // appear in auto_inject_skills even when registered.
+        let mut registry = SkillRegistry::new(None);
+        registry.register_builtins().unwrap();
+
+        let auto = registry.auto_inject_skills(None);
+        assert!(
+            auto.iter().all(|s| s.name != "ralph-tools-handoff"),
+            "ralph-tools-handoff must not be auto-injected; got: {:?}",
+            auto.iter().map(|s| s.name.as_str()).collect::<Vec<_>>()
+        );
     }
 
     #[test]

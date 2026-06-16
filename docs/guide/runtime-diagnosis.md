@@ -595,6 +595,48 @@ cat .ralph/agent/tasks.jsonl
 
 ---
 
+## 12.1 emit rejection → task.resume → 修复 决策树
+
+agent 在 loop 内收到 `task.resume` 后，按以下决策树定位问题层并修复：
+
+```text
+emit 失败 / 拒收
+  │
+  ├─ CLI 入口拒收（`ralph emit` 非零退出）
+  │   ├─ stderr 提到 `not in allowlist` → 检查 RALPH_EVENTS_FILE / --file 路径
+  │   ├─ stderr 提到 `policy check failed` / `validation_errors` → 读 `validation_errors[].field`，
+  │   │     修正 payload 后用 `ralph emit --policy-check` 预检
+  │   └─ stderr 提到 `isolated` / 越权 → 改用 hat `publishes` 列表内 topic（`ralph hats list`）
+  │
+  ├─ Loop 端拒收（events.jsonl 末尾出现 `task.resume`）
+  │   ├─ `stage` = `origin` → 越权 topic（多发）或 unknown hat；改用 hat 实际可发 topic
+  │   ├─ `stage` = `policy` + `required_fields` 非空 → 按字段补齐 payload
+  │   ├─ `stage` = `execution_contract` → 读 `violation`；缺字段补字段，类型不匹配改类型
+  │   └─ `stage` = `payload_contract` → 通常是直写 events.jsonl；停手走 CLI
+  │
+  └─ 复杂 violation（progress_task_mismatch / handoff_dispatch_timeout /
+       plan.blocked 越权 / review_passed_while_wave_open）
+      → ralph tools skill load ralph-tools-handoff
+```
+
+**自纠步骤**（按顺序）：
+
+1. 读 PENDING EVENTS 里 `task.resume` payload（`stage` / `topic` / `violation` / `required_fields` / `allowed_topics`）。
+2. 按决策树第一分支定位层。
+3. 不要用 `--unsafe-no-policy-check`（`ce-executor-isolated` preset 默认 `allow_unsafe_cli_emit: false` 时该参数被拒）；不要直写 `events.jsonl`。
+4. 修复后用 `ralph emit --policy-check` 预检；同源通过再正式发。
+5. 仍不明：`ralph diagnose --session latest` 出报告；本 guide §10 解释 schema；本节决策树与 §12 互补。
+
+**相关文档**：
+
+- 自动注入的速查：`crates/ralph-core/data/ralph-tools.md` 「收到 `task.resume` 时」段
+- emit 详表：`crates/ralph-core/data/ralph-tools-emit.md`
+- handoff 深参考：`crates/ralph-core/data/ralph-tools-handoff.md`
+- 机制设计：`docs/plans/2026-06-17-002-feat-ce-executor-step-handoff-plan.md`
+- 机制边角（CLI 预检）：`docs/plans/2026-06-17-005-fix-agent-recovery-mechanism-gaps-plan.md`
+
+---
+
 ## 13. 计划 / 设计文档
 
 - 计划: `docs/plans/2026-06-04-004-feat-drift-auto-calibration-plan.md`（U0–U9 完整分解）

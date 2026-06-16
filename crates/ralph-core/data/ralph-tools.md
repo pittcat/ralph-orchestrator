@@ -7,7 +7,7 @@ metadata:
 
 # Ralph CLI 核心参考
 
-> **前提**：本 skill 仅在 `memories.enabled` 或 `tasks.enabled` 至少一个启用时被注入（`crates/ralph-core/src/event_loop/mod.rs:910-930`）。速查表中的"已注入"列均受此条件约束。
+> **前提**：本 skill 仅在 `memories.enabled` 或 `tasks.enabled` 至少一个启用时被注入（`crates/ralph-core/src/event_loop/mod.rs:4862-4873`）。速查表中的"已注入"列均受此条件约束。
 
 > **遇到不确定的命令语法时，先 `ralph <cmd> --help` 再执行。**
 
@@ -17,6 +17,22 @@ metadata:
 2. **emit 后必须校验** — 确认事件已写入事件文件
 3. **task/memory 操作后必须确认状态** — 用 `--format json` + `jq` 验证
 4. **失败时先查 `--help`** — 不要猜测参数，文档可能已更新
+
+## 收到 `task.resume` 时（policy / origin / contract 拒收后自动注入）
+
+编排器拒收后会在 PENDING EVENTS 注入 `task.resume`（payload 形状：`crates/ralph-core/src/event_loop/rejection.rs:324-398` `build_task_resume_payload`）。**不要重发同样 payload**，按以下顺序修复：
+
+1. **读 PENDING EVENTS 里 `task.resume` 的 JSON payload**，关键字段：
+   - `stage`：`origin` / `policy` / `execution_contract` / `payload_contract`
+   - `topic`：被拒收的事件主题
+   - `violation`：人类可读原因（含字段名 / 类型不匹配）
+   - `required_fields`：当前 topic 缺失或类型错的字段清单
+   - `allowed_topics`：当前 hat 可发布的所有 topic（**只在这列里挑**）
+2. **对照 `required_fields` 补齐 payload**；用 `ralph emit <topic> --policy-check -j '...'` 在写盘前预检（U4，CLI 100% 与 loop gate 同源 schema）。
+3. **确认 hat 作用域**：isolated 模式下未在 `allowed_topics`（与 hat `publishes` 交集）的 topic 越权 — 改用 hat 实际可发的 topic，不要靠 `--unsafe-no-policy-check` 绕过。
+4. **不要**用 `--unsafe-no-policy-check` 绕 policy；`ce-executor-isolated` preset 默认 `allow_unsafe_cli_emit: false`，该参数直接被拒。**不要**直写 `events.jsonl` — 写完仍会被 `payload_contract` 拒。
+5. **复杂 violation**（`progress_task_mismatch` / `handoff_dispatch_timeout` / `plan.blocked` / `review_passed_while_wave_open` 等）一行摘要见 `ralph-tools-handoff`；按需 `ralph tools skill load ralph-tools-handoff` 加载深参考。
+6. **仍不明**：`RALPH_DIAGNOSTICS=1` 启的 loop 把 envelope 写到 `recovery.jsonl`；`ralph diagnose --session latest` 出报告（`docs/guide/runtime-diagnosis.md` §10）。
 
 ## 命令速查表
 
@@ -34,6 +50,7 @@ metadata:
 | 命令 | 用途 | 详细参考 |
 |------|------|---------|
 | `ralph emit` | 发射事件（最常用） | `ralph tools skill load ralph-tools-emit` |
+| Step handoff / ce-executor | `task.resume` 复杂 violation | `ralph tools skill load ralph-tools-handoff` |
 | `ralph wave emit` | 并行 wave 调度 | `ralph tools skill load ralph-tools-wave` |
 | `ralph run` | 启动编排循环 | `ralph tools skill load ralph-tools-cmdref` |
 | `ralph hats validate [--strict]` | 拓扑/payload/orphan/lint 校验 | `crates/ralph-cli/src/hats.rs:170`（strict 时启用 lint 所有权检查） |
@@ -51,7 +68,7 @@ metadata:
 
 🔴 **绝不静默回退**：如果设置了 `RALPH_EVENTS_FILE=foo.jsonl` 但 `foo.jsonl` 不在 allowlist 中，命令会**失败**（不会改写到 marker），错误信息会列出当前 allowlist 的所有合法目标。
 
-> `ralph wave emit` 的事件文件解析走 3 级：`RALPH_EVENTS_FILE` → `.ralph/current-events` → `.ralph/events.jsonl`（`crates/ralph-cli/src/wave.rs:475-485`），与 ralph emit 不同。**wave worker 通过 `ralph emit` 返回结果时，事件会写入 candidate-events（与 wave 调度相关），不要改写 `RALPH_EVENTS_FILE` 指向其他文件。**
+> `ralph wave emit` 的事件文件解析走 3 级：`RALPH_EVENTS_FILE` → `.ralph/current-events` → `.ralph/events.jsonl`（`crates/ralph-cli/src/wave.rs:551-560`），与 ralph emit 不同。**wave worker 通过 `ralph emit` 返回结果时，事件会写入 candidate-events（与 wave 调度相关），不要改写 `RALPH_EVENTS_FILE` 指向其他文件。**
 
 ### `ralph wave emit` Schema 预检（U4）
 
@@ -85,7 +102,7 @@ metadata:
 |----------|---------|---------|
 | `events file not in allowlist` | `RALPH_EVENTS_FILE`/`--file` 指向了非 allowlist 路径 | 查看错误信息中列出的 allowlist 条目；如需新路径，先 `touch` 一个 marker 或去掉显式参数 |
 | `topic is required` | 缺少必需的位置参数 | 补上 topic 参数 |
-| `policy check failed` | 事件不符合策略 | 检查 payload 格式，或确认配置允许 `--unsafe-no-policy-check` |
+| `policy check failed` | 事件不符合策略 | 读 stderr 列出违规字段（`validation_errors[].field`）；修正后用 `ralph emit <topic> --policy-check -j '...'` 预检通过再正式发出。**不要**首选 `--unsafe-no-policy-check`（`ce-executor-isolated` preset 默认 `allow_unsafe_cli_emit: false` 时该参数不生效） |
 | `task not found` | task ID 不存在或属于其他 loop | `ralph tools task list` 确认当前可用任务 |
 | `memory not found` | memory ID 不存在或无权访问 | `ralph tools memory list` 确认可用记忆 |
 | `skill not found` | skill 名称错误或对当前 hat 不可见 | `ralph tools skill list` 确认可用 skill；检查 `RALPH_CURRENT_HAT` |

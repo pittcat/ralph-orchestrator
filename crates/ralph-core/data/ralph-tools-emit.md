@@ -9,6 +9,8 @@ metadata:
 
 > **NEVER use echo/cat to write tasks or memories** — always use CLI tools.
 
+> **速查见 `ralph-tools` 自动注入段**：本 skill 是按需深参考。loop 内最常见的 `task.resume` 修复（policy / origin / contract）已在每轮自动注入的 `ralph-tools.md` 「收到 `task.resume` 时」段说明；本文件覆盖更细的 emit / schema / null-payload / isolated 越权表。
+
 ---
 
 ## `ralph emit`
@@ -59,6 +61,19 @@ ralph emit [OPTIONS] <TOPIC> [PAYLOAD]
 - 🔴 `ralph emit` **没有** `format` 选项。
 - 🔴 试图通过 `RALPH_EVENTS_FILE` 或 `--file` 写入其他 worktree 的 events 文件会被 `ralph emit` 拒绝；错误信息会列出当前 allowlist。
 
+**NULL payload 拒收白名单**（`crates/ralph-core/src/event_policy.rs:502-512` `NULL_PAYLOAD_REJECT_TOPICS`）：以下 9 个 topic 不接受空 payload（`[PAYLOAD]` 省略 + 无 `-j`）— 必须传 JSON object：
+
+| Topic | 出现位置 |
+|-------|---------|
+| `review.passed` / `review.failed` / `review.complete` | review chain 终态 |
+| `work.done` / `queue.advance` | executor / step handoff |
+| `review.wave.ready` | wave 入口 |
+| `work.ready` / `plan.complete` / `plan.blocked` | step handoff 关键事件 |
+
+JSON 写法：`ralph emit work.done --policy-check -j '{"plan_path": "...", "task_id": "..."}'`（事件文件已存在 + allowlist 命中）。
+
+**`--policy-check` 边界**：CLI `--policy-check` 与 `ralph run` 循环内 `apply_event_policy_validation` 行为**同源**（都走 `event_policy.schemas.<topic>.required_fields`），但**不覆盖** step handoff 的 `progress_task_gate`（`progress.md` ↔ `tasks.jsonl` 一致性）。完整预检（含 `progress_task_gate` 在 CLI 入口预检）见计划 `docs/plans/2026-06-17-005-fix-agent-recovery-mechanism-gaps-plan.md`。
+
 **校验：**
 ```bash
 # 1. 确定实际写入的事件文件（与 ralph emit 源码一致）
@@ -85,7 +100,7 @@ tail -n 1 "$events_file" | jq -e '.payload | type == "object"'
 |------|------|------|
 | `events file not in allowlist` | `RALPH_EVENTS_FILE` / `--file` 命中非 allowlist 路径 | 查看错误信息中列出的 allowlist 条目；优先移除显式参数让 ralph emit 走 marker 解析 |
 | `topic is required` | 缺少位置参数 | 补上 topic |
-| `policy check failed` | payload 不符合策略 | 检查格式或用 `--unsafe-no-policy-check` |
+| `policy check failed` | payload 不符合策略 | 读 stderr / 用 `--output json` 取 `validation_errors[].field` 一次拿全部缺失字段；修正后用 `ralph emit <topic> --policy-check -j '...'` 预检通过再发。**不要**首选 `--unsafe-no-policy-check`（`ce-executor-isolated` preset 默认 `allow_unsafe_cli_emit: false` 时该参数被拒） |
 | `cannot write to events file` | 文件不存在或权限不足 | 确认 `.ralph/` 目录存在，检查权限 |
 | `Invalid JSON payload` | 用 `-j` 但 payload 不是合法 JSON | 用 `jq` 验证 payload：`echo '{"a":1}' \| jq .` |
 | `Event provenance required` | 配置要求 hat 但 `--hat` 未设且 `RALPH_CURRENT_HAT` 空 | 显式 `--hat <hat-id>` 或设置环境变量 |
@@ -94,3 +109,5 @@ tail -n 1 "$events_file" | jq -e '.payload | type == "object"'
 | 任何命令失败 | 通用恢复 | 1. `ralph emit --help` 确认语法 2. 检查退出码 3. 查看错误信息 4. 重试 |
 
 > **wave worker 注意**：在 `RALPH_WAVE_WORKER=1` 的子进程中通过 `ralph emit` 返回结果时，事件会写入 **candidate-events**（不是 current-events），与 wave 调度器一致。不要强行设置 `RALPH_EVENTS_FILE` 指向其他文件——会被 allowlist 拒绝。
+
+> **诊断**：emit 拒收后无法在 CLI 层修复时，启 `RALPH_DIAGNOSTICS=1` 重新 loop；envelope 写到 `recovery.jsonl`，`ralph diagnose --session latest` 出报告。详见 `docs/guide/runtime-diagnosis.md` §10 / §12.1。
