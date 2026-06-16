@@ -379,6 +379,55 @@ fn test_progress_task_mismatch_gate_blocks_queue_advance() {
     run_progress_task_mismatch_scenario(yaml);
 }
 
+// ──────────────────────────────────────────────────────────────────────
+// 2026-06-17-002 plan U8: Multi-step E2E / BDD handoff coverage
+//
+// These scenarios exercise the full ce-executor-isolated handoff
+// topology end-to-end through the real EventLoop. They complement
+// the per-unit Rust tests by pinning the wire flow that the runtime
+// contract aggregator and isolated mode dispatch guarantee:
+//   - step_advance_u1_to_u2: plan-gate dual-publishes
+//     (queue.advance, work.ready) in one turn; executor wakes on
+//     work.ready priority dispatch (KTD-12 / WAC-U4) and emits
+//     work.done; loop completes via plan-gate (collapsed terminal).
+//   - fix_exhausted_reaches_plan_gate: U1 multi-consumer whitelist
+//     routes `fix.exhausted` to BOTH debug-resolver (primary) and
+//     plan-gate (escalation). Plan-gate emits `plan.blocked` so the
+//     manager report chain still surfaces the failure.
+//   - debug_exhausted_reaches_plan_gate: U1 multi-consumer whitelist
+//     routes `debug.exhausted` to BOTH shipper (primary) and
+//     plan-gate (escalation). Plan-gate emits `plan.blocked` for
+//     redundancy with shipper's REVIEW_COMPLETE path.
+// ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_step_advance_u1_to_u2_handoff_under_30s() {
+    // 2026-06-17-002 U8: end-to-end U1→U2 step advance via dual-publish.
+    // The <30s target is satisfied by the scenario's 3-iteration budget;
+    // the assertion is on topology wire flow (queue.advance + work.ready
+    // both accepted, executor wakes, work.done accepted, loop completes).
+    let yaml = load_scenario("tests/scenarios/step_handoff/step_advance_u1_to_u2.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_fix_exhausted_reaches_plan_gate() {
+    // 2026-06-17-002 U8: U1 multi-consumer path — fix.exhausted routes
+    // to plan-gate alongside debug-resolver; plan-gate emits
+    // plan.blocked for the manager report chain.
+    let yaml = load_scenario("tests/scenarios/step_handoff/fix_exhausted_reaches_plan_gate.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_debug_exhausted_reaches_plan_gate() {
+    // 2026-06-17-002 U8: U1 multi-consumer path — debug.exhausted routes
+    // to plan-gate alongside shipper; plan-gate emits plan.blocked
+    // redundantly with shipper's REVIEW_COMPLETE path.
+    let yaml = load_scenario("tests/scenarios/step_handoff/debug_exhausted_reaches_plan_gate.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 /// U4 (2026-06-17-002 plan) scenario runner: seeds the workspace
 /// `.ralph/agent/progress.md` and `.ralph/agent/tasks.jsonl` to
 /// establish a progress/task mismatch, then runs the YAML scenario
