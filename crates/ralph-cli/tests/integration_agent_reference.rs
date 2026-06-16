@@ -48,7 +48,7 @@ fn ralph_skill_with_env(temp_path: &Path, env: &[(&str, &str)], args: &[&str]) -
 }
 
 /// Run `ralph emit` in an isolated temp workspace.
-fn ralph_emit(temp_path: &Path, args: &[&str]) -> Output {
+fn _ralph_emit(temp_path: &Path, args: &[&str]) -> Output {
     // Create .ralph/ directory and events marker so emit has a target
     let ralph_dir = temp_path.join(".ralph");
     fs::create_dir_all(&ralph_dir).expect("create .ralph dir");

@@ -913,16 +913,12 @@ mod tests {
         match decision {
             PolicyDecision::RejectWithResume(finding) => {
                 assert!(
-                    finding.message.contains("WAC R10")
-                        || finding.message.contains("null payload"),
+                    finding.message.contains("WAC R10") || finding.message.contains("null payload"),
                     "review.passed null must be flagged with WAC R10 finding, got: {}",
                     finding.message
                 );
             }
-            other => panic!(
-                "review.passed null must RejectWithResume, got {:?}",
-                other
-            ),
+            other => panic!("review.passed null must RejectWithResume, got {:?}", other),
         }
     }
 
@@ -975,7 +971,9 @@ mod tests {
         );
         tracker.observe_accepted(&passed);
         assert!(
-            tracker.check_semantic_gates(&plan_complete_blocked).is_none(),
+            tracker
+                .check_semantic_gates(&plan_complete_blocked)
+                .is_none(),
             "synth_terminal must be set after a well-formed review.passed, \
              so plan.complete must pass the gate"
         );

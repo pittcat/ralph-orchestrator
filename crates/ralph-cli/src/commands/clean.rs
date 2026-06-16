@@ -148,7 +148,6 @@ pub fn list_directory_contents(path: &Path, use_colors: bool, indent: usize) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     #[test]
     fn test_list_directory_contents_handles_nested_paths() {
         let temp_dir = tempfile::tempdir().unwrap();

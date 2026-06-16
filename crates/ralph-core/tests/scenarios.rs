@@ -393,8 +393,7 @@ fn test_plan_gate_dual_publish_inverse_rejected() {
     // *ordered* pair. Inverse order `(work.ready, queue.advance)` must
     // NOT admit the second event — only the first business event
     // (`work.ready`) is accepted; `queue.advance` is dropped.
-    let yaml =
-        load_scenario("tests/scenarios/plan_gate_dual_publish_inverse_rejected.yml");
+    let yaml = load_scenario("tests/scenarios/plan_gate_dual_publish_inverse_rejected.yml");
     run_workflow_guard_scenario(yaml);
 }
 

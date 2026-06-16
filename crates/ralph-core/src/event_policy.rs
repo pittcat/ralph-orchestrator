@@ -2759,7 +2759,6 @@ mod tests {
     #[test]
     fn wac_r10_null_payload_rejects_every_whitelist_topic() {
         let config = test_config_with_enforce_and_resume();
-        let mut state = PolicyRuntimeState::default();
         for topic in [
             "review.passed",
             "review.failed",

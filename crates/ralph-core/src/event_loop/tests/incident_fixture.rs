@@ -23,7 +23,7 @@ const INCIDENT_FIXTURE: &str = "tests/fixtures/wave-isolated-dimension-done/8-di
 
 /// The fixture's wave_id (anonymized from the original
 /// `wave_id=w-2026-06-13-001`).
-const FIXTURE_WAVE_ID: &str = "w-2026-06-13-001";
+const _FIXTURE_WAVE_ID: &str = "w-2026-06-13-001";
 
 /// KTD-2 + KTD-3 happy path: 8 `review.dimension.done` from
 /// `dimension-reviewer` workers must all be accepted when

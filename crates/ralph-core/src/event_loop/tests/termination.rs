@@ -621,9 +621,8 @@ fn u6_verdict_gate_rejects_loop_complete_on_report_done_fail() {
     // REVIEW_COMPLETE was never seen — this verifies `additional_topics`
     // works as an OR gate (not gated on the upstream topic being seen).
     event_loop.state_mut().last_verdict_topic = Some("report.done".to_string());
-    event_loop.state_mut().last_verdict_payload = Some(
-        r#"{"pass_or_fail":"fail","verdict":"fail","report_path":"r.md"}"#.to_string(),
-    );
+    event_loop.state_mut().last_verdict_payload =
+        Some(r#"{"pass_or_fail":"fail","verdict":"fail","report_path":"r.md"}"#.to_string());
     write_event_to_jsonl(&events_path, "LOOP_COMPLETE", r#"{"plan_name":"p"}"#);
     let _ = event_loop.process_events_from_jsonl();
 
@@ -640,15 +639,9 @@ fn u6_verdict_gate_rejects_loop_complete_on_report_done_fail() {
 
 /// U6: "fake pass" attempt — a reporter claims pass_or_fail="pass"
 /// on report.done while the upstream REVIEW_COMPLETE verdict was
-/// fail. The gate records the most recent mirror payload
-/// (report.done) so the gate's `last_verdict_payload` becomes the
-/// reporter's lie. The gate is a *fail-detector*, not a
-/// *consistency-checker* between the upstream verdict and its
-/// downstream mirrors — it just trusts the latest recorded
-/// payload. So in this case LOOP_COMPLETE slips through the gate
-/// (the gate sees pass), but the upstream fail is also visible to
-/// the system via the topic-tracking path. This test pins the
-/// actual current behavior so future fixes have a baseline.
+/// fail. The gate now keeps the upstream verdict payload separate
+/// from downstream mirrors, so the fake pass on `report.done` does
+/// not erase the upstream fail. `LOOP_COMPLETE` must be rejected.
 #[test]
 fn u6_verdict_gate_fake_pass_on_report_done_after_upstream_fail() {
     use crate::config::VerdictGateConfig;
@@ -670,13 +663,13 @@ fn u6_verdict_gate_fake_pass_on_report_done_after_upstream_fail() {
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
 
     // Sequence: REVIEW_COMPLETE fail → report.done fake pass.
-    // record_verdict_if_match always overwrites with the latest
-    // matching topic, so the final recorded payload is the fake pass.
+    // The upstream fail is preserved separately from the mirror payload.
     event_loop.state_mut().last_verdict_topic = Some("REVIEW_COMPLETE".to_string());
     event_loop.state_mut().last_verdict_payload =
         Some(r#"{"pass_or_fail":"fail","verdict":"fail"}"#.to_string());
-    // Simulate the report.done event landing and overwriting via the
-    // record_verdict_if_match path (mirrors process_events_from_jsonl).
+    event_loop.state_mut().last_upstream_verdict_payload =
+        Some(r#"{"pass_or_fail":"fail","verdict":"fail"}"#.to_string());
+
     let report_done = Event::new(
         "report.done",
         r#"{"pass_or_fail":"pass","awaiting_decision":false}"#,
@@ -698,29 +691,20 @@ fn u6_verdict_gate_fake_pass_on_report_done_after_upstream_fail() {
         "verdict_payload_is_fail must return false on the fake pass payload"
     );
 
-    // LOOP_COMPLETE follows. The gate sees the most recent recorded
-    // payload (report.done fake pass) and does NOT fire. This is the
-    // gate's documented behavior: it inspects the latest mirror, not
-    // the consistency chain. The reporter obligation layer
-    // (conditional_forbid_topics) is the consistency checker — not
-    // this backstop. Pin this behavior here so any future tightening
-    // is a deliberate change.
+    // LOOP_COMPLETE follows. The gate must reject it because the
+    // upstream REVIEW_COMPLETE payload was fail, even though the
+    // downstream mirror claims pass.
     write_event_to_jsonl(&events_path, "LOOP_COMPLETE", r#"{"plan_name":"p"}"#);
     let _ = event_loop.process_events_from_jsonl();
     let reason = event_loop.check_completion_event();
-    // Persistent-mode / required-events path is short-circuited; we
-    // assert *only* that the verdict gate did not block. The default
-    // RalphConfig has no required_events and is non-persistent, so
-    // the gate being the only check is safe here.
-    if reason.is_none() {
-        // The gate fired — that would be a behavior change relative
-        // to the documented "latest mirror wins" semantics.
-        panic!(
-            "verdict gate fired on a fake pass; expected it to trust the latest mirror payload. \
-             Recorded payload = {:?}",
-            event_loop.state().last_verdict_payload
-        );
-    }
+    assert!(
+        reason.is_none(),
+        "verdict gate must reject LOOP_COMPLETE when upstream verdict was fail, got {reason:?}"
+    );
+    assert!(
+        event_loop.has_pending_events(),
+        "Rejection must inject task.resume so the loop continues"
+    );
 }
 
 /// U6: happy path — pass on the final mirror allows LOOP_COMPLETE.
@@ -787,7 +771,10 @@ fn u6_verdict_payload_is_fail_contract() {
         el.state_mut().last_verdict_topic = Some("report.done".to_string());
         el.state_mut().last_verdict_payload = Some(r#"{"pass_or_fail":"fail"}"#.to_string());
         assert!(
-            matches!(el.check_termination(), Some(TerminationReason::ReviewFailed { .. })),
+            matches!(
+                el.check_termination(),
+                Some(TerminationReason::ReviewFailed { .. })
+            ),
             "fail payload on last mirror must trigger ReviewFailed"
         );
     }
@@ -799,7 +786,10 @@ fn u6_verdict_payload_is_fail_contract() {
         el.state_mut().last_verdict_topic = Some("report.done".to_string());
         el.state_mut().last_verdict_payload = Some(r#"{"pass_or_fail":"pass"}"#.to_string());
         assert!(
-            !matches!(el.check_termination(), Some(TerminationReason::ReviewFailed { .. })),
+            !matches!(
+                el.check_termination(),
+                Some(TerminationReason::ReviewFailed { .. })
+            ),
             "pass payload must not trigger ReviewFailed"
         );
     }
@@ -811,7 +801,10 @@ fn u6_verdict_payload_is_fail_contract() {
         el.state_mut().last_verdict_topic = Some("report.done".to_string());
         el.state_mut().last_verdict_payload = Some(r#"{"other":"x"}"#.to_string());
         assert!(
-            !matches!(el.check_termination(), Some(TerminationReason::ReviewFailed { .. })),
+            !matches!(
+                el.check_termination(),
+                Some(TerminationReason::ReviewFailed { .. })
+            ),
             "absent fail_field must not trigger ReviewFailed"
         );
     }

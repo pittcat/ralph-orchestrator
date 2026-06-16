@@ -319,15 +319,11 @@ pub fn check_progress_task_alignment(
             // agent will create progress.md on its first iteration
             // and subsequent steps will go through the full check.
             //
-            // `read_progress` returns the same `progress_unreadable`
-            // error for both I/O and missing-file; we treat any
-            // unreadable state at cold start as "skip the gate" —
-            // narrower than that risks regressing legitimate
-            // permissions/IO errors as silent skips.
-            let looks_like_cold_start = step
-                .map(is_cold_start_step)
-                .unwrap_or(false);
-            if reason == "progress_unreadable" && looks_like_cold_start {
+            // Only a missing file qualifies for the cold-start
+            // exemption. Real I/O errors (permissions, corruption,
+            // etc.) remain fail-closed and produce a Mismatch.
+            let looks_like_cold_start = step.map(is_cold_start_step).unwrap_or(false);
+            if reason == "progress_not_found" && looks_like_cold_start {
                 return GateDecision::Aligned;
             }
             return GateDecision::Mismatch(ProgressTaskMismatch {
@@ -457,9 +453,11 @@ fn is_task_closed(task: &Task) -> bool {
 }
 
 fn read_progress(path: &Path) -> Result<ProgressSnapshot, &'static str> {
-    let content = std::fs::read_to_string(path).map_err(|_| "progress_unreadable")?;
-    let snap = ProgressSnapshot::parse(&content);
-    Ok(snap)
+    match std::fs::read_to_string(path) {
+        Ok(content) => Ok(ProgressSnapshot::parse(&content)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err("progress_not_found"),
+        Err(_) => Err("progress_unreadable"),
+    }
 }
 
 /// Review fix #5 (code-review-2026-06-17-002): helper for the
@@ -474,17 +472,44 @@ fn read_progress(path: &Path) -> Result<ProgressSnapshot, &'static str> {
 /// Conservative: anything we cannot pattern-match confidently
 /// returns false so the strict fail-closed path stays the default.
 fn is_cold_start_step(step: &str) -> bool {
-    // Strip a leading "u<digit>-" or "U<digit>-" unit prefix that
-    // the task system uses, then look at the remainder.
-    let trimmed = step
+    // Strip an optional leading "u<digits>-" / "U<digits>-" unit prefix
+    // that the task system uses, then look at the remainder.
+    let s = step
         .strip_prefix(|c: char| c.is_ascii_alphabetic())
-        .map(|rest| rest.trim_start_matches(|c: char| c.is_ascii_digit()))
+        .and_then(|rest| {
+            let digit_count = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+            if digit_count == 0 {
+                return None;
+            }
+            rest[digit_count..].strip_prefix('-')
+        })
         .unwrap_or(step);
-    // Accept `-1`, `.1`, `_1`, or `/1` as a cold-start indicator
-    // (e.g. `step-1`, `u1-step-1`, `01.1`, `phase_1`).
-    trimmed.starts_with(['-', '.', '_', '/'])
-        && trimmed[1..].starts_with(|c: char| c.is_ascii_digit())
-        && !trimmed[1..].chars().nth(1).is_some_and(|c| c.is_ascii_digit())
+
+    // Accept a single digit `1` preceded by a separator (`-`, `.`, `_`, `/`)
+    // and not followed by another digit. This handles `step-1`, `u1-step-1`,
+    // `01.1`, `phase_1`, etc., while rejecting `step-10` or `step-2`.
+    let bytes = s.as_bytes();
+    for i in 0..bytes.len().saturating_sub(1) {
+        let sep = bytes[i];
+        if !matches!(sep, b'-' | b'.' | b'_' | b'/') {
+            continue;
+        }
+        let digit = bytes[i + 1];
+        if !digit.is_ascii_digit() {
+            continue;
+        }
+        if digit != b'1' {
+            continue;
+        }
+        let next_is_digit = bytes
+            .get(i + 2)
+            .map(|b| b.is_ascii_digit())
+            .unwrap_or(false);
+        if !next_is_digit {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -592,12 +617,8 @@ mod tests {
             "## Current Step\nstep-05\n\n## Completed Steps\n- step-01\n- step-02\n",
         );
 
-        let decision = check_progress_task_alignment(
-            "queue.advance",
-            Some("step-09"),
-            None,
-            tmp.path(),
-        );
+        let decision =
+            check_progress_task_alignment("queue.advance", Some("step-09"), None, tmp.path());
         match decision {
             GateDecision::Mismatch(m) => {
                 assert_eq!(m.reason, "step_mismatch");
@@ -612,12 +633,8 @@ mod tests {
         let tmp = workspace();
         write_file(tmp.path(), ".ralph/agent/progress.md", "# nothing here\n\n");
 
-        let decision = check_progress_task_alignment(
-            "queue.advance",
-            Some("step-01"),
-            None,
-            tmp.path(),
-        );
+        let decision =
+            check_progress_task_alignment("queue.advance", Some("step-01"), None, tmp.path());
         match decision {
             GateDecision::Mismatch(m) => {
                 assert_eq!(m.reason, "progress_missing_headings");
@@ -627,21 +644,27 @@ mod tests {
     }
 
     #[test]
-    fn missing_progress_md_is_rejected() {
+    fn missing_progress_md_is_rejected_for_non_cold_start() {
         let tmp = workspace();
-        // No progress.md at all.
-        let decision = check_progress_task_alignment(
-            "queue.advance",
-            Some("step-01"),
-            None,
-            tmp.path(),
-        );
+        // No progress.md and a non-cold-start step → fail-closed.
+        let decision =
+            check_progress_task_alignment("queue.advance", Some("step-02"), None, tmp.path());
         match decision {
             GateDecision::Mismatch(m) => {
-                assert_eq!(m.reason, "progress_unreadable");
+                assert_eq!(m.reason, "progress_not_found");
             }
             other => panic!("expected mismatch, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn missing_progress_md_cold_start_step_is_exempt() {
+        let tmp = workspace();
+        // No progress.md but a cold-start step → exempt so the agent
+        // can create the ledger on its first iteration.
+        let decision =
+            check_progress_task_alignment("queue.advance", Some("step-1"), None, tmp.path());
+        assert_eq!(decision, GateDecision::Aligned);
     }
 
     #[test]
@@ -697,10 +720,7 @@ mod tests {
             "**Current Step**: step-04\n\n**Completed Steps**:\n- step-01\n- step-02\n* step-03\n";
         let snap = ProgressSnapshot::parse(content);
         assert_eq!(snap.current_step.as_deref(), Some("step-04"));
-        assert_eq!(
-            snap.completed_steps,
-            vec!["step-01", "step-02", "step-03"]
-        );
+        assert_eq!(snap.completed_steps, vec!["step-01", "step-02", "step-03"]);
     }
 
     #[test]

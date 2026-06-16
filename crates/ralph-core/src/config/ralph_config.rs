@@ -450,11 +450,7 @@ impl RalphConfig {
                     let all_allowed = hats.iter().all(|hat_id| {
                         self.hats
                             .get(*hat_id)
-                            .map(|hc| {
-                                hc.trigger_multi_consumer_topics
-                                    .iter()
-                                    .any(|t| t == trigger)
-                            })
+                            .map(|hc| hc.trigger_multi_consumer_topics.contains(trigger))
                             .unwrap_or(false)
                     });
                     if !all_allowed {

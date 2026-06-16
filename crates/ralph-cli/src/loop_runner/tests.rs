@@ -3,6 +3,7 @@ use crate::test_support::CwdGuard;
 use ralph_core::HatRegistry;
 use ralph_core::planning_session::{ConversationEntry, ConversationType};
 use ralph_proto::{Hat, Topic};
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -4544,7 +4545,7 @@ fn make_test_wave_with_timeout_and_payload(
             phase_triggers: None,
             ignore_payload_fields: vec![],
             obligations: vec![],
-            trigger_multi_consumer_topics: vec![],
+            trigger_multi_consumer_topics: HashSet::new(),
         },
         events: vec![event],
         total: 1,
@@ -11048,7 +11049,7 @@ fn make_wave_with_count(
             phase_triggers: None,
             ignore_payload_fields: vec![],
             obligations: vec![],
-            trigger_multi_consumer_topics: vec![],
+            trigger_multi_consumer_topics: HashSet::new(),
         },
         events,
         total,

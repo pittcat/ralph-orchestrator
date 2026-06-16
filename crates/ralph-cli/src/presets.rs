@@ -1452,8 +1452,8 @@ mod tests {
             ("ce-executor-isolated-zh", zh.as_str()),
         ];
         for (name, yaml) in cases {
-            let config = RalphConfig::parse_yaml(yaml)
-                .unwrap_or_else(|e| panic!("{name} must parse: {e}"));
+            let config =
+                RalphConfig::parse_yaml(yaml).unwrap_or_else(|e| panic!("{name} must parse: {e}"));
             config
                 .validate()
                 .unwrap_or_else(|e| panic!("{name} must validate (U1 whitelist): {e}"));
@@ -4580,19 +4580,13 @@ mod tests {
         // Helper: assert that exactly the expected hats consume a topic
         // (multi-consumer whitelist preserves the union).
         let assert_consumers = |topic: &str, expected: &[&str], label: &str| {
-            let actual = consumers
-                .get(topic)
-                .cloned()
-                .unwrap_or_default();
+            let actual = consumers.get(topic).cloned().unwrap_or_default();
             // Note: builtin ralph hat is the universal bus destination
             // (`subscribe("*")`), but is excluded from
             // select_for_topic_excluding_ralph. We filter it from
             // the actual set so the assertion matches user-facing
             // topology.
-            let actual_filtered: Vec<&str> = actual
-                .into_iter()
-                .filter(|h| *h != "ralph")
-                .collect();
+            let actual_filtered: Vec<&str> = actual.into_iter().filter(|h| *h != "ralph").collect();
             let mut actual_sorted = actual_filtered.clone();
             actual_sorted.sort_unstable();
             let mut expected_sorted = expected.to_vec();
@@ -4650,10 +4644,7 @@ mod tests {
         // plan.blocked, and (via U1) debug.exhausted. All three
         // routes feed REVIEW_COMPLETE → reporter → LOOP_COMPLETE.
         for topic in ["plan.complete", "plan.blocked", "debug.exhausted"] {
-            let shipper_consumers = consumers
-                .get(topic)
-                .cloned()
-                .unwrap_or_default();
+            let shipper_consumers = consumers.get(topic).cloned().unwrap_or_default();
             assert!(
                 shipper_consumers.contains(&"shipper"),
                 "shipper must consume '{topic}' to drive the manager report chain, got {:?}",

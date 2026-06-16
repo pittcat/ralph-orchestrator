@@ -76,4 +76,6 @@ expected:
   events:
     - topic: queue.advance
     - topic: work.ready
+  absent_events:
+    - topic: work.done
   completion: true

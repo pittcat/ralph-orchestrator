@@ -915,12 +915,13 @@ fn append_hat_publishes_hint(
 /// `&mut EventLoop`, not the `&mut EventBus` signature below.
 fn apply_step_handoff_gate(
     events: Vec<JsonlEvent>,
-    workspace_root: &str,
+    workspace: &std::path::Path,
     bus: &mut EventBus,
-) -> (Vec<JsonlEvent>, Vec<crate::diagnosis::RecoveryDiagnosisEnvelope>) {
+) -> (
+    Vec<JsonlEvent>,
+    Vec<crate::diagnosis::RecoveryDiagnosisEnvelope>,
+) {
     use crate::step_handoff::progress_task_gate;
-
-    let workspace = std::path::Path::new(workspace_root);
     let mut accepted: Vec<JsonlEvent> = Vec::with_capacity(events.len());
     let mut envelopes: Vec<crate::diagnosis::RecoveryDiagnosisEnvelope> = Vec::new();
 
@@ -955,17 +956,16 @@ fn apply_step_handoff_gate(
                 // publish-scope check when its source claims authorship
                 // of `plan.blocked`. The orchestrator synthesizes
                 // `plan.blocked` and must own the source.
-                let blocked_payload = format!(
-                    "PROGRESS_TASK_GATE_REJECTED: topic='{}' rejected by step_handoff gate.\n\
-                     reason={}\n\
-                     detail={}\n\
-                     step={:?}\n\
-                     task_id={:?}",
-                    event.topic, mismatch.reason, mismatch.detail, mismatch.step, mismatch.task_id,
-                );
+                let blocked_payload = serde_json::json!({
+                    "reason": "progress_task_mismatch",
+                    "topic": event.topic,
+                    "step": mismatch.step,
+                    "task_id": mismatch.task_id,
+                    "detail": mismatch.detail,
+                });
                 let source_hat = HatId::from("plan-gate");
-                let blocked = Event::new("plan.blocked", blocked_payload)
-                    .with_source(source_hat);
+                let blocked =
+                    Event::new("plan.blocked", blocked_payload.to_string()).with_source(source_hat);
                 bus.publish(blocked);
                 // Diagnostic on the bus for operators reading
                 // orchestration logs. The main signal is the
@@ -1011,30 +1011,57 @@ fn apply_step_handoff_gate(
     (accepted, envelopes)
 }
 
-/// Extract `step` and `task_id` fields from a JSON event payload.
+/// Extract `step` and `task_id` fields from an event payload.
 ///
 /// Both fields are best-effort: a missing field is fine and means
 /// the gate will skip the corresponding check. This mirrors how
 /// plan-gate / executor emit payloads today — fields are optional
 /// and the schema is enforced by the policy layer (not by the gate).
+///
+/// The primary source is a JSON object. If the payload is not valid
+/// JSON, we fall back to scanning for XML-style attributes
+/// (`step="..."`, `task_id='...'`) so that mock/scenario fixtures
+/// and agents emitting XML attributes are still gated.
 fn extract_step_and_task_id(event: &JsonlEvent) -> (Option<String>, Option<String>) {
     let payload = match event.payload.as_deref() {
         Some(p) if !p.is_empty() => p,
         _ => return (None, None),
     };
-    let parsed: serde_json::Value = match serde_json::from_str(payload) {
-        Ok(v) => v,
-        Err(_) => return (None, None),
-    };
-    let step = parsed
-        .get("step")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let task_id = parsed
-        .get("task_id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(payload) {
+        let step = parsed
+            .get("step")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let task_id = parsed
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        return (step, task_id);
+    }
+    // Fallback: scan for XML-style attributes in a non-JSON payload.
+    let step = extract_xml_attr(payload, "step");
+    let task_id = extract_xml_attr(payload, "task_id");
     (step, task_id)
+}
+
+/// Best-effort extraction of an XML-style attribute value from a
+/// free-text payload. Supports double-quoted and single-quoted
+/// values. Returns `None` when the attribute is missing or malformed.
+fn extract_xml_attr(text: &str, attr: &str) -> Option<String> {
+    for quote in ['"', '\''] {
+        let pattern = format!("{attr}={quote}");
+        if let Some(start) = text.find(&pattern) {
+            let value_start = start + pattern.len();
+            let rest = &text[value_start..];
+            if let Some(end) = rest.find(quote) {
+                let value = &rest[..end];
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 fn apply_event_policy_validation(
@@ -1798,11 +1825,21 @@ impl EventLoop {
             .unwrap_or_else(|_| context.events_path());
         let event_reader = EventReader::new(&events_path);
 
+        let mut state = LoopState::new();
+        let handoff_timeout = config
+            .event_loop
+            .workflow_contract
+            .as_ref()
+            .map(|wc| wc.effective_timeout_seconds())
+            .unwrap_or(crate::config::HANDOFF_DISPATCH_TIMEOUT_DEFAULT_SECONDS);
+        state.handoff_tracker = crate::workflow_contract::HandoffTracker::new()
+            .with_default_timeout(std::time::Duration::from_secs(handoff_timeout));
+
         Self {
             config: config.clone(),
             registry,
             bus,
-            state: LoopState::new(),
+            state,
             instruction_builder,
             ralph,
             robot_guidance: Vec::new(),
@@ -1928,11 +1965,21 @@ impl EventLoop {
             .unwrap_or_else(|_| ".ralph/events.jsonl".to_string());
         let event_reader = EventReader::new(&events_path);
 
+        let mut state = LoopState::new();
+        let handoff_timeout = config
+            .event_loop
+            .workflow_contract
+            .as_ref()
+            .map(|wc| wc.effective_timeout_seconds())
+            .unwrap_or(crate::config::HANDOFF_DISPATCH_TIMEOUT_DEFAULT_SECONDS);
+        state.handoff_tracker = crate::workflow_contract::HandoffTracker::new()
+            .with_default_timeout(std::time::Duration::from_secs(handoff_timeout));
+
         Self {
             config: config.clone(),
             registry,
             bus,
-            state: LoopState::new(),
+            state,
             instruction_builder,
             ralph,
             robot_guidance: Vec::new(),
@@ -2628,14 +2675,29 @@ impl EventLoop {
         // Verdict gate: when configured, the most recent event matching the gate
         // topic must NOT carry fail_field == fail_value. This prevents a hat from
         // declaring success in its final review while bypassing the backstop check.
+        //
+        // 2026-06-17-002 U6: also check the upstream verdict payload
+        // (`gate.topic` itself, e.g. `REVIEW_COMPLETE`) independently of
+        // downstream mirrors. A fake pass on `report.done` must not hide
+        // an upstream fail.
         if let Some(gate) = self.config.event_loop.verdict_gate.clone() {
-            if let Some(payload) = self.state.last_verdict_payload.as_deref()
-                && Self::verdict_payload_is_fail(payload, &gate)
-            {
+            let upstream_fail = self
+                .state
+                .last_upstream_verdict_payload
+                .as_deref()
+                .is_some_and(|p| Self::verdict_payload_is_fail(p, &gate));
+            let mirror_fail = self
+                .state
+                .last_verdict_payload
+                .as_deref()
+                .is_some_and(|p| Self::verdict_payload_is_fail(p, &gate));
+            if upstream_fail || mirror_fail {
                 warn!(
                     topic = %gate.topic,
                     field = %gate.fail_field,
                     value = %gate.fail_value,
+                    upstream_fail,
+                    mirror_fail,
                     "Rejecting LOOP_COMPLETE: verdict gate observed a failing verdict"
                 );
                 let sig = format!("verdict_fail:{}", gate.topic);
@@ -5650,12 +5712,12 @@ impl EventLoop {
             );
             // Synthesize the resume event into the bus so the
             // dispatcher can route it on the next iteration. The
-            // event's `hat` is the safe_target so the
-            // `EventOriginGuard` accepts the publish (it is in the
-            // safe_target's `publishes` list per
-            // `HatRegistry::from_runtime_config`). The payload
-            // carries the full escalation metadata for the
-            // downstream hat to act on.
+            // event's `target` is the safe_target so it bypasses
+            // normal subscription matching and is delivered directly
+            // to that hat; `source` is the orchestrator (`ralph`) so
+            // the `EventOriginGuard` accepts the publish. The payload
+            // carries the full escalation metadata for the downstream
+            // hat to act on.
             let payload = serde_json::json!({
                 "reason": "handoff_dispatch_timeout",
                 "topic": esc.topic,
@@ -5665,7 +5727,8 @@ impl EventLoop {
                 "details": esc.reason,
             });
             let resume_event = Event::new("task.resume", payload.to_string())
-                .with_source(HatId::from(esc.safe_target.as_str()));
+                .with_source(HatId::from("ralph"))
+                .with_target(HatId::from(esc.safe_target.as_str()));
             self.bus.publish(resume_event);
             // 2026-06-13-004 U7 (P2-4): write a recovery envelope
             // for the handoff escalation so the responder can
@@ -7244,7 +7307,7 @@ impl EventLoop {
         {
             let (accepted_events, gate_envelopes) = apply_step_handoff_gate(
                 events,
-                self.config.core.workspace_root.to_str().unwrap_or("."),
+                self.config.core.workspace_root.as_path(),
                 &mut self.bus,
             );
             events = accepted_events;

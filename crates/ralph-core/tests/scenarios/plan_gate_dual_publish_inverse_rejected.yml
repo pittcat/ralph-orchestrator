@@ -75,4 +75,6 @@ expected:
   iterations: 2
   events:
     - topic: work.ready
+  absent_events:
+    - topic: queue.advance
   completion: true

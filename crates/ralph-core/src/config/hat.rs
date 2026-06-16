@@ -1,6 +1,6 @@
 //! Hat configuration types.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ralph_proto::Topic;
 use serde::{Deserialize, Serialize};
@@ -517,8 +517,8 @@ pub struct HatConfig {
     /// triggers the standard AmbiguousRouting error.
     ///
     /// Empty (the default) means "use the legacy strict 1:1 mapping".
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub trigger_multi_consumer_topics: Vec<String>,
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub trigger_multi_consumer_topics: HashSet<String>,
 
     /// Fields to ignore when extracting payload field references from instructions.
     ///
@@ -597,7 +597,7 @@ impl Default for HatConfig {
             phase_triggers: None,
             ignore_payload_fields: Vec::new(),
             obligations: Vec::new(),
-            trigger_multi_consumer_topics: Vec::new(),
+            trigger_multi_consumer_topics: HashSet::new(),
         }
     }
 }
@@ -783,7 +783,7 @@ mod tests {
             phase_triggers: None,
             ignore_payload_fields: Vec::new(),
             obligations,
-            trigger_multi_consumer_topics: Vec::new(),
+            trigger_multi_consumer_topics: HashSet::new(),
         }
     }
 

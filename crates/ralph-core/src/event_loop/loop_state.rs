@@ -178,6 +178,14 @@ pub struct LoopState {
     /// `None` when no verdict has been observed.
     pub last_verdict_topic: Option<String>,
 
+    /// Payload of the most recent **upstream** verdict event (the
+    /// `gate.topic` itself, e.g. `REVIEW_COMPLETE`). This is kept
+    /// separate from `last_verdict_payload` so that downstream mirror
+    /// events (`report.done`) cannot overwrite a failing upstream
+    /// verdict with a fake pass. `None` until the upstream topic is
+    /// seen.
+    pub last_upstream_verdict_payload: Option<String>,
+
     /// Signature of the most recent completion rejection (for stale-breaker).
     pub completion_rejection_signature: Option<String>,
 
@@ -217,8 +225,8 @@ pub struct LoopState {
     /// never runs in coordinator mode because the priority pass
     /// is disabled there). `Default::default()` builds a tracker
     /// with the documented 30s timeout (replaced from
-    /// `WorkflowContractConfig` at construction time in
-    /// `EventLoop::with_diagnostics`).
+    /// `WorkflowContractConfig` at construction time in both
+    /// `EventLoop::with_context` and `EventLoop::with_diagnostics`).
     pub handoff_tracker: crate::workflow_contract::HandoffTracker,
 
     /// Unit 6 (2026-06-17-001 plan): FlowLifecycleRegistry owned
@@ -345,6 +353,7 @@ impl Default for LoopState {
             state_machine_runtime_state: None,
             last_verdict_payload: None,
             last_verdict_topic: None,
+            last_upstream_verdict_payload: None,
             completion_rejection_signature: None,
             consecutive_completion_rejections: 0,
             last_rejection_fingerprint: 0,
@@ -650,6 +659,15 @@ impl LoopState {
             // topic (e.g. `report.done`).
             self.last_verdict_topic = Some(event.topic.to_string());
             self.last_verdict_payload = Some(event.payload.clone());
+
+            // 2026-06-17-002 U6: keep the upstream verdict payload
+            // separate from downstream mirrors. A fake pass on a mirror
+            // must not erase an upstream fail verdict.
+            if let Some(upstream) = topics.first()
+                && upstream == event.topic.as_str()
+            {
+                self.last_upstream_verdict_payload = Some(event.payload.clone());
+            }
         }
     }
 

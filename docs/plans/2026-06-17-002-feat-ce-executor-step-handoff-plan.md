@@ -149,7 +149,7 @@ flowchart TB
 
 ## Implementation Units
 
-- [ ] **Unit 1: Tier-0 WAC 闭包与 preset 触发器修补**
+- [x] **Unit 1: Tier-0 WAC 闭包与 preset 触发器修补**
 
 **Goal:** `ce-executor-isolated` strict WAC 零 error；补全 plan-gate triggers / 验证 handoff pairing。
 
@@ -239,7 +239,7 @@ flowchart TB
 
 ---
 
-- [ ] **Unit 4: Progress–Task 硬门（pre-handoff gate）**
+- [x] **Unit 4: Progress–Task 硬门（pre-handoff gate）**
 
 **Goal:** `queue.advance` / `plan.complete` 前，progress.md 与 tasks.jsonl 一致；否则 `plan.blocked`。
 
@@ -340,7 +340,7 @@ flowchart TB
 
 ---
 
-- [ ] **Unit 7: Handoff topic SSOT 四消费链验收（002 集成点）**
+- [x] **Unit 7: Handoff topic SSOT 四消费链验收（002 集成点）**
 
 **Goal:** handoff topic 在 prompt / precheck / loop / drift 同源（002 R-A3 在 handoff 子集的证明）。
 
@@ -409,7 +409,7 @@ cargo nextest run -p ralph-core -- workflow_activation
 
 ---
 
-- [ ] **Unit 8: Multi-step E2E、BDD 与全量回归**
+- [x] **Unit 8: Multi-step E2E、BDD 与全量回归**
 
 **Goal:** U1→U2 推进 <30s；fix/debug exhausted 路径；全 workspace 无回归。
 
@@ -427,7 +427,7 @@ cargo nextest run -p ralph-core -- workflow_activation
 2. `fix_exhausted_reaches_plan_gate.yml`
 3. `debug_exhausted_reaches_plan_gate.yml`
 4. `progress_task_mismatch.yml`（Unit 4）
-5. `verdict_gate_fail_blocks_report.yml`（Unit 6）
+5. `verdict_gate_fail_keeps_loop_open.yml`（Unit 6）
 
 **Approach:**
 - 复用 `2026-06-10-003` plan 结构作 fixture prompt/plan.md（不跑 live LLM；scenario player 注入 events）。
@@ -454,17 +454,17 @@ cargo nextest run -p ralph-core -- workflow_activation
 | Progress 解析脆弱 | 窄字段（Current Step / Completed Steps）；测 fixture 覆盖 |
 | plan-gate 触发器增多导致误激活 | 每 trigger 写 obligation / instructions 分支；scenario 覆盖 |
 | 与 002 merge 冲突 | 约定：`event_policy` 大改在 002；本计划只加 gate 钩子 |
-| Handoff Hard resume 循环 | 3 次上限 + plan.blocked Final |
+| Handoff Hard resume 循环 | 单次 Hard escalation；Responder ladder 负责后续升级 |
 | Tier-0 strict 阻断 CI | Unit 1 先修 preset 再启 strict |
 
 ## Phased Delivery
 
 | Phase | Units | 说明 | 当前状态 |
 |-------|-------|------|----------|
-| 1 | 1, 3 | preset + dual-publish（低风险、高价值） | Unit 3 已实现；Unit 1 待改 preset |
-| 2 | 2, 5 | handoff SLA + payload 硬门 | 核心代码已实现；待补分档逻辑（Unit 2）和 R10 列表扩展决策（Unit 5） |
-| 3 | 4, 6 | progress/tasks + verdict | Unit 6 核心代码已实现；Unit 4 需新增模块 |
-| 4 | 7, 8 | SSOT 集成验收 + E2E | 待 002 merge 后执行 |
+| 1 | 1, 3 | preset + dual-publish（低风险、高价值） | 已实现 |
+| 2 | 2, 5 | handoff SLA + payload 硬门 | 已实现（单次 escalation；R10 列表已扩展至 9 topic） |
+| 3 | 4, 6 | progress/tasks + verdict | 已实现 |
+| 4 | 7, 8 | SSOT 集成验收 + E2E | 已实现（policy_check_handoff 四链基线 + 5 step_handoff scenarios） |
 
 可与 002、017-001 并行；**Phase 4** 建议三计划均 merge 后跑 `2026-06-10-003` 全 plan。
 

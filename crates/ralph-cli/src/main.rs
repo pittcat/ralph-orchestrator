@@ -542,7 +542,6 @@ mod tests {
     use crate::commands::run::default_run_args;
     use crate::test_support::CwdGuard;
     use std::path::PathBuf;
-    use tempfile::TempDir;
     #[test]
     fn test_cli_parses_global_hats_flag() {
         let cli =

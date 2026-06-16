@@ -20,28 +20,21 @@ use std::process::Command;
 
 use chrono::{TimeZone, Utc};
 use ralph_core::DriftConfig;
+use ralph_core::DriftMetric;
 use ralph_core::ViolationType;
 use ralph_core::config::{EventPolicyConfig, EventSchema, PayloadType};
 use ralph_core::drift::detector::{DeclaredEdges, DriftDetector};
 use ralph_core::drift::engine::required_fields_from_config;
 use ralph_core::drift::window::EventSnapshot;
 use ralph_core::emit_schema_hint::build_publish_emit_section;
-use ralph_core::{
-    PolicyDecision, PolicyRuntimeState, validate_event_with_hat,
-};
-use ralph_core::DriftMetric;
+use ralph_core::{PolicyDecision, PolicyRuntimeState, validate_event_with_hat};
 use ralph_proto::{Hat, Topic};
 use tempfile::TempDir;
 
 // ── SSOT snapshot helpers ─────────────────────────────────────────────
 
 /// The four handoff topics under test, in plan order.
-const HANDOFF_TOPICS: &[&str] = &[
-    "work.ready",
-    "queue.advance",
-    "work.done",
-    "review.passed",
-];
+const HANDOFF_TOPICS: &[&str] = &["work.ready", "queue.advance", "work.done", "review.passed"];
 
 /// Map a handoff topic to the hat that publishes it in
 /// `ce-executor-isolated`. Used by chain 1 (prompt) and chain 2
@@ -56,69 +49,12 @@ fn author_hat_for(topic: &str) -> &'static str {
     }
 }
 
-/// Required fields per topic, mirroring the SSOT, for use in
-/// `EventPolicyConfig::schemas`.
-fn schema_for(topic: &str) -> EventSchema {
-    let required: Vec<String> = match topic {
-        "work.ready" => vec![
-            "plan_name",
-            "plan_path",
-            "task_id",
-            "task_key",
-            "step",
-            "complexity",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect(),
-        "queue.advance" => vec![
-            "plan_name",
-            "completed_step",
-            "next_step",
-            "reviewed_task_id",
-            "reviewed_task_key",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect(),
-        "work.done" => vec![
-            "plan_name",
-            "plan_path",
-            "task_id",
-            "task_key",
-            "step",
-            "commit_count",
-            "changed_lines",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect(),
-        "review.passed" => vec![
-            "plan_name",
-            "task_id",
-            "task_key",
-            "step",
-            "findings_count",
-            "fix_round",
-            "verdict",
-            "skip_reason",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect(),
-        _ => panic!("unknown handoff topic in test fixture: {topic}"),
-    };
-    EventSchema {
-        payload: Some(PayloadType::JsonObject),
-        required_fields: required,
-        allowed_values: HashMap::new(),
-        hat_allowed_values: HashMap::new(),
-    }
-}
-
-/// All required fields per topic, mirroring the SSOT, used to build
-/// the JSON payload and to assert the prompt builder renders them.
-fn full_required_fields(topic: &str) -> &'static [&'static str] {
+/// SSOT table: required fields per handoff topic.
+///
+/// This is the single source of truth for the test; `schema_for` and
+/// `full_required_fields` are derived from it so the field list cannot
+/// drift between the prompt, loop-gate, and drift-detector chains.
+fn topic_required_fields(topic: &str) -> &'static [&'static str] {
     match topic {
         "work.ready" => &[
             "plan_name",
@@ -156,6 +92,27 @@ fn full_required_fields(topic: &str) -> &'static [&'static str] {
         ],
         _ => panic!("unknown handoff topic in test fixture: {topic}"),
     }
+}
+
+/// Required fields per topic, mirroring the SSOT, for use in
+/// `EventPolicyConfig::schemas`.
+fn schema_for(topic: &str) -> EventSchema {
+    let required: Vec<String> = topic_required_fields(topic)
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    EventSchema {
+        payload: Some(PayloadType::JsonObject),
+        required_fields: required,
+        allowed_values: HashMap::new(),
+        hat_allowed_values: HashMap::new(),
+    }
+}
+
+/// All required fields per topic, mirroring the SSOT, used to build
+/// the JSON payload and to assert the prompt builder renders them.
+fn full_required_fields(topic: &str) -> &'static [&'static str] {
+    topic_required_fields(topic)
 }
 
 /// Pick the FIRST required field of a topic, used to omit and trigger
@@ -249,9 +206,7 @@ fn chain_2_precheck_rejects_missing_required_field_per_topic() {
             "chain 2 / precheck: {topic} with missing `{dropped}` should be rejected: stderr={stderr}"
         );
         assert!(
-            stderr.contains("missing")
-                || stderr.contains("required")
-                || stderr.contains(dropped),
+            stderr.contains("missing") || stderr.contains("required") || stderr.contains(dropped),
             "chain 2 / precheck: {topic} stderr should explain the missing field `{dropped}`: {stderr}"
         );
     }
@@ -298,18 +253,12 @@ fn chain_3_loop_gate_rejects_missing_required_field_per_topic() {
             | PolicyDecision::Ignore(f) => {
                 f.message.contains(dropped)
                     || f.message.contains("required")
-                    || matches!(
-                        f.violation_type,
-                        ViolationType::MissingRequiredField { .. }
-                    )
+                    || matches!(f.violation_type, ViolationType::MissingRequiredField { .. })
             }
             PolicyDecision::Warn(findings) => findings.iter().any(|f| {
                 f.message.contains(dropped)
                     || f.message.contains("required")
-                    || matches!(
-                        f.violation_type,
-                        ViolationType::MissingRequiredField { .. }
-                    )
+                    || matches!(f.violation_type, ViolationType::MissingRequiredField { .. })
             }),
             PolicyDecision::Accept => false,
         };
@@ -407,9 +356,7 @@ fn cross_chain_required_fields_are_uniformly_tracked() {
             enabled: true,
             ..EventPolicyConfig::default()
         };
-        policy
-            .schemas
-            .insert((*topic).to_string(), schema.clone());
+        policy.schemas.insert((*topic).to_string(), schema.clone());
 
         for field in &schema.required_fields {
             // (1) prompt mentions the field
@@ -433,16 +380,12 @@ fn cross_chain_required_fields_are_uniformly_tracked() {
                 | PolicyDecision::Hold(f)
                 | PolicyDecision::Block(f)
                 | PolicyDecision::Ignore(f) => {
-                    matches!(
-                        f.violation_type,
-                        ViolationType::MissingRequiredField { .. }
-                    ) || f.message.contains(field)
+                    matches!(f.violation_type, ViolationType::MissingRequiredField { .. })
+                        || f.message.contains(field)
                 }
                 PolicyDecision::Warn(findings) => findings.iter().any(|f| {
-                    matches!(
-                        f.violation_type,
-                        ViolationType::MissingRequiredField { .. }
-                    ) || f.message.contains(field)
+                    matches!(f.violation_type, ViolationType::MissingRequiredField { .. })
+                        || f.message.contains(field)
                 }),
                 PolicyDecision::Accept => false,
             };

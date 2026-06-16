@@ -797,6 +797,19 @@ fn show_hat<W: Write>(
         }
     }
 
+    // Multi-consumer opt-in topics are hat-config metadata, not part of
+    // the public event contract, but they determine routing behavior in
+    // isolated mode. Surface them so operators/agents can discover why a
+    // topic is consumed by more than one hat.
+    if let Some(config) = config_registry.get_config(&hat.id) {
+        if !config.trigger_multi_consumer_topics.is_empty() {
+            writeln!(writer, "\nMulti-consumer topics (opt-in):")?;
+            for topic in &config.trigger_multi_consumer_topics {
+                writeln!(writer, "  - {}", topic)?;
+            }
+        }
+    }
+
     if !hat.instructions.is_empty() {
         writeln!(writer, "\nInstructions:")?;
         for line in hat.instructions.lines() {
@@ -1291,6 +1304,27 @@ event_loop:
         assert!(output.contains("build.task"));
         assert!(output.contains("Publishes:"));
         assert!(output.contains("build.done"));
+    }
+
+    #[test]
+    fn test_show_hat_includes_multi_consumer_topics() {
+        use ralph_core::config::HatConfig;
+        use std::collections::HashSet;
+
+        let mut config_registry = HatRegistry::new();
+        let hat = mock_hat("Router", &["task.*"], &["task.done"]);
+        let mut cfg = HatConfig::default();
+        cfg.trigger_multi_consumer_topics =
+            HashSet::from(["fix.exhausted".to_string(), "debug.exhausted".to_string()]);
+        config_registry.register_with_config(hat, cfg);
+
+        let mut buf = Vec::new();
+        show_hat(&mut buf, &config_registry, "Router", false).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        assert!(output.contains("Multi-consumer topics (opt-in):"));
+        assert!(output.contains("fix.exhausted"));
+        assert!(output.contains("debug.exhausted"));
     }
 
     #[test]

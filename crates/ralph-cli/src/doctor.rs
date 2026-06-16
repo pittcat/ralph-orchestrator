@@ -650,7 +650,7 @@ mod tests {
             event_filter: None,
             phase_triggers: None,
             obligations: vec![],
-            trigger_multi_consumer_topics: vec![],
+            trigger_multi_consumer_topics: HashSet::new(),
         }
     }
 

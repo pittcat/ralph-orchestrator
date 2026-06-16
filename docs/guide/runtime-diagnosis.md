@@ -570,7 +570,32 @@ ralph diagnose --diagnostics-root /var/log/ralph/sessions
 
 ---
 
-## 12. 计划 / 设计文档
+## 12. Step Handoff 诊断（2026-06-17-002）
+
+`ce-executor-isolated` preset 在 2026-06-17-002 中新增了两类 Step Handoff 诊断事件，均写入 `recovery.jsonl`：
+
+| 信号 | `source` | `reason_code` | 含义 / 排查 |
+|---|---|---|---|
+| `handoff_dispatch_timeout` | `stall_recovery` | `handoff_dispatch_timeout` | `work.ready` 等唯一消费者 handoff 在 `event_loop.workflow_contract.handoff_dispatch_timeout_seconds`（默认 30s，上限 120s）内未被激活。排查：消费者 hat 是否崩溃 / 被隔离预算阻塞 / 后端未返回事件。 |
+| `progress_task_mismatch` | `PayloadContract` / `WorkflowGuard` | `progress_task_mismatch` | `queue.advance` 或 `plan.complete` 被 pre-handoff gate 拒绝，原因是 `progress.md` 与 `tasks.jsonl` 不一致。排查：agent 是否正确关闭任务并回写 `## Completed Steps`；`tasks.jsonl` 中任务状态是否为 `closed`。 |
+
+对应排查命令：
+
+```bash
+# 查看 handoff 超时记录
+jq 'select(.reason_code == "handoff_dispatch_timeout")' .ralph/diagnostics/latest/recovery.jsonl
+
+# 查看 progress/task 不一致记录
+jq 'select(.reason_code == "progress_task_mismatch")' .ralph/diagnostics/latest/recovery.jsonl
+
+# 查看当前 progress.md / tasks.jsonl 状态
+cat .ralph/agent/progress.md
+cat .ralph/agent/tasks.jsonl
+```
+
+---
+
+## 13. 计划 / 设计文档
 
 - 计划: `docs/plans/2026-06-04-004-feat-drift-auto-calibration-plan.md`（U0–U9 完整分解）
 - 关键源文件：
@@ -585,7 +610,7 @@ ralph diagnose --diagnostics-root /var/log/ralph/sessions
 
 ---
 
-## 13. 一分钟自检清单
+## 14. 一分钟自检清单
 
 提交新 hat / preset 之前可以这样自检：
 
