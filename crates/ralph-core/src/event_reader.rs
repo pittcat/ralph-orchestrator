@@ -1,10 +1,50 @@
 //! Event reader for consuming events from `.ralph/events.jsonl`.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::PathBuf;
 use tracing::warn;
+
+/// Maximum skew (in seconds) tolerated for an event's `ts` field.
+///
+/// `read_new_events` rejects events whose `ts` parses as RFC3339 and is more
+/// than this many seconds in the future relative to wall clock at read time.
+/// 5 minutes absorbs clock skew, container time drift, and PTY spawn latency
+/// without being a meaningful attack or fixture-forgery window.
+const MAX_FUTURE_TS_SKEW_SECS: i64 = 300;
+
+/// Classifies an event's `ts` field for the read-time window check.
+///
+/// Returns `Ok(())` when the value should be accepted (empty, well-formed and
+/// within the future-skew window, or a non-RFC3339 string that nonetheless
+/// does not trigger the strict checks). Returns `Err(reason)` for events
+/// that must be reported as `MalformedLine`:
+/// - `future_timestamp` — parses as RFC3339 and is more than
+///   `MAX_FUTURE_TS_SKEW_SECS` seconds ahead of `now`.
+/// - `invalid_timestamp` — non-empty and not parseable as RFC3339.
+///
+/// Empty strings are accepted unconditionally to preserve existing fixture
+/// compatibility (e.g. `crates/ralph-core/tests/fixtures/basic_session.jsonl`
+/// lines that omit `ts`).
+fn classify_timestamp(ts: &str) -> Result<(), &'static str> {
+    if ts.is_empty() {
+        return Ok(());
+    }
+    match DateTime::parse_from_rfc3339(ts) {
+        Ok(parsed) => {
+            let now = Utc::now();
+            let max_future = now + chrono::Duration::seconds(MAX_FUTURE_TS_SKEW_SECS);
+            if parsed.with_timezone(&Utc) > max_future {
+                Err("future_timestamp")
+            } else {
+                Ok(())
+            }
+        }
+        Err(_) => Err("invalid_timestamp"),
+    }
+}
 
 /// Result of parsing events from a JSONL file.
 ///
@@ -94,7 +134,7 @@ pub struct Event {
         deserialize_with = "deserialize_flexible_payload"
     )]
     pub payload: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "timestamp")]
     pub ts: String,
 
     /// Hat that published this event.
@@ -199,7 +239,22 @@ impl EventReader {
             }
 
             match serde_json::from_str::<Event>(&line) {
-                Ok(event) => result.events.push(event),
+                Ok(event) => match classify_timestamp(&event.ts) {
+                    Ok(()) => result.events.push(event),
+                    Err(reason) => {
+                        warn!(
+                            reason = reason,
+                            ts = %event.ts,
+                            line_number = line_number,
+                            "Event timestamp outside allowed window"
+                        );
+                        result.malformed.push(MalformedLine::new(
+                            line_number,
+                            &line,
+                            format!("{}: {}", reason, event.ts),
+                        ));
+                    }
+                },
                 Err(e) => {
                     warn!(error = %e, line_number = line_number, "Malformed JSON line");
                     result
@@ -746,5 +801,194 @@ mod tests {
             Some("dispatcher")
         );
         assert_eq!(proto.target.as_ref().map(|s| s.as_str()), Some("reviewer"));
+    }
+
+    // -----------------------------------------------------------------
+    // Timestamp window + alias tests (see plan 2026-06-18-002).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_timestamp_field_alias_is_accepted() {
+        // Producers may use "timestamp" instead of "ts"; the alias must
+        // surface the value into `event.ts` rather than dropping it.
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"{{"topic":"x","timestamp":"2024-01-01T00:00:00Z"}}"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let mut reader = EventReader::new(file.path());
+        let result = reader.read_new_events().unwrap();
+
+        assert_eq!(result.events.len(), 1);
+        assert_eq!(result.events[0].ts, "2024-01-01T00:00:00Z");
+        assert!(result.malformed.is_empty());
+    }
+
+    #[test]
+    fn test_empty_ts_remains_accepted() {
+        // R3: an empty/missing `ts` must NOT trigger the future-window or
+        // invalid-timestamp paths. Legacy fixtures and wave-worker output
+        // omit `ts` entirely.
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, r#"{{"topic":"x"}}"#).unwrap();
+        file.flush().unwrap();
+
+        let mut reader = EventReader::new(file.path());
+        let result = reader.read_new_events().unwrap();
+
+        assert_eq!(result.events.len(), 1);
+        assert_eq!(result.events[0].ts, "");
+        assert!(result.malformed.is_empty());
+    }
+
+    #[test]
+    fn test_past_timestamp_accepted() {
+        // No lower bound on `ts`; stale / past timestamps are not flagged.
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"{{"topic":"x","ts":"2020-01-01T00:00:00Z"}}"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let mut reader = EventReader::new(file.path());
+        let result = reader.read_new_events().unwrap();
+
+        assert_eq!(result.events.len(), 1);
+        assert!(result.malformed.is_empty());
+    }
+
+    #[test]
+    fn test_within_5min_future_timestamp_accepted() {
+        // Boundary: a `ts` 4 minutes in the future is inside the 5-minute
+        // skew window and must NOT be flagged.
+        let now_plus_4min = Utc::now() + chrono::Duration::seconds(4 * 60);
+        let ts = now_plus_4min.to_rfc3339();
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, r#"{{"topic":"x","ts":"{}"}}"#, ts).unwrap();
+        file.flush().unwrap();
+
+        let mut reader = EventReader::new(file.path());
+        let result = reader.read_new_events().unwrap();
+
+        assert_eq!(result.events.len(), 1);
+        assert!(result.malformed.is_empty());
+    }
+
+    #[test]
+    fn test_future_timestamp_is_rejected() {
+        // R1: a `ts` more than 5 minutes in the future lands in `malformed`
+        // with a `future_timestamp` reason.
+        let now_plus_10min = Utc::now() + chrono::Duration::seconds(10 * 60);
+        let ts = now_plus_10min.to_rfc3339();
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, r#"{{"topic":"x","ts":"{}"}}"#, ts).unwrap();
+        file.flush().unwrap();
+
+        let mut reader = EventReader::new(file.path());
+        let result = reader.read_new_events().unwrap();
+
+        assert!(result.events.is_empty());
+        assert_eq!(result.malformed.len(), 1);
+        assert!(
+            result.malformed[0].error.contains("future_timestamp"),
+            "expected future_timestamp reason, got: {}",
+            result.malformed[0].error
+        );
+        assert!(result.malformed[0].error.contains(&ts));
+    }
+
+    #[test]
+    fn test_invalid_timestamp_is_rejected() {
+        // R2: a non-RFC3339 `ts` lands in `malformed` with an
+        // `invalid_timestamp` reason.
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, r#"{{"topic":"x","ts":"not-a-date"}}"#).unwrap();
+        file.flush().unwrap();
+
+        let mut reader = EventReader::new(file.path());
+        let result = reader.read_new_events().unwrap();
+
+        assert!(result.events.is_empty());
+        assert_eq!(result.malformed.len(), 1);
+        assert!(
+            result.malformed[0].error.contains("invalid_timestamp"),
+            "expected invalid_timestamp reason, got: {}",
+            result.malformed[0].error
+        );
+    }
+
+    #[test]
+    fn test_future_timestamp_via_timestamp_alias_is_malformed() {
+        // R1 + R4 combined: the "timestamp" field name must NOT bypass the
+        // window check. This is the regression test for the exact bug
+        // observed in the worktree's events.jsonl (line 19).
+        let now_plus_10min = Utc::now() + chrono::Duration::seconds(10 * 60);
+        let ts = now_plus_10min.to_rfc3339();
+        let mut file = NamedTempFile::new().unwrap();
+        // Mirror the worktree line-19 shape: `timestamp` field name with a
+        // forged-future RFC3339 value and a complete payload.
+        writeln!(
+            file,
+            r#"{{"topic":"review.dimension.done","payload":{{"dimension":"agent-native","findings_count":0,"status":"ok"}},"hat":"dimension-reviewer","timestamp":"{}","source":"dimension-reviewer","wave_id":"w-1","wave_index":0,"wave_total":7}}"#,
+            ts
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let mut reader = EventReader::new(file.path());
+        let result = reader.read_new_events().unwrap();
+
+        assert!(
+            result.events.is_empty(),
+            "future-timestamp event must not reach events, got: {:?}",
+            result.events
+        );
+        assert_eq!(result.malformed.len(), 1);
+        assert!(
+            result.malformed[0].error.contains("future_timestamp"),
+            "expected future_timestamp reason, got: {}",
+            result.malformed[0].error
+        );
+    }
+
+    #[test]
+    fn test_mixed_future_and_valid_events() {
+        // A forged-future event in a stream of valid events must be flagged
+        // without disturbing the surrounding lines.
+        let now_plus_10min = Utc::now() + chrono::Duration::seconds(10 * 60);
+        let future_ts = now_plus_10min.to_rfc3339();
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"{{"topic":"before","ts":"2024-01-01T00:00:00Z"}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"topic":"forged","ts":"{}"}}"#,
+            future_ts
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"topic":"after","ts":"2024-01-01T00:00:02Z"}}"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let mut reader = EventReader::new(file.path());
+        let result = reader.read_new_events().unwrap();
+
+        assert_eq!(result.events.len(), 2);
+        assert_eq!(result.events[0].topic, "before");
+        assert_eq!(result.events[1].topic, "after");
+        assert_eq!(result.malformed.len(), 1);
+        assert_eq!(result.malformed[0].line_number, 2);
+        assert!(result.malformed[0].error.contains("future_timestamp"));
     }
 }
