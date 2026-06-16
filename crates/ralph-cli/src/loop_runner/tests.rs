@@ -7950,8 +7950,164 @@ hats:
     );
 }
 
-// 2026-06-17-001 Unit 6 tests removed: they depended on the
-// `flow_lifecycle` registry which is not part of the 2026-06-16-002 plan.
+// 2026-06-17-001 Unit 6: GateWaveMutex. The wave registry lives
+// in `LoopState::flow_lifecycle`; the hard gate must NOT fire
+// while a wave obligation is pending, and must still fire when
+// no wave was emitted (the "completely forgot to emit" case).
+
+#[test]
+fn test_u6_does_not_gate_while_wave_obligation_pending() {
+    use ralph_core::flow_lifecycle::{FlowLifecycleRecord, FlowLifecycleRegistry, FlowPhase};
+    use ralph_core::RalphConfig;
+    let yaml = r#"
+hats:
+  review-coordinator:
+    name: "Review Coordinator"
+    triggers: ["work.done"]
+    publishes: ["review.passed", "review.failed", "review.wave.ready"]
+    obligations:
+      - on_trigger: "work.done"
+        must_emit_any_of: ["review.passed", "review.wave.ready"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).expect("yaml config");
+    let mut event_loop = EventLoop::new(config);
+    event_loop.state_mut().last_activation_events =
+        vec![ralph_proto::Event::new("work.done", "{}")];
+    let hat_id: HatId = "review-coordinator".into();
+
+    // Last activation was a `work.done` event — the hat declared
+    // an obligation to publish `review.passed`. The activation
+    // has not produced `review.passed` yet (candidate_topics is
+    // empty), so the obligation is unsatisfied.
+    let candidate_topics: Vec<String> = vec![];
+
+    // Pre-condition: no wave has been registered yet. The legacy
+    // path would gate the hat (unsatisfied obligation, no wave
+    // outstanding).
+    let pre = should_gate_missing_events(&hat_id, &event_loop, &candidate_topics);
+    assert!(pre, "no wave registered → gate must fire (legacy path)");
+
+    // Register a wave obligation for review-coordinator on the
+    // review.wave.ready topic. The gate must back off and let
+    // the wave workers report back.
+    let record = FlowLifecycleRecord::new(
+        "wave-1",
+        "review-coordinator",
+        "review.wave.ready",
+        7,
+    )
+    .with_timeouts(60, 1800);
+    // Use a fresh registry whose record is mid-flight (WorkersActive)
+    // so the gate sees an active obligation.
+    let mut registry = FlowLifecycleRegistry::new();
+    registry.register(record);
+    registry
+        .transition("wave-1", FlowPhase::Spawning, 1, None, None)
+        .unwrap();
+    registry
+        .transition("wave-1", FlowPhase::WorkersActive, 1, None, None)
+        .unwrap();
+    let active_record = registry.get("wave-1").unwrap().clone();
+    event_loop
+        .state_mut()
+        .flow_lifecycle
+        .register(active_record);
+
+    let post = should_gate_missing_events(&hat_id, &event_loop, &candidate_topics);
+    assert!(
+        !post,
+        "wave obligation pending → gate must NOT fire (Unit 6 GateWaveMutex)"
+    );
+}
+
+#[test]
+fn test_u6_gates_again_after_wave_reaches_terminal() {
+    use ralph_core::flow_lifecycle::{FlowLifecycleRecord, FlowLifecycleRegistry, FlowPhase};
+    use ralph_core::RalphConfig;
+    let yaml = r#"
+hats:
+  review-coordinator:
+    name: "Review Coordinator"
+    triggers: ["work.done"]
+    publishes: ["review.passed", "review.failed", "review.wave.ready"]
+    obligations:
+      - on_trigger: "work.done"
+        must_emit_any_of: ["review.passed", "review.wave.ready"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).expect("yaml config");
+    let mut event_loop = EventLoop::new(config);
+    event_loop.state_mut().last_activation_events =
+        vec![ralph_proto::Event::new("work.done", "{}")];
+    let hat_id: HatId = "review-coordinator".into();
+
+    let mut registry = FlowLifecycleRegistry::new();
+    registry.register(
+        FlowLifecycleRecord::new(
+            "wave-1",
+            "review-coordinator",
+            "review.wave.ready",
+            7,
+        )
+        .with_timeouts(60, 1800),
+    );
+    registry
+        .transition("wave-1", FlowPhase::Spawning, 1, None, None)
+        .unwrap();
+    registry
+        .transition("wave-1", FlowPhase::WorkersActive, 1, None, None)
+        .unwrap();
+    registry
+        .transition("wave-1", FlowPhase::Aggregating, 1, None, None)
+        .unwrap();
+    registry
+        .transition("wave-1", FlowPhase::Closed, 1, None, None)
+        .unwrap();
+    let closed_record = registry.get("wave-1").unwrap().clone();
+    event_loop
+        .state_mut()
+        .flow_lifecycle
+        .register(closed_record);
+
+    // Wave closed → obligation no longer pending → gate fires
+    // again because no `review.passed` candidate was emitted.
+    let candidate_topics: Vec<String> = vec![];
+    let gated = should_gate_missing_events(&hat_id, &event_loop, &candidate_topics);
+    assert!(
+        gated,
+        "wave reached Closed → obligation cleared → gate must fire"
+    );
+}
+
+#[test]
+fn test_u6_legacy_path_unchanged_when_no_wave_present() {
+    // Defensive regression: a hat without a flow record must keep
+    // its pre-Unit-6 behavior. This is the exact scenario the
+    // archive P0-B report identified (executor emits no
+    // `work.done` at all → gate fires).
+    use ralph_core::RalphConfig;
+    let yaml = r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.ready"]
+    publishes: ["work.done", "work.failed"]
+    obligations:
+      - on_trigger: "work.ready"
+        must_emit_any_of: ["work.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).expect("yaml config");
+    let mut event_loop = EventLoop::new(config);
+    event_loop.state_mut().last_activation_events =
+        vec![ralph_proto::Event::new("work.ready", "{}")];
+    let hat_id: HatId = "executor".into();
+
+    let candidate_topics: Vec<String> = vec![];
+    let gated = should_gate_missing_events(&hat_id, &event_loop, &candidate_topics);
+    assert!(
+        gated,
+        "executor with no work.done and no wave → gate must fire"
+    );
+}
 
 #[test]
 fn test_p1_conditional_obligation_gates_when_commit_count_positive() {

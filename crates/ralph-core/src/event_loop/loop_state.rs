@@ -10,6 +10,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::{Duration, Instant};
 
 use super::TerminationReason;
+use crate::flow_lifecycle::FlowLifecycleRegistry;
 
 /// Maximum number of times the same rejection key may be retried
 /// before the runner stops attempting targeted `task.resume` and
@@ -220,6 +221,16 @@ pub struct LoopState {
     /// `EventLoop::with_diagnostics`).
     pub handoff_tracker: crate::workflow_contract::HandoffTracker,
 
+    /// Unit 6 (2026-06-17-001 plan): FlowLifecycleRegistry owned
+    /// by the loop. The wave dispatcher registers each new wave
+    /// here on `Detected` and drives it through
+    /// `Spawning -> WorkersActive -> Closed` / `PartialClosed ->
+    /// Degraded` / `Failed -> Degraded`. Read by
+    /// `hard_gate::should_gate_missing_events` (Unit 6,
+    /// GateWaveMutex) to suppress the gate while a hat is
+    /// legitimately waiting on wave workers.
+    pub flow_lifecycle: FlowLifecycleRegistry,
+
     /// Count of consecutive stall_no_events recoveries (U5).
     pub stall_recovery_counts: HashMap<String, u32>,
 
@@ -340,6 +351,7 @@ impl Default for LoopState {
             // `EventLoop::with_diagnostics` so the per-loop config
             // value (clamped to 120s) takes effect.
             handoff_tracker: crate::workflow_contract::HandoffTracker::new(),
+            flow_lifecycle: FlowLifecycleRegistry::new(),
             stall_recovery_counts: HashMap::new(),
             pending_recovery_hat: None,
             pending_synthesizer_timeout: None,

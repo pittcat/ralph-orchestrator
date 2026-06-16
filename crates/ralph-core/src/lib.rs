@@ -18,6 +18,7 @@ pub mod diagnosis;
 pub mod diagnostics;
 pub mod drift;
 pub mod ephemeral_isolation;
+pub mod flow_lifecycle;
 mod event_logger;
 pub mod event_loop;
 pub mod event_origin;
@@ -125,6 +126,10 @@ pub use event_policy::{
 pub use event_projection::apply_projection;
 pub use event_reader::{Event, EventReader, MalformedLine, ParseResult};
 pub use file_lock::{FileLock, LockGuard as FileLockGuard, LockedFile};
+pub use flow_lifecycle::{
+    FlowLifecycleRecord, FlowLifecycleRegistry, FlowPhase, WaveDeadlines,
+    effective_wave_deadlines, reconcile_wave_timeouts,
+};
 pub use git_ops::{
     AutoCommitResult, GitOpsError, auto_commit_changes, clean_stashes, get_changed_files_between,
     get_commit_summary, get_current_branch, get_head_sha, get_recent_files,

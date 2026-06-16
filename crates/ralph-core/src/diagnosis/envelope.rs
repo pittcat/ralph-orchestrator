@@ -91,6 +91,14 @@ pub enum DiagnosisSource {
     /// CLI `ralph emit` precheck rejected an event before it landed
     /// in the trusted events file. Added in U1/U2 (2026-06-14).
     CliEmit,
+    /// 2026-06-17-001 plan Unit 1: a parallel flow unit (typically
+    /// a `wave_id`) has changed lifecycle phase. Each transition
+    /// `Detected -> Spawning -> WorkersActive -> {Aggregating ->
+    /// Closed | PartialClosed -> Degraded | Failed -> Degraded}`
+    /// produces one envelope so the `ralph diagnose` reporter can
+    /// reconstruct the wave's timeline even when the original
+    /// events.jsonl entries have been rolled up.
+    FlowLifecycle,
 }
 
 impl DiagnosisSource {
@@ -111,6 +119,7 @@ impl DiagnosisSource {
             DiagnosisSource::AgentDocSync => "agent_doc_sync",
             DiagnosisSource::WaveDispatcher => "wave_dispatcher",
             DiagnosisSource::CliEmit => "cli_emit",
+            DiagnosisSource::FlowLifecycle => "flow_lifecycle",
         }
     }
 }

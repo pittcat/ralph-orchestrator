@@ -76,7 +76,7 @@ pub fn should_gate_missing_events(
         // `TriggerContext::from_payload` returns a context with all
         // fields `None` — which means predicates effectively never
         // match (preserves legacy OR semantics as a safe default).
-        return !matching_obligations.iter().any(|obligation| {
+        let obligation_satisfied = matching_obligations.iter().any(|obligation| {
             let trigger_context: Option<ralph_core::TriggerContext> = event_loop
                 .state()
                 .last_activation_events
@@ -90,6 +90,26 @@ pub fn should_gate_missing_events(
                 trigger_context.as_ref(),
             )
         });
+        if obligation_satisfied {
+            return false;
+        }
+        // Obligation declared but unsatisfied: only fall back to
+        // the gate when the hat is NOT waiting on a wave. If the
+        // dispatcher has a non-terminal flow record for this hat,
+        // the hat is still legitimately waiting on its workers —
+        // give them time before the gate trips. We pass an empty
+        // topic filter: any in-flight wave for the hat counts,
+        // because the dispatcher's flow record uses the wave's
+        // own topic (e.g. `review.wave.ready`), not the hat's
+        // activation trigger (`work.done`).
+        if event_loop
+            .state()
+            .flow_lifecycle
+            .is_obligation_pending_for_hat(hat_id.as_str(), &[])
+        {
+            return false;
+        }
+        return true;
     }
     // Legacy blanket rule: hat has an obligation to publish but no
     // automatic fallback.
