@@ -1478,6 +1478,11 @@ hats:
     name: "🐛 Debug Resolver"
     description: "Root-cause diagnosis after Fixer safe_auto exhaustion. Ports ce-debug Phase 0–2 discipline."
     triggers: ["fix.exhausted"]
+    # U1 (2026-06-17-002): `fix.exhausted` is whitelisted as a
+    # multi-consumer trigger. Both `debug-resolver` and `plan-gate`
+    # opt in via `trigger_multi_consumer_topics`; without this,
+    # `validate_ambiguous_routing` would reject the preset.
+    trigger_multi_consumer_topics: ["fix.exhausted"]
     publishes: ["fix.plan.ready", "debug.exhausted", "plan.blocked"]
     terminal_events: ["fix.plan.ready", "debug.exhausted", "plan.blocked"]
     # No default_publishes: debug.exhausted requires contextual payload fields,
@@ -1570,7 +1575,15 @@ hats:
   plan-gate:
     name: "🚦 Plan Gate"
     description: "Reconciles review verdict against plan progress and decides queue.advance vs plan.complete."
-    triggers: ["review.passed", "review.complete", "work.failed", "loop.cancel", "queue.advance"]
+    triggers: ["review.passed", "review.complete", "work.failed", "loop.cancel", "queue.advance", "fix.exhausted", "debug.exhausted"]
+    # U1 (2026-06-17-002): plan-gate participates in the multi-consumer
+    # whitelisted routes for `fix.exhausted` (also consumed by
+    # `debug-resolver`) and `debug.exhausted` (also consumed by `shipper`).
+    # All three hats opt in via `trigger_multi_consumer_topics` so the
+    # strict 1:1 ambiguous-routing check accepts the topology. Plan-gate
+    # uses these exhausted paths to escalate to `plan.blocked` so the
+    # rest of the pipeline (shipper, reporter) still surfaces the failure.
+    trigger_multi_consumer_topics: ["fix.exhausted", "debug.exhausted"]
     # WAC-U4 (2026-06-12-002): plan-gate dual-publishes
     # `queue.advance` (progress / audit signal, retained for
     # observers and timeline) and `work.ready` (the executor's
@@ -1608,10 +1621,26 @@ hats:
       `plan_name` (from payload or context.md), `task_id`, and `task_key` when
       present for correlation.
 
+      ### fix.exhausted / debug.exhausted Routing (U1, 2026-06-17-002)
+      `fix.exhausted` (Fixer safe_auto exhausted) and `debug.exhausted`
+      (debug-resolver root cause unconfirmed) are whitelisted multi-consumer
+      topics. The primary consumer is the resolver chain
+      (`debug-resolver` / `shipper`); plan-gate subscribes to surface the
+      same escalation as `plan.blocked` so the loop terminates cleanly and
+      the manager report still records the blocked state.
+      - On `fix.exhausted` / `debug.exhausted`: publish `plan.blocked` with
+        `plan_name`, `reason` mirroring the upstream trigger reason (e.g.
+        `"fix.exhausted: safe_auto rounds exhausted"` or
+        `"debug.exhausted: root cause unconfirmed"`), `task_id`, `task_key`,
+        `step`.
+      - Both routes flow to `shipper -> REVIEW_COMPLETE -> reporter -> LOOP_COMPLETE`
+        just like `work.failed`; the block must not skip final reporting.
+
       ### Read State
       1. From event payload, based on trigger:
          - `review.passed` / `review.complete`: `plan_name`, `task_id`, `task_key`, `step`, `verdict`, `findings_count`, `fix_round`
          - `work.failed`: `plan_name`, `reason`, `task_id`, `task_key`, `step`
+         - `fix.exhausted` / `debug.exhausted`: `plan_name`, `reason`, `task_id`, `task_key`, `step` (also `fix_round`, `residual_findings`, `failed_attempt_summary` when present)
       2. Read `context.md`, `plan.md`, `progress.md`
       3. Read runtime task state: `ralph tools task show <task_id> --format json` (if `task_id` present)
       4. List all open runtime tasks: `ralph tools task list`
@@ -1733,6 +1762,11 @@ hats:
     name: "📦 Shipper"
     description: "Final validation, plan status update, final commit."
     triggers: ["plan.complete", "plan.blocked", "debug.exhausted"]
+    # U1 (2026-06-17-002): `debug.exhausted` is whitelisted as a
+    # multi-consumer trigger. Both `shipper` and `plan-gate` opt in
+    # via `trigger_multi_consumer_topics`; without this,
+    # `validate_ambiguous_routing` would reject the preset.
+    trigger_multi_consumer_topics: ["debug.exhausted"]
     publishes: ["REVIEW_COMPLETE"]
     default_publishes: "REVIEW_COMPLETE"
     terminal_events: ["REVIEW_COMPLETE"]

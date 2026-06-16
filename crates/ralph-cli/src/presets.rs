@@ -1334,6 +1334,33 @@ mod tests {
             plan_gate.triggers.contains(&"work.failed".to_string()),
             "plan-gate must trigger on work.failed so failures route to plan.blocked (U5)"
         );
+        // U1 (2026-06-17-002): plan-gate must also subscribe to the
+        // multi-consumer whitelisted topics `fix.exhausted` (also
+        // consumed by `debug-resolver`) and `debug.exhausted` (also
+        // consumed by `shipper`). All three hats opt in via
+        // `trigger_multi_consumer_topics`. Without these, the
+        // exhausted paths cannot surface as `plan.blocked` and the
+        // loop can stall.
+        assert!(
+            plan_gate.triggers.contains(&"fix.exhausted".to_string()),
+            "plan-gate must trigger on fix.exhausted (U1, 2026-06-17-002)"
+        );
+        assert!(
+            plan_gate.triggers.contains(&"debug.exhausted".to_string()),
+            "plan-gate must trigger on debug.exhausted (U1, 2026-06-17-002)"
+        );
+        assert!(
+            plan_gate
+                .trigger_multi_consumer_topics
+                .contains(&"fix.exhausted".to_string()),
+            "plan-gate must whitelist fix.exhausted as a multi-consumer topic"
+        );
+        assert!(
+            plan_gate
+                .trigger_multi_consumer_topics
+                .contains(&"debug.exhausted".to_string()),
+            "plan-gate must whitelist debug.exhausted as a multi-consumer topic"
+        );
         assert!(
             plan_gate.publishes.contains(&"queue.advance".to_string()),
             "plan-gate must publish queue.advance"
@@ -1409,6 +1436,32 @@ mod tests {
             !executor.publishes.contains(&"queue.advance".to_string()),
             "executor must NOT publish queue.advance; plan-gate owns queue advancement"
         );
+    }
+
+    /// U1 (2026-06-17-002): the full `ce-executor-isolated` preset must
+    /// pass `RalphConfig::validate` end-to-end, including the new
+    /// `trigger_multi_consumer_topics` whitelist for `fix.exhausted`
+    /// and `debug.exhausted`. This is the KTD regression: if any
+    /// consumer hat forgets to opt in, the preset's
+    /// `validate_ambiguous_routing` rejects it on first run, not just
+    /// in unit tests.
+    #[test]
+    fn test_ce_executor_isolated_preset_validates_ambiguous_routing() {
+        let en = get_preset("ce-executor-isolated")
+            .expect("ce-executor-isolated must be embedded with non-empty content");
+        let zh = read_root_preset("ce-executor-isolated-zh.yml");
+        let en_yaml: &str = en.content.as_ref();
+        let cases: &[(&str, &str)] = &[
+            ("ce-executor-isolated", en_yaml),
+            ("ce-executor-isolated-zh", zh.as_str()),
+        ];
+        for (name, yaml) in cases {
+            let config = RalphConfig::parse_yaml(yaml)
+                .unwrap_or_else(|e| panic!("{name} must parse: {e}"));
+            config
+                .validate()
+                .unwrap_or_else(|e| panic!("{name} must validate (U1 whitelist): {e}"));
+        }
     }
 
     #[test]
@@ -1701,6 +1754,10 @@ mod tests {
         assert_eq!(
             en_gate.default_publishes, zh_gate.default_publishes,
             "plan-gate default_publishes must match between EN and ZH"
+        );
+        assert_eq!(
+            en_gate.trigger_multi_consumer_topics, zh_gate.trigger_multi_consumer_topics,
+            "plan-gate trigger_multi_consumer_topics must match between EN and ZH (U1)"
         );
     }
 

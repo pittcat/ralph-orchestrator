@@ -1024,6 +1024,10 @@ hats:
     name: "🐛 Debug Resolver"
     description: "Fixer safe_auto 耗尽后的根因诊断。移植 ce-debug Phase 0–2 纪律。"
     triggers: ["fix.exhausted"]
+    # U1 (2026-06-17-002)：`fix.exhausted` 是白名单多消费方 trigger。
+    # `debug-resolver` 和 `plan-gate` 都通过 `trigger_multi_consumer_topics`
+    # 声明；缺失此声明 `validate_ambiguous_routing` 会拒绝 preset。
+    trigger_multi_consumer_topics: ["fix.exhausted"]
     publishes: ["fix.plan.ready", "debug.exhausted", "plan.blocked"]
     # 无 default_publishes：debug.exhausted 需要上下文 payload 字段，
     # debug-resolver 必须显式发布 fix.plan.ready/debug.exhausted/plan.blocked。
@@ -1114,7 +1118,15 @@ hats:
   plan-gate:
     name: "🚦 计划门控"
     description: "对账 review 结果与 plan 进度，决定 queue.advance 或 plan.complete。"
-    triggers: ["review.passed", "review.complete", "work.failed", "loop.cancel", "queue.advance"]
+    triggers: ["review.passed", "review.complete", "work.failed", "loop.cancel", "queue.advance", "fix.exhausted", "debug.exhausted"]
+    # U1 (2026-06-17-002)：plan-gate 参与 `fix.exhausted`
+    # （同时被 `debug-resolver` 消费）和 `debug.exhausted`（同时被
+    # `shipper` 消费）的多消费方白名单路由。三个 hat 都通过
+    # `trigger_multi_consumer_topics` 显式声明，否则 strict
+    # 1:1 ambiguous-routing 检查会拒绝此 preset。plan-gate 通过
+    # 这些 exhausted 路径把升级转写为 `plan.blocked`，让 shipper、
+    # reporter 仍能完整上报失败状态。
+    trigger_multi_consumer_topics: ["fix.exhausted", "debug.exhausted"]
     # WAC-U4 (2026-06-12-002): plan-gate 双 publish `queue.advance`
     # (进度/审计信号,保留给 observer 和 timeline) 和 `work.ready`
     # (executor 的 handoff,带完整 task payload)。Executor 永远不
@@ -1140,10 +1152,23 @@ hats:
       - 失败不能跳过最终报告。`plan.blocked` 流向
         `shipper -> REVIEW_COMPLETE -> reporter -> LOOP_COMPLETE`，manager 报告仍记录 blocked 状态。
 
+      ### fix.exhausted / debug.exhausted 路由（U1, 2026-06-17-002）
+      `fix.exhausted`（Fixer safe_auto 耗尽）和 `debug.exhausted`（debug-resolver
+      根因未确认）是白名单多消费方 topic。主消费方是 resolver 链
+      （`debug-resolver` / `shipper`），plan-gate 订阅后将同一升级转写为
+      `plan.blocked`，确保 loop 干净终止且 manager 报告仍记录 blocked 状态。
+      - 收到 `fix.exhausted` / `debug.exhausted` 时，发布 `plan.blocked`，
+        payload 包含 `plan_name`、`reason`（镜像上游触发原因，例如
+        `"fix.exhausted: safe_auto 轮次已耗尽"` 或
+        `"debug.exhausted: 根因未确认"`）、`task_id`、`task_key`、`step`。
+      - 两条路径都流向 `shipper -> REVIEW_COMPLETE -> reporter -> LOOP_COMPLETE`
+        与 `work.failed` 一致；block 状态不得跳过最终报告。
+
       ### 读取状态
       1. 从事件 payload，按触发源读取：
          - `review.passed` / `review.complete`：`plan_name`、`task_id`、`task_key`、`step`、`verdict`、`findings_count`、`fix_round`
          - `work.failed`：`plan_name`、`reason`、`task_id`、`task_key`、`step`
+         - `fix.exhausted` / `debug.exhausted`：`plan_name`、`reason`、`task_id`、`task_key`、`step`（若 payload 含 `fix_round` / `residual_findings` / `failed_attempt_summary` 也要读取）
       2. 读取 `context.md`、`plan.md`、`progress.md`
       3. 读取 runtime task 状态：`ralph tools task show <task_id> --format json`（如 `task_id` 存在）
       4. 列出所有 open runtime tasks：`ralph tools task list`
@@ -1261,6 +1286,10 @@ hats:
     name: "📦 交付器"
     description: "最终验证、plan 状态更新、最终提交。"
     triggers: ["plan.complete", "plan.blocked", "debug.exhausted"]
+    # U1 (2026-06-17-002)：`debug.exhausted` 是白名单多消费方 trigger。
+    # `shipper` 和 `plan-gate` 都通过 `trigger_multi_consumer_topics`
+    # 声明；缺失此声明 `validate_ambiguous_routing` 会拒绝 preset。
+    trigger_multi_consumer_topics: ["debug.exhausted"]
     publishes: ["REVIEW_COMPLETE"]
     default_publishes: "REVIEW_COMPLETE"
     instructions: |

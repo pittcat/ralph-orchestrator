@@ -427,18 +427,43 @@ impl RalphConfig {
 
         // Check for ambiguous routing: each trigger topic must map to exactly one hat
         // Per spec: "Every trigger maps to exactly one hat | No ambiguous routing"
+        //
+        // Exception: when ALL hats subscribed to a given trigger explicitly list
+        // that trigger in their `trigger_multi_consumer_topics`, the strict 1:1
+        // check is bypassed. This is the documented escape hatch for design-level
+        // multi-consumer topics (e.g. `fix.exhausted` consumed by both `plan-gate`
+        // and `debug-resolver`; `debug.exhausted` consumed by both `plan-gate` and
+        // `shipper`). A single missing opt-in keeps the strict check, so accidental
+        // multi-consumption is impossible.
         if !self.hats.is_empty() {
-            let mut trigger_to_hat: HashMap<&str, &str> = HashMap::new();
+            let mut trigger_to_hats: HashMap<&str, Vec<&str>> = HashMap::new();
             for (hat_id, hat_config) in &self.hats {
                 for trigger in &hat_config.triggers {
-                    if let Some(existing_hat) = trigger_to_hat.get(trigger.as_str()) {
+                    trigger_to_hats
+                        .entry(trigger.as_str())
+                        .or_default()
+                        .push(hat_id.as_str());
+                }
+            }
+            for (trigger, hats) in trigger_to_hats {
+                if hats.len() > 1 {
+                    let all_allowed = hats.iter().all(|hat_id| {
+                        self.hats
+                            .get(*hat_id)
+                            .map(|hc| {
+                                hc.trigger_multi_consumer_topics
+                                    .iter()
+                                    .any(|t| t == trigger)
+                            })
+                            .unwrap_or(false)
+                    });
+                    if !all_allowed {
                         return Err(ConfigError::AmbiguousRouting {
-                            trigger: trigger.clone(),
-                            hat1: (*existing_hat).to_string(),
-                            hat2: hat_id.clone(),
+                            trigger: trigger.to_string(),
+                            hat1: hats[0].to_string(),
+                            hat2: hats[1].to_string(),
                         });
                     }
-                    trigger_to_hat.insert(trigger.as_str(), hat_id.as_str());
                 }
             }
         }
@@ -1153,6 +1178,73 @@ hats:
             result.is_ok(),
             "Expected valid config, got: {:?}",
             result.unwrap_err()
+        );
+    }
+
+    /// U1: when ALL hats subscribed to a multi-consumer trigger list
+    /// that trigger in their `trigger_multi_consumer_topics`, the strict
+    /// 1:1 check is bypassed. This is the documented escape hatch for
+    /// `fix.exhausted` / `debug.exhausted` consumed by `plan-gate` and
+    /// the respective downstream resolver/shipper.
+    #[test]
+    fn test_validate_ambiguous_routing_allows_whitelisted_multi_consumer() {
+        let yaml = r#"
+hats:
+  plan-gate:
+    name: "Plan Gate"
+    description: "Reconcile review verdict and decide queue.advance vs plan.complete"
+    triggers: ["review.passed", "fix.exhausted", "debug.exhausted"]
+    trigger_multi_consumer_topics: ["fix.exhausted", "debug.exhausted"]
+  debug-resolver:
+    name: "Debug Resolver"
+    description: "Root-cause diagnosis after Fixer safe_auto exhaustion"
+    triggers: ["fix.exhausted"]
+    trigger_multi_consumer_topics: ["fix.exhausted"]
+  shipper:
+    name: "Shipper"
+    description: "Finalize plan status and emit REVIEW_COMPLETE"
+    triggers: ["plan.complete", "plan.blocked", "debug.exhausted"]
+    trigger_multi_consumer_topics: ["debug.exhausted"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = config.validate();
+
+        assert!(
+            result.is_ok(),
+            "Expected whitelisted multi-consumer config to validate, got: {:?}",
+            result.unwrap_err()
+        );
+    }
+
+    /// U1: a single missing opt-in keeps the strict 1:1 check, so
+    /// accidental multi-consumption is impossible. If one of the
+    /// `fix.exhausted` consumers forgets to declare
+    /// `trigger_multi_consumer_topics`, validate must fail with
+    /// `AmbiguousRouting`.
+    #[test]
+    fn test_validate_ambiguous_routing_rejects_non_whitelisted_multi_consumer() {
+        let yaml = r#"
+hats:
+  plan-gate:
+    name: "Plan Gate"
+    description: "Reconcile review verdict and decide queue.advance vs plan.complete"
+    triggers: ["review.passed", "fix.exhausted"]
+    trigger_multi_consumer_topics: ["fix.exhausted"]
+  debug-resolver:
+    name: "Debug Resolver"
+    description: "Root-cause diagnosis after Fixer safe_auto exhaustion"
+    triggers: ["fix.exhausted"]
+    # NOTE: missing `trigger_multi_consumer_topics` for `fix.exhausted` — must still fail.
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = config.validate();
+
+        assert!(result.is_err(), "Expected AmbiguousRouting error");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::AmbiguousRouting { trigger, .. } if trigger == "fix.exhausted"),
+            "Expected AmbiguousRouting for 'fix.exhausted', got: {:?}",
+            err
         );
     }
 
