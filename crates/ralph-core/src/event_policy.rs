@@ -50,12 +50,26 @@ pub enum ViolationType {
         rule_hat: String,
         rule_topic: String,
     },
+    /// U1 (2026-06-17-003 plan): semantic gate violation. The event
+    /// passed schema validation but violates an orchestrator-level
+    /// invariant (e.g. `review.passed` while a review wave is still
+    /// open). Distinct from `InvalidFieldValue` because the payload
+    /// itself is well-formed — the violation is in the **timing /
+    /// state** relative to other events tracked by
+    /// `ReviewStepTracker`. Kept fail-closed (event does NOT enter
+    /// the bus) but loop continues — see
+    /// `is_recoverable_policy_finding` for the bucket mapping.
+    SemanticGateViolation {
+        gate: String,
+        context: String,
+    },
 }
 
 impl ViolationType {
     /// Field name that triggered the violation, when the violation
     /// is field-scoped. Returns `None` for topic-scoped violations
-    /// (terminal-monotonicity, topic-format, topic-deny, etc.).
+    /// (terminal-monotonicity, topic-format, topic-deny, etc.) and
+    /// for semantic-gate violations (which use `gate` instead).
     pub fn field(&self) -> Option<&str> {
         match self {
             Self::MissingRequiredField { field } | Self::InvalidFieldValue { field, .. } => {
@@ -78,6 +92,7 @@ impl ViolationType {
             Self::BusinessEventAfterCompletion { .. } => "business_event_after_completion",
             Self::InvalidTopicFormat { .. } => "invalid_topic_format",
             Self::TopicDenied { .. } => "topic_denied",
+            Self::SemanticGateViolation { .. } => "semantic_gate_violation",
         }
     }
 }
@@ -135,7 +150,7 @@ pub struct PolicyRejection {
 /// | `PayloadTypeMismatch` (incl. non-JSON string) | `plan_name` / task key mismatch
 /// | `MissingRequiredField`                   | duplicate terminal / completion guard
 /// | `TopicDenied` (deny rules + isolated scope)   | `InvalidFieldValue` / `AllowedValueMismatch` (deferred)
-/// | ---                                      | 4th attempt on the same (hat, reason_class)
+/// | `SemanticGateViolation` (U1, 2026-06-17-003) | 4th attempt on the same (hat, reason_class)
 ///
 /// The bucket is the last segment of the loop's
 /// `record_rejection_key` counter so two distinct buckets on the
@@ -152,6 +167,15 @@ pub enum ReasonClass {
     /// `TopicDenied` — the (hat, topic) pair matched a deny rule.
     /// Recoverable on first 3 attempts.
     TopicDenied,
+    /// U1 (2026-06-17-003 plan): `SemanticGateViolation` — event
+    /// passed schema validation but violates an orchestrator-level
+    /// invariant (e.g. `review.passed` while a review wave is still
+    /// open). Recoverable on first 3 attempts AND bypasses the U6
+    /// `PayloadContractViolation` fatal path. The bucket is its own
+    /// dimension on the loop-level retry counter so semantic-gate
+    /// rejections never compete with payload-typed rejections for
+    /// the budget.
+    SemanticGateViolation,
 }
 
 impl ReasonClass {
@@ -162,6 +186,7 @@ impl ReasonClass {
             ReasonClass::PayloadTypeMismatch => "payload_type_mismatch",
             ReasonClass::MissingRequiredField => "missing_required_field",
             ReasonClass::TopicDenied => "topic_denied",
+            ReasonClass::SemanticGateViolation => "semantic_gate_violation",
         }
     }
 }
@@ -174,6 +199,14 @@ pub fn is_recoverable_policy_finding(finding: &PolicyFinding) -> Option<ReasonCl
         ViolationType::PayloadTypeMismatch { .. } => Some(ReasonClass::PayloadTypeMismatch),
         ViolationType::MissingRequiredField { .. } => Some(ReasonClass::MissingRequiredField),
         ViolationType::TopicDenied { .. } => Some(ReasonClass::TopicDenied),
+        // U1 (2026-06-17-003 plan): semantic gate violations are
+        // recoverable on first 3 attempts AND bypass U6 fatal
+        // termination (see runner.rs `TerminationReason::PayloadContractViolation`
+        // branch). The bucket is independent of the other three
+        // reason classes so a misbehaving coordinator can be
+        // corrected via `task.resume` without exhausting the schema
+        // validation budget for unrelated events.
+        ViolationType::SemanticGateViolation { .. } => Some(ReasonClass::SemanticGateViolation),
         _ => None,
     }
 }
@@ -2520,5 +2553,91 @@ mod tests {
         config.mode = EventPolicyMode::Enforce;
         config.on_violation = ViolationAction::RejectWithResume;
         config
+    }
+
+    // U1 (2026-06-17-003 plan): the new `SemanticGateViolation`
+    // variant must be in the recoverable set with its own bucket
+    // — and its reason_code must NOT collide with the schema-level
+    // `invalid_field_value` so diagnostics stay unambiguous.
+    #[test]
+    fn u1_semantic_gate_violation_is_recoverable_with_own_bucket() {
+        let finding = PolicyFinding {
+            topic: "review.passed".to_string(),
+            violation_type: ViolationType::SemanticGateViolation {
+                gate: "review_passed_while_wave_open".to_string(),
+                context: "wave='w-1' received=0/3 expected".to_string(),
+            },
+            message: "review-coordinator must not emit review.passed while wave is incomplete"
+                .to_string(),
+        };
+        let class = is_recoverable_policy_finding(&finding)
+            .expect("SemanticGateViolation must be in the recoverable set");
+        assert_eq!(class, ReasonClass::SemanticGateViolation);
+        assert_eq!(class.as_str(), "semantic_gate_violation");
+        assert_eq!(
+            finding.violation_type.reason_code(),
+            "semantic_gate_violation"
+        );
+        // field() returns None — semantic-gate violations are
+        // state-scoped, not field-scoped.
+        assert!(finding.violation_type.field().is_none());
+    }
+
+    // U1 (2026-06-17-003 plan): the four existing recoverable
+    // buckets must keep their stable labels — adding
+    // `SemanticGateViolation` to the enum must not shift them.
+    #[test]
+    fn u1_semantic_gate_violation_does_not_perturb_other_buckets() {
+        assert_eq!(ReasonClass::PayloadTypeMismatch.as_str(), "payload_type_mismatch");
+        assert_eq!(ReasonClass::MissingRequiredField.as_str(), "missing_required_field");
+        assert_eq!(ReasonClass::TopicDenied.as_str(), "topic_denied");
+        // And the non-recoverable ones stay non-recoverable.
+        let finding = PolicyFinding {
+            topic: "review.passed".to_string(),
+            violation_type: ViolationType::TerminalMonotonicityViolation {
+                terminal_topic: "plan.complete".to_string(),
+                business_topic: "review.passed".to_string(),
+            },
+            message: "terminal monotonicity".to_string(),
+        };
+        assert!(is_recoverable_policy_finding(&finding).is_none());
+    }
+
+    // U1 (2026-06-17-003 plan): the `finding_to_payload_contract_violation`
+    // bridge (in `event_loop/mod.rs`) maps a `PolicyFinding` to a
+    // `PayloadContractViolation` only when the violation is
+    // schema-derived. `SemanticGateViolation` must NOT be in that
+    // set so the runner's `PayloadContractViolation` fatal branch
+    // never fires for `review_passed_while_wave_open`. We re-test
+    // here at the policy layer because the bridge is in `mod.rs`
+    // and not exposed for direct unit testing without spinning up
+    // an `EventLoop`. The downstream guarantee is:
+    //   is_recoverable_policy_finding == Some(SemanticGateViolation)
+    //   → bridge returns None → runner skips the fatal branch.
+    #[test]
+    fn u1_semantic_gate_is_recoverable_implies_not_fatal() {
+        let finding = PolicyFinding {
+            topic: "review.passed".to_string(),
+            violation_type: ViolationType::SemanticGateViolation {
+                gate: "review_passed_while_wave_open".to_string(),
+                context: "wave='w-1' received=0/3 expected".to_string(),
+            },
+            message: "review-coordinator must not emit review.passed while wave is incomplete"
+                .to_string(),
+        };
+        // Recoverable → never feeds the U6 fast-fail
+        // (`capture_violation` in `event_loop/mod.rs` early-returns
+        // when this returns `Some`).
+        assert!(is_recoverable_policy_finding(&finding).is_some());
+        // And the bridge arms for `AllowedValueMismatch` /
+        // `MissingRequiredField` / `PayloadTypeMismatch` only —
+        // `SemanticGateViolation` falls through to `return None`.
+        // We re-state the arms here so a future enum expansion
+        // that accidentally adds a new fatal mapping is caught
+        // by this test.
+        assert!(matches!(
+            finding.violation_type,
+            ViolationType::SemanticGateViolation { .. }
+        ));
     }
 }

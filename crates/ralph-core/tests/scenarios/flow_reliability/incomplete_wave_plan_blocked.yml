@@ -1,0 +1,111 @@
+# Incomplete Wave → plan.blocked 机制收摊
+# 模拟 zippy-sparrow 类失败: 11 维 review wave 只收回 4 维,review-synthesizer 永不 fire。
+# 机制层应在 staleness 窗口(0.8 * aggregate_timeout_secs)到达后 emit plan.blocked,
+# 路由 shipper,关闭 tracker wave 防重发。
+#
+# 期望:
+# - 1 条 plan.blocked (hat=review-synthesizer, target=shipper, reason=dimension_reviewers_failed_to_converge)
+# - 无 review.passed(empty_diff) 进 bus
+# - 无 PayloadContractViolation 终止
+
+name: incomplete_wave_plan_blocked
+description: incomplete wave staleness 触发机制层 emit plan.blocked,而非 fatal 终止
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 8
+  hats:
+    review-coordinator:
+      subscribes_to:
+        - work.done
+      publishes:
+        - review.wave.ready
+        - review.passed
+      default_publishes: review.wave.ready
+    dimension-reviewer:
+      subscribes_to:
+        - review.wave.ready
+      publishes:
+        - review.dimension.done
+      default_publishes: review.dimension.done
+    review-synthesizer:
+      subscribes_to:
+        - review.dimension.done
+      publishes:
+        - review.complete
+        - plan.blocked
+      default_publishes: review.complete
+    shipper:
+      subscribes_to:
+        - plan.complete
+        - plan.blocked
+        - debug.exhausted
+      publishes:
+        - LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    workflow_contract:
+      incomplete_wave_gate:
+        enabled: true
+        staleness_fraction: 0.8
+
+mock_responses:
+  - |
+    <event topic="work.done">
+    plan_name: "demo"
+    step: "implement"
+    task_id: "u1-impl"
+    </event>
+  - |
+    派发 review wave...
+    <event topic="review.wave.ready">
+    wave_id: "wave-zippy"
+    wave_total: 11
+    expected_dimensions: ["d1","d2","d3","d4","d5","d6","d7","d8","d9","d10","d11"]
+    aggregate_timeout_secs: 5
+    </event>
+  - |
+    <event topic="review.dimension.done">
+    wave_id: "wave-zippy"
+    dimension: "d1"
+    verdict: ok
+    </event>
+  - |
+    <event topic="review.dimension.done">
+    wave_id: "wave-zippy"
+    dimension: "d2"
+    verdict: ok
+    </event>
+  - |
+    <event topic="review.dimension.done">
+    wave_id: "wave-zippy"
+    dimension: "d3"
+    verdict: warn
+    </event>
+  - |
+    <event topic="review.dimension.done">
+    wave_id: "wave-zippy"
+    dimension: "d4"
+    verdict: warn
+    </event>
+  # 注: 7 维没收齐。staleness 窗口到达后,机制层应 emit plan.blocked。
+  - |
+    <event topic="LOOP_COMPLETE">
+    waiting.
+    </event>
+
+checkpoints:
+  - after_response: 7
+    workflow_progress: []
+
+expected:
+  iterations: 7
+  events:
+    - topic: work.done
+    - topic: review.wave.ready
+    - topic: review.dimension.done
+    - topic: review.dimension.done
+    - topic: review.dimension.done
+    - topic: review.dimension.done
+    - topic: plan.blocked
+  completion: true

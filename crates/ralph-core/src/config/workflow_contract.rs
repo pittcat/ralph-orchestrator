@@ -71,6 +71,37 @@ pub struct WorkflowContractConfig {
     /// lint finding (KTD-6).
     #[serde(default = "default_handoff_topic_seeds")]
     pub handoff_topic_seeds: Vec<String>,
+
+    /// U2 (2026-06-17-003 plan): incomplete-wave gate
+    /// configuration. When enabled, the mechanism emits
+    /// `plan.blocked` for review waves that stall past
+    /// `0.8 * aggregate_timeout_secs` without further
+    /// `dimension.done` progress. Default: `enabled = false`.
+    /// The `ce-executor-isolated` preset sets this to
+    /// `enabled = true` via the `preset_enforce` path.
+    #[serde(default = "default_incomplete_wave_gate")]
+    pub incomplete_wave_gate: IncompleteWaveGateConfig,
+}
+
+/// U2 (2026-06-17-003 plan): incomplete-wave gate configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IncompleteWaveGateConfig {
+    /// Whether the gate is active. Defaults to `false`
+    /// (presets opt in). When `true`, the EventLoop checks
+    /// every iteration for stalled review waves and emits
+    /// `plan.blocked` on the hat `review-synthesizer` with
+    /// target `shipper`.
+    pub enabled: bool,
+}
+
+impl Default for IncompleteWaveGateConfig {
+    fn default() -> Self {
+        Self { enabled: false }
+    }
+}
+
+fn default_incomplete_wave_gate() -> IncompleteWaveGateConfig {
+    IncompleteWaveGateConfig::default()
 }
 
 impl Default for WorkflowContractConfig {
@@ -78,6 +109,7 @@ impl Default for WorkflowContractConfig {
         Self {
             handoff_dispatch_timeout_seconds: default_handoff_dispatch_timeout_seconds(),
             handoff_topic_seeds: default_handoff_topic_seeds(),
+            incomplete_wave_gate: default_incomplete_wave_gate(),
         }
     }
 }
@@ -137,6 +169,7 @@ mod tests {
         let cfg = WorkflowContractConfig {
             handoff_dispatch_timeout_seconds: 600,
             handoff_topic_seeds: vec![],
+            incomplete_wave_gate: Default::default(),
         };
         assert_eq!(
             cfg.effective_timeout_seconds(),
@@ -149,6 +182,7 @@ mod tests {
         let cfg = WorkflowContractConfig {
             handoff_dispatch_timeout_seconds: HANDOFF_DISPATCH_TIMEOUT_MAX_SECONDS,
             handoff_topic_seeds: vec![],
+            incomplete_wave_gate: Default::default(),
         };
         assert_eq!(
             cfg.effective_timeout_seconds(),

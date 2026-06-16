@@ -386,6 +386,9 @@ fn finding_record(finding: &ralph_core::PolicyFinding) -> ValidationError {
             (String::new(), "invalid_topic_format".to_string())
         }
         ViolationType::TopicDenied { .. } => (String::new(), "topic_denied".to_string()),
+        ViolationType::SemanticGateViolation { gate, .. } => {
+            (gate.clone(), "semantic_gate_violation".to_string())
+        }
     };
     ValidationError {
         payload_index: 0, // caller (single vs batch) fills this in

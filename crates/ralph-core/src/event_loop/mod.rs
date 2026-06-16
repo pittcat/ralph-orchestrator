@@ -31,7 +31,7 @@ use crate::event_parser::{
     parse_backpressure_json, parse_review_json,
 };
 use crate::event_policy::{
-    PolicyDecision, PolicyFinding, PolicyRuntimeState, check_completion_guard,
+    PolicyDecision, PolicyFinding, PolicyRuntimeState, ReasonClass, check_completion_guard,
     check_completion_honored, check_topic_deny_rules, is_recoverable_policy_finding,
     validate_event,
 };
@@ -855,6 +855,18 @@ fn apply_event_policy_validation(
     // (`PayloadTypeMismatch`, `MissingRequiredField`, `TopicDenied`)
     // bypasses this closure entirely so the U6 fast-fail is not
     // triggered on a recoverable first attempt.
+    //
+    // U1 (2026-06-17-003 plan): `SemanticGateViolation` (e.g.
+    // `review_passed_while_wave_open`) is in the same recoverable
+    // set via `is_recoverable_policy_finding` returning
+    // `Some(ReasonClass::SemanticGateViolation)`.  The bucket is
+    // **independent** — semantic-gate rejections never compete
+    // with `PayloadTypeMismatch` / `MissingRequiredField` /
+    // `TopicDenied` for the same `(hat, topic)` retry budget.  The
+    // dedicated `task.resume` payload (see the call sites below)
+    // tells the source hat to wait for the mechanism-emitted
+    // `plan.blocked` or to actually complete the missing dimensions
+    // before retrying `review.passed`.
     let mut capture_violation = |finding: &PolicyFinding, payload: Option<&str>| {
         if payload_contract_violation.is_some() {
             return; // capture only the first
@@ -1074,15 +1086,25 @@ fn apply_event_policy_validation(
         match decision {
             PolicyDecision::Accept => {
                 if let Some(finding) = review_step_tracker.check_semantic_gates(&event) {
+                    // U1 (2026-06-17-003 plan): `capture_violation`
+                    // no-ops for `SemanticGateViolation` because the
+                    // variant is in the recoverable set. We still
+                    // emit a `task.resume` so the source hat sees
+                    // the failure reason; the hint explicitly tells
+                    // review-coordinator NOT to retry with
+                    // `skip_reason=empty_diff` and to either
+                    // complete the missing dimensions or wait for
+                    // the mechanism to emit `plan.blocked` (U2).
                     capture_violation(&finding, event.payload.as_deref());
                     policy_rejections.push(crate::event_policy::PolicyRejection {
                         topic: event.topic.clone(),
                         source_hat: event.hat.clone(),
                         finding: finding.clone(),
-                        reason_class: None,
+                        reason_class: is_recoverable_policy_finding(&finding),
                     });
                     let recovery_payload = format!(
-                        "EVENT_POLICY_REJECTED: event '{}' violates review step gate.\n{}\n\n\
+                        "EVENT_POLICY_REJECTED: event '{}' violates semantic gate (review step gate).\n{}\n\n\
+                         Wave 未闭合，禁止 empty_diff；等待机制 plan.blocked 或补全维度后重发 review.passed。\
                          Wait for review-synthesizer terminal before plan-gate events.",
                         event.topic, finding.message
                     );
@@ -1102,15 +1124,19 @@ fn apply_event_policy_validation(
                     bus.publish(diagnostic);
                 }
                 if let Some(finding) = review_step_tracker.check_semantic_gates(&event) {
+                    // U1 (2026-06-17-003 plan): same handling as
+                    // the `Accept` arm — `SemanticGateViolation` is
+                    // recoverable and the loop continues.
                     capture_violation(&finding, event.payload.as_deref());
                     policy_rejections.push(crate::event_policy::PolicyRejection {
                         topic: event.topic.clone(),
                         source_hat: event.hat.clone(),
                         finding: finding.clone(),
-                        reason_class: None,
+                        reason_class: is_recoverable_policy_finding(&finding),
                     });
                     let recovery_payload = format!(
-                        "EVENT_POLICY_REJECTED: event '{}' violates review step gate.\n{}\n\n\
+                        "EVENT_POLICY_REJECTED: event '{}' violates semantic gate (review step gate).\n{}\n\n\
+                         Wave 未闭合，禁止 empty_diff；等待机制 plan.blocked 或补全维度后重发 review.passed。\
                          Wait for review-synthesizer terminal before plan-gate events.",
                         event.topic, finding.message
                     );
@@ -1147,19 +1173,25 @@ fn apply_event_policy_validation(
                 if let Some(rc) = reason_class {
                     let hat_for_counter =
                         event.hat.as_deref().unwrap_or("unknown");
-                    // Unit 2 (2026-06-16-002 plan) take-3: the
-                    // actual `state.record_recoverable_rejection_key`
-                    // call lives in the caller.  We just
-                    // surface the candidate `(hat, topic,
-                    // reason_class)` triple; the caller bumps
-                    // the counter and decides whether to push a
-                    // `RecoverableExhaustion` into the runner's
-                    // buffer.
-                    recoverable_candidates.push(RecoverableExhaustionCandidate {
-                        hat: hat_for_counter.to_string(),
-                        topic: event.topic.clone(),
-                        reason_class: rc,
-                    });
+                    // U1 (2026-06-17-003 plan): `SemanticGateViolation`
+                    // is in the recoverable set so the event is not
+                    // fatal, but it is intentionally **not** pushed
+                    // into `recoverable_candidates` — semantic-gate
+                    // rejections (e.g. `review_passed_while_wave_open`)
+                    // never count toward `U2_REJECTION_RETRY_LIMIT`.
+                    // Otherwise a misbehaving review-coordinator
+                    // would exhaust the budget on empty-diff retries
+                    // and the loop would still terminate via
+                    // `RecoverablePayloadExhausted`.  The mechanism
+                    // emits `plan.blocked` (U2) before the budget
+                    // can run out for any meaningful case.
+                    if !matches!(rc, ReasonClass::SemanticGateViolation) {
+                        recoverable_candidates.push(RecoverableExhaustionCandidate {
+                            hat: hat_for_counter.to_string(),
+                            topic: event.topic.clone(),
+                            reason_class: rc,
+                        });
+                    }
                     // NOTE: do not `continue` here — we still
                     // want to publish a `task.resume` (the
                     // recoverable path's contract).  The caller
@@ -1242,6 +1274,12 @@ fn apply_event_policy_validation(
 /// if the finding is schema-derived (MissingRequiredField, PayloadTypeMismatch,
 /// InvalidFieldValue). Terminal-monotonicity and completion-guard violations
 /// are NOT payload contract violations and are passed through unchanged.
+///
+/// U1 (2026-06-17-003 plan): `SemanticGateViolation` is also passed
+/// through unchanged — semantic-gate rejections are recoverable
+/// (`task.resume` → review-coordinator) and **not** a payload contract
+/// violation. Treating them as one would re-introduce the
+/// `PayloadContractViolation` fatal termination that this unit removes.
 fn finding_to_payload_contract_violation(
     finding: &PolicyFinding,
     payload: Option<&str>,
@@ -1263,13 +1301,19 @@ fn finding_to_payload_contract_violation(
             PayloadContractViolationKind::AllowedValueMismatch,
             Some(field.clone()),
         ),
-        // Terminal / completion-guard / topic-format violations are NOT payload
-        // contract violations and must not be reported as such.
+        // Terminal / completion-guard / topic-format / topic-deny /
+        // semantic-gate violations are NOT payload contract violations
+        // and must not be reported as such. Semantic-gate violations
+        // still write a diagnostic envelope via the unified recovery
+        // pipeline (see runner.rs `record_recovery_envelope`), but
+        // they do NOT trigger the U6 `PayloadContractViolation`
+        // fatal termination — see the runner's branch below.
         ViolationType::TerminalMonotonicityViolation { .. }
         | ViolationType::DuplicateTerminalEvent { .. }
         | ViolationType::BusinessEventAfterCompletion { .. }
         | ViolationType::InvalidTopicFormat { .. }
-        | ViolationType::TopicDenied { .. } => return None,
+        | ViolationType::TopicDenied { .. }
+        | ViolationType::SemanticGateViolation { .. } => return None,
     };
     let fix_hint = match kind {
         PayloadContractViolationKind::MissingRequiredField => format!(
@@ -2826,6 +2870,126 @@ impl EventLoop {
             .get(hat_id)
             .map(|hat| hat.publishes.iter().map(|t| t.to_string()).collect())
             .unwrap_or_default()
+    }
+
+    /// U2 (2026-06-17-003 plan): mechanism-emitted `plan.blocked`
+    /// for a review wave that has stalled below `wave_total` past
+    /// `0.8 * aggregate_timeout_secs` without further
+    /// `dimension.done` progress.
+    ///
+    /// The hat provenance is `review-synthesizer` (so the event
+    /// passes the isolated-scope publish allowlist check); the
+    /// target is `shipper` per plan §Key Technical Decisions —
+    /// `plan-gate.triggers` does NOT include `plan.blocked`, so
+    /// routing through plan-gate would silently drop the event.
+    /// The wave is then closed in the tracker (`open_wave_id =
+    /// None`) so the gate does not re-fire on the next
+    /// iteration.
+    ///
+    /// Called **before** [`Self::inject_review_aggregate_timeouts`]
+    /// (per plan §U2 fixed order: incomplete-wave gate →
+    /// handoff-expired → process JSONL → policy validation).
+    /// When this method emits a `plan.blocked`, the U4 path is
+    /// not consulted in the same iteration.
+    ///
+    /// Returns `true` if a `plan.blocked` was emitted.
+    pub fn maybe_emit_incomplete_wave_blocked(&mut self) -> bool {
+        use crate::flow_lifecycle::incomplete_wave_gate::{
+            IncompleteWaveGate, IncompleteWaveGateConfig,
+        };
+
+        // Plan §U2: global default off, `ce-executor-isolated`
+        // default on. The config key is
+        // `workflow_contract.incomplete_wave_gate.enabled`. We
+        // read it defensively — when the preset does not set it,
+        // the helper returns None and the gate stays disabled.
+        let enabled = self
+            .config
+            .event_loop
+            .workflow_contract
+            .as_ref()
+            .map(|wc| wc.incomplete_wave_gate.enabled)
+            .unwrap_or(false);
+        if !enabled {
+            return false;
+        }
+
+        // Compute staleness from the configured `review-synthesizer`
+        // aggregate.timeout — matches what U4
+        // `inject_review_aggregate_timeouts` reads.
+        let aggregate_timeout_secs = self
+            .registry
+            .get_config(&HatId::new("review-synthesizer"))
+            .and_then(|cfg| cfg.aggregate.as_ref())
+            .map(|agg| u64::from(agg.timeout))
+            .unwrap_or(300);
+        let gate = IncompleteWaveGate::new(IncompleteWaveGateConfig {
+            enabled: true,
+            staleness_ratio: 0.8,
+        });
+        let staleness_secs = gate.staleness_secs(aggregate_timeout_secs);
+        let candidates = self
+            .state
+            .review_step_tracker
+            .open_waves_needing_intervention(staleness_secs);
+        if candidates.is_empty() {
+            return false;
+        }
+        // Use the first candidate per iteration — closing its
+        // wave before the next call prevents re-emit. The next
+        // iteration will pick up any remaining stalled waves.
+        let info = candidates.into_iter().next().unwrap();
+
+        let last_dim_secs_ago = info.last_dimension_at.map(|t| t.elapsed().as_secs());
+        let payload = gate.evaluate(
+            &self.state.flow_lifecycle,
+            aggregate_timeout_secs,
+            &info.wave_id,
+            info.expected,
+            info.received,
+            last_dim_secs_ago,
+        );
+        let Some(mut payload) = payload else {
+            return false;
+        };
+        // Fill in the per-step correlation fields from the
+        // tracker observation.
+        payload.plan_name = info.plan_name;
+        payload.task_id = info.task_id;
+        payload.step = info.step;
+
+        // The plan requires the publish provenance be
+        // `review-synthesizer` (which has `plan.blocked` in its
+        // `publishes` allowlist per the preset validator). The
+        // `Event::with_source(...)` helper stamps the producer
+        // hat; `with_target(...)` routes to `shipper`.
+        let json_payload = match serde_json::to_string(&payload) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let event = Event::new("plan.blocked", json_payload)
+            .with_source(HatId::new("review-synthesizer"))
+            .with_target(HatId::new("shipper"));
+        debug!(
+            wave_id = %info.wave_id,
+            expected = info.expected,
+            received = info.received,
+            "U2: emitting mechanism-level plan.blocked (dimension_reviewers_failed_to_converge)"
+        );
+        self.bus.publish(event);
+
+        // Close the wave in the tracker so the gate does not
+        // re-fire on subsequent iterations. We do not change
+        // `synth_terminal` / `synth_pass` here — the closed
+        // wave has a `plan.blocked` outcome, not a `review.passed`
+        // verdict, so plan-gate must not see it as terminal.
+        let key = review_step_state::StepKey {
+            plan_name: payload.plan_name.clone(),
+            task_id: payload.task_id.clone(),
+            step: payload.step.clone(),
+        };
+        self.state.review_step_tracker.close_wave(&key);
+        true
     }
 
     /// U4: When a review wave is incomplete past the synthesizer aggregate window,
