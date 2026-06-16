@@ -24,6 +24,17 @@ pub struct StepKey {
     pub step: String,
 }
 
+/// U3 (2026-06-17-003 plan): minimal projection of an open wave
+/// used by `publish_policy_rejection_resume` to print the
+/// `## WAVE_OPEN HINT` block. Carries no time information — the
+/// textual hint only needs the wave id + receive/total counts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenWaveSnapshot {
+    pub wave_id: String,
+    pub received: u32,
+    pub expected: u32,
+}
+
 #[derive(Debug, Clone, Default)]
 struct StepReviewState {
     open_wave_id: Option<String>,
@@ -351,6 +362,34 @@ impl ReviewStepTracker {
     /// True when any tracked step still has an incomplete review wave.
     pub fn has_open_review_wave(&self) -> bool {
         self.steps.values().any(wave_open)
+    }
+
+    /// U3 (2026-06-17-003 plan): return a small snapshot of the
+    /// first open review wave tracked by the registry, or `None`
+    /// if every wave is closed. The snapshot carries the fields
+    /// `publish_policy_rejection_resume` needs to print the
+    /// `## WAVE_OPEN HINT` block on a `work.done` rejection —
+    /// `wave_id`, `received` (`dimensions_received.len()`),
+    /// `expected` (`wave_expected`). Used only for the textual
+    /// rejection hint; the mechanism layer (`open_waves_needing_intervention`
+    /// + `maybe_emit_incomplete_wave_blocked`) remains the
+    /// single source of truth for whether the wave is actually
+    /// stalled and whether `plan.blocked` should be emitted.
+    pub fn first_open_wave_snapshot(&self) -> Option<OpenWaveSnapshot> {
+        for state in self.steps.values() {
+            if !wave_open(state) {
+                continue;
+            }
+            let Some(wave_id) = state.open_wave_id.clone() else {
+                continue;
+            };
+            return Some(OpenWaveSnapshot {
+                wave_id,
+                received: state.dimensions_received.len() as u32,
+                expected: state.wave_expected,
+            });
+        }
+        None
     }
 
     /// U2 (2026-06-17-003 plan): close the wave tracked under
