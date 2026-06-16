@@ -552,8 +552,15 @@ hats:
       - `changed_lines == 0`（按 shortstat 无变更）
       - `git ls-files --others --exclude-standard` 为空
       - `git diff <base>..HEAD`（或 `git diff <base>` fallback）为空
+      - `open_wave_id` 为 `None`（按 `ReviewStepTracker` 语义——wave 进行中禁止 emit `review.passed`；此条件封堵 `work.done → empty_diff` 旁路）
+      - 若 `events.jsonl` 中存在 active wave 记录，`received_count == wave_total`（active wave 必须先 fully closed 才允许走 empty_diff fast-path）
 
       **审计字段 — 强制**：每个 `review.passed` 事件 payload 必须包含 `skip_reason: "empty_diff"`。下游 reporter 会 REJECT 没有 `skip_reason` 的 `review.passed`（硬 schema gate）。有疑问时选 wave。
+
+      **U3（2026-06-17-003 计划）— wave-open 信心协议**：若 `open_wave_id` 为 `Some(_)`（wave 仍在进行），coordinator 必须二选一（机制由 U1 semantic gate + U2 staleness terminal 兜底——preset 只声明协议）：
+      - emit `review.wave.ready`（继续 wave），或
+      - 在 `received_count < wave_total` 超过 aggregate window 时，emit `plan.blocked(reason=dimension_reviewers_failed_to_converge)`。
+      在 wave 进行中既不走 wave 也不走 plan.blocked，而是 emit `review.passed(empty_diff)` 属于**硬违规**——semantic gate 会以 `review_passed_while_wave_open` 拒收（recoverable，非 fatal），机制会通过 U2 staleness emit `plan.blocked`。
 
       - 将共享 diff 写入 `.agents/scratchpad/ce-executor/{plan_name}/wave-diff.patch`
 

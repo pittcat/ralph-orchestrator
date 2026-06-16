@@ -369,8 +369,24 @@ pub struct EventLoop {
 /// was a wave record.  Falls back to an un-targeted publish when
 /// the source hat is unknown (preserves the pre-R5 behaviour of
 /// letting `Ralph` recover).
-fn publish_policy_rejection_resume(bus: &mut EventBus, event: &JsonlEvent, payload: String) {
+///
+/// U3 (2026-06-17-003 plan): when the source event is `work.done`
+/// and `tracker` reports an open wave, append a `## WAVE_OPEN
+/// HINT` block to the payload instructing the agent to NOT emit
+/// `review.passed(empty_diff)` while a wave is in progress and
+/// NOT to repeat `work.done` (both are hard semantic violations
+/// — the `review_passed_while_wave_open` gate is recoverable but
+/// `work.done` dedup is the U4 sibling). This is the textual
+/// counterpart to the mechanism: the gate rejects, the hint
+/// explains why.
+fn publish_policy_rejection_resume(
+    bus: &mut EventBus,
+    event: &JsonlEvent,
+    payload: String,
+    tracker: Option<&crate::event_loop::review_step_state::ReviewStepTracker>,
+) {
     let payload = enrich_payload_with_wave(&payload, event);
+    let payload = enrich_payload_with_wave_open_hint(&payload, event, tracker);
     let mut resume = Event::new("task.resume", payload);
     if let Some(hat) = event.hat.as_deref() {
         if !hat.is_empty() {
@@ -378,6 +394,48 @@ fn publish_policy_rejection_resume(bus: &mut EventBus, event: &JsonlEvent, paylo
         }
     }
     bus.publish(resume);
+}
+
+/// U3 (2026-06-17-003 plan) — when the source event is `work.done`
+/// and the tracker reports any open wave, append a structured
+/// `## WAVE_OPEN HINT` block to the resume payload. The block
+/// tells the agent:
+///   - a wave is currently open (`open_wave_id=<id>`,
+///     `received=<n>/<total>`),
+///   - do NOT emit `review.passed(empty_diff)` while the wave
+///     is open (semantic gate `review_passed_while_wave_open`
+///     will reject and recover — see U1),
+///   - do NOT re-emit `work.done` (duplicate dedup is U4).
+///   - the mechanism will emit `plan.blocked` via U2 staleness
+///     if the wave does not close; agents should let it close
+///     instead of attempting empty_diff fast-path.
+fn enrich_payload_with_wave_open_hint(
+    payload: &str,
+    event: &JsonlEvent,
+    tracker: Option<&crate::event_loop::review_step_state::ReviewStepTracker>,
+) -> String {
+    if event.topic != "work.done" {
+        return payload.to_string();
+    }
+    let Some(tracker) = tracker else {
+        return payload.to_string();
+    };
+    let Some(snapshot) = tracker.first_open_wave_snapshot() else {
+        return payload.to_string();
+    };
+    format!(
+        "{payload}\n\n\
+         ## WAVE_OPEN HINT (U3)\n\
+         - reason: work.done rejected while a review wave is open; do not bypass with empty_diff\n\
+         - open_wave_id: {wave_id}\n\
+         - received: {received}/{expected}\n\
+         - prohibition: do NOT emit `review.passed(empty_diff)` while a wave is open — semantic gate rejects with `review_passed_while_wave_open` (recoverable, not fatal); do NOT re-emit `work.done` either (U4 dedup blocks it).\n\
+         - fallback: let the wave close naturally, or wait for mechanism `plan.blocked` via U2 staleness if the wave stalls past the aggregate window.\n"
+        ,
+        wave_id = snapshot.wave_id,
+        received = snapshot.received,
+        expected = snapshot.expected,
+    )
 }
 
 /// Append a `<!-- wave_id=... wave_index=... wave_total=... -->`
@@ -503,6 +561,7 @@ fn apply_workflow_guard_validation(
     guards: &crate::config::WorkflowGuardsConfig,
     workflow_progress: &mut WorkflowProgress,
     bus: &mut EventBus,
+    review_step_tracker: &review_step_state::ReviewStepTracker,
 ) -> WorkflowGuardOutcome {
     let mut outcome = WorkflowGuardOutcome {
         accepted_events: Vec::with_capacity(events.len()),
@@ -610,7 +669,7 @@ fn apply_workflow_guard_validation(
                 event.topic,
                 rejection_details.join("\n")
             );
-            publish_policy_rejection_resume(bus, &event, recovery_payload);
+            publish_policy_rejection_resume(bus, &event, recovery_payload, Some(review_step_tracker));
 
             // U4: surface the rejection metadata to the caller. The
             // helper itself stays free of diagnostics dependencies;
@@ -950,7 +1009,7 @@ fn apply_event_policy_validation(
                          The loop will continue to allow recovery.",
                         event.topic, finding.message
                     );
-                    publish_policy_rejection_resume(bus, &event, recovery_payload);
+                    publish_policy_rejection_resume(bus, &event, recovery_payload, Some(review_step_tracker));
                 }
                 PolicyDecision::Hold(finding) => {
                     hold_triggered = true;
@@ -967,7 +1026,7 @@ fn apply_event_policy_validation(
                          Loop held due to completion guard violation. Use resume to continue.",
                         event.topic, finding.message
                     );
-                    publish_policy_rejection_resume(bus, &event, recovery_payload);
+                    publish_policy_rejection_resume(bus, &event, recovery_payload, Some(review_step_tracker));
                 }
                 PolicyDecision::Block(finding) => {
                     if write_diagnostic {
@@ -1048,7 +1107,7 @@ fn apply_event_policy_validation(
                         event.hat.as_deref(),
                         registry,
                     );
-                    publish_policy_rejection_resume(bus, &event, recovery_payload);
+                    publish_policy_rejection_resume(bus, &event, recovery_payload, Some(review_step_tracker));
                 }
                 PolicyDecision::Hold(finding) => {
                     hold_triggered = true;
@@ -1064,7 +1123,7 @@ fn apply_event_policy_validation(
                          Loop held due to topic-deny rule. Use resume to continue.",
                         event.topic, finding.message
                     );
-                    publish_policy_rejection_resume(bus, &event, recovery_payload);
+                    publish_policy_rejection_resume(bus, &event, recovery_payload, Some(review_step_tracker));
                 }
                 PolicyDecision::Block(_finding) => {
                     // Silently drop the event
@@ -1108,7 +1167,7 @@ fn apply_event_policy_validation(
                          Wait for review-synthesizer terminal before plan-gate events.",
                         event.topic, finding.message
                     );
-                    publish_policy_rejection_resume(bus, &event, recovery_payload);
+                    publish_policy_rejection_resume(bus, &event, recovery_payload, Some(review_step_tracker));
                 } else {
                     review_step_tracker.observe_accepted(&event);
                     validated_events.push(event);
@@ -1140,7 +1199,7 @@ fn apply_event_policy_validation(
                          Wait for review-synthesizer terminal before plan-gate events.",
                         event.topic, finding.message
                     );
-                    publish_policy_rejection_resume(bus, &event, recovery_payload);
+                    publish_policy_rejection_resume(bus, &event, recovery_payload, Some(review_step_tracker));
                 } else {
                     review_step_tracker.observe_accepted(&event);
                     validated_events.push(event);
@@ -1212,7 +1271,7 @@ fn apply_event_policy_validation(
                     policy_config,
                     registry,
                 );
-                publish_policy_rejection_resume(bus, &event, recovery_payload);
+                publish_policy_rejection_resume(bus, &event, recovery_payload, Some(review_step_tracker));
                 // Do NOT record the rejected event
             }
             PolicyDecision::Hold(finding) => {
@@ -1240,7 +1299,7 @@ fn apply_event_policy_validation(
                     policy_config,
                     registry,
                 );
-                publish_policy_rejection_resume(bus, &event, recovery_payload);
+                publish_policy_rejection_resume(bus, &event, recovery_payload, Some(review_step_tracker));
             }
             PolicyDecision::Block(_finding) => {
                 // Silently drop the event without publishing recovery or hold artifacts
@@ -3064,13 +3123,13 @@ impl EventLoop {
         true
     }
 
-    /// Unit 8 (2026-06-17-001): Returns true if `hat` is one of the
-    /// wave-related hats that use a dedicated stall recovery counter.
+    /// Unit 8 (2026-06-17-001) + U3 (2026-06-17-003): Returns true if `hat`
+    /// is `review-synthesizer` — the only consumer routed through the
+    /// 3-step stall escalation ladder. `review-coordinator` and
+    /// `dimension-reviewer` use their own `stall:<name>` bucket (U8
+    /// invariant pinned by `test_u3_ladder_inert_for_non_wave_hats`).
     fn is_wave_hat(hat: &HatId) -> bool {
-        matches!(
-            hat.as_str(),
-            "review-coordinator" | "review-synthesizer" | "dimension-reviewer"
-        )
+        hat.as_str() == "review-synthesizer"
     }
 
     /// Injects a fallback event to recover from a stalled loop.
@@ -3097,14 +3156,14 @@ impl EventLoop {
             "stall:ralph".to_string()
         };
 
-        let stall_count = self
+        let stall_count_value = *self
             .state
             .stall_recovery_counts
             .entry(stall_key.clone())
             .and_modify(|c| *c += 1)
             .or_insert(1);
 
-        let hard_escalation = *stall_count >= STALL_HARD_THRESHOLD;
+        let hard_escalation = stall_count_value >= STALL_HARD_THRESHOLD;
         // Unit 8: wave stall escalation — route to review-coordinator when
         // a wave hat is the last to execute and it has stalled.
         let hard_target = if let Some(last_hat) = &self.state.last_hat {
@@ -3117,6 +3176,43 @@ impl EventLoop {
             HatId::new("review-synthesizer")
         };
 
+        // U3 (2026-06-17-003 plan) — Stall/handoff routing ladder
+        // (R-F3, SC-F1): for wave hats, the 3rd consecutive stall
+        // (hard_escalation == true) MUST escalate to the mechanism
+        // layer (`maybe_emit_incomplete_wave_blocked`) instead of
+        // routing to review-coordinator. The coordinator path was
+        // what activated the `work.done → empty_diff` bypass in
+        // zippy-sparrow (review-coordinator fired while a wave was
+        // still open and tried to terminate with `review.passed`).
+        // The ladder is:
+        //   - count 1, 2: existing `task.resume` → review-synthesizer
+        //     (lets the synthesizer try to close the wave normally)
+        //   - count 3+: mechanism emits `plan.blocked` via U2
+        //     staleness; we return early so no `task.resume` is
+        //     published and no extra work is routed to executor.
+        // Shares the `flow:review-synthesizer` bucket with 001-U8
+        // (no double counter) — the existing threshold (3) is the
+        // single source of truth.
+        if hard_escalation && stall_key.starts_with("flow:") {
+            if self.maybe_emit_incomplete_wave_blocked() {
+                debug!(
+                    stall_count = stall_count_value,
+                    stall_key = %stall_key,
+                    "U3: stall ladder reached hard threshold — mechanism emitted plan.blocked; \
+                     NOT routing executor to re-emit work.done (empty_diff bypass closed)"
+                );
+                return true;
+            }
+            // If U2 had nothing to emit (no open waves / no
+            // candidates), fall through to the legacy hard path
+            // so the loop does not get stuck — this preserves the
+            // pre-U3 behaviour for the edge case where the
+            // stall counter has drifted past threshold but the
+            // tracker has no open wave (e.g. ralph itself is the
+            // last hat and `last_hat` is a wave hat from a prior
+            // session).
+        }
+
         // If a custom hat was last executing, target the fallback back to it
         // This preserves hat context instead of always falling back to Ralph
         let fallback_event = if hard_escalation {
@@ -3128,7 +3224,7 @@ impl EventLoop {
             let mut payload = format!(
                 "RECOVERY (HARD): {} consecutive stall iterations (key=`{}`). \
                  Route to `{}` to emit review terminal or re-dispatch wave.",
-                stall_count,
+                stall_count_value,
                 stall_key,
                 hard_target.as_str()
             );
@@ -3136,11 +3232,11 @@ impl EventLoop {
                 reason_str,
                 hard_target.as_str(),
                 "emit review.wave.ready, review.passed, or review.failed",
-                *stall_count,
+                stall_count_value,
                 &[],
             ));
             debug!(
-                stall_count,
+                stall_count = stall_count_value,
                 target = %hard_target.as_str(),
                 "Injecting HARD stall recovery to review hat"
             );
@@ -6893,6 +6989,7 @@ impl EventLoop {
                     guards,
                     &mut self.state.workflow_progress,
                     &mut self.bus,
+                    &self.state.review_step_tracker,
                 );
                 for rejection in &outcome.rejections {
                     Self::log_workflow_guard_rejection(&mut *self, rejection);

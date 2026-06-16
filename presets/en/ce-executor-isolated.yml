@@ -744,8 +744,15 @@ hats:
       - `changed_lines == 0` (no changes vs base, per shortstat)
       - `git ls-files --others --exclude-standard` is empty
       - `git diff <base>..HEAD` (or `git diff <base>` fallback) is empty
+      - `open_wave_id` is `None` (per `ReviewStepTracker` — the agent must not emit `review.passed` while a wave is open; this catches the `work.done → empty_diff` bypass)
+      - if an active wave record exists in `events.jsonl`, `received_count == wave_total` (active wave must be fully closed before the empty_diff fast-path is legal)
 
       **Audit field — mandatory**: every `review.passed` event MUST include `skip_reason: "empty_diff"` in its payload. Downstream reporters will REJECT `review.passed` without `skip_reason` (hard schema gate). When in doubt, choose wave.
+
+      **U3 (2026-06-17-003 plan) — wave-open confidence protocol**: if `open_wave_id` is `Some(_)` (wave still in progress), the coordinator MUST choose one of the following (mechanism enforces via U1 semantic gate + U2 staleness terminal — preset only states the protocol):
+      - emit `review.wave.ready` (continue the wave), OR
+      - emit `plan.blocked(reason=dimension_reviewers_failed_to_converge)` once `received_count < wave_total` past the aggregate window.
+      Bypassing both by emitting `review.passed(empty_diff)` while a wave is open is a HARD VIOLATION — the semantic gate will reject the event with `review_passed_while_wave_open` (recoverable, not fatal) and the mechanism emits `plan.blocked` via U2 staleness.
 
       Write shared diff to `.agents/scratchpad/ce-executor/{plan_name}/wave-diff.patch`
 
