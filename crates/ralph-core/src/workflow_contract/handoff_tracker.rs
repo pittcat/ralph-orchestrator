@@ -21,6 +21,22 @@
 //! Construction is cheap (default state is empty). All public
 //! methods are `&mut self` because the tracker mutates its
 //! pending map on every call.
+//!
+//! ## Escalation semantics (U2, 2026-06-17 plan)
+//!
+//! The tracker implements **single Hard escalation** semantics:
+//! each timed-out handoff produces exactly one
+//! [`HandoffEscalation`] whose `safe_target` is either the
+//! original consumer (the canonical path) or, when the original
+//! consumer is itself `plan-gate` (i.e. plan-gate is the
+//! bottleneck), `review-coordinator` as the audit fallback. There
+//! is **no** repeated-counter or multi-step escalation ladder
+//! (e.g. "3 Hard → 1 Final / plan.blocked"): if a subsequent
+//! handoff on the same topic also times out, that handoff is
+//! tracked and escalated independently by the loop's next
+//! iteration. Operators see one escalation per stuck handoff;
+//! the `reason` field includes the configured timeout so
+//! diagnose reports can correlate timing.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
