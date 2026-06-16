@@ -843,15 +843,23 @@ fn append_hat_publishes_hint(
 /// Topics not in `GATED_TOPICS` are passed through untouched. This
 /// keeps the gate narrow: the hard fail is reserved for the two
 /// topics that mutate the step counter / finalize the plan.
+///
+/// Review fix #4 (code-review-2026-06-17-002): the second return
+/// value carries a `RecoveryDiagnosisEnvelope` per rejection so the
+/// caller can persist it via `EventLoop::record_recovery_envelope`
+/// (writes `recovery.jsonl` for `ralph diagnose`). The gate itself
+/// cannot call `record_recovery_envelope` because that requires
+/// `&mut EventLoop`, not the `&mut EventBus` signature below.
 fn apply_step_handoff_gate(
     events: Vec<JsonlEvent>,
     workspace_root: &str,
     bus: &mut EventBus,
-) -> Vec<JsonlEvent> {
+) -> (Vec<JsonlEvent>, Vec<crate::diagnosis::RecoveryDiagnosisEnvelope>) {
     use crate::step_handoff::progress_task_gate;
 
     let workspace = std::path::Path::new(workspace_root);
     let mut accepted: Vec<JsonlEvent> = Vec::with_capacity(events.len());
+    let mut envelopes: Vec<crate::diagnosis::RecoveryDiagnosisEnvelope> = Vec::new();
 
     for event in events {
         if !progress_task_gate::is_gated_topic(event.topic.as_str()) {
@@ -875,8 +883,15 @@ fn apply_step_handoff_gate(
                 // Reject the gated event and publish `plan.blocked`
                 // with the mismatch reason. The plan-gate hat is the
                 // canonical consumer (it owns `plan.blocked` in
-                // ce-executor-isolated); we stamp `event.hat` as the
-                // source so the EventOriginGuard accepts the publish.
+                // ce-executor-isolated).
+                //
+                // Review fix #1 (code-review-2026-06-17-002): hardcode
+                // the source hat to `plan-gate` rather than copying
+                // `event.hat`. Rationale: any non-plan-gate hat that
+                // emits a gated topic will fail the EventOriginGuard's
+                // publish-scope check when its source claims authorship
+                // of `plan.blocked`. The orchestrator synthesizes
+                // `plan.blocked` and must own the source.
                 let blocked_payload = format!(
                     "PROGRESS_TASK_GATE_REJECTED: topic='{}' rejected by step_handoff gate.\n\
                      reason={}\n\
@@ -885,10 +900,7 @@ fn apply_step_handoff_gate(
                      task_id={:?}",
                     event.topic, mismatch.reason, mismatch.detail, mismatch.step, mismatch.task_id,
                 );
-                let source_hat = event
-                    .hat
-                    .clone()
-                    .unwrap_or_else(|| "plan-gate".to_string());
+                let source_hat = HatId::from("plan-gate");
                 let blocked = Event::new("plan.blocked", blocked_payload)
                     .with_source(source_hat);
                 bus.publish(blocked);
@@ -903,6 +915,28 @@ fn apply_step_handoff_gate(
                     ),
                 );
                 bus.publish(diagnostic);
+                // Review fix #4 (code-review-2026-06-17-002):
+                // accumulate a recovery envelope so the caller can
+                // persist via `record_recovery_envelope`. This makes
+                // the rejection visible to `ralph diagnose --session
+                // latest` and to the responder ladder. The envelope is
+                // a builder-stamped payload; `iteration` and
+                // `retry_attempt` are patched in by the caller from
+                // the live EventLoop state.
+                let envelope = crate::diagnosis::RecoveryDiagnosisEnvelope::builder()
+                    .source(crate::diagnosis::DiagnosisSource::PayloadContract)
+                    .severity(crate::diagnosis::DiagnosisSeverity::Warning)
+                    .source_hat("plan-gate")
+                    .target_hat("plan-gate")
+                    .topic(event.topic.clone())
+                    .reason_code("progress_task_mismatch")
+                    .message(format!(
+                        "step_handoff gate rejected topic='{}' reason={} detail={}",
+                        event.topic, mismatch.reason, mismatch.detail
+                    ))
+                    .safe_target(true)
+                    .build();
+                envelopes.push(envelope);
                 // Reject the original event: do NOT push it to
                 // `accepted`. The next iteration's `plan-gate`
                 // activation will see `plan.blocked` and emit a
@@ -911,7 +945,7 @@ fn apply_step_handoff_gate(
         }
     }
 
-    accepted
+    (accepted, envelopes)
 }
 
 /// Extract `step` and `task_id` fields from a JSON event payload.
@@ -6832,11 +6866,19 @@ impl EventLoop {
             .as_ref()
             .is_some_and(|wc| wc.step_handoff.progress_task_gate)
         {
-            events = apply_step_handoff_gate(
+            let (accepted_events, gate_envelopes) = apply_step_handoff_gate(
                 events,
                 self.config.core.workspace_root.to_str().unwrap_or("."),
                 &mut self.bus,
             );
+            events = accepted_events;
+            // Review fix #4 (code-review-2026-06-17-002): persist
+            // each gate rejection as a recovery envelope so
+            // `ralph diagnose --session latest` and the responder
+            // ladder see the gate failure.
+            for envelope in gate_envelopes {
+                self.record_recovery_envelope(&envelope, Vec::new());
+            }
         }
         // --- End step handoff gate ---
 
