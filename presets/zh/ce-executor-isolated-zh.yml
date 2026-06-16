@@ -587,17 +587,16 @@ hats:
       - 记录哪些需求已满足/未满足
 
       ### Dimension 选择（来自 compound-engineering persona-catalog）
-      **触发事件决定 dimension 集合。** 选择 dimension 前先识别触发（work.done vs fix.applied）。触发感知的逻辑属于上限而非下限 —— work.done 保持完整 7+ 集合，fix.applied 收窄为聚焦的 3 维集合，避免重复覆盖 work.done 首评已查过的维度。
+      **触发事件决定 dimension 集合。** 选择 dimension 前先识别触发（work.done vs fix.applied）。触发感知的逻辑属于上限而非下限 —— work.done 保持聚焦的 4 维集合，fix.applied 收窄为聚焦的 3 维集合，避免重复覆盖 work.done 首评已查过的维度。
 
       **`work.done` 触发（step 首评）**：
       **Required dimensions（必含于每个 emit 的 review.wave.ready — 这是下限，不是上限）**：
       - `correctness` — 逻辑正确性、边界情况、错误传播
       - `testing` — 测试覆盖、断言质量、脆弱测试
       - `maintainability` — 结构质量、复杂度、死代码
-      - `standards` — 项目标准合规（CLAUDE.md、AGENTS.md）
       - `requirements` — 需求保真度、R-ID 验证
-      - `agent-native` — Agent 可访问性
-      - `learnings` — docs/solutions/ 搜索
+
+      **2026-06-16-001 U4 已从 work.done 首评移除**：`standards`（合并到 `maintainability` + `requirements` — 两者均查格式/结构/对齐）、`agent-native`（咨询性，对内部 refactor 信号低；每步都会触发）、`learnings`（咨询性，信噪比低；需要时通过 `ralph tools` 显式调用即可，不占用 wave slot）。
 
       **Conditional dimensions（根据 diff 决定）**：
       | 条件 | 添加 |
@@ -614,7 +613,11 @@ hats:
       - `standards` — 验证修复遵循项目规约（CLAUDE.md、AGENTS.md）
       - `requirements` — 验证修复针对原始 finding（R-ID / 维度匹配）
 
-      **不要包含** 另 4 个 required dimension（`testing`、`maintainability`、`agent-native`、`learnings`）。这些已被 work.done 首评覆盖；对小 fix 再次跑它们是重复 review，没有新信号。
+      **`standards` 在 fix.applied 中的特殊处理**：该 dimension 不在 work.done 首评集合中，但保留在 fix.applied 路径 —— 因为 fix delta 比全新实现更可能引入格式/结构回归。dimension-reviewer 的 `standards` checklist 块因此仅用于 `fix.applied`，**绝不出现在 work.done wave 中**。
+
+      **不要包含** 另 3 个 required dimension（`testing`、`maintainability`）。这些已被 work.done 首评覆盖；对小 fix 再次跑它们是重复 review，没有新信号。
+
+      **不要包含** 已移除的 first-pass 维度（`agent-native`、`learnings`）—— 任何触发、任何路径都不要。work.done 首评固定为 4 维；fix.applied 增量复评固定为 3 维；移除的维度整段删除（不再补回）。
 
       **不要包含** 任何 conditional dimension（`security`、`performance`、`api-contract`、`reliability`、`adversarial`）。fix 阶段无条件走 3 维集合。这是已知权衡：若 fix 涉及 auth / payments / data-mutation 代码，这些区域的回归风险由本 step 的 work.done 首评覆盖（work.done wave 在完整 conditional 集合下审过同一段代码），不由 fix 阶段在小 fix delta 上重跑。这是增量 review 明确接受的成本。
       **不要试图给 `fix.applied` wave 追加 `security` 或 `adversarial`，即便 diff 涉及 auth / payments / data-mutation 代码。** 这是设计如此，不是要补的窟窿 —— 本 step 的 work.done 首评已经为同一段代码覆盖了这些维度。在这里追加它们会破坏增量 review 的目的（重复审已审过的内容），也不会增加新信号。
@@ -823,7 +826,9 @@ hats:
       - **类型安全漏洞（类型语言）**：new `any`、`@ts-ignore`、未检查转型
       不标记：反映领域复杂度、框架强制模式、纯风格偏好。
 
-      #### WAVE_DIMENSION == "standards"
+      #### WAVE_DIMENSION == "standards"（仅 fix.applied — 2026-06-16-001 U4）
+      U4 已从 work.done 首评移除（合并到 maintainability + requirements），但保留在 fix.applied 路径 —— 因为 fix delta 比全新实现更可能引入格式/结构回归。review-coordinator **不应**在 work.done 触发下 emit 该 dimension。
+      ---
       - **CLAUDE.md / AGENTS.md 合规**：frontmatter、引用、命名规范
       - **跨平台移植**：平台特定工具名无对应替代
       - **工具选择违规**：shell 命令做文件操作应使用原生工具
@@ -838,14 +843,18 @@ hats:
       - **行为保真度**：代码匹配描述的行为
       未满足的需求 → P1 finding，`autofix_class: manual`，`owner: downstream-resolver`
 
-      #### WAVE_DIMENSION == "agent-native"
+      #### WAVE_DIMENSION == "agent-native"（不再使用 — 2026-06-16-001 U4）
+      U4 已从 work.done 首评集合移除。下方 checklist 块保留以备运营者手动恢复；默认规则下 review-coordinator **不应** emit 该 dimension。
+      ---
       - **Action parity**：每个 UI 操作有对应 agent tool/CLI
       - **Context parity**：agent 看到用户相同的视图
       - **Shared workspace**：agent 和用户在相同的数据空间操作
       - **Discoverability**：新功能有 CLI 入口或 agent 可调用的接口
       不标记：人类专用流程（CAPTCHA、2FA）、认证仪式、纯 UI、平台限制。
 
-      #### WAVE_DIMENSION == "learnings"
+      #### WAVE_DIMENSION == "learnings"（不再使用 — 2026-06-16-001 U4）
+      U4 已从 work.done 首评集合移除 —— advisory 性质在各 step 间产生过多噪声。需要时直接通过 `ralph tools` 读取 `docs/solutions/` 即可。
+      ---
       - 搜索 `docs/solutions/` 中与改动相关的问题
       - 使用 glob/grep 按模块/组件/关键词查找
       - 如过去的解决方案指出的问题仍存在 → 提升为 finding

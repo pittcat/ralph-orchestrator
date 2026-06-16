@@ -795,17 +795,16 @@ hats:
       - Include requirements completeness data in each wave payload
 
       ### Dimension Selection (from compound-engineering persona-catalog)
-      **Trigger determines the dimension set.** Identify the trigger (work.done vs fix.applied) before selecting. The trigger-aware logic is part of the ceiling, not the floor — work.done stays at the full 7+ set, fix.applied narrows to a focused 3-dim set to avoid re-covering dimensions that the work.done first-pass already covered.
+      **Trigger determines the dimension set.** Identify the trigger (work.done vs fix.applied) before selecting. The trigger-aware logic is part of the ceiling, not the floor — work.done stays at the focused 4-dim set, fix.applied narrows to a focused 3-dim set to avoid re-covering dimensions that the work.done first-pass already covered.
 
       **`work.done` trigger (first-pass review of a step)**:
       **Required dimensions** (MUST include in every emitted `review.wave.ready` wave — these are the floor, not the ceiling):
       - `correctness` — logic correctness, edge cases, error propagation
       - `testing` — test coverage, assertion quality, brittle tests
       - `maintainability` — structural quality, complexity, dead code
-      - `standards` — project standards compliance (CLAUDE.md, AGENTS.md)
       - `requirements` — requirement fidelity, R-ID verification
-      - `agent-native` — agent accessibility of new features
-      - `learnings` — docs/solutions/ history search
+
+      **Removed (2026-06-16-001 U4)** from the `work.done` first-pass: `standards` (consolidated into `maintainability` + `requirements` — both check format/structure/alignment to plan), `agent-native` (advisory, low signal for an internal refactor; would re-fire on every step), and `learnings` (advisory, low signal-to-noise ratio; can be invoked explicitly via `ralph tools` instead of taking a wave slot).
 
       **Conditional dimensions** (evaluate diff content to decide):
       | Condition | Add |
@@ -822,7 +821,11 @@ hats:
       - `standards` — verify the fix follows project conventions (CLAUDE.md, AGENTS.md)
       - `requirements` — verify the fix addresses the original finding (R-ID / dimension match)
 
-      **DO NOT include** the 4 other required dimensions (`testing`, `maintainability`, `agent-native`, `learnings`). They were already covered by the work.done first-pass; running them again on a small fix is duplicate review with no new signal.
+      **Note on `standards` in `fix.applied`**: the `standards` dimension is NOT in the `work.done` first-pass set, but it IS preserved in the `fix.applied` path because a fix is more likely to introduce formatting/structural regressions than a fresh implementation. The dimension-reviewer's `standards` checklist block is therefore retained for `fix.applied` use only and must not appear in `work.done` waves.
+
+      **DO NOT include** the 3 other required dimensions (`testing`, `maintainability`). They were already covered by the work.done first-pass; running them again on a small fix is duplicate review with no new signal.
+
+      **DO NOT include** the removed first-pass dimensions (`agent-native`, `learnings`) in any wave, on any trigger. The first-pass `work.done` set is now 4-dim; the incremental `fix.applied` set is 3-dim; the removed dimensions are dropped entirely (not re-introduced).
 
       **DO NOT include** any conditional dimension (`security`, `performance`, `api-contract`, `reliability`, `adversarial`). The fix stage is unconditionally a 3-dim set. This is a known tradeoff: if a fix touches auth / payments / data-mutation code, the regression risk in those areas is covered by the work.done first-pass for the step (the work.done wave reviewed the same code under the full conditional set), NOT by re-running it on the small fix delta. This is the explicit, accepted cost of incremental review.
       **Do NOT attempt to retroactively add `security` or `adversarial` to a `fix.applied` wave, even if the diff touches auth, payments, or data-mutation code.** This is by design, not a gap to fill — the work.done first-pass for the step already covered those dimensions for the same code. Adding them here would defeat the purpose of the incremental review (re-covering work that was already reviewed) without adding signal.
@@ -1125,7 +1128,14 @@ hats:
       - **Type safety holes (typed langs)**: new `any`, `@ts-ignore`, unchecked casts.
       Do NOT flag: complexity mirroring domain complexity, framework-mandated patterns, style-only preferences.
 
-      #### WAVE_DIMENSION == "standards"
+      #### WAVE_DIMENSION == "standards" (FIX-APPLIED ONLY — 2026-06-16-001 U4)
+      Removed from the `work.done` first-pass in U4 (consolidated
+      into `maintainability` + `requirements`); retained for
+      `fix.applied` only because a fix delta is more likely to
+      introduce formatting/structural regressions. The
+      review-coordinator MUST NOT emit this dimension on a
+      `work.done` trigger.
+      ---
       Check:
       - **CLAUDE.md / AGENTS.md compliance**: frontmatter violations, reference inclusion mistakes, naming conventions.
       - **Cross-platform portability**: platform-specific tool names without equivalents.
@@ -1142,7 +1152,13 @@ hats:
       - **Behavior fidelity**: code matches the described behavior, not just the function signature
       Unmet requirements → P1 finding, `autofix_class: manual`, `owner: downstream-resolver`
 
-      #### WAVE_DIMENSION == "agent-native"
+      #### WAVE_DIMENSION == "agent-native" (NO LONGER USED — 2026-06-16-001 U4)
+      The `agent-native` dimension is removed from the `work.done`
+      first-pass set in U4. The checklist block below is retained
+      verbatim for reference / for any operator who opts back in by
+      editing the `work.done` dimension set, but the
+      `review-coordinator` MUST NOT emit it under default rules.
+      ---
       Check:
       - **Action parity**: every UI action has equivalent agent tool/CLI
       - **Context parity**: agents see same data users see
@@ -1151,7 +1167,13 @@ hats:
       - **Config discoverability**: new config items in agent's context scope
       Do NOT flag: intentionally human-only flows (CAPTCHA, 2FA), auth ceremony, cosmetic UI, platform gates.
 
-      #### WAVE_DIMENSION == "learnings"
+      #### WAVE_DIMENSION == "learnings" (NO LONGER USED — 2026-06-16-001 U4)
+      The `learnings` dimension is removed from the `work.done`
+      first-pass set in U4. The advisory nature produced too much
+      noise vs. signal across steps. Operators who need it can
+      invoke `ralph tools` to read `docs/solutions/` directly
+      instead of taking a wave slot.
+      ---
       Check:
       - Search `docs/solutions/` for past learnings relevant to changed files and plan goals
       - Use glob/grep to find matching entries by module/component/keyword
