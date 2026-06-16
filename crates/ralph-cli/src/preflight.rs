@@ -203,11 +203,14 @@ pub(crate) async fn load_config_for_preflight(
     validate_core_config_shape(&core_value, &core_label)?;
 
     if let Some(source) = hats_source {
+        let operator_core = core_value.clone();
         if let Some(mapping) = core_value.as_mapping()
             && (mapping_get(mapping, "hats").is_some() || mapping_get(mapping, "events").is_some())
         {
             warn!(
-                "Core config '{}' contains hats/events and hats source '{}' was provided; hats source takes precedence for hats/events",
+                "Core config '{}' contains hats/events and hats source '{}' was provided; \
+                 preset supplies hats/events, then per-hat fields from the operator config \
+                 (e.g. backend) are merged on top",
                 core_label,
                 source.label()
             );
@@ -216,6 +219,7 @@ pub(crate) async fn load_config_for_preflight(
         let hats_value = load_hats_value(source).await?;
         validate_hats_config_shape(&hats_value, &source.label())?;
         core_value = merge_hats_overlay(core_value, hats_value)?;
+        merge_operator_hat_field_overlays(&operator_core, &mut core_value);
     }
 
     let mut config: RalphConfig = serde_yaml::from_value(core_value)
@@ -267,11 +271,14 @@ pub(crate) fn load_config_for_preflight_sync(
     validate_core_config_shape(&core_value, &core_label)?;
 
     if let Some(source) = hats_source {
+        let operator_core = core_value.clone();
         if let Some(mapping) = core_value.as_mapping()
             && (mapping_get(mapping, "hats").is_some() || mapping_get(mapping, "events").is_some())
         {
             warn!(
-                "Core config '{}' contains hats/events and hats source '{}' was provided; hats source takes precedence for hats/events",
+                "Core config '{}' contains hats/events and hats source '{}' was provided; \
+                 preset supplies hats/events, then per-hat fields from the operator config \
+                 (e.g. backend) are merged on top",
                 core_label,
                 source.label()
             );
@@ -280,6 +287,7 @@ pub(crate) fn load_config_for_preflight_sync(
         let hats_value = load_hats_value_sync(source)?;
         validate_hats_config_shape(&hats_value, &source.label())?;
         core_value = merge_hats_overlay(core_value, hats_value)?;
+        merge_operator_hat_field_overlays(&operator_core, &mut core_value);
     }
 
     let mut config: RalphConfig = serde_yaml::from_value(core_value)
@@ -752,6 +760,62 @@ fn extract_hat_overlay_from_preset(preset_value: Value) -> Result<Value> {
     Ok(Value::Mapping(overlay))
 }
 
+/// Deep-merge `overlay` mapping fields into `base` when both are mappings;
+/// otherwise `overlay` wins (operator scalar/array replaces preset).
+fn deep_merge_yaml_values(base: Value, overlay: Value) -> Value {
+    match (base, overlay) {
+        (Value::Mapping(mut base_mapping), Value::Mapping(overlay_mapping)) => {
+            for (key, overlay_value) in overlay_mapping {
+                let merged = base_mapping
+                    .remove(&key)
+                    .map(|existing| deep_merge_yaml_values(existing, overlay_value.clone()))
+                    .unwrap_or(overlay_value);
+                base_mapping.insert(key, merged);
+            }
+            Value::Mapping(base_mapping)
+        }
+        (_, overlay) => overlay,
+    }
+}
+
+/// After a builtin preset replaces `hats:` wholesale, re-apply per-hat field
+/// overrides from the operator `ralph.yml` (e.g. `backend`, `backend_args`).
+/// Unknown hat IDs are ignored with a warning.
+pub(crate) fn merge_operator_hat_field_overlays(operator_core: &Value, merged: &mut Value) {
+    let Some(operator_mapping) = operator_core.as_mapping() else {
+        return;
+    };
+    let Some(operator_hats) = mapping_get(operator_mapping, "hats") else {
+        return;
+    };
+    let Some(operator_hats_mapping) = operator_hats.as_mapping() else {
+        return;
+    };
+    let Some(merged_mapping) = merged.as_mapping_mut() else {
+        return;
+    };
+    let Some(merged_hats) = merged_mapping.get_mut(&Value::String("hats".to_string())) else {
+        return;
+    };
+    let Some(merged_hats_mapping) = merged_hats.as_mapping_mut() else {
+        return;
+    };
+
+    for (hat_key, operator_hat) in operator_hats_mapping {
+        let hat_id = hat_key.as_str().unwrap_or("<invalid>");
+        if let Some(preset_hat) = merged_hats_mapping.get_mut(hat_key) {
+            let preset_clone = preset_hat.clone();
+            *preset_hat = deep_merge_yaml_values(preset_clone, operator_hat.clone());
+        } else {
+            warn!(
+                "operator config declares hat '{}' which is not in the active hat collection; \
+                 ignoring per-hat overlay for that id",
+                hat_id
+            );
+        }
+    }
+}
+
 /// P1-3 fix (post-review): made `pub(crate)` so `loop_runner::tests` can
 /// drive the real merge path in `u2_lint_gate_blocks_4_hat_after_base_plus_overlay_merge`.
 /// The function is the same one used by `ralph run -c base -H overlay`;
@@ -1069,6 +1133,46 @@ hats:
         assert_eq!(config.event_loop.completion_promise, "REVIEW_COMPLETE");
         assert!(config.hats.contains_key("reviewer"));
         assert!(!config.hats.contains_key("builder"));
+    }
+
+    #[test]
+    fn merge_operator_hat_field_overlays_preserves_preset_and_sets_backend() {
+        let operator_core: Value = serde_yaml::from_str(
+            r"
+cli:
+  backend: claude
+hats:
+  reviewer:
+    backend: pi
+  unknown-hat:
+    backend: gemini
+",
+        )
+        .unwrap();
+
+        let preset: Value = serde_yaml::from_str(
+            r"
+hats:
+  reviewer:
+    name: Reviewer
+    triggers: [work.done]
+    publishes: [review.passed]
+",
+        )
+        .unwrap();
+
+        let mut merged = merge_hats_overlay(operator_core.clone(), preset).unwrap();
+        merge_operator_hat_field_overlays(&operator_core, &mut merged);
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        let reviewer = config.hats.get("reviewer").expect("reviewer hat");
+        assert_eq!(reviewer.name, "Reviewer");
+        assert_eq!(reviewer.triggers.len(), 1);
+        assert!(matches!(
+            reviewer.backend,
+            Some(ralph_core::HatBackend::Named(ref name)) if name == "pi"
+        ));
+        assert!(!config.hats.contains_key("unknown-hat"));
     }
 
     #[test]

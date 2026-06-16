@@ -40,6 +40,29 @@ core:
     - "Preserve primary sources — capture referenced code snippets with file:line attribution in scratchpad."
     - "Run targeted tests per crate via `cargo nextest run -p <crate>` during subtasks; full `./scripts/run-tests.sh` (nextest + doctest) only at final step. 详见 CLAUDE.md / AGENTS.md「Build & Test」段 HARD RULE 1+2 与「并行 vs 串行分级表」。"
 
+# Per-hat backend overrides for builtin:ce-executor-isolated (merged on top of preset).
+# Implementation chain → claude; review / gate / ship / report → pi (uses ~/.pi/agent).
+hats:
+  coordinator:
+    backend: claude
+  executor:
+    backend: claude
+  fixer:
+    backend: claude
+  debug-resolver:
+    backend: claude
+  review-coordinator:
+    backend: claude
+  dimension-reviewer:
+    backend: pi
+  review-synthesizer:
+    backend: claude
+  plan-gate:
+    backend: claude
+  shipper:
+    backend: claude
+  reporter:
+    backend: claude
 
 
 
