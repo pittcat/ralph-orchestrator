@@ -302,6 +302,16 @@ pub struct LoopState {
     /// `TerminationReason::RecoverablePayloadExhausted`.
     pub recoverable_exhaustion_buffer: Vec<crate::event_loop::RecoverableExhaustion>,
 
+    /// U4 (2026-06-17-003 plan): dedup set for `work.done` events.
+    /// Key format: `{plan_name}::{step}::{task_id}`. The set is
+    /// populated when a `work.done` event is accepted by policy
+    /// validation, and pruned on `queue.advance` / `review.failed`
+    /// / `fix.applied` / step-close events. Fix-rounds within the
+    /// same step are allowed to re-send `work.done` legitimately
+    /// (the pruning fires on step boundaries, not on every
+    /// `review.failed`).
+    pub work_done_seen_tasks: HashSet<String>,
+
 }
 impl Default for LoopState {
     fn default() -> Self {
@@ -359,6 +369,7 @@ impl Default for LoopState {
             bootstrap_complete: false,
             bootstrap_failed: false,
             recoverable_exhaustion_buffer: Vec::new(),
+            work_done_seen_tasks: HashSet::new(),
         }
     }
 }
@@ -561,6 +572,24 @@ impl LoopState {
         let normalized = crate::diagnosis::normalize_part(hat);
         self.rejection_retry_counts
             .retain(|key, _| key.split(':').nth(1) != Some(&normalized));
+    }
+
+    /// Build a U4 dedup key from a (plan_name, step, task_id) triple.
+    /// Used for `work.done` duplicate detection in event policy.
+    pub fn work_done_dedup_key(plan_name: &str, step: &str, task_id: &str) -> String {
+        format!("{plan_name}::{step}::{task_id}")
+    }
+
+    /// U4 (2026-06-17-003 plan): prune the dedup-set entries that
+    /// belong to a given `(plan_name, step)` bucket. Called on
+    /// `queue.advance` (step close), `review.failed` (fix-round
+    /// re-emit window opens), and `fix.applied` (fix-round
+    /// completed). After pruning, a new `work.done` for the same
+    /// `(plan_name, step, task_id)` can be accepted by policy.
+    pub fn prune_work_done_bucket(&mut self, plan_name: &str, step: &str) {
+        let prefix = format!("{plan_name}::{step}::");
+        self.work_done_seen_tasks
+            .retain(|key| !key.starts_with(&prefix));
     }
 
     fn event_counts_toward_stale_loop(event: &Event) -> bool {
@@ -985,5 +1014,56 @@ mod tests {
         let state = LoopState::new();
         assert_eq!(state.rejection_retry_count("nonexistent"), 0);
         assert!(!state.rejection_key_is_exhausted("nonexistent"));
+    }
+
+    // -------------------------------------------------------------------------
+    // U4 (2026-06-17-003 plan): work_done dedup key + bucket pruning
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn u4_work_done_dedup_key_format() {
+        // Key format is `plan_name::step::task_id` to match the
+        // event-policy dedup check.
+        assert_eq!(
+            LoopState::work_done_dedup_key("p1", "step-01", "t1"),
+            "p1::step-01::t1"
+        );
+    }
+
+    #[test]
+    fn u4_prune_work_done_bucket_removes_step_entries() {
+        let mut state = LoopState::new();
+        // Two entries in the (p1, step-01) bucket
+        state
+            .work_done_seen_tasks
+            .insert(LoopState::work_done_dedup_key("p1", "step-01", "t1"));
+        state
+            .work_done_seen_tasks
+            .insert(LoopState::work_done_dedup_key("p1", "step-01", "t2"));
+        // One entry in a different step bucket
+        state
+            .work_done_seen_tasks
+            .insert(LoopState::work_done_dedup_key("p1", "step-02", "t1"));
+
+        state.prune_work_done_bucket("p1", "step-01");
+
+        // step-01 bucket is gone
+        assert!(!state
+            .work_done_seen_tasks
+            .contains("p1::step-01::t1"));
+        assert!(!state
+            .work_done_seen_tasks
+            .contains("p1::step-01::t2"));
+        // step-02 bucket is preserved (different step key)
+        assert!(state
+            .work_done_seen_tasks
+            .contains("p1::step-02::t1"));
+    }
+
+    #[test]
+    fn u4_prune_work_done_bucket_empty_state_is_noop() {
+        let mut state = LoopState::new();
+        state.prune_work_done_bucket("p1", "step-01");
+        assert!(state.work_done_seen_tasks.is_empty());
     }
 }
