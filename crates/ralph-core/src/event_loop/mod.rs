@@ -5209,6 +5209,38 @@ impl EventLoop {
             let env_source_hat = esc.consumer.clone();
             let env_target_hat = esc.safe_target.clone();
             let env_topic = esc.topic.clone();
+            // Unit 5 / Unit 7 R-C2 (2026-06-17-001 plan): when the
+            // escalation targets a wave-related hat, attach the
+            // current flow record (wave_id / wave_total /
+            // received_count / flow_phase) to the envelope so the
+            // diagnose reporter can reconstruct the wave's
+            // timeline.  This is informational only: the existing
+            // handoff escalation path stays unchanged for non-wave
+            // handoffs (R5, payload contract, etc.).
+            let mut flow_context: Option<serde_json::Value> = None;
+            if Self::is_wave_hat(&HatId::new(&esc.consumer)) {
+                if let Some(record) = self.state.flow_lifecycle.get(&esc.event_id) {
+                    flow_context = Some(serde_json::json!({
+                        "wave_id": record.flow_unit_id,
+                        "wave_total": record.wave_total,
+                        "received_count": record.received_count,
+                        "flow_phase": record.phase.as_str(),
+                    }));
+                } else if let Some(active) =
+                    self.state.flow_lifecycle.active_records().next()
+                {
+                    // No record keyed by event_id — fall back to
+                    // the most recent active record. This keeps the
+                    // envelope useful when the event_id naming
+                    // diverges (e.g. legacy `sla:*` keys).
+                    flow_context = Some(serde_json::json!({
+                        "wave_id": active.flow_unit_id,
+                        "wave_total": active.wave_total,
+                        "received_count": active.received_count,
+                        "flow_phase": active.phase.as_str(),
+                    }));
+                }
+            }
             let mut env_builder = crate::diagnosis::RecoveryDiagnosisEnvelope::builder()
                 .source(crate::diagnosis::DiagnosisSource::StallRecovery)
                 .severity(crate::diagnosis::DiagnosisSeverity::Warning)
@@ -5243,6 +5275,13 @@ impl EventLoop {
                         None,
                     ),
                 );
+            if let Some(ctx) = flow_context.as_ref() {
+                env_builder = env_builder.evidence(crate::diagnosis::EvidenceRef {
+                    kind: crate::diagnosis::EvidenceKind::Field,
+                    ref_path: "flow.context".to_string(),
+                    snippet: Some(ctx.to_string()),
+                });
+            }
             if let Some(session_id) = self.diagnostics().session_id() {
                 env_builder = env_builder.session_id(session_id);
             }

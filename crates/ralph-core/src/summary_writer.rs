@@ -523,6 +523,11 @@ mod tests {
             // dispatch-deadline test (in event_loop/tests/handoff_dispatch.rs)
             // exercises a real deadline path.
             handoff_tracker: crate::workflow_contract::HandoffTracker::new(),
+            // Unit 1 (2026-06-17-001 plan): test helper builds a
+            // default empty registry; the dispatch-deadline test
+            // (in event_loop/tests/handoff_dispatch.rs) exercises
+            // a real deadline path.
+            flow_lifecycle: crate::flow_lifecycle::FlowLifecycleRegistry::new(),
             stall_recovery_counts: std::collections::HashMap::new(),
             pending_recovery_hat: None,
             pending_synthesizer_timeout: None,
