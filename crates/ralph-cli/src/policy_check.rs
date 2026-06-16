@@ -24,6 +24,9 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::{ConfigSource, load_config_with_overrides, resolve_workspace_root};
 use crate::config_resolution;
+use ralph_core::step_handoff::progress_task_gate::{
+    GateDecision, ProgressTaskMismatch, check_progress_task_alignment, is_gated_topic,
+};
 use ralph_core::{
     EventPolicyConfig, PolicyDecision, PolicyRuntimeState, RalphConfig, ViolationType,
     validate_event,
@@ -239,6 +242,114 @@ pub fn build_policy_state(
         );
         PolicyRuntimeState::default()
     })
+}
+
+/// Outcome of the step-handoff progress-task gate precheck at the CLI
+/// boundary. Mirrors `ralph_core::step_handoff::progress_task_gate`
+/// but returns a CLI-friendly validation error so the policy-check
+/// failure response stays uniform with the rest of the policy
+/// validator (U1 / 2026-06-17-005 plan).
+///
+/// Returns `Ok(())` when the topic is not gated or when the ledgers
+/// align (`Aligned` / `Inert`); returns `Err(ValidationError)` only
+/// when the gate produced a `Mismatch`. Non-JSON / empty payloads on
+/// gated topics are surfaced as a parse-style mismatch so the agent
+/// gets structured backpressure instead of a silent fall-through
+/// (review finding #6 / U3 fail-closed alignment).
+pub fn check_step_handoff_gate(
+    topic: &str,
+    payload_str: &str,
+    workspace_root: &Path,
+) -> std::result::Result<(), ValidationError> {
+    if !is_gated_topic(topic) {
+        return Ok(());
+    }
+
+    let (step, task_id) = extract_step_and_task_id_from_payload(payload_str);
+    let (step, task_id) = match (step, task_id) {
+        (Some(s), Some(t)) => (Some(s), Some(t)),
+        (Some(s), None) => (Some(s), None),
+        (None, Some(t)) => (None, Some(t)),
+        // Finding #6: empty / non-JSON gated payload must not
+        // silently pass — the loop's gate would not see fields either
+        // and would degrade to inert. Surface a structured mismatch
+        // so the agent sees the same reason before write.
+        (None, None) if payload_str.trim().is_empty() => {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: "payload".to_string(),
+                reason_code: "progress_task_mismatch".to_string(),
+                message: format!(
+                    "step_handoff gate requires non-empty JSON payload for topic '{topic}'; \
+                     cannot extract step / task_id"
+                ),
+            });
+        }
+        (None, None) => {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: "payload".to_string(),
+                reason_code: "progress_task_mismatch".to_string(),
+                message: format!(
+                    "step_handoff gate could not extract step / task_id from payload for \
+                     topic '{topic}'; expected JSON object with `step` and/or `task_id`"
+                ),
+            });
+        }
+    };
+
+    let decision = check_progress_task_alignment(topic, step.as_deref(), task_id.as_deref(), workspace_root);
+    match decision {
+        GateDecision::Inert | GateDecision::Aligned => Ok(()),
+        GateDecision::Mismatch(mismatch) => Err(mismatch_to_validation_error(&mismatch, topic)),
+    }
+}
+
+fn mismatch_to_validation_error(m: &ProgressTaskMismatch, topic: &str) -> ValidationError {
+    ValidationError {
+        payload_index: 0,
+        field: if m.task_id.is_some() {
+            "task_id".to_string()
+        } else if m.step.is_some() {
+            "step".to_string()
+        } else {
+            "payload".to_string()
+        },
+        reason_code: "progress_task_mismatch".to_string(),
+        message: format!(
+            "progress_task_gate rejected topic='{topic}' reason={} detail={}",
+            m.reason, m.detail
+        ),
+    }
+}
+
+/// Lightweight JSON-object extractor for the CLI gate. Mirrors the
+/// loop-side `extract_step_and_task_id` semantics but is local to
+/// `policy_check` so the CLI does not pull a `&EventBus` boundary
+/// just to look at two payload fields.
+fn extract_step_and_task_id_from_payload(payload_str: &str) -> (Option<String>, Option<String>) {
+    let trimmed = payload_str.trim();
+    if trimmed.is_empty() {
+        return (None, None);
+    }
+    if !trimmed.starts_with('{') {
+        return (None, None);
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+        return (None, None);
+    };
+    let step = value
+        .get("step")
+        .or_else(|| value.get("completed_step"))
+        .or_else(|| value.get("next_step"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let task_id = value
+        .get("task_id")
+        .or_else(|| value.get("reviewed_task_id"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    (step, task_id)
 }
 
 /// A single structured validation error. Stable JSON shape — agents
@@ -839,5 +950,139 @@ event_loop:
             },
         );
         assert_eq!(direct.terminal_observed, wrapped.terminal_observed);
+    }
+
+    // ── U1 / 2026-06-17-005 plan ─────────────────────────────────────
+    // CLI step-handoff progress-task gate precheck (`check_step_handoff_gate`).
+    // The helper must:
+    //   * pass through non-gated topics without invoking the gate
+    //   * pass when progress.md ↔ tasks.jsonl align
+    //   * return `progress_task_mismatch` when the agent's claim
+    //     disagrees with the ledger — the same reason the loop would
+    //     emit on the same fixture
+    //   * fail-closed on non-JSON / empty payloads for gated topics
+    //     (review finding #6)
+
+    fn workspace() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".ralph").join("agent")).unwrap();
+        tmp
+    }
+
+    fn write_progress(tmp: &tempfile::TempDir, body: &str) {
+        let path = tmp.path().join(".ralph").join("agent").join("progress.md");
+        std::fs::write(path, body).unwrap();
+    }
+
+    fn write_closed_task(tmp: &tempfile::TempDir, id: &str, title: &str) {
+        use ralph_core::task::{Task, TaskStatus};
+        let mut task = Task::new(title.to_string(), 3);
+        task.id = id.to_string();
+        task.status = TaskStatus::Closed;
+        let line = serde_json::to_string(&task).unwrap();
+        let path = tmp.path().join(".ralph").join("agent").join("tasks.jsonl");
+        let mut existing = std::fs::read_to_string(&path).unwrap_or_default();
+        existing.push_str(&line);
+        existing.push('\n');
+        std::fs::write(&path, existing).unwrap();
+    }
+
+    /// Happy path: aligned progress + tasks, `queue.advance` policy-check passes.
+    #[test]
+    fn u1_step_handoff_gate_happy_path_aligned_progress() {
+        let tmp = workspace();
+        write_closed_task(&tmp, "task-1", "step-01");
+        write_progress(
+            &tmp,
+            "## Current Step\nstep-02\n\n## Completed Steps\n- step-01\n",
+        );
+        let payload = r#"{"step":"step-02","task_id":"task-1"}"#;
+        let res = check_step_handoff_gate("queue.advance", payload, tmp.path());
+        assert!(res.is_ok(), "aligned progress must pass: {res:?}");
+    }
+
+    /// Error path: deliberate progress drift → CLI gate returns the
+    /// same `progress_task_mismatch` reason the loop would emit.
+    #[test]
+    fn u1_step_handoff_gate_rejects_misaligned_progress() {
+        let tmp = workspace();
+        write_closed_task(&tmp, "task-1", "step-01");
+        // progress.md does NOT list step-01 → mismatch.
+        write_progress(
+            &tmp,
+            "## Current Step\nstep-02\n\n## Completed Steps\n- step-02\n",
+        );
+        let payload = r#"{"step":"step-02","task_id":"task-1"}"#;
+        let err = check_step_handoff_gate("queue.advance", payload, tmp.path())
+            .expect_err("mismatched progress must produce validation error");
+        assert_eq!(err.reason_code, "progress_task_mismatch");
+        assert!(err.message.contains("task_closed_but_progress_missing"));
+    }
+
+    /// Edge: topic not in `GATED_TOPICS` → no gate call, no error.
+    #[test]
+    fn u1_step_handoff_gate_skips_non_gated_topic() {
+        let tmp = workspace();
+        // No progress.md / tasks.jsonl — gate must short-circuit.
+        let payload = r#"{"step":"step-01"}"#;
+        let res = check_step_handoff_gate("review.dimension.done", payload, tmp.path());
+        assert!(res.is_ok(), "non-gated topic must pass without gate call");
+    }
+
+    /// Fail-closed alignment with review finding #6: empty payload on
+    /// a gated topic must surface `progress_task_mismatch`, not
+    /// silently pass through.
+    #[test]
+    fn u1_step_handoff_gate_fail_closed_on_empty_payload() {
+        let tmp = workspace();
+        let err = check_step_handoff_gate("queue.advance", "", tmp.path())
+            .expect_err("empty gated payload must fail closed");
+        assert_eq!(err.reason_code, "progress_task_mismatch");
+        assert!(err.message.contains("non-empty"));
+    }
+
+    /// Fail-closed alignment with finding #6: non-JSON payload on a
+    /// gated topic must surface `progress_task_mismatch` instead of
+    /// inert-passing.
+    #[test]
+    fn u1_step_handoff_gate_fail_closed_on_non_json_payload() {
+        let tmp = workspace();
+        let err = check_step_handoff_gate("plan.complete", "not json at all", tmp.path())
+            .expect_err("non-JSON gated payload must fail closed");
+        assert_eq!(err.reason_code, "progress_task_mismatch");
+    }
+
+    /// Integration: the CLI gate and the loop gate share
+    /// `check_progress_task_alignment` — they MUST produce the same
+    /// `Mismatch.reason` for the same fixture. Drift between the two
+    /// would re-introduce finding #21 (CLI passes / loop rejects).
+    #[test]
+    fn u1_step_handoff_gate_matches_loop_gate_reason() {
+        let tmp = workspace();
+        write_closed_task(&tmp, "task-1", "step-01");
+        write_progress(
+            &tmp,
+            "## Current Step\nstep-02\n\n## Completed Steps\n- step-02\n",
+        );
+
+        let payload = r#"{"step":"step-02","task_id":"task-1"}"#;
+        let cli_err = check_step_handoff_gate("queue.advance", payload, tmp.path())
+            .expect_err("CLI gate must reject");
+
+        let decision = check_progress_task_alignment(
+            "queue.advance",
+            Some("step-02"),
+            Some("task-1"),
+            tmp.path(),
+        );
+        let loop_reason = match decision {
+            GateDecision::Mismatch(m) => m.reason,
+            other => panic!("expected Mismatch from loop gate, got {other:?}"),
+        };
+        assert!(
+            cli_err.message.contains(&loop_reason),
+            "CLI gate message must reference the loop-gate reason `{loop_reason}`; got: {}",
+            cli_err.message
+        );
     }
 }

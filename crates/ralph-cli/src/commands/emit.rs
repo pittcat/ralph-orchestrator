@@ -4,13 +4,13 @@ use crate::cli::{
 };
 use crate::config_resolution;
 use crate::display::colors;
-use crate::policy_check::{PolicyCheckFlags, resolve_policy_check_mode};
+use crate::policy_check::{PolicyCheckFlags, ValidationFailure, resolve_policy_check_mode};
 use anyhow::{Context, Result};
 use clap::Parser;
 use ralph_core::config::HatExecutionMode;
 use ralph_core::emit_schema_hint::fix_hint_for_hat_topic;
 use ralph_core::{
-    RalphConfig, UrgentSteerStore,
+    RalphConfig, UrgentSteerStore, ViolationType,
     diagnosis::{
         DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, EvidenceKind, EvidenceRef,
         RecoveryDiagnosisEnvelope, RecoveryJournalEntry,
@@ -535,6 +535,50 @@ fn emit_command_with_root_and_hats(
         }
     } else if check_mode == PolicyCheckMode::Skip {
         tracing::info!("cli emit policy check skipped: no event_policy in resolved config");
+    }
+
+    // U1 (2026-06-17-005 plan): step handoff gate precheck at the CLI
+    // boundary. Mirrors the loop-side `apply_step_handoff_gate` so an
+    // agent calling `ralph emit --policy-check` (or running under
+    // `require_policy_check_for_cli_emit: true`) gets the same
+    // `progress_task_mismatch` backpressure before writing the event
+    // to disk. The CLI is *additive* — it never replaces the loop
+    // gate, it surfaces the same reason earlier.
+    if ralph_core::step_handoff::progress_task_gate::is_gated_topic(&args.topic)
+        && check_mode != PolicyCheckMode::Skip
+    {
+        match crate::policy_check::check_step_handoff_gate(
+            &args.topic,
+            &args.payload,
+            &workspace_root,
+        ) {
+            Ok(()) => {}
+            Err(err) => {
+                record_cli_emit_rejection(
+                    &workspace_root,
+                    &args.topic,
+                    hat.as_deref(),
+                    &ralph_core::PolicyFinding {
+                        violation_type: ViolationType::SemanticGateViolation {
+                            gate: "progress_task_gate".to_string(),
+                            context: err.message.clone(),
+                        },
+                        topic: args.topic.clone(),
+                        message: err.message.clone(),
+                    },
+                );
+                let failure = ValidationFailure {
+                    ok: false,
+                    error: "policy_validation_failed",
+                    topic: args.topic.clone(),
+                    validation_errors: vec![err],
+                };
+                crate::policy_check::emit_policy_validation_failure(
+                    &failure,
+                    crate::policy_check::OutputMode::Text,
+                )?;
+            }
+        }
     }
 
     // Generate timestamp internally — agents cannot forge timestamps
