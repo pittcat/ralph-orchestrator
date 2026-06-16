@@ -1627,6 +1627,16 @@ hats:
   progress-steward:
     name: "🛟 Progress Steward"
     description: "Loop-level 兜底 hat —— 检测到 stall 时唤醒，读取状态并 emit 一个 recovery 事件。"
+    # 2026-06-16-001 U5 review fix：progress-steward 订阅
+    # runtime-injected 的 `loop.stalled` topic（runtime 在
+    # `max_steward_iterations` 轮无进展时代表 steward emit）。
+    # `plan.blocked` 与 `task.resume` **不在**此列表 ——
+    # `plan.blocked` 已被 `shipper` 占用（canonical
+    # termination path），`task.resume` 是 ralph pseudo-hat
+    # 的 reserved trigger。operator 想手动 nudge 应发送
+    # `human.guidance` with `target=progress-steward`；
+    # runner-injected nudge（`loop.stalled`）已由 runtime
+    # 通过 `with_target(steward_hat_id)` 路由给 steward。
     triggers: ["loop.stalled", "human.guidance"]
     # 2026-06-16-001 U5：`plan.blocked` 是 steward 的终态事件 —
     # 当 steward 自身被连续唤醒 `max_steward_iterations` 轮仍未

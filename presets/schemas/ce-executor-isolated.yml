@@ -253,12 +253,19 @@ wave.worker.failed:
 # timestamp for freshness filtering (U3 TTL) and audit. U5 uses
 # this topic to nudge a stuck hat (e.g. plan-gate that never
 # emitted plan.complete).
+#
+# `target_task_id` and `source_event_id` are NOT in
+# required_fields: the runtime synthesises `task.resume` from
+# a `Rejection` whose only context is the source hat and the
+# topic, and cannot reconstruct a task id (which lives in
+# `tasks.jsonl`, not the rejection). A future enhancement
+# could plumb the current step's open task id through the
+# rejection path; until then, `reason` and `target_hat` are
+# the routable fields.
 task.resume:
   required_fields:
     - reason
-    - target_task_id
     - target_hat
-    - source_event_id
   payload: json_object
 
 # 2026-06-16-001 U5: diagnostic topic emitted by the loop when no

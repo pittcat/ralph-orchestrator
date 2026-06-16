@@ -6415,6 +6415,7 @@ impl EventLoop {
             run_stall_detector_on_state(
                 &mut self.state,
                 &self.config.event_loop.progress_steward,
+                &self.registry,
                 &mut self.bus,
             );
             return Ok(ProcessedEvents {
@@ -8527,6 +8528,7 @@ impl EventLoop {
         run_stall_detector_on_state(
             &mut self.state,
             &self.config.event_loop.progress_steward,
+            &self.registry,
             &mut self.bus,
         );
         // --- End U5 stall detection ---
@@ -8987,9 +8989,22 @@ fn termination_status_text(reason: &TerminationReason) -> &'static str {
 /// business event was admitted this turn; false otherwise
 /// (including the empty-JSONL case, where the function is
 /// invoked directly).
+///
+/// 2026-06-16-001 review fix (F-REL-002): takes a `&HatRegistry`
+/// so the wake can be cross-validated against the actual hat
+/// graph before publishing. A `loop.stalled` published with
+/// `target=steward_hat_id` is silently dropped by
+/// `EventBus::publish` when the target hat is not in the
+/// registry (event_bus.rs:118-128). Validating here logs a
+/// `warn!` and skips the wake — the loop continues
+/// `no_progress` until either (a) the operator adds the
+/// steward hat to the preset, or (b) the runtime escalates
+/// to `plan.blocked` via the U5 escalation branch. The
+/// runtime never silently dies.
 fn run_stall_detector_on_state(
     state: &mut crate::event_loop::loop_state::LoopState,
     config_progress_steward: &crate::config::ProgressStewardConfig,
+    registry: &crate::hat_registry::HatRegistry,
     bus: &mut ralph_proto::EventBus,
 ) {
     if !config_progress_steward.enabled {
@@ -9027,6 +9042,34 @@ fn run_stall_detector_on_state(
     if state.consecutive_no_progress_turns >= max_iter
         && state.consecutive_steward_activations < max_iter
     {
+        // 2026-06-16-001 review fix (F-REL-002): cross-validate
+        // the steward hat id against the runtime registry. A
+        // `loop.stalled` with `target=<unknown hat>` is
+        // silently dropped by `EventBus::publish` —
+        // operators would see "no progress" warnings without
+        // any recovery action. The runtime logs a `warn!`
+        // and treats the wake as a no-op (so the
+        // `consecutive_steward_activations` counter still
+        // increments toward the U5 escalation branch).
+        let steward_id = ralph_proto::HatId::new(
+            config_progress_steward.steward_hat_id.as_str(),
+        );
+        if registry.get(&steward_id).is_none() {
+            warn!(
+                steward_hat_id = %config_progress_steward.steward_hat_id,
+                "isolated loop: progress-steward hat is not registered — \
+                 skipping loop.stalled wake (the U5 escalation branch \
+                 will emit plan.blocked after max_steward_iterations). \
+                 Add the hat to the preset's `hats:` map or set \
+                 `progress_steward.steward_hat_id` to an existing hat id."
+            );
+            // Still increment the activation counter so the
+            // U5 escalation path can fire if the misconfig
+            // persists.
+            state.consecutive_steward_activations =
+                state.consecutive_steward_activations.saturating_add(1);
+            return;
+        }
         // First-time wake: auto-emit `loop.stalled` diagnostic
         // and increment the steward activation counter. The
         // actual steward activation happens in the next
@@ -9046,9 +9089,7 @@ fn run_stall_detector_on_state(
                 state.consecutive_no_progress_turns
             ),
         )
-        .with_target(ralph_proto::HatId::new(
-            config_progress_steward.steward_hat_id.as_str(),
-        ));
+        .with_target(steward_id);
         bus.publish(stalled);
         state.consecutive_steward_activations =
             state.consecutive_steward_activations.saturating_add(1);
@@ -9068,7 +9109,19 @@ fn run_stall_detector_on_state(
         let blocked = ralph_proto::Event::new(
             "plan.blocked",
             "{\"reason\":\"loop_stalled_max_iterations\"}".to_string(),
-        );
+        )
+        // 2026-06-16-001 review fix (CORR-P1-2): explicit
+        // `with_target(shipper)` so the route matches the R5
+        // hard-gate hat-routing convention. Without a
+        // target, the bus delivers the event to the
+        // default-routed hats; with the target, the
+        // shipper is the canonical consumer and the
+        // event reaches the shipper → reporter termination
+        // path consistently. Loopback to progress-steward
+        // is unnecessary: the steward was the one that
+        // failed to make progress, so the recovery action
+        // is to terminate, not retry.
+        .with_target(ralph_proto::HatId::new("shipper"));
         bus.publish(blocked);
         // Reset so the next loop (e.g. a follow-up diagnostic
         // or operator restart) starts from a clean state.
@@ -9089,6 +9142,15 @@ fn run_stall_detector_on_state(
 /// flows through the existing recovery path. A TTL of `0` disables
 /// the filter (always fresh) so unit tests can opt out without
 /// monkey-patching the helper.
+///
+/// 2026-06-16-001 review fix (ADV-U3-1): a source timestamp
+/// in the FUTURE relative to the current wall clock is treated
+/// as STALE. The previous behaviour used `saturating_sub`
+/// which clamps to 0 for future ts (treated as fresh), letting
+/// a clock-skewed or forged event slip through. A test fixture
+/// or a buggy clock could re-introduce the same 50-min stall
+/// the plan aims to fix. The runtime logs a `warn!` so the
+/// anomaly is observable in `orchestration.jsonl`.
 fn is_rejection_stale(
     rejection: &crate::event_loop::rejection::Rejection,
     ttl_seconds: u64,
@@ -9104,6 +9166,18 @@ fn is_rejection_stale(
     };
     let source_unix = source_dt.timestamp();
     let now_unix = chrono::Utc::now().timestamp();
+    // Future timestamp: clock skew or forgery. Treat as stale
+    // so the recovery signal cannot be re-injected.
+    if source_unix > now_unix {
+        warn!(
+            source_event_ts = %ts_str,
+            now_unix,
+            source_unix,
+            "task.resume TTL: source event timestamp is in the future — \
+             treating as stale (clock skew or forgery)"
+        );
+        return true;
+    }
     let age = now_unix.saturating_sub(source_unix);
     age > ttl_seconds as i64
 }

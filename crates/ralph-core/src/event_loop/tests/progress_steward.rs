@@ -57,9 +57,12 @@ fn write_event(path: &std::path::Path, topic: &str, hat: &str) {
 }
 
 /// Build a minimal isolated-mode event loop with `executor` as the
-/// publishing hat. No `progress-steward` hat is declared in the
-/// registry — the runtime's stall detector only needs the config
-/// (`max_steward_iterations`); the hat is matched by name.
+/// publishing hat. The `progress-steward` hat IS declared here
+/// because the runtime's stall detector cross-validates the
+/// configured `steward_hat_id` against the runtime registry
+/// (F-REL-002) — a missing hat causes the wake to be skipped.
+/// Without this declaration the wake branch logs a warn and
+/// skips the `loop.stalled` emit.
 fn make_isolated_stall_loop(events_path: &std::path::Path) -> EventLoop {
     let yaml = r#"
 event_loop:
@@ -79,6 +82,11 @@ hats:
     name: "Executor"
     triggers: ["work.start"]
     publishes: ["work.ready", "work.done"]
+  progress-steward:
+    name: "🛟 Progress Steward"
+    triggers: ["loop.stalled", "human.guidance"]
+    publishes: ["work.ready", "queue.advance", "review.wave.ready", "task.resume", "plan.blocked"]
+    terminal_events: ["plan.blocked"]
 "#;
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
     let mut event_loop = EventLoop::new(config);

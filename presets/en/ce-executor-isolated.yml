@@ -314,8 +314,15 @@ event_loop:
       # workflow guard, execution contract, isolated scope, and the
       # `progress-steward` hat. Carries the source event's id and
       # timestamp for freshness filtering (U3 TTL) and audit.
+      #
+      # `target_task_id` / `source_event_id` removed: the runtime
+      # cannot reconstruct a task id from a Rejection (the task
+      # id lives in `tasks.jsonl`, not the rejection). See the
+      # matching SSOT entry in
+      # `presets/schemas/ce-executor-isolated.yml` for the
+      # rationale.
       task.resume:
-        required_fields: [reason, target_task_id, target_hat, source_event_id]
+        required_fields: [reason, target_hat]
         payload: json_object
       # 2026-06-16-001 U5: diagnostic topic emitted when the loop
       # has stalled (no accepted business event for
@@ -2184,6 +2191,20 @@ hats:
   progress-steward:
     name: "🛟 Progress Steward"
     description: "Loop-level fallback hat — wakes on stall to read state and emit a single recovery event."
+    # 2026-06-16-001 U5 review fix: progress-steward subscribes
+    # to the runtime-injected `loop.stalled` topic (the runtime
+    # emits it on the steward's behalf when no business
+    # event has advanced for `max_steward_iterations`
+    # consecutive turns). `plan.blocked` and `task.resume`
+    # are intentionally NOT here — `plan.blocked` is
+    # already claimed by `shipper` (the canonical
+    # termination path), and `task.resume` is a reserved
+    # trigger for the ralph pseudo-hat. Operators who
+    # want to nudge the steward manually should send a
+    # `human.guidance` event with `target=progress-steward`;
+    # for the runner-injected nudges (`loop.stalled`),
+    # the runtime already routes them to the steward via
+    # `with_target(steward_hat_id)`.
     triggers: ["loop.stalled", "human.guidance"]
     # 2026-06-16-001 U5: `plan.blocked` is the steward's terminal
     # event — emitted when the steward itself has been woken
