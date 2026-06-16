@@ -23,6 +23,26 @@ related:
 
 与 `2026-06-16-002`（payload 恢复）、`2026-06-17-001`（wave 内并行）**正交、可并行**。本计划 **只增强、不削弱** 现有 WAC / U3 / U4 / isolated budget 行为。
 
+### 代码现状速览（2026-06-16 审核）
+
+以下能力已在当前 `main` 落地，本计划以**补缺口 + 加固回归**为主，不需要从零实现：
+
+| 能力 | 路径 | 状态 |
+|------|------|------|
+| `HandoffIndex` / `HandoffTracker` | `crates/ralph-core/src/workflow_contract/` | ✅ 已实现并测试 |
+| EventBus priority pre-emption | `crates/ralph-proto/src/event_bus.rs:251` | ✅ 已实现 |
+| event_loop priority pass 集成 | `crates/ralph-core/src/event_loop/mod.rs:2684-2702` | ✅ 已集成 |
+| HandoffTracker 集成（accepted/activated/expired） | `crates/ralph-core/src/event_loop/mod.rs:5150-5212`, `6602-6618`, `7705-7708` | ✅ 已集成 |
+| Dual-publish carve-out | `crates/ralph-core/src/event_loop/mod.rs:6322-6327` | ✅ 已实现 |
+| `review_step_state` synth terminal gate | `crates/ralph-core/src/event_loop/review_step_state.rs` | ✅ 已实现 |
+| `verdict_gate`（含 `additional_topics`） | `crates/ralph-core/src/event_loop/mod.rs:1315`, `2150`, `2316`, `2785`, `5087` | ✅ 已实现 |
+| `NULL_PAYLOAD_REJECT_TOPICS` | `crates/ralph-core/src/event_policy.rs:412` | ✅ 已实现，列表待审视 |
+
+运行验证（当前已通过）：
+- `cargo nextest run -p ralph-core -- workflow_activation` → 18/18 PASS
+- `cargo nextest run -p ralph-core --test scenarios plan_gate_dual_publish` → PASS
+- `cargo run -p ralph-cli -- preset check --strict -H builtin:ce-executor-isolated` → PASS
+
 ## Problem Frame
 
 archive dispatch-gap：`plan-gate` 发 `queue.advance` 后 executor **10 分钟**未启动；ralph 兜底 re-emit 被拒；最终 `loop.cancel`。后续 `2026-06-15`：preset 双发 `queue.advance`+`work.ready` 仍被 isolated 单轮 business-event 预算打掉 `work.ready`。
@@ -34,19 +54,21 @@ archive dispatch-gap：`plan-gate` 发 `queue.advance` 后 executor **10 分钟*
 | WAC 静态规则 | `crates/ralph-core/src/preset_lint/workflow_activation.rs` | re-emit trap、handoff pairing 等 |
 | HandoffIndex | `crates/ralph-core/src/workflow_contract/handoff_index.rs` | 单消费者 priority |
 | HandoffTracker | `crates/ralph-core/src/workflow_contract/handoff_tracker.rs` | 30s SLA + escalation |
-| Dual-publish carve-out | `crates/ralph-core/src/event_loop/mod.rs` ~L6274 | `is_dual_publish_step_handoff` |
-| plan-gate 双发 preset | `presets/en/ce-executor-isolated.yml` ~L1559 | `publishes: [queue.advance, work.ready, ...]` |
+| Dual-publish carve-out | `crates/ralph-core/src/event_loop/mod.rs` ~L6322 | `is_dual_publish_step_handoff` |
+| plan-gate 双发 preset | `presets/en/ce-executor-isolated.yml` ~L1570 | `publishes: [queue.advance, work.ready, ...]` |
 | Synth terminal gate | `crates/ralph-core/src/event_loop/review_step_state.rs` | null `review.passed` 不置 terminal |
 | Verdict gate | `presets/en/ce-executor-isolated.yml` `verdict_gate.additional_topics` | 含 `report.done` |
 | BDD | `crates/ralph-core/tests/scenarios/plan_gate_dual_publish_handoff.yml` | dual-publish 验收 |
 
 ### 仍缺 / 被击穿
 
-- `plan-gate.triggers` **缺** `fix.exhausted`、`debug.exhausted`（`2026-06-09`）
+- `plan-gate.triggers` **缺** `fix.exhausted`、`debug.exhausted`（`2026-06-09` 诊断：plan-gate 在这些终态路径上没被激活）
 - HandoffTracker escalation 在真实 multi-step run 仍可能 `pending`（multi-run 报告）
 - **Progress ↔ tasks** 无机制硬门（agent 可漂移）
 - null payload handoff 依赖分散逻辑，需与 002 SSOT 验收闭环
 - Tier-0 WAC strict 需 **再验证** preset 变更后仍零 error
+
+> **⚠️ 设计副作用预警**：把 `fix.exhausted` / `debug.exhausted` 加入 `plan-gate.triggers` 后，这两个 topic 将不再是单消费者（`debug-resolver` 消费 `fix.exhausted`，`shipper` 消费 `debug.exhausted`）。`HandoffIndex` 会把它们的 `consumer` 置为 `None`，从而**不再走 priority dispatch**。这对 SHM 主路径没有影响（核心 handoff 仍是 `work.ready` → `executor`），但 Unit 2 验收时需要确认 `work.ready` 的 priority 不受影响。
 
 ## Requirements Trace
 
@@ -143,21 +165,21 @@ flowchart TB
 - Test: `scripts/validate-builtin-presets.sh`（Tier-0 strict）
 
 **Approach:**
-- `plan-gate.triggers` 追加：`fix.exhausted`, `debug.exhausted`（保留现有 5 项）。
-- instructions 补 3–5 行：收到 `fix.exhausted` / `debug.exhausted` 时发 `queue.advance`+`work.ready` 或 `plan.complete` / `plan.blocked`（与 `debug.exhausted` 路径一致）。
+- `plan-gate.triggers` 追加：`fix.exhausted`, `debug.exhausted`（保留现有 5 项：[`review.passed`, `review.complete`, `work.failed`, `loop.cancel`, `queue.advance`]）。
+- instructions 补 3–5 行：收到 `fix.exhausted` / `debug.exhausted` 时，按当前 step 状态决定发 `queue.advance`+`work.ready`、发 `plan.complete` 或 `plan.blocked`。**注意**：这不会取代 `debug-resolver` / `shipper` 的原有路径，只是让 plan-gate 在这些终态路径上也能被激活，避免 `2026-06-09` 诊断中“发了 5 次 `fix.exhausted` 但 plan-gate 0 次激活”的 stall。
 - 跑 `run_workflow_activation_contract(config, strict=true)` 确认零 `preset.re_emit_trap` / handoff pairing error。
 - **验证** `coordinator_hats` 已含 plan-gate/fixer/…（当前 preset 已齐，加回归测试防漂移）。
 
 **Test scenarios:**
-- Happy path: `ralph preset check --strict -H builtin:ce-executor-isolated` exit 0。
+- Happy path: `ralph preset check --strict -H builtin:ce-executor-isolated` exit 0（当前已 PASS）。
 - Happy path: 篡改 executor+queue.advance trap → strict check fail（AE1 回归）。
-- Regression: `test_workflow_activation_contract_step_advance_handoff_chain` 仍绿。
+- Regression: `test_workflow_activation_contract_step_advance_handoff_chain` 仍绿（当前已 PASS）。
 
 **Verification:** SC2 零 finding。
 
 ---
 
-- [ ] **Unit 2: HandoffTracker 运行时加固与 priority dispatch 验收**
+- [x] **Unit 2: HandoffTracker 运行时加固与 priority dispatch 验收**
 
 **Goal:** `work.ready` handoff 后 executor **30s 内** activation；超时 Hard escalation。
 
@@ -175,9 +197,11 @@ flowchart TB
 **Approach:**
 - 确认 `work.ready` 在 HandoffIndex 中 `consumer=executor` 且 `is_priority_dispatchable`。
 - `queue.advance` **不**进入 priority（KTD-WRC-5 / KTD-12：audit only）。
-- `HandoffTracker::expired` → 写 recovery `handoff_dispatch_timeout` + inject `task.resume` **target=executor**（或 plan-gate 若 work.ready 从未发出——区分 reason）。
-- Escalation 档位：1–2 次 `repeated` → Soft（已有）；3 次 → Hard resume；4 次 → `plan.blocked` 机制 emit（**非** loop.cancel）。
-- **Non-regression**: `test_workflow_activation_contract_handoff_priority_dispatch` 仍绿。
+- `HandoffTracker::expired` → 写 recovery `handoff_dispatch_timeout` + inject `task.resume` **target=safe_target**：
+  - 默认 safe target 为 `plan-gate`；
+  - 当 original consumer 本身就是 `plan-gate` 时，fallback 到 `review-coordinator`（`HandoffTracker::expired` 当前实现）。
+- **当前实现差异**：`HandoffTracker` 目前没有 repeated 计数器，也没有“3 次 Hard / 4 次 `plan.blocked`”的分档逻辑。该分档是否实现需由执行者判断：若保留，应在 `handoff_tracker.rs` 增加 `repeated` 计数并在 `event_loop/mod.rs` 升级；若认为一次 escalation 足够，应删除本计划中的分档描述。
+- **Non-regression**: `test_workflow_activation_contract_handoff_priority_dispatch` 仍绿（当前已 PASS）。
 
 **Test scenarios:**
 - Happy path: `work.ready` publish → mock 时钟 29s 内 executor selected。
@@ -188,7 +212,7 @@ flowchart TB
 
 ---
 
-- [ ] **Unit 3: Dual-publish isolated budget 回归加固**
+- [x] **Unit 3: Dual-publish isolated budget 回归加固**
 
 **Goal:** `queue.advance` + `work.ready` 同轮双发稳定；第三 business event 仍拒。
 
@@ -197,7 +221,7 @@ flowchart TB
 **Dependencies:** Unit 1
 
 **Files:**
-- Modify: `crates/ralph-core/src/event_loop/mod.rs`（`is_dual_publish_step_handoff` 注释与边界，~L6274）
+- Modify: `crates/ralph-core/src/event_loop/mod.rs`（`is_dual_publish_step_handoff` 注释与边界，~L6322）
 - Test: `crates/ralph-core/tests/scenarios/plan_gate_dual_publish_handoff.yml`
 - Test: isolated boundary scenario（与 2026-06-15-003 同名或 `four-p0-guards` 下）
 
@@ -207,7 +231,7 @@ flowchart TB
 - 不改 per-turn budget 默认值（仍为 1 business + carve-out）。
 
 **Test scenarios:**
-- Happy path: dual-publish scenario YAML 绿。
+- Happy path: dual-publish scenario YAML 绿（当前已 PASS）。
 - Error path: 第三 business event → `event.isolation.boundary_violation`。
 - Regression: `2026-06-15` 复现 fixture（若已有）仍通过。
 
@@ -226,7 +250,9 @@ flowchart TB
 **Files:**
 - Add: `crates/ralph-core/src/step_handoff/progress_task_gate.rs`
 - Modify: `crates/ralph-core/src/event_loop/mod.rs`（在 policy accept 前或 `queue.advance`/`plan.complete` 专用钩子里调用）
-- Modify: `crates/ralph-core/src/lib.rs`
+- Modify: `crates/ralph-core/src/config/workflow_contract.rs`（新增 `step_handoff.progress_task_gate` 配置字段）
+- Modify: `crates/ralph-core/src/config/loop_config.rs`（透传新字段）
+- Modify: `crates/ralph-core/src/lib.rs`（新增 `pub mod step_handoff;`）
 - Test: `crates/ralph-core/src/step_handoff/progress_task_gate.rs`
 - Test: 新 scenario `step_handoff/progress_task_mismatch.yml`
 
@@ -239,6 +265,8 @@ flowchart TB
 - **配置**：`workflow_contract.step_handoff.progress_task_gate: true`；builtin `ce-executor-isolated` preset 显式 `true`；默认 `false`（non-regression for other presets）。
 - 不替代 agent 写 progress；只在 **推进类** topic 上硬门。
 
+> **当前状态**：`step_handoff/` 目录、`progress_task_gate.rs`、`workflow_contract.step_handoff` 配置块均不存在。本单元是真正需要从零新增的模块。
+
 **Test scenarios:**
 - Happy path: task closed + progress 一致 → `queue.advance` accept。
 - Error path: task closed + progress in_progress → `plan.blocked`，loop 不挂。
@@ -248,7 +276,7 @@ flowchart TB
 
 ---
 
-- [ ] **Unit 5: Synth terminal + handoff payload 硬门统一**
+- [x] **Unit 5: Synth terminal + handoff payload 硬门统一**
 
 **Goal:** null handoff terminal 拒收；synth terminal 仅 full payload；与 002 SSOT 验收对齐。
 
@@ -264,21 +292,25 @@ flowchart TB
 - Test: 新 `step_handoff/null_review_passed_blocked.yml`
 
 **Approach:**
-- 确认 R10 topic 列表包含：`queue.advance`, `work.ready`, `work.done`, `review.passed`, `review.complete`, `plan.complete`, `plan.blocked`。
-- `review.passed` null → 不进入主 events；不置 `synth_terminal`；plan-gate 不被假阳性触发。
+- 当前 `NULL_PAYLOAD_REJECT_TOPICS`（`crates/ralph-core/src/event_policy.rs:412`）包含：`review.passed`, `review.failed`, `review.complete`, `work.done`, `queue.advance`, `review.wave.ready`。
+- 未直接包含 `work.ready`, `plan.complete`, `plan.blocked`，但这三个 topic 在 `ce-executor-isolated` 的 `event_policy.schemas` 中已强制 `payload: json_object` + `required_fields`，null payload 会在 schema 层被 `RejectWithResume`，实际效果等价。
+- 是否扩展 `NULL_PAYLOAD_REJECT_TOPICS` 需由执行者决定：
+  - **选项 A（推荐）**：把 `work.ready`, `plan.complete`, `plan.blocked` 加入 `NULL_PAYLOAD_REJECT_TOPICS`，使 R10 统一覆盖所有 handoff/terminal  topic，避免依赖 schema 层的副作用。
+  - **选项 B**：保持现状，依赖 schema 层，但要在验收中证明 null 被 schema 拒绝。
+- `review.passed` null → 不进入主 events；不置 `synth_terminal`；plan-gate 不被假阳性触发（当前已实现）。
 - string→object normalize 保持（WAC R11）。
 - 若 002 已 merge：recoverable reject 走统一 `task.resume`；否则维持现有 Reject 行为（**不放宽**）。
 
 **Test scenarios:**
-- Happy path: full payload `review.passed` → synth_terminal set → `queue.advance` 可发。
-- Error path: null `review.passed` ×3 → 主 events 0 条；recovery 有记录。
+- Happy path: full payload `review.passed` → synth_terminal set → `queue.advance` 可发（当前已 PASS）。
+- Error path: null `review.passed` ×3 → 主 events 0 条；recovery 有记录（当前已 PASS）。
 - Regression: dispatch-gap events #17–19 类 fixture replay 不推进 plan-gate。
 
 **Verification:** SC3 主 events null 计数 0。
 
 ---
 
-- [ ] **Unit 6: Verdict gate 闭包验证与加固**
+- [x] **Unit 6: Verdict gate 闭包验证与加固**
 
 **Goal:** REVIEW_COMPLETE fail 时 `report.done` / `LOOP_COMPLETE` 均被挡。
 
@@ -287,7 +319,7 @@ flowchart TB
 **Dependencies:** None（preset 已有 `additional_topics`）
 
 **Files:**
-- Modify: `crates/ralph-core/src/event_loop/mod.rs`（verdict_gate 实现，~L1315 / L2525）
+- Modify: `crates/ralph-core/src/event_loop/mod.rs`（verdict_gate 实现，~L1315 / L2150 / L2316 / L2785 / L5087）
 - Modify: `presets/en/ce-executor-isolated.yml`（reporter `conditional_forbid_topics` 若需对齐）
 - Test: `crates/ralph-core/src/event_loop/tests/`（新增 verdict_gate_report_done.rs 或扩展现有）
 - Test: scenario `step_handoff/verdict_gate_fail_blocks_report.yml`
@@ -296,6 +328,8 @@ flowchart TB
 - 读现有 `verdict_gate`：确认对 `report.done` 检查 `pass_or_fail`（preset 已声明 `additional_topics`）。
 - 补单测：先 `REVIEW_COMPLETE` fail → reporter 发 `report.done` pass_or_fail=fail → gate reject LOOP_COMPLETE；发 `report.done` 假 pass → 若 payload 与 REVIEW_COMPLETE 不一致则拒。
 - **Non-regression**：pass 路径 LOOP_COMPLETE 仍允许。
+
+> **当前实现状态**：`verdict_gate` 已在多处调用（`event_loop/mod.rs:1315` 聚合 topics、`L2150` 记录 verdict、`L2316` 检查 fail、`L2785`/`L5087` 默认事件记录）。`additional_topics: [report.done]` 已在 preset 中声明。本单元主要是**补测试**，源码改动可能很小。
 
 **Test scenarios:**
 - Happy path: REVIEW_COMPLETE pass → report.done → LOOP_COMPLETE OK。
@@ -363,10 +397,11 @@ flowchart TB
 
 ## System-Wide Impact
 
-- **与 017-001 交界：** `review.failed`（含 mechanism degraded）必须触发 plan-gate（Unit 1 triggers）；`review.passed` 仍走 synth gate。
+- **与 017-001 交界：** `review.failed`（含 mechanism degraded）必须触发 plan-gate（Unit 1 triggers 已含 `work.failed`，加入 `fix.exhausted`/`debug.exhausted` 后 plan-gate 也会在这些路径激活）；`review.passed` 仍走 synth gate。
 - **与 002 交界：** handoff payload 恢复统一；SSOT 四链在 Unit 7 验收。
 - **Interaction graph:** `preset_lint/WAC` → startup；`plan-gate` dual-publish → `is_dual_publish_step_handoff` → `HandoffTracker` → executor；`progress_task_gate` → `plan.blocked`。
 - **Unchanged:** U4 全局 fair scheduling；ralph hat control topics；executor 不 publish `queue.advance`。
+- **新增影响（Unit 1）：** `fix.exhausted` / `debug.exhausted` 变为多消费者 topic，`HandoffIndex` 中其 `consumer` 将变为 `None`，不再触发 priority dispatch。`work.ready` → `executor` 的 priority dispatch 不受影响。
 
 ## Risks & Dependencies
 
@@ -380,12 +415,12 @@ flowchart TB
 
 ## Phased Delivery
 
-| Phase | Units | 说明 |
-|-------|-------|------|
-| 1 | 1, 3 | preset + dual-publish（低风险、高价值） |
-| 2 | 2, 5 | handoff SLA + payload 硬门 |
-| 3 | 4, 6 | progress/tasks + verdict |
-| 4 | 7, 8 | SSOT 集成验收 + E2E |
+| Phase | Units | 说明 | 当前状态 |
+|-------|-------|------|----------|
+| 1 | 1, 3 | preset + dual-publish（低风险、高价值） | Unit 3 已实现；Unit 1 待改 preset |
+| 2 | 2, 5 | handoff SLA + payload 硬门 | 核心代码已实现；待补分档逻辑（Unit 2）和 R10 列表扩展决策（Unit 5） |
+| 3 | 4, 6 | progress/tasks + verdict | Unit 6 核心代码已实现；Unit 4 需新增模块 |
+| 4 | 7, 8 | SSOT 集成验收 + E2E | 待 002 merge 后执行 |
 
 可与 002、017-001 并行；**Phase 4** 建议三计划均 merge 后跑 `2026-06-10-003` 全 plan。
 
@@ -414,11 +449,11 @@ flowchart TB
 ### 评审发现与已修正
 
 1. `parallel_with` 中 `2026-06-16-002` 已归档到 `docs/achieved/plan/`，已更新路径。
-2. `is_dual_publish_step_handoff` 实际位于 `crates/ralph-core/src/event_loop/mod.rs` ~L6274（原写 ~L5723），已修正两处引用。
-3. `verdict_gate` 核心实现位于 `event_loop/mod.rs` ~L1315 / L2525（原写 ~L1401），已修正 Unit 6 文件列表。
+2. `is_dual_publish_step_handoff` 实际位于 `crates/ralph-core/src/event_loop/mod.rs` ~L6322（原写 ~L5723 / ~L6274），已修正引用。
+3. `verdict_gate` 核心实现位于 `event_loop/mod.rs` ~L1315 / L2150 / L2316 / L2785 / L5087（原写 ~L1401 / L2525），已修正 Unit 6 文件列表。
 4. `event_policy.rs` 的 `NULL_PAYLOAD_REJECT_TOPICS` 当前未包含 `work.ready`、`plan.complete`、`plan.blocked`，Unit 5 需扩展列表；当前包含的 `review.failed`、`review.wave.ready` 可保留。
-5. `plan-gate.triggers` 当前确实缺失 `fix.exhausted`、`debug.exhausted`，与 Unit 1 目标一致；同时需检查 `presets/zh/ce-executor-isolated-zh.yml` 镜像同步。
-6. `step_handoff/` 目录与 `progress_task_gate.rs` 尚未创建，Unit 4 为新增模块。
+5. `plan-gate.triggers` 当前确实缺失 `fix.exhausted`、`debug.exhausted`，与 Unit 1 目标一致；当前实际 triggers 为 5 项：`review.passed`, `review.complete`, `work.failed`, `loop.cancel`, `queue.advance`。同时需检查 `presets/zh/ce-executor-isolated-zh.yml` 镜像同步。
+6. `step_handoff/` 目录与 `progress_task_gate.rs` 尚未创建，Unit 4 为新增模块；配置层也缺少 `workflow_contract.step_handoff` 字段。
 
 ### 建议执行顺序
 
