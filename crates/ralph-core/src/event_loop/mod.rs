@@ -6441,16 +6441,25 @@ impl EventLoop {
             // single-event budget path so an isolated hat cannot bypass its
             // declared publish scope by emitting a completion-style event.
             let mut accepted = Vec::new();
-            let mut first_business_event_accepted = false;
-            // 2026-06-13-004 U3: track the first wave_id admitted in
-            // this turn so subsequent events with the same wave_id
-            // are exempt from the per-turn business-event budget.
-            // The inner type is `Option<Option<String>>`:
-            // outer `None` = no business event yet; inner `Some(None)`
-            // = first business event had no wave_id (regular emit);
-            // inner `Some(Some(wid))` = first business event was a
-            // wave result with that wave_id.
-            let mut first_wave_id_accepted: Option<Option<String>> = None;
+            // 2026-06-16-001 U1: replace `first_wave_id_accepted: Option<Option<String>>`
+            // with two independent slots so a wave group is not
+            // poisoned by a preceding no-wave_id business event (or
+            // vice versa).
+            //
+            // Invariants:
+            // - `non_wave_business_event_accepted` records whether
+            //   the single non-wave business slot in this turn has
+            //   been consumed.
+            // - `accepted_wave_id` records the wave_id of the wave
+            //   group (if any) admitted in this turn. A new wave_id
+            //   still gets rejected, but a continuation of the same
+            //   wave does not.
+            // - `is_dual_publish_step_handoff` carves out the
+            //   `queue.advance` + `work.ready` handoff pair (see
+            //   2026-06-15-003 U1) — the second event in the pair
+            //   does not consume a fresh slot.
+            let mut non_wave_business_event_accepted = false;
+            let mut accepted_wave_id: Option<String> = None;
             // 2026-06-13-004 P0 #4 review fix (U7 envelope disk
             // storm): per-turn dedup set for scope_drop retry_keys.
             // Multiple identical scope drops in the same
@@ -6825,53 +6834,61 @@ impl EventLoop {
                     continue;
                 }
 
-                // 2026-06-13-004 U3: a `wave_id` group of result
-                // events is ONE business emission, not N. The merge
-                // layer (see `merge_wave_results_to_events_file`)
-                // stamps every record with the originating `wave_id`,
-                // so a batch of N `review.dimension.done` from
-                // workers in the same wave must be admitted in full
-                // even after the first business event was already
-                // accepted in the same turn. Without this carve-out
-                // the 8/8 wave result would be reduced to 1/8 by the
-                // per-turn budget, which is the upstream cause of
-                // the 2026-06-13 incident. We track the *set* of
-                // wave_ids already accepted in this turn so a
-                // distinct second wave still gets rejected (one
-                // business emission per turn) but a continuation of
-                // the same wave does not.
-                let same_wave_continuation = event.wave_id.as_deref().is_some_and(|wid| {
-                    first_wave_id_accepted
-                        .as_ref()
-                        .and_then(|inner| inner.as_deref())
-                        == Some(wid)
-                });
+                // 2026-06-16-001 U1: wave group admission logic.
+                // A `wave_id` group of result events is ONE business
+                // emission, not N. The merge layer (see
+                // `merge_wave_results_to_events_file`) stamps every
+                // record with the originating `wave_id`, so a batch
+                // of N `review.dimension.done` from workers in the
+                // same wave must be admitted in full even after a
+                // non-wave business event was already accepted in the
+                // same turn.
+                //
+                // Rules (evaluated in order):
+                // 1. event.wave_id == accepted_wave_id → admit
+                //    (continuation of the admitted wave group).
+                // 2. event.wave_id.is_some() && accepted_wave_id.is_none()
+                //    → admit, set accepted_wave_id (new wave group).
+                // 3. event.wave_id.is_some() && accepted_wave_id is
+                //    some other id → reject (a distinct second wave).
+                // 4. event.wave_id.is_none() && !non_wave_business_event_accepted
+                //    → admit (consume the non-wave slot).
+                // 5. event.wave_id.is_none() && non_wave_business_event_accepted
+                //    but event is `work.ready` and the last accepted
+                //    event is `queue.advance` from the same hat
+                //    (is_dual_publish_step_handoff) → admit (handoff
+                //    carve-out, see 2026-06-15-003 U1).
+                // 6. otherwise → reject.
+                let event_wave_id = event.wave_id.clone();
+                let admitted_under_wave = match event_wave_id.as_deref() {
+                    Some(wid) => match accepted_wave_id.as_deref() {
+                        Some(current) => current == wid,
+                        None => true,
+                    },
+                    None => false,
+                };
+                let wave_collision = match event_wave_id.as_deref() {
+                    Some(wid) => matches!(accepted_wave_id.as_deref(), Some(current) if current != wid),
+                    None => false,
+                };
 
-                // 2026-06-15-003 fix U1: `plan-gate` Path A dual-publish.
-                // `queue.advance` followed by `work.ready` is the only
-                // legitimate two-business-event sequence in isolated mode
-                // — `queue.advance` advances the step counter, `work.ready`
-                // carries the execution context that wakes the executor.
-                // Without this carve-out the second event is dropped, the
-                // executor is never scheduled, and the loop eventually
-                // hits `consecutive_same_signature >= 3` → LoopStale.
-                // See docs/plans/2026-06-15-003-...-plan.md and
-                // docs/report/2026-06-15-plan-gate-dual-publish-...-diagnosis.md.
-                // Scope is intentionally narrow: ordered pair, exact topics,
-                // same hat, and only ONE extra event — the third business event in
-                // the same turn is still dropped (sticky budget).
-                // Hat check prevents cross-hat false positives: executor's
-                // queue.advance does not豁免 coordinator's work.ready and vice versa.
                 let is_dual_publish_step_handoff = event.topic.as_str() == "work.ready"
                     && accepted.last().is_some_and(|prev| {
                         prev.topic.as_str() == "queue.advance"
                             && prev.hat.as_ref() == event.hat.as_ref()
                     });
 
-                if first_business_event_accepted
-                    && !same_wave_continuation
-                    && !is_dual_publish_step_handoff
-                {
+                let should_admit = if admitted_under_wave {
+                    true
+                } else if wave_collision {
+                    false
+                } else if !non_wave_business_event_accepted {
+                    true
+                } else {
+                    is_dual_publish_step_handoff
+                };
+
+                if !should_admit {
                     warn!(
                         topic = %event.topic,
                         "Isolated mode: extra business event dropped — only one per turn"
@@ -6885,18 +6902,16 @@ impl EventLoop {
                     );
                     self.bus.publish(diagnostic);
                 } else {
-                    // 2026-06-13-004 U3: capture the wave_id *before*
-                    // the event is moved into `accepted`, so we can
-                    // remember the first wave's identity to
-                    // discriminate continuations from distinct
-                    // second waves.
-                    let wave_id_to_record = event.wave_id.clone();
                     accepted.push(event);
-                    if !first_business_event_accepted {
-                        first_business_event_accepted = true;
-                    }
-                    if first_wave_id_accepted.is_none() {
-                        first_wave_id_accepted = Some(wave_id_to_record);
+                    match event_wave_id.as_deref() {
+                        Some(wid) => {
+                            if accepted_wave_id.is_none() {
+                                accepted_wave_id = Some(wid.to_string());
+                            }
+                        }
+                        None => {
+                            non_wave_business_event_accepted = true;
+                        }
                     }
                     // U3 P0 fix: write the sticky per-turn budget flag so
                     // `check_default_publishes` (which runs later in the same

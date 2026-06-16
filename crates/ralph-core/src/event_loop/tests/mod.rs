@@ -25,6 +25,7 @@ mod human_timeout;
 mod incident_fixture;
 mod initialization;
 mod isolated_complex_regression;
+mod isolated_wave_budget;
 mod loop_context;
 mod objective;
 mod origin_guard;
