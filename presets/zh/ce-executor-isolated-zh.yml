@@ -36,6 +36,11 @@ tasks:
     - debug-resolver
     - shipper
     - reporter
+    # 2026-06-16-001 U5：`progress-steward` 是 loop-level 兜底 hat，
+    # 会发布 `task.resume` 来推一下卡住的 hat（例如从未 emit
+    # plan.complete 的 plan-gate）。因此它属于 `tasks` workflow
+    # contract 的 coordinator 类 hat。
+    - progress-steward
 
 event_loop:
   prompt_file: "PROMPT.md"
@@ -1597,3 +1602,84 @@ hats:
       - 必须区分事实和假设
       - 必须处理同一天多次运行的路径冲突（追加 HHMM）
       - 必须先写完 1–6 节，再写附录
+
+  # 2026-06-16-001 U5: progress-steward 是 loop-level 兜底 hat。
+  # 当 runtime 检测到 `consecutive_no_progress_turns >=
+  # progress_steward.max_steward_iterations` 时自动唤醒。其职责
+  # 是读 plan.md / progress.md / tasks.jsonl / events.jsonl，
+  # 总结当前状态，并 emit 一个以下事件之一：
+  # - `work.ready` — 当前 step 有 open task，但 executor 无响应
+  # - `review.wave.ready` — 当前 step 的 task 已 closed，但 review
+  #   未聚合 → 用 4 维（per U4）重新 kick review wave
+  # - `queue.advance` + `work.ready` — review 通过/失败但
+  #   plan-gate 未推进 → 标准双发 handoff（2026-06-15-003）
+  # - `task.resume` — 所有 step 完成但 plan-gate 未 emit
+  #   `plan.complete` → 推一下 plan-gate
+  # - `plan.blocked(reason=loop_stalled_max_iterations)` — steward
+  #   自身卡住（consecutive_steward_activations >=
+  #   max_steward_iterations）→ 通过 shipper → reporter 干净结束
+  #
+  # 安全约束：
+  # - 不订阅正常业务事件，仅 recovery / diagnostic triggers
+  # - 每次 emit 必须带 `reason` payload
+  # - steward 自路由在 runtime 层被抑制（`steward_woken_this_turn`）；
+  #   被 origin guard 拒绝的 steward emit 不会递归重唤醒该 hat
+  progress-steward:
+    name: "🛟 Progress Steward"
+    description: "Loop-level 兜底 hat —— 检测到 stall 时唤醒，读取状态并 emit 一个 recovery 事件。"
+    triggers: ["loop.stalled", "human.guidance"]
+    # 2026-06-16-001 U5：`plan.blocked` 是 steward 的终态事件 —
+    # 当 steward 自身被连续唤醒 `max_steward_iterations` 轮仍未
+    # 产生进展时 emit。terminal_events 收尾以满足 strict lint。
+    terminal_events: ["plan.blocked"]
+    publishes:
+      # steward 可能 emit 的全部 recovery topic，对应上述决策树
+      - "work.ready"
+      - "queue.advance"
+      - "review.wave.ready"
+      - "task.resume"
+      - "plan.blocked"
+    instructions: |
+      ## PROGRESS STEWARD MODE — 读状态、决策、emit 一个 recovery 事件
+
+      你是 loop-level 兜底 hat。runtime 在 loop 卡住
+      （连续 `max_steward_iterations` 轮无进展）时自动唤醒。
+      你的职责是打破卡顿，**不是**做底层工作。
+
+      ### Step 1 — 读状态
+      按顺序读这些文件：
+      1. `plan.md` — 当前 step 及所需交付物
+      2. `progress.md` — 已完成的 steps、open tasks、阻塞
+      3. `.ralph/agent/tasks.jsonl` — task 生命周期（`open` →
+         `active` → `closed`）
+      4. `.ralph/events.jsonl` — 最近 2000 行 bus events
+         （找 `work.done`、`review.complete`、`plan.complete`、
+         `task.resume`、`loop.stalled`）
+
+      ### Step 2 — 选择一个 emit
+
+      | 当前状态 | Emit | 下一个 hat |
+      |---|---|---|
+      | 当前 step 有 `open` task，但最近无 executor 输出 | `work.ready(plan_name, plan_path, task_id, task_key, step, complexity)` | executor |
+      | 当前 step 的 task 已 `closed`，但 review 未聚合 | `review.wave.ready(... 4 维集合 per U4 ...)` | review-coordinator → dimension-reviewer wave |
+      | review 通过/失败但 `plan-gate` 未推进 | `queue.advance(...)` 然后 `work.ready(...)` **同一轮** | plan-gate → executor（这是 2026-06-15-003 双发 handoff；同轮 emit 以命中 U1 的 carve-out） |
+      | 所有 steps 已完成但 `plan-gate` 未 emit `plan.complete` | `task.resume(reason=plan_complete_not_emitted, target_hat=plan-gate)` | plan-gate |
+      | 无法确定安全动作 | `plan.blocked(reason=loop_stalled_max_iterations)` | shipper → reporter（干净结束） |
+
+      ### Step 3 — emit 并退出
+
+      仅 emit 一个事件（或 queue.advance + work.ready 配对，
+      如适用）。然后停止。**不要**做底层工作 —— 那是下一个
+      hat 的职责。如果你的 emit 被 origin guard 拒绝，
+      **不要**重试；runtime 不会在被拒绝的 emit 上重唤醒你
+      （见 runtime 配置中的 steward 自保护规则）。
+
+      ### 安全约束
+
+      - 每次 emit 必须带 `reason` payload，说明为什么选它。
+      - 不得 emit `LOOP_COMPLETE` —— 那是 orchestrator 的
+        终止事件，不是 steward 的。
+      - 不要自己执行工作。你是读状态的分发者；下一个 hat
+        做工作。
+      - 如果不确定，选 `plan.blocked(reason=loop_stalled_max_iterations)`。
+        干净结束比递归卡住好。

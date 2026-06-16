@@ -31,6 +31,7 @@ mod objective;
 mod origin_guard;
 mod payload_types;
 mod persistent_mode;
+mod progress_steward;
 mod r5_hard_gate_routing;
 mod recovery_envelope_u7_u8;
 mod replay_light_integration;

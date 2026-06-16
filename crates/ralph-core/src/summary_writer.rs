@@ -512,6 +512,16 @@ mod tests {
             last_upstream_verdict_payload: None,
             completion_rejection_signature: None,
             consecutive_completion_rejections: 0,
+            // 2026-06-16-001 U5: progress-steward counters in the
+            // test fixture. The default 0/0/false is the "fresh
+            // state" the runtime expects at turn 0.
+            consecutive_no_progress_turns: 0,
+            consecutive_steward_activations: 0,
+            steward_woken_this_turn: false,
+            // 2026-06-16-001 U5: per-turn stall-detector flag,
+            // reset at the start of every
+            // `process_events_from_jsonl` call.
+            stall_detector_had_events: false,
             last_rejection_fingerprint: 0,
             loop_start_sha: None,
             rejection_retry_counts: std::collections::HashMap::new(),

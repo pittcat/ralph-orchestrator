@@ -576,6 +576,17 @@ pub fn check_trigger_publish_asymmetry(
         Some(config.event_loop.cancellation_promise.as_str())
     };
 
+    // 2026-06-16-001 U5: topics synthesised by the loop runner
+    // (not by any user-defined hat) are exempt from R5's "no
+    // publisher" archetype for the same reason as
+    // cancellation_promise: the runner injects the publish. The
+    // `progress-steward` hat is the canonical consumer.
+    const RUNNER_INJECTED_TRIGGERS: &[&str] = &[
+        "loop.stalled",
+        "human.guidance",
+        "task.resume",
+    ];
+
     // R5 is per-trigger and depends only on graph topology (no
     // bounded BFS over terminals), so the terminal set is unused.
     // The call is kept for symmetry with R3 / R4 and to give the
@@ -595,6 +606,13 @@ pub fn check_trigger_publish_asymmetry(
             // runner-injected, same exemption as starting_event
             // above.
             if Some(trigger.as_str()) == cancellation_promise {
+                continue;
+            }
+            // 2026-06-16-001 U5: runner-injected topics
+            // (`loop.stalled`, `human.guidance`, `task.resume`) are
+            // exempt for the same reason — the loop runner is
+            // the publisher, not a hat.
+            if RUNNER_INJECTED_TRIGGERS.contains(&trigger.as_str()) {
                 continue;
             }
             // starting_event exemption: ralph hat owns the emit.

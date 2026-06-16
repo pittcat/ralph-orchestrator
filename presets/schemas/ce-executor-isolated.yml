@@ -247,9 +247,34 @@ wave.worker.failed:
     - wave_index
   payload: json_object
 
-# NOTE: `task.resume`, `loop.stalled`, `human.guidance` schemas are
-# added in U3/U5 (see plan 2026-06-16-001). The runtime emits these
-# topics via the U3 freshness filter and the U5 progress-steward
-# hat, and the SSOT/inline schema entries will be added together
-# with the corresponding hat subscriptions to keep the preset
-# contract lint green.
+# 2026-06-16-001 U3/U5: recovery signal emitted by origin guard,
+# workflow guard, execution contract, isolated scope, and the
+# `progress-steward` hat. Carries the original event's id and
+# timestamp for freshness filtering (U3 TTL) and audit. U5 uses
+# this topic to nudge a stuck hat (e.g. plan-gate that never
+# emitted plan.complete).
+task.resume:
+  required_fields:
+    - reason
+    - target_task_id
+    - target_hat
+    - source_event_id
+  payload: json_object
+
+# 2026-06-16-001 U5: diagnostic topic emitted by the loop when no
+# accepted business event has advanced for `max_steward_iterations`
+# consecutive turns. The `progress-steward` hat is the only
+# subscriber (it is the recovery handler).
+loop.stalled:
+  required_fields:
+    - reason
+  payload: json_object
+
+# 2026-06-16-001 U5: human-in-the-loop guidance injected by Telegram
+# (or any RObot client). The `progress-steward` hat subscribes to
+# this topic so an operator's proactive guidance also wakes the
+# fallback path (e.g. "skip the failing step").
+human.guidance:
+  required_fields:
+    - message
+  payload: json_object

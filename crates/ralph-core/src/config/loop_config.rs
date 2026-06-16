@@ -245,6 +245,20 @@ pub struct EventLoopConfig {
     #[serde(default)]
     pub enforce_current_unit: bool,
 
+    /// 2026-06-16-001 U5: progress-steward fallback configuration.
+    /// When the loop detects that no accepted business event has
+    /// advanced for `max_steward_iterations` consecutive turns, it
+    /// wakes the `steward_hat_id` hat to summarise the state and
+    /// emit a single recovery event. The steward is itself exempt
+    /// from re-routing (a steward emit that fails the origin guard
+    /// will not recursively re-trigger the steward).
+    ///
+    /// Defaults are conservative: enabled with `progress-steward`
+    /// as the target and 3 iterations as the stall threshold. Set
+    /// `enabled: false` to disable the steward entirely.
+    #[serde(default)]
+    pub progress_steward: ProgressStewardConfig,
+
     /// 2026-06-16-001 U3: TTL for `task.resume` injection. Rejections
     /// whose source event is older than this TTL are silently
     /// dropped — the rejection would otherwise re-activate a task
@@ -257,6 +271,53 @@ pub struct EventLoopConfig {
     /// itself).
     #[serde(default)]
     pub task_resume_ttl_seconds: Option<u64>,
+}
+
+/// 2026-06-16-001 U5: per-preset configuration for the loop-level
+/// `progress-steward` fallback hat.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProgressStewardConfig {
+    /// Master switch. When false, the loop never auto-wakes the
+    /// steward; the human must intervene manually.
+    #[serde(default = "default_progress_steward_enabled")]
+    pub enabled: bool,
+
+    /// The hat id to wake when a stall is detected. The hat must
+    /// exist in the preset's `hats:` mapping; otherwise the
+    /// runtime logs a warning and skips the wake.
+    #[serde(default = "default_progress_steward_hat_id")]
+    pub steward_hat_id: String,
+
+    /// Number of consecutive turns with no accepted business event
+    /// before the loop auto-emits `loop.stalled` and wakes the
+    /// steward. After this many consecutive steward activations
+    /// without a forwarded business event, the loop emits
+    /// `plan.blocked(reason=loop_stalled_max_iterations)` and
+    /// terminates cleanly through shipper → reporter.
+    #[serde(default = "default_progress_steward_max_iterations")]
+    pub max_steward_iterations: u32,
+}
+
+fn default_progress_steward_enabled() -> bool {
+    true
+}
+
+fn default_progress_steward_hat_id() -> String {
+    "progress-steward".to_string()
+}
+
+fn default_progress_steward_max_iterations() -> u32 {
+    3
+}
+
+impl Default for ProgressStewardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_progress_steward_enabled(),
+            steward_hat_id: default_progress_steward_hat_id(),
+            max_steward_iterations: default_progress_steward_max_iterations(),
+        }
+    }
 }
 
 impl Default for EventLoopConfig {
@@ -294,6 +355,10 @@ impl Default for EventLoopConfig {
             // task that has since been closed. Operators can
             // override per-preset or in `ralph.yml`.
             task_resume_ttl_seconds: Some(300),
+            // 2026-06-16-001 U5: default progress-steward
+            // configuration. Enabled, target = `progress-steward`,
+            // 3 iterations before auto-emit of `plan.blocked`.
+            progress_steward: ProgressStewardConfig::default(),
         }
     }
 }

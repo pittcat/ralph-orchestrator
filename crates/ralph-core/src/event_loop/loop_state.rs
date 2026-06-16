@@ -192,6 +192,40 @@ pub struct LoopState {
     /// Count of consecutive completion rejections with the same signature.
     pub consecutive_completion_rejections: u32,
 
+    /// 2026-06-16-001 U5: number of consecutive turns with no
+    /// accepted business event. Reset to 0 the first time a
+    /// business event is admitted; incremented on each
+    /// no-progress turn. When the counter reaches
+    /// `progress_steward.max_steward_iterations`, the loop emits
+    /// `loop.stalled` and wakes the steward hat.
+    pub consecutive_no_progress_turns: u32,
+
+    /// 2026-06-16-001 U5: number of consecutive times the
+    /// `progress-steward` hat has been auto-woken without
+    /// producing a forwarded business event. When this counter
+    /// reaches `progress_steward.max_steward_iterations`, the
+    /// loop emits
+    /// `plan.blocked(reason=loop_stalled_max_iterations)` and
+    /// terminates cleanly.
+    pub consecutive_steward_activations: u32,
+
+    /// 2026-06-16-001 U5: when the loop auto-woke the steward in
+    /// the current turn. Used to suppress recursive
+    /// steward-wakes when the steward's own emit is rejected by
+    /// the origin guard. The flag is set in
+    /// `process_parse_result` and cleared at the start of the
+    /// next turn.
+    pub steward_woken_this_turn: bool,
+
+    /// 2026-06-16-001 U5: per-turn flag passed to the
+    /// stall-detector helper so it knows whether to reset the
+    /// counters. Set at the start of each
+    /// `process_events_from_jsonl` call to false; flipped to
+    /// true if any business event is admitted; consulted by
+    /// `run_stall_detector_on_state` after the post-validation
+    /// tail.
+    pub stall_detector_had_events: bool,
+
     /// Progress fingerprint hash at the time of the last completion rejection.
     /// Used to detect whether real progress has occurred between rejections.
     pub last_rejection_fingerprint: u64,
@@ -356,6 +390,17 @@ impl Default for LoopState {
             last_upstream_verdict_payload: None,
             completion_rejection_signature: None,
             consecutive_completion_rejections: 0,
+            // 2026-06-16-001 U5: stall counter starts at 0. The
+            // first turn that admits a business event resets it
+            // (see process_parse_result).
+            consecutive_no_progress_turns: 0,
+            consecutive_steward_activations: 0,
+            steward_woken_this_turn: false,
+            // 2026-06-16-001 U5: per-turn stall-detector flag.
+            // Set to false at the start of each
+            // `process_events_from_jsonl` call; the helper
+            // consults it after the post-validation tail.
+            stall_detector_had_events: false,
             last_rejection_fingerprint: 0,
             loop_start_sha: None,
             rejection_retry_counts: HashMap::new(),

@@ -353,6 +353,23 @@ pub const LOOP_RUNNER_INTERNAL_TOPICS: &[&str] = &[
     // synthesizes `build.task.abandoned` and abandons the task. The
     // Builder hat is the typical publisher; no hat needs to subscribe.
     "build.blocked",
+    // 2026-06-16-001 U5: the loop runner itself synthesizes
+    // `loop.stalled` when no business event has advanced for
+    // `max_steward_iterations` consecutive turns. Only the
+    // `progress-steward` hat subscribes, but the topic has no
+    // publisher in the hat graph (the runner is the publisher).
+    "loop.stalled",
+    // 2026-06-16-001 U5: `human.guidance` is produced by the RObot
+    // (Telegram) channel, not by any hat. The
+    // `progress-steward` hat subscribes so an operator's proactive
+    // guidance can wake the fallback path.
+    "human.guidance",
+    // 2026-06-16-001 U5: `task.resume` is produced by the loop
+    // runner as a recovery signal (U3 freshness filter, U5
+    // steward). The runner is the publisher, not a hat. Listed
+    // here so the required-topic lint does not flag it as
+    // "no publisher / no subscriber in the hat graph".
+    "task.resume",
 ];
 
 // ──────────────────────────────────────────────────────────────────────────

@@ -6343,6 +6343,10 @@ impl EventLoop {
     /// handle.
     pub fn process_events_from_jsonl(&mut self) -> std::io::Result<ProcessedEvents> {
         let result = self.event_reader.read_new_events()?;
+        // 2026-06-16-001 U5: reset the per-turn stall-detector
+        // flag at the start of each read so the helper can
+        // observe whether THIS turn admitted a business event.
+        self.state.stall_detector_had_events = false;
         self.process_parse_result(result)
     }
 
@@ -6404,6 +6408,15 @@ impl EventLoop {
         }
 
         if result.events.is_empty() && result.malformed.is_empty() {
+            // 2026-06-16-001 U5: a turn with no events is the
+            // canonical "no progress" turn. Run the stall
+            // detector before returning so the loop does not
+            // silently starve when the JSONL is empty.
+            run_stall_detector_on_state(
+                &mut self.state,
+                &self.config.event_loop.progress_steward,
+                &mut self.bus,
+            );
             return Ok(ProcessedEvents {
                 had_events: false,
                 had_raw_events: false,
@@ -6966,6 +6979,10 @@ impl EventLoop {
                     // turn when JSONL had zero events, or earlier when JSONL
                     // had business events) sees a consistent view.
                     self.state.isolated_turn_business_event_accepted = true;
+                    // 2026-06-16-001 U5: mark the per-turn
+                    // stall-detector flag so the post-validation
+                    // stall detector resets the counters.
+                    self.state.stall_detector_had_events = true;
                 }
             }
             accepted
@@ -8502,6 +8519,18 @@ impl EventLoop {
         }
         // --- End invariant checks ---
 
+        // 2026-06-16-001 U5: stall detection and progress-steward
+        // wake. The counter is updated after all validation layers
+        // have run so it reflects the *post-validation* state
+        // (a turn that only produced rejections is a
+        // no-progress turn, not a turn that advanced).
+        run_stall_detector_on_state(
+            &mut self.state,
+            &self.config.event_loop.progress_steward,
+            &mut self.bus,
+        );
+        // --- End U5 stall detection ---
+
         Ok(ProcessedEvents {
             had_events,
             had_raw_events,
@@ -8945,6 +8974,106 @@ fn termination_status_text(reason: &TerminationReason) -> &'static str {
         TerminationReason::RecoverablePayloadExhausted { .. } => {
             "Recoverable-payload budget exhausted - loop terminated."
         }
+    }
+}
+
+/// 2026-06-16-001 U5: stall detection and progress-steward wake
+/// helper, extracted from the post-validation tail of
+/// `process_parse_result` so it can also run from the
+/// empty-JSONL early-return path (a turn with zero events is
+/// the canonical no-progress turn).
+///
+/// `had_events` is the per-turn boolean: true if any accepted
+/// business event was admitted this turn; false otherwise
+/// (including the empty-JSONL case, where the function is
+/// invoked directly).
+fn run_stall_detector_on_state(
+    state: &mut crate::event_loop::loop_state::LoopState,
+    config_progress_steward: &crate::config::ProgressStewardConfig,
+    bus: &mut ralph_proto::EventBus,
+) {
+    if !config_progress_steward.enabled {
+        return;
+    }
+    if state.stall_detector_had_events {
+        // A business event was admitted in this turn — reset
+        // the no-progress counter and clear the per-turn
+        // self-protection flag.
+        if state.consecutive_no_progress_turns > 0 {
+            debug!(
+                was = state.consecutive_no_progress_turns,
+                "isolated loop: progress detected — resetting stall counter"
+            );
+        }
+        state.consecutive_no_progress_turns = 0;
+        if state.consecutive_steward_activations > 0 {
+            debug!(
+                was = state.consecutive_steward_activations,
+                "isolated loop: steward produced progress — resetting steward counter"
+            );
+        }
+        state.consecutive_steward_activations = 0;
+        state.steward_woken_this_turn = false;
+        return;
+    }
+    if state.steward_woken_this_turn {
+        // Self-protection: the steward was already woken in
+        // this turn. Suppress recursive wakes.
+        return;
+    }
+    state.consecutive_no_progress_turns =
+        state.consecutive_no_progress_turns.saturating_add(1);
+    let max_iter = config_progress_steward.max_steward_iterations;
+    if state.consecutive_no_progress_turns >= max_iter
+        && state.consecutive_steward_activations < max_iter
+    {
+        // First-time wake: auto-emit `loop.stalled` diagnostic
+        // and increment the steward activation counter. The
+        // actual steward activation happens in the next
+        // `process_output` cycle when the loop picks up the
+        // `loop.stalled` event and routes it to the steward
+        // hat.
+        warn!(
+            consecutive_no_progress = state.consecutive_no_progress_turns,
+            max_iter,
+            "isolated loop: no progress for {} turns — waking progress-steward",
+            max_iter,
+        );
+        let stalled = ralph_proto::Event::new(
+            "loop.stalled",
+            format!(
+                "{{\"reason\":\"no_progress_for_{}_turns\"}}",
+                state.consecutive_no_progress_turns
+            ),
+        )
+        .with_target(ralph_proto::HatId::new(
+            config_progress_steward.steward_hat_id.as_str(),
+        ));
+        bus.publish(stalled);
+        state.consecutive_steward_activations =
+            state.consecutive_steward_activations.saturating_add(1);
+        state.steward_woken_this_turn = true;
+    } else if state.consecutive_steward_activations >= max_iter {
+        // The steward has been woken `max_iter` times in a row
+        // without producing a forwarded business event.
+        // Escalate by emitting `plan.blocked` and forcing the
+        // loop to route through shipper → reporter for a
+        // clean termination.
+        warn!(
+            consecutive_steward_activations = state.consecutive_steward_activations,
+            max_iter,
+            "isolated loop: steward did not produce progress after {} wakes — emitting plan.blocked",
+            max_iter,
+        );
+        let blocked = ralph_proto::Event::new(
+            "plan.blocked",
+            "{\"reason\":\"loop_stalled_max_iterations\"}".to_string(),
+        );
+        bus.publish(blocked);
+        // Reset so the next loop (e.g. a follow-up diagnostic
+        // or operator restart) starts from a clean state.
+        state.consecutive_no_progress_turns = 0;
+        state.consecutive_steward_activations = 0;
     }
 }
 
