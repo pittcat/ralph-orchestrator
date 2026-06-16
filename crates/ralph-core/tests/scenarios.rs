@@ -1016,3 +1016,129 @@ fn test_multi_hat_isolation_lint_bdd_4_hat_default_fails() {
         finding.details
     );
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// 2026-06-17-003 plan U6: flow reliability replay & BDD scenarios
+//
+// U6 (2026-06-17-003 plan) locks the zippy-sparrow failure pattern
+// via direct integration tests against the real mechanism APIs
+// (`open_waves_needing_intervention` + `incomplete_wave_gate::evaluate`).
+// The BDD `expected.events` framework asserts on `seen_topics`,
+// which is populated by `process_events_from_jsonl` — mechanism
+// events bypass that path and are verified separately here.
+//
+// The `SemanticGateViolation` recoverable behavior is locked by
+// the existing `test_review_passed_while_wave_open_emits_semantic_gate_violation_not_invalid_field_value`
+// in `crates/ralph-core/src/event_loop/review_step_state.rs`.
+// ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_u6_incomplete_wave_plan_blocked_mechanism() {
+    // U2 (2026-06-17-003 plan): 11-维 wave 收 4 维后 stall,
+    // 机制层应在 0.8 * aggregate_timeout_secs 窗口后 emit
+    // `plan.blocked(reason=dimension_reviewers_failed_to_converge)`。
+    //
+    // We test the mechanism in two layers:
+    // 1. `ReviewStepTracker::open_waves_needing_intervention` returns
+    //    the candidate when the wave is stalled.
+    // 2. `IncompleteWaveGate::evaluate` returns the correct payload
+    //    shape (reason, missing_dimensions, routing).
+    use ralph_core::event_loop::review_step_state::ReviewStepTracker;
+    use ralph_core::Event as JsonlEvt;
+    use ralph_core::flow_lifecycle::incomplete_wave_gate::{
+        IncompleteWaveGate, IncompleteWaveGateConfig,
+    };
+    use ralph_core::flow_lifecycle::FlowLifecycleRegistry;
+    use std::thread::sleep;
+    use std::time::Duration;
+
+    // Build a tracker that mirrors the 4/11 维 stall pattern.
+    let mut tracker = ReviewStepTracker::default();
+
+    // Register wave (wave_total=11).
+    let wave = JsonlEvt {
+        topic: "review.wave.ready".to_string(),
+        payload: Some(
+            r#"{"plan_name":"u6-bdd","task_id":"u6-bdd-task","task_key":"u6-bdd-key","step":"step-01"}"#
+                .to_string(),
+        ),
+        ts: String::new(),
+        hat: Some("review-coordinator".to_string()),
+        triggered: None,
+        source: None,
+        wave_id: Some("w-u6bdd-0001".to_string()),
+        wave_index: None,
+        wave_total: Some(11),
+    };
+    tracker.observe_accepted(&wave);
+
+    // Register 4 dimension.done events.
+    for dim in &["d1", "d2", "d3", "d4"] {
+        let dim_evt = JsonlEvt {
+            topic: "review.dimension.done".to_string(),
+            payload: Some(format!(
+                r#"{{"plan_name":"u6-bdd","task_id":"u6-bdd-task","task_key":"u6-bdd-key","step":"step-01","dimension":"{dim}"}}"#
+            )),
+            ts: String::new(),
+            hat: Some("dimension-reviewer".to_string()),
+            triggered: None,
+            source: None,
+            wave_id: Some("w-u6bdd-0001".to_string()),
+            wave_index: None,
+            wave_total: Some(11),
+        };
+        tracker.observe_accepted(&dim_evt);
+    }
+
+    // Sleep so the staleness window (0.8 * 5s = 4s) elapses.
+    sleep(Duration::from_millis(5000));
+
+    // The tracker's `open_waves_needing_intervention` returns the
+    // candidate wave with expected=11, received=4.
+    let staleness_secs = 4u64;
+    let candidates = tracker.open_waves_needing_intervention(staleness_secs);
+    assert_eq!(
+        candidates.len(),
+        1,
+        "U6: 4/11 stalled wave must be a candidate for plan.blocked"
+    );
+    let candidate = &candidates[0];
+    assert_eq!(candidate.expected, 11);
+    assert_eq!(candidate.received, 4);
+    assert_eq!(candidate.wave_id, "w-u6bdd-0001");
+
+    // The gate's `evaluate` returns the right payload shape.
+    let gate = IncompleteWaveGate::new(IncompleteWaveGateConfig {
+        enabled: true,
+        staleness_ratio: 0.8,
+    });
+    let registry = FlowLifecycleRegistry::default();
+    let last_dim_secs_ago = candidate
+        .last_dimension_at
+        .map(|t| t.elapsed().as_secs());
+    let payload = gate
+        .evaluate(
+            &registry,
+            5, // aggregate_timeout_secs
+            "w-u6bdd-0001",
+            11, // expected
+            4,  // received
+            last_dim_secs_ago,
+        )
+        .expect("U6: gate must emit plan.blocked payload for stalled wave");
+
+    assert_eq!(payload.reason, "dimension_reviewers_failed_to_converge");
+    assert_eq!(payload.wave_id, "w-u6bdd-0001");
+    assert_eq!(payload.expected, 11);
+    assert_eq!(payload.received, 4);
+    // `missing_dimensions` from the tracker is empty by design (the
+    // tracker only learns dimension names from `dimension.done`).
+    // The audit surfaces counts only — the mechanism already covers
+    // the case via `received < expected`.
+    assert!(
+        payload.missing_dimensions.is_empty(),
+        "U6: missing_dimensions is filled by the runner from the gap between expected and received"
+    );
+}
+
+

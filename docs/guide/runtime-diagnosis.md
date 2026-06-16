@@ -206,6 +206,76 @@ Failed → Degraded
 
 > `flow_lifecycle` envelope 是只读的观测信号，不影响 `WaveDispatchOutcome` 或 `PartialWavePolicy` 的内部行为。它通过 `FlowLifecycleRegistry`（`crates/ralph-core/src/flow_lifecycle.rs`）写入，供 `ralph diagnose` 渲染 wave 健康状态。
 
+### Semantic Gate Envelope（semantic_gate_violation）
+
+2026-06-17-003 计划（U1+U2）引入的 `SemanticGateViolation` envelope kind，用于区分 schema 级 schema-mismatch 与**wave 状态级**的 semantic gate 拒收。`semantic_gate_violation` 不归入 fatal `PayloadContractViolation` 桶——它落在独立 bucket，loop 继续。
+
+**触发场景：**
+
+| gate 名 | 触发条件 | 含义 |
+|---|---|---|
+| `review_passed_while_wave_open` | `hat=review-coordinator` emit `review.passed` 而 `ReviewStepTracker.open_wave_id` 仍非空 | review-coordinator 在 wave 未闭合时不能走 empty_diff fast-path；agent 必须等待机制层 `plan.blocked`（U2）或补全维度 |
+
+**envelope 字段（`payload_contract` source, severity=error, reason_code=semantic_gate_violation）：**
+
+```jsonc
+{
+  "source": "payload_contract",
+  "severity": "error",
+  "source_hat": "review-coordinator",
+  "target_hat": "review-coordinator",  // R5 hard-gate routing
+  "topic": "review.passed",
+  "reason_code": "semantic_gate_violation",
+  "message": "review_passed_while_wave_open: review-coordinator must not emit review.passed while wave 'w-...' is incomplete (4/11 dimensions)",
+  "retry_key": "payload_contract:review-coordinator:review.passed:semantic_gate_violation:gate=review_passed_while_wave_open",
+  "expected_action": "等待机制 plan.blocked 或补全维度后重发 review.passed",
+  "outcome": "pending"  // 不进 U2_REJECTION_RETRY_LIMIT 桶
+}
+```
+
+> U1 修复后，`review_passed_while_wave_open` 不再误标为 `InvalidFieldValue { field: "skip_reason" }`，避免 payload-contract-error.json 的 `field/value` 误导审计。`gate` 字段是规范名（canonical name），`context` 字段是 wave 状态摘要。
+
+### Incomplete Wave 机制收摊（plan.blocked）
+
+2026-06-17-003 计划 U2 引入的**机制层**收摊路径：当 review wave 收齐维度不足且 `now - last_dimension_at > 0.8 * aggregate_timeout_secs` 时，`EventLoop::maybe_emit_incomplete_wave_blocked` 自动 emit `plan.blocked` 而非依赖 `review-synthesizer` agent 自觉。
+
+**机制 vs 编排分工：**
+
+| 卡点 | 机制（Rust） | 编排（preset） |
+|------|--------------|----------------|
+| wave 没收齐 | `incomplete_wave_gate::evaluate` 触发 `plan.blocked`（route: `review-synthesizer` → `shipper`） | `review-synthesizer` 在 `publishes` 中声明 `plan.blocked`（preset 校验硬门） |
+| empty_diff 旁路 | semantic gate recoverable（见上） | preset empty_diff 强约束 `wave_closed + received == wave_total` |
+| 二次 work.done | event_policy dedup（U4） | executor 指令「禁止重发」 |
+
+**触发条件（所有 4 条同时满足）：**
+
+1. `workflow_contract.incomplete_wave_gate.enabled = true`（仅 `ce-executor-isolated` preset 显式开启）
+2. `ReviewStepTracker.open_wave_id` 非空 + `received < expected`
+3. `last_dimension_at` 已设置（至少 1 个 dimension.done 到过）
+4. `now - last_dimension_at > 0.8 * aggregate_timeout_secs`（**仅 staleness**，不含 handoff timeout；handoff 归 U3 ladder）
+5. `FlowLifecycleRegistry` 中 wave phase ∉ `{WorkersActive, Spawning}`（避免与 U4 `inject_review_aggregate_timeouts` 抢跑）
+
+**emit 的 `plan.blocked` payload shape：**
+
+```jsonc
+{
+  "reason": "dimension_reviewers_failed_to_converge",
+  "wave_id": "w-...",
+  "plan_name": "...",      // 由 runner 填自 tracker
+  "task_id": "...",
+  "step": "...",
+  "expected": 11,
+  "received": 4,           // unique count
+  "missing_dimensions": [],
+  "staleness_secs": 1440,  // 0.8 * 1800
+  "aggregate_timeout_secs": 1800
+}
+```
+
+**routing：** `Event::with_source("review-synthesizer").with_target("shipper")`（plan-gate `triggers` 不含 `plan.blocked`，不可假定 plan-gate 消费）。
+
+emit 后 tracker 调用 `close_wave`，避免同 wave 在下一 iteration 重复 emit。
+
 ---
 
 ## 5. U5 的 3 个 drift 指标
