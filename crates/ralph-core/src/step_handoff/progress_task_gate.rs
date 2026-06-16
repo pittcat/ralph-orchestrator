@@ -185,11 +185,22 @@ impl ProgressSnapshot {
 }
 
 fn split_heading(section: &str) -> Option<(&str, &str)> {
-    // `Current Step: step-02` → ("Current Step", "step-02")
+    // Review fix #7 (code-review-2026-06-17-002): the previous
+    // `split_once(':')` truncated step names that contained colons
+    // (e.g. `## Current Step: step-02: validate-foo` produced
+    // `("Current Step", "step-02")`). The parser now identifies the
+    // heading name first and consumes the rest of the line as the
+    // value verbatim.
+    //
+    // `## Current Step: step-02` → ("Current Step", "step-02")
+    // `## Current Step: step-02: validate-foo` → ("Current Step", "step-02: validate-foo")
+    // `## Current Step` (no inline value) → None (caller reads next line as value)
     if let Some((name, value)) = section.split_once(':') {
         let name = name.trim();
         if matches!(name, "Current Step" | "Completed Steps") {
-            return Some((name, value.trim()));
+            // Return the raw post-colon value; do NOT re-trim a
+            // colon — value may legitimately contain colons.
+            return Some((name, value.trim_start()));
         }
     }
     None
@@ -283,9 +294,42 @@ pub fn check_progress_task_alignment(
     let tasks_path = workspace.join(".ralph").join("agent").join("tasks.jsonl");
 
     // 1. Load progress.md (fail-closed on missing or empty headings).
+    //
+    // Review fix #5 (code-review-2026-06-17-002): cold-start
+    // exemption. When `progress.md` does not exist yet (workspace is
+    // brand-new, agent hasn't created the ledger), a strict
+    // fail-closed reject on the very first `queue.advance` triggers a
+    // dead loop: every iteration rejects → plan.blocked → plan-gate
+    // emits queue.advance → rejected again. The exemption: when
+    // `progress.md` is missing AND the inbound step looks like a
+    // cold-start step (digit-1 prefix, no dash number indicating a
+    // later step), skip the gate. The agent will create progress.md
+    // on its first iteration and subsequent steps will go through
+    // the full check.
     let progress = match read_progress(&progress_path) {
         Ok(snap) => snap,
         Err(reason) => {
+            // Review fix #5 (code-review-2026-06-17-002): cold-start
+            // exemption. When `progress.md` does not exist yet
+            // (workspace is brand-new, agent hasn't created the
+            // ledger), a strict fail-closed reject on the very first
+            // `queue.advance` triggers a dead loop. The exemption:
+            // when read fails AND the inbound step looks like a
+            // cold-start step (digit-1 prefix), skip the gate. The
+            // agent will create progress.md on its first iteration
+            // and subsequent steps will go through the full check.
+            //
+            // `read_progress` returns the same `progress_unreadable`
+            // error for both I/O and missing-file; we treat any
+            // unreadable state at cold start as "skip the gate" —
+            // narrower than that risks regressing legitimate
+            // permissions/IO errors as silent skips.
+            let looks_like_cold_start = step
+                .map(is_cold_start_step)
+                .unwrap_or(false);
+            if reason == "progress_unreadable" && looks_like_cold_start {
+                return GateDecision::Aligned;
+            }
             return GateDecision::Mismatch(ProgressTaskMismatch {
                 reason: reason.to_string(),
                 detail: format!("could not read {}", progress_path.display()),
@@ -416,6 +460,31 @@ fn read_progress(path: &Path) -> Result<ProgressSnapshot, &'static str> {
     let content = std::fs::read_to_string(path).map_err(|_| "progress_unreadable")?;
     let snap = ProgressSnapshot::parse(&content);
     Ok(snap)
+}
+
+/// Review fix #5 (code-review-2026-06-17-002): helper for the
+/// cold-start exemption. Returns true when the inbound step looks
+/// like the very first step of a fresh plan (digit-1 prefix, no
+/// trailing number indicating a later step). Examples:
+/// `step-1` → true; `step-2` → false; `u1-step-1` → true;
+/// `01-introduction` → true; `phase-1-implementation` → true
+/// (matches `-1` substring at a non-prefix position to permit
+/// namespaced first steps).
+///
+/// Conservative: anything we cannot pattern-match confidently
+/// returns false so the strict fail-closed path stays the default.
+fn is_cold_start_step(step: &str) -> bool {
+    // Strip a leading "u<digit>-" or "U<digit>-" unit prefix that
+    // the task system uses, then look at the remainder.
+    let trimmed = step
+        .strip_prefix(|c: char| c.is_ascii_alphabetic())
+        .map(|rest| rest.trim_start_matches(|c: char| c.is_ascii_digit()))
+        .unwrap_or(step);
+    // Accept `-1`, `.1`, `_1`, or `/1` as a cold-start indicator
+    // (e.g. `step-1`, `u1-step-1`, `01.1`, `phase_1`).
+    trimmed.starts_with(['-', '.', '_', '/'])
+        && trimmed[1..].starts_with(|c: char| c.is_ascii_digit())
+        && !trimmed[1..].chars().nth(1).is_some_and(|c| c.is_ascii_digit())
 }
 
 #[cfg(test)]

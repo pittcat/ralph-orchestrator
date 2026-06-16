@@ -680,6 +680,7 @@ impl LoopState {
                 | "event.completion.blocked"
                 | "event.completion.ignored"
                 | "event.isolation.boundary_violation"
+                | "event.step_handoff.gate_rejected"
                 | "human.interact"
                 | "human.response"
                 | "human.guidance"

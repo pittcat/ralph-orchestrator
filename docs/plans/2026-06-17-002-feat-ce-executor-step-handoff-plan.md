@@ -36,7 +36,7 @@ related:
 | Dual-publish carve-out | `crates/ralph-core/src/event_loop/mod.rs:6322-6327` | ✅ 已实现 |
 | `review_step_state` synth terminal gate | `crates/ralph-core/src/event_loop/review_step_state.rs` | ✅ 已实现 |
 | `verdict_gate`（含 `additional_topics`） | `crates/ralph-core/src/event_loop/mod.rs:1315`, `2150`, `2316`, `2785`, `5087` | ✅ 已实现 |
-| `NULL_PAYLOAD_REJECT_TOPICS` | `crates/ralph-core/src/event_policy.rs:412` | ✅ 已实现，列表待审视 |
+| `NULL_PAYLOAD_REJECT_TOPICS` | `crates/ralph-core/src/event_policy.rs:495` | ✅ 已实现，列表已扩展至 9 topic |
 
 运行验证（当前已通过）：
 - `cargo nextest run -p ralph-core -- workflow_activation` → 18/18 PASS
@@ -292,10 +292,10 @@ flowchart TB
 - Test: 新 `step_handoff/null_review_passed_blocked.yml`
 
 **Approach:**
-- 当前 `NULL_PAYLOAD_REJECT_TOPICS`（`crates/ralph-core/src/event_policy.rs:412`）包含：`review.passed`, `review.failed`, `review.complete`, `work.done`, `queue.advance`, `review.wave.ready`。
+- 当前 `NULL_PAYLOAD_REJECT_TOPICS`（`crates/ralph-core/src/event_policy.rs:495`）包含 9 topic：`review.passed`, `review.failed`, `review.complete`, `work.done`, `queue.advance`, `review.wave.ready`, `work.ready`, `plan.complete`, `plan.blocked`。
 - 未直接包含 `work.ready`, `plan.complete`, `plan.blocked`，但这三个 topic 在 `ce-executor-isolated` 的 `event_policy.schemas` 中已强制 `payload: json_object` + `required_fields`，null payload 会在 schema 层被 `RejectWithResume`，实际效果等价。
 - 是否扩展 `NULL_PAYLOAD_REJECT_TOPICS` 需由执行者决定：
-  - **选项 A（推荐）**：把 `work.ready`, `plan.complete`, `plan.blocked` 加入 `NULL_PAYLOAD_REJECT_TOPICS`，使 R10 统一覆盖所有 handoff/terminal  topic，避免依赖 schema 层的副作用。
+  - **选项 A（推荐，已执行）**：把 `work.ready`, `plan.complete`, `plan.blocked` 加入 `NULL_PAYLOAD_REJECT_TOPICS`，使 R10 统一覆盖所有 handoff/terminal  topic，避免依赖 schema 层的副作用。当前总数 9 个 topic。
   - **选项 B**：保持现状，依赖 schema 层，但要在验收中证明 null 被 schema 拒绝。
 - `review.passed` null → 不进入主 events；不置 `synth_terminal`；plan-gate 不被假阳性触发（当前已实现）。
 - string→object normalize 保持（WAC R11）。
