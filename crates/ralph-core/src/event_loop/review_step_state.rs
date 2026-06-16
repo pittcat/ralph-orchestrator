@@ -364,6 +364,29 @@ impl ReviewStepTracker {
         self.steps.values().any(wave_open)
     }
 
+    /// R-F5 / 003-U5: query whether the review wave for a given step
+    /// has fully closed (all dimensions received OR a verdict terminal
+    /// has been emitted). Returns `true` only when the tracker has
+    /// NO open wave for that step AND either no wave was ever opened
+    /// or it was already completed (received >= expected or terminal
+    /// event seen).
+    ///
+    /// Used by agents and the runner to gate `last_reviewed_sha`
+    /// persistence: writing the SHA is only safe after the wave
+    /// closes, so DEC-002 empty_diff fast-paths cannot use a premature
+    /// SHA as fuel.
+    pub fn is_wave_closed(&self, plan_name: &str, task_id: &str, step: &str) -> bool {
+        let key = StepKey {
+            plan_name: plan_name.to_string(),
+            task_id: task_id.to_string(),
+            step: step.to_string(),
+        };
+        match self.steps.get(&key) {
+            None => true, // No tracker entry means no wave ever opened.
+            Some(state) => !wave_open(state),
+        }
+    }
+
     /// U3 (2026-06-17-003 plan): return a small snapshot of the
     /// first open review wave tracked by the registry, or `None`
     /// if every wave is closed. The snapshot carries the fields
@@ -996,6 +1019,159 @@ mod tests {
         assert!(
             actions.is_empty(),
             "closed wave must not surface, got {actions:?}"
+        );
+    }
+}
+    // 003-U5 / R-F5: last_reviewed_sha wave-closed gate tests
+    //
+    // `is_wave_closed` is the query that agents and the runner use to
+    // decide whether writing `last_reviewed_sha` is safe. The gate MUST
+    // return `false` when a wave is open (even if `review.wave.ready`
+    // was emitted) and `true` only when the wave is fully closed
+    // (all dimensions received OR a verdict terminal seen).
+    // ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn u5_is_wave_closed_no_tracker_entry_returns_true() {
+        // No wave ever opened for this step — writing SHA is safe.
+        let tracker = ReviewStepTracker::default();
+        assert!(
+            tracker.is_wave_closed("p", "t1", "1"),
+            "R-F5: no tracker entry means no open wave, SHA write is safe"
+        );
+    }
+
+    #[test]
+    fn u5_is_wave_closed_after_wave_ready_returns_false() {
+        // `review.wave.ready` just emitted, no dimensions yet.
+        // Writing SHA here is the DEC-002 empty_diff fuel the plan
+        // explicitly forbids.
+        let mut tracker = ReviewStepTracker::default();
+        let mut wave = jsonl(
+            "review.wave.ready",
+            "review-coordinator",
+            r#"{"plan_name":"p","task_id":"t1","task_key":"k1","step":"1","dimension":"sec"}"#,
+        );
+        wave.wave_id = Some("w-1".to_string());
+        wave.wave_total = Some(11);
+        tracker.observe_accepted(&wave);
+
+        assert!(
+            !tracker.is_wave_closed("p", "t1", "1"),
+            "R-F5: wave just opened, SHA write must be blocked"
+        );
+    }
+
+    #[test]
+    fn u5_is_wave_closed_partial_dimensions_returns_false() {
+        // 4/11 dimensions received, wave still open.
+        // This is the zippy-sparrow stall scenario: a premature SHA
+        // write would let the next pass claim empty diff.
+        let mut tracker = ReviewStepTracker::default();
+        let mut wave = jsonl(
+            "review.wave.ready",
+            "review-coordinator",
+            r#"{"plan_name":"p","task_id":"t1","task_key":"k1","step":"1","dimension":"sec"}"#,
+        );
+        wave.wave_id = Some("w-1".to_string());
+        wave.wave_total = Some(11);
+        tracker.observe_accepted(&wave);
+
+        for dim in ["sec", "rel", "perf", "a11y"] {
+            let mut d = jsonl(
+                "review.dimension.done",
+                "dimension-reviewer",
+                &format!(
+                    r#"{{"plan_name":"p","task_id":"t1","task_key":"k1","step":"1","dimension":"{dim}","findings_count":0,"findings_file":"f.json"}}"#
+                ),
+            );
+            d.wave_id = Some("w-1".to_string());
+            tracker.observe_accepted(&d);
+        }
+
+        assert!(
+            !tracker.is_wave_closed("p", "t1", "1"),
+            "R-F5: 4/11 dimensions received, wave open, SHA write must be blocked"
+        );
+    }
+
+    #[test]
+    fn u5_is_wave_closed_all_dimensions_returns_true() {
+        // All 11 dimensions received — wave fully closed.
+        let mut tracker = ReviewStepTracker::default();
+        let mut wave = jsonl(
+            "review.wave.ready",
+            "review-coordinator",
+            r#"{"plan_name":"p","task_id":"t1","task_key":"k1","step":"1","dimension":"sec"}"#,
+        );
+        wave.wave_id = Some("w-1".to_string());
+        wave.wave_total = Some(2);
+        tracker.observe_accepted(&wave);
+
+        for dim in ["sec", "rel"] {
+            let mut d = jsonl(
+                "review.dimension.done",
+                "dimension-reviewer",
+                &format!(
+                    r#"{{"plan_name":"p","task_id":"t1","task_key":"k1","step":"1","dimension":"{dim}","findings_count":0,"findings_file":"f.json"}}"#
+                ),
+            );
+            d.wave_id = Some("w-1".to_string());
+            tracker.observe_accepted(&d);
+        }
+
+        assert!(
+            tracker.is_wave_closed("p", "t1", "1"),
+            "R-F5: all dimensions received, wave closed, SHA write is safe"
+        );
+    }
+
+    #[test]
+    fn u5_is_wave_closed_after_verdict_returns_true() {
+        // Wave opened then `review.passed` verdict seen — wave closed.
+        let mut tracker = ReviewStepTracker::default();
+        let mut wave = jsonl(
+            "review.wave.ready",
+            "review-coordinator",
+            r#"{"plan_name":"p","task_id":"t1","task_key":"k1","step":"1","dimension":"sec"}"#,
+        );
+        wave.wave_id = Some("w-1".to_string());
+        wave.wave_total = Some(3);
+        tracker.observe_accepted(&wave);
+
+        let passed = jsonl(
+            "review.passed",
+            "review-synthesizer",
+            r#"{"plan_name":"p","task_id":"t1","task_key":"k1","step":"1","findings_count":0,"fix_round":0,"verdict":"pass","skip_reason":"empty_diff"}"#,
+        );
+        tracker.observe_accepted(&passed);
+
+        assert!(
+            tracker.is_wave_closed("p", "t1", "1"),
+            "R-F5: verdict terminal seen, wave closed, SHA write is safe"
+        );
+    }
+
+    #[test]
+    fn u5_is_wave_closed_different_step_isolated() {
+        // Wave open for step "1" must not affect step "2" gate.
+        let mut tracker = ReviewStepTracker::default();
+        let mut wave = jsonl(
+            "review.wave.ready",
+            "review-coordinator",
+            r#"{"plan_name":"p","task_id":"t1","task_key":"k1","step":"1","dimension":"sec"}"#,
+        );
+        wave.wave_id = Some("w-1".to_string());
+        wave.wave_total = Some(5);
+        tracker.observe_accepted(&wave);
+
+        assert!(
+            !tracker.is_wave_closed("p", "t1", "1"),
+            "R-F5: step 1 wave is open"
+        );
+        assert!(
+            tracker.is_wave_closed("p", "t1", "2"),
+            "R-F5: step 2 has no wave, SHA write is safe (different step)"
         );
     }
 }
