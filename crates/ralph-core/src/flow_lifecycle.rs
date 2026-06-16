@@ -1089,3 +1089,163 @@ mod tests {
         assert_eq!(deadlines.per_worker, 45);
     }
 }
+
+// U2 (2026-06-17-003 plan): incomplete wave gate — when a review
+// wave stalls below its `wave_total` for longer than 80% of
+// `aggregate_timeout_secs` past the **last dimension progress**,
+// the mechanism emits a `plan.blocked` event on behalf of
+// `review-synthesizer` (which has been observed to never fire
+// when no `dimension.done` arrives). The target is `shipper` per
+// the plan's routing decision (`plan-gate.triggers` does NOT
+// include `plan.blocked`).
+//
+// This module is intentionally a submodule of `flow_lifecycle`
+// (per plan §Files — "扩展现有 `flow_lifecycle.rs` 模块，非新目录")
+// so the existing observability channel stays coherent. The
+// helper [`IncompleteWaveGate::evaluate`] returns the
+// `plan.blocked` payload as JSON; the caller is responsible
+// for publishing it through `Event::with_target("shipper")` and
+// closing the tracker wave so the gate does not re-fire.
+pub mod incomplete_wave_gate {
+    use super::{FlowLifecycleRegistry, FlowPhase};
+    use serde::Serialize;
+
+    /// Configuration knobs for the U2 incomplete-wave gate.
+    ///
+    /// `enabled` defaults to `false` globally and `true` for
+    /// `ce-executor-isolated` (per plan §U2). The caller
+    /// (`EventLoop::maybe_emit_incomplete_wave_blocked`) reads
+    /// `workflow_contract.incomplete_wave_gate.enabled` from
+    /// `RalphConfig` and falls back to the global default.
+    #[derive(Debug, Clone)]
+    pub struct IncompleteWaveGateConfig {
+        pub enabled: bool,
+        /// Multiplier on `aggregate_timeout_secs` that defines
+        /// the staleness window. Plan §U2: 0.8 (80%).
+        pub staleness_ratio: f64,
+    }
+
+    impl Default for IncompleteWaveGateConfig {
+        fn default() -> Self {
+            Self {
+                enabled: false,
+                staleness_ratio: 0.8,
+            }
+        }
+    }
+
+    /// Payload published as `plan.blocked` when the gate fires.
+    ///
+    /// Field names match the plan §U2 "Payload" spec. We
+    /// intentionally **exclude** the parsed-but-unused
+    /// `missing_dimensions` set from the JSON when it's empty
+    /// (the tracker cannot know per-dimension labels for waves
+    /// where `dimension.done` never arrives), so the audit
+    /// payload does not carry a misleading empty array.
+    #[derive(Debug, Clone, Serialize)]
+    pub struct PlanBlockedPayload {
+        pub reason: &'static str,
+        pub wave_id: String,
+        pub plan_name: String,
+        pub task_id: String,
+        pub step: String,
+        pub expected: u32,
+        pub received: u32,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        pub missing_dimensions: Vec<String>,
+        pub staleness_secs: u64,
+        pub aggregate_timeout_secs: u64,
+    }
+
+    impl PlanBlockedPayload {
+        /// Stable reason string used in the audit trail. The
+        /// plan pins this as `dimension_reviewers_failed_to_converge`
+        /// so operators can grep on it across runs.
+        pub const REASON: &'static str = "dimension_reviewers_failed_to_converge";
+    }
+
+    /// U2 gate evaluator. Pure function over the inputs —
+    /// construction is cheap; `evaluate` does no I/O.
+    pub struct IncompleteWaveGate {
+        pub config: IncompleteWaveGateConfig,
+    }
+
+    impl IncompleteWaveGate {
+        pub const fn new(config: IncompleteWaveGateConfig) -> Self {
+            Self { config }
+        }
+
+        /// Compute the absolute staleness threshold from the
+        /// configured ratio and the supplied aggregate timeout.
+        /// Uses saturating arithmetic to avoid panics on
+        /// pathological inputs (ratio = 0, aggregate = 0).
+        pub fn staleness_secs(&self, aggregate_timeout_secs: u64) -> u64 {
+            if aggregate_timeout_secs == 0 {
+                return 0;
+            }
+            let ratio_milli = (self.config.staleness_ratio * 1000.0).round() as u64;
+            (aggregate_timeout_secs.saturating_mul(ratio_milli)) / 1000
+        }
+
+        /// Decide whether to emit `plan.blocked` for an
+        /// incomplete wave. The gate fires **only** when all of:
+        ///
+        /// 1. `config.enabled` is true.
+        /// 2. The wave is open (`expected > 0` and `received <
+        ///    expected`).
+        /// 3. There is at least one `dimension.done` arrival
+        ///    (a baseline to measure staleness against) — without
+        ///    a baseline, the wave is simply "just started" and
+        ///    the U4 aggregate-timeout path is the right
+        ///    recovery.
+        /// 4. `now - last_dimension_at > staleness_secs`.
+        /// 5. The flow-lifecycle phase is **not** one of the
+        ///    active worker phases (`WorkersActive`, `Spawning`)
+        ///    — we only emit when the wave is otherwise idle
+        ///    (post-aggregating, partial-closed, or failed),
+        ///    which avoids racing with `inject_review_aggregate_timeouts`.
+        pub fn evaluate(
+            &self,
+            registry: &FlowLifecycleRegistry,
+            aggregate_timeout_secs: u64,
+            wave_id: &str,
+            expected: u32,
+            received: u32,
+            last_dimension_secs_ago: Option<u64>,
+        ) -> Option<PlanBlockedPayload> {
+            if !self.config.enabled {
+                return None;
+            }
+            if expected == 0 || received >= expected {
+                return None;
+            }
+            let last_dimension_secs_ago = last_dimension_secs_ago?;
+            let staleness = self.staleness_secs(aggregate_timeout_secs);
+            if last_dimension_secs_ago <= staleness {
+                return None;
+            }
+            // Phase guard: only fire when the wave is otherwise
+            // idle — `WorkersActive` / `Spawning` mean workers
+            // are still racing and the aggregator hat has not
+            // even been activated. The U4 path covers those
+            // cases via `inject_review_aggregate_timeouts`.
+            let phase = registry.get(wave_id).map(|r| r.phase);
+            match phase {
+                Some(FlowPhase::WorkersActive) | Some(FlowPhase::Spawning) => return None,
+                _ => {}
+            }
+            Some(PlanBlockedPayload {
+                reason: PlanBlockedPayload::REASON,
+                wave_id: wave_id.to_string(),
+                plan_name: String::new(),
+                task_id: String::new(),
+                step: String::new(),
+                expected,
+                received,
+                missing_dimensions: Vec::new(),
+                staleness_secs: staleness,
+                aggregate_timeout_secs,
+            })
+        }
+    }
+}

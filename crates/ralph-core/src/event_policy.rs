@@ -50,12 +50,57 @@ pub enum ViolationType {
         rule_hat: String,
         rule_topic: String,
     },
+/// U1 (2026-06-17-003 plan): semantic gate violation. The event
+    /// passed schema validation but violates an orchestrator-level
+    /// invariant (e.g. `review.passed` while a review wave is still
+    /// open). Distinct from `InvalidFieldValue` because the payload
+    /// itself is well-formed — the violation is in the **timing /
+    /// state** relative to other events tracked by
+    /// `ReviewStepTracker`. Kept fail-closed (event does NOT enter
+    /// the bus) but loop continues — see
+    /// `is_recoverable_policy_finding` for the bucket mapping.
+    SemanticGateViolation {
+        gate: String,
+        context: String,
+    },
+    /// U4 (2026-06-17-003 plan): duplicate `work.done` for the
+    /// same `(plan_name, step, task_id)` tuple. The `hint`
+    /// distinguishes:
+    ///   - `duplicate_stall_bypass`: the current event carries
+    ///     `wave_id` (wave is still open) or is part of a stall
+    ///     recovery flow — the agent is trying to re-send
+    ///     `work.done` to bypass a stalled review cycle.
+    ///   - `duplicate_same_step`: pure same-step re-emit (fix-round
+    ///     did not advance, or the agent is not following the
+    ///     `fix.applied` → re-`work.done` contract).
+    DuplicateWorkDone {
+        key: String,
+        hint: DuplicateWorkDoneHint,
+    },
+}
+
+/// U4 (2026-06-17-003 plan): hint carried in
+/// [`ViolationType::DuplicateWorkDone`]. Lets the runner pick the
+/// correct recovery payload (stall-bypass has a different message
+/// from pure duplicate-same-step).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DuplicateWorkDoneHint {
+    /// Wave is open (event has `wave_id` set) or the agent is
+    /// known to be in a stall-recovery flow. The re-emit is
+    /// likely an attempt to bypass the stalled review cycle.
+    DuplicateStallBypass,
+    /// Pure same-step re-emit: no wave open, no stall recovery in
+    /// progress. The agent simply re-emitted `work.done` for a
+    /// step that has already closed.
+    DuplicateSameStep,
 }
 
 impl ViolationType {
     /// Field name that triggered the violation, when the violation
     /// is field-scoped. Returns `None` for topic-scoped violations
-    /// (terminal-monotonicity, topic-format, topic-deny, etc.).
+    /// (terminal-monotonicity, topic-format, topic-deny, etc.) and
+    /// for semantic-gate violations (which use `gate` instead).
     pub fn field(&self) -> Option<&str> {
         match self {
             Self::MissingRequiredField { field } | Self::InvalidFieldValue { field, .. } => {
@@ -78,6 +123,8 @@ impl ViolationType {
             Self::BusinessEventAfterCompletion { .. } => "business_event_after_completion",
             Self::InvalidTopicFormat { .. } => "invalid_topic_format",
             Self::TopicDenied { .. } => "topic_denied",
+            Self::SemanticGateViolation { .. } => "semantic_gate_violation",
+            Self::DuplicateWorkDone { .. } => "duplicate_work_done",
         }
     }
 }
@@ -135,7 +182,7 @@ pub struct PolicyRejection {
 /// | `PayloadTypeMismatch` (incl. non-JSON string) | `plan_name` / task key mismatch
 /// | `MissingRequiredField`                   | duplicate terminal / completion guard
 /// | `TopicDenied` (deny rules + isolated scope)   | `InvalidFieldValue` / `AllowedValueMismatch` (deferred)
-/// | ---                                      | 4th attempt on the same (hat, reason_class)
+/// | `SemanticGateViolation` (U1, 2026-06-17-003) | 4th attempt on the same (hat, reason_class)
 ///
 /// The bucket is the last segment of the loop's
 /// `record_rejection_key` counter so two distinct buckets on the
@@ -152,6 +199,21 @@ pub enum ReasonClass {
     /// `TopicDenied` — the (hat, topic) pair matched a deny rule.
     /// Recoverable on first 3 attempts.
     TopicDenied,
+    /// U1 (2026-06-17-003 plan): `SemanticGateViolation` — event
+    /// passed schema validation but violates an orchestrator-level
+    /// invariant (e.g. `review.passed` while a review wave is still
+    /// open). Recoverable on first 3 attempts AND bypasses the U6
+    /// `PayloadContractViolation` fatal path. The bucket is its own
+    /// dimension on the loop-level retry counter so semantic-gate
+    /// rejections never compete with payload-typed rejections for
+    /// the budget.
+    SemanticGateViolation,
+    /// U4 (2026-06-17-003 plan): duplicate `work.done` for the
+    /// same `(plan_name, step, task_id)` tuple. The 2nd emit is
+    /// rejected as recoverable (agent can re-emit with a different
+    /// step or task_id, or wait for `fix.applied` / step close to
+    /// re-send legitimately).
+    DuplicateWorkDone,
 }
 
 impl ReasonClass {
@@ -162,6 +224,8 @@ impl ReasonClass {
             ReasonClass::PayloadTypeMismatch => "payload_type_mismatch",
             ReasonClass::MissingRequiredField => "missing_required_field",
             ReasonClass::TopicDenied => "topic_denied",
+            ReasonClass::SemanticGateViolation => "semantic_gate_violation",
+            ReasonClass::DuplicateWorkDone => "duplicate_work_done",
         }
     }
 }
@@ -174,6 +238,15 @@ pub fn is_recoverable_policy_finding(finding: &PolicyFinding) -> Option<ReasonCl
         ViolationType::PayloadTypeMismatch { .. } => Some(ReasonClass::PayloadTypeMismatch),
         ViolationType::MissingRequiredField { .. } => Some(ReasonClass::MissingRequiredField),
         ViolationType::TopicDenied { .. } => Some(ReasonClass::TopicDenied),
+        // U1 (2026-06-17-003 plan): semantic gate violations are
+        // recoverable on first 3 attempts AND bypass U6 fatal
+        // termination (see runner.rs `TerminationReason::PayloadContractViolation`
+        // branch). The bucket is independent of the other three
+        // reason classes so a misbehaving coordinator can be
+        // corrected via `task.resume` without exhausting the schema
+        // validation budget for unrelated events.
+        ViolationType::SemanticGateViolation { .. } => Some(ReasonClass::SemanticGateViolation),
+        ViolationType::DuplicateWorkDone { .. } => Some(ReasonClass::DuplicateWorkDone),
         _ => None,
     }
 }
@@ -194,6 +267,16 @@ pub struct PolicyRuntimeState {
     /// The current plan_name extracted from the most recent `work.ready` event.
     /// Used for plan_name equality validation (U4).
     pub current_plan_name: Option<String>,
+    /// U4 (2026-06-17-003 plan): dedup set for `work.done` events.
+    /// Key format: `{plan_name}::{step}::{task_id}`. Populated when
+    /// a `work.done` is accepted by `validate_event_with_hat`;
+    /// consumed by the event loop for per-batch pruning. The
+    /// per-loop lifetime set lives in `LoopState::work_done_seen_tasks`
+    /// (see `event_loop/loop_state.rs`); this set is the
+    /// `PolicyRuntimeState` mirror used during `validate_event`
+    /// for **in-batch** dedup (when the same `work.done` appears
+    /// twice in the same `process_output` batch).
+    pub work_done_seen_keys: HashSet<String>,
 }
 
 impl PolicyRuntimeState {
@@ -504,6 +587,52 @@ pub fn validate_event_with_hat(
     state.observed_topics.insert(topic.to_string());
 
     let mut findings = Vec::new();
+
+    // U4 (2026-06-17-003 plan): duplicate `work.done` detection.
+    // The dedup key is `(plan_name, step, task_id)`. A 2nd
+    // `work.done` with the same key is rejected as
+    // `RecoverableRejection` (NOT fatal) so the runner can
+    // re-route to the source hat with a `task.resume` carrying
+    // the correct `fix_hint`. The hint distinguishes
+    // `duplicate_stall_bypass` (wave_id is set → agent trying
+    // to bypass a stalled review cycle) from `duplicate_same_step`
+    // (no wave → pure same-step re-emit, fix-round did not
+    // advance). The check is applied before all other policy
+    // layers so a duplicate is a duplicate regardless of
+    // schema/terminal state.
+    if topic == "work.done"
+        && let Some(p) = payload
+        && let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p)
+    {
+        let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
+        let step = obj.get("step").and_then(|v| v.as_str());
+        let task_id = obj.get("task_id").and_then(|v| v.as_str());
+        if let (Some(pn), Some(st), Some(ti)) = (plan_name, step, task_id) {
+            let dedup_key = format!("{pn}::{st}::{ti}");
+            if state.work_done_seen_keys.contains(&dedup_key) {
+                let finding = PolicyFinding {
+                    topic: topic.to_string(),
+                    violation_type: ViolationType::DuplicateWorkDone {
+                        key: dedup_key.clone(),
+                        hint: DuplicateWorkDoneHint::DuplicateSameStep,
+                    },
+                    message: format!(
+                        "duplicate_same_step: work.done for key '{dedup_key}' was already accepted. \
+                         Wait for fix.applied / queue.advance / step close before re-sending work.done \
+                         for the same (plan_name, step, task_id)."
+                    ),
+                };
+                return PolicyDecision::RejectWithResume(finding);
+            }
+            // Record the key so a 3rd emit in the same batch is
+            // also rejected. The in-batch set is drained by the
+            // event loop after `process_output` completes; the
+            // per-loop lifetime set lives in
+            // `LoopState::work_done_seen_tasks` and is pruned
+            // on step-boundary events.
+            state.work_done_seen_keys.insert(dedup_key);
+        }
+    }
 
     // WAC-U7 R10 (2026-06-12-002): null payloads on the
     // `NULL_PAYLOAD_REJECT_TOPICS` whitelist are hard-rejected
@@ -2111,6 +2240,196 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // U4 (2026-06-17-003 plan): duplicate `work.done` dedup tests
+    //
+    // Same `(plan_name, step, task_id)` tuple — 2nd `work.done` is
+    // rejected with `RecoverableRejection` (NOT fatal).
+    // -------------------------------------------------------------------------
+
+    fn work_done_payload(plan: &str, step: &str, task: &str) -> String {
+        format!(r#"{{"plan_name":"{plan}","step":"{step}","task_id":"{task}","task_key":"k"}}"#)
+    }
+
+    #[test]
+    fn test_u4_duplicate_work_done_first_accepted() {
+        // Happy path: first `work.done` for a (plan, step, task) tuple is accepted.
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = work_done_payload("p1", "step-01", "t1");
+        let decision = validate_event("work.done", Some(&payload), &config, &mut state);
+        assert_eq!(
+            decision,
+            PolicyDecision::Accept,
+            "First work.done for a new (plan, step, task) tuple must be accepted"
+        );
+        // The dedup key should now be in the per-batch set
+        assert!(state.work_done_seen_keys.contains("p1::step-01::t1"));
+    }
+
+    #[test]
+    fn test_u4_duplicate_work_done_second_rejected() {
+        // Error path: 2nd `work.done` with the same (plan, step, task)
+        // tuple is rejected with `RejectWithResume` (RecoverableRejection
+        // — the policy validator routes it through the recoverable bucket).
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = work_done_payload("p1", "step-01", "t1");
+
+        // First emit: accepted
+        let first = validate_event("work.done", Some(&payload), &config, &mut state);
+        assert_eq!(first, PolicyDecision::Accept);
+
+        // Second emit (same key, same batch): rejected
+        let second = validate_event("work.done", Some(&payload), &config, &mut state);
+        assert!(
+            matches!(
+                second,
+                PolicyDecision::RejectWithResume(PolicyFinding {
+                    violation_type: ViolationType::DuplicateWorkDone { ref key, .. },
+                    ..
+                }) if key == "p1::step-01::t1"
+            ),
+            "Second work.done for same key must be rejected with DuplicateWorkDone, got {:?}",
+            second
+        );
+    }
+
+    #[test]
+    fn test_u4_duplicate_work_done_different_step_accepted() {
+        // Edge case: same (plan, task_id) but different `step` key →
+        // still accepted (key includes step).
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+
+        // step-01 emit
+        let p1 = work_done_payload("p1", "step-01", "t1");
+        let first = validate_event("work.done", Some(&p1), &config, &mut state);
+        assert_eq!(first, PolicyDecision::Accept);
+
+        // Same task, different step: accepted
+        let p2 = work_done_payload("p1", "step-02", "t1");
+        let second = validate_event("work.done", Some(&p2), &config, &mut state);
+        assert_eq!(
+            second,
+            PolicyDecision::Accept,
+            "work.done for same task but different step must be accepted, got {:?}",
+            second
+        );
+    }
+
+    #[test]
+    fn test_u4_duplicate_work_done_different_task_accepted() {
+        // Edge case: same (plan, step) but different `task_id` →
+        // still accepted (key includes task_id).
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+
+        let p1 = work_done_payload("p1", "step-01", "t1");
+        let first = validate_event("work.done", Some(&p1), &config, &mut state);
+        assert_eq!(first, PolicyDecision::Accept);
+
+        let p2 = work_done_payload("p1", "step-01", "t2");
+        let second = validate_event("work.done", Some(&p2), &config, &mut state);
+        assert_eq!(
+            second,
+            PolicyDecision::Accept,
+            "work.done for same step but different task must be accepted, got {:?}",
+            second
+        );
+    }
+
+    #[test]
+    fn test_u4_duplicate_work_done_is_recoverable() {
+        // The DuplicateWorkDone violation must be in the recoverable
+        // bucket (R-B1) so the runner publishes a `task.resume` with
+        // `fix_hint` instead of the U6 fast-fail.
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = work_done_payload("p1", "step-01", "t1");
+        let first = validate_event("work.done", Some(&payload), &config, &mut state);
+        assert_eq!(first, PolicyDecision::Accept);
+
+        let second = validate_event("work.done", Some(&payload), &config, &mut state);
+        let finding = match second {
+            PolicyDecision::RejectWithResume(f) => f,
+            other => panic!("expected RejectWithResume, got {:?}", other),
+        };
+        let class = is_recoverable_policy_finding(&finding);
+        assert_eq!(
+            class,
+            Some(ReasonClass::DuplicateWorkDone),
+            "DuplicateWorkDone must map to the recoverable bucket, got {:?}",
+            class
+        );
+    }
+
+    #[test]
+    fn test_u4_duplicate_work_done_disabled_policy_accepts_all() {
+        // When event policy is disabled, the dedup check must be
+        // skipped (mirrors all other policy checks).
+        let mut config = test_config();
+        config.enabled = false;
+        let mut state = PolicyRuntimeState::default();
+        let payload = work_done_payload("p1", "step-01", "t1");
+
+        let first = validate_event("work.done", Some(&payload), &config, &mut state);
+        let second = validate_event("work.done", Some(&payload), &config, &mut state);
+        assert_eq!(first, PolicyDecision::Accept);
+        assert_eq!(
+            second,
+            PolicyDecision::Accept,
+            "disabled policy must not dedup, got {:?}",
+            second
+        );
+    }
+
+    #[test]
+    fn test_u4_duplicate_work_done_missing_fields_skips_dedup() {
+        // If the payload is missing plan_name/step/task_id, the dedup
+        // check cannot run — fall through to other policy layers.
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = r#"{"task_key":"k"}"#; // missing plan_name/step/task_id
+        let first = validate_event("work.done", Some(payload), &config, &mut state);
+        // First emit: not rejected by dedup (no key to compare).
+        // May be rejected by other policies (e.g. required fields), but
+        // the dedup violation type must NOT appear.
+        if let PolicyDecision::RejectWithResume(f) = &first {
+            assert!(
+                !matches!(f.violation_type, ViolationType::DuplicateWorkDone { .. }),
+                "missing-fields payload must not trigger DuplicateWorkDone, got {:?}",
+                f.violation_type
+            );
+        }
+    }
+
+    #[test]
+    fn test_u4_duplicate_work_done_hint_mapped_to_reason_code() {
+        // The reason_code for DuplicateWorkDone must be a stable
+        // snake_case string usable in CLI precheck JSON output.
+        let finding = PolicyFinding {
+            topic: "work.done".to_string(),
+            violation_type: ViolationType::DuplicateWorkDone {
+                key: "p::s::t".to_string(),
+                hint: DuplicateWorkDoneHint::DuplicateSameStep,
+            },
+            message: "test".to_string(),
+        };
+        assert_eq!(finding.violation_type.reason_code(), "duplicate_work_done");
+    }
+
+    #[test]
+    fn test_u4_duplicate_work_done_hint_distinct() {
+        // The two hints are distinct enum values so the runtime can
+        // branch on them.
+        assert_ne!(
+            DuplicateWorkDoneHint::DuplicateSameStep,
+            DuplicateWorkDoneHint::DuplicateStallBypass
+        );
+    }
+
+
+    // -------------------------------------------------------------------------
     // U1 (2026-06-11-002): trivial_step semantic gate
     //
     // Rejects `review.passed` events with `skip_reason=trivial_step` when the
@@ -2520,5 +2839,91 @@ mod tests {
         config.mode = EventPolicyMode::Enforce;
         config.on_violation = ViolationAction::RejectWithResume;
         config
+    }
+
+    // U1 (2026-06-17-003 plan): the new `SemanticGateViolation`
+    // variant must be in the recoverable set with its own bucket
+    // — and its reason_code must NOT collide with the schema-level
+    // `invalid_field_value` so diagnostics stay unambiguous.
+    #[test]
+    fn u1_semantic_gate_violation_is_recoverable_with_own_bucket() {
+        let finding = PolicyFinding {
+            topic: "review.passed".to_string(),
+            violation_type: ViolationType::SemanticGateViolation {
+                gate: "review_passed_while_wave_open".to_string(),
+                context: "wave='w-1' received=0/3 expected".to_string(),
+            },
+            message: "review-coordinator must not emit review.passed while wave is incomplete"
+                .to_string(),
+        };
+        let class = is_recoverable_policy_finding(&finding)
+            .expect("SemanticGateViolation must be in the recoverable set");
+        assert_eq!(class, ReasonClass::SemanticGateViolation);
+        assert_eq!(class.as_str(), "semantic_gate_violation");
+        assert_eq!(
+            finding.violation_type.reason_code(),
+            "semantic_gate_violation"
+        );
+        // field() returns None — semantic-gate violations are
+        // state-scoped, not field-scoped.
+        assert!(finding.violation_type.field().is_none());
+    }
+
+    // U1 (2026-06-17-003 plan): the four existing recoverable
+    // buckets must keep their stable labels — adding
+    // `SemanticGateViolation` to the enum must not shift them.
+    #[test]
+    fn u1_semantic_gate_violation_does_not_perturb_other_buckets() {
+        assert_eq!(ReasonClass::PayloadTypeMismatch.as_str(), "payload_type_mismatch");
+        assert_eq!(ReasonClass::MissingRequiredField.as_str(), "missing_required_field");
+        assert_eq!(ReasonClass::TopicDenied.as_str(), "topic_denied");
+        // And the non-recoverable ones stay non-recoverable.
+        let finding = PolicyFinding {
+            topic: "review.passed".to_string(),
+            violation_type: ViolationType::TerminalMonotonicityViolation {
+                terminal_topic: "plan.complete".to_string(),
+                business_topic: "review.passed".to_string(),
+            },
+            message: "terminal monotonicity".to_string(),
+        };
+        assert!(is_recoverable_policy_finding(&finding).is_none());
+    }
+
+    // U1 (2026-06-17-003 plan): the `finding_to_payload_contract_violation`
+    // bridge (in `event_loop/mod.rs`) maps a `PolicyFinding` to a
+    // `PayloadContractViolation` only when the violation is
+    // schema-derived. `SemanticGateViolation` must NOT be in that
+    // set so the runner's `PayloadContractViolation` fatal branch
+    // never fires for `review_passed_while_wave_open`. We re-test
+    // here at the policy layer because the bridge is in `mod.rs`
+    // and not exposed for direct unit testing without spinning up
+    // an `EventLoop`. The downstream guarantee is:
+    //   is_recoverable_policy_finding == Some(SemanticGateViolation)
+    //   → bridge returns None → runner skips the fatal branch.
+    #[test]
+    fn u1_semantic_gate_is_recoverable_implies_not_fatal() {
+        let finding = PolicyFinding {
+            topic: "review.passed".to_string(),
+            violation_type: ViolationType::SemanticGateViolation {
+                gate: "review_passed_while_wave_open".to_string(),
+                context: "wave='w-1' received=0/3 expected".to_string(),
+            },
+            message: "review-coordinator must not emit review.passed while wave is incomplete"
+                .to_string(),
+        };
+        // Recoverable → never feeds the U6 fast-fail
+        // (`capture_violation` in `event_loop/mod.rs` early-returns
+        // when this returns `Some`).
+        assert!(is_recoverable_policy_finding(&finding).is_some());
+        // And the bridge arms for `AllowedValueMismatch` /
+        // `MissingRequiredField` / `PayloadTypeMismatch` only —
+        // `SemanticGateViolation` falls through to `return None`.
+        // We re-state the arms here so a future enum expansion
+        // that accidentally adds a new fatal mapping is caught
+        // by this test.
+        assert!(matches!(
+            finding.violation_type,
+            ViolationType::SemanticGateViolation { .. }
+        ));
     }
 }

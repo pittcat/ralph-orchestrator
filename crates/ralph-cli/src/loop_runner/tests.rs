@@ -1,7 +1,7 @@
 use super::*;
 use crate::test_support::CwdGuard;
-use ralph_core::HatRegistry;
 use ralph_core::planning_session::{ConversationEntry, ConversationType};
+use ralph_core::HatRegistry;
 use ralph_proto::{Hat, Topic};
 use std::ffi::OsStr;
 use std::sync::Arc;
@@ -2542,16 +2542,12 @@ exit 0"#
             .collect::<Vec<_>>(),
         vec![1, 2, 3]
     );
-    assert!(
-        telemetry_entries
-            .iter()
-            .all(|entry| entry.retry_max_attempts == 4)
-    );
-    assert!(
-        telemetry_entries
-            .iter()
-            .all(|entry| entry.suspend_mode == HookSuspendMode::RetryBackoff)
-    );
+    assert!(telemetry_entries
+        .iter()
+        .all(|entry| entry.retry_max_attempts == 4));
+    assert!(telemetry_entries
+        .iter()
+        .all(|entry| entry.suspend_mode == HookSuspendMode::RetryBackoff));
     assert_eq!(
         telemetry_entries
             .iter()
@@ -2819,16 +2815,12 @@ exit 0"#
             .collect::<Vec<_>>(),
         vec![1, 2]
     );
-    assert!(
-        telemetry_entries
-            .iter()
-            .all(|entry| entry.retry_max_attempts == 2)
-    );
-    assert!(
-        telemetry_entries
-            .iter()
-            .all(|entry| entry.suspend_mode == HookSuspendMode::WaitThenRetry)
-    );
+    assert!(telemetry_entries
+        .iter()
+        .all(|entry| entry.retry_max_attempts == 2));
+    assert!(telemetry_entries
+        .iter()
+        .all(|entry| entry.suspend_mode == HookSuspendMode::WaitThenRetry));
     assert_eq!(
         telemetry_entries
             .iter()
@@ -7990,13 +7982,8 @@ hats:
     // Register a wave obligation for review-coordinator on the
     // review.wave.ready topic. The gate must back off and let
     // the wave workers report back.
-    let record = FlowLifecycleRecord::new(
-        "wave-1",
-        "review-coordinator",
-        "review.wave.ready",
-        7,
-    )
-    .with_timeouts(60, 1800);
+    let record = FlowLifecycleRecord::new("wave-1", "review-coordinator", "review.wave.ready", 7)
+        .with_timeouts(60, 1800);
     // Use a fresh registry whose record is mid-flight (WorkersActive)
     // so the gate sees an active obligation.
     let mut registry = FlowLifecycleRegistry::new();
@@ -8020,8 +8007,19 @@ hats:
     );
     // Pin the registry state explicitly so a refactor that flips the
     // return value without touching the registry still fails.
-    assert!(event_loop.state().flow_lifecycle.is_obligation_pending("wave-1"));
-    assert_eq!(event_loop.state().flow_lifecycle.get("wave-1").unwrap().phase, FlowPhase::WorkersActive);
+    assert!(event_loop
+        .state()
+        .flow_lifecycle
+        .is_obligation_pending("wave-1"));
+    assert_eq!(
+        event_loop
+            .state()
+            .flow_lifecycle
+            .get("wave-1")
+            .unwrap()
+            .phase,
+        FlowPhase::WorkersActive
+    );
 }
 
 #[test]
@@ -8046,13 +8044,8 @@ hats:
 
     let mut registry = FlowLifecycleRegistry::new();
     registry.register(
-        FlowLifecycleRecord::new(
-            "wave-1",
-            "review-coordinator",
-            "review.wave.ready",
-            7,
-        )
-        .with_timeouts(60, 1800),
+        FlowLifecycleRecord::new("wave-1", "review-coordinator", "review.wave.ready", 7)
+            .with_timeouts(60, 1800),
     );
     registry
         .transition("wave-1", FlowPhase::Spawning, 1, None, None)
@@ -9612,11 +9605,11 @@ fn u4_handle_execution_contract_rejections_writes_envelope_for_safe_target() {
     // U4: a rejected contract event with a safe retry target writes
     // a recovery envelope with `safe_target = true` and
     // `target_hat = <retry target>`.
-    use ralph_core::ProcessedEvents;
     use ralph_core::diagnosis::{DiagnosisSeverity, DiagnosisSource};
     use ralph_core::execution_contract::{
         ExecutionContractFinding, ExecutionContractViolationKind,
     };
+    use ralph_core::ProcessedEvents;
 
     let (_temp, workspace) = u4_workspace();
     let diagnostics = ralph_core::diagnostics::DiagnosticsCollector::with_enabled(&workspace, true)
@@ -9735,12 +9728,12 @@ fn u4_handle_execution_contract_rejections_writes_envelope_when_no_safe_target()
     // not be honored) and a "failed-closed" / "retry budget exhausted"
     // note.  Pre-2026-06-07, this test asserted the no-task-resume-on-bus
     // case; normal publication is owned by EventLoop.
-    use ralph_core::ProcessedEvents;
-    use ralph_core::U2_REJECTION_RETRY_LIMIT;
     use ralph_core::diagnosis::DiagnosisSource;
     use ralph_core::execution_contract::{
         ExecutionContractFinding, ExecutionContractViolationKind,
     };
+    use ralph_core::ProcessedEvents;
+    use ralph_core::U2_REJECTION_RETRY_LIMIT;
 
     let (_temp, workspace) = u4_workspace();
     let diagnostics = ralph_core::diagnostics::DiagnosticsCollector::with_enabled(&workspace, true)
@@ -11960,5 +11953,134 @@ fn test_adv2_hat_spoofing_omitted_source_rejected_at_merge_layer() {
         "ADV-2 omitted-source: event with source=None must be dropped; got {} lines: {:?}",
         lines.len(),
         lines
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 003 plan U5 / R-F5: last_reviewed_sha wave-closed gate integration tests
+// ──────────────────────────────────────────────────────────────────────
+//
+// `last_reviewed_sha` persistence must be gated by
+// `ReviewStepTracker::is_wave_closed`. The agent writes this SHA to
+// `context.md` after review-coordinator emits a terminal; the guard
+// prevents DEC-002 empty_diff fast-paths from using a premature SHA
+// as fuel when the wave is still open (4/11 dimensions scenario).
+
+#[test]
+fn test_u5_r5_last_reviewed_sha_written_when_wave_fully_closed_and_passed() {
+    use ralph_core::event_loop::review_step_state::ReviewStepTracker;
+    use ralph_core::Event as JsonlEvent;
+
+    // Happy path: wave fully closed + review.passed → SHA write allowed.
+    let mut tracker = ReviewStepTracker::default();
+
+    let wave = JsonlEvent {
+        topic: "review.wave.ready".to_string(),
+        payload: Some(
+            r#"{"plan_name":"u5-plan","task_id":"t1","task_key":"k1","step":"1","dimension":"sec"}"#
+                .to_string(),
+        ),
+        ts: String::new(),
+        hat: Some("review-coordinator".to_string()),
+        triggered: None,
+        source: None,
+        wave_id: Some("w-1".to_string()),
+        wave_index: None,
+        wave_total: Some(2),
+    };
+    tracker.observe_accepted(&wave);
+
+    // All dimensions received.
+    for dim in ["sec", "rel"] {
+        let mut d = wave.clone();
+        d.topic = "review.dimension.done".to_string();
+        d.hat = Some("dimension-reviewer".to_string());
+        d.payload = Some(format!(
+            r#"{{"plan_name":"u5-plan","task_id":"t1","task_key":"k1","step":"1","dimension":"{dim}","findings_count":0,"findings_file":"f.json"}}"#
+        ));
+        tracker.observe_accepted(&d);
+    }
+
+    // Verdict terminal.
+    let passed = JsonlEvent {
+        topic: "review.passed".to_string(),
+        payload: Some(
+            r#"{"plan_name":"u5-plan","task_id":"t1","task_key":"k1","step":"1","findings_count":0,"fix_round":0,"verdict":"pass","skip_reason":"empty_diff"}"#
+                .to_string(),
+        ),
+        ts: String::new(),
+        hat: Some("review-synthesizer".to_string()),
+        triggered: None,
+        source: None,
+        wave_id: None,
+        wave_index: None,
+        wave_total: None,
+    };
+    tracker.observe_accepted(&passed);
+
+    assert!(
+        tracker.is_wave_closed("u5-plan", "t1", "1"),
+        "U5: happy path — wave fully closed + verdict seen → SHA write allowed"
+    );
+}
+
+#[test]
+fn test_u5_r5_last_reviewed_sha_blocked_when_wave_open_4_of_11() {
+    use ralph_core::event_loop::review_step_state::ReviewStepTracker;
+    use ralph_core::Event as JsonlEvent;
+
+    // Error path: wave ready + only 4/11 dimensions → SHA write MUST be blocked.
+    // This is the zippy-sparrow stall scenario: a premature SHA would let
+    // DEC-002 empty_diff claim an empty review when in fact 7 dimensions
+    // never received.
+    let mut tracker = ReviewStepTracker::default();
+
+    let wave = JsonlEvent {
+        topic: "review.wave.ready".to_string(),
+        payload: Some(
+            r#"{"plan_name":"zippy-plan","task_id":"t-4of11","task_key":"k-4of11","step":"1","dimension":"sec"}"#
+                .to_string(),
+        ),
+        ts: String::new(),
+        hat: Some("review-coordinator".to_string()),
+        triggered: None,
+        source: None,
+        wave_id: Some("w-stall".to_string()),
+        wave_index: None,
+        wave_total: Some(11),
+    };
+    tracker.observe_accepted(&wave);
+
+    // Only 4 unique dimensions received.
+    for dim in ["sec", "rel", "perf", "a11y"] {
+        let mut d = wave.clone();
+        d.topic = "review.dimension.done".to_string();
+        d.hat = Some("dimension-reviewer".to_string());
+        d.payload = Some(format!(
+            r#"{{"plan_name":"zippy-plan","task_id":"t-4of11","task_key":"k-4of11","step":"1","dimension":"{dim}","findings_count":0,"findings_file":"f.json"}}"#
+        ));
+        tracker.observe_accepted(&d);
+    }
+
+    assert!(
+        !tracker.is_wave_closed("zippy-plan", "t-4of11", "1"),
+        "U5: error path — 4/11 dimensions, wave open → SHA write MUST be blocked \
+         (this kills DEC-002 empty_diff fuel)"
+    );
+}
+
+#[test]
+fn test_u5_r5_last_reviewed_sha_written_for_real_empty_diff() {
+    use ralph_core::event_loop::review_step_state::ReviewStepTracker;
+
+    // Regression: real empty diff (no wave, no commit, just verdict)
+    // → SHA write is safe. The `is_wave_closed` gate returns true for
+    // steps with no tracker entry, which is the correct behavior for
+    // empty_diff fast-path (the DEC-002 attack vector is only when a
+    // wave IS open but verdict is being emitted prematurely).
+    let tracker = ReviewStepTracker::default();
+    assert!(
+        tracker.is_wave_closed("u5-plan", "never-touched", "1"),
+        "U5: regression — step with no wave ever opened, empty_diff is safe"
     );
 }
