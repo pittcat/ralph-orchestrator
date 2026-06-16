@@ -235,3 +235,21 @@ report.done:
     # manager-decision flag.
     - awaiting_decision
   payload: json_object
+
+# 2026-06-16-001 U2: synthetic record emitted by the wave dispatcher
+# when a dimension-reviewer worker fails or times out. Attribution is
+# `review-synthesizer` (the wave-result aggregator); see also
+# `presets/en/ce-executor-isolated.yml` `review-synthesizer.publishes`.
+wave.worker.failed:
+  required_fields:
+    - reason
+    - wave_id
+    - wave_index
+  payload: json_object
+
+# NOTE: `task.resume`, `loop.stalled`, `human.guidance` schemas are
+# added in U3/U5 (see plan 2026-06-16-001). The runtime emits these
+# topics via the U3 freshness filter and the U5 progress-steward
+# hat, and the SSOT/inline schema entries will be added together
+# with the corresponding hat subscriptions to keep the preset
+# contract lint green.

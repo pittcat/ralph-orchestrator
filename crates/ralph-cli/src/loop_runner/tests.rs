@@ -5322,6 +5322,8 @@ fn assert_single_failure_with_synthetic_events_marked(
         &merged_events_path,
         &["review.done".to_string(), "review.audit".to_string()],
         "reviewer",
+        // 2026-06-16-001 U2: tests use the same default.
+        None,
     )
     .expect("merge wave failure results");
 
@@ -5332,12 +5334,27 @@ fn assert_single_failure_with_synthetic_events_marked(
         .collect();
 
     assert_eq!(records.len(), 3, "unexpected merged records: {records:?}");
+    // 2026-06-16-001 U2: the synthetic `wave.worker.failed` payload is
+    // a JSON object `{reason, wave_id, wave_index, error}` instead of a
+    // free-form string. The legacy string check (`payload.contains(...)`)
+    // is replaced with structured-field checks. The `error` substring
+    // remains a useful correlation marker for downstream log scrapers.
     assert!(records.iter().any(|record| {
         record["topic"] == "wave.worker.failed"
-            && record["payload"]
-                .as_str()
-                .is_some_and(|payload| payload.contains(expected_error))
+            && record["hat"] == "review-synthesizer"
+            && record["source"] == "review-synthesizer"
             && record["wave_index"] == 0
+            // The JSONL `payload` field is a string carrying the
+            // serialized JSON object. Parse it before asserting on
+            // the structured fields.
+            && record["payload"].as_str()
+                .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+                .and_then(|obj| obj.get("error").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                .is_some_and(|err| err.contains(expected_error))
+            && record["payload"].as_str()
+                .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+                .and_then(|obj| obj.get("reason").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                .is_some_and(|reason| reason.starts_with("worker_failed:"))
     }));
     for topic in ["review.done", "review.audit"] {
         assert!(records.iter().any(|record| {
@@ -5381,6 +5398,8 @@ fn assert_partial_timeout_events_visible_marked(
         &merged_events_path,
         &["review.done".to_string()],
         "reviewer",
+        // 2026-06-16-001 U2: tests use the same default.
+        None,
     )
     .expect("merge partial-timeout results");
 
@@ -6862,6 +6881,8 @@ async fn test_run_wave_worker_acp_timeout_with_partial_events_keeps_events_visib
         &merged_events_path,
         &["review.done".to_string()],
         "reviewer",
+        // 2026-06-16-001 U2: tests use the same default.
+        None,
     )
     .expect("merge partial ACP results");
 
@@ -7024,6 +7045,8 @@ fn test_merge_wave_results_to_events_file_synthesizes_failure_events() {
         &events_file,
         &["review.done".to_string(), "review.audit".to_string()],
         "reviewer",
+        // 2026-06-16-001 U2: tests use the same default.
+        None,
     )
     .expect("merge wave results");
 
@@ -10181,6 +10204,8 @@ fn u3_wave_merge_stamps_wave_total_on_every_record() {
         &events_path,
         &["review.dimension.done".into()],
         "reviewer",
+        // 2026-06-16-001 U2: tests use the same default.
+        None,
     )
     .expect("merge must succeed");
 
@@ -10255,6 +10280,8 @@ fn u3_wave_merge_emits_synthetic_events_on_failure_with_wave_total() {
         &events_path,
         &["review.dimension.done".into()],
         "reviewer",
+        // 2026-06-16-001 U2: tests use the same default.
+        None,
     )
     .expect("merge must succeed");
 
@@ -10321,6 +10348,8 @@ fn u3_wave_merge_handles_duplicate_indexes_without_panicking() {
         &events_path,
         &["review.dimension.done".into()],
         "reviewer",
+        // 2026-06-16-001 U2: tests use the same default.
+        None,
     )
     .expect("merge must succeed");
     let raw = std::fs::read_to_string(&events_path).unwrap();
@@ -11184,6 +11213,8 @@ async fn u3_wave_dispatch_merge_activates_wait_for_all_aggregator() {
         &events_file,
         &wave.hat_config.publishes,
         wave.target_hat.as_str(),
+        // 2026-06-16-001 U2: tests use the same default.
+        None,
     )
     .expect("merge must succeed");
 
@@ -11369,6 +11400,8 @@ async fn u3_partial_wave_does_not_activate_aggregator_until_full_set() {
         &events_file,
         &wave.hat_config.publishes,
         wave.target_hat.as_str(),
+        // 2026-06-16-001 U2: tests use the same default.
+        None,
     )
     .expect("partial merge must succeed");
 
@@ -11426,6 +11459,8 @@ async fn u3_partial_wave_does_not_activate_aggregator_until_full_set() {
         &events_file,
         &wave.hat_config.publishes,
         wave.target_hat.as_str(),
+        // 2026-06-16-001 U2: tests use the same default.
+        None,
     )
     .expect("full merge must succeed");
     event_loop2.initialize("u3-b init full");
@@ -11545,6 +11580,8 @@ async fn u3_worker_failure_emits_synthetic_result_for_aggregator() {
         &events_file,
         &wave.hat_config.publishes,
         wave.target_hat.as_str(),
+        // 2026-06-16-001 U2: tests use the same default.
+        None,
     )
     .expect("merge must succeed");
 
@@ -11716,6 +11753,8 @@ async fn u3_two_independent_waves_route_to_separate_aggregations() {
         &events_file,
         &wave_a.hat_config.publishes,
         wave_a.target_hat.as_str(),
+        // 2026-06-16-001 U2: tests use the same default.
+        None,
     )
     .expect("merge A");
     merge_wave_results_to_events_file(
@@ -11723,6 +11762,8 @@ async fn u3_two_independent_waves_route_to_separate_aggregations() {
         &events_file,
         &wave_b.hat_config.publishes,
         wave_b.target_hat.as_str(),
+        // 2026-06-16-001 U2: tests use the same default.
+        None,
     )
     .expect("merge B");
 
@@ -11889,6 +11930,8 @@ fn test_adv2_hat_spoofing_rejected_at_merge_layer() {
         &events_path,
         &["review.dimension.done".to_string()],
         "worker",
+        // 2026-06-16-001 U2: tests use the same default.
+        None,
     )
     .expect("merge must succeed (legitimate event should be admitted)");
 
@@ -11955,6 +11998,8 @@ fn test_adv2_hat_spoofing_omitted_source_rejected_at_merge_layer() {
         &events_path,
         &["review.dimension.done".to_string()],
         "worker",
+        // 2026-06-16-001 U2: tests use the same default.
+        None,
     )
     .expect("merge must succeed");
 

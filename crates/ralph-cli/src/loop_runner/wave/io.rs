@@ -236,20 +236,33 @@ pub fn read_worker_events_with_retry(path: &Path, timeout: Duration) -> Vec<ralp
 /// any record missing these fields is a bypass attempt or a stale
 /// hand-written file from a historical run.
 ///
-/// 2026-06-13-004 U1 (P0-1): every record MUST also carry `hat` (and
-/// the canonical `source` mirror) so the re-published event survives
-/// the isolated scope check in `process_parse_result`. The merge
-/// layer is the only path that sees the original worker hat identity
-/// — the worker's per-worker events file never reaches the main bus
-/// directly. If `event.source` is empty (e.g. synthetic record from a
-/// worker that failed to populate provenance), we fall back to
-/// `default_source_hat` (the wave's target hat) so the line still
-/// survives the origin guard.
+/// 2026-06-16-001 U2: synthetic `wave.worker.failed` records use
+/// `failure_source_hat` (default: `review-synthesizer`) as the
+/// provenance, NOT `default_source_hat` (the wave's target hat, e.g.
+/// `review-coordinator`). The previous behaviour labelled the synthetic
+/// record as `review-coordinator`, but `review-coordinator` does NOT
+/// declare `wave.worker.failed` in its `publishes` list, so the origin
+/// guard rejected the record and emitted a stray `task.resume` against
+/// review-coordinator — a self-inflicted stall on an already-partial
+/// wave. `review-synthesizer` is the wave-result aggregator and
+/// declares `wave.worker.failed` in its `publishes` list (see
+/// `presets/en/ce-executor-isolated.yml`), so the synthetic record
+/// now passes the origin guard and reaches the synthesizer as the
+/// intended aggregated-failure signal.
+///
+/// The synthetic payload is a JSON object (`{reason, wave_id,
+/// wave_index, error}`) instead of a free-form string, so the
+/// synthesizer and downstream diagnostic tooling can parse it
+/// uniformly. The legacy free-form string would still surface in
+/// `recovery.jsonl` and `events.jsonl`, but structured access by
+/// the synthesizer's `aggregate.wait_for_all` incomplete-wave path
+/// requires a parseable payload.
 pub fn merge_wave_results_to_events_file(
     completed: &ralph_core::CompletedWave,
     events_file: &Path,
     publish_topics: &[String],
     default_source_hat: &str,
+    failure_source_hat: Option<&str>,
 ) -> Result<()> {
     use std::io::Write;
 
@@ -336,26 +349,36 @@ pub fn merge_wave_results_to_events_file(
 
     // Also write failure events so the aggregator knows about partial results
     for failure in &completed.failures {
-        // U1: synthetic failure records use `default_source_hat` as
-        // the provenance — they are emitted by the dispatcher, not
-        // a worker, so the wave's target hat is the only safe
-        // attribution. This still survives the origin guard because
-        // `publish_topics` is constrained by the preset.
+        // 2026-06-16-001 U2: synthetic `wave.worker.failed` records
+        // attribute to `failure_source_hat` (default `review-synthesizer`)
+        // — see the function-level docstring for the rationale.
+        let failure_hat = failure_source_hat.unwrap_or("review-synthesizer");
+        let failure_payload = serde_json::json!({
+            "reason": format!("worker_failed:{}", failure.error),
+            "wave_id": completed.wave_id,
+            "wave_index": failure.index,
+            "error": failure.error,
+        })
+        .to_string();
         let record = serde_json::json!({
             "topic": "wave.worker.failed",
-            "payload": format!("Worker {} failed: {}", failure.index, failure.error),
+            "payload": failure_payload,
             "ts": ts,
             "wave_id": completed.wave_id,
             "wave_index": failure.index,
             "wave_total": completed.wave_total,
-            "hat": default_source_hat,
-            "source": default_source_hat,
+            "hat": failure_hat,
+            "source": failure_hat,
         });
         buf.push_str(&serde_json::to_string(&record)?);
         buf.push('\n');
 
         // Emit synthetic events on the hat's publish topics so downstream
-        // aggregators can still trigger even when workers fail/timeout
+        // aggregators can still trigger even when workers fail/timeout.
+        // These follow-ups still use `default_source_hat` because they
+        // are direct re-publications of the target hat's declared
+        // publish topics (e.g. `review.dimension.done`), not the
+        // dispatcher-internal `wave.worker.failed`.
         for topic in publish_topics {
             let record = serde_json::json!({
                 "topic": topic,

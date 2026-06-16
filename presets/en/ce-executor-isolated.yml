@@ -295,6 +295,19 @@ event_loop:
         # manager-decision flag.
         required_fields: [report_path, awaiting_decision]
         payload: json_object
+      # 2026-06-16-001 U2: synthetic `wave.worker.failed` is emitted
+      # by the wave dispatcher on behalf of `review-synthesizer`
+      # (the wave-result aggregator). The schema mirrors the SSOT
+      # entry in `presets/schemas/ce-executor-isolated.yml` and is
+      # kept in lockstep here until the SSOT merge is the sole
+      # source of truth.
+      wave.worker.failed:
+        required_fields: [reason, wave_id, wave_index]
+        payload: json_object
+      # NOTE: `task.resume`, `loop.stalled`, `human.guidance` schemas
+      # are added in U3/U5 (see plan 2026-06-16-001) together with
+      # the `progress-steward` hat subscriptions, to keep the
+      # preset contract lint green.
 
 cli:
   backend: "claude"
@@ -1196,12 +1209,19 @@ hats:
   review-synthesizer:
     name: "🧩 Review Synthesizer"
     description: "Merges all dimension findings, deduplicates, applies quality gates, and routes."
-    triggers: ["review.dimension.done"]
+    triggers: ["review.dimension.done", "wave.worker.failed"]
     # NOTE: `plan.blocked` MUST be in publishes — the All-Dimensions-Timeout
     # 守则 below requires it when `wait_for_all` times out. The previous
     # omission caused the timeout fallback to be silently rejected by the
     # origin guard (P0-B fix on 2026-06-10).
-    publishes: ["review.passed", "review.failed", "review.complete", "plan.blocked"]
+    # 2026-06-16-001 U2: `wave.worker.failed` is in publishes because
+    # the dispatcher emits it as a synthetic provenance-bearing record
+    # on `review-synthesizer`'s behalf (synthesizer is the consumer of
+    # the wave result stream; the synthetic record is part of that
+    # stream). Without this entry, the origin guard would reject the
+    # merged record and inject an unsolicited `task.resume` into
+    # review-coordinator, restarting an already-partial wave.
+    publishes: ["review.passed", "review.failed", "review.complete", "plan.blocked", "wave.worker.failed"]
     terminal_events: ["review.passed", "review.failed", "review.complete"]
     aggregate:
       mode: wait_for_all

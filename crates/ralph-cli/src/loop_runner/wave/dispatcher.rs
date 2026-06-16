@@ -508,6 +508,11 @@ pub async fn handle_wave_events(
                     &main_events_file,
                     &detected.hat_config.publishes,
                     detected.target_hat.as_str(),
+                    // 2026-06-16-001 U2: synthetic `wave.worker.failed`
+                    // records attribute to `review-synthesizer` (the
+                    // wave-result consumer) instead of the wave target
+                    // hat. Pass `None` to use the default.
+                    None,
                 ) {
                     warn!(error = %e, "Failed to merge wave results to events file");
                 }
@@ -2993,6 +2998,8 @@ hats: {}
             &events_file,
             &["review.dimension.done".to_string()],
             "dimension-reviewer",
+            // 2026-06-16-001 U2: tests use the same default.
+            None,
         )
         .unwrap();
 
