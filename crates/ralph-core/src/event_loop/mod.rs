@@ -31,9 +31,9 @@ use crate::event_parser::{
     parse_backpressure_json, parse_review_json,
 };
 use crate::event_policy::{
-    PolicyDecision, PolicyFinding, PolicyRuntimeState, check_completion_guard,
-    check_completion_honored, check_topic_deny_rules, is_recoverable_policy_finding,
-    validate_event,
+    DuplicateWorkDoneHint, PolicyDecision, PolicyFinding, PolicyRuntimeState, ViolationType,
+    check_completion_guard, check_completion_honored, check_topic_deny_rules,
+    is_recoverable_policy_finding, validate_event,
 };
 use crate::event_reader::{Event as JsonlEvent, EventReader};
 use crate::execution_contract::{
@@ -1121,7 +1121,30 @@ fn apply_event_policy_validation(
                 }
             }
             PolicyDecision::RejectWithResume(finding) => {
+                let mut finding = finding;
                 let reason_class = is_recoverable_policy_finding(&finding);
+                // U4 (2026-06-17-003 plan): when the rejection is a
+                // `DuplicateWorkDone` and the event carries a
+                // `wave_id` (wave is still open), upgrade the hint
+                // from `DuplicateSameStep` to `DuplicateStallBypass`
+                // so the recovery message warns the agent against
+                // bypassing a stalled review cycle. Also include
+                // the wave_id in the message for diagnostics.
+                if let ViolationType::DuplicateWorkDone { ref mut hint, ref key } =
+                    finding.violation_type
+                {
+                    if event.wave_id.is_some() {
+                        *hint = DuplicateWorkDoneHint::DuplicateStallBypass;
+                        finding.message = format!(
+                            "duplicate_stall_bypass: work.done for key '{key}' was already accepted \
+                             but wave_id={:?} is still open. The agent is attempting to re-emit \
+                             work.done to bypass the stalled review cycle. Wait for review-synthesizer \
+                             terminal (review.passed or review.complete) or plan.blocked before \
+                             re-sending work.done.",
+                            event.wave_id
+                        );
+                    }
+                }
                 if reason_class.is_none() {
                     // Non-recoverable: capture the violation
                     // for the U6 fast-fail path.  We still
@@ -1269,7 +1292,8 @@ fn finding_to_payload_contract_violation(
         | ViolationType::DuplicateTerminalEvent { .. }
         | ViolationType::BusinessEventAfterCompletion { .. }
         | ViolationType::InvalidTopicFormat { .. }
-        | ViolationType::TopicDenied { .. } => return None,
+        | ViolationType::TopicDenied { .. }
+        | ViolationType::DuplicateWorkDone { .. } => return None,
     };
     let fix_hint = match kind {
         PayloadContractViolationKind::MissingRequiredField => format!(
@@ -6629,6 +6653,53 @@ impl EventLoop {
             // `ReviewStepTracker::check_semantic_gates` rule at
             // `review_step_state.rs:174-191`.
             self.update_bootstrap_flags_from_accepted(&policy_result.events);
+
+            // U4 (2026-06-17-003 plan): maintain the per-loop
+            // `work.done` dedup set. For each policy-accepted
+            // event, either (a) record the dedup key (for
+            // `work.done`) or (b) prune the step bucket (for
+            // step-boundary events `queue.advance`, `review.failed`,
+            // `fix.applied`). The set lives in
+            // `LoopState::work_done_seen_tasks`; the in-batch
+            // mirror lives in `PolicyRuntimeState::work_done_seen_keys`
+            // and is consulted by `validate_event_with_hat` for
+            // per-batch dedup.
+            for accepted in &policy_result.events {
+                match accepted.topic.as_str() {
+                    "work.done" => {
+                        if let Some(p) = accepted.payload.as_deref()
+                            && let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p)
+                            && let (Some(pn), Some(st), Some(ti)) = (
+                                obj.get("plan_name").and_then(|v| v.as_str()),
+                                obj.get("step").and_then(|v| v.as_str()),
+                                obj.get("task_id").and_then(|v| v.as_str()),
+                            )
+                        {
+                            let key = LoopState::work_done_dedup_key(pn, st, ti);
+                            self.state.work_done_seen_tasks.insert(key);
+                        }
+                    }
+                    "queue.advance" | "review.failed" | "fix.applied" => {
+                        if let Some(p) = accepted.payload.as_deref()
+                            && let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p)
+                        {
+                            let plan_name = obj
+                                .get("plan_name")
+                                .and_then(|v| v.as_str())
+                                .map(String::from);
+                            let step = obj
+                                .get("completed_step")
+                                .or_else(|| obj.get("step"))
+                                .and_then(|v| v.as_str())
+                                .map(String::from);
+                            if let (Some(pn), Some(st)) = (plan_name, step) {
+                                self.state.prune_work_done_bucket(&pn, &st);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
 
             events = policy_result.events;
 

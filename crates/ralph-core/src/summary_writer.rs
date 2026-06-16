@@ -537,6 +537,8 @@ mod tests {
             bootstrap_failed: false,
             // Unit 2 (2026-06-16-002 plan) recoverable budget buffer.
             recoverable_exhaustion_buffer: Vec::new(),
+            // U4 (2026-06-17-003 plan) work.done dedup set.
+            work_done_seen_tasks: std::collections::HashSet::new(),
         }
     }
 

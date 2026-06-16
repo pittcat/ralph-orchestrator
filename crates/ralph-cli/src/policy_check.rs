@@ -386,6 +386,9 @@ fn finding_record(finding: &ralph_core::PolicyFinding) -> ValidationError {
             (String::new(), "invalid_topic_format".to_string())
         }
         ViolationType::TopicDenied { .. } => (String::new(), "topic_denied".to_string()),
+        ViolationType::DuplicateWorkDone { .. } => {
+            (String::new(), "duplicate_work_done".to_string())
+        }
     };
     ValidationError {
         payload_index: 0, // caller (single vs batch) fills this in
