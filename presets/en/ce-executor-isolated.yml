@@ -916,8 +916,12 @@ hats:
 
       ### Persist `last_reviewed_sha` After Terminal Event
       **Why this exists:** `last_reviewed_sha` is the incremental diff base for the NEXT review-coordinator pass. The `context.md` key-value header is the chosen persistence layer (see also `start_sha` written by Coordinator on `work.start`, and `current_fix_round` in `fix-log.md`).
-      **When to run:** immediately after emitting EITHER `review.wave.ready` OR `review.passed`. Both paths mark the current HEAD as reviewed. The empty-diff `review.passed` path matters as much as the wave path: skipping a wave on empty diff does NOT mean the HEAD should be re-reviewed next time. Without this update, the next wave's `last_reviewed_sha` would point too far back and double-cover code.
+      **When to run (R-F5 / 003-U5 — wave-closed gate):** the persist step is allowed ONLY when at least one of these is true:
+      - You are emitting a verdict terminal event: `review.passed`, `review.complete`, or `review.failed`. These are the only events that legally close a review cycle.
+      - The review wave for this step is FULLY closed: ALL expected dimensions have arrived (received == wave_total) and `open_wave_id` is cleared by the tracker. In agent-side terms: you have observed `review.dimension.done` for every dimension listed in your `review.wave.ready` payload, AND the next event you would emit is a terminal (synthesizer path).
+      **When NOT to run:** if you are about to emit or have just emitted `review.wave.ready` but the wave is still open (e.g. only 4/11 dimensions received), DO NOT write `last_reviewed_sha` yet. This kills the DEC-002 empty_diff fast-path that uses a premature SHA as fuel — a half-written SHA would let the next coordinator pass claim an empty diff when in fact the wave never closed. If the wave stalls, let the mechanism layer emit `plan.blocked`; do not pre-empt it by writing SHA.
       **How to write (single atomic write, no Read+Write race, with U8 read-back):**
+      - First verify the wave-closed gate above. If not satisfied, skip this entire section.
       - Capture current HEAD: `current_sha=$(git rev-parse HEAD)`
       - Resolve the plan's `context.md` path (from `plan_name` in the trigger payload).
       - If the file already has a `last_reviewed_sha:` line, replace it in place using a single-fd sed (avoids the TOCTOU race where a concurrent writer lands between two operations): `sed -i 's|^last_reviewed_sha:.*|last_reviewed_sha: '"$current_sha"'|' <context_md_path>`. Do NOT append a duplicate line.
@@ -931,7 +935,7 @@ hats:
         materializes a backup file in the workspace. Use the in-place form
         above (no `.bak` suffix) so the workspace stays clean.
       - The key-value header format mirrors `start_sha` — agents that grep `context.md` for the field expect a single, well-formed line.
-      **If the write or the read-back fails:** publish `work.failed` and
+      **If the wave-closed gate fails (wave still open) or the write/read-back fails:** publish `work.failed` and
       STOP. Do not emit `review.passed` / `review.complete` / wave follow-ups
       on top of an unverified SHA — that path is what allowed the prior
       race to silently double-review. The next wave will fall back to
