@@ -116,6 +116,18 @@ pub struct Rejection {
     /// and is the value the `task.resume` event's `target` field
     /// should carry.
     pub target_hat: Option<String>,
+    /// 2026-06-16-001 U3: id of the original event that triggered
+    /// this rejection. Used by the `task.resume` freshness filter to
+    /// correlate the rejection to its source and to drop stale
+    /// rejections whose source event no longer exists in the
+    /// recovery log. Optional for backwards compatibility with
+    /// rejection paths that pre-date the TTL filter.
+    pub original_event_id: Option<String>,
+    /// 2026-06-16-001 U3: timestamp of the original event. Used to
+    /// compute the age against `task_resume_ttl_seconds`. Falls
+    /// back to the rejection creation time when the source event
+    /// had no `ts` field (legacy JSONL or synthesised records).
+    pub original_ts: Option<String>,
 }
 
 impl Rejection {
@@ -139,6 +151,10 @@ impl Rejection {
             retry_eligible: false,
             non_retryable_reason: Some(NonRetryableReason::InvalidTopicFormat),
             target_hat: None,
+            // 2026-06-16-001 U3: topic-format rejections are non-retryable
+            // by definition, so freshness metadata is informational only.
+            original_event_id: None,
+            original_ts: None,
         };
         s.retry_key = s.compute_retry_key();
         s
@@ -161,6 +177,11 @@ impl Rejection {
             retry_eligible,
             non_retryable_reason,
             target_hat: if retry_eligible { target_hat } else { None },
+            // 2026-06-16-001 U3: legacy origin-guard constructor does
+            // not capture the source event's id/ts; freshness falls
+            // back to the rejection creation time.
+            original_event_id: None,
+            original_ts: None,
         };
         s.retry_key = s.compute_retry_key();
         s
@@ -200,6 +221,12 @@ impl Rejection {
             retry_eligible,
             non_retryable_reason,
             target_hat,
+            // 2026-06-16-001 U3: execution-contract rejections do
+            // not yet capture source event metadata — the freshness
+            // filter treats them as fresh until the contract layer
+            // is updated in a follow-up.
+            original_event_id: None,
+            original_ts: None,
         };
         s.retry_key = s.compute_retry_key();
         s
@@ -301,6 +328,13 @@ pub fn rejection_with_key(
             Some(NonRetryableReason::UnknownHat)
         },
         target_hat,
+        // 2026-06-16-001 U3: `rejection_with_key` is the legacy
+        // constructor used by tests and a few ad-hoc paths. The
+        // freshness filter falls back to the rejection creation
+        // time when these fields are None, so omitting them here
+        // is safe for backwards compatibility.
+        original_event_id: None,
+        original_ts: None,
     }
 }
 

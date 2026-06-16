@@ -162,6 +162,13 @@ fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
     if !yaml.config.event_loop.is_null() {
         config.event_loop = serde_yaml::from_value(yaml.config.event_loop).unwrap();
     }
+    // 2026-06-16-001 U3: scenario fixtures use a hardcoded
+    // `2024-01-01T00:00:00Z` timestamp, which is older than the
+    // default 300s TTL. Disable the freshness filter so the
+    // fixtures continue to exercise the workflow-guard path without
+    // being classified as stale rejections. The U3 TTL behavior
+    // is covered by `event_loop/tests/task_resume_ttl.rs`.
+    config.event_loop.task_resume_ttl_seconds = Some(0);
 
     let context = LoopContext::primary(temp_dir.path().to_path_buf());
 

@@ -132,7 +132,15 @@ hats:
 fn make_event_loop(workspace: &Path) -> (EventLoop, std::path::PathBuf) {
     let config = build_complex_config(workspace);
     let ctx = crate::loop_context::LoopContext::primary(workspace.to_path_buf());
-    let event_loop = EventLoop::with_context(config, ctx);
+    let mut event_loop = EventLoop::with_context(config, ctx);
+    // 2026-06-16-001 U3: the complex-regression fixtures use a
+    // hardcoded `2024-01-01T00:00:00Z` timestamp, which is older than
+    // the default 300s TTL. Disable the freshness filter so the
+    // fixture-driven tests continue to exercise the
+    // targeted-`task.resume` recovery path without being classified as
+    // stale rejections. The U3 TTL behavior is covered by
+    // `event_loop/tests/task_resume_ttl.rs`.
+    event_loop.config.event_loop.task_resume_ttl_seconds = Some(0);
     let events_path = workspace.join(".ralph/events.jsonl");
     fs::create_dir_all(workspace.join(".ralph")).unwrap();
     (event_loop, events_path)

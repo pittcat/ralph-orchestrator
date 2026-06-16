@@ -244,6 +244,19 @@ pub struct EventLoopConfig {
     /// Defaults to `false`; `ce-executor-isolated` opts in.
     #[serde(default)]
     pub enforce_current_unit: bool,
+
+    /// 2026-06-16-001 U3: TTL for `task.resume` injection. Rejections
+    /// whose source event is older than this TTL are silently
+    /// dropped — the rejection would otherwise re-activate a task
+    /// that has since been closed or whose context has drifted past
+    /// the recovery window. The default is 300s; operators can
+    /// override per-preset or in `ralph.yml`. A value of `0`
+    /// disables the freshness filter (always admit). U5 also reads
+    /// this TTL when routing rejections to the `progress-steward`
+    /// hat (the steward itself is exempt from re-routing into
+    /// itself).
+    #[serde(default)]
+    pub task_resume_ttl_seconds: Option<u64>,
 }
 
 impl Default for EventLoopConfig {
@@ -275,6 +288,12 @@ impl Default for EventLoopConfig {
             workflow_contract: None,
             ephemeral_isolation: false,
             enforce_current_unit: false,
+            // 2026-06-16-001 U3: 300s default TTL for `task.resume`
+            // freshness. Rejections older than this are dropped to
+            // prevent stale recovery signals from re-activating a
+            // task that has since been closed. Operators can
+            // override per-preset or in `ralph.yml`.
+            task_resume_ttl_seconds: Some(300),
         }
     }
 }

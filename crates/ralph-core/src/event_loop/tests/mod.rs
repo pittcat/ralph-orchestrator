@@ -41,6 +41,7 @@ mod scratchpad;
 mod stale_breaker;
 mod state_machine;
 mod structured_evidence;
+mod task_resume_ttl;
 mod termination;
 mod text_fallback;
 mod topic_format_recovery;

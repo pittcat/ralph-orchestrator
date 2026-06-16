@@ -6776,7 +6776,55 @@ impl EventLoop {
                             retry_eligible: true,
                             non_retryable_reason: None,
                             target_hat: Some(isolated_hat.to_string()),
+                            // 2026-06-16-001 U3: capture the source
+                            // event's timestamp so the freshness
+                            // filter (U3 TTL) can drop stale
+                            // rejections on the next call. The
+                            // `event_reader::Event` struct does not
+                            // carry a stable `id` field — the JSONL
+                            // line offset or `ts` is the closest
+                            // available correlation key, so
+                            // `original_event_id` stays None and
+                            // `original_ts` carries the event
+                            // timestamp.
+                            original_event_id: None,
+                            original_ts: Some(event.ts.clone()),
                         };
+                        // 2026-06-16-001 U3: freshness filter — drop
+                        // the rejection (and the synthetic
+                        // `task.resume` it would produce) if the
+                        // source event's timestamp is older than
+                        // `task_resume_ttl_seconds`. The default is
+                        // 300s; operators can override per-preset.
+                        // We treat missing/unparseable timestamps
+                        // as "fresh" so legacy JSONL that lacks a
+                        // recoverable ts still flows through the
+                        // existing recovery path.
+                        let ttl_seconds = self
+                            .config
+                            .event_loop
+                            .task_resume_ttl_seconds
+                            .unwrap_or(300);
+                        if is_rejection_stale(&rejection, ttl_seconds) {
+                            warn!(
+                                source_event_ts = ?rejection.original_ts,
+                                ttl_seconds,
+                                hat = %isolated_hat.as_str(),
+                                topic = %event.topic,
+                                "isolated mode: stale rejection — dropping task.resume"
+                            );
+                            self.bus.publish(Event::new(
+                                "event.isolation.boundary_violation",
+                                format!(
+                                    "{{\"hat\":\"{}\",\"topic\":\"{}\",\"violation\":\"Isolated mode: stale rejection for '{}' (TTL={}s) — dropping task.resume\"}}",
+                                    isolated_hat.as_str(),
+                                    event.topic,
+                                    event.topic,
+                                    ttl_seconds
+                                ),
+                            ));
+                            continue;
+                        }
                         // R5 (2026-06-14-003 plan): carry the wave
                         // metadata (when present) so the resumed hat
                         // can recover the wave context.  Plan AC7
@@ -8898,4 +8946,35 @@ fn termination_status_text(reason: &TerminationReason) -> &'static str {
             "Recoverable-payload budget exhausted - loop terminated."
         }
     }
+}
+
+/// 2026-06-16-001 U3: freshness filter for `task.resume` injection.
+///
+/// Returns `true` when the rejection is older than `ttl_seconds` and
+/// should be dropped. The check prefers `rejection.original_ts` (the
+/// source event's timestamp) and falls back to treating the
+/// rejection as fresh.
+///
+/// Missing or unparseable timestamps are treated as "fresh" (not
+/// stale) so legacy JSONL that pre-dates the freshness filter still
+/// flows through the existing recovery path. A TTL of `0` disables
+/// the filter (always fresh) so unit tests can opt out without
+/// monkey-patching the helper.
+fn is_rejection_stale(
+    rejection: &crate::event_loop::rejection::Rejection,
+    ttl_seconds: u64,
+) -> bool {
+    if ttl_seconds == 0 {
+        return false;
+    }
+    let Some(ts_str) = rejection.original_ts.as_deref() else {
+        return false;
+    };
+    let Ok(source_dt) = chrono::DateTime::parse_from_rfc3339(ts_str) else {
+        return false;
+    };
+    let source_unix = source_dt.timestamp();
+    let now_unix = chrono::Utc::now().timestamp();
+    let age = now_unix.saturating_sub(source_unix);
+    age > ttl_seconds as i64
 }
