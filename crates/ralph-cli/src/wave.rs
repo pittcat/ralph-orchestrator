@@ -376,6 +376,38 @@ fn run_wave_precheck(
 
     let batch = validate_batch_against_config(topic, payloads, policy, events_file)?;
     if batch.is_ok() {
+        // U1 (2026-06-17-005 plan): step handoff progress-task gate
+        // precheck, batch path. For each payload on a gated topic
+        // (`queue.advance` / `plan.complete`), invoke the same
+        // `check_progress_task_alignment` the loop uses so agents
+        // running `ralph wave emit --policy-check` see
+        // `progress_task_mismatch` before write. Fail-closed on the
+        // first mismatch (mirrors batch atomicity).
+        if ralph_core::step_handoff::progress_task_gate::is_gated_topic(topic) {
+            let workspace_root = std::env::current_dir().unwrap_or_default();
+            for (idx, payload) in payloads.iter().enumerate() {
+                if let Err(err) = crate::policy_check::check_step_handoff_gate(
+                    topic,
+                    payload,
+                    &workspace_root,
+                ) {
+                    let mut errors = batch.errors.clone();
+                    errors.push(crate::policy_check::ValidationError {
+                        payload_index: idx,
+                        ..err
+                    });
+                    let failure = ValidationFailure::from_batch(
+                        topic,
+                        crate::policy_check::BatchValidation { errors },
+                    );
+                    let out_mode = match output {
+                        WaveOutputFormat::Text => OutputMode::Text,
+                        WaveOutputFormat::Json => OutputMode::Json,
+                    };
+                    return emit_policy_validation_failure(&failure, out_mode);
+                }
+            }
+        }
         return Ok(());
     }
 
