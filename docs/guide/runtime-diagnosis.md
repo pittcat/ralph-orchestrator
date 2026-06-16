@@ -103,7 +103,7 @@ telemetry:
 
 U2 的 `RecoveryDiagnosisEnvelope`（schema_version=1）是 9 个 `source` × 4 个 `severity` × 6 个 `outcome` 的笛卡尔积，外加一个稳定的 `retry_key` 用来跨迭代聚合。
 
-### 9 个 `source`（诊断源）
+### 13 个 `source`（诊断源）
 
 | source | 含义 | 典型 reason_code |
 |---|---|---|
@@ -115,8 +115,11 @@ U2 的 `RecoveryDiagnosisEnvelope`（schema_version=1）是 9 个 `source` × 4 
 | `drift_monitor` | U5 drift detector 检出指标跌破阈值 | `drift_field_completeness`, `drift_coord_join_rate`, `drift_emit_cadence` |
 | `hook_retry` | pre/post agent hook 被重试 | `hook_timeout`, `hook_nonzero` |
 | `loop_stale` | 整个 loop 跨迭代无进展 | `stale` |
+| `topic_format` | topic 不在 hat publishes / system-control 白名单（U5/R9，non-retryable） | `topic_not_allowed` |
 | `agent_doc_sync` | `ralph run` 启动时同步 managed doc blocks 失败或降级 | `sync_failed`, `sync_completed`, `sync_up_to_date` |
-| `flow_lifecycle` | wave / parallel-flow 生命周期状态转换（U2/U9） | `wave_spawn_failed`, `aggregate_timeout`, `partial_threshold`, `all_workers_reported` |
+| `wave_dispatcher` | U2（2026-06-17-001）：wave worker 的 `tokio::spawn` 或 semaphore acquire 失败，无法 materialize workers | `wave_spawn_failed` |
+| `cli_emit` | CLI `ralph emit` precheck 拒收（U1/U2，2026-06-14） | `not_in_allowlist`, `policy_check_failed` |
+| `flow_lifecycle` | wave / parallel-flow 生命周期状态转换（U1/U3/U5/U7 2026-06-17-001） | `wave_spawn_failed`, `aggregate_timeout`, `wave_timeout_drift`, `phase_transition` |
 
 ### 6 个 `outcome`（终态）
 
