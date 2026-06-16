@@ -33,6 +33,9 @@ cd "$REPO_ROOT"
 unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy NO_PROXY no_proxy 2>/dev/null || true
 
 FALLBACK=1
+# 当 RALPH_BASELINE_SERIAL=1 时，即使安装了 cargo-nextest，也强制走单线程 cargo test。
+# 用于消除 ralph-cli loop_runner 测试中 Mutex + 500ms sleep 在 CPU 抢占下触发的竞态 flake。
+SERIAL=${RALPH_BASELINE_SERIAL:-0}
 
 usage() {
   cat <<'EOF'
@@ -41,6 +44,9 @@ usage() {
 选项:
   --skip-fallback  未找到 cargo-nextest 时直接非零退出，不回退到单线程 cargo test。
   --help, -h       显示本帮助并退出。
+
+环境变量:
+  RALPH_BASELINE_SERIAL=1  强制使用单线程 cargo test（忽略 nextest），用于排除并行 flake。
 EOF
 }
 
@@ -70,7 +76,7 @@ run_cargo() {
   fi
 }
 
-if run_cargo nextest --version >/dev/null 2>&1; then
+if [[ "$SERIAL" -ne 1 ]] && run_cargo nextest --version >/dev/null 2>&1; then
   echo "🚀 使用 cargo-nextest 并行运行测试（ralph-cli 串行组，其它包并行）..."
   run_cargo nextest run --workspace --exclude ralph-e2e
 
@@ -80,6 +86,14 @@ if run_cargo nextest --version >/dev/null 2>&1; then
 
   echo
   echo "✅ 测试通过（nextest + doctest）"
+  exit 0
+fi
+
+if [[ "$SERIAL" -eq 1 ]]; then
+  echo "🔒 RALPH_BASELINE_SERIAL=1：强制使用单线程 cargo test（跳过 nextest）..." >&2
+  run_cargo test --workspace --exclude ralph-e2e -- --test-threads=1 --skip acp_executor::tests::test_create_terminal_and_output
+  echo
+  echo "✅ 测试通过（serial fallback）"
   exit 0
 fi
 

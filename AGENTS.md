@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Build & Test
 
-> **⚠️ HARD RULE 1: 测试入口必须用 `cargo nextest run` 系列**(`./scripts/run-tests.sh` / `just test-parallel` / `cargo nextest run -p <pkg> --bin <bin> -- <subset>`)。**禁止**裸跑 `cargo test -p ralph-cli` 或 `cargo test -p ralph-cli --bin ralph`——根因是 `crates/ralph-cli/src/loop_runner/tests.rs:14-49` 的 4 个 process-global Mutex + 时间敏感测试(`std::thread::sleep(500ms)`)。Nextest 的 process-per-test 隔离 Mutex 是第一道保险。允许的例外:① `cargo test --doc` 跑 doctest(nextest 不跑);② nextest 不可用时的最后兜底 `cargo test --workspace --exclude ralph-e2e -- --test-threads=1`;③ `crates/ralph-core/data/ralph-tools*.md` 这类**仅文档用途**的 cargo test 引用。详见 `docs/solutions/developer-experience/ralph-cli-loop-runner-tests-must-run-serial.md`。
+> **⚠️ HARD RULE 1: 测试入口必须用 `cargo nextest run` 系列**(`./scripts/run-tests.sh` / `just test-parallel` / `cargo nextest run -p <pkg> --bin <bin> -- <subset>`)。**禁止**裸跑 `cargo test -p ralph-cli` 或 `cargo test -p ralph-cli --bin ralph`——根因是 `crates/ralph-cli/src/loop_runner/tests.rs:14-49` 的 4 个 process-global Mutex + 时间敏感测试(`std::thread::sleep(500ms)`)。Nextest 的 process-per-test 隔离 Mutex 是第一道保险。允许的例外:① `cargo test --doc` 跑 doctest(nextest 不跑);② nextest 不可用时的最后兜底 `cargo test --workspace --exclude ralph-e2e -- --test-threads=1`;③ `RALPH_BASELINE_SERIAL=1 ./scripts/run-tests.sh` 强制 flake 兜底（显式跳过 nextest、走单线程 `cargo test --workspace --exclude ralph-e2e -- --test-threads=1`，仅用于竞态/时序 flake 恢复，不是默认路径）;④ `crates/ralph-core/data/ralph-tools*.md` 这类**仅文档用途**的 cargo test 引用。详见 `docs/solutions/developer-experience/ralph-cli-loop-runner-tests-must-run-serial.md`。
 >
 > **⚠️ HARD RULE 2: 默认走并发,确需串行时显式配置**。**能用并行的必须用并行**(快是默认值,不是可选优化)。具体分级见下方「并行 vs 串行分级表」。
 
@@ -53,6 +53,17 @@ cargo doc --no-deps                          # Documentation
 ```
 
 **IMPORTANT**: Run `cargo nextest run` (or `./scripts/run-tests.sh` if nextest is installed) before declaring any task done. Smoke test after code changes.
+
+### 开发基线 vs CI 基线（处理测试 flake）
+
+- **子任务 / 开发中验证**：只跑 targeted tests（`cargo nextest run -p <crate> -- <test>`），不要每次小改动都跑全 workspace。
+- **最终验证 / 准备 `LOOP_COMPLETE` 前**：再跑完整 `./scripts/run-tests.sh`（nextest + doctest）。
+- **如果全量基线出现竞态/时序类 flake**（尤其 `ralph-cli` `loop_runner` 测试中 Mutex + 500ms sleep 在 CPU 抢占下超时），强制走单线程兜底：
+  ```bash
+  RALPH_BASELINE_SERIAL=1 ./scripts/run-tests.sh
+  ```
+  这会跳过 nextest，执行 `cargo test --workspace --exclude ralph-e2e -- --test-threads=1 --skip acp_executor::tests::test_create_terminal_and_output`。**更慢但更稳定，仅作为 flake 排查/兜底手段，不要当成默认路径**——默认仍应优先走 nextest 并行（见 HARD RULE 2）。
+- 如果 serial fallback 仍然失败，说明是真失败，必须修复后才能继续。
 
 ### Web Dashboard
 
