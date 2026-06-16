@@ -5,7 +5,7 @@ status: active
 date: 2026-06-17
 origin: docs/brainstorms/2026-06-17-ce-executor-flow-reliability-requirements.md
 parallel_with:
-  - docs/plans/2026-06-16-002-feat-ce-executor-loop-stability-plan.md
+  - docs/achieved/plan/2026-06-16-002-feat-ce-executor-loop-stability-plan.md
   - docs/plans/2026-06-17-002-feat-ce-executor-step-handoff-plan.md
 related:
   - docs/achieved/report/2026-06-13-review-wave-no-spawn.md
@@ -215,7 +215,7 @@ flowchart LR
 - 修复 archive 1464s 类 bug：若根因是 dispatcher 未用 `aggregate_timeout_secs()`，在此 Unit 修；修前必须有 failing test 用 **压缩时钟** 复现。
 
 **Test scenarios:**
-- Happy path: synthesizer `aggregate.timeout: 300` → mock 时钟 301s 触发 `AggregateDeadlineExceeded`，`actual≈301s`。
+- Happy path: synthesizer `aggregate.timeout: 1800`（当前 `ce-executor-isolated` preset 实际值）→ mock 时钟 1801s 触发 `AggregateDeadlineExceeded`，`actual≈1801s`。
 - Regression: 现有 `test_ce_executor_wave_synthesizer_aggregate_timeout`（presets.rs）仍绿。
 - Edge case: worker hat 自带 `aggregate` 块时优先级高于 consumer 继承（`wave_detection.rs:65-79`）。
 
@@ -234,13 +234,13 @@ flowchart LR
 **Files:**
 - Modify: `crates/ralph-core/src/wave_detection.rs`（`AllowPartial` 路径）
 - Modify: `crates/ralph-cli/src/loop_runner/wave/dispatcher.rs`（`WaveDispatchOutcome::Partial` merge）
-- Modify: `crates/ralph-core/src/wave_context.rs`（`missing_dimensions`）
+- Modify: `crates/ralph-core/src/event_loop/mod.rs::build_wave_context_for_synthesizer`（`missing_dimensions`）
 - Test: `crates/ralph-core/tests/scenarios/four-p0-guards/u1-partial-wave-dispatch.yml`（扩展断言）
 - Test: 新 `flow_reliability/partial_wave_consumed.yml`
 
 **Approach:**
 - 确认 `WaveDispatchOutcome::Partial` 仍 merge `review.dimension.done` 到主 events（已有）；补断言 aggregator hat pending。
-- `build_wave_context_for_synthesizer`：partial 时 `ALL_DIMENSIONS_RECEIVED=false`，列出 `missing_dimensions`。
+- `crates/ralph-core/src/event_loop/mod.rs::build_wave_context_for_synthesizer`：partial 时 `ALL_DIMENSIONS_RECEIVED=false`，列出 `missing_dimensions`。
 - **禁止**回退 `RequireComplete` 为默认；`AllowPartial` 仅在 staleness 阈值到达后由 dispatcher 触发（保持现有语义）。
 
 **Test scenarios:**
@@ -414,6 +414,35 @@ flowchart LR
 | 4 | 8, 9 | 升级 + 全量回归 |
 
 可与 `2026-06-16-002`、`2026-06-17-002` **并行**；建议 Phase 4 在三者均 merge 后做联合 E2E。
+
+## Review
+
+> 评审日期：2026-06-16  
+> 评审结论：**可行度 High**，基础设施已就绪，主要工作为新增 `flow_lifecycle` 模块并扩展现有 dispatcher / event_loop / hard_gate 路径。
+
+### 评价标准
+
+| 维度 | 权重 | 通过标准 |
+|------|------|----------|
+| 代码落地完整性 | 30% | `FlowLifecycleRegistry`、`TimeoutReconciler`、`DegradedCompletionRouter` 实现并通过单测；无编译告警 |
+| 非回归 | 25% | `./scripts/run-tests.sh` 全绿；`ralph preset check --strict -H builtin:ce-executor-isolated` 通过 |
+| 场景覆盖 | 25% | 新增 ≥5 个 `flow_reliability/` scenario 全绿；archive 片段构造的 replay fixture 断言旧失败模式不再出现 |
+| 诊断可观测 | 10% | `recovery.jsonl` / `ralph diagnose` JSON 显式包含 `flow_phase`、`configured_aggregate_secs`、`actual_wait_ms` 字段 |
+| 正交集成 | 10% | 与 002 recoverable 链、017-002 `review.failed` trigger 闭包无冲突；`review.passed(aggregate_timeout)` 仍被 event_policy 拒收 |
+
+### 评审发现与已修正
+
+1. `parallel_with` 中 `2026-06-16-002` 已归档到 `docs/achieved/plan/`，已更新路径。
+2. `build_wave_context_for_synthesizer` 实际位于 `crates/ralph-core/src/event_loop/mod.rs`（约 L4662），而非 `wave_context.rs`，已在 Unit 4 修正。
+3. `ce-executor-isolated` preset 中 `review-synthesizer.aggregate.timeout` 实际为 **1800s**，Unit 3 示例已同步，避免测试 fixture 用错阈值。
+4. `WaveDispatchOutcome::SpawnFailed` 已提前存在于 dispatcher，Unit 2 应复用并显式化，而非新增枚举变体。
+5. `flow_lifecycle.rs` 为新模块，需同步 export 到 `crates/ralph-core/src/lib.rs` 并接入 `LoopState`。
+
+### 建议执行顺序
+
+- **Phase 1（Unit 1 + Unit 3）** 可立即启动：纯新增可观测 + timeout 对账，不改动成功路径时序，风险最低。
+- **Phase 2（Unit 2 + Unit 6）** 紧接：直接解 archive 中 `review-wave-no-spawn` / gate 死循环 P0 问题。
+- **Phase 3/4** 待 002 及 017-002 Phase 1 落地后再合并，避免 event_policy / preset 触发器冲突。
 
 ## Sources & References
 

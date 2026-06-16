@@ -5,7 +5,7 @@ status: active
 date: 2026-06-17
 origin: docs/brainstorms/2026-06-17-ce-executor-step-handoff-requirements.md
 parallel_with:
-  - docs/plans/2026-06-16-002-feat-ce-executor-loop-stability-plan.md
+  - docs/achieved/plan/2026-06-16-002-feat-ce-executor-loop-stability-plan.md
   - docs/plans/2026-06-17-001-feat-ce-executor-flow-reliability-plan.md
 related:
   - docs/achieved/brainstorms/2026-06-12-workflow-activation-contract-requirements.md
@@ -34,7 +34,7 @@ archive dispatch-gap：`plan-gate` 发 `queue.advance` 后 executor **10 分钟*
 | WAC 静态规则 | `crates/ralph-core/src/preset_lint/workflow_activation.rs` | re-emit trap、handoff pairing 等 |
 | HandoffIndex | `crates/ralph-core/src/workflow_contract/handoff_index.rs` | 单消费者 priority |
 | HandoffTracker | `crates/ralph-core/src/workflow_contract/handoff_tracker.rs` | 30s SLA + escalation |
-| Dual-publish carve-out | `crates/ralph-core/src/event_loop/mod.rs` ~L5723 | `is_dual_publish_step_handoff` |
+| Dual-publish carve-out | `crates/ralph-core/src/event_loop/mod.rs` ~L6274 | `is_dual_publish_step_handoff` |
 | plan-gate 双发 preset | `presets/en/ce-executor-isolated.yml` ~L1559 | `publishes: [queue.advance, work.ready, ...]` |
 | Synth terminal gate | `crates/ralph-core/src/event_loop/review_step_state.rs` | null `review.passed` 不置 terminal |
 | Verdict gate | `presets/en/ce-executor-isolated.yml` `verdict_gate.additional_topics` | 含 `report.done` |
@@ -197,7 +197,7 @@ flowchart TB
 **Dependencies:** Unit 1
 
 **Files:**
-- Modify: `crates/ralph-core/src/event_loop/mod.rs`（`is_dual_publish_step_handoff` 注释与边界）
+- Modify: `crates/ralph-core/src/event_loop/mod.rs`（`is_dual_publish_step_handoff` 注释与边界，~L6274）
 - Test: `crates/ralph-core/tests/scenarios/plan_gate_dual_publish_handoff.yml`
 - Test: isolated boundary scenario（与 2026-06-15-003 同名或 `four-p0-guards` 下）
 
@@ -287,7 +287,7 @@ flowchart TB
 **Dependencies:** None（preset 已有 `additional_topics`）
 
 **Files:**
-- Modify: `crates/ralph-core/src/event_loop/mod.rs`（verdict_gate 实现 ~L1401）
+- Modify: `crates/ralph-core/src/event_loop/mod.rs`（verdict_gate 实现，~L1315 / L2525）
 - Modify: `presets/en/ce-executor-isolated.yml`（reporter `conditional_forbid_topics` 若需对齐）
 - Test: `crates/ralph-core/src/event_loop/tests/`（新增 verdict_gate_report_done.rs 或扩展现有）
 - Test: scenario `step_handoff/verdict_gate_fail_blocks_report.yml`
@@ -394,6 +394,38 @@ flowchart TB
 - Operator 工作流不变。
 - `docs/solutions/integration-issues/ce-executor-isolated-preset-dispatch-gap-plan-gate-executor-2026-06-12.md` 顶部可加「已由 017-002 机制闭合」注记（Unit 8 可选）。
 - `docs/guide/runtime-diagnosis.md` 补 `handoff_dispatch_timeout` / `progress_task_mismatch` 排查一句（若尚无）。
+
+## Review
+
+> 评审日期：2026-06-16  
+> 评审结论：**可行度 High**，WAC、HandoffTracker、`is_dual_publish_step_handoff`、verdict_gate 均已存在；主要工作为 preset 触发器闭包、新增 `step_handoff/progress_task_gate` 模块与 SSOT 集成验收。
+
+### 评价标准
+
+| 维度 | 权重 | 通过标准 |
+|------|------|----------|
+| WAC strict 基线 | 25% | `cargo nextest run -p ralph-core -- workflow_activation` 绿；`ralph preset check --strict -H builtin:ce-executor-isolated` exit 0；零 `preset.re_emit_trap` / handoff pairing error |
+| Dual-publish 回归对 | 20% | `plan_gate_dual_publish_handoff.yml` 通过；第三 business event 仍产生 `event.isolation.boundary_violation` |
+| Handoff SLA | 20% | `work.ready` → executor activation < 30s（mock 时钟）；超时触发 `handoff_dispatch_timeout` + `task.resume` |
+| Progress–Task 门 | 15% | ≥4 个 step_handoff scenario 全绿；`queue.advance`/`plan.complete` 前 progress.md 与 tasks.jsonl 不一致时发 `plan.blocked` |
+| Verdict 闭包 | 10% | `REVIEW_COMPLETE` fail 时 `report.done` / `LOOP_COMPLETE` 均被挡；pass 路径仍允许 |
+| SSOT 四链验收 | 10% | 002 merge 后，handoff topic 在 prompt / precheck / loop / drift 四处的必填字段同步变化（未 merge 时 skip 标记 optional） |
+
+### 评审发现与已修正
+
+1. `parallel_with` 中 `2026-06-16-002` 已归档到 `docs/achieved/plan/`，已更新路径。
+2. `is_dual_publish_step_handoff` 实际位于 `crates/ralph-core/src/event_loop/mod.rs` ~L6274（原写 ~L5723），已修正两处引用。
+3. `verdict_gate` 核心实现位于 `event_loop/mod.rs` ~L1315 / L2525（原写 ~L1401），已修正 Unit 6 文件列表。
+4. `event_policy.rs` 的 `NULL_PAYLOAD_REJECT_TOPICS` 当前未包含 `work.ready`、`plan.complete`、`plan.blocked`，Unit 5 需扩展列表；当前包含的 `review.failed`、`review.wave.ready` 可保留。
+5. `plan-gate.triggers` 当前确实缺失 `fix.exhausted`、`debug.exhausted`，与 Unit 1 目标一致；同时需检查 `presets/zh/ce-executor-isolated-zh.yml` 镜像同步。
+6. `step_handoff/` 目录与 `progress_task_gate.rs` 尚未创建，Unit 4 为新增模块。
+
+### 建议执行顺序
+
+- **Phase 1（Unit 1 + Unit 3）** 可立即启动：preset triggers 修补 + dual-publish 回归对加固，低风险且直接闭合 dispatch-gap 类 P0。
+- **Phase 2（Unit 2 + Unit 5）** 紧接：HandoffTracker SLA + null payload 硬门，依赖 Phase 1 的 preset 稳定。
+- **Phase 3（Unit 4 + Unit 6）** 随后：progress/task gate + verdict gate，需在 event_loop 中新增钩子。
+- **Phase 4** 待 002 merge 后跑 SSOT 四链验收与 multi-step E2E。
 
 ## Sources & References
 
