@@ -11,6 +11,19 @@
 # - 无 TerminationReason::PayloadContractViolation
 # - task.resume 被路由到 review-coordinator 带 hint
 # - loop 继续,可后续 emit plan.blocked
+#
+# NOTE on `expected.events`:
+#   The BDD scenario framework asserts on `seen_topics` (populated by
+#   `process_events_from_jsonl` after each response). The mechanism
+#   layer's `maybe_emit_incomplete_wave_blocked` is called from
+#   `run_iteration`, which the framework does NOT invoke — so
+#   `plan.blocked` is verified separately by
+#   `test_u6_incomplete_wave_plan_blocked_mechanism` (the
+#   `incomplete_wave_gate::evaluate` path) and by
+#   `test_u6_zippy_sparrow_replay_fixture` (the JSONL fixture
+#   replay). The events listed here are only the agent-emitted
+#   ones that should be accepted by the bus before the
+#   `review.passed(empty_diff)` rejection.
 
 name: review_passed_while_wave_open
 description: review-coordinator 发 empty_diff while wave open → semantic gate recoverable 路径
