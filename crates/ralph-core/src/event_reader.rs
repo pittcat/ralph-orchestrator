@@ -28,6 +28,12 @@ const MAX_FUTURE_TS_SKEW_SECS: i64 = 300;
 /// Empty strings are accepted unconditionally to preserve existing fixture
 /// compatibility (e.g. `crates/ralph-core/tests/fixtures/basic_session.jsonl`
 /// lines that omit `ts`).
+///
+/// The boundary check uses strict greater-than (`>`), so a `ts` exactly at
+/// `now + MAX_FUTURE_TS_SKEW_SECS` is accepted. Non-Z timezone offsets
+/// (e.g. `+09:00`) are normalized via `parsed.with_timezone(&Utc)` before
+/// the comparison, so equivalent instants in different offset notations
+/// classify identically.
 fn classify_timestamp(ts: &str) -> Result<(), &'static str> {
     if ts.is_empty() {
         return Ok(());
@@ -880,6 +886,25 @@ mod tests {
     }
 
     #[test]
+    fn test_exactly_5min_future_timestamp_accepted() {
+        // Boundary lock: a `ts` exactly 5 minutes (300s) in the future
+        // must be accepted. classify_timestamp uses strict `>` comparison,
+        // so the threshold is exclusive. A future refactor to `>=` would
+        // break this test and force the operator to consider the impact.
+        let now_plus_5min = Utc::now() + chrono::Duration::seconds(MAX_FUTURE_TS_SKEW_SECS);
+        let ts = now_plus_5min.to_rfc3339();
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, r#"{{"topic":"x","ts":"{}"}}"#, ts).unwrap();
+        file.flush().unwrap();
+
+        let mut reader = EventReader::new(file.path());
+        let result = reader.read_new_events().unwrap();
+
+        assert_eq!(result.events.len(), 1);
+        assert!(result.malformed.is_empty());
+    }
+
+    #[test]
     fn test_future_timestamp_is_rejected() {
         // R1: a `ts` more than 5 minutes in the future lands in `malformed`
         // with a `future_timestamp` reason.
@@ -894,12 +919,39 @@ mod tests {
 
         assert!(result.events.is_empty());
         assert_eq!(result.malformed.len(), 1);
+        assert_eq!(result.malformed[0].line_number, 1);
         assert!(
             result.malformed[0].error.contains("future_timestamp"),
             "expected future_timestamp reason, got: {}",
             result.malformed[0].error
         );
         assert!(result.malformed[0].error.contains(&ts));
+    }
+
+    #[test]
+    fn test_position_advances_past_rejected_future_timestamp() {
+        // Position-tracking contract: when a line is rejected as
+        // malformed, the reader's file position must advance past it so a
+        // subsequent call to `read_new_events` does not re-read the same
+        // rejected line. A future refactor that moves the `current_pos +=`
+        // into the success arm only would silently cause infinite re-reads.
+        let now_plus_10min = Utc::now() + chrono::Duration::seconds(10 * 60);
+        let future_ts = now_plus_10min.to_rfc3339();
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, r#"{{"topic":"rejected","ts":"{}"}}"#, future_ts).unwrap();
+        file.flush().unwrap();
+
+        let mut reader = EventReader::new(file.path());
+        let first = reader.read_new_events().unwrap();
+        assert_eq!(first.malformed.len(), 1);
+        assert!(first.events.is_empty());
+
+        // Second call must observe zero new lines (position already past
+        // the rejected line).
+        let second = reader.read_new_events().unwrap();
+        assert!(second.events.is_empty());
+        assert!(second.malformed.is_empty());
+        assert!(reader.position() > 0);
     }
 
     #[test]
@@ -915,6 +967,7 @@ mod tests {
 
         assert!(result.events.is_empty());
         assert_eq!(result.malformed.len(), 1);
+        assert_eq!(result.malformed[0].line_number, 1);
         assert!(
             result.malformed[0].error.contains("invalid_timestamp"),
             "expected invalid_timestamp reason, got: {}",
@@ -949,6 +1002,7 @@ mod tests {
             result.events
         );
         assert_eq!(result.malformed.len(), 1);
+        assert_eq!(result.malformed[0].line_number, 1);
         assert!(
             result.malformed[0].error.contains("future_timestamp"),
             "expected future_timestamp reason, got: {}",
