@@ -369,6 +369,190 @@ fn test_plan_gate_dual_publish_third_blocked() {
 }
 
 #[test]
+fn test_progress_task_mismatch_gate_blocks_queue_advance() {
+    // 2026-06-17-002 U4: pre-handoff gate rejects `queue.advance`
+    // when `.ralph/agent/progress.md` and `.ralph/agent/tasks.jsonl`
+    // disagree, and injects `plan.blocked` so plan-gate can remediate
+    // on the next iteration. This scenario wires the gate end-to-end
+    // through the real EventLoop.
+    let yaml = load_scenario("tests/scenarios/step_handoff/progress_task_mismatch.yml");
+    run_progress_task_mismatch_scenario(yaml);
+}
+
+/// U4 (2026-06-17-002 plan) scenario runner: seeds the workspace
+/// `.ralph/agent/progress.md` and `.ralph/agent/tasks.jsonl` to
+/// establish a progress/task mismatch, then runs the YAML scenario
+/// through the real EventLoop. The seeded files deliberately disagree
+/// (task is closed but the step is missing from progress.md Completed
+/// Steps) so the pre-handoff gate MUST reject `queue.advance`.
+fn run_progress_task_mismatch_scenario(yaml: ScenarioYaml) {
+    use std::io::Write;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ralph_dir = temp_dir.path().join(".ralph");
+    let agent_dir = ralph_dir.join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let events_path = ralph_dir.join("events.jsonl");
+
+    // Seed `.ralph/agent/progress.md` with step-02 as Current Step
+    // but step-01 listed under Completed Steps (NOT step-01 as a
+    // completed entry — the mismatch is on the task side).
+    let progress_path = agent_dir.join("progress.md");
+    std::fs::write(
+        &progress_path,
+        "## Current Step\nstep-02\n\n## Completed Steps\n- step-02\n",
+    )
+    .unwrap();
+
+    // Seed `.ralph/agent/tasks.jsonl` with a closed task whose title
+    // is step-01 — this is the "task closed but progress.md does NOT
+    // list step-01 under Completed Steps" mismatch the gate must
+    // detect.
+    let tasks_path = agent_dir.join("tasks.jsonl");
+    let task_json = serde_json::json!({
+        "id": "task-step-01",
+        "title": "step-01",
+        "status": "closed",
+        "priority": 3,
+        "blocked_by": [],
+        "created": "2026-06-17T00:00:00Z",
+        "closed": "2026-06-17T00:01:00Z",
+    });
+    let mut tasks_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&tasks_path)
+        .unwrap();
+    writeln!(tasks_file, "{}", task_json).unwrap();
+
+    // Build RalphConfig from the YAML config section
+    let mut config = RalphConfig::default();
+    config.max_iterations = Some(yaml.config.max_iterations);
+    config.prompt_file = Some(yaml.config.prompt_file);
+    // Seed `workspace_root` so the gate reads files from temp_dir.
+    config.core.workspace_root = temp_dir.path().to_path_buf();
+    // Turn the gate ON — the YAML does not declare this block to keep
+    // the scenario focused on the runtime gate, but the test must
+    // explicitly opt in for the gate to fire.
+    let mut wc = ralph_core::config::WorkflowContractConfig::default();
+    wc.step_handoff.progress_task_gate = true;
+    config.event_loop.workflow_contract = Some(wc);
+
+    // Parse hats if present (inject map key as name if missing)
+    if !yaml.config.hats.is_null() {
+        if let Ok(hat_map) = serde_yaml::from_value::<
+            std::collections::HashMap<String, serde_yaml::Value>,
+        >(yaml.config.hats.clone())
+        {
+            let mut hats = std::collections::HashMap::new();
+            for (hat_id, mut hat_value) in hat_map {
+                if let Some(map) = hat_value.as_mapping_mut() {
+                    if !map.contains_key(&serde_yaml::Value::String("name".to_string())) {
+                        map.insert(
+                            serde_yaml::Value::String("name".to_string()),
+                            serde_yaml::Value::String(hat_id.clone()),
+                        );
+                    }
+                }
+                let hat_config: HatConfig = serde_yaml::from_value(hat_value).unwrap_or_else(|e| {
+                    panic!("Failed to parse hat config for '{}': {}", hat_id, e)
+                });
+                hats.insert(hat_id, hat_config);
+            }
+            config.hats = hats;
+        }
+    }
+    if !yaml.config.event_loop.is_null() {
+        let mut el: ralph_core::EventLoopConfig = serde_yaml::from_value(yaml.config.event_loop)
+            .unwrap_or_else(|e| panic!("Failed to parse event_loop config: {}", e));
+        // Preserve the workflow_contract we set above unless the YAML
+        // declares its own.
+        if el.workflow_contract.is_none() {
+            el.workflow_contract = config.event_loop.workflow_contract.clone();
+        }
+        config.event_loop = el;
+    }
+
+    let context = LoopContext::primary(temp_dir.path().to_path_buf());
+
+    let mut event_loop = EventLoop::with_context(config, context);
+    event_loop.initialize("Test");
+
+    let parser = EventParser::new();
+
+    for response in &yaml.mock_responses {
+        if let Some(hat) = event_loop.next_hat() {
+            let hat = hat.clone();
+            let _ = event_loop.build_prompt(&hat);
+            let _ = event_loop.process_output(&hat, "", true);
+        }
+
+        let events = parser.parse(response);
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&events_path)
+                .unwrap();
+            for event in &events {
+                let json = serde_json::json!({
+                    "topic": event.topic,
+                    "payload": event.payload,
+                    "ts": "2024-01-01T00:00:00Z",
+                });
+                writeln!(file, "{}", json).unwrap();
+            }
+        }
+
+        let _result = event_loop.process_events_from_jsonl();
+    }
+
+    // Verify all expected events were seen (accepted) at least once
+    for expected_event in &yaml.expected.events {
+        assert!(
+            event_loop
+                .state()
+                .seen_topics
+                .contains(&expected_event.topic),
+            "{}: Expected event '{}' to be seen (accepted), but it was not recorded. Seen topics: {:?}",
+            yaml.name,
+            expected_event.topic,
+            event_loop.state().seen_topics
+        );
+    }
+
+    // Verify completion
+    if yaml.expected.completion {
+        let reason = event_loop.check_completion_event();
+        assert!(
+            reason.is_some(),
+            "{}: Expected LOOP_COMPLETE to be accepted, but it was rejected or not present",
+            yaml.name
+        );
+    } else {
+        let reason = event_loop.check_completion_event();
+        assert!(
+            reason.is_none(),
+            "{}: Expected LOOP_COMPLETE to be rejected, but got {:?}",
+            yaml.name,
+            reason
+        );
+    }
+
+    assert_eq!(
+        yaml.mock_responses.len(),
+        yaml.expected.iterations,
+        "{}: Expected {} iterations, but scenario has {} mock responses",
+        yaml.name,
+        yaml.expected.iterations,
+        yaml.mock_responses.len()
+    );
+
+    println!("✓ {} passed", yaml.description);
+}
+
+#[test]
 fn test_workflow_activation_contract_re_emit_trap() {
     // WAC-U8 AE1 (2026-06-12-002): a hat that triggers on a
     // topic published by another hat and does not declare that

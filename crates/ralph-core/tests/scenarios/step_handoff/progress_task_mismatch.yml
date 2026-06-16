@@ -1,0 +1,59 @@
+# step_handoff/progress_task_mismatch: Pre-handoff gate rejects queue.advance
+# when progress.md and tasks.jsonl disagree (U4 of 2026-06-17-002 plan).
+#
+# Scenario flow:
+#   - iteration 1: plan-gate closes task-step-01 in tasks.jsonl but
+#     progress.md still has step-01 listed under `Completed Steps`
+#     while Current Step is step-02 (the agent already wrote step-02
+#     ahead).  The pre-handoff gate rejects queue.advance and injects
+#     plan.blocked.
+#   - iteration 2: plan-gate emits plan.blocked to signal the recovery.
+#   - iteration 3: plan-gate emits LOOP_COMPLETE to terminate.
+#
+# The scenario wires the U4 gate end-to-end through the real EventLoop.
+# A regression that disables the gate would let queue.advance through
+# and the expected-events check below would still see queue.advance in
+# seen_topics — failing the test.  Conversely, a regression that broke
+# the plan.blocked injection would also fail this test.
+
+name: progress_task_mismatch
+description: Pre-handoff gate rejects queue.advance when progress.md ↔ tasks.jsonl disagree
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 10
+  hats:
+    plan-gate:
+      subscribes_to:
+        - work.done
+        - review.passed
+      publishes:
+        - queue.advance
+        - plan.complete
+        - plan.blocked
+        - LOOP_COMPLETE
+    executor:
+      subscribes_to:
+        - work.ready
+      publishes:
+        - work.done
+
+mock_responses:
+  - |
+    <event topic="queue.advance" step="step-02" task_id="task-step-01">
+    Advancing to step-02.
+    </event>
+  - |
+    <event topic="plan.blocked" reason="progress_task_mismatch">
+    Blocked: step-01 missing from progress.md Completed Steps.
+    </event>
+  - |
+    <event topic="LOOP_COMPLETE">
+    Loop terminated.
+    </event>
+
+expected:
+  iterations: 3
+  events:
+    - topic: plan.blocked
+  completion: true

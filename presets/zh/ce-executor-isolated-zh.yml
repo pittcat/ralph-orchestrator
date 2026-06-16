@@ -61,6 +61,14 @@ event_loop:
     # 的同名字段 — 这是与 reporter `conditional_forbid_topics`
     # obligation 配合的双层防护。
     additional_topics: ["report.done"]
+  # U4（2026-06-17-002 计划）：pre-handoff progress ↔ task 硬门。
+  # 当 `.ralph/agent/progress.md` 与 `.ralph/agent/tasks.jsonl` 不一致时
+  # （例如 agent 关闭了一个 task 但未在 progress.md 中标记该 step 完成），
+  # 拒绝 `queue.advance` / `plan.complete`，并注入 `plan.blocked`
+  # 让 plan-gate 在下一轮修复。其他 preset 默认关闭。
+  workflow_contract:
+    step_handoff:
+      progress_task_gate: true
   # U7: 启用 work.done 执行契约验证。
   # 防止 executor 忘记 emit 或发出无效的 work.done 时产生假阳性。
   execution_contracts:

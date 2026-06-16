@@ -84,6 +84,15 @@ event_loop:
     # obligation — either one alone would close the gap, but
     # running both gives a defense-in-depth posture.
     additional_topics: ["report.done"]
+  # U4 (2026-06-17-002 plan): pre-handoff progress ↔ task gate.
+  # Rejects `queue.advance` / `plan.complete` when `.ralph/agent/progress.md`
+  # is not consistent with `.ralph/agent/tasks.jsonl` (e.g. the agent
+  # closed a task but did not mark the step as completed in progress.md).
+  # Mismatches inject `plan.blocked` so plan-gate can remediate on the
+  # next iteration. Default `false` for non-tier-0 presets.
+  workflow_contract:
+    step_handoff:
+      progress_task_gate: true
   # U7: Enable execution contract for work.done validation.
   # Protects against false positives when executor forgets to emit or emits invalid work.done.
   execution_contracts:

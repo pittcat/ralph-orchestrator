@@ -70,7 +70,7 @@ pub use v1_adapters::{AdapterSettings, AdaptersConfig};
 pub use warning::ConfigWarning;
 pub use workflow_contract::{
     HANDOFF_DISPATCH_TIMEOUT_DEFAULT_SECONDS, HANDOFF_DISPATCH_TIMEOUT_MAX_SECONDS,
-    HANDOFF_TOPIC_SEEDS, WorkflowContractConfig,
+    HANDOFF_TOPIC_SEEDS, StepHandoffConfig, WorkflowContractConfig,
 };
 pub use workflow_guards::{
     HatExecutionMode, WorkflowChain, WorkflowChainMode, WorkflowGuardsConfig,
