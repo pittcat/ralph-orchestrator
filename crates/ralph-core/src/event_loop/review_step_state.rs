@@ -1021,7 +1021,7 @@ mod tests {
             "closed wave must not surface, got {actions:?}"
         );
     }
-}
+
     // 003-U5 / R-F5: last_reviewed_sha wave-closed gate tests
     //
     // `is_wave_closed` is the query that agents and the runner use to
