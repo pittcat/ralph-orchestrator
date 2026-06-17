@@ -56,6 +56,11 @@ config:
         - work.done
         - work.failed
     # review-coordinator kicks the first dimension after work.done.
+    # 2026-06-17-004 plan U1 (R3): review.passed is owned by
+    # review-synthesizer only. review-coordinator publishes
+    # review.dimension.ready and review.dimensions.complete; on the
+    # empty-diff fast path the synthesizer emits
+    # review.passed(skip_reason=dimensions_complete).
     review-coordinator:
       subscribes_to:
         - work.done
@@ -65,7 +70,6 @@ config:
       publishes:
         - review.dimension.ready
         - review.dimensions.complete
-        - review.passed
     # dimension-reviewer handles one dimension per activation. The mock
     # will deliberately be silent on the first activation (correctness)
     # and emit `review.dimension.done` on the second — this is the U6

@@ -49,6 +49,11 @@ config:
     # review-coordinator owns the serial kick-off + close events.
     # Subscribes to work.done / fix.applied to initialize the sequence
     # and to per-dim terminal events to walk one step at a time.
+    # 2026-06-17-004 plan U1 (R3): review.passed is owned by
+    # review-synthesizer only; review-coordinator publishes
+    # review.dimensions.complete to close the sequence (and on the
+    # empty-diff fast path). The synthesizer then emits
+    # review.passed(skip_reason=dimensions_complete).
     review-coordinator:
       subscribes_to:
         - work.done
@@ -58,7 +63,6 @@ config:
       publishes:
         - review.dimension.ready
         - review.dimensions.complete
-        - review.passed
     # dimension-reviewer handles a single dimension per activation.
     # No concurrency: the scenario asserts 1 instance per turn.
     dimension-reviewer:
