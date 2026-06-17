@@ -2566,9 +2566,11 @@ mod tests {
             PolicyDecision::Accept,
             "First review.dimension.ready for a new key must be accepted"
         );
-        assert!(state
-            .review_dimension_ready_seen_keys
-            .contains("p1::step-01::t1::correctness"));
+        assert!(
+            state
+                .review_dimension_ready_seen_keys
+                .contains("p1::step-01::t1::correctness")
+        );
     }
 
     #[test]
@@ -2616,21 +2618,11 @@ mod tests {
         let mut state = PolicyRuntimeState::default();
 
         let p1 = review_dimension_ready_payload("p1", "step-01", "t1", "correctness");
-        let first = validate_event(
-            "review.dimension.ready",
-            Some(&p1),
-            &config,
-            &mut state,
-        );
+        let first = validate_event("review.dimension.ready", Some(&p1), &config, &mut state);
         assert_eq!(first, PolicyDecision::Accept);
 
         let p2 = review_dimension_ready_payload("p1", "step-01", "t1", "security");
-        let second = validate_event(
-            "review.dimension.ready",
-            Some(&p2),
-            &config,
-            &mut state,
-        );
+        let second = validate_event("review.dimension.ready", Some(&p2), &config, &mut state);
         assert_eq!(
             second,
             PolicyDecision::Accept,
@@ -2647,21 +2639,11 @@ mod tests {
         let mut state = PolicyRuntimeState::default();
 
         let p1 = review_dimension_ready_payload("p1", "step-01", "t1", "correctness");
-        let first = validate_event(
-            "review.dimension.ready",
-            Some(&p1),
-            &config,
-            &mut state,
-        );
+        let first = validate_event("review.dimension.ready", Some(&p1), &config, &mut state);
         assert_eq!(first, PolicyDecision::Accept);
 
         let p2 = review_dimension_ready_payload("p1", "step-02", "t1", "correctness");
-        let second = validate_event(
-            "review.dimension.ready",
-            Some(&p2),
-            &config,
-            &mut state,
-        );
+        let second = validate_event("review.dimension.ready", Some(&p2), &config, &mut state);
         assert_eq!(
             second,
             PolicyDecision::Accept,
@@ -2745,12 +2727,7 @@ mod tests {
         let config = test_config();
         let mut state = PolicyRuntimeState::default();
         let payload = r#"{"dimension":"correctness"}"#; // missing plan_name/step/task_id
-        let decision = validate_event(
-            "review.dimension.ready",
-            Some(payload),
-            &config,
-            &mut state,
-        );
+        let decision = validate_event("review.dimension.ready", Some(payload), &config, &mut state);
         if let PolicyDecision::RejectWithResume(f) = &decision {
             assert!(
                 !matches!(f.violation_type, ViolationType::DuplicateWorkDone { .. }),

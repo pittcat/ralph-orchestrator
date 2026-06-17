@@ -300,7 +300,8 @@ pub fn check_step_handoff_gate(
         }
     };
 
-    let decision = check_progress_task_alignment(topic, step.as_deref(), task_id.as_deref(), workspace_root);
+    let decision =
+        check_progress_task_alignment(topic, step.as_deref(), task_id.as_deref(), workspace_root);
     match decision {
         GateDecision::Inert | GateDecision::Aligned => Ok(()),
         GateDecision::Mismatch(mismatch) => Err(mismatch_to_validation_error(&mismatch, topic)),
@@ -1213,28 +1214,34 @@ event_loop:
     #[test]
     fn test_check_wave_dimension_assignment_no_env_returns_ok() {
         // env unset, any topic
-        assert!(check_wave_dimension_assignment_with_env(
-            "review.dimension.done",
-            r#"{"dimension":"testing"}"#,
-            None
-        )
-        .is_ok());
-        assert!(check_wave_dimension_assignment_with_env(
-            "work.done",
-            r#"{"dimension":"testing"}"#,
-            None
-        )
-        .is_ok());
+        assert!(
+            check_wave_dimension_assignment_with_env(
+                "review.dimension.done",
+                r#"{"dimension":"testing"}"#,
+                None
+            )
+            .is_ok()
+        );
+        assert!(
+            check_wave_dimension_assignment_with_env(
+                "work.done",
+                r#"{"dimension":"testing"}"#,
+                None
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn test_check_wave_dimension_assignment_match_returns_ok() {
-        assert!(check_wave_dimension_assignment_with_env(
-            "review.dimension.done",
-            r#"{"dimension":"testing"}"#,
-            Some("testing")
-        )
-        .is_ok());
+        assert!(
+            check_wave_dimension_assignment_with_env(
+                "review.dimension.done",
+                r#"{"dimension":"testing"}"#,
+                Some("testing")
+            )
+            .is_ok()
+        );
     }
 
     #[test]

@@ -581,11 +581,7 @@ pub fn check_trigger_publish_asymmetry(
     // publisher" archetype for the same reason as
     // cancellation_promise: the runner injects the publish. The
     // `progress-steward` hat is the canonical consumer.
-    const RUNNER_INJECTED_TRIGGERS: &[&str] = &[
-        "loop.stalled",
-        "human.guidance",
-        "task.resume",
-    ];
+    const RUNNER_INJECTED_TRIGGERS: &[&str] = &["loop.stalled", "human.guidance", "task.resume"];
 
     // R5 is per-trigger and depends only on graph topology (no
     // bounded BFS over terminals), so the terminal set is unused.

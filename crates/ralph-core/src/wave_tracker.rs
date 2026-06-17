@@ -406,7 +406,11 @@ impl WaveTracker {
     /// hole where retry-on-failure looped indefinitely.
     pub fn bump_dimension_retry(&mut self, wave_id: &str, index: u32) -> Option<u32> {
         let state = self.active_waves.get_mut(wave_id)?;
-        let used = state.dimension_retry_counts.get(&index).copied().unwrap_or(0);
+        let used = state
+            .dimension_retry_counts
+            .get(&index)
+            .copied()
+            .unwrap_or(0);
         let next = used + 1;
         state.dimension_retry_counts.insert(index, next);
         Some(next)

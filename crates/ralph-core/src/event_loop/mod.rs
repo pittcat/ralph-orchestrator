@@ -2769,11 +2769,8 @@ impl EventLoop {
                 // `reason` and `target_hat` fields so the drift
                 // detector counts the injected `task.resume` as
                 // schema-compliant.
-                let resume_payload = enrich_task_resume_payload(
-                    &free_form,
-                    "missing required events",
-                    None,
-                );
+                let resume_payload =
+                    enrich_task_resume_payload(&free_form, "missing required events", None);
                 self.bus.publish(Event::new("task.resume", resume_payload));
                 return None;
             }
@@ -2828,11 +2825,7 @@ impl EventLoop {
                 // U2 (2026-06-17-003 plan): wrap the free-form
                 // message in a JSON object carrying the
                 // schema-required `reason` and `target_hat` fields.
-                let resume_payload = enrich_task_resume_payload(
-                    &free_form,
-                    "verdict_fail",
-                    None,
-                );
+                let resume_payload = enrich_task_resume_payload(&free_form, "verdict_fail", None);
                 self.bus.publish(Event::new("task.resume", resume_payload));
                 return None;
             }
@@ -2865,11 +2858,8 @@ impl EventLoop {
             // U2 (2026-06-17-003 plan): wrap the free-form message
             // in a JSON object carrying the schema-required
             // `reason` and `target_hat` fields.
-            let resume_payload = enrich_task_resume_payload(
-                &free_form,
-                "workflow_guard incomplete",
-                None,
-            );
+            let resume_payload =
+                enrich_task_resume_payload(&free_form, "workflow_guard incomplete", None);
             self.bus.publish(Event::new("task.resume", resume_payload));
             return None;
         }
@@ -3512,11 +3502,8 @@ impl EventLoop {
         // U2 (2026-06-17-003 plan): wrap the free-form message in
         // a JSON object carrying the schema-required `reason` and
         // `target_hat` fields.
-        let payload = enrich_task_resume_payload(
-            &free_form,
-            "aggregate_timeout",
-            Some(target.as_str()),
-        );
+        let payload =
+            enrich_task_resume_payload(&free_form, "aggregate_timeout", Some(target.as_str()));
         debug!(
             wave_id = %action.wave_id,
             received = action.received,
@@ -3663,11 +3650,8 @@ impl EventLoop {
             // U2 (2026-06-17-003 plan): wrap the free-form message
             // in a JSON object carrying the schema-required
             // `reason` and `target_hat` fields.
-            let structured_payload = enrich_task_resume_payload(
-                &payload,
-                reason_str,
-                Some(hard_target.as_str()),
-            );
+            let structured_payload =
+                enrich_task_resume_payload(&payload, reason_str, Some(hard_target.as_str()));
             debug!(
                 stall_count = stall_count_value,
                 target = %hard_target.as_str(),
@@ -3742,11 +3726,8 @@ impl EventLoop {
                     // U2 (2026-06-17-003 plan): wrap the free-form
                     // message in a JSON object carrying the
                     // schema-required `reason` and `target_hat` fields.
-                    let structured_payload = enrich_task_resume_payload(
-                        &payload,
-                        "stall_no_events",
-                        Some("ralph"),
-                    );
+                    let structured_payload =
+                        enrich_task_resume_payload(&payload, "stall_no_events", Some("ralph"));
                     debug!(
                         "Injecting fallback event to recover - triggering Ralph with task.resume"
                     );
@@ -7110,7 +7091,9 @@ impl EventLoop {
                     None => false,
                 };
                 let wave_collision = match event_wave_id.as_deref() {
-                    Some(wid) => matches!(accepted_wave_id.as_deref(), Some(current) if current != wid),
+                    Some(wid) => {
+                        matches!(accepted_wave_id.as_deref(), Some(current) if current != wid)
+                    }
                     None => false,
                 };
 
@@ -7345,7 +7328,10 @@ impl EventLoop {
                 &source_hats_by_topic,
                 &target_hats_by_topic,
                 &self.registry,
-                self.config.event_loop.task_resume_ttl_seconds.unwrap_or(300),
+                self.config
+                    .event_loop
+                    .task_resume_ttl_seconds
+                    .unwrap_or(300),
             );
             // Restore the `ReviewStepTracker` and put the
             // `PolicyRuntimeState` back so the next call sees the
@@ -7605,7 +7591,10 @@ impl EventLoop {
                     &mut self.state.workflow_progress,
                     &mut self.bus,
                     &self.state.review_step_tracker,
-                    self.config.event_loop.task_resume_ttl_seconds.unwrap_or(300),
+                    self.config
+                        .event_loop
+                        .task_resume_ttl_seconds
+                        .unwrap_or(300),
                 );
                 for rejection in &outcome.rejections {
                     Self::log_workflow_guard_rejection(&mut *self, rejection);
@@ -8878,7 +8867,10 @@ impl EventLoop {
                 &std::collections::HashMap::new(),
                 &std::collections::HashMap::new(),
                 &self.registry,
-                self.config.event_loop.task_resume_ttl_seconds.unwrap_or(300),
+                self.config
+                    .event_loop
+                    .task_resume_ttl_seconds
+                    .unwrap_or(300),
             );
             self.state.review_step_tracker = review_step_tracker;
             self.state.policy_runtime_state = Some(policy_state);
@@ -9230,8 +9222,7 @@ fn run_stall_detector_on_state(
         // this turn. Suppress recursive wakes.
         return;
     }
-    state.consecutive_no_progress_turns =
-        state.consecutive_no_progress_turns.saturating_add(1);
+    state.consecutive_no_progress_turns = state.consecutive_no_progress_turns.saturating_add(1);
     let max_iter = config_progress_steward.max_steward_iterations;
     if state.consecutive_no_progress_turns >= max_iter
         && state.consecutive_steward_activations < max_iter
@@ -9245,9 +9236,7 @@ fn run_stall_detector_on_state(
         // and treats the wake as a no-op (so the
         // `consecutive_steward_activations` counter still
         // increments toward the U5 escalation branch).
-        let steward_id = ralph_proto::HatId::new(
-            config_progress_steward.steward_hat_id.as_str(),
-        );
+        let steward_id = ralph_proto::HatId::new(config_progress_steward.steward_hat_id.as_str());
         if registry.get(&steward_id).is_none() {
             warn!(
                 steward_hat_id = %config_progress_steward.steward_hat_id,
@@ -9272,9 +9261,7 @@ fn run_stall_detector_on_state(
         // hat.
         warn!(
             consecutive_no_progress = state.consecutive_no_progress_turns,
-            max_iter,
-            "isolated loop: no progress for {} turns — waking progress-steward",
-            max_iter,
+            max_iter, "isolated loop: no progress for {} turns — waking progress-steward", max_iter,
         );
         let stalled = ralph_proto::Event::new(
             "loop.stalled",

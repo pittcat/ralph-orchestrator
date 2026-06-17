@@ -854,11 +854,7 @@ mod tests {
     fn test_past_timestamp_accepted() {
         // No lower bound on `ts`; stale / past timestamps are not flagged.
         let mut file = NamedTempFile::new().unwrap();
-        writeln!(
-            file,
-            r#"{{"topic":"x","ts":"2020-01-01T00:00:00Z"}}"#
-        )
-        .unwrap();
+        writeln!(file, r#"{{"topic":"x","ts":"2020-01-01T00:00:00Z"}}"#).unwrap();
         file.flush().unwrap();
 
         let mut reader = EventReader::new(file.path());
@@ -1017,22 +1013,9 @@ mod tests {
         let now_plus_10min = Utc::now() + chrono::Duration::seconds(10 * 60);
         let future_ts = now_plus_10min.to_rfc3339();
         let mut file = NamedTempFile::new().unwrap();
-        writeln!(
-            file,
-            r#"{{"topic":"before","ts":"2024-01-01T00:00:00Z"}}"#
-        )
-        .unwrap();
-        writeln!(
-            file,
-            r#"{{"topic":"forged","ts":"{}"}}"#,
-            future_ts
-        )
-        .unwrap();
-        writeln!(
-            file,
-            r#"{{"topic":"after","ts":"2024-01-01T00:00:02Z"}}"#
-        )
-        .unwrap();
+        writeln!(file, r#"{{"topic":"before","ts":"2024-01-01T00:00:00Z"}}"#).unwrap();
+        writeln!(file, r#"{{"topic":"forged","ts":"{}"}}"#, future_ts).unwrap();
+        writeln!(file, r#"{{"topic":"after","ts":"2024-01-01T00:00:02Z"}}"#).unwrap();
         file.flush().unwrap();
 
         let mut reader = EventReader::new(file.path());

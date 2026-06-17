@@ -569,7 +569,9 @@ fn emit_command_with_root_and_hats(
     // enforcement. Without `--hat` the call defers to the origin
     // guard (which rejects unknown/missing provenance).
     if let Some(cfg) = config.as_ref() {
-        if let Err(err) = crate::policy_check::check_isolated_scope(hat.as_deref(), &args.topic, cfg) {
+        if let Err(err) =
+            crate::policy_check::check_isolated_scope(hat.as_deref(), &args.topic, cfg)
+        {
             use ralph_core::{PolicyFinding, ViolationType};
             let finding = PolicyFinding {
                 violation_type: ViolationType::SemanticGateViolation {
@@ -579,16 +581,8 @@ fn emit_command_with_root_and_hats(
                 topic: args.topic.clone(),
                 message: err.message.clone(),
             };
-            record_cli_emit_rejection(
-                &workspace_root,
-                &args.topic,
-                hat.as_deref(),
-                &finding,
-            );
-            anyhow::bail!(
-                "Event rejected by isolated scope guard: {}",
-                err.message
-            );
+            record_cli_emit_rejection(&workspace_root, &args.topic, hat.as_deref(), &finding);
+            anyhow::bail!("Event rejected by isolated scope guard: {}", err.message);
         }
     }
 
@@ -597,10 +591,9 @@ fn emit_command_with_root_and_hats(
     // emits the wrong dimension never reaches the events file. The
     // env var is set by the loop runner on `review.dimension.done`
     // workers; non-wave callers (env unset) pass through unchanged.
-    if let Err(err) = crate::policy_check::check_wave_dimension_assignment(
-        &args.topic,
-        &args.payload,
-    ) {
+    if let Err(err) =
+        crate::policy_check::check_wave_dimension_assignment(&args.topic, &args.payload)
+    {
         use ralph_core::{PolicyFinding, ViolationType};
         let finding = PolicyFinding {
             violation_type: ViolationType::SemanticGateViolation {
@@ -610,16 +603,8 @@ fn emit_command_with_root_and_hats(
             topic: args.topic.clone(),
             message: err.message.clone(),
         };
-        record_cli_emit_rejection(
-            &workspace_root,
-            &args.topic,
-            hat.as_deref(),
-            &finding,
-        );
-        anyhow::bail!(
-            "Event rejected by wave dimension guard: {}",
-            err.message
-        );
+        record_cli_emit_rejection(&workspace_root, &args.topic, hat.as_deref(), &finding);
+        anyhow::bail!("Event rejected by wave dimension guard: {}", err.message);
     }
 
     // U1 (2026-06-17-005 plan): step handoff gate precheck at the CLI

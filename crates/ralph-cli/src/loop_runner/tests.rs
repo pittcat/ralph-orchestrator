@@ -9632,17 +9632,18 @@ fn u4_inject_missing_event_writes_recovery_envelope() {
     // "missing" so it resolves to the stable "missing_field" code.
     assert_eq!(payload["reason"], "missing_field");
     assert_eq!(payload["target_hat"], "builder");
-    assert!(payload["hint"]
-        .as_str()
-        .map(|s| s.contains("builder"))
-        .unwrap_or(false));
+    assert!(
+        payload["hint"]
+            .as_str()
+            .map(|s| s.contains("builder"))
+            .unwrap_or(false)
+    );
     // Structured allowed_topics carries the topics verbatim.
     let allowed = payload["allowed_topics"]
         .as_array()
         .expect("allowed_topics must be an array");
     assert!(
-        allowed.iter().any(|v| v == "work.done")
-            && allowed.iter().any(|v| v == "work.failed"),
+        allowed.iter().any(|v| v == "work.done") && allowed.iter().any(|v| v == "work.failed"),
         "task.resume payload must list work.done and work.failed in allowed_topics; got: {content}"
     );
     assert_eq!(payload["triggered"], "builder");

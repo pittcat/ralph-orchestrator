@@ -394,8 +394,7 @@ fn test_incomplete_wave_plan_blocked() {
 /// `plan.blocked`.
 #[test]
 fn test_wave_dimension_mismatch_retry() {
-    let yaml =
-        load_scenario("tests/scenarios/flow_reliability/wave_dimension_mismatch_retry.yml");
+    let yaml = load_scenario("tests/scenarios/flow_reliability/wave_dimension_mismatch_retry.yml");
     run_workflow_guard_scenario(yaml);
 }
 

@@ -625,9 +625,7 @@ pub async fn handle_wave_events(
                             .get(idx)
                             .copied()
                             .unwrap_or(0);
-                        completed
-                            .dimension_retry_counts
-                            .insert(*idx, prev + inc);
+                        completed.dimension_retry_counts.insert(*idx, prev + inc);
                     }
                     if injected > 0 {
                         let write_result = std::fs::OpenOptions::new()
@@ -2886,7 +2884,6 @@ hats: {}
         );
     }
 
-
     // ---------------------------------------------------------------------
     // U5 (2026-06-17-002): task.resume injection for dimension mismatches
     //
@@ -2938,8 +2935,14 @@ hats: {}
             wave_id: "w-u5-dim".to_string(),
             wave_total: 2,
             results: vec![
-                ralph_core::WaveResult { index: 0, events: vec![event_index_0] },
-                ralph_core::WaveResult { index: 1, events: vec![event_index_1] },
+                ralph_core::WaveResult {
+                    index: 0,
+                    events: vec![event_index_0],
+                },
+                ralph_core::WaveResult {
+                    index: 1,
+                    events: vec![event_index_1],
+                },
             ],
             failures: vec![],
             duration: Duration::from_millis(10),
@@ -2958,7 +2961,11 @@ hats: {}
         )
         .expect("merge succeeds");
 
-        assert_eq!(pending.len(), 1, "one mismatched slot must produce one pending resume");
+        assert_eq!(
+            pending.len(),
+            1,
+            "one mismatched slot must produce one pending resume"
+        );
         assert_eq!(pending[0].wave_index, 1);
 
         // Now run the dispatcher's filter inline. The production
@@ -2966,7 +2973,11 @@ hats: {}
         let mut resume_buf = String::new();
         let mut round: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
         for p in &pending {
-            let used = completed.dimension_retry_counts.get(&p.wave_index).copied().unwrap_or(0);
+            let used = completed
+                .dimension_retry_counts
+                .get(&p.wave_index)
+                .copied()
+                .unwrap_or(0);
             if used >= ralph_core::MAX_DIMENSION_RETRIES_PER_SLOT {
                 continue;
             }
@@ -2975,13 +2986,25 @@ hats: {}
             *round.entry(p.wave_index).or_insert(0) += 1;
         }
         for (idx, inc) in &round {
-            let prev = completed.dimension_retry_counts.get(idx).copied().unwrap_or(0);
+            let prev = completed
+                .dimension_retry_counts
+                .get(idx)
+                .copied()
+                .unwrap_or(0);
             completed.dimension_retry_counts.insert(*idx, prev + inc);
         }
-        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&events_file).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&events_file)
+            .unwrap();
         f.write_all(resume_buf.as_bytes()).unwrap();
 
-        assert_eq!(completed.dimension_retry_counts.get(&1), Some(&1), "budget must reflect 1 used retry");
+        assert_eq!(
+            completed.dimension_retry_counts.get(&1),
+            Some(&1),
+            "budget must reflect 1 used retry"
+        );
 
         let content = fs::read_to_string(&events_file).expect("read events file");
         let mut resume_count = 0usize;
@@ -3066,15 +3089,26 @@ hats: {}
         .unwrap();
         let mut buf1 = String::new();
         for p in &p1 {
-            let used = completed_round1.dimension_retry_counts.get(&p.wave_index).copied().unwrap_or(0);
+            let used = completed_round1
+                .dimension_retry_counts
+                .get(&p.wave_index)
+                .copied()
+                .unwrap_or(0);
             if used >= ralph_core::MAX_DIMENSION_RETRIES_PER_SLOT {
                 continue;
             }
             buf1.push_str(&p.jsonl_line);
             buf1.push('\n');
-            *completed_round1.dimension_retry_counts.entry(p.wave_index).or_insert(0) += 1;
+            *completed_round1
+                .dimension_retry_counts
+                .entry(p.wave_index)
+                .or_insert(0) += 1;
         }
-        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&events_file).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&events_file)
+            .unwrap();
         f.write_all(buf1.as_bytes()).unwrap();
         assert_eq!(
             completed_round1.dimension_retry_counts.get(&1),
@@ -3115,7 +3149,11 @@ hats: {}
         .unwrap();
         let mut buf2 = String::new();
         for p in &p2 {
-            let used = completed_round2.dimension_retry_counts.get(&p.wave_index).copied().unwrap_or(0);
+            let used = completed_round2
+                .dimension_retry_counts
+                .get(&p.wave_index)
+                .copied()
+                .unwrap_or(0);
             if used >= ralph_core::MAX_DIMENSION_RETRIES_PER_SLOT {
                 continue;
             }
@@ -3134,7 +3172,10 @@ hats: {}
             .filter(|l| !l.trim().is_empty())
             .filter(|l| l.contains("\"topic\":\"task.resume\""))
             .count();
-        assert_eq!(resume_count, 1, "exactly 1 task.resume across 2 rounds; got {resume_count}");
+        assert_eq!(
+            resume_count, 1,
+            "exactly 1 task.resume across 2 rounds; got {resume_count}"
+        );
     }
 
     /// U5/R5: an empty mismatch list produces no pending task
@@ -3218,7 +3259,7 @@ hats: {}
             WaveDispatchLimits {
                 global_deadline: Some(global_deadline),
             },
-        std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
         );
 
         let mut tracker = ralph_core::WaveTracker::new();
@@ -3290,7 +3331,7 @@ hats: {}
             WaveDispatchLimits {
                 global_deadline: Some(global_deadline),
             },
-        std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
         );
 
         let mut tracker = ralph_core::WaveTracker::new();
@@ -3696,11 +3737,8 @@ hats: {}
     #[test]
     fn test_ralph_wave_dimension_env_var() {
         let (progress_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut request = make_worker_request_with_dimension(
-            0,
-            progress_tx,
-            Some("testing".to_string()),
-        );
+        let mut request =
+            make_worker_request_with_dimension(0, progress_tx, Some("testing".to_string()));
 
         // Mirror the dispatcher injection step (see the inline
         // `if let Some(ref dim) = assigned_dimension` block in

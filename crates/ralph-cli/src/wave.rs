@@ -386,11 +386,9 @@ fn run_wave_precheck(
         if ralph_core::step_handoff::progress_task_gate::is_gated_topic(topic) {
             let workspace_root = std::env::current_dir().unwrap_or_default();
             for (idx, payload) in payloads.iter().enumerate() {
-                if let Err(err) = crate::policy_check::check_step_handoff_gate(
-                    topic,
-                    payload,
-                    &workspace_root,
-                ) {
+                if let Err(err) =
+                    crate::policy_check::check_step_handoff_gate(topic, payload, &workspace_root)
+                {
                     let mut errors = batch.errors.clone();
                     errors.push(crate::policy_check::ValidationError {
                         payload_index: idx,

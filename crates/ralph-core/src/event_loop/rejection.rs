@@ -866,9 +866,7 @@ mod tests {
         assert!(!task_resume_payload_has_required_fields(bad6));
 
         // Not valid JSON → false.
-        assert!(!task_resume_payload_has_required_fields(
-            "not json at all"
-        ));
+        assert!(!task_resume_payload_has_required_fields("not json at all"));
         assert!(!task_resume_payload_has_required_fields(""));
 
         // Not a JSON object → false.

@@ -171,8 +171,7 @@ fn test_u3_ttl_zero_disables_freshness_filter() {
 
     // 1 hour ago — far past any reasonable TTL, but with TTL=0 the
     // filter is off and the rejection flows through.
-    let one_hour_ago =
-        (chrono::Utc::now() - chrono::Duration::seconds(3600)).to_rfc3339();
+    let one_hour_ago = (chrono::Utc::now() - chrono::Duration::seconds(3600)).to_rfc3339();
     write_event(&events_path, "build.done", "executor", &one_hour_ago);
 
     event_loop.state.current_isolated_hat = Some(HatId::new("executor"));
@@ -240,8 +239,7 @@ fn test_u3_custom_ttl_respected() {
     event_loop.config.event_loop.task_resume_ttl_seconds = Some(60);
 
     // 90 seconds ago — past the tuned TTL but inside the default.
-    let ninety_seconds_ago =
-        (chrono::Utc::now() - chrono::Duration::seconds(90)).to_rfc3339();
+    let ninety_seconds_ago = (chrono::Utc::now() - chrono::Duration::seconds(90)).to_rfc3339();
     write_event(&events_path, "build.done", "executor", &ninety_seconds_ago);
 
     event_loop.state.current_isolated_hat = Some(HatId::new("executor"));
@@ -379,8 +377,7 @@ hats:
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
 
     // 10 minutes ago — past the default 300s TTL.
-    let ten_minutes_ago =
-        (chrono::Utc::now() - chrono::Duration::seconds(600)).to_rfc3339();
+    let ten_minutes_ago = (chrono::Utc::now() - chrono::Duration::seconds(600)).to_rfc3339();
     let json = serde_json::json!({
         "topic": "work.done",
         "payload": "{}",  // empty — completion guard requires plan_path
@@ -525,8 +522,7 @@ hats:
     // survives the read-time future-window check, but the
     // `is_rejection_stale` helper at the policy-rejection site
     // treats any `source_unix > now_unix` as stale.
-    let sixty_seconds_future =
-        (chrono::Utc::now() + chrono::Duration::seconds(60)).to_rfc3339();
+    let sixty_seconds_future = (chrono::Utc::now() + chrono::Duration::seconds(60)).to_rfc3339();
     let json = serde_json::json!({
         "topic": "work.done",
         "payload": "{}",

@@ -215,7 +215,8 @@ pub use wave_detection::{
 };
 pub use wave_prompt::{WaveWorkerContext, build_wave_worker_prompt};
 pub use wave_tracker::{
-    CompletedWave, WaveFailure, WaveProgress, WaveResult, WaveTracker, MAX_DIMENSION_RETRIES_PER_SLOT,
+    CompletedWave, MAX_DIMENSION_RETRIES_PER_SLOT, WaveFailure, WaveProgress, WaveResult,
+    WaveTracker,
 };
 pub use workspace::{
     CleanupPolicy, TaskWorkspace, VerificationResult, WorkspaceError, WorkspaceInfo,

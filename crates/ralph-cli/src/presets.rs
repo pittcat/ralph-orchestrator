@@ -41,10 +41,7 @@ const PRESETS: &[EmbeddedPreset] = &[
     EmbeddedPreset {
         name: "ce-executor-serial",
         description: "Isolated-mode plan-driven work execution with serial code review (no wave), auto-fix, shipping, and manager report",
-        content: include_str!(concat!(
-            env!("OUT_DIR"),
-            "/presets/ce-executor-serial.yml"
-        )),
+        content: include_str!(concat!(env!("OUT_DIR"), "/presets/ce-executor-serial.yml")),
         public: true,
     },
     EmbeddedPreset {
@@ -1069,8 +1066,8 @@ mod tests {
     /// never reach `LOOP_COMPLETE` and stall at the missing-event gate.
     #[test]
     fn test_ce_executor_serial_has_report_done_completion_gate() {
-        let preset = get_preset("ce-executor-serial")
-            .expect("ce-executor-serial preset should exist");
+        let preset =
+            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor-serial YAML should parse");
         assert_eq!(
@@ -1088,8 +1085,8 @@ mod tests {
     /// stalls on the missing-event gate.
     #[test]
     fn test_ce_executor_serial_synthesizer_triggers_on_dimensions_complete() {
-        let preset = get_preset("ce-executor-serial")
-            .expect("ce-executor-serial preset should exist");
+        let preset =
+            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor-serial YAML should parse");
         let synthesizer = config
@@ -1106,11 +1103,15 @@ mod tests {
         // Defense in depth: the wave topic must NOT appear anywhere in
         // the synthesizer's trigger list, even as a duplicate.
         assert!(
-            !synthesizer.triggers.contains(&"review.wave.ready".to_string()),
+            !synthesizer
+                .triggers
+                .contains(&"review.wave.ready".to_string()),
             "ce-executor-serial review-synthesizer must NOT trigger on review.wave.ready (no wave in this preset)"
         );
         assert!(
-            !synthesizer.triggers.contains(&"wave.worker.failed".to_string()),
+            !synthesizer
+                .triggers
+                .contains(&"wave.worker.failed".to_string()),
             "ce-executor-serial review-synthesizer must NOT trigger on wave.worker.failed (no wave dispatcher in this preset)"
         );
     }
@@ -1123,8 +1124,8 @@ mod tests {
     /// serial or rename the preset to a wave variant.
     #[test]
     fn test_ce_executor_serial_dimension_reviewer_no_concurrency_no_aggregate() {
-        let preset = get_preset("ce-executor-serial")
-            .expect("ce-executor-serial preset should exist");
+        let preset =
+            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor-serial YAML should parse");
         let reviewer = config
@@ -1157,8 +1158,8 @@ mod tests {
     /// through `task.resume`, not `human.guidance`.
     #[test]
     fn test_ce_executor_serial_progress_steward_only_loop_stalled() {
-        let preset = get_preset("ce-executor-serial")
-            .expect("ce-executor-serial preset should exist");
+        let preset =
+            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor-serial YAML should parse");
         let steward = config
@@ -1186,8 +1187,8 @@ mod tests {
     /// guard as it is not in the hat's `publishes` list).
     #[test]
     fn test_ce_executor_serial_topic_ownership() {
-        let preset = get_preset("ce-executor-serial")
-            .expect("ce-executor-serial preset should exist");
+        let preset =
+            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor-serial YAML should parse");
         let coordinator = config
@@ -1201,33 +1202,47 @@ mod tests {
 
         // review-coordinator owns the kick-off + close events
         assert!(
-            coordinator.publishes.contains(&"review.dimension.ready".to_string()),
+            coordinator
+                .publishes
+                .contains(&"review.dimension.ready".to_string()),
             "review-coordinator must publish review.dimension.ready"
         );
         assert!(
-            coordinator.publishes.contains(&"review.dimensions.complete".to_string()),
+            coordinator
+                .publishes
+                .contains(&"review.dimensions.complete".to_string()),
             "review-coordinator must publish review.dimensions.complete (plural — aggregate over the sequence)"
         );
         assert!(
-            !coordinator.publishes.contains(&"review.dimension.done".to_string()),
+            !coordinator
+                .publishes
+                .contains(&"review.dimension.done".to_string()),
             "review-coordinator must NOT publish review.dimension.done (dimension-reviewer owns that)"
         );
         assert!(
-            !coordinator.publishes.contains(&"review.dimension.failed".to_string()),
+            !coordinator
+                .publishes
+                .contains(&"review.dimension.failed".to_string()),
             "review-coordinator must NOT publish review.dimension.failed (dimension-reviewer owns that)"
         );
 
         // dimension-reviewer owns the per-dim completion events
         assert!(
-            reviewer.publishes.contains(&"review.dimension.done".to_string()),
+            reviewer
+                .publishes
+                .contains(&"review.dimension.done".to_string()),
             "dimension-reviewer must publish review.dimension.done"
         );
         assert!(
-            reviewer.publishes.contains(&"review.dimension.failed".to_string()),
+            reviewer
+                .publishes
+                .contains(&"review.dimension.failed".to_string()),
             "dimension-reviewer must publish review.dimension.failed"
         );
         assert!(
-            !reviewer.publishes.contains(&"review.dimensions.complete".to_string()),
+            !reviewer
+                .publishes
+                .contains(&"review.dimensions.complete".to_string()),
             "dimension-reviewer must NOT publish review.dimensions.complete (review-coordinator owns that)"
         );
     }
@@ -1261,8 +1276,8 @@ mod tests {
     /// before runtime does.
     #[test]
     fn test_ce_executor_serial_has_no_wave_topic() {
-        let preset = get_preset("ce-executor-serial")
-            .expect("ce-executor-serial preset should exist");
+        let preset =
+            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor-serial YAML should parse");
         for (hat_name, hat) in &config.hats {

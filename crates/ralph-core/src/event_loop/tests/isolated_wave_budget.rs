@@ -36,12 +36,7 @@ use crate::event_reader::Event as JsonlEvent;
 use std::io::Write;
 
 /// Write a non-wave business event (no wave_id) into the events file.
-fn write_business_event(
-    path: &std::path::Path,
-    topic: &str,
-    payload: &str,
-    hat: &str,
-) {
+fn write_business_event(path: &std::path::Path, topic: &str, payload: &str, hat: &str) {
     let ts = chrono::Utc::now().to_rfc3339();
     let json = serde_json::json!({
         "topic": topic,
@@ -151,13 +146,7 @@ fn count_budget_violations(event_loop: &EventLoop) -> usize {
     let hat_ids: Vec<ralph_proto::HatId> = event_loop.bus.hat_ids().cloned().collect();
     hat_ids
         .iter()
-        .flat_map(|id| {
-            event_loop
-                .bus
-                .peek_pending(id)
-                .cloned()
-                .unwrap_or_default()
-        })
+        .flat_map(|id| event_loop.bus.peek_pending(id).cloned().unwrap_or_default())
         .filter(|e| e.topic.as_str() == "event.isolation.boundary_violation")
         .count()
 }
@@ -187,9 +176,7 @@ fn test_u1_wave_group_with_wave_id_admitted_atomically() {
         );
     }
 
-    let result = event_loop
-        .process_events_from_jsonl_with_waves()
-        .unwrap();
+    let result = event_loop.process_events_from_jsonl_with_waves().unwrap();
 
     assert_eq!(
         result.wave_events.len(),
@@ -246,9 +233,7 @@ fn test_u1_mixed_non_wave_then_wave_group_admitted() {
         );
     }
 
-    let result = event_loop
-        .process_events_from_jsonl_with_waves()
-        .unwrap();
+    let result = event_loop.process_events_from_jsonl_with_waves().unwrap();
 
     // The non-wave business event (queue.advance) should be admitted.
     // Note: `processed.accepted_events` is `Vec<ralph_proto::Event>`
@@ -332,9 +317,7 @@ fn test_u1_two_distinct_wave_ids_rejects_second_wave() {
         );
     }
 
-    let result = event_loop
-        .process_events_from_jsonl_with_waves()
-        .unwrap();
+    let result = event_loop.process_events_from_jsonl_with_waves().unwrap();
 
     let wave_a: Vec<&JsonlEvent> = result
         .wave_events
@@ -441,9 +424,7 @@ fn test_u1_regression_non_wave_first_then_wave_admitted() {
         );
     }
 
-    let result = event_loop
-        .process_events_from_jsonl_with_waves()
-        .unwrap();
+    let result = event_loop.process_events_from_jsonl_with_waves().unwrap();
 
     let wave_accepted: Vec<&JsonlEvent> = result
         .wave_events

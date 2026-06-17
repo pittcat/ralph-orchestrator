@@ -234,8 +234,14 @@ fn test_u5_disabled_steward_does_not_emit() {
     let _ = event_loop.process_events_from_jsonl();
 
     let observed_topics = observed.lock().unwrap().clone();
-    let stalled_count = observed_topics.iter().filter(|t| *t == "loop.stalled").count();
-    let plan_blocked_count = observed_topics.iter().filter(|t| *t == "plan.blocked").count();
+    let stalled_count = observed_topics
+        .iter()
+        .filter(|t| *t == "loop.stalled")
+        .count();
+    let plan_blocked_count = observed_topics
+        .iter()
+        .filter(|t| *t == "plan.blocked")
+        .count();
 
     assert_eq!(
         stalled_count, 0,
@@ -269,7 +275,10 @@ fn test_u5_steward_woken_this_turn_prevents_recurisve_wake() {
     let _ = event_loop.process_events_from_jsonl();
 
     let observed_topics = observed.lock().unwrap().clone();
-    let stalled_count = observed_topics.iter().filter(|t| *t == "loop.stalled").count();
+    let stalled_count = observed_topics
+        .iter()
+        .filter(|t| *t == "loop.stalled")
+        .count();
     assert_eq!(
         stalled_count, 0,
         "steward_woken_this_turn must suppress recursive loop.stalled emits; got {stalled_count}"

@@ -299,7 +299,15 @@ fn test_emit_isolated_mode_rejects_coordinator_aggregate_timeout() {
 }
 
 /// Phase 2: in isolated mode, when --hat agrees with RALPH_CURRENT_HAT the
-/// emit proceeds normally.
+/// emit proceeds normally (provided the topic is in the hat's `publishes`).
+///
+/// 2026-06-17-003 plan U1: this test previously emitted `debug.step` from
+/// `review-synthesizer` — a hat that does not own `debug.step`. The test
+/// was capturing the pre-U1 behaviour where isolated-scope was only
+/// enforced at loop runtime (events would land in events.jsonl and be
+/// dropped silently). U1 closes that precheck gap; the test now emits a
+/// topic the hat actually owns (`review.passed`) and asserts the
+/// provenance-override path still works.
 #[test]
 fn test_emit_isolated_mode_allows_matching_hat() {
     let temp_dir = TempDir::new().expect("temp dir");
@@ -311,8 +319,8 @@ fn test_emit_isolated_mode_allows_matching_hat() {
             "-H",
             "builtin:ce-executor-isolated",
             "emit",
-            "debug.step",
-            "task_id=demo",
+            "review.passed",
+            r#"{"plan_name":"p","task_id":"t","task_key":"k","step":"s","findings_count":0,"fix_round":0,"verdict":"pass","skip_reason":"aggregate_timeout"}"#,
             "--hat",
             "review-synthesizer",
         ])
@@ -331,6 +339,7 @@ fn test_emit_isolated_mode_allows_matching_hat() {
     let events_file = temp_path.join(".ralph/events.jsonl");
     let events = std::fs::read_to_string(&events_file).unwrap();
     assert!(events.contains("\"hat\":\"review-synthesizer\""));
+    assert!(events.contains("review.passed"));
 }
 
 // -------------------------------------------------------------------------
