@@ -676,6 +676,19 @@ const ALLOWED_PLAN_STATUSES: &[&str] = &[
     "abandoned",
 ];
 
+/// Statuses that are not in [`ALLOWED_PLAN_STATUSES`] but follow a
+/// regular pattern (suffix handoff labels, multi-stage merged-into
+/// plans, etc.). Keeping this whitelist open by pattern rather than
+/// exhaustively enumerating avoids rot every time a plan hands off
+/// the remaining units to a successor plan.
+fn is_pattern_allowed_status(status: &str) -> bool {
+    // Multi-stage handoff: `uM-closed-uN-...-merged-into-plan-XXX`
+    // (any number of intermediate `uN-*` tokens). Lets plan authors
+    // express a finished unit that has been rolled into a successor
+    // without enumeration churn.
+    status.contains("-merged-into-plan-")
+}
+
 /// Run plan-sync check and return a [`CheckResult`].
 pub(crate) fn check_plan_sync(plan_path: &Path, tasks_path: &Path) -> CheckResult {
     let plan_name = plan_path
@@ -746,7 +759,9 @@ pub(crate) fn check_plan_sync(plan_path: &Path, tasks_path: &Path) -> CheckResul
 
     let mut issues: Vec<String> = Vec::new();
 
-    if !ALLOWED_PLAN_STATUSES.contains(&status.as_str()) {
+    if !ALLOWED_PLAN_STATUSES.contains(&status.as_str())
+        && !is_pattern_allowed_status(&status)
+    {
         issues.push(format!(
             "status '{}' not in allowed enum: {}",
             status,
@@ -1284,6 +1299,51 @@ mod tests {
         std::fs::write(&plan, "---\ntitle: t\nstatus: active\n---\n# body\n").unwrap();
         let tasks = dir.path().join("nonexistent-tasks.jsonl");
         let result = check_plan_sync(&plan, &tasks);
+        assert_eq!(result.status, CheckStatus::Warn);
+    }
+
+    /// P1-1 / P1-2 (plan 004 code review): handoff status
+    /// `uN-closed-...-merged-into-plan-XXX` is not in the literal
+    /// [`ALLOWED_PLAN_STATUSES`] but is recognised by the pattern
+    /// helper, so the rule must pass without flagging a phantom
+    /// enum violation.
+    #[test]
+    fn plan_sync_merged_into_plan_status_is_accepted() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let plan = dir.path().join("p.md");
+        std::fs::write(
+            &plan,
+            "---\ntitle: t\nstatus: u1-closed-u2-u5-merged-into-plan-004\n---\n# body\n",
+        )
+        .unwrap();
+        let tasks = dir.path().join("tasks.jsonl");
+        std::fs::write(
+            &tasks,
+            "{\"id\":\"t1\",\"title\":\"u1\",\"status\":\"closed\",\"key\":\"ce-executor:p:step-01:u1-impl\",\"created\":\"2026-06-17T00:00:00Z\"}\n",
+        )
+        .unwrap();
+        let result = check_plan_sync(&plan, &tasks);
+        // Pattern-accepted status, no other drift → pass.
+        assert_eq!(result.status, CheckStatus::Pass);
+    }
+
+    /// Negative companion: an unrelated suffix-like status (e.g.
+    /// `merged-into-plan-` without the `uN-closed-` prefix) is
+    /// still rejected so the pattern helper does not become a
+    /// blanket bypass.
+    #[test]
+    fn plan_sync_merged_into_plan_without_prefix_fails() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let plan = dir.path().join("p.md");
+        std::fs::write(
+            &plan,
+            "---\ntitle: t\nstatus: random-merged-into-plan-001\n---\n# body\n",
+        )
+        .unwrap();
+        let tasks = dir.path().join("nonexistent-tasks.jsonl");
+        let result = check_plan_sync(&plan, &tasks);
+        // Wrong prefix → pattern helper does NOT recognise, but
+        // tasks.jsonl is missing → warn path dominates.
         assert_eq!(result.status, CheckStatus::Warn);
     }
 }

@@ -55,24 +55,25 @@ pub fn agent_wrote_any_valid_or_rejected(
 /// `ralph diagnose` see the full picture. Returns `(0, 0)` if
 /// neither file exists — the absence is not a failure.
 ///
-/// `session_dir` is the absolute path to the diagnostics session
-/// directory (e.g. `<root>/.ralph/diagnostics/<id>/`). The
-/// workspace root is derived as three parents up from there so
-/// we do not depend on LoopContext / config layout details.
-pub(crate) fn count_recovery_entries(session_dir: &Path) -> (u32, u32) {
+/// `workspace_root` is the absolute path to the repo root that
+/// hosts `<root>/.ralph/`; `session_dir` is the absolute path
+/// to the diagnostics session directory (typically
+/// `<root>/.ralph/diagnostics/<id>/`). The workspace journal
+/// lives at `<root>/.ralph/recovery.jsonl`; the session journal
+/// lives at `<session_dir>/recovery.jsonl`. Using `session_dir`
+/// directly (rather than reconstructing it from `session_id`)
+/// keeps the lookup robust against helper paths that nest
+/// `.ralph` differently (e.g. tests that pass
+/// `ctx.workspace().join(".ralph")` as the collector base).
+pub(crate) fn count_recovery_entries(
+    workspace_root: &Path,
+    session_dir: &Path,
+) -> (u32, u32) {
+    let workspace_path = workspace_root.join(".ralph").join("recovery.jsonl");
     let session_path = session_dir.join("recovery.jsonl");
-    // `.ralph/diagnostics/<id>/recovery.jsonl` → workspace root is
-    // three parents up (`<root>`).
-    let workspace_root = session_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent());
-    let workspace_path = workspace_root.map(|r| r.join(".ralph").join("recovery.jsonl"));
-    let workspace_count = workspace_path
-        .as_deref()
-        .map(count_non_empty_lines)
-        .unwrap_or(0);
-    (workspace_count, count_non_empty_lines(&session_path))
+    let workspace_count = count_non_empty_lines(&workspace_path);
+    let session_count = count_non_empty_lines(&session_path);
+    (workspace_count, session_count)
 }
 
 /// Count non-blank lines in a JSONL file. Returns 0 on any I/O
@@ -96,7 +97,19 @@ pub(crate) fn build_termination_diagnostics(
     ralph_core::DiagnosisHint,
     ralph_core::diagnostics::DiagnosisSummary,
 )> {
-    let session_id = event_loop.diagnostics().session_id()?;
+    // `session_id()` is implemented as `session_dir().file_name()`,
+    // so when `session_dir()` is `Some(_)` the id is also `Some(_)`
+    // (the directory is created with a timestamped name like
+    // `2026-06-17T22-21-30`, always valid UTF-8 ASCII). The
+    // `?` above short-circuits the disabled-collector case; the
+    // `expect` here only triggers on a malformed file system,
+    // which the surrounding `count_recovery_entries` would then
+    // also fail to read.
+    let session_dir = event_loop.diagnostics().session_dir()?;
+    let session_id = event_loop
+        .diagnostics()
+        .session_id()
+        .expect("session_id must be Some when session_dir is Some");
 
     // Workspace-relative path so the hint survives a worktree
     // checkout. The session directory always lives at
@@ -132,7 +145,7 @@ pub(crate) fn build_termination_diagnostics(
         .map(|c| c.workspace().to_path_buf())
         .unwrap_or_else(|| event_loop.config().core.workspace_root.clone());
     let workspace_root = workspace_root_owned.as_path();
-    let (workspace_count, session_count) = count_recovery_entries(workspace_root, &session_id);
+    let (workspace_count, session_count) = count_recovery_entries(workspace_root, session_dir);
     let recovery_count = workspace_count + session_count;
 
     let mut notes = Vec::new();
