@@ -15,7 +15,8 @@ pub use loop_state::{LoopState, U2_REJECTION_RETRY_LIMIT, WorkflowProgress};
 #[allow(unused_imports)]
 pub use rejection::{
     NonRetryableReason, Rejection, RejectionStage, build_task_resume_payload,
-    rejection_from_origin, resolve_target_hat,
+    enrich_task_resume_payload, extract_reason_code, rejection_from_origin, resolve_target_hat,
+    task_resume_payload_has_required_fields,
 };
 
 use crate::config::{HatBackend, HatExecutionMode, InjectMode, RalphConfig, ScratchpadConfig};
@@ -380,6 +381,15 @@ pub struct EventLoop {
 /// `work.done` dedup is the U4 sibling). This is the textual
 /// counterpart to the mechanism: the gate rejects, the hint
 /// explains why.
+///
+/// U2 (2026-06-17-003 plan): the payload is wrapped in a JSON
+/// object that carries the schema-required `reason` and
+/// `target_hat` fields.  Before publish, the wrapped payload is
+/// audited via `task_resume_payload_has_required_fields`; if
+/// either field is missing, the `task.resume` event is NOT
+/// published and a `event.isolation.boundary_violation`
+/// diagnostic is emitted instead (drift would otherwise flag the
+/// injected event as `field_completeness=0%`).
 fn publish_policy_rejection_resume(
     bus: &mut EventBus,
     event: &JsonlEvent,
@@ -426,7 +436,52 @@ fn publish_policy_rejection_resume(
 
     let payload = enrich_payload_with_wave(&payload, event);
     let payload = enrich_payload_with_wave_open_hint(&payload, event, tracker);
-    let mut resume = Event::new("task.resume", payload);
+
+    // U2 (2026-06-17-003 plan): wrap the free-form payload text in a
+    // JSON object that carries the schema-required `reason` (derived
+    // from the rejected topic via `extract_reason_code`) and
+    // `target_hat` (the source hat).  Without this wrap the
+    // injected `task.resume` would carry only the free-form text
+    // and the drift detector would flag it as `field_completeness=0%`.
+    let reason_code = extract_reason_code(&format!("{}: {}", event.topic, payload));
+    let target_hat_value = event
+        .hat
+        .clone()
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "ralph".to_string());
+    let structured_payload = serde_json::json!({
+        "reason": reason_code,
+        "target_hat": target_hat_value,
+        "rejected_topic": event.topic.as_str(),
+        "source_hat": event.hat.as_deref(),
+        "message": payload,
+    });
+    let structured_payload_str = structured_payload.to_string();
+
+    // U2 gate: fail-closed when the schema-required fields are
+    // missing.  The check is cheap (single JSON parse) and
+    // mirrors the `is_rejection_stale` pattern above.  When the
+    // gate fires, we emit an orchestrator diagnostic
+    // (`event.isolation.boundary_violation`) so operators see
+    // the gate trip in `orchestration.jsonl`.
+    if !task_resume_payload_has_required_fields(&structured_payload_str) {
+        warn!(
+            hat = ?event.hat.as_deref(),
+            topic = %event.topic,
+            "policy rejection: structured task.resume payload missing required fields — dropping"
+        );
+        bus.publish(Event::new(
+            "event.isolation.boundary_violation",
+            format!(
+                "{{\"hat\":\"{}\",\"topic\":\"{}\",\"violation\":\"Policy rejection: task.resume payload missing required fields (reason/target_hat)\",\"stage\":\"policy\"}}",
+                event.hat.as_deref().unwrap_or("unknown"),
+                event.topic
+            ),
+        ));
+        return;
+    }
+
+    let mut resume = Event::new("task.resume", structured_payload_str);
     if let Some(hat) = event.hat.as_deref() {
         if !hat.is_empty() {
             resume = resume.with_target(HatId::new(hat.to_string()));
@@ -2703,11 +2758,21 @@ impl EventLoop {
                 self.state.completion_requested = false;
 
                 // Inject task.resume so the loop continues
-                let resume_payload = format!(
+                let free_form = format!(
                     "LOOP_COMPLETE rejected: missing required events: {:?}. \
                      The agent must complete all workflow phases before emitting LOOP_COMPLETE. \
                      Use loop.cancel to abort the workflow instead.",
                     missing
+                );
+                // U2 (2026-06-17-003 plan): wrap the free-form message in
+                // a JSON object carrying the schema-required
+                // `reason` and `target_hat` fields so the drift
+                // detector counts the injected `task.resume` as
+                // schema-compliant.
+                let resume_payload = enrich_task_resume_payload(
+                    &free_form,
+                    "missing required events",
+                    None,
                 );
                 self.bus.publish(Event::new("task.resume", resume_payload));
                 return None;
@@ -2755,10 +2820,18 @@ impl EventLoop {
                 }
                 self.state.completion_requested = false;
 
-                let resume_payload = format!(
+                let free_form = format!(
                     "LOOP_COMPLETE rejected: most recent {} event has {}={}. \
                      The workflow has not passed final review. Use loop.cancel to abort instead.",
                     gate.topic, gate.fail_field, gate.fail_value
+                );
+                // U2 (2026-06-17-003 plan): wrap the free-form
+                // message in a JSON object carrying the
+                // schema-required `reason` and `target_hat` fields.
+                let resume_payload = enrich_task_resume_payload(
+                    &free_form,
+                    "verdict_fail",
+                    None,
                 );
                 self.bus.publish(Event::new("task.resume", resume_payload));
                 return None;
@@ -2783,11 +2856,19 @@ impl EventLoop {
             }
             self.state.completion_requested = false;
 
-            let resume_payload = format!(
+            let free_form = format!(
                 "LOOP_COMPLETE rejected: {}. \
                  All workflow instances must reach a terminal phase before emitting LOOP_COMPLETE. \
                  Use loop.cancel to abort the workflow instead.",
                 rejection.message
+            );
+            // U2 (2026-06-17-003 plan): wrap the free-form message
+            // in a JSON object carrying the schema-required
+            // `reason` and `target_hat` fields.
+            let resume_payload = enrich_task_resume_payload(
+                &free_form,
+                "workflow_guard incomplete",
+                None,
             );
             self.bus.publish(Event::new("task.resume", resume_payload));
             return None;
@@ -2808,11 +2889,16 @@ impl EventLoop {
             );
 
             // Inject a task.resume event so the loop continues with an idle prompt
-            let resume_event = Event::new(
-                "task.resume",
+            // U2 (2026-06-17-003 plan): wrap the free-form message in
+            // a JSON object carrying the schema-required
+            // `reason` and `target_hat` fields.
+            let persistent_payload = enrich_task_resume_payload(
                 "Persistent mode: loop staying alive after completion signal. \
                  Check for new tasks or await human guidance.",
+                "persistent mode",
+                None,
             );
+            let resume_event = Event::new("task.resume", persistent_payload);
             self.bus.publish(resume_event);
 
             return None;
@@ -2846,13 +2932,21 @@ impl EventLoop {
                     return Some(reason);
                 }
                 self.state.completion_requested = false;
-                self.bus.publish(Event::new(
-                    "task.resume",
-                    format!(
-                        "Completion rejected: runtime tasks remain open: {:?}. Close, fail, or reopen outstanding tasks before emitting the completion promise.",
+                // U2 (2026-06-17-003 plan): wrap the free-form
+                // message in a JSON object carrying the
+                // schema-required `reason` and `target_hat` fields.
+                let open_tasks_payload = enrich_task_resume_payload(
+                    &format!(
+                        "Completion rejected: runtime tasks remain open: {:?}. \
+                         Close, fail, or reopen outstanding tasks before \
+                         emitting the completion promise.",
                         open_tasks
                     ),
-                ));
+                    "open tasks remain",
+                    None,
+                );
+                self.bus
+                    .publish(Event::new("task.resume", open_tasks_payload));
                 return None;
             }
         } else if let Ok(false) = self.verify_scratchpad_complete() {
@@ -3399,7 +3493,7 @@ impl EventLoop {
             return false;
         };
 
-        let payload = format!(
+        let free_form = format!(
             "RECOVERY (AGGREGATE TIMEOUT): review wave '{}' received {}/{} \
              review.dimension.done events within {}s. Activate review-synthesizer and emit \
              review.passed with skip_reason=aggregate_timeout (or review.failed if verdict \
@@ -3415,6 +3509,14 @@ impl EventLoop {
             action.wave_id,
         );
         let target = HatId::new("review-synthesizer");
+        // U2 (2026-06-17-003 plan): wrap the free-form message in
+        // a JSON object carrying the schema-required `reason` and
+        // `target_hat` fields.
+        let payload = enrich_task_resume_payload(
+            &free_form,
+            "aggregate_timeout",
+            Some(target.as_str()),
+        );
         debug!(
             wave_id = %action.wave_id,
             received = action.received,
@@ -3558,12 +3660,20 @@ impl EventLoop {
                 stall_count_value,
                 &[],
             ));
+            // U2 (2026-06-17-003 plan): wrap the free-form message
+            // in a JSON object carrying the schema-required
+            // `reason` and `target_hat` fields.
+            let structured_payload = enrich_task_resume_payload(
+                &payload,
+                reason_str,
+                Some(hard_target.as_str()),
+            );
             debug!(
                 stall_count = stall_count_value,
                 target = %hard_target.as_str(),
                 "Injecting HARD stall recovery to review hat"
             );
-            Event::new("task.resume", payload).with_target(hard_target)
+            Event::new("task.resume", structured_payload).with_target(hard_target)
         } else {
             match &self.state.last_hat {
                 Some(hat_id) if hat_id.as_str() != "ralph" => {
@@ -3600,11 +3710,20 @@ impl EventLoop {
                         &[],
                     ));
 
+                    // U2 (2026-06-17-003 plan): wrap the free-form
+                    // message in a JSON object carrying the
+                    // schema-required `reason` and `target_hat` fields.
+                    let structured_payload = enrich_task_resume_payload(
+                        &payload,
+                        "stall_no_events",
+                        Some(hat_id.as_str()),
+                    );
+
                     debug!(
                         hat = %hat_id.as_str(),
                         "Injecting fallback event to recover - targeting last hat with task.resume"
                     );
-                    Event::new("task.resume", payload).with_target(hat_id.clone())
+                    Event::new("task.resume", structured_payload).with_target(hat_id.clone())
                 }
                 _ => {
                     let mut payload = String::from(
@@ -3620,10 +3739,18 @@ impl EventLoop {
                         0,
                         &[],
                     ));
+                    // U2 (2026-06-17-003 plan): wrap the free-form
+                    // message in a JSON object carrying the
+                    // schema-required `reason` and `target_hat` fields.
+                    let structured_payload = enrich_task_resume_payload(
+                        &payload,
+                        "stall_no_events",
+                        Some("ralph"),
+                    );
                     debug!(
                         "Injecting fallback event to recover - triggering Ralph with task.resume"
                     );
-                    Event::new("task.resume", payload)
+                    Event::new("task.resume", structured_payload)
                 }
             }
         };
@@ -5767,8 +5894,12 @@ impl EventLoop {
             // the `EventOriginGuard` accepts the publish. The payload
             // carries the full escalation metadata for the downstream
             // hat to act on.
+            // U2 (2026-06-17-003 plan): the JSON payload already
+            // includes `reason`; add `target_hat` so the drift
+            // detector counts it as schema-compliant.
             let payload = serde_json::json!({
                 "reason": "handoff_dispatch_timeout",
+                "target_hat": esc.safe_target,
                 "topic": esc.topic,
                 "consumer": esc.consumer,
                 "event_id": esc.event_id,
@@ -7618,6 +7749,12 @@ impl EventLoop {
                                     );
                                 let retry_payload = serde_json::json!({
                                     "rejected_topic": event.topic.as_str(),
+                                    // U2 (2026-06-17-003 plan): add the
+                                    // schema-required `target_hat` field
+                                    // alongside `reason` so the drift
+                                    // detector counts the contract recovery
+                                    // as schema-compliant.
+                                    "target_hat": hat_id.as_str(),
                                     "reason": finding.message,
                                     "finding_kind": format!("{:?}", finding.kind),
                                     "required_action": format!(

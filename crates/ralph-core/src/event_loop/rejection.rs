@@ -289,6 +289,18 @@ fn violation_class(violation: &str) -> &'static str {
     }
 }
 
+/// Map a `Rejection`'s free-form violation string to a stable short
+/// reason code suitable for the `task.resume` payload's `reason`
+/// field.  Schema validators (e.g. `ce-executor-serial.yml`) require
+/// `reason` to be a non-empty string; this helper produces codes
+/// that the drift detector can count as "field present and
+/// well-typed".  Mirrors [`violation_class`] but is `pub` so
+/// callers (e.g. the audit gate at `event_loop/mod.rs`) can
+/// reason about the same vocabulary the payload uses.
+pub fn extract_reason_code(violation: &str) -> &'static str {
+    violation_class(violation)
+}
+
 /// Convert an [`OriginCheck::Rejected`] to a [`Rejection`].  Helper
 /// for callers that already have the origin guard's verdict.
 pub fn rejection_from_origin(check: &OriginCheck, source_hat: Option<String>) -> Option<Rejection> {
@@ -416,6 +428,31 @@ pub fn build_task_resume_payload(
             serde_json::Value::String(hat.to_string()),
         );
     }
+    // U2 (2026-06-17-003 plan): schema-required `reason` and
+    // `target_hat` fields.  These were previously missing from the
+    // payload, which caused the drift detector to report
+    // `field_completeness=0%` for the `task.resume` topic.  Both
+    // fields are top-level strings so the preset schema validator
+    // (e.g. `ce-executor-serial.yml`) sees them as present.
+    payload.insert(
+        "reason".into(),
+        serde_json::Value::String(extract_reason_code(&rejection.violation).to_string()),
+    );
+    // `target_hat` resolution: explicit `target_hat` first, then
+    // `source_hat` (which is what `resolve_target_hat` falls back
+    // to), then `business_hat`.  Mirrors the existing helper
+    // `resolve_target_hat` so the values are consistent.
+    let resolved_target_hat = rejection
+        .target_hat
+        .as_deref()
+        .or(rejection.source_hat.as_deref())
+        .or(rejection.business_hat.as_deref());
+    if let Some(hat) = resolved_target_hat {
+        payload.insert(
+            "target_hat".into(),
+            serde_json::Value::String(hat.to_string()),
+        );
+    }
     if let Some(wc) = wave_context {
         payload.insert(
             "wave_id".into(),
@@ -478,6 +515,65 @@ pub fn resolve_target_hat(business_hat: Option<&str>, source_hat: Option<&str>) 
     business_hat
         .or(source_hat)
         .map(|s| HatId::new(s.to_string()))
+}
+
+/// Returns `true` when the JSON payload string contains both
+/// `reason` and `target_hat` as string fields.  Used by
+/// `publish_policy_rejection_resume` and other `task.resume`
+/// injection points to fail-closed when the schema-required
+/// fields are missing — the drift detector would otherwise
+/// report `0%` field completeness for the `task.resume` topic.
+///
+/// `payload` is the JSON-serialised payload (the value passed
+/// to `Event::new("task.resume", payload)`).  Returns `false`
+/// when the payload is not a valid JSON object, or when either
+/// of the two fields is absent or not a string.
+pub fn task_resume_payload_has_required_fields(payload: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return false;
+    };
+    let Some(obj) = value.as_object() else {
+        return false;
+    };
+    let reason_ok = obj
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty());
+    let target_hat_ok = obj
+        .get("target_hat")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty());
+    reason_ok && target_hat_ok
+}
+
+/// Wrap a free-form `task.resume` payload in a JSON object that
+/// carries the schema-required `reason` and `target_hat` fields.
+/// Used by orchestrator-injected `task.resume` paths (completion
+/// rejection, hard fallback, handoff escalation, etc.) that
+/// historically shipped only a free-form message string.  Without
+/// the wrap, the drift detector would flag the injected event
+/// as `field_completeness=0%`.
+///
+/// `reason_hint` is a free-form text used to derive a stable
+/// `reason` code (see [`extract_reason_code`]).  When
+/// `target_hat` is `None` and no default is provided, the
+/// function falls back to `"ralph"`.
+pub fn enrich_task_resume_payload(
+    free_form_message: &str,
+    reason_hint: &str,
+    target_hat: Option<&str>,
+) -> String {
+    let reason_code = extract_reason_code(reason_hint);
+    let target_hat_value = target_hat
+        .filter(|h| !h.is_empty())
+        .unwrap_or("ralph")
+        .to_string();
+    serde_json::json!({
+        "reason": reason_code,
+        "target_hat": target_hat_value,
+        "message": free_form_message,
+    })
+    .to_string()
 }
 
 #[cfg(test)]
@@ -609,6 +705,9 @@ mod tests {
         assert_eq!(v["original_trigger_topic"], "work.ready");
         assert_eq!(v["original_trigger_payload"]["task_id"], "task-x");
         assert!(v["retry_key"].as_str().unwrap().contains("executor"));
+        // U2 (2026-06-17-003 plan): schema-required fields.
+        assert_eq!(v["reason"], "missing_field");
+        assert_eq!(v["target_hat"], "executor");
     }
 
     #[test]
@@ -646,6 +745,174 @@ mod tests {
         assert_eq!(v["wave_index"], 3);
         assert_eq!(v["wave_total"], 7);
         assert_eq!(v["original_hat"], "dimension-reviewer");
+        // U2 (2026-06-17-003 plan): schema-required fields.
+        assert_eq!(v["reason"], "missing_field");
+        assert_eq!(v["target_hat"], "dimension-reviewer");
+    }
+
+    /// U2 (2026-06-17-003 plan): the `reason` field must be derived
+    /// from the rejection's violation string, and `target_hat` must
+    /// fall back through `source_hat` → `business_hat` when the
+    /// explicit `target_hat` is `None`.  Drift detector field
+    /// completeness was 0% before this fix.
+    #[test]
+    fn build_task_resume_payload_includes_reason_and_target_hat() {
+        // Case 1: explicit target_hat wins.
+        let r1 = Rejection {
+            stage: RejectionStage::Policy,
+            source_hat: Some("executor".into()),
+            business_hat: Some("executor".into()),
+            topic: "work.done".into(),
+            violation: "TypeMismatch: expected bool, got string".into(),
+            retry_key: "policy:executor:work.done:type_mismatch".into(),
+            retry_eligible: true,
+            non_retryable_reason: None,
+            target_hat: Some("explicit-target".into()),
+            original_event_id: None,
+            original_ts: None,
+        };
+        let payload1 = build_task_resume_payload(&r1, &[], &[], None, None, None);
+        let v1: serde_json::Value = serde_json::from_str(&payload1).unwrap();
+        assert_eq!(v1["reason"], "type_mismatch");
+        assert_eq!(v1["target_hat"], "explicit-target");
+
+        // Case 2: no explicit target_hat → fall back to source_hat.
+        let r2 = Rejection {
+            target_hat: None,
+            source_hat: Some("review-coordinator".into()),
+            business_hat: Some("review-coordinator".into()),
+            topic: "review.dimension.ready".into(),
+            violation: "out-of-scope topic for declared hat".into(),
+            ..r1.clone()
+        };
+        let payload2 = build_task_resume_payload(&r2, &[], &[], None, None, None);
+        let v2: serde_json::Value = serde_json::from_str(&payload2).unwrap();
+        assert_eq!(v2["reason"], "out_of_scope");
+        assert_eq!(v2["target_hat"], "review-coordinator");
+
+        // Case 3: neither target_hat nor source_hat → business_hat.
+        let r3 = Rejection {
+            target_hat: None,
+            source_hat: None,
+            business_hat: Some("business-fallback".into()),
+            topic: "work.done".into(),
+            violation: "task not open".into(),
+            ..r1.clone()
+        };
+        let payload3 = build_task_resume_payload(&r3, &[], &[], None, None, None);
+        let v3: serde_json::Value = serde_json::from_str(&payload3).unwrap();
+        assert_eq!(v3["reason"], "task_state");
+        assert_eq!(v3["target_hat"], "business-fallback");
+
+        // Case 4: reason falls back to "other" when no pattern matches.
+        let r4 = Rejection {
+            target_hat: Some("executor".into()),
+            source_hat: Some("executor".into()),
+            business_hat: Some("executor".into()),
+            topic: "work.done".into(),
+            violation: "completely unrecognised violation message".into(),
+            ..r1.clone()
+        };
+        let payload4 = build_task_resume_payload(&r4, &[], &[], None, None, None);
+        let v4: serde_json::Value = serde_json::from_str(&payload4).unwrap();
+        assert_eq!(v4["reason"], "other");
+        assert_eq!(v4["target_hat"], "executor");
+    }
+
+    /// U2 (2026-06-17-003 plan): the gate helper that audit-logs
+    /// `task.resume` payloads before publishing must return true
+    /// for payloads built by `build_task_resume_payload` and
+    /// false for anything that is missing either required field.
+    #[test]
+    fn task_resume_payload_has_required_fields_helper() {
+        // Valid payload from build_task_resume_payload.
+        let r = Rejection::from_execution_contract(
+            &ExecutionContractFinding {
+                topic: "work.done".into(),
+                kind: ExecutionContractViolationKind::MissingPayloadField {
+                    field: "plan_path".into(),
+                },
+                message: "missing plan_path".into(),
+                source_hat: None,
+            },
+            Some("executor".into()),
+            Some("executor".into()),
+        );
+        let payload = build_task_resume_payload(&r, &[], &[], None, None, None);
+        assert!(task_resume_payload_has_required_fields(&payload));
+
+        // Missing reason → false.
+        let bad1 = r#"{"target_hat":"executor","stage":"policy"}"#;
+        assert!(!task_resume_payload_has_required_fields(bad1));
+
+        // Missing target_hat → false.
+        let bad2 = r#"{"reason":"missing_field","stage":"policy"}"#;
+        assert!(!task_resume_payload_has_required_fields(bad2));
+
+        // reason not a string → false.
+        let bad3 = r#"{"reason":42,"target_hat":"executor"}"#;
+        assert!(!task_resume_payload_has_required_fields(bad3));
+
+        // target_hat not a string → false.
+        let bad4 = r#"{"reason":"missing_field","target_hat":null}"#;
+        assert!(!task_resume_payload_has_required_fields(bad4));
+
+        // Empty string reason → false.
+        let bad5 = r#"{"reason":"","target_hat":"executor"}"#;
+        assert!(!task_resume_payload_has_required_fields(bad5));
+
+        // Empty string target_hat → false.
+        let bad6 = r#"{"reason":"missing_field","target_hat":""}"#;
+        assert!(!task_resume_payload_has_required_fields(bad6));
+
+        // Not valid JSON → false.
+        assert!(!task_resume_payload_has_required_fields(
+            "not json at all"
+        ));
+        assert!(!task_resume_payload_has_required_fields(""));
+
+        // Not a JSON object → false.
+        let array = r#"["reason","target_hat"]"#;
+        assert!(!task_resume_payload_has_required_fields(array));
+    }
+
+    /// U2 (2026-06-17-003 plan): `enrich_task_resume_payload` wraps
+    /// a free-form message in a JSON object with the
+    /// schema-required `reason` and `target_hat` fields.  The
+    /// output must satisfy `task_resume_payload_has_required_fields`.
+    #[test]
+    fn enrich_task_resume_payload_wraps_free_form() {
+        // Explicit target_hat + reason hint that contains "missing" → missing_field.
+        let payload = enrich_task_resume_payload(
+            "WORKFLOW_GUARD_REJECTED: out-of-order event 'work.done'",
+            "missing plan_path",
+            Some("executor"),
+        );
+        assert!(task_resume_payload_has_required_fields(&payload));
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["reason"], "missing_field");
+        assert_eq!(v["target_hat"], "executor");
+        assert_eq!(
+            v["message"],
+            "WORKFLOW_GUARD_REJECTED: out-of-order event 'work.done'"
+        );
+
+        // No target_hat → defaults to "ralph".
+        let payload2 = enrich_task_resume_payload("RECOVERY hint", "out-of-scope", None);
+        assert!(task_resume_payload_has_required_fields(&payload2));
+        let v2: serde_json::Value = serde_json::from_str(&payload2).unwrap();
+        assert_eq!(v2["target_hat"], "ralph");
+        assert_eq!(v2["reason"], "out_of_scope");
+
+        // Empty target_hat → also defaults to "ralph".
+        let payload3 = enrich_task_resume_payload("RECOVERY hint", "out-of-scope", Some(""));
+        let v3: serde_json::Value = serde_json::from_str(&payload3).unwrap();
+        assert_eq!(v3["target_hat"], "ralph");
+
+        // Reason hint that matches "type" → type_mismatch.
+        let payload4 = enrich_task_resume_payload("bad", "TypeMismatch: expected bool", Some("h"));
+        let v4: serde_json::Value = serde_json::from_str(&payload4).unwrap();
+        assert_eq!(v4["reason"], "type_mismatch");
     }
 
     #[test]
