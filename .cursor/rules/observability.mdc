@@ -1,0 +1,51 @@
+---
+description: Runtime Diagnosis (U0-U8) + Doctor (plan frontmatter drift detection) + Diagnostics
+globs: ["**/docs/guide/runtime-diagnosis.md", "**/.ralph/diagnostics/**", "**/recovery.jsonl", "**/drift.jsonl", "**/diagnosis-summary.json", "**/docs/plans/**/*.md", "**/docs/achieved/plan/**/*.md"]
+alwaysApply: false
+---
+
+# Observability & Doctor
+
+## Diagnostics (TUI base layer)
+
+TUI mode always logs to `.ralph/diagnostics/logs/ralph-{timestamp}.log` (last 5 kept automatically).
+
+```bash
+RALPH_DIAGNOSTICS=1 ralph run -p "your prompt"
+```
+
+Output in `.ralph/diagnostics/<timestamp>/`:
+- `agent-output.jsonl` — Agent text, tool calls, results
+- `orchestration.jsonl` — Hat selection, events, backpressure
+- `errors.jsonl` — Parse errors, validation failures
+
+```bash
+jq 'select(.type == "tool_call")' .ralph/diagnostics/*/agent-output.jsonl
+ralph clean --diagnostics
+```
+
+## Runtime Diagnosis (U0-U8, observability + self-calibration layer)
+
+Above TUI / full diagnostics. Drops back-pressure points (payload / execution contract, workflow guard, stall, loop stale) to `recovery.jsonl`. When U5 drift detector's 3 metrics (field completeness / coord join rate / emit cadence) fall below threshold → `drift.jsonl`. On loop termination, appends `## Diagnostics` section to `.ralph/agent/summary.md` and writes `diagnosis-summary.json` seed.
+
+- **Enable (env preferred)**: `RALPH_DIAGNOSTICS=1 ralph run -c ralph.yml -H builtin:<preset> -p "..."`. Disk-only mode (no prompt alert): set `telemetry.runtime_diagnosis: { enabled: true, write_artifacts: true, prompt_injection_enabled: true, ... }` in `ralph.yml`.
+- **Report**: `ralph diagnose --session latest` (Markdown) or `--format json` (CI, `schema_version="1"`); `--diagnostics-root` overrides default root.
+- **Exit codes**: `0` rendered / `2` no session / `3` invalid path / `4` I/O failure.
+- **Recovery count (2026-06-17-004 U4)**: `diagnosis-summary.json`'s `recovery_count` now aggregates workspace-level `<root>/.ralph/recovery.jsonl` (CLI emit rejections) AND session-level `<root>/.ralph/diagnostics/<id>/recovery.jsonl` (hard gate / workflow guard) — two journals; `notes` lists both paths. `ralph diagnose` falls back to workspace journal when session journal is empty, avoiding stale session hiding cli_emit rejections.
+
+Full reference: `docs/guide/runtime-diagnosis.md` (config matrix, report fields, common symptom troubleshooting, disk file manifest).
+
+## Doctor — Plan Frontmatter Drift Detection
+
+`ralph doctor plan-sync [--plan PATH]` (2026-06-17-004 U5 / R7) detects inconsistency between plan YAML frontmatter `status` and `.ralph/agent/tasks.jsonl` closure state:
+
+- `status: completed` but `open` task remains → fail
+- `status: stalled-after-uN` but uN all `closed` and no open → fail
+- `status` not in allowed enum (`draft / active / stalled-after-u0..8 / uN-closed-u(N+1)-pending / completed / abandoned`) → fail
+- Missing `tasks.jsonl` → warning only, not fail
+- Without `--plan`, auto-picks the most recent `mtime` `.md` under `docs/plans/` or `docs/achieved/plan/`
+- `ce-executor-serial` preset coordinator instructions include HARD RULE: every `work.done` MUST update plan frontmatter `status` (after `ralph tools task close`, before `ralph emit work.ready`)
+
+**8 envelope sources**: `stall_recovery / missing_event_gate / workflow_guard / execution_contract / payload_contract / drift_monitor / hook_retry / loop_stale`
+**6 outcomes**: `pending / recovered / repeated / escalated / failed / not_retriable`
+**Responder 3-tier escalation**: Soft (prompt alert) → Hard (`task.resume` to safe target) → Final (`TerminationHint`, NOT overriding `PayloadContractViolation`)

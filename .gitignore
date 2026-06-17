@@ -136,4 +136,7 @@ AGENTS.md.lock
 CLAUDE.md.lock
 .mcp.json
 LEAN-CTX.md
-.cursor/
+# Cursor IDE local config is private (.cursor/settings.json, .cursor/agents/, etc.)
+# but project-level rules must be tracked.
+.cursor/*
+!.cursor/rules/

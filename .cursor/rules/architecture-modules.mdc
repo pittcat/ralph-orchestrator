@@ -1,0 +1,141 @@
+---
+description: Ralph architecture — crate map, event system, code module locations
+globs: ["**/*.rs", "**/Cargo.toml", "**/Cargo.lock"]
+alwaysApply: false
+---
+
+# Ralph Architecture (Modules & Code Locations)
+
+Detailed module path index. For high-level architecture + isolation policy, see CLAUDE.md. For runtime diagnostic topics, see observability.mdc.
+
+## Crate Map
+
+```
+ralph-proto    → Foundation types: Event, Hat, HatId, Topic, EventBus, RobotService
+ralph-core     → Orchestration logic, event loop, state machine, hats, memories, tasks, hooks, skills
+ralph-adapters → Backend adapters (Claude, Kiro, Gemini, Codex, Amp, Copilot CLI, OpenCode)
+ralph-cli      → CLI entry point, commands (run, plan, task, loops, web, mcp, wave, bot)
+ralph-telegram → Telegram bot for human-in-the-loop communication
+ralph-tui      → Terminal UI (ratatui-based)
+ralph-e2e      → End-to-end test framework (scenarios, mock CLI, reporters)
+ralph-api      → Rust RPC API server for web dashboard backend
+ralph-bench    → Benchmarking
+
+backend/       → Web server (@ralph-web/server) - Fastify + tRPC + SQLite (legacy, deprecated)
+frontend/      → Web dashboard (@ralph-web/dashboard) - React + Vite + TailwindCSS
+```
+
+## Event System Architecture
+
+```
+JSONL (agent output) → EventReader → EventParser → EventOriginGuard → EventPolicy → StateMachine → EventBus → Hats
+```
+
+- **EventReader**: Reads JSONL lines from agent output files, handles malformed lines
+- **EventParser**: Parses JSONL into structured events, detects event mutations
+- **EventOriginGuard** (`event_origin.rs`): Validates event provenance — rejects events from unregistered hats or out-of-scope topics. Fail-closed security model.
+- **EventPolicy** (`event_policy.rs`): Enforces typed payload schema, terminal monotonicity, duplicate terminal detection, business-after-completion guards
+- **StateMachine** (`state_machine.rs`): Pure-Rust instance lifecycle (open → active → terminal), no filesystem dependencies
+- **EventBus** (`ralph-proto/src/event_bus.rs`): Pub/sub hub routing events to subscribed hats, observer pattern for recording/TUI
+- **EventProjection** (`event_projection.rs`): Transforms/redacts events before forwarding
+
+## Backend Adapter Architecture
+
+```
+CLI Config → HaBackend → auto_detect → CliExecutor / PtyExecutor → StreamHandler
+```
+
+- **CliBackend**: Defines backend CLI path, args, prompt mode, output format
+- **CliExecutor**: Spawns backend process, streams output, handles termination
+- **PtyExecutor**: PTY-based execution for Claude CLI, supports interactive and observe modes
+- **auto_detect**: Scans PATH for available backends (`claude`, `code`/`codex`, `gemini`, `kiro`, `amp`, `copilot`, `opencode`)
+- **StreamHandler**: Console/pretty/quiet/TUI output handlers
+- **Backend-specific stream parsers**: `claude_stream.rs`, `copilot_stream.rs`, `pi_stream.rs`, `json_rpc_handler.rs`
+
+## Code Locations
+
+| Module | Path | Purpose |
+|---|---|---|
+| Event loop | `crates/ralph-core/src/event_loop/` | `mod.rs` (main loop), `loop_state.rs` |
+| Hat system | `crates/ralph-core/src/hatless_ralph.rs`, `hat_registry.rs` | Topology, subscription matching, selection |
+| State machine | `crates/ralph-core/src/state_machine.rs` | Instance lifecycle (open → active → terminal) |
+| Event policy | `crates/ralph-core/src/event_policy.rs` | Schema, terminal monotonicity |
+| Event origin | `crates/ralph-core/src/event_origin.rs` | JSONL provenance guard (fail-closed) |
+| Event projection | `crates/ralph-core/src/event_projection.rs` | Transform / redact events |
+| Memory | `crates/ralph-core/src/memory.rs`, `memory_store.rs` | Persistent learning (markdown) |
+| Task | `crates/ralph-core/src/task.rs`, `task_store.rs`, `task_definition.rs` | JSONL work tracking |
+| Hooks | `crates/ralph-core/src/hooks/` | engine, executor, suspend state |
+| Skills | `crates/ralph-core/src/skill.rs`, `skill_registry.rs` | Discovery, auto-injection |
+| Lock coordination | `crates/ralph-core/src/worktree.rs`, `loop_lock.rs`, `file_lock.rs` | Git-worktree + lockfiles |
+| Loop registry | `crates/ralph-core/src/loop_registry.rs` | Tracked loops across worktrees |
+| Merge queue | `crates/ralph-core/src/merge_queue.rs` | Event-sourced queue |
+| Config | `crates/ralph-core/src/config/` | v1/v2 compat; `robot.rs` for RObot |
+| CLI commands | `crates/ralph-cli/src/` | `commands/`, `cli/`, `loops.rs`, `task_cli.rs`, `wave.rs`, `bot.rs`, `web.rs`, `mcp.rs`, `init.rs`, `hats.rs`, `presets.rs`, `hooks.rs`, `tools.rs`, `doctor.rs` |
+| Telegram | `crates/ralph-telegram/src/` | bot, service, state, handler |
+| Wave | `crates/ralph-core/src/wave_tracker.rs`, `wave_detection.rs`, `wave_prompt.rs`; CLI in `crates/ralph-cli/src/wave.rs`; loop dispatch in `crates/ralph-cli/src/loop_runner/wave/dispatcher.rs` | Intra-loop parallelism |
+| Adapters | `crates/ralph-adapters/src/` | `cli_backend.rs`, `cli_executor.rs`, `pty_executor.rs`, `auto_detect.rs`, stream parsers |
+| Preflight | `crates/ralph-core/src/preflight.rs` | Acceptance criteria extraction / validation |
+| Harness extensions | `crates/ralph-core/src/{config,event_loop,event_projection,state_file_injector,preflight}.rs` | Event filtering, projection, state injection, preflight hooks |
+| Web server (Rust) | `crates/ralph-api/src/` | Axum REST/WS for TUI/dashboard |
+| Web server (Node, legacy) | `backend/ralph-web-server/src/` | Fastify + tRPC + SQLite (deprecated) |
+| Web frontend | `frontend/ralph-web/src/` | React components |
+| E2E | `crates/ralph-e2e/src/` | scenarios, mock CLI, reporter |
+| BDD scenarios | `crates/ralph-core/tests/scenarios/` | YAML integration scenarios |
+| Smoke fixtures | `crates/ralph-core/tests/fixtures/` | Recorded JSONL for replay |
+| Proto types | `crates/ralph-proto/src/` | `Event`, `Hat`, `HatId`, `Topic`, `EventBus`, `RobotService`, `DaemonAdapter`, `FrameCapture`, `UxEvent` |
+
+## Key Files (.ralph/ artifacts)
+
+| File | Purpose |
+|------|---------|
+| `.ralph/agent/memories.md` | Persistent learning across sessions |
+| `.ralph/agent/tasks.jsonl` | Runtime work tracking |
+| `.ralph/loop.lock` | Contains PID + prompt of primary loop |
+| `.ralph/loops.json` | Registry of all tracked loops. `worktree_path: Option<String>` + `workspace: String` — `None`/`Some(_)` is the canonical primary-vs-worktree signal. Lives only in the main repo. |
+| `.ralph/merge-queue.jsonl` | Event-sourced merge queue |
+| `.ralph/telegram-state.json` | Telegram bot state (chat ID, pending questions) |
+| `.ralph/diagnostics/<timestamp>/` | Per-session logs (behind `RALPH_DIAGNOSTICS=1`) |
+| `docs/solutions/` | Documented solutions (YAML frontmatter: `module`, `tags`, `problem_type`) |
+| `docs/guide/harness-extensions.md` | User guide for Harness 4 extension mechanisms |
+| `presets/COLLECTION.md` | Preset metadata and authorship docs |
+| `presets/index.json` | Preset manifest index |
+| `crates/ralph-core/data/` | Embedded tool definitions (`ralph-tools*.md`) |
+
+## Configuration System
+
+```
+User YAML → RalphConfig → EventLoopConfig → HatConfig overrides → effective runtime config
+```
+
+Key modules in `crates/ralph-core/src/config/`:
+- `RalphConfig`: Top-level config
+- `CoreConfig`: Event loop, scratchpad, memories, tasks
+- `HatConfig`: Per-hat backend, triggers, publishes, instructions, concurrency, `missing_event_grace_secs` (resolve chain: `per-hat → preset → min(idle_timeout*0.3, 540)`)
+- `EventPolicyConfig`: Schema validation, payload types, terminal event handling
+- `EventFilterConfig`: Filter events by topic patterns
+- `StateMachineConfig`: Instance lifecycle rules
+- `PreflightExtensionsConfig`: External command hooks
+- `EventProjectionConfig`: Event transformation/redaction rules
+- `FeaturesConfig`: Feature flags (memories, tasks, loop naming, urgent steer)
+
+## Hook System
+
+Hooks run external commands at lifecycle points (`crates/ralph-core/src/hooks/`):
+- **HookEngine**: Manages hook lifecycle (discovery, resolution, execution)
+- **HookExecutor**: Runs external commands as hooks with timeout and output capture
+- **SuspendStateStore**: Persists suspend state across loop restarts
+
+Hook stages: `pre_agent` → `post_agent` → `pre_event_processing` → `post_event_processing` → `completion`
+
+## Skill System
+
+Skills are markdown documents with YAML frontmatter (`crates/ralph-core/src/skill.rs` + `skill_registry.rs`):
+- Support auto-injection, hat-scoping, backend-scoping, tags
+- Built-in (compiled via `include_str!`) + filesystem sources
+- Registry discovers and indexes skills from multiple sources
+
+## Session Recording & Playback
+
+- **SessionRecorder** (`session_recorder.rs`): Records events to JSONL (behind `recording` feature flag)
+- **SessionPlayer** (`session_player.rs`): Replays recorded sessions for smoke tests
+- Fixtures stored in `crates/ralph-core/tests/fixtures/`

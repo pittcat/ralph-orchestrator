@@ -1,0 +1,152 @@
+---
+description: Parallel Loops / Waves / RObot (Telegram) / Smoke / E2E / Presets feature flag reference
+globs: ["**/presets/**/*.yml", "**/presets/index.json", "**/presets/manifest.yml", "**/crates/ralph-cli/src/wave.rs", "**/crates/ralph-telegram/**/*.rs", "**/.e2e-tests/**"]
+alwaysApply: false
+---
+
+# Feature Flags & Workflows (Parallel Loops / Waves / RObot / Smoke / E2E)
+
+## Parallel Loops
+
+Ralph supports multiple orchestration loops in parallel using git worktrees.
+
+```
+Primary Loop (holds .ralph/loop.lock)
+├── Runs in main workspace
+├── Processes merge queue on completion
+└── Spawns merge-ralph for queued loops
+
+Worktree Loops (.worktrees/<loop-id>/)
+├── Isolated filesystem via git worktree
+├── Symlinked memories, specs, tasks → main repo
+├── Queue for merge on completion
+└── Exit cleanly (no spawn)
+```
+
+### Testing Parallel Loops
+
+```bash
+cd $(mktemp -d) && git init && echo "<p>Hello</p>" > index.html && git add . && git commit -m "init"
+
+# Terminal 1: Primary loop
+ralph run -p "Add header before <p>" --max-iterations 5
+
+# Terminal 2: Worktree loop
+ralph run -p "Add footer after </p>" --max-iterations 5
+
+# Monitor
+ralph loops
+```
+
+## Agent Waves (Intra-Loop Parallelism)
+
+Waves enable a single hat to process multiple work items in parallel within one iteration.
+
+### Wave Dispatch
+
+Agents dispatch waves via CLI:
+```bash
+ralph wave emit review.file --payloads "src/main.rs" "src/lib.rs" "src/config.rs"
+```
+
+### How It Works
+
+1. Agent emits wave events (tagged with shared `wave_id`)
+2. Loop runner detects wave events, resolves target hat
+3. Spawns N parallel backend instances (up to `concurrency` limit)
+4. Each worker gets: focused prompt, per-worker events file, wave env vars
+5. Results merged back to main events file
+6. Aggregator hat picks up results on next iteration
+
+### Key Code Locations
+
+- **Wave CLI**: `crates/ralph-cli/src/wave.rs`
+- **Wave detection**: `crates/ralph-core/src/wave_detection.rs`
+- **Worker prompt**: `crates/ralph-core/src/wave_prompt.rs`
+- **Wave tracker**: `crates/ralph-core/src/wave_tracker.rs`
+- **Loop integration**: `crates/ralph-cli/src/loop_runner/wave/dispatcher.rs` (`execute_wave`)
+
+### Preset
+
+- `presets/wave-review.yml` — Scatter-gather code review
+
+## Smoke Tests (Replay-Based)
+
+Use the `smoke_runner` entry point from Build & Test above. Per-backend filters as test name substrings, e.g. `cargo nextest run -p ralph-core -- kiro` (runs ralph-core package default parallel; see "Build & Test" section tier table).
+
+**Fixtures location:** `crates/ralph-core/tests/fixtures/`
+
+### Recording New Fixtures
+
+```bash
+cargo run --bin ralph -- run -c ralph.claude.yml --record-session session.jsonl -p "your prompt"
+```
+
+## E2E Testing
+
+```bash
+cargo run -p ralph-e2e -- claude             # Live API tests
+cargo run -p ralph-e2e -- --mock             # CI-safe mock mode
+cargo run -p ralph-e2e -- --mock --filter connect  # Filter scenarios
+cargo run -p ralph-e2e -- --list             # List scenarios
+```
+
+Reports generated in `.e2e-tests/`.
+
+## RObot (Human-in-the-Loop)
+
+Ralph supports human interaction during orchestration via Telegram. Agents ask questions; humans send proactive guidance.
+
+### Configuration
+
+```yaml
+# ralph.yml
+RObot:
+  enabled: true
+  timeout_seconds: 300    # How long to block waiting for response
+  telegram:
+    bot_token: "your-token"  # Or RALPH_TELEGRAM_BOT_TOKEN env var
+```
+
+### Event Types
+
+| Event / Command | Direction | Purpose |
+|-------|-----------|---------|
+| `human.interact` | Agent → Human | Agent asks a question; loop blocks until response or timeout |
+| `human.response` | Human → Agent | Reply to `human.interact` question |
+| `human.guidance` | Human → Agent | Proactive guidance injected as `## ROBOT GUIDANCE` in prompt |
+| `ralph tools interact progress` | Agent → Human | Non-blocking progress notification via Telegram (no event, direct send) |
+
+### How It Works
+
+- Telegram bot starts only on the **primary loop** (holds `.ralph/loop.lock`)
+- When agent emits `human.interact`, event loop sends question via Telegram and **blocks**
+- Responses publish as `human.response` events on the bus
+- Proactive messages become `human.guidance` events, squashed into numbered list in prompt
+- Send failures retry with exponential backoff (3 attempts); if all fail → treated as timeout
+- Parallel loops route via reply-to, `@loop-id` prefix, or default to primary
+
+See `crates/ralph-telegram/README.md` for setup instructions.
+
+## Specs & Tasks
+
+- Create specs in `.ralph/specs/` — do NOT implement without approved spec first
+- Create code tasks in `.ralph/tasks/` using `.code-task.md` extension
+- Work step-by-step: spec → dogfood spec → implement → dogfood implementation → done
+
+### Memories and Tasks (Default Mode)
+
+Memories and tasks enabled by default. Both must be enabled/disabled together:
+
+When enabled (default):
+- Scratchpad is disabled
+- Tasks replace scratchpad for completion verification
+- Loop terminates when no open tasks + consecutive LOOP_COMPLETE
+
+To disable (legacy scratchpad mode):
+```yaml
+memories:
+  enabled: false
+tasks:
+  enabled: false
+```

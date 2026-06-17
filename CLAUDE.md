@@ -4,45 +4,43 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 > The orchestrator is a thin coordination layer, not a platform. Agents are smart; let them do the work.
 
+> **保持精简**:详细架构、模块路径、多 hat 策略、可观测性、特性用法等已下沉到 `.cursor/rules/*.mdc`(按主题按文件 glob 按需加载)。本文件只保留 always-apply 的硬规则 + 高频命令。
+
 ## Build & Test
 
-> **⚠️ HARD RULE 1: 测试入口必须用 `cargo nextest run` 系列**(`./scripts/run-tests.sh` / `just test-parallel` / `cargo nextest run -p <pkg> --bin <bin> -- <subset>`)。**禁止**裸跑 `cargo test -p ralph-cli` 或 `cargo test -p ralph-cli --bin ralph`——根因是 `crates/ralph-cli/src/loop_runner/tests.rs:14-49` 的 4 个 process-global Mutex + 时间敏感测试(`std::thread::sleep(500ms)`)。Nextest 的 process-per-test 隔离 Mutex 是第一道保险。允许的例外:① `cargo test --doc` 跑 doctest(nextest 不跑);② nextest 不可用时的最后兜底 `cargo test --workspace --exclude ralph-e2e -- --test-threads=1`;③ `RALPH_BASELINE_SERIAL=1 ./scripts/run-tests.sh` 强制 flake 兜底（显式跳过 nextest、走单线程 `cargo test --workspace --exclude ralph-e2e -- --test-threads=1`，仅用于竞态/时序 flake 恢复，不是默认路径）;④ `crates/ralph-core/data/ralph-tools*.md` 这类**仅文档用途**的 cargo test 引用。详见 `docs/solutions/developer-experience/ralph-cli-loop-runner-tests-must-run-serial.md`。
+> **⚠️ HARD RULE 1: 测试入口必须用 `cargo nextest run` 系列**(`./scripts/run-tests.sh` / `just test-parallel` / `cargo nextest run -p <pkg> --bin <bin> -- <subset>`)。**禁止**裸跑 `cargo test -p ralph-cli` 或 `cargo test -p ralph-cli --bin ralph`——根因是 `crates/ralph-cli/src/loop_runner/tests.rs:14-49` 的 4 个 process-global Mutex + 时间敏感测试(`std::thread::sleep(500ms)`)。Nextest 的 process-per-test 隔离 Mutex 是第一道保险。允许的例外:① `cargo test --doc` 跑 doctest;② nextest 不可用时的最后兜底 `cargo test --workspace --exclude ralph-e2e -- --test-threads=1`;③ `RALPH_BASELINE_SERIAL=1 ./scripts/run-tests.sh` 强制 flake 兜底（走单线程,仅用于竞态/时序 flake 恢复,不是默认路径）;④ `crates/ralph-core/data/ralph-tools*.md` 这类**仅文档用途**的 cargo test 引用。详见 `docs/solutions/developer-experience/ralph-cli-loop-runner-tests-must-run-serial.md`。
 >
-> **⚠️ HARD RULE 2: 默认走并发,确需串行时显式配置**。**能用并行的必须用并行**(快是默认值,不是可选优化)。具体分级见下方「并行 vs 串行分级表」。
+> **⚠️ HARD RULE 2: 默认走并发,确需串行时显式配置**。`ralph-cli` 整个包走 cli-serial 串行(`.config/nextest.toml:17-18, 20-22`,根因:Mutex + sleep CPU 抢占,2026-06-13 已验证不能放开);其他 7 个包(`ralph-proto` / `ralph-core` / `ralph-adapters` / `ralph-telegram` / `ralph-tui` / `ralph-api` / `ralph-bench` / `ralph-e2e`)走 nextest 默认并发(`test-threads = num-cpus`)。**两件事必须同时改**(sleep 改为事件驱动等待 + 4 个静态量改 per-test 隔离)才能放开 ralph-cli 并发,不在本轮范围。
 
-### 并行 vs 串行分级表(实际跑过的事实)
+### 并行 vs 串行分级速查表
 
-| 范围 | 并行 / 串行 | 触发机制 | 根因(若需串行) |
-|---|---|---|---|
-| **`ralph-cli` 整个包**(`loop_runner` 二进制) | **串行** | `.config/nextest.toml:17-18, 20-22` `cli-serial = { max-threads = 1 }` + `[[profile.default.overrides]] filter = 'package(ralph-cli)'` | `loop_runner/tests.rs:14-49` 4 个 process-global Mutex **+ 时间敏感测试**(500ms sleep 等待子进程 flush,并行 CPU 抢占下 sleep 不够)。**两类风险都要保护**,process-per-test 只能解第一类(Mutex),解不了第二类(CPU 抢占) |
-| **`ralph-cli` 之外所有包**(`ralph-proto` / `ralph-core` / `ralph-adapters` / `ralph-telegram` / `ralph-tui` / `ralph-api` / `ralph-bench` / `ralph-e2e`) | **并行** | nextest 默认 `test-threads = num-cpus`,`[profile.default]` 无 group 限制 | 无 process-global Mutex,无时间敏感共享 TempDir |
-| **单包内单测**(`cargo nextest run -p ralph-core -- test_name`) | **走包级规则** | 继承所在包的 group 配置 | 同上 |
-| **Doctest** | 单独跑,`cargo test --doc` | `cargo test --doc`(nextest 不支持 doctest) | 不存在并发问题,但 doctest 的 `--test-threads=1` 仍是合理兜底 |
-| **E2E**(`ralph-e2e` 包) | 走其包默认;`cargo run -p ralph-e2e -- --mock` 是单进程 CLI | 不是 nextest 测试,无 nextest 配置 | 单次 mock run 顺序跑 scenario |
-| **Smoke / replay**(`smoke_runner` 集成测试) | 顺序跑 | `cargo nextest run -p ralph-core --features recording --test smoke_runner` | `smoke_runner.rs` 第 1 行 `#![cfg(feature = "recording")]`,必须开 `recording` feature 才编译 |
-| **BDD scenarios**(`scenarios` 集成测试) | 顺序跑 | `cargo nextest run -p ralph-core --test scenarios` | 集成测试 binary,走 `--test` 形式不是 `-- <substring>` 形式 |
+| 范围 | 并行/串行 | 触发命令 |
+|---|---|---|
+| `ralph-cli` 全包 | **串行** | `cargo nextest run -p ralph-cli --bin ralph -- <substring>` |
+| 其他 7 个包 | **并行** | `cargo nextest run -p <pkg> -- <substring>` |
+| 单包内单测 | 走包级规则 | 同上 |
+| Doctest | 单独跑 | `cargo test --workspace --exclude ralph-e2e --doc` |
+| E2E | 单进程 CLI | `cargo run -p ralph-e2e -- --mock` |
+| Smoke/replay | 顺序跑 | `cargo nextest run -p ralph-core --features recording --test smoke_runner` |
+| BDD scenarios | 顺序跑 | `cargo nextest run -p ralph-core --test scenarios` |
 
-**为什么不放开 ralph-cli 并发**:已验证(2026-06-13,见 `docs/brainstorms/2026-06-13-ralph-cli-test-concurrency-via-nextest-requirements.md`)——删 `cli-serial` 配置后 3 跑 3 失败,根因是 500ms sleep 在 CPU 抢占下超时。**两件事必须同时改**(sleep 改为事件驱动等待 + 4 个静态量改 per-test 隔离)才能放开,不在本轮范围。
+详细分级 + 根因参见 `.cursor/rules/architecture-modules.mdc`("Code Locations" + 顶部 `ralph-cli` 串行配置)。
 
 ```bash
 # 全 workspace 并行(ralph-cli 串行,其他 7 包并行)——CI 推荐入口
 ./scripts/run-tests.sh
 
-# 等价手写
-cargo nextest run --workspace --exclude ralph-e2e
-cargo test --workspace --exclude ralph-e2e --doc
-
-# 子集(全部走 nextest,继承包级并行/串行规则)
-cargo nextest run -p ralph-cli --bin ralph -- <substring>          # 串行(cli-serial)
+# 子集(全部走 nextest,继承包级规则)
+cargo nextest run -p ralph-cli --bin ralph -- <substring>          # 串行
 cargo nextest run -p ralph-core -- <substring>                     # 并行
-cargo nextest run -p ralph-api --test <integration_test_name>     # 并行,集成测试走 --test 形式
-cargo nextest run -p ralph-core --test scenarios                   # BDD scenarios 集成测试
-cargo nextest run -p ralph-core --features recording --test smoke_runner  # Smoke 集成测试,需 recording feature
-cargo nextest run -p ralph-e2e --list 2>/dev/null || cargo run -p ralph-e2e -- --list  # E2E 不是 nextest,走 CLI
+cargo nextest run -p ralph-api --test <integration_test_name>      # 并行
+cargo nextest run -p ralph-core --test scenarios                   # BDD
+cargo nextest run -p ralph-core --features recording --test smoke_runner  # Smoke
+cargo run -p ralph-e2e -- --mock                                  # E2E
 
-# Last-resort fallback ONLY when nextest is unavailable; same semantics as the historical CI gate.
+# Last-resort fallback ONLY when nextest is unavailable.
 cargo test --workspace --exclude ralph-e2e -- --test-threads=1 --skip acp_executor::tests::test_create_terminal_and_output
-just test-serial                                      # alias for the single-threaded slow path
+just test-serial                                                   # 单线程 slow path
 
 # Other build, lint and test commands.
 cargo build
@@ -52,50 +50,48 @@ cargo doc --no-deps                          # Documentation
 ./scripts/setup-hooks.sh                     # Install pre-commit hooks (once)
 ```
 
-**IMPORTANT**: Run `cargo nextest run` (or `./scripts/run-tests.sh` if nextest is installed) before declaring any task done. Smoke test after code changes.
+**IMPORTANT**: Run `cargo nextest run` (or `./scripts/run-tests.sh` if nextest is installed) before declaring any task done.
 
 ### 开发基线 vs CI 基线（处理测试 flake）
 
-- **子任务 / 开发中验证**：只跑 targeted tests（`cargo nextest run -p <crate> -- <test>`），不要每次小改动都跑全 workspace。
+- **子任务 / 开发中验证**：只跑 targeted tests（`cargo nextest run -p <crate> -- <test>`）。
 - **最终验证 / 准备 `LOOP_COMPLETE` 前**：再跑完整 `./scripts/run-tests.sh`（nextest + doctest）。
-- **如果全量基线出现竞态/时序类 flake**（尤其 `ralph-cli` `loop_runner` 测试中 Mutex + 500ms sleep 在 CPU 抢占下超时），强制走单线程兜底：
-  ```bash
-  RALPH_BASELINE_SERIAL=1 ./scripts/run-tests.sh
-  ```
-  这会跳过 nextest，执行 `cargo test --workspace --exclude ralph-e2e -- --test-threads=1 --skip acp_executor::tests::test_create_terminal_and_output`。**更慢但更稳定，仅作为 flake 排查/兜底手段，不要当成默认路径**——默认仍应优先走 nextest 并行（见 HARD RULE 2）。
-- 如果 serial fallback 仍然失败，说明是真失败，必须修复后才能继续。
+- **如果全量基线出现竞态/时序类 flake**:强制走单线程兜底 `RALPH_BASELINE_SERIAL=1 ./scripts/run-tests.sh`(跳过 nextest,执行 `cargo test --workspace --exclude ralph-e2e -- --test-threads=1`)。**仅作为 flake 兜底,不是默认路径**。
+- 如果 serial fallback 仍然失败,说明是真失败,必须修复后才能继续。
 
 ### Web Dashboard
 
 ```bash
-ralph web                                    # Launch both servers (backend:3000, frontend:5173)
-npm install                                  # Install all dependencies
-npm run dev                                  # Dev mode (both)
-npm run dev:server                           # Backend only
-npm run dev:web                              # Frontend only
-npm run test:server                          # Backend tests
-npm run test                                 # All npm workspace tests
+ralph web                 # Launch both servers (backend:3000, frontend:5173)
+npm install               # Install all dependencies
+npm run dev               # Dev mode (both)
+npm run dev:server        # Backend only
+npm run dev:web           # Frontend only
+npm run test:server       # Backend tests
+npm run test              # All npm workspace tests
 ```
 
 BDD scenarios (YAML, exercise real runtime paths) live in `crates/ralph-core/tests/scenarios/`.
 
-## Architecture
+## Architecture (High Level)
 
-### Crate Map
+> **详细模块路径 / 代码位置表**:`.cursor/rules/architecture-modules.mdc`(自动按 `**/*.rs` glob 加载)
+> **多 hat 隔离 / Agent Output Governance (R1-R6) / preset 单一事实源**:`.cursor/rules/multi-hat-isolation.mdc`
+> **可观测性(Runtime Diagnosis U0-U8 + Doctor) / 诊断**:`.cursor/rules/observability.mdc`
+> **Parallel Loops / Waves / RObot / Smoke / E2E / Specs & Tasks**:`.cursor/rules/feature-flags.mdc`
+
+### Crate Map (Top-Level)
 
 ```
-ralph-proto    → Foundation types: Event, Hat, HatId, Topic, EventBus, RobotService
-ralph-core     → Orchestration logic, event loop, state machine, hats, memories, tasks, hooks, skills
+ralph-proto → Foundation types: Event, Hat, HatId, Topic, EventBus, RobotService
+ralph-core → Orchestration logic, event loop, state machine, hats, memories, tasks, hooks, skills
 ralph-adapters → Backend adapters (Claude, Kiro, Gemini, Codex, Amp, Copilot CLI, OpenCode)
-ralph-cli      → CLI entry point, commands (run, plan, task, loops, web, mcp, wave, bot)
-ralph-telegram → Telegram bot for human-in-the-loop communication
-ralph-tui      → Terminal UI (ratatui-based)
-ralph-e2e      → End-to-end test framework (scenarios, mock CLI, reporters)
-ralph-api      → Rust RPC API server for web dashboard backend
-ralph-bench    → Benchmarking
-
-backend/       → Web server (@ralph-web/server) - Fastify + tRPC + SQLite (legacy, deprecated)
-frontend/      → Web dashboard (@ralph-web/dashboard) - React + Vite + TailwindCSS
+ralph-cli → CLI entry point, commands (run, plan, task, loops, web, mcp, wave, bot)
+ralph-telegram → Telegram bot for human-in-the-loop
+ralph-tui → Terminal UI (ratatui-based)
+ralph-e2e → End-to-end test framework
+ralph-api → Rust RPC API server for web dashboard backend
+ralph-bench → Benchmarking
 ```
 
 ### Event System Architecture
@@ -104,181 +100,42 @@ frontend/      → Web dashboard (@ralph-web/dashboard) - React + Vite + Tailwin
 JSONL (agent output) → EventReader → EventParser → EventOriginGuard → EventPolicy → StateMachine → EventBus → Hats
 ```
 
-- **EventReader**: Reads JSONL lines from agent output files, handles malformed lines
-- **EventParser**: Parses JSONL into structured events, detects event mutations
-- **EventOriginGuard** (`event_origin.rs`): Validates event provenance — rejects events from unregistered hats or out-of-scope topics. Implements fail-closed security model.
-- **EventPolicy** (`event_policy.rs`): Enforces typed payload schema, terminal monotonicity, duplicate terminal detection, business-after-completion guards
-- **StateMachine** (`state_machine.rs`): Pure-Rust instance lifecycle enforcement (open → active → terminal), no filesystem dependencies
-- **EventBus** (`ralph-proto/src/event_bus.rs`): Pub/sub hub routing events to subscribed hats with observer pattern for recording/TUI
-- **EventProjection** (`event_projection.rs`): Transforms/redacts events before forwarding
-
 ### Backend Adapter Architecture
 
 ```
 CLI Config → HaBackend → auto_detect → CliExecutor / PtyExecutor → StreamHandler
 ```
 
-- **CliBackend**: Defines backend CLI path, args, prompt mode, output format
-- **CliExecutor**: Spawns backend process, streams output, handles termination
-- **PtyExecutor**: PTY-based execution for Claude CLI (preserves rich TUI output), supports interactive and observe modes
-- **auto_detect**: Scans PATH for available backends (`claude`, `code`/`codex`, `gemini`, `kiro`, `amp`, `copilot`, `opencode`)
-- **StreamHandler**: Console/pretty/quiet/TUI output handlers for displaying agent output
-- **Backend-specific stream parsers**: `claude_stream.rs`, `copilot_stream.rs`, `pi_stream.rs`, `json_rpc_handler.rs`
-
 ### Configuration System
-
-Config supports both v1.x flat format and v2.0 nested format for zero-config migration. Resolution chain:
 
 ```
 User YAML → RalphConfig → EventLoopConfig → HatConfig overrides → effective runtime config
 ```
 
-Key config modules in `crates/ralph-core/src/config/`:
-- `RalphConfig`: Top-level config
-- `CoreConfig`: Event loop, scratchpad, memories, tasks
-- `HatConfig`: Per-hat backend, triggers, publishes, instructions, concurrency, `missing_event_grace_secs`（2026-06-17-004 U2：`should_gate_missing_events` 跳过本 hat 首次激活后 grace 秒内的 missing-event 检查；解析链 `per-hat → preset → min(idle_timeout*0.3, 540)`；`Some(0)` 关闭 grace，`None` 走默认）
-- `EventPolicyConfig`: Schema validation, payload types, terminal event handling
-- `EventFilterConfig`: Filter events by topic patterns
-- `StateMachineConfig`: Instance lifecycle rules
-- `PreflightExtensionsConfig`: External command hooks
-- `EventProjectionConfig`: Event transformation/redaction rules
-- `FeaturesConfig`: Feature flags (memories, tasks, loop naming, urgent steer)
-
 ### Multi-Hat Isolation Policy（强制）
 
-`event_loop.execution_mode` 与 hat 数量配合时遵循**固定阈值**，没有豁免路径：
+- **3-hat 上限（coordinator 模式）**：`hats` 数 ≤ 3 时,preset 可显式 `execution_mode: coordinator`(默认)或 `execution_mode: isolated`,任一可启动。
+- **4+ hats 必须显式 isolated**：`hats` 数 ≥ 4 时,`event_loop.execution_mode: isolated` 是**强制**配置;缺少该字段、值不是 `isolated`、或被注释掉,preset 启动即被 `preset_lint::check_multi_hat_isolation` 拒绝。
+- **错误消息固定**:`preset declares N hats which exceeds the coordinator limit of 3; set \`event_loop.execution_mode: isolated\` to run this preset`,调用方按字面匹配即可定位根因。
+- **无豁免**:环境变量(`RALPH_ALLOW_COORDINATOR_OVERRIDE` 等)、测试开关、preset 名称维护的 exemption 均**不可用**;所有 builtin 4+ hat preset 均已迁移到 isolated(见 U6 commit `2a29e24`)。
 
-- **3-hat 上限（coordinator 模式）**：`hats` 数 ≤ 3 时，preset 可显式 `execution_mode: coordinator`（默认）或 `execution_mode: isolated`，任一可启动。
-- **4+ hats 必须显式 isolated**：`hats` 数 ≥ 4 时，`event_loop.execution_mode: isolated` 是**强制**配置；缺少该字段、值不是 `isolated`、或被注释掉，preset 启动即被 `preset_lint::check_multi_hat_isolation` 拒绝。
-- **错误消息固定**：`preset declares N hats which exceeds the coordinator limit of 3; set \`event_loop.execution_mode: isolated\` to run this preset`，调用方按字面匹配即可定位根因。
-- **无豁免**：环境变量（`RALPH_ALLOW_COORDINATOR_OVERRIDE` 等）、测试开关、preset 名称维护的 exemption 均**不可用**；所有 builtin 4+ hat preset 均已迁移到 isolated（见 U6 commit `2a29e24`）。
-
-#### Isolated 终态 Authority（U3）
-
-在 `execution_mode: isolated` 下，**所有 agent 终态**（completion、review verdict、report completion、plan blocked）必须在 hat 的 `publishes` 列表中显式声明：
-
-- 未在 `publishes` 中声明的终态主题（如裸 `LOOP_COMPLETE`、未声明的 `report.done`、未声明的 `review.complete`）被 `EventOriginGuard` 直接拒绝；
-- 拒绝行为 emit `event.isolation.boundary_violation` 诊断事件到 `recovery.jsonl`，并把 `task.resume` 注入事件流以便 agent 看到失败原因；
-- 同一规则适用于 `default_publishes` 兜底：兜底主题必须也在 `publishes` 中，否则被原 guard 拒绝。
-- 唯一例外是 `hat=ralph` 运行时内置 hat：它由 `HatRegistry::from_runtime_config()` 注入 `LOOP_COMPLETE` / `work.start` / `loop.cancel`，这是单一豁免。
-
-#### Isolated Fair Scheduling（U4）
-
-`EventBus` 在 isolated 模式下使用**轮转游标（round-robin cursor）**而非字典序首项来选择下一个 hat：
-
-- 同一事件后多 hat 都 pending 时，cursor 推进到当前 hat 之后，下一次从该位置继续；
-- 防止「一直先选 hat 名靠前的」造成的饥饿；
-- 字典序首项行为已**移除**，不要在文档、测试、prompt 中描述旧行为。
-
-#### 上限 + 调度 + 终态 的交互
-
-- 3-hat coordinator preset 不受 isolated 终态 authority / fair scheduling 约束（它走单 prompt 多 hat 路径）。
-- 4+ hat isolated preset **必须**同时满足：execution_mode=isolated、每个 hat 的所有终态主题在 `publishes` 中显式声明、字典序不再被依赖。
-- 任何 preset 校验失败都被 `ralph preset check` / `ralph preflight` / `ralph run` 启动硬门拦住，运行时不会进入半启动状态。
-
-#### Agent Output Governance（2026-06-14 计划 003 — `ce-executor-isolated` only）
-
-`ce-executor-isolated` preset 在四个卡点上加硬规则（机制优先于编排补丁；默认关闭，preset 显式开启）：
-
-- **R1 — Wave context 注入（review-synthesizer）**：当 `review-synthesizer` 被激活时，runner 从 events.jsonl 末尾 2000 行解析 `review.wave.ready` / `review.dimension.done`，构造 `## WAVE CONTEXT` 块注入 prompt 顶部（`wave_id` / `wave_total` / `received_count` / `expected_dimensions` / `missing_dimensions` / `ALL_DIMENSIONS_RECEIVED` / `AGGREGATE_TIMEOUT`）。同一 JSON 也通过 `RALPH_WAVE_CONTEXT` 环境变量暴露给 agent 的 bash tool。代码：`crates/ralph-core/src/wave_context.rs`、`event_loop/mod.rs::build_wave_context_for_synthesizer`。
-- **R3 — Ephemeral 文件隔离**：每个 `process_output` 迭代扫描 `git ls-files --others --exclude-standard`，把匹配 `scratchpad.md` / `notes.md` / `tmp*.md` / `*.tmp.md` / `*.bak` / `*agent-notes.md` 模式且在源码树（`crates/`、`src/`、`backend/`、`frontend/`、`examples/`、`docs/`）下的文件先追加到 `.ralph/agent/scratchpad-{loop_id}.md` 再删除原文件。下一轮 prompt 顶部注入 `## EPHEMERAL RELOCATED` 块告知 agent 路径迁移。`event_loop.ephemeral_isolation: true` 开启。代码：`crates/ralph-core/src/ephemeral_isolation.rs`、`event_loop/mod.rs::run_ephemeral_isolation`。
-- **R4 — Single-U 契约（coordinator 单 U 原则）**：`TaskStore::ensure` 检测同 `(loop_id, plan_name, step)` 下已 open 但 unit 不同的任务并拒绝，unit 形如 `uN-` / `uNa-`（N 是数字）。同一 U 的 sub-units（`u1a` / `u1b`）塌缩到 base `u1` 允许并存。`ralph run` 在 bootstrap 时写 `.ralph/agent/.ralph-enforce-current-unit` marker（env var `RALPH_ENFORCE_CURRENT_UNIT` 被 workspace `forbid(unsafe_code)` 阻挡），子进程 `ralph tools task ensure` 读取 marker 后激活契约；同 key 的 ensure 触发时 CLI 退出非零。`event_loop.enforce_current_unit: true` 开启。代码：`crates/ralph-core/src/task_store.rs::find_unit_collision_idx`、`crates/ralph-cli/src/task_cli.rs::execute_ensure`。
-- **R5 — Hard-gate hat 路由稳定性**：policy / workflow guard / execution contract / isolated scope 的 rejection 产生 `task.resume` 时，`Event::with_target(event.hat)` 路由到源 hat（不再漂到字典序首项 hat）。rejection payload 同时带 `wave_id` / `wave_index` / `wave_total`（当 source event 是 wave record）。`build_wave_context_for_synthesizer` 在 `review-synthesizer` 被 `inject_review_aggregate_timeouts` 唤醒时设置 `pending_synthesizer_timeout` pin，第一次读取时 `.take()` 消费，避免跨 wave 泄漏。代码：`crates/ralph-core/src/event_loop/mod.rs::publish_policy_rejection_resume`、`rejection.rs::build_task_resume_payload`。
-- **R6 — Incomplete wave 机制收摊（plan.blocked，2026-06-17-003 U1+U2）**：当 review wave `received < expected` 且 `now - last_dimension_at > 0.8 * aggregate_timeout_secs`，**机制层** `EventLoop::maybe_emit_incomplete_wave_blocked` 自动 emit `plan.blocked(reason=dimension_reviewers_failed_to_converge)`，路由 `review-synthesizer` → `shipper`（`plan-gate.triggers` 不含 `plan.blocked`，不可假定 plan-gate 消费）。`flow_lifecycle` phase 必须 ∉ `{WorkersActive, Spawning}`（避免与 U4 aggregate-timeout 抢跑），handoff 升级归 U3 ladder（不在 R6 触发）。emit 后 tracker `close_wave` 防重发。同时 `review_passed_while_wave_open`（U1）改为 `ViolationType::SemanticGateViolation`，独立 recoverable bucket，**不**计入 `U2_REJECTION_RETRY_LIMIT`，不发 fatal `PayloadContractViolation`；`task.resume` hint 显式禁止 empty_diff，提示等待机制 plan.blocked 或补全维度。代码：`crates/ralph-core/src/flow_lifecycle/incomplete_wave_gate.rs`、`event_loop/mod.rs::maybe_emit_incomplete_wave_blocked`、`event_loop/review_step_state.rs::check_semantic_gates`。
-
-`R1` / `R3` 默认关闭（需 preset 显式开启 `ephemeral_isolation: true` / 注入逻辑由 `ce-executor-isolated` preset 显式激活）；`R4` / `R5` 同样。`ce-executor-lite` / `autoresearch` / `debug` / `merge-loop` 等其他 preset 不受影响。
-
-**R2 (CLI 写入前 enforce `topic_deny_rules`) 由 `2026-06-14-001` 计划覆盖，本节不重复。**
-
-### Hook System
-
-Hooks run external commands at lifecycle points. Located in `crates/ralph-core/src/hooks/`:
-
-- **HookEngine**: Manages hook lifecycle (discovery, resolution, execution)
-- **HookExecutor**: Runs external commands as hooks with timeout and output capture
-- **SuspendStateStore**: Persists suspend state across loop restarts
-
-Hook stages: `pre_agent` → `post_agent` → `pre_event_processing` → `post_event_processing` → `completion`
-
-### Skill System
-
-Skills are markdown documents with YAML frontmatter providing knowledge and tool instructions to agents. Located in `crates/ralph-core/src/skill.rs` and `skill_registry.rs`:
-
-- Support auto-injection, hat-scoping, backend-scoping, tags
-- Both built-in (compiled via `include_str!`) and filesystem sources
-- Registry discovers and indexes skills from multiple sources
-
-### Session Recording & Playback
-
-- **SessionRecorder** (`session_recorder.rs`): Records all events to JSONL files (behind `recording` feature flag)
-- **SessionPlayer** (`session_player.rs`): Replays recorded sessions for smoke tests, supports step-through and replay modes
-- Fixtures stored in `crates/ralph-core/tests/fixtures/`
+完整 Isolated 终态 Authority(U3)/ Fair Scheduling(U4)/ Agent Output Governance(R1-R6)/ preset SSoT 多点同步规则 → `.cursor/rules/multi-hat-isolation.mdc`。
 
 ### Presets & Hats System
 
 Presets define collections of hats. Located in `presets/` directory and `crates/ralph-cli/src/presets.rs` (~1100 lines):
-
 - **HatlessRalph** (`hatless_ralph.rs`): Hat topology, event subscription matching, hat selection algorithm
 - **HatRegistry**: Manages hat discovery, registration, subscription
 - Presets support Chinese (`*-zh.yml`) variants and chainable configurations
-- Builtin presets: `autoresearch`, `ce-executor-isolated`, `ce-executor-lite` (template), `ce-executor-wave`, `debug`, `merge-loop`（裸 `ce-executor` 已删除：所有 plan-driven 执行请使用 `ce-executor-isolated`；仅作模板时可使用 `ce-executor-lite`）
+- Builtin presets: `autoresearch`, `ce-executor-isolated`, `ce-executor-lite` (template), `ce-executor-wave`, `debug`, `merge-loop`(裸 `ce-executor` 已删除:所有 plan-driven 执行请使用 `ce-executor-isolated`;仅作模板时可使用 `ce-executor-lite`)
 - `presets/index.json` is the user-facing preset manifest
 
-**`presets/manifest.yml` 是 builtin preset 的 single source of truth**（`crates/ralph-cli/build.rs` 和 `crates/ralph-cli/src/presets.rs` 都从这里读取并在不一致时 panic）。新增/重命名/删除一个 builtin preset 必须**同步改 4 处**：
-
-1. `presets/en/<name>.yml`（实际 YAML）
+**`presets/manifest.yml` 是 builtin preset 的 single source of truth**(`crates/ralph-cli/build.rs` 和 `crates/ralph-cli/src/presets.rs` 都从这里读取并在不一致时 panic)。新增/重命名/删除一个 builtin preset 必须**同步改 4 处**:
+1. `presets/en/<name>.yml`(实际 YAML)
 2. `presets/manifest.yml` 的 `embedded:` 列表
-3. `crates/ralph-cli/src/presets.rs` 的 `PRESETS` 数组（`EmbeddedPreset { name, description, content, public }`）
-4. `presets/index.json`（如对用户可见）
-5. 同步更新本文件 Presets & Hats 段的 builtin preset 列表，以及 `scripts/ralph-zsh-plugin.zsh` 的 zsh 补全
-
-### Key Files
-
-| File | Purpose |
-|------|---------|
-| `.ralph/agent/memories.md` | Persistent learning across sessions |
-| `.ralph/agent/tasks.jsonl` | Runtime work tracking |
-| `.ralph/loop.lock` | Contains PID + prompt of primary loop |
-| `.ralph/loops.json` | Registry of all tracked loops. Each `LoopEntry` has `worktree_path: Option<String>` and `workspace: String`: in worktree mode both equal the worktree absolute path; in primary mode `worktree_path` is `None` and `workspace` is the main repo root. `None` vs `Some(_)` is the canonical primary-vs-worktree signal consumed by `ralph loops list`, `is_alive()` checks, and the web dashboard's domain model. The registry is shared across worktrees and always lives in the main repo (the only `.ralph/` artifact that does). |
-| `.ralph/merge-queue.jsonl` | Event-sourced merge queue |
-| `.ralph/telegram-state.json` | Telegram bot state (chat ID, pending questions) |
-| `docs/solutions/` | Documented solutions to past problems (bugs, best practices, workflow patterns), organized by category with YAML frontmatter (`module`, `tags`, `problem_type`). Relevant when implementing or debugging in documented areas. |
-| `docs/guide/harness-extensions.md` | User guide for Harness 4 extension mechanisms (event filtering, projection, state injection, preflight hooks) |
-| `presets/COLLECTION.md` | Preset metadata and authorship docs |
-| `presets/index.json` | Preset manifest index |
-| `crates/ralph-core/data/` | Embedded tool definitions (`ralph-tools.md`, `ralph-tools-tasks.md`, `ralph-tools-memories.md`) |
-
-### Code Locations
-
-| Module | Path | Purpose |
-|---|---|---|
-| Event loop | `crates/ralph-core/src/event_loop/` | `mod.rs` (main loop), `loop_state.rs` |
-| Hat system | `crates/ralph-core/src/hatless_ralph.rs`, `hat_registry.rs` | Topology, subscription matching, selection |
-| State machine | `crates/ralph-core/src/state_machine.rs` | Instance lifecycle (`open → active → terminal`) |
-| Event policy | `crates/ralph-core/src/event_policy.rs` | Schema, terminal monotonicity |
-| Event origin | `crates/ralph-core/src/event_origin.rs` | JSONL provenance guard (fail-closed) |
-| Event projection | `crates/ralph-core/src/event_projection.rs` | Transform / redact events |
-| Memory | `crates/ralph-core/src/memory.rs`, `memory_store.rs` | Persistent learning (markdown) |
-| Task | `crates/ralph-core/src/task.rs`, `task_store.rs`, `task_definition.rs` | JSONL work tracking |
-| Hooks | `crates/ralph-core/src/hooks/` | engine, executor, suspend state |
-| Skills | `crates/ralph-core/src/skill.rs`, `skill_registry.rs` | Discovery, auto-injection |
-| Lock coordination | `crates/ralph-core/src/worktree.rs`, `loop_lock.rs`, `file_lock.rs` | Git-worktree + lockfiles |
-| Loop registry | `crates/ralph-core/src/loop_registry.rs` | Tracked loops across worktrees |
-| Merge queue | `crates/ralph-core/src/merge_queue.rs` | Event-sourced queue |
-| Config | `crates/ralph-core/src/config/` | v1/v2 compat; `robot.rs` for RObot |
-| CLI commands | `crates/ralph-cli/src/` | `commands/`, `cli/`, `loops.rs`, `task_cli.rs`, `wave.rs`, `bot.rs`, `web.rs`, `mcp.rs`, `init.rs`, `hats.rs`, `presets.rs`, `hooks.rs`, `tools.rs`, `doctor.rs` |
-| Telegram | `crates/ralph-telegram/src/` | bot, service, state, handler |
-| Wave | `crates/ralph-core/src/wave_tracker.rs`, `wave_detection.rs`, `wave_prompt.rs`; CLI in `crates/ralph-cli/src/wave.rs`; loop dispatch in `crates/ralph-cli/src/loop_runner/wave/dispatcher.rs` | Intra-loop parallelism |
-| Adapters | `crates/ralph-adapters/src/` | `cli_backend.rs`, `cli_executor.rs`, `pty_executor.rs`, `auto_detect.rs`, stream parsers |
-| Preflight | `crates/ralph-core/src/preflight.rs` | Acceptance criteria extraction / validation |
-| Harness extensions | `crates/ralph-core/src/{config,event_loop,event_projection,state_file_injector,preflight}.rs` | Event filtering, projection, state injection, preflight hooks |
-| Web server (Rust) | `crates/ralph-api/src/` | Axum REST/WS for TUI/dashboard |
-| Web server (Node, legacy) | `backend/ralph-web-server/src/` | Fastify + tRPC + SQLite (deprecated) |
-| Web frontend | `frontend/ralph-web/src/` | React components |
-| E2E | `crates/ralph-e2e/src/` | scenarios, mock CLI, reporter |
-| BDD scenarios | `crates/ralph-core/tests/scenarios/` | YAML integration scenarios |
-| Smoke fixtures | `crates/ralph-core/tests/fixtures/` | Recorded JSONL for replay |
-| Proto types | `crates/ralph-proto/src/` | `Event`, `Hat`, `HatId`, `Topic`, `EventBus`, `RobotService`, `DaemonAdapter`, `FrameCapture`, `UxEvent` |
+3. `crates/ralph-cli/src/presets.rs` 的 `PRESETS` 数组(`EmbeddedPreset { name, description, content, public }`)
+4. `presets/index.json`(如对用户可见)
+5. 同步更新本文件 Presets & Hats 段的 builtin preset 列表,以及 `scripts/ralph-zsh-plugin.zsh` 的 zsh 补全
 
 ## The Ralph Tenets
 
@@ -302,222 +159,11 @@ Presets define collections of hats. Located in `presets/` directory and `crates/
 - ❌ Scoping work at task selection time (scope at plan creation instead)
 - ❌ Assuming functionality is missing without code verification
 
-## Specs & Tasks
+## IMPORTANT (Hard Rules — read before writing any code)
 
-- Create specs in `.ralph/specs/` — do NOT implement without an approved spec first
-- Create code tasks in `.ralph/tasks/` using `.code-task.md` extension
-- Work step-by-step: spec → dogfood spec → implement → dogfood implementation → done
+> **以下规则优先级最高,请在动手写任何代码前先完整读完本段。** 任何「先看了某段就开始写」的冲动都应当先回头对照本段。
 
-### Memories and Tasks (Default Mode)
-
-Memories and tasks are enabled by default. Both must be enabled/disabled together:
-
-When enabled (default):
-- Scratchpad is disabled
-- Tasks replace scratchpad for completion verification
-- Loop terminates when no open tasks + consecutive LOOP_COMPLETE
-
-To disable (legacy scratchpad mode):
-```yaml
-memories:
-  enabled: false
-tasks:
-  enabled: false
-```
-
-## Parallel Loops
-
-Ralph supports multiple orchestration loops in parallel using git worktrees.
-
-```
-Primary Loop (holds .ralph/loop.lock)
-├── Runs in main workspace
-├── Processes merge queue on completion
-└── Spawns merge-ralph for queued loops
-
-Worktree Loops (.worktrees/<loop-id>/)
-├── Isolated filesystem via git worktree
-├── Symlinked memories, specs, tasks → main repo
-├── Queue for merge on completion
-└── Exit cleanly (no spawn)
-```
-
-### Testing Parallel Loops
-
-```bash
-cd $(mktemp -d) && git init && echo "<p>Hello</p>" > index.html && git add . && git commit -m "init"
-
-# Terminal 1: Primary loop
-ralph run -p "Add header before <p>" --max-iterations 5
-
-# Terminal 2: Worktree loop
-ralph run -p "Add footer after </p>" --max-iterations 5
-
-# Monitor
-ralph loops
-```
-
-## Agent Waves (Intra-Loop Parallelism)
-
-Waves enable a single hat to process multiple work items in parallel within one iteration.
-
-### Hat Config Fields
-
-```yaml
-hats:
-  reviewer:
-    name: "Reviewer"
-    triggers: ["review.file"]
-    publishes: ["review.done"]
-    concurrency: 4              # Max parallel workers (default: 1)
-    instructions: "..."
-
-  synthesizer:
-    triggers: ["review.done"]
-    publishes: ["review.complete"]
-    aggregate:                   # Buffer results until all arrive
-      mode: wait_for_all
-      timeout: 300               # Seconds to wait
-```
-
-- `concurrency > 1` enables wave execution for a hat
-- `aggregate` makes a hat wait for all wave results before activating
-- A hat cannot have both `concurrency > 1` and `aggregate`
-- `missing_event_grace_secs`（可选）：per-hat missing-event 闸门宽限期；2026-06-17-004 U2 引入，专为长跑 hat（如 `dimension-reviewer`）的首轮沉默保护。不设置 → 走 preset 默认 → `min(idle_timeout*0.3, 540)`。设为 `0` 显式关闭 grace。代码：`crates/ralph-core/src/config/hat.rs::resolve_missing_event_grace_secs`、`crates/ralph-cli/src/loop_runner/hard_gate.rs::should_gate_missing_events`
-
-### Wave Dispatch
-
-Agents dispatch waves via CLI:
-```bash
-ralph wave emit review.file --payloads "src/main.rs" "src/lib.rs" "src/config.rs"
-```
-
-### How It Works
-
-1. Agent emits wave events (tagged with shared `wave_id`)
-2. Loop runner detects wave events, resolves target hat
-3. Spawns N parallel backend instances (up to `concurrency` limit)
-4. Each worker gets: focused prompt, per-worker events file, wave env vars
-5. Results merged back to main events file
-6. Aggregator hat picks up results on next iteration
-
-### Key Code Locations
-
-- **Wave CLI**: `crates/ralph-cli/src/wave.rs`
-- **Wave detection**: `crates/ralph-core/src/wave_detection.rs`
-- **Worker prompt**: `crates/ralph-core/src/wave_prompt.rs`
-- **Wave tracker**: `crates/ralph-core/src/wave_tracker.rs`
-- **Loop integration**: `crates/ralph-cli/src/loop_runner/wave/dispatcher.rs` (`execute_wave`)
-
-### Presets
-
-- `presets/wave-review.yml` — Scatter-gather code review
-
-## Smoke Tests (Replay-Based)
-
-Use the `smoke_runner` entry point from Build & Test above. Per-backend filters are passed as test name substrings, e.g. `cargo nextest run -p ralph-core -- kiro` (走 ralph-core 包内默认并发,见「Build & Test」段分级表)。
-
-**Fixtures location:** `crates/ralph-core/tests/fixtures/`
-
-### Recording New Fixtures
-
-```bash
-cargo run --bin ralph -- run -c ralph.claude.yml --record-session session.jsonl -p "your prompt"
-```
-
-## E2E Testing
-
-```bash
-cargo run -p ralph-e2e -- claude             # Live API tests
-cargo run -p ralph-e2e -- --mock             # CI-safe mock mode
-cargo run -p ralph-e2e -- --mock --filter connect  # Filter scenarios
-cargo run -p ralph-e2e -- --list             # List scenarios
-```
-
-Reports generated in `.e2e-tests/`.
-
-## RObot (Human-in-the-Loop)
-
-Ralph supports human interaction during orchestration via Telegram. Agents can ask questions and humans can send proactive guidance.
-
-### Configuration
-
-```yaml
-# ralph.yml
-RObot:
-  enabled: true
-  timeout_seconds: 300    # How long to block waiting for a response
-  telegram:
-    bot_token: "your-token"  # Or set RALPH_TELEGRAM_BOT_TOKEN env var
-```
-
-### Event Types
-
-| Event / Command | Direction | Purpose |
-|-------|-----------|---------|
-| `human.interact` | Agent to Human | Agent asks a question; loop blocks until response or timeout |
-| `human.response` | Human to Agent | Reply to a `human.interact` question |
-| `human.guidance` | Human to Agent | Proactive guidance injected as `## ROBOT GUIDANCE` in prompt |
-| `ralph tools interact progress` | Agent to Human | Non-blocking progress notification via Telegram (no event, direct send) |
-
-### How It Works
-
-- The Telegram bot starts only on the **primary loop** (the one holding `.ralph/loop.lock`)
-- When an agent emits `human.interact`, the event loop sends the question via Telegram and **blocks**
-- Responses are published as `human.response` events on the bus
-- Proactive messages become `human.guidance` events, squashed into a numbered list in the prompt
-- Send failures retry with exponential backoff (3 attempts); if all fail, treated as timeout
-- Parallel loops route messages via reply-to, `@loop-id` prefix, or default to primary
-
-See `crates/ralph-telegram/README.md` for setup instructions.
-
-## Diagnostics
-
-TUI mode always logs to `.ralph/diagnostics/logs/ralph-{timestamp}.log` (last 5 kept automatically).
-
-```bash
-RALPH_DIAGNOSTICS=1 ralph run -p "your prompt"
-```
-
-Output in `.ralph/diagnostics/<timestamp>/`:
-- `agent-output.jsonl` — Agent text, tool calls, results
-- `orchestration.jsonl` — Hat selection, events, backpressure
-- `errors.jsonl` — Parse errors, validation failures
-
-```bash
-jq 'select(.type == "tool_call")' .ralph/diagnostics/*/agent-output.jsonl
-ralph clean --diagnostics
-```
-
-## Runtime Diagnosis
-
-Runtime Diagnosis（U0–U8）是在上述 TUI / full diagnostics 之上的**可观测性 + 自校准层**：把反压点（payload / execution contract、workflow guard、stall、loop stale 等）落 `recovery.jsonl`，把 U5 drift detector 的 3 个指标（field completeness / coord join rate / emit cadence）跌破阈值时落 `drift.jsonl`，loop 终止时把 `## Diagnostics` 段追加到 `.ralph/agent/summary.md`，并写 `diagnosis-summary.json` 种子。
-
-- 启用（env 优先）：`RALPH_DIAGNOSTICS=1 ralph run -c ralph.yml -H builtin:<preset> -p "..."`。仅想写盘不写 prompt alert，可在 `ralph.yml` 配 `telemetry.runtime_diagnosis: { enabled: true, write_artifacts: true, prompt_injection_enabled: true, ... }`。
-- 报告：`ralph diagnose --session latest`（Markdown）或 `--format json`（CI，schema_version="1"）；`--diagnostics-root` 可自定义根目录。
-- 退出码：`0` 渲染成功 / `2` 无 session / `3` 路径非法 / `4` I/O 失败。
-- **Recovery 计数（2026-06-17-004 U4）**：`diagnosis-summary.json` 的 `recovery_count` 现在汇总 workspace 层 `<root>/.ralph/recovery.jsonl`（CLI emit 拒收）与 session 层 `<root>/.ralph/diagnostics/<id>/recovery.jsonl`（hard gate / workflow guard）两条 journal；`notes` 列出两条路径。`ralph diagnose` 在 session journal 为空时回退到 workspace journal，避免 stale session 隐藏 cli_emit 拒收。
-
-## Doctor (Plan Frontmatter Drift Detection)
-
-`ralph doctor plan-sync [--plan PATH]`（2026-06-17-004 U5 / R7）检测 plan YAML frontmatter `status` 与 `.ralph/agent/tasks.jsonl` 闭合状态是否一致：
-
-- `status: completed` 但还有 `open` task → 失败；
-- `status: stalled-after-uN` 但 uN 已全部 `closed` 且无 open → 失败；
-- `status` 不在允许枚举（`draft / active / stalled-after-u0..8 / uN-closed-u(N+1)-pending / completed / abandoned`）→ 失败；
-- 缺 `tasks.jsonl` → 仅警告，不失败；
-- 不传 `--plan` 时自动选 `docs/plans/` 或 `docs/achieved/plan/` 下 mtime 最新的 `.md`。
-- `ce-executor-serial` preset coordinator instructions 含 HARD RULE：每次 `work.done` 后必须更新 plan frontmatter `status`（在 `ralph tools task close` 之后、`ralph emit work.ready` 之前）。
-- 8 个 envelope source：`stall_recovery / missing_event_gate / workflow_guard / execution_contract / payload_contract / drift_monitor / hook_retry / loop_stale`；6 个 outcome：`pending / recovered / repeated / escalated / failed / not_retriable`。
-- Responder 三档升级：Soft（prompt alert）→ Hard（`task.resume` 路由到 safe target）→ Final（`TerminationHint`，不覆盖 `PayloadContractViolation`）。
-
-详见 `docs/guide/runtime-diagnosis.md`（配置矩阵、report 字段、常见症状排查流程、磁盘文件清单）。
-
-## IMPORTANT
-
-> **以下规则优先级最高，请在动手写任何代码前先完整读完本段。** 任何「先看了某段就开始写」的冲动都应当先回头对照本段。
-
-- 讨论 ralph-orchestrator 的任何功能、架构、行为时，必须先去读源码确认，不允许凭记忆或猜测讨论
+- 讨论 ralph-orchestrator 的任何功能、架构、行为时,必须先去读源码确认,不允许凭记忆或猜测讨论
 - Run `cargo nextest run`(或 `./scripts/run-tests.sh`)before declaring any task done——绝对不要用裸 `cargo test` 跑 `ralph-cli` 测试,会触发 loop_runner 的 process-global Mutex 中毒 flake(参见本文档「Build & Test」段 HARD RULE 1)。**默认走并发**(ralph-cli 除外,见分级表)
 - Backwards compatibility doesn't matter — it adds clutter for no reason
 - Prefer replay-based smoke tests over live API calls for CI
@@ -526,158 +172,37 @@ Runtime Diagnosis（U0–U8）是在上述 TUI / full diagnostics 之上的**可
 - You MUST not commit ephemeral files
 - When I ask you to view something that means to use playwright/chrome tools to go view it.
 - When adding or changing `ralph tools` subcommands, update the appropriate file in `crates/ralph-core/data/`: `ralph-tools.md` (shared commands), `ralph-tools-tasks.md` (task commands), or `ralph-tools-memories.md` (memory commands). `.claude/skills/ralph-tools/SKILL.md` is a symlink to the base `ralph-tools.md`
-- **反向验证（必须）**：修改 ralph tools 子命令、被这些 skill 文档引用的源码（行号、参数、行为描述）后，必须用 `sed -n 'NN,MMp' <file>` 复核 `crates/ralph-core/data/*.md` 里所有形如 `xxx.rs:NN-MM` 的源码引用范围是否仍指向正确代码。**行号漂移、参数表与代码 clap 定义不符、引用了不存在的命令/字段，都算违规**。改完必须跑一次 `ralph <cmd> --help`（涉及命令语法）或对应 skill 列出的全部命令做冒烟测试（涉及行为）。发现漂移立即在文档里同步修正，不允许文档落后于代码。
+- **反向验证(必须)**:修改 ralph tools 子命令、被这些 skill 文档引用的源码(行号、参数、行为描述)后,必须用 `sed -n 'NN,MMp' <file>` 复核 `crates/ralph-core/data/*.md` 里所有形如 `xxx.rs:NN-MM` 的源码引用范围是否仍指向正确代码。**行号漂移、参数表与代码 clap 定义不符、引用了不存在的命令/字段,都算违规**。改完必须跑一次 `ralph <cmd> --help`(涉及命令语法)或对应 skill 列出的全部命令做冒烟测试(涉及行为)。发现漂移立即在文档里同步修正,不允许文档落后于代码。
 - When adding, removing, renaming, or changing builtin hat collections/presets in `crates/ralph-cli/src/presets.rs` or mirrored preset files, update `scripts/ralph-zsh-plugin.zsh` so `ralph run -H builtin:<TAB>` stays accurate. Preserve the current `compadd`-based completion style for values containing `:`; do not use `_describe` for `builtin:*` values. After updating the script, install it for the current user with `cp scripts/ralph-zsh-plugin.zsh ~/.oh-my-zsh/plugins/ralph/ralph.plugin.zsh` and verify zsh completion loads.
-- **builtin preset 改动后**：除上述 zsh 脚本外，还必须同步更新本文件「Presets & Hats System」段的 builtin preset 列表（参见该段对 `presets/manifest.yml` 单一事实源的说明）。文档落后于代码视为违规。
+- **builtin preset 改动后**:除上述 zsh 脚本外,还必须同步更新本文件「Presets & Hats System」段的 builtin preset 列表(参见该段对 `presets/manifest.yml` 单一事实源的说明)。文档落后于代码视为违规。
 - Design docs and specs go in `.ralph/specs` and one-off code tasks and bug fixes go in `.ralph/tasks`
-- **`DEVELOPMENT.md` 已弃用**：它描述的是旧 `specs/` 目录规范，已被 `.ralph/specs/` 取代；请遵循本文件「Specs & Tasks」段的规范。
-- **不要手动编辑 `.ralph/` 下的运行时状态文件**（`loop.lock` / `events.jsonl` / `agent/memories.md` / `agent/tasks.jsonl` / `loops.json` / `merge-queue.jsonl` / `telegram-state.json` / `diagnostics/`）。这些由 loop 自己维护；手工改动会与 in-flight 状态错位。确实需要重置时，先停掉所有相关 loop 再用对应 CLI（如 `ralph loops clean`）清理。
-- **所有中文输出规则**：无论使用哪个 skill 进行操作，所有面向人类的输出——包括但不限于计划文档、设计文档、需求文档、实施计划、任务文件、报告、总结、注释说明、代码 review 意见、PR 描述等——都必须使用中文撰写。不影响：文件名、代码中的字符串字面量、代码注释中的技术标识符（如变量名、函数名、crate 名）、命令行输出块。这条规则优先于任何 skill 内置的语言默认值。
-- **CLAUDE.md 与 AGENTS.md 同步规则**：这两个文件必须保持内容完全一致。修改其中一个时，必须同步更新另一个（推荐 `cp CLAUDE.md AGENTS.md`），确保不会出现差异。
+- **`DEVELOPMENT.md` 已弃用**:它描述的是旧 `specs/` 目录规范,已被 `.ralph/specs/` 取代;请遵循本文件「Specs & Tasks」段的规范。
+- **不要手动编辑 `.ralph/` 下的运行时状态文件**(`loop.lock` / `events.jsonl` / `agent/memories.md` / `agent/tasks.jsonl` / `loops.json` / `merge-queue.jsonl` / `telegram-state.json` / `diagnostics/`)。这些由 loop 自己维护;手工改动会与 in-flight 状态错位。确实需要重置时,先停掉所有相关 loop 再用对应 CLI(如 `ralph loops clean`)清理。
+- **所有中文输出规则**:无论使用哪个 skill 进行操作,所有面向人类的输出——包括但不限于计划文档、设计文档、需求文档、实施计划、任务文件、报告、总结、注释说明、代码 review 意见、PR 描述等——都必须使用中文撰写。不影响:文件名、代码中的字符串字面量、代码注释中的技术标识符(如变量名、函数名、crate 名)、命令行输出块。这条规则优先于任何 skill 内置的语言默认值。
+- **CLAUDE.md 与 AGENTS.md 同步规则**:这两个文件必须保持内容完全一致。修改其中一个时,必须同步更新另一个(推荐 `cp CLAUDE.md AGENTS.md`),确保不会出现差异。
 - **测试入口强制 nextest(HARD RULE 1 + 2)**:
-  - **HARD RULE 1**:本项目所有测试入口必须是 `cargo nextest run` 系列(`./scripts/run-tests.sh` / `just test-parallel` / `cargo nextest run -p <pkg> --bin <bin> -- <subset>`),**禁止**裸跑 `cargo test -p ralph-cli` 或 `cargo test -p ralph-cli --bin ralph`。根因是 `crates/ralph-cli/src/loop_runner/tests.rs:14-49` 的 4 个 process-global Mutex + 时间敏感测试。允许的例外:① `cargo test --doc` 跑 doctest(nextest 不跑);② nextest 不可用时的最后兜底 `cargo test --workspace --exclude ralph-e2e -- --test-threads=1`;③ `crates/ralph-core/data/ralph-tools*.md` 这类**仅文档用途**的 cargo test 引用。
-  - **HARD RULE 2**:默认走并发,确需串行时显式配置。**能用并行的必须用并行**(快是默认值,不是可选优化)。具体分级见「Build & Test」段「并行 vs 串行分级表」——`ralph-cli` 整个包走 cli-serial 串行(根因:Mutex + sleep CPU 抢占,2026-06-13 已验证不能放开);其他 7 个包全部走 nextest 默认并发(`test-threads = num-cpus`)。
+  - **HARD RULE 1**:本项目所有测试入口必须是 `cargo nextest run` 系列(`./scripts/run-tests.sh` / `just test-parallel` / `cargo nextest run -p <pkg> --bin <bin> -- <subset>`),**禁止**裸跑 `cargo test -p ralph-cli` 或 `cargo test -p ralph-cli --bin ralph`。根因是 `crates/ralph-cli/src/loop_runner/tests.rs:14-49` 的 4 个 process-global Mutex + 时间敏感测试。允许的例外:① `cargo test --doc` 跑 doctest;② nextest 不可用时的最后兜底 `cargo test --workspace --exclude ralph-e2e -- --test-threads=1`;③ `crates/ralph-core/data/ralph-tools*.md` 这类**仅文档用途**的 cargo test 引用。
+  - **HARD RULE 2**:默认走并发,确需串行时显式配置。**能用并行的必须用并行**(快是默认值,不是可选优化)。具体分级见「Build & Test」段「并行 vs 串行分级速查表」——`ralph-cli` 整个包走 cli-serial 串行(根因:Mutex + sleep CPU 抢占,2026-06-13 已验证不能放开);其他 7 个包全部走 nextest 默认并发(`test-threads = num-cpus`)。
   - **修改任一规则须先确认所有 IDE/hook/CI 入口已切到 nextest**,并跑 3+1 验证(ralph-cli 子集 3 跑 + 全 workspace 1 跑)。
 
 <!-- rtk-instructions v2 -->
 # RTK (Rust Token Killer) - Token-Optimized Commands
 
-> **可选优化**：本节是 token 节省提示，不影响项目行为。RTK 不可用时直接跑原命令即可。
+> **完整 RTK 命令手册已迁移到 `.cursor/rules/rtk-token-killer.mdc`**(按 `**/*.sh` glob 按需加载)。本节只保留「Golden Rule」。
 
 ## Golden Rule
 
-**Always prefix commands with `rtk`**. If RTK has a dedicated filter, it uses it. If not, it passes through unchanged. This means RTK is always safe to use.
+**Always prefix commands with `rtk`**. If RTK has a dedicated filter, it uses it. If not, it passes through unchanged. Always safe to use.
 
-**Important**: Even in command chains with `&&`, use `rtk`:
 ```bash
-# ❌ Wrong
+# Wrong
 git add . && git commit -m "msg" && git push
 
-# ✅ Correct
+# Correct
 rtk git add . && rtk git commit -m "msg" && rtk git push
 ```
 
-## RTK Commands by Workflow
-
-### Build & Compile (80-90% savings)
-```bash
-rtk cargo build         # Cargo build output
-rtk cargo check         # Cargo check output
-rtk cargo clippy        # Clippy warnings grouped by file (80%)
-rtk tsc                 # TypeScript errors grouped by file/code (83%)
-rtk lint                # ESLint/Biome violations grouped (84%)
-rtk prettier --check    # Files needing format only (70%)
-rtk next build          # Next.js build with route metrics (87%)
-```
-
-### Test (60-99% savings)
-```bash
-rtk cargo test          # Cargo test failures only (90%)
-rtk go test             # Go test failures only (90%)
-rtk jest                # Jest failures only (99.5%)
-rtk vitest              # Vitest failures only (99.5%)
-rtk playwright test     # Playwright failures only (94%)
-rtk pytest              # Python test failures only (90%)
-rtk rake test           # Ruby test failures only (90%)
-rtk rspec               # RSpec test failures only (60%)
-rtk test <cmd>          # Generic test wrapper - failures only
-```
-
-### Git (59-80% savings)
-```bash
-rtk git status          # Compact status
-rtk git log             # Compact log (works with all git flags)
-rtk git diff            # Compact diff (80%)
-rtk git show            # Compact show (80%)
-rtk git add             # Ultra-compact confirmations (59%)
-rtk git commit          # Ultra-compact confirmations (59%)
-rtk git push            # Ultra-compact confirmations
-rtk git pull            # Ultra-compact confirmations
-rtk git branch          # Compact branch list
-rtk git fetch           # Compact fetch
-rtk git stash           # Compact stash
-rtk git worktree        # Compact worktree
-```
-
-Note: Git passthrough works for ALL subcommands, even those not explicitly listed.
-
-### GitHub (26-87% savings)
-```bash
-rtk gh pr view <num>    # Compact PR view (87%)
-rtk gh pr checks        # Compact PR checks (79%)
-rtk gh run list         # Compact workflow runs (82%)
-rtk gh issue list       # Compact issue list (80%)
-rtk gh api              # Compact API responses (26%)
-```
-
-### JavaScript/TypeScript Tooling (70-90% savings)
-```bash
-rtk pnpm list           # Compact dependency tree (70%)
-rtk pnpm outdated       # Compact outdated packages (80%)
-rtk pnpm install        # Compact install output (90%)
-rtk npm run <script>    # Compact npm script output
-rtk npx <cmd>           # Compact npx command output
-rtk prisma              # Prisma without ASCII art (88%)
-```
-
-### Files & Search (60-75% savings)
-```bash
-rtk ls <path>           # Tree format, compact (65%)
-rtk read <file>         # Code reading with filtering (60%)
-rtk grep <pattern>      # Search grouped by file (75%)
-rtk find <pattern>      # Find grouped by directory (70%)
-```
-
-### Analysis & Debug (70-90% savings)
-```bash
-rtk err <cmd>           # Filter errors only from any command
-rtk log <file>          # Deduplicated logs with counts
-rtk json <file>         # JSON structure without values
-rtk deps                # Dependency overview
-rtk env                 # Environment variables compact
-rtk summary <cmd>       # Smart summary of command output
-rtk diff                # Ultra-compact diffs
-```
-
-### Infrastructure (85% savings)
-```bash
-rtk docker ps           # Compact container list
-rtk docker images       # Compact image list
-rtk docker logs <c>     # Deduplicated logs
-rtk kubectl get         # Compact resource list
-rtk kubectl logs        # Deduplicated pod logs
-```
-
-### Network (65-70% savings)
-```bash
-rtk curl <url>          # Compact HTTP responses (70%)
-rtk wget <url>          # Compact download output (65%)
-```
-
-### Meta Commands
-```bash
-rtk gain                # View token savings statistics
-rtk gain --history      # View command history with savings
-rtk discover            # Analyze Claude Code sessions for missed RTK usage
-rtk proxy <cmd>         # Run command without filtering (for debugging)
-rtk init                # Add RTK instructions to CLAUDE.md
-rtk init --global       # Add RTK to ~/.claude/CLAUDE.md
-```
-
-## Token Savings Overview
-
-| Category | Commands | Typical Savings |
-|----------|----------|-----------------|
-| Tests | vitest, playwright, cargo test | 90-99% |
-| Build | next, tsc, lint, prettier | 70-87% |
-| Git | status, log, diff, add, commit | 59-80% |
-| GitHub | gh pr, gh run, gh issue | 26-87% |
-| Package Managers | pnpm, npm, npx | 70-90% |
-| Files | ls, read, grep, find | 60-75% |
-| Infrastructure | docker, kubectl | 85% |
-| Network | curl, wget | 65-70% |
-
-Overall average: **60-90% token reduction** on common development operations.
+常用高频: `rtk cargo test` / `rtk cargo clippy` / `rtk cargo build` / `rtk git status` / `rtk git diff`。完整 30+ 命令表见 `.cursor/rules/rtk-token-killer.mdc`。
 <!-- /rtk-instructions -->
 
 ## Ralph Managed Blocks
@@ -714,7 +239,6 @@ Overall average: **60-90% token reduction** on common development operations.
    - grep -n "keyword" <file> | head -50
 
 5. Every external command that may block must have timeout.
-
 <!-- ralph:end hang-prevention -->
 
 OUTPUT STYLE: concise
@@ -722,4 +246,3 @@ OUTPUT STYLE: concise
 - Skip filler words and hedging ("I think", "probably", "it seems")
 - 1-sentence explanations max, then code/action
 - No repeating what the user said
-

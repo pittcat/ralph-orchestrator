@@ -1,0 +1,86 @@
+---
+description: Multi-hat isolation policy + agent output governance (ce-executor-isolated R1-R6)
+globs: ["**/presets/**/*.yml", "**/presets/**/*.yaml", "**/presets/manifest.yml", "**/crates/ralph-core/src/config/**/*.rs", "**/crates/ralph-core/src/event_loop/**/*.rs", "**/crates/ralph-core/src/event_policy.rs", "**/crates/ralph-core/src/event_origin.rs"]
+alwaysApply: false
+---
+
+# Multi-Hat Isolation Policy (Mandatory)
+
+`event_loop.execution_mode` + hat count follow a **fixed threshold** — no exemptions:
+
+- **3-hat limit (coordinator mode)**: `hats` count ≤ 3 → preset may use `execution_mode: coordinator` (default) or `execution_mode: isolated`.
+- **4+ hats must be explicitly isolated**: `hats` count ≥ 4 → `event_loop.execution_mode: isolated` is **mandatory**. Missing, wrong value, or commented out → preset startup rejected by `preset_lint::check_multi_hat_isolation`.
+- **Error message fixed**: `preset declares N hats which exceeds the coordinator limit of 3; set \`event_loop.execution_mode: isolated\` to run this preset` — callers match this literal to localize root cause.
+- **No exemptions**: env vars (`RALPH_ALLOW_COORDINATOR_OVERRIDE`), test switches, preset-name exemptions all **unavailable**. All builtin 4+ hat presets already migrated to isolated (U6 commit `2a29e24`).
+
+## Isolated 终态 Authority (U3)
+
+In `execution_mode: isolated`, **all agent terminal states** (completion, review verdict, report completion, plan blocked) must be explicitly listed in the hat's `publishes`:
+
+- Topics NOT in `publishes` (e.g. bare `LOOP_COMPLETE`, undeclared `report.done`, undeclared `review.complete`) are directly rejected by `EventOriginGuard`
+- Rejection emits `event.isolation.boundary_violation` diagnostic to `recovery.jsonl` + injects `task.resume` so the agent sees the failure reason
+- Same rule applies to `default_publishes` fallback: fallback topics must also be in `publishes`
+- **Only exception**: `hat=ralph` runtime builtin hat — `HatRegistry::from_runtime_config()` injects `LOOP_COMPLETE` / `work.start` / `loop.cancel`. Single exemption.
+
+## Isolated Fair Scheduling (U4)
+
+`EventBus` uses **round-robin cursor** (NOT lexicographic first) to pick the next hat in isolated mode:
+
+- After a single event triggers multiple pending hats, cursor advances past the current hat and resumes from that position next time
+- Prevents starvation from "always pick alphabetically-first hat"
+- Lexicographic first behavior **removed** — don't document old behavior in docs/tests/prompts
+
+## 上限 + 调度 + 终态 Interaction
+
+- 3-hat coordinator preset: not bound by isolated terminal authority / fair scheduling (uses single-prompt multi-hat path)
+- 4+ hat isolated preset **must simultaneously satisfy**: `execution_mode=isolated` + every terminal topic in `publishes` + no lexicographic-order dependency
+- Any preset validation failure → blocked by `ralph preset check` / `ralph preflight` / `ralph run` startup hard gate — runtime never enters half-started state
+
+## Agent Output Governance (2026-06-14 plan 003 — `ce-executor-isolated` only)
+
+`ce-executor-isolated` preset adds hard rules on 5 card-points (mechanism > orchestration patch; default OFF, preset explicit ON):
+
+- **R1 — Wave context injection (review-synthesizer)**: When `review-synthesizer` activates, runner parses last 2000 lines of `events.jsonl` for `review.wave.ready` / `review.dimension.done`, constructs `## WAVE CONTEXT` block at prompt top (`wave_id` / `wave_total` / `received_count` / `expected_dimensions` / `missing_dimensions` / `ALL_DIMENSIONS_RECEIVED` / `AGGREGATE_TIMEOUT`). Same JSON exposed via `RALPH_WAVE_CONTEXT` env var to agent's bash tool. Code: `crates/ralph-core/src/wave_context.rs`, `event_loop/mod.rs::build_wave_context_for_synthesizer`.
+- **R3 — Ephemeral file isolation**: Every `process_output` iteration scans `git ls-files --others --exclude-standard`. Files matching `scratchpad.md` / `notes.md` / `tmp*.md` / `*.tmp.md` / `*.bak` / `*agent-notes.md` patterns AND in source tree (`crates/`, `src/`, `backend/`, `frontend/`, `examples/`, `docs/`) are appended to `.ralph/agent/scratchpad-{loop_id}.md` then deleted. Next prompt top injects `## EPHEMERAL RELOCATED` block. `event_loop.ephemeral_isolation: true` enables. Code: `crates/ralph-core/src/ephemeral_isolation.rs`, `event_loop/mod.rs::run_ephemeral_isolation`.
+- **R4 — Single-U contract (coordinator 单 U principle)**: `TaskStore::ensure` rejects same `(loop_id, plan_name, step)` with open task but different unit (unit form: `uN-` / `uNa-`, N digit). Same U sub-units (`u1a` / `u1b`) collapse to base `u1` allowed. `ralph run` writes `.ralph/agent/.ralph-enforce-current-unit` marker at bootstrap (env var `RALPH_ENFORCE_CURRENT_UNIT` blocked by workspace `forbid(unsafe_code)`), child process `ralph tools task ensure` reads marker to activate contract; same-key ensure triggers CLI exit non-zero. `event_loop.enforce_current_unit: true` enables. Code: `crates/ralph-core/src/task_store.rs::find_unit_collision_idx`, `crates/ralph-cli/src/task_cli.rs::execute_ensure`.
+- **R5 — Hard-gate hat routing stability**: Policy / workflow guard / execution contract / isolated scope rejection producing `task.resume` uses `Event::with_target(event.hat)` routing to source hat (no longer drifts to lex-first hat). Rejection payload carries `wave_id` / `wave_index` / `wave_total` (when source event is wave record). `build_wave_context_for_synthesizer` sets `pending_synthesizer_timeout` pin when `review-synthesizer` is woken by `inject_review_aggregate_timeouts`, first read `.take()` consumes to prevent cross-wave leak. Code: `crates/ralph-core/src/event_loop/mod.rs::publish_policy_rejection_resume`, `rejection.rs::build_task_resume_payload`.
+- **R6 — Incomplete wave mechanism shut-down (plan.blocked, 2026-06-17-003 U1+U2)**: When review wave `received < expected` AND `now - last_dimension_at > 0.8 * aggregate_timeout_secs`, **mechanism layer** `EventLoop::maybe_emit_incomplete_wave_blocked` auto-emits `plan.blocked(reason=dimension_reviewers_failed_to_converge)`, routes `review-synthesizer` → `shipper` (`plan-gate.triggers` does NOT contain `plan.blocked`, don't assume plan-gate consumes). `flow_lifecycle` phase must be ∉ `{WorkersActive, Spawning}` (avoid race with U4 aggregate-timeout). Handoff escalation belongs to U3 ladder (not triggered by R6). After emit, tracker `close_wave` prevents re-emission. Meanwhile `review_passed_while_wave_open` (U1) becomes `ViolationType::SemanticGateViolation`, independent recoverable bucket, **NOT** counted in `U2_REJECTION_RETRY_LIMIT`, NOT emitting fatal `PayloadContractViolation`; `task.resume` hint explicitly forbids `empty_diff`, prompts wait for mechanism `plan.blocked` OR complete missing dimensions. Code: `crates/ralph-core/src/flow_lifecycle/incomplete_wave_gate.rs`, `event_loop/mod.rs::maybe_emit_incomplete_wave_blocked`, `event_loop/review_step_state.rs::check_semantic_gates`.
+
+`R1` / `R3` default OFF (preset must explicitly enable `ephemeral_isolation: true` / injection logic activated by `ce-executor-isolated` preset). `R4` / `R5` same. `ce-executor-lite` / `autoresearch` / `debug` / `merge-loop` etc. other presets NOT affected.
+
+**R2 (CLI 写入前 enforce `topic_deny_rules`) covered by `2026-06-14-001` plan, not duplicated here.**
+
+## Preset System Single-Source-Of-Truth
+
+`presets/manifest.yml` is the **single source of truth** for builtin presets (`crates/ralph-cli/build.rs` + `crates/ralph-cli/src/presets.rs` both read from here, panic on inconsistency). Adding/renaming/deleting a builtin preset MUST sync **4 places**:
+
+1. `presets/en/<name>.yml` (actual YAML)
+2. `presets/manifest.yml`'s `embedded:` list
+3. `crates/ralph-cli/src/presets.rs` PRESETS array (`EmbeddedPreset { name, description, content, public }`)
+4. `presets/index.json` (if user-visible)
+5. Sync update CLAUDE.md "Presets & Hats System" builtin list + `scripts/ralph-zsh-plugin.zsh` zsh completion
+
+**Builtin presets**: `autoresearch`, `ce-executor-isolated`, `ce-executor-lite` (template), `ce-executor-wave`, `debug`, `merge-loop` (bare `ce-executor` deleted: all plan-driven execution uses `ce-executor-isolated`; template-only use `ce-executor-lite`).
+
+## Wave Config Fields
+
+```yaml
+hats:
+  reviewer:
+    triggers: ["review.file"]
+    publishes: ["review.done"]
+    concurrency: 4              # Max parallel workers (default: 1)
+    instructions: "..."
+
+  synthesizer:
+    triggers: ["review.done"]
+    publishes: ["review.complete"]
+    aggregate:                   # Buffer results until all arrive
+      mode: wait_for_all
+      timeout: 300               # Seconds to wait
+```
+
+- `concurrency > 1` enables wave execution for a hat
+- `aggregate` makes a hat wait for all wave results before activating
+- A hat cannot have both `concurrency > 1` and `aggregate`
+- `missing_event_grace_secs` (optional): per-hat missing-event gate grace period (2026-06-17-004 U2, protects long-running hats like `dimension-reviewer` from first-round silence). Resolve chain: `per-hat → preset → min(idle_timeout*0.3, 540)`. Set `0` to explicitly disable grace. Code: `crates/ralph-core/src/config/hat.rs::resolve_missing_event_grace_secs`, `crates/ralph-cli/src/loop_runner/hard_gate.rs::should_gate_missing_events`
