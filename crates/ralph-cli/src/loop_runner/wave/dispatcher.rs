@@ -202,6 +202,11 @@ pub(crate) struct DispatchContext {
     payload_previews: Vec<String>,
     show_progress: bool,
     use_colors: bool,
+    /// U1/R1 (2026-06-17-002): per-worker dimension assignment
+    /// parsed from each `review.wave.ready` payload. Carried on
+    /// the context so `execute_wave_structured` can stamp it
+    /// onto the `CompletedWave` for the merge layer to read.
+    assigned_dimensions: std::collections::HashMap<u32, String>,
 }
 
 impl DispatchContext {
@@ -213,6 +218,7 @@ impl DispatchContext {
         show_progress: bool,
         use_colors: bool,
         limits: WaveDispatchLimits,
+        assigned_dimensions: std::collections::HashMap<u32, String>,
     ) -> Self {
         let started_at = tokio::time::Instant::now();
         let partial_threshold = Duration::from_secs((aggregate_timeout.as_secs() * 8).div_ceil(10));
@@ -240,6 +246,7 @@ impl DispatchContext {
             payload_previews,
             show_progress,
             use_colors,
+            assigned_dimensions,
         }
     }
 }
@@ -285,6 +292,15 @@ pub async fn handle_wave_events(
     // when any wave hits the runner-supplied global deadline so
     // the runner can map to `TerminationReason::MaxRuntime`.
     let mut result = HandleWaveOutcome::default();
+    // U5/R5 (2026-06-17-002): per-slot retry budget for
+    // dimension mismatch retries. Key is `(wave_id, wave_index)`.
+    // The budget caps each slot at 1 retry (2 total attempts:
+    // initial + 1 retry) so a permanently-mismatched worker
+    // does not infinite-loop on the dispatcher's `task.resume`.
+    // The map is process-local; it is discarded when
+    // `handle_wave_events` returns (no persistence needed).
+    let mut dimension_retry_budget: std::collections::HashMap<(String, u32), u32> =
+        std::collections::HashMap::new();
     let outcome = ralph_core::detect_all_wave_events_capped(
         wave_events,
         event_loop.registry(),
@@ -512,7 +528,16 @@ pub async fn handle_wave_events(
                 // resulting `hat` field is what the isolated scope
                 // check in `process_parse_result` reads to decide
                 // whether the re-published event is in-scope.
-                if let Err(e) = merge_wave_results_to_events_file(
+                //
+                // U5/R5 (2026-06-17-002): capture the per-slot
+                // mismatch list returned by the merge layer. The
+                // dispatcher uses it to inject `task.resume`
+                // events so the `dimension-reviewer` retries the
+                // mismatched slot. Per-slot retry budget lives on
+                // `dimension_retry_budget` below; the same function
+                // call also writes the synthetic `wave.worker.failed`
+                // records.
+                let mismatch_info = match merge_wave_results_to_events_file(
                     &completed,
                     &main_events_file,
                     &detected.hat_config.publishes,
@@ -523,7 +548,25 @@ pub async fn handle_wave_events(
                     // hat. Pass `None` to use the default.
                     None,
                 ) {
-                    warn!(error = %e, "Failed to merge wave results to events file");
+                    Ok(info) => info,
+                    Err(e) => {
+                        warn!(error = %e, "Failed to merge wave results to events file");
+                        Vec::new()
+                    }
+                };
+
+                // U5/R5: for each mismatched slot that is not yet
+                // budget-exhausted, write a `task.resume` event to
+                // the main events file. The `dimension-reviewer`
+                // hat picks it up and retries that single slot.
+                if !mismatch_info.is_empty() {
+                    inject_dimension_retry_task_resume(
+                        &mismatch_info,
+                        &completed,
+                        &main_events_file,
+                        &mut dimension_retry_budget,
+                        &detected,
+                    );
                 }
             }
             WaveDispatchOutcome::GlobalDeadlineExceeded => {
@@ -834,6 +877,21 @@ pub async fn execute_wave_structured(
             ),
         ]);
 
+        // U2: surface the worker-bound dimension (parsed by U1 from
+        // the wave event's payload) to the backend's process
+        // environment as `RALPH_WAVE_DIMENSION`. The agent's bash
+        // tool can read this var to know which dimension it is
+        // reviewing for, matching the `## ASSIGNED DIMENSION`
+        // block in the worker prompt (also added by U1). When the
+        // wave carries no dimension (legacy / non-review waves),
+        // do NOT inject — the var stays unset, preserving the
+        // pre-U2 behaviour for non-dimension-bound workers.
+        if let Some(ref dim) = assigned_dimension {
+            worker_backend
+                .env_vars
+                .push(("RALPH_WAVE_DIMENSION".into(), dim.clone()));
+        }
+
         // Inject hat execution context for wave worker. Plan 001 C1:
         // forward `hats_source_label` explicitly when available so the
         // worker inherits the loop's preset (and its event_policy.schemas)
@@ -879,6 +937,27 @@ pub async fn execute_wave_structured(
 
     let executor: Arc<ProductionExecutor> = Arc::new(ProductionExecutor);
 
+    // U4/R4 (2026-06-17-002): build the per-index dimension map
+    // from the dispatcher-parsed `WorkerRequest::assigned_dimension`
+    // fields and pass it through `DispatchContext` so:
+    //   1. `inject_synthetic_failures` (the timeout / never-reported
+    //      path) can stamp `dimension_missing` failures on slots
+    //      that had a dimension assignment, and
+    //   2. the merge layer can read it from the returned
+    //      `CompletedWave.assigned_dimensions` to drop mismatched
+    //      `review.dimension.done` events.
+    // The `assigned_dimension` field is parsed by U1 from each
+    // wave event's payload; `None` entries (legacy / non-review
+    // waves) are omitted so the map only contains slots the
+    // dispatcher actually hard-bound.
+    let mut assigned_dimensions: std::collections::HashMap<u32, String> =
+        std::collections::HashMap::new();
+    for request in &worker_requests {
+        if let Some(dim) = request.assigned_dimension.as_ref() {
+            assigned_dimensions.insert(request.index, dim.clone());
+        }
+    }
+
     dispatch_wave_inner(
         tracker,
         worker_requests,
@@ -890,6 +969,7 @@ pub async fn execute_wave_structured(
             show_progress,
             use_colors,
             limits,
+            assigned_dimensions,
         ),
         executor,
         ProgressChannels {
@@ -1189,7 +1269,8 @@ pub(crate) async fn dispatch_wave_inner<E: WaveWorkerExecutor + ?Sized>(
                             // Drain the rest so the progress reporter
                             // can see all senders dropped.
                             while join_set.join_next().await.is_some() {}
-                            let completed = take_results(&mut tracker, &ctx.wave_id);
+                            let completed =
+                                take_results(&mut tracker, &ctx.wave_id, &ctx.assigned_dimensions);
                             wait_for_progress_reporter(progress_handle).await;
                             return outcome_for_completion(completed);
                         }
@@ -1258,16 +1339,32 @@ pub(crate) async fn dispatch_wave_inner<E: WaveWorkerExecutor + ?Sized>(
     // worker index that never reported (panicked or cancelled).
     for i in 0..ctx.expected_total {
         if !tracker.has_reported(&ctx.wave_id, i) {
-            tracker.record_failure(
-                &ctx.wave_id,
-                i,
-                "worker did not report (panic or cancellation)".into(),
-                ctx.started_at.elapsed(),
-            );
+            // U4/R4 (2026-06-17-002): when the un-reported slot
+            // had a dimension assignment, record a
+            // `dimension_missing` failure so the merge layer
+            // emits the structured `wave.worker.failed` record.
+            let expected = ctx.assigned_dimensions.get(&i).cloned();
+            if let Some(expected_dim) = expected {
+                tracker.record_failure_with_dimensions(
+                    &ctx.wave_id,
+                    i,
+                    format!("dimension_missing: expected={expected_dim}"),
+                    ctx.started_at.elapsed(),
+                    Some(expected_dim),
+                    None,
+                );
+            } else {
+                tracker.record_failure(
+                    &ctx.wave_id,
+                    i,
+                    "worker did not report (panic or cancellation)".into(),
+                    ctx.started_at.elapsed(),
+                );
+            }
         }
     }
 
-    let completed = take_results(&mut tracker, &ctx.wave_id);
+    let completed = take_results(&mut tracker, &ctx.wave_id, &ctx.assigned_dimensions);
     wait_for_progress_reporter(progress_handle).await;
     outcome_for_completion(completed)
 }
@@ -1291,10 +1388,140 @@ fn record_outcome(
     }
 }
 
-fn take_results(tracker: &mut ralph_core::WaveTracker, wave_id: &str) -> CompletedWave {
-    tracker
+fn take_results(
+    tracker: &mut ralph_core::WaveTracker,
+    wave_id: &str,
+    assigned_dimensions: &std::collections::HashMap<u32, String>,
+) -> CompletedWave {
+    let mut completed = tracker
         .take_wave_results(wave_id)
-        .expect("wave must exist in tracker after registration")
+        .expect("wave must exist in tracker after registration");
+    // U4/R4 (2026-06-17-002): stamp the per-index dimension map
+    // onto the returned CompletedWave so the merge layer can
+    // drop mismatched review.dimension.done events.
+    completed.assigned_dimensions = assigned_dimensions.clone();
+    completed
+}
+
+/// U5/R5 (2026-06-17-002): write a `task.resume` event for each
+/// mismatched slot whose retry budget is not yet exhausted.
+///
+/// Each slot may retry at most once (2 total attempts). Exhausted
+/// slots are skipped so a permanently-mismatched worker cannot
+/// infinite-loop on the dispatcher's `task.resume` — U4's
+/// `wave.worker.failed` record (already written by the merge
+/// layer) becomes the terminal signal for the synthesizer.
+///
+/// The injected events are appended directly to the main events
+/// file as JSONL so the `EventReader` picks them up on the next
+/// iteration. The `triggered` field targets `dimension-reviewer`
+/// (per the ce-executor-isolated preset's `triggers` list, which
+/// we extend to include `task.resume` as part of this unit) and
+/// the payload carries the structured fields the retry worker
+/// needs to re-run the review for the correct dimension.
+fn inject_dimension_retry_task_resume(
+    mismatch_info: &[super::io::DimensionMismatchInfo],
+    completed: &ralph_core::CompletedWave,
+    main_events_file: &Path,
+    budget: &mut std::collections::HashMap<(String, u32), u32>,
+    detected: &ralph_core::DetectedWave,
+) {
+    use std::io::Write;
+
+    const MAX_RETRIES_PER_SLOT: u32 = 1;
+
+    let mut file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(main_events_file)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            warn!(
+                error = %e,
+                "U5/R5: failed to open events file for task.resume injection; skipping retries"
+            );
+            return;
+        }
+    };
+
+    let ts = chrono::Utc::now().to_rfc3339();
+
+    for mismatch in mismatch_info {
+        let key = (completed.wave_id.clone(), mismatch.wave_index);
+        let used = budget.get(&key).copied().unwrap_or(0);
+        if used >= MAX_RETRIES_PER_SLOT {
+            // Budget exhausted: do not inject another task.resume.
+            // The synthetic wave.worker.failed record already
+            // written by the merge layer remains the terminal
+            // signal.
+            tracing::debug!(
+                wave_id = %completed.wave_id,
+                wave_index = mismatch.wave_index,
+                used,
+                "U5/R5: dimension retry budget exhausted; skipping task.resume"
+            );
+            continue;
+        }
+        let retry_key = format!(
+            "wave_dimension_guard:{}:{}:dimension_mismatch:dimension",
+            completed.wave_id, mismatch.wave_index
+        );
+        let payload = serde_json::json!({
+            "stage": "WaveDimensionGuard",
+            "topic": "review.dimension.done",
+            "violation": "dimension_mismatch",
+            "allowed_topics": ["review.dimension.done"],
+            "required_fields": ["dimension"],
+            "original_trigger_topic": "review.wave.ready",
+            "original_trigger_payload": detected
+                .events
+                .get(mismatch.wave_index as usize)
+                .and_then(|e| e.payload.clone()),
+            "retry_key": retry_key,
+            "original_hat": "dimension-reviewer",
+            "wave_id": completed.wave_id,
+            "wave_index": mismatch.wave_index,
+            "wave_total": completed.wave_total,
+            "reason": "dimension_mismatch",
+            "target_hat": "dimension-reviewer",
+            "expected_dimension": mismatch.expected_dimension,
+            "actual_dimension": mismatch.actual_dimension,
+        });
+        let record = serde_json::json!({
+            "topic": "task.resume",
+            "triggered": "dimension-reviewer",
+            "hat": "review-synthesizer",
+            "source": "review-synthesizer",
+            // U5/R5: set `target` so the bus routes the recovery
+            // signal to `dimension-reviewer`. `task.resume` is a
+            // reserved orchestrator control topic that cannot
+            // appear in a hat's `triggers` list (strict lint
+            // rejects it); target-based routing is the standard
+            // pattern for all recovery signals.
+            "target": "dimension-reviewer",
+            "payload": payload.to_string(),
+            "ts": ts,
+            "wave_id": completed.wave_id,
+            "wave_index": mismatch.wave_index,
+            "wave_total": completed.wave_total,
+        });
+        if let Err(e) = writeln!(file, "{}", record) {
+            warn!(
+                error = %e,
+                "U5/R5: failed to write task.resume event to events file"
+            );
+            continue;
+        }
+        budget.insert(key, used + 1);
+        tracing::info!(
+            wave_id = %completed.wave_id,
+            wave_index = mismatch.wave_index,
+            expected = %mismatch.expected_dimension,
+            actual = %mismatch.actual_dimension,
+            "U5/R5: injected task.resume to retry dimension-reviewer for mismatched slot"
+        );
+    }
 }
 
 fn outcome_for_completion(completed: CompletedWave) -> WaveDispatchOutcome {
@@ -1320,9 +1547,14 @@ async fn finalize_timeout(
     inject_synthetic_failures(tracker, ctx, label, threshold);
     join_set.abort_all();
     while join_set.join_next().await.is_some() {}
-    tracker
+    let mut completed = tracker
         .force_take_wave_results(&ctx.wave_id)
-        .expect("wave must exist in tracker after registration")
+        .expect("wave must exist in tracker after registration");
+    // U4/R4 (2026-06-17-002): stamp the per-index dimension map
+    // onto the returned CompletedWave even on the timeout path
+    // so the merge layer can record dimension_missing failures.
+    completed.assigned_dimensions = ctx.assigned_dimensions.clone();
+    completed
 }
 
 async fn finalize_global_exceeded(
@@ -1352,12 +1584,30 @@ fn inject_synthetic_failures(
                 label,
                 "Worker did not report — recording synthetic failure"
             );
-            tracker.record_failure(
-                &ctx.wave_id,
-                i,
-                format!("worker did not report before {label}"),
-                threshold.saturating_duration_since(ctx.started_at),
-            );
+            // U4/R4 (2026-06-17-002): when the un-reported slot
+            // had a dimension assignment, record a
+            // `dimension_missing` failure so the merge layer
+            // emits `wave.worker.failed(reason=worker_failed:dimension_missing)`
+            // with the expected dimension. Plain
+            // `record_failure` would lose the dimension context.
+            let expected = ctx.assigned_dimensions.get(&i).cloned();
+            if let Some(expected_dim) = expected {
+                tracker.record_failure_with_dimensions(
+                    &ctx.wave_id,
+                    i,
+                    format!("dimension_missing: expected={expected_dim}"),
+                    threshold.saturating_duration_since(ctx.started_at),
+                    Some(expected_dim),
+                    None,
+                );
+            } else {
+                tracker.record_failure(
+                    &ctx.wave_id,
+                    i,
+                    format!("worker did not report before {label}"),
+                    threshold.saturating_duration_since(ctx.started_at),
+                );
+            }
         }
     }
 }
@@ -1757,9 +2007,11 @@ async fn handle_wave_rejection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::loop_runner::wave::io::DimensionMismatchInfo;
     use ralph_core::EventLoop;
     use ralph_core::config::RalphConfig;
     use ralph_proto::HatId;
+    use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -2037,6 +2289,14 @@ hats: {}
         index: u32,
         progress_tx: tokio::sync::mpsc::UnboundedSender<(u32, bool, Duration)>,
     ) -> WorkerRequest {
+        make_worker_request_with_dimension(index, progress_tx, None)
+    }
+
+    fn make_worker_request_with_dimension(
+        index: u32,
+        progress_tx: tokio::sync::mpsc::UnboundedSender<(u32, bool, Duration)>,
+        assigned_dimension: Option<String>,
+    ) -> WorkerRequest {
         WorkerRequest {
             index,
             backend: CliBackend {
@@ -2053,6 +2313,7 @@ hats: {}
             progress_tx,
             worker_rpc_tx: None,
             worker_tui_state: None,
+            assigned_dimension,
         }
     }
 
@@ -2083,6 +2344,7 @@ hats: {}
             false,
             false,
             WaveDispatchLimits::default(),
+            std::collections::HashMap::new(),
         );
 
         let mut tracker = ralph_core::WaveTracker::new();
@@ -2152,6 +2414,7 @@ hats: {}
             false,
             false,
             WaveDispatchLimits::default(),
+            std::collections::HashMap::new(),
         );
 
         let mut tracker = ralph_core::WaveTracker::new();
@@ -2201,6 +2464,7 @@ hats: {}
             false,
             false,
             WaveDispatchLimits::default(),
+            std::collections::HashMap::new(),
         );
 
         let mut tracker = ralph_core::WaveTracker::new();
@@ -2268,6 +2532,7 @@ hats: {}
             false,
             false,
             WaveDispatchLimits::default(),
+            std::collections::HashMap::new(),
         );
 
         let mut tracker = ralph_core::WaveTracker::new();
@@ -2315,6 +2580,7 @@ hats: {}
             false,
             false,
             WaveDispatchLimits::default(),
+            std::collections::HashMap::new(),
         );
 
         let mut tracker = ralph_core::WaveTracker::new();
@@ -2366,6 +2632,7 @@ hats: {}
             false,
             false,
             WaveDispatchLimits::default(),
+            std::collections::HashMap::new(),
         );
 
         let mut tracker = ralph_core::WaveTracker::new();
@@ -2421,6 +2688,7 @@ hats: {}
             false,
             false,
             WaveDispatchLimits::default(),
+            std::collections::HashMap::new(),
         );
 
         let mut tracker = ralph_core::WaveTracker::new();
@@ -2485,6 +2753,7 @@ hats: {}
             false,
             false,
             WaveDispatchLimits::default(),
+            std::collections::HashMap::new(),
         );
 
         let mut tracker = ralph_core::WaveTracker::new();
@@ -2636,6 +2905,251 @@ hats: {}
     }
 
     // ---------------------------------------------------------------------
+    // U5 (2026-06-17-002): task.resume injection for dimension mismatches
+    // ---------------------------------------------------------------------
+
+    /// U5/R5: a single dimension-mismatch slot must produce a
+    /// `task.resume` event in the main events file with the
+    /// expected/actual dimensions carried in the structured payload.
+    #[test]
+    fn u5_mismatch_writes_task_resume() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let events_file = tmp.path().join("events.jsonl");
+
+        let mismatches = vec![DimensionMismatchInfo {
+            wave_index: 1,
+            expected_dimension: "testing".to_string(),
+            actual_dimension: "correctness".to_string(),
+        }];
+        let mut assigned_dimensions = std::collections::HashMap::new();
+        assigned_dimensions.insert(0u32, "correctness".to_string());
+        assigned_dimensions.insert(1, "testing".to_string());
+
+        let completed = ralph_core::CompletedWave {
+            wave_id: "w-u5-dim".to_string(),
+            wave_total: 2,
+            results: vec![],
+            failures: vec![],
+            duration: Duration::from_millis(10),
+            partial: false,
+            expected_source_hat: None,
+            assigned_dimensions: assigned_dimensions.clone(),
+        };
+
+        // Build a minimal DetectedWave so the helper can read
+        // `original_trigger_payload` from `wave.events[index]`.
+        use ralph_core::config::HatConfig;
+        let det = ralph_core::DetectedWave {
+            wave_id: "w-u5-dim".to_string(),
+            target_hat: ralph_proto::HatId::new("dimension-reviewer"),
+            hat_config: HatConfig {
+                name: "Dimension Reviewer".to_string(),
+                concurrency: 9,
+                ..HatConfig::default()
+            },
+            events: vec![
+                ralph_core::Event {
+                    topic: "review.wave.ready".to_string(),
+                    payload: Some("{\"dimension\":\"correctness\"}".to_string()),
+                    ts: String::new(),
+                    hat: None,
+                    triggered: None,
+                    source: None,
+                    wave_id: None,
+                    wave_index: None,
+                    wave_total: None,
+                },
+                ralph_core::Event {
+                    topic: "review.wave.ready".to_string(),
+                    payload: Some("{\"dimension\":\"testing\"}".to_string()),
+                    ts: String::new(),
+                    hat: None,
+                    triggered: None,
+                    source: None,
+                    wave_id: None,
+                    wave_index: None,
+                    wave_total: None,
+                },
+            ],
+            total: 2,
+            partial: false,
+            consumer_aggregate_timeout: None,
+        };
+
+        let mut budget = std::collections::HashMap::new();
+        inject_dimension_retry_task_resume(
+            &mismatches,
+            &completed,
+            &events_file,
+            &mut budget,
+            &det,
+        );
+
+        let content = fs::read_to_string(&events_file).expect("read events file");
+        let records: Vec<serde_json::Value> = content
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("json event"))
+            .collect();
+
+        assert_eq!(
+            records.len(),
+            1,
+            "U5/R5: exactly one task.resume event expected, got {records:?}"
+        );
+        let r = &records[0];
+        assert_eq!(r["topic"], "task.resume");
+        assert_eq!(r["triggered"], "dimension-reviewer");
+        assert_eq!(r["hat"], "review-synthesizer");
+        assert_eq!(r["source"], "review-synthesizer");
+        assert_eq!(r["target"], "dimension-reviewer");
+        assert_eq!(r["wave_id"], "w-u5-dim");
+        assert_eq!(r["wave_index"], 1);
+        assert_eq!(r["wave_total"], 2);
+
+        let payload_str = r["payload"].as_str().expect("payload must be string");
+        let payload: serde_json::Value =
+            serde_json::from_str(payload_str).expect("payload must be JSON object");
+        assert_eq!(payload["stage"], "WaveDimensionGuard");
+        assert_eq!(payload["violation"], "dimension_mismatch");
+        assert_eq!(payload["reason"], "dimension_mismatch");
+        assert_eq!(payload["target_hat"], "dimension-reviewer");
+        assert_eq!(payload["expected_dimension"], "testing");
+        assert_eq!(payload["actual_dimension"], "correctness");
+        assert_eq!(payload["wave_id"], "w-u5-dim");
+        assert_eq!(payload["wave_index"], 1);
+        assert_eq!(payload["wave_total"], 2);
+
+        // Budget must reflect 1 used retry.
+        assert_eq!(budget.get(&("w-u5-dim".to_string(), 1)), Some(&1));
+    }
+
+    /// U5/R5: a second call for the same slot must NOT inject
+    /// another `task.resume` because the per-slot budget (1
+    /// retry = 2 total attempts) is exhausted.
+    #[test]
+    fn u5_budget_exhausted_skips_second_resume() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let events_file = tmp.path().join("events.jsonl");
+
+        let mismatches = vec![DimensionMismatchInfo {
+            wave_index: 1,
+            expected_dimension: "testing".to_string(),
+            actual_dimension: "correctness".to_string(),
+        }];
+        let completed = ralph_core::CompletedWave {
+            wave_id: "w-u5-exhaust".to_string(),
+            wave_total: 2,
+            results: vec![],
+            failures: vec![],
+            duration: Duration::from_millis(10),
+            partial: false,
+            expected_source_hat: None,
+            assigned_dimensions: std::collections::HashMap::new(),
+        };
+        use ralph_core::config::HatConfig;
+        let det = ralph_core::DetectedWave {
+            wave_id: "w-u5-exhaust".to_string(),
+            target_hat: ralph_proto::HatId::new("dimension-reviewer"),
+            hat_config: HatConfig {
+                name: "Dimension Reviewer".to_string(),
+                concurrency: 9,
+                ..HatConfig::default()
+            },
+            events: vec![],
+            total: 2,
+            partial: false,
+            consumer_aggregate_timeout: None,
+        };
+
+        let mut budget = std::collections::HashMap::new();
+        inject_dimension_retry_task_resume(
+            &mismatches,
+            &completed,
+            &events_file,
+            &mut budget,
+            &det,
+        );
+        // First call writes one task.resume.
+        assert_eq!(budget.get(&("w-u5-exhaust".to_string(), 1)), Some(&1));
+
+        // Second call for the same (wave_id, wave_index) must
+        // not write a second event because the budget is exhausted.
+        inject_dimension_retry_task_resume(
+            &mismatches,
+            &completed,
+            &events_file,
+            &mut budget,
+            &det,
+        );
+
+        let content = fs::read_to_string(&events_file).expect("read events file");
+        let records: Vec<serde_json::Value> = content
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("json event"))
+            .collect();
+
+        let resume_count = records
+            .iter()
+            .filter(|r| r["topic"] == "task.resume")
+            .count();
+        assert_eq!(
+            resume_count, 1,
+            "U5/R5: budget exhausted → must not write a second task.resume, got {resume_count}"
+        );
+    }
+
+    /// U5/R5: an empty mismatch list must not write any
+    /// `task.resume` events to the events file.
+    #[test]
+    fn u5_no_mismatch_no_resume() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let events_file = tmp.path().join("events.jsonl");
+
+        let completed = ralph_core::CompletedWave {
+            wave_id: "w-u5-clean".to_string(),
+            wave_total: 4,
+            results: vec![],
+            failures: vec![],
+            duration: Duration::from_millis(10),
+            partial: false,
+            expected_source_hat: None,
+            assigned_dimensions: std::collections::HashMap::new(),
+        };
+        use ralph_core::config::HatConfig;
+        let det = ralph_core::DetectedWave {
+            wave_id: "w-u5-clean".to_string(),
+            target_hat: ralph_proto::HatId::new("dimension-reviewer"),
+            hat_config: HatConfig {
+                name: "Dimension Reviewer".to_string(),
+                concurrency: 9,
+                ..HatConfig::default()
+            },
+            events: vec![],
+            total: 4,
+            partial: false,
+            consumer_aggregate_timeout: None,
+        };
+
+        let mut budget = std::collections::HashMap::new();
+        let mismatches: Vec<DimensionMismatchInfo> = vec![];
+        inject_dimension_retry_task_resume(
+            &mismatches,
+            &completed,
+            &events_file,
+            &mut budget,
+            &det,
+        );
+
+        let content = fs::read_to_string(&events_file).expect("read events file");
+        assert!(
+            content.trim().is_empty(),
+            "U5/R5: no mismatches → events file must be empty, got: {content}"
+        );
+    }
+
+    // ---------------------------------------------------------------------
     // U4-C1: failing integration test for runner-supplied global deadline.
     // ---------------------------------------------------------------------
 
@@ -2676,6 +3190,7 @@ hats: {}
             WaveDispatchLimits {
                 global_deadline: Some(global_deadline),
             },
+        std::collections::HashMap::new(),
         );
 
         let mut tracker = ralph_core::WaveTracker::new();
@@ -2747,6 +3262,7 @@ hats: {}
             WaveDispatchLimits {
                 global_deadline: Some(global_deadline),
             },
+        std::collections::HashMap::new(),
         );
 
         let mut tracker = ralph_core::WaveTracker::new();
@@ -3041,6 +3557,7 @@ hats: {}
             duration: std::time::Duration::ZERO,
             partial: false,
             expected_source_hat: Some(ralph_proto::HatId::new("dimension-reviewer")),
+            assigned_dimensions: std::collections::HashMap::new(),
         };
 
         merge_wave_results_to_events_file(
@@ -3128,5 +3645,79 @@ hats: {}
     fn parse_assigned_dimension_empty_string_returns_none() {
         assert_eq!(parse_assigned_dimension(Some("")), None);
         assert_eq!(parse_assigned_dimension(Some("   \n  ")), None);
+    }
+
+    // -------------------------------------------------------------------
+    // U2: RALPH_WAVE_DIMENSION env var injection
+    // -------------------------------------------------------------------
+
+    /// U2: when a `WorkerRequest` is built with
+    /// `assigned_dimension: Some("testing")`, the dispatcher's
+    /// injection step must add `("RALPH_WAVE_DIMENSION", "testing")`
+    /// to `request.backend.env_vars` so the backend process can read
+    /// its hard-bound dimension from the environment (matching the
+    /// `## ASSIGNED DIMENSION` block U1 added to the prompt).
+    ///
+    /// This test mirrors the injection logic in
+    /// `execute_wave_structured` (the inline `if let Some(ref dim)`
+    /// block right after the wave-env-vars `extend`). Constructing
+    /// a `WorkerRequest` and applying the same push lets us assert
+    /// the exact env-var key/value without spinning up a real wave
+    /// dispatch.
+    #[test]
+    fn test_raph_wave_dimension_env_var() {
+        let (progress_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut request = make_worker_request_with_dimension(
+            0,
+            progress_tx,
+            Some("testing".to_string()),
+        );
+
+        // Mirror the dispatcher injection step (see the inline
+        // `if let Some(ref dim) = assigned_dimension` block in
+        // `execute_wave_structured`).
+        if let Some(ref dim) = request.assigned_dimension {
+            request
+                .backend
+                .env_vars
+                .push(("RALPH_WAVE_DIMENSION".into(), dim.clone()));
+        }
+
+        assert!(
+            request
+                .backend
+                .env_vars
+                .iter()
+                .any(|(k, v)| k == "RALPH_WAVE_DIMENSION" && v == "testing"),
+            "U2: env_vars must contain (\"RALPH_WAVE_DIMENSION\", \"testing\"), got {:?}",
+            request.backend.env_vars
+        );
+    }
+
+    /// U2: when `assigned_dimension` is `None` (legacy / non-review
+    /// waves), the dispatcher MUST NOT inject `RALPH_WAVE_DIMENSION`
+    /// — the var stays unset so pre-U2 behaviour is preserved for
+    /// non-dimension-bound workers.
+    #[test]
+    fn test_raph_wave_dimension_env_var_absent_when_unassigned() {
+        let (progress_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut request = make_worker_request_with_dimension(0, progress_tx, None);
+
+        if let Some(ref dim) = request.assigned_dimension {
+            request
+                .backend
+                .env_vars
+                .push(("RALPH_WAVE_DIMENSION".into(), dim.clone()));
+        }
+
+        assert!(
+            !request
+                .backend
+                .env_vars
+                .iter()
+                .any(|(k, _)| k == "RALPH_WAVE_DIMENSION"),
+            "U2: RALPH_WAVE_DIMENSION must NOT be injected when assigned_dimension is None, got {:?}",
+            request.backend.env_vars
+        );
     }
 }

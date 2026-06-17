@@ -39,6 +39,67 @@ pub struct WaveFailure {
     pub index: u32,
     pub error: String,
     pub duration: Duration,
+    /// Optional: when this failure is a dimension mismatch (R4 of
+    /// 2026-06-17-002), the expected (assigned) and actual
+    /// (worker-emitted) dimensions. `Some` only on the synthetic
+    /// `wave.worker.failed(reason=dimension_mismatch|dimension_missing)`
+    /// records the merge layer writes when the worker's emitted
+    /// `review.dimension.done` does not match its assigned slot.
+    /// `None` for legacy / non-review waves and for plain
+    /// worker-error failures (timeout, crash, etc).
+    pub expected_dimension: Option<String>,
+    pub actual_dimension: Option<String>,
+}
+
+impl Default for WaveFailure {
+    fn default() -> Self {
+        Self {
+            index: 0,
+            error: String::new(),
+            duration: Duration::ZERO,
+            expected_dimension: None,
+            actual_dimension: None,
+        }
+    }
+}
+
+impl WaveFailure {
+    /// Build a `WaveFailure` whose `error` string is dimension_mismatch
+    /// (R4 of 2026-06-17-002). The merge layer stamps these into
+    /// `wave.worker.failed` records so the synthesizer's
+    /// `WaveContext.missing_dimensions` covers both "never reported"
+    /// and "reported wrong dimension" slots.
+    pub fn dimension_mismatch(
+        index: u32,
+        expected: String,
+        actual: String,
+        duration: Duration,
+    ) -> Self {
+        Self {
+            index,
+            error: format!("dimension_mismatch: expected={expected} actual={actual}"),
+            duration,
+            expected_dimension: Some(expected),
+            actual_dimension: Some(actual),
+        }
+    }
+
+    /// Build a `WaveFailure` whose `error` string is dimension_missing
+    /// (R4 timeout path of 2026-06-17-002). The dispatcher's
+    /// synthetic-failure path stamps these into `wave.worker.failed`
+    /// records when a worker never reported for a slot that carried
+    /// a dimension assignment, so the synthesizer's
+    /// `WaveContext.missing_dimensions` covers both "never reported"
+    /// and "reported wrong dimension" slots.
+    pub fn dimension_missing(index: u32, expected: String, duration: Duration) -> Self {
+        Self {
+            index,
+            error: format!("dimension_missing: expected={expected}"),
+            duration,
+            expected_dimension: Some(expected),
+            actual_dimension: None,
+        }
+    }
 }
 
 /// A completed wave with all results and failures.
@@ -66,6 +127,31 @@ pub struct CompletedWave {
     /// "unverified" and falls back to `default_source_hat` (so
     /// the fix is non-breaking for old fixtures).
     pub expected_source_hat: Option<HatId>,
+    /// Per-worker dimension assignment produced by the dispatcher
+    /// from each wave event's `dimension` payload field (R1 of
+    /// 2026-06-17-002). Carried on the `CompletedWave` so the
+    /// merge layer can drop mismatched `review.dimension.done`
+    /// events without the dispatcher having to thread the map
+    /// through every call site (R4 of 2026-06-17-002). `None` /
+    /// empty map means "no assignment" — the merge layer skips the
+    /// dimension check entirely so legacy / non-review waves pass
+    /// through unchanged.
+    pub assigned_dimensions: std::collections::HashMap<u32, String>,
+}
+
+impl Default for CompletedWave {
+    fn default() -> Self {
+        Self {
+            wave_id: String::new(),
+            wave_total: 0,
+            results: Vec::new(),
+            failures: Vec::new(),
+            duration: Duration::ZERO,
+            partial: false,
+            expected_source_hat: None,
+            assigned_dimensions: std::collections::HashMap::new(),
+        }
+    }
 }
 
 /// Progress indicator returned by `record_result`.
@@ -189,6 +275,61 @@ impl WaveTracker {
             index,
             error,
             duration,
+            // R4 (2026-06-17-002): the tracker-side `record_failure`
+            // path is reached on real worker errors (timeout, crash,
+            // panic). It does not have the dimension context — only
+            // the dispatcher-side synthetic-failure path does. Leave
+            // the dimension fields None so the merge layer emits a
+            // plain `wave.worker.failed(worker_failed:...)` record,
+            // not the dimension_mismatch variant.
+            expected_dimension: None,
+            actual_dimension: None,
+        });
+        state.progress()
+    }
+
+    /// Record a failure for a wave instance with explicit dimension
+    /// context (U4/R4 of 2026-06-17-002). Used by the dispatcher's
+    /// synthetic-failure path so timeout / never-reported slots that
+    /// had a dimension assignment are recorded as `dimension_missing`
+    /// (rather than a plain "worker did not report") and the merge
+    /// layer's `wave.worker.failed(reason=worker_failed:dimension_missing)`
+    /// payload carries the expected dimension for downstream
+    /// `WaveContext.missing_dimensions` resolution.
+    pub fn record_failure_with_dimensions(
+        &mut self,
+        wave_id: &str,
+        index: u32,
+        error: String,
+        duration: Duration,
+        expected_dimension: Option<String>,
+        actual_dimension: Option<String>,
+    ) -> WaveProgress {
+        let Some(state) = self.active_waves.get_mut(wave_id) else {
+            tracing::warn!(
+                wave_id,
+                index,
+                "Failure recorded for unknown wave, ignoring"
+            );
+            return WaveProgress::InProgress {
+                received: 0,
+                expected: 0,
+            };
+        };
+        if state.has_index(index) {
+            tracing::warn!(
+                wave_id,
+                index,
+                "Duplicate worker index in failure, ignoring"
+            );
+            return state.progress();
+        }
+        state.failures.push(WaveFailure {
+            index,
+            error,
+            duration,
+            expected_dimension,
+            actual_dimension,
         });
         state.progress()
     }
@@ -220,6 +361,12 @@ impl WaveTracker {
             duration: state.started_at.elapsed(),
             partial,
             expected_source_hat: state.expected_source_hat,
+            // R4 (2026-06-17-002): the dispatcher stamps this on the
+            // returned CompletedWave (see dispatcher.rs); the tracker
+            // itself has no per-slot dimension map, so it ships an
+            // empty default. Callers that need the dimension gate
+            // must set it explicitly.
+            assigned_dimensions: std::collections::HashMap::new(),
         })
     }
 
@@ -242,6 +389,10 @@ impl WaveTracker {
             duration: state.started_at.elapsed(),
             partial,
             expected_source_hat: state.expected_source_hat,
+            // R4 (2026-06-17-002): see `take_wave_results` for why
+            // this starts empty. The dispatcher stamps the actual
+            // per-slot assignments before the merge layer reads it.
+            assigned_dimensions: std::collections::HashMap::new(),
         })
     }
 

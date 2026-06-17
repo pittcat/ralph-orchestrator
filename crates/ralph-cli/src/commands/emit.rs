@@ -537,6 +537,36 @@ fn emit_command_with_root_and_hats(
         tracing::info!("cli emit policy check skipped: no event_policy in resolved config");
     }
 
+    // U3 (R3): wave worker dimension assignment precheck. Fires before
+    // any policy / step-handoff processing so a wave worker that
+    // emits the wrong dimension never reaches the events file. The
+    // env var is set by the loop runner on `review.dimension.done`
+    // workers; non-wave callers (env unset) pass through unchanged.
+    if let Err(err) = crate::policy_check::check_wave_dimension_assignment(
+        &args.topic,
+        &args.payload,
+    ) {
+        use ralph_core::{PolicyFinding, ViolationType};
+        let finding = PolicyFinding {
+            violation_type: ViolationType::SemanticGateViolation {
+                gate: "wave_dimension_assignment".to_string(),
+                context: err.message.clone(),
+            },
+            topic: args.topic.clone(),
+            message: err.message.clone(),
+        };
+        record_cli_emit_rejection(
+            &workspace_root,
+            &args.topic,
+            hat.as_deref(),
+            &finding,
+        );
+        anyhow::bail!(
+            "Event rejected by wave dimension guard: {}",
+            err.message
+        );
+    }
+
     // U1 (2026-06-17-005 plan): step handoff gate precheck at the CLI
     // boundary. Mirrors the loop-side `apply_step_handoff_gate` so an
     // agent calling `ralph emit --policy-check` (or running under

@@ -6874,6 +6874,7 @@ async fn test_run_wave_worker_acp_timeout_with_partial_events_keeps_events_visib
         duration: Duration::from_millis(1),
         partial: false,
         expected_source_hat: None,
+        assigned_dimensions: std::collections::HashMap::new(),
     };
 
     merge_wave_results_to_events_file(
@@ -7034,10 +7035,13 @@ fn test_merge_wave_results_to_events_file_synthesizes_failure_events() {
             index: 1,
             error: "PTY spawn failed: missing-worker".to_string(),
             duration: Duration::from_secs(1),
+            expected_dimension: None,
+            actual_dimension: None,
         }],
         duration: Duration::from_secs(1),
         partial: false,
         expected_source_hat: None,
+        assigned_dimensions: std::collections::HashMap::new(),
     };
 
     merge_wave_results_to_events_file(
@@ -10193,6 +10197,7 @@ fn u3_wave_merge_stamps_wave_total_on_every_record() {
         duration: Duration::from_millis(1234),
         partial: false,
         expected_source_hat: None,
+        assigned_dimensions: std::collections::HashMap::new(),
     };
 
     let tmp = tempfile::TempDir::new().unwrap();
@@ -10260,16 +10265,21 @@ fn u3_wave_merge_emits_synthetic_events_on_failure_with_wave_total() {
                 index: 1,
                 error: "worker crashed".into(),
                 duration: Duration::from_millis(50),
+                expected_dimension: None,
+                actual_dimension: None,
             },
             WaveFailure {
                 index: 2,
                 error: "timeout".into(),
                 duration: Duration::from_millis(300),
+                expected_dimension: None,
+                actual_dimension: None,
             },
         ],
         duration: Duration::from_millis(500),
         partial: false,
         expected_source_hat: None,
+        assigned_dimensions: std::collections::HashMap::new(),
     };
     let tmp = tempfile::TempDir::new().unwrap();
     let events_path = tmp.path().join("events.jsonl");
@@ -10338,6 +10348,7 @@ fn u3_wave_merge_handles_duplicate_indexes_without_panicking() {
         duration: Duration::from_millis(100),
         partial: false,
         expected_source_hat: None,
+        assigned_dimensions: std::collections::HashMap::new(),
     };
     let tmp = tempfile::TempDir::new().unwrap();
     let events_path = tmp.path().join("events.jsonl");
@@ -11394,6 +11405,7 @@ async fn u3_partial_wave_does_not_activate_aggregator_until_full_set() {
         duration: completed.duration,
         partial: true,
         expected_source_hat: None,
+        assigned_dimensions: std::collections::HashMap::new(),
     };
     merge_wave_results_to_events_file(
         &partial,
@@ -11923,6 +11935,7 @@ fn test_adv2_hat_spoofing_rejected_at_merge_layer() {
         duration: Duration::from_millis(10),
         partial: false,
         expected_source_hat: Some(ralph_proto::HatId::new("worker")),
+        assigned_dimensions: std::collections::HashMap::new(),
     };
 
     merge_wave_results_to_events_file(
@@ -11991,6 +12004,7 @@ fn test_adv2_hat_spoofing_omitted_source_rejected_at_merge_layer() {
         duration: Duration::from_millis(10),
         partial: false,
         expected_source_hat: Some(ralph_proto::HatId::new("worker")),
+        assigned_dimensions: std::collections::HashMap::new(),
     };
 
     merge_wave_results_to_events_file(

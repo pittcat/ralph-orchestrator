@@ -143,6 +143,15 @@ The following wave metadata is injected by the runner. Do not count events manua
 
 **等效 env var**：`RALPH_WAVE_CONTEXT`（JSON 字符串，可 `echo $RALPH_WAVE_CONTEXT | jq`）。
 
+#### Wave worker 环境变量
+
+`ralph wave emit` 派发的 dimension worker 进程会注入以下 env var（与 prompt 顶部的 `## WAVE CONTEXT` / `## ASSIGNED DIMENSION` 块同源，由 wave dispatcher 盖章）：
+
+- `RALPH_WAVE_ID`：当前 wave 的 `wave_id`（与 `review.wave.ready` payload 同值）。
+- `RALPH_WAVE_TOTAL`：wave 总维度数（与 `wave_total` 同值）。
+- `RALPH_WAVE_DIMENSION`：当前 worker 的分配维度（与 `review.wave.ready` payload 的 `dimension` 字段同值）。dimension reviewer emit `review.dimension.done` 时必须用**精确等于**此值的 `dimension` 字段；CLI precheck 与 merge layer 双重拒绝 mismatch（`wave.worker.failed(reason=dimension_mismatch)` + `task.resume` 重试）。
+- `RALPH_WAVE_CONTEXT`：wave 元数据 JSON（同 `## WAVE CONTEXT` 块内容），review-synthesizer / synthesizer 路径用。
+
 ### `## EPHEMERAL RELOCATED` Block（R3 — review-synthesizer / executor / fixer / shipper）
 
 当 agent 在源码树下写了 `scratchpad.md` / `notes.md` / `tmp*.md` / `*.bak` 等运行时产物时，runner 在下一轮 prompt 顶部注入：

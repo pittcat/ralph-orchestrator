@@ -4690,4 +4690,47 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn ce_executor_isolated_dimension_reviewer_mentions_assigned_dimension() {
+        // U6 (2026-06-17-002): The dimension-reviewer hat's instructions
+        // MUST explain that the assigned dimension comes from TWO sources
+        // (`## ASSIGNED DIMENSION` block + `RALPH_WAVE_DIMENSION` env var)
+        // and that mismatch with the emitted `dimension` field is hard-rejected
+        // by the CLI precheck and the merge layer. This test guards against
+        // silent drift in the instructions text.
+        //
+        // The block extraction below is intentionally tolerant of additional
+        // sibling hats that may be appended below dimension-reviewer — it
+        // walks forward looking for the next top-level sibling hat key
+        // (newline + 2-space indent + `name:`). If no sibling is found,
+        // it falls back to the rest of the document.
+        use regex::Regex;
+        let yaml = include_str!("../../../presets/en/ce-executor-isolated.yml");
+        let after_start = yaml
+            .find("dimension-reviewer:")
+            .expect("dimension-reviewer hat defined in ce-executor-isolated.yml");
+        let after = &yaml[after_start..];
+        // Find the next sibling hat key: `\n  <hat-name>:`. We offset by 1
+        // to skip past the dimension-reviewer header itself when searching.
+        let sibling_re = Regex::new(r"\n  [a-z][a-z0-9_-]*:").unwrap();
+        let end = sibling_re
+            .find(&after[1..])
+            .map(|m| m.start() + 1)
+            .unwrap_or(after.len());
+        let block = &after[..end];
+
+        assert!(
+            block.contains("## ASSIGNED DIMENSION"),
+            "dimension-reviewer instructions must reference `## ASSIGNED DIMENSION` block"
+        );
+        assert!(
+            block.contains("RALPH_WAVE_DIMENSION"),
+            "dimension-reviewer instructions must reference `RALPH_WAVE_DIMENSION` env var"
+        );
+        assert!(
+            block.contains("HARD RULE") && block.contains("dimension"),
+            "dimension-reviewer instructions must contain a HARD RULE about dimension match"
+        );
+    }
 }

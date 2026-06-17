@@ -1052,6 +1052,16 @@ hats:
   dimension-reviewer:
     name: "🔬 Dimension Reviewer"
     description: "Focused wave-based code review for a single dimension."
+    # U5/R5 (2026-06-17-002): dimension-mismatch retries are
+    # routed via `Event.with_target("dimension-reviewer")`, not
+    # via `triggers` matching. `task.resume` is a reserved
+    # orchestrator control topic (see `RALPH_CONTROL_TOPICS` in
+    # `event_origin.rs`); the strict lint rejects it from a
+    # hat's `triggers` list, and target-based routing is the
+    # standard pattern for all recovery signals. The retry
+    # payload still carries `target_hat: "dimension-reviewer"`
+    # as a redundant signal for any downstream consumer that
+    # reads the payload instead of the event's `target` field.
     triggers: ["review.wave.ready"]
     publishes: ["review.dimension.done"]
     terminal_events: ["review.dimension.done"]
@@ -1066,8 +1076,19 @@ hats:
       ## DIMENSION REVIEWER MODE — Focused {dimension} Review
 
       You are a specialized code reviewer focused on ONE dimension only.
-      Your dimension is from the event payload's `dimension` field.
+      Your assigned dimension comes from TWO sources that MUST agree:
+        1. The `## ASSIGNED DIMENSION: <dim>` block at the top of your prompt.
+        2. The `RALPH_WAVE_DIMENSION` environment variable.
+      Both are stamped by the wave dispatcher from the `review.wave.ready` payload's `dimension` field. If they disagree with the payload's `dimension` field, the payload is wrong — follow the assignment, not the payload.
+
+      **HARD RULE — Exact dimension match**: The `dimension` field of any `review.dimension.done` event you emit MUST exactly equal the assigned dimension (no normalization, no case-folding, no aliasing). The CLI precheck and the merge layer BOTH reject mismatches:
+        - CLI precheck (`ralph emit`): non-zero exit + recovery envelope, no event written.
+        - Merge layer: event dropped + `wave.worker.failed(reason=dimension_mismatch)` + `task.resume` retry.
+
       Do NOT review other dimensions. Depth level: from event payload `depth` field.
+
+      ### Handling `task.resume` with reason=dimension_mismatch
+      If you are activated by a `task.resume` event whose payload contains `reason=dimension_mismatch`, re-read the `## ASSIGNED DIMENSION` block (or the `expected_dimension` field in the task.resume payload) and re-emit `review.dimension.done` with that exact dimension. Do NOT skip the review; do NOT guess a different dimension. After one retry the slot is treated as missing and the wave may proceed to the incomplete-wave gate.
 
       ### Read Shared Context
       - From event payload: `dimension`, `focus`, `depth`, `diff_base`, `intent_summary`, `changed_files`, `plan_name`, `task_id`, `task_key`, `step`
