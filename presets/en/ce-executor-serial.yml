@@ -88,6 +88,31 @@ event_loop:
   # Same single-U contract as ce-executor-isolated. Coordinator must
   # only create the current U's task.
   enforce_current_unit: true
+  # 2026-06-17-003 plan U1: enable state projection. Same
+  # semantics as ce-executor-isolated: the orchestrator is the
+  # canonical writer for `.ralph/agent/tasks.jsonl` and
+  # `.ralph/agent/progress.md`; the agent reads the live values
+  # from the `## ORCHESTRATOR CONTEXT` block. The mapping table
+  # is identical to the isolated preset because the serial path
+  # inherits the same topic taxonomy.
+  state_projection:
+    enabled: true
+    actions:
+      work.ready:
+        kind: ensure_task
+        key: "task_key"
+        title: "step"
+      work.done:
+        kind: close_task
+        task_id: "task_id"
+        step: "step"
+      queue.advance:
+        kind: advance_step
+        current_step: "step"
+        completed_step: "completed_step"
+      plan.complete:
+        kind: plan_complete
+        final_step: "step"
   # Serial review path does NOT use the wave dispatcher, so the
   # `incomplete_wave_gate` is meaningless here. The serial path relies
   # on review-coordinator's own state machine + dimension-reviewer's
@@ -109,6 +134,15 @@ event_loop:
     # Mirror the wave preset's defense-in-depth: also gate on
     # `report.done` carrying pass_or_fail="fail".
     additional_topics: ["report.done"]
+  # 2026-06-17-003 U5: cross-hat HARD RULE (mirrors
+  # ce-executor-isolated). Per-hat instructions below may still
+  # mention hand-writing the ledgers (legacy phrasing); treat
+  # those as stale and read the live values from the
+  # `## ORCHESTRATOR CONTEXT` block. Forbidden: agent-side
+  # `ralph tools task ensure|start|close|fail|reopen`, direct
+  # writes to `.ralph/agent/tasks.jsonl` /
+  # `.ralph/agent/progress.md`, and `tail` of `.ralph/events.jsonl`
+  # to compute the current step.
   # U7: Enable execution contract for work.done validation. Identical
   # to ce-executor-isolated; the executor's contract is the same.
   execution_contracts:

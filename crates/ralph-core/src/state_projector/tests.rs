@@ -57,7 +57,9 @@ fn make_config() -> StateProjectionConfig {
     );
     actions.insert(
         "plan.complete".to_string(),
-        StateProjectionAction::PlanComplete { final_step: Some("step".to_string()) },
+        StateProjectionAction::PlanComplete {
+            final_step: Some("step".to_string()),
+        },
     );
     StateProjectionConfig {
         enabled: true,
@@ -70,7 +72,10 @@ fn disabled_config_is_a_noop() {
     let tmp = workspace();
     let cfg = StateProjectionConfig::default();
     let mut proj = StateProjector::new(ProjectionContext::new(tmp.path(), cfg));
-    let event = make_event("work.ready", json!({"task_key": "x", "step": "step-01"}).to_string());
+    let event = make_event(
+        "work.ready",
+        json!({"task_key": "x", "step": "step-01"}).to_string(),
+    );
     let report = proj.apply(&[event]);
     assert_eq!(report.applied, 0);
     assert_eq!(report.rejected, 0);
@@ -80,7 +85,10 @@ fn disabled_config_is_a_noop() {
 #[test]
 fn empty_actions_map_is_a_noop() {
     let tmp = workspace();
-    let cfg = StateProjectionConfig { enabled: true, actions: Default::default() };
+    let cfg = StateProjectionConfig {
+        enabled: true,
+        actions: Default::default(),
+    };
     let mut proj = StateProjector::new(ProjectionContext::new(tmp.path(), cfg));
     let event = make_event("work.ready", json!({"task_key": "x"}).to_string());
     let report = proj.apply(&[event]);
@@ -99,8 +107,7 @@ fn happy_path_ensure_task_writes_ledger() {
     let report = proj.apply(&[event]);
     assert_eq!(report.applied, 1);
     assert_eq!(report.rejected, 0);
-    let content =
-        std::fs::read_to_string(tmp.path().join(".ralph/agent/tasks.jsonl")).unwrap();
+    let content = std::fs::read_to_string(tmp.path().join(".ralph/agent/tasks.jsonl")).unwrap();
     assert!(content.contains("\"step-01\""));
     assert!(content.contains("\"open\""));
 }

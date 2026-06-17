@@ -135,6 +135,11 @@ fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
     let mut config = RalphConfig::default();
     config.max_iterations = Some(yaml.config.max_iterations);
     config.prompt_file = Some(yaml.config.prompt_file);
+    // Pin the workspace to the temp dir so the projector and
+    // the event reader resolve `.ralph/...` from there. Without
+    // this the projector would point at the cwd of the test
+    // runner and the scenario would silently no-op.
+    config.core.workspace_root = temp_dir.path().to_path_buf();
     // Parse hats if present (inject map key as name if missing)
     if !yaml.config.hats.is_null() {
         if let Ok(hat_map) = serde_yaml::from_value::<
@@ -436,6 +441,26 @@ fn test_progress_task_mismatch_gate_blocks_queue_advance() {
     // through the real EventLoop.
     let yaml = load_scenario("tests/scenarios/step_handoff/progress_task_mismatch.yml");
     run_progress_task_mismatch_scenario(yaml);
+}
+
+#[test]
+fn test_state_projection_work_done_updates_progress() {
+    // 2026-06-17-003 U3 / U6: end-to-end check that the state
+    // projector writes both `.ralph/agent/tasks.jsonl` and
+    // `.ralph/agent/progress.md` on `work.done`, and that the
+    // subsequent `queue.advance` passes the U4
+    // `progress_task_gate` because the ledgers now agree.
+    //
+    // The scenario runs in coordinator mode (the workflow guard
+    // scenario runner has a single routing hat, plan-gate, that
+    // subscribes to every relevant topic). A regression that
+    // drops the projector or breaks the progress write would
+    // surface as a `plan.blocked` injection — the
+    // `absent_events` check below would fail.
+    let yaml = load_scenario(
+        "tests/scenarios/step_handoff/state_projection_work_done_updates_progress.yml",
+    );
+    run_workflow_guard_scenario(yaml);
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -812,6 +837,11 @@ fn test_isolated_with_event_projection() {
     let mut config = RalphConfig::default();
     config.max_iterations = Some(yaml.config.max_iterations);
     config.prompt_file = Some(yaml.config.prompt_file);
+    // Pin the workspace to the temp dir so the projector and
+    // the event reader resolve `.ralph/...` from there. Without
+    // this the projector would point at the cwd of the test
+    // runner and the scenario would silently no-op.
+    config.core.workspace_root = temp_dir.path().to_path_buf();
     // Parse hats if present (inject map key as name if missing)
     if !yaml.config.hats.is_null() {
         if let Ok(hat_map) = serde_yaml::from_value::<

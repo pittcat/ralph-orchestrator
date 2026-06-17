@@ -21,9 +21,9 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::state_projector::StateProjector;
+use crate::step_handoff::progress_task_gate::ProgressSnapshot;
 use crate::task::Task;
 use crate::task_store::TaskStore;
-use crate::step_handoff::progress_task_gate::ProgressSnapshot;
 
 /// Heading the loop prepends. Logged in the prompt verbatim so
 /// agents and grep-based scrapers can match a single literal.
@@ -87,11 +87,11 @@ impl RuntimeStateSnapshot {
             completed_steps: progress.completed_steps.clone(),
             open_tasks: open_task_summaries(&tasks),
             wave: None, // U4 spike deferred: wave sub-section is
-                        //            duplicated with `## WAVE
-                        //            CONTEXT`. We omit the
-                        //            duplicate until U4 spike picks
-                        //            one. Both blocks remain
-                        //            available side-by-side.
+            //            duplicated with `## WAVE
+            //            CONTEXT`. We omit the
+            //            duplicate until U4 spike picks
+            //            one. Both blocks remain
+            //            available side-by-side.
             projection_disabled: !ctx.config.enabled,
         }
     }
@@ -148,18 +148,18 @@ impl RuntimeStateSnapshot {
         if self.completed_steps.is_empty() {
             let _ = writeln!(buf, "- completed_steps: (none)");
         } else {
-            let _ = writeln!(buf, "- completed_steps: {}", self.completed_steps.join(", "));
+            let _ = writeln!(
+                buf,
+                "- completed_steps: {}",
+                self.completed_steps.join(", ")
+            );
         }
         if self.open_tasks.is_empty() {
             let _ = writeln!(buf, "- open_tasks: (none)");
         } else {
             let _ = writeln!(buf, "- open_tasks:");
             for task in &self.open_tasks {
-                let _ = writeln!(
-                    buf,
-                    "  - {} [{}] {}",
-                    task.id, task.status, task.title
-                );
+                let _ = writeln!(buf, "  - {} [{}] {}", task.id, task.status, task.title);
             }
         }
         if let Some(wave) = &self.wave {

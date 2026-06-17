@@ -75,6 +75,31 @@ event_loop:
   # so `TaskStore::ensure` rejects sibling unit tasks in the same
   # step (the original `calm-oak` failure mode).
   enforce_current_unit: true
+  # 2026-06-17-003 plan U1: enable state projection. The
+  # orchestrator becomes the canonical writer for
+  # `.ralph/agent/tasks.jsonl` and `.ralph/agent/progress.md`;
+  # the agent reads the live values through the
+  # `## ORCHESTRATOR CONTEXT` block injected into the prompt and
+  # MUST NOT hand-write either ledger. Per-topic actions are
+  # declared below.
+  state_projection:
+    enabled: true
+    actions:
+      work.ready:
+        kind: ensure_task
+        key: "task_key"
+        title: "step"
+      work.done:
+        kind: close_task
+        task_id: "task_id"
+        step: "step"
+      queue.advance:
+        kind: advance_step
+        current_step: "step"
+        completed_step: "completed_step"
+      plan.complete:
+        kind: plan_complete
+        final_step: "step"
   # 2026-06-17-003 plan U2: enable the incomplete-wave gate so a
   # stalled review wave (received < wave_total past 80% of the
   # aggregate timeout) is closed by the mechanism with
@@ -106,6 +131,27 @@ event_loop:
     # obligation — either one alone would close the gap, but
     # running both gives a defense-in-depth posture.
     additional_topics: ["report.done"]
+  # 2026-06-17-003 U5: cross-hat HARD RULE. Both ce-executor
+  # presets opt in to state projection; the orchestrator is the
+  # single writer for `.ralph/agent/tasks.jsonl` and
+  # `.ralph/agent/progress.md`. Per-hat instructions below
+  # continue to mention hand-writing the ledgers (legacy
+  # phrasing); treat those as stale and read the live values from
+  # the `## ORCHESTRATOR CONTEXT` block instead. The block is
+  # prepended to every hat prompt by the loop runner.
+  #
+  # Forbidden CLI (hat-side, not operator):
+  # - `ralph tools task ensure|start|close|fail|reopen` — the
+  #   orchestrator is the only writer in Phase 1. The CLI stays
+  #   available to operators for manual recovery.
+  #
+  # Forbidden behaviour:
+  # - Direct `tee` / `cat` / `echo` into `.ralph/agent/tasks.jsonl`
+  #   or `.ralph/agent/progress.md`.
+  # - `tail -F` / `tail -n` on `.ralph/events.jsonl` to compute
+  #   the current step or wave state. The `## ORCHESTRATOR
+  #   CONTEXT` and `## WAVE CONTEXT` blocks already carry the
+  #   authoritative view.
   # U7: Enable execution contract for work.done validation.
   # Protects against false positives when executor forgets to emit or emits invalid work.done.
   execution_contracts:

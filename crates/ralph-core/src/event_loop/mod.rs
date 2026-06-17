@@ -7594,21 +7594,18 @@ impl EventLoop {
         // affected events are dropped from the bus with an
         // `event.state_projection.rejected` diagnostic.
         if self.config.event_loop.state_projection.enabled {
-            let projector = self
-                .state
-                .state_projection
-                .get_or_insert_with(|| {
-                    let ctx = crate::state_projector::ProjectionContext::new(
-                        self.config.core.workspace_root.as_path(),
-                        self.config.event_loop.state_projection.clone(),
-                    );
-                    let mut p = crate::state_projector::StateProjector::new(ctx);
-                    // Best-effort bootstrap; failure is non-fatal
-                    // because the projector falls back to live
-                    // disk reads on a cold cache.
-                    let _ = p.bootstrap_from_disk();
-                    p
-                });
+            let projector = self.state.state_projection.get_or_insert_with(|| {
+                let ctx = crate::state_projector::ProjectionContext::new(
+                    self.config.core.workspace_root.as_path(),
+                    self.config.event_loop.state_projection.clone(),
+                );
+                let mut p = crate::state_projector::StateProjector::new(ctx);
+                // Best-effort bootstrap; failure is non-fatal
+                // because the projector falls back to live
+                // disk reads on a cold cache.
+                let _ = p.bootstrap_from_disk();
+                p
+            });
             let report = projector.apply(&events);
             if !report.rejections.is_empty() {
                 for rej in &report.rejections {
@@ -7626,11 +7623,8 @@ impl EventLoop {
                 // batch; the bus and downstream hats never see
                 // them. This matches the fail-closed contract
                 // for invalid payloads (see U1 risk note).
-                let rejected_topics: std::collections::HashSet<String> = report
-                    .rejections
-                    .iter()
-                    .map(|r| r.topic.clone())
-                    .collect();
+                let rejected_topics: std::collections::HashSet<String> =
+                    report.rejections.iter().map(|r| r.topic.clone()).collect();
                 events.retain(|e| !rejected_topics.contains(&e.topic));
             }
         }

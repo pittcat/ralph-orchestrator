@@ -191,8 +191,7 @@ impl StateProjector {
             if self.ctx.progress_cache.completed_steps.is_empty()
                 && self.ctx.progress_cache.current_step.is_none()
             {
-                let content =
-                    std::fs::read_to_string(&self.ctx.progress_path).unwrap_or_default();
+                let content = std::fs::read_to_string(&self.ctx.progress_path).unwrap_or_default();
                 self.ctx.progress_cache = ProgressSnapshot::parse(&content);
             }
 

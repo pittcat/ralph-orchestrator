@@ -16,8 +16,8 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::state_projector::json_pointer;
 use crate::state_projector::ProjectionContext;
+use crate::state_projector::json_pointer;
 use crate::task::Task;
 use crate::task_store::TaskStore;
 
@@ -46,7 +46,14 @@ pub(crate) fn project_ensure_task(
     // locking discipline the rest of the orchestrator uses.
     let mut store = TaskStore::load(&ctx.tasks_path).map_err(|e| format!("tasks_load: {e}"))?;
     store.set_enforce_current_unit(false); // projector never enforces R4 itself
-    let mut task = Task::new(title, 1).with_key(Some(key));
+    let mut task = Task::new(title, 1).with_key(Some(key.clone()));
+    // Honour the payload's `task_id` when the agent supplies one
+    // (ce-executor presets always do). Without this the loop
+    // would round-trip through a generated id that the agent
+    // can never reproduce, breaking the subsequent `work.done`.
+    if let Some(provided_id) = json_pointer(payload, "task_id") {
+        task.id = provided_id.to_string();
+    }
     if let Some(plan_name) = json_pointer(payload, "plan_name") {
         task = task.with_description(Some(format!("plan: {plan_name}")));
     }
@@ -91,11 +98,7 @@ pub(crate) fn project_close_task(
     }
 }
 
-fn persist(
-    _path: &Path,
-    store: &TaskStore,
-    cache: &mut Vec<Task>,
-) -> Result<(), String> {
+fn persist(_path: &Path, store: &TaskStore, cache: &mut Vec<Task>) -> Result<(), String> {
     // `_path` is reserved for a future diagnostic event that
     // records the on-disk write site (e.g. via the
     // `ralph_diagnostics` collector). The path lives on the

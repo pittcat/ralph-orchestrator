@@ -13,8 +13,8 @@ use std::path::Path;
 use serde_json::Value;
 use tracing::warn;
 
-use crate::state_projector::json_pointer;
 use crate::state_projector::ProjectionContext;
+use crate::state_projector::json_pointer;
 use crate::step_handoff::ProgressSnapshot;
 
 const PROGRESS_HEADER: &str = "# Progress\n\n";
@@ -52,10 +52,7 @@ pub(crate) fn project_advance_step(
 
 /// Append a completed step to the progress file. Called from
 /// `work.done` (via the task sub-module).
-pub(crate) fn project_close_step(
-    ctx: &mut ProjectionContext,
-    step: &str,
-) -> Result<(), String> {
+pub(crate) fn project_close_step(ctx: &mut ProjectionContext, step: &str) -> Result<(), String> {
     push_completed(&mut ctx.progress_cache, step);
     write_progress(&ctx.progress_path, &ctx.progress_cache)
 }
