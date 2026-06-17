@@ -1,4 +1,5 @@
 ---
+superseded_by: docs/brainstorms/2026-06-18-supervisor-wave-protocol-upgrade-requirements.md
 date: 2026-06-17
 topic: wave-dimension-assignment-enforcement
 related:
@@ -7,6 +8,7 @@ related:
   - docs/brainstorms/2026-06-17-ce-executor-flow-reliability-requirements.md
   - presets/en/ce-executor-isolated.yml
 ---
+
 
 # Wave Dimension Assignment Enforcement — 需求文档
 
@@ -26,6 +28,7 @@ Operator 用 `ce-executor-isolated` 跑多步 plan 时，review wave 的 worker 
 本需求在 **wave 派发、worker 输入、merge 回写** 三个卡点加硬绑定，让「审错维度」和「缺维度」变成可观测、可恢复的运行时事件，而不是让 synthesizer 拿到残缺信号后一枪 fail。
 
 ---
+---
 
 ## Actors
 
@@ -34,6 +37,7 @@ Operator 用 `ce-executor-isolated` 跑多步 plan 时，review wave 的 worker 
 - A3. **dimension-reviewer worker agent**：wave 中单个 worker，应按分配维度审代码并 emit `review.dimension.done`。
 - A4. **review-synthesizer agent**：聚合全部维度结果，emit 终态 verdict 或 `plan.blocked`。
 
+---
 ---
 
 ## Key Flows
@@ -59,6 +63,7 @@ Operator 用 `ce-executor-isolated` 跑多步 plan 时，review wave 的 worker 
   - **Outcome:** synthesizer 可基于 partial 结果做 verdict 或按 preset 协议 emit `plan.blocked`，但机制层不再把它伪装成完整 wave。
   - **Covered by:** R5, R6
 
+---
 ---
 
 ## Requirements
@@ -91,6 +96,7 @@ Operator 用 `ce-executor-isolated` 跑多步 plan 时，review wave 的 worker 
 - R11. `cargo nextest run --workspace --exclude ralph-e2e` 通过；现有 wave 相关 scenario 不得回归。
 
 ---
+---
 
 ## Acceptance Examples
 
@@ -115,6 +121,7 @@ Operator 用 `ce-executor-isolated` 跑多步 plan 时，review wave 的 worker 
   - **Then:** synthesizer 收到的 wave context 含 `missing_dimensions=["testing"]`（或等价信号），不假装 wave 完整。
 
 ---
+---
 
 ## Success Criteria
 
@@ -123,6 +130,7 @@ Operator 用 `ce-executor-isolated` 跑多步 plan 时，review wave 的 worker 
 - SC3：单一 worker slot 的维度错误只导致该 slot 重试，不影响同 wave 其他 worker 结果。
 - SC4：测试与 lint 全绿，preset 文档与示例同步更新。
 
+---
 ---
 
 ## Scope Boundaries
@@ -136,6 +144,7 @@ Operator 用 `ce-executor-isolated` 跑多步 plan 时，review wave 的 worker 
   - 引入新的 agent backend 或模型能力。
 
 ---
+---
 
 ## Key Decisions
 
@@ -145,6 +154,7 @@ Operator 用 `ce-executor-isolated` 跑多步 plan 时，review wave 的 worker 
 - **复用现有 wave worker 失败路径**：`wave.worker.failed` 与 `task.resume` 已存在，新需求只增加 `dimension_mismatch` reason，不新增事件拓扑。
 
 ---
+---
 
 ## Dependencies / Assumptions
 
@@ -153,6 +163,7 @@ Operator 用 `ce-executor-isolated` 跑多步 plan 时，review wave 的 worker 
 - 假设 `task.resume` 路由已支持 targeted hat（R5 hard-gate routing 已落地）。
 - 假设 `ralph emit` CLI policy check 可访问 active preset 与 `RALPH_WAVE_DIMENSION`。
 
+---
 ---
 
 ## Outstanding Questions
@@ -168,6 +179,7 @@ Operator 用 `ce-executor-isolated` 跑多步 plan 时，review wave 的 worker 
 - **[Technical]** merge 时 rejected mismatch 的 retry 策略：立即重跑同一 slot、还是等下一轮 loop 由 `task.resume` 驱动？是否需要重试上限？
 - **[Technical]** 占位/缺失维度信号的具体形态：synthetic `review.dimension.done`（`findings_count=0` 带 `missing=true`）还是扩展 `WaveContext` 的 `missing_dimensions`？
 
+---
 ---
 
 ## Next Steps

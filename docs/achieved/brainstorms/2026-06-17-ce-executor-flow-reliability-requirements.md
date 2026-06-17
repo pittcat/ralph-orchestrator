@@ -1,4 +1,5 @@
 ---
+superseded_by: docs/brainstorms/2026-06-18-supervisor-wave-protocol-upgrade-requirements.md
 date: 2026-06-17
 topic: ce-executor-flow-reliability
 related:
@@ -9,6 +10,7 @@ related:
   - docs/achieved/report/2026-06-15-ce-executor-isolated-review-passed-aggregate-timeout-loop-death.md
 supersedes: none
 parallel_with: docs/plans/2026-06-16-002-feat-ce-executor-loop-stability-plan.md
+---
 ---
 
 # ce-executor Flow Reliability — 并行流程可靠性机制
@@ -56,6 +58,7 @@ flowchart TB
 ```
 
 ---
+---
 
 ## Requirements
 
@@ -94,6 +97,7 @@ flowchart TB
 - **R-E3.** `cargo nextest run --workspace --exclude ralph-e2e` 通过。
 
 ---
+---
 
 ## Success Criteria
 
@@ -103,6 +107,7 @@ flowchart TB
 - **SC4**：`ralph diagnose` 对 wave 失败 session 能展示 `wave_id`、spawn 状态、timeout 配置值 vs 实际等待时长。
 - **SC5**：机制验收不依赖改 operator 命令或 `PROMPT.md` 格式。
 
+---
 ---
 
 ## Scope Boundaries
@@ -127,6 +132,7 @@ flowchart TB
 - 为单次 incident 硬编码 topic 白名单而不走 preset 声明。
 
 ---
+---
 
 ## Key Decisions
 
@@ -139,6 +145,7 @@ flowchart TB
 | **不恢复「整批 skip partial 结果」** | `2026-06-09` 36% 找回率但全丢是机制 bug |
 
 ---
+---
 
 ## Dependencies / Assumptions
 
@@ -147,6 +154,7 @@ flowchart TB
 - 假设 isolated 模式与 U4 fair scheduling 保持；aggregator SLA 为 **窄例外**（单消费者 handoff），与 WAC R9 一致。
 - U3 `publishes` 终态 authority 不变；degraded terminal 须在 aggregator hat `publishes` 中声明。
 
+---
 ---
 
 ## Outstanding Questions
@@ -161,6 +169,7 @@ flowchart TB
 - **Q2** [Technical] partial 阈值：80% staleness vs 绝对时间 vs `wave_total` 比例——对齐现有 `wave_detection` 默认并写测试锁定。
 - **Q3** [Needs research] 未来「多 step 并行」首个 preset 拓扑是否复用 wave 还是新 `flow_unit` 抽象——本机制预留 `flow_unit_id`，具体拓扑在 plan 并行需求明确后再定。
 
+---
 ---
 
 ## Next Steps

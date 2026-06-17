@@ -1,4 +1,5 @@
 ---
+superseded_by: docs/brainstorms/2026-06-18-supervisor-wave-protocol-upgrade-requirements.md
 date: 2026-06-17
 topic: ce-executor-serial-review
 related:
@@ -7,6 +8,7 @@ related:
   - presets/en/ce-executor-isolated.yml
   - presets/en/ce-executor-wave.yml
 ---
+
 
 # ce-executor-serial Review Preset — 需求文档
 
@@ -17,6 +19,7 @@ Operator 对 `ce-executor-isolated` 的并行 review wave 失去信心：多次�
 本需求提供一个 **串行 review 版本** 的 preset，把 4 个 dimension-reviewer 从并发执行改成顺序执行，先让 loop 能稳定跑完，再视情况叠加维度强制校验。
 
 ---
+---
 
 ## Actors
 
@@ -25,6 +28,7 @@ Operator 对 `ce-executor-isolated` 的并行 review wave 失去信心：多次�
 - A3. **review-synthesizer agent**：聚合全部维度结果。
 - A4. **operator**：使用新的串行 preset 跑 plan，希望 review 阶段稳定完成。
 
+---
 ---
 
 ## Key Flows
@@ -43,6 +47,7 @@ Operator 对 `ce-executor-isolated` 的并行 review wave 失去信心：多次�
   - **Outcome:** 失败被定位到具体维度，不因为并发混乱而淹没信号。
   - **Covered by:** R3, R5
 
+---
 ---
 
 ## Requirements
@@ -80,6 +85,7 @@ Operator 对 `ce-executor-isolated` 的并行 review wave 失去信心：多次�
 - R14. `ralph preset check builtin:ce-executor-serial` 通过 strict check。
 
 ---
+---
 
 ## Acceptance Examples
 
@@ -99,6 +105,7 @@ Operator 对 `ce-executor-isolated` 的并行 review wave 失去信心：多次�
   - **Then:** 记录 `wave.worker.failed` 含 wave_index=2、dimension=testing；后续策略（继续或重试）按 preset 声明执行。
 
 ---
+---
 
 ## Success Criteria
 
@@ -107,6 +114,7 @@ Operator 对 `ce-executor-isolated` 的并行 review wave 失去信心：多次�
 - SC3：现有并行 wave 测试与 scenario 不回归。
 - SC4：preset 清单 4 处同步完成，无遗漏。
 
+---
 ---
 
 ## Scope Boundaries
@@ -124,6 +132,7 @@ Operator 对 `ce-executor-isolated` 的并行 review wave 失去信心：多次�
   - 修复 keen-fern 报告中 U1 残留。
 
 ---
+---
 
 ## Key Decisions
 
@@ -133,6 +142,7 @@ Operator 对 `ce-executor-isolated` 的并行 review wave 失去信心：多次�
 - **先串行、后强制**：串行解决的是并发调度类 failure；若串行后仍出现审错维度，再叠加 `wave-dimension-assignment-enforcement` 的绑定/校验。
 
 ---
+---
 
 ## Dependencies / Assumptions
 
@@ -140,6 +150,7 @@ Operator 对 `ce-executor-isolated` 的并行 review wave 失去信心：多次�
 - 假设 `review-synthesizer.aggregate.timeout` 可被 preset 覆盖。
 - 假设新增 builtin preset 的流程与 `ce-executor-isolated` 一致（manifest / presets.rs / index.json / zsh 补全 4 处同步）。
 
+---
 ---
 
 ## Outstanding Questions
@@ -155,6 +166,7 @@ Operator 对 `ce-executor-isolated` 的并行 review wave 失去信心：多次�
 - **[Technical]** 是否需要新增 dispatcher 集成测试断言「concurrency=1 时同时运行的 worker 数 ≤ 1」？
 - **[User decision]** 中文变体 `presets/zh/ce-executor-serial-zh.yml` 是否首版就提供？
 
+---
 ---
 
 ## Next Steps

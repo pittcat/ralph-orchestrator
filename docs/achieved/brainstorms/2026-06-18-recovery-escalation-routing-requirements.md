@@ -1,6 +1,8 @@
 ---
+---
 title: "Recovery Escalation Routing: 重复失败时升级 target hat"
 type: requirements
+superseded_by: docs/brainstorms/2026-06-18-supervisor-wave-protocol-upgrade-requirements.md
 status: ready-for-planning
 date: 2026-06-18
 origin: ce-brainstorm with maintainer

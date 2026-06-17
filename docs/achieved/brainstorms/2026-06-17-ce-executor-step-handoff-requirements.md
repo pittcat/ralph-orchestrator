@@ -1,4 +1,5 @@
 ---
+superseded_by: docs/brainstorms/2026-06-18-supervisor-wave-protocol-upgrade-requirements.md
 date: 2026-06-17
 topic: ce-executor-step-handoff
 related:
@@ -8,6 +9,7 @@ related:
   - docs/solutions/integration-issues/ce-executor-isolated-preset-dispatch-gap-plan-gate-executor-2026-06-12.md
   - docs/plans/2026-06-15-003-fix-plan-gate-dual-publish-isolated-budget-plan.md
 parallel_with: docs/plans/2026-06-16-002-feat-ce-executor-loop-stability-plan.md
+---
 ---
 
 # ce-executor Step Handoff — 阶段交接机制
@@ -52,6 +54,7 @@ sequenceDiagram
 ```
 
 ---
+---
 
 ## Requirements
 
@@ -95,6 +98,7 @@ sequenceDiagram
 - **R-F4.** BDD：`plan_gate_dual_publish_handoff` + `isolated_boundary_violation` 同时绿；`cargo nextest run --workspace --exclude ralph-e2e` 通过。
 
 ---
+---
 
 ## Success Criteria
 
@@ -104,6 +108,7 @@ sequenceDiagram
 - **SC4**：`fix.exhausted` / `debug.exhausted` 路径到达 plan-gate 的集成测试通过。
 - **SC5**：operator 工作流不变（`PROMPT.md` + `ralph run --worktree --reuse-worktree`）。
 
+---
 ---
 
 ## Scope Boundaries
@@ -127,6 +132,7 @@ sequenceDiagram
 - 让 ralph hat 常规发布 `work.ready` 推进 plan。
 
 ---
+---
 
 ## Key Decisions
 
@@ -139,6 +145,7 @@ sequenceDiagram
 | **拒绝隐式桥接** | 编排语义必须在 preset 可见；机制只保证与校验 |
 
 ---
+---
 
 ## Dependencies / Assumptions
 
@@ -147,6 +154,7 @@ sequenceDiagram
 - 假设 `preset_lint` / `preset_validator` 可扩展 WAC 规则族，无需新 crate。
 - flow-reliability 负责 synthesizer handoff **之后** 的 wave 链；本文档负责 **step 计数推进** 链，二者在 `review.passed → plan-gate` 处交汇。
 
+---
 ---
 
 ## Outstanding Questions
@@ -161,6 +169,7 @@ sequenceDiagram
 - **Q2** [Technical] handoff SLA 超时后的 escalation：直接 `plan.blocked` vs targeted `task.resume` to plan-gate vs Final terminate——按 Responder 三档对齐。
 - **Q3** [User decision] 是否在首版即对 **用户自定义 preset** 开启 strict handoff contract，或仅 builtin strict（WAC 原决策为 builtin strict / 用户 warn，建议维持）。
 
+---
 ---
 
 ## Next Steps
