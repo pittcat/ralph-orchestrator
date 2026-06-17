@@ -649,3 +649,313 @@ fn test_emit_rejection_hint_excludes_unauthorised_topics() {
         stderr
     );
 }
+
+// -------------------------------------------------------------------------
+// 2026-06-17-004 plan U1 (R1, R2): CLI provenance fail-closed tests.
+// -------------------------------------------------------------------------
+
+/// T1.1 Happy path: isolated + `--hat executor` + legal `work.done` → write.
+#[test]
+fn test_emit_t1_1_isolated_with_hat_legal_work_done_succeeds() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "-H",
+            "builtin:ce-executor-serial",
+            "emit",
+            "work.done",
+            "--json",
+            r#"{"plan_name":"p","plan_path":"p.md","task_id":"t","task_key":"k","step":"s","commit_count":1,"changed_lines":10}"#,
+            "--hat",
+            "executor",
+        ])
+        .env("RALPH_CURRENT_HAT", "executor")
+        .current_dir(temp_path)
+        .output()
+        .expect("Failed to execute ralph emit command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "executor+work.done in ce-executor-serial must succeed (T1.1): stderr={}",
+        stderr
+    );
+
+    let events_file = temp_path.join(".ralph/events.jsonl");
+    let events = std::fs::read_to_string(&events_file).unwrap();
+    assert!(events.contains("work.done"));
+    assert!(events.contains("\"hat\":\"executor\""));
+}
+
+/// T1.2 Error: isolated + no hat + `review.passed` + `aggregate_timeout` →
+/// reject (Covers AE1 — the original noble-peacock root cause).
+#[test]
+fn test_emit_t1_2_isolated_no_hat_review_passed_rejected() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    // NOTE: --hat is deliberately omitted; RALPH_CURRENT_HAT is also unset
+    // so the CLI must run check_emit_provenance.
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "-H",
+            "builtin:ce-executor-serial",
+            "emit",
+            "review.passed",
+            "--json",
+            r#"{"plan_name":"p","task_id":"t","task_key":"k","step":"s","findings_count":0,"fix_round":0,"verdict":"pass","skip_reason":"aggregate_timeout"}"#,
+        ])
+        .current_dir(temp_path)
+        .output()
+        .expect("Failed to execute ralph emit command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "isolated+no-hat+review.passed must be rejected (T1.2 / AE1): stderr={}",
+        stderr
+    );
+    // The blanket `Event provenance required` check fires first
+    // (preset has `require_emit_provenance: true`); the smart
+    // `check_emit_provenance` gate below is the second line of
+    // defense for business topics. Both messages prove the event
+    // was blocked at the CLI boundary before reaching JSONL.
+    assert!(
+        stderr.contains("missing_provenance")
+            || stderr.contains("missing provenance")
+            || stderr.contains("Event provenance required"),
+        "expected missing_provenance or Event provenance required rejection, got: {}",
+        stderr
+    );
+
+    // Critical: the event must NOT have landed in events.jsonl.
+    let events_file = temp_path.join(".ralph/events.jsonl");
+    let events = std::fs::read_to_string(&events_file).unwrap_or_default();
+    assert!(
+        !events.contains("review.passed"),
+        "rejected review.passed must NOT be written (T1.2 / AE1): {}",
+        events
+    );
+}
+
+/// T1.3 Error: isolated + no hat + `build.done` → reject (topic_denied or
+/// missing_provenance depending on gate ordering).
+#[test]
+fn test_emit_t1_3_isolated_no_hat_build_done_rejected() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "-H",
+            "builtin:ce-executor-serial",
+            "emit",
+            "build.done",
+            "--json",
+            r#"{"ok":true}"#,
+        ])
+        .current_dir(temp_path)
+        .output()
+        .expect("Failed to execute ralph emit command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "isolated+no-hat+build.done must be rejected (T1.3): stderr={}",
+        stderr
+    );
+    // Either missing_provenance (caught at the new U1 gate), or
+    // `Event provenance required` (existing blanket gate for presets
+    // with `require_emit_provenance: true`), or topic_denied (caught
+    // at the existing topic-deny-rules gate) is acceptable — all
+    // three prove no event was written.
+    assert!(
+        stderr.contains("missing_provenance")
+            || stderr.contains("missing provenance")
+            || stderr.contains("Event provenance required")
+            || stderr.contains("topic_denied")
+            || stderr.contains("topic denied"),
+        "expected provenance or topic_denied rejection, got: {}",
+        stderr
+    );
+
+    let events_file = temp_path.join(".ralph/events.jsonl");
+    let events = std::fs::read_to_string(&events_file).unwrap_or_default();
+    assert!(
+        !events.contains("build.done"),
+        "rejected build.done must NOT be written (T1.3): {}",
+        events
+    );
+}
+
+/// T1.4 Edge: isolated + `hat=ralph` + `loop.cancel` → allowed (control topic
+/// exemption for the runtime pseudo-hat).
+#[test]
+fn test_emit_t1_4_isolated_ralph_hat_loop_cancel_allowed() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "-H",
+            "builtin:ce-executor-serial",
+            "emit",
+            "loop.cancel",
+            "--json",
+            r#"{"reason":"demo"}"#,
+            "--hat",
+            "ralph",
+        ])
+        .current_dir(temp_path)
+        .output()
+        .expect("Failed to execute ralph emit command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "isolated+ralph+loop.cancel must succeed (T1.4 control topic exemption): \
+         stdout={stdout} stderr={stderr}"
+    );
+
+    let events_file = temp_path.join(".ralph/events.jsonl");
+    let events = std::fs::read_to_string(&events_file).unwrap();
+    assert!(
+        events.contains("loop.cancel"),
+        "loop.cancel must be written (T1.4): {}",
+        events
+    );
+}
+
+/// T1.5 Integration: with `RALPH_CURRENT_HAT=executor`, `debug.step` →
+/// `isolated_scope_violation` (regression for plan 003 U1 — executor must
+/// not be allowed to publish `debug.step`).
+#[test]
+fn test_emit_t1_5_isolated_executor_debug_step_scope_violation() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "-H",
+            "builtin:ce-executor-serial",
+            "emit",
+            "debug.step",
+            "task_id=demo",
+            "--hat",
+            "executor",
+        ])
+        .env("RALPH_CURRENT_HAT", "executor")
+        .current_dir(temp_path)
+        .output()
+        .expect("Failed to execute ralph emit command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "executor+debug.step must be rejected (T1.5 plan-003 regression): \
+         stderr={}",
+        stderr
+    );
+    assert!(
+        stderr.contains("isolated_scope_violation") || stderr.contains("isolated scope guard"),
+        "expected isolated_scope_violation rejection, got: {}",
+        stderr
+    );
+
+    let events_file = temp_path.join(".ralph/events.jsonl");
+    let events = std::fs::read_to_string(&events_file).unwrap_or_default();
+    assert!(
+        !events.contains("debug.step"),
+        "rejected debug.step must NOT be written (T1.5): {}",
+        events
+    );
+}
+
+/// T1.6 Integration: review-synthesizer emits `review.passed` with a
+/// hat-allowed `skip_reason` → allowed. Confirms the U1 fail-closed gate
+/// does not mis-block legitimate emits when provenance is supplied.
+#[test]
+fn test_emit_t1_6_isolated_review_synthesizer_legal_emit_allowed() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    // `review-synthesizer` is allowed `skip_reason=dimensions_complete`
+    // in ce-executor-serial (per the SSOT schema). Pass --hat
+    // explicitly to pin the positive path; the test confirms the new
+    // U1 gate does not over-block when provenance is supplied.
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "-H",
+            "builtin:ce-executor-serial",
+            "emit",
+            "review.passed",
+            r#"{"plan_name":"p","task_id":"t","task_key":"k","step":"s","findings_count":0,"fix_round":0,"verdict":"pass","skip_reason":"dimensions_complete"}"#,
+            "--hat",
+            "review-synthesizer",
+        ])
+        .env("RALPH_CURRENT_HAT", "review-synthesizer")
+        .current_dir(temp_path)
+        .output()
+        .expect("Failed to execute ralph emit command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "isolated+review-synthesizer+review.passed(dimensions_complete) must succeed (T1.6): \
+         stdout={stdout} stderr={stderr}"
+    );
+
+    let events_file = temp_path.join(".ralph/events.jsonl");
+    let events = std::fs::read_to_string(&events_file).unwrap();
+    assert!(events.contains("review.passed"));
+    assert!(events.contains("\"hat\":\"review-synthesizer\""));
+    assert!(events.contains("dimensions_complete"));
+}
+
+/// T1.7 Edge: isolated + no hat + `task.resume` → allowed (control topic
+/// exemption for the loop's recovery signal).
+#[test]
+fn test_emit_t1_7_isolated_no_hat_task_resume_allowed() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "-H",
+            "builtin:ce-executor-serial",
+            "emit",
+            "task.resume",
+            "--json",
+            r#"{"target_hat":"executor","reason":"missing_event_gate","original_trigger_topic":"review.dimension.ready"}"#,
+        ])
+        .current_dir(temp_path)
+        .output()
+        .expect("Failed to execute ralph emit command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "isolated+no-hat+task.resume must succeed (T1.7 control topic exemption): \
+         stdout={stdout} stderr={stderr}"
+    );
+
+    let events_file = temp_path.join(".ralph/events.jsonl");
+    let events = std::fs::read_to_string(&events_file).unwrap();
+    assert!(
+        events.contains("task.resume"),
+        "task.resume must be written (T1.7): {}",
+        events
+    );
+}

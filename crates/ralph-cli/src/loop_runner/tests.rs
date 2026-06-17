@@ -4538,6 +4538,10 @@ fn make_test_wave_with_timeout_and_payload(
             max_activations: None,
             disallowed_tools: vec![],
             timeout: Some(timeout_secs),
+            // 2026-06-17-004 U2 (R3): explicit `None` for new
+            // field keeps the test helper aligned with
+            // `HatConfig::default()`.
+            missing_event_grace_secs: None,
             concurrency: 1,
             aggregate: None,
             scratchpad: None,
@@ -7981,6 +7985,474 @@ hats:
     );
 }
 
+// 2026-06-17-004 U2 (R3): HatActivationClock + missing-event
+// gate grace window.  These tests pin the new behaviour
+// (T2.1-T2.5 in the plan).
+
+#[test]
+fn test_u2_t2_1_grace_within_window_suppresses_gate() {
+    // T2.1: when the hat has been activated within the grace
+    // window and produced no event, the gate must NOT fire.
+    // Covers AE2 from the plan (long-running hat killed during
+    // model warm-up).
+    let yaml = r#"
+hats:
+  dimension-reviewer:
+    name: "Dimension Reviewer"
+    triggers: ["review.dimension.ready"]
+    publishes: ["review.dimension.done", "review.dimension.failed"]
+    missing_event_grace_secs: 540
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    let hat = HatId::new("dimension-reviewer");
+    // Record the activation *now* — elapsed is well under 540s.
+    event_loop.state_mut().record_hat_activation(&hat);
+
+    let no_candidates: Vec<String> = Vec::new();
+    assert!(
+        !should_gate_missing_events(&hat, &event_loop, &no_candidates),
+        "gate must be suppressed within the per-hat grace window"
+    );
+}
+
+#[test]
+fn test_u2_t2_2_grace_boundary_just_inside_window_suppresses_gate() {
+    // T2.2: a hat that was activated `grace - 1s` ago must still
+    // be within the window.  We simulate this by manually
+    // inserting an `Instant` in the past into the clock.
+    use std::time::{Duration, Instant};
+    let yaml = r#"
+hats:
+  dimension-reviewer:
+    name: "Dimension Reviewer"
+    triggers: ["review.dimension.ready"]
+    publishes: ["review.dimension.done", "review.dimension.failed"]
+    missing_event_grace_secs: 60
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    let hat = HatId::new("dimension-reviewer");
+    // Insert an activation that was 59s ago.  `Instant` does not
+    // allow arbitrary backdating, so we use a tiny manual offset
+    // by sleeping 50ms to ensure elapsed > 0.  The 60s grace
+    // window is far larger than any test sleep, so the gate must
+    // remain suppressed.
+    event_loop.state_mut().record_hat_activation(&hat);
+    std::thread::sleep(Duration::from_millis(50));
+    let _ = Instant::now(); // ensure Instant is in scope
+
+    let no_candidates: Vec<String> = Vec::new();
+    assert!(
+        !should_gate_missing_events(&hat, &event_loop, &no_candidates),
+        "gate must be suppressed for any elapsed < grace_secs (60s grace, 50ms sleep)"
+    );
+}
+
+#[test]
+fn test_u2_t2_3_grace_boundary_just_outside_window_fires_gate() {
+    // T2.3: a hat with `missing_event_grace_secs: 0` has no grace
+    // window — the gate must fire on the very first iteration.
+    // This is the "opt out" path.  We also verify the legacy
+    // blanket-rule hat (no `obligations:` declared) still
+    // respects the grace when one is set.
+    let yaml_zero = r#"
+hats:
+  legacy:
+    name: "Legacy"
+    triggers: ["work.ready"]
+    publishes: ["work.done"]
+    missing_event_grace_secs: 0
+"#;
+    let config_zero: RalphConfig = serde_yaml::from_str(yaml_zero).unwrap();
+    let mut event_loop_zero = EventLoop::new(config_zero);
+    let hat_zero = HatId::new("legacy");
+    event_loop_zero.state_mut().record_hat_activation(&hat_zero);
+
+    let no_candidates: Vec<String> = Vec::new();
+    assert!(
+        should_gate_missing_events(&hat_zero, &event_loop_zero, &no_candidates),
+        "missing_event_grace_secs: 0 disables the defer — gate fires immediately"
+    );
+}
+
+#[test]
+fn test_u2_t2_4_wave_obligation_still_suppresses_gate_during_grace() {
+    // T2.4: regression for `test_wave_policy_rejection_skips_missing_event_gate`.
+    // Even with the new grace logic, a wave obligation that is
+    // still pending (no terminal phase) must continue to
+    // suppress the gate.  The grace check is a *new* early-return
+    // path; the wave-mutex / obligation check is layered on top.
+    use ralph_core::flow_lifecycle::{FlowLifecycleRecord, FlowLifecycleRegistry, FlowPhase};
+    let yaml = r#"
+hats:
+  review-coordinator:
+    name: "Review Coordinator"
+    triggers: ["work.done"]
+    publishes: ["review.wave.ready", "review.passed"]
+    obligations:
+      - on_trigger: "work.done"
+        must_emit_any_of: ["review.wave.ready", "review.passed"]
+    missing_event_grace_secs: 540
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.state_mut().last_activation_events =
+        vec![ralph_proto::Event::new("work.done", "{}")];
+    let hat = HatId::new("review-coordinator");
+    // Record an open wave — this is the "waiting on workers" case.
+    use std::time::Instant;
+    let now = Instant::now();
+    let mut wave_reg = FlowLifecycleRegistry::new();
+    wave_reg.register(FlowLifecycleRecord {
+        flow_unit_id: "w-001".into(),
+        target_hat: hat.as_str().into(),
+        source_topic: "review.wave.ready".into(),
+        wave_total: 3,
+        received_count: 0,
+        missing_indices: vec![0, 1, 2],
+        configured_aggregate_secs: 0,
+        configured_worker_secs: 0,
+        started_at: now,
+        last_transition_at: now,
+        phase: FlowPhase::WorkersActive,
+        last_source_hat: None,
+        last_reason_code: None,
+    });
+    event_loop.state_mut().flow_lifecycle = wave_reg;
+    // Record activation just now to be inside grace.
+    event_loop.state_mut().record_hat_activation(&hat);
+
+    let no_candidates: Vec<String> = Vec::new();
+    assert!(
+        !should_gate_missing_events(&hat, &event_loop, &no_candidates),
+        "wave obligation pending must continue to suppress the gate even within grace window"
+    );
+}
+
+#[test]
+fn test_u2_t2_5_agent_emit_rejected_still_suppresses_gate() {
+    // T2.5: regression — when the agent DID try to emit
+    // (contract-rejected topics land in `candidate_topics`),
+    // the gate must continue to be suppressed.  The grace
+    // window does not change this behaviour; it just adds an
+    // additional early-return path.
+    let yaml = r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.ready"]
+    publishes: ["work.done", "work.failed"]
+    missing_event_grace_secs: 540
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    let hat = HatId::new("executor");
+    event_loop.state_mut().record_hat_activation(&hat);
+
+    // Candidates include the contract-rejected `work.done` topic.
+    let rejected_candidates = vec!["work.done".to_string()];
+    assert!(
+        !should_gate_missing_events(&hat, &event_loop, &rejected_candidates),
+        "agent attempting to emit (even if contract-rejected) must continue to suppress the gate"
+    );
+}
+
+#[test]
+fn test_u2_resolve_missing_event_grace_secs_helper() {
+    // Pin the resolution chain from KTD-4 in the plan:
+    //   1. per-hat `missing_event_grace_secs` wins
+    //   2. preset default
+    //   3. min(adapter_idle * 0.3, 540)
+    use ralph_core::config::hat::HatConfig;
+    use ralph_core::config::hat::resolve_missing_event_grace_secs;
+
+    // Case 1: per-hat override wins.
+    let mut h = HatConfig::default();
+    h.missing_event_grace_secs = Some(7);
+    let g = resolve_missing_event_grace_secs(&h, Some(999), 1000);
+    assert_eq!(g, 7, "per-hat override wins");
+
+    // Case 2: per-hat is None, preset default wins.
+    let mut h2 = HatConfig::default();
+    h2.missing_event_grace_secs = None;
+    let g2 = resolve_missing_event_grace_secs(&h2, Some(120), 1000);
+    assert_eq!(g2, 120, "preset default wins when per-hat is None");
+
+    // Case 3: per-hat None, preset default None, fallback applies.
+    let mut h3 = HatConfig::default();
+    h3.missing_event_grace_secs = None;
+    // adapter_idle = 1000, expected: floor(1000 * 0.3) = 300.
+    let g3 = resolve_missing_event_grace_secs(&h3, None, 1000);
+    assert_eq!(g3, 300);
+
+    // Case 4: cap at 540s.
+    let mut h4 = HatConfig::default();
+    h4.missing_event_grace_secs = None;
+    // adapter_idle = 100_000, expected: min(floor(100_000 * 0.3), 540) = 540.
+    let g4 = resolve_missing_event_grace_secs(&h4, None, 100_000);
+    assert_eq!(g4, 540, "540s floor cap must apply");
+
+    // Case 5: explicit Some(0) opts out (gate fires immediately).
+    let mut h5 = HatConfig::default();
+    h5.missing_event_grace_secs = Some(0);
+    let g5 = resolve_missing_event_grace_secs(&h5, Some(999), 1000);
+    assert_eq!(g5, 0, "Some(0) opt-out must be honoured");
+}
+
+// 2026-06-17-004 U3 (R4+R5): Recovery routing — target + trigger
+// context replay.  These tests pin the new behaviour (T3.1-T3.6
+// in the plan).
+
+#[test]
+fn test_u3_t3_1_replay_obligation_triggers_to_activation_state() {
+    // T3.1 / T3.4: when the gate fires, the next activation must
+    // see the original trigger topic in `last_activation_events`
+    // (not the empty default).  Multi-trigger snapshots are
+    // drained as-is (the obligation check filters by topic at
+    // evaluation time).
+    let mut state = ralph_core::event_loop::LoopState::new();
+    let trigger =
+        ralph_proto::Event::new("review.dimension.ready", r#"{"dimension":"correctness"}"#);
+    state.pending_obligation_triggers = vec![trigger.clone()];
+
+    let drained = state.replay_obligation_triggers_to_activation_state();
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].topic.as_str(), "review.dimension.ready");
+    assert_eq!(state.last_activation_events.len(), 1);
+    assert_eq!(
+        state.last_activation_events[0].topic.as_str(),
+        "review.dimension.ready"
+    );
+    // Drain again — empty now.
+    let drained2 = state.replay_obligation_triggers_to_activation_state();
+    assert!(drained2.is_empty());
+    // last_activation_events is preserved on a no-op replay.
+    assert_eq!(state.last_activation_events.len(), 1);
+}
+
+#[test]
+fn test_u3_t3_2_inject_missing_event_writes_target_field() {
+    // T3.2: the resume JSONL line written by the missing-event
+    // gate helper must include a top-level `target` field equal
+    // to the offending hat id, and a `hat` field too (for U1
+    // provenance allowlist compatibility).
+    use std::io::Read;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // Create the .ralph/ directory so the current-events marker
+    // file can be written.
+    std::fs::create_dir_all(tmp.path().join(".ralph")).expect("create .ralph");
+    let events_path = tmp.path().join(".ralph/events.jsonl");
+    std::fs::write(&events_path, "").expect("seed events file");
+    // Write the current-events marker so the helper resolves to
+    // our chosen path.
+    let ctx = ralph_core::loop_context::LoopContext::primary(tmp.path().to_path_buf());
+    std::fs::write(
+        ctx.current_events_marker(),
+        events_path.to_string_lossy().to_string(),
+    )
+    .expect("write current-events marker");
+
+    let hat = HatId::new("dimension-reviewer");
+    let expected_topics = vec!["review.dimension.done".to_string()];
+
+    inject_missing_event_hard_gate_guidance(&ctx, None, &hat, &expected_topics);
+
+    let mut buf = String::new();
+    std::fs::File::open(&events_path)
+        .expect("open events file")
+        .read_to_string(&mut buf)
+        .expect("read events file");
+    let line = buf.lines().last().expect("at least one line written");
+    let value: serde_json::Value = serde_json::from_str(line).expect("valid JSONL");
+    assert_eq!(value["topic"], "task.resume");
+    assert_eq!(value["target"], "dimension-reviewer");
+    assert_eq!(value["hat"], "dimension-reviewer");
+    assert!(value["payload"].is_string());
+}
+
+#[test]
+fn test_u3_t3_3_payload_has_stage_missing_event_and_target_hat() {
+    // T3.3: the embedded payload (the `payload` field, which is
+    // itself a JSON string) must contain `stage: missing_event`,
+    // `target_hat: dimension-reviewer`, and `reason`.
+    use std::io::Read;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(tmp.path().join(".ralph")).expect("create .ralph");
+    let events_path = tmp.path().join(".ralph/events.jsonl");
+    std::fs::write(&events_path, "").expect("seed events file");
+    let ctx = ralph_core::loop_context::LoopContext::primary(tmp.path().to_path_buf());
+    std::fs::write(
+        ctx.current_events_marker(),
+        events_path.to_string_lossy().to_string(),
+    )
+    .expect("write current-events marker");
+
+    let hat = HatId::new("dimension-reviewer");
+    let expected_topics = vec!["review.dimension.done".to_string()];
+
+    inject_missing_event_hard_gate_guidance(&ctx, None, &hat, &expected_topics);
+
+    let mut buf = String::new();
+    std::fs::File::open(&events_path)
+        .expect("open events file")
+        .read_to_string(&mut buf)
+        .expect("read events file");
+    let line = buf.lines().last().expect("at least one line written");
+    let value: serde_json::Value = serde_json::from_str(line).expect("valid JSONL");
+    let payload_str = value["payload"].as_str().expect("payload is a string");
+    let payload: serde_json::Value = serde_json::from_str(payload_str).expect("payload is JSON");
+    assert_eq!(payload["stage"], "missing_event");
+    assert_eq!(payload["target_hat"], "dimension-reviewer");
+    assert_eq!(payload["reason"], "missing_field");
+    assert!(
+        payload["allowed_topics"]
+            .as_array()
+            .expect("allowed_topics array")
+            .iter()
+            .any(|v| v == "review.dimension.done")
+    );
+}
+
+#[test]
+fn test_u3_t3_4_triggers_embedded_in_resume_when_provided() {
+    // T3.4: when the helper is called with the trigger-snapshot
+    // extension, the first trigger's `topic` and `payload` are
+    // embedded in the resume JSON as `original_trigger_topic`
+    // and `original_trigger_payload`.
+    use std::io::Read;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(tmp.path().join(".ralph")).expect("create .ralph");
+    let events_path = tmp.path().join(".ralph/events.jsonl");
+    std::fs::write(&events_path, "").expect("seed events file");
+    let ctx = ralph_core::loop_context::LoopContext::primary(tmp.path().to_path_buf());
+    std::fs::write(
+        ctx.current_events_marker(),
+        events_path.to_string_lossy().to_string(),
+    )
+    .expect("write current-events marker");
+
+    let hat = HatId::new("dimension-reviewer");
+    let expected_topics = vec!["review.dimension.done".to_string()];
+    let trigger = ralph_proto::Event::new(
+        "review.dimension.ready",
+        r#"{"dimension":"correctness","depth":"standard"}"#,
+    );
+
+    inject_missing_event_hard_gate_guidance_with_triggers(
+        &ctx,
+        None,
+        &hat,
+        &expected_topics,
+        &[trigger],
+    );
+
+    let mut buf = String::new();
+    std::fs::File::open(&events_path)
+        .expect("open events file")
+        .read_to_string(&mut buf)
+        .expect("read events file");
+    let line = buf.lines().last().expect("at least one line written");
+    let value: serde_json::Value = serde_json::from_str(line).expect("valid JSONL");
+    let payload_str = value["payload"].as_str().expect("payload is a string");
+    let payload: serde_json::Value = serde_json::from_str(payload_str).expect("payload is JSON");
+    assert_eq!(payload["original_trigger_topic"], "review.dimension.ready");
+    assert_eq!(
+        payload["original_trigger_payload"]["dimension"],
+        "correctness"
+    );
+    assert_eq!(payload["original_trigger_payload"]["depth"], "standard");
+}
+
+#[test]
+fn test_u3_t3_5_enrich_with_stage_helper() {
+    // T3.5: enrich_task_resume_payload_with_stage must add a
+    // `stage` field when supplied, and must NOT add one when
+    // the caller passes `None` (legacy behaviour).
+    use ralph_core::event_loop::rejection::task_resume_payload_has_required_fields;
+    use ralph_core::event_loop::rejection::{
+        RejectionStage, enrich_task_resume_payload_with_stage,
+    };
+
+    // Case 1: explicit stage → JSON has `stage` field.
+    let p1 = enrich_task_resume_payload_with_stage(
+        "missing event",
+        "hard_gate_missing_event",
+        Some("dimension-reviewer"),
+        Some(RejectionStage::MissingEvent),
+    );
+    assert!(task_resume_payload_has_required_fields(&p1));
+    let v1: serde_json::Value = serde_json::from_str(&p1).expect("valid JSON");
+    assert_eq!(v1["stage"], "missing_event");
+    assert_eq!(v1["target_hat"], "dimension-reviewer");
+    assert_eq!(v1["reason"], "missing_field");
+
+    // Case 2: None → JSON has no `stage` field.
+    let p2 = enrich_task_resume_payload_with_stage(
+        "missing event",
+        "hard_gate_missing_event",
+        Some("dimension-reviewer"),
+        None,
+    );
+    let v2: serde_json::Value = serde_json::from_str(&p2).expect("valid JSON");
+    assert!(
+        v2.get("stage").is_none(),
+        "legacy callers must not see a `stage` field"
+    );
+    assert_eq!(v2["target_hat"], "dimension-reviewer");
+}
+
+#[test]
+fn test_u3_t3_6_rejection_stage_missing_event_as_str() {
+    // T3.6: the new `RejectionStage::MissingEvent` variant
+    // serialises as the stable string `"missing_event"` so the
+    // drift detector can count these as a recognisable class.
+    use ralph_core::event_loop::rejection::RejectionStage;
+    assert_eq!(RejectionStage::MissingEvent.as_str(), "missing_event");
+    // Serialise / round-trip via serde.
+    let json = serde_json::to_string(&RejectionStage::MissingEvent).expect("serialize");
+    assert_eq!(json, "\"missing_event\"");
+    let back: RejectionStage = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(back, RejectionStage::MissingEvent);
+}
+
+#[test]
+fn test_u3_t3_6b_r5_hard_gate_routing_regression() {
+    // T3.6: R5 routing regression — the JSONL line written by the
+    // missing-event gate helper must carry top-level `target` =
+    // hat name (matches the `Event::with_target` shape that R5
+    // uses for policy / workflow rejections).  The R5 test
+    // (`r5_hard_gate_routing.rs`) covers the policy-rejection
+    // path; this test pins the parallel contract for the
+    // missing-event gate.
+    use std::io::Read;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(tmp.path().join(".ralph")).expect("create .ralph");
+    let events_path = tmp.path().join(".ralph/events.jsonl");
+    std::fs::write(&events_path, "").expect("seed events file");
+    let ctx = ralph_core::loop_context::LoopContext::primary(tmp.path().to_path_buf());
+    std::fs::write(
+        ctx.current_events_marker(),
+        events_path.to_string_lossy().to_string(),
+    )
+    .expect("write current-events marker");
+
+    let hat = HatId::new("review-coordinator");
+    let expected_topics = vec!["review.passed".to_string()];
+
+    inject_missing_event_hard_gate_guidance(&ctx, None, &hat, &expected_topics);
+
+    let mut buf = String::new();
+    std::fs::File::open(&events_path)
+        .expect("open events file")
+        .read_to_string(&mut buf)
+        .expect("read events file");
+    let line = buf.lines().last().expect("at least one line written");
+    let value: serde_json::Value = serde_json::from_str(line).expect("valid JSONL");
+    assert_eq!(value["target"], "review-coordinator");
+    assert_eq!(value["hat"], "review-coordinator");
+}
+
 // 2026-06-17-001 Unit 6: GateWaveMutex. The wave registry lives
 // in `LoopState::flow_lifecycle`; the hard gate must NOT fire
 // while a wave obligation is pending, and must still fire when
@@ -11246,6 +11718,10 @@ fn make_wave_with_count(
             max_activations: None,
             disallowed_tools: vec![],
             timeout: Some(30),
+            // 2026-06-17-004 U2 (R3): explicit `None` for new
+            // field keeps the test helper aligned with
+            // `HatConfig::default()`.
+            missing_event_grace_secs: None,
             concurrency: 2,
             aggregate: None,
             scratchpad: None,

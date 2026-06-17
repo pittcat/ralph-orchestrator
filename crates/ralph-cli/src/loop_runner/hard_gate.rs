@@ -1,12 +1,13 @@
 use super::*;
 use ralph_core::{
-    NonRetryableReason, PolicyRejection, Rejection, TerminationReason, U2_REJECTION_RETRY_LIMIT,
-    ViolationType,
+    NonRetryableReason, PolicyRejection, Rejection, RejectionStage, TerminationReason,
+    U2_REJECTION_RETRY_LIMIT, ViolationType,
+    config::hat::resolve_missing_event_grace_secs,
     diagnosis::{
         DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, EvidenceKind, EvidenceRef,
         RecoveryDiagnosisEnvelope, RecoveryDiagnosisEnvelopeBuilder,
     },
-    event_loop::rejection::enrich_task_resume_payload,
+    event_loop::rejection::enrich_task_resume_payload_with_stage,
 };
 
 pub fn should_hard_gate(hat_id: &HatId, event_loop: &EventLoop) -> bool {
@@ -38,6 +39,19 @@ pub fn should_hard_gate(hat_id: &HatId, event_loop: &EventLoop) -> bool {
 /// activation-level obligation.  When the hat has no obligations the
 /// legacy blanket rule is applied unchanged for backwards
 /// compatibility with presets that have not opted in.
+///
+/// 2026-06-17-004 U2 (R3): the per-hat activation clock
+/// (`LoopState::hat_activation_at`) defers the gate for the first
+/// `missing_event_grace_secs` seconds after a hat is activated.  This
+/// protects long-running hats like `dimension-reviewer` (per-worker
+/// timeout 1800s) from being mis-fired during the first ~30-60s of
+/// model warm-up just because no event has appeared on the bus yet.
+/// The grace window is resolved by
+/// [`resolve_missing_event_grace_secs`]:
+///   1. `hat.missing_event_grace_secs` (per-hat override)
+///   2. preset default (operator-controlled)
+///   3. `min(adapter_idle * 0.3, 540)` (diagnostic-recommended)
+///   4. `0` (never suppress — legacy / opt-out)
 pub fn should_gate_missing_events(
     hat_id: &HatId,
     event_loop: &EventLoop,
@@ -46,6 +60,24 @@ pub fn should_gate_missing_events(
     let Some(config) = event_loop.registry().get_config(hat_id) else {
         return false;
     };
+
+    // 2026-06-17-004 U2 (R3): HatActivationClock defer.  When the
+    // elapsed time since the hat's last activation is less than
+    // the resolved grace window, suppress the gate entirely.  The
+    // hat may legitimately be in its first model warm-up turn
+    // (e.g. `dimension-reviewer` running under an isolated
+    // backend with `timeout: 1800`).
+    let grace_secs = resolve_missing_event_grace_secs(
+        config,
+        None, // preset default — TODO: wire in U3 follow-up
+        event_loop.config().cli.idle_timeout_secs,
+    );
+    if grace_secs > 0
+        && let Some(elapsed) = event_loop.state().hat_activation_elapsed(hat_id)
+        && elapsed < std::time::Duration::from_secs(u64::from(grace_secs))
+    {
+        return false;
+    }
 
     // Unit 6 (2026-06-17-001): GateWaveMutex — don't gate if a wave obligation
     // is pending for this hat. When a hat has emitted a wave batch (e.g.
@@ -466,15 +498,16 @@ pub fn inject_hard_gate_guidance(
         topics = topics_str
     );
 
-    // U3: build a structured `task.resume` payload.  `enrich_task_resume_payload`
+    // U3: build a structured `task.resume` payload.  `enrich_task_resume_payload_with_stage`
     // wraps the free-form message and adds schema-required `reason` + `target_hat`.
     // We then add `allowed_topics` and `hint` fields so the agent can read the
     // concrete recovery instructions from the event payload itself.
     let hat_name = hat_id.as_str();
-    let resume_payload = enrich_task_resume_payload(
+    let resume_payload = enrich_task_resume_payload_with_stage(
         &free_form_message,
         "emit_claimed_but_not_written",
         Some(hat_name),
+        None,
     );
     let resume_value: serde_json::Value = serde_json::from_str(&resume_payload)
         .expect("enrich_task_resume_payload must produce valid JSON");
@@ -499,8 +532,18 @@ pub fn inject_hard_gate_guidance(
     let payload_str = serde_json::Value::Object(resume_obj).to_string();
 
     let timestamp = chrono::Utc::now().to_rfc3339();
+    // 2026-06-17-004 U3 (R4+R5): write the resume event as an
+    // `Event::with_target`-shaped JSONL record.  The top-level
+    // `target` field mirrors `Event::target` so downstream
+    // consumers (e.g. the `EventBus` re-reader) can route the
+    // resume to the offending hat without parsing the payload.
+    // The `hat` field is also written for backwards compat with
+    // U1's `check_emit_provenance` (it inspects the top-level
+    // `hat` for the allowlist check).
     let event = serde_json::json!({
         "topic": "task.resume",
+        "hat": hat_name,
+        "target": hat_name,
         "payload": payload_str,
         "ts": timestamp,
     });
@@ -562,11 +605,48 @@ pub fn inject_hard_gate_guidance(
 /// and `triggered` is stamped to the offending hat.  The
 /// `pending_recovery_hat` pin and the recovery envelope write are
 /// unchanged.
+///
+/// 2026-06-17-004 U3 (R4+R5): the function now records the
+/// obligation-trigger snapshot into `LoopState::pending_obligation_triggers`
+/// before injecting the resume, and embeds the first trigger's
+/// `topic` + `payload` into the resume JSON via
+/// `original_trigger_topic` / `original_trigger_payload`.  The
+/// runner's `replay_obligation_triggers_to_activation_state` is
+/// called from the runner AFTER pinning `pending_recovery_hat`
+/// (see `runner.rs:4156` area) so the next activation's
+/// `last_activation_events` contains the original trigger — the
+/// obligation check on the next pass has the right context.
+///
+/// `#[allow(dead_code)]` — kept for backwards compatibility
+/// (legacy callers + tests) but the runner now invokes
+/// `inject_missing_event_hard_gate_guidance_with_triggers`
+/// directly.
+#[allow(dead_code)]
 pub fn inject_missing_event_hard_gate_guidance(
     ctx: &LoopContext,
     event_loop: Option<&mut EventLoop>,
     hat_id: &HatId,
     expected_topics: &[String],
+) {
+    inject_missing_event_hard_gate_guidance_with_triggers(
+        ctx,
+        event_loop,
+        hat_id,
+        expected_topics,
+        &[],
+    )
+}
+
+/// 2026-06-17-004 U3 (R4+R5): internal entry point that takes
+/// the obligation-trigger snapshot.  Public callers (e.g. the
+/// runner) should prefer the no-snapshot wrapper above for
+/// backwards compatibility.
+pub fn inject_missing_event_hard_gate_guidance_with_triggers(
+    ctx: &LoopContext,
+    event_loop: Option<&mut EventLoop>,
+    hat_id: &HatId,
+    expected_topics: &[String],
+    obligation_triggers: &[ralph_proto::Event],
 ) {
     let events_path = resolve_current_events_path(ctx);
     let topics_str = if expected_topics.is_empty() {
@@ -588,14 +668,19 @@ pub fn inject_missing_event_hard_gate_guidance(
     );
 
     // U3: build a structured `task.resume` payload.  Same shape as
-    // `inject_hard_gate_guidance` — `enrich_task_resume_payload` adds
-    // schema-required `reason` + `target_hat`; we layer `allowed_topics`,
-    // `hint` and `triggered` on top for the agent to read from the event.
+    // `inject_hard_gate_guidance` — `enrich_task_resume_payload_with_stage`
+    // adds schema-required `reason` + `target_hat`; we layer
+    // `allowed_topics`, `hint` and `triggered` on top for the
+    // agent to read from the event.  2026-06-17-004 U3 (R4+R5)
+    // adds `stage: "missing_event"` so the drift detector's
+    // field-completeness metric counts these as a recognisable
+    // rejection class.
     let hat_name = hat_id.as_str();
-    let resume_payload = enrich_task_resume_payload(
+    let resume_payload = enrich_task_resume_payload_with_stage(
         &free_form_message,
         "hard_gate_missing_event",
         Some(hat_name),
+        Some(RejectionStage::MissingEvent),
     );
     let resume_value: serde_json::Value = serde_json::from_str(&resume_payload)
         .expect("enrich_task_resume_payload must produce valid JSON");
@@ -617,11 +702,34 @@ pub fn inject_missing_event_hard_gate_guidance(
         "triggered".into(),
         serde_json::Value::String(hat_name.to_string()),
     );
+    // 2026-06-17-004 U3 (R4+R5): embed the original obligation
+    // trigger topic + payload so the resumed hat sees the same
+    // context it saw on the first dispatch.  When multiple
+    // triggers are pending (e.g. `work.done` + `fix.applied`),
+    // the first trigger is used; the rest are still replayed
+    // into `last_activation_events` so the obligation check sees
+    // them on the next activation.
+    if let Some(first_trigger) = obligation_triggers.first() {
+        resume_obj.insert(
+            "original_trigger_topic".into(),
+            serde_json::Value::String(first_trigger.topic.to_string()),
+        );
+        let trigger_payload = serde_json::from_str::<serde_json::Value>(&first_trigger.payload)
+            .unwrap_or_else(|_| serde_json::Value::String(first_trigger.payload.clone()));
+        resume_obj.insert("original_trigger_payload".into(), trigger_payload);
+    }
     let payload_str = serde_json::Value::Object(resume_obj).to_string();
 
     let timestamp = chrono::Utc::now().to_rfc3339();
+    // 2026-06-17-004 U3 (R4+R5): same `Event::with_target` shape
+    // as `inject_hard_gate_guidance` — top-level `target` and
+    // `hat` fields so the resume is routed to the offending hat
+    // by both the bus re-reader (target) and the U1 provenance
+    // allowlist (hat).
     let event = serde_json::json!({
         "topic": "task.resume",
+        "hat": hat_name,
+        "target": hat_name,
         "payload": payload_str,
         "ts": timestamp,
     });
@@ -670,6 +778,14 @@ pub fn inject_missing_event_hard_gate_guidance(
         // we surface the missing-event guidance.  Cleared by
         // `EventLoop::next_hat` on the next activation.
         event_loop.state_mut().pending_recovery_hat = Some(hat_id.clone());
+        // 2026-06-17-004 U3 (R4+R5): stash the obligation-trigger
+        // snapshot so the runner can replay it into
+        // `last_activation_events` for the next activation.  The
+        // snapshot is drained by
+        // `LoopState::replay_obligation_triggers_to_activation_state`.
+        if !obligation_triggers.is_empty() {
+            event_loop.state_mut().pending_obligation_triggers = obligation_triggers.to_vec();
+        }
         let mut builder = RecoveryDiagnosisEnvelope::builder()
             .source(DiagnosisSource::MissingEventGate)
             .severity(DiagnosisSeverity::Warning)

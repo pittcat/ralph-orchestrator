@@ -451,6 +451,33 @@ pub struct HatConfig {
     #[serde(default)]
     pub timeout: Option<u32>,
 
+    /// 2026-06-17-004 U2 (R3): per-hat missing-event gate grace
+    /// window in seconds.  When the gate evaluates the obligation
+    /// for this hat and the elapsed time since the hat's last
+    /// activation is **less** than this value, the gate is
+    /// suppressed (`should_gate_missing_events` returns `false`).
+    /// This protects long-running hats (e.g. `dimension-reviewer`
+    /// with `timeout: 1800`) from being mis-fired during the first
+    /// ~30-60s of model warm-up just because no event has
+    /// appeared on the bus yet.
+    ///
+    /// Resolution order in [`resolve_missing_event_grace_secs`]:
+    ///   1. This per-hat value (highest priority).
+    ///   2. The `EventLoopConfig::default_missing_event_grace_secs`
+    ///      preset default (operator-controlled).
+    ///   3. `min(idle_timeout_secs * 0.3, 540)` — diagnostic-
+    ///      recommended default that scales with the backend idle
+    ///      timeout, capped at 540s to prevent extremely short
+    ///      adapter timeouts from collapsing the grace window to
+    ///      a uselessly small value.
+    ///   4. `0` — gate is never suppressed (legacy / opt-out).
+    ///
+    /// `None` means "fall through to the default chain".  Set to
+    /// `Some(0)` to opt out of the grace entirely (the gate fires
+    /// on the very first missing-event iteration).
+    #[serde(default)]
+    pub missing_event_grace_secs: Option<u32>,
+
     /// Maximum concurrent wave instances for this hat.
     ///
     /// When > 1, the loop runner spawns multiple backend instances in parallel
@@ -591,6 +618,10 @@ impl Default for HatConfig {
             scratchpad: None,
             disallowed_tools: Vec::new(),
             timeout: None,
+            // 2026-06-17-004 U2 (R3): default `None` so the
+            // `resolve_missing_event_grace_secs` helper falls
+            // through to the operator-controlled default chain.
+            missing_event_grace_secs: None,
             concurrency: 1,
             aggregate: None,
             event_filter: None,
@@ -757,6 +788,40 @@ pub fn obligation_satisfied(
             .any(|m| candidate_topics.iter().any(|t| t == m))
 }
 
+/// 2026-06-17-004 U2 (R3): resolve the missing-event gate grace
+/// window for a given hat.  Resolution chain (KTD-4 in the plan):
+///
+///   1. `hat.missing_event_grace_secs` (per-hat override; explicit
+///      `Some(0)` opts out and disables the grace).
+///   2. `preset_default` — the operator-controlled default for the
+///      preset, typically wired from `EventLoopConfig`.
+///   3. `min(adapter_idle_secs * 0.3, 540)` — diagnostic-recommended
+///      fallback that scales with the backend idle timeout, capped
+///      at 540s to prevent extremely short adapter timeouts from
+///      collapsing the grace window to a uselessly small value.
+///   4. `0` — never suppress (legacy / opt-out).
+///
+/// The `0.3` multiplier matches the diagnostic report's
+/// "≥ timeout×0.3" recommendation; the 540s floor keeps the
+/// recommended default from collapsing to <30s for adapters with
+/// `idle_timeout_secs < 100`.  `u32` is the natural unit
+/// throughout the `HatConfig` API.
+pub fn resolve_missing_event_grace_secs(
+    hat: &HatConfig,
+    preset_default: Option<u32>,
+    adapter_idle_secs: u32,
+) -> u32 {
+    if let Some(secs) = hat.missing_event_grace_secs {
+        return secs;
+    }
+    if let Some(secs) = preset_default {
+        return secs;
+    }
+    // Fallback: scale with adapter idle, cap at 540s.
+    let scaled = (adapter_idle_secs as f64 * 0.3).floor() as u32;
+    scaled.min(540)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -777,6 +842,10 @@ mod tests {
             scratchpad: None,
             disallowed_tools: Vec::new(),
             timeout: None,
+            // 2026-06-17-004 U2 (R3): test helper does not need
+            // the new field; explicit `None` keeps the helper
+            // aligned with `HatConfig::default()`.
+            missing_event_grace_secs: None,
             concurrency: 1,
             aggregate: None,
             event_filter: None,

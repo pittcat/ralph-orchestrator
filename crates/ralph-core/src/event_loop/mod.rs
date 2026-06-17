@@ -4190,6 +4190,24 @@ impl EventLoop {
                 self.record_hat_activations(&active_hat_ids);
                 self.state.last_active_hat_ids = active_hat_ids.clone();
 
+                // 2026-06-17-004 U2 (R3): refresh the per-hat
+                // activation clock for every hat about to execute
+                // an agent.  The clock is the source of truth for
+                // the missing-event gate's grace window: when the
+                // gate fires within `hat.missing_event_grace_secs`
+                // (default `min(adapter_idle * 0.3, 540)`) of an
+                // activation, the gate is suppressed so long-running
+                // hats like `dimension-reviewer` (per-worker timeout
+                // 1800s) are not mis-fired during the first few
+                // seconds of model warm-up.  Subsequent activations
+                // REPLACE the timestamp so a hat that loops through
+                // many short turns does not accumulate a stale
+                // clock that suppresses the gate past its useful
+                // window.
+                for hat_id in &active_hat_ids {
+                    self.state.record_hat_activation(hat_id);
+                }
+
                 // U3: Record activation lifecycle for each active hat.
                 // For each hat activation, create an ActivationKey and activate the tracker.
                 // The trigger topic is the first regular event whose topic matches

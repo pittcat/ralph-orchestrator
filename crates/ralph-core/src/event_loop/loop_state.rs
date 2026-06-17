@@ -353,6 +353,39 @@ pub struct LoopState {
     /// (the pruning fires on step boundaries, not on every
     /// `review.failed`).
     pub work_done_seen_tasks: HashSet<String>,
+
+    /// 2026-06-17-004 U2 (R3): per-hat first-activation timestamp
+    /// for the current loop lifetime.  The `HatActivationClock` is
+    /// written/refreshed when a hat is selected to execute an agent
+    /// (see `event_loop/mod.rs::process_output` L4228 area).  The
+    /// missing-event hard gate consults the clock to defer itself
+    /// for a per-hat `missing_event_grace_secs` window — long-running
+    /// hats like `dimension-reviewer` (per-worker timeout 1800s) must
+    /// not be mis-fired during the first ~30-60s of model warm-up
+    /// just because no event has appeared on the bus yet.
+    ///
+    /// `Instant::now()` is recorded the first time a hat activates;
+    /// subsequent activations REFRESH the timestamp so repeated
+    /// short activations do not accumulate a stale clock.  The
+    /// missing-event gate fires only when `now - activation_at >=
+    /// grace_secs`; within the grace window the gate is suppressed
+    /// (returns `false`) regardless of the obligation/legacy path.
+    pub hat_activation_at: HashMap<HatId, Instant>,
+
+    /// 2026-06-17-004 U3 (R4+R5): snapshot of the trigger events
+    /// that activated the most recent hat.  Populated when the
+    /// gate is about to inject a `task.resume` for a hat that
+    /// forgot to emit — the gate's `inject_missing_event_hard_gate_guidance`
+    /// helper reads this snapshot to embed the original trigger
+    /// topic + payload into the resume JSON (via
+    /// `original_trigger_topic` / `original_trigger_payload`).
+    /// The snapshot is then drained by the runner's
+    /// `replay_obligation_triggers_to_activation_state` helper so
+    /// the next `last_activation_events` snapshot includes the
+    /// triggers (the resume's first activation sees its own
+    /// `task.resume` event, not the original `review.dimension.ready`
+    /// that woke the original hat).
+    pub pending_obligation_triggers: Vec<Event>,
 }
 impl Default for LoopState {
     fn default() -> Self {
@@ -423,6 +456,16 @@ impl Default for LoopState {
             bootstrap_failed: false,
             recoverable_exhaustion_buffer: Vec::new(),
             work_done_seen_tasks: HashSet::new(),
+            // 2026-06-17-004 U2 (R3): per-hat activation clock for
+            // missing-event gate grace window. Empty by default;
+            // the loop populates entries as hats are activated.
+            hat_activation_at: HashMap::new(),
+            // 2026-06-17-004 U3 (R4+R5): empty obligation-trigger
+            // snapshot. Populated by the missing-event hard gate
+            // before injecting the resume JSON; drained by the
+            // runner's `replay_obligation_triggers_to_activation_state`
+            // helper after `pending_recovery_hat` is pinned.
+            pending_obligation_triggers: Vec::new(),
         }
     }
 }
@@ -643,6 +686,58 @@ impl LoopState {
         let prefix = format!("{plan_name}::{step}::");
         self.work_done_seen_tasks
             .retain(|key| !key.starts_with(&prefix));
+    }
+
+    /// 2026-06-17-004 U2 (R3): record/refresh the per-hat
+    /// activation clock.  Called from
+    /// `event_loop/mod.rs::process_output` whenever a hat is
+    /// selected to execute an agent.  Subsequent activations
+    /// REPLACE the timestamp so a hat that loops through several
+    /// short activations (e.g. executor retrying on a transient
+    /// contract failure) does not accumulate a stale "first
+    /// activation" that suppresses the gate across many turns.
+    /// The default zero-duration return means "no clock
+    /// recorded" — the missing-event gate does not consult
+    /// `hat_activation_at` at all when the hat has never been
+    /// activated (e.g. fresh deployment, tests that bypass
+    /// `process_output`).
+    pub fn record_hat_activation(&mut self, hat_id: &HatId) {
+        self.hat_activation_at
+            .insert(hat_id.clone(), Instant::now());
+    }
+
+    /// 2026-06-17-004 U2 (R3): how long since the hat was last
+    /// activated, or `None` when no activation has been recorded.
+    /// Used by [`crate::event_loop::hard_gate::should_gate_missing_events`]
+    /// to defer the missing-event gate during the per-hat grace
+    /// window.
+    pub fn hat_activation_elapsed(&self, hat_id: &HatId) -> Option<Duration> {
+        self.hat_activation_at
+            .get(hat_id)
+            .map(|when| when.elapsed())
+    }
+
+    /// 2026-06-17-004 U3 (R4+R5): drain the obligation-trigger
+    /// snapshot into `last_activation_events` so the next hat
+    /// activation (the one woken by the recovery `task.resume`)
+    /// sees the original trigger topic — typically
+    /// `review.dimension.ready` for `dimension-reviewer`.  Without
+    /// the replay, the next activation's `last_activation_events`
+    /// would be empty (only the resume itself is in flight), and
+    /// the obligation check in `should_gate_missing_events` would
+    /// not know which trigger event the hat is responding to.
+    ///
+    /// Called by the runner after `pending_recovery_hat` is pinned
+    /// and before the next `process_output` runs.  Returns the
+    /// drained events for callers that want to log them; the
+    /// in-place side effect (mutating `last_activation_events`) is
+    /// the load-bearing piece.
+    pub fn replay_obligation_triggers_to_activation_state(&mut self) -> Vec<Event> {
+        let drained = std::mem::take(&mut self.pending_obligation_triggers);
+        if !drained.is_empty() {
+            self.last_activation_events = drained.clone();
+        }
+        drained
     }
 
     fn event_counts_toward_stale_loop(event: &Event) -> bool {

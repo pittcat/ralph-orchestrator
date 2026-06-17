@@ -39,6 +39,16 @@ pub enum RejectionStage {
     ExecutionContract,
     /// Rejected by the payload contract.
     PayloadContract,
+    /// 2026-06-17-004 U3 (R4+R5): synthesised by the missing-event
+    /// hard gate (`hard_gate::inject_missing_event_hard_gate_guidance`).
+    /// The agent did not emit any event on its publish obligation;
+    /// the gate injects a `task.resume` so the hat gets another
+    /// chance.  The `stage` value in the resume payload is
+    /// `"missing_event"` so the drift detector's field-completeness
+    /// metric counts these as a recognisable rejection class
+    /// (rather than collapsing them into the generic `policy` or
+    /// `execution_contract` buckets).
+    MissingEvent,
 }
 
 impl RejectionStage {
@@ -49,6 +59,7 @@ impl RejectionStage {
             RejectionStage::Policy => "policy",
             RejectionStage::ExecutionContract => "execution_contract",
             RejectionStage::PayloadContract => "payload_contract",
+            RejectionStage::MissingEvent => "missing_event",
         }
     }
 }
@@ -563,17 +574,48 @@ pub fn enrich_task_resume_payload(
     reason_hint: &str,
     target_hat: Option<&str>,
 ) -> String {
+    enrich_task_resume_payload_with_stage(free_form_message, reason_hint, target_hat, None)
+}
+
+/// 2026-06-17-004 U3 (R4+R5): extend `enrich_task_resume_payload`
+/// with an explicit `stage` field on the JSON payload.  When the
+/// caller passes `Some(stage)`, the produced JSON includes a
+/// top-level `stage` key whose value is the `RejectionStage::as_str()`
+/// of the supplied variant (e.g. `"missing_event"` for the
+/// missing-event hard gate).  When the caller passes `None`, the
+/// legacy behaviour is preserved (no `stage` field) so existing
+/// callers that derive `stage` from the rejection remain
+/// unchanged.
+///
+/// The function is the single entry point for synthesising
+/// `task.resume` JSON in the orchestrator (see
+/// `hard_gate::inject_missing_event_hard_gate_guidance` and
+/// `hard_gate::inject_hard_gate_guidance`).
+pub fn enrich_task_resume_payload_with_stage(
+    free_form_message: &str,
+    reason_hint: &str,
+    target_hat: Option<&str>,
+    stage: Option<RejectionStage>,
+) -> String {
     let reason_code = extract_reason_code(reason_hint);
     let target_hat_value = target_hat
         .filter(|h| !h.is_empty())
         .unwrap_or("ralph")
         .to_string();
-    serde_json::json!({
+    let mut obj = serde_json::json!({
         "reason": reason_code,
         "target_hat": target_hat_value,
         "message": free_form_message,
-    })
-    .to_string()
+    });
+    if let Some(stage_value) = stage {
+        if let serde_json::Value::Object(ref mut map) = obj {
+            map.insert(
+                "stage".into(),
+                serde_json::Value::String(stage_value.as_str().into()),
+            );
+        }
+    }
+    obj.to_string()
 }
 
 #[cfg(test)]

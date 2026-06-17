@@ -453,6 +453,73 @@ pub fn check_isolated_scope(
     })
 }
 
+/// U1 (2026-06-17-004 plan, R1+R2): CLI provenance fail-closed.
+///
+/// Closes the `hat = None` bypass where an isolated-mode CLI emit
+/// slips past `check_isolated_scope` (which only enforces when the
+/// hat is known). Without provenance, the origin guard downstream
+/// drops the event at JSONL read time — the agent gets no
+/// actionable backpressure at the CLI boundary.
+///
+/// Returns `Ok(())` when:
+/// - `config.event_loop.execution_mode != Isolated` (coordinator
+///   mode allows shared-prompt emission without per-hat provenance)
+/// - `hat` is `Some(_)` (scope guard will check the hat; this gate
+///   only catches the *missing*-provenance path)
+/// - `topic` is in `RALPH_CONTROL_TOPICS` (loop completion, cancel,
+///   human interaction, recovery — produced by Ralph itself or by
+///   the runtime ralph pseudo-hat)
+/// - `topic` is an orchestrator-produced diagnostic topic (`event.*`
+///   allowlist, see `is_orchestrator_diagnostic_topic`)
+///
+/// Returns `Err(ValidationError)` with
+/// `reason_code = "missing_provenance"` when the caller is in
+/// isolated mode, has no hat, and is trying to publish a business
+/// topic. The error message names the topic and tells the agent to
+/// pass `--hat` or set `RALPH_CURRENT_HAT`.
+///
+/// Note: `task.resume` is intentionally in `RALPH_CONTROL_TOPICS`
+/// (post-U1 fix in `event_origin.rs`) so the recovery envelope can
+/// be emitted by the runner without a hat. This matches the runtime
+/// origin-guard exemption for control topics.
+pub fn check_emit_provenance(
+    hat: Option<&str>,
+    topic: &str,
+    config: &RalphConfig,
+) -> std::result::Result<(), ValidationError> {
+    if config.event_loop.execution_mode != HatExecutionMode::Isolated {
+        return Ok(());
+    }
+
+    if hat.is_some() {
+        // Provenance present — scope guard (check_isolated_scope) and
+        // runtime origin guard handle the rest.
+        return Ok(());
+    }
+
+    // Control topics are produced by the loop / runtime ralph pseudo-hat
+    // and are exempt from hat provenance. Diagnostic events are emitted
+    // by the loop itself for observability.
+    if ralph_core::RALPH_CONTROL_TOPICS.iter().any(|t| *t == topic) {
+        return Ok(());
+    }
+    if ralph_core::is_orchestrator_diagnostic_topic(topic) {
+        return Ok(());
+    }
+
+    Err(ValidationError {
+        payload_index: 0,
+        field: "hat".to_string(),
+        reason_code: "missing_provenance".to_string(),
+        message: format!(
+            "missing provenance: isolated mode requires a hat for business topic '{topic}'. \
+             Pass --hat <hat-id> or set RALPH_CURRENT_HAT=<hat-id>. \
+             (Control topics {:?} and orchestrator diagnostics bypass this gate.)",
+            ralph_core::RALPH_CONTROL_TOPICS
+        ),
+    })
+}
+
 /// Lightweight extractor mirroring the loop-side `dimension` field
 /// reading. Returns `<missing>` for any non-JSON payload, missing
 /// field, or non-string value. Trims the value (P1#6 fix) so the
@@ -1472,5 +1539,92 @@ hats:
             "message must show empty allowed_publishes for unknown hat, got: {}",
             err.message
         );
+    }
+
+    // -----------------------------------------------------------------
+    // 2026-06-17-004 plan U1 (R1, R2): unit tests for check_emit_provenance.
+    // -----------------------------------------------------------------
+
+    fn isolated_config_minimal() -> RalphConfig {
+        let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  executor:
+    name: "Executor"
+    publishes: ["work.done"]
+"#;
+        serde_yaml::from_str(yaml).unwrap()
+    }
+
+    #[test]
+    fn u1_check_emit_provenance_no_hat_business_topic_rejected() {
+        let cfg = isolated_config_minimal();
+        let err = check_emit_provenance(None, "review.passed", &cfg)
+            .expect_err("isolated + no hat + business topic must be rejected");
+        assert_eq!(err.reason_code, "missing_provenance");
+        assert!(err.message.contains("review.passed"));
+        assert!(err.message.contains("--hat"));
+    }
+
+    #[test]
+    fn u1_check_emit_provenance_with_hat_passes() {
+        let cfg = isolated_config_minimal();
+        // Hat present → defer to scope guard, this gate returns Ok.
+        assert!(check_emit_provenance(Some("executor"), "work.done", &cfg).is_ok());
+        assert!(check_emit_provenance(Some("executor"), "review.passed", &cfg).is_ok());
+    }
+
+    #[test]
+    fn u1_check_emit_provenance_control_topics_allowed_without_hat() {
+        let cfg = isolated_config_minimal();
+        // Control topics are produced by the loop / runtime pseudo-hat.
+        for topic in [
+            "LOOP_COMPLETE",
+            "loop.cancel",
+            "task.resume",
+            "human.interact",
+            "human.guidance",
+        ] {
+            assert!(
+                check_emit_provenance(None, topic, &cfg).is_ok(),
+                "control topic '{topic}' must be allowed without hat"
+            );
+        }
+    }
+
+    #[test]
+    fn u1_check_emit_provenance_diagnostic_topics_allowed_without_hat() {
+        let cfg = isolated_config_minimal();
+        // Orchestrator diagnostics (event.* allowlist) are emitted by
+        // the loop itself.
+        for topic in [
+            "event.malformed",
+            "event.scope_violation",
+            "event.isolation.boundary_violation",
+            "event.payload_contract.rejected",
+        ] {
+            assert!(
+                check_emit_provenance(None, topic, &cfg).is_ok(),
+                "diagnostic topic '{topic}' must be allowed without hat"
+            );
+        }
+    }
+
+    #[test]
+    fn u1_check_emit_provenance_coordinator_mode_noop() {
+        let yaml = r#"
+event_loop:
+  execution_mode: coordinator
+hats:
+  executor:
+    name: "Executor"
+    publishes: ["work.done"]
+"#;
+        let cfg: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        // Coordinator mode does not require provenance — the existing
+        // blanket check (L424-436 in emit.rs) governs.
+        assert!(check_emit_provenance(None, "review.passed", &cfg).is_ok());
+        assert!(check_emit_provenance(None, "debug.step", &cfg).is_ok());
     }
 }

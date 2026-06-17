@@ -46,6 +46,7 @@ pub use features::FeaturesConfig;
 pub use hat::{
     ActivationObligation, AggregateConfig, AggregateMode, ConditionalEmission, EventMetadata,
     HatBackend, HatConfig, TriggerContext, TriggerPredicate, obligation_satisfied,
+    resolve_missing_event_grace_secs,
 };
 pub use hooks::{
     HookDefaults, HookMutationConfig, HookOnError, HookPhaseEvent, HookSpec, HookSuspendMode,

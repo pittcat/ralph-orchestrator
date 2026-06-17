@@ -645,6 +645,9 @@ mod tests {
             scratchpad: None,
             disallowed_tools: vec![],
             timeout: None,
+            // 2026-06-17-004 U2 (R3): test helper aligned with
+            // `HatConfig::default()`.
+            missing_event_grace_secs: None,
             concurrency: 1,
             aggregate: None,
             event_filter: None,

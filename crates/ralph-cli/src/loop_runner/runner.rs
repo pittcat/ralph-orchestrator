@@ -4160,12 +4160,36 @@ async fn run_loop_impl_inner(
             // the helper can take `&mut event_loop` (U6 recovery
             // responder bookkeeping lives on the event loop).
             let publishes = event_loop.get_hat_publishes(&display_hat);
-            inject_missing_event_hard_gate_guidance(
+            // 2026-06-17-004 U3 (R4+R5): snapshot the obligation
+            // triggers (the events that woke the gated hat) so
+            // the gate can embed their topic + payload into the
+            // `task.resume` JSON AND replay them into
+            // `last_activation_events` for the next activation.
+            // For hats without explicit obligations we use the
+            // same `last_activation_events` (the legacy blanket
+            // rule path doesn't care about triggers, but the
+            // replay is still useful for the U1 field-completeness
+            // metric and the U2 recovery envelope shape).
+            let triggers_for_gate = event_loop.state().last_activation_events.clone();
+            inject_missing_event_hard_gate_guidance_with_triggers(
                 &ctx,
                 Some(&mut event_loop),
                 &display_hat,
                 &publishes,
+                &triggers_for_gate,
             );
+            // 2026-06-17-004 U3 (R4+R5): after the gate pins
+            // `pending_recovery_hat`, drain the snapshot into
+            // `last_activation_events` so the next activation
+            // (the one woken by the recovery `task.resume`) sees
+            // the original trigger context.  Without this replay
+            // the next iteration's `last_activation_events` would
+            // be empty (only the resume itself is in flight), and
+            // the obligation check in `should_gate_missing_events`
+            // would have no trigger to evaluate against.
+            event_loop
+                .state_mut()
+                .replay_obligation_triggers_to_activation_state();
             info!(
                 hat = %display_hat.as_str(),
                 consecutive = event_loop.state().consecutive_hard_gates,

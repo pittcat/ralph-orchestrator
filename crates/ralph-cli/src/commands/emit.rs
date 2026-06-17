@@ -422,6 +422,14 @@ fn emit_command_with_root_and_hats(
     };
 
     // Enforce provenance requirements when hat is missing.
+    //
+    // U1 (2026-06-17-004 plan, R1+R2): the blanket precheck is replaced
+    // by `check_emit_provenance` (called below as a separate gate). The
+    // smart gate allows control topics (loop.cancel, task.resume,
+    // human.*) and orchestrator diagnostics (event.*) to be emitted
+    // without a hat — these are produced by the loop / runtime ralph
+    // pseudo-hat. Business topics still fail-closed when provenance
+    // is missing.
     if hat.is_none() {
         let provenance_required = config
             .as_ref()
@@ -429,9 +437,19 @@ fn emit_command_with_root_and_hats(
             .map(|p| p.require_emit_provenance)
             .unwrap_or(false);
         if provenance_required {
-            anyhow::bail!(
-                "Event provenance required: --hat <hat-id> or RALPH_CURRENT_HAT must be set."
-            );
+            // Skip the bail for control / diagnostic topics — they are
+            // produced by the loop itself and bypass the new
+            // check_emit_provenance gate (see policy_check.rs). The
+            // smart gate catches business-topic cases below.
+            let is_control = ralph_core::RALPH_CONTROL_TOPICS
+                .iter()
+                .any(|t| *t == args.topic.as_str());
+            let is_diagnostic = ralph_core::is_orchestrator_diagnostic_topic(&args.topic);
+            if !is_control && !is_diagnostic {
+                anyhow::bail!(
+                    "Event provenance required: --hat <hat-id> or RALPH_CURRENT_HAT must be set."
+                );
+            }
         }
     }
 
@@ -552,6 +570,37 @@ fn emit_command_with_root_and_hats(
         }
     } else if check_mode == PolicyCheckMode::Skip {
         tracing::info!("cli emit policy check skipped: no event_policy in resolved config");
+    }
+
+    // U1 (2026-06-17-004 plan, R1+R2): CLI provenance fail-closed.
+    // Fires regardless of `check_mode`: if the agent is in isolated
+    // mode and forgot to pass `--hat`, the CLI must reject the event
+    // BEFORE it lands in events.jsonl. Without this gate, the runtime
+    // origin guard drops the event silently at JSONL read time and the
+    // agent gets no actionable backpressure at the CLI boundary.
+    //
+    // `check_isolated_scope` below only enforces when the hat is known;
+    // `check_emit_provenance` is the matching gate for the `hat = None`
+    // path. Together they form the full isolated-mode CLI guard.
+    if let Some(cfg) = config.as_ref() {
+        if let Err(err) =
+            crate::policy_check::check_emit_provenance(hat.as_deref(), &args.topic, cfg)
+        {
+            use ralph_core::{PolicyFinding, ViolationType};
+            let finding = PolicyFinding {
+                violation_type: ViolationType::SemanticGateViolation {
+                    gate: "missing_provenance".to_string(),
+                    context: err.message.clone(),
+                },
+                topic: args.topic.clone(),
+                message: err.message.clone(),
+            };
+            record_cli_emit_rejection(&workspace_root, &args.topic, hat.as_deref(), &finding);
+            anyhow::bail!(
+                "Event rejected by missing-provenance guard: {}",
+                err.message
+            );
+        }
     }
 
     // U1 (2026-06-17-003 plan): isolated mode scope precheck. When the

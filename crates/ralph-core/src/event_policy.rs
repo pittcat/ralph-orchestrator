@@ -937,9 +937,25 @@ pub fn validate_event_with_hat(
         }
 
         // Hat-aware allowed values.
-        // Only enforce when the emitting hat is known; this lets CLI emit
-        // reject cross-hat impersonation before the event reaches jsonl.
-        if let Some(hat_id) = hat {
+        // U1 (2026-06-17-004 plan, R2): fail-closed when provenance is
+        // missing and the schema carries per-hat restrictions. Without
+        // a known hat, no hat-specific value can be validated, so the
+        // event must be rejected — leaving the question of "which hat"
+        // to the caller (CLI emit pipeline enforces `check_emit_provenance`
+        // before reaching this function; programmatic callers are still
+        // required to supply a hat for topics with `hat_allowed_values`).
+        //
+        // The previous code silently skipped the entire hat-aware block
+        // when `hat = None`. That let a hat-less emit bypass the
+        // per-hat restriction (e.g. review-coordinator could emit
+        // `review.passed(skip_reason=aggregate_timeout)` by dropping
+        // the `--hat` flag). This is now a hard `MissingRequiredField`
+        // finding — the gate fails closed.
+        if schema.hat_allowed_values.is_empty() {
+            // No per-hat restrictions on this topic — skip the block.
+            // (Implicit: when `hat = None` and no `hat_allowed_values`
+            // are configured, nothing to validate.)
+        } else if let Some(hat_id) = hat {
             for (field_path, per_hat_rules) in &schema.hat_allowed_values {
                 if let Some(rule) = per_hat_rules.iter().find(|r| r.hat_id == hat_id) {
                     if let Some(p) = payload
@@ -961,6 +977,35 @@ pub fn validate_event_with_hat(
                     }
                 }
             }
+        } else {
+            // Hat is missing but schema has hat-specific allowed values.
+            // Without provenance we cannot pick the right rule, so we
+            // emit a single finding that names the topic + the per-hat
+            // restrictions. The CLI emit pipeline's
+            // `check_emit_provenance` rejects this event earlier; this
+            // finding covers programmatic callers (API server,
+            // in-process emitters) that go straight to
+            // `validate_event_with_hat`.
+            let mut per_hat_summary: Vec<String> = Vec::new();
+            for (field_path, per_hat_rules) in &schema.hat_allowed_values {
+                for rule in per_hat_rules {
+                    per_hat_summary.push(format!(
+                        "hat='{}' field='{}' allowed={:?}",
+                        rule.hat_id, field_path, rule.values
+                    ));
+                }
+            }
+            findings.push(PolicyFinding {
+                topic: topic.to_string(),
+                violation_type: ViolationType::MissingRequiredField {
+                    field: "hat".to_string(),
+                },
+                message: format!(
+                    "Topic '{topic}' has hat-specific allowed values; a hat is required \
+                     to validate the payload. Provenance rules: {per_hat_summary:?}. \
+                     Pass --hat <hat-id> or set RALPH_CURRENT_HAT=<hat-id>."
+                ),
+            });
         }
     }
 
@@ -2016,16 +2061,41 @@ mod tests {
     #[test]
     fn test_u4_review_passed_skip_reason_allowlist_accepts_legal_values() {
         let config = review_passed_allowlist_config();
-        for legal in ["empty_diff", "trivial_step", "aggregate_timeout"] {
+        // Each legal value is paired with a hat that allows it (per the
+        // hat_allowed_values below). `trivial_step` is allowed by the
+        // global allowlist only — no hat-specific entry — so the
+        // hat-aware check skips and the value passes through the
+        // global allowlist. With a hat, the check passes when the
+        // value is either: (a) in the hat's per-hat list, or (b) not
+        // restricted per-hat (i.e. the schema has no entry for that
+        // hat, in which case only the global allowlist applies).
+        let cases: &[(&str, &str)] = &[
+            ("empty_diff", "review-coordinator"),
+            ("aggregate_timeout", "review-synthesizer"),
+            // trivial_step is in the global allowlist but not in any
+            // hat-specific entry. The hat-aware block only fires when
+            // the schema has a rule for the emitting hat; pick a hat
+            // without a per-hat rule (the schema only has rules for
+            // review-coordinator / review-synthesizer, so use any
+            // other hat id to exercise the "no rule → skip" branch).
+            ("trivial_step", "executor"),
+        ];
+        for (legal, hat_id) in cases {
             let payload = format!(
                 r#"{{"plan_name":"p","task_id":"t","task_key":"k","step":"s","findings_count":0,"fix_round":0,"verdict":"pass","skip_reason":"{legal}"}}"#
             );
             let mut state = PolicyRuntimeState::default();
-            let decision = validate_event("review.passed", Some(&payload), &config, &mut state);
+            let decision = validate_event_with_hat(
+                "review.passed",
+                Some(&payload),
+                &config,
+                &mut state,
+                Some(hat_id),
+            );
             assert_eq!(
                 decision,
                 PolicyDecision::Accept,
-                "skip_reason='{legal}' should be accepted by the allowlist, got {:?}",
+                "skip_reason='{legal}' with hat='{hat_id}' should be accepted by the allowlist, got {:?}",
                 decision
             );
         }
@@ -2093,14 +2163,39 @@ mod tests {
             decision
         );
 
-        // No hat provided → hat-aware check is skipped, regular allowlist applies.
+        // U1 (2026-06-17-004 plan, R2): no hat provided + schema has
+        // hat_allowed_values → fail-closed with a MissingRequiredField
+        // finding. The CLI emit pipeline's `check_emit_provenance` gate
+        // rejects hat-less business-topic emits earlier; this test pins
+        // the programmatic-caller contract (validate_event / API
+        // server path) so the old "skip hat-aware when None" behavior
+        // cannot silently re-appear. The `validate_event` convenience
+        // wraps `validate_event_with_hat(..., None)` so it inherits
+        // the same fail-closed semantics.
         let mut state = PolicyRuntimeState::default();
-        let decision = validate_event("review.passed", Some(payload), &config, &mut state);
-        assert_eq!(
-            decision,
-            PolicyDecision::Accept,
-            "aggregate_timeout must remain in the global allowlist"
-        );
+        let decision =
+            validate_event_with_hat("review.passed", Some(payload), &config, &mut state, None);
+        match decision {
+            PolicyDecision::RejectWithResume(finding) => {
+                assert!(
+                    matches!(
+                        finding.violation_type,
+                        ViolationType::MissingRequiredField { .. }
+                    ),
+                    "no-hat + hat_allowed_values must yield MissingRequiredField, got {:?}",
+                    finding.violation_type
+                );
+                assert!(
+                    finding.message.contains("hat-specific allowed values"),
+                    "message must explain the provenance requirement, got: {}",
+                    finding.message
+                );
+            }
+            other => panic!(
+                "no-hat + hat_allowed_values must be rejected (fail-closed), got {:?}",
+                other
+            ),
+        }
     }
 
     #[test]

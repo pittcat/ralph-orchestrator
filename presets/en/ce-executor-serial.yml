@@ -158,6 +158,12 @@ event_loop:
     # non-conforming event under this preset.
     require_policy_check_for_cli_emit: true
     allow_unsafe_cli_emit: false
+    # U1 (2026-06-17-004 plan): CLI provenance fail-closed. In isolated
+    # mode, every `ralph emit` MUST carry a hat (--hat or
+    # RALPH_CURRENT_HAT) for business topics. Control topics
+    # (loop.cancel, task.resume, human.*) and orchestrator diagnostics
+    # are exempt — the loop itself emits them.
+    require_emit_provenance: true
     # Topic-deny rules with glob support. Serial preset replaces
     # `review.wave.ready` with three new topics; each is restricted to
     # its owning hat and locked for the runtime pseudo-hat `ralph`.
@@ -961,6 +967,13 @@ hats:
     # `fix.applied` or on the next `review.dimension.done` /
     # `review.dimension.failed` from any other dimension).
     timeout: 1800
+    # 2026-06-17-004 U2 (R3): missing-event gate grace window. The
+    # diagnostic report flagged that the missing-event gate fires
+    # within ~49s of `dimension-reviewer` activation, killing the
+    # worker during its first model warm-up turn. The 540s grace
+    # matches the recommended default cap and gives the worker a
+    # full 9 minutes before the gate may trip.
+    missing_event_grace_secs: 540
     instructions: |
       ## DIMENSION REVIEWER MODE — Focused {dimension} Review
 
