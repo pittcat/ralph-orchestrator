@@ -284,8 +284,11 @@ fn test_u2_fresh_policy_rejection_still_injects_task_resume() {
     let events_path = temp_dir.path().join("events.jsonl");
 
     // Policy rejects events that don't match the declared schema.
-    // We use `work.done` with an empty payload `{}` which violates
-    // the completion guard (expects `plan_path` field).
+    // The `work.done` schema requires 5 fields (`plan_name`,
+    // `plan_path`, `task_id`, `task_key`, `step`); an empty payload
+    // `{}` produces a `MissingRequiredField` finding that escalates
+    // to `RejectWithResume` under the enforce / reject_with_resume
+    // policy mode.
     let yaml = r#"
 event_loop:
   event_policy:
@@ -294,6 +297,10 @@ event_loop:
     on_violation: reject_with_resume
     terminal_topics: ["work.done"]
     business_topics: ["work.ready", "work.done"]
+    schemas:
+      work.done:
+        payload: json_object
+        required_fields: ["plan_name", "plan_path", "task_id", "task_key", "step"]
 hats:
   executor:
     name: "Executor"
@@ -356,6 +363,10 @@ event_loop:
     on_violation: reject_with_resume
     terminal_topics: ["work.done"]
     business_topics: ["work.ready", "work.done"]
+    schemas:
+      work.done:
+        payload: json_object
+        required_fields: ["plan_name", "plan_path", "task_id", "task_key", "step"]
 hats:
   executor:
     name: "Executor"
@@ -430,6 +441,10 @@ event_loop:
     on_violation: reject_with_resume
     terminal_topics: ["work.done"]
     business_topics: ["work.ready", "work.done"]
+    schemas:
+      work.done:
+        payload: json_object
+        required_fields: ["plan_name", "plan_path", "task_id", "task_key", "step"]
 hats:
   executor:
     name: "Executor"
@@ -490,6 +505,10 @@ event_loop:
     on_violation: reject_with_resume
     terminal_topics: ["work.done"]
     business_topics: ["work.ready", "work.done"]
+    schemas:
+      work.done:
+        payload: json_object
+        required_fields: ["plan_name", "plan_path", "task_id", "task_key", "step"]
 hats:
   executor:
     name: "Executor"
@@ -501,13 +520,17 @@ hats:
     event_loop.initialize("TestU2FutureTs");
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
 
-    // Timestamp 1 hour in the future.
-    let one_hour_future =
-        (chrono::Utc::now() + chrono::Duration::seconds(3600)).to_rfc3339();
+    // Timestamp 60s in the future. Stays inside
+    // `EventReader::MAX_FUTURE_TS_SKEW_SECS` (300s) so the event
+    // survives the read-time future-window check, but the
+    // `is_rejection_stale` helper at the policy-rejection site
+    // treats any `source_unix > now_unix` as stale.
+    let sixty_seconds_future =
+        (chrono::Utc::now() + chrono::Duration::seconds(60)).to_rfc3339();
     let json = serde_json::json!({
         "topic": "work.done",
         "payload": "{}",
-        "ts": one_hour_future,
+        "ts": sixty_seconds_future,
         "hat": "executor",
     });
     std::fs::OpenOptions::new()
