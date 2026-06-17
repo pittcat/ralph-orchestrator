@@ -312,9 +312,14 @@ loop.stalled:
   payload: json_object
 
 # 2026-06-16-001 U5: RObot/Telegram human guidance topic.
-# The `progress-steward` hat subscribes to it so an
-# operator's proactive guidance can also wake the fallback
-# path.
+#
+# The `human.guidance` schema is retained so an operator can still
+# emit it manually from a Telegram/RObot context. The serial preset's
+# `progress-steward` does NOT subscribe to this topic — it is
+# auto-woken on `loop.stalled` only. The 2026-06-17-003 plan
+# (merry-lotus follow-up) records the product decision: automated
+# recovery flows through `task.resume` (structured), not
+# `human.guidance` (free-form, reserved for humans).
 human.guidance:
   required_fields:
     - message

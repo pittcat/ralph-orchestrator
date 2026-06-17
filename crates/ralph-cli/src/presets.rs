@@ -1148,6 +1148,34 @@ mod tests {
         );
     }
 
+    /// U4 (2026-06-17-003 plan): the `progress-steward` hat in the
+    /// serial preset must trigger on `loop.stalled` ONLY. The serial
+    /// preset does not consume `human.guidance` (no RObot/Telegram);
+    /// the topic schema is retained for operator/manual emit, but the
+    /// steward must not subscribe. The 2026-06-17-003 plan records
+    /// this as the U4 product decision — automated recovery flows
+    /// through `task.resume`, not `human.guidance`.
+    #[test]
+    fn test_ce_executor_serial_progress_steward_only_loop_stalled() {
+        let preset = get_preset("ce-executor-serial")
+            .expect("ce-executor-serial preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor-serial YAML should parse");
+        let steward = config
+            .hats
+            .get("progress-steward")
+            .expect("ce-executor-serial must define a 'progress-steward' hat");
+        assert!(
+            steward.triggers.contains(&"loop.stalled".to_string()),
+            "ce-executor-serial progress-steward must trigger on loop.stalled"
+        );
+        assert!(
+            !steward.triggers.contains(&"human.guidance".to_string()),
+            "ce-executor-serial progress-steward must NOT trigger on human.guidance \
+             (no RObot/Telegram in this preset; automated recovery uses task.resume — U4)"
+        );
+    }
+
     /// U4: review-coordinator must own the serial review events
     /// (`review.dimension.ready` and `review.dimensions.complete`) and
     /// dimension-reviewer must own the per-dim completion events
