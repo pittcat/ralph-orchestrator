@@ -435,6 +435,100 @@ fn test_emit_ce_executor_serial_executor_cannot_emit_debug_step() {
     );
 }
 
+/// 2026-06-17-004 plan U1 (R2): the builtin `ralph` pseudo-hat is the
+/// orchestration fallback. Allowing it to emit business topics (e.g.
+/// `review.passed`, `work.start`) lets a worktree loop's loop runner
+/// impersonate `review-synthesizer` / `plan-gate` / coordinator and
+/// advance the workflow as `ralph` — the same impersonation attack the
+/// P0 origin guard rejects at JSONL read time. The CLI-side guard in
+/// `commands/emit.rs:464-478` rejects this at the write boundary so
+/// the agent gets immediate backpressure. This test pins that path.
+///
+/// Control topics (`loop.cancel`, `task.resume`, `human.*`, …) remain
+/// allowed because they are produced by the loop / runtime ralph
+/// pseudo-hat itself.
+#[test]
+fn test_emit_ralph_pseudo_hat_cannot_emit_review_passed() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "-H",
+            "builtin:ce-executor-isolated",
+            "emit",
+            "review.passed",
+            "--json",
+            r#"{"plan_name":"p","task_id":"t","task_key":"k","step":"s","findings_count":0,"fix_round":0,"verdict":"pass"}"#,
+            "--hat",
+            "ralph",
+        ])
+        .current_dir(temp_path)
+        .output()
+        .expect("Failed to execute ralph emit command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "ralph pseudo-hat + review.passed (business topic) must be rejected, got stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("ralph")
+            && (stderr.contains("business topic") || stderr.contains("control topics")),
+        "expected ralph pseudo-hat rejection message, got stderr={stderr}"
+    );
+
+    // Critical: the event must NOT have landed in events.jsonl.
+    let events_file = temp_path.join(".ralph/events.jsonl");
+    let events = std::fs::read_to_string(&events_file).unwrap_or_default();
+    assert!(
+        !events.contains("review.passed"),
+        "rejected event must not be written to events.jsonl, got: {events}"
+    );
+}
+
+/// Companion of `test_emit_ralph_pseudo_hat_cannot_emit_review_passed`:
+/// control topics (`loop.cancel`, `task.resume`, `human.*`) MUST still
+/// be accepted when emitted by `ralph`, because the loop / runtime
+/// pseudo-hat is the legitimate producer. This pins the allowlist side
+/// of the same guard so a future tightening does not break the runner.
+#[test]
+fn test_emit_ralph_pseudo_hat_can_emit_loop_cancel() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "-H",
+            "builtin:ce-executor-isolated",
+            "emit",
+            "loop.cancel",
+            "--json",
+            r#"{"reason":"manual cancel for test"}"#,
+            "--hat",
+            "ralph",
+        ])
+        .current_dir(temp_path)
+        .output()
+        .expect("Failed to execute ralph emit command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "ralph pseudo-hat + loop.cancel (control topic) must succeed: stdout={stdout} stderr={stderr}"
+    );
+
+    let events_file = temp_path.join(".ralph/events.jsonl");
+    let events = std::fs::read_to_string(&events_file).unwrap();
+    assert!(
+        events.contains("loop.cancel") && events.contains("\"hat\":\"ralph\""),
+        "expected loop.cancel with hat=ralph in events.jsonl, got: {events}"
+    );
+}
+
 // -------------------------------------------------------------------------
 // Plan 001 §4.3 C1/C4/C5: RALPH_HATS_SOURCE env routes pre-publish check.
 // -------------------------------------------------------------------------
