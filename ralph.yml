@@ -40,8 +40,8 @@ core:
     - "Preserve primary sources — capture referenced code snippets with file:line attribution in scratchpad."
     - "Run targeted tests per crate via `cargo nextest run -p <crate>` during subtasks; full `./scripts/run-tests.sh` (nextest + doctest) only at final step. 若全量基线出现竞态/时序 flake（如 ralph-cli loop_runner Mutex/timeout 错误），先用 `RALPH_BASELINE_SERIAL=1 ./scripts/run-tests.sh` 强制单线程 cargo test 兜底；serial 仍失败才是真失败。详见 CLAUDE.md / AGENTS.md「Build & Test」段 HARD RULE 1+2、「并行 vs 串行分级表」与「开发基线 vs CI 基线」段。"
 
-# Per-hat backend overrides for builtin:ce-executor-isolated (merged on top of preset).
-# Implementation chain → claude; review / gate / ship / report → pi (uses ~/.pi/agent).
+# Per-hat backend overrides for builtin:ce-executor-serial (merged on top of preset).
+# Implementation chain → claude; review / gate / ship / report → claude (pi disabled for dimension-reviewer due to event contract drift).
 hats:
   coordinator:
     backend: claude
@@ -54,7 +54,7 @@ hats:
   review-coordinator:
     backend: claude
   dimension-reviewer:
-    backend: pi
+    backend: claude
   review-synthesizer:
     backend: claude
   plan-gate:
