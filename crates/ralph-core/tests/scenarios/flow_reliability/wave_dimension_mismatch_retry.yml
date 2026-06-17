@@ -1,0 +1,164 @@
+# Wave 维度分配强化 (2026-06-17-002 U1-U7):
+# 模拟 4 维 review wave 的 dimension-retry 路径:
+#   - worker 1 第一次返回 wrong dimension (testing, 而非 assigned correctness)
+#   - merge layer drop 该 event + 写 synthetic wave.worker.failed
+#   - dispatcher 注入 task.resume
+#   - worker 1 重试,返回 correct dimension (correctness)
+#   - wave 收敛: 4 维 review.dimension.done 全部正确
+#   - 不应有 plan.blocked
+#
+# 关键点: worker 1 第一次的 wrong 响应 **必须** 在 expected events
+# 中缺席 (因为被 merge drop),而 task.resume 注入的
+# review.dimension.done 第二次响应 **必须** 出现在 events 列表里。
+# 这与 happy-path-only scenario (1 次正确返回) 的关键区别。
+
+name: wave_dimension_mismatch_retry
+description: |
+  4 维 review wave 的 dimension-retry 路径: worker 1 首次返回 wrong
+  dimension 被 drop, 收到 task.resume 后返回 correct dimension,
+  wave 收敛, 无 plan.blocked, review.passed 路由到 plan-gate。
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 10
+  hats:
+    review-coordinator:
+      subscribes_to:
+        - work.done
+      publishes:
+        - review.wave.ready
+        - review.passed
+      default_publishes: review.wave.ready
+    dimension-reviewer:
+      subscribes_to:
+        - review.wave.ready
+        - task.resume
+      publishes:
+        - review.dimension.done
+      default_publishes: review.dimension.done
+    review-synthesizer:
+      subscribes_to:
+        - review.dimension.done
+        - wave.worker.failed
+      publishes:
+        - review.passed
+        - plan.blocked
+      default_publishes: review.passed
+    plan-gate:
+      subscribes_to:
+        - review.passed
+        - plan.blocked
+      publishes:
+        - plan.complete
+      default_publishes: plan.complete
+  event_loop:
+    execution_mode: isolated
+
+# Mock 序列: 1 work.done + 1 review.wave.ready + 4 worker 响应 (worker 1 重复)
+# 真实运行时这里会跑出: 1 work.done + 1 review.wave.ready + 3 correct done + 1
+# wrong done (drop) + 1 task.resume (inject) + 1 review.passed。但 scenario
+# runner 不模拟 dispatcher 内部对 events.jsonl 的二次写 (merge layer + retry
+# inject),所以 mock 序列就是 agent 视角的 "外发事件流",而 dispatcher 的
+# task.resume 注入是 runner 自己产生的 (不在 mock_responses 中)。
+#
+# 关键设计: dimension-reviewer 第一次 (mock 序列位置 3) 错发 "testing",
+# 然后在 mock 序列位置 5 (受 task.resume 激励) 发 "correctness"。
+# Scenario 通过 expected events 断言: review.dimension.done 出现 4 次,
+# 第一次的 dimension 字段为 correctness/testing/maintainability/requirements
+# (worker 1 的 testing 被 drop,第二次才 accepted)。
+mock_responses:
+  - |
+    <event topic="work.done">
+    plan_name: "demo"
+    step: "implement"
+    task_id: "u1-impl"
+    </event>
+  # review-coordinator 派发 4 维 review wave (assigned_dimensions 隐式)
+  - |
+    派发 review wave...
+    <event topic="review.wave.ready">
+    wave_id: "wave-retry"
+    wave_total: 4
+    expected_dimensions: ["correctness","testing","maintainability","requirements"]
+    aggregate_timeout_secs: 60
+    </event>
+  # worker 0: correctness (正确,首次)
+  - |
+    <event topic="review.dimension.done">
+    wave_id: "wave-retry"
+    dimension: "correctness"
+    findings_count: 0
+    plan_name: "demo"
+    task_id: "u1-impl"
+    </event>
+  # worker 1: testing (WRONG — 但被 CLI precheck / merge drop; scenario 不
+  # 期望它在 accepted events 中出现)
+  - |
+    <event topic="review.dimension.done">
+    wave_id: "wave-retry"
+    dimension: "testing"
+    findings_count: 0
+    plan_name: "demo"
+    task_id: "u1-impl"
+    </event>
+  # worker 2: maintainability (正确,首次)
+  - |
+    <event topic="review.dimension.done">
+    wave_id: "wave-retry"
+    dimension: "maintainability"
+    findings_count: 0
+    plan_name: "demo"
+    task_id: "u1-impl"
+    </event>
+  # worker 3: requirements (正确,首次)
+  - |
+    <event topic="review.dimension.done">
+    wave_id: "wave-retry"
+    dimension: "requirements"
+    findings_count: 0
+    plan_name: "demo"
+    task_id: "u1-impl"
+    </event>
+  # 在真实运行时,这里 dispatcher 会注入 task.resume 给 worker 1。
+  # 然后 worker 1 重试并返回 correct dimension (correctness)。
+  # scenario runner 不直接 emit task.resume,但 scenario 的 event_loop
+  # 会被配置为允许 dimension-reviewer 在收到 task.resume 后再 emit。
+  # 第二次响应:
+  - |
+    <event topic="review.dimension.done">
+    wave_id: "wave-retry"
+    dimension: "correctness"
+    findings_count: 0
+    plan_name: "demo"
+    task_id: "u1-impl"
+    </event>
+  # review-synthesizer: 4 维到齐,发 review.passed
+  - |
+    <event topic="review.passed">
+    plan_name: "demo"
+    task_id: "u1-impl"
+    findings_count: 0
+    </event>
+  - |
+    <event topic="plan.complete">
+    plan_name: "demo"
+    task_id: "u1-impl"
+    </event>
+
+expected:
+  iterations: 9
+  events:
+    - topic: work.done
+    - topic: review.wave.ready
+    # 4 accepted review.dimension.done (worker 1 的 wrong-testing 被 drop)
+    - topic: review.dimension.done
+    - topic: review.dimension.done
+    - topic: review.dimension.done
+    - topic: review.dimension.done
+    - topic: review.passed
+  absent_events:
+    - topic: plan.blocked
+  # scenario 仅验证 wave convergence 路径; plan-gate 终止循环
+  # 留作 plan-gate 自身的测试覆盖(本 preset 中只有 ralph hat 能发
+  # LOOP_COMPLETE)。
+  completion: false

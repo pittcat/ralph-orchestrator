@@ -207,21 +207,38 @@ fn write_cli_emit_recovery_envelope(
         })?;
     }
 
-    let (severity, outcome, reason_code) = match &finding.violation_type {
+    let (severity, outcome, reason_code, source) = match &finding.violation_type {
         ralph_core::ViolationType::PayloadTypeMismatch { .. } => (
             DiagnosisSeverity::Critical,
             DiagnosisOutcome::NotRetriable,
             "payload_contract_violation".to_string(),
+            DiagnosisSource::CliEmit,
+        ),
+        // P1#13 fix: dimension-mismatch rejections (CLI precheck
+        // for wave worker's `review.dimension.done` value) are
+        // surfaced as `WaveDimensionGuard` envelopes so
+        // `ralph diagnose` and operators can filter for the
+        // specific gate (rather than lumping them in with the
+        // generic `CliEmit` bucket). The reason code is the
+        // gate's own (`dimension_mismatch`), so the evidence
+        // is unambiguous even when both sources appear in the
+        // same recovery journal.
+        _ if finding.violation_type.reason_code() == "dimension_mismatch" => (
+            DiagnosisSeverity::Error,
+            DiagnosisOutcome::Failed,
+            finding.violation_type.reason_code().to_string(),
+            DiagnosisSource::WaveDimensionGuard,
         ),
         _ => (
             DiagnosisSeverity::Error,
             DiagnosisOutcome::Failed,
             finding.violation_type.reason_code().to_string(),
+            DiagnosisSource::CliEmit,
         ),
     };
 
     let mut builder = RecoveryDiagnosisEnvelope::builder()
-        .source(DiagnosisSource::CliEmit)
+        .source(source)
         .severity(severity)
         .topic(topic)
         .reason_code(reason_code)
@@ -535,6 +552,36 @@ fn emit_command_with_root_and_hats(
         }
     } else if check_mode == PolicyCheckMode::Skip {
         tracing::info!("cli emit policy check skipped: no event_policy in resolved config");
+    }
+
+    // U3 (R3): wave worker dimension assignment precheck. Fires before
+    // any policy / step-handoff processing so a wave worker that
+    // emits the wrong dimension never reaches the events file. The
+    // env var is set by the loop runner on `review.dimension.done`
+    // workers; non-wave callers (env unset) pass through unchanged.
+    if let Err(err) = crate::policy_check::check_wave_dimension_assignment(
+        &args.topic,
+        &args.payload,
+    ) {
+        use ralph_core::{PolicyFinding, ViolationType};
+        let finding = PolicyFinding {
+            violation_type: ViolationType::SemanticGateViolation {
+                gate: "wave_dimension_assignment".to_string(),
+                context: err.message.clone(),
+            },
+            topic: args.topic.clone(),
+            message: err.message.clone(),
+        };
+        record_cli_emit_rejection(
+            &workspace_root,
+            &args.topic,
+            hat.as_deref(),
+            &finding,
+        );
+        anyhow::bail!(
+            "Event rejected by wave dimension guard: {}",
+            err.message
+        );
     }
 
     // U1 (2026-06-17-005 plan): step handoff gate precheck at the CLI

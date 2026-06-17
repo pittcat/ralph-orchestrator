@@ -214,7 +214,9 @@ pub use wave_detection::{
     detect_all_wave_events_with_policy, detect_wave_events, detect_wave_events_capped,
 };
 pub use wave_prompt::{WaveWorkerContext, build_wave_worker_prompt};
-pub use wave_tracker::{CompletedWave, WaveFailure, WaveProgress, WaveResult, WaveTracker};
+pub use wave_tracker::{
+    CompletedWave, WaveFailure, WaveProgress, WaveResult, WaveTracker, MAX_DIMENSION_RETRIES_PER_SLOT,
+};
 pub use workspace::{
     CleanupPolicy, TaskWorkspace, VerificationResult, WorkspaceError, WorkspaceInfo,
     WorkspaceManager,

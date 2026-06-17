@@ -323,6 +323,98 @@ fn mismatch_to_validation_error(m: &ProgressTaskMismatch, topic: &str) -> Valida
     }
 }
 
+/// U3 (R3): CLI-side precheck for wave worker dimension assignment.
+///
+/// When the `RALPH_WAVE_DIMENSION` env var is set and non-empty and
+/// the topic is `review.dimension.done`, the emitted payload's
+/// `dimension` field MUST exactly match the env var. Returns:
+/// - `Ok(())` when no check applies (env unset, different topic)
+/// - `Ok(())` when the dimension matches
+/// - `Err(ValidationError)` with `reason_code=dimension_mismatch` when mismatched
+/// - `Err(ValidationError)` with `reason_code=dimension_mismatch` when payload is not JSON
+///   or lacks `dimension` (actual is rendered as `<missing>`)
+pub fn check_wave_dimension_assignment(
+    topic: &str,
+    payload_str: &str,
+) -> std::result::Result<(), ValidationError> {
+    let expected = std::env::var("RALPH_WAVE_DIMENSION")
+        .ok()
+        .filter(|v| !v.is_empty());
+    check_wave_dimension_assignment_with_env(topic, payload_str, expected.as_deref())
+}
+
+/// Inner helper for `check_wave_dimension_assignment` that accepts the
+/// expected dimension explicitly. Split out so unit tests can drive
+/// both branches without mutating process-global env vars (the
+/// workspace `forbid(unsafe_code)` lint blocks `set_var`).
+fn check_wave_dimension_assignment_with_env(
+    topic: &str,
+    payload_str: &str,
+    expected: Option<&str>,
+) -> std::result::Result<(), ValidationError> {
+    // Only applies to `review.dimension.done` events. Other topics
+    // pass through unchanged.
+    if topic != "review.dimension.done" {
+        return Ok(());
+    }
+
+    // Only applies when the runner has tagged this worker with a
+    // specific dimension assignment. A worker that did not receive
+    // the env var (e.g. an agent invoking `ralph emit` outside a
+    // wave worker context) is not subject to the dimension check.
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+
+    // Try to extract the `dimension` field from the payload. When
+    // the payload is not valid JSON, or the field is missing / not a
+    // string, we render the actual value as `<missing>` so the agent
+    // sees the same diagnostic shape regardless of failure mode.
+    let actual = extract_dimension_field(payload_str);
+
+    if actual == expected {
+        return Ok(());
+    }
+
+    Err(ValidationError {
+        payload_index: 0,
+        field: "dimension".to_string(),
+        reason_code: "dimension_mismatch".to_string(),
+        message: format!(
+            "dimension mismatch: expected_dimension={expected} actual_dimension={actual}"
+        ),
+    })
+}
+
+/// Lightweight extractor mirroring the loop-side `dimension` field
+/// reading. Returns `<missing>` for any non-JSON payload, missing
+/// field, or non-string value. Trims the value (P1#6 fix) so the
+/// CLI precheck matches the merge layer's
+/// `parse_payload_dimension` behavior — otherwise a payload with
+/// `"dimension": "testing "` would be rejected by the precheck
+/// but accepted by the merge layer, producing a confusing
+/// "agent got rejected but the merge would have accepted" loop.
+fn extract_dimension_field(payload_str: &str) -> String {
+    let trimmed = payload_str.trim();
+    if trimmed.is_empty() || !trimmed.starts_with('{') {
+        return "<missing>".to_string();
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+        return "<missing>".to_string();
+    };
+    match value.get("dimension").and_then(|v| v.as_str()) {
+        Some(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                "<missing>".to_string()
+            } else {
+                t.to_string()
+            }
+        }
+        None => "<missing>".to_string(),
+    }
+}
+
 /// Lightweight JSON-object extractor for the CLI gate. Mirrors the
 /// loop-side `extract_step_and_task_id` semantics but is local to
 /// `policy_check` so the CLI does not pull a `&EventBus` boundary
@@ -1050,6 +1142,70 @@ event_loop:
         let err = check_step_handoff_gate("plan.complete", "not json at all", tmp.path())
             .expect_err("non-JSON gated payload must fail closed");
         assert_eq!(err.reason_code, "progress_task_mismatch");
+    }
+
+    #[test]
+    fn test_check_wave_dimension_assignment_no_env_returns_ok() {
+        // env unset, any topic
+        assert!(check_wave_dimension_assignment_with_env(
+            "review.dimension.done",
+            r#"{"dimension":"testing"}"#,
+            None
+        )
+        .is_ok());
+        assert!(check_wave_dimension_assignment_with_env(
+            "work.done",
+            r#"{"dimension":"testing"}"#,
+            None
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn test_check_wave_dimension_assignment_match_returns_ok() {
+        assert!(check_wave_dimension_assignment_with_env(
+            "review.dimension.done",
+            r#"{"dimension":"testing"}"#,
+            Some("testing")
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn test_check_wave_dimension_assignment_mismatch_returns_err() {
+        let err = check_wave_dimension_assignment_with_env(
+            "review.dimension.done",
+            r#"{"dimension":"correctness"}"#,
+            Some("testing"),
+        )
+        .unwrap_err();
+        assert_eq!(err.reason_code, "dimension_mismatch");
+        assert!(err.message.contains("expected_dimension=testing"));
+        assert!(err.message.contains("actual_dimension=correctness"));
+    }
+
+    #[test]
+    fn test_check_wave_dimension_assignment_missing_field_returns_err() {
+        let err = check_wave_dimension_assignment_with_env(
+            "review.dimension.done",
+            r#"{"findings_count":3}"#,
+            Some("testing"),
+        )
+        .unwrap_err();
+        assert_eq!(err.reason_code, "dimension_mismatch");
+        assert!(err.message.contains("actual_dimension=<missing>"));
+    }
+
+    #[test]
+    fn test_check_wave_dimension_assignment_non_json_returns_err() {
+        let err = check_wave_dimension_assignment_with_env(
+            "review.dimension.done",
+            "not json",
+            Some("testing"),
+        )
+        .unwrap_err();
+        assert_eq!(err.reason_code, "dimension_mismatch");
+        assert!(err.message.contains("actual_dimension=<missing>"));
     }
 
     /// Integration: the CLI gate and the loop gate share

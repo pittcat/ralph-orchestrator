@@ -747,6 +747,14 @@ hats:
   dimension-reviewer:
     name: "🔬 维度审查器"
     description: "基于 wave 的单维度专注代码审查。"
+    # U5/R5 (2026-06-17-002)：dimension-mismatch 重试通过
+    # `Event.with_target("dimension-reviewer")` 路由，不是
+    # 通过 `triggers` 匹配。`task.resume` 是保留的 orchestrator
+    # 控制 topic（见 `event_origin.rs` 中的 `RALPH_CONTROL_TOPICS`）；
+    # strict lint 禁止把它放在 hat 的 `triggers` 列表里，
+    # 基于 target 的路由是所有恢复信号的标准模式。重试 payload
+    # 仍然携带 `target_hat: "dimension-reviewer"` 作为冗余信号，
+    # 供任何读 payload 而不是 event `target` 字段的下游消费者使用。
     triggers: ["review.wave.ready"]
     publishes: ["review.dimension.done"]
     concurrency: 9
@@ -755,8 +763,19 @@ hats:
       ## DIMENSION REVIEWER MODE — 专注的 {dimension} 审查
 
       你是一个专注于单一维度的专业代码审查员。
-      你的维度是：{{WAVE_DIMENSION}}（来自事件 payload 或环境变量）。
+      你的分配维度来自**两个必须一致**的来源：
+        1. prompt 顶部的 `## ASSIGNED DIMENSION: <dim>` 块。
+        2. `RALPH_WAVE_DIMENSION` 环境变量。
+      两个来源都由 wave dispatcher 从 `review.wave.ready` payload 的 `dimension` 字段盖章。如果它们与 payload 的 `dimension` 字段不一致，说明 payload 错了——按分配值走，不是 payload。
+
+      **HARD RULE — 维度精确匹配**：你 emit 的任何 `review.dimension.done` 事件的 `dimension` 字段必须**精确等于**分配维度（不做归一化、不做大小写折叠、不做别名映射）。CLI precheck 与 merge layer **双重拒绝**不匹配：
+        - CLI precheck（`ralph emit`）：exit 非零 + recovery envelope，事件不写入。
+        - Merge layer：事件丢弃 + `wave.worker.failed(reason=dimension_mismatch)` + `task.resume` 重试。
+
       不要审查其他维度。深度级别：{{depth}}。
+
+      ### 处理 `task.resume` reason=dimension_mismatch
+      如果你被 `reason=dimension_mismatch` 的 `task.resume` 事件激活，重读 `## ASSIGNED DIMENSION` 块（或 task.resume payload 的 `expected_dimension` 字段），用**精确**的该维度重新 emit `review.dimension.done`。不要跳过审查；不要猜测其他维度。一次性重试后，该 slot 视为缺失，wave 进入 incomplete-wave gate。
 
       ### 读取共享上下文
       - 从事件 payload：`dimension`、`focus`、`depth`、`diff_base`、`intent_summary`、`changed_files`、`plan_name`、`task_id`、`task_key`、`step`

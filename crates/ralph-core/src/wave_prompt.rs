@@ -17,6 +17,13 @@ pub struct WaveWorkerContext {
     pub wave_total: u32,
     /// Topics this worker should publish results to.
     pub result_topics: Vec<String>,
+    /// Dimension this worker is hard-bound to (parsed from the
+    /// `review.wave.ready` payload's `dimension` field). When
+    /// `Some`, the worker MUST emit `review.dimension.done` with
+    /// exactly this dimension; mismatch is rejected by the CLI
+    /// precheck (R3) and dropped at merge (R4). `None` for waves
+    /// that do not carry a dimension assignment.
+    pub assigned_dimension: Option<String>,
 }
 
 /// Builds a focused prompt for a wave worker instance.
@@ -50,6 +57,19 @@ pub fn build_wave_worker_prompt(hat: &HatConfig, event: &Event, ctx: &WaveWorker
         ctx.wave_total,
         ctx.wave_id,
     ));
+
+    // 2b. Assigned dimension block (R2).
+    // Surfaced for workers spawned from a `review.wave.ready` wave.
+    // The HARD RULE in the preset (U6) tells the agent the CLI
+    // precheck enforces this value; we still surface it here so
+    // the prompt is self-describing.
+    if let Some(ref dim) = ctx.assigned_dimension {
+        prompt.push_str(&format!(
+            "## ASSIGNED DIMENSION: {dim}\n\n\
+             You MUST emit `review.dimension.done` with `dimension` exactly equal to `{dim}`.\n\
+             Any other value will be rejected by the CLI precheck and dropped at merge.\n\n"
+        ));
+    }
 
     // 3. Task payload
     prompt.push_str("# Your Task\n\n");
@@ -131,6 +151,7 @@ mod tests {
             wave_index: 0,
             wave_total: 3,
             result_topics: vec!["review.done".to_string()],
+            assigned_dimension: None,
         };
 
         let prompt = build_wave_worker_prompt(&hat, &event, &ctx);
@@ -157,6 +178,7 @@ mod tests {
             wave_index: 2,
             wave_total: 5,
             result_topics: vec![],
+            assigned_dimension: None,
         };
 
         let prompt = build_wave_worker_prompt(&hat, &event, &ctx);
@@ -178,6 +200,7 @@ mod tests {
             wave_index: 0,
             wave_total: 1,
             result_topics: vec![],
+            assigned_dimension: None,
         };
 
         let prompt = build_wave_worker_prompt(&hat, &event, &ctx);
@@ -193,6 +216,7 @@ mod tests {
             wave_index: 0,
             wave_total: 1,
             result_topics: vec![],
+            assigned_dimension: None,
         };
 
         let prompt = build_wave_worker_prompt(&hat, &event, &ctx);
@@ -208,6 +232,7 @@ mod tests {
             wave_index: 0,
             wave_total: 1,
             result_topics: vec!["review.done".to_string()],
+            assigned_dimension: None,
         };
 
         let prompt = build_wave_worker_prompt(&hat, &event, &ctx);
@@ -226,6 +251,7 @@ mod tests {
             wave_index: 0,
             wave_total: 1,
             result_topics: vec!["review.done".to_string()],
+            assigned_dimension: None,
         };
 
         let prompt = build_wave_worker_prompt(&hat, &event, &ctx);
@@ -253,11 +279,53 @@ mod tests {
             wave_index: 0,
             wave_total: 1,
             result_topics: vec!["review.done".to_string()],
+            assigned_dimension: None,
         };
 
         let prompt = build_wave_worker_prompt(&hat, &event, &ctx);
 
         assert!(prompt.contains("No specific task payload provided"));
         assert!(prompt.contains("WARNING"));
+    }
+
+    /// U1/R1 — when `assigned_dimension` is set, the prompt MUST
+    /// contain a `## ASSIGNED DIMENSION: <dim>` block naming it.
+    /// The agent uses this to know which dimension's review.dimension.done
+    /// value is valid (R2/R8).
+    #[test]
+    fn test_assigned_dimension_renders_in_prompt() {
+        let hat = make_hat_config();
+        let event = make_event("src/main.rs");
+        let ctx = WaveWorkerContext {
+            wave_id: "w-test1234".to_string(),
+            wave_index: 0,
+            wave_total: 3,
+            result_topics: vec!["review.dimension.done".to_string()],
+            assigned_dimension: Some("testing".to_string()),
+        };
+
+        let prompt = build_wave_worker_prompt(&hat, &event, &ctx);
+        assert!(
+            prompt.contains("## ASSIGNED DIMENSION: testing"),
+            "prompt must contain the assigned dimension block; got: {prompt}"
+        );
+    }
+
+    /// U1/R1 — when `assigned_dimension` is None, the prompt MUST
+    /// NOT contain the assignment block (legacy waves).
+    #[test]
+    fn test_no_assigned_dimension_omits_block() {
+        let hat = make_hat_config();
+        let event = make_event("src/main.rs");
+        let ctx = WaveWorkerContext {
+            wave_id: "w-test1234".to_string(),
+            wave_index: 0,
+            wave_total: 1,
+            result_topics: vec!["review.done".to_string()],
+            assigned_dimension: None,
+        };
+
+        let prompt = build_wave_worker_prompt(&hat, &event, &ctx);
+        assert!(!prompt.contains("## ASSIGNED DIMENSION:"));
     }
 }

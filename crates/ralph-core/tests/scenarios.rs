@@ -385,6 +385,20 @@ fn test_incomplete_wave_plan_blocked() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// 2026-06-17-002 plan U8: regression for the wave dimension
+/// enforcement loop. A 4-dimension review wave where one worker
+/// initially returns the wrong `dimension`; CLI precheck + merge
+/// layer drop the event, the dispatcher writes a `task.resume`,
+/// the worker retries with the correct dimension, and the wave
+/// converges to 4 valid `review.dimension.done` events with no
+/// `plan.blocked`.
+#[test]
+fn test_wave_dimension_mismatch_retry() {
+    let yaml =
+        load_scenario("tests/scenarios/flow_reliability/wave_dimension_mismatch_retry.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 #[test]
 fn test_plan_gate_dual_publish_handoff() {
     // 2026-06-15-003 fix U2: regression for the `(queue.advance, work.ready)`
