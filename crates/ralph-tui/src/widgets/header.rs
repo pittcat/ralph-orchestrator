@@ -381,11 +381,18 @@ mod tests {
 
         let mut state = TuiState::with_hat_map(hat_map);
 
+        // Iter 1: Security reviewer is the executing hat. The mirror in
+        // TuiState::update writes the new pending_hat to iterations.last()
+        // (iter 1), so iter 1's hat_display is Security.
+        state.start_new_iteration();
         state.update(&Event::new("review.security", "Check auth"));
-        state.start_new_iteration();
 
-        state.update(&Event::new("review.correctness", "Check logic"));
+        // Start iter 2 BEFORE the second hat_map hit, so the mirror writes
+        // to iter 2 (the new last), not iter 1. This is the realistic
+        // production shape: hat_map events for the next subagent arrive
+        // after the next iteration has been opened.
         state.start_new_iteration();
+        state.update(&Event::new("review.correctness", "Check logic"));
 
         state.current_view = 0;
         state.following_latest = false;
@@ -460,6 +467,100 @@ mod tests {
         assert!(
             !text.contains("@kiro"),
             "should not show current backend while reviewing, got: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn header_reflects_hat_map_change_during_iteration() {
+        // U2: when hat_map is hit twice on the executing iter, the header
+        // must follow the latest pending_hat (mirrored to the iter buffer
+        // by U1), not the value frozen at start_new_iteration.
+        use std::collections::HashMap;
+
+        let mut hat_map = HashMap::new();
+        hat_map.insert(
+            "review.security".to_string(),
+            (
+                HatId::new("security_reviewer"),
+                "🛡 Security Reviewer".to_string(),
+            ),
+        );
+        hat_map.insert(
+            "review.correctness".to_string(),
+            (
+                HatId::new("correctness_reviewer"),
+                "🎯 Correctness Reviewer".to_string(),
+            ),
+        );
+
+        let mut state = TuiState::with_hat_map(hat_map);
+        state.start_new_iteration();
+
+        state.update(&Event::new("review.security", "Check auth"));
+        state.update(&Event::new("review.correctness", "Check logic"));
+
+        let text = render_to_string(&state);
+        assert!(
+            text.contains("Correctness"),
+            "header must reflect the latest subagent, got: {}",
+            text
+        );
+        assert!(
+            !text.contains("Security"),
+            "header must drop the previous subagent, got: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn header_does_not_pollute_history_when_user_reviews_older_iter() {
+        // U2 critical regression: end-to-end check that the header shows the
+        // historical iter's frozen hat when the user is in REVIEW mode, even
+        // if the executing iter receives a hat_map hit afterwards. Pairs with
+        // `mirroring_does_not_pollute_history_when_user_reviews_older_iter` in
+        // state.rs — that one checks the buffer; this one checks the rendered
+        // header.
+        use std::collections::HashMap;
+
+        let mut hat_map = HashMap::new();
+        hat_map.insert(
+            "review.security".to_string(),
+            (
+                HatId::new("security_reviewer"),
+                "🛡 Security Reviewer".to_string(),
+            ),
+        );
+        hat_map.insert(
+            "review.correctness".to_string(),
+            (
+                HatId::new("correctness_reviewer"),
+                "🎯 Correctness Reviewer".to_string(),
+            ),
+        );
+
+        let mut state = TuiState::with_hat_map(hat_map);
+
+        state.start_new_iteration();
+        state.update(&Event::new("review.security", "Check auth"));
+
+        state.start_new_iteration();
+        state.navigate_prev();
+        assert_eq!(state.current_view, 0);
+        assert!(!state.following_latest);
+
+        // Backend fires another hat_map hit on the *executing* iter (iter 2).
+        state.update(&Event::new("review.correctness", "Check logic"));
+
+        let text = render_to_string(&state);
+        assert!(
+            text.contains("Security"),
+            "user is reviewing iter 1, header must show Security, got: {}",
+            text
+        );
+        assert!(
+            !text.contains("Correctness"),
+            "user is reviewing iter 1, header must not show iter 2's hat, got: {}",
             text
         );
     }

@@ -391,10 +391,22 @@ impl TuiState {
 
         let custom_hat = self.hat_map.get(topic).cloned();
         if let Some((hat_id, hat_display)) = custom_hat.clone() {
-            self.pending_hat = Some((hat_id, hat_display));
+            self.pending_hat = Some((hat_id, hat_display.clone()));
             // Handle iteration timing for custom hats
             if topic.starts_with("build.") {
                 self.iteration_started = Some(now);
+            }
+            // Mirror the pending_hat change to the currently-executing iter
+            // (state.rs `iterations.last()`), so the header reflects the active
+            // subagent instead of the hat frozen at `start_new_iteration_with_metadata`.
+            // We use `last_mut()` (executing iter), not `current_iteration_mut()`
+            // (user's viewed iter — `self.current_view`): in REVIEW mode the two
+            // diverge, and writing to `current_view`'s iter would pollute history
+            // when the user is paging back through older iterations.
+            if let Some(buffer) = self.iterations.last_mut()
+                && buffer.hat_display.as_deref() != Some(hat_display.as_str())
+            {
+                buffer.hat_display = Some(hat_display);
             }
         }
 
@@ -1595,6 +1607,228 @@ mod tests {
             state.get_pending_hat_display(),
             "🎯 Correctness Reviewer",
             "Should display correctness reviewer hat for review.correctness topic"
+        );
+    }
+
+    #[test]
+    fn hat_map_hit_mirrors_to_currently_executing_iter() {
+        // U1 happy path: hat_map hit mirrors pending_hat.display to the
+        // currently-executing iter buffer (iterations.last()), so the header
+        // reflects the active subagent instead of the hat frozen at
+        // start_new_iteration_with_metadata.
+        use std::collections::HashMap;
+
+        let mut hat_map = HashMap::new();
+        hat_map.insert(
+            "review.security".to_string(),
+            (
+                HatId::new("security_reviewer"),
+                "🔒 Security Reviewer".to_string(),
+            ),
+        );
+
+        let mut state = TuiState::with_hat_map(hat_map);
+        state.start_new_iteration();
+        // Snapshot of "executing iter" before the event lands.
+        assert!(
+            state.iterations.last().unwrap().hat_display.is_none(),
+            "fresh iter has no hat_display"
+        );
+
+        state.update(&Event::new("review.security", "Review PR #123"));
+
+        assert_eq!(
+            state.get_pending_hat_display(),
+            "🔒 Security Reviewer",
+            "pending_hat itself must still be updated"
+        );
+        assert_eq!(
+            state.iterations.last().unwrap().hat_display.as_deref(),
+            Some("🔒 Security Reviewer"),
+            "executing iter buffer must mirror the new hat"
+        );
+    }
+
+    #[test]
+    fn finished_iter_hat_display_is_not_overwritten() {
+        // U1 regression: an iter that is no longer the executing iter
+        // (already finished via build.done) must NOT have its hat_display
+        // touched when a later hat_map hit lands.
+        //
+        // Realistic shape: iter 1 runs, gets build.done (freezes its
+        // hat_display + elapsed), iter 2 starts, then a hat_map hit fires
+        // for iter 2. iter 1's hat_display must stay as it was frozen.
+        use std::collections::HashMap;
+
+        let mut hat_map = HashMap::new();
+        hat_map.insert(
+            "review.security".to_string(),
+            (
+                HatId::new("security_reviewer"),
+                "🔒 Security Reviewer".to_string(),
+            ),
+        );
+        hat_map.insert(
+            "review.correctness".to_string(),
+            (
+                HatId::new("correctness_reviewer"),
+                "🎯 Correctness Reviewer".to_string(),
+            ),
+        );
+
+        let mut state = TuiState::with_hat_map(hat_map);
+
+        // Iter 1: hat_map lands, then build.done freezes it.
+        state.start_new_iteration_with_metadata(Some("📋 Planner".to_string()), None);
+        state.update(&Event::new("review.security", "Review"));
+        // Mirror should have run for iter 1 — that's the happy path.
+        assert_eq!(
+            state.iterations[0].hat_display.as_deref(),
+            Some("🔒 Security Reviewer"),
+            "iter 1 (executing at the time) should receive the mirror"
+        );
+
+        // build.done freezes iter 1.
+        state.update(&Event::new("build.done", "Done"));
+        assert!(
+            state.iterations[0].elapsed.is_some(),
+            "build.done must freeze iter 1's elapsed"
+        );
+        assert_eq!(
+            state.iterations[0].hat_display.as_deref(),
+            Some("🔒 Security Reviewer"),
+            "frozen iter 1's hat_display must be preserved at freeze time"
+        );
+
+        // Iter 2 starts. Another hat_map hit lands.
+        state.start_new_iteration_with_metadata(Some("📋 Planner".to_string()), None);
+        state.update(&Event::new("review.correctness", "Review"));
+        // Iter 2 (now executing) gets the mirror — that's correct.
+        assert_eq!(
+            state.iterations[1].hat_display.as_deref(),
+            Some("🎯 Correctness Reviewer"),
+            "iter 2 (executing) should receive the new mirror"
+        );
+        // Iter 1 (frozen historical) stays untouched.
+        assert_eq!(
+            state.iterations[0].hat_display.as_deref(),
+            Some("🔒 Security Reviewer"),
+            "frozen iter 1 must NOT be overwritten by iter 2's hat_map hit"
+        );
+    }
+
+    #[test]
+    fn hardcoded_topics_do_not_mirror_hat_display() {
+        // U1 regression: hat_map miss path (hardcoded `build.task`) must not
+        // populate the executing iter's hat_display.
+        let mut state = TuiState::new();
+        state.start_new_iteration();
+
+        state.update(&Event::new("build.task", ""));
+
+        assert!(
+            state.iterations.last().unwrap().hat_display.is_none(),
+            "hardcoded build.task path must not write hat_display"
+        );
+    }
+
+    #[test]
+    fn mirroring_does_not_modify_backend() {
+        // U1 regression: only hat_display is mirrored. backend stays untouched.
+        use std::collections::HashMap;
+
+        let mut hat_map = HashMap::new();
+        hat_map.insert(
+            "review.security".to_string(),
+            (
+                HatId::new("security_reviewer"),
+                "🔒 Security Reviewer".to_string(),
+            ),
+        );
+
+        let mut state = TuiState::with_hat_map(hat_map);
+        state.start_new_iteration_with_metadata(None, Some("claude".to_string()));
+        let backend_before = state.current_iteration_backend().map(str::to_string);
+
+        state.update(&Event::new("review.security", "Review"));
+
+        assert_eq!(
+            state.current_iteration_backend().map(str::to_string),
+            backend_before,
+            "backend must not be touched by hat_map mirroring"
+        );
+        assert_eq!(
+            state.iterations.last().unwrap().hat_display.as_deref(),
+            Some("🔒 Security Reviewer"),
+        );
+    }
+
+    #[test]
+    fn mirroring_does_not_pollute_history_when_user_reviews_older_iter() {
+        // U1 critical regression: when the user is in REVIEW mode looking at
+        // an older iter (current_view points at it), a hat_map hit on the
+        // *currently-executing* iter must NOT mutate the older iter's
+        // hat_display. The user is looking at history; it must stay frozen.
+        //
+        // Without the `last_mut()` (not `current_iteration_mut()`) fix, this
+        // test would fail: `current_iteration_mut()` would return the
+        // historical iter, and the mirroring would overwrite its
+        // hat_display. That breaks header_uses_per_iteration_hat_from_events_when_reviewing
+        // and any user that pages back through past iterations.
+        use std::collections::HashMap;
+
+        let mut hat_map = HashMap::new();
+        hat_map.insert(
+            "review.security".to_string(),
+            (
+                HatId::new("security_reviewer"),
+                "🔒 Security Reviewer".to_string(),
+            ),
+        );
+        hat_map.insert(
+            "review.correctness".to_string(),
+            (
+                HatId::new("correctness_reviewer"),
+                "🎯 Correctness Reviewer".to_string(),
+            ),
+        );
+
+        let mut state = TuiState::with_hat_map(hat_map);
+
+        // Iter 1: write Security via hat_map. iter 1 is the executing iter,
+        // so its hat_display becomes Security.
+        state.start_new_iteration();
+        state.update(&Event::new("review.security", "Review security"));
+        assert_eq!(
+            state.iterations.last().unwrap().hat_display.as_deref(),
+            Some("🔒 Security Reviewer"),
+        );
+
+        // Iter 2 starts. User then navigates back to iter 1 (REVIEW mode).
+        state.start_new_iteration();
+        state.navigate_prev();
+        assert_eq!(state.current_view, 0, "user is reviewing iter 1");
+        assert!(!state.following_latest, "REVIEW mode is active");
+
+        // Iter 1.elapsed is still None — it hasn't received build.done yet.
+        // This is the key: an `elapsed.is_none()` guard would WRONGLY allow
+        // the mirroring to write to iter 1.
+        assert!(state.iterations[0].elapsed.is_none());
+
+        // Backend fires another hat_map hit on the executing iter (iter 2).
+        state.update(&Event::new("review.correctness", "Review correctness"));
+
+        // Executing iter (iter 2) gets the mirror — that's correct.
+        assert_eq!(
+            state.iterations.last().unwrap().hat_display.as_deref(),
+            Some("🎯 Correctness Reviewer"),
+            "executing iter 2 should receive the mirror",
+        );
+        // But the historical iter 1 must stay frozen at Security.
+        assert_eq!(
+            state.iterations[0].hat_display.as_deref(),
+            Some("🔒 Security Reviewer"),
+            "historical iter 1 must NOT be overwritten by iter 2's hat_map hit",
         );
     }
 
