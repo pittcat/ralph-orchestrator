@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::event_policy::EventPolicyConfig;
 use super::execution_contracts::ExecutionContractsConfig;
 use super::state_machine::StateMachineConfig;
+use super::state_projection::StateProjectionConfig;
 use super::workflow_contract::WorkflowContractConfig;
 use super::workflow_guards::{HatExecutionMode, WorkflowGuardsConfig};
 
@@ -271,6 +272,17 @@ pub struct EventLoopConfig {
     /// itself).
     #[serde(default)]
     pub task_resume_ttl_seconds: Option<u64>,
+
+    /// State projection (Phase 1 of the north-star plan). When
+    /// `enabled` is `true`, the event loop projects the canonical
+    /// `.ralph/agent/tasks.jsonl` and `.ralph/agent/progress.md`
+    /// ledgers from the inbound event batch **before** the
+    /// `progress_task_gate` runs (SP-R8). Defaults to `disabled` so
+    /// legacy presets are unaffected; `ce-executor-isolated` and
+    /// `ce-executor-serial` opt in via
+    /// `event_loop.state_projection.enabled: true` (SP-R18).
+    #[serde(default)]
+    pub state_projection: StateProjectionConfig,
 }
 
 /// 2026-06-16-001 U5: per-preset configuration for the loop-level
@@ -359,6 +371,9 @@ impl Default for EventLoopConfig {
             // configuration. Enabled, target = `progress-steward`,
             // 3 iterations before auto-emit of `plan.blocked`.
             progress_steward: ProgressStewardConfig::default(),
+            // 2026-06-17-003 U1: state projection opt-in. Disabled
+            // by default; presets opt in via YAML.
+            state_projection: StateProjectionConfig::default(),
         }
     }
 }

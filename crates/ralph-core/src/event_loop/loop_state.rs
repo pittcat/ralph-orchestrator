@@ -164,6 +164,13 @@ pub struct LoopState {
     /// State machine runtime state (opt-in, None when state machine is disabled).
     pub state_machine_runtime_state: Option<crate::state_machine::StateMachineRuntimeState>,
 
+    /// 2026-06-17-003 U1: state-projection context. Held on the
+    /// loop state so the projector survives across iterations and
+    /// `bootstrap_from_disk` can re-populate the in-memory cache
+    /// once on loop resume (Unit 6). `None` until the first
+    /// projector-enabled iteration runs.
+    pub state_projection: Option<crate::state_projector::StateProjector>,
+
     /// Payload of the most recent event whose topic matches the configured
     /// verdict gate topic. Used to enforce that the latest review verdict was
     /// a pass before the loop can terminate. `None` when no such event has
@@ -456,6 +463,10 @@ impl Default for LoopState {
             bootstrap_failed: false,
             recoverable_exhaustion_buffer: Vec::new(),
             work_done_seen_tasks: HashSet::new(),
+            // 2026-06-17-003 U1: state projector is lazily
+            // initialised by the first enabled iteration; the
+            // cache is empty until then.
+            state_projection: None,
             // 2026-06-17-004 U2 (R3): per-hat activation clock for
             // missing-event gate grace window. Empty by default;
             // the loop populates entries as hats are activated.
