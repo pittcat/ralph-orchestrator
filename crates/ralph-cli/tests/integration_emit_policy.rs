@@ -1170,3 +1170,172 @@ fn test_noble_peacock_executor_review_passed_never_lands() {
         events
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 2026-06-17-004 plan U1 (R3): review.passed ownership is locked to
+// review-synthesizer. review-coordinator no longer appears in the
+// `publishes` scope for review.passed; the empty-diff fast path now
+// closes the sequence with `review.dimensions.complete` and the
+// synthesizer emits `review.passed(skip_reason=dimensions_complete)`.
+//
+// This regression test pins the new contract: a `review-coordinator`
+// hat emitting `review.passed` (with the legacy `empty_diff` skip_reason
+// OR with the synthesizer's `dimensions_complete` skip_reason) must be
+// rejected at the CLI boundary by either the `publishes` scope guard
+// (`isolated_scope_violation`) or the `topic_deny_rules` defence-in-depth
+// rule, AND the event must NEVER land in events.jsonl. This is the
+// companion test to `test_noble_peacock_executor_review_passed_never_lands`
+// (which covered the executor case) and `test_emit_t1_6_*` (which pins
+// the synthesizer's positive path).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// U1 (R3) Error path: review-coordinator emitting `review.passed` with the
+/// legacy `empty_diff` skip_reason is rejected — the empty-diff fast path
+/// was migrated to `review.dimensions.complete` ownership in U1.
+#[test]
+fn test_ce_executor_serial_coordinator_review_passed_rejected_empty_diff() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "-H",
+            "builtin:ce-executor-serial",
+            "emit",
+            "review.passed",
+            "--json",
+            r#"{"plan_name":"p","task_id":"t","task_key":"k","step":"s","findings_count":0,"fix_round":0,"verdict":"pass","skip_reason":"empty_diff"}"#,
+            "--hat",
+            "review-coordinator",
+        ])
+        .env("RALPH_CURRENT_HAT", "review-coordinator")
+        .current_dir(temp_path)
+        .output()
+        .expect("Failed to execute ralph emit command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr_lower = stderr.to_lowercase();
+
+    // CLI must exit non-zero — review-coordinator is not in
+    // review.passed's `publishes` scope for ce-executor-serial.
+    assert!(
+        !output.status.success(),
+        "review-coordinator + review.passed + empty_diff must be rejected \
+         (U1 R3 ownership rule). Got status=success. stderr={}",
+        stderr
+    );
+    // The rejection must be an actionable scope / topic-deny / field
+    // violation, not a panic. Acceptable signals:
+    // - `Event rejected by policy:` (the CLI wrapper) + finding
+    //   message `Hat '...' is denied from publishing topic '...'` —
+    //   this is the topic_deny_rules path that fires ahead of the
+    //   scope guard.
+    // - `isolated_scope_violation` / `isolated scope` (the publishes
+    //   scope guard, if the topic-deny rule is dropped in future).
+    // - `invalid_field_value` / `skip_reason` (if the schema layer
+    //   rejects `empty_diff` first).
+    let has_actionable_rejection = stderr.contains("Event rejected by policy")
+        || stderr_lower.contains("isolated_scope_violation")
+        || stderr_lower.contains("isolated scope")
+        || stderr_lower.contains("topic_denied")
+        || stderr_lower.contains("topic denied")
+        || stderr_lower.contains("is denied from publishing")
+        || stderr_lower.contains("invalid_field_value")
+        || stderr_lower.contains("invalid field value")
+        || stderr_lower.contains("allowed_values")
+        || stderr_lower.contains("skip_reason");
+    assert!(
+        has_actionable_rejection,
+        "rejection must be actionable (cite scope/deny/field), got: {}",
+        stderr
+    );
+    // The error message must name the hat so the agent can correct.
+    assert!(
+        stderr.contains("review-coordinator"),
+        "rejection must name the offending hat, got: {}",
+        stderr
+    );
+
+    // The event must NEVER land in events.jsonl. The pre-U1 behavior
+    // was that the event was written and dropped at runtime — leaving
+    // the agent with no actionable backpressure. The new contract
+    // rejects at the CLI boundary.
+    let events_file = temp_path.join(".ralph/events.jsonl");
+    let events = std::fs::read_to_string(&events_file).unwrap_or_default();
+    assert!(
+        !events.contains("review.passed"),
+        "rejected review.passed from review-coordinator must NEVER land in events.jsonl \
+         (U1 R3 ownership rule). events: {}",
+        events
+    );
+}
+
+/// U1 (R3) Error path: review-coordinator cannot even impersonate the
+/// synthesizer by emitting `review.passed` with
+/// `skip_reason=dimensions_complete`. Ownership is enforced at the topic
+/// layer (publishes scope + topic-deny rule), not by hat-skip_reason
+/// pairing — so the synthesizer's own skip_reason is still rejected for
+/// the coordinator. This pins the full scope of the ownership change.
+#[test]
+fn test_ce_executor_serial_coordinator_review_passed_rejected_dimensions_complete() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "-H",
+            "builtin:ce-executor-serial",
+            "emit",
+            "review.passed",
+            "--json",
+            r#"{"plan_name":"p","task_id":"t","task_key":"k","step":"s","findings_count":0,"fix_round":0,"verdict":"pass","skip_reason":"dimensions_complete"}"#,
+            "--hat",
+            "review-coordinator",
+        ])
+        .env("RALPH_CURRENT_HAT", "review-coordinator")
+        .current_dir(temp_path)
+        .output()
+        .expect("Failed to execute ralph emit command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr_lower = stderr.to_lowercase();
+
+    assert!(
+        !output.status.success(),
+        "review-coordinator + review.passed + dimensions_complete must be rejected \
+         (U1 R3 ownership rule — review-coordinator is not in review.passed's publishes scope). \
+         Got status=success. stderr={}",
+        stderr
+    );
+    // The rejection must be the SCOPE / topic-deny guard (the
+    // skip_reason value is legal for the synthesizer, so the
+    // allowed_values check passes; ownership is what trips the
+    // gate). Acceptable signals:
+    // - `Event rejected by policy:` + `is denied from publishing
+    //   topic` (topic_deny_rules path, the strongest signal).
+    // - `isolated_scope_violation` (the publishes scope guard).
+    // - `topic_denied` (the literal reason code).
+    let has_scope_or_deny_rejection = stderr.contains("Event rejected by policy")
+        && (stderr.contains("is denied from publishing")
+            || stderr_lower.contains("isolated_scope_violation")
+            || stderr_lower.contains("isolated scope")
+            || stderr_lower.contains("topic_denied")
+            || stderr_lower.contains("topic denied")
+            || stderr_lower.contains("is not allowed to publish"));
+    assert!(
+        has_scope_or_deny_rejection,
+        "rejection must be a scope / topic-deny violation, got: {}",
+        stderr
+    );
+
+    let events_file = temp_path.join(".ralph/events.jsonl");
+    let events = std::fs::read_to_string(&events_file).unwrap_or_default();
+    assert!(
+        !events.contains("review.passed"),
+        "rejected review.passed from review-coordinator must NEVER land in events.jsonl \
+         (U1 R3 ownership rule). events: {}",
+        events
+    );
+}
