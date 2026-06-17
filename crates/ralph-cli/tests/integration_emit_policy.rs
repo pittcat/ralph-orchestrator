@@ -343,6 +343,99 @@ fn test_emit_isolated_mode_allows_matching_hat() {
 }
 
 // -------------------------------------------------------------------------
+// 2026-06-17-003 plan U1: regression coverage for merry-lotus root cause.
+//
+// merry-lotus run: `executor` (in `ce-executor-serial`) emitted `debug.step`
+// 8 times, each landing in events.jsonl before being dropped at loop runtime.
+// U1 closes this precheck gap. These two tests pin the fix to the actual
+// preset that triggered the bug — `ce-executor-serial` — not the
+// `ce-executor-isolated` preset covered by `test_emit_isolated_mode_allows_matching_hat`.
+// -------------------------------------------------------------------------
+
+/// P0 (testing reviewer): `ce-executor-serial` executor emits `work.done` →
+/// event lands in events.jsonl. Regression guard against the inverse of
+/// merry-lotus.
+#[test]
+fn test_emit_ce_executor_serial_executor_can_emit_work_done() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "-H",
+            "builtin:ce-executor-serial",
+            "emit",
+            "work.done",
+            r#"{"plan_name":"p","plan_path":"p.md","task_id":"t","task_key":"k","step":"s","commit_count":1,"changed_lines":10}"#,
+            "--hat",
+            "executor",
+        ])
+        .env("RALPH_CURRENT_HAT", "executor")
+        .current_dir(temp_path)
+        .output()
+        .expect("Failed to execute ralph emit command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "executor+work.done in ce-executor-serial must succeed: stderr={}",
+        stderr
+    );
+
+    let events_file = temp_path.join(".ralph/events.jsonl");
+    let events = std::fs::read_to_string(&events_file).unwrap();
+    assert!(events.contains("work.done"));
+    assert!(events.contains("\"hat\":\"executor\""));
+}
+
+/// P0 (testing reviewer): `ce-executor-serial` executor emits `debug.step` →
+/// CLI rejects before write. Reproduces the merry-lotus root cause and
+/// asserts the U1 precheck now catches it (instead of letting it land in
+/// events.jsonl for the loop to silently drop).
+#[test]
+fn test_emit_ce_executor_serial_executor_cannot_emit_debug_step() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "-H",
+            "builtin:ce-executor-serial",
+            "emit",
+            "debug.step",
+            "task_id=demo",
+            "--hat",
+            "executor",
+        ])
+        .env("RALPH_CURRENT_HAT", "executor")
+        .current_dir(temp_path)
+        .output()
+        .expect("Failed to execute ralph emit command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !output.status.success(),
+        "executor+debug.step in ce-executor-serial must be rejected (merry-lotus root cause): \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("isolated_scope_violation") || stderr.contains("isolated scope guard"),
+        "expected isolated scope rejection message, got stderr={stderr}"
+    );
+
+    // Critical: the event must NOT have landed in events.jsonl.
+    let events_file = temp_path.join(".ralph/events.jsonl");
+    let events = std::fs::read_to_string(&events_file).unwrap_or_default();
+    assert!(
+        !events.contains("debug.step"),
+        "rejected event must not be written to events.jsonl (merry-lotus regression), got: {events}"
+    );
+}
+
+// -------------------------------------------------------------------------
 // Plan 001 §4.3 C1/C4/C5: RALPH_HATS_SOURCE env routes pre-publish check.
 // -------------------------------------------------------------------------
 

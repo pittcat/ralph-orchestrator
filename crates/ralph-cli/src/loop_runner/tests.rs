@@ -9695,7 +9695,10 @@ fn u3_inject_hard_gate_guidance_writes_task_resume() {
     let events_path = resolve_current_events_path(&ctx);
     let _ = std::fs::remove_file(&events_path);
 
-    inject_hard_gate_guidance(&ctx, &hat_id, &expected_topics);
+    // P1 fix: pass `None` for `event_loop` to keep the legacy
+    // no-pin call shape exercised. The pin-side path is covered by
+    // `u3_pending_recovery_hat_pin_after_task_resume_inject` below.
+    inject_hard_gate_guidance(&ctx, None, &hat_id, &expected_topics);
 
     let content = std::fs::read_to_string(&events_path).expect("read events");
     assert!(
@@ -9739,6 +9742,61 @@ fn u3_inject_hard_gate_guidance_writes_task_resume() {
             .map(|s| s.contains("HARD GATE TRIGGERED") && s.contains("executor"))
             .unwrap_or(false),
         "hint must contain the original free-form message"
+    );
+}
+
+#[test]
+fn u3_pending_recovery_hat_pin_after_task_resume_inject() {
+    // 2026-06-17-003 plan U3 P1 fix: `inject_hard_gate_guidance` now
+    // writes `task.resume` instead of `human.guidance`. The pre-existing
+    // pin test (`test_u3_pending_recovery_hat_is_set_by_missing_event_guidance`)
+    // only covers the missing-event path. This test pins the behaviour
+    // for the new U3 (claim-but-no-write) path: the
+    // `pending_recovery_hat` field on the EventLoop state must be
+    // pinned to the offending hat so the next activation lands back
+    // on it (defends against round-robin drift to an unrelated hat).
+    let (_temp, workspace) = u4_workspace();
+    let diagnostics = ralph_core::diagnostics::DiagnosticsCollector::with_enabled(&workspace, true)
+        .expect("create diagnostics collector");
+    let config = ralph_core::RalphConfig::default();
+    let mut event_loop = EventLoop::with_diagnostics(config, diagnostics);
+    event_loop.set_iteration_for_test(4);
+
+    let ctx = LoopContext::primary(workspace.clone());
+    let hat_id = ralph_proto::HatId::new("executor");
+    let expected_topics = vec!["work.done".to_string()];
+
+    // Sanity: pin starts as None on a fresh loop.
+    assert!(
+        event_loop.state().pending_recovery_hat.is_none(),
+        "pending_recovery_hat must start as None on a fresh loop"
+    );
+
+    // U3 swap: this is the new task.resume-injecting variant.
+    // Pass `Some(&mut event_loop)` to exercise the pin path.
+    inject_hard_gate_guidance(&ctx, Some(&mut event_loop), &hat_id, &expected_topics);
+
+    // Pin must be set to the offending hat.
+    let pinned = event_loop
+        .state()
+        .pending_recovery_hat
+        .as_ref()
+        .map(|h| h.as_str().to_string());
+    assert_eq!(
+        pinned.as_deref(),
+        Some("executor"),
+        "U3 task.resume inject must pin pending_recovery_hat to the gated hat, just like the pre-U3 human.guidance path did"
+    );
+
+    // And the events file must carry the structured task.resume, not
+    // human.guidance. (Belt-and-braces: the inject function writes to
+    // disk unconditionally; the pin is set only when event_loop is
+    // provided. We pass Some above, so both should be present.)
+    let events_path = resolve_current_events_path(&ctx);
+    let content = std::fs::read_to_string(&events_path).expect("events file written");
+    assert!(
+        content.contains("\"topic\":\"task.resume\""),
+        "events file must contain task.resume (U3 swap); got: {content}"
     );
 }
 

@@ -367,21 +367,52 @@ pub fn handle_execution_contract_rejections(
 /// Inspects the bus for a targeted `task.resume` event whose target is a
 /// registered hat. Returns the target hat name if a recovery was published
 /// for the given topic in the current iteration's pending queues.
+///
+/// 2026-06-17-003 P1 fix: parses the task.resume payload as JSON and
+/// matches the `rejected_topic` field directly. The previous
+/// implementation used `event.payload.contains(topic)`, which is
+/// fragile — once U2 introduced structured JSON payloads
+/// (`rejected_topic`, `target_hat`, `reason`, `source_hat`, `message`),
+/// a topic name like `work.done` would substring-match the
+/// `target_hat`'s `allowed_topics` array (if the JSON serialised the
+/// array with that topic) and produce a false positive. The JSON
+/// parse also degrades gracefully for legacy free-form payloads
+/// (returns `false` from the parser, falls through to the no-match
+/// path — the same behaviour as the old code's `contains` on a
+/// non-matching string).
 pub fn compute_recovery_status(event_loop: &mut EventLoop, topic: &str) -> Option<String> {
     let bus = event_loop.bus();
     for hat_id in bus.hat_ids() {
         if let Some(pending) = bus.peek_pending(hat_id) {
             for event in pending {
-                if event.topic.as_str() == "task.resume"
-                    && event.payload.contains(topic)
-                    && let Some(target) = event.target.as_ref()
-                {
+                if event.topic.as_str() != "task.resume" {
+                    continue;
+                }
+                let Some(target) = event.target.as_ref() else {
+                    continue;
+                };
+                if task_resume_payload_matches_topic(&event.payload, topic) {
                     return Some(target.as_str().to_string());
                 }
             }
         }
     }
     None
+}
+
+/// Returns `true` when the task.resume payload's `rejected_topic` field
+/// equals the given topic. Defensive JSON parser — if the payload is
+/// not valid JSON, or the field is missing / not a string, returns
+/// `false` (no false-positive match). Used by [`compute_recovery_status`]
+/// to replace the previous `event.payload.contains(topic)` heuristic.
+fn task_resume_payload_matches_topic(payload: &str, topic: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return false;
+    };
+    value
+        .get("rejected_topic")
+        .and_then(|v| v.as_str())
+        .is_some_and(|t| t == topic)
 }
 
 /// Inject a structured `task.resume` event directly into the events file so
@@ -396,9 +427,27 @@ pub fn compute_recovery_status(event_loop: &mut EventLoop, topic: &str) -> Optio
 /// present (drift detector's `field_completeness` was 0% before this
 /// fix).  The original message text is preserved as the `message` field
 /// inside the JSON payload, and the allowed topics are written as a
-/// structured `allowed_topics` array.  The `pending_recovery_hat` pin
-/// and the recovery envelope write are unchanged.
-pub fn inject_hard_gate_guidance(ctx: &LoopContext, hat_id: &HatId, expected_topics: &[String]) {
+/// structured `allowed_topics` array.  When `event_loop` is provided
+/// the `pending_recovery_hat` pin is set to the offending hat so the
+/// next activation lands back on it (matches the missing-event
+/// sibling helper below).
+///
+/// 2026-06-17-003 P1 fix: the signature now takes
+/// `event_loop: Option<&mut EventLoop>` so the helper can mirror
+/// `inject_missing_event_hard_gate_guidance` and pin
+/// `pending_recovery_hat` to the offending hat. Previously the
+/// claim-but-no-write path left the pin unset, so the next iteration
+/// could round-robin to an unrelated hat and the agent would have no
+/// clear retry path. The call site at `runner.rs` is updated to pass
+/// `Some(&mut event_loop)`. The signature is intentionally
+/// `Option<&mut EventLoop>` to keep backwards compatibility with the
+/// legacy callers that did not have an EventLoop handle available.
+pub fn inject_hard_gate_guidance(
+    ctx: &LoopContext,
+    event_loop: Option<&mut EventLoop>,
+    hat_id: &HatId,
+    expected_topics: &[String],
+) {
     let events_path = resolve_current_events_path(ctx);
     let topics_str = if expected_topics.is_empty() {
         "(check hat configuration)".to_string()
@@ -478,6 +527,16 @@ pub fn inject_hard_gate_guidance(ctx: &LoopContext, hat_id: &HatId, expected_top
         Err(e) => {
             warn!(error = %e, "Failed serializing hard-gate guidance event");
         }
+    }
+
+    // P1 fix: pin the next iteration to the offending hat so the
+    // round-robin / coordinator selection cannot drift away from the
+    // gated hat. Mirrors `inject_missing_event_hard_gate_guidance`
+    // (line ~644). Without this pin, the next iteration could
+    // round-robin to a different hat and the task.resume hint would
+    // land on a hat that does not own the expected topics.
+    if let Some(event_loop) = event_loop {
+        event_loop.state_mut().pending_recovery_hat = Some(hat_id.clone());
     }
 }
 

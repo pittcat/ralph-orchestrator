@@ -3959,10 +3959,18 @@ async fn run_loop_impl_inner(
                     if should_hard_gate(&display_hat, &event_loop) {
                         hard_gate_triggered_this_iteration = true;
                         event_loop.increment_hard_gate_count();
+                        // Capture the expected_topics before taking a
+                        // mutable borrow on `event_loop` (passed to
+                        // `inject_hard_gate_guidance` for the
+                        // `pending_recovery_hat` pin) so the
+                        // immutable borrow on `get_hat_publishes`
+                        // does not overlap with the mut borrow.
+                        let expected_topics = event_loop.get_hat_publishes(&display_hat);
                         inject_hard_gate_guidance(
                             &ctx,
+                            Some(&mut event_loop),
                             &display_hat,
-                            &event_loop.get_hat_publishes(&display_hat),
+                            &expected_topics,
                         );
                         info!(
                             hat = %display_hat.as_str(),

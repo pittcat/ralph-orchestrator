@@ -1437,4 +1437,40 @@ hats:
         // hat == None → defer to origin guard; check returns Ok.
         assert!(check_isolated_scope(None, "debug.step", &cfg).is_ok());
     }
+
+    /// P1 (testing reviewer, plan §U1 test-scenarios Edge): an unknown
+    /// hat in isolated mode must be rejected with `isolated_scope_violation`
+    /// and `allowed: []` in the message. `HatRegistry::can_publish` is
+    /// fail-closed for unknown hats, so the new precheck agrees with the
+    /// loop's runtime scope guard. Without this test, the
+    /// `config.hats.get(hat_id).map(|c| c.publishes.clone()).unwrap_or_default()`
+    /// branch on line 444 is untested.
+    #[test]
+    fn u1_isolated_scope_unknown_hat_rejected() {
+        let cfg = isolated_config_with_hats(
+            r#"
+  executor:
+    name: "Executor"
+    publishes: ["work.done"]
+"#,
+        );
+        let err = check_isolated_scope(Some("ghost-hat"), "work.done", &cfg)
+            .expect_err("unknown hat in isolated mode must be rejected (fail-closed)");
+        assert_eq!(err.reason_code, "isolated_scope_violation");
+        assert!(
+            err.message.contains("ghost-hat"),
+            "message must name the offending hat, got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("work.done"),
+            "message must name the offending topic, got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("[]"),
+            "message must show empty allowed_publishes for unknown hat, got: {}",
+            err.message
+        );
+    }
 }
