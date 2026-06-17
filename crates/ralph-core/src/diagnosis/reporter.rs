@@ -368,6 +368,31 @@ pub fn load_session(session_dir: &Path) -> SessionData {
     let mut warnings = Vec::new();
     let summary = read_summary(&session_dir.join(DIAGNOSIS_SUMMARY_FILENAME), &mut warnings);
     let recovery = read_recovery_journal(&session_dir.join(RECOVERY_FILENAME), &mut warnings);
+    // U4 (2026-06-17-004): when the session recovery journal is
+    // missing or empty, fall back to the workspace-level
+    // `.ralph/recovery.jsonl` (cli_emit / wave_dimension_guard
+    // rejections persist there). The session layout is
+    // `<workspace>/.ralph/diagnostics/<id>/`, so the workspace
+    // root is three parents up from the session dir.
+    let recovery = if recovery.is_empty() {
+        let workspace_root = session_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent());
+        match workspace_root {
+            Some(root) => {
+                let workspace_path = root.join(".ralph").join("recovery.jsonl");
+                if workspace_path.exists() {
+                    read_recovery_journal(&workspace_path, &mut warnings)
+                } else {
+                    Vec::new()
+                }
+            }
+            None => recovery,
+        }
+    } else {
+        recovery
+    };
     let drift = read_drift_journal(&session_dir.join(DRIFT_FILENAME), &mut warnings);
     let orchestration =
         read_orchestration(&session_dir.join(ORCHESTRATION_FILENAME), &mut warnings);

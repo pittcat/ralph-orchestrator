@@ -39,6 +39,56 @@ pub fn agent_wrote_any_valid_or_rejected(
 /// violation reference. The two artifacts are returned as a pair so
 /// the caller can choose to ignore the seed while still appending
 /// the hint, or vice versa.
+/// U4 (2026-06-17-004): count non-empty lines in the two
+/// `recovery.jsonl` journals that coexist in a workspace:
+///
+/// - **workspace** (`<root>/.ralph/recovery.jsonl`) — appended by
+///   the `ralph emit` CLI precheck (cli_emit / wave_dimension_guard
+///   rejections) and any other CLI-side audit path. Persists
+///   across loops.
+/// - **session** (`<root>/.ralph/diagnostics/<id>/recovery.jsonl`)
+///   — appended by the runtime (missing_event_gate, workflow_guard,
+///   etc.) for the active diagnostics session.
+///
+/// Per KTD-6 we keep both journals in place (no migration) and
+/// expose their combined count + dual-path notes so operators and
+/// `ralph diagnose` see the full picture. Returns `(0, 0)` if
+/// neither file exists — the absence is not a failure.
+///
+/// `session_dir` is the absolute path to the diagnostics session
+/// directory (e.g. `<root>/.ralph/diagnostics/<id>/`). The
+/// workspace root is derived as three parents up from there so
+/// we do not depend on LoopContext / config layout details.
+pub(crate) fn count_recovery_entries(session_dir: &Path) -> (u32, u32) {
+    let session_path = session_dir.join("recovery.jsonl");
+    // `.ralph/diagnostics/<id>/recovery.jsonl` → workspace root is
+    // three parents up (`<root>`).
+    let workspace_root = session_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent());
+    let workspace_path = workspace_root.map(|r| r.join(".ralph").join("recovery.jsonl"));
+    let workspace_count = workspace_path
+        .as_deref()
+        .map(count_non_empty_lines)
+        .unwrap_or(0);
+    (workspace_count, count_non_empty_lines(&session_path))
+}
+
+/// Count non-blank lines in a JSONL file. Returns 0 on any I/O
+/// error (NotFound, permission denied, malformed UTF-8, ...) so
+/// the absence of a journal never aborts summary generation.
+fn count_non_empty_lines(path: &Path) -> u32 {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return 0,
+    };
+    content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count() as u32
+}
+
 pub(crate) fn build_termination_diagnostics(
     event_loop: &ralph_core::EventLoop,
     payload_violation_report_relpath: Option<&str>,
@@ -71,6 +121,28 @@ pub(crate) fn build_termination_diagnostics(
 
     let state = event_loop.state();
     let now = chrono::Utc::now();
+
+    // U4: aggregate both recovery journals so `recovery_count`
+    // reflects every envelope the operator could grep for.
+    // Prefer the LoopContext's workspace (the actual on-disk root
+    // where `.ralph/` lives and where cli_emit writes its journal);
+    // fall back to the config workspace root for non-context runs.
+    let workspace_root_owned: std::path::PathBuf = event_loop
+        .loop_context()
+        .map(|c| c.workspace().to_path_buf())
+        .unwrap_or_else(|| event_loop.config().core.workspace_root.clone());
+    let workspace_root = workspace_root_owned.as_path();
+    let (workspace_count, session_count) = count_recovery_entries(workspace_root, &session_id);
+    let recovery_count = workspace_count + session_count;
+
+    let mut notes = Vec::new();
+    notes.push(format!(
+        "recovery journal: workspace .ralph/recovery.jsonl ({workspace_count} entries)"
+    ));
+    notes.push(format!(
+        "recovery journal: session .ralph/diagnostics/{session_id}/recovery.jsonl ({session_count} entries)"
+    ));
+
     let summary = ralph_core::diagnostics::DiagnosisSummary {
         schema_version: ralph_core::diagnostics::DiagnosisSummary::SCHEMA_VERSION,
         session_id: session_id.clone(),
@@ -85,9 +157,9 @@ pub(crate) fn build_termination_diagnostics(
             ".ralph/diagnostics/{session_id}/orchestration.jsonl"
         )),
         errors_log_path: Some(format!(".ralph/diagnostics/{session_id}/errors.jsonl")),
-        recovery_count: 0,
+        recovery_count,
         drift_finding_count: 0,
-        notes: Vec::new(),
+        notes,
     };
 
     Some((hint, summary))

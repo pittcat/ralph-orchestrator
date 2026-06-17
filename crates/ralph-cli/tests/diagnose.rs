@@ -291,3 +291,135 @@ fn invalid_session_exits_3() {
         "stderr should explain invalid session, got: {stderr}"
     );
 }
+
+// -------------------------------------------------------------------------
+// U4 (2026-06-17-004): `ralph diagnose` sees workspace-level
+// `recovery.jsonl` (cli_emit rejects) when the session journal is
+// empty. Without the fallback, the 26 cli_emit rejects from the
+// noble-peacock incident would be invisible to operators running
+// `ralph diagnose` on a stale or fresh session.
+
+/// T4.3 (Integration): `ralph diagnose --format json` reports a
+/// non-zero `recovery_count` when the session-level `recovery.jsonl`
+/// is empty but the workspace `.ralph/recovery.jsonl` carries 3
+/// cli_emit envelopes.
+#[test]
+fn u4_diagnose_falls_back_to_workspace_recovery_journal() {
+    let tmp = TempDir::new().unwrap();
+    let session = fresh_session(&tmp, "2026-06-05T10-20-30");
+    // Intentionally do NOT write session recovery.jsonl.
+    write_summary(&session);
+    write_orchestration(&session);
+
+    // 3 cli_emit entries in workspace-level journal.
+    let workspace_journal = tmp.path().join(".ralph").join("recovery.jsonl");
+    fs::create_dir_all(workspace_journal.parent().unwrap()).unwrap();
+    let cli_emit_entry = "{\"schema_version\":1,\"envelope\":{\"schema_version\":1,\"diagnosis_id\":\"cli-1\",\"iteration\":1,\"source\":\"cli_emit\",\"severity\":\"error\",\"reason_code\":\"policy_denied\",\"message\":\"reject\",\"source_hat\":\"ralph\",\"target_hat\":\"executor\",\"topic\":\"work.done\",\"retry_key\":\"cli_emit:executor:work_done:policy_denied:*\",\"retry_attempt\":0,\"safe_target\":false,\"outcome\":\"failed\",\"timestamp\":\"2026-06-05T10:20:30Z\"},\"iteration\":1,\"timestamp\":\"2026-06-05T10:20:30Z\"}\n";
+    fs::write(&workspace_journal, cli_emit_entry.repeat(3)).unwrap();
+
+    let output = ralph_bin()
+        .arg("diagnose")
+        .arg("--format")
+        .arg("json")
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "diagnose should succeed (stderr: {})",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(value["schema_version"], "1");
+    let findings = value["top_findings"]
+        .as_array()
+        .expect("top_findings array");
+    assert_eq!(
+        findings.len(),
+        1,
+        "U4: workspace fallback should surface 1 grouped finding (same retry_key), got {findings:?}"
+    );
+    assert_eq!(
+        findings[0]["occurrences"], 3,
+        "U4: 3 cli_emit envelopes must aggregate to occurrences=3"
+    );
+    assert_eq!(
+        findings[0]["source"], "cli_emit",
+        "U4: source must reflect workspace journal provenance"
+    );
+}
+
+/// T4.2 (Edge, CLI side): no workspace recovery, no session recovery
+/// → top_findings is empty, exit code 0.
+#[test]
+fn u4_diagnose_no_journal_no_findings_no_panic() {
+    let tmp = TempDir::new().unwrap();
+    let session = fresh_session(&tmp, "2026-06-05T10-20-30");
+    write_summary(&session);
+    write_orchestration(&session);
+
+    let output = ralph_bin()
+        .arg("diagnose")
+        .arg("--format")
+        .arg("json")
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "missing recovery journals must not fail (stderr: {})",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let findings = value["top_findings"]
+        .as_array()
+        .expect("top_findings array");
+    assert!(
+        findings.is_empty(),
+        "U4: no journals → top_findings must be empty, got {findings:?}"
+    );
+}
+
+/// T4.4 (Edge, CLI side): session has its own recovery.jsonl with 1
+/// entry → workspace fallback must NOT double-count. Session entries
+/// take precedence (per KTD-6: dual-path indexing, not merging).
+#[test]
+fn u4_diagnose_session_takes_precedence_over_workspace() {
+    let tmp = TempDir::new().unwrap();
+    let session = fresh_session(&tmp, "2026-06-05T10-20-30");
+    write_recovery_entry(&session);
+    write_summary(&session);
+    write_orchestration(&session);
+
+    // Also populate workspace journal — must be ignored when session
+    // journal is non-empty.
+    let workspace_journal = tmp.path().join(".ralph").join("recovery.jsonl");
+    fs::create_dir_all(workspace_journal.parent().unwrap()).unwrap();
+    let cli_emit_entry = "{\"schema_version\":1,\"envelope\":{\"schema_version\":1,\"diagnosis_id\":\"cli-1\",\"iteration\":1,\"source\":\"cli_emit\",\"severity\":\"error\",\"reason_code\":\"policy_denied\",\"message\":\"reject\",\"source_hat\":\"ralph\",\"target_hat\":\"executor\",\"topic\":\"work.done\",\"retry_key\":\"cli_emit:executor:work_done:policy_denied:*\",\"retry_attempt\":0,\"safe_target\":false,\"outcome\":\"failed\",\"timestamp\":\"2026-06-05T10:20:30Z\"},\"iteration\":1,\"timestamp\":\"2026-06-05T10:20:30Z\"}\n";
+    fs::write(&workspace_journal, cli_emit_entry).unwrap();
+
+    let output = ralph_bin()
+        .arg("diagnose")
+        .arg("--format")
+        .arg("json")
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let findings = value["top_findings"]
+        .as_array()
+        .expect("top_findings array");
+    assert_eq!(
+        findings.len(),
+        1,
+        "U4: session journal takes precedence; workspace entry ignored, got {findings:?}"
+    );
+    assert_eq!(
+        findings[0]["source"], "missing_event_gate",
+        "U4: source must come from session journal"
+    );
+}

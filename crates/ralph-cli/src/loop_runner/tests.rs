@@ -12799,3 +12799,121 @@ fn test_u5_r5_last_reviewed_sha_written_for_real_empty_diff() {
         "U5: regression — step with no wave ever opened, empty_diff is safe"
     );
 }
+
+// -------------------------------------------------------------------------
+// U4 (2026-06-17-004): diagnosis-summary recovery 聚合 (R6)
+//
+// Termination diagnostics must report the combined count of recovery
+// envelopes from BOTH journals:
+//   - workspace `<root>/.ralph/recovery.jsonl` (cli_emit rejects)
+//   - session   `<root>/.ralph/diagnostics/<id>/recovery.jsonl`
+//     (missing_event_gate / workflow_guard / etc.)
+//
+// Previous behavior hard-coded `recovery_count: 0` and surfaced
+// `recovery_journal_path` only, hiding the 26 cli_emit rejects from
+// the operator's terminal summary.
+
+/// T4.1 (Happy path, Covers AE4): 3 cli_emit + 1 missing_event_gate
+/// → `recovery_count == 4`. Both journal paths appear in `notes`.
+#[test]
+fn u4_recovery_count_aggregates_workspace_and_session_journals() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let workspace = tmp.path().to_path_buf();
+
+    // 3 cli_emit rejection envelopes in workspace journal.
+    let workspace_journal = workspace.join(".ralph").join("recovery.jsonl");
+    std::fs::create_dir_all(workspace_journal.parent().unwrap()).unwrap();
+    let cli_emit_entry = "{\"schema_version\":1,\"envelope\":{\"schema_version\":1,\"diagnosis_id\":\"cli-1\",\"iteration\":1,\"source\":\"cli_emit\",\"severity\":\"error\",\"reason_code\":\"policy_denied\",\"message\":\"reject\",\"source_hat\":\"ralph\",\"target_hat\":\"executor\",\"topic\":\"work.done\",\"retry_key\":\"cli_emit:executor:work_done:policy_denied:*\",\"retry_attempt\":0,\"safe_target\":false,\"outcome\":\"failed\",\"timestamp\":\"2026-06-17T10:00:00Z\"},\"iteration\":1,\"timestamp\":\"2026-06-17T10:00:00Z\"}\n";
+    std::fs::write(&workspace_journal, cli_emit_entry.repeat(3)).unwrap();
+
+    // 1 missing_event_gate envelope in the session journal.
+    let event_loop = build_u8_event_loop(workspace.clone(), true);
+    let session_dir = event_loop
+        .diagnostics()
+        .session_dir()
+        .expect("session dir must exist when diagnostics enabled");
+    std::fs::write(
+        session_dir.join("recovery.jsonl"),
+        "{\"schema_version\":1,\"envelope\":{\"schema_version\":1,\"diagnosis_id\":\"sess-1\",\"iteration\":1,\"source\":\"missing_event_gate\",\"severity\":\"error\",\"reason_code\":\"no_emit\",\"message\":\"builder did not emit work.done\",\"source_hat\":\"builder\",\"target_hat\":\"builder\",\"topic\":\"work.done\",\"retry_key\":\"missing_event_gate:builder:work_done:no_emit:*\",\"retry_attempt\":0,\"safe_target\":true,\"outcome\":\"pending\",\"timestamp\":\"2026-06-17T10:01:00Z\"},\"iteration\":1,\"timestamp\":\"2026-06-17T10:01:00Z\"}\n",
+    )
+    .unwrap();
+
+    let (_hint, seed) =
+        build_termination_diagnostics(&event_loop, None).expect("hint + seed must be Some");
+
+    assert_eq!(
+        seed.recovery_count, 4,
+        "U4: 3 cli_emit + 1 missing_event_gate → recovery_count must be 4, got {}. notes={:?}",
+        seed.recovery_count, seed.notes
+    );
+    // Both journal paths must appear in notes for operator visibility.
+    assert!(
+        seed.notes
+            .iter()
+            .any(|n| n.contains(".ralph/recovery.jsonl") && n.contains("(3 entries)")),
+        "notes must report workspace journal with count, got: {:?}",
+        seed.notes
+    );
+    assert!(
+        seed.notes.iter().any(|n| n.contains("diagnostics/")
+            && n.contains("/recovery.jsonl")
+            && n.contains("(1 entries)")),
+        "notes must report session journal with count, got: {:?}",
+        seed.notes
+    );
+}
+
+/// T4.2 (Edge): no recovery files exist → count is 0, no panic.
+#[test]
+fn u4_recovery_count_zero_when_no_journals_present() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let event_loop = build_u8_event_loop(tmp.path().to_path_buf(), true);
+
+    let (_hint, seed) =
+        build_termination_diagnostics(&event_loop, None).expect("hint + seed must be Some");
+
+    assert_eq!(
+        seed.recovery_count, 0,
+        "U4: no recovery files → count must be 0, got {}. notes={:?}",
+        seed.recovery_count, seed.notes
+    );
+    // Notes still describe both paths so operators know where to look.
+    assert_eq!(seed.notes.len(), 2);
+    assert!(
+        seed.notes[0].contains("(0 entries)"),
+        "workspace note must report 0 entries, got: {}",
+        seed.notes[0]
+    );
+    assert!(
+        seed.notes[1].contains("(0 entries)"),
+        "session note must report 0 entries, got: {}",
+        seed.notes[1]
+    );
+}
+
+/// T4.4 (Edge, runner side): only workspace has data, session is empty
+/// → `recovery_count == workspace_count`. The session path still appears
+/// in `notes` for the operator (with 0 entries).
+#[test]
+fn u4_recovery_count_falls_back_to_workspace_when_session_empty() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let workspace = tmp.path().to_path_buf();
+
+    // 2 cli_emit rejections in workspace journal.
+    let workspace_journal = workspace.join(".ralph").join("recovery.jsonl");
+    std::fs::create_dir_all(workspace_journal.parent().unwrap()).unwrap();
+    let cli_emit_entry = "{\"schema_version\":1,\"envelope\":{\"schema_version\":1,\"diagnosis_id\":\"cli-1\",\"iteration\":1,\"source\":\"cli_emit\",\"severity\":\"error\",\"reason_code\":\"policy_denied\",\"message\":\"r\",\"source_hat\":\"ralph\",\"target_hat\":\"executor\",\"topic\":\"work.done\",\"retry_key\":\"cli_emit:executor:work_done:policy_denied:*\",\"retry_attempt\":0,\"safe_target\":false,\"outcome\":\"failed\",\"timestamp\":\"2026-06-17T10:00:00Z\"},\"iteration\":1,\"timestamp\":\"2026-06-17T10:00:00Z\"}\n";
+    std::fs::write(&workspace_journal, cli_emit_entry.repeat(2)).unwrap();
+
+    let event_loop = build_u8_event_loop(workspace.clone(), true);
+    // No session-level recovery.jsonl written.
+
+    let (_hint, seed) =
+        build_termination_diagnostics(&event_loop, None).expect("hint + seed must be Some");
+
+    assert_eq!(
+        seed.recovery_count, 2,
+        "U4: workspace-only journal → recovery_count must equal workspace_count (2), got {}",
+        seed.recovery_count
+    );
+}
