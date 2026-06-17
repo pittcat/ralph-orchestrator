@@ -275,3 +275,78 @@ fn test_u5_steward_woken_this_turn_prevents_recurisve_wake() {
         "steward_woken_this_turn must suppress recursive loop.stalled emits; got {stalled_count}"
     );
 }
+
+/// U1.HAPPY-via-WAVES: process_events_from_jsonl_with_waves() resets
+/// the stall detector at the start of each call. Three consecutive
+/// empty JSONL calls via this entry point must emit `loop.stalled`
+/// on the 3rd turn — the same as `process_events_from_jsonl()`.
+#[test]
+fn test_u1_loop_stalled_via_process_events_from_jsonl_with_waves() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+    let mut event_loop = make_isolated_stall_loop(&events_path);
+    let observed = install_bus_observer(&mut event_loop);
+    // Pre-fill: two prior no-progress turns, so the 3rd empty call
+    // (after the two we do below) triggers the threshold.
+    event_loop.state.consecutive_no_progress_turns = 2;
+    event_loop.state.current_isolated_hat = Some(HatId::new("executor"));
+
+    // Turn 1: empty JSONL → no-progress.
+    let _ = event_loop.process_events_from_jsonl_with_waves().unwrap();
+    assert_eq!(
+        event_loop.state.consecutive_no_progress_turns, 3,
+        "consecutive_no_progress_turns must reach 3 after 3 empty turns"
+    );
+
+    let observed_topics = observed.lock().unwrap().clone();
+    assert!(
+        observed_topics.iter().any(|t| t == "loop.stalled"),
+        "loop.stalled must be emitted on the 3rd consecutive no-progress turn via process_events_from_jsonl_with_waves; observed: {observed_topics:?}"
+    );
+}
+
+/// U1.REGRESSION: pre-2026-06-17 the stall detector state was NOT
+/// reset in process_events_from_jsonl_with_waves(), so a
+/// `work.ready` event processed via that entry point would NOT
+/// reset the counter. After the fix, a business event admitted
+/// through process_events_from_jsonl_with_waves() correctly resets
+/// the counter, and subsequent empty turns eventually trigger
+/// `loop.stalled` again.
+#[test]
+fn test_u1_work_ready_via_process_events_from_jsonl_with_waves_resets_counter() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+    let mut event_loop = make_isolated_stall_loop(&events_path);
+    let observed = install_bus_observer(&mut event_loop);
+
+    // Simulate a previously-stalled loop.
+    event_loop.state.consecutive_no_progress_turns = 2;
+    event_loop.state.consecutive_steward_activations = 1;
+    event_loop.state.current_isolated_hat = Some(HatId::new("executor"));
+
+    // This turn admits work.ready via process_events_from_jsonl_with_waves → reset.
+    write_event(&events_path, "work.ready", "executor");
+    let _ = event_loop.process_events_from_jsonl_with_waves().unwrap();
+
+    assert_eq!(
+        event_loop.state.consecutive_no_progress_turns, 0,
+        "consecutive_no_progress_turns must be reset to 0 when work.ready is admitted via process_events_from_jsonl_with_waves"
+    );
+    assert_eq!(
+        event_loop.state.consecutive_steward_activations, 0,
+        "consecutive_steward_activations must be reset to 0 after a business event admitted via process_events_from_jsonl_with_waves"
+    );
+
+    // Now simulate two more empty turns to confirm the counter
+    // advances again and triggers loop.stalled on the 3rd.
+    event_loop.state.consecutive_no_progress_turns = 2;
+    event_loop.state.current_isolated_hat = Some(HatId::new("executor"));
+
+    let _ = event_loop.process_events_from_jsonl_with_waves().unwrap();
+
+    let observed_topics = observed.lock().unwrap().clone();
+    assert!(
+        observed_topics.iter().any(|t| t == "loop.stalled"),
+        "loop.stalled must fire on 3rd empty turn after reset via process_events_from_jsonl_with_waves; observed: {observed_topics:?}"
+    );
+}

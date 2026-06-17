@@ -299,7 +299,7 @@ pub struct ProgressStewardConfig {
 }
 
 fn default_progress_steward_enabled() -> bool {
-    true
+    false
 }
 
 fn default_progress_steward_hat_id() -> String {

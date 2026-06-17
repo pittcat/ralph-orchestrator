@@ -263,3 +263,284 @@ fn test_u3_custom_ttl_respected() {
         "90s-old rejection must be dropped under TTL=60s; got {task_resume_count} task.resume"
     );
 }
+
+// ---------------------------------------------------------------------------
+// U2 (2026-06-17-001 plan): policy-rejection TTL freshness
+//
+// The TTL filter that was added for origin-guard isolated-scope violations
+// (U3) is now also applied to `event_policy` `RejectWithResume` decisions.
+// This closes the gap where stale policy rejections could re-inject
+// `task.resume` into the loop long after the source event was emitted.
+//
+// The tests below exercise the `publish_policy_rejection_resume` path
+// through the completion-guard `RejectWithResume` branch.
+// ---------------------------------------------------------------------------
+
+/// U2.HAPPY: policy rejects a fresh event (timestamp = now). The
+/// `task.resume` IS injected — the TTL filter admits fresh rejections.
+#[test]
+fn test_u2_fresh_policy_rejection_still_injects_task_resume() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    // Policy rejects events that don't match the declared schema.
+    // We use `work.done` with an empty payload `{}` which violates
+    // the completion guard (expects `plan_path` field).
+    let yaml = r#"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    terminal_topics: ["work.done"]
+    business_topics: ["work.ready", "work.done"]
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["work.ready", "work.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("TestU2Fresh");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // Write a `work.done` with current timestamp and an empty payload
+    // (triggers completion-guard rejection).
+    let now = chrono::Utc::now().to_rfc3339();
+    let json = serde_json::json!({
+        "topic": "work.done",
+        "payload": "{}",  // empty — completion guard requires plan_path
+        "ts": now,
+        "hat": "executor",
+    });
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&events_path)
+        .unwrap()
+        .write_all(format!("{}\n", json).as_bytes())
+        .unwrap();
+
+    let _ = event_loop.process_events_from_jsonl();
+
+    let hat_ids: Vec<ralph_proto::HatId> = event_loop.bus.hat_ids().cloned().collect();
+    let bus_events: Vec<ralph_proto::Event> = hat_ids
+        .iter()
+        .flat_map(|id| event_loop.bus.peek_pending(id).cloned().unwrap_or_default())
+        .collect();
+
+    let task_resume_count = bus_events
+        .iter()
+        .filter(|e| e.topic.as_str() == "task.resume")
+        .count();
+    assert!(
+        task_resume_count >= 1,
+        "fresh policy rejection must still inject task.resume; got {task_resume_count}"
+    );
+}
+
+/// U2.STALE: policy rejects an event whose timestamp is 10 minutes ago
+/// (default TTL = 300s). The `task.resume` is dropped and an
+/// `event.isolation.boundary_violation` diagnostic is published instead.
+#[test]
+fn test_u2_stale_policy_rejection_drops_task_resume() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let yaml = r#"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    terminal_topics: ["work.done"]
+    business_topics: ["work.ready", "work.done"]
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["work.ready", "work.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("TestU2Stale");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // 10 minutes ago — past the default 300s TTL.
+    let ten_minutes_ago =
+        (chrono::Utc::now() - chrono::Duration::seconds(600)).to_rfc3339();
+    let json = serde_json::json!({
+        "topic": "work.done",
+        "payload": "{}",  // empty — completion guard requires plan_path
+        "ts": ten_minutes_ago,
+        "hat": "executor",
+    });
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&events_path)
+        .unwrap()
+        .write_all(format!("{}\n", json).as_bytes())
+        .unwrap();
+
+    let _ = event_loop.process_events_from_jsonl();
+
+    let hat_ids: Vec<ralph_proto::HatId> = event_loop.bus.hat_ids().cloned().collect();
+    let bus_events: Vec<ralph_proto::Event> = hat_ids
+        .iter()
+        .flat_map(|id| event_loop.bus.peek_pending(id).cloned().unwrap_or_default())
+        .collect();
+
+    let task_resume_count = bus_events
+        .iter()
+        .filter(|e| e.topic.as_str() == "task.resume")
+        .count();
+    let boundary_violation_count = bus_events
+        .iter()
+        .filter(|e| {
+            e.topic.as_str() == "event.isolation.boundary_violation"
+                && e.payload.contains("Policy rejection")
+        })
+        .count();
+
+    assert_eq!(
+        task_resume_count, 0,
+        "stale policy rejection must NOT inject task.resume; got {task_resume_count}"
+    );
+    assert!(
+        boundary_violation_count >= 1,
+        "stale policy rejection must publish boundary_violation diagnostic; got {boundary_violation_count}"
+    );
+}
+
+/// U2.MISSING-TS: policy rejects an event with no timestamp field.
+// The TTL filter treats missing ts as fresh (backwards-compatible fallback),
+// so `task.resume` is injected.
+#[test]
+fn test_u2_missing_ts_policy_rejection_treated_as_fresh() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let yaml = r#"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    terminal_topics: ["work.done"]
+    business_topics: ["work.ready", "work.done"]
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["work.ready", "work.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("TestU2MissingTs");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // Write a `work.done` with no `ts` field at all.
+    let json = serde_json::json!({
+        "topic": "work.done",
+        "payload": "{}",
+        "hat": "executor",
+    });
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&events_path)
+        .unwrap()
+        .write_all(format!("{}\n", json).as_bytes())
+        .unwrap();
+
+    let _ = event_loop.process_events_from_jsonl();
+
+    let hat_ids: Vec<ralph_proto::HatId> = event_loop.bus.hat_ids().cloned().collect();
+    let bus_events: Vec<ralph_proto::Event> = hat_ids
+        .iter()
+        .flat_map(|id| event_loop.bus.peek_pending(id).cloned().unwrap_or_default())
+        .collect();
+
+    let task_resume_count = bus_events
+        .iter()
+        .filter(|e| e.topic.as_str() == "task.resume")
+        .count();
+    assert!(
+        task_resume_count >= 1,
+        "policy rejection with missing ts must be treated as fresh; got {task_resume_count} task.resume"
+    );
+}
+
+/// U2.FUTURE-TS: policy rejects an event whose timestamp is in the future
+/// (clock skew or forged ts). The `is_rejection_stale` helper treats
+/// future timestamps as stale, so `task.resume` is dropped and a
+/// boundary_violation diagnostic is published.
+#[test]
+fn test_u2_future_ts_policy_rejection_treated_as_stale() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let yaml = r#"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    terminal_topics: ["work.done"]
+    business_topics: ["work.ready", "work.done"]
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["work.ready", "work.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("TestU2FutureTs");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // Timestamp 1 hour in the future.
+    let one_hour_future =
+        (chrono::Utc::now() + chrono::Duration::seconds(3600)).to_rfc3339();
+    let json = serde_json::json!({
+        "topic": "work.done",
+        "payload": "{}",
+        "ts": one_hour_future,
+        "hat": "executor",
+    });
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&events_path)
+        .unwrap()
+        .write_all(format!("{}\n", json).as_bytes())
+        .unwrap();
+
+    let _ = event_loop.process_events_from_jsonl();
+
+    let hat_ids: Vec<ralph_proto::HatId> = event_loop.bus.hat_ids().cloned().collect();
+    let bus_events: Vec<ralph_proto::Event> = hat_ids
+        .iter()
+        .flat_map(|id| event_loop.bus.peek_pending(id).cloned().unwrap_or_default())
+        .collect();
+
+    let task_resume_count = bus_events
+        .iter()
+        .filter(|e| e.topic.as_str() == "task.resume")
+        .count();
+    let boundary_violation_count = bus_events
+        .iter()
+        .filter(|e| e.topic.as_str() == "event.isolation.boundary_violation")
+        .count();
+
+    assert_eq!(
+        task_resume_count, 0,
+        "future-ts policy rejection must be treated as stale; got {task_resume_count} task.resume"
+    );
+    assert!(
+        boundary_violation_count >= 1,
+        "future-ts policy rejection must publish boundary_violation; got {boundary_violation_count}"
+    );
+}

@@ -1,7 +1,7 @@
 ---
 title: 修复 Isolated Wave 稳定性并增加 Progress Steward 兜底机制
 type: fix
-status: active
+status: completed
 date: 2026-06-16
 origin: .worktrees/2026-06-10-003-refactor-event-loop-and-loop-runner-tests-split-plan-sunny-lotus/.ralph/agent/progress.md
 ---
@@ -132,7 +132,7 @@ origin: .worktrees/2026-06-10-003-refactor-event-loop-and-loop-runner-tests-spli
 |---|---|---|---|
 | `wave.worker.failed` | U2 | 新增 topic，`required_fields: [reason, wave_id, wave_index]`，`payload: json_object` | `presets/schemas/ce-executor-isolated.yml` + inline `schemas:` |
 | `loop.stalled` | U5 | 新增 diagnostic topic，`required_fields: [reason]`，`payload: json_object` | `presets/schemas/ce-executor-isolated.yml` + inline `schemas:` |
-| `task.resume` | U3/U5 | 新增/补充 schema：`required_fields: [reason, target_task_id, target_hat, source_event_id]`，`payload: json_object` | `presets/schemas/ce-executor-isolated.yml` + inline `schemas:` |
+| `task.resume` | U3/U5 | 补充 schema：`required_fields: [reason, target_hat]`，`payload: json_object`；runtime 无法从 Rejection 重建 task id，故去掉 `target_task_id` 和 `source_event_id` | `presets/schemas/ce-executor-isolated.yml` + inline `schemas:` |
 | `human.guidance` | U5 | 如当前未在 schema 中定义，补充最小 schema：`required_fields: [message]`，`payload: json_object`；如为系统 topic 免检，需在 preset 注释中显式说明 | `presets/schemas/ce-executor-isolated.yml` + inline `schemas:` |
 | `review.wave.ready` | U4/U5 | 字段不变，但 steward 会复用；确保 idempotency key 字段不要求为 required | 检查现有 schema 是否兼容 |
 
@@ -171,9 +171,11 @@ event_loop:
 ```yaml
 progress-steward:
   name: "🛟 Progress Steward"
-  triggers: ["task.resume", "loop.stalled", "plan.blocked", "human.guidance"]
+  triggers: ["loop.stalled", "human.guidance"]
   publishes: ["work.ready", "queue.advance", "review.wave.ready", "task.resume", "plan.blocked"]
 ```
+
+> **说明**：review 后发现 `task.resume` 是 ralph pseudo-hat 的保留 trigger、`plan.blocked` 与 shipper 路由冲突，故实际实现保留 `[loop.stalled, human.guidance]`，steward 通过 `loop.stalled` 被 runtime 唤醒。
 
 #### Steward 决策树与 handoff
 
@@ -329,7 +331,7 @@ Steward 被唤醒后读取 `plan.md`、`progress.md`、`tasks.jsonl`、`events.j
   - 目标 task 已 closed 且 rejection 的 topic 不在该 hat 当前可恢复范围内 → 丢弃（可恢复范围指该 hat 的 `publishes` 明确包含 rejection 原 topic 或相关恢复 topic）。
 - 丢弃时发布 `event.isolation.boundary_violation` 诊断事件，payload 含 `rejected_topic`、`source_hat`、`reason`（`expired` / `task_closed`），便于排查。
 - `task.resume` schema（U2/U5 同步到 schema SSOT 与 inline schemas）：
-  - `required_fields`: [reason, target_task_id, target_hat, source_event_id]
+  - `required_fields`: [reason, target_hat]（runtime 无法从 Rejection 重建 task id，故去掉 `target_task_id` 和 `source_event_id`）
   - `payload`: json_object
 
 **测试场景：**
@@ -412,7 +414,7 @@ Steward 被唤醒后读取 `plan.md`、`progress.md`、`tasks.jsonl`、`events.j
   - 若连续 `max_steward_iterations` 轮无 accepted 业务事件，自动 emit `loop.stalled`（diagnostic topic，不占用业务预算；计数只统计 accepted business events，diagnostic/rejection 不算）并唤醒 steward。
   - steward 自身连续激活 `max_steward_iterations` 次无进展，强制 emit `plan.blocked(reason=loop_stalled_max_iterations)`，loop 干净结束。
 - Preset 中 `progress-steward` hat：
-  - `triggers`: `["task.resume", "loop.stalled", "plan.blocked", "human.guidance"]`
+  - `triggers`: `["loop.stalled", "human.guidance"]`（review 后确认：`task.resume` 为 ralph pseudo-hat 保留，`plan.blocked` 与 shipper 路由冲突，实际实现仅保留 `[loop.stalled, human.guidance]`）
   - `publishes`: `["work.ready", "queue.advance", "review.wave.ready", "task.resume", "plan.blocked"]`
   - instructions 中实现决策树：读 plan.md / progress.md / tasks.jsonl / events.jsonl → 选择 emit 事件 → 明确下一个 hat。
 
@@ -510,3 +512,9 @@ Steward 被唤醒后读取 `plan.md`、`progress.md`、`tasks.jsonl`、`events.j
   - `presets/en/ce-executor-isolated.yml`
   - `presets/schemas/ce-executor-isolated.yml`
   - `crates/ralph-cli/src/presets.rs`
+
+---
+
+## 后续修复
+
+- **2026-06-17-001**（本计划）：修正 `progress-steward.triggers` 从 `[task.resume, loop.stalled, plan.blocked, human.guidance]` 更新为 `[loop.stalled, human.guidance]`；修正 `task.resume` 的 `required_fields` 从 `[reason, target_task_id, target_hat, source_event_id]` 更新为 `[reason, target_hat]`。

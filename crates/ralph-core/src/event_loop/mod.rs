@@ -385,7 +385,45 @@ fn publish_policy_rejection_resume(
     event: &JsonlEvent,
     payload: String,
     tracker: Option<&crate::event_loop::review_step_state::ReviewStepTracker>,
+    ttl_seconds: u64,
 ) {
+    // 2026-06-17-001 U2: TTL freshness filter — mirror the origin-guard
+    // stale-rejection path.  Construct a minimal Rejection so we can
+    // reuse `is_rejection_stale()`.  Missing/unparseable ts is treated
+    // as fresh (same fallback semantics as U3).
+    let rejection = crate::event_loop::rejection::Rejection {
+        stage: crate::event_loop::rejection::RejectionStage::Policy,
+        source_hat: event.hat.clone(),
+        business_hat: event.hat.clone(),
+        topic: event.topic.to_string(),
+        violation: payload.clone(),
+        retry_key: String::new(),
+        retry_eligible: true,
+        non_retryable_reason: None,
+        target_hat: event.hat.clone(),
+        original_event_id: None,
+        original_ts: Some(event.ts.clone()),
+    };
+    if is_rejection_stale(&rejection, ttl_seconds) {
+        warn!(
+            source_event_ts = ?rejection.original_ts,
+            ttl_seconds,
+            hat = ?event.hat.as_deref(),
+            topic = %event.topic,
+            "policy rejection: stale (TTL exceeded) — dropping task.resume"
+        );
+        bus.publish(Event::new(
+            "event.isolation.boundary_violation",
+            format!(
+                "{{\"hat\":\"{}\",\"topic\":\"{}\",\"violation\":\"Policy rejection: stale (TTL={}s)\",\"stage\":\"policy\"}}",
+                event.hat.as_deref().unwrap_or("unknown"),
+                event.topic,
+                ttl_seconds
+            ),
+        ));
+        return;
+    }
+
     let payload = enrich_payload_with_wave(&payload, event);
     let payload = enrich_payload_with_wave_open_hint(&payload, event, tracker);
     let mut resume = Event::new("task.resume", payload);
@@ -562,6 +600,7 @@ fn apply_workflow_guard_validation(
     workflow_progress: &mut WorkflowProgress,
     bus: &mut EventBus,
     review_step_tracker: &review_step_state::ReviewStepTracker,
+    ttl_seconds: u64,
 ) -> WorkflowGuardOutcome {
     let mut outcome = WorkflowGuardOutcome {
         accepted_events: Vec::with_capacity(events.len()),
@@ -674,6 +713,7 @@ fn apply_workflow_guard_validation(
                 &event,
                 recovery_payload,
                 Some(review_step_tracker),
+                ttl_seconds,
             );
 
             // U4: surface the rejection metadata to the caller. The
@@ -1074,6 +1114,7 @@ fn apply_event_policy_validation(
     source_hats_by_topic: &std::collections::HashMap<String, Vec<String>>,
     target_hats_by_topic: &std::collections::HashMap<String, Vec<String>>,
     registry: &crate::hat_registry::HatRegistry,
+    ttl_seconds: u64,
 ) -> PolicyValidationResult {
     // Unit 2 (2026-06-16-002 plan) take-3: the validator does NOT
     // take `&mut LoopState` directly.  It returns a list of
@@ -1189,6 +1230,7 @@ fn apply_event_policy_validation(
                         &event,
                         recovery_payload,
                         Some(review_step_tracker),
+                        ttl_seconds,
                     );
                 }
                 PolicyDecision::Hold(finding) => {
@@ -1211,6 +1253,7 @@ fn apply_event_policy_validation(
                         &event,
                         recovery_payload,
                         Some(review_step_tracker),
+                        ttl_seconds,
                     );
                 }
                 PolicyDecision::Block(finding) => {
@@ -1296,6 +1339,7 @@ fn apply_event_policy_validation(
                         &event,
                         recovery_payload,
                         Some(review_step_tracker),
+                        ttl_seconds,
                     );
                 }
                 PolicyDecision::Hold(finding) => {
@@ -1317,6 +1361,7 @@ fn apply_event_policy_validation(
                         &event,
                         recovery_payload,
                         Some(review_step_tracker),
+                        ttl_seconds,
                     );
                 }
                 PolicyDecision::Block(_finding) => {
@@ -1366,6 +1411,7 @@ fn apply_event_policy_validation(
                         &event,
                         recovery_payload,
                         Some(review_step_tracker),
+                        ttl_seconds,
                     );
                 } else {
                     review_step_tracker.observe_accepted(&event);
@@ -1403,6 +1449,7 @@ fn apply_event_policy_validation(
                         &event,
                         recovery_payload,
                         Some(review_step_tracker),
+                        ttl_seconds,
                     );
                 } else {
                     review_step_tracker.observe_accepted(&event);
@@ -1504,6 +1551,7 @@ fn apply_event_policy_validation(
                     &event,
                     recovery_payload,
                     Some(review_step_tracker),
+                    ttl_seconds,
                 );
                 // Do NOT record the rejected event
             }
@@ -1537,6 +1585,7 @@ fn apply_event_policy_validation(
                     &event,
                     recovery_payload,
                     Some(review_step_tracker),
+                    ttl_seconds,
                 );
             }
             PolicyDecision::Block(_finding) => {
@@ -7165,6 +7214,7 @@ impl EventLoop {
                 &source_hats_by_topic,
                 &target_hats_by_topic,
                 &self.registry,
+                self.config.event_loop.task_resume_ttl_seconds.unwrap_or(300),
             );
             // Restore the `ReviewStepTracker` and put the
             // `PolicyRuntimeState` back so the next call sees the
@@ -7424,6 +7474,7 @@ impl EventLoop {
                     &mut self.state.workflow_progress,
                     &mut self.bus,
                     &self.state.review_step_tracker,
+                    self.config.event_loop.task_resume_ttl_seconds.unwrap_or(300),
                 );
                 for rejection in &outcome.rejections {
                     Self::log_workflow_guard_rejection(&mut *self, rejection);
@@ -8555,6 +8606,11 @@ impl EventLoop {
         &mut self,
     ) -> std::io::Result<ProcessedEventsWithWaves> {
         let result = self.event_reader.read_new_events()?;
+        // 2026-06-16-001 U1: reset the per-turn stall-detector
+        // flag at the start of each read so the helper can
+        // observe whether THIS turn admitted a business event.
+        // Mirror of process_events_from_jsonl() line 6349.
+        self.state.stall_detector_had_events = false;
 
         // Partition: wave dispatch events vs regular events.
         // Only events that target a concurrent hat (concurrency > 1) are wave dispatches.
@@ -8685,6 +8741,7 @@ impl EventLoop {
                 &std::collections::HashMap::new(),
                 &std::collections::HashMap::new(),
                 &self.registry,
+                self.config.event_loop.task_resume_ttl_seconds.unwrap_or(300),
             );
             self.state.review_step_tracker = review_step_tracker;
             self.state.policy_runtime_state = Some(policy_state);

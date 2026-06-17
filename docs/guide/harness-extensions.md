@@ -386,6 +386,15 @@ and event projection for an AutoResearch pipeline:
 event_loop:
   execution_mode: isolated
   starting_event: "experiment.start"
+  # U3: 过滤 stale rejection。默认 300s，0 表示关闭。
+  task_resume_ttl_seconds: 300
+  # U5: progress-steward 配置。默认关闭（enabled: false），
+  # 需在 preset 中显式开启。仅在 stall/recovery 路径激活，
+  # 不订阅正常业务事件。
+  progress_steward:
+    enabled: false
+    steward_hat_id: "progress-steward"
+    max_steward_iterations: 3
   workflow_guards:
     chains:
       - name: experiment
