@@ -6,7 +6,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- State projection: the orchestrator is the canonical writer for
+  `.ralph/agent/tasks.jsonl` and `.ralph/agent/progress.md`. New
+  `state_projector` module drives both ledgers from the inbound
+  event batch; the new `## ORCHESTRATOR CONTEXT` block exposes the
+  live values to every hat prompt so the agent never has to
+  hand-read a ledger. Opt-in via
+  `event_loop.state_projection.enabled`; the `ce-executor-isolated`
+  and `ce-executor-serial` presets opt in by default. Plan:
+  `docs/plans/2026-06-17-003-feat-hat-orchestrator-state-projection-phase1-plan.md`.
+
+### Changed
+
+- The two `ce-executor` presets now route task creation and
+  progress updates through the projector. Per-hat instructions
+  still reference the legacy hand-written paths; the new HARD
+  RULE comment in `event_loop.state_projection` documents the
+  orchestrator-owned surfaces. Fail-closed on bad payloads —
+  rejected events are dropped with an
+  `event.state_projection.rejected` diagnostic and never
+  reach the bus.
+
 ### Fixed
+
+- Multi-event batches where two events share a topic and one
+  fails the projector used to drop the whole topic. The hook
+  now retains by `(topic, payload)` so only the matching
+  rejection is dropped; sibling events of the same topic
+  survive. P0 fix in review 2026-06-17-003.
+- `state_projection.project_plan_complete` now closes any open
+  tasks in `tasks.jsonl`. The previous behaviour only touched
+  `progress.md`, leaving stale open rows that the U4
+  `progress_task_gate` would reject on the next step. P1 fix.
+- `runtime_state.derive_plan_name` now reads the plan name from
+  the canonical `task.key` shape
+  (`ce-executor:<plan>:<step>:<unit>`) instead of the
+  free-form `description` field. An agent that overwrites its
+  own description can no longer poison the snapshot. P2 fix.
 
 - Claude child sessions now default to `--setting-sources project,local`, preventing host user-level `~/.claude/settings.json` hooks, plugins, and MCP servers from leaking into Ralph orchestration runs. Users who want the old behavior can opt back in with `cli.args: ["--setting-sources", "user,project,local"]`.
 

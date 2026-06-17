@@ -23,7 +23,6 @@ use serde::{Deserialize, Serialize};
 use crate::state_projector::StateProjector;
 use crate::step_handoff::progress_task_gate::ProgressSnapshot;
 use crate::task::Task;
-use crate::task_store::TaskStore;
 
 /// Heading the loop prepends. Logged in the prompt verbatim so
 /// agents and grep-based scrapers can match a single literal.
@@ -72,19 +71,18 @@ impl RuntimeStateSnapshot {
     /// loop runs in a single process so disk reads are cheap.
     pub fn build(projector: &StateProjector) -> Self {
         let ctx = projector.context();
-        let progress = &ctx.progress_cache;
-        let tasks = if ctx.tasks_cache.is_empty() {
-            // Cold cache; try disk before giving up.
-            TaskStore::load(&ctx.tasks_path)
-                .map(|s| s.all().to_vec())
-                .unwrap_or_default()
+        let (tasks, _) = if ctx.tasks_cache.is_empty() {
+            // Cold cache; try disk before giving up. The progress
+            // path is already cached (or empty), so the disk read
+            // for tasks is the only fall-through.
+            crate::state_projector::read_state_from_disk(&ctx.workspace_root)
         } else {
-            ctx.tasks_cache.clone()
+            (ctx.tasks_cache.clone(), ProgressSnapshot::default())
         };
         Self {
             plan_name: derive_plan_name(&tasks),
-            current_step: progress.current_step.clone(),
-            completed_steps: progress.completed_steps.clone(),
+            current_step: ctx.progress_cache.current_step.clone(),
+            completed_steps: ctx.progress_cache.completed_steps.clone(),
             open_tasks: open_task_summaries(&tasks),
             wave: None, // U4 spike deferred: wave sub-section is
             //            duplicated with `## WAVE
@@ -175,15 +173,41 @@ impl RuntimeStateSnapshot {
 }
 
 fn derive_plan_name(tasks: &[Task]) -> Option<String> {
-    // Phase 1 heuristic: pick the most-recently-touched task's
-    // description prefix `plan: <name>` (set by the projector on
-    // ensure). When no tasks exist, return None — the agent will
-    // see `(none)`.
+    // Phase 1 heuristic: the projector stamps every task with a
+    // stable `key` shaped `ce-executor:<plan_name>:<step>:<unit>`.
+    // The second `:`-delimited segment is the plan name. This is
+    // more robust than parsing the free-form `description` field
+    // (which the agent may overwrite), and keeps the `key` as the
+    // single source of truth for plan identity. P2 fix — see
+    // review notes. When no tasks exist, the snapshot reports
+    // `(none)`.
     tasks
         .iter()
         .rev()
-        .find_map(|t| t.description.as_ref())
-        .and_then(|d| d.strip_prefix("plan: ").map(|s| s.to_string()))
+        .filter_map(|t| t.key.as_deref())
+        .find_map(|key| {
+            // Skip the leading `ce-executor:` prefix; the second
+            // segment is the plan name. Anything that does not
+            // match the canonical 4-segment shape falls through
+            // to legacy parsing so we never misclassify a foreign
+            // key.
+            let mut parts = key.splitn(4, ':');
+            let prefix = parts.next()?;
+            if prefix != "ce-executor" {
+                return None;
+            }
+            let plan = parts.next()?;
+            if plan.is_empty() {
+                return None;
+            }
+            // The shape has 4 segments total: prefix, plan, step,
+            // unit. Reject anything with fewer or more parts so
+            // we don't pick up `legacy-key` style entries.
+            if parts.next().is_none() || parts.next().is_none() {
+                return None;
+            }
+            Some(plan.to_string())
+        })
 }
 
 fn open_task_summaries(tasks: &[Task]) -> Vec<OpenTaskSummary> {
@@ -201,13 +225,7 @@ fn open_task_summaries(tasks: &[Task]) -> Vec<OpenTaskSummary> {
 /// Helper used by the event loop: read the canonical ledgers from
 /// disk when no projector is wired up (U4 test path, cold paths).
 pub fn snapshot_from_disk(workspace: &Path) -> RuntimeStateSnapshot {
-    let tasks_path = crate::state_projector::tasks_path(workspace);
-    let progress_path = crate::state_projector::progress_path(workspace);
-    let tasks = TaskStore::load(&tasks_path)
-        .map(|s| s.all().to_vec())
-        .unwrap_or_default();
-    let content = std::fs::read_to_string(&progress_path).unwrap_or_default();
-    let progress = ProgressSnapshot::parse(&content);
+    let (tasks, progress) = crate::state_projector::read_state_from_disk(workspace);
     RuntimeStateSnapshot {
         plan_name: derive_plan_name(&tasks),
         current_step: progress.current_step,
@@ -295,5 +313,65 @@ mod tests {
         // fixed string. A future rename must be coordinated with
         // the docs in U4.
         assert_eq!(ORCHESTRATOR_CONTEXT_HEADING, "## ORCHESTRATOR CONTEXT");
+    }
+
+    // P2 fix (review 2026-06-17-003): derive_plan_name must read
+    // the plan from the canonical key shape
+    // `ce-executor:<plan>:<step>:<unit>`, not the free-form
+    // `description` field. The legacy description-based path
+    // could be hijacked by an agent that overwrites the
+    // description; the key is stamped by the projector itself
+    // and never modified.
+    fn task_with(key: Option<&str>, description: Option<&str>) -> Task {
+        let mut t = Task::new("step-01".to_string(), 1);
+        t.key = key.map(|s| s.to_string());
+        t.description = description.map(|s| s.to_string());
+        t
+    }
+
+    #[test]
+    fn derive_plan_name_reads_canonical_key() {
+        let tasks = vec![
+            task_with(Some("ce-executor:demo-plan:step-01:u1-impl"), None),
+            task_with(Some("ce-executor:demo-plan:step-02:u2-impl"), None),
+        ];
+        // The reverse iterator picks the most recent task; the
+        // plan name is the second `:` segment of its key.
+        let snap = RuntimeStateSnapshot {
+            plan_name: derive_plan_name(&tasks),
+            ..RuntimeStateSnapshot::default()
+        };
+        assert_eq!(snap.plan_name.as_deref(), Some("demo-plan"));
+    }
+
+    #[test]
+    fn derive_plan_name_falls_back_to_legacy_key_only_when_safe() {
+        // No canonical 4-segment keys at all → plan_name is
+        // unknown. The agent sees `(none)`, which is correct
+        // because the projector is the only writer of the
+        // canonical shape.
+        let tasks = vec![task_with(Some("legacy-key"), None)];
+        let snap = RuntimeStateSnapshot {
+            plan_name: derive_plan_name(&tasks),
+            ..RuntimeStateSnapshot::default()
+        };
+        assert_eq!(snap.plan_name, None);
+    }
+
+    #[test]
+    fn derive_plan_name_ignores_free_form_description() {
+        // A task with a fake `plan: something` in its description
+        // but a non-canonical key must NOT be picked up: the
+        // legacy description-based path is gone, so the agent's
+        // free-form text cannot poison the snapshot.
+        let tasks = vec![task_with(
+            Some("ce-executor:trusted-plan:step-01:u1-impl"),
+            Some("plan: attacker-plan"),
+        )];
+        let snap = RuntimeStateSnapshot {
+            plan_name: derive_plan_name(&tasks),
+            ..RuntimeStateSnapshot::default()
+        };
+        assert_eq!(snap.plan_name.as_deref(), Some("trusted-plan"));
     }
 }

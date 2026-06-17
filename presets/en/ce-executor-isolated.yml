@@ -456,6 +456,14 @@ hats:
       - Create `logs/` directory
 
       ### Runtime Task Creation
+      - **2026-06-17-003 U5 (state projection)**: the orchestrator is the
+        canonical writer for `.ralph/agent/tasks.jsonl`. The
+        instructions below describe the legacy hand-written path;
+        both paths are now safe because the projector dedups on
+        the `key` field. **Prefer emitting `work.ready`** (the
+        projector creates the task); fall back to `ralph tools task
+        ensure` only if the `## ORCHESTRATOR CONTEXT` block in the
+        next prompt shows the task is missing.
       - Convert Step 1 Implementation Units to runtime tasks
       - Use `ralph tools task ensure` with stable key format:
         - `ce-executor:{plan_name}:step-01:{slug}`
@@ -518,6 +526,12 @@ hats:
       - Do NOT run `git checkout -b ...`, `git switch -c ...`, `git worktree add ...`, or any equivalent. If a task seems to require a new branch, stop and publish `work.failed` with `reason: "branch creation forbidden in this preset; pass --worktree to ralph run"`.
 
       ### Pre-Publish Validation
+      - **2026-06-17-003 U5**: trust the `## ORCHESTRATOR CONTEXT`
+        block — if the open_tasks list is empty, the projector has
+        not yet received your `work.ready` events, or the plan
+        has no tasks for this step. Do not run `ralph tools task
+        ensure` directly to backfill; emit a `work.ready` for the
+        missing unit and let the loop route it.
       - **必选检查**: 执行 `ralph tools task list` 验证步骤 1 的 runtime tasks 已创建
       - 如果 task list 为空或命令失败（说明 `ralph tools task ensure` 未被正确执行）：
         - 返回 Runtime Task Creation 步骤，确保 tasks 被创建
@@ -587,6 +601,13 @@ hats:
         decide `queue.advance` vs `plan.complete`; a stale
         checkbox (left unchecked after the work is committed)
         forces an unnecessary review-synthesizer round.
+        - **2026-06-17-003 U5 (state projection)**: in Phase 1 the
+          orchestrator is the canonical writer for `progress.md`;
+          the projector will mark the step as completed when it
+          sees your `work.done` event. The instruction above is
+          preserved for operators and for the very rare case
+          where the projector is disabled. Do not race the
+          projector by also writing `progress.md` yourself.
 
       ### PAYLOAD SCHEMA CHECKLIST (U4)
 
@@ -662,6 +683,13 @@ hats:
       while (current step has uncompleted tasks):
         1. ralph tools task start <task_id>
         2. Update `progress.md` (path: `.agents/scratchpad/ce-executor/{plan_name}/progress.md`): set `Current Step`, `Runtime Task ID`, `Status: in_progress`, update time. Concrete shape (replace `<...>` placeholders, do NOT wrap in nested fenced block — this section is itself a fenced block):
+        - **2026-06-17-003 U5 (state projection)**: in Phase 1 the
+          orchestrator writes the canonical `.ralph/agent/progress.md`
+          from your `work.ready` / `work.done` events. The
+          scratchpad path above is preserved for operators and
+          hat-side context, but the loop gate only reads
+          `.ralph/agent/progress.md`. Keep the scratchpad as a
+          human-readable journal; do not duplicate ledger state.
 
            ## Current Step
            - <step number + title from `work.ready` payload `step` field, e.g. `step-04 (U4 progress/task 轻量对账)`>
@@ -674,6 +702,11 @@ hats:
         4. Implement (test-first / characterization-first per Execution note)
         5. Run and verify tests
         6. ralph tools task close <task_id>     ← missing → contract rejection
+        - **2026-06-17-003 U5**: the `ralph tools task close`
+          call is now redundant for the gate's purposes — the
+          projector closes the task when it sees `work.done` and
+          the U4 `progress_task_gate` reads the projected ledger.
+          Operators may still call the CLI for manual recovery.
         7. Evaluate incremental commit
       ```
 
@@ -710,6 +743,10 @@ hats:
       2. `git add <relevant files>` (not `git add .`)
       3. `git commit -m "feat(scope): U-ID description"`
       4. Record the commit hash in `progress.md` under the completed U-ID
+      - **2026-06-17-003 U5**: keep the hash in the scratchpad
+        for the human journal; the canonical
+        `.ralph/agent/progress.md` is maintained by the projector
+        and does not need commit hashes.
 
       Exception: If the current runtime task explicitly represents an incomplete logical
       unit that spans multiple iterations, you may defer the commit until the logical
@@ -1825,6 +1862,13 @@ hats:
       - If `progress.md` lags (task closed but `Completed Steps` empty), update it now.
       - If event payload, runtime task, and `progress.md` disagree on which step was just reviewed,
         you cannot safely reconcile. Publish `plan.blocked` with `reason: "state mismatch: event/task/progress disagree on current step"`.
+      - **2026-06-17-003 U5 (state projection)**: in Phase 1 the
+        orchestrator already wrote `Completed Steps` when the
+        `work.done` event for this step arrived. The reconcile
+        step above is a safety net for the very rare case where
+        the projector is disabled (the `projection_disabled:
+        true` flag in the next `## ORCHESTRATOR CONTEXT` block
+        signals this). Do not race the projector.
 
       ### Base-Layer Enforcement (2026-06-12)
       The orchestrator **rejects** `queue.advance`, `work.ready`, and `plan.complete` until
@@ -1842,6 +1886,11 @@ hats:
 
       Before publishing `work.ready` for step advance:
       - Run `ralph tools task ensure` for `next_step` so runtime tasks exist
+      - **2026-06-17-003 U5**: the projector creates the task
+        automatically when it sees the `work.ready` event. The
+        `ralph tools task ensure` call is now optional — only run
+        it when the `## ORCHESTRATOR CONTEXT` block in the next
+        prompt shows the open_tasks list is missing the next unit.
       - Select the first uncompleted task of `next_step` for the `work.ready` payload
       - 2026-06-15-003 fix U3 (HARD RULE): `task_id` MUST be the real ID returned by
         `ralph tools task ensure` (or surfaced by `ralph tools task list`). NEVER use

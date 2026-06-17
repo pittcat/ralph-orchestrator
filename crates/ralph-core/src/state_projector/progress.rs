@@ -16,6 +16,7 @@ use tracing::warn;
 use crate::state_projector::ProjectionContext;
 use crate::state_projector::json_pointer;
 use crate::step_handoff::ProgressSnapshot;
+use tracing::debug;
 
 const PROGRESS_HEADER: &str = "# Progress\n\n";
 const CURRENT_STEP_HEADING: &str = "## Current Step\n";
@@ -57,7 +58,16 @@ pub(crate) fn project_close_step(ctx: &mut ProjectionContext, step: &str) -> Res
     write_progress(&ctx.progress_path, &ctx.progress_cache)
 }
 
-/// Finalize the plan. Closes the progress banner.
+/// Finalize the plan. Closes any open tasks in `tasks.jsonl`
+/// and updates the progress banner. P1 fix (review 2026-06-17-003):
+/// the docstring previously promised "closes all open tasks" but
+/// only the progress file was touched. Without closing the
+/// tasks, `tasks.jsonl` would carry stale open rows and the U4
+/// `progress_task_gate` would reject the next `queue.advance`
+/// for any new step that the agent tries to run. The closing
+/// loop is best-effort: a save error fails the whole
+/// projection (fail-closed) so the diagnostic surfaces a
+/// `plan.blocked` rather than a silent task leak.
 pub(crate) fn project_plan_complete(
     ctx: &mut ProjectionContext,
     payload: &Value,
@@ -67,6 +77,27 @@ pub(crate) fn project_plan_complete(
     if let Some(step) = json_pointer(payload, final_ptr) {
         push_completed(&mut ctx.progress_cache, step);
         ctx.progress_cache.current_step = Some(step.to_string());
+    }
+    // Close every still-open task so the ledger matches the
+    // plan-complete state. We do NOT re-open tasks that were
+    // already closed/failed — `is_terminal` is the source of
+    // truth. The single `save` makes the close atomic on disk.
+    let mut store = crate::task_store::TaskStore::load(&ctx.tasks_path)
+        .map_err(|e| format!("tasks_load: {e}"))?;
+    let mut closed = 0usize;
+    for task in store.all().to_vec() {
+        if !task.status.is_terminal() {
+            store.close(&task.id);
+            closed += 1;
+        }
+    }
+    if closed > 0 {
+        store.save().map_err(|e| format!("tasks_save: {e}"))?;
+        ctx.tasks_cache = store.all().to_vec();
+        debug!(
+            closed_count = closed,
+            "state projection: plan.complete closed remaining open tasks"
+        );
     }
     write_progress(&ctx.progress_path, &ctx.progress_cache)
 }

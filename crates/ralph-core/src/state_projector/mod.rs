@@ -22,6 +22,19 @@
 //! [`progress::project`] (Unit 3). Both submodules share the same
 //! [`ProjectionContext`] so they see the same view of the
 //! workspace.
+//!
+//! ## Known limitation: cross-loop cache staleness
+//!
+//! The in-memory `tasks_cache` / `progress_cache` live on the
+//! loop's `LoopState` and survive across iterations. The cold-start
+//! read in `apply` only fires when the cache is empty. If a
+//! separate loop (e.g. an operator CLI) mutates the ledger out of
+//! band, this loop's cache will lag the disk until the next
+//! `bootstrap_from_disk` call. Phase 1 assumes worktree-isolated
+//! loops; cross-loop invalidation is a Phase 2 concern (see plan
+//! "Risks & Dependencies" table). The `project_ensure_task` and
+//! `project_close_task` helpers re-read disk on every call, which
+//! partially mitigates the risk for the most common path.
 
 use std::path::{Path, PathBuf};
 
@@ -123,6 +136,16 @@ pub struct ApplyReport {
 pub struct Rejection {
     pub topic: String,
     pub reason: String,
+    /// Per-event payload snapshot used as a tie-breaker when
+    /// several events of the same topic appear in a single batch.
+    /// `None` when the source event had no payload (e.g. a bare
+    /// `task.resume`). The event loop uses
+    /// `(topic, payload_text)` as the unique key for
+    /// `events.retain` so a single reject does not drop sibling
+    /// events of the same topic in the same batch — a regression
+    /// that previously wiped out the whole batch on one bad
+    /// event. P0 fix — see review notes.
+    pub payload: Option<String>,
 }
 
 /// Top-level projector. Cheap to construct; holds the running
@@ -213,6 +236,7 @@ impl StateProjector {
                     report.rejections.push(Rejection {
                         topic: event.topic.clone(),
                         reason: format!("payload_parse_error: {e}"),
+                        payload: event.payload.clone(),
                     });
                     report.rejected += 1;
                     continue;
@@ -261,6 +285,7 @@ impl StateProjector {
                     report.rejections.push(Rejection {
                         topic: event.topic.clone(),
                         reason,
+                        payload: event.payload.clone(),
                     });
                     report.rejected += 1;
                 }
@@ -268,6 +293,24 @@ impl StateProjector {
         }
         report
     }
+}
+
+/// Read the canonical ledgers from disk and return a fresh
+/// `(tasks, progress)` pair. Used by [`RuntimeStateSnapshot`]
+/// when its in-memory cache is cold, and by tests that need a
+/// "load everything" helper without going through the projector.
+/// Best-effort: missing files → empty `(Vec::new(), default)`.
+/// Real I/O errors (permissions, corruption) on tasks.jsonl
+/// surface as an empty task list — same as
+/// [`TaskStore::load`]'s contract — so the snapshot degrades
+/// gracefully rather than panicking in the prompt path.
+pub fn read_state_from_disk(workspace: &Path) -> (Vec<crate::task::Task>, ProgressSnapshot) {
+    let tasks = crate::task_store::TaskStore::load(&tasks_path(workspace))
+        .map(|s| s.all().to_vec())
+        .unwrap_or_default();
+    let content = std::fs::read_to_string(&progress_path(workspace)).unwrap_or_default();
+    let progress = ProgressSnapshot::parse(&content);
+    (tasks, progress)
 }
 
 /// Read a JSON pointer (e.g. `"step"`, `"payload.title"`) from a

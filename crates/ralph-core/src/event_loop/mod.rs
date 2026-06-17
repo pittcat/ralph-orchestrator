@@ -7612,6 +7612,7 @@ impl EventLoop {
                     let payload = serde_json::json!({
                         "topic": rej.topic,
                         "reason": rej.reason,
+                        "event_payload": rej.payload,
                     })
                     .to_string();
                     self.bus.publish(ralph_proto::Event::new(
@@ -7619,13 +7620,49 @@ impl EventLoop {
                         payload,
                     ));
                 }
-                // Drop the rejected events from the accepted
-                // batch; the bus and downstream hats never see
-                // them. This matches the fail-closed contract
-                // for invalid payloads (see U1 risk note).
-                let rejected_topics: std::collections::HashSet<String> =
-                    report.rejections.iter().map(|r| r.topic.clone()).collect();
-                events.retain(|e| !rejected_topics.contains(&e.topic));
+                // P0 fix (review 2026-06-17-003): retain by the
+                // event's `(topic, payload)` pair rather than by
+                // topic name alone. When two events of the same
+                // topic appear in a single batch (ce-executor
+                // wave scenarios, plan-gate dual-publish
+                // carve-outs), rejecting the whole topic dropped
+                // sibling events that the projector would
+                // otherwise accept. The event reader does not
+                // surface a line number, so we use the payload
+                // text as the per-event tie-breaker: events with
+                // distinct payloads are independent and only the
+                // exact matching entry is dropped. Events with no
+                // payload (e.g. bare `task.resume`) fall back to
+                // a per-topic index counter so a single no-payload
+                // reject still does not wipe the whole topic.
+                let mut seen_no_payload: std::collections::HashMap<String, usize> =
+                    std::collections::HashMap::new();
+                let mut need_no_payload: std::collections::HashMap<String, usize> =
+                    std::collections::HashMap::new();
+                for r in &report.rejections {
+                    if r.payload.is_none() {
+                        *need_no_payload.entry(r.topic.clone()).or_insert(0) += 1;
+                    }
+                }
+                let rejected_with_payload: std::collections::HashSet<(String, String)> = report
+                    .rejections
+                    .iter()
+                    .filter_map(|r| {
+                        let p = r.payload.as_ref()?;
+                        Some((r.topic.clone(), p.clone()))
+                    })
+                    .collect();
+                events.retain(|e| {
+                    if let Some(p) = e.payload.as_ref() {
+                        !rejected_with_payload.contains(&(e.topic.clone(), p.clone()))
+                    } else {
+                        let seen = seen_no_payload.entry(e.topic.clone()).or_insert(0);
+                        let needed = need_no_payload.get(&e.topic).copied().unwrap_or(0);
+                        let drop = *seen < needed;
+                        *seen += 1;
+                        !drop
+                    }
+                });
             }
         }
         // --- End state projection ---

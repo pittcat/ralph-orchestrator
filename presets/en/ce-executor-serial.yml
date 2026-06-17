@@ -406,6 +406,15 @@ hats:
       - Create `logs/` directory
 
       ### Runtime Task Creation
+      - **2026-06-17-003 U5 (state projection)**: the orchestrator is
+        the canonical writer for `.ralph/agent/tasks.jsonl`. Both
+        the legacy `ralph tools task ensure` path and the
+        projector-driven `work.ready` path are safe — the
+        projector dedups on the `key` field. **Prefer emitting
+        `work.ready`** (the projector creates the task); fall
+        back to `ralph tools task ensure` only if the
+        `## ORCHESTRATOR CONTEXT` block in the next prompt shows
+        the task is missing.
       - Convert Step 1 Implementation Units to runtime tasks
       - Use `ralph tools task ensure` with stable key format:
         - `ce-executor:{plan_name}:step-01:{slug}`
@@ -455,6 +464,13 @@ hats:
       - Do NOT run `git checkout -b ...`, `git switch -c ...`, `git worktree add ...`, or any equivalent. If a task seems to require a new branch, stop and publish `work.failed` with `reason: "branch creation forbidden in this preset; pass --worktree to ralph run"`.
 
       ### Pre-Publish Validation
+      - **2026-06-17-003 U5**: trust the `## ORCHESTRATOR CONTEXT`
+        block — if the open_tasks list is empty, the projector
+        has not yet received your `work.ready` events, or the
+        plan has no tasks for this step. Do not run
+        `ralph tools task ensure` directly to backfill; emit a
+        `work.ready` for the missing unit and let the loop
+        route it.
       - **必选检查**: 执行 `ralph tools task list` 验证步骤 1 的 runtime tasks 已创建
       - 如果 task list 为空或命令失败（说明 `ralph tools task ensure` 未被正确执行）：
         - 返回 Runtime Task Creation 步骤，确保 tasks 被创建
@@ -528,6 +544,14 @@ hats:
         decide `queue.advance` vs `plan.complete`; a stale
         checkbox (left unchecked after the work is committed)
         forces an unnecessary review-synthesizer round.
+        - **2026-06-17-003 U5 (state projection)**: in Phase 1
+          the orchestrator is the canonical writer for
+          `progress.md`; the projector marks the step as
+          completed when it sees your `work.done` event. The
+          instruction above is preserved for operators and
+          for the rare case where the projector is disabled. Do
+          not race the projector by also writing `progress.md`
+          yourself.
 
       ### PAYLOAD SCHEMA CHECKLIST
 
@@ -1585,6 +1609,12 @@ hats:
 
       Before publishing `work.ready` for step advance:
       - Run `ralph tools task ensure` for `next_step` so runtime tasks exist
+      - **2026-06-17-003 U5**: the projector creates the task
+        automatically when it sees the `work.ready` event. The
+        `ralph tools task ensure` call is now optional — only
+        run it when the `## ORCHESTRATOR CONTEXT` block in the
+        next prompt shows the open_tasks list is missing the
+        next unit.
       - Select the first uncompleted task of `next_step` for the `work.ready` payload
       - `task_id` MUST be the real ID returned by `ralph tools task ensure` (or surfaced by
         `ralph tools task list`). NEVER use a placeholder.
