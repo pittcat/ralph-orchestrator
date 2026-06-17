@@ -277,6 +277,18 @@ pub struct PolicyRuntimeState {
     /// for **in-batch** dedup (when the same `work.done` appears
     /// twice in the same `process_output` batch).
     pub work_done_seen_keys: HashSet<String>,
+    /// U5 (2026-06-17-003 plan, R6): dedup set for
+    /// `review.dimension.ready` events. Key format:
+    /// `{plan_name}::{step}::{task_id}::{dimension}`. Populated
+    /// when a `review.dimension.ready` is accepted by
+    /// `validate_event_with_hat`; a 2nd emit with the same key
+    /// is rejected as `DuplicateWorkDone` (variant reused —
+    /// same retry-key semantics, smaller blast radius than
+    /// introducing a new ViolationType). Mirrors the
+    /// `work.done` dedup pattern: this is the in-batch mirror;
+    /// the per-loop lifetime set is also populated in
+    /// `from_events` for cross-batch replay.
+    pub review_dimension_ready_seen_keys: HashSet<String>,
 }
 
 impl PolicyRuntimeState {
@@ -312,6 +324,31 @@ impl PolicyRuntimeState {
                     if let Ok(val) = serde_json::from_str::<serde_json::Value>(payload) {
                         if let Some(name) = val.get("plan_name").and_then(|v| v.as_str()) {
                             state.current_plan_name = Some(name.to_string());
+                        }
+                    }
+                }
+            }
+            // U5 (2026-06-17-003 plan, R6): replay prior
+            // `review.dimension.ready` events to populate the
+            // dedup set so cross-batch re-emits (e.g. on loop
+            // restart or in a new process_output batch) are
+            // still rejected. The key shape matches the
+            // in-batch check: `{plan_name}::{step}::{task_id}::{dimension}`.
+            if event.topic == "review.dimension.ready" {
+                if let Some(ref payload) = event.payload {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(payload) {
+                        if let Value::Object(obj) = &val {
+                            let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
+                            let step = obj.get("step").and_then(|v| v.as_str());
+                            let task_id = obj.get("task_id").and_then(|v| v.as_str());
+                            let dimension = obj.get("dimension").and_then(|v| v.as_str());
+                            if let (Some(pn), Some(st), Some(ti), Some(dim)) =
+                                (plan_name, step, task_id, dimension)
+                            {
+                                state
+                                    .review_dimension_ready_seen_keys
+                                    .insert(format!("{pn}::{st}::{ti}::{dim}"));
+                            }
                         }
                     }
                 }
@@ -643,6 +680,62 @@ pub fn validate_event_with_hat(
             // `LoopState::work_done_seen_tasks` and is pruned
             // on step-boundary events.
             state.work_done_seen_keys.insert(dedup_key);
+        }
+    }
+
+    // U5 (2026-06-17-003 plan, R6): duplicate
+    // `review.dimension.ready` detection. The dedup key is
+    // `(plan_name, step, task_id, dimension)`. A 2nd
+    // `review.dimension.ready` with the same key is rejected
+    // as `RejectWithResume` so the runner publishes a
+    // `task.resume` with `fix_hint` pointing the agent to wait
+    // for the matching `review.dimension.done` /
+    // `review.dimension.failed` before re-sending
+    // `review.dimension.ready`. The check is applied before
+    // schema/terminal layers so a duplicate is a duplicate
+    // regardless of state.
+    //
+    // We reuse the `DuplicateWorkDone` variant (same key/hint
+    // shape) rather than introducing a new ViolationType
+    // because the recovery flow is identical: both are
+    // recoverable rejections that carry a retry-key, and
+    // `is_recoverable_policy_finding` already maps the variant
+    // to the correct bucket. Adding a new variant would force
+    // a parallel `is_recoverable` arm and a parallel
+    // `reason_code` mapping for no behavioral gain.
+    if topic == "review.dimension.ready"
+        && let Some(p) = payload
+        && let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p)
+    {
+        let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
+        let step = obj.get("step").and_then(|v| v.as_str());
+        let task_id = obj.get("task_id").and_then(|v| v.as_str());
+        let dimension = obj.get("dimension").and_then(|v| v.as_str());
+        if let (Some(pn), Some(st), Some(ti), Some(dim)) = (plan_name, step, task_id, dimension) {
+            let dedup_key = format!("{pn}::{st}::{ti}::{dim}");
+            if state.review_dimension_ready_seen_keys.contains(&dedup_key) {
+                let finding = PolicyFinding {
+                    topic: topic.to_string(),
+                    violation_type: ViolationType::DuplicateWorkDone {
+                        key: dedup_key.clone(),
+                        hint: DuplicateWorkDoneHint::DuplicateSameStep,
+                    },
+                    message: format!(
+                        "duplicate_dimension_ready: review.dimension.ready for key '{dedup_key}' \
+                         was already accepted. Wait for review.dimension.done / \
+                         review.dimension.failed for the same dimension before re-sending \
+                         review.dimension.ready."
+                    ),
+                };
+                return PolicyDecision::RejectWithResume(finding);
+            }
+            // Record the key so a 3rd emit in the same batch
+            // is also rejected. The in-batch set is drained by
+            // the event loop after `process_output` completes;
+            // the per-loop lifetime set is populated by
+            // `from_events` on restart so cross-batch replays
+            // honor the dedup.
+            state.review_dimension_ready_seen_keys.insert(dedup_key);
         }
     }
 
@@ -2437,6 +2530,258 @@ mod tests {
         assert_ne!(
             DuplicateWorkDoneHint::DuplicateSameStep,
             DuplicateWorkDoneHint::DuplicateStallBypass
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // U5 (2026-06-17-003 plan, R6): `review.dimension.ready` dedup
+    //
+    // Mirrors the U4 work.done dedup pattern. Key is
+    // `(plan_name, step, task_id, dimension)`. A 2nd emit with
+    // the same key is rejected as `DuplicateWorkDone` (variant
+    // reused for retry-key parity).
+    // -------------------------------------------------------------------------
+
+    fn review_dimension_ready_payload(plan: &str, step: &str, task: &str, dim: &str) -> String {
+        format!(
+            r#"{{"plan_name":"{plan}","step":"{step}","task_id":"{task}","dimension":"{dim}","wave_id":"w1"}}"#
+        )
+    }
+
+    #[test]
+    fn review_dimension_ready_dedup_first_accepted() {
+        // Happy path: first `review.dimension.ready` for a
+        // (plan, step, task, dimension) tuple is accepted.
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = review_dimension_ready_payload("p1", "step-01", "t1", "correctness");
+        let decision = validate_event(
+            "review.dimension.ready",
+            Some(&payload),
+            &config,
+            &mut state,
+        );
+        assert_eq!(
+            decision,
+            PolicyDecision::Accept,
+            "First review.dimension.ready for a new key must be accepted"
+        );
+        assert!(state
+            .review_dimension_ready_seen_keys
+            .contains("p1::step-01::t1::correctness"));
+    }
+
+    #[test]
+    fn review_dimension_ready_dedup_rejects_second_emit() {
+        // Error path: 2nd `review.dimension.ready` with the
+        // same (plan, step, task, dimension) tuple is rejected
+        // with `RejectWithResume`.
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = review_dimension_ready_payload("p1", "step-01", "t1", "correctness");
+
+        let first = validate_event(
+            "review.dimension.ready",
+            Some(&payload),
+            &config,
+            &mut state,
+        );
+        assert_eq!(first, PolicyDecision::Accept);
+
+        let second = validate_event(
+            "review.dimension.ready",
+            Some(&payload),
+            &config,
+            &mut state,
+        );
+        assert!(
+            matches!(
+                second,
+                PolicyDecision::RejectWithResume(PolicyFinding {
+                    violation_type: ViolationType::DuplicateWorkDone { ref key, .. },
+                    ..
+                }) if key == "p1::step-01::t1::correctness"
+            ),
+            "Second review.dimension.ready for same key must be rejected with DuplicateWorkDone, got {:?}",
+            second
+        );
+    }
+
+    #[test]
+    fn review_dimension_ready_dedup_different_dimensions_both_accepted() {
+        // Edge case: same (plan, step, task) but different
+        // `dimension` → both accepted (serial walk through
+        // review dimensions).
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+
+        let p1 = review_dimension_ready_payload("p1", "step-01", "t1", "correctness");
+        let first = validate_event(
+            "review.dimension.ready",
+            Some(&p1),
+            &config,
+            &mut state,
+        );
+        assert_eq!(first, PolicyDecision::Accept);
+
+        let p2 = review_dimension_ready_payload("p1", "step-01", "t1", "security");
+        let second = validate_event(
+            "review.dimension.ready",
+            Some(&p2),
+            &config,
+            &mut state,
+        );
+        assert_eq!(
+            second,
+            PolicyDecision::Accept,
+            "review.dimension.ready for same task but different dimension must be accepted, got {:?}",
+            second
+        );
+    }
+
+    #[test]
+    fn review_dimension_ready_dedup_different_step_accepted() {
+        // Edge case: same (plan, task, dimension) but different
+        // `step` → still accepted (key includes step).
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+
+        let p1 = review_dimension_ready_payload("p1", "step-01", "t1", "correctness");
+        let first = validate_event(
+            "review.dimension.ready",
+            Some(&p1),
+            &config,
+            &mut state,
+        );
+        assert_eq!(first, PolicyDecision::Accept);
+
+        let p2 = review_dimension_ready_payload("p1", "step-02", "t1", "correctness");
+        let second = validate_event(
+            "review.dimension.ready",
+            Some(&p2),
+            &config,
+            &mut state,
+        );
+        assert_eq!(
+            second,
+            PolicyDecision::Accept,
+            "review.dimension.ready for same dim but different step must be accepted, got {:?}",
+            second
+        );
+    }
+
+    #[test]
+    fn review_dimension_ready_dedup_is_recoverable() {
+        // The DuplicateWorkDone violation (reused for
+        // review.dimension.ready) must map to the recoverable
+        // bucket so the runner publishes a `task.resume` with
+        // a fix_hint.
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = review_dimension_ready_payload("p1", "step-01", "t1", "correctness");
+        let first = validate_event(
+            "review.dimension.ready",
+            Some(&payload),
+            &config,
+            &mut state,
+        );
+        assert_eq!(first, PolicyDecision::Accept);
+
+        let second = validate_event(
+            "review.dimension.ready",
+            Some(&payload),
+            &config,
+            &mut state,
+        );
+        let finding = match second {
+            PolicyDecision::RejectWithResume(f) => f,
+            other => panic!("expected RejectWithResume, got {:?}", other),
+        };
+        let class = is_recoverable_policy_finding(&finding);
+        assert_eq!(
+            class,
+            Some(ReasonClass::DuplicateWorkDone),
+            "review.dimension.ready dup must map to recoverable bucket, got {:?}",
+            class
+        );
+    }
+
+    #[test]
+    fn review_dimension_ready_dedup_disabled_policy_accepts_all() {
+        // When event policy is disabled, the dedup check must
+        // be skipped.
+        let mut config = test_config();
+        config.enabled = false;
+        let mut state = PolicyRuntimeState::default();
+        let payload = review_dimension_ready_payload("p1", "step-01", "t1", "correctness");
+
+        let first = validate_event(
+            "review.dimension.ready",
+            Some(&payload),
+            &config,
+            &mut state,
+        );
+        let second = validate_event(
+            "review.dimension.ready",
+            Some(&payload),
+            &config,
+            &mut state,
+        );
+        assert_eq!(first, PolicyDecision::Accept);
+        assert_eq!(
+            second,
+            PolicyDecision::Accept,
+            "disabled policy must not dedup review.dimension.ready, got {:?}",
+            second
+        );
+    }
+
+    #[test]
+    fn review_dimension_ready_dedup_missing_fields_skips_dedup() {
+        // If payload is missing any of the dedup fields, the
+        // dedup check cannot run — fall through to other
+        // policy layers. The DuplicateWorkDone variant must
+        // NOT appear.
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = r#"{"dimension":"correctness"}"#; // missing plan_name/step/task_id
+        let decision = validate_event(
+            "review.dimension.ready",
+            Some(payload),
+            &config,
+            &mut state,
+        );
+        if let PolicyDecision::RejectWithResume(f) = &decision {
+            assert!(
+                !matches!(f.violation_type, ViolationType::DuplicateWorkDone { .. }),
+                "missing-fields payload must not trigger DuplicateWorkDone, got {:?}",
+                f.violation_type
+            );
+        }
+    }
+
+    #[test]
+    fn review_dimension_ready_replay_from_events_populates_seen_keys() {
+        // `PolicyRuntimeState::from_events` must populate the
+        // dedup set from any prior `review.dimension.ready`
+        // events in the JSONL so cross-batch replay is
+        // honored.
+        use std::io::Write;
+
+        let jsonl = r#"{"topic":"review.dimension.ready","hat":"review-coordinator","payload":"{\"plan_name\":\"p1\",\"step\":\"step-01\",\"task_id\":\"t1\",\"dimension\":\"correctness\"}"}
+{"topic":"review.dimension.done","hat":"dimension-reviewer","payload":"{\"plan_name\":\"p1\",\"step\":\"step-01\",\"task_id\":\"t1\",\"dimension\":\"correctness\"}"}
+"#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        tmp.write_all(jsonl.as_bytes()).unwrap();
+        tmp.flush().unwrap();
+
+        let state = PolicyRuntimeState::from_events(tmp.path(), &test_config()).unwrap();
+        assert!(
+            state
+                .review_dimension_ready_seen_keys
+                .contains("p1::step-01::t1::correctness"),
+            "from_events must populate dedup set from prior review.dimension.ready, got {:?}",
+            state.review_dimension_ready_seen_keys
         );
     }
 
