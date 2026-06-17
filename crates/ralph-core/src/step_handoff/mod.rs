@@ -9,3 +9,5 @@
 //! See [`crate::event_loop`] for the integration site.
 
 pub mod progress_task_gate;
+
+pub use progress_task_gate::ProgressSnapshot;

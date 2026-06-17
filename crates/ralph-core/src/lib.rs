@@ -66,6 +66,7 @@ pub mod skill;
 pub mod skill_registry;
 mod state_file_injector;
 mod state_machine;
+pub mod state_projector;
 pub mod step_handoff;
 mod summary_writer;
 pub mod task;
@@ -182,6 +183,7 @@ pub use preflight::{
     AcceptanceCriterion, CheckResult, CheckStatus, PreflightCheck, PreflightReport,
     PreflightRunner, extract_acceptance_criteria, extract_all_criteria, extract_criteria_from_file,
 };
+pub mod runtime_state;
 pub use preset_validator::{
     TopologyError, TopologyErrorKind, TopologyValidationResult, validate_preset_topology,
 };

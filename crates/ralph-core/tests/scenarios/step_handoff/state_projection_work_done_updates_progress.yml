@@ -1,0 +1,93 @@
+# step_handoff/state_projection_work_done_updates_progress:
+# 2026-06-17-003 U3 end-to-end check. The state projector is the
+# canonical writer for `.ralph/agent/tasks.jsonl` and
+# `.ralph/agent/progress.md`; a `work.done` event drives both
+# ledgers, and the subsequent `queue.advance` passes the
+# `progress_task_gate` because the two ledgers now agree.
+#
+# This scenario uses coordinator mode (NOT isolated) so the
+# scenario runner's `next_hat()` helper can route every emit
+# without scope enforcement complicating the assertion surface.
+# The plan-gate hat subscribes to every relevant topic, so the
+# `hat` field in each event is left empty and the routing
+# resolves to plan-gate by default.
+#
+# Plan ref: docs/plans/2026-06-17-003-feat-hat-orchestrator-state-projection-phase1-plan.md U3 / U6.
+
+name: state_projection_work_done_updates_progress
+description: work.done → projector writes both ledgers → progress_task_gate allows queue.advance
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 10
+  # 2026-06-17-003 U1: opt in to the projector. Phase 1 default
+  # is `false` so non-tier-0 presets are unaffected.
+  event_loop:
+    completion_promise: LOOP_COMPLETE
+    state_projection:
+      enabled: true
+      actions:
+        work.ready:
+          kind: ensure_task
+          key: "task_key"
+          title: "step"
+        work.done:
+          kind: close_task
+          task_id: "task_id"
+          step: "step"
+        queue.advance:
+          kind: advance_step
+          current_step: "step"
+          completed_step: "completed_step"
+        plan.complete:
+          kind: plan_complete
+          final_step: "step"
+    workflow_contract:
+      step_handoff:
+        progress_task_gate: true
+  hats:
+    plan-gate:
+      subscribes_to:
+        - work.ready
+        - work.done
+        - queue.advance
+        - plan.complete
+      publishes:
+        - queue.advance
+        - plan.complete
+        - plan.blocked
+        - LOOP_COMPLETE
+    executor:
+      subscribes_to: []
+      publishes: []
+
+# Iter 1: project the work.ready + work.done pair; the projector
+# creates task-step-01, closes it, and writes step-01 into
+# progress.md's Completed Steps.
+# Iter 2: queue.advance passes the U4 progress_task_gate because
+# the projected ledgers agree.
+# Iter 3: LOOP_COMPLETE terminates the loop.
+mock_responses:
+  - |
+    <event topic="work.ready">
+    {"task_id":"task-step-01","task_key":"ce-executor:demo-plan:step-01:u1-impl","plan_name":"demo-plan","step":"step-01"}
+    </event>
+    <event topic="work.done">
+    {"step":"step-01","task_id":"task-step-01","task_key":"ce-executor:demo-plan:step-01:u1-impl","plan_name":"demo-plan","commit_count":0,"changed_lines":0}
+    </event>
+  - |
+    <event topic="queue.advance">
+    {"step":"step-02","completed_step":"step-01","task_id":"task-step-01","message":"Advancing."}
+    </event>
+  - |
+    <event topic="LOOP_COMPLETE">
+    Loop terminated.
+    </event>
+
+expected:
+  iterations: 3
+  events:
+    - topic: queue.advance
+  absent_events:
+    - topic: plan.blocked
+  completion: true

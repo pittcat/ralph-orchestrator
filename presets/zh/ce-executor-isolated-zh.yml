@@ -54,6 +54,28 @@ event_loop:
   max_iterations: 50
   max_runtime_seconds: 28800  # 8 hours
   enforce_hat_scope: true
+  # 2026-06-17-003 U1：开启 state projection。orchestrator 成为
+  # `.ralph/agent/tasks.jsonl` 与 `.ralph/agent/progress.md` 的
+  # 唯一 writer；hat 通过 `## ORCHESTRATOR CONTEXT` 块读取运行时
+  # 状态，禁止手工改 ledger。
+  state_projection:
+    enabled: true
+    actions:
+      work.ready:
+        kind: ensure_task
+        key: "task_key"
+        title: "step"
+      work.done:
+        kind: close_task
+        task_id: "task_id"
+        step: "step"
+      queue.advance:
+        kind: advance_step
+        current_step: "step"
+        completed_step: "completed_step"
+      plan.complete:
+        kind: plan_complete
+        final_step: "step"
   # 2026-06-17-003 plan U2: 启用 incomplete-wave gate，
   # 当 review wave 在 aggregate timeout 的 80% 窗口内仍未收齐维度时，
   # 由机制层 emit `plan.blocked(reason=dimension_reviewers_failed_to_converge)`

@@ -4491,6 +4491,13 @@ impl EventLoop {
             // prompt for `review-synthesizer` so the agent cannot miss
             // it.  The block is a no-op for any other hat.
             let base_prompt = self.prepend_wave_context(base_prompt, hat_id);
+            // 2026-06-17-003 U4: `## ORCHESTRATOR CONTEXT` block
+            // is the canonical view of the run. The block is
+            // always emitted (even when projection is disabled)
+            // so the agent never has to hand-read a ledger; the
+            // `projection_disabled` flag in the block tells the
+            // agent whether the values are live.
+            let base_prompt = self.prepend_orchestrator_context(base_prompt, hat_id);
             // R3: surface ephemeral relocations so the agent stops
             // recreating runtime artefacts inside the source tree.
             let base_prompt = self.prepend_ephemeral_relocations(base_prompt);
@@ -5397,6 +5404,26 @@ impl EventLoop {
             return prompt;
         };
         format!("{}{prompt}", ctx.to_prompt_block())
+    }
+
+    /// 2026-06-17-003 U4: prepend the `## ORCHESTRATOR CONTEXT`
+    /// block. Reads the projector's in-memory cache when state
+    /// projection is enabled; falls back to a disabled-stub
+    /// explanation otherwise (so the agent still sees the
+    /// heading and knows the orchestrator owns the ledgers).
+    fn prepend_orchestrator_context(&mut self, prompt: String, hat_id: &HatId) -> String {
+        // The `ralph` / orchestrator itself and short-lived
+        // control hats do not need the context; the prompt is
+        // already covered by the framework's own message.
+        if hat_id.as_str() == "ralph" {
+            return prompt;
+        }
+        let snap = if let Some(p) = self.state.state_projection.as_ref() {
+            crate::runtime_state::RuntimeStateSnapshot::build(p)
+        } else {
+            crate::runtime_state::RuntimeStateSnapshot::disabled_stub()
+        };
+        format!("{}{prompt}", snap.to_prompt_block())
     }
 
     /// R3 (2026-06-14-003 plan): invoke the ephemeral isolation engine
@@ -7556,6 +7583,89 @@ impl EventLoop {
             events = accepted;
         }
         // --- End state machine validation ---
+
+        // --- State projection (U1 of 2026-06-17-003 plan): ---
+        // SP-R8 mandates that the projector runs **after** the
+        // state machine has accepted the batch and **before** the
+        // `progress_task_gate`. The projector is the canonical
+        // writer for `.ralph/agent/tasks.jsonl` and
+        // `.ralph/agent/progress.md`; the gate then reads the
+        // projected ledgers. Failures are fail-closed — the
+        // affected events are dropped from the bus with an
+        // `event.state_projection.rejected` diagnostic.
+        if self.config.event_loop.state_projection.enabled {
+            let projector = self.state.state_projection.get_or_insert_with(|| {
+                let ctx = crate::state_projector::ProjectionContext::new(
+                    self.config.core.workspace_root.as_path(),
+                    self.config.event_loop.state_projection.clone(),
+                );
+                let mut p = crate::state_projector::StateProjector::new(ctx);
+                // Best-effort bootstrap; failure is non-fatal
+                // because the projector falls back to live
+                // disk reads on a cold cache.
+                let _ = p.bootstrap_from_disk();
+                p
+            });
+            let report = projector.apply(&events);
+            if !report.rejections.is_empty() {
+                for rej in &report.rejections {
+                    let payload = serde_json::json!({
+                        "topic": rej.topic,
+                        "reason": rej.reason,
+                        "event_payload": rej.payload,
+                    })
+                    .to_string();
+                    self.bus.publish(ralph_proto::Event::new(
+                        "event.state_projection.rejected",
+                        payload,
+                    ));
+                }
+                // P0 fix (review 2026-06-17-003): retain by the
+                // event's `(topic, payload)` pair rather than by
+                // topic name alone. When two events of the same
+                // topic appear in a single batch (ce-executor
+                // wave scenarios, plan-gate dual-publish
+                // carve-outs), rejecting the whole topic dropped
+                // sibling events that the projector would
+                // otherwise accept. The event reader does not
+                // surface a line number, so we use the payload
+                // text as the per-event tie-breaker: events with
+                // distinct payloads are independent and only the
+                // exact matching entry is dropped. Events with no
+                // payload (e.g. bare `task.resume`) fall back to
+                // a per-topic index counter so a single no-payload
+                // reject still does not wipe the whole topic.
+                let mut seen_no_payload: std::collections::HashMap<String, usize> =
+                    std::collections::HashMap::new();
+                let mut need_no_payload: std::collections::HashMap<String, usize> =
+                    std::collections::HashMap::new();
+                for r in &report.rejections {
+                    if r.payload.is_none() {
+                        *need_no_payload.entry(r.topic.clone()).or_insert(0) += 1;
+                    }
+                }
+                let rejected_with_payload: std::collections::HashSet<(String, String)> = report
+                    .rejections
+                    .iter()
+                    .filter_map(|r| {
+                        let p = r.payload.as_ref()?;
+                        Some((r.topic.clone(), p.clone()))
+                    })
+                    .collect();
+                events.retain(|e| {
+                    if let Some(p) = e.payload.as_ref() {
+                        !rejected_with_payload.contains(&(e.topic.clone(), p.clone()))
+                    } else {
+                        let seen = seen_no_payload.entry(e.topic.clone()).or_insert(0);
+                        let needed = need_no_payload.get(&e.topic).copied().unwrap_or(0);
+                        let drop = *seen < needed;
+                        *seen += 1;
+                        !drop
+                    }
+                });
+            }
+        }
+        // --- End state projection ---
 
         // --- Step handoff gate (U4 of 2026-06-17-002 plan): ---
         // pre-handoff consistency check for `progress.md` ↔

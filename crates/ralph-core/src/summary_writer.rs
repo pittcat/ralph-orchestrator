@@ -550,6 +550,10 @@ mod tests {
             recoverable_exhaustion_buffer: Vec::new(),
             // U4 (2026-06-17-003 plan) work.done dedup set.
             work_done_seen_tasks: std::collections::HashSet::new(),
+            // 2026-06-17-003 U1: state projector is lazily
+            // initialised by the first enabled iteration; the
+            // cache is empty until then.
+            state_projection: None,
             // 2026-06-17-004 U2 (R3): per-hat activation clock.
             hat_activation_at: std::collections::HashMap::new(),
             // 2026-06-17-004 U3 (R4+R5): obligation-trigger

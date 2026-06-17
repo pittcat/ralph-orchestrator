@@ -30,6 +30,7 @@ mod workflow_contract;
 pub(crate) mod workflow_guards;
 
 pub mod multi_hat_policy;
+mod state_projection;
 
 pub use agent_doc_sync::{AgentDocSyncConfig, OnErrorPolicy};
 pub use cli::{CliConfig, TuiConfig};
@@ -65,6 +66,7 @@ pub use robot::RobotConfig;
 pub use skills::{SkillOverride, SkillsConfig};
 pub use state_files::{StateFileEntry, StateFileFormat, StateFilesConfig};
 pub use state_machine::{BusinessAfterTerminalAction, DuplicateTerminalAction, StateMachineConfig};
+pub use state_projection::{StateProjectionAction, StateProjectionConfig};
 pub use tasks::TasksConfig;
 pub use telemetry::{DriftConfig, MalformedJsonlPolicy, RuntimeDiagnosisConfig, TelemetryConfig};
 pub use v1_adapters::{AdapterSettings, AdaptersConfig};
