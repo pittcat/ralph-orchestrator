@@ -554,6 +554,44 @@ fn emit_command_with_root_and_hats(
         tracing::info!("cli emit policy check skipped: no event_policy in resolved config");
     }
 
+    // U1 (2026-06-17-003 plan): isolated mode scope precheck. When the
+    // resolved preset has `event_loop.execution_mode: isolated` and the
+    // caller passed a hat (`--hat` or `RALPH_CURRENT_HAT`), the hat's
+    // `publishes` scope must be enforced BEFORE the event lands in
+    // events.jsonl. This mirrors the loop's runtime
+    // `isolated_publish_allowed` check via `HatRegistry::can_publish`,
+    // giving the agent actionable backpressure at the CLI boundary
+    // instead of a silent drop at the loop reader.
+    //
+    // Fires regardless of `check_mode`: if the agent is in isolated
+    // mode and passed `--hat`, the runner's scope is the contract —
+    // `--policy-check` toggles schema enforcement, not scope
+    // enforcement. Without `--hat` the call defers to the origin
+    // guard (which rejects unknown/missing provenance).
+    if let Some(cfg) = config.as_ref() {
+        if let Err(err) = crate::policy_check::check_isolated_scope(hat.as_deref(), &args.topic, cfg) {
+            use ralph_core::{PolicyFinding, ViolationType};
+            let finding = PolicyFinding {
+                violation_type: ViolationType::SemanticGateViolation {
+                    gate: "isolated_scope".to_string(),
+                    context: err.message.clone(),
+                },
+                topic: args.topic.clone(),
+                message: err.message.clone(),
+            };
+            record_cli_emit_rejection(
+                &workspace_root,
+                &args.topic,
+                hat.as_deref(),
+                &finding,
+            );
+            anyhow::bail!(
+                "Event rejected by isolated scope guard: {}",
+                err.message
+            );
+        }
+    }
+
     // U3 (R3): wave worker dimension assignment precheck. Fires before
     // any policy / step-handoff processing so a wave worker that
     // emits the wrong dimension never reaches the events file. The

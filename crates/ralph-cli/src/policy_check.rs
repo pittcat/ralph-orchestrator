@@ -24,13 +24,15 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::{ConfigSource, load_config_with_overrides, resolve_workspace_root};
 use crate::config_resolution;
+use ralph_core::config::HatExecutionMode;
 use ralph_core::step_handoff::progress_task_gate::{
     GateDecision, ProgressTaskMismatch, check_progress_task_alignment, is_gated_topic,
 };
 use ralph_core::{
-    EventPolicyConfig, PolicyDecision, PolicyRuntimeState, RalphConfig, ViolationType,
+    EventPolicyConfig, HatRegistry, PolicyDecision, PolicyRuntimeState, RalphConfig, ViolationType,
     validate_event,
 };
+use ralph_proto::HatId;
 
 /// Determines whether and how a CLI emit should undergo policy validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -382,6 +384,70 @@ fn check_wave_dimension_assignment_with_env(
         reason_code: "dimension_mismatch".to_string(),
         message: format!(
             "dimension mismatch: expected_dimension={expected} actual_dimension={actual}"
+        ),
+    })
+}
+
+/// U1 (2026-06-17-003 plan): CLI precheck for isolated mode hat
+/// publish scope. Mirrors the loop's `isolated_publish_allowed` →
+/// `registry.can_publish` so an agent running inside a hat context
+/// in `event_loop.execution_mode: isolated` cannot bypass the scope
+/// check by writing to events.jsonl via `ralph emit` (the topic
+/// would land in the JSONL, then get dropped at loop runtime
+/// without actionable backpressure).
+///
+/// Returns `Ok(())` when:
+/// - `config.event_loop.execution_mode != Isolated` (coordinator mode
+///   is unaffected — multiple hats share one prompt)
+/// - `hat` is `None` (we cannot decide; the runtime origin guard
+///   handles missing-provenance separately)
+/// - `hat == "ralph"` and `topic` is in `RALPH_CONTROL_TOPICS` (the
+///   ralph pseudo-hat is allowed to publish orchestrator control
+///   topics even in isolated mode)
+/// - `hat` is registered and the topic is in the hat's `publishes`
+///
+/// Returns `Err(ValidationError)` with `reason_code =
+/// "isolated_scope_violation"` when the hat is registered but the
+/// topic is not in the hat's `publishes` list. The message names
+/// the hat, the topic, and the hat's allowed publishes so the
+/// agent can self-correct without re-reading the preset.
+pub fn check_isolated_scope(
+    hat: Option<&str>,
+    topic: &str,
+    config: &RalphConfig,
+) -> std::result::Result<(), ValidationError> {
+    if config.event_loop.execution_mode != HatExecutionMode::Isolated {
+        return Ok(());
+    }
+    let Some(hat_id) = hat else {
+        return Ok(());
+    };
+    if hat_id == "ralph"
+        && ralph_core::event_origin::RALPH_CONTROL_TOPICS
+            .iter()
+            .any(|t| *t == topic)
+    {
+        return Ok(());
+    }
+
+    let registry = HatRegistry::from_runtime_config(config);
+    let hat_id_typed = HatId::new(hat_id);
+    if registry.can_publish(&hat_id_typed, topic) {
+        return Ok(());
+    }
+
+    let allowed: Vec<String> = config
+        .hats
+        .get(hat_id)
+        .map(|c| c.publishes.clone())
+        .unwrap_or_default();
+    Err(ValidationError {
+        payload_index: 0,
+        field: "topic".to_string(),
+        reason_code: "isolated_scope_violation".to_string(),
+        message: format!(
+            "isolated scope violation: hat '{hat_id}' is not allowed to publish topic '{topic}'; \
+             allowed publishes: {allowed:?}"
         ),
     })
 }
@@ -1240,5 +1306,128 @@ event_loop:
             "CLI gate message must reference the loop-gate reason `{loop_reason}`; got: {}",
             cli_err.message
         );
+    }
+
+    // ── U1 / 2026-06-17-003 plan ─────────────────────────────────────
+    // CLI isolated-mode scope precheck (`check_isolated_scope`).
+    // The helper must:
+    //   * pass through coordinator mode without effect
+    //   * pass when hat is None (defer to origin guard)
+    //   * pass when hat is ralph and topic is in RALPH_CONTROL_TOPICS
+    //   * pass when hat is registered and topic is in hat.publishes
+    //   * reject with isolated_scope_violation when hat is registered
+    //     and topic is NOT in hat.publishes
+    //   * reject with the same reason when the ralph pseudo-hat tries
+    //     to publish a business topic (the existing ralph-guard at
+    //     emit.rs catches this earlier, but the isolated-scope check
+    //     must still agree so the two gates compose cleanly)
+
+    fn isolated_config_with_hats(yaml_hats: &str) -> RalphConfig {
+        let yaml = format!(
+            r#"
+event_loop:
+  execution_mode: isolated
+hats:
+{yaml_hats}
+"#
+        );
+        serde_yaml::from_str(&yaml).unwrap()
+    }
+
+    #[test]
+    fn u1_isolated_scope_happy_path_executor_publishes_work_done() {
+        let cfg = isolated_config_with_hats(
+            r#"
+  executor:
+    name: "Executor"
+    triggers: ["plan.advance"]
+    publishes: ["work.done", "task.resume"]
+"#,
+        );
+        assert!(
+            check_isolated_scope(Some("executor"), "work.done", &cfg).is_ok(),
+            "executor publishing work.done must be allowed in isolated mode"
+        );
+    }
+
+    #[test]
+    fn u1_isolated_scope_error_path_executor_publishes_debug_step() {
+        let cfg = isolated_config_with_hats(
+            r#"
+  executor:
+    name: "Executor"
+    triggers: ["plan.advance"]
+    publishes: ["work.done", "task.resume"]
+"#,
+        );
+        let err = check_isolated_scope(Some("executor"), "debug.step", &cfg)
+            .expect_err("executor publishing debug.step must be rejected in isolated mode");
+        assert_eq!(err.reason_code, "isolated_scope_violation");
+        assert!(err.message.contains("executor"));
+        assert!(err.message.contains("debug.step"));
+        assert!(err.message.contains("work.done"));
+    }
+
+    #[test]
+    fn u1_isolated_scope_coordinator_mode_is_noop() {
+        let yaml = r#"
+event_loop:
+  execution_mode: coordinator
+hats:
+  executor:
+    name: "Executor"
+    publishes: ["work.done"]
+"#;
+        let cfg: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        // Any hat + any topic in coordinator mode → Ok.
+        assert!(check_isolated_scope(Some("executor"), "debug.step", &cfg).is_ok());
+        assert!(check_isolated_scope(Some("unknown-hat"), "anything", &cfg).is_ok());
+    }
+
+    #[test]
+    fn u1_isolated_scope_ralph_hat_control_topic_allowed() {
+        let cfg = isolated_config_with_hats(
+            r#"
+  executor:
+    name: "Executor"
+    publishes: ["work.done"]
+"#,
+        );
+        // ralph + LOOP_COMPLETE → Ok (control topic whitelist).
+        assert!(check_isolated_scope(Some("ralph"), "LOOP_COMPLETE", &cfg).is_ok());
+        assert!(check_isolated_scope(Some("ralph"), "task.resume", &cfg).is_ok());
+        assert!(check_isolated_scope(Some("ralph"), "human.guidance", &cfg).is_ok());
+    }
+
+    #[test]
+    fn u1_isolated_scope_ralph_hat_business_topic_rejected() {
+        let cfg = isolated_config_with_hats(
+            r#"
+  executor:
+    name: "Executor"
+    publishes: ["work.done"]
+"#,
+        );
+        // ralph + business topic → Err. The existing ralph-guard in
+        // emit.rs already rejects this; the isolated-scope check
+        // independently agrees (no double-reject at the gate level,
+        // since emit.rs's ralph-guard runs first and bails before
+        // reaching the isolated-scope check).
+        let err = check_isolated_scope(Some("ralph"), "review.passed", &cfg)
+            .expect_err("ralph + business topic must be rejected");
+        assert_eq!(err.reason_code, "isolated_scope_violation");
+    }
+
+    #[test]
+    fn u1_isolated_scope_no_hat_passes() {
+        let cfg = isolated_config_with_hats(
+            r#"
+  executor:
+    name: "Executor"
+    publishes: ["work.done"]
+"#,
+        );
+        // hat == None → defer to origin guard; check returns Ok.
+        assert!(check_isolated_scope(None, "debug.step", &cfg).is_ok());
     }
 }
