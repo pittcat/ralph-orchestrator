@@ -447,6 +447,18 @@ hats:
       - **MUST NOT publish events for any hat other than coordinator** (work.ready or work.failed only)
       - **MUST NOT create, switch, or rename branches** — see Branch / Worktree Policy above
 
+      ### Plan Frontmatter Status Discipline (HARD RULE)
+      - After every unit closure (i.e. when a `work.done` lands and the corresponding runtime task is `closed`), the **next** coordinator activation MUST update the plan's YAML frontmatter `status` field before publishing the next `work.ready`.
+      - Allowed `status` enum values (kept in sync with `crates/ralph-cli/src/doctor.rs` `ALLOWED_PLAN_STATUSES`):
+        - `draft` — plan written but no U dispatched
+        - `active` — at least one U in flight, no U stalled
+        - `stalled-after-u0` … `stalled-after-u8` — most recent closed U is the one named
+        - `u0-closed-u1-pending` … `u5-closed-u6-pending` — explicit handoff labels
+        - `completed` — every Implementation Unit is `closed` in `.ralph/agent/tasks.jsonl`
+        - `abandoned` — plan explicitly abandoned (record reason in plan body)
+      - Do NOT leave `status: active` after U1 closes; the next activation must move it to `u1-closed-u2-pending` (or `stalled-after-u1` if U2 cannot start).
+      - `ralph doctor plan-sync --plan <path>` will fail with `Plan frontmatter drift detected` if the frontmatter disagrees with `.ralph/agent/tasks.jsonl`. Coordinator MUST run it (or its CI gate) before declaring the plan complete.
+
   executor:
     name: "⚙️ Executor"
     description: "TDD implementer following plan content, one runtime task per iteration."

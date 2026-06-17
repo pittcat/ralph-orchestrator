@@ -1,7 +1,7 @@
 //! CLI command for `ralph doctor`.
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use ralph_adapters::{CliBackend, DEFAULT_PRIORITY};
 use ralph_core::{CheckResult, CheckStatus, ConfigError, HatBackend, PreflightReport, RalphConfig};
 use std::collections::HashSet;
@@ -14,14 +14,40 @@ use crate::{ConfigSource, HatsSource};
 
 /// Run first-run diagnostics and environment validation.
 #[derive(Parser, Debug)]
-pub struct DoctorArgs {}
+pub struct DoctorArgs {
+    #[command(subcommand)]
+    pub subcommand: Option<DoctorSubcommand>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DoctorSubcommand {
+    /// Detect plan frontmatter drift against `.ralph/agent/tasks.jsonl` (U5 / R7).
+    PlanSync(PlanSyncArgs),
+}
+
+/// Arguments for `ralph doctor plan-sync`.
+#[derive(Parser, Debug)]
+pub struct PlanSyncArgs {
+    /// Path to the plan markdown file. If omitted, scans the workspace for
+    /// the most recent `.ralph` plan under `docs/plans/` or `docs/achieved/plan/`.
+    #[arg(long)]
+    pub plan: Option<String>,
+}
 
 pub async fn execute(
     config_sources: &[ConfigSource],
     hats_source: Option<&HatsSource>,
-    _args: DoctorArgs,
+    args: DoctorArgs,
     use_colors: bool,
 ) -> Result<()> {
+    if let Some(sub) = args.subcommand {
+        match sub {
+            DoctorSubcommand::PlanSync(plan_args) => {
+                return execute_plan_sync(plan_args).await;
+            }
+        }
+    }
+
     let source_label = crate::preflight::config_source_label(config_sources, hats_source);
     let config = crate::preflight::load_config_for_preflight(config_sources, hats_source).await?;
 
@@ -623,6 +649,388 @@ fn print_check_line(check: &CheckResult, name_width: usize, use_colors: bool) {
     }
 }
 
+// =============================================================================
+// Plan-sync (U5 / R7): detect frontmatter drift between plan files and
+// `.ralph/agent/tasks.jsonl`.
+// =============================================================================
+
+const ALLOWED_PLAN_STATUSES: &[&str] = &[
+    "draft",
+    "active",
+    "stalled-after-u0",
+    "stalled-after-u1",
+    "stalled-after-u2",
+    "stalled-after-u3",
+    "stalled-after-u4",
+    "stalled-after-u5",
+    "stalled-after-u6",
+    "stalled-after-u7",
+    "stalled-after-u8",
+    "u0-closed-u1-pending",
+    "u1-closed-u2-splitting-pending",
+    "u2-closed-u3-pending",
+    "u3-closed-u4-pending",
+    "u4-closed-u5-pending",
+    "u5-closed-u6-pending",
+    "completed",
+    "abandoned",
+];
+
+/// Run plan-sync check and return a [`CheckResult`].
+pub(crate) fn check_plan_sync(plan_path: &Path, tasks_path: &Path) -> CheckResult {
+    let plan_name = plan_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+
+    if !plan_path.is_file() {
+        return CheckResult::fail(
+            "plan_sync",
+            "Plan file not found",
+            format!("Expected plan at: {}", plan_path.display()),
+        );
+    }
+
+    let plan_text = match std::fs::read_to_string(plan_path) {
+        Ok(s) => s,
+        Err(err) => {
+            return CheckResult::fail(
+                "plan_sync",
+                "Plan file unreadable",
+                format!("{}: {}", plan_path.display(), err),
+            );
+        }
+    };
+
+    let front = match parse_frontmatter(&plan_text) {
+        Some(f) => f,
+        None => {
+            return CheckResult::fail(
+                "plan_sync",
+                "Plan frontmatter missing",
+                format!(
+                    "Plan '{}' has no YAML frontmatter; cannot detect status drift",
+                    plan_path.display()
+                ),
+            );
+        }
+    };
+
+    let status = match front.get("status").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => {
+            return CheckResult::fail(
+                "plan_sync",
+                "Plan frontmatter missing 'status'",
+                format!("Plan '{}' has no status field", plan_path.display()),
+            );
+        }
+    };
+
+    // Tasks.jsonl: missing -> warn (T5.4), not a fail.
+    let tasks_summary = if !tasks_path.is_file() {
+        TaskSummary::default()
+    } else {
+        match read_tasks_summary(tasks_path, &plan_name) {
+            Ok(summary) => summary,
+            Err(err) => {
+                return CheckResult::fail(
+                    "plan_sync",
+                    "tasks.jsonl parse error",
+                    format!("{}: {}", tasks_path.display(), err),
+                );
+            }
+        }
+    };
+
+    let mut issues: Vec<String> = Vec::new();
+
+    if !ALLOWED_PLAN_STATUSES.contains(&status.as_str()) {
+        issues.push(format!(
+            "status '{}' not in allowed enum: {}",
+            status,
+            ALLOWED_PLAN_STATUSES.join(", ")
+        ));
+    }
+
+    // Rule 1: status says completed but tasks are still open.
+    if status == "completed" && tasks_summary.open > 0 {
+        issues.push(format!(
+            "status='completed' but {} open task(s) remain for plan '{}'",
+            tasks_summary.open, plan_name
+        ));
+    }
+
+    // Rule 2: status still references a stalled unit while tasks for that unit are closed.
+    if let Some(unit_id) = stalled_unit_from_status(&status) {
+        if tasks_summary.closed_for_unit(&unit_id) > 0 && tasks_summary.open_for_unit(&unit_id) == 0
+        {
+            issues.push(format!(
+                "status='{}' but unit {} has closed tasks and no open ones",
+                status, unit_id
+            ));
+        }
+    }
+
+    if !tasks_path.is_file() {
+        // T5.4: missing tasks.jsonl is a warn, not a fail.
+        return CheckResult::warn(
+            "plan_sync",
+            "tasks.jsonl missing; drift check skipped",
+            format!(
+                "Plan '{}' status='{}' parsed; no tasks to compare against. Create .ralph/agent/tasks.jsonl or run a loop first.",
+                plan_path.display(),
+                status
+            ),
+        );
+    }
+
+    if issues.is_empty() {
+        CheckResult::pass(
+            "plan_sync",
+            format!(
+                "Plan '{}' status='{}' consistent with tasks (open={}, closed={})",
+                plan_name, status, tasks_summary.open, tasks_summary.closed
+            ),
+        )
+    } else {
+        CheckResult::fail(
+            "plan_sync",
+            "Plan frontmatter drift detected",
+            issues.join("\n"),
+        )
+    }
+}
+
+/// Parses the leading YAML frontmatter (`---\n...\n---`) of a markdown plan.
+fn parse_frontmatter(text: &str) -> Option<serde_yaml::Value> {
+    let trimmed = text.trim_start_matches('\u{feff}');
+    let rest = trimmed.strip_prefix("---")?;
+    let rest = rest.strip_prefix('\n').unwrap_or(rest);
+    let end = rest.find("\n---")?;
+    let yaml_text = &rest[..end];
+    serde_yaml::from_str(yaml_text).ok()
+}
+
+/// Extracts the U-id referenced by a `stalled-after-uN` status.
+///
+/// Returns `None` for statuses that do not encode a unit reference (e.g.
+/// `completed`, `active`, `draft`).
+fn stalled_unit_from_status(status: &str) -> Option<String> {
+    if let Some(rest) = status.strip_prefix("stalled-after-") {
+        // Accept e.g. "stalled-after-u3" or "stalled-after-U3".
+        let lower = rest.to_lowercase();
+        if lower.starts_with('u') {
+            return Some(lower.to_string());
+        }
+    }
+    None
+}
+
+#[derive(Debug, Default)]
+struct TaskSummary {
+    open: usize,
+    in_progress: usize,
+    closed: usize,
+    failed: usize,
+    /// Map of unit id (e.g. "u1") -> (open, closed) for tasks whose key
+    /// contains `:uN-` or `:uNa-` segments.
+    by_unit: std::collections::BTreeMap<String, (usize, usize)>,
+}
+
+impl TaskSummary {
+    fn closed_for_unit(&self, unit_id: &str) -> usize {
+        self.by_unit.get(unit_id).map(|(_, c)| *c).unwrap_or(0)
+    }
+    fn open_for_unit(&self, unit_id: &str) -> usize {
+        self.by_unit.get(unit_id).map(|(o, _)| *o).unwrap_or(0)
+    }
+}
+
+/// Reads `.ralph/agent/tasks.jsonl` and tallies tasks whose `key` (or
+/// `description`) references `plan_name`. Tasks without a key are ignored
+/// because we cannot associate them with a plan.
+fn read_tasks_summary(tasks_path: &Path, plan_name: &str) -> Result<TaskSummary, String> {
+    let text = std::fs::read_to_string(tasks_path).map_err(|e| format!("read failed: {e}"))?;
+    let mut summary = TaskSummary::default();
+
+    for (line_no, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(err) => {
+                return Err(format!("line {}: invalid JSON: {}", line_no + 1, err));
+            }
+        };
+
+        // Identify the plan: prefer the `key` field (format
+        // `ce-executor:{plan_name}:...`); fall back to a `plan_name` field
+        // if present, or a substring match in `description`.
+        let key = value.get("key").and_then(|v| v.as_str()).unwrap_or("");
+        let plan_field = value
+            .get("plan_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let matches = if !key.is_empty() {
+            key_matches_plan(key, plan_name)
+        } else if !plan_field.is_empty() {
+            plan_field == plan_name
+        } else {
+            false
+        };
+
+        if !matches {
+            continue;
+        }
+
+        let status = value
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("open");
+        match status {
+            "open" => summary.open += 1,
+            "in_progress" => summary.in_progress += 1,
+            "closed" => summary.closed += 1,
+            "failed" => summary.failed += 1,
+            _ => {}
+        }
+
+        if let Some(unit) = extract_unit_from_key(key) {
+            let entry = summary.by_unit.entry(unit).or_insert((0, 0));
+            match status {
+                "open" | "in_progress" => entry.0 += 1,
+                "closed" | "failed" => entry.1 += 1,
+                _ => {}
+            }
+        }
+    }
+
+    Ok(summary)
+}
+
+/// Returns true if the task key encodes the same `plan_name`.
+fn key_matches_plan(key: &str, plan_name: &str) -> bool {
+    // Expected formats:
+    //   "ce-executor:{plan_name}:step-01:u1-impl"
+    //   "ce-executor:{plan_name}:trivial"
+    let parts: Vec<&str> = key.split(':').collect();
+    if parts.len() >= 3 && parts[0] == "ce-executor" {
+        return parts[1] == plan_name;
+    }
+    false
+}
+
+/// Extracts a unit id (lowercased) from a key like
+/// `ce-executor:foo:step-01:u1-impl` → "u1" or "u1a".
+fn extract_unit_from_key(key: &str) -> Option<String> {
+    let last = key.rsplit(':').next()?;
+    // Match `uN` or `uNa`, where N is digits and a is optional lowercase letter.
+    let bytes = last.as_bytes();
+    if bytes.first()? != &b'u' && bytes.first()? != &b'U' {
+        return None;
+    }
+    let mut idx = 1_usize;
+    let digit_start = idx;
+    while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+        idx += 1;
+    }
+    if idx == digit_start {
+        return None;
+    }
+    // Optional sub-unit letter.
+    if idx < bytes.len() && bytes[idx].is_ascii_alphabetic() {
+        idx += 1;
+    }
+    Some(last[..idx].to_lowercase())
+}
+
+async fn execute_plan_sync(args: PlanSyncArgs) -> Result<()> {
+    let plan_path = match resolve_plan_path(args.plan.as_deref()) {
+        Ok(p) => p,
+        Err(err) => {
+            eprintln!("plan-sync error: {err}");
+            std::process::exit(1);
+        }
+    };
+
+    // tasks.jsonl lives in .ralph/agent/ relative to the workspace root.
+    // We resolve it relative to the plan file's parent or the cwd.
+    let workspace_root = plan_path
+        .ancestors()
+        .find(|p| p.join(".ralph").is_dir())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let tasks_path = workspace_root
+        .join(".ralph")
+        .join("agent")
+        .join("tasks.jsonl");
+
+    let result = check_plan_sync(&plan_path, &tasks_path);
+    println!("plan-sync: {}", result.label);
+    if let Some(msg) = &result.message {
+        for line in msg.lines() {
+            println!("    {line}");
+        }
+    }
+    match result.status {
+        CheckStatus::Pass => {
+            println!("Result: PASS");
+            Ok(())
+        }
+        CheckStatus::Warn => {
+            println!("Result: WARN");
+            // T5.4 / T5.3: warn exits 0, plan-file-missing exits 1.
+            Ok(())
+        }
+        CheckStatus::Fail => {
+            println!("Result: FAIL");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn resolve_plan_path(explicit: Option<&str>) -> Result<std::path::PathBuf, String> {
+    if let Some(p) = explicit {
+        let path = std::path::PathBuf::from(p);
+        if !path.is_file() {
+            return Err(format!("plan file not found: {}", path.display()));
+        }
+        return Ok(path);
+    }
+
+    // Auto-discover: look for the newest `.md` under docs/plans/ or
+    // docs/achieved/plan/. We deliberately keep this simple; users can
+    // always pass --plan.
+    let cwd = std::env::current_dir().map_err(|e| format!("cwd unavailable: {e}"))?;
+    let candidates = [
+        cwd.join("docs").join("plans"),
+        cwd.join("docs").join("achieved").join("plan"),
+    ];
+    let mut newest: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    for dir in &candidates {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("md")
+                    && let Ok(meta) = entry.metadata()
+                    && let Ok(modified) = meta.modified()
+                    && newest.as_ref().map_or(true, |(t, _)| modified > *t)
+                {
+                    newest = Some((modified, path));
+                }
+            }
+        }
+    }
+    newest.map(|(_, p)| p).ok_or_else(|| {
+        "no plan file specified and none found under docs/plans/ or docs/achieved/plan/".to_string()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -748,5 +1156,134 @@ mod tests {
         let check = ralph_core::agent_doc_sync::health::check_agent_doc_sync_health(&diag);
         assert_eq!(check.name, "agent_doc_sync");
         assert_eq!(check.status, CheckStatus::Warn);
+    }
+
+    // ---- plan-sync unit tests (U5 / R7) ----
+
+    #[test]
+    fn plan_sync_extract_unit_lowercases_subunit() {
+        assert_eq!(
+            extract_unit_from_key("ce-executor:foo:step-01:u1-impl"),
+            Some("u1".to_string())
+        );
+        assert_eq!(
+            extract_unit_from_key("ce-executor:foo:step-02:u1a-impl"),
+            Some("u1a".to_string())
+        );
+        assert_eq!(
+            extract_unit_from_key("ce-executor:foo:step-02:u1b-impl"),
+            Some("u1b".to_string())
+        );
+        assert_eq!(extract_unit_from_key("ce-executor:foo:trivial"), None);
+    }
+
+    #[test]
+    fn plan_sync_stalled_unit_extraction() {
+        assert_eq!(
+            stalled_unit_from_status("stalled-after-u3"),
+            Some("u3".to_string())
+        );
+        assert_eq!(
+            stalled_unit_from_status("stalled-after-U7"),
+            Some("u7".to_string())
+        );
+        assert_eq!(stalled_unit_from_status("active"), None);
+        assert_eq!(stalled_unit_from_status("completed"), None);
+    }
+
+    #[test]
+    fn plan_sync_key_matches_plan() {
+        assert!(key_matches_plan(
+            "ce-executor:my-plan:step-01:u1-impl",
+            "my-plan"
+        ));
+        assert!(!key_matches_plan(
+            "ce-executor:other-plan:step-01:u1-impl",
+            "my-plan"
+        ));
+        assert!(!key_matches_plan("ce-executor:my-plan", "my-plan"));
+    }
+
+    #[test]
+    fn plan_sync_parses_frontmatter() {
+        let md = "---\ntitle: test\nstatus: active\n---\n# body\n";
+        let fm = parse_frontmatter(md).expect("frontmatter");
+        assert_eq!(fm.get("status").and_then(|v| v.as_str()), Some("active"));
+    }
+
+    #[test]
+    fn plan_sync_missing_frontmatter_is_none() {
+        assert!(parse_frontmatter("# body\n").is_none());
+    }
+
+    #[test]
+    fn plan_sync_detects_stalled_with_closed_tasks() {
+        // T5.1 core scenario: frontmatter stalled + unit closed.
+        let dir = tempfile::TempDir::new().unwrap();
+        let plan = dir.path().join("test-plan.md");
+        std::fs::write(
+            &plan,
+            "---\ntitle: t\nstatus: stalled-after-u1\n---\n# body\n",
+        )
+        .unwrap();
+        let tasks = dir.path().join("tasks.jsonl");
+        std::fs::write(
+            &tasks,
+            "{\"id\":\"t1\",\"title\":\"u1\",\"status\":\"closed\",\"key\":\"ce-executor:test-plan:step-01:u1-impl\",\"created\":\"2026-06-17T00:00:00Z\"}\n",
+        )
+        .unwrap();
+        let result = check_plan_sync(&plan, &tasks);
+        assert_eq!(result.status, CheckStatus::Fail);
+        assert!(result.message.as_deref().unwrap_or("").contains("u1"));
+    }
+
+    #[test]
+    fn plan_sync_consistent_state_passes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let plan = dir.path().join("ok-plan.md");
+        std::fs::write(&plan, "---\ntitle: t\nstatus: active\n---\n# body\n").unwrap();
+        let tasks = dir.path().join("tasks.jsonl");
+        std::fs::write(
+            &tasks,
+            "{\"id\":\"t1\",\"title\":\"u1\",\"status\":\"open\",\"key\":\"ce-executor:ok-plan:step-01:u1-impl\",\"created\":\"2026-06-17T00:00:00Z\"}\n",
+        )
+        .unwrap();
+        let result = check_plan_sync(&plan, &tasks);
+        assert_eq!(result.status, CheckStatus::Pass);
+    }
+
+    #[test]
+    fn plan_sync_completed_with_open_task_fails() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let plan = dir.path().join("done-plan.md");
+        std::fs::write(&plan, "---\ntitle: t\nstatus: completed\n---\n# body\n").unwrap();
+        let tasks = dir.path().join("tasks.jsonl");
+        std::fs::write(
+            &tasks,
+            "{\"id\":\"t1\",\"title\":\"u1\",\"status\":\"open\",\"key\":\"ce-executor:done-plan:step-01:u1-impl\",\"created\":\"2026-06-17T00:00:00Z\"}\n",
+        )
+        .unwrap();
+        let result = check_plan_sync(&plan, &tasks);
+        assert_eq!(result.status, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn plan_sync_missing_plan_file_fails() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let plan = dir.path().join("nonexistent.md");
+        let tasks = dir.path().join("tasks.jsonl");
+        let result = check_plan_sync(&plan, &tasks);
+        assert_eq!(result.status, CheckStatus::Fail);
+        assert!(result.label.contains("not found"));
+    }
+
+    #[test]
+    fn plan_sync_missing_tasks_warns_not_fails() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let plan = dir.path().join("t.md");
+        std::fs::write(&plan, "---\ntitle: t\nstatus: active\n---\n# body\n").unwrap();
+        let tasks = dir.path().join("nonexistent-tasks.jsonl");
+        let result = check_plan_sync(&plan, &tasks);
+        assert_eq!(result.status, CheckStatus::Warn);
     }
 }
