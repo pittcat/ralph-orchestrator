@@ -108,6 +108,10 @@ event_loop:
 - 现场塌缩的真正机制修复见 `docs/plans/2026-06-04-001-fix-contract-rejection-hat-retry-plan.md`（U1-U8）。它的修复对象是 event loop 的 rejection recovery 路径，不是 `HatRegistry::get_for_topic`。
 - 早期诊断（`docs/report/2026-06-04-ce-executor-worktree-prod-audit.md`）将 Ralph fallback 误判为 registry bug；该归因已在 2026-06-04 plan U8 中修正。
 
+### 2026-06-17 U3: human.guidance → task.resume in hard_gate
+
+`crates/ralph-cli/src/loop_runner/hard_gate.rs` 的 `inject_hard_gate_guidance`（agent 声称 emit 但未写盘）和 `inject_missing_event_hard_gate_guidance`（agent 完全忘记 emit）历史上向 events.jsonl 写 `human.guidance`（自由文本），把编排器的自动化恢复伪装成人类指导，违反 `human.guidance` 仅供真人/operator 用的产品决策。U3 改为写结构化 `task.resume`，使用 U2 提供的 `enrich_task_resume_payload` 助手保证 `reason` + `target_hat` schema 必填字段（drift detector 不再报 0% field completeness），把原始自由文本放入 `hint` 字段供 agent 读 event 时看到。`pending_recovery_hat` pin 和 `recovery.jsonl` envelope 写入保持不变。`inject_wave_policy_rejection_guidance`（wave 专用路径，serial preset 不走）按计划留待 follow-up。
+
 ## Preset 作者检查清单
 
 - [ ] 这个 hat 忘 emit 时，默认事件是否会造成假成功？

@@ -6,6 +6,7 @@ use ralph_core::{
         DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, EvidenceKind, EvidenceRef,
         RecoveryDiagnosisEnvelope, RecoveryDiagnosisEnvelopeBuilder,
     },
+    event_loop::rejection::enrich_task_resume_payload,
 };
 
 pub fn should_hard_gate(hat_id: &HatId, event_loop: &EventLoop) -> bool {
@@ -383,9 +384,20 @@ pub fn compute_recovery_status(event_loop: &mut EventLoop, topic: &str) -> Optio
     None
 }
 
-/// Inject a human.guidance event directly into the events file so the agent
-/// sees it on the next iteration. Used when the agent claimed to emit but no
-/// event was actually written.
+/// Inject a structured `task.resume` event directly into the events file so
+/// the agent sees it on the next iteration. Used when the agent claimed to
+/// emit but no event was actually written.
+///
+/// 2026-06-17-003 plan U3: switched from `human.guidance` (free-form
+/// text, impersonating human steer) to `task.resume` (structured
+/// recovery payload) so automated recovery does not pretend to be
+/// operator guidance.  The `enrich_task_resume_payload` helper
+/// guarantees the schema-required `reason` + `target_hat` fields are
+/// present (drift detector's `field_completeness` was 0% before this
+/// fix).  The original message text is preserved as the `message` field
+/// inside the JSON payload, and the allowed topics are written as a
+/// structured `allowed_topics` array.  The `pending_recovery_hat` pin
+/// and the recovery envelope write are unchanged.
 pub fn inject_hard_gate_guidance(ctx: &LoopContext, hat_id: &HatId, expected_topics: &[String]) {
     let events_path = resolve_current_events_path(ctx);
     let topics_str = if expected_topics.is_empty() {
@@ -394,7 +406,7 @@ pub fn inject_hard_gate_guidance(ctx: &LoopContext, hat_id: &HatId, expected_top
         expected_topics.join("`, `")
     };
 
-    let payload = format!(
+    let free_form_message = format!(
         "⚠️ HARD GATE TRIGGERED: Previous iteration by hat `{hat}` claimed to emit an event, \
          but NO EVENT WAS WRITTEN to the events file.\n\n\
          You MUST use the bash tool to execute: ralph emit <topic>\n\
@@ -405,10 +417,42 @@ pub fn inject_hard_gate_guidance(ctx: &LoopContext, hat_id: &HatId, expected_top
         topics = topics_str
     );
 
+    // U3: build a structured `task.resume` payload.  `enrich_task_resume_payload`
+    // wraps the free-form message and adds schema-required `reason` + `target_hat`.
+    // We then add `allowed_topics` and `hint` fields so the agent can read the
+    // concrete recovery instructions from the event payload itself.
+    let hat_name = hat_id.as_str();
+    let resume_payload = enrich_task_resume_payload(
+        &free_form_message,
+        "emit_claimed_but_not_written",
+        Some(hat_name),
+    );
+    let resume_value: serde_json::Value = serde_json::from_str(&resume_payload)
+        .expect("enrich_task_resume_payload must produce valid JSON");
+    let mut resume_obj = resume_value
+        .as_object()
+        .cloned()
+        .expect("enrich_task_resume_payload must produce a JSON object");
+    resume_obj.insert(
+        "allowed_topics".into(),
+        serde_json::Value::Array(
+            expected_topics
+                .iter()
+                .map(|s| serde_json::Value::String(s.clone()))
+                .collect(),
+        ),
+    );
+    resume_obj.insert("hint".into(), serde_json::Value::String(free_form_message));
+    resume_obj.insert(
+        "triggered".into(),
+        serde_json::Value::String(hat_name.to_string()),
+    );
+    let payload_str = serde_json::Value::Object(resume_obj).to_string();
+
     let timestamp = chrono::Utc::now().to_rfc3339();
     let event = serde_json::json!({
-        "topic": "human.guidance",
-        "payload": payload,
+        "topic": "task.resume",
+        "payload": payload_str,
         "ts": timestamp,
     });
 
@@ -437,7 +481,8 @@ pub fn inject_hard_gate_guidance(ctx: &LoopContext, hat_id: &HatId, expected_top
     }
 }
 
-/// Inject a human.guidance event when the agent completely forgot to emit.
+/// Inject a structured `task.resume` event when the agent completely
+/// forgot to emit.
 ///
 /// This is distinct from `inject_hard_gate_guidance` which handles the case
 /// where the agent claimed to emit but no event was written. This function
@@ -448,6 +493,16 @@ pub fn inject_hard_gate_guidance(ctx: &LoopContext, hat_id: &HatId, expected_top
 /// `OrchestrationEvent::RecoveryDiagnosed` audit to `orchestration.jsonl`
 /// so the missing-event gate is auditable. The guidance payload itself
 /// is unchanged; the envelope only records the diagnosis.
+///
+/// 2026-06-17-003 plan U3: switched from `human.guidance` (free-form
+/// text, impersonating human steer) to `task.resume` (structured
+/// recovery payload).  `enrich_task_resume_payload` guarantees the
+/// schema-required `reason` + `target_hat` fields are present.  The
+/// free-form message is preserved as `message` / `hint` fields, the
+/// allowed topics are written as a structured `allowed_topics` array,
+/// and `triggered` is stamped to the offending hat.  The
+/// `pending_recovery_hat` pin and the recovery envelope write are
+/// unchanged.
 pub fn inject_missing_event_hard_gate_guidance(
     ctx: &LoopContext,
     event_loop: Option<&mut EventLoop>,
@@ -461,7 +516,7 @@ pub fn inject_missing_event_hard_gate_guidance(
         expected_topics.join("`, `")
     };
 
-    let payload = format!(
+    let free_form_message = format!(
         "⚠️ HARD GATE TRIGGERED: Previous iteration by hat `{hat}` did NOT emit any event.\n\n\
          This hat is configured to publish events but emitted nothing. Ralph cannot \
          proceed without observable completion signals.\n\n\
@@ -473,10 +528,42 @@ pub fn inject_missing_event_hard_gate_guidance(
         topics = topics_str
     );
 
+    // U3: build a structured `task.resume` payload.  Same shape as
+    // `inject_hard_gate_guidance` — `enrich_task_resume_payload` adds
+    // schema-required `reason` + `target_hat`; we layer `allowed_topics`,
+    // `hint` and `triggered` on top for the agent to read from the event.
+    let hat_name = hat_id.as_str();
+    let resume_payload = enrich_task_resume_payload(
+        &free_form_message,
+        "hard_gate_missing_event",
+        Some(hat_name),
+    );
+    let resume_value: serde_json::Value = serde_json::from_str(&resume_payload)
+        .expect("enrich_task_resume_payload must produce valid JSON");
+    let mut resume_obj = resume_value
+        .as_object()
+        .cloned()
+        .expect("enrich_task_resume_payload must produce a JSON object");
+    resume_obj.insert(
+        "allowed_topics".into(),
+        serde_json::Value::Array(
+            expected_topics
+                .iter()
+                .map(|s| serde_json::Value::String(s.clone()))
+                .collect(),
+        ),
+    );
+    resume_obj.insert("hint".into(), serde_json::Value::String(free_form_message));
+    resume_obj.insert(
+        "triggered".into(),
+        serde_json::Value::String(hat_name.to_string()),
+    );
+    let payload_str = serde_json::Value::Object(resume_obj).to_string();
+
     let timestamp = chrono::Utc::now().to_rfc3339();
     let event = serde_json::json!({
-        "topic": "human.guidance",
-        "payload": payload,
+        "topic": "task.resume",
+        "payload": payload_str,
         "ts": timestamp,
     });
 
@@ -568,6 +655,16 @@ pub fn inject_missing_event_hard_gate_guidance(
 /// U2 (2026-06-13-001): inject a `human.guidance` event when a wave
 /// batch was *policy-rejected* but no `wave_events` reached the
 /// dispatcher.
+///
+/// U3 deferred (2026-06-17-003 plan): this helper is **NOT** converted
+/// to `task.resume` in U3.  It is wave-only — `ce-executor-serial`
+/// does not use waves — and the U2 contracts (recovery envelope shape,
+/// pinning, dedup) are still consumed by the wave path.  The
+/// conversion will happen in the isolated wave stability follow-up
+/// using the same `enrich_task_resume_payload` pattern that U3 applies
+/// to `inject_hard_gate_guidance` / `inject_missing_event_hard_gate_guidance`.
+/// See `docs/plans/2026-06-17-003-fix-ce-executor-serial-precheck-recovery-gates-plan.md`
+/// → "Deferred to Follow-Up Work" for the rationale.
 ///
 /// This is the schema-level cousin of `inject_missing_event_hard_gate_guidance`.
 /// The agent DID emit a wave batch (it sits in the JSONL with `wave_id`

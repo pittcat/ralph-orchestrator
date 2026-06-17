@@ -9504,7 +9504,9 @@ cli:
 //     `OrchestrationEvent::ExecutionContractRejected` audit. The
 //     rejected event still does NOT enter the bus.
 //   - `inject_missing_event_hard_gate_guidance` still writes the
-//     `human.guidance` event to the events file with the right payload.
+//     `task.resume` event to the events file with the right payload
+//     (U3 2026-06-17-003: switched from `human.guidance` to a
+//     structured recovery payload with `reason` + `target_hat`).
 //   - `inject_fallback_event` still targets the last active hat (or
 //     ralph) and the `task.resume` payload now carries a structured
 //     "## Recovery Diagnosis" block.
@@ -9581,7 +9583,7 @@ fn u4_inject_missing_event_writes_recovery_envelope() {
     let expected_topics = vec!["work.done".to_string(), "work.failed".to_string()];
 
     // Capture the events path before injecting, so we can read back
-    // the `human.guidance` event the gate writes.
+    // the `task.resume` event the gate writes.
     let events_path = resolve_current_events_path(&ctx);
 
     // Pre-condition: the events file may or may not exist yet — the
@@ -9595,21 +9597,55 @@ fn u4_inject_missing_event_writes_recovery_envelope() {
         &expected_topics,
     );
 
-    // Characterization: the guidance event is still written to the
-    // events file with the right shape.
+    // Characterization: U3 (2026-06-17-003 plan) — the gate now writes
+    // a structured `task.resume` event (not `human.guidance`).  The
+    // payload is a JSON object with `reason` + `target_hat` (schema-
+    // required) plus `allowed_topics`, `hint` and `triggered` for
+    // agent readability.  The free-form message is preserved as the
+    // `hint` field, and the allowed topics appear inside the payload.
     let content = std::fs::read_to_string(&events_path).expect("read events");
     assert!(
-        content.contains("\"topic\":\"human.guidance\""),
-        "missing-event gate must still write a human.guidance event; got: {content}"
+        content.contains("\"topic\":\"task.resume\""),
+        "missing-event gate must write a task.resume event (U3); got: {content}"
     );
     assert!(
-        content.contains("builder"),
-        "guidance payload must mention the offending hat"
+        !content.contains("\"topic\":\"human.guidance\""),
+        "missing-event gate must NOT write human.guidance events anymore (U3); got: {content}"
     );
+
+    // Parse the single written line and assert the structured payload.
+    let line = content
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .expect("at least one event line must be written");
+    let event: serde_json::Value =
+        serde_json::from_str(line).expect("task.resume event must be valid JSON");
+    assert_eq!(event["topic"], "task.resume");
+    let payload_str = event["payload"]
+        .as_str()
+        .expect("task.resume payload must be a string");
+    let payload: serde_json::Value =
+        serde_json::from_str(payload_str).expect("task.resume payload must be valid JSON");
+    // Schema-required fields (enforced by `enrich_task_resume_payload`).
+    // The `reason` field is derived from the reason_hint via
+    // `extract_reason_code`; "hard_gate_missing_event" contains
+    // "missing" so it resolves to the stable "missing_field" code.
+    assert_eq!(payload["reason"], "missing_field");
+    assert_eq!(payload["target_hat"], "builder");
+    assert!(payload["hint"]
+        .as_str()
+        .map(|s| s.contains("builder"))
+        .unwrap_or(false));
+    // Structured allowed_topics carries the topics verbatim.
+    let allowed = payload["allowed_topics"]
+        .as_array()
+        .expect("allowed_topics must be an array");
     assert!(
-        content.contains("work.done") && content.contains("work.failed"),
-        "guidance payload must mention the allowed topics"
+        allowed.iter().any(|v| v == "work.done")
+            && allowed.iter().any(|v| v == "work.failed"),
+        "task.resume payload must list work.done and work.failed in allowed_topics; got: {content}"
     );
+    assert_eq!(payload["triggered"], "builder");
 
     // U4: a recovery journal entry was written.
     let entries = u4_recovery_journal(&workspace);
@@ -9638,6 +9674,70 @@ fn u4_inject_missing_event_writes_recovery_envelope() {
         u4_orchestration_has_recovery_diagnosed(&workspace, &env.diagnosis_id),
         "expected RecoveryDiagnosed audit line for diagnosis_id={}",
         env.diagnosis_id
+    );
+}
+
+#[test]
+fn u3_inject_hard_gate_guidance_writes_task_resume() {
+    // 2026-06-17-003 plan U3 — characterization: the "claimed to
+    // emit but no event written" hard gate now writes a structured
+    // `task.resume` event (was `human.guidance`).  The payload is a
+    // JSON object with `reason` + `target_hat` (schema-required),
+    // `allowed_topics`, `hint` and `triggered` for agent readability.
+    let (_temp, workspace) = u4_workspace();
+    // Create the .ralph directory so the events file can be written.
+    let ctx = LoopContext::primary(workspace.clone());
+    std::fs::create_dir_all(ctx.ralph_dir()).expect("create .ralph dir");
+    let hat_id = ralph_proto::HatId::new("executor");
+    let expected_topics = vec!["work.done".to_string(), "work.failed".to_string()];
+
+    let events_path = resolve_current_events_path(&ctx);
+    let _ = std::fs::remove_file(&events_path);
+
+    inject_hard_gate_guidance(&ctx, &hat_id, &expected_topics);
+
+    let content = std::fs::read_to_string(&events_path).expect("read events");
+    assert!(
+        content.contains("\"topic\":\"task.resume\""),
+        "hard gate must write a task.resume event (U3); got: {content}"
+    );
+    assert!(
+        !content.contains("\"topic\":\"human.guidance\""),
+        "hard gate must NOT write human.guidance events anymore (U3); got: {content}"
+    );
+
+    let line = content
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .expect("at least one event line must be written");
+    let event: serde_json::Value =
+        serde_json::from_str(line).expect("task.resume event must be valid JSON");
+    assert_eq!(event["topic"], "task.resume");
+    let payload_str = event["payload"]
+        .as_str()
+        .expect("task.resume payload must be a string");
+    let payload: serde_json::Value =
+        serde_json::from_str(payload_str).expect("task.resume payload must be valid JSON");
+    // Schema-required fields.
+    // `reason_hint` "emit_claimed_but_not_written" does not match any
+    // keyword in `extract_reason_code`, so it falls through to "other".
+    assert_eq!(payload["reason"], "other");
+    assert_eq!(payload["target_hat"], "executor");
+    assert_eq!(payload["triggered"], "executor");
+    // `allowed_topics` is the structured array.
+    let allowed = payload["allowed_topics"]
+        .as_array()
+        .expect("allowed_topics must be an array");
+    assert!(allowed.iter().any(|v| v == "work.done"));
+    assert!(allowed.iter().any(|v| v == "work.failed"));
+    // The original free-form message is preserved as `hint` so the
+    // agent sees the explanation when reading the event.
+    assert!(
+        payload["hint"]
+            .as_str()
+            .map(|s| s.contains("HARD GATE TRIGGERED") && s.contains("executor"))
+            .unwrap_or(false),
+        "hint must contain the original free-form message"
     );
 }
 
