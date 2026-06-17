@@ -1,0 +1,49 @@
+# 2026-06-17-004 U6: noble-peacock review chain stall replay fixture
+#
+# Synthetic minimal-reproduction JSONL extracted from the noble-peacock
+# run (`docs/report/2026-06-17-ce-executor-serial-noble-peacock-review-chain-stalled-diagnosis.md`).
+# This is NOT a real recording — the events are hand-crafted to reproduce
+# the exact wire-level shape that triggered the failure:
+#
+#   work.start → work.ready → work.done → review.passed (越权)
+#     → review.dimension.ready (correctness) → [silence 49s]
+#     → task.resume (orchestrator injects)
+#     → review.dimension.done (recovery)
+#     → loop.cancel
+#
+# The fixture proves two things:
+#   1. After U1 fix, the 越权 `review.passed` event from `executor` (with
+#      `skip_reason=aggregate_timeout`) MUST be rejected at CLI boundary
+#      before reaching this jsonl — the `pre-fix` re-run writes the event;
+#      `post-fix` rejects it (see integration_emit_policy.rs::test_emit_t1_2).
+#   2. The minimal recovery sequence (ready → task.resume → done) can
+#      replay through the smoke runner to confirm the orchestrator-side
+#      recovery wiring survives fixture re-reads.
+#
+# Tests assert hat/topic ordering only; payload values are opaque.
+# This fixture is paired with crates/ralph-core/tests/scenarios/
+# ce_executor_serial_review_silent_reviewer_recovers.yml (BDD scenario)
+# which exercises the same sequence against the scenario runner.
+
+hats:
+  coordinator:
+    name: "Coordinator"
+    triggers: ["work.start"]
+    publishes: ["work.ready", "work.failed"]
+  executor:
+    name: "Executor"
+    triggers: ["work.ready", "fix.plan.ready"]
+    publishes: ["work.done", "work.failed"]
+  review-coordinator:
+    name: "Review Coordinator"
+    triggers: ["work.done", "review.dimension.done", "review.dimension.failed"]
+    publishes:
+      - review.dimension.ready
+      - review.dimensions.complete
+      - review.passed
+  dimension-reviewer:
+    name: "Dimension Reviewer"
+    triggers: ["review.dimension.ready"]
+    publishes:
+      - review.dimension.done
+      - review.dimension.failed

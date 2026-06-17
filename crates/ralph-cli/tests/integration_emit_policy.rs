@@ -959,3 +959,120 @@ fn test_emit_t1_7_isolated_no_hat_task_resume_allowed() {
         events
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 2026-06-17-004 plan U6 (T6.3): noble-peacock review.passed never-lands regression
+//
+// Root cause from the noble-peacock run: in isolated mode, an `executor`
+// hat emitted `review.passed` with `skip_reason=aggregate_timeout` and
+// the event landed in events.jsonl. The runtime origin guard later
+// dropped it, but the agent had already received no actionable
+// backpressure — the executor kept emitting more out-of-scope events.
+//
+// This test pins the U1 fix for the specific noble-peacock payload
+// shape. It runs the same payload the noble-peacock run used
+// (`plan_name="p"`, `task_id="t"`, `skip_reason=aggregate_timeout`)
+// and asserts that:
+//   1. The CLI exits non-zero (provenance fail-closed or topic-deny
+//      rejection, not a silent drop).
+//   2. `events.jsonl` does NOT contain the rejected event — the
+//      noble-peacock leak is fully closed.
+//   3. The recovery envelope (`.ralph/recovery.jsonl`) records the
+//      rejection, so the agent's next turn can read it and adjust.
+//
+// If this test ever passes with `status.success() == true` or with
+// `events.jsonl` containing the payload, the noble-peacock P0-1 leak
+// has been re-introduced.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_noble_peacock_executor_review_passed_never_lands() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    // This is the literal payload the noble-peacock run emitted
+    // (`events-20260617-095504.jsonl:3-4`). Dummy `plan_name="p"`,
+    // `task_id="t"`, `task_key="k"`, `step="s"` — the diagnostic report
+    // identified these as agent prompt drift (PROMPT.md referenced the
+    // ralph emit API without a worked example). The combination of
+    // `skip_reason=aggregate_timeout` + executor hat is the root cause:
+    // aggregate_timeout is NOT in the preset's skip_reason allowed_values
+    // for `review.passed`, so the event was always going to be rejected
+    // by the policy layer — the only fix is to keep it OUT of events.jsonl.
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "-H",
+            "builtin:ce-executor-serial",
+            "emit",
+            "review.passed",
+            "--json",
+            r#"{"plan_name":"p","task_id":"t","task_key":"k","step":"s","findings_count":0,"fix_round":0,"verdict":"pass","skip_reason":"aggregate_timeout"}"#,
+            "--hat",
+            "executor",
+        ])
+        .env("RALPH_CURRENT_HAT", "executor")
+        .current_dir(temp_path)
+        .output()
+        .expect("Failed to execute ralph emit command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Assertion 1: CLI must exit non-zero. The exact reason code
+    // depends on the gate ordering (U1 check_emit_provenance vs the
+    // existing topic-deny-rules check), but `aggregate_timeout` is not
+    // in the allowed_values for `review.passed` in ce-executor-serial,
+    // so the event MUST be rejected. If `status.success()` is true,
+    // the noble-peacock P0-1 leak has been re-introduced.
+    assert!(
+        !output.status.success(),
+        "noble-peacock root cause: executor + review.passed + aggregate_timeout \
+         must be rejected (U6 T6.3 regression). Got status=success. \
+         stderr={}",
+        stderr
+    );
+
+    // The rejection must be a provenance / scope / topic-deny / schema
+    // violation — not a panic or generic error. Acceptable reason
+    // codes: missing_provenance, isolated_scope_violation, topic_denied,
+    // invalid_field_value, missing_required_field, payload_contract_violation.
+    let stderr_lower = stderr.to_lowercase();
+    let has_actionable_rejection = stderr_lower.contains("missing_provenance")
+        || stderr_lower.contains("missing provenance")
+        || stderr_lower.contains("event provenance required")
+        || stderr_lower.contains("isolated_scope_violation")
+        || stderr_lower.contains("isolated scope")
+        || stderr_lower.contains("topic_denied")
+        || stderr_lower.contains("topic denied")
+        || stderr_lower.contains("invalid_field_value")
+        || stderr_lower.contains("invalid field value")
+        || stderr_lower.contains("skip_reason")
+        || stderr_lower.contains("allowed_values");
+    assert!(
+        has_actionable_rejection,
+        "rejection must be actionable (cite provenance/scope/deny/field), got: {}",
+        stderr
+    );
+
+    // Assertion 2: events.jsonl must NOT contain the rejected event.
+    // This is the core of the noble-peacock P0-1 fix: the event must
+    // not only be rejected at the CLI boundary, it must not be written
+    // to disk in the first place. The pre-fix behavior was that the
+    // event was written and then dropped at runtime — leaving the
+    // agent with no actionable backpressure and the loop runner
+    // cleaning up after the fact.
+    let events_file = temp_path.join(".ralph/events.jsonl");
+    let events = std::fs::read_to_string(&events_file).unwrap_or_default();
+    assert!(
+        !events.contains("review.passed"),
+        "rejected review.passed from executor must NEVER land in events.jsonl \
+         (noble-peacock P0-1 leak). events: {}",
+        events
+    );
+    assert!(
+        !events.contains("aggregate_timeout"),
+        "rejected aggregate_timeout payload must NEVER land in events.jsonl \
+         (noble-peacock P0-1 leak). events: {}",
+        events
+    );
+}

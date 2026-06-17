@@ -1070,6 +1070,26 @@ fn test_ce_executor_serial_review_scenario() {
 }
 
 // ──────────────────────────────────────────────────────────────────────
+// 2026-06-17-004 plan U6 (T6.1): silent DR recovery variant
+//
+// This variant mirrors the noble-peacock failure shape (DR silent on
+// first activation, recovers on second) in scenario-runnable form. The
+// mock returns an empty body in iter 4 (the silent turn) and then
+// emits `review.dimension.done` in iter 5. The scenario passes when
+// the wire-level contract (4 ready/done pairs + close + downstream) is
+// preserved across the silence — proving that the orchestrator's
+// recovery wiring (task.resume + trigger replay) carries the
+// `review.dimension.ready` context forward to the second activation.
+// ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_ce_executor_serial_review_silent_reviewer_recovers_scenario() {
+    let yaml =
+        load_scenario("tests/scenarios/ce_executor_serial_review_silent_reviewer_recovers.yml");
+    run_scenario(yaml);
+}
+
+// ──────────────────────────────────────────────────────────────────────
 // 2026-06-16-002 plan U6: coordinator build.deny deny rule
 // ──────────────────────────────────────────────────────────────────────
 
