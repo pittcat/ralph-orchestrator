@@ -216,6 +216,14 @@ event_loop:
       - {hat_id: review-synthesizer, topic: review.dimensions.complete}
       - {hat_id: review-coordinator, topic: review.dimension.done}
       - {hat_id: review-coordinator, topic: review.dimension.failed}
+      # 2026-06-17-004 plan U1 (R3): review.passed is owned exclusively
+      # by review-synthesizer. review-coordinator is locked out at the
+      # policy layer as a defence-in-depth alongside the `publishes`
+      # scope check (which already rejects review-coordinator emitting
+      # review.passed at the CLI precheck). The empty-diff fast path
+      # now closes the sequence with `review.dimensions.complete`
+      # instead.
+      - {hat_id: review-coordinator, topic: review.passed}
       # ralph (the loop-runner fallback hat) is locked out of every
       # workflow topic that downstream hats own. The JSONL origin guard
       # already rejects ralph at read time, but enforcing the same
@@ -275,18 +283,20 @@ event_loop:
         payload: json_object
       review.passed:
         # skip_reason is a hard audit field — every review.passed MUST
-        # declare WHY the review was skipped. See the review-coordinator
-        # HARD RULE for valid values. The serial preset uses
-        # `dimensions_complete` instead of `aggregate_timeout` for the
-        # normal all-dimensions pass (no wave to time out).
+        # declare WHY the review was skipped. The serial preset uses
+        # `dimensions_complete` for the normal all-dimensions pass
+        # (no wave to time out). 2026-06-17-004 plan U1 (R3) removes
+        # `empty_diff` from the legal values because
+        # `review-coordinator` no longer publishes `review.passed` —
+        # the empty-diff fast path now closes the sequence with
+        # `review.dimensions.complete` and the synthesizer emits
+        # `review.passed(skip_reason=dimensions_complete)`.
         required_fields: [plan_name, task_id, task_key, step, findings_count, fix_round, verdict, skip_reason]
         payload: json_object
         allowed_values:
-          skip_reason: ["empty_diff", "trivial_step", "dimensions_complete"]
+          skip_reason: ["trivial_step", "dimensions_complete"]
         hat_allowed_values:
           skip_reason:
-            - hat_id: review-coordinator
-              values: ["empty_diff"]
             - hat_id: review-synthesizer
               values: ["dimensions_complete"]
       review.failed:
@@ -744,11 +754,19 @@ hats:
     # each per-dimension completion re-enters the coordinator so it can
     # either kick the next dimension or close the sequence.
     triggers: ["work.done", "fix.applied", "review.dimension.done", "review.dimension.failed"]
-    publishes: ["review.dimension.ready", "review.dimensions.complete", "review.passed"]
-    terminal_events: ["review.dimension.ready", "review.dimensions.complete", "review.passed"]
+    # 2026-06-17-004 plan U1 (R3): review.passed is owned by review-synthesizer
+    # only. review-coordinator's empty-diff fast path was the source of a
+    # dual-publisher race with the synthesizer; ownership is now scoped to a
+    # single hat. review-coordinator instead emits `review.dimensions.complete`
+    # on the empty-diff path, with the per-dim `dimensions` array marked
+    # `status: done` and `findings_file: null`. The synthesizer reads that
+    # payload, sees no findings, and emits
+    # `review.passed(skip_reason=dimensions_complete)`.
+    publishes: ["review.dimension.ready", "review.dimensions.complete"]
+    terminal_events: ["review.dimension.ready", "review.dimensions.complete"]
     obligations:
       - on_trigger: "work.done"
-        must_emit_any_of: ["review.dimension.ready", "review.dimensions.complete", "review.passed"]
+        must_emit_any_of: ["review.dimension.ready", "review.dimensions.complete"]
         conditional_must_emit:
           - when: { commit_count_min: 1 }
             must_emit_any_of: ["review.dimension.ready", "review.dimensions.complete"]
@@ -757,7 +775,7 @@ hats:
           - when: { has_untracked: true }
             must_emit_any_of: ["review.dimension.ready", "review.dimensions.complete"]
       - on_trigger: "fix.applied"
-        must_emit_any_of: ["review.dimension.ready", "review.dimensions.complete", "review.passed"]
+        must_emit_any_of: ["review.dimension.ready", "review.dimensions.complete"]
         conditional_must_emit:
           - when: { commit_count_min: 1 }
             must_emit_any_of: ["review.dimension.ready", "review.dimensions.complete"]
@@ -867,14 +885,14 @@ hats:
       - `git ls-files --others --exclude-standard` is non-empty (untracked files present)
       - `git diff <base>..HEAD` (or `git diff <base>` fallback) is non-empty
 
-      Emit `review.passed` (with `skip_reason: "empty_diff"`) ONLY when ALL of these are true:
+      Emit `review.dimensions.complete` (empty-diff fast path) ONLY when ALL of these are true:
       - `commit_count == 0`
       - `changed_lines == 0`
       - `git ls-files --others --exclude-standard` is empty
       - `git diff <base>..HEAD` (or `git diff <base>` fallback) is empty
       - the sequence is empty (no `pending` dimensions remain) — this is the normal post-synthesis case where the synthesizer already closed the previous sequence
 
-      **Audit field — mandatory**: every `review.passed` event MUST include `skip_reason: "empty_diff"` in its payload. Downstream reporters will REJECT `review.passed` without `skip_reason` (hard schema gate). When in doubt, choose walk.
+      **Empty-diff ownership (HARD RULE — 2026-06-17-004 plan U1, R3)**: the empty-diff path closes the sequence with `review.dimensions.complete`, NOT `review.passed`. `review.passed` is owned exclusively by `review-synthesizer`; the synthesizer will read the `dimensions` array you emit (every row `status: done` and `findings_file: null`), see no findings, and emit `review.passed(skip_reason=dimensions_complete)`. The topic-deny rules + `publishes` scope both reject `review-coordinator → review.passed` at the CLI precheck. When in doubt, choose walk.
 
       Write shared diff to `.agents/scratchpad/ce-executor/{plan_name}/wave-diff.patch` (filename retained from the wave preset for compat with downstream tooling).
 
@@ -895,19 +913,31 @@ hats:
          atomically.
       2. Walk the sequence in order. Find the first `status: "pending"`
          dimension.
-      3. If no pending dimension remains:
-         - Read all `findings_file` paths from the sequence. They
-           should exist for every `status: "done"` dimension. For any
-           `status: "failed"` dimension, surface `reason` instead.
-         - Emit `review.dimensions.complete` with payload:
-           - `plan_name`, `task_id`, `task_key`, `step`: copy from
-             triggering event payload
-           - `dimensions`: array — one entry per sequence row,
-             in the original 4-dim order. Each entry has
-             `dimension` (string), `status` (`"done"` or
-             `"failed"`), `findings_file` (string when `done`,
-             absent or null when `failed`), `reason` (string when
-             `failed`, absent or null when `done`).
+      3. If no pending dimension remains, close the sequence by
+         emitting `review.dimensions.complete` (single owner of
+         sequence closure — covers BOTH the normal post-walk close
+         AND the 2026-06-17-004 plan U1 empty-diff fast path):
+         - The `dimensions` array carries one entry per sequence row,
+           in the original 4-dim order. Each entry has `dimension`
+           (string) and `status` (`"done"` or `"failed"`).
+         - For a normal close: every entry with `status: "done"`
+           carries `findings_file` (string); every entry with
+           `status: "failed"` carries `reason` (string) and an
+           absent/null `findings_file`. The synthesizer reads these
+           and either aggregates findings or escalates failures.
+         - For the empty-diff fast path (sequence was empty / never
+           had pending dimensions, AND `commit_count == 0` AND
+           `changed_lines == 0` AND untracked is empty AND
+           `git diff <base>..HEAD` is empty): emit the array with
+           every row `status: "done"` and `findings_file: null`. The
+           synthesizer reads the payload, sees no findings, and
+           emits `review.passed(skip_reason=dimensions_complete)`
+           — `review.passed` is owned by `review-synthesizer`, not
+           this hat. The CLI precheck (`publishes` scope +
+           `topic_deny_rules`) refuses `review-coordinator →
+           review.passed`.
+         - `plan_name`, `task_id`, `task_key`, `step`: copy from
+           triggering event payload.
          - Stop — do not emit anything else this turn.
       4. If a pending dimension exists and the diff is non-empty:
          - Emit `review.dimension.ready` with payload:
@@ -927,16 +957,17 @@ hats:
            atomically. Do NOT mark it as in-progress — the runtime
            state machine tracks the in-progress hat activation.
          - Stop — do not emit anything else this turn.
-      5. If a pending dimension exists and the diff is empty
-         (i.e. the hard rule says emit `review.passed`):
-         - Emit `review.passed` with payload:
-           - `plan_name`, `task_id`, `task_key`, `step`: copy from
-             triggering event payload
-           - `findings_count`: 0
-           - `fix_round`: 0
-           - `verdict`: `pass`
-           - `skip_reason`: `"empty_diff"`
-         - Stop — do not emit anything else this turn.
+      5. If a pending dimension exists and the diff is empty: this
+         is the rare in-flight empty state. Per the HARD RULE above,
+         choose `walk` — emit `review.dimension.ready` against the
+         next pending dimension so the synthesizer can still run its
+         inline validation pass. The empty-diff fast path is only
+         legal when the sequence has no pending rows; emitting
+         `review.dimension.ready` against an empty diff would still
+         keep the contract intact because the dimension-reviewer
+         handles its own finding-or-not decision. Do NOT emit
+         `review.passed` from this hat (ownership belongs to
+         `review-synthesizer`).
       6. If a `review.dimension.done` or `review.dimension.failed`
          event just arrived:
          - Find the matching dimension row in the sequence by
@@ -990,7 +1021,7 @@ hats:
 
       ### Persist `last_reviewed_sha` After Sequence Close (wave-closed gate analog)
       **Why this exists:** `last_reviewed_sha` is the incremental diff base for the NEXT review-coordinator pass. The `context.md` key-value header is the chosen persistence layer (see also `start_sha` written by Coordinator on `work.start`).
-      **When to run:** the persist step is allowed ONLY when you are about to emit or have just emitted `review.passed` (empty-diff fast path) OR `review.dimensions.complete` (the sequence has just closed). These are the only events that legally close a review cycle in the serial path. If a per-dimension terminal (`review.dimension.done` / `review.dimension.failed`) just arrived but the sequence is still open (more pending dimensions), DO NOT write `last_reviewed_sha` yet.
+      **When to run:** the persist step is allowed ONLY when you are about to emit or have just emitted `review.dimensions.complete` (covers BOTH the normal sequence close AND the 2026-06-17-004 plan U1 empty-diff fast path — `review.passed` is no longer in this hat's `publishes` scope). `review.dimensions.complete` is the only event that legally closes a review cycle from this hat. If a per-dimension terminal (`review.dimension.done` / `review.dimension.failed`) just arrived but the sequence is still open (more pending dimensions), DO NOT write `last_reviewed_sha` yet.
       **How to write (single atomic write, no Read+Write race, with read-back):**
       - Capture current HEAD: `current_sha=$(git rev-parse HEAD)`
       - Resolve the plan's `context.md` path (from `plan_name` in the trigger payload).
@@ -1015,7 +1046,7 @@ hats:
       - MUST NOT review code directly
       - MUST NOT start fixing issues
       - MUST decide walk vs pass per the HARD RULE above (commit_count / changed_lines / untracked / diff state), NOT based on intent or trust in the executor
-      - MUST include `skip_reason: "empty_diff"` in every `review.passed` payload (audit field — missing it is a hard schema violation)
+      - MUST NOT emit `review.passed` from this hat — `review.passed` is owned exclusively by `review-synthesizer`. The empty-diff fast path is now `review.dimensions.complete` (with all rows `status: done`, `findings_file: null`); the synthesizer then emits `review.passed(skip_reason=dimensions_complete)`. Any attempt to call `ralph emit review.passed --hat review-coordinator` is rejected by the CLI precheck (`isolated_scope_violation`) and the topic-deny rule.
       - MUST NOT emit `review.dimension.ready` for more than one dimension per turn (single-event boundary)
       - MUST walk the sequence in the fixed order (correctness → testing → maintainability → requirements)
       - MUST write `review-sequence.json` atomically (temp + rename) — no Read+Write race window
