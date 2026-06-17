@@ -6875,6 +6875,7 @@ async fn test_run_wave_worker_acp_timeout_with_partial_events_keeps_events_visib
         partial: false,
         expected_source_hat: None,
         assigned_dimensions: std::collections::HashMap::new(),
+        dimension_retry_counts: std::collections::HashMap::new(),
     };
 
     merge_wave_results_to_events_file(
@@ -7042,6 +7043,7 @@ fn test_merge_wave_results_to_events_file_synthesizes_failure_events() {
         partial: false,
         expected_source_hat: None,
         assigned_dimensions: std::collections::HashMap::new(),
+        dimension_retry_counts: std::collections::HashMap::new(),
     };
 
     merge_wave_results_to_events_file(
@@ -10198,6 +10200,7 @@ fn u3_wave_merge_stamps_wave_total_on_every_record() {
         partial: false,
         expected_source_hat: None,
         assigned_dimensions: std::collections::HashMap::new(),
+        dimension_retry_counts: std::collections::HashMap::new(),
     };
 
     let tmp = tempfile::TempDir::new().unwrap();
@@ -10280,6 +10283,7 @@ fn u3_wave_merge_emits_synthetic_events_on_failure_with_wave_total() {
         partial: false,
         expected_source_hat: None,
         assigned_dimensions: std::collections::HashMap::new(),
+        dimension_retry_counts: std::collections::HashMap::new(),
     };
     let tmp = tempfile::TempDir::new().unwrap();
     let events_path = tmp.path().join("events.jsonl");
@@ -10349,6 +10353,7 @@ fn u3_wave_merge_handles_duplicate_indexes_without_panicking() {
         partial: false,
         expected_source_hat: None,
         assigned_dimensions: std::collections::HashMap::new(),
+        dimension_retry_counts: std::collections::HashMap::new(),
     };
     let tmp = tempfile::TempDir::new().unwrap();
     let events_path = tmp.path().join("events.jsonl");
@@ -11406,6 +11411,7 @@ async fn u3_partial_wave_does_not_activate_aggregator_until_full_set() {
         partial: true,
         expected_source_hat: None,
         assigned_dimensions: std::collections::HashMap::new(),
+        dimension_retry_counts: std::collections::HashMap::new(),
     };
     merge_wave_results_to_events_file(
         &partial,
@@ -11936,6 +11942,7 @@ fn test_adv2_hat_spoofing_rejected_at_merge_layer() {
         partial: false,
         expected_source_hat: Some(ralph_proto::HatId::new("worker")),
         assigned_dimensions: std::collections::HashMap::new(),
+        dimension_retry_counts: std::collections::HashMap::new(),
     };
 
     merge_wave_results_to_events_file(
@@ -12005,6 +12012,7 @@ fn test_adv2_hat_spoofing_omitted_source_rejected_at_merge_layer() {
         partial: false,
         expected_source_hat: Some(ralph_proto::HatId::new("worker")),
         assigned_dimensions: std::collections::HashMap::new(),
+        dimension_retry_counts: std::collections::HashMap::new(),
     };
 
     merge_wave_results_to_events_file(

@@ -29,6 +29,25 @@ pub struct DimensionMismatchInfo {
     pub actual_dimension: String,
 }
 
+/// 2026-06-17-002 U5/R5 (P0#4 fix): the merge layer returns the
+/// pre-rendered `task.resume` JSONL records it WOULD inject for
+/// each mismatched slot. The caller (dispatcher) decides — based on
+/// the per-slot retry budget it reads from the WaveTracker — which
+/// records to include in the final atomic `write_all`. Building
+/// the records inside the merge function (instead of a separate
+/// `inject_dimension_retry_task_resume` call that re-opens the
+/// events file) eliminates the previous concurrent-append race
+/// (merge + inject interleaving `writeln!` syscalls on the same
+/// file descriptor) by collapsing all writes into a single
+/// `write_all` per dispatch round.
+#[derive(Debug, Clone)]
+pub struct PendingTaskResumeRecord {
+    /// Worker index this resume targets.
+    pub wave_index: u32,
+    /// The full JSONL line to append (without trailing newline).
+    pub jsonl_line: String,
+}
+
 /// 2026-06-17-002 U4 R4: extract the `dimension` field from an
 /// event payload. Returns `None` for missing / empty / non-JSON /
 /// non-string / whitespace-only / absent-key payloads. The merge
@@ -307,19 +326,24 @@ pub fn read_worker_events_with_retry(path: &Path, timeout: Duration) -> Vec<ralp
 /// `WaveContext.missing_dimensions` therefore covers both
 /// "never reported" slots and "reported wrong dimension" slots.
 ///
-/// 2026-06-17-002 U5 R5: the function also returns a
-/// `Vec<DimensionMismatchInfo>` describing each slot that hit a
-/// dimension mismatch, so the caller (dispatcher) can inject a
-/// `task.resume` event to trigger `dimension-reviewer` to retry
-/// the mismatched slot. The merge layer is the authoritative
-/// detector; the dispatcher only acts on the result.
+/// 2026-06-17-002 U5 R5: the function returns
+/// `(Vec<DimensionMismatchInfo>, Vec<PendingTaskResumeRecord>)` —
+/// the first is the human-readable summary used in tests and
+/// logging, the second is the pre-rendered JSONL lines the
+/// dispatcher appends to the events file together with the merged
+/// records (single `write_all`, no concurrent-append race). The
+/// dispatcher filters the second list through the WaveTracker's
+/// per-slot retry quota before appending, so a permanently
+/// mismatched worker cannot drain more than
+/// `MAX_DIMENSION_RETRIES_PER_SLOT` retries across the wave's
+/// lifetime.
 pub fn merge_wave_results_to_events_file(
     completed: &ralph_core::CompletedWave,
     events_file: &Path,
     publish_topics: &[String],
     default_source_hat: &str,
     failure_source_hat: Option<&str>,
-) -> Result<Vec<DimensionMismatchInfo>> {
+) -> Result<(Vec<DimensionMismatchInfo>, Vec<PendingTaskResumeRecord>)> {
     use std::io::Write;
 
     let mut file = fs::OpenOptions::new()
@@ -348,6 +372,14 @@ pub fn merge_wave_results_to_events_file(
     // caller can inject `task.resume` events. One entry per
     // mismatched index (deduplicated by `mismatch_indexes`).
     let mut mismatch_details: Vec<DimensionMismatchInfo> = Vec::new();
+    // P0#4 / P1#11 fix: pre-render the `task.resume` JSONL lines
+    // here so the dispatcher appends them to the SAME `buf` that
+    // is flushed in the single `write_all` below. No separate
+    // file open / `writeln!` race. The dispatcher filters these
+    // through the WaveTracker's per-slot retry quota before
+    // appending, so a permanently-mismatched worker never gets
+    // more than `MAX_DIMENSION_RETRIES_PER_SLOT` retries.
+    let mut pending_task_resumes: Vec<PendingTaskResumeRecord> = Vec::new();
 
     for result in &completed.results {
         if merged_indexes.contains(&result.index) {
@@ -435,7 +467,50 @@ pub fn merge_wave_results_to_events_file(
                             mismatch_details.push(DimensionMismatchInfo {
                                 wave_index: result.index,
                                 expected_dimension: assigned_dim.clone(),
-                                actual_dimension: actual_dim,
+                                actual_dimension: actual_dim.clone(),
+                            });
+                            // P0#4 fix: also pre-render the
+                            // `task.resume` JSONL line. Same ts as
+                            // the rest of the records in this
+                            // dispatch round. The retry_key
+                            // includes the wave id and worker
+                            // index so the operation is
+                            // idempotent across dispatch rounds.
+                            let retry_key = format!(
+                                "wave_dimension_guard:{}:{}:dimension_mismatch:dimension",
+                                completed.wave_id, result.index
+                            );
+                            let resume_payload = serde_json::json!({
+                                "stage": "WaveDimensionGuard",
+                                "topic": "review.dimension.done",
+                                "violation": "dimension_mismatch",
+                                "allowed_topics": ["review.dimension.done"],
+                                "required_fields": ["dimension"],
+                                "original_trigger_topic": "review.wave.ready",
+                                "retry_key": retry_key,
+                                "original_hat": "dimension-reviewer",
+                                "wave_id": completed.wave_id,
+                                "wave_index": result.index,
+                                "wave_total": completed.wave_total,
+                                "reason": "dimension_mismatch",
+                                "target_hat": "dimension-reviewer",
+                                "expected_dimension": assigned_dim,
+                                "actual_dimension": actual_dim,
+                            });
+                            let resume_record = serde_json::json!({
+                                "topic": "task.resume",
+                                "triggered": "dimension-reviewer",
+                                "hat": "review-synthesizer",
+                                "source": "review-synthesizer",
+                                "payload": resume_payload.to_string(),
+                                "ts": ts,
+                                "wave_id": completed.wave_id,
+                                "wave_index": result.index,
+                                "wave_total": completed.wave_total,
+                            });
+                            pending_task_resumes.push(PendingTaskResumeRecord {
+                                wave_index: result.index,
+                                jsonl_line: serde_json::to_string(&resume_record)?,
                             });
                         }
                         continue;
@@ -558,7 +633,7 @@ pub fn merge_wave_results_to_events_file(
         );
     }
 
-    Ok(mismatch_details)
+    Ok((mismatch_details, pending_task_resumes))
 }
 
 /// Serialize a single `WaveFailure` into the events-file buffer:
@@ -782,9 +857,10 @@ mod tests {
             partial: false,
             expected_source_hat: None,
             assigned_dimensions,
+            dimension_retry_counts: std::collections::HashMap::new(),
         };
 
-        let mismatches = merge_wave_results_to_events_file(
+        let (mismatches, _pending_resumes) = merge_wave_results_to_events_file(
             &completed,
             &events_file,
             &["review.dimension.done".to_string()],
@@ -903,9 +979,10 @@ mod tests {
             partial: false,
             expected_source_hat: None,
             assigned_dimensions: std::collections::HashMap::new(),
+            dimension_retry_counts: std::collections::HashMap::new(),
         };
 
-        let mismatches = merge_wave_results_to_events_file(
+        let (mismatches, _pending_resumes) = merge_wave_results_to_events_file(
             &completed,
             &events_file,
             &["review.dimension.done".to_string()],
@@ -987,9 +1064,10 @@ mod tests {
             partial: false,
             expected_source_hat: None,
             assigned_dimensions,
+            dimension_retry_counts: std::collections::HashMap::new(),
         };
 
-        let mismatches = merge_wave_results_to_events_file(
+        let (mismatches, _pending_resumes) = merge_wave_results_to_events_file(
             &completed,
             &events_file,
             &["review.dimension.done".to_string()],

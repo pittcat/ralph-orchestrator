@@ -388,7 +388,12 @@ fn check_wave_dimension_assignment_with_env(
 
 /// Lightweight extractor mirroring the loop-side `dimension` field
 /// reading. Returns `<missing>` for any non-JSON payload, missing
-/// field, or non-string value.
+/// field, or non-string value. Trims the value (P1#6 fix) so the
+/// CLI precheck matches the merge layer's
+/// `parse_payload_dimension` behavior — otherwise a payload with
+/// `"dimension": "testing "` would be rejected by the precheck
+/// but accepted by the merge layer, producing a confusing
+/// "agent got rejected but the merge would have accepted" loop.
 fn extract_dimension_field(payload_str: &str) -> String {
     let trimmed = payload_str.trim();
     if trimmed.is_empty() || !trimmed.starts_with('{') {
@@ -398,7 +403,14 @@ fn extract_dimension_field(payload_str: &str) -> String {
         return "<missing>".to_string();
     };
     match value.get("dimension").and_then(|v| v.as_str()) {
-        Some(s) => s.to_string(),
+        Some(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                "<missing>".to_string()
+            } else {
+                t.to_string()
+            }
+        }
         None => "<missing>".to_string(),
     }
 }

@@ -24,7 +24,25 @@ pub(crate) struct WaveState {
     /// Hat the dispatcher expects each worker's `event.source` to
     /// carry. `None` skips the merge-layer check.
     expected_source_hat: Option<HatId>,
+    /// 2026-06-17-002 U5/R5: per-worker retry counts. Each worker
+    /// index may be retried at most `MAX_DIMENSION_RETRIES_PER_SLOT`
+    /// times across the lifetime of the wave (initial attempt + N
+    /// retries). Persisted in the tracker so a permanently-mismatched
+    /// worker cannot drain an unbounded number of dispatches — once
+    /// the per-slot budget is exhausted the merge layer's
+    /// `wave.worker.failed(reason=dimension_mismatch)` record is the
+    /// terminal signal for the synthesizer. See
+    /// `take_retry_quota` / `consume_retry_quota`.
+    dimension_retry_counts: std::collections::HashMap<u32, u32>,
 }
+
+/// 2026-06-17-002 U5/R5: per-slot retry cap. The plan explicitly
+/// requires that "after two attempts (initial + one retry) the slot
+/// is treated as missing and the wave may proceed to
+/// incomplete_wave_gate". Persisted in the WaveTracker so a
+/// permanent mismatch across dispatches does not slip past the
+/// cap.
+pub const MAX_DIMENSION_RETRIES_PER_SLOT: u32 = 1;
 
 /// A successful result from a wave instance.
 #[derive(Debug)]
@@ -137,6 +155,17 @@ pub struct CompletedWave {
     /// dimension check entirely so legacy / non-review waves pass
     /// through unchanged.
     pub assigned_dimensions: std::collections::HashMap<u32, String>,
+    /// 2026-06-17-002 U5/R5: per-slot dimension-mismatch retry
+    /// counts. The tracker increments this map in
+    /// `try_consume_dimension_retry`; when the wave is
+    /// `take_wave_results`-ed the counts transfer to the
+    /// `CompletedWave` so the caller (dispatcher) can decide
+    /// whether to inject a `task.resume` based on a quota that
+    /// survives across `handle_wave_events` invocations. The
+    /// previous process-local HashMap in the dispatcher was
+    /// reset on every dispatch round, allowing a permanent
+    /// mismatch to loop indefinitely.
+    pub dimension_retry_counts: std::collections::HashMap<u32, u32>,
 }
 
 impl Default for CompletedWave {
@@ -150,6 +179,7 @@ impl Default for CompletedWave {
             partial: false,
             expected_source_hat: None,
             assigned_dimensions: std::collections::HashMap::new(),
+            dimension_retry_counts: std::collections::HashMap::new(),
         }
     }
 }
@@ -214,6 +244,7 @@ impl WaveTracker {
             failures: Vec::new(),
             started_at: Instant::now(),
             expected_source_hat,
+            dimension_retry_counts: std::collections::HashMap::new(),
         };
         self.active_waves.insert(wave_id, state);
     }
@@ -348,6 +379,39 @@ impl WaveTracker {
             .is_some_and(|state| state.progress() == WaveProgress::Complete)
     }
 
+    /// 2026-06-17-002 U5/R5: read the number of dimension-mismatch
+    /// retries that have been issued for `index` in `wave_id`.
+    /// Returns 0 if the wave is not tracked or the slot has not
+    /// been retried yet. Persisted on the tracker so the budget
+    /// survives across `handle_wave_events` invocations (the prior
+    /// process-local `HashMap` in the dispatcher was reset on every
+    /// dispatch round, allowing a permanent mismatch to loop
+    /// indefinitely).
+    pub fn dimension_retry_count(&self, wave_id: &str, index: u32) -> u32 {
+        self.active_waves
+            .get(wave_id)
+            .and_then(|s| s.dimension_retry_counts.get(&index).copied())
+            .unwrap_or(0)
+    }
+
+    /// 2026-06-17-002 U5/R5: increment the per-slot retry counter
+    /// and return the new total. Returns `None` if the wave is
+    /// not tracked, `Some(used)` (the new count, capped at
+    /// `MAX_DIMENSION_RETRIES_PER_SLOT`) otherwise. The caller is
+    /// responsible for NOT incrementing if the previous count
+    /// already reached the cap (use `dimension_retry_count` to
+    /// check first). Increment-only — the counter never
+    /// decreases, so a disk-write failure that drops the retry
+    /// cannot be retried again, which closes the previously-found
+    /// hole where retry-on-failure looped indefinitely.
+    pub fn bump_dimension_retry(&mut self, wave_id: &str, index: u32) -> Option<u32> {
+        let state = self.active_waves.get_mut(wave_id)?;
+        let used = state.dimension_retry_counts.get(&index).copied().unwrap_or(0);
+        let next = used + 1;
+        state.dimension_retry_counts.insert(index, next);
+        Some(next)
+    }
+
     /// Consume a completed wave, removing it from tracking.
     pub fn take_wave_results(&mut self, wave_id: &str) -> Option<CompletedWave> {
         let state = self.active_waves.remove(wave_id)?;
@@ -367,6 +431,12 @@ impl WaveTracker {
             // empty default. Callers that need the dimension gate
             // must set it explicitly.
             assigned_dimensions: std::collections::HashMap::new(),
+            // R5 (2026-06-17-002): transfer the per-slot retry
+            // counts so the dispatcher (caller) can use them to
+            // decide whether to inject a `task.resume` for the
+            // mismatched slot, with the budget surviving across
+            // dispatch rounds (P0#1 fix).
+            dimension_retry_counts: state.dimension_retry_counts,
         })
     }
 
@@ -393,6 +463,7 @@ impl WaveTracker {
             // this starts empty. The dispatcher stamps the actual
             // per-slot assignments before the merge layer reads it.
             assigned_dimensions: std::collections::HashMap::new(),
+            dimension_retry_counts: state.dimension_retry_counts,
         })
     }
 

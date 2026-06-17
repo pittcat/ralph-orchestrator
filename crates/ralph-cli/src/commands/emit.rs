@@ -207,21 +207,38 @@ fn write_cli_emit_recovery_envelope(
         })?;
     }
 
-    let (severity, outcome, reason_code) = match &finding.violation_type {
+    let (severity, outcome, reason_code, source) = match &finding.violation_type {
         ralph_core::ViolationType::PayloadTypeMismatch { .. } => (
             DiagnosisSeverity::Critical,
             DiagnosisOutcome::NotRetriable,
             "payload_contract_violation".to_string(),
+            DiagnosisSource::CliEmit,
+        ),
+        // P1#13 fix: dimension-mismatch rejections (CLI precheck
+        // for wave worker's `review.dimension.done` value) are
+        // surfaced as `WaveDimensionGuard` envelopes so
+        // `ralph diagnose` and operators can filter for the
+        // specific gate (rather than lumping them in with the
+        // generic `CliEmit` bucket). The reason code is the
+        // gate's own (`dimension_mismatch`), so the evidence
+        // is unambiguous even when both sources appear in the
+        // same recovery journal.
+        _ if finding.violation_type.reason_code() == "dimension_mismatch" => (
+            DiagnosisSeverity::Error,
+            DiagnosisOutcome::Failed,
+            finding.violation_type.reason_code().to_string(),
+            DiagnosisSource::WaveDimensionGuard,
         ),
         _ => (
             DiagnosisSeverity::Error,
             DiagnosisOutcome::Failed,
             finding.violation_type.reason_code().to_string(),
+            DiagnosisSource::CliEmit,
         ),
     };
 
     let mut builder = RecoveryDiagnosisEnvelope::builder()
-        .source(DiagnosisSource::CliEmit)
+        .source(source)
         .severity(severity)
         .topic(topic)
         .reason_code(reason_code)
