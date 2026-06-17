@@ -114,6 +114,15 @@ pub(crate) struct WorkerRequest {
     /// Shared TUI state used by `run_wave_worker` to push per-line
     /// deltas. Same ownership semantics as `worker_rpc_tx`.
     worker_tui_state: Option<Arc<std::sync::Mutex<ralph_tui::TuiState>>>,
+    /// Dimension this worker is hard-bound to (R1). Parsed from the
+    /// `review.wave.ready` payload's `dimension` field. `None` for
+    /// waves that do not carry a dimension assignment (legacy
+    /// waves, or non-review waves). When `Some`, the worker prompt
+    /// and the `RALPH_WAVE_DIMENSION` env var surface this value,
+    /// the CLI precheck enforces it (R3), and the merge layer drops
+    /// any emitted `review.dimension.done` with a mismatched
+    /// dimension (R4).
+    assigned_dimension: Option<String>,
 }
 
 /// Dispatcher-internal seam that abstracts "run one wave worker".
@@ -771,6 +780,14 @@ pub async fn execute_wave_structured(
         let index_u32 = index as u32;
         let hat_config = wave.hat_config.clone();
 
+        // U1/R1: parse the `dimension` field from the wave event's
+        // payload. When present and non-empty, the worker is
+        // hard-bound to that dimension for `review.dimension.done`
+        // emissions; the CLI precheck (R3) and merge layer (R4)
+        // enforce this. Whitespace-only / missing / non-string values
+        // become `None` so legacy / malformed waves still dispatch.
+        let assigned_dimension = parse_assigned_dimension(event.payload.as_deref());
+
         // Create per-worker events file
         let worker_events_file = wave_dir.join(format!("wave-{}-{}.jsonl", wave_id, index_u32));
 
@@ -780,6 +797,7 @@ pub async fn execute_wave_structured(
             wave_index: index_u32,
             wave_total: wave.total,
             result_topics: hat_config.publishes.clone(),
+            assigned_dimension: assigned_dimension.clone(),
         };
         let prompt = build_wave_worker_prompt(&hat_config, event, &ctx);
 
@@ -855,6 +873,7 @@ pub async fn execute_wave_structured(
             progress_tx,
             worker_rpc_tx,
             worker_tui_state,
+            assigned_dimension,
         });
     }
 
@@ -896,6 +915,37 @@ fn aggregate_timeout_for(
     let concurrency = concurrency.max(1) as u64;
     let batches = events_count.div_ceil(concurrency);
     Duration::from_secs(wave_timeout.as_secs().saturating_mul(batches)) + Duration::from_secs(30)
+}
+
+/// U1/R1: extract the `dimension` field from a `review.wave.ready`
+/// payload so the dispatcher can hard-bind the worker to that
+/// dimension. The agent then MUST emit `review.dimension.done` with
+/// exactly this dimension; mismatches are rejected (R3) and
+/// dropped (R4) with a `task.resume` retry (R5).
+///
+/// Returns `None` for:
+/// - missing / empty / whitespace-only payload
+/// - non-JSON payload
+/// - payload without a `dimension` key
+/// - `dimension` value that is not a string
+/// - empty / whitespace-only string value
+///
+/// This mirrors the malformed-payload tolerance of
+/// `merge_wave_results_to_events_file`'s JSONL parsing so legacy
+/// / off-spec waves keep dispatching.
+fn parse_assigned_dimension(payload: Option<&str>) -> Option<String> {
+    let payload = payload?.trim();
+    if payload.is_empty() {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let dim = value.get("dimension")?.as_str()?;
+    let trimmed = dim.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 /// Core dispatch loop. Shared by the public `execute_wave` wrapper
@@ -3014,5 +3064,69 @@ hats: {}
             "merged record must mirror source to target hat: {}",
             merged
         );
+    }
+
+    // -------------------------------------------------------------------
+    // U1: parse_assigned_dimension
+    // -------------------------------------------------------------------
+
+    /// U1/R1 — `dimension: "testing"` in a JSON payload is parsed.
+    #[test]
+    fn parse_assigned_dimension_reads_string_field() {
+        let payload = r#"{"dimension": "testing", "depth": "standard"}"#;
+        assert_eq!(
+            parse_assigned_dimension(Some(payload)),
+            Some("testing".to_string())
+        );
+    }
+
+    /// U1/R1 — value is trimmed (leading/trailing whitespace tolerated).
+    #[test]
+    fn parse_assigned_dimension_trims_whitespace() {
+        let payload = r#"{"dimension": "  correctness  "}"#;
+        assert_eq!(
+            parse_assigned_dimension(Some(payload)),
+            Some("correctness".to_string())
+        );
+    }
+
+    /// U1/R1 — non-JSON payload returns None (legacy wave, no enforcement).
+    #[test]
+    fn parse_assigned_dimension_non_json_returns_none() {
+        assert_eq!(parse_assigned_dimension(Some("src/main.rs")), None);
+    }
+
+    /// U1/R1 — payload without `dimension` returns None.
+    #[test]
+    fn parse_assigned_dimension_missing_field_returns_none() {
+        let payload = r#"{"depth": "standard", "focus": "all"}"#;
+        assert_eq!(parse_assigned_dimension(Some(payload)), None);
+    }
+
+    /// U1/R1 — `dimension` that is not a string returns None.
+    #[test]
+    fn parse_assigned_dimension_non_string_field_returns_none() {
+        let payload = r#"{"dimension": 42}"#;
+        assert_eq!(parse_assigned_dimension(Some(payload)), None);
+    }
+
+    /// U1/R1 — empty / whitespace-only dimension returns None.
+    #[test]
+    fn parse_assigned_dimension_empty_value_returns_none() {
+        let payload = r#"{"dimension": "   "}"#;
+        assert_eq!(parse_assigned_dimension(Some(payload)), None);
+    }
+
+    /// U1/R1 — missing payload (None) returns None.
+    #[test]
+    fn parse_assigned_dimension_none_payload_returns_none() {
+        assert_eq!(parse_assigned_dimension(None), None);
+    }
+
+    /// U1/R1 — empty payload string returns None.
+    #[test]
+    fn parse_assigned_dimension_empty_string_returns_none() {
+        assert_eq!(parse_assigned_dimension(Some("")), None);
+        assert_eq!(parse_assigned_dimension(Some("   \n  ")), None);
     }
 }

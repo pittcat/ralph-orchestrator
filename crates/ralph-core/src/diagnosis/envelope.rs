@@ -99,6 +99,15 @@ pub enum DiagnosisSource {
     /// reconstruct the wave's timeline even when the original
     /// events.jsonl entries have been rolled up.
     FlowLifecycle,
+    /// 2026-06-17-002 plan U7: a wave worker emitted
+    /// `review.dimension.done` with a `dimension` that does not
+    /// match the wave dispatcher's assigned value. Reported as
+    /// `reason_code=dimension_mismatch` (CLI precheck or merge
+    /// drop) or `reason_code=dimension_missing` (timeout slot
+    /// where the worker produced no emit at all). The downstream
+    /// R5 path turns this into a per-slot `task.resume` so the
+    /// worker can retry with the correct dimension.
+    WaveDimensionGuard,
 }
 
 impl DiagnosisSource {
@@ -120,6 +129,7 @@ impl DiagnosisSource {
             DiagnosisSource::WaveDispatcher => "wave_dispatcher",
             DiagnosisSource::CliEmit => "cli_emit",
             DiagnosisSource::FlowLifecycle => "flow_lifecycle",
+            DiagnosisSource::WaveDimensionGuard => "wave_dimension_guard",
         }
     }
 }
@@ -722,6 +732,7 @@ mod tests {
             DiagnosisSource::WaveDispatcher,
             DiagnosisSource::CliEmit,
             DiagnosisSource::FlowLifecycle,
+            DiagnosisSource::WaveDimensionGuard,
         ] {
             let s = serde_json::to_string(&source).unwrap();
             let v: serde_json::Value = serde_json::from_str(&s).unwrap();
