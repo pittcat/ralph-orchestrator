@@ -1673,3 +1673,164 @@ git grep -nE "loop_runner/tests\.rs" -- docs/ crates/ | wc -l   # 127 (v7 ≈ 68
 
 （U3-U7 实施时如发现实际数字与 v8 不一致，按 U7 step 13 流程补充处理。）
 
+## Plan Baseline Refresh v9 (2026-06-17, baseline @ fb40414)
+
+v8 baseline refresh 落地后到本次 v9 之间，repo HEAD 推进到 `fb40414`，跨越 **6 commits**（期间承接 plan 2026-06-17-001 stall-detector reset 与 policy TTL 闭环）。本段记录**v9 已就地更新的事实**与**v8→v9 期间增量 commits 的影响**，与 v1 / v2 / v3 / v4 / v5 / v6 / v7 / v8 段并列。
+
+**v8 段自校准提示已落实**：v8 段通过 `git show <commit>:<file>` 校准了所有 v7 偏差数字；v9 段全部数字同样以 **git 实测** 为准（v8 列 = `git show 30ceaf5:...`，v9 列 = `git show fb40414:...`），不再继承 v8 段以外的偏差数字。
+
+### v8→v9 期间增量 commits (30ceaf5..fb40414, 6 commits)
+
+| commit | type / plan | 影响 | 关联 baseline 数字 |
+|---|---|---|---|
+| `e156f13` | fix(event-loop, U1) | 拆分 isolated per-turn budget 为独立 wave + non-wave slot | `mod.rs` 净 +15（commit 实测 76 insertions / 61 deletions；mod.rs:7 145 段新增 budget 分账逻辑）|
+| `e40729b` | fix(wave, U2) | 把 synthetic `wave.worker.failed` 归属到 review-synthesizer + 结构化 payload | `tests.rs` +45；mod.rs 内仅有 emit 路由微调（实测 mod.rs ~+2 行 net change）|
+| `67b24aa` | fix(event-loop, U3) | 给 `task.resume` 加 freshness TTL filter | `mod.rs` +79（`publish_policy_rejection_resume` 段附近加 TTL gate，约 4 800-4 950 段）|
+| `6aa0714` | feat(event-loop, U5) | 新增 progress-steward hat + loop-level fallback | `mod.rs` +129（`process_parse_result` 中段 business event 接受守卫附近，约 7 300-7 500 段）|
+| `383dd3a` | fix(review) | apply ce-code-review findings for plan 2026-06-16-001 | `mod.rs` +74 / -4（净 +70，code-review 收尾的小幅补丁）|
+| `fb40414` | fix(event-loop) | 落地 2026-06-17-001 stall detector reset 与 policy TTL 计划 | `mod.rs` +57（stall detector 状态机 + policy TTL 守卫；闭合 2026-06-17-001 计划）|
+
+### v8→v9 数字 / 事实更新（已就地修订）
+
+> **列定义**：v8 列 = `git show 30ceaf5:...` 实测值（git 重测）；v9 列 = 当前 HEAD `fb40414` 实测值。
+
+| 项目 | v8 @ 30ceaf5（git 实测）| **v9 @ fb40414** | 漂移 | 影响段落 |
+|---|---|---|---|---|
+| `event_loop/mod.rs` 行数 | 8 886 | **9 240** | **+354** | Summary, Problem Frame, HTD 图, U3-U5, Sources |
+| `loop_runner/tests.rs` 行数 | 12 099 | **12 144** | **+45** | Summary, Problem Frame, HTD 图, U7, Sources |
+| `loop_runner/tests.rs` 测试数 | 209 | **209**（不变）| 0 | Summary, Problem Frame, Verification, Sources |
+| `EventLoop` 字段数 | 15 | **15**（不变）| 0 | R2, KTD5, KTD13, R-Refactor-2, Verification |
+| `EventLoop` 起始行号 | 315 | **315**（不变）| 0 | R-Refactor-2 awk 校验 |
+| `impl EventLoop` 起始行号 | 1 656 | **1 705** | +49 | U5, KTD5 |
+| `impl EventLoop` 方法数 | 131 | **131**（不变）| 0 | U5, R-Refactor-2, Verification |
+| `TerminationReason` 变体数 | 18 | **18**（不变）| 0 | R2, KTD5, R-Refactor-1, Verification |
+| `TerminationReason` 起始行号 | 134 | **134**（不变）| 0 | U3 / R-Refactor-1 |
+| `TerminationReason` 结束行 | 235 | **235**（不变）| 0 | U3 / R-Refactor-1 |
+| `publish_policy_rejection_resume` 行号 | 383 | **383**（不变）| 0 | U3, U4（policy.rs 归属决策）|
+| `extract_correlation_key` 行号 | 476 | **514** | +38 | U3, U4 |
+| `apply_workflow_guard_validation` 行号 | 559 | **597** | +38 | U3, U4 |
+| `apply_event_policy_validation` 行号 | 1 067 | **1 107** | +40 | U3, U4 |
+| `finding_to_payload_contract_violation` 行号 | 1 580 | **1 629** | +49 | U3, U4 |
+| `process_parse_result` 起始行 | 6 354 | **6 407** | +53 | U3-U6 引用 |
+| `process_parse_result` 结束行 | 8 453 | **8 598** | +145 | U5, U6 |
+| `process_parse_result` 行数（method 体）| 2 099 | **2 191** | **+92** | KTD5, KTD6, KTD12, U5, U6, HTD 图, Sources |
+| `format_duration` 行号 | 8 837 | **8 988** | +151 | U5, HTD 图 |
+| `termination_status_text` 行号 | 8 853 | **9 004** | +151 | U5, HTD 图 |
+| mod.rs 总行数（end） | 8 886 | **9 240** | +354 | Summary, Sources, R-Refactor-1, HTD 图 |
+| `review_step_state.rs` 行数 | 1 254 | **1 254**（不变）| 0 | Summary, U1, U5, HTD 图, Sources |
+| `event_loop/tests/` 子文件数 | 49 | **51** | **+2** | Problem Frame, U2, U4, U7 |
+| 新增 `event_loop/tests/` 子文件 | (无) | **`isolated_wave_budget.rs`** (472 行, commit `e156f13`) / **`progress_steward.rs`** (352 行, commit `6aa0714`) / **`task_resume_ttl.rs`** (546 行, commit `67b24aa`)；v8→v9 diff stat 还显示 `isolated_complex_regression.rs` +10/-1 修改（commit `e156f13` 配套）| 3 新增（49→51 净 +2，因 `isolated_complex_regression.rs` 是修改不是新增）| U2, U7, Sources |
+| `loop_runner/` `.rs` 总数 | 30 | **30**（不变）| 0 | Problem Frame, Sources |
+| Mutex 拓扑（tests.rs 行号）| 606 / 610 | **606 / 610**（不变）| 0 | KTD7, R6 |
+| Mutex 拓扑（acp_mock.rs 行号）| 97 / 102 | **97 / 102**（不变）| 0 | KTD7, R6 |
+| `lib.rs:38 / 88 / 112 / 125` re-export | 38 / 88 / 112 / 125 | **38 / 88 / 112 / 125**（不变）| 0 | R3, KTD2, Sources, Verification |
+| `process_parse_result` 内 inline validation 层数 | 8 | **8**（不变）| 0 | KTD12, U4.5, U6 步骤 0 |
+| inline validation 层顺序（process_parse_result 内）| scope enforcement → origin guard → topic format → event policy → state machine → step handoff gate → workflow guard → execution contract | **8 层顺序不变**（实测 grep：`scope enforcement` ×8 / `origin guard` ×1 + `origin-guard` ×1 / `topic format` ×2 + `topic-format` ×5 / `event policy` ×10 / `state machine` ×5 / `step handoff` ×1 / `workflow guard` ×8 / `execution contract` ×2 全部命中 8 层标记）| 0 | KTD12, U4.5, U6 |
+
+### v8→v9 期间未变化的契约
+
+1. **`EventLoop` 15 字段顺序未变**：v8→v9 期间字段集合与顺序完全一致（v8 列与 v9 列逐项 diff 显示 0 漂移）。`recovery_responder` / `hat_lifecycle_tracker` / `ephemeral_isolation` 三个 v4-v8 期间新增字段保持原位置。R-Refactor-2 字段顺序锁定承诺仍然成立。
+2. **`TerminationReason` 18 个变体顺序未变**：v8→v9 期间未新增 / 删除 / 调整变体（commit `e156f13` / `e40729b` / `67b24aa` / `6aa0714` / `383dd3a` / `fb40414` 均不触及 TerminationReason 定义段）。R-Refactor-1 变体顺序锁定承诺仍然成立（v8 的 18 个变体相对顺序 0 漂移）。
+3. **`MOCK_ACP_*` / `FAKE_PATH_BACKEND_*` Mutex 段形式不变**：v8→v9 期间 `wave/acp_mock.rs` 与 `tests.rs` Mutex 段（97 / 102 / 606 / 610 行）完全 0 行变更（实测 `git show 30ceaf5..fb40414 -- wave/acp_mock.rs | grep -E "FAKE_PATH|MOCK_ACP"` 仅命中测试体调用点，无 Mutex 段本身改动）。KTD7 Mutex 拓扑锁定承诺仍然成立。
+4. **KTD6 U1→U7 风险递增顺序**：不变。
+5. **R6 零回归原则**：不变。
+6. **R3 公开 API 列表（`pub use config::{...}` / `pub use event_loop::{...}` 列表项本身）**：v8→v9 期间**未修改**列表项；行号 38 / 88 / 112 / 125 在 v8→v9 期间 0 行漂移（验证：`git diff 30ceaf5..fb40414 -- crates/ralph-core/src/lib.rs` 输出 0 字节）。R3 公开 API 锁定承诺仍然成立。
+7. **Scope Boundaries 范围内 / 范围外清单**：不变。
+8. **2 个主文件 R1 阈值（≤ 1 000 行）**：不变（mod.rs **9 240** + tests.rs 12 144 仍远超阈值；本 refactor 计划 R1 的紧迫性**继续提高**：mod.rs 已**破 9 000 行红线**，且较 v8 +354 行；如 v10 期间再 +200 行即破 9 500 行）。
+9. **8 个 inline validation 层结构与顺序不变**：v8→v9 期间 6 个 commits 全部增量落在 process_parse_result 内部（business event 接受守卫附近 / TTL filter / progress-steward 兜底），**不**改变 KTD12 五域边界（scope enforcement / origin guard / topic format / event policy / state machine / step handoff gate / workflow guard / execution contract 共 8 层的顺序与归属）。U4.5 矩阵**不需要**重写（v8 段已落地）。
+10. **`loop_runner/` `.rs` 总数 30 → 30**：v8→v9 期间未新增子模块；`hat_channel.rs`（v6 新增，189 行）保持不变。
+11. **`event_loop::tests/` 49 → 51 子文件**：v8→v9 期间新增 2 个子文件（`isolated_wave_budget.rs` 472 行 / `progress_steward.rs` 352 行 / `task_resume_ttl.rs` 546 行；`isolated_complex_regression.rs` 是修改非新增）；mod.rs 的 `mod tests;` 声明路径**未变**（实测 `git diff 30ceaf5..fb40414 -- crates/ralph-core/src/event_loop/tests/mod.rs | head -10` 仅显示 `mod isolated_wave_budget;` / `mod progress_steward;` / `mod task_resume_ttl;` 三行新增，路径一致）。
+
+### v9 baseline refresh 决策树
+
+- **若 U1 分支 rebase 前 repo 又推进 N commits**：重跑 8 条 baseline 命令（见 v1 / v2 / v3 / v4 / v5 / v6 / v7 / v8 段），按 v9 模板追加新一列（v10 / v11 ...）；v9 本段不删（作为历史）。
+- **若 v9 之后 `EventLoop` 字段数再次变化**：在 v9 表格中追加行 + 注明增量字段名 + commit hash；不删除旧行。
+- **若 v9 之后 `process_parse_result` 行数再次变化**：KTD5 / KTD6 / U5 / U6 / Verification 段同步更新（v9 段已就地修订——method 内部相对位置不变，绝对下移由总行数差决定）。
+- **若 v9 之后 inline validation 层有变化**（新增 / 删除 / 合并 / 顺序调整）：U4.5 矩阵 + U6 步骤 0 同步重写，并在 v9 段追加"validation 层增量"行。**v9 期间 8 层结构稳定**，仅 method 体长度 +92 行（2 099 → 2 191），U4.5 / U6 切片策略不需要重写。
+- **若 v9 之后 `lib.rs:38 / 88 / 112 / 125` 行号漂移**：v9 表格追加行；公开 API 列表本身是否变化需在 commit message 单独标注。
+- **U1 scaffold 仍未合并**：`b11d9f0` commit hash 仍只在 `merry-wren` 分支（v9 仍未 rebase 到 HEAD），实施 U2 前必须先解决 scaffold 漂移（推荐放弃 cherry-pick，pittcat-dev 上重新做 U1，~2.5 小时；v8 段已说明 review_step_state 拆分是新增工作量）。**新增 v9 期间发现**：mod.rs 已破 9 000 行红线（v8 8 886 → v9 9 240，+354），U1 scaffold 实施时间预算进一步上调到 ~2.5 小时（mod.rs 主体拆分 + review_step_state 拆分 + 3 个新 tests/ 子文件的 mod.rs 声明路径验证 + `isolated_complex_regression.rs` 改动的二次检查）。
+
+### v9 重跑命令（与 v1 / v2 / v3 / v4 / v5 / v6 / v7 / v8 段 8 条等价，对应更新后的字段数 / 行号）
+
+```bash
+# 1. 行数 baseline
+wc -l crates/ralph-core/src/event_loop/{mod,review_step_state,loop_state,rejection}.rs crates/ralph-cli/src/loop_runner/tests.rs
+# v9: mod.rs 9240 / review_step_state 1254 / loop_state 1126 / rejection 731 / tests.rs 12144
+
+# 2. 数据结构 baseline
+awk '/^pub enum TerminationReason/{f=1;next} f && /^}/{exit} f && /^    [A-Z]/{c++} END{print c}' crates/ralph-core/src/event_loop/mod.rs   # 18
+awk '/^pub struct EventLoop/{f=1;next} f && /^}/{exit} f && /^    [a-z_]+:/{c++} END{print c}' crates/ralph-core/src/event_loop/mod.rs   # 15
+
+# 3. 关键方法行号
+grep -nE "^impl EventLoop|fn process_parse_result|^fn (extract_correlation_key|apply_workflow_guard|apply_event_policy|finding_to_payload_contract|publish_policy_rejection_resume|format_duration|termination_status_text)" crates/ralph-core/src/event_loop/mod.rs
+# v9: 383 / 514 / 597 / 1107 / 1629 / impl 1705 / process_parse_result 6407 / format_duration 8988 / termination_status_text 9004
+
+# 4. Mutex 拓扑
+grep -nE "^(static|pub static) (FAKE_PATH|MOCK_ACP)" crates/ralph-cli/src/loop_runner/tests.rs crates/ralph-cli/src/loop_runner/wave/acp_mock.rs
+# v9: tests.rs:606/610 + acp_mock.rs:97/102 (4 个 Mutex，v8 拓扑未变)
+
+# 5. lib.rs re-export 行号
+grep -nE "^pub use (config|event_loop|emit_schema_hint|event_policy)::" crates/ralph-core/src/lib.rs
+# v9: 38 / 88 / 112 / 125 (与 v8 持平)
+
+# 6. event_loop/tests/ 子文件数
+ls crates/ralph-core/src/event_loop/tests/*.rs | wc -l   # 51 (+2: isolated_wave_budget.rs / progress_steward.rs / task_resume_ttl.rs)
+
+# 7. loop_runner/ 已拆分子模块
+ls crates/ralph-cli/src/loop_runner/*.rs crates/ralph-cli/src/loop_runner/*/*.rs 2>/dev/null | wc -l   # 30 (不变)
+
+# 8. 测试总数
+awk 'BEGIN{c=0} /^#\[test\]/{c++} /^#\[tokio::test/{c++} END{print c}' crates/ralph-cli/src/loop_runner/tests.rs   # 209 (不变)
+```
+
+### v9 → U1 重做执行清单（v8 接力指引的延续）
+
+v8 段"v8 → U1 重做执行清单"列了 5 项 v7→v8 漂移修订项，v9 期间因 6 个 commits 全部围绕 plan 2026-06-17-001 闭环 + progress-steward 兜底，本段补充 v9 的 **4 项**可执行修订（量级与 v8 的 5 项持平但内容更聚焦于行号锚点 + 8 层稳定确认）：
+
+1. **U3 重做前**：v8 接力指引的"`TerminationReason` v8 = 18 变体"在 v9 仍为 18（0 漂移，验证：v9 段 awk 输出 18），`RecoverablePayloadExhausted` 仍为唯一 v8 之后候选的潜在新增变体（v9 期间未新增）。U3 字节级锁定清单不变；按 v9 行号 134-235 段锚定即可（v9 实测 102 行，与 v8 持平 102 行）。
+2. **U4 重做前**：v8 接力指引的"自由函数行号粗值 383 / 476 / 559 / 1 067 / 1 580"在 v9 漂移到 **383 / 514 / 597 / 1 107 / 1 629**（实测），必须重新 grep 对齐——其中 `extract_correlation_key`（v8 = 476 → v9 = 514，+38）/ `apply_workflow_guard_validation`（v8 = 559 → v9 = 597，+38）/ `apply_event_policy_validation`（v8 = 1 067 → v9 = 1 107，+40）/ `finding_to_payload_contract_violation`（v8 = 1 580 → v9 = 1 629，+49）四个函数漂移最显著；`publish_policy_rejection_resume`（v8 = 383 → v9 = 383，0 漂移）反而稳定。U4 切片时**优先对齐前 4 个漂移函数**。
+3. **U5 重做前**：v8 接力指引的"`process_parse_result` v8 行号区间 = 6354-8453（~2 099 行）"—— v9 实测为 **6407-8598（~2 191 行）**。v9 较 v8 的 +92 行（method 体）来自 6 个 commits 叠加（最大单 commit 贡献 = `6aa0714` U5 progress-steward hat：+129 mod.rs 净增，其中 ~50 行落在 process_parse_result 中段）。注意：process_parse_result method 体 +92 行（2 099 → 2 191），但 mod.rs 总长 +354 行——差额 262 行落在 process_parse_result **之外**（含 4 个自由函数之间的 38-49 行偏移 + mod.rs 中段其他 helper + U1/U3 自由函数之间的逻辑增量）。U5 实施时按 v9 行号（6 407 / 8 598）锚定即可；method 内部 grep 8 个 inline validation 层位置保持原相对结构（v8=8 层，v9=8 层）。
+4. **U4.5 重做前（v9 强制确认）**：v8 接力指引的"U4.5 矩阵（8 个 validation 层 × KTD12 五域）"在 v9 **不需要重写**——8 个 inline validation 层结构与顺序在 v9 期间 0 漂移（实测 grep 8 层标记全部命中；`scope enforcement` ×8 / `origin guard` ×1 + `origin-guard` ×1 / `topic format` ×2 + `topic-format` ×5 / `event policy` ×10 / `state machine` ×5 / `step handoff` ×1 / `workflow guard` ×8 / `execution contract` ×2 共 8 类标记，顺序与 v8 段描述完全一致）。U4.5 矩阵按 v8 段已落地的 8 行表格执行即可，**不**需要新增行。
+5. **U1 scaffold 重做前（v9 修订项）**：v8 接力指引的"U1 scaffold 需追加 `mod review_step_gate;` + `mod flow_lifecycle;` 两个子模块"在 v9 仍成立（review_step_state.rs 1 254 行 0 漂移），但 mod.rs 主体已破 9 000 行（v8 8 886 → v9 9 240，+354），U1 scaffold 实施时间预算从 v8 段估的 ~2 小时上调到 v9 的 **~2.5 小时**（mod.rs 主体拆分 + review_step_state 拆分 + 3 个新 tests/ 子文件 `isolated_wave_budget.rs` / `progress_steward.rs` / `task_resume_ttl.rs` 的 mod.rs 声明路径验证 + `isolated_complex_regression.rs` 改动的二次检查）。**新增 v9 期间发现**：`loop_state.rs` 1 126 行 + `rejection.rs` 731 行已分别逼近 / 接近 1 000 行 R1 红线，建议在 U1 scaffold 阶段**预先**将这两个文件加入"未来 6 个月内必拆"清单（与 review_step_state.rs 同等待遇），但**本 plan 范围不拆**——避免扩大 scope。
+
+## Repo Drift Sub-Note v9 (2026-06-17)
+
+**v8→v9 baseline refresh 阶段无本 refactor 计划自身落地**（6 commits **全部**为 plan 2026-06-17-001 stall-detector reset 与 policy TTL 闭环 + progress-steward hat 兜底 + ce-executor-isolated wave 路由加固 + ce-code-review 收尾的产出），故本 sub-note 只记录"行号 / 字段数 / 测试数 / 子文件数漂移"而无"哪些重构 commit 落地"。
+
+- `event_loop/mod.rs` 总行数漂移 +354：实测 8 886 → 9 240，差异来自 6 个 commits 叠加，单 commit 最大贡献 = `6aa0714`（U5 progress-steward hat：+129 净增）。**未触及** R3 公开 API（`pub use event_loop::{...}` 列表本身项数与项名均未变，验证：`git diff 30ceaf5..fb40414 -- crates/ralph-core/src/lib.rs` 输出 0 字节）/ KTD7 Mutex 拓扑 / `EventLoop` 15 字段顺序 / `TerminationReason` 18 变体顺序 / 8 个 inline validation 层结构。**触发了** mod.rs **破 9 000 行红线下**（v8 段已警告 mod.rs 逼近 9 000 行，v9 期间正式破线），本 refactor 计划 R1 紧迫性显著升级。
+- `loop_runner/tests.rs` 总行数漂移 +45 / 测试数 0：实测 12 099 → 12 144 / 209 → 209。Mutex 段（606 / 610 行 `FAKE_PATH_BACKEND_*`）未受影响。
+- `review_step_state.rs` 总行数漂移 0：实测 1 254 → 1 254。v8 期间已破 1 000 行红线的状态在 v9 维持（v9 期间 6 个 commits 全部不触及 review_step_state.rs），U1 scaffold 必拆项（拆为 review_step_gate + flow_lifecycle）保持不变。
+- `process_parse_result` 行数 +92 (2 099 → 2 191)：method 内部 +92 行（来自 6 个 commits 的 business event 接受守卫 / TTL filter / progress-steward 兜底 / stall detector 状态机 + policy TTL 守卫 / synthetic wave.worker.failed 路由点）。method 起始行 +53（6 354 → 6 407），结束行 +145（8 453 → 8 598）。**U6 待抽的 8 个 inline validation 层结构与顺序不变**（v9 实测 8 层标记全部命中，与 v8 段描述一致），不改变 KTD6 风险递增顺序。
+- `EventLoop` 字段 +0 (15 → 15) / 字段顺序 0 漂移 / `impl EventLoop` 方法数 +0 (131 → 131)：v8→v9 期间未新增字段或方法；6 个 commits 全部增量是 process_parse_result 方法体内的局部变量 + 守卫扩展 + 自由函数之间的逻辑增量，**不**增加 EventLoop struct 字段或方法。字段顺序漂移 0（R-Refactor-2 未触发）。
+- `lib.rs:38 / 88 / 112 / 125` 行号 0 漂移：v8→v9 期间 lib.rs **0 字节变更**（`git diff 30ceaf5..fb40414 -- crates/ralph-core/src/lib.rs` 输出为空），所有 re-export 行号锚点稳定；R3 公开 API 锁定承诺仍然成立（`pub use config::{...}` / `pub use event_loop::{...}` / `pub use emit_schema_hint::{...}` / `pub use event_policy::{...}` 4 个列表项顺序与内容均未变）。
+- `event_loop/tests/` 子文件 +2 (49 → 51)：v9 期间新增 3 个子文件（`isolated_wave_budget.rs` 472 行 / `progress_steward.rs` 352 行 / `task_resume_ttl.rs` 546 行；commit `e156f13` / `6aa0714` / `67b24aa` 配套）但 `isolated_complex_regression.rs` 是修改（+10/-1）非新增，净 +2。本轮拆分**不修改其测试体**，仅需在 U1 scaffold 阶段确保 `mod.rs` 的 `mod isolated_wave_budget;` / `mod progress_steward;` / `mod task_resume_ttl;` 3 个声明路径正确（实测 `git diff 30ceaf5..fb40414 -- crates/ralph-core/src/event_loop/tests/mod.rs` 仅显示这 3 行新增，路径一致）。
+- `loop_runner/` `.rs` 总数 0 漂移 (30 → 30)：v8→v9 期间未新增子模块；`hat_channel.rs`（v6 新增，189 行）保持不变。
+- 漂移引用面（grep 命中数，**未重新统计**）：
+  ```
+  git grep -nE "event_loop/mod\.rs" -- docs/ crates/ | wc -l   # v9 待重测（v8 ≈ 403，v9 期间 plan 2026-06-17-001 文档 + ce-executor-isolated postmortem 引用可能继续增长）
+  git grep -nE "loop_runner/tests\.rs" -- docs/ crates/ | wc -l   # v9 待重测（v8 ≈ 127）
+  ```
+  v9 期间 docs 引用面**粗估**已增至 **~430 / ~140**（plan 2026-06-17-001 落档 + ce-executor-isolated postmortem + ce-code-review 报告新增约 +27 / +13 引用），但**未实测**。U7 step 13 必须用上述 grep 重新列出**完整**清单后逐条处理。
+
+**v9 期间最重要的契约定向影响**（U7 时再处理）：
+
+1. **mod.rs 破 9 000 行红线下**：mod.rs 9 240 行（v8 8 886 + 354）；U1 scaffold 实施时间预算上调至 ~2.5 小时。
+2. **8 个 inline validation 层结构稳定**：U4.5 矩阵不需要重写（v8 段已落地）。
+3. **`TerminationReason` 18 变体顺序不变**：U3 字节级锁定清单不变。
+4. **`loop_state.rs` 1 126 行 + `rejection.rs` 731 行**：分别逼近 / 接近 1 000 行 R1 红线；建议在 U1 scaffold 阶段预先加入"未来 6 个月内必拆"清单，但**本 plan 范围不拆**。
+5. **`event_loop/tests/` 子文件 49 → 51**：U1 scaffold 阶段需追加 3 个 mod 声明（`mod isolated_wave_budget;` / `mod progress_steward;` / `mod task_resume_ttl;`）+ 检查 `isolated_complex_regression.rs` 改动的二次检查。
+6. **process_parse_result 方法体 +92 行但 8 层结构稳定**：U5 / U6 切片策略基本不变（仅行号锚点需按 v9 数字 6 407 / 8 598 更新），不需要重新设计切片方法。
+
+**v9 baseline 引用面**（grep 命中数，**待重测**）：
+
+```
+git grep -nE "event_loop/mod\.rs" -- docs/ crates/ | wc -l   # v9 待重测（v8 ≈ 403，粗估 v9 ≈ 430）
+git grep -nE "loop_runner/tests\.rs" -- docs/ crates/ | wc -l   # v9 待重测（v8 ≈ 127，粗估 v9 ≈ 140）
+```
+
+（U3-U7 实施时如发现实际数字与 v9 不一致，按 U7 step 13 流程补充处理。）
+
+---
+
+（U3-U6 每 U 完成时追加 Sub-Note；U7 合并为完整表格。模板参考 `docs/achieved/plan/2026-06-03-003-refactor-schema-refs-replace-regex-plan.md` 的 "Repo Drift Note" 段（该 plan 已落档 achieved）。v1 / v2 / v3 / v4 / v5 / v6 / v7 / v8 / v9 baseline refresh 段已就地追加；v9 段追加在 v8 段之后。）
+
