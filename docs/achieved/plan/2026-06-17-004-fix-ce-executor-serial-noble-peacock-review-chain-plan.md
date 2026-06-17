@@ -1,7 +1,7 @@
 ---
 title: fix: ce-executor-serial noble-peacock review 链死锁与恢复机制缺口
 type: fix
-status: active
+status: completed
 date: 2026-06-17
 origin: docs/report/2026-06-17-ce-executor-serial-noble-peacock-review-chain-stalled-diagnosis.md
 related:

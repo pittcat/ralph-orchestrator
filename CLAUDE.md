@@ -136,7 +136,7 @@ User YAML → RalphConfig → EventLoopConfig → HatConfig overrides → effect
 Key config modules in `crates/ralph-core/src/config/`:
 - `RalphConfig`: Top-level config
 - `CoreConfig`: Event loop, scratchpad, memories, tasks
-- `HatConfig`: Per-hat backend, triggers, publishes, instructions, concurrency
+- `HatConfig`: Per-hat backend, triggers, publishes, instructions, concurrency, `missing_event_grace_secs`（2026-06-17-004 U2：`should_gate_missing_events` 跳过本 hat 首次激活后 grace 秒内的 missing-event 检查；解析链 `per-hat → preset → min(idle_timeout*0.3, 540)`；`Some(0)` 关闭 grace，`None` 走默认）
 - `EventPolicyConfig`: Schema validation, payload types, terminal event handling
 - `EventFilterConfig`: Filter events by topic patterns
 - `StateMachineConfig`: Instance lifecycle rules
@@ -383,6 +383,7 @@ hats:
 - `concurrency > 1` enables wave execution for a hat
 - `aggregate` makes a hat wait for all wave results before activating
 - A hat cannot have both `concurrency > 1` and `aggregate`
+- `missing_event_grace_secs`（可选）：per-hat missing-event 闸门宽限期；2026-06-17-004 U2 引入，专为长跑 hat（如 `dimension-reviewer`）的首轮沉默保护。不设置 → 走 preset 默认 → `min(idle_timeout*0.3, 540)`。设为 `0` 显式关闭 grace。代码：`crates/ralph-core/src/config/hat.rs::resolve_missing_event_grace_secs`、`crates/ralph-cli/src/loop_runner/hard_gate.rs::should_gate_missing_events`
 
 ### Wave Dispatch
 
@@ -495,6 +496,18 @@ Runtime Diagnosis（U0–U8）是在上述 TUI / full diagnostics 之上的**可
 - 启用（env 优先）：`RALPH_DIAGNOSTICS=1 ralph run -c ralph.yml -H builtin:<preset> -p "..."`。仅想写盘不写 prompt alert，可在 `ralph.yml` 配 `telemetry.runtime_diagnosis: { enabled: true, write_artifacts: true, prompt_injection_enabled: true, ... }`。
 - 报告：`ralph diagnose --session latest`（Markdown）或 `--format json`（CI，schema_version="1"）；`--diagnostics-root` 可自定义根目录。
 - 退出码：`0` 渲染成功 / `2` 无 session / `3` 路径非法 / `4` I/O 失败。
+- **Recovery 计数（2026-06-17-004 U4）**：`diagnosis-summary.json` 的 `recovery_count` 现在汇总 workspace 层 `<root>/.ralph/recovery.jsonl`（CLI emit 拒收）与 session 层 `<root>/.ralph/diagnostics/<id>/recovery.jsonl`（hard gate / workflow guard）两条 journal；`notes` 列出两条路径。`ralph diagnose` 在 session journal 为空时回退到 workspace journal，避免 stale session 隐藏 cli_emit 拒收。
+
+## Doctor (Plan Frontmatter Drift Detection)
+
+`ralph doctor plan-sync [--plan PATH]`（2026-06-17-004 U5 / R7）检测 plan YAML frontmatter `status` 与 `.ralph/agent/tasks.jsonl` 闭合状态是否一致：
+
+- `status: completed` 但还有 `open` task → 失败；
+- `status: stalled-after-uN` 但 uN 已全部 `closed` 且无 open → 失败；
+- `status` 不在允许枚举（`draft / active / stalled-after-u0..8 / uN-closed-u(N+1)-pending / completed / abandoned`）→ 失败；
+- 缺 `tasks.jsonl` → 仅警告，不失败；
+- 不传 `--plan` 时自动选 `docs/plans/` 或 `docs/achieved/plan/` 下 mtime 最新的 `.md`。
+- `ce-executor-serial` preset coordinator instructions 含 HARD RULE：每次 `work.done` 后必须更新 plan frontmatter `status`（在 `ralph tools task close` 之后、`ralph emit work.ready` 之前）。
 - 8 个 envelope source：`stall_recovery / missing_event_gate / workflow_guard / execution_contract / payload_contract / drift_monitor / hook_retry / loop_stale`；6 个 outcome：`pending / recovered / repeated / escalated / failed / not_retriable`。
 - Responder 三档升级：Soft（prompt alert）→ Hard（`task.resume` 路由到 safe target）→ Final（`TerminationHint`，不覆盖 `PayloadContractViolation`）。
 
