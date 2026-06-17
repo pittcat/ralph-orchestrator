@@ -29,6 +29,7 @@
 embedded:
   - autoresearch
   - ce-executor-isolated
+  - ce-executor-serial
   - ce-executor-wave
   - debug
   # - hatless-baseline  # P3 #29: legacy experimental preset; kept on disk

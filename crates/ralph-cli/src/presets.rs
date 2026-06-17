@@ -39,6 +39,15 @@ const PRESETS: &[EmbeddedPreset] = &[
         public: true,
     },
     EmbeddedPreset {
+        name: "ce-executor-serial",
+        description: "Isolated-mode plan-driven work execution with serial code review (no wave), auto-fix, shipping, and manager report",
+        content: include_str!(concat!(
+            env!("OUT_DIR"),
+            "/presets/ce-executor-serial.yml"
+        )),
+        public: true,
+    },
+    EmbeddedPreset {
         name: "ce-executor-wave",
         description: "Wave-based parallel plan-driven execution with adversarial review, auto-fix, and shipping",
         content: include_str!(concat!(env!("OUT_DIR"), "/presets/ce-executor-wave.yml")),
@@ -152,7 +161,7 @@ mod tests {
     #[test]
     fn test_list_presets_returns_all() {
         let presets = list_presets();
-        assert_eq!(presets.len(), 4, "Expected 4 public presets");
+        assert_eq!(presets.len(), 5, "Expected 5 public presets");
     }
 
     #[test]
@@ -234,6 +243,12 @@ mod tests {
             public_names.contains(&"ce-executor-wave"),
             "ce-executor-wave must remain a public builtin"
         );
+        // 2026-06-17-002 U3: ce-executor-serial (serial-review variant) is a
+        // sibling public builtin alongside -isolated and -wave.
+        assert!(
+            public_names.contains(&"ce-executor-serial"),
+            "ce-executor-serial must be a public builtin (2026-06-17-002 U3)"
+        );
     }
 
     #[test]
@@ -274,9 +289,10 @@ mod tests {
     #[test]
     fn test_preset_names_returns_all_names() {
         let names = preset_names();
-        assert_eq!(names.len(), 4);
+        assert_eq!(names.len(), 5);
         assert!(names.contains(&"autoresearch"));
         assert!(names.contains(&"ce-executor-isolated"));
+        assert!(names.contains(&"ce-executor-serial"));
         assert!(names.contains(&"ce-executor-wave"));
         assert!(names.contains(&"debug"));
     }
@@ -1042,6 +1058,219 @@ mod tests {
             "Embedded ce-executor-isolated must equal merge(canonical preset, schema SSOT). \
              Re-run `cargo build` so build.rs regenerates $OUT_DIR/presets/ce-executor-isolated.yml."
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // 2026-06-17-002 U4: ce-executor-serial preset tests
+    // -------------------------------------------------------------------------
+
+    /// U4: ce-executor-serial must use `report.done` as its sole completion
+    /// gate, mirroring ce-executor-isolated. Without this, the loop would
+    /// never reach `LOOP_COMPLETE` and stall at the missing-event gate.
+    #[test]
+    fn test_ce_executor_serial_has_report_done_completion_gate() {
+        let preset = get_preset("ce-executor-serial")
+            .expect("ce-executor-serial preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor-serial YAML should parse");
+        assert_eq!(
+            config.event_loop.required_events,
+            &["report.done"],
+            "ce-executor-serial must require 'report.done' as its only completion gate"
+        );
+    }
+
+    /// U4: review-synthesizer's triggers must be `[review.dimensions.complete]`
+    /// for the serial preset — the wave variant triggers on
+    /// `review.dimension.done` and `wave.worker.failed`, neither of which
+    /// exists in the serial path. If a serial preset accidentally keeps the
+    /// wave-style triggers, the synthesizer never activates and the loop
+    /// stalls on the missing-event gate.
+    #[test]
+    fn test_ce_executor_serial_synthesizer_triggers_on_dimensions_complete() {
+        let preset = get_preset("ce-executor-serial")
+            .expect("ce-executor-serial preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor-serial YAML should parse");
+        let synthesizer = config
+            .hats
+            .get("review-synthesizer")
+            .expect("ce-executor-serial must define a 'review-synthesizer' hat");
+        assert_eq!(
+            synthesizer.triggers,
+            vec!["review.dimensions.complete".to_string()],
+            "ce-executor-serial review-synthesizer must trigger only on review.dimensions.complete; \
+             the wave-style triggers (review.dimension.done, wave.worker.failed) are absent in the \
+             serial path and would never fire"
+        );
+        // Defense in depth: the wave topic must NOT appear anywhere in
+        // the synthesizer's trigger list, even as a duplicate.
+        assert!(
+            !synthesizer.triggers.contains(&"review.wave.ready".to_string()),
+            "ce-executor-serial review-synthesizer must NOT trigger on review.wave.ready (no wave in this preset)"
+        );
+        assert!(
+            !synthesizer.triggers.contains(&"wave.worker.failed".to_string()),
+            "ce-executor-serial review-synthesizer must NOT trigger on wave.worker.failed (no wave dispatcher in this preset)"
+        );
+    }
+
+    /// U4: dimension-reviewer in the serial preset must have
+    /// `concurrency: 1` (the default; no fan-out) and NO `aggregate`
+    /// block — the serial path is a strict 1-instance-per-activation
+    /// design. If a future edit re-introduces concurrency, the test
+    /// fails loudly and forces the author to either keep the topology
+    /// serial or rename the preset to a wave variant.
+    #[test]
+    fn test_ce_executor_serial_dimension_reviewer_no_concurrency_no_aggregate() {
+        let preset = get_preset("ce-executor-serial")
+            .expect("ce-executor-serial preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor-serial YAML should parse");
+        let reviewer = config
+            .hats
+            .get("dimension-reviewer")
+            .expect("ce-executor-serial must define a 'dimension-reviewer' hat");
+        assert_eq!(
+            reviewer.concurrency, 1,
+            "ce-executor-serial dimension-reviewer concurrency must be 1 (single instance per activation)"
+        );
+        assert!(
+            reviewer.aggregate.is_none(),
+            "ce-executor-serial dimension-reviewer must have no aggregate block (no wait_for_all in serial path)"
+        );
+        // Timeout must still be 1800 (parallel preset's per-worker cap) so
+        // a single hung dimension still surfaces in bounded wall time.
+        assert_eq!(
+            reviewer.timeout,
+            Some(1800),
+            "ce-executor-serial dimension-reviewer timeout must be 1800s to bound per-dim wall time"
+        );
+    }
+
+    /// U4: review-coordinator must own the serial review events
+    /// (`review.dimension.ready` and `review.dimensions.complete`) and
+    /// dimension-reviewer must own the per-dim completion events
+    /// (`review.dimension.done` and `review.dimension.failed`).
+    /// Crossing the ownership lines would let dimension-reviewer kick
+    /// a new review dimension (denied by topic_deny_rules) or let
+    /// review-coordinator emit a per-dim done (rejected by origin
+    /// guard as it is not in the hat's `publishes` list).
+    #[test]
+    fn test_ce_executor_serial_topic_ownership() {
+        let preset = get_preset("ce-executor-serial")
+            .expect("ce-executor-serial preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor-serial YAML should parse");
+        let coordinator = config
+            .hats
+            .get("review-coordinator")
+            .expect("ce-executor-serial must define a 'review-coordinator' hat");
+        let reviewer = config
+            .hats
+            .get("dimension-reviewer")
+            .expect("ce-executor-serial must define a 'dimension-reviewer' hat");
+
+        // review-coordinator owns the kick-off + close events
+        assert!(
+            coordinator.publishes.contains(&"review.dimension.ready".to_string()),
+            "review-coordinator must publish review.dimension.ready"
+        );
+        assert!(
+            coordinator.publishes.contains(&"review.dimensions.complete".to_string()),
+            "review-coordinator must publish review.dimensions.complete (plural — aggregate over the sequence)"
+        );
+        assert!(
+            !coordinator.publishes.contains(&"review.dimension.done".to_string()),
+            "review-coordinator must NOT publish review.dimension.done (dimension-reviewer owns that)"
+        );
+        assert!(
+            !coordinator.publishes.contains(&"review.dimension.failed".to_string()),
+            "review-coordinator must NOT publish review.dimension.failed (dimension-reviewer owns that)"
+        );
+
+        // dimension-reviewer owns the per-dim completion events
+        assert!(
+            reviewer.publishes.contains(&"review.dimension.done".to_string()),
+            "dimension-reviewer must publish review.dimension.done"
+        );
+        assert!(
+            reviewer.publishes.contains(&"review.dimension.failed".to_string()),
+            "dimension-reviewer must publish review.dimension.failed"
+        );
+        assert!(
+            !reviewer.publishes.contains(&"review.dimensions.complete".to_string()),
+            "dimension-reviewer must NOT publish review.dimensions.complete (review-coordinator owns that)"
+        );
+    }
+
+    /// U4: root preset must match the embedded copy after build.rs's
+    /// SSOT merge. Mirrors test_ce_executor_root_preset_matches_embedded
+    /// for the new serial preset.
+    #[test]
+    fn test_ce_executor_serial_root_preset_matches_embedded() {
+        let merged = merge_root_with_ssot("ce-executor-serial");
+        let preset =
+            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
+        assert_eq!(
+            merged, preset.content,
+            "Embedded ce-executor-serial must equal merge(canonical preset, schema SSOT). \
+             Re-run `cargo build` so build.rs regenerates $OUT_DIR/presets/ce-executor-serial.yml."
+        );
+    }
+
+    /// U4: ce-executor-serial must NOT declare `review.wave.ready` or
+    /// `wave.worker.failed` as triggers / publishes / aggregate
+    /// members / required keys on any hat. (The preset may mention
+    /// these topics in PROSE comments explaining what was removed;
+    /// that prose is fine. What is not fine is wiring the wave
+    /// topics into the runtime contract.)
+    ///
+    /// This guards against a future edit accidentally wiring the
+    /// serial preset to the wave dispatcher — the topic_deny_rules
+    /// block would still reject the emit, but at that point the
+    /// preset is internally inconsistent and the test should fire
+    /// before runtime does.
+    #[test]
+    fn test_ce_executor_serial_has_no_wave_topic() {
+        let preset = get_preset("ce-executor-serial")
+            .expect("ce-executor-serial preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor-serial YAML should parse");
+        for (hat_name, hat) in &config.hats {
+            // Triggers must not subscribe to wave-only events.
+            for forbidden in ["review.wave.ready", "wave.worker.failed"] {
+                assert!(
+                    !hat.triggers.contains(&forbidden.to_string()),
+                    "ce-executor-serial hat '{}' must NOT declare '{}' as a trigger \
+                     (no wave in this preset)",
+                    hat_name,
+                    forbidden
+                );
+                assert!(
+                    !hat.publishes.contains(&forbidden.to_string()),
+                    "ce-executor-serial hat '{}' must NOT declare '{}' in publishes \
+                     (no wave in this preset)",
+                    hat_name,
+                    forbidden
+                );
+            }
+        }
+    }
+
+    /// U4: ce-executor-serial must validate end-to-end (ambiguous routing
+    /// whitelist, terminal event authority, etc.). Mirrors
+    /// test_ce_executor_isolated_preset_validates_ambiguous_routing for the
+    /// new preset.
+    #[test]
+    fn test_ce_executor_serial_preset_validates() {
+        let preset = get_preset("ce-executor-serial")
+            .expect("ce-executor-serial must be embedded with non-empty content");
+        let config = RalphConfig::parse_yaml(preset.content)
+            .unwrap_or_else(|e| panic!("ce-executor-serial must parse: {e}"));
+        config.validate().unwrap_or_else(|e| {
+            panic!("ce-executor-serial must validate (ambiguous routing + terminal authority): {e}")
+        });
     }
 
     #[test]
@@ -2482,6 +2711,7 @@ mod tests {
         // This must stay in sync with scripts/ralph-zsh-plugin.zsh
         let zsh_values: std::collections::BTreeSet<String> = [
             "builtin:ce-executor-isolated",
+            "builtin:ce-executor-serial",
             "builtin:ce-executor-wave",
             "builtin:debug",
             "builtin:autoresearch",

@@ -10,6 +10,11 @@
     "category": "development"
   },
   {
+    "name": "ce-executor-serial",
+    "description": "Isolated-mode plan-driven work execution with serial code review (no wave), auto-fix, shipping, and manager report",
+    "category": "development"
+  },
+  {
     "name": "ce-executor-wave",
     "description": "Wave-based parallel plan-driven execution with adversarial review, auto-fix, and shipping",
     "category": "development"

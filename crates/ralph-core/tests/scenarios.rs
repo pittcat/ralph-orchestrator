@@ -1039,6 +1039,24 @@ fn test_ce_executor_bootstrap_recovery_scenario() {
 }
 
 // ──────────────────────────────────────────────────────────────────────
+// 2026-06-17-002 plan U5: serial review chain (no wave) for ce-executor-serial
+// ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_ce_executor_serial_review_scenario() {
+    // 4-dim serial review chain: review-coordinator walks one dimension per
+    // turn (review.dimension.ready → review.dimension.done × 4), then emits
+    // review.dimensions.complete to wake the synthesizer. The chain length
+    // (4 ready/done pairs + 1 close + downstream) is the wire-level contract
+    // that distinguishes the serial preset from the parallel wave variant.
+    // If a future edit re-introduces a wave dispatcher or collapses the
+    // per-dim hops, the topic count and order assertions in
+    // `expected.events` will fire before integration tests do.
+    let yaml = load_scenario("tests/scenarios/ce_executor_serial_review.yml");
+    run_scenario(yaml);
+}
+
+// ──────────────────────────────────────────────────────────────────────
 // 2026-06-16-002 plan U6: coordinator build.deny deny rule
 // ──────────────────────────────────────────────────────────────────────
 

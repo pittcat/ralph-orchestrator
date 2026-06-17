@@ -1012,6 +1012,7 @@ still works, but the inline form is preferred for consistency.
 | Schema file | Referenced by | Status |
 |---|---|---|
 | `schemas/ce-executor-isolated.yml` | `ce-executor-isolated` | Deprecated reference copy (schemas inlined into `presets/en/ce-executor-isolated.yml`) |
+| `schemas/ce-executor-serial.yml`   | `ce-executor-serial`   | Deprecated reference copy (schemas inlined into `presets/en/ce-executor-serial.yml`) |
 | `schemas/ce-executor-wave.yml`   | `ce-executor-wave`    | Deprecated reference copy (schemas inlined into `presets/en/ce-executor-wave.yml`) |
 
 ### Task Split Heuristics (ce-executor-isolated)
@@ -1058,4 +1059,4 @@ regression matrix source.
 - [ ] Does `./scripts/validate-builtin-presets.sh --strict` pass after the change?
 - [ ] If a new finding id appears, is it documented in `docs/guide/runtime-contracts.md`?
 - [ ] For new public builtin presets, is the name added to `presets/index.json`?
-- [ ] For development presets (`ce-executor-isolated`, `ce-executor-wave`), does `ralph preset check --strict --format json` show zero findings?
+- [ ] For development presets (`ce-executor-isolated`, `ce-executor-serial`, `ce-executor-wave`), does `ralph preset check --strict --format json` show zero findings?

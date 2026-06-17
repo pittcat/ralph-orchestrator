@@ -1,0 +1,213 @@
+# ce_executor_serial_review: serial review chain (no wave) end-to-end
+#
+# 2026-06-17-002 U5: BDD scenario for the serial-review preset.
+#
+# This BDD scenario exercises the **serial review chain** that
+# `ce-executor-serial` introduces (replacing the parallel wave chain
+# in `ce-executor-isolated`). The chain walks 4 dimensions one at a
+# time:
+#
+#   work.done → review-coordinator → review.dimension.ready (correctness)
+#     → dimension-reviewer → review.dimension.done (correctness)
+#     → review-coordinator → review.dimension.ready (testing)
+#     → dimension-reviewer → review.dimension.done (testing)
+#     → review-coordinator → review.dimension.ready (maintainability)
+#     → dimension-reviewer → review.dimension.done (maintainability)
+#     → review-coordinator → review.dimension.ready (requirements)
+#     → dimension-reviewer → review.dimension.done (requirements)
+#     → review-coordinator → review.dimensions.complete
+#     → review-synthesizer → review.passed
+#     → plan-gate → plan.complete → shipper → REVIEW_COMPLETE
+#     → reporter → report.done → LOOP_COMPLETE
+#
+# This wire-level scenario asserts the topic shape and the count of
+# serial review hops, not the per-hypothesis origin / policy / contract
+# checks (those live in ralph-cli/tests/ce_executor_recovery.rs).
+# It is the smoke alarm: if the chain length changes or any new topic
+# replaces a serial hop, this scenario fails before integration tests do.
+
+name: ce_executor_serial_review
+description: Serial review chain for ce-executor-serial preset — 4 dimensions walked one at a time, no wave dispatcher
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 16
+  hats:
+    coordinator:
+      subscribes_to:
+        - work.start
+      publishes:
+        - work.ready
+        - work.failed
+    executor:
+      subscribes_to:
+        - work.ready
+        - fix.plan.ready
+      publishes:
+        - work.done
+        - work.failed
+    # review-coordinator owns the serial kick-off + close events.
+    # Subscribes to work.done / fix.applied to initialize the sequence
+    # and to per-dim terminal events to walk one step at a time.
+    review-coordinator:
+      subscribes_to:
+        - work.done
+        - fix.applied
+        - review.dimension.done
+        - review.dimension.failed
+      publishes:
+        - review.dimension.ready
+        - review.dimensions.complete
+        - review.passed
+    # dimension-reviewer handles a single dimension per activation.
+    # No concurrency: the scenario asserts 1 instance per turn.
+    dimension-reviewer:
+      subscribes_to:
+        - review.dimension.ready
+      publishes:
+        - review.dimension.done
+        - review.dimension.failed
+    # review-synthesizer triggers on the closed-sequence event
+    # (NOT on the per-dim terminals — those route to the coordinator
+    # to keep the walk going).
+    review-synthesizer:
+      subscribes_to:
+        - review.dimensions.complete
+      publishes:
+        - review.passed
+        - review.failed
+        - review.complete
+        - plan.blocked
+    plan-gate:
+      subscribes_to:
+        - review.passed
+        - review.complete
+        - work.failed
+      publishes:
+        - queue.advance
+        - work.ready
+        - plan.complete
+        - plan.blocked
+    shipper:
+      subscribes_to:
+        - plan.complete
+        - plan.blocked
+      publishes:
+        - REVIEW_COMPLETE
+    reporter:
+      subscribes_to:
+        - REVIEW_COMPLETE
+      publishes:
+        - report.done
+        - LOOP_COMPLETE
+
+# 16 mock responses — one per iteration. The chain is intentionally
+# long: each of the 4 dimensions is one round-trip (coordinator →
+# reviewer → done), plus 4 closer/transport events.
+mock_responses:
+  # 0. coordinator parses plan
+  - |
+    <event topic="work.start" plan_name="plan-s" plan_path="docs/plans/s.md" task_id="t1" task_key="k1" step="step-01">
+    Plan parsed.
+    </event>
+  # 1. coordinator's first work.ready (bootstrap; no reviewed_task_id)
+  - |
+    <event topic="work.ready" plan_name="plan-s" plan_path="docs/plans/s.md" task_id="t1" task_key="k1" step="step-01" complexity="small">
+    Work ready.
+    </event>
+  # 2. executor completes
+  - |
+    <event topic="work.done" plan_name="plan-s" plan_path="docs/plans/s.md" task_id="t1" task_key="k1" step="step-01" commit_count="1" changed_lines="10">
+    Implementation done.
+    </event>
+  # 3. review-coordinator kicks the first dimension (correctness)
+  - |
+    <event topic="review.dimension.ready" plan_name="plan-s" plan_path="docs/plans/s.md" task_id="t1" task_key="k1" step="step-01" dimension="correctness" focus="logic correctness" depth="standard" diff_base="HEAD~1" intent_summary="Serial preset" changed_files="src/foo.rs">
+    First dimension.
+    </event>
+  # 4. dimension-reviewer completes correctness
+  - |
+    <event topic="review.dimension.done" plan_name="plan-s" plan_path="docs/plans/s.md" task_id="t1" task_key="k1" step="step-01" dimension="correctness" findings_count="0" findings_file=".agents/scratchpad/ce-executor/plan-s/findings-correctness-t1.json">
+    Correctness done.
+    </event>
+  # 5. review-coordinator kicks the second dimension (testing)
+  - |
+    <event topic="review.dimension.ready" plan_name="plan-s" plan_path="docs/plans/s.md" task_id="t1" task_key="k1" step="step-01" dimension="testing" focus="test coverage" depth="standard" diff_base="HEAD~1" intent_summary="Serial preset" changed_files="src/foo.rs">
+    Second dimension.
+    </event>
+  # 6. dimension-reviewer completes testing
+  - |
+    <event topic="review.dimension.done" plan_name="plan-s" plan_path="docs/plans/s.md" task_id="t1" task_key="k1" step="step-01" dimension="testing" findings_count="0" findings_file=".agents/scratchpad/ce-executor/plan-s/findings-testing-t1.json">
+    Testing done.
+    </event>
+  # 7. review-coordinator kicks the third dimension (maintainability)
+  - |
+    <event topic="review.dimension.ready" plan_name="plan-s" plan_path="docs/plans/s.md" task_id="t1" task_key="k1" step="step-01" dimension="maintainability" focus="structure" depth="standard" diff_base="HEAD~1" intent_summary="Serial preset" changed_files="src/foo.rs">
+    Third dimension.
+    </event>
+  # 8. dimension-reviewer completes maintainability
+  - |
+    <event topic="review.dimension.done" plan_name="plan-s" plan_path="docs/plans/s.md" task_id="t1" task_key="k1" step="step-01" dimension="maintainability" findings_count="0" findings_file=".agents/scratchpad/ce-executor/plan-s/findings-maintainability-t1.json">
+    Maintainability done.
+    </event>
+  # 9. review-coordinator kicks the fourth dimension (requirements)
+  - |
+    <event topic="review.dimension.ready" plan_name="plan-s" plan_path="docs/plans/s.md" task_id="t1" task_key="k1" step="step-01" dimension="requirements" focus="R-ID fulfillment" depth="standard" diff_base="HEAD~1" intent_summary="Serial preset" changed_files="src/foo.rs">
+    Fourth dimension.
+    </event>
+  # 10. dimension-reviewer completes requirements
+  - |
+    <event topic="review.dimension.done" plan_name="plan-s" plan_path="docs/plans/s.md" task_id="t1" task_key="k1" step="step-01" dimension="requirements" findings_count="0" findings_file=".agents/scratchpad/ce-executor/plan-s/findings-requirements-t1.json">
+    Requirements done.
+    </event>
+  # 11. review-coordinator closes the sequence (no pending dimensions left)
+  - |
+    <event topic="review.dimensions.complete" plan_name="plan-s" plan_path="docs/plans/s.md" task_id="t1" task_key="k1" step="step-01" dimensions='[{"dimension":"correctness","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-s/findings-correctness-t1.json"},{"dimension":"testing","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-s/findings-testing-t1.json"},{"dimension":"maintainability","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-s/findings-maintainability-t1.json"},{"dimension":"requirements","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-s/findings-requirements-t1.json"}]'>
+    Sequence closed.
+    </event>
+  # 12. review-synthesizer passes
+  - |
+    <event topic="review.passed" plan_name="plan-s" plan_path="docs/plans/s.md" task_id="t1" task_key="k1" step="step-01" findings_count="0" fix_round="0" verdict="pass" skip_reason="dimensions_complete">
+    All 4 dimensions passed.
+    </event>
+  # 13. plan-gate advances (queue.advance + work.ready in the same
+  # turn is the production behaviour; this scenario only asserts
+  # queue.advance to keep the mock list manageable for the test
+  # runner's single-event-per-turn contract).
+  - |
+    <event topic="queue.advance" plan_name="plan-s" completed_step="step-01" next_step="step-02" reviewed_task_id="t1" reviewed_task_key="k1">
+    Advance.
+    </event>
+  # 14. plan-gate emits plan.complete
+  - |
+    <event topic="plan.complete" plan_name="plan-s" completed_steps="[step-01]" task_id="t1" task_key="k1" verdict="pass">
+    Plan complete.
+    </event>
+  # 15. shipper REVIEW_COMPLETE → reporter → LOOP_COMPLETE
+  - |
+    <event topic="LOOP_COMPLETE" plan_name="plan-s" reason="serial-review success">
+    Done.
+    </event>
+
+expected:
+  iterations: 16
+  events:
+    - topic: work.start
+    - topic: work.ready
+    - topic: work.done
+    # The 4 serial review hops — each one is a `ready` followed by a `done`.
+    - topic: review.dimension.ready
+    - topic: review.dimension.done
+    - topic: review.dimension.ready
+    - topic: review.dimension.done
+    - topic: review.dimension.ready
+    - topic: review.dimension.done
+    - topic: review.dimension.ready
+    - topic: review.dimension.done
+    # Sequence closure + downstream terminal
+    - topic: review.dimensions.complete
+    - topic: review.passed
+    - topic: queue.advance
+    - topic: plan.complete
+    - topic: LOOP_COMPLETE
+  completion: true
