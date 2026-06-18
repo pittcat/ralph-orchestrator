@@ -4,52 +4,17 @@
 //! 实现(需要访问私有的 `bus` / `config`)。本模块仅暴露:
 //! - 纯函数 `format_block` / `truncate_preserving_next`(测试覆盖)
 //! - `build_block`(供 caller 在简单场景下使用)
-//! - `find_pending_handoff_path` helper(从 hat pending events 抽出 path)
+//!
+//! 注:`find_pending_handoff_path` 已迁移到 `payload::find_in_pending`
+//! (2026-06-18 P1-1 单一 SSOT);请改用
+//! `crate::hat_handoff::payload::find_in_pending`。
 
 use std::path::Path;
 
-use crate::hat_handoff::{
-    DEFAULT_HAT_HANDOFF_MAX_BYTES, HatHandoffConfig, allocator::resolve_jailed,
-};
-use ralph_proto::Event;
+use crate::hat_handoff::{HatHandoffConfig, allocator::resolve_jailed};
 
-/// 从 hat pending events 中抽取 `handoff_path`。
-///
-/// 找到首个 payload 含 `handoff_path` 字段的事件;未找到 → `None`。
-///
-/// 支持两种 payload 形态:
-/// - JSON: `{"handoff_path": "..."}`
-/// - raw key/value (EventParser 默认格式):
-///   `task_id: "..."\nhandoff_path: ".ralph/..."`
-pub fn find_pending_handoff_path(pending: &[Event]) -> Option<String> {
-    pending.iter().find_map(|ev| {
-        if ev.payload.is_empty() {
-            return None;
-        }
-        // 1) 尝试 JSON。
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&ev.payload) {
-            if let Some(s) = v.get("handoff_path").and_then(|p| p.as_str()) {
-                return Some(s.to_string());
-            }
-        }
-        // 2) 回退到行内 key:value 抽取。
-        for line in ev.payload.lines() {
-            let line = line.trim();
-            if let Some(rest) = line
-                .strip_prefix("handoff_path:")
-                .or_else(|| line.strip_prefix("\"handoff_path\":"))
-                .or_else(|| line.strip_prefix("'handoff_path':"))
-            {
-                let value = rest.trim().trim_matches(',').trim();
-                let value = value.trim_matches('"').trim_matches('\'');
-                if !value.is_empty() {
-                    return Some(value.to_string());
-                }
-            }
-        }
-        None
-    })
-}
+#[cfg(test)]
+use crate::hat_handoff::DEFAULT_HAT_HANDOFF_MAX_BYTES;
 
 /// 构造 HAT HANDOFF 块(测试 + 简单 caller 共用)。
 pub fn build_block(
@@ -204,21 +169,6 @@ mod tests {
         assert!(block.contains("**动作**"));
     }
 
-    #[test]
-    fn find_pending_handoff_path_extracts_payload_field() {
-        let pending = vec![Event::new(
-            "work.ready",
-            r#"{"handoff_path":".ralph/agent/hat-handoff/3-2-a-b.md"}"#,
-        )];
-        assert_eq!(
-            find_pending_handoff_path(&pending).as_deref(),
-            Some(".ralph/agent/hat-handoff/3-2-a-b.md")
-        );
-    }
-
-    #[test]
-    fn find_pending_handoff_path_returns_none_when_absent() {
-        let pending = vec![Event::new("work.ready", r#"{"foo":"bar"}"#)];
-        assert!(find_pending_handoff_path(&pending).is_none());
-    }
+    // 注:`find_pending_handoff_path` 的测试已迁移到
+    // `hat_handoff::payload::tests`(2026-06-18 P1-1)。
 }

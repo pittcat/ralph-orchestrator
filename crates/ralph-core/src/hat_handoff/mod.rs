@@ -25,6 +25,7 @@ pub mod allocator;
 pub mod gate;
 pub mod inject;
 pub mod macro_edges;
+pub mod payload;
 pub mod publishes_check;
 pub mod validator;
 

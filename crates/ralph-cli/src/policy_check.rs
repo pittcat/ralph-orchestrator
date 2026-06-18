@@ -485,16 +485,11 @@ pub fn check_hat_handoff_gate(
         return Ok(());
     };
 
-    // 解析 payload 中的 handoff_path(与 runtime 同语义)。
-    let handoff_path = payload_str.and_then(|raw| {
-        serde_json::from_str::<serde_json::Value>(raw)
-            .ok()
-            .and_then(|v| {
-                v.get("handoff_path")
-                    .and_then(|p| p.as_str())
-                    .map(|s| s.to_string())
-            })
-    });
+    // 解析 payload 中的 handoff_path(与 runtime 同语义,走 SSOT)。
+    // 2026-06-18 P1-1: 改用 `hat_handoff::payload::extract_handoff_path`,
+    // 与 runtime gate / inject 共用同一函数,避免 SSOT 漂移。
+    let handoff_path = payload_str
+        .and_then(|raw| ralph_core::hat_handoff::payload::extract_handoff_path(raw));
 
     // 用 preset 配置构造 HandoffIndex。
     let index = HandoffIndex::from_config(config);

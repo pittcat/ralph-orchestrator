@@ -5512,7 +5512,8 @@ impl EventLoop {
             return prompt;
         }
 
-        let handoff_path = inject::find_pending_handoff_path(pending);
+        let handoff_path =
+            crate::hat_handoff::payload::find_in_pending(pending);
         let workspace_root = self.config.core.workspace_root.as_path();
         match inject::build_block(
             workspace_root,
@@ -6698,17 +6699,11 @@ impl EventLoop {
         self.process_parse_result(result)
     }
 
-    /// 2026-06-18-002 plan U5: parse `handoff_path` out of a JSON
-    /// payload. The convention is a top-level string field
-    /// `"handoff_path"`. Missing/malformed → `None` (the gate will
-    /// reject macro-edge emits that omit it).
+    /// 2026-06-18-002 plan U5: parse `handoff_path` out of a payload.
+    /// 2026-06-18 P1-1: 改为调用 `hat_handoff::payload::extract_handoff_path`
+    /// 单一 SSOT(此前只支持 JSON,inject 走 raw 双解析,SSOT 漂移)。
     fn parse_handoff_path_from_payload(payload: Option<&str>) -> Option<String> {
-        let raw = payload?;
-        let value: serde_json::Value = serde_json::from_str(raw).ok()?;
-        value
-            .get("handoff_path")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
+        payload.and_then(crate::hat_handoff::payload::extract_handoff_path)
     }
 
     /// 2026-06-18-002 plan U5: look up the downstream hat's
