@@ -1,10 +1,10 @@
 ---
 title: 拆分 event_loop/mod.rs 与 loop_runner/tests.rs（零回归分模块）
 type: refactor
-status: draft-after-v11
+status: draft-after-v12
 date: 2026-06-10
 baseline_refreshed: 2026-06-18
-baseline_head: c556a846
+baseline_head: a2ff2c8
 baseline_head_v1: 37bd281
 baseline_head_v2: 918192a
 baseline_head_v3: 9799bf9
@@ -16,13 +16,14 @@ baseline_head_v8: 30ceaf5
 baseline_head_v9: fb40414
 baseline_head_v10: 9a2a87e
 baseline_head_v11: c556a846
+baseline_head_v12: a2ff2c8
 completion:
-  - U1: scaffold 仅在历史分支 `merry-wren` commit `b11d9f0` 落地，**未合并**到 pittcat-dev / main；当前 HEAD `c556a846` 已漂移，U1 必须重做
+  - U1: scaffold 仅在历史分支 `merry-wren` commit `b11d9f0` 落地，**未合并**到 pittcat-dev / main；当前 HEAD `a2ff2c8` 已漂移，U1 必须重做
   - U2a-U2h / U3 / U4a-U4b / U4.5 / U5a-U5e / U6a-U6f / U7: 未开工
 landed_in_HEAD:
-  - event_loop/mod.rs 仍为单文件 (9 574 行)
-  - loop_runner/tests.rs 仍为单文件 (13 602 行 / 238 测试)
-  - review_step_state.rs 1 254 行 / loop_state.rs 1 232 行 / rejection.rs 1 051 行 均破 R1 1 000 行红线
+  - event_loop/mod.rs 仍为单文件 (9 944 行)
+  - loop_runner/tests.rs 仍为单文件 (13 605 行 / 238 测试)
+  - review_step_state.rs 1 254 行 / loop_state.rs 1 243 行 / rejection.rs 1 060 行 均破 R1 1 000 行红线
   - audit-file-sizes.sh 仍仅 wc event_loop/tests/* (未含 event_loop/ 根子文件)
 ---
 
@@ -294,17 +295,17 @@ flowchart LR
 
 ## Implementation Units
 
-> 📌 **2026-06-18 v11 接力指引**（在当前 HEAD `c556a846` 上重启时必读）：
+> 📌 **2026-06-18 v12 接力指引**（在当前 HEAD `a2ff2c8` 上重启时必读）：
 >
-> - **U1 必须重做**：历史 scaffold `b11d9f0` 已完全不能 cherry-pick。直接在 `pittcat-dev` 上重新 scaffold：10 个 event_loop 子模块 + tests 目录占位 + audit-script 扩展 + `mod xxx;` 声明（**预算 ~3 小时**，因 mod.rs 已破 9 000 行，且 `rejection.rs` / `loop_state.rs` / `review_step_state.rs` 均已破/逼近 R1 红线，需在 scaffold 阶段为它们预留占位或列入必拆清单）。
-> - **v11 关键漂移**：`TerminationReason` **18 变体**（v10 新增 `RecoverablePayloadExhausted`），`EventLoop` **15 字段**，`process_parse_result` 当前行号区间 **6618-9318**（method 体 ~2 700 行，含 8 个 inline validation 层），`impl EventLoop` 方法数 **131**，`event_loop/tests/` 子文件数 **53**，`loop_runner/tests.rs` 测试数 **238**。
-> - **U3 重做前**：按 v11 行号 **135-236** 锚定 `TerminationReason`；字节级锁定清单必须包含 `RecoverablePayloadExhausted { recoverable, retry_key, ... }`。
-> - **U4 重做前**：5 个自由函数行号已漂移到 **393 / 569 / 652 / 1162 / 1690**（`publish_policy_rejection_resume` / `extract_correlation_key` / `apply_workflow_guard_validation` / `apply_event_policy_validation` / `finding_to_payload_contract_violation`），必须重新 grep 对齐，不可再用 v10 数字。
-> - **U4.5 矩阵**：v11 保持 **8 个 inline validation 层**（scope enforcement → origin guard → topic format → event policy → state machine → step handoff gate → workflow guard → execution contract），矩阵按 v10 已落地 8 行执行，无需新增层。
-> - **U5 重做前**：`process_parse_result` v11 行号区间 = **6618-9318**；method 体较 v10 显著膨胀（v10 约 2 085 行 → v11 约 2 700 行），主要来自 2026-06-17-004 plan 收尾 commit `c556a846` 及前序 commit 对 policy / serial / state-projector 的增量。U5d 将变成本轮最大单 commit，建议 review 时逐层对照 8 个 validation 层边界标记。
-> - **新增红线文件**：`rejection.rs` 1 051 行、`loop_state.rs` 1 232 行均已破 R1 1 000 行红线。本 plan **原 scope 不拆它们**，但 U1 scaffold 阶段应为其创建 placeholder 或至少预留 mod 声明；若后续 baseline 继续漂移，再开独立 follow-up plan。
+> - **U1 必须重做**：历史 scaffold `b11d9f0` 已完全不能 cherry-pick。直接在 `pittcat-dev` 上重新 scaffold：10 个 event_loop 子模块 + tests 目录占位 + audit-script 扩展 + `mod xxx;` 声明（**预算 ~3.5 小时**，因 mod.rs 已破 9 900 行，且 `rejection.rs` / `loop_state.rs` / `review_step_state.rs` 均已破 R1 红线，需在 scaffold 阶段为它们预留占位或列入必拆清单）。
+> - **v12 关键漂移**：`TerminationReason` **18 变体**，`EventLoop` **15 字段**，`process_parse_result` 当前行号区间 **6798-9697**（method 体 ~2 900 行，含 8 个 inline validation 层），`impl EventLoop` 方法数 **131**，`event_loop/tests/` 子文件数 **53**，`loop_runner/tests.rs` 测试数 **238**。
+> - **U3 重做前**：按 v12 行号 **135-236** 锚定 `TerminationReason`；字节级锁定清单必须包含 `RecoverablePayloadExhausted { recoverable, retry_key, ... }`。
+> - **U4 重做前**：5 个自由函数行号已漂移到 **393 / 569 / 652 / 1162 / 1690**（`publish_policy_rejection_resume` / `extract_correlation_key` / `apply_workflow_guard_validation` / `apply_event_policy_validation` / `finding_to_payload_contract_violation`），**v11 → v12 期间整体推移 +180~190**，必须重新 grep 对齐，不可再用 v11 前数字。
+> - **U4.5 矩阵**：v12 保持 **8 个 inline validation 层**（scope enforcement → origin guard → topic format → event policy → state machine → step handoff gate → workflow guard → execution contract），矩阵按 v8 已落地 8 行执行，无需新增层。
+> - **U5 重做前**：`process_parse_result` v12 行号区间 = **6798-9697**；method 体较 v11 的 2 700 行继续膨胀到约 2 900 行（+200），主要来自 hat-handoff 模块接入（allocator / gate / validator 等）叠加在 process_parse_result 体内。U5d 将变成本轮最大单 commit，建议 review 时逐层对照 8 个 validation 层边界标记。
+> - **新增红线文件**：`rejection.rs` 1 060 行、`loop_state.rs` 1 243 行均已破 R1 1 000 行红线。本 plan **原 scope 不拆它们**，但 U1 scaffold 阶段应为其创建 placeholder 或至少预留 mod 声明；若后续 baseline 继续漂移，再开独立 follow-up plan。
 >
-> 上面修订是 v10 → v11 baseline 漂移引起，**KTD1-KTD13 / R1-R10 主体仍然有效**；本次重启不需要重新设计架构，只需按 v11 数字重新对齐切片。
+> 上面修订是 v11 → v12 baseline 漂移引起，**KTD1-KTD13 / R1-R10 主体仍然有效**；本次重启不需要重新设计架构，只需按 v12 数字重新对齐切片。
 
 ## Implementation Units（细则）
 
@@ -2361,4 +2362,158 @@ git grep -nE "loop_runner/tests\.rs\b" -- docs/ crates/ | wc -l   # v11 待重�
 
 ---
 
-（U3-U6 每 U / 子单元完成时追加 Sub-Note；U7 合并为完整表格。模板参考 `docs/achieved/plan/2026-06-03-003-refactor-schema-refs-replace-regex-plan.md` 的 "Repo Drift Note" 段（该 plan 已落档 achieved）。v1 / v2 / v3 / v4 / v5 / v6 / v7 / v8 / v9 / v10 / v11 baseline refresh 段已就地追加；v11 段追加在 v10 段之后。）
+## Plan Baseline Refresh v12 (2026-06-18, baseline @ a2ff2c8)
+
+v11 baseline refresh 落地后到本次 v12 之间，repo HEAD 推进到 `a2ff2c8`，跨越 **约 34 commits / ~14 小时**。期间主要承接 hat-handoff 模块接入（U1-U12 完整落地）+ ce-executor-serial review findings 修复 + perky-maple 诊断 + 状态投影修复。本段记录 **v12 已就地更新的事实** 与 **v11→v12 期间增量 commits 的影响**，与 v1 / v2 / v3 / v4 / v5 / v6 / v7 / v8 / v9 / v10 / v11 段并列。
+
+**v11 段自校准提示已落实**：v11 段全部数字以 `git show c556a846:...` 实测为准；v12 段同样以 **git 实测** 为准（v11 列 = `git show c556a846:...`，v12 列 = 当前 HEAD `a2ff2c8` 实测），不再继承 v11 段以外的偏差数字。
+
+### v11→v12 期间增量 commits (c556a846..a2ff2c8, 按影响筛选)
+
+| commit | type / plan | 影响 | 关联 baseline 数字 |
+|---|---|---|---|
+| `aef7d51` | docs(plan) | 刷新 event_loop/loop_runner 拆分计划到 v11 baseline 并细化单元 | 文档同步 |
+| `72342f0` | fix(preflight) | 修复 state_projection 在 merge_hats_overlay 中被静默丢弃 | mod.rs 微增 |
+| `9071234` | feat(hat-handoff) | U1 配置与宏观边解析 | mod.rs +~100 行 |
+| `af30998` | feat(hat-handoff) | U3 结构校验器 | mod.rs +~50 行 |
+| `44fedc4` | feat(hat-handoff) | U4 R15 topic 校验 | mod.rs +~30 行 |
+| `d7e7db9` | docs | 新增 perky-maple 诊断报告与修复计划 | 文档 |
+| `8a4d8b0` | feat(hat-handoff) | U2 Seq 分配器 + CLI prepare | mod.rs +~60 行 |
+| `5e55ac1` | fix(event-policy+serial) | U0/U1 fix_round schema + fix.applied prune review_dimension_ready dedup | mod.rs +~40 行 |
+| `cb0c76e` | feat(hat-handoff) | U8 BDD harness prompt_contains 扩展 | tests.rs +~15 行 |
+| `4624550` | feat(hat-handoff) | U6 注入 prepend_hat_handoff fail-closed | mod.rs +~50 行 |
+| `cb141de` | feat(hat-handoff) | U7 CLI policy_check 镜像 | policy_check.rs 新文件 |
+| `3f72ffe` | feat(hat-handoff) | U5 运行时门 + Tracker cancel_pending | mod.rs +~60 行 |
+| `2b3c49c` | fix(presets) | ce-executor-serial queue.advance 指向 next_step 并补齐 fix_round 必填 | tests.rs +~5 行 |
+| `f0781ab` | fix(hat-handoff) | P0+P1 review findings (CLI seq, task.resume, context fields) | mod.rs +~50 行 |
+| `a2ff2c8` | docs(plans) | 将已完成计划归档至 docs/achieved/plan | 文档 |
+
+### v11→v12 数字 / 事实更新（已就地修订）
+
+> **列定义**：v11 列 = `git show c556a846:...` 实测值（git 重测）；v12 列 = 当前 HEAD `a2ff2c8` 实测值。
+
+| 项目 | v11 @ c556a846（git 实测）| **v12 @ a2ff2c8** | 漂移 | 影响段落 |
+|---|---|---|---|---|
+| `event_loop/mod.rs` 行数 | 9 574 | **9 944** | **+370** | Summary, Problem Frame, HTD 图, U3-U5, Sources |
+| `loop_runner/tests.rs` 行数 | 13 602 | **13 605** | **+3** | Summary, Problem Frame, U2a-U2h, Sources |
+| `loop_runner/tests.rs` 测试数 | 238 | **238**（不变）| 0 | Summary, Problem Frame, Verification, Sources |
+| `EventLoop` 字段数 | 15 | **15**（不变）| 0 | R2, KTD5, KTD13, R-Refactor-2, Verification |
+| `impl EventLoop` 起始行号 | 1 766 | **1 766**（不变）| 0 | U5a-U5e, KTD5 |
+| `impl EventLoop` 方法数 | 131 | **131**（不变）| 0 | U5a-U5e, R-Refactor-2, Verification |
+| `TerminationReason` 变体数 | 18 | **18**（不变）| 0 | R2, KTD5, R-Refactor-1, Verification |
+| `TerminationReason` 起始行号 | 135 | **135**（不变）| 0 | U3 / R-Refactor-1 |
+| `TerminationReason` 结束行 | 236 | **236**（不变）| 0 | U3 / R-Refactor-1 |
+| `publish_policy_rejection_resume` 行号 | 393 | **393**（不变）| 0 | U3, U4b（policy.rs 归属决策）|
+| `extract_correlation_key` 行号 | 569 | **569**（不变）| 0 | U3, U4a |
+| `apply_workflow_guard_validation` 行号 | 652 | **652**（不变）| 0 | U3, U4a |
+| `apply_event_policy_validation` 行号 | 1 162 | **1 162**（不变）| 0 | U3, U4b |
+| `finding_to_payload_contract_violation` 行号 | 1 690 | **1 690**（不变）| 0 | U3, U4b |
+| `process_parse_result` 起始行 | 6 618 | **6 798** | **+180** | U3-U6 引用 |
+| `process_parse_result` 结束行 | 9 318 | **9 697** | **+379** | U5d, U6a-U6f |
+| `process_parse_result` method 体行数 | ~2 700 | **~2 900** | **+200** | KTD5, KTD6, KTD12, U5d, U6a-U6f, HTD 图, Sources |
+| `format_duration` 行号 | 9 331 | **9 697** | **+366** | U5b, HTD 图 |
+| `termination_status_text` 行号 | 9 347 | **9 713** | **+366** | U5b, HTD 图 |
+| mod.rs 总行数（end） | 9 574 | **9 944** | +370 | Summary, Sources, R-Refactor-1, HTD 图 |
+| `review_step_state.rs` 行数 | 1 254 | **1 254**（不变）| 0 | Summary, U1, U5a-U5e, HTD 图, Sources |
+| `rejection.rs` 行数 | 1 051 | **1 060** | **+9** | Summary, U1, U5a-U5e, HTD 图, Sources |
+| `loop_state.rs` 行数 | 1 232 | **1 243** | **+11** | Summary, U1, HTD 图, Sources |
+| `event_loop/tests/` 子文件数 | 53 | **53**（不变）| 0 | Problem Frame, U2a-U2h, Sources |
+| `loop_runner/` `.rs` 总数 | 30 | **30**（不变）| 0 | Problem Frame, Sources |
+| Mutex 拓扑（tests.rs 行号）| 606 / 610 | **606 / 610**（不变）| 0 | KTD7, R6 |
+| Mutex 拓扑（acp_mock.rs 行号）| 97 / 102 | **97 / 102**（不变）| 0 | KTD7, R6 |
+| `lib.rs:38 / 89 / 113 / 121 / 127` re-export | 38 / 89 / 113 / 121 / 127 | **38 / 89 / 113 / 121 / 127**（不变）| 0 | R3, KTD2, Sources, Verification |
+| `process_parse_result` 内 inline validation 层数 | 8 | **8**（不变）| 0 | KTD12, U4.5, U6a-U6f |
+| inline validation 层顺序 | 8 层顺序不变 | **8 层顺序不变** | 0 | KTD12, U4.5, U6a-U6f |
+
+### v11→v12 期间**变化**的契约
+
+1. **`process_parse_result` method 体继续膨胀 +200 行（2 700 → ~2 900）**：v11→v12 期间 hat-handoff 模块接入（allocator / gate / validator / inject / macro_edges / publishes_check 等）将新逻辑叠加到 `process_parse_result` 体内。method 起始行 +180（6 618 → 6 798），结束行 +379（9 318 → 9 697）。**U5d 实施时**必须按 v12 行号（6 798 / 9 697）锚定。
+2. **`format_duration` / `termination_status_text` 行号 +366**：因 process_parse_result 体膨胀而显著下移（9 331/9 347 → 9 697/9 713）。**U5b 实施时**按 v12 行号锚定。
+3. **5 个自由函数行号在 v11→v12 期间完全不变**：393 / 569 / 652 / 1162 / 1690 与 v11 完全一致，说明 hat-handoff 模块接入没有插入到这 5 个函数所在位置，插入点全部落在 `impl EventLoop` 的 method 体内。
+4. **`rejection.rs` / `loop_state.rs` 继续微增**：+9 / +11 行，均已破 R1 红线，U1 scaffold 预留占位建议不变。
+5. **`event_loop/mod.rs` 总行数 +370**：hat-handoff 模块接入是主要贡献者，新增 `hat_handoff/` 子模块在 mod.rs 中通过 `mod hat_handoff; pub mod hat_handoff;` 引入，不影响 event_loop 外部契约。
+
+### v11→v12 期间未变化的契约
+
+1. **`EventLoop` 15 字段顺序未变**：v11→v12 期间未新增 / 删除 / 调整字段。
+2. **`TerminationReason` 18 个变体顺序未变**：v11→v12 期间未新增 / 删除 / 调整变体。
+3. **`MOCK_ACP_*` / `FAKE_PATH_BACKEND_*` Mutex 段形式不变**：v11→v12 期间 `wave/acp_mock.rs` 与 `tests.rs` Mutex 段（97 / 102 / 606 / 610 行）完全 0 行变更。
+4. **8 个 inline validation 层结构与顺序不变**：v11→v12 期间增量全部落在 8 层内部，**不**改变层边界与顺序。U4.5 矩阵**不需要**重写（v8 段已落地）。
+5. **KTD6 风险递增顺序 / R6 零回归原则**：不变。
+6. **R3 公开 API 列表**：`lib.rs` re-export 行号 38 / 89 / 113 / 121 / 127 完全不变，R3 公开 API 锁定承诺仍然成立。
+7. **`event_loop/tests/` 子文件数**：53 → 53（v11→v12 期间 0 变化）。
+
+### v12 baseline refresh 决策树
+
+- **若 U1 分支 rebase 前 repo 又推进 N commits**：重跑 8 条 baseline 命令，按 v12 模板追加新一列（v13 / v14 ...）；v12 本段不删（作为历史）。
+- **若 v12 之后 `EventLoop` 字段数再次变化**：在 v12 表格中追加行 + 注明增量字段名 + commit hash；不删除旧行。
+- **若 v12 之后 `process_parse_result` 行数再次变化**：KTD5 / KTD6 / U5d / U6a-U6f / Verification 段同步更新（v12 段已就地修订）。
+- **若 v12 之后 inline validation 层有变化**（新增 / 删除 / 合并 / 顺序调整）：U4.5 矩阵 + U6 步骤同步重写，并在 v12 段追加"validation 层增量"行。**v12 期间 8 层结构稳定**，U4.5 / U6 切片策略不需要重写。
+- **若 v12 之后 `lib.rs:38 / 89 / 113 / 121 / 127` 行号漂移**：v12 表格追加行；公开 API 列表本身是否变化需在 commit message 单独标注。
+- **U1 scaffold 仍未合并**：历史 commit `b11d9f0` / `464b6d4` 均已严重漂移，**必须放弃 cherry-pick**，在 `pittcat-dev` 上重新做 U1。实施时间预算维持 **~3.5 小时**（mod.rs 主体 10 个子模块 + tests 目录 scaffold + audit 扩展 + `rejection.rs` / `loop_state.rs` / `review_step_state.rs` 三个红线文件的 placeholder 预留）。
+- **U1 scaffold 阶段新增必拆清单**：`rejection.rs`（1 060 行）/ `loop_state.rs`（1 243 行）/ `review_step_state.rs`（1 254 行）三个文件均已破 R1 红线。U1 scaffold 阶段必须为其创建 placeholder 子模块（`loop_state_active.rs` / `loop_state_history.rs` / `rejection_payload.rs` / `rejection_envelope.rs` / `review_step_gate.rs` / `flow_lifecycle.rs`），并在 `mod.rs` 中追加对应 `mod xxx;` 声明——这些文件**本 plan 不填充内容**，仅为后续 follow-up plan 预留编译路径。
+
+### v12 重跑命令（与 v1-v11 段 8 条等价，对应更新后的字段数 / 行号）
+
+```bash
+# 1. 行数 baseline
+wc -l crates/ralph-core/src/event_loop/{mod,review_step_state,loop_state,rejection}.rs crates/ralph-cli/src/loop_runner/tests.rs
+# v12: mod.rs 9944 / review_step_state 1254 / loop_state 1243 / rejection 1060 / tests.rs 13605
+
+# 2. 数据结构 baseline
+awk '/^pub enum TerminationReason/{f=1;next} f && /^}/{exit} f && /^    [A-Z][a-zA-Z]+/{c++} END{print c}' crates/ralph-core/src/event_loop/mod.rs   # 18
+awk '/^pub struct EventLoop/{f=1;next} f && /^}/{exit} f && /^    [a-z_]+:/{c++} END{print c}' crates/ralph-core/src/event_loop/mod.rs        # 15
+
+# 3. 关键方法行号
+grep -nE "^impl EventLoop|fn process_parse_result|^fn (extract_correlation_key|apply_workflow_guard|apply_event_policy|finding_to_payload_contract|publish_policy_rejection_resume|format_duration|termination_status_text)" crates/ralph-core/src/event_loop/mod.rs
+# v12: 393 / 569 / 652 / 1162 / 1690 / impl 1766 / process_parse_result 6798 / format_duration 9697 / termination_status_text 9713
+
+# 4. Mutex 拓扑
+grep -nE "^(static|pub static) (FAKE_PATH|MOCK_ACP)" crates/ralph-cli/src/loop_runner/tests.rs crates/ralph-cli/src/loop_runner/wave/acp_mock.rs
+# v12: tests.rs:606/610 + acp_mock.rs:97/102 (4 个 Mutex，v11 拓扑未变)
+
+# 5. lib.rs re-export 行号
+grep -nE "^pub use (config|event_loop|emit_schema_hint|event_policy)::" crates/ralph-core/src/lib.rs
+# v12: 38 / 89 / 113 / 121 / 127 (与 v11 持平)
+
+# 6. event_loop/tests/ 子文件数
+ls crates/ralph-core/src/event_loop/tests/*.rs | wc -l   # 53 (v11→v12 不变)
+
+# 7. loop_runner/ 已拆分子模块
+ls crates/ralph-cli/src/loop_runner/*.rs crates/ralph-cli/src/loop_runner/*/*.rs 2>/dev/null | wc -l   # 30 (不变)
+
+# 8. 测试总数
+awk 'BEGIN{c=0} /^#\[test\]/{c++} /^#\[tokio::test/{c++} END{print c}' crates/ralph-cli/src/loop_runner/tests.rs   # 238 (v11→v12 不变)
+```
+
+### v12 → U1 重做执行清单（v11 接力指引的延续）
+
+v11 段"v11 → U1 重做执行清单"列了 6 项 v10→v11 漂移修订项，v12 期间数字进一步漂移，本段补充 v12 的 **5 项**可执行修订：
+
+1. **U3 重做前**：v11 接力指引的"`TerminationReason` v11 = 18 变体"在 v12 仍为 18（0 漂移），`RecoverablePayloadExhausted` 仍为唯一 v8 之后候选的潜在新增变体（v11 / v12 期间均未新增）。U3 字节级锁定清单不变；按 v12 行号 **135-236** 段锚定即可（v12 实测 102 行，含 18 个变体；与 v11 持平）。
+2. **U4a / U4b 重做前**：v11 接力指引的"自由函数行号 393 / 569 / 652 / 1162 / 1690"在 v12 **完全不变**（v11→v12 期间 hat-handoff 插入点全部落在 `impl EventLoop` method 体内，未触及 5 个自由函数）。U4a 切片 `workflow_guard.rs` 时用 569 / 652 锚定；U4b 切片 `policy.rs` 时用 1 162 / 1 690 / 393 锚定。
+3. **U5d 重做前**：v11 接力指引的"`process_parse_result` v11 行号区间 = 6618-9318（~2 700 行）"—— v12 实测为 **6798-9697（~2 900 行）**。v12 较 v11 的 method 体**继续膨胀 +200 行**，主要来自 hat-handoff 模块接入（allocator / gate / validator 等）叠加。U5d 实施时必须按 v12 行号（6 798 / 9 697）锚定；method 内部 8 个 inline validation 层结构仍稳定，但每层内部行数膨胀，review 时需逐层对照边界标记。
+4. **U5b 重做前**：`format_duration` / `termination_status_text` v11 行号 9 331 / 9 347 → v12 **9 697 / 9 713**（+366），因 process_parse_result 体膨胀推移。U5b 切片时按 v12 数字锚定。
+5. **U4.5 重做前（v12 强制确认）**：v8 段已落地的"U4.5 矩阵（8 个 validation 层 × KTD12 五域）"在 v12 **不需要重写**——8 个 inline validation 层结构与顺序在 v12 期间 0 漂移（实测 grep 8 类标记全部命中）。U4.5 矩阵按 v8 段已落地 8 行表格执行即可，不需要新增行。
+
+## Repo Drift Sub-Note v12 (2026-06-18)
+
+**v11→v12 baseline refresh 阶段无本 refactor 计划自身落地**（约 34 commits **全部**为 hat-handoff 模块接入 + ce-executor-serial review findings 修复 + perky-maple 诊断 + 状态投影修复的产出），故本 sub-note 只记录"行号 / 字段数 / 测试数 / 子文件数漂移"而无"哪些重构 commit 落地"。
+
+- `event_loop/mod.rs` 总行数漂移 **+370**：实测 9 574 → 9 944，差异主要来自 hat-handoff 模块接入（allocator / gate / validator / inject / macro_edges / publishes_check 等 7 个新子文件通过 `mod hat_handoff; pub mod hat_handoff;` 引入 mod.rs）。**未触及** R3 公开 API / KTD7 Mutex 拓扑 / `EventLoop` 15 字段顺序 / `TerminationReason` 18 变体顺序 / 5 个自由函数行号 / 8 个 inline validation 层结构。**触发了** `process_parse_result` method 体继续膨胀 +200 行（2 700 → 2 900）。
+- `loop_runner/tests.rs` 总行数漂移 **+3**：实测 13 602 → 13 605 / 测试数 238 不变。增量来自 ce-executor-serial review findings 修复相关测试 + hat-handoff BDD harness 扩展。Mutex 段（606 / 610 行 `FAKE_PATH_BACKEND_*`）未受影响。
+- `rejection.rs` 总行数漂移 +9：实测 1 051 → 1 060。v11 已破 R1 红线，v12 继续微增。U1 scaffold 必拆项（拆为 rejection_payload + rejection_envelope）保持不变。
+- `loop_state.rs` 总行数漂移 +11：实测 1 232 → 1 243。v11 已破 R1 红线，v12 继续微增。U1 scaffold 必拆项（拆为 loop_state_active + loop_state_history）保持不变。
+- `review_step_state.rs` 总行数漂移 0：实测 1 254 → 1 254。v8 期间已破红线的状态在 v9 / v10 / v11 / v12 期间维持，U1 scaffold 必拆项（拆为 review_step_gate + flow_lifecycle）保持不变。
+- `process_parse_result` method 体继续膨胀 +200 (2 700 → ~2 900)：method 起始行 +180（6 618 → 6 798），结束行 +379（9 318 → 9 697）。8 个 inline validation 层结构与顺序未变，但每层内部行数膨胀。**U6a-U6f 切片策略不变**，仍是每 1-2 层一个子单元。
+- 5 个自由函数行号 **0 漂移**：393 / 569 / 652 / 1162 / 1690 与 v11 完全一致，说明 hat-handoff 插入点不在这些函数位置。
+- `EventLoop` 字段 +0 (15 → 15) / 字段顺序 0 漂移 / `impl EventLoop` 方法数 +0 (131 → 131)：v11→v12 期间未新增字段或方法；增量全部在 method 体内 / tests.rs 内 / 新增 hat_handoff 子模块。
+- `lib.rs:38 / 89 / 113 / 121 / 127` 行号 0 字节变更：v11→v12 期间 lib.rs 0 字节变更，R3 公开 API 锁定承诺仍然成立。
+- `event_loop/tests/` 子文件 0 漂移 (53 → 53)：v11→v12 期间未增减子文件。
+- `loop_runner/` `.rs` 总数 0 漂移 (30 → 30)：v11→v12 期间未新增子模块（hat-handoff 在 `ralph-core/src/hat_handoff/` 而非 `loop_runner/` 下）。
+
+（U2a-U6f / U7 实施时如发现实际数字与 v12 不一致，按 U7 step 13 流程补充处理。）
+
+---
+
+（U3-U6 每 U / 子单元完成时追加 Sub-Note；U7 合并为完整表格。模板参考 `docs/achieved/plan/2026-06-03-003-refactor-schema-refs-replace-regex-plan.md` 的 "Repo Drift Note" 段（该 plan 已落档 achieved）。v1 / v2 / v3 / v4 / v5 / v6 / v7 / v8 / v9 / v10 / v11 / v12 baseline refresh 段已就地追加；v12 段追加在 v11 段之后。）
