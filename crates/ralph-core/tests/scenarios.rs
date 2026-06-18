@@ -22,6 +22,21 @@ struct ScenarioYaml {
     #[serde(default)]
     checkpoints: Vec<CheckpointYaml>,
     expected: ExpectedYaml,
+    /// 2026-06-18-002 plan U9: scenario fixture files written to the
+    /// temp workspace root **before** the run starts. Used by
+    /// hat-handoff scenarios to pre-stage `.ralph/agent/hat-handoff/*.md`
+    /// files so the gate's file-read step finds them.
+    #[serde(default)]
+    fixture_files: Vec<FixtureFileYaml>,
+}
+
+#[allow(dead_code)] // Test infrastructure - fields used for YAML deserialization
+#[derive(Debug, Deserialize)]
+struct FixtureFileYaml {
+    /// Path relative to the workspace root (e.g.
+    /// `.ralph/agent/hat-handoff/1-2-a-b.md`).
+    path: String,
+    content: String,
 }
 
 #[allow(dead_code)] // Test infrastructure - fields used for YAML deserialization
@@ -47,6 +62,7 @@ struct ConfigYaml {
 #[derive(Debug, Deserialize)]
 struct ExpectedYaml {
     iterations: usize,
+    #[serde(default)]
     events: Vec<EventYaml>,
     #[serde(default)]
     workflow_progress: Vec<WorkflowProgressYaml>,
@@ -147,6 +163,17 @@ fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
     let ralph_dir = temp_dir.path().join(".ralph");
     std::fs::create_dir_all(&ralph_dir).unwrap();
     let events_path = ralph_dir.join("events.jsonl");
+
+    // 2026-06-18-002 plan U9: write fixture files (e.g. handoff
+    // markdown files) to the temp workspace before the run. These
+    // are scenario fixtures, not loop state.
+    for fixture in &yaml.fixture_files {
+        let abs = temp_dir.path().join(&fixture.path);
+        if let Some(parent) = abs.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&abs, &fixture.content).unwrap();
+    }
 
     // Build RalphConfig from the YAML config section
     let mut config = RalphConfig::default();
@@ -460,6 +487,36 @@ fn test_plan_gate_dual_publish_handoff() {
     // dual-publish carve-out. Both topics must be accepted in the same turn
     // and the executor must wake in a later turn.
     let yaml = load_scenario("tests/scenarios/plan_gate_dual_publish_handoff.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+// 2026-06-18-002 plan U9: hat-handoff BDD scenarios.
+//
+// AE1: macro-edge handoff inject (T1).
+#[test]
+fn test_hat_handoff_macro_inject() {
+    let yaml = load_scenario("tests/scenarios/hat_handoff/macro_handoff_inject.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+// AE2: next-action antipattern → gate rejects (T2).
+#[test]
+fn test_hat_handoff_next_rejected() {
+    let yaml = load_scenario("tests/scenarios/hat_handoff/next_rejected.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+// AE3 / T3: review.dimension.* micro-edges are exempt.
+#[test]
+fn test_hat_handoff_micro_edge_exempt() {
+    let yaml = load_scenario("tests/scenarios/hat_handoff/micro_edge_exempt.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+// T15: `hat_handoff.enabled: false` is a full passthrough.
+#[test]
+fn test_hat_handoff_disabled_passthrough() {
+    let yaml = load_scenario("tests/scenarios/hat_handoff/disabled_passthrough.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -883,6 +940,17 @@ fn test_isolated_with_event_projection() {
     let ralph_dir = temp_dir.path().join(".ralph");
     std::fs::create_dir_all(&ralph_dir).unwrap();
     let events_path = ralph_dir.join("events.jsonl");
+
+    // 2026-06-18-002 plan U9: write fixture files (e.g. handoff
+    // markdown files) to the temp workspace before the run. These
+    // are scenario fixtures, not loop state.
+    for fixture in &yaml.fixture_files {
+        let abs = temp_dir.path().join(&fixture.path);
+        if let Some(parent) = abs.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&abs, &fixture.content).unwrap();
+    }
 
     // Build RalphConfig from the YAML config section
     let mut config = RalphConfig::default();

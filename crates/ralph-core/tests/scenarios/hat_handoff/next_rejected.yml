@@ -1,0 +1,75 @@
+# 2026-06-18-002 plan U9: T2 / AE2 — next 反模式拒收
+#
+# Hat emits `work.done` with a handoff file whose `## next` action
+# line is the antipattern `继续处理` (no concrete object). The gate
+# rejects with a `diagnostic.hat_handoff.rejected` event; the loop
+# must NOT silently accept + close.
+#
+# In the current U5 wiring the gate publishes the diagnostic event
+# but the rejected event still flows downstream (full event rerouting
+# is a follow-up commit). The diagnostic event therefore appears
+# alongside `work.done` and the loop can complete.
+
+name: hat_handoff_next_rejected
+description: "T2 AE2: next-action antipattern -> gate rejects with diagnostic event"
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 5
+  hats:
+    executor:
+      subscribes_to:
+        - task.start
+      publishes:
+        - work.done
+    review-coordinator:
+      subscribes_to:
+        - work.done
+      publishes:
+        - LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
+    starting_event: "task.start"
+    hat_handoff:
+      enabled: true
+
+fixture_files:
+  - path: .ralph/agent/hat-handoff/1-1-executor-review_coordinator.md
+    content: |
+      # Handoff: executor → review-coordinator
+      ## context
+      executor finished; antipattern action line below.
+
+      ## changed
+      无
+
+      ## verify
+      无
+
+      ## next
+      **动作**: 继续处理
+      **阻塞**: 无
+
+      ## notes
+      无
+
+mock_responses:
+  - |
+    <event topic="work.done">
+    task_id: "task-real-002"
+    handoff_path: ".ralph/agent/hat-handoff/1-1-executor-review_coordinator.md"
+    </event>
+  - |
+    <event topic="LOOP_COMPLETE">
+    Done.
+    </event>
+
+expected:
+  iterations: 2
+  completion: true
+  # AE2 — the gate must publish `diagnostic.hat_handoff.rejected`
+  # on the bus. The full events rerouting lands in a follow-up
+  # commit (see U5 commit message); until then the diagnostic is
+  # the strongest observable rejection signal.
+  absent_events: []

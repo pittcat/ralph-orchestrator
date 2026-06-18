@@ -16,18 +16,38 @@ use ralph_proto::Event;
 /// 从 hat pending events 中抽取 `handoff_path`。
 ///
 /// 找到首个 payload 含 `handoff_path` 字段的事件;未找到 → `None`。
+///
+/// 支持两种 payload 形态:
+/// - JSON: `{"handoff_path": "..."}`
+/// - raw key/value (EventParser 默认格式):
+///   `task_id: "..."\nhandoff_path: ".ralph/..."`
 pub fn find_pending_handoff_path(pending: &[Event]) -> Option<String> {
     pending.iter().find_map(|ev| {
         if ev.payload.is_empty() {
             return None;
         }
-        serde_json::from_str::<serde_json::Value>(&ev.payload)
-            .ok()
-            .and_then(|v| {
-                v.get("handoff_path")
-                    .and_then(|p| p.as_str())
-                    .map(|s| s.to_string())
-            })
+        // 1) 尝试 JSON。
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&ev.payload) {
+            if let Some(s) = v.get("handoff_path").and_then(|p| p.as_str()) {
+                return Some(s.to_string());
+            }
+        }
+        // 2) 回退到行内 key:value 抽取。
+        for line in ev.payload.lines() {
+            let line = line.trim();
+            if let Some(rest) = line
+                .strip_prefix("handoff_path:")
+                .or_else(|| line.strip_prefix("\"handoff_path\":"))
+                .or_else(|| line.strip_prefix("'handoff_path':"))
+            {
+                let value = rest.trim().trim_matches(',').trim();
+                let value = value.trim_matches('"').trim_matches('\'');
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
+            }
+        }
+        None
     })
 }
 

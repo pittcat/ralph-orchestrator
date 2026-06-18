@@ -4406,11 +4406,21 @@ impl EventLoop {
 
         // Non-ralph hat requested
         if self.config.event_loop.execution_mode == HatExecutionMode::Isolated {
-            // Isolated mode: build focused prompt for this hat only
+            // Isolated mode: build focused prompt for this hat only.
+            // 2026-06-18-002 U6 (KTD-16): take pending **once** at
+            // the top so both `events_context` below and
+            // `prepend_hat_handoff` see the same payload (the
+            // `take_pending` API removes by hat_id, so the second
+            // call would otherwise return empty).
             let mut events = self.bus.take_pending(&hat_id.clone());
             let mut human_events = self.bus.take_human_pending();
             events.append(&mut human_events);
 
+            // 2026-06-18-002 U6: capture the handoff path **before**
+            // `events` is consumed by `events_context` so
+            // `prepend_hat_handoff` (called later in the pipeline)
+            // can still resolve `handoff_path` from this batch.
+            let pending_for_handoff: Vec<ralph_proto::Event> = events.clone();
             let (guidance_events, regular_events): (Vec<_>, Vec<_>) = events
                 .into_iter()
                 .partition(|e| e.topic.as_str() == "human.guidance");
@@ -4525,7 +4535,15 @@ impl EventLoop {
             // `## ORCHESTRATOR CONTEXT` so the navigation block
             // sits at the top alongside the wave header. Fail-closed:
             // missing/unreadable file → no block + diagnostic.
-            let base_prompt = self.prepend_hat_handoff(base_prompt, hat_id);
+            // We pass `pending_for_handoff` (cloned at the top of
+            // the isolated branch) instead of re-taking from the bus
+            // because `events_context` already consumed the live
+            // pending queue.
+            let base_prompt = self.prepend_hat_handoff_from_pending(
+                base_prompt,
+                hat_id,
+                &pending_for_handoff,
+            );
             // 2026-06-17-003 U4 / 2026-06-17-005 R5:
             // `## ORCHESTRATOR CONTEXT` block is the canonical
             // view of the run. The block is always emitted
@@ -5463,6 +5481,23 @@ impl EventLoop {
     /// no block + diagnostic event. Skip when disabled or in
     /// coordinator mode or when the hat is `ralph`.
     fn prepend_hat_handoff(&mut self, prompt: String, hat_id: &HatId) -> String {
+        // peek(不要 take,避免污染 hat pending):bus 没有 peek 接口,
+        // 我们用 take 后 publish 回去——这里是 build_prompt 入口,
+        // pending 还未被消费,所以是安全的(同上 take_pending 用法)。
+        let pending = self.bus.take_pending(hat_id);
+        self.prepend_hat_handoff_from_pending(prompt, hat_id, &pending)
+    }
+
+    /// 2026-06-18-002 U6: same as [`prepend_hat_handoff`] but takes
+    /// the pending events directly so it can run after the
+    /// `events_context` has already drained the bus in the
+    /// isolated-path prepend pipeline.
+    fn prepend_hat_handoff_from_pending(
+        &mut self,
+        prompt: String,
+        hat_id: &HatId,
+        pending: &[ralph_proto::Event],
+    ) -> String {
         use crate::hat_handoff::inject;
         if !self.config.event_loop.hat_handoff.enabled {
             return prompt;
@@ -5476,14 +5511,8 @@ impl EventLoop {
         if hat_id.as_str() == "ralph" {
             return prompt;
         }
-        // peek(不要 take,避免污染 hat pending):bus 没有 peek 接口,
-        // 我们用 take 后 publish 回去——这里是 build_prompt 入口,
-        // pending 还未被消费,所以是安全的(同上 take_pending 用法)。
-        let pending = self.bus.take_pending(hat_id);
-        let handoff_path = inject::find_pending_handoff_path(&pending);
-        for ev in pending {
-            self.bus.publish(ev);
-        }
+
+        let handoff_path = inject::find_pending_handoff_path(pending);
         let workspace_root = self.config.core.workspace_root.as_path();
         match inject::build_block(
             workspace_root,

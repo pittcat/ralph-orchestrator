@@ -1,0 +1,82 @@
+# 2026-06-18-002 plan U9: macro-edge handoff injection (T1 / AE1)
+#
+# Executor emits `work.done` with a valid handoff file → the
+# downstream hat (review-coordinator) build_prompt must include
+# `## HAT HANDOFF` block.
+#
+# Note: scenarios drive the loop by writing events to
+# `.ralph/events.jsonl` and calling `process_events_from_jsonl`.
+# The starting hat must be triggered by an event the runtime
+# routes to it (here: `task.start` → executor via `subscribes_to`).
+
+name: hat_handoff_macro_inject
+description: "AE1: executor work.done plus valid handoff -> review-coordinator prompt contains HAT HANDOFF"
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 5
+  hats:
+    executor:
+      subscribes_to:
+        - task.start
+      publishes:
+        - work.done
+    review-coordinator:
+      subscribes_to:
+        - work.done
+      publishes:
+        - LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
+    starting_event: "task.start"
+    hat_handoff:
+      enabled: true
+
+fixture_files:
+  - path: .ralph/agent/hat-handoff/1-1-executor-review_coordinator.md
+    content: |
+      # Handoff: executor → review-coordinator
+      ## context
+      executor just finished task-real-001; review-coordinator should evaluate the diff.
+
+      ## changed
+      modified crates/ralph-core/src/hat_handoff/mod.rs
+
+      ## verify
+      cargo nextest run -p ralph-core --lib hat_handoff — 43/43 green
+
+      ## next
+      **动作**: emit LOOP_COMPLETE after review aggregation
+      **阻塞**: 无
+
+      ## notes
+      无
+
+mock_responses:
+  - |
+    <event topic="work.done">
+    task_id: "task-real-001"
+    handoff_path: ".ralph/agent/hat-handoff/1-1-executor-review_coordinator.md"
+    </event>
+  - |
+    <event topic="LOOP_COMPLETE">
+    Done.
+    </event>
+
+expected:
+  iterations: 2
+  # The BDD harness's `seen_topics` field is populated by
+  # `process_events_from_jsonl` and the loop's own record path. For
+  # hat-handoff scenarios the rejection diagnostic event is what we
+  # really care about (see KTD-5 cancel_pending + U6 inject_failed);
+  # we only assert the **presence** of the inject outcome via
+  # `prompt_contains` rather than the exact seen_topics set.
+  completion: true
+  prompt_contains:
+    - hat: review-coordinator
+      substrings:
+        - "## HAT HANDOFF"
+        - "**动作**:"
+        - "**阻塞**:"
+        - "handoff_path:"

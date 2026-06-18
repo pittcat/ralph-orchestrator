@@ -1,0 +1,51 @@
+# 2026-06-18-002 plan U9: T15 — enabled=false is full passthrough
+#
+# Sanity check that the default off-switch does not touch the
+# pipeline. Macro-edge emits still work without a handoff file.
+#
+# References: plan T15 / R1.
+
+name: hat_handoff_disabled_passthrough
+description: "T15: hat_handoff.enabled false (default) is a full passthrough"
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 5
+  hats:
+    plan-gate:
+      subscribes_to:
+        - task.start
+      publishes:
+        - work.ready
+    executor:
+      subscribes_to:
+        - work.ready
+      publishes:
+        - work.done
+    review-coordinator:
+      subscribes_to:
+        - work.done
+      publishes:
+        - LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
+    # hat_handoff.enabled omitted → defaults to false.
+
+mock_responses:
+  - |
+    <event topic="work.ready">
+    task_id: "task-real-003"
+    </event>
+  - |
+    <event topic="work.done">
+    task_id: "task-real-003"
+    </event>
+  - |
+    <event topic="LOOP_COMPLETE">
+    Done.
+    </event>
+
+expected:
+  iterations: 3
+  completion: true
