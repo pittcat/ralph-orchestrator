@@ -527,3 +527,117 @@ fn test_valid_work_done_directly_published_activates_reviewer() {
         "A valid work.done event must activate reviewer"
     );
 }
+
+// -------------------------------------------------------------------------
+// U6 (2026-06-18-004 plan, R3): `fix.applied` execution contract
+// with `require_git_change.mode: commit_only`. Pins the perky-maple
+// P2-3 commit-count drift path — the agent emitted `commit_count=0`
+// while the real commit was still in flight. The contract MUST
+// require a real commit before downstream review can proceed.
+// The execution_contract.rs error messages now use the dynamic
+// `event.topic` (no more hardcoded `work.done`) so the same
+// message surface covers `fix.applied`.
+// -------------------------------------------------------------------------
+
+#[test]
+fn u6_fix_applied_missing_payload_field_rejected_with_dynamic_topic() {
+    // Pin U6: a `fix.applied` payload missing a required field
+    // must produce a finding whose message uses `fix.applied`,
+    // not the legacy hardcoded `work.done`.
+    use crate::config::{
+        ExecutionContractRule,
+        execution_contracts::{
+            ContractRejectConfig, GitChangeRequirement, TaskCompletionRequirement,
+            TestEvidenceRequirement,
+        },
+    };
+    use crate::execution_contract::validate_execution_contract;
+
+    let rule = ExecutionContractRule {
+        require_payload_fields: vec!["commit_count".into(), "fix_round".into()],
+        require_task: TaskCompletionRequirement::default(),
+        require_git_change: GitChangeRequirement::default(),
+        require_test_evidence: TestEvidenceRequirement::default(),
+        reject: ContractRejectConfig::default(),
+    };
+
+    let event = Event::new(
+        "fix.applied",
+        r#"{"plan_name":"p1","task_id":"t1","task_key":"k1","step":"step-01","applied_count":1,"failed_count":0,"commit_count":1}"#,
+    );
+
+    let decision = validate_execution_contract(
+        &event,
+        &rule,
+        std::path::Path::new("/nonexistent"),
+        "loop-1",
+        std::path::Path::new("/nonexistent/tasks.jsonl"),
+        None, // hat_id
+        &crate::execution_contract::DefaultGitEvidenceProvider,
+        None, // loop_start_sha
+    );
+
+    match decision {
+        crate::execution_contract::ExecutionContractDecision::Reject(findings) => {
+            assert!(
+                !findings.is_empty(),
+                "fix.applied missing-payload-field MUST produce at least one finding"
+            );
+            let finding = &findings[0];
+            assert!(
+                finding.message.contains("fix.applied"),
+                "fix.applied contract violation MUST mention fix.applied in the recovery hint, got: {}",
+                finding.message
+            );
+            assert!(
+                !finding.message.contains("work.done"),
+                "fix.applied contract violation MUST NOT mention the legacy work.done, got: {}",
+                finding.message
+            );
+        }
+        other => panic!("expected Reject decision, got {:?}", other),
+    }
+}
+
+#[test]
+fn u6_fix_applied_contract_present_in_ce_executor_serial_preset() {
+    // Static preset-level assertion: the
+    // `ce-executor-serial` preset MUST declare a
+    // `fix.applied` execution contract with
+    // `commit_only` git-evidence mode. Without this the
+    // perky-maple P2-3 drift path re-opens.
+    use crate::config::RalphConfig;
+    let yaml_text = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../presets/en/ce-executor-serial.yml"),
+    )
+    .expect("ce-executor-serial.yml must be readable");
+    let config = RalphConfig::parse_yaml(&yaml_text)
+        .expect("ce-executor-serial.yml must parse");
+
+    let contract = config
+        .event_loop
+        .execution_contracts
+        .as_ref()
+        .expect("ce-executor-serial must declare execution_contracts");
+    let rule = contract
+        .rules
+        .get("fix.applied")
+        .expect("ce-executor-serial MUST declare a fix.applied execution contract rule (U6)");
+
+    assert!(
+        rule.require_payload_fields.contains(&"commit_count".to_string()),
+        "fix.applied rule MUST require commit_count, got {:?}",
+        rule.require_payload_fields
+    );
+    assert!(
+        rule.require_payload_fields.contains(&"fix_round".to_string()),
+        "fix.applied rule MUST require fix_round, got {:?}",
+        rule.require_payload_fields
+    );
+    assert_eq!(
+        rule.require_git_change.mode, "commit_only",
+        "fix.applied rule MUST use commit_only mode (NOT diff_or_commit and NOT fictional strict), got {:?}",
+        rule.require_git_change.mode
+    );
+}
