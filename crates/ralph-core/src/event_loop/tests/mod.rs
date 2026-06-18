@@ -10,6 +10,7 @@ mod chain_validation;
 mod common;
 mod completion_honored;
 mod default_publishes;
+mod deterministic_routing;
 mod drift_integration;
 mod ephemeral_isolation_integration;
 mod event_filter;

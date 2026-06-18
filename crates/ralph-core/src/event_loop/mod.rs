@@ -1166,8 +1166,14 @@ fn apply_event_policy_validation(
     review_step_tracker: &mut review_step_state::ReviewStepTracker,
     bus: &mut EventBus,
     write_diagnostic: bool,
-    source_hats_by_topic: &std::collections::HashMap<String, Vec<String>>,
-    target_hats_by_topic: &std::collections::HashMap<String, Vec<String>>,
+    // U6 (2026-06-17-004 plan, R6): use `BTreeMap` so the topic keys iterate
+    // in sorted order, and each per-topic hat list is pre-sorted by the
+    // caller.  Without this, the `source_hat` / `target_hat` vectors that
+    // get serialized into a `PayloadContractViolation` would inherit the
+    // `config.hats` (HashMap) iteration order, which is undefined across
+    // runs and breaks diagnostic snapshot stability.
+    source_hats_by_topic: &std::collections::BTreeMap<String, Vec<String>>,
+    target_hats_by_topic: &std::collections::BTreeMap<String, Vec<String>>,
     registry: &crate::hat_registry::HatRegistry,
     ttl_seconds: u64,
 ) -> PolicyValidationResult {
@@ -7357,10 +7363,21 @@ impl EventLoop {
                 self.state.policy_runtime_state.take().unwrap_or_default();
             // U6: build source/target hat indexes for payload contract
             // violation attribution.
-            let mut source_hats_by_topic: std::collections::HashMap<String, Vec<String>> =
-                std::collections::HashMap::new();
-            let mut target_hats_by_topic: std::collections::HashMap<String, Vec<String>> =
-                std::collections::HashMap::new();
+            //
+            // R6 (2026-06-17-004 plan): use `BTreeMap` so the per-topic
+            // hat lists are built in a deterministic order.  `config.hats`
+            // is a `HashMap`, so iterating it produces a non-deterministic
+            // push order into the per-topic Vec; without the sort the
+            // resulting `source_hat` / `target_hat` vectors that get
+            // serialized into a `PayloadContractViolation` would inherit
+            // that order and break diagnostic / regression snapshot
+            // stability.  Sorting each Vec once after construction is
+            // O(N log N) on the total hat count and only runs when the
+            // event policy is enabled.
+            let mut source_hats_by_topic: std::collections::BTreeMap<String, Vec<String>> =
+                std::collections::BTreeMap::new();
+            let mut target_hats_by_topic: std::collections::BTreeMap<String, Vec<String>> =
+                std::collections::BTreeMap::new();
             for (hat_id, hat_config) in &self.config.hats {
                 for t in &hat_config.publishes {
                     source_hats_by_topic
@@ -7374,6 +7391,13 @@ impl EventLoop {
                         .or_default()
                         .push(hat_id.clone());
                 }
+            }
+            // Stable, sorted hat lists per topic.
+            for hats in source_hats_by_topic.values_mut() {
+                hats.sort();
+            }
+            for hats in target_hats_by_topic.values_mut() {
+                hats.sort();
             }
             // Unit 2 (2026-06-16-002 plan) take-3: the policy
             // validator no longer takes `&mut LoopState`; it
@@ -9006,6 +9030,11 @@ impl EventLoop {
             // restore them and post-process the recoverable
             // candidates.
             let mut review_step_tracker = std::mem::take(&mut self.state.review_step_tracker);
+            // U6 (2026-06-17-004 plan, R6): wave partition passes empty
+            // BTreeMaps because wave events don't produce payload-contract
+            // attributions (they fan out before any schema violation can
+            // resolve to a single (hat, topic) attribution).  The type
+            // stays `BTreeMap` to match the regular partition.
             let policy_result = apply_event_policy_validation(
                 wave_events,
                 policy_config,
@@ -9015,8 +9044,8 @@ impl EventLoop {
                 policy_config
                     .completion_after_terminal
                     .write_diagnostic_event,
-                &std::collections::HashMap::new(),
-                &std::collections::HashMap::new(),
+                &std::collections::BTreeMap::new(),
+                &std::collections::BTreeMap::new(),
                 &self.registry,
                 self.config
                     .event_loop
