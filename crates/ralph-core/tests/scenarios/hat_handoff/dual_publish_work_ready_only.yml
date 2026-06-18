@@ -1,0 +1,121 @@
+# 2026-06-18-002 plan U9: T5 — dual-publish carve-out under hat_handoff gate
+#
+# When plan-gate dual-publishes `queue.advance` + `work.ready` in a
+# single turn, the handoff gate must treat them **independently**:
+#
+# - `queue.advance` has no consumer in the HandoffIndex → not a
+#   macro edge → `NotRequired` → flows through unchanged.
+# - `work.ready` has consumer = executor → macro edge → must carry
+#   a valid handoff file → accepted.
+#
+# 2026-06-18 P0-1 + P0-2 wiring: this scenario exercises the macro
+# path end-to-end (read handoff file, validate structure, accept
+# and increment `hat_handoff_seq`). The dual-publish carve-out in
+# event policy / state machine must NOT be disturbed by the gate
+# — queue.advance is exempt, work.ready is gated, both pass.
+#
+# References: plan T5 / AE5.
+
+name: hat_handoff_dual_publish_work_ready_only
+description: "T5 AE5: plan-gate dual-publishes queue.advance + work.ready; only work.ready goes through the gate"
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 5
+  hats:
+    plan-gate:
+      subscribes_to:
+        - task.start
+        - work.done
+      publishes:
+        - queue.advance
+        - work.ready
+        - LOOP_COMPLETE
+    executor:
+      subscribes_to:
+        - work.ready
+      publishes:
+        - work.done
+  event_loop:
+    execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
+    starting_event: "task.start"
+    hat_handoff:
+      enabled: true
+
+fixture_files:
+  - path: .ralph/agent/hat-handoff/1-1-plan_gate-executor.md
+    content: |
+      # Handoff: plan-gate → executor
+      ## context
+      dual-publish scenario; queue.advance is exempt, work.ready carries this handoff.
+
+      ## changed
+      none
+
+      ## verify
+      cargo nextest run -p ralph-core --lib hat_handoff — green
+
+      ## next
+      **动作**: emit work.done after task execution
+      **阻塞**: 无
+
+      ## notes
+      无
+
+  - path: .ralph/agent/hat-handoff/2-1-executor-plan_gate.md
+    content: |
+      # Handoff: executor → plan-gate
+      ## context
+      executor finished; review summary below.
+
+      ## changed
+      none
+
+      ## verify
+      cargo nextest run -p ralph-core --lib — green
+
+      ## next
+      **动作**: emit LOOP_COMPLETE
+      **阻塞**: 无
+
+      ## notes
+      无
+
+# Run 1: plan-gate dual-publishes queue.advance + work.ready in one
+# turn. queue.advance is exempt; work.ready carries a valid handoff
+# file → both flow through.
+# Run 2: executor wakes on work.ready and emits work.done.
+# Run 3: plan-gate wakes on work.done and emits LOOP_COMPLETE.
+# Each response is tagged with its source hat so the runtime
+# handoff gate sees a non-empty `from_hat` and can evaluate
+# the macro edge for work.ready.
+mock_responses:
+  - text: |
+      <event topic="queue.advance">
+      step: "step-01"
+      </event>
+      <event topic="work.ready">
+      task_id: "task-real-005"
+      handoff_path: ".ralph/agent/hat-handoff/1-1-plan_gate-executor.md"
+      </event>
+    hat: plan-gate
+  - text: |
+      <event topic="work.done">
+      task_id: "task-real-005"
+      handoff_path: ".ralph/agent/hat-handoff/2-1-executor-plan_gate.md"
+      </event>
+    hat: executor
+  - text: |
+      <event topic="LOOP_COMPLETE">
+      Done.
+      </event>
+    hat: plan-gate
+
+expected:
+  iterations: 3
+  completion: true
+  events:
+    - topic: queue.advance
+    - topic: work.ready
+    - topic: work.done

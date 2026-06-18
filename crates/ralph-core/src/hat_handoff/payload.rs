@@ -7,10 +7,13 @@
 //!   `{"handoff_path": "...", ...}`
 //!
 //! gate 与 inject 共享 `extract_handoff_path`,避免 SSOT 漂移
-//! (此前 `EventLoop::parse_handoff_path_from_payload` 只支持 JSON,
-//! 而 `inject::find_pending_handoff_path` 支持双格式,导致同一 payload
-//! 在 gate 阶段被判「无 handoff_path」但 inject 阶段能找到 path 的
-//! 不一致)。
+//! (此前 `inject::find_pending_handoff_path` 支持双格式而 gate
+//! 阶段的自实现只支持 JSON,导致同一 payload 在 gate 阶段被判
+//! 「无 handoff_path」但 inject 阶段能找到 path 的不一致)。
+//!
+//! 2026-06-18 P0-1 fix:`EventLoop::parse_handoff_path_from_payload`
+//! 已删除(原本只支持 JSON,现在 gate 直接调用 `extract_handoff_path`
+//! SSOT,消除 SSOT 漂移)。
 
 use ralph_proto::Event;
 

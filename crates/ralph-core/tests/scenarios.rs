@@ -18,7 +18,15 @@ struct ScenarioYaml {
     name: String,
     description: String,
     config: ConfigYaml,
-    mock_responses: Vec<String>,
+    /// Mock responses: each entry is either a raw XML string
+    /// (the LLM's emitted text) or a `{text, hat}` object. The
+    /// `hat` field, when present, is stamped on every event parsed
+    /// from the response as the JSONL `hat` field. The runtime
+    /// handoff gate (`event_loop/mod.rs:7788`) requires a non-empty
+    /// `from_hat` to evaluate macro edges, so scenarios that exercise
+    /// the gate need to set `hat` on their mock events.
+    #[serde(default, deserialize_with = "deserialize_mock_responses")]
+    mock_responses: Vec<MockResponseYaml>,
     #[serde(default)]
     checkpoints: Vec<CheckpointYaml>,
     expected: ExpectedYaml,
@@ -28,6 +36,44 @@ struct ScenarioYaml {
     /// files so the gate's file-read step finds them.
     #[serde(default)]
     fixture_files: Vec<FixtureFileYaml>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct MockResponseYaml {
+    text: String,
+    /// Optional source hat to stamp on parsed events. When `None`
+    /// the events are written without a `hat` field (legacy behavior).
+    #[serde(default)]
+    hat: Option<String>,
+}
+
+fn deserialize_mock_responses<'de, D>(deserializer: D) -> Result<Vec<MockResponseYaml>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    // Accept either a list of strings (legacy) or a list of
+    // `{text, hat}` objects. This keeps existing scenarios
+    // source-compatible while letting new ones opt into hat
+    // tagging.
+    let raw: Vec<serde_yaml::Value> = Deserialize::deserialize(deserializer)?;
+    let mut out = Vec::with_capacity(raw.len());
+    for (i, v) in raw.into_iter().enumerate() {
+        match v {
+            serde_yaml::Value::String(s) => out.push(MockResponseYaml { text: s, hat: None }),
+            serde_yaml::Value::Mapping(_) => {
+                let parsed: MockResponseYaml = serde_yaml::from_value(v)
+                    .map_err(|e| D::Error::custom(format!("mock_responses[{i}]: {e}")))?;
+                out.push(parsed);
+            }
+            other => {
+                return Err(D::Error::custom(format!(
+                    "mock_responses[{i}]: expected string or mapping, got {other:?}"
+                )));
+            }
+        }
+    }
+    Ok(out)
 }
 
 #[allow(dead_code)] // Test infrastructure - fields used for YAML deserialization
@@ -125,7 +171,12 @@ fn load_scenario(path: &str) -> ScenarioYaml {
 }
 
 fn run_scenario(yaml: ScenarioYaml) {
-    let backend = MockBackend::new(yaml.mock_responses);
+    let backend = MockBackend::new(
+        yaml.mock_responses
+            .iter()
+            .map(|r| r.text.clone())
+            .collect(),
+    );
     let runner = ScenarioRunner::new(backend.clone());
 
     let mut config = RalphConfig::default();
@@ -163,7 +214,6 @@ fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
     let ralph_dir = temp_dir.path().join(".ralph");
     std::fs::create_dir_all(&ralph_dir).unwrap();
     let events_path = ralph_dir.join("events.jsonl");
-
     // 2026-06-18-002 plan U9: write fixture files (e.g. handoff
     // markdown files) to the temp workspace before the run. These
     // are scenario fixtures, not loop state.
@@ -247,7 +297,7 @@ fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
             let _ = event_loop.process_output(&hat, "", true);
         }
 
-        let events = parser.parse(response);
+        let events = parser.parse(&response.text);
         {
             let mut file = std::fs::OpenOptions::new()
                 .create(true)
@@ -255,12 +305,15 @@ fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
                 .open(&events_path)
                 .unwrap();
             for event in &events {
-                let json = serde_json::json!({
+                let mut entry = serde_json::json!({
                     "topic": event.topic,
                     "payload": event.payload,
                     "ts": "2024-01-01T00:00:00Z",
                 });
-                writeln!(file, "{}", json).unwrap();
+                if let Some(ref hat) = response.hat {
+                    entry["hat"] = serde_json::Value::String(hat.clone());
+                }
+                writeln!(file, "{}", entry).unwrap();
             }
         }
 
@@ -520,6 +573,26 @@ fn test_hat_handoff_disabled_passthrough() {
     run_workflow_guard_scenario(yaml);
 }
 
+// T5 / AE5: dual-publish (queue.advance, work.ready) — only work.ready
+// flows through the macro-edge gate; queue.advance is exempt.
+#[test]
+fn test_hat_handoff_dual_publish_work_ready_only() {
+    let yaml =
+        load_scenario("tests/scenarios/hat_handoff/dual_publish_work_ready_only.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+// T7 / AE7: gate drops work.done (fail-closed) and publishes
+// diagnostic.hat_handoff.rejected. Both effects are observable via
+// `absent_events` and `events` in seen_topics.
+#[test]
+fn test_hat_handoff_work_done_rejected_blocks_projection() {
+    let yaml = load_scenario(
+        "tests/scenarios/hat_handoff/work_done_rejected_blocks_projection.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
 #[test]
 fn test_plan_gate_dual_publish_inverse_rejected() {
     // 2026-06-17-002 U3 regression: the dual-publish carve-out is an
@@ -729,7 +802,7 @@ fn run_progress_task_mismatch_scenario(yaml: ScenarioYaml) {
             let _ = event_loop.process_output(&hat, "", true);
         }
 
-        let events = parser.parse(response);
+        let events = parser.parse(&response.text);
         {
             let mut file = std::fs::OpenOptions::new()
                 .create(true)
@@ -737,12 +810,15 @@ fn run_progress_task_mismatch_scenario(yaml: ScenarioYaml) {
                 .open(&events_path)
                 .unwrap();
             for event in &events {
-                let json = serde_json::json!({
+                let mut entry = serde_json::json!({
                     "topic": event.topic,
                     "payload": event.payload,
                     "ts": "2024-01-01T00:00:00Z",
                 });
-                writeln!(file, "{}", json).unwrap();
+                if let Some(ref hat) = response.hat {
+                    entry["hat"] = serde_json::Value::String(hat.clone());
+                }
+                writeln!(file, "{}", entry).unwrap();
             }
         }
 
@@ -1021,7 +1097,7 @@ fn test_isolated_with_event_projection() {
             let _ = event_loop.process_output(&hat, "", true);
         }
 
-        let events = parser.parse(response);
+        let events = parser.parse(&response.text);
         {
             let mut file = std::fs::OpenOptions::new()
                 .create(true)
@@ -1029,12 +1105,15 @@ fn test_isolated_with_event_projection() {
                 .open(&events_path)
                 .unwrap();
             for event in &events {
-                let json = serde_json::json!({
+                let mut entry = serde_json::json!({
                     "topic": event.topic,
                     "payload": event.payload,
                     "ts": "2024-01-01T00:00:00Z",
                 });
-                writeln!(file, "{}", json).unwrap();
+                if let Some(ref hat) = response.hat {
+                    entry["hat"] = serde_json::Value::String(hat.clone());
+                }
+                writeln!(file, "{}", entry).unwrap();
             }
         }
 

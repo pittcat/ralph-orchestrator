@@ -4,6 +4,12 @@
 # downstream hat (review-coordinator) build_prompt must include
 # `## HAT HANDOFF` block.
 #
+# 2026-06-18 P0-1 fix: the runtime gate now actually reads the
+# handoff file end-to-end and validates it (filename, seq, from/to,
+# U3 structure, U4 publishes_check). Because this scenario ships a
+# valid file, the gate accepts and `## HAT HANDOFF` gets injected
+# into review-coordinator's prompt.
+#
 # Note: scenarios drive the loop by writing events to
 # `.ralph/events.jsonl` and calling `process_events_from_jsonl`.
 # The starting hat must be triggered by an event the runtime
@@ -54,24 +60,24 @@ fixture_files:
       无
 
 mock_responses:
-  - |
-    <event topic="work.done">
-    task_id: "task-real-001"
-    handoff_path: ".ralph/agent/hat-handoff/1-1-executor-review_coordinator.md"
-    </event>
-  - |
-    <event topic="LOOP_COMPLETE">
-    Done.
-    </event>
+  - text: |
+      <event topic="work.done">
+      task_id: "task-real-001"
+      handoff_path: ".ralph/agent/hat-handoff/1-1-executor-review_coordinator.md"
+      </event>
+    hat: executor
+  - text: |
+      <event topic="LOOP_COMPLETE">
+      Done.
+      </event>
+    hat: review-coordinator
 
 expected:
   iterations: 2
-  # The BDD harness's `seen_topics` field is populated by
-  # `process_events_from_jsonl` and the loop's own record path. For
-  # hat-handoff scenarios the rejection diagnostic event is what we
-  # really care about (see KTD-5 cancel_pending + U6 inject_failed);
-  # we only assert the **presence** of the inject outcome via
-  # `prompt_contains` rather than the exact seen_topics set.
+  # With P0-1 + P0-2 wiring the gate now actually validates the
+  # handoff file; this scenario's fixture passes all five sections
+  # and the gate accepts, so `work.done` flows downstream and
+  # `## HAT HANDOFF` gets injected into review-coordinator's prompt.
   completion: true
   prompt_contains:
     - hat: review-coordinator

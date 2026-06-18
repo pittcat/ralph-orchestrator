@@ -6699,13 +6699,6 @@ impl EventLoop {
         self.process_parse_result(result)
     }
 
-    /// 2026-06-18-002 plan U5: parse `handoff_path` out of a payload.
-    /// 2026-06-18 P1-1: 改为调用 `hat_handoff::payload::extract_handoff_path`
-    /// 单一 SSOT(此前只支持 JSON,inject 走 raw 双解析,SSOT 漂移)。
-    fn parse_handoff_path_from_payload(payload: Option<&str>) -> Option<String> {
-        payload.and_then(crate::hat_handoff::payload::extract_handoff_path)
-    }
-
     /// 2026-06-18-002 plan U5: look up the downstream hat's
     /// declared `publishes` list for the gate's R15 topic check.
     /// `from_hat` is unused for this lookup — the gate resolves the
@@ -7771,20 +7764,20 @@ impl EventLoop {
         }
         // --- End state machine validation ---
 
-        // --- Hat-handoff gate (2026-06-18-002 plan U5, KTD-4) ---
+        // --- Hat-handoff gate (2026-06-18-002 plan U5, KTD-4; P0-1 + P0-2 fix) ---
         // Inserted **between state machine and state_projection** so
         // a reject does not poison the projector with a handoff
         // that the agent will have to re-emit. The gate is a
         // **minimum-surprise passthrough** when `hat_handoff.enabled`
         // is false (T15/T20 coverage): events flow through, the
-        // tracker is untouched, no diagnostic is published. When
-        // enabled in `isolated` mode, the gate consumes only the
-        // macro-edge accept/reject bookkeeping (seq++, cancel,
-        // diagnostic) and **does not yet reroute events** to/from
-        // `state_projection` — that full wiring lands in a
-        // follow-up commit (the unit-level gate is exercised by
-        // `hat_handoff::gate::tests`; the runtime integration is
-        // deliberately staged).
+        // tracker is untouched, no diagnostic is published.
+        //
+        // When enabled in `isolated` mode, the gate is **fail-closed**:
+        // every macro-edge emit is validated end-to-end (filename +
+        // seq + from/to + U3 structure + U4 publishes_check), and a
+        // reject drops the event from the batch so the downstream
+        // `state_projection` and `bus.publish` never see it. The agent
+        // must re-emit with a fixed handoff file to progress.
         if self.config.event_loop.hat_handoff.enabled
             && matches!(
                 self.config.event_loop.execution_mode,
@@ -7792,12 +7785,16 @@ impl EventLoop {
             )
         {
             use crate::hat_handoff::gate::{self, GateDecision, GateInputs};
-            for ev in events.iter() {
+            let mut rejected_diagnostics: Vec<ralph_proto::Event> = Vec::new();
+            events.retain(|ev| {
                 let from_hat = ev.hat.as_deref().unwrap_or("");
                 if from_hat.is_empty() {
-                    continue;
+                    return true;
                 }
-                let handoff_path = Self::parse_handoff_path_from_payload(ev.payload.as_deref());
+                let handoff_path = ev
+                    .payload
+                    .as_deref()
+                    .and_then(crate::hat_handoff::payload::extract_handoff_path);
                 let downstream_publishes: Vec<String> =
                     self.preset_hats_publishes(from_hat, &ev.topic);
                 let inputs = GateInputs {
@@ -7812,26 +7809,51 @@ impl EventLoop {
                     downstream_publishes: &downstream_publishes,
                     repo_root: self.config.core.workspace_root.as_path(),
                 };
-                match gate::evaluate_event(&inputs, None) {
-                    GateDecision::NotRequired => {}
+                let file_content: Option<String> = handoff_path.as_deref().and_then(|path| {
+                    use crate::hat_handoff::allocator;
+                    allocator::resolve_jailed(
+                        self.config.core.workspace_root.as_path(),
+                        path,
+                    )
+                    .ok()
+                    .and_then(|abs| std::fs::read_to_string(&abs).ok())
+                });
+                match gate::evaluate_event(&inputs, file_content.as_deref()) {
+                    GateDecision::NotRequired => true,
                     GateDecision::Accept { .. } => {
                         self.state.hat_handoff_seq += 1;
+                        true
                     }
-                    GateDecision::Reject { reason_code, message } => {
+                    GateDecision::Reject {
+                        reason_code,
+                        message,
+                    } => {
                         // KTD-5: cancel the pending record we set at
                         // policy-accept time so it doesn't escalate.
                         let event_id = format!("{}:{}", ev.ts, ev.topic);
                         self.state.handoff_tracker.cancel_pending(&event_id);
-                        self.bus.publish(ralph_proto::Event::new(
+                        let diag = ralph_proto::Event::new(
                             "diagnostic.hat_handoff.rejected",
                             format!(
                                 "{{\"reason_code\":\"{reason_code}\",\"message\":\"{}\",\"from_hat\":\"{from_hat}\",\"topic\":\"{}\"}}",
                                 message.replace('"', "'"),
                                 ev.topic,
                             ),
-                        ));
+                        );
+                        // 2026-06-18 P0-2: record the diagnostic in
+                        // seen_topics so the fail-closed wiring is
+                        // observable to BDD scenarios and downstream
+                        // monitors. The diagnostic is a side-effect of
+                        // the gate, not an event that survived the
+                        // gate, so we record it explicitly here.
+                        self.state.record_event(&diag);
+                        rejected_diagnostics.push(diag);
+                        false
                     }
                 }
+            });
+            for diag in rejected_diagnostics {
+                self.bus.publish(diag);
             }
         }
 

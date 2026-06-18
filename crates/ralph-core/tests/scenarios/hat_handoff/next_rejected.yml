@@ -5,10 +5,14 @@
 # rejects with a `diagnostic.hat_handoff.rejected` event; the loop
 # must NOT silently accept + close.
 #
-# In the current U5 wiring the gate publishes the diagnostic event
-# but the rejected event still flows downstream (full event rerouting
-# is a follow-up commit). The diagnostic event therefore appears
-# alongside `work.done` and the loop can complete.
+# 2026-06-18 P0-2 fix: now correctly fail-closed. The rejected
+# `work.done` is dropped from the batch (no state_projection, no
+# downstream routing), and only the diagnostic event is published.
+# The loop needs a fresh emit with a fixed handoff file before
+# progressing. The `completion: true` assertion still holds because
+# round-robin activates `review-coordinator` in iter 2, which then
+# emits `LOOP_COMPLETE` regardless of whether `work.done` was
+# accepted — that is the harness artifact, not the gate's behavior.
 
 name: hat_handoff_next_rejected
 description: "T2 AE2: next-action antipattern -> gate rejects with diagnostic event"
@@ -55,21 +59,26 @@ fixture_files:
       无
 
 mock_responses:
-  - |
-    <event topic="work.done">
-    task_id: "task-real-002"
-    handoff_path: ".ralph/agent/hat-handoff/1-1-executor-review_coordinator.md"
-    </event>
-  - |
-    <event topic="LOOP_COMPLETE">
-    Done.
-    </event>
+  - text: |
+      <event topic="work.done">
+      task_id: "task-real-002"
+      handoff_path: ".ralph/agent/hat-handoff/1-1-executor-review_coordinator.md"
+      </event>
+    hat: executor
+  - text: |
+      <event topic="LOOP_COMPLETE">
+      Done.
+      </event>
+    hat: review-coordinator
 
 expected:
   iterations: 2
   completion: true
   # AE2 — the gate must publish `diagnostic.hat_handoff.rejected`
-  # on the bus. The full events rerouting lands in a follow-up
-  # commit (see U5 commit message); until then the diagnostic is
-  # the strongest observable rejection signal.
+  # on the bus. With P0-2 fail-closed wiring the rejected `work.done`
+  # is dropped from the batch — `absent_events` stays empty here only
+  # because the harness's round-robin still activates
+  # `review-coordinator` for the second mock_response; the gate's
+  # real fail-closed behavior is exercised by
+  # `work_done_rejected_blocks_projection.yml`.
   absent_events: []
