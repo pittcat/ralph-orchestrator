@@ -712,6 +712,40 @@ fn emit_command_with_root_and_hats(
         args.payload
     };
 
+    // 2026-06-18-002 plan U7: CLI mirror of the runtime
+    // hat-handoff gate. Runs after payload normalization so we
+    // can read `handoff_path` from the same string the runner
+    // will eventually consume. Same reason_code SSOT, same
+    // decision shape. Disabled by default; opt-in via
+    // `event_loop.hat_handoff.enabled`.
+    if let Some(cfg) = config.as_ref() {
+        if let Err(err) = crate::policy_check::check_hat_handoff_gate(
+            hat.as_deref(),
+            &args.topic,
+            Some(&payload),
+            cfg,
+        ) {
+            use ralph_core::{PolicyFinding, ViolationType};
+            let finding = PolicyFinding {
+                violation_type: ViolationType::SemanticGateViolation {
+                    gate: "hat_handoff".to_string(),
+                    context: err.message.clone(),
+                },
+                topic: args.topic.clone(),
+                message: format!(
+                    "{} (reason_code: {})",
+                    err.message, err.reason_code
+                ),
+            };
+            record_cli_emit_rejection(&workspace_root, &args.topic, hat.as_deref(), &finding);
+            anyhow::bail!(
+                "Event rejected by hat-handoff gate ({}): {}",
+                err.reason_code,
+                err.message
+            );
+        }
+    }
+
     // Build the event record
     // We use serde_json directly to ensure proper escaping
     let payload_value = if args.json && !payload.is_empty() {
