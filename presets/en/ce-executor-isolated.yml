@@ -809,6 +809,17 @@ hats:
       - <50: Choose safe default + document in `decisions.md`
       - `decisions.md` format: ID (DEC-NNN), confidence, alternatives, reasoning, reversibility
 
+      ## 2026-06-18-002 plan: HAT HANDOFF (roadmap) for `work.done` macro-edge
+      When `event_loop.hat_handoff.enabled: true` (Phase 3+),
+      `work.done` is a macro edge (executor → review-coordinator).
+      Before emitting, you MUST:
+      1. Run `ralph tools handoff prepare --from executor --to review-coordinator --topic work.done`.
+      2. Fill the returned `handoff_path` (5-section markdown).
+      3. Emit `work.done` with payload field `handoff_path: <returned-path>`.
+      4. If the gate rejects, load `task.resume(reason_code=hat_handoff_*)` and
+         either fix and re-prepare (`--force` to overwrite the same path) or
+         re-prepare with the next seq.
+
   review-coordinator:
     name: "🔍 Review Coordinator"
     description: "Diff analysis, intent discovery, conditional dimension selection, wave emission."
@@ -1979,6 +1990,22 @@ hats:
       - MUST include `reviewed_task_id` and `reviewed_task_key` in `queue.advance` payload for correlation.
       - MUST dual-publish `work.ready` with the next step's `task_id`/`task_key` whenever publishing `queue.advance` for step advance.
       - MUST NOT publish `work.ready` for step advance without the corresponding `queue.advance` audit event.
+
+      ## 2026-06-18-002 plan: HAT HANDOFF (roadmap) for `work.ready` macro-edge
+      When `event_loop.hat_handoff.enabled: true` (Phase 3+),
+      `work.ready` is a macro edge (plan-gate → executor, unique
+      consumer). Before emitting, you MUST:
+      1. Run `ralph tools handoff prepare --from plan-gate --to executor --topic work.ready`
+         (or use `--current-seq` / `--iteration` matching the
+         loop state, see `ralph tools handoff prepare --help`).
+      2. Fill the returned `handoff_path` (5-section markdown:
+         `## context / ## changed / ## verify / ## next / ## notes`).
+         The `## next` block MUST have `**动作**: ...` (concrete
+         downstream action) and `**阻塞**: ...`.
+      3. Emit `work.ready` with payload field `handoff_path: <returned-path>`.
+      4. Do NOT emit `queue.advance` *as* the macro edge (it is a
+         self-loop and exempted). The `queue.advance` audit event
+         remains the carve-out; only `work.ready` requires handoff.
 
   shipper:
     name: "📦 Shipper"
