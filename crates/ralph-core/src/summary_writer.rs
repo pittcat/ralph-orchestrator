@@ -480,6 +480,8 @@ mod tests {
     fn test_state() -> LoopState {
         LoopState {
             iteration: 12,
+            // 2026-06-18-002 U1: reset on iteration boundary.
+            hat_handoff_seq: 0,
             consecutive_failures: 0,
             cumulative_cost: 1.50,
             started_at: Instant::now(),

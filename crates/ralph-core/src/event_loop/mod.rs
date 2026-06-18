@@ -5934,6 +5934,10 @@ impl EventLoop {
         success: bool,
     ) -> Option<TerminationReason> {
         self.state.iteration += 1;
+        // 2026-06-18-002 U1 (KTD-12): reset handoff seq on iteration
+        // boundary so the same hat→hat path within a new iteration
+        // starts again from seq=1.
+        self.state.hat_handoff_seq = 0;
         self.state.last_hat = Some(hat_id.clone());
 
         // WRC-U4 (2026-06-12-003 / KTD-13 / hook 3): drain

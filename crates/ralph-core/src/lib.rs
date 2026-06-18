@@ -31,6 +31,7 @@ pub mod file_lock;
 pub mod flow_lifecycle;
 mod git_ops;
 mod handoff;
+pub mod hat_handoff;
 pub mod hat_lifecycle;
 mod hat_registry;
 mod hatless_ralph;
