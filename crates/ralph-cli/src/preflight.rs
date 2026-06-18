@@ -715,7 +715,21 @@ const ALLOWED_HATS_EVENT_LOOP_OVERLAY_KEYS: &[&str] = &[
     "event_policy",
     "verdict_gate",
     "execution_contracts",
+];
+
+/// Preset opt-in keys: take effect when the operator ralph.yml omits them.
+/// When the operator explicitly declares the key, the operator wins.
+/// (Differs from [`ALLOWED_HATS_EVENT_LOOP_OVERLAY_KEYS`], where preset wins.)
+const PRESET_OPT_IN_WHEN_OPERATOR_OMITS: &[&str] = &[
     "state_projection",
+    "hat_handoff",
+    // 2026-06-18-004 U2: ce-executor-serial suppresses guidance-in-prompt.
+    "suppress_human_guidance",
+    // 2026-06-17-002: step_handoff progress ↔ task gate.
+    "workflow_contract",
+    // ce-executor-* hat safety properties (defaults are off).
+    "ephemeral_isolation",
+    "enforce_current_unit",
 ];
 
 fn hats_disallowed_keys(mapping: &Mapping) -> Vec<String> {
@@ -892,29 +906,11 @@ pub(crate) fn merge_hats_overlay(mut core: Value, hats: Value) -> Result<Value> 
 
         for (key, value) in overlay_mapping {
             if let Some(key_str) = key.as_str() {
-                if key_str == "state_projection" {
-                    // Opt-in semantics specific to `state_projection`:
-                    // the preset supplies a default that takes effect when
-                    // the operator ralph.yml has not declared the key.
-                    // If the operator DID declare it (any value, including
-                    // `enabled: false`), the operator's value wins — the
-                    // preset is not allowed to override an explicit
-                    // operator decision. This is the only "opt-in default"
-                    // entry in the hat-driven list; the other entries
-                    // (workflow promises, execution_mode, contract keys)
-                    // are hat-defined and may override the operator.
-                    //
-                    // The perky-maple regression
-                    // (worktree 2026-06-10-003-...-perky-maple, 2026-06-18)
-                    // surfaced this: the preset's
-                    // `state_projection.enabled: true` was being filtered
-                    // by the operator/hat-collection security boundary and
-                    // fell back to `false`, disabling the phase1 projector
-                    // at runtime. The two tests
-                    // `merge_hats_overlay_preserves_preset_state_projection_enabled_when_operator_omits_it`
-                    // and
-                    // `merge_hats_overlay_lets_operator_override_preset_state_projection`
-                    // pin the contract.
+                if PRESET_OPT_IN_WHEN_OPERATOR_OMITS.contains(&key_str) {
+                    // Perky-maple (state_projection) and bold-heron
+                    // (hat_handoff) regressions: keys outside
+                    // ALLOWED_HATS_EVENT_LOOP_OVERLAY_KEYS were warned
+                    // then dropped, falling back to framework defaults.
                     if !event_loop_mapping.contains_key(&key) {
                         event_loop_mapping.insert(key.clone(), value.clone());
                     }
@@ -926,32 +922,6 @@ pub(crate) fn merge_hats_overlay(mut core: Value, hats: Value) -> Result<Value> 
                     // execution_contracts) — those are properties of the
                     // hat collection, not operator policy.
                     event_loop_mapping.insert(key.clone(), value.clone());
-                } else if key_str == "hat_handoff" {
-                    // 2026-06-19 fix: `hat_handoff` is opt-in per preset
-                    // (off by default; enabled by ce-executor-isolated /
-                    // serial / wave). Mirror the `state_projection`
-                    // pattern: when the operator ralph.yml has NOT
-                    // declared the key, fall through to the preset's
-                    // value (which is what makes "I enabled hat_handoff
-                    // in my preset" actually take effect). When the
-                    // operator HAS declared it (any value, including
-                    // `enabled: false`), the operator's value wins —
-                    // the preset is not allowed to override an explicit
-                    // operator decision.
-                    //
-                    // Symptom of the previous bug (root cause for
-                    // worktree 2026-06-10-003-...-bold-heron's missing
-                    // .ralph/agent/hat-handoff/): the
-                    // `else if !contains_key` branch below only printed
-                    // an eprintln warning, did NOT insert, so the
-                    // default-deserialize fell back to
-                    // `HatHandoffConfig::default() = enabled: false`.
-                    if !event_loop_mapping.contains_key(&key) {
-                        event_loop_mapping.insert(key.clone(), value.clone());
-                    }
-                    // else: operator's ralph.yml already declares
-                    // `event_loop.hat_handoff`; the operator's value
-                    // wins, no warning, no fallback.
                 } else if !event_loop_mapping.contains_key(&key) {
                     // Surface the silent-drop UX defect ONLY when the operator's
                     // ralph.yml has NOT already declared the key. If the operator
@@ -1558,6 +1528,62 @@ hats:
         assert!(
             !config.event_loop.hat_handoff.enabled,
             "operator's explicit hat_handoff.enabled=false must override preset"
+        );
+    }
+
+    #[test]
+    fn merge_hats_overlay_preserves_preset_opt_in_event_loop_keys_when_operator_omits_them(
+    ) {
+        // bold-heron (2026-06-19): ce-executor-serial declares these keys
+        // but operator ralph.yml typically omits them; they must not fall
+        // back to framework defaults.
+        let core: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  completion_promise: LOOP_COMPLETE
+  max_iterations: 100
+",
+        )
+        .unwrap();
+
+        let hats: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  suppress_human_guidance: true
+  ephemeral_isolation: true
+  enforce_current_unit: true
+  workflow_contract:
+    step_handoff:
+      progress_task_gate: true
+hats:
+  executor:
+    name: Executor
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        assert!(
+            config.event_loop.suppress_human_guidance,
+            "preset suppress_human_guidance must apply when operator omits it"
+        );
+        assert!(
+            config.event_loop.ephemeral_isolation,
+            "preset ephemeral_isolation must apply when operator omits it"
+        );
+        assert!(
+            config.event_loop.enforce_current_unit,
+            "preset enforce_current_unit must apply when operator omits it"
+        );
+        assert!(
+            config
+                .event_loop
+                .workflow_contract
+                .as_ref()
+                .is_some_and(|wc| wc.step_handoff.progress_task_gate),
+            "preset workflow_contract.step_handoff.progress_task_gate must apply when operator omits it"
         );
     }
 
