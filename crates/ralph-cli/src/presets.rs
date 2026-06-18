@@ -1247,6 +1247,77 @@ mod tests {
         );
     }
 
+    /// U3 (2026-06-18-004 plan, R1, R5): after `fix.applied`,
+    /// the `review-coordinator` obligation MUST require
+    /// `review.dimension.ready` ONLY — the legacy
+    /// `review.dimensions.complete` shortcut is closed at the
+    /// obligation layer to prevent the perky-maple P2-5 spiral
+    /// where the agent emitted a 5th `review.dimensions.complete`
+    /// after fix without re-walking. The `work.done` empty-diff
+    /// fast path remains a legal `review.dimensions.complete`
+    /// (via the `work.done` obligation, which still allows it).
+    #[test]
+    fn test_ce_executor_serial_review_coordinator_fix_applied_must_not_allow_complete() {
+        let preset =
+            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor-serial YAML should parse");
+        let coordinator = config
+            .hats
+            .get("review-coordinator")
+            .expect("ce-executor-serial must define a 'review-coordinator' hat");
+
+        let fix_applied_obligation = coordinator
+            .obligations
+            .iter()
+            .find(|o| o.on_trigger == "fix.applied")
+            .expect("review-coordinator must have a fix.applied obligation (U3)");
+
+        assert!(
+            fix_applied_obligation
+                .must_emit_any_of
+                .contains(&"review.dimension.ready".to_string()),
+            "fix.applied obligation MUST allow review.dimension.ready, got {:?}",
+            fix_applied_obligation.must_emit_any_of
+        );
+        assert!(
+            !fix_applied_obligation
+                .must_emit_any_of
+                .contains(&"review.dimensions.complete".to_string()),
+            "fix.applied obligation MUST NOT allow review.dimensions.complete (U3 closes the shortcut), got {:?}",
+            fix_applied_obligation.must_emit_any_of
+        );
+
+        // Conditional arms inherit the same tightening.
+        for cond in &fix_applied_obligation.conditional_must_emit {
+            assert!(
+                !cond
+                    .must_emit_any_of
+                    .contains(&"review.dimensions.complete".to_string()),
+                "fix.applied conditional arm (when={:?}) MUST NOT allow review.dimensions.complete, got {:?}",
+                cond.when,
+                cond.must_emit_any_of
+            );
+        }
+
+        // Sanity: the `work.done` obligation still allows
+        // `review.dimensions.complete` because the empty-diff
+        // fast path is a legitimate shortcut for the FIRST
+        // round (fix_round=0).
+        let work_done_obligation = coordinator
+            .obligations
+            .iter()
+            .find(|o| o.on_trigger == "work.done")
+            .expect("review-coordinator must have a work.done obligation");
+        assert!(
+            work_done_obligation
+                .must_emit_any_of
+                .contains(&"review.dimensions.complete".to_string()),
+            "work.done obligation MUST still allow review.dimensions.complete (empty-diff fast path), got {:?}",
+            work_done_obligation.must_emit_any_of
+        );
+    }
+
     /// U4: root preset must match the embedded copy after build.rs's
     /// SSOT merge. Mirrors test_ce_executor_root_preset_matches_embedded
     /// for the new serial preset.

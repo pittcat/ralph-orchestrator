@@ -784,14 +784,23 @@ hats:
           - when: { has_untracked: true }
             must_emit_any_of: ["review.dimension.ready", "review.dimensions.complete"]
       - on_trigger: "fix.applied"
-        must_emit_any_of: ["review.dimension.ready", "review.dimensions.complete"]
+        # U3 (2026-06-18-004 plan, R1, KTD3): after `fix.applied`
+        # we MUST walk the 4-dim sequence again via
+        # `review.dimension.ready`. The previous
+        # `review.dimensions.complete` shortcut allowed the
+        # perky-maple P2-5 spiral where the agent emitted the
+        # 5th `review.dimensions.complete` without a fresh
+        # walk. Closing the shortcut here is a structural fix
+        # that complements the U1 policy prune and the U5
+        # complete dedup.
+        must_emit_any_of: ["review.dimension.ready"]
         conditional_must_emit:
           - when: { commit_count_min: 1 }
-            must_emit_any_of: ["review.dimension.ready", "review.dimensions.complete"]
+            must_emit_any_of: ["review.dimension.ready"]
           - when: { changed_lines_min: 50 }
-            must_emit_any_of: ["review.dimension.ready", "review.dimensions.complete"]
+            must_emit_any_of: ["review.dimension.ready"]
           - when: { has_untracked: true }
-            must_emit_any_of: ["review.dimension.ready", "review.dimensions.complete"]
+            must_emit_any_of: ["review.dimension.ready"]
       - on_trigger: "review.dimension.done"
         must_emit_any_of: ["review.dimension.ready", "review.dimensions.complete"]
       - on_trigger: "review.dimension.failed"
@@ -801,6 +810,24 @@ hats:
 
       You own the review-sequence.json state machine. Do not review code yourself.
       Do not implement fixes. Walk the dimension sequence one step at a time.
+
+      ### U3 (2026-06-18-004 plan) — fix.applied → RE-WALK, do NOT shortcut
+      When your trigger is `fix.applied(fix_round=N)` you MUST re-walk
+      the full 4-dimension sequence starting from `correctness`,
+      regardless of whether you have just walked it. Concretely:
+        1. Update `fix_round` in `review-sequence.json` to `N+1`.
+        2. Reset the per-dimension terminal status fields.
+        3. Emit `review.dimension.ready(correctness, fix_round=N+1)`
+           on the FIRST activation after `fix.applied`.
+      You MUST NOT emit `review.dimensions.complete` after
+      `fix.applied` — that path is closed at the
+      `obligations.on_trigger` level and the CLI will reject it
+      if attempted. The `work.done` empty-diff fast path is the
+      only `review.dimensions.complete` shortcut that remains
+      legal (and only on the very first review cycle, fix_round=0).
+      This rule is the structural complement to the U1 policy
+      prune + U5 complete dedup — together they close the
+      perky-maple P2-5 fix→re-review spiral.
 
       ### Sequence contract (HARD RULE)
       The sequence is **always** 4 dimensions in this fixed order:
@@ -1107,6 +1134,19 @@ hats:
     missing_event_grace_secs: 540
     instructions: |
       ## DIMENSION REVIEWER MODE — Focused {dimension} Review
+
+      ### HARD RULE — One Terminal Emit Per Activation (2026-06-18-004 plan U3, R5)
+      Each activation triggered by `review.dimension.ready({dimension}, …)`
+      MUST emit EXACTLY ONE terminal: either
+      `review.dimension.done(...)` or `review.dimension.failed(...)`.
+      You MUST NOT re-emit the same terminal within the same
+      activation. The `isolated mode: extra business event dropped`
+      rule in `event_loop/mod.rs:7265` is the runtime guard; if
+      you find yourself wanting to emit a duplicate, stop and
+      treat the request as already-satisfied. This rule is the
+      source of the perky-maple P2-2 dimension-reviewer double
+      emit (05:42:33 / 05:43:33 maintainability) and closes that
+      drift path.
 
       ### HARD RULE — Read-Only Role (2026-06-17-004 U2, R2)
 
