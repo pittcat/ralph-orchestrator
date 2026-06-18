@@ -1342,7 +1342,7 @@ fn test_ce_executor_serial_coordinator_review_passed_rejected_dimensions_complet
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 2026-06-17-004 plan U2 (R2): dimension-reviewer is locked to a read-only
-// role. The preset now pins `disallowed_tools: ["Bash", "Edit"]` and a HARD
+// role. The preset now pins `disallowed_tools: ["Edit"]` and a HARD
 // RULE in the instructions; this section verifies the contract from two
 // angles:
 //   - Happy path: dimension-reviewer emitting `review.dimension.done` with
@@ -1420,7 +1420,7 @@ fn test_ce_executor_serial_dimension_reviewer_review_done_lands() {
 }
 
 /// U2 (R2) Round-trip: loading `builtin:ce-executor-serial` deserializes
-/// the new `disallowed_tools: ["Bash", "Edit"]` on the
+/// the new `disallowed_tools: ["Edit"]` on the
 /// `dimension-reviewer` hat. This is the only assertion that does not
 /// need a live CLI invocation — it exercises the YAML schema directly
 /// via the same loader the operator uses (`ralph preset check --strict`).
@@ -1450,17 +1450,19 @@ fn test_ce_executor_serial_dimension_reviewer_disallowed_tools_pinned() {
         .expect("dimension-reviewer must be present in ce-executor-serial preset");
 
     // The exact ordered list is part of the U2 R2 contract:
-    //   - `Bash` — soft ban, prevents reviewer from running
-    //     cargo test / build / clippy / shell pipelines.
     //   - `Edit` — hard ban, runtime git-diff audit detects any
     //     source-file edit and emits a scope_violation event.
+    //   - `Bash` is intentionally **allowed** so the reviewer can use
+    //     `echo`/`grep`/`cat`/`find` for read-only probes. The Bash
+    //     subset that IS forbidden (`cargo` / `ralph emit <business>`)
+    //     is constrained in instructions, not in the tool list.
     //   - `Write` MUST remain in the allowed set so the reviewer can
     //     still emit the findings JSON file.
     assert_eq!(
         dr.disallowed_tools,
-        vec!["Bash".to_string(), "Edit".to_string()],
+        vec!["Edit".to_string()],
         "U2 R2: dimension-reviewer.disallowed_tools must be exactly \
-         [\"Bash\", \"Edit\"]; got {:?}",
+         [\"Edit\"]; got {:?}",
         dr.disallowed_tools
     );
 

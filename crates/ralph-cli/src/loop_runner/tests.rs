@@ -13196,7 +13196,7 @@ fn u4_recovery_count_falls_back_to_workspace_when_session_empty() {
 //
 // The test reproduces the audit path with a real git workspace and a
 // mock `dimension-reviewer` hat that mirrors the production preset's
-// `disallowed_tools: ["Bash", "Edit"]` configuration. We then check that
+// `disallowed_tools: ["Edit"]` configuration. We then check that
 // `process_output(...)` (the public entry point that calls
 // `audit_file_modifications` last) produces a `dimension-reviewer.scope_violation`
 // event on the bus. This is the smallest possible reproduction of the
@@ -13246,10 +13246,13 @@ fn u2_dimension_reviewer_edit_disallowed_triggers_scope_violation_audit() {
     std::fs::write(workspace.join("baseline.txt"), "modified\n").expect("modify");
 
     // 3. Build a minimal `RalphConfig` with a `dimension-reviewer` hat
-    //    carrying the U2 R2 contract: `disallowed_tools: ["Bash", "Edit"]`.
+    //    carrying the U2 R2 contract: `disallowed_tools: ["Edit"]`.
     //    The audit hook only checks for "Edit" or "Write" in the
-    //    disallowed list — including "Bash" alongside "Edit" is a no-op
-    //    for the audit but matches the production preset exactly.
+    //    disallowed list — `Bash` is intentionally left in the allowed
+    //    set so the reviewer can use `echo`/`grep`/`cat` for read-only
+    //    probes (verification belongs to executor/shipper, not
+    //    reviewer; that boundary is enforced via instructions, not the
+    //    tool list).
     let mut config: RalphConfig = serde_yaml::from_str(
         r#"
 event_loop:
@@ -13260,7 +13263,7 @@ hats:
     description: "U2 hard-audit test fixture"
     triggers: ["review.dimension.ready"]
     publishes: ["review.dimension.done"]
-    disallowed_tools: ["Bash", "Edit"]
+    disallowed_tools: ["Edit"]
 "#,
     )
     .expect("fixture yaml must parse");
@@ -13311,7 +13314,7 @@ hats:
         seen.iter()
             .any(|t| t == "dimension-reviewer.scope_violation"),
         "U2 R2: hard audit must publish dimension-reviewer.scope_violation when \
-         tracked files were modified under disallowed_tools=[Bash, Edit]. \
+         tracked files were modified under disallowed_tools=[Edit]. \
          observed topics: {seen:?}"
     );
 }

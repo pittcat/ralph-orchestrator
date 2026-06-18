@@ -1058,24 +1058,25 @@ hats:
     triggers: ["review.dimension.ready"]
     publishes: ["review.dimension.done", "review.dimension.failed"]
     terminal_events: ["review.dimension.done", "review.dimension.failed"]
-    # 2026-06-17-004 U2 (R2): 锁定 reviewer 为只读角色。
+    # 2026-06-17-004 U2 (R2): 锁定 reviewer 为只读源码角色,允许使用
+    # Bash 做 echo/grep/cat 这类只读探查,不能跑 cargo/ralph emit 等
+    # 命令——验证归 executor/shipper,不是 reviewer。
     #
-    # - `Bash` 软禁:reviewer 不得运行 `cargo test` / `cargo nextest` /
-    #   `cargo build` / `cargo clippy` / `ralph emit <business>` 等 shell
-    #   命令。验证归 executor/shipper,不是 reviewer。工具列表注入
-    #   TOOL RESTRICTIONS 段(prompt-level enforcement)。
     # - `Edit` 硬禁:reviewer 不得修改任何源码。runtime 在每次
     #   `audit_file_modifications()` 之后用 `git diff --stat HEAD` 检
     #   测,若发现新增则 emit `<hat>.scope_violation` 事件,触发
     #   scope_violation circuit breaker;`recovery.jsonl` 记录 violation
     #   原因。
+    # - `Bash` 故意保留:reviewer 需要 echo/grep/cat/find 等只读 shell
+    #   命令探查源码内容;禁止子集(cargo/ralph emit)在 instructions
+    #   的 HARD RULE 段以白名单/黑名单措辞约束。
     # - `Write` 故意保留:reviewer 唯一可写的是 findings JSON
     #   (`.agents/scratchpad/ce-executor/{plan}/findings-{dim}-{task_id}.json`),
     #   通过 `Write` 工具产出。`git diff --stat` 会把该新文件也视为
     #   modification,因此 reviewer 必须把 findings 写到 plan 的
     #   scratchpad 子目录(`.agents/scratchpad/...`)而非仓内源码
     #   路径——scratchpad 路径通常被 gitignore,审计不触发。
-    disallowed_tools: ["Bash", "Edit"]
+    disallowed_tools: ["Edit"]
     # Per-worker hard limit: a single dimension reviewer may run up to
     # 30 min. The serial path has NO aggregate block — the coordinator
     # walks one dimension per turn, so the per-instance timeout is the
@@ -1115,7 +1116,7 @@ hats:
       源码路径或 `findings.md`(那会触发 `<hat>.scope_violation` 硬审计)。
 
       越权调用后果:
-      - 工具列表已被 preset 锁为 `disallowed_tools: ["Bash", "Edit"]`,TOOL
+      - 工具列表已被 preset 锁为 `disallowed_tools: ["Edit"]`,TOOL
         RESTRICTIONS 段会注入 prompt(软约束)。
       - `Edit` 一旦在仓内路径触发,runtime 的
         `audit_file_modifications()` 用 `git diff --stat HEAD` 检出
