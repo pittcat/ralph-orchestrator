@@ -40,7 +40,10 @@ pub use preset_lint_gate::{
 pub use runner::resolve_loop_id;
 pub use runner::run_loop_impl;
 #[cfg(test)]
-pub(crate) use runner::{build_termination_diagnostics, write_termination_diagnostics};
+pub(crate) use runner::{
+    build_termination_diagnostics, persist_starting_event_to_events_file,
+    write_termination_diagnostics,
+};
 pub use start_loop::start_loop;
 
 // Re-export all other module items for internal use and test access

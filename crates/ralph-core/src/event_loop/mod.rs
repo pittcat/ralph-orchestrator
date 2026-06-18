@@ -3258,6 +3258,29 @@ impl EventLoop {
         }
     }
 
+    /// Returns the current byte offset of the embedded `EventReader`.
+    ///
+    /// Primarily for tests that need to assert the cursor was pushed
+    /// to the end of the file (e.g. after
+    /// [`Self::sync_event_reader_to_file_end`]) so a freshly
+    /// appended bootstrap record is not re-delivered to the bus.
+    pub fn event_reader_position(&self) -> u64 {
+        self.event_reader.position()
+    }
+
+    /// Reads the events file from the current reader offset without
+    /// advancing the cursor.
+    ///
+    /// Convenience wrapper for tests so they can assert that a
+    /// freshly persisted bootstrap line is no longer "new" after
+    /// `sync_event_reader_to_file_end()` is called.  The wrapper
+    /// deliberately exposes the same `ParseResult` shape returned by
+    /// `EventReader::read_new_events` so test assertions stay
+    /// uniform.
+    pub fn peek_event_reader_for_test(&self) -> std::io::Result<crate::event_reader::ParseResult> {
+        self.event_reader.peek_new_events()
+    }
+
     /// Points the JSONL candidate reader at a different file and resets its
     /// offset. State-machine runs use this to keep raw candidate events
     /// separate from the accepted event history.

@@ -65,10 +65,7 @@ pub fn agent_wrote_any_valid_or_rejected(
 /// keeps the lookup robust against helper paths that nest
 /// `.ralph` differently (e.g. tests that pass
 /// `ctx.workspace().join(".ralph")` as the collector base).
-pub(crate) fn count_recovery_entries(
-    workspace_root: &Path,
-    session_dir: &Path,
-) -> (u32, u32) {
+pub(crate) fn count_recovery_entries(workspace_root: &Path, session_dir: &Path) -> (u32, u32) {
     let workspace_path = workspace_root.join(".ralph").join("recovery.jsonl");
     let session_path = session_dir.join("recovery.jsonl");
     let workspace_count = count_non_empty_lines(&workspace_path);
@@ -436,6 +433,66 @@ fn write_loop_termination_sentinel(loop_context: &Option<LoopContext>, reason: &
     }
 }
 
+/// U5 (2026-06-17-004 R5): append a single JSONL record for the
+/// configured `starting_event` (typically `work.start` for serial
+/// presets, `task.start` otherwise) to the trusted events file
+/// resolved from the current-events marker.
+///
+/// The record shape mirrors what `ralph emit` would write — a
+/// top-level `topic`, JSON-string `payload`, RFC3339 `ts`, and
+/// `source: "loop-bootstrap"` so downstream provenance checks
+/// recognise this as an orchestrator-owned write.  We deliberately
+/// omit the `hat` field (consistent with the orchestrator's
+/// internal emits) so the origin guard does not need to whitelist a
+/// new producer identity.
+///
+/// The freshly-built `EventLoop` calls
+/// `sync_event_reader_to_file_end()` immediately after
+/// `with_context` so the appended record is not re-delivered to the
+/// bus.  Resume mode never reaches this function — it uses
+/// `EventLoop::initialize_resume` which emits `task.resume` to the
+/// bus without persisting a new bootstrap record.
+///
+/// Returns `Err` on I/O failure (e.g. directory not writable).  The
+/// caller already logs a `warn!` and continues because the history
+/// logger retains a copy of the start event regardless.
+pub(crate) fn persist_starting_event_to_events_file(
+    ctx: &LoopContext,
+    topic: &str,
+    prompt_content: &str,
+) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let events_path = resolve_current_events_path(ctx);
+
+    // Use the same JSON object shape `ralph emit` produces so
+    // `EventReader` can parse the line uniformly.  We build it as a
+    // `serde_json::Value` first so missing or oddly-escaped fields
+    // surface as a single serialization error rather than corrupting
+    // the events file with a partial line.
+    let record = serde_json::json!({
+        "topic": topic,
+        "payload": prompt_content,
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "source": "loop-bootstrap",
+    });
+    let line = serde_json::to_string(&record).map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, format!("serialize: {e}"))
+    })?;
+
+    // `append(true)` + `create(true)` mirrors the hard-gate writers
+    // in `hard_gate.rs`; the file is normally already created by the
+    // surrounding `if !resume` block, but we tolerate races where
+    // another process clears it between marker write and persistence.
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&events_path)?;
+    writeln!(file, "{line}")?;
+    file.flush()?;
+    Ok(())
+}
+
 /// Core loop implementation supporting both fresh start and continue modes.
 ///
 /// This public wrapper exists so U3 can write a termination sentinel for
@@ -719,6 +776,41 @@ async fn run_loop_impl_inner(
             let _ = fs::remove_file(current_candidate_events_marker(&ctx));
         }
 
+        // U5 (2026-06-17-004 R5): persist the configured `starting_event`
+        // (e.g. `work.start` for serial presets, `task.start` by default)
+        // to the freshly created trusted events file so `ralph diagnose`,
+        // replay, and audit tooling can read it.  Without this, the
+        // bootstrap event only lives in the history logger and is invisible
+        // to the JSONL stream that drives the live loop.  Resume mode is
+        // handled separately by `EventLoop::initialize_resume` and uses
+        // `task.resume`; do not inject another `work.start` here.
+        let starting_topic = config
+            .event_loop
+            .starting_event
+            .clone()
+            .unwrap_or_else(|| "task.start".to_string());
+        match persist_starting_event_to_events_file(&ctx, &starting_topic, &prompt_content) {
+            Ok(()) => {
+                debug!(
+                    topic = %starting_topic,
+                    path = %relative_events_path,
+                    "U5: persisted starting_event to trusted events file"
+                );
+            }
+            Err(e) => {
+                // Best-effort persistence: a failure here is not fatal to
+                // the loop (we have already written the history record)
+                // but it must be loud so operators can spot broken
+                // diagnose / replay runs in production.
+                warn!(
+                    error = %e,
+                    topic = %starting_topic,
+                    path = %relative_events_path,
+                    "U5: failed to persist starting_event to trusted events file"
+                );
+            }
+        }
+
         // Clear scratchpads for fresh objective start
         // Stale content from previous runs can confuse the agent about current task state
         // Clear global scratchpad and all per-hat scratchpad overrides
@@ -749,6 +841,15 @@ async fn run_loop_impl_inner(
 
     // Initialize event loop with context for proper path resolution
     let mut event_loop = EventLoop::with_context(config.clone(), ctx.clone());
+    // U5 (2026-06-17-004 R5): the trusted events file now contains the
+    // starting event we just persisted.  Push the EventReader cursor to
+    // the end of the file so the live loop does not re-read and
+    // re-deliver that bootstrap event to the bus (which would cause a
+    // double-publish of `work.start` / `task.start`).  Resume mode
+    // already skipped persisting a starting event, so the cursor stays
+    // at offset 0 and the next `read_new_events` call picks up
+    // whatever the agent has been writing to the existing file.
+    event_loop.sync_event_reader_to_file_end();
     // R4 (2026-06-14-003 plan): advertise the single-U contract to
     // child processes (the agent's `ralph tools task ensure` calls)
     // when the preset opts in.  We rely on standard
@@ -4051,12 +4152,46 @@ async fn run_loop_impl_inner(
                         // immutable borrow on `get_hat_publishes`
                         // does not overlap with the mut borrow.
                         let expected_topics = event_loop.get_hat_publishes(&display_hat);
-                        inject_hard_gate_guidance(
+                        // 2026-06-17-004 U4 (R1): snapshot the
+                        // obligation triggers (the events that woke
+                        // the gated hat) so the gate can embed
+                        // their topic + payload into the
+                        // `task.resume` JSON AND replay them into
+                        // `last_activation_events` for the next
+                        // activation.  For hats without explicit
+                        // obligations we use the same
+                        // `last_activation_events` (the legacy
+                        // blanket rule path doesn't care about
+                        // triggers, but the replay is still useful
+                        // for the U1 field-completeness metric and
+                        // the U2 recovery envelope shape).
+                        let triggers_for_gate = event_loop.state().last_activation_events.clone();
+                        inject_hard_gate_guidance_with_triggers(
                             &ctx,
                             Some(&mut event_loop),
                             &display_hat,
                             &expected_topics,
+                            &triggers_for_gate,
                         );
+                        // 2026-06-17-004 U4 (R1): after the gate
+                        // pins `pending_recovery_hat`, drain the
+                        // snapshot into `last_activation_events`
+                        // so the next activation (the one woken by
+                        // the recovery `task.resume`) sees the
+                        // original trigger context.  Without this
+                        // replay the next iteration's
+                        // `last_activation_events` would be empty
+                        // (only the resume itself is in flight), and
+                        // the obligation check in
+                        // `should_gate_missing_events` would have
+                        // no trigger to evaluate against — a
+                        // `dimension-reviewer` that was originally
+                        // woken by `review.dimension.ready(dimension=testing)`
+                        // would then have no idea which dimension
+                        // to review on the retry turn.
+                        event_loop
+                            .state_mut()
+                            .replay_obligation_triggers_to_activation_state();
                         info!(
                             hat = %display_hat.as_str(),
                             consecutive = event_loop.state().consecutive_hard_gates,
