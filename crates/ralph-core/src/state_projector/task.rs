@@ -45,7 +45,12 @@ pub(crate) fn project_ensure_task(
     // (rare in Phase 1 but cheap and safe) and to keep the same
     // locking discipline the rest of the orchestrator uses.
     let mut store = TaskStore::load(&ctx.tasks_path).map_err(|e| format!("tasks_load: {e}"))?;
-    store.set_enforce_current_unit(false); // projector never enforces R4 itself
+    // Honour the loop's R4 setting from `ProjectionContext` so the
+    // projector matches loop behaviour. Previously this hard-coded
+    // `false` and silently disabled the R4 gate inside the
+    // projector; that bypassed the preset contract — see R1 in
+    // docs/plans/2026-06-17-005-fix-state-projection-phase1-review-findings-plan.md.
+    store.set_enforce_current_unit(ctx.enforce_current_unit);
     let mut task = Task::new(title, 1).with_key(Some(key.clone()));
     // Honour the payload's `task_id` when the agent supplies one
     // (ce-executor presets always do). Without this the loop
@@ -59,6 +64,31 @@ pub(crate) fn project_ensure_task(
     }
     if let Some(loop_id) = ctx_loop_id(payload) {
         task = task.with_loop_id(Some(loop_id.to_string()));
+    }
+    // R1 (2026-06-17-005 fix plan): when the loop enables R4, the
+    // projector must surface single-U collisions as `Err` so the
+    // hook can drop the offending event and emit
+    // `event.state_projection.rejected`. `TaskStore::ensure`
+    // silently returns the existing task on collision (legacy
+    // contract); we pre-check so the reject is loud.
+    if let Some(collision_idx) = ctx
+        .enforce_current_unit
+        .then(|| store.find_unit_collision_idx(&task))
+        .flatten()
+    {
+        let sibling = store.all().get(collision_idx);
+        let sibling_key = sibling
+            .and_then(|t| t.key.as_deref())
+            .unwrap_or("<unknown>");
+        let sibling_id = sibling.map(|t| t.id.as_str()).unwrap_or("<unknown>");
+        return Err(format!(
+            "r4_unit_collision: refusing work.ready for task_key='{}' \
+             (R4 enforce_current_unit is active; sibling task already open in \
+             the same step: sibling_task_id='{}' sibling_task_key='{}')",
+            task.key.as_deref().unwrap_or("<no-key>"),
+            sibling_id,
+            sibling_key,
+        ));
     }
     store.ensure(task);
     persist(&ctx.tasks_path, &store, &mut ctx.tasks_cache)

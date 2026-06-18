@@ -48,14 +48,20 @@ use crate::step_handoff::ProgressSnapshot;
 /// Topics the projector inspects. Other topics are inert (no
 /// projection). The list is locked in a unit test so a future
 /// refactor cannot silently widen the surface.
+///
+/// R6 (2026-06-17-005 fix plan): `review.passed` / `review.failed`
+/// / `plan.blocked` were declared in this list during Phase 1 but
+/// have **no** `StateProjectionAction` mapping — they would have
+/// been inert no-ops in practice. They are removed to keep the
+/// declared surface in lock-step with the implementation. A future
+/// Phase 2 unit that needs them must add the matching
+/// `StateProjectionAction` variant *and* the topic here in the
+/// same commit.
 pub const PROJECTED_TOPICS: &[&str] = &[
     "work.ready",
     "work.done",
     "queue.advance",
     "plan.complete",
-    "review.passed",
-    "review.failed",
-    "plan.blocked",
 ];
 
 /// Build the canonical path to the task ledger under a workspace
@@ -90,6 +96,15 @@ pub struct ProjectionContext {
     pub progress_path: PathBuf,
     /// Projection config from the loop config.
     pub config: StateProjectionConfig,
+    /// Whether R4 (current unit gating) is enforced in this loop.
+    /// Mirrors `EventLoopConfig.enforce_current_unit` so the
+    /// projector matches loop behaviour: a `work.ready` for a
+    /// non-current U is rejected when this is `true`. Default is
+    /// `false` to preserve pre-Phase-1 behaviour.
+    ///
+    /// Plan ref: R1 in
+    /// `docs/plans/2026-06-17-005-fix-state-projection-phase1-review-findings-plan.md`.
+    pub enforce_current_unit: bool,
     /// In-memory cache of the tasks ledger. Populated by
     /// [`StateProjector::bootstrap_from_disk`] on loop resume; kept
     /// in sync by [`task::project`] on every apply.
@@ -105,15 +120,41 @@ impl ProjectionContext {
     /// for calling [`StateProjector::bootstrap_from_disk`] before
     /// applying any events (otherwise the cache is rebuilt on
     /// demand from the live ledger).
-    pub fn new(workspace_root: &Path, config: StateProjectionConfig) -> Self {
+    ///
+    /// `enforce_current_unit` mirrors the loop's R4 setting so
+    /// `TaskStore::ensure` rejects sibling-unit `work.ready`
+    /// payloads when the loop does. The 2-arg overload keeps
+    /// pre-Phase-1 behaviour (R4 disabled inside the projector)
+    /// for tests and any caller that has not yet threaded the
+    /// loop config through.
+    pub fn new(
+        workspace_root: &Path,
+        config: StateProjectionConfig,
+        enforce_current_unit: bool,
+    ) -> Self {
         Self {
             workspace_root: workspace_root.to_path_buf(),
             tasks_path: tasks_path(workspace_root),
             progress_path: progress_path(workspace_root),
             config,
+            enforce_current_unit,
             tasks_cache: Vec::new(),
             progress_cache: ProgressSnapshot::default(),
         }
+    }
+
+    /// Backward-compatible constructor with `enforce_current_unit=false`.
+    /// Used by tests and any caller that has not yet threaded the
+    /// loop config through. The loop's primary entry point uses
+    /// [`Self::new`] with the live `EventLoopConfig.enforce_current_unit`.
+    ///
+    /// Not marked `#[deprecated]` because the project standard
+    /// (`CLAUDE.md`) is "Backwards compatibility doesn't matter";
+    /// the plan-authorising call is the `ProjectionContext` doc
+    /// comment in `2026-06-17-005`. Phase 2 should remove this
+    /// helper alongside the `enforce_current_unit` field itself.
+    pub fn new_legacy(workspace_root: &Path, config: StateProjectionConfig) -> Self {
+        Self::new(workspace_root, config, false)
     }
 }
 
@@ -186,6 +227,17 @@ impl StateProjector {
     /// (U4) and by tests.
     pub fn context(&self) -> &ProjectionContext {
         &self.ctx
+    }
+
+    /// Override the R4 (`enforce_current_unit`) flag after
+    /// construction. Production code sets this via
+    /// [`ProjectionContext::new`]; this helper exists so the R1
+    /// regression matrix can flip the flag in tests without
+    /// rebuilding the context from scratch.
+    #[doc(hidden)]
+    pub fn with_enforce_current_unit(mut self, enforce_current_unit: bool) -> Self {
+        self.ctx.enforce_current_unit = enforce_current_unit;
+        self
     }
 
     /// Apply a batch of events to the ledgers. Events whose topic

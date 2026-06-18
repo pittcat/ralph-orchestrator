@@ -71,7 +71,7 @@ fn make_config() -> StateProjectionConfig {
 fn disabled_config_is_a_noop() {
     let tmp = workspace();
     let cfg = StateProjectionConfig::default();
-    let mut proj = StateProjector::new(ProjectionContext::new(tmp.path(), cfg));
+    let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
     let event = make_event(
         "work.ready",
         json!({"task_key": "x", "step": "step-01"}).to_string(),
@@ -89,7 +89,7 @@ fn empty_actions_map_is_a_noop() {
         enabled: true,
         actions: Default::default(),
     };
-    let mut proj = StateProjector::new(ProjectionContext::new(tmp.path(), cfg));
+    let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
     let event = make_event("work.ready", json!({"task_key": "x"}).to_string());
     let report = proj.apply(&[event]);
     assert_eq!(report.applied, 0);
@@ -99,7 +99,7 @@ fn empty_actions_map_is_a_noop() {
 #[test]
 fn happy_path_ensure_task_writes_ledger() {
     let tmp = workspace();
-    let mut proj = StateProjector::new(ProjectionContext::new(tmp.path(), make_config()));
+    let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), make_config()));
     let event = make_event(
         "work.ready",
         json!({"task_key": "ce-executor:p:step-01:u1-impl", "step": "step-01"}).to_string(),
@@ -115,7 +115,7 @@ fn happy_path_ensure_task_writes_ledger() {
 #[test]
 fn happy_path_close_task_updates_progress() {
     let tmp = workspace();
-    let mut proj = StateProjector::new(ProjectionContext::new(tmp.path(), make_config()));
+    let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), make_config()));
     let ready = make_event(
         "work.ready",
         json!({"task_key": "ce-executor:p:step-01:u1-impl", "step": "step-01"}).to_string(),
@@ -150,7 +150,7 @@ fn happy_path_close_task_updates_progress() {
 #[test]
 fn happy_path_queue_advance_advances_current_step() {
     let tmp = workspace();
-    let mut proj = StateProjector::new(ProjectionContext::new(tmp.path(), make_config()));
+    let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), make_config()));
     let event = make_event(
         "queue.advance",
         json!({"step": "step-02", "completed_step": "step-01"}).to_string(),
@@ -165,7 +165,7 @@ fn happy_path_queue_advance_advances_current_step() {
 #[test]
 fn rejected_event_returns_reason() {
     let tmp = workspace();
-    let mut proj = StateProjector::new(ProjectionContext::new(tmp.path(), make_config()));
+    let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), make_config()));
     // Missing task_key pointer — fail-closed.
     let event = make_event("work.ready", json!({}).to_string());
     let report = proj.apply(&[event]);
@@ -177,7 +177,7 @@ fn rejected_event_returns_reason() {
 #[test]
 fn unprojected_topic_is_inert() {
     let tmp = workspace();
-    let mut proj = StateProjector::new(ProjectionContext::new(tmp.path(), make_config()));
+    let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), make_config()));
     let event = make_event("build.done", json!({}).to_string());
     let report = proj.apply(&[event]);
     assert_eq!(report.applied, 0);
@@ -186,6 +186,16 @@ fn unprojected_topic_is_inert() {
 
 #[test]
 fn projected_topics_list_is_locked() {
+    // R6 (2026-06-17-005 fix plan): review/plan-blocked topics
+    // removed; declared surface must match implementation.
+    //
+    // The assert_eq! below doubles as the "removed topics stay
+    // out" check: any future re-add of `review.passed` /
+    // `review.failed` / `plan.blocked` must come with a
+    // matching `StateProjectionAction` variant and an
+    // explanation in commit / plan / docs. See the comment on
+    // `PROJECTED_TOPICS` in `state_projector/mod.rs` for the
+    // Phase 2 re-introduction protocol.
     assert_eq!(
         PROJECTED_TOPICS,
         &[
@@ -193,11 +203,20 @@ fn projected_topics_list_is_locked() {
             "work.done",
             "queue.advance",
             "plan.complete",
-            "review.passed",
-            "review.failed",
-            "plan.blocked",
         ]
     );
+    // Belt-and-suspenders reverse check: if a future refactor
+    // ever widens the list without the corresponding
+    // `StateProjectionAction` mapping, this catches the
+    // mismatch before it ships.
+    for forbidden in ["review.passed", "review.failed", "plan.blocked"] {
+        assert!(
+            !PROJECTED_TOPICS.contains(&forbidden),
+            "PROJECTED_TOPICS must not contain `{forbidden}`; \
+             re-introducing it requires a matching StateProjectionAction variant \
+             and a plan / commit message explaining why (R6 of 2026-06-17-005)"
+        );
+    }
 }
 
 #[test]
@@ -217,7 +236,7 @@ fn bootstrap_from_disk_loads_existing_ledger() {
     std::fs::write(&task_path, "{}\n").unwrap();
     std::fs::write(&progress_path, "## Current Step\nstep-07\n").unwrap();
 
-    let mut proj = StateProjector::new(ProjectionContext::new(tmp.path(), make_config()));
+    let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), make_config()));
     proj.bootstrap_from_disk().unwrap();
     let snap = &proj.context().progress_cache;
     assert_eq!(snap.current_step.as_deref(), Some("step-07"));
@@ -246,7 +265,7 @@ fn progress_paths_match_canonical_layout() {
 #[test]
 fn p0_retain_drops_only_matching_payload_in_batch() {
     let tmp = workspace();
-    let mut proj = StateProjector::new(ProjectionContext::new(tmp.path(), make_config()));
+    let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), make_config()));
     // Pre-populate the ledger with the task that the OK event
     // will close, so the OK event passes the projector.
     let ready = make_event(
@@ -352,7 +371,7 @@ fn p0_retain_drops_only_matching_payload_in_batch() {
 #[test]
 fn p1_plan_complete_closes_open_tasks() {
     let tmp = workspace();
-    let mut proj = StateProjector::new(ProjectionContext::new(tmp.path(), make_config()));
+    let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), make_config()));
     // Create two open tasks via the projector so the ledger is
     // // populated the same way the loop would do it.
     let ready1 = make_event(
@@ -416,7 +435,7 @@ fn p1_plan_complete_closes_open_tasks() {
 fn p2_bootstrap_handles_missing_files() {
     let tmp = tempfile::tempdir().unwrap();
     // No `.ralph/agent/` dir at all — bootstrap should not panic.
-    let mut proj = StateProjector::new(ProjectionContext::new(
+    let mut proj = StateProjector::new(ProjectionContext::new_legacy(
         tmp.path(),
         StateProjectionConfig::default(),
     ));
@@ -442,7 +461,7 @@ fn p2_bootstrap_handles_malformed_task_lines() {
           \"blocked_by\":[],\"created\":\"2026-01-01T00:00:00Z\"}\n",
     )
     .unwrap();
-    let mut proj = StateProjector::new(ProjectionContext::new(
+    let mut proj = StateProjector::new(ProjectionContext::new_legacy(
         tmp.path(),
         StateProjectionConfig::default(),
     ));
@@ -458,7 +477,7 @@ fn p2_bootstrap_handles_empty_progress_headings() {
     let tmp = workspace();
     let progress_path = tmp.path().join(".ralph").join("agent").join("progress.md");
     std::fs::write(&progress_path, "# nothing here\n\n").unwrap();
-    let mut proj = StateProjector::new(ProjectionContext::new(
+    let mut proj = StateProjector::new(ProjectionContext::new_legacy(
         tmp.path(),
         StateProjectionConfig::default(),
     ));
@@ -485,7 +504,7 @@ fn p2_repeated_apply_keeps_cache_warm() {
         "{\"id\":\"seed\",\"title\":\"t\",\"status\":\"open\",\"priority\":1,\"blocked_by\":[],\"created\":\"2026-01-01T00:00:00Z\"}\n",
     )
     .unwrap();
-    let mut proj = StateProjector::new(ProjectionContext::new(tmp.path(), make_config()));
+    let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), make_config()));
     proj.apply(&[make_event(
         "work.ready",
         json!({"task_key": "k1", "step": "step-01"}).to_string(),
@@ -511,5 +530,251 @@ fn p2_repeated_apply_keeps_cache_warm() {
         cache_after_first.len(),
         disk_task_count - 1,
         "the first apply must have added exactly one task to disk"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// R1 regression matrix (2026-06-17-005 fix plan): the projector must
+// honour `EventLoopConfig.enforce_current_unit` rather than hard-coding
+// the R4 gate off. These tests pin the contract so a future refactor
+// cannot silently re-introduce the P0 regression.
+// ---------------------------------------------------------------------------
+
+fn make_projector_with_r4(
+    tmp: &TempDir,
+    enforce_current_unit: bool,
+) -> StateProjector {
+    StateProjector::new(ProjectionContext::new_legacy(
+        tmp.path(),
+        make_config(),
+    ))
+    // Mirror what `EventLoop` does on first use: thread the loop's
+    // R4 setting into the projector. The new path is exercised in
+    // `event_loop` integration tests; here we toggle the field
+    // directly so the unit test stays focused on the projector.
+    .with_enforce_current_unit(enforce_current_unit)
+}
+
+/// R1 happy path — `enforce_current_unit=true`. Two `work.ready`
+/// events for the same step but different units: the first is
+/// accepted, the second is rejected (loud, not silent).
+#[test]
+fn r1_enforce_current_unit_true_rejects_sibling_unit() {
+    let tmp = workspace();
+    let mut proj = make_projector_with_r4(&tmp, true);
+
+    let first = make_event(
+        "work.ready",
+        json!({"task_key": "ce-executor:p:step-01:u1-impl", "step": "step-01"}).to_string(),
+    );
+    let second = make_event(
+        "work.ready",
+        json!({"task_key": "ce-executor:p:step-01:u2-impl", "step": "step-01"}).to_string(),
+    );
+
+    let first_report = proj.apply(&[first]);
+    assert_eq!(first_report.applied, 1);
+    assert_eq!(first_report.rejected, 0);
+
+    let second_report = proj.apply(&[second]);
+    assert_eq!(second_report.applied, 0);
+    assert_eq!(second_report.rejected, 1);
+    let rejection = &second_report.rejections[0];
+    assert_eq!(rejection.topic, "work.ready");
+    assert!(
+        rejection.reason.contains("r4_unit_collision"),
+        "R4 reject must be loud; got: {}",
+        rejection.reason,
+    );
+    // The reject reason must surface the sibling's key + id so
+    // an operator (or agent) can locate the existing task
+    // without grepping the ledger.
+    assert!(
+        rejection.reason.contains("sibling_task_key=")
+            && rejection.reason.contains("sibling_task_id="),
+        "R4 reject must include sibling_task_key and sibling_task_id for debug; got: {}",
+        rejection.reason,
+    );
+    assert!(
+        rejection.reason.contains("ce-executor:p:step-01:u1-impl"),
+        "R4 reject must surface the existing sibling's key (u1-impl); got: {}",
+        rejection.reason,
+    );
+    // The sibling event's payload must travel with the rejection
+    // so the hook can drop it by `(topic, payload)` (P0 fix from
+    // commit 0e6e9cc9).
+    let payload_text = rejection
+        .payload
+        .as_deref()
+        .expect("R1 reject must carry the offending event's payload snapshot");
+    assert!(
+        payload_text.contains("u2-impl"),
+        "rejection payload must include the offending event's payload; got: {:?}",
+        payload_text,
+    );
+
+    // Only the first task should be on disk.
+    let disk = std::fs::read_to_string(tmp.path().join(".ralph/agent/tasks.jsonl")).unwrap();
+    let line_count = disk.lines().filter(|l| !l.trim().is_empty()).count();
+    assert_eq!(
+        line_count, 1,
+        "R4 reject must not have created the second task"
+    );
+}
+
+/// R1 happy path — `enforce_current_unit=false`. The pre-Phase-1
+/// behaviour is preserved: two sibling-unit `work.ready` events
+/// both create tasks.
+#[test]
+fn r1_enforce_current_unit_false_allows_sibling_units() {
+    let tmp = workspace();
+    let mut proj = make_projector_with_r4(&tmp, false);
+
+    let first = make_event(
+        "work.ready",
+        json!({"task_key": "ce-executor:p:step-01:u1-impl", "step": "step-01"}).to_string(),
+    );
+    let second = make_event(
+        "work.ready",
+        json!({"task_key": "ce-executor:p:step-01:u2-impl", "step": "step-01"}).to_string(),
+    );
+
+    let report = proj.apply(&[first, second]);
+    assert_eq!(report.applied, 2);
+    assert_eq!(report.rejected, 0);
+
+    let disk = std::fs::read_to_string(tmp.path().join(".ralph/agent/tasks.jsonl")).unwrap();
+    let line_count = disk.lines().filter(|l| !l.trim().is_empty()).count();
+    assert_eq!(line_count, 2, "both sibling tasks must be on disk");
+}
+
+/// R1 edge case — same unit, second `work.ready` is a refresh, not
+/// a collision. R4 must allow refreshes (`u1` == `u1`).
+#[test]
+fn r1_enforce_current_unit_true_allows_same_unit_refresh() {
+    let tmp = workspace();
+    let mut proj = make_projector_with_r4(&tmp, true);
+
+    let first = make_event(
+        "work.ready",
+        json!({"task_key": "ce-executor:p:step-01:u1-impl", "step": "step-01"}).to_string(),
+    );
+    let second = make_event(
+        "work.ready",
+        json!({"task_key": "ce-executor:p:step-01:u1-review", "step": "step-01"}).to_string(),
+    );
+
+    let report = proj.apply(&[first, second]);
+    assert_eq!(report.applied, 2);
+    assert_eq!(report.rejected, 0);
+}
+
+/// R1 edge case — `enforce_current_unit` is not on the YAML. The
+/// default is `false`, so the projector's default behaviour is
+/// unchanged (legacy semantics preserved).
+#[test]
+fn r1_default_enforce_current_unit_is_false() {
+    assert!(!ProjectionContext::new_legacy(
+        std::env::temp_dir().as_path(),
+        StateProjectionConfig::default(),
+    )
+    .enforce_current_unit);
+}
+
+/// R1 boundary — R4 must not collide across `loop_id` boundaries.
+/// `find_unit_collision_idx` (task_store.rs) skips tasks whose
+/// `loop_id` differs from the candidate's. This pins the
+/// contract so a future refactor cannot silently start
+/// cross-loop rejecting.
+#[test]
+fn r1_enforce_current_unit_true_different_loop_id_no_collision() {
+    let tmp = workspace();
+    let mut proj = make_projector_with_r4(&tmp, true);
+
+    // Seed an open task for `ce-executor:p:step-01:u1-impl`
+    // under one loop. We do not have a way to set
+    // `loop_id` through the projector path (it is sourced
+    // from the event payload's `loop_id` field), so we write
+    // the tasks.jsonl row directly to model a foreign-loop
+    // sibling.
+    let tasks_path = tmp.path().join(".ralph").join("agent").join("tasks.jsonl");
+    let foreign_row = json!({
+        "id": "foreign-1",
+        "title": "u1-impl",
+        "key": "ce-executor:p:step-01:u1-impl",
+        "status": "open",
+        "priority": 1,
+        "blocked_by": [],
+        "created": "2026-01-01T00:00:00Z",
+        "loop_id": "loop-other",
+    });
+    std::fs::write(&tasks_path, format!("{foreign_row}\n")).unwrap();
+    // Bootstrap so the cache mirrors the seeded row.
+    let _ = proj
+        .bootstrap_from_disk();
+
+    // A work.ready for the same key+unit+step under a
+    // different loop_id (we pass `loop_id` in the payload
+    // to distinguish it from the seeded row).
+    let event = make_event(
+        "work.ready",
+        json!({
+            "task_key": "ce-executor:p:step-01:u1-impl",
+            "task_id": "t-self",
+            "step": "step-01",
+            "loop_id": "loop-self",
+        })
+        .to_string(),
+    );
+    let report = proj.apply(&[event]);
+    assert_eq!(
+        report.rejected, 0,
+        "R4 must not collide across loop_id boundaries; the foreign \
+         sibling (loop_id=loop-other) must be invisible to the candidate \
+         (loop_id=loop-self). rejections={:?}",
+        report.rejections,
+    );
+    assert_eq!(
+        report.applied, 1,
+        "the candidate's task must be created despite the foreign sibling"
+    );
+}
+
+/// R1 boundary — R4 must not collide across `step` boundaries.
+/// `task_locus` extracts the `{plan}:{step}` middle portion
+/// of the canonical key. Two tasks with the same unit but
+/// different steps are NOT collisions.
+#[test]
+fn r1_enforce_current_unit_true_different_step_no_collision() {
+    let tmp = workspace();
+    let mut proj = make_projector_with_r4(&tmp, true);
+
+    let first = make_event(
+        "work.ready",
+        json!({"task_key": "ce-executor:p:step-01:u1-impl", "step": "step-01"}).to_string(),
+    );
+    let second = make_event(
+        "work.ready",
+        json!({"task_key": "ce-executor:p:step-02:u1-impl", "step": "step-02"}).to_string(),
+    );
+
+    let first_report = proj.apply(&[first]);
+    assert_eq!(first_report.applied, 1);
+    assert_eq!(first_report.rejected, 0);
+
+    let second_report = proj.apply(&[second]);
+    assert_eq!(second_report.applied, 1);
+    assert_eq!(
+        second_report.rejected, 0,
+        "R4 must not collide across step boundaries; u1-impl in step-01 \
+         and u1-impl in step-02 are different loci"
+    );
+
+    // Both tasks should be on disk (different steps).
+    let disk = std::fs::read_to_string(tmp.path().join(".ralph/agent/tasks.jsonl")).unwrap();
+    let line_count = disk.lines().filter(|l| !l.trim().is_empty()).count();
+    assert_eq!(
+        line_count, 2,
+        "both sibling tasks (step-01, step-02) must be on disk"
     );
 }

@@ -261,7 +261,7 @@ mod tests {
     fn empty_projector_yields_minimal_block() {
         let tmp = workspace();
         let cfg = StateProjectionConfig::default();
-        let proj = StateProjector::new(ProjectionContext::new(tmp.path(), cfg));
+        let proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
         let snap = RuntimeStateSnapshot::build(&proj);
         // projection_disabled reflects the config (default false
         // because config.enabled defaults to false → !false = true

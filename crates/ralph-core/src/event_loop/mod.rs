@@ -4520,12 +4520,17 @@ impl EventLoop {
             // prompt for `review-synthesizer` so the agent cannot miss
             // it.  The block is a no-op for any other hat.
             let base_prompt = self.prepend_wave_context(base_prompt, hat_id);
-            // 2026-06-17-003 U4: `## ORCHESTRATOR CONTEXT` block
-            // is the canonical view of the run. The block is
-            // always emitted (even when projection is disabled)
-            // so the agent never has to hand-read a ledger; the
+            // 2026-06-17-003 U4 / 2026-06-17-005 R5:
+            // `## ORCHESTRATOR CONTEXT` block is the canonical
+            // view of the run. The block is always emitted
+            // (even when projection is disabled) so the agent
+            // never has to hand-read a ledger; the
             // `projection_disabled` flag in the block tells the
-            // agent whether the values are live.
+            // agent whether the values are live. R5 in
+            // 2026-06-17-005 pins Phase 1 scope to the
+            // **isolated** build_prompt path only — see the
+            // Phase 1 scope note on `prepend_orchestrator_context`
+            // and the backward-compat custom-hat path.
             let base_prompt = self.prepend_orchestrator_context(base_prompt, hat_id);
             // R3: surface ephemeral relocations so the agent stops
             // recreating runtime artefacts inside the source tree.
@@ -4579,6 +4584,18 @@ impl EventLoop {
             .build_custom_hat(hat, &events_context);
         let with_phase = self.inject_phase_into_prompt(base);
         let with_diagnosis = self.apply_runtime_diagnosis_prompt(with_phase, hat_id);
+        // R5 (2026-06-17-005 fix plan): the
+        // `## ORCHESTRATOR CONTEXT` block is intentionally NOT
+        // injected on this path in Phase 1. The backward-compat
+        // custom-hat path predates the state projector and
+        // shares a single `events_context` across every hat in
+        // the same loop; threading the projector snapshot
+        // through here without breaking the
+        // `RUNTIME_DIAGNOSIS_ALERT_HEADER` / auto-inject-skills
+        // contract is a Phase 2 task. See the Phase 1 scope
+        // note on `prepend_orchestrator_context` (event_loop)
+        // and the comment on the isolated build_prompt branch
+        // at L4522.
         // We intentionally skip `prepend_auto_inject_skills` here
         // because the backward-compat custom-hat path predates
         // that pipeline and tests assert the absence of skill
@@ -5440,7 +5457,15 @@ impl EventLoop {
     /// projection is enabled; falls back to a disabled-stub
     /// explanation otherwise (so the agent still sees the
     /// heading and knows the orchestrator owns the ledgers).
-    fn prepend_orchestrator_context(&mut self, prompt: String, hat_id: &HatId) -> String {
+    ///
+    /// Phase 1 scope (R5 in 2026-06-17-005 fix plan): only the
+    /// `isolated` build_prompt path calls this helper. The
+    /// `HatlessRalph` (solo / multi-hat coordinator) and the
+    /// backward-compat custom-hat paths skip injection — they
+    /// build their prompts through a different pipeline that
+    /// does not own a `StateProjector`. Widening the scope to
+    /// those paths is deferred to Phase 2.
+    fn prepend_orchestrator_context(&self, prompt: String, hat_id: &HatId) -> String {
         // The `ralph` / orchestrator itself and short-lived
         // control hats do not need the context; the prompt is
         // already covered by the framework's own message.
@@ -7645,6 +7670,11 @@ impl EventLoop {
                 let ctx = crate::state_projector::ProjectionContext::new(
                     self.config.core.workspace_root.as_path(),
                     self.config.event_loop.state_projection.clone(),
+                    // Mirror the loop's R4 setting so the projector
+                    // respects `enforce_current_unit` rather than
+                    // silently disabling it. R1 in
+                    // 2026-06-17-005 fix plan.
+                    self.config.event_loop.enforce_current_unit,
                 );
                 let mut p = crate::state_projector::StateProjector::new(ctx);
                 // Best-effort bootstrap; failure is non-fatal

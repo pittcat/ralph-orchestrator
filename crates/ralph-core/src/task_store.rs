@@ -344,7 +344,12 @@ impl TaskStore {
     /// The function returns an index (not a reference) so the caller
     /// can hold the answer across the eventual `Vec::push` without
     /// tripping the borrow checker.
-    fn find_unit_collision_idx(&self, candidate: &Task) -> Option<usize> {
+    ///
+    /// `pub(crate)` so the state projector (which owns the single
+    /// writer contract in Phase 1) can pre-check before delegating
+    /// to [`TaskStore::ensure`]. See R1 in
+    /// docs/plans/2026-06-17-005-fix-state-projection-phase1-review-findings-plan.md.
+    pub(crate) fn find_unit_collision_idx(&self, candidate: &Task) -> Option<usize> {
         let candidate_key = candidate.key.as_deref()?;
         let candidate_unit = unit_from_key(candidate_key)?;
         let candidate_locus = task_locus(candidate_key)?;
