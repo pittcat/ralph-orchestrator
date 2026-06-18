@@ -690,6 +690,22 @@ const ALLOWED_HATS_TOP_LEVEL: &[&str] = &[
 // NOT in this list. They are operator-controlled, not hat-controlled,
 // so a hat collection must not be able to widen the loop budget or
 // disable scope enforcement behind the user's back.
+//
+// `state_projection` (2026-06-18) joins the hat-driven opt-in list.
+// A preset that opts in to state projection (e.g.
+// `presets/en/ce-executor-serial.yml` declares
+// `event_loop.state_projection.enabled: true` and the four canonical
+// actions) must have those settings survive `merge_hats_overlay` even
+// when the operator ralph.yml does not declare its own
+// `state_projection` subtree. Without this entry, the operator's
+// `event_loop` block (which carries budget/promise keys) would shadow
+// the preset's whole `event_loop` subtree in the deep_merge fallback,
+// dropping `state_projection` silently and leaving the runtime with
+// `state_projection.enabled = false`. Perky-maple worktree
+// (2026-06-10-003-...-perky-maple, 2026-06-18) was the regression that
+// surfaced this; the test
+// `merge_hats_overlay_preserves_preset_state_projection_enabled_when_operator_omits_it`
+// pins the post-merge contract.
 const ALLOWED_HATS_EVENT_LOOP_OVERLAY_KEYS: &[&str] = &[
     "completion_promise",
     "starting_event",
@@ -699,6 +715,7 @@ const ALLOWED_HATS_EVENT_LOOP_OVERLAY_KEYS: &[&str] = &[
     "event_policy",
     "verdict_gate",
     "execution_contracts",
+    "state_projection",
 ];
 
 fn hats_disallowed_keys(mapping: &Mapping) -> Vec<String> {
@@ -875,7 +892,39 @@ pub(crate) fn merge_hats_overlay(mut core: Value, hats: Value) -> Result<Value> 
 
         for (key, value) in overlay_mapping {
             if let Some(key_str) = key.as_str() {
-                if ALLOWED_HATS_EVENT_LOOP_OVERLAY_KEYS.contains(&key_str) {
+                if key_str == "state_projection" {
+                    // Opt-in semantics specific to `state_projection`:
+                    // the preset supplies a default that takes effect when
+                    // the operator ralph.yml has not declared the key.
+                    // If the operator DID declare it (any value, including
+                    // `enabled: false`), the operator's value wins — the
+                    // preset is not allowed to override an explicit
+                    // operator decision. This is the only "opt-in default"
+                    // entry in the hat-driven list; the other entries
+                    // (workflow promises, execution_mode, contract keys)
+                    // are hat-defined and may override the operator.
+                    //
+                    // The perky-maple regression
+                    // (worktree 2026-06-10-003-...-perky-maple, 2026-06-18)
+                    // surfaced this: the preset's
+                    // `state_projection.enabled: true` was being filtered
+                    // by the operator/hat-collection security boundary and
+                    // fell back to `false`, disabling the phase1 projector
+                    // at runtime. The two tests
+                    // `merge_hats_overlay_preserves_preset_state_projection_enabled_when_operator_omits_it`
+                    // and
+                    // `merge_hats_overlay_lets_operator_override_preset_state_projection`
+                    // pin the contract.
+                    if !event_loop_mapping.contains_key(&key) {
+                        event_loop_mapping.insert(key.clone(), value.clone());
+                    }
+                } else if ALLOWED_HATS_EVENT_LOOP_OVERLAY_KEYS.contains(&key_str) {
+                    // Hat-defined keys: the preset's value wins, even if
+                    // the operator has declared the same key. This is
+                    // intentional for workflow promises, execution_mode,
+                    // and the contract keys (event_policy, verdict_gate,
+                    // execution_contracts) — those are properties of the
+                    // hat collection, not operator policy.
                     event_loop_mapping.insert(key.clone(), value.clone());
                 } else if !event_loop_mapping.contains_key(&key) {
                     // Surface the silent-drop UX defect ONLY when the operator's
@@ -1546,6 +1595,140 @@ hats:
         let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
 
         assert_eq!(config.topic_format_whitelist, vec!["KEEP_ME".to_string()]);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // 2026-06-18 perky-maple regression: `state_projection` is opt-in at
+    // the preset level (presets/en/ce-executor-serial.yml declares
+    // `event_loop.state_projection.enabled: true`). The previous
+    // verification path only deserialized the preset YAML in isolation
+    // (`presets.rs::test_ce_executor_state_projection_enabled_*`); it
+    // did NOT exercise `merge_hats_overlay`, so a silent drop of the
+    // `state_projection` subtree in the merge layer went undetected.
+    //
+    // The operator's ralph.yml in perky-maple has `event_loop:` with
+    // budget/promise keys but no `state_projection` child — so when
+    // `merge_hats_overlay` runs, the preset's `state_projection` falls
+    // outside the `ALLOWED_HATS_EVENT_LOOP_OVERLAY_KEYS` whitelist
+    // (preflight.rs:693-702) and is filtered out by the
+    // operator/hat-collection security boundary. The runtime config
+    // ends up with `state_projection.enabled = false`, the projector
+    // never applies, `.ralph/agent/progress.md` is never written, and
+    // `prepend_orchestrator_context` falls back to the disabled stub.
+    //
+    // The two tests below pin the post-merge contract: a preset that
+    // declares `state_projection.enabled: true` MUST survive the merge
+    // when the operator has not declared its own `state_projection`.
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn merge_hats_overlay_preserves_preset_state_projection_enabled_when_operator_omits_it() {
+        // Reproduces the perky-maple config: operator ralph.yml has
+        // event_loop budget/promise keys but no `state_projection` child.
+        let core: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  max_iterations: 500
+  max_runtime_seconds: 28800
+  completion_promise: LOOP_COMPLETE
+  prompt_file: PROMPT.md
+hats:
+  builder:
+    name: Builder
+",
+        )
+        .unwrap();
+
+        // Preset declares state_projection (mirrors
+        // presets/en/ce-executor-serial.yml:98-121). The minimal
+        // per-action shape must include `kind` + the field names the
+        // projector looks up; the exact set of action fields is
+        // verified by `presets::test_ce_executor_state_projection_enabled_serial_en`
+        // so this test only needs enough to deserialize.
+        let hats: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  state_projection:
+    enabled: true
+    actions:
+      work.ready:
+        kind: ensure_task
+        key: task_key
+        title: step
+      work.done:
+        kind: close_task
+        task_id: task_id
+        step: step
+      queue.advance:
+        kind: advance_step
+        current_step: step
+        completed_step: completed_step
+      plan.complete:
+        kind: plan_complete
+        final_step: step
+hats:
+  coordinator:
+    name: Coordinator
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        assert!(
+            config.event_loop.state_projection.enabled,
+            "preset-declared `event_loop.state_projection.enabled: true` must survive \
+             `merge_hats_overlay` when the operator ralph.yml does not override it; \
+             the previous silent drop caused phase1 to be disabled at runtime \
+             (perky-maple worktree 2026-06-10-003-...-perky-maple, 2026-06-18)"
+        );
+        for topic in ["work.ready", "work.done", "queue.advance", "plan.complete"] {
+            assert!(
+                config.event_loop.state_projection.actions.contains_key(topic),
+                "preset-declared action `{topic}` must survive `merge_hats_overlay`"
+            );
+        }
+        // Sanity: operator's budget keys are still honored.
+        assert_eq!(config.event_loop.max_iterations, 500);
+        assert_eq!(config.event_loop.max_runtime_seconds, 28800);
+    }
+
+    #[test]
+    fn merge_hats_overlay_lets_operator_override_preset_state_projection() {
+        // The inverse: when the operator explicitly disables
+        // state_projection, the operator's choice wins. This pins
+        // the security-boundary contract that the operator retains
+        // the final say over the runtime opt-in.
+        let core: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  max_iterations: 500
+  state_projection:
+    enabled: false
+",
+        )
+        .unwrap();
+
+        let hats: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  state_projection:
+    enabled: true
+hats:
+  coordinator:
+    name: Coordinator
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        assert!(
+            !config.event_loop.state_projection.enabled,
+            "operator's `state_projection.enabled: false` must win over preset's `true`"
+        );
     }
 
     /// End-to-end regression guard for the U5 bug. The user's ralph.yml
