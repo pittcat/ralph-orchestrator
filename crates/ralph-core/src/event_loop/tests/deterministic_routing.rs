@@ -68,6 +68,20 @@ fn collect_attribution_for_violation(
     violating_payload: &str,
 ) -> (Vec<String>, Vec<String>) {
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+
+    // Pick a hat that actually publishes this topic in the supplied config.
+    // The helper is reused across YAMLs with different hat id sets, so a
+    // hard-coded `alpha-publisher` would cause origin-guard rejection when
+    // that hat does not exist (e.g. the two-hat / six-hat variants in
+    // `test_payload_contract_attribution_survives_hat_set_change`).
+    let hat_id: String = config
+        .hats
+        .iter()
+        .filter(|(_, h)| h.publishes.iter().any(|t| t == topic))
+        .map(|(id, _)| id.clone())
+        .min()
+        .unwrap_or_else(|| "alpha-publisher".to_string());
+
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("DeterminismTest");
 
@@ -80,7 +94,7 @@ fn collect_attribution_for_violation(
         "topic": topic,
         "payload": violating_payload,
         "ts": chrono::Utc::now().to_rfc3339(),
-        "hat": "alpha-publisher",
+        "hat": hat_id,
     });
     let mut f = std::fs::OpenOptions::new()
         .create(true)

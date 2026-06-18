@@ -442,17 +442,22 @@ pub fn check_topic_format(topic: &str, allowed_topics: &HashSet<String>) -> Opti
         return None;
     }
 
+    // R6 (2026-06-17-004 plan): make the diagnostic list deterministic.
+    // `HashSet` iteration order is undefined, so sort before serialising
+    // into the finding/message to keep regression snapshots stable.
+    let mut allowed_list: Vec<String> = allowed_topics.iter().cloned().collect();
+    allowed_list.sort();
+
     let finding = PolicyFinding {
         topic: topic.to_string(),
         violation_type: ViolationType::InvalidTopicFormat {
             topic: topic.to_string(),
-            allowed_topics: allowed_topics.iter().cloned().collect(),
+            allowed_topics: allowed_list.clone(),
         },
         message: format!(
             "Topic '{}' is not in the whitelist of known topics. \
              Valid topics: {:?}",
-            topic,
-            allowed_topics.iter().collect::<Vec<_>>()
+            topic, allowed_list
         ),
     };
 

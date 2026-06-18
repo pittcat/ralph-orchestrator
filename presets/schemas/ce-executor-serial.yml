@@ -151,20 +151,18 @@ review.passed:
     - verdict
     - skip_reason
   payload: json_object
-  # Serial preset uses `dimensions_complete` as the legal skip_reason for the
-  # normal all-dimensions-pass case (the wave preset reserved
-  # `aggregate_timeout` for the synthesizer to lie about partial waves; the
-  # serial path never has that ambiguity, so a dedicated value is clearer).
+  # 2026-06-17-004 plan U1 (R3): `review.passed` is owned exclusively by
+  # `review-synthesizer`. The empty-diff fast path is now closed by
+  # `review-coordinator` emitting `review.dimensions.complete`, and the
+  # synthesizer emits `review.passed(skip_reason=dimensions_complete)`.
+  # Therefore `empty_diff` is removed from the legal skip_reason values and
+  # `review-coordinator` is removed from hat_allowed_values.
   allowed_values:
     skip_reason:
-      - empty_diff
       - trivial_step
       - dimensions_complete
   hat_allowed_values:
     skip_reason:
-      - hat_id: review-coordinator
-        values:
-          - empty_diff
       - hat_id: review-synthesizer
         values:
           - dimensions_complete

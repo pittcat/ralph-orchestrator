@@ -570,7 +570,71 @@ ralph diagnose --diagnostics-root /var/log/ralph/sessions
 
 ---
 
-## 12. Step Handoff 诊断（2026-06-17-002）
+## 12. Serial review 链 recovery 形状（2026-06-17-004）
+
+`builtin:ce-executor-serial` 把 4 个 review 维度串行走完。当 `dimension-reviewer` 声称 emit 了事件但实际上没有写入时，orchestrator 会注入一条 `task.resume` 并把它 pin 回同一个 hat。为了让 reviewer 在第二次激活时知道该 review 哪个维度，`task.resume` payload 必须携带原始触发上下文：
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `stage` | string | `emit_claimed_but_not_written` 或 `missing_event` |
+| `target_hat` | string | `dimension-reviewer` |
+| `original_trigger_topic` | string | `review.dimension.ready` |
+| `original_trigger_payload` | object | 包含 `dimension`、`focus`、`depth`、`diff_base`、`intent_summary`、`changed_files` 等 |
+| `allowed_topics` | array | 该 hat 可发的 topic 列表 |
+
+排查命令：
+
+```bash
+# 查看最近一次 task.resume 是否携带 original_trigger_*
+jq -s 'map(select(.topic == "task.resume")) | last' .ralph/events-*.jsonl
+
+# 如果 original_trigger_topic 缺失，说明 claim-but-no-write 路径未正确 replay
+# 检查 recovery.jsonl 中的 stage
+jq 'select(.topic == "task.resume") | {stage, target_hat, original_trigger_topic}' .ralph/diagnostics/latest/recovery.jsonl
+```
+
+典型恢复成功的 wire shape：
+
+```text
+work.done
+  → review.dimension.ready(dimension=correctness)
+  → [dimension-reviewer silent, no event]
+  → task.resume(stage=emit_claimed_but_not_written, original_trigger_topic=review.dimension.ready)
+  → review.dimension.done(dimension=correctness)
+  → review.dimension.ready(dimension=testing)
+  → ...
+```
+
+---
+
+## 12.1 `work.start` 未进入 events.jsonl 排查（2026-06-17-004 U5）
+
+从 plan 2026-06-17-004 U5 开始，loop 启动时会把配置的 `starting_event`（serial preset 下为 `work.start`）持久化到当前 `.ralph/events-{run_id}.jsonl` 的第一行，并立即把 `EventReader` cursor 推到文件末尾，避免 live loop 重复消费。
+
+自检：
+
+```bash
+# 1. 确认 current-events marker 指向的文件
+CURRENT=$(cat .ralph/current-events)
+
+# 2. 第一行必须是 work.start
+head -1 "$CURRENT" | jq '{topic, source}'
+# 预期: { "topic": "work.start", "source": "loop-bootstrap" }
+
+# 3. 不能出现两行 work.start（resume 路径不应重复注入）
+grep -c '"topic":"work.start"' "$CURRENT"
+# 预期: 1
+```
+
+如果第一行不是 `work.start`：
+
+- 检查是否使用了 `--continue` / `resume` 模式；resume 路径使用 `task.resume`，不注入新的 `work.start`。
+- 检查 `ralph.yml` / preset 的 `event_loop.starting_event` 是否被覆盖为 `task.start`。
+- 检查 `.ralph/` 目录是否有写权限；I/O 失败会在日志中输出 `U5: failed to persist starting_event`。
+
+---
+
+## 13. Step Handoff 诊断（2026-06-17-002）
 
 `ce-executor-isolated` preset 在 2026-06-17-002 中新增了两类 Step Handoff 诊断事件，均写入 `recovery.jsonl`：
 
@@ -595,7 +659,7 @@ cat .ralph/agent/tasks.jsonl
 
 ---
 
-## 12.1 emit rejection → task.resume → 修复 决策树
+## 13.1 emit rejection → task.resume → 修复 决策树
 
 agent 在 loop 内收到 `task.resume` 后，按以下决策树定位问题层并修复：
 
@@ -625,7 +689,7 @@ emit 失败 / 拒收
 2. 按决策树第一分支定位层。
 3. 不要用 `--unsafe-no-policy-check`（`ce-executor-isolated` preset 默认 `allow_unsafe_cli_emit: false` 时该参数被拒）；不要直写 `events.jsonl`。
 4. 修复后用 `ralph emit --policy-check` 预检；同源通过再正式发。
-5. 仍不明：`ralph diagnose --session latest` 出报告；本 guide §10 解释 schema；本节决策树与 §12 互补。
+5. 仍不明：`ralph diagnose --session latest` 出报告；本 guide §10 解释 schema；本节决策树与 §13 互补。
 
 **相关文档**：
 
@@ -637,7 +701,7 @@ emit 失败 / 拒收
 
 ---
 
-## 13. 计划 / 设计文档
+## 14. 计划 / 设计文档
 
 - 计划: `docs/plans/2026-06-04-004-feat-drift-auto-calibration-plan.md`（U0–U9 完整分解）
 - 关键源文件：
@@ -652,7 +716,7 @@ emit 失败 / 拒收
 
 ---
 
-## 14. 一分钟自检清单
+## 15. 一分钟自检清单
 
 提交新 hat / preset 之前可以这样自检：
 
