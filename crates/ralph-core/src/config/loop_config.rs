@@ -10,6 +10,7 @@ use super::state_machine::StateMachineConfig;
 use super::state_projection::StateProjectionConfig;
 use super::workflow_contract::WorkflowContractConfig;
 use super::workflow_guards::{HatExecutionMode, WorkflowGuardsConfig};
+use crate::hat_handoff::HatHandoffConfig;
 
 /// Hat-specific allowed values for a field within an event schema.
 ///
@@ -283,6 +284,13 @@ pub struct EventLoopConfig {
     /// `event_loop.state_projection.enabled: true` (SP-R18).
     #[serde(default)]
     pub state_projection: StateProjectionConfig,
+
+    /// 2026-06-18-002 plan U1: hat→hat roadmap handoff 配置。
+    /// 默认 `enabled: false`;仅在 `execution_mode == isolated`
+    /// 且本字段 `enabled: true` 时,宏观边才会被校验/注入。
+    /// 详情见 `crate::hat_handoff` 模块文档。
+    #[serde(default)]
+    pub hat_handoff: HatHandoffConfig,
 }
 
 /// 2026-06-16-001 U5: per-preset configuration for the loop-level
@@ -374,6 +382,9 @@ impl Default for EventLoopConfig {
             // 2026-06-17-003 U1: state projection opt-in. Disabled
             // by default; presets opt in via YAML.
             state_projection: StateProjectionConfig::default(),
+            // 2026-06-18-002 U1: hat→hat roadmap handoff.
+            // Opt-in (presets flip to `enabled: true` after E2E green).
+            hat_handoff: HatHandoffConfig::default(),
         }
     }
 }

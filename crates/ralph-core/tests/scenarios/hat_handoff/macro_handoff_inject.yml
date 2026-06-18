@@ -1,0 +1,88 @@
+# 2026-06-18-002 plan U9: macro-edge handoff injection (T1 / AE1)
+#
+# Executor emits `work.done` with a valid handoff file → the
+# downstream hat (review-coordinator) build_prompt must include
+# `## HAT HANDOFF` block.
+#
+# 2026-06-18 P0-1 fix: the runtime gate now actually reads the
+# handoff file end-to-end and validates it (filename, seq, from/to,
+# U3 structure, U4 publishes_check). Because this scenario ships a
+# valid file, the gate accepts and `## HAT HANDOFF` gets injected
+# into review-coordinator's prompt.
+#
+# Note: scenarios drive the loop by writing events to
+# `.ralph/events.jsonl` and calling `process_events_from_jsonl`.
+# The starting hat must be triggered by an event the runtime
+# routes to it (here: `task.start` → executor via `subscribes_to`).
+
+name: hat_handoff_macro_inject
+description: "AE1: executor work.done plus valid handoff -> review-coordinator prompt contains HAT HANDOFF"
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 5
+  hats:
+    executor:
+      subscribes_to:
+        - task.start
+      publishes:
+        - work.done
+    review-coordinator:
+      subscribes_to:
+        - work.done
+      publishes:
+        - LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
+    starting_event: "task.start"
+    hat_handoff:
+      enabled: true
+
+fixture_files:
+  - path: .ralph/agent/hat-handoff/1-1-executor-review_coordinator.md
+    content: |
+      # Handoff: executor → review-coordinator
+      ## context
+      executor just finished task-real-001; review-coordinator should evaluate the diff.
+
+      ## changed
+      modified crates/ralph-core/src/hat_handoff/mod.rs
+
+      ## verify
+      cargo nextest run -p ralph-core --lib hat_handoff — 43/43 green
+
+      ## next
+      **动作**: emit LOOP_COMPLETE after review aggregation
+      **阻塞**: 无
+
+      ## notes
+      无
+
+mock_responses:
+  - text: |
+      <event topic="work.done">
+      task_id: "task-real-001"
+      handoff_path: ".ralph/agent/hat-handoff/1-1-executor-review_coordinator.md"
+      </event>
+    hat: executor
+  - text: |
+      <event topic="LOOP_COMPLETE">
+      Done.
+      </event>
+    hat: review-coordinator
+
+expected:
+  iterations: 2
+  # With P0-1 + P0-2 wiring the gate now actually validates the
+  # handoff file; this scenario's fixture passes all five sections
+  # and the gate accepts, so `work.done` flows downstream and
+  # `## HAT HANDOFF` gets injected into review-coordinator's prompt.
+  completion: true
+  prompt_contains:
+    - hat: review-coordinator
+      substrings:
+        - "## HAT HANDOFF"
+        - "**动作**:"
+        - "**阻塞**:"
+        - "handoff_path:"

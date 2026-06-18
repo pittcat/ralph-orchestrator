@@ -18,10 +18,71 @@ struct ScenarioYaml {
     name: String,
     description: String,
     config: ConfigYaml,
-    mock_responses: Vec<String>,
+    /// Mock responses: each entry is either a raw XML string
+    /// (the LLM's emitted text) or a `{text, hat}` object. The
+    /// `hat` field, when present, is stamped on every event parsed
+    /// from the response as the JSONL `hat` field. The runtime
+    /// handoff gate (`event_loop/mod.rs:7788`) requires a non-empty
+    /// `from_hat` to evaluate macro edges, so scenarios that exercise
+    /// the gate need to set `hat` on their mock events.
+    #[serde(default, deserialize_with = "deserialize_mock_responses")]
+    mock_responses: Vec<MockResponseYaml>,
     #[serde(default)]
     checkpoints: Vec<CheckpointYaml>,
     expected: ExpectedYaml,
+    /// 2026-06-18-002 plan U9: scenario fixture files written to the
+    /// temp workspace root **before** the run starts. Used by
+    /// hat-handoff scenarios to pre-stage `.ralph/agent/hat-handoff/*.md`
+    /// files so the gate's file-read step finds them.
+    #[serde(default)]
+    fixture_files: Vec<FixtureFileYaml>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct MockResponseYaml {
+    text: String,
+    /// Optional source hat to stamp on parsed events. When `None`
+    /// the events are written without a `hat` field (legacy behavior).
+    #[serde(default)]
+    hat: Option<String>,
+}
+
+fn deserialize_mock_responses<'de, D>(deserializer: D) -> Result<Vec<MockResponseYaml>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    // Accept either a list of strings (legacy) or a list of
+    // `{text, hat}` objects. This keeps existing scenarios
+    // source-compatible while letting new ones opt into hat
+    // tagging.
+    let raw: Vec<serde_yaml::Value> = Deserialize::deserialize(deserializer)?;
+    let mut out = Vec::with_capacity(raw.len());
+    for (i, v) in raw.into_iter().enumerate() {
+        match v {
+            serde_yaml::Value::String(s) => out.push(MockResponseYaml { text: s, hat: None }),
+            serde_yaml::Value::Mapping(_) => {
+                let parsed: MockResponseYaml = serde_yaml::from_value(v)
+                    .map_err(|e| D::Error::custom(format!("mock_responses[{i}]: {e}")))?;
+                out.push(parsed);
+            }
+            other => {
+                return Err(D::Error::custom(format!(
+                    "mock_responses[{i}]: expected string or mapping, got {other:?}"
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
+
+#[allow(dead_code)] // Test infrastructure - fields used for YAML deserialization
+#[derive(Debug, Deserialize)]
+struct FixtureFileYaml {
+    /// Path relative to the workspace root (e.g.
+    /// `.ralph/agent/hat-handoff/1-2-a-b.md`).
+    path: String,
+    content: String,
 }
 
 #[allow(dead_code)] // Test infrastructure - fields used for YAML deserialization
@@ -47,6 +108,7 @@ struct ConfigYaml {
 #[derive(Debug, Deserialize)]
 struct ExpectedYaml {
     iterations: usize,
+    #[serde(default)]
     events: Vec<EventYaml>,
     #[serde(default)]
     workflow_progress: Vec<WorkflowProgressYaml>,
@@ -55,6 +117,23 @@ struct ExpectedYaml {
     #[serde(default)]
     absent_events: Vec<EventYaml>,
     completion: bool,
+    /// 2026-06-18-002 plan U8 (KTD-17): assert that for a given
+    /// `hat`, the last prompt the runner built contains every
+    /// substring. Used by hat-handoff scenarios to verify
+    /// `## HAT HANDOFF` injection end-to-end. Empty list = no
+    /// prompt assertions.
+    #[serde(default)]
+    prompt_contains: Vec<PromptContainsYaml>,
+}
+
+/// `ExpectedYaml.prompt_contains` 元素:断言 hat 的 prompt 含
+/// 列出的所有 substrings。
+#[allow(dead_code)] // Test infrastructure - fields used for YAML deserialization
+#[derive(Debug, Deserialize)]
+struct PromptContainsYaml {
+    hat: String,
+    #[serde(default)]
+    substrings: Vec<String>,
 }
 
 #[allow(dead_code)] // Test infrastructure - fields used for YAML deserialization
@@ -92,7 +171,12 @@ fn load_scenario(path: &str) -> ScenarioYaml {
 }
 
 fn run_scenario(yaml: ScenarioYaml) {
-    let backend = MockBackend::new(yaml.mock_responses);
+    let backend = MockBackend::new(
+        yaml.mock_responses
+            .iter()
+            .map(|r| r.text.clone())
+            .collect(),
+    );
     let runner = ScenarioRunner::new(backend.clone());
 
     let mut config = RalphConfig::default();
@@ -130,6 +214,16 @@ fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
     let ralph_dir = temp_dir.path().join(".ralph");
     std::fs::create_dir_all(&ralph_dir).unwrap();
     let events_path = ralph_dir.join("events.jsonl");
+    // 2026-06-18-002 plan U9: write fixture files (e.g. handoff
+    // markdown files) to the temp workspace before the run. These
+    // are scenario fixtures, not loop state.
+    for fixture in &yaml.fixture_files {
+        let abs = temp_dir.path().join(&fixture.path);
+        if let Some(parent) = abs.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&abs, &fixture.content).unwrap();
+    }
 
     // Build RalphConfig from the YAML config section
     let mut config = RalphConfig::default();
@@ -182,16 +276,28 @@ fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
 
     let parser = EventParser::new();
 
+    // 2026-06-18-002 plan U8 (KTD-17): capture the **last prompt**
+    // each hat saw during the run. Stored by hat id so the
+    // `prompt_contains` assertions below can look up the right
+    // entry. Only the last prompt per hat is retained because the
+    // prompt grows monotonically and the asserts want the most
+    // representative state.
+    let mut last_prompts: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+
     for (idx, response) in yaml.mock_responses.iter().enumerate() {
         // Simulate hat execution so isolated mode scope enforcement is active.
         // build_prompt() consumes pending events from the bus, matching real loop behavior.
         if let Some(hat) = event_loop.next_hat() {
             let hat = hat.clone();
-            let _ = event_loop.build_prompt(&hat);
+            let prompt = event_loop.build_prompt(&hat);
+            if let Some(p) = prompt {
+                last_prompts.insert(hat.to_string(), p);
+            }
             let _ = event_loop.process_output(&hat, "", true);
         }
 
-        let events = parser.parse(response);
+        let events = parser.parse(&response.text);
         {
             let mut file = std::fs::OpenOptions::new()
                 .create(true)
@@ -199,12 +305,15 @@ fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
                 .open(&events_path)
                 .unwrap();
             for event in &events {
-                let json = serde_json::json!({
+                let mut entry = serde_json::json!({
                     "topic": event.topic,
                     "payload": event.payload,
                     "ts": "2024-01-01T00:00:00Z",
                 });
-                writeln!(file, "{}", json).unwrap();
+                if let Some(ref hat) = response.hat {
+                    entry["hat"] = serde_json::Value::String(hat.clone());
+                }
+                writeln!(file, "{}", entry).unwrap();
             }
         }
 
@@ -275,6 +384,28 @@ fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
             yaml.name,
             absent_event.topic
         );
+    }
+
+    // 2026-06-18-002 plan U8 (KTD-17): assert `prompt_contains` per
+    // hat. Each entry's substrings must appear in the **last** prompt
+    // captured for that hat. Skip silently when the hat was never
+    // activated (no entry in `last_prompts`); this keeps scenarios
+    // that don't exercise the prompt path passing without forcing
+    // every hat to be reached.
+    for pc in &yaml.expected.prompt_contains {
+        let Some(prompt) = last_prompts.get(&pc.hat) else {
+            continue;
+        };
+        for needle in &pc.substrings {
+            assert!(
+                prompt.contains(needle.as_str()),
+                "{}: prompt for hat `{}` is missing substring `{}`\n--- prompt (first 800 chars) ---\n{}\n---",
+                yaml.name,
+                pc.hat,
+                needle,
+                &prompt[..prompt.len().min(800)],
+            );
+        }
     }
 
     // Verify final workflow progress
@@ -409,6 +540,56 @@ fn test_plan_gate_dual_publish_handoff() {
     // dual-publish carve-out. Both topics must be accepted in the same turn
     // and the executor must wake in a later turn.
     let yaml = load_scenario("tests/scenarios/plan_gate_dual_publish_handoff.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+// 2026-06-18-002 plan U9: hat-handoff BDD scenarios.
+//
+// AE1: macro-edge handoff inject (T1).
+#[test]
+fn test_hat_handoff_macro_inject() {
+    let yaml = load_scenario("tests/scenarios/hat_handoff/macro_handoff_inject.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+// AE2: next-action antipattern → gate rejects (T2).
+#[test]
+fn test_hat_handoff_next_rejected() {
+    let yaml = load_scenario("tests/scenarios/hat_handoff/next_rejected.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+// AE3 / T3: review.dimension.* micro-edges are exempt.
+#[test]
+fn test_hat_handoff_micro_edge_exempt() {
+    let yaml = load_scenario("tests/scenarios/hat_handoff/micro_edge_exempt.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+// T15: `hat_handoff.enabled: false` is a full passthrough.
+#[test]
+fn test_hat_handoff_disabled_passthrough() {
+    let yaml = load_scenario("tests/scenarios/hat_handoff/disabled_passthrough.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+// T5 / AE5: dual-publish (queue.advance, work.ready) — only work.ready
+// flows through the macro-edge gate; queue.advance is exempt.
+#[test]
+fn test_hat_handoff_dual_publish_work_ready_only() {
+    let yaml =
+        load_scenario("tests/scenarios/hat_handoff/dual_publish_work_ready_only.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+// T7 / AE7: gate drops work.done (fail-closed) and publishes
+// diagnostic.hat_handoff.rejected. Both effects are observable via
+// `absent_events` and `events` in seen_topics.
+#[test]
+fn test_hat_handoff_work_done_rejected_blocks_projection() {
+    let yaml = load_scenario(
+        "tests/scenarios/hat_handoff/work_done_rejected_blocks_projection.yml",
+    );
     run_workflow_guard_scenario(yaml);
 }
 
@@ -621,7 +802,7 @@ fn run_progress_task_mismatch_scenario(yaml: ScenarioYaml) {
             let _ = event_loop.process_output(&hat, "", true);
         }
 
-        let events = parser.parse(response);
+        let events = parser.parse(&response.text);
         {
             let mut file = std::fs::OpenOptions::new()
                 .create(true)
@@ -629,12 +810,15 @@ fn run_progress_task_mismatch_scenario(yaml: ScenarioYaml) {
                 .open(&events_path)
                 .unwrap();
             for event in &events {
-                let json = serde_json::json!({
+                let mut entry = serde_json::json!({
                     "topic": event.topic,
                     "payload": event.payload,
                     "ts": "2024-01-01T00:00:00Z",
                 });
-                writeln!(file, "{}", json).unwrap();
+                if let Some(ref hat) = response.hat {
+                    entry["hat"] = serde_json::Value::String(hat.clone());
+                }
+                writeln!(file, "{}", entry).unwrap();
             }
         }
 
@@ -833,6 +1017,17 @@ fn test_isolated_with_event_projection() {
     std::fs::create_dir_all(&ralph_dir).unwrap();
     let events_path = ralph_dir.join("events.jsonl");
 
+    // 2026-06-18-002 plan U9: write fixture files (e.g. handoff
+    // markdown files) to the temp workspace before the run. These
+    // are scenario fixtures, not loop state.
+    for fixture in &yaml.fixture_files {
+        let abs = temp_dir.path().join(&fixture.path);
+        if let Some(parent) = abs.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&abs, &fixture.content).unwrap();
+    }
+
     // Build RalphConfig from the YAML config section
     let mut config = RalphConfig::default();
     config.max_iterations = Some(yaml.config.max_iterations);
@@ -881,16 +1076,28 @@ fn test_isolated_with_event_projection() {
 
     let parser = EventParser::new();
 
+    // 2026-06-18-002 plan U8 (KTD-17): capture the **last prompt**
+    // each hat saw during the run. Stored by hat id so the
+    // `prompt_contains` assertions below can look up the right
+    // entry. Only the last prompt per hat is retained because the
+    // prompt grows monotonically and the asserts want the most
+    // representative state.
+    let mut last_prompts: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+
     for (idx, response) in yaml.mock_responses.iter().enumerate() {
         // Simulate hat execution so isolated mode scope enforcement is active.
         // build_prompt() consumes pending events from the bus, matching real loop behavior.
         if let Some(hat) = event_loop.next_hat() {
             let hat = hat.clone();
-            let _ = event_loop.build_prompt(&hat);
+            let prompt = event_loop.build_prompt(&hat);
+            if let Some(p) = prompt {
+                last_prompts.insert(hat.to_string(), p);
+            }
             let _ = event_loop.process_output(&hat, "", true);
         }
 
-        let events = parser.parse(response);
+        let events = parser.parse(&response.text);
         {
             let mut file = std::fs::OpenOptions::new()
                 .create(true)
@@ -898,12 +1105,15 @@ fn test_isolated_with_event_projection() {
                 .open(&events_path)
                 .unwrap();
             for event in &events {
-                let json = serde_json::json!({
+                let mut entry = serde_json::json!({
                     "topic": event.topic,
                     "payload": event.payload,
                     "ts": "2024-01-01T00:00:00Z",
                 });
-                writeln!(file, "{}", json).unwrap();
+                if let Some(ref hat) = response.hat {
+                    entry["hat"] = serde_json::Value::String(hat.clone());
+                }
+                writeln!(file, "{}", entry).unwrap();
             }
         }
 
@@ -974,6 +1184,28 @@ fn test_isolated_with_event_projection() {
             yaml.name,
             absent_event.topic
         );
+    }
+
+    // 2026-06-18-002 plan U8 (KTD-17): assert `prompt_contains` per
+    // hat. Each entry's substrings must appear in the **last** prompt
+    // captured for that hat. Skip silently when the hat was never
+    // activated (no entry in `last_prompts`); this keeps scenarios
+    // that don't exercise the prompt path passing without forcing
+    // every hat to be reached.
+    for pc in &yaml.expected.prompt_contains {
+        let Some(prompt) = last_prompts.get(&pc.hat) else {
+            continue;
+        };
+        for needle in &pc.substrings {
+            assert!(
+                prompt.contains(needle.as_str()),
+                "{}: prompt for hat `{}` is missing substring `{}`\n--- prompt (first 800 chars) ---\n{}\n---",
+                yaml.name,
+                pc.hat,
+                needle,
+                &prompt[..prompt.len().min(800)],
+            );
+        }
     }
 
     // Verify final workflow progress

@@ -4406,11 +4406,21 @@ impl EventLoop {
 
         // Non-ralph hat requested
         if self.config.event_loop.execution_mode == HatExecutionMode::Isolated {
-            // Isolated mode: build focused prompt for this hat only
+            // Isolated mode: build focused prompt for this hat only.
+            // 2026-06-18-002 U6 (KTD-16): take pending **once** at
+            // the top so both `events_context` below and
+            // `prepend_hat_handoff` see the same payload (the
+            // `take_pending` API removes by hat_id, so the second
+            // call would otherwise return empty).
             let mut events = self.bus.take_pending(&hat_id.clone());
             let mut human_events = self.bus.take_human_pending();
             events.append(&mut human_events);
 
+            // 2026-06-18-002 U6: capture the handoff path **before**
+            // `events` is consumed by `events_context` so
+            // `prepend_hat_handoff` (called later in the pipeline)
+            // can still resolve `handoff_path` from this batch.
+            let pending_for_handoff: Vec<ralph_proto::Event> = events.clone();
             let (guidance_events, regular_events): (Vec<_>, Vec<_>) = events
                 .into_iter()
                 .partition(|e| e.topic.as_str() == "human.guidance");
@@ -4520,6 +4530,20 @@ impl EventLoop {
             // prompt for `review-synthesizer` so the agent cannot miss
             // it.  The block is a no-op for any other hat.
             let base_prompt = self.prepend_wave_context(base_prompt, hat_id);
+            // 2026-06-18-002 plan U6 (KTD-6): `## HAT HANDOFF` block
+            // is inserted **between** `## WAVE CONTEXT` and
+            // `## ORCHESTRATOR CONTEXT` so the navigation block
+            // sits at the top alongside the wave header. Fail-closed:
+            // missing/unreadable file → no block + diagnostic.
+            // We pass `pending_for_handoff` (cloned at the top of
+            // the isolated branch) instead of re-taking from the bus
+            // because `events_context` already consumed the live
+            // pending queue.
+            let base_prompt = self.prepend_hat_handoff_from_pending(
+                base_prompt,
+                hat_id,
+                &pending_for_handoff,
+            );
             // 2026-06-17-003 U4 / 2026-06-17-005 R5:
             // `## ORCHESTRATOR CONTEXT` block is the canonical
             // view of the run. The block is always emitted
@@ -5452,6 +5476,67 @@ impl EventLoop {
         format!("{}{prompt}", ctx.to_prompt_block())
     }
 
+    /// 2026-06-18-002 plan U6 (KTD-16): prepend the `## HAT HANDOFF`
+    /// navigation block. Fail-closed: missing/unreadable file →
+    /// no block + diagnostic event. Skip when disabled or in
+    /// coordinator mode or when the hat is `ralph`.
+    fn prepend_hat_handoff(&mut self, prompt: String, hat_id: &HatId) -> String {
+        // peek(不要 take,避免污染 hat pending):bus 没有 peek 接口,
+        // 我们用 take 后 publish 回去——这里是 build_prompt 入口,
+        // pending 还未被消费,所以是安全的(同上 take_pending 用法)。
+        let pending = self.bus.take_pending(hat_id);
+        self.prepend_hat_handoff_from_pending(prompt, hat_id, &pending)
+    }
+
+    /// 2026-06-18-002 U6: same as [`prepend_hat_handoff`] but takes
+    /// the pending events directly so it can run after the
+    /// `events_context` has already drained the bus in the
+    /// isolated-path prepend pipeline.
+    fn prepend_hat_handoff_from_pending(
+        &mut self,
+        prompt: String,
+        hat_id: &HatId,
+        pending: &[ralph_proto::Event],
+    ) -> String {
+        use crate::hat_handoff::inject;
+        if !self.config.event_loop.hat_handoff.enabled {
+            return prompt;
+        }
+        if !matches!(
+            self.config.event_loop.execution_mode,
+            crate::config::HatExecutionMode::Isolated
+        ) {
+            return prompt;
+        }
+        if hat_id.as_str() == "ralph" {
+            return prompt;
+        }
+
+        let handoff_path =
+            crate::hat_handoff::payload::find_in_pending(pending);
+        let workspace_root = self.config.core.workspace_root.as_path();
+        match inject::build_block(
+            workspace_root,
+            &self.config.event_loop.hat_handoff,
+            handoff_path.as_deref(),
+        ) {
+            Some(block) => format!("{block}{prompt}"),
+            None => {
+                if handoff_path.is_some() {
+                    self.bus.publish(ralph_proto::Event::new(
+                        "event.hat_handoff.inject_failed",
+                        format!(
+                            "{{\"hat\":\"{}\",\"reason\":\"file_missing_or_unreadable\",\"handoff_path\":\"{}\"}}",
+                            hat_id.as_str(),
+                            handoff_path.as_deref().unwrap_or(""),
+                        ),
+                    ));
+                }
+                prompt
+            }
+        }
+    }
+
     /// 2026-06-17-003 U4: prepend the `## ORCHESTRATOR CONTEXT`
     /// block. Reads the projector's in-memory cache when state
     /// projection is enabled; falls back to a disabled-stub
@@ -5934,6 +6019,10 @@ impl EventLoop {
         success: bool,
     ) -> Option<TerminationReason> {
         self.state.iteration += 1;
+        // 2026-06-18-002 U1 (KTD-12): reset handoff seq on iteration
+        // boundary so the same hat→hat path within a new iteration
+        // starts again from seq=1.
+        self.state.hat_handoff_seq = 0;
         self.state.last_hat = Some(hat_id.clone());
 
         // WRC-U4 (2026-06-12-003 / KTD-13 / hook 3): drain
@@ -6608,6 +6697,25 @@ impl EventLoop {
         // observe whether THIS turn admitted a business event.
         self.state.stall_detector_had_events = false;
         self.process_parse_result(result)
+    }
+
+    /// 2026-06-18-002 plan U5: look up the downstream hat's
+    /// declared `publishes` list for the gate's R15 topic check.
+    /// `from_hat` is unused for this lookup — the gate resolves the
+    /// downstream via `HandoffIndex::consumer_of(topic)`.
+    fn preset_hats_publishes(&self, _from_hat: &str, _topic: &str) -> Vec<String> {
+        // Resolution happens via `HandoffIndex::consumer_of` in
+        // the gate, which only needs the index. The downstream's
+        // publishes are looked up here from the preset `hats` map.
+        let consumer = match self.handoff_index.consumer_of(_topic) {
+            Some(c) => c,
+            None => return Vec::new(),
+        };
+        self.config
+            .hats
+            .get(consumer)
+            .map(|h| h.publishes.clone())
+            .unwrap_or_default()
     }
 
     /// Inner event processing that operates on an already-parsed `ParseResult`.
@@ -7655,6 +7763,99 @@ impl EventLoop {
             events = accepted;
         }
         // --- End state machine validation ---
+
+        // --- Hat-handoff gate (2026-06-18-002 plan U5, KTD-4; P0-1 + P0-2 fix) ---
+        // Inserted **between state machine and state_projection** so
+        // a reject does not poison the projector with a handoff
+        // that the agent will have to re-emit. The gate is a
+        // **minimum-surprise passthrough** when `hat_handoff.enabled`
+        // is false (T15/T20 coverage): events flow through, the
+        // tracker is untouched, no diagnostic is published.
+        //
+        // When enabled in `isolated` mode, the gate is **fail-closed**:
+        // every macro-edge emit is validated end-to-end (filename +
+        // seq + from/to + U3 structure + U4 publishes_check), and a
+        // reject drops the event from the batch so the downstream
+        // `state_projection` and `bus.publish` never see it. The agent
+        // must re-emit with a fixed handoff file to progress.
+        if self.config.event_loop.hat_handoff.enabled
+            && matches!(
+                self.config.event_loop.execution_mode,
+                crate::config::HatExecutionMode::Isolated
+            )
+        {
+            use crate::hat_handoff::gate::{self, GateDecision, GateInputs};
+            let mut rejected_diagnostics: Vec<ralph_proto::Event> = Vec::new();
+            events.retain(|ev| {
+                let from_hat = ev.hat.as_deref().unwrap_or("");
+                if from_hat.is_empty() {
+                    return true;
+                }
+                let handoff_path = ev
+                    .payload
+                    .as_deref()
+                    .and_then(crate::hat_handoff::payload::extract_handoff_path);
+                let downstream_publishes: Vec<String> =
+                    self.preset_hats_publishes(from_hat, &ev.topic);
+                let inputs = GateInputs {
+                    config: &self.config.event_loop.hat_handoff,
+                    execution_mode: self.config.event_loop.execution_mode.clone(),
+                    index: &self.handoff_index,
+                    from_hat,
+                    topic: &ev.topic,
+                    iteration: self.state.iteration,
+                    current_seq: self.state.hat_handoff_seq,
+                    handoff_path: handoff_path.as_deref(),
+                    downstream_publishes: &downstream_publishes,
+                    repo_root: self.config.core.workspace_root.as_path(),
+                };
+                let file_content: Option<String> = handoff_path.as_deref().and_then(|path| {
+                    use crate::hat_handoff::allocator;
+                    allocator::resolve_jailed(
+                        self.config.core.workspace_root.as_path(),
+                        path,
+                    )
+                    .ok()
+                    .and_then(|abs| std::fs::read_to_string(&abs).ok())
+                });
+                match gate::evaluate_event(&inputs, file_content.as_deref()) {
+                    GateDecision::NotRequired => true,
+                    GateDecision::Accept { .. } => {
+                        self.state.hat_handoff_seq += 1;
+                        true
+                    }
+                    GateDecision::Reject {
+                        reason_code,
+                        message,
+                    } => {
+                        // KTD-5: cancel the pending record we set at
+                        // policy-accept time so it doesn't escalate.
+                        let event_id = format!("{}:{}", ev.ts, ev.topic);
+                        self.state.handoff_tracker.cancel_pending(&event_id);
+                        let diag = ralph_proto::Event::new(
+                            "diagnostic.hat_handoff.rejected",
+                            format!(
+                                "{{\"reason_code\":\"{reason_code}\",\"message\":\"{}\",\"from_hat\":\"{from_hat}\",\"topic\":\"{}\"}}",
+                                message.replace('"', "'"),
+                                ev.topic,
+                            ),
+                        );
+                        // 2026-06-18 P0-2: record the diagnostic in
+                        // seen_topics so the fail-closed wiring is
+                        // observable to BDD scenarios and downstream
+                        // monitors. The diagnostic is a side-effect of
+                        // the gate, not an event that survived the
+                        // gate, so we record it explicitly here.
+                        self.state.record_event(&diag);
+                        rejected_diagnostics.push(diag);
+                        false
+                    }
+                }
+            });
+            for diag in rejected_diagnostics {
+                self.bus.publish(diag);
+            }
+        }
 
         // --- State projection (U1 of 2026-06-17-003 plan): ---
         // SP-R8 mandates that the projector runs **after** the

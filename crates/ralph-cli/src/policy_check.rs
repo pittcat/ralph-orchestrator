@@ -453,6 +453,180 @@ pub fn check_isolated_scope(
     })
 }
 
+/// 2026-06-18-002 plan U7: CLI-side mirror of the runtime hat-handoff
+/// gate. Wraps `ralph_core::hat_handoff::gate::evaluate_event` so the
+/// `ralph emit --policy-check` path and the runtime gate share the
+/// same reason_code vocabulary (KTD-13 / U7 contract).
+///
+/// `payload_str` is the raw JSON payload the agent would write to the
+/// events file. The CLI reads `handoff_path` from it the same way the
+/// runtime gate does, and applies file-content checks (read from
+/// disk) for structural / R15 validation. When `handoff_path` is
+/// present but the file is missing on disk, the CLI returns a
+/// `ValidationError` mirroring the runtime's `file_not_found`
+/// reason_code.
+pub fn check_hat_handoff_gate(
+    hat: Option<&str>,
+    topic: &str,
+    payload_str: Option<&str>,
+    config: &RalphConfig,
+) -> std::result::Result<(), ValidationError> {
+    use ralph_core::hat_handoff::gate::{self, GateDecision, GateInputs};
+    use ralph_core::workflow_contract::HandoffIndex;
+
+    let handoff_config = &config.event_loop.hat_handoff;
+    if !handoff_config.enabled {
+        return Ok(());
+    }
+    if config.event_loop.execution_mode != HatExecutionMode::Isolated {
+        return Ok(());
+    }
+    let Some(hat_id) = hat else {
+        return Ok(());
+    };
+
+    // 解析 payload 中的 handoff_path(与 runtime 同语义,走 SSOT)。
+    // 2026-06-18 P1-1: 改用 `hat_handoff::payload::extract_handoff_path`,
+    // 与 runtime gate / inject 共用同一函数,避免 SSOT 漂移。
+    let handoff_path = payload_str
+        .and_then(|raw| ralph_core::hat_handoff::payload::extract_handoff_path(raw));
+
+    // 用 preset 配置构造 HandoffIndex。
+    let index = HandoffIndex::from_config(config);
+
+    // 下游 hat publishes(同 runtime `preset_hats_publishes`)。
+    let downstream_publishes: Vec<String> = index
+        .consumer_of(topic)
+        .and_then(|consumer| config.hats.get(consumer))
+        .map(|h| h.publishes.clone())
+        .unwrap_or_default();
+
+    let workspace_root = &config.core.workspace_root;
+
+    // 读 handoff 文件(如有)。不在 gate 里 panic。
+    let file_content = match handoff_path.as_deref() {
+        Some(path) => match ralph_core::hat_handoff::allocator::resolve_jailed(
+            workspace_root,
+            path,
+        ) {
+            Ok(abs) => std::fs::read_to_string(&abs).ok(),
+            Err(_) => None,
+        },
+        None => None,
+    };
+
+    let inputs = GateInputs {
+        config: handoff_config,
+        execution_mode: config.event_loop.execution_mode.clone(),
+        index: &index,
+        from_hat: hat_id,
+        topic,
+        iteration: 1, // CLI 不在 loop 内,默认值;仅影响文件名 seq 校验。
+        current_seq: 0,
+        handoff_path: handoff_path.as_deref(),
+        downstream_publishes: &downstream_publishes,
+        repo_root: workspace_root.as_path(),
+    };
+
+    match gate::evaluate_event(&inputs, file_content.as_deref()) {
+        GateDecision::NotRequired | GateDecision::Accept { .. } => Ok(()),
+        GateDecision::Reject { reason_code, message } => Err(ValidationError {
+            payload_index: 0,
+            field: "handoff_path".to_string(),
+            reason_code: reason_code.to_string(),
+            message,
+        }),
+    }
+}
+
+#[cfg(test)]
+mod hat_handoff_tests {
+    use super::*;
+    use ralph_core::hat_handoff::gate::{
+        REASON_CODE_HAT_HANDOFF_FILE_NOT_FOUND, REASON_CODE_HAT_HANDOFF_MISSING_PATH,
+    };
+    use std::fs;
+
+    fn isolated_two_hat_yaml(hat_handoff_block: &str) -> String {
+        format!(
+            r#"
+tasks:
+  enabled: false
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+  execution_mode: isolated
+{hat_handoff_block}
+hats:
+  plan_gate:
+    name: "PlanGate"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+  executor:
+    name: "Executor"
+    triggers: ["work.ready"]
+    publishes: ["work.done"]
+"#
+        )
+    }
+
+    fn parse_cfg(yaml: &str) -> RalphConfig {
+        serde_yaml::from_str::<RalphConfig>(yaml).expect("parse ralph.yml fixture")
+    }
+
+    #[test]
+    fn disabled_returns_ok() {
+        let yaml = isolated_two_hat_yaml("  hat_handoff:\n    enabled: false\n");
+        let mut cfg = parse_cfg(&yaml);
+        cfg.core.workspace_root = tempfile::tempdir().unwrap().path().to_path_buf();
+        assert!(check_hat_handoff_gate(Some("plan-gate"), "work.ready", None, &cfg).is_ok());
+    }
+
+    #[test]
+    fn missing_path_rejected_with_ssot_reason_code() {
+        let yaml = isolated_two_hat_yaml("  hat_handoff:\n    enabled: true\n");
+        let mut cfg = parse_cfg(&yaml);
+        cfg.core.workspace_root = tempfile::tempdir().unwrap().path().to_path_buf();
+        let err = check_hat_handoff_gate(Some("plan-gate"), "work.ready", None, &cfg)
+            .expect_err("expected Reject");
+        assert_eq!(err.reason_code, REASON_CODE_HAT_HANDOFF_MISSING_PATH);
+    }
+
+    #[test]
+    fn file_not_found_rejected_with_ssot_reason_code() {
+        let yaml = isolated_two_hat_yaml("  hat_handoff:\n    enabled: true\n");
+        let mut cfg = parse_cfg(&yaml);
+        let dir = tempfile::tempdir().unwrap();
+        cfg.core.workspace_root = dir.path().to_path_buf();
+        let payload =
+            r#"{"handoff_path":".ralph/agent/hat-handoff/1-1-plan_gate-executor.md"}"#;
+        let err = check_hat_handoff_gate(Some("plan-gate"), "work.ready", Some(payload), &cfg)
+            .expect_err("expected Reject");
+        assert_eq!(err.reason_code, REASON_CODE_HAT_HANDOFF_FILE_NOT_FOUND);
+    }
+
+    #[test]
+    fn file_present_and_valid_accepts() {
+        let yaml = isolated_two_hat_yaml("  hat_handoff:\n    enabled: true\n");
+        let mut cfg = parse_cfg(&yaml);
+        let dir = tempfile::tempdir().unwrap();
+        cfg.core.workspace_root = dir.path().to_path_buf();
+        let abs = dir
+            .path()
+            .join(".ralph/agent/hat-handoff/1-1-plan_gate-executor.md");
+        fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        fs::write(
+            &abs,
+            "# Handoff: plan_gate → executor\n## context\nx\n## changed\ny\n## verify\nz\n## next\n**动作**: emit work.done after completion\n**阻塞**: 无\n## notes\n无\n",
+        )
+        .unwrap();
+        let payload =
+            r#"{"handoff_path":".ralph/agent/hat-handoff/1-1-plan_gate-executor.md"}"#;
+        assert!(check_hat_handoff_gate(Some("plan-gate"), "work.ready", Some(payload), &cfg).is_ok());
+    }
+}
+
+
 /// U1 (2026-06-17-004 plan, R1+R2): CLI provenance fail-closed.
 ///
 /// Closes the `hat = None` bypass where an isolated-mode CLI emit

@@ -324,6 +324,13 @@ impl LoopContext {
         self.agent_dir().join("handoff.md")
     }
 
+    /// 2026-06-18-002 plan: hat→hat roadmap handoff 文件目录。
+    /// 每个 (iteration, seq) 对应一个文件,文件名格式见
+    /// [`crate::hat_handoff::allocator`].
+    pub fn hat_handoff_dir(&self) -> PathBuf {
+        self.agent_dir().join("hat-handoff")
+    }
+
     /// Path to the diagnostics directory.
     ///
     /// Each loop has its own diagnostics output.

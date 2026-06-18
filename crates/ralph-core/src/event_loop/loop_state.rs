@@ -65,6 +65,13 @@ impl ProgressFingerprint {
 pub struct LoopState {
     /// Current iteration number (1-indexed).
     pub iteration: u32,
+    /// 2026-06-18-002 plan U1 (KTD-12): hat→hat roadmap handoff
+    /// sequence number within the current iteration. Reset to 0
+    /// when `iteration` changes. `hat_handoff_seq + 1` is the
+    /// `seq` portion of the next `handoff_path` returned by
+    /// `HatHandoffAllocator::prepare` and validated by
+    /// `apply_hat_handoff_gate`.
+    pub hat_handoff_seq: u32,
     /// Number of consecutive failures.
     pub consecutive_failures: u32,
     /// Cumulative cost in USD (if tracked).
@@ -398,6 +405,10 @@ impl Default for LoopState {
     fn default() -> Self {
         Self {
             iteration: 0,
+            // 2026-06-18-002 U1 (KTD-12): reset on iteration change.
+            // 0 means "no handoff accepted in this iteration yet";
+            // next prepare / accept uses seq = 1.
+            hat_handoff_seq: 0,
             consecutive_failures: 0,
             cumulative_cost: 0.0,
             started_at: Instant::now(),

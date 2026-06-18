@@ -21,6 +21,7 @@ mod commands;
 mod config_resolution;
 mod display;
 mod doctor;
+mod handoff_cli;
 mod hats;
 mod hooks;
 mod init;

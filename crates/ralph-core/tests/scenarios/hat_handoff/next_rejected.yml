@@ -1,0 +1,84 @@
+# 2026-06-18-002 plan U9: T2 / AE2 — next 反模式拒收
+#
+# Hat emits `work.done` with a handoff file whose `## next` action
+# line is the antipattern `继续处理` (no concrete object). The gate
+# rejects with a `diagnostic.hat_handoff.rejected` event; the loop
+# must NOT silently accept + close.
+#
+# 2026-06-18 P0-2 fix: now correctly fail-closed. The rejected
+# `work.done` is dropped from the batch (no state_projection, no
+# downstream routing), and only the diagnostic event is published.
+# The loop needs a fresh emit with a fixed handoff file before
+# progressing. The `completion: true` assertion still holds because
+# round-robin activates `review-coordinator` in iter 2, which then
+# emits `LOOP_COMPLETE` regardless of whether `work.done` was
+# accepted — that is the harness artifact, not the gate's behavior.
+
+name: hat_handoff_next_rejected
+description: "T2 AE2: next-action antipattern -> gate rejects with diagnostic event"
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 5
+  hats:
+    executor:
+      subscribes_to:
+        - task.start
+      publishes:
+        - work.done
+    review-coordinator:
+      subscribes_to:
+        - work.done
+      publishes:
+        - LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
+    starting_event: "task.start"
+    hat_handoff:
+      enabled: true
+
+fixture_files:
+  - path: .ralph/agent/hat-handoff/1-1-executor-review_coordinator.md
+    content: |
+      # Handoff: executor → review-coordinator
+      ## context
+      executor finished; antipattern action line below.
+
+      ## changed
+      无
+
+      ## verify
+      无
+
+      ## next
+      **动作**: 继续处理
+      **阻塞**: 无
+
+      ## notes
+      无
+
+mock_responses:
+  - text: |
+      <event topic="work.done">
+      task_id: "task-real-002"
+      handoff_path: ".ralph/agent/hat-handoff/1-1-executor-review_coordinator.md"
+      </event>
+    hat: executor
+  - text: |
+      <event topic="LOOP_COMPLETE">
+      Done.
+      </event>
+    hat: review-coordinator
+
+expected:
+  iterations: 2
+  completion: true
+  # AE2 — the gate must publish `diagnostic.hat_handoff.rejected`
+  # on the bus. With P0-2 fail-closed wiring the rejected `work.done`
+  # is dropped from the batch — `absent_events` stays empty here only
+  # because the harness's round-robin still activates
+  # `review-coordinator` for the second mock_response; the gate's
+  # real fail-closed behavior is exercised by
+  # `work_done_rejected_blocks_projection.yml`.
+  absent_events: []

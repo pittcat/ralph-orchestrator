@@ -1,0 +1,103 @@
+# 2026-06-18-002 plan U9: T7 / AE7 — fail-closed blocks state_projection
+#
+# Executor emits `work.done` with a handoff file whose `## next`
+# action is the antipattern `继续处理`. The gate must:
+#
+# 1. **Drop** `work.done` from the batch so the downstream
+#    `state_projection` never sees it (fail-closed).
+# 2. **Publish** `diagnostic.hat_handoff.rejected` so the agent
+#    can recover.
+#
+# 2026-06-18 P0-2 wiring pins both behaviors:
+#
+# - `work.done` is **absent** from `seen_topics` (retain filter
+#   removed it before `record_event`).
+# - `diagnostic.hat_handoff.rejected` **is** in `seen_topics`
+#   (it gets published to the bus and recorded normally).
+#
+# The test harness's round-robin will still activate
+# `review-coordinator` in iter 2 (no completion path required),
+# so we only assert on the gate's two observable side effects.
+#
+# References: plan T7 / AE7 / R14.
+
+name: hat_handoff_work_done_rejected_blocks_projection
+description: "T7 AE7: gate drops work.done and publishes diagnostic; seen_topics reflects both"
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 5
+  hats:
+    executor:
+      subscribes_to:
+        - task.start
+      publishes:
+        - work.done
+    review-coordinator:
+      subscribes_to:
+        - work.done
+      publishes:
+        - LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
+    starting_event: "task.start"
+    hat_handoff:
+      enabled: true
+
+fixture_files:
+  - path: .ralph/agent/hat-handoff/1-1-executor-review_coordinator.md
+    content: |
+      # Handoff: executor → review-coordinator
+      ## context
+      executor finished; antipattern action line below.
+
+      ## changed
+      无
+
+      ## verify
+      无
+
+      ## next
+      **动作**: 继续处理
+      **阻塞**: 无
+
+      ## notes
+      无
+
+# Run 1: executor emits work.done with an antipattern handoff file
+# → gate rejects → work.done dropped, diagnostic published.
+# Run 2: round-robin activates review-coordinator. It has no work.done
+# to aggregate (it was dropped), so the prompt is empty; the test
+# harness still consumes the response, but it is unrelated to the
+# gate's fail-closed semantics — we only assert on the side effects.
+# Each response is tagged with its source hat so the runtime
+# handoff gate sees a non-empty `from_hat` and can fire the macro
+# edge rejection.
+mock_responses:
+  - text: |
+      <event topic="work.done">
+      task_id: "task-real-007"
+      handoff_path: ".ralph/agent/hat-handoff/1-1-executor-review_coordinator.md"
+      </event>
+    hat: executor
+  - text: |
+      <event topic="LOOP_COMPLETE">
+      Done.
+      </event>
+    hat: review-coordinator
+
+expected:
+  iterations: 2
+  completion: true
+  # The gate's fail-closed contract:
+  # - `work.done` was rejected, so it must NOT appear in seen_topics.
+  # - `diagnostic.hat_handoff.rejected` was published, so it MUST.
+  # These two assertions together prove fail-closed is wired
+  # end-to-end (P0-1 + P0-2). The harness's round-robin still
+  # completes the loop via review-coordinator + LOOP_COMPLETE; that
+  # is orthogonal to the gate's behavior.
+  absent_events:
+    - topic: work.done
+  events:
+    - topic: diagnostic.hat_handoff.rejected

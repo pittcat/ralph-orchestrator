@@ -13,6 +13,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+use crate::handoff_cli;
 use crate::interact;
 use crate::memory;
 use crate::skill_cli;
@@ -38,6 +39,10 @@ pub enum ToolsCommands {
 
     /// Interact with human via Telegram (progress updates, notifications)
     Interact(interact::InteractArgs),
+
+    /// 2026-06-18-002 plan: hat→hat roadmap handoff helper.
+    /// Allocates `handoff_path` + skeleton for macro-edge emits.
+    Handoff(handoff_cli::HandoffArgs),
 }
 
 /// Execute a tools command.
@@ -47,5 +52,6 @@ pub async fn execute(args: ToolsArgs, use_colors: bool) -> Result<()> {
         ToolsCommands::Task(task_args) => task_cli::execute(task_args, use_colors),
         ToolsCommands::Skill(skill_args) => skill_cli::execute(skill_args),
         ToolsCommands::Interact(interact_args) => interact::execute(interact_args).await,
+        ToolsCommands::Handoff(handoff_args) => handoff_cli::execute(handoff_args),
     }
 }
