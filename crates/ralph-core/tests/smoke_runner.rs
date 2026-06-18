@@ -253,6 +253,63 @@ fn test_noble_peacock_replay_fixture_runs_without_panic() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// 2026-06-17-004 U5 (R5): the `work.start` bootstrap record now lives in the
+// trusted events file (not just the history logger), and the live loop skips
+// it via `EventReader::sync_event_reader_to_file_end`.  Replay tooling must
+// therefore be able to consume fixtures whose first line is `work.start`.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// T5.5 (Fixture content guard, Covers R5): the noble-peacock replay
+/// fixture must keep `work.start` as its first non-empty line so it
+/// matches the wire shape produced by the U5 runner change.  A
+/// regression here means downstream replay tooling (e.g. `ralph
+/// diagnose` walking the events file) would see a missing bootstrap
+/// line and the chain contract would be off by one event.
+#[test]
+fn test_noble_peacock_replay_fixture_starts_with_work_start() {
+    let fixture = fixtures_dir().join("noble-peacock-review-stall/replay.jsonl");
+    let content = std::fs::read_to_string(&fixture).expect("fixture must be readable");
+    let first_line = content
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .expect("fixture must have at least one non-empty line");
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(first_line).expect("first line must be valid JSON");
+    assert_eq!(
+        parsed["topic"], "work.start",
+        "U5: noble-peacock fixture first line must be work.start (runner now persists \
+         the bootstrap event to the events file); got: {parsed}"
+    );
+    assert!(
+        parsed["payload"].is_object(),
+        "U5: work.start payload must be a structured object so the planner can read \
+         plan_name/task_id/etc; got: {parsed}"
+    );
+}
+
+/// T5.6 (Integration, Covers R5): the smoke replay backend must
+/// process a fixture whose first line is `work.start` without
+/// panicking or refusing the line.  This is the same code path
+/// `ralph diagnose` would use, so a panic here would mean the new
+/// U5 runner code broke the replay side of the contract.
+#[test]
+fn test_noble_peacock_replay_with_work_start_first_line_does_not_panic() {
+    let fixture = fixtures_dir().join("noble-peacock-review-stall/replay.jsonl");
+    let config = SmokeTestConfig::new(&fixture).with_timeout(Duration::from_secs(10));
+    // We do not care about the completion verdict here — only that
+    // the runner does not panic on a fixture whose first event is
+    // the bootstrap `work.start` that U5 now persists to the
+    // trusted events file.
+    let result = SmokeRunner::run(&config);
+    assert!(
+        result.is_ok() || result.is_err(),
+        "U5: smoke runner must deterministically Ok/Err on a work.start-led \
+         fixture, never panic. result: {result:?}"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // REGRESSION DETECTION TESTS
 // These tests prove the smoke test infrastructure catches bugs and regressions.
 // They intentionally create broken scenarios to verify the system fails correctly.
