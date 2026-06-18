@@ -75,6 +75,20 @@ event_loop:
   # so `TaskStore::ensure` rejects sibling unit tasks in the same
   # step (the original `calm-oak` failure mode).
   enforce_current_unit: true
+  # 2026-06-18-002 plan U11: enable hat_handoff (roadmap hat→hat
+  # handoff). KTD-11 / Phased Delivery gate (U9 BDD green) is
+  # satisfied — all 6 hat_handoff scenarios pass on
+  # `cargo nextest run -p ralph-core --test scenarios hat_handoff`.
+  # Once enabled, the runtime gate enforces `handoff_path` on
+  # macro edges (executor → review-coordinator for `work.done`,
+  # plan-gate → executor for `work.ready`); the inject step
+  # prepends `## HAT HANDOFF` to the downstream hat prompt.
+  # See `crates/ralph-core/src/hat_handoff/` for the gate /
+  # allocator / validator / publishes_check modules, and
+  # `docs/achieved/plan/2026-06-18-002-feat-isolated-hat-handoff-plan.md`
+  # for the full design.
+  hat_handoff:
+    enabled: true
   # 2026-06-17-003 plan U1: enable state projection. The
   # orchestrator becomes the canonical writer for
   # `.ralph/agent/tasks.jsonl` and `.ralph/agent/progress.md`;

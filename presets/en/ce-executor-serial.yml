@@ -88,6 +88,15 @@ event_loop:
   # Same single-U contract as ce-executor-isolated. Coordinator must
   # only create the current U's task.
   enforce_current_unit: true
+  # 2026-06-18-002 plan U11: enable hat_handoff (roadmap hat→hat
+  # handoff). KTD-11 / Phased Delivery gate (U9 BDD green) is
+  # satisfied — all 6 hat_handoff scenarios pass on
+  # `cargo nextest run -p ralph-core --test scenarios hat_handoff`.
+  # Identical contract to ce-executor-isolated: the gate enforces
+  # `handoff_path` on macro edges; the inject step prepends
+  # `## HAT HANDOFF` to the downstream hat prompt.
+  hat_handoff:
+    enabled: true
   # 2026-06-18-004 plan U2 (R2, KTD2): suppress human guidance
   # injection for all hats in this preset. Free-text guidance
   # caused the perky-maple P1-2 probe storm where the executor
