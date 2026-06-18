@@ -55,6 +55,23 @@ struct ExpectedYaml {
     #[serde(default)]
     absent_events: Vec<EventYaml>,
     completion: bool,
+    /// 2026-06-18-002 plan U8 (KTD-17): assert that for a given
+    /// `hat`, the last prompt the runner built contains every
+    /// substring. Used by hat-handoff scenarios to verify
+    /// `## HAT HANDOFF` injection end-to-end. Empty list = no
+    /// prompt assertions.
+    #[serde(default)]
+    prompt_contains: Vec<PromptContainsYaml>,
+}
+
+/// `ExpectedYaml.prompt_contains` 元素:断言 hat 的 prompt 含
+/// 列出的所有 substrings。
+#[allow(dead_code)] // Test infrastructure - fields used for YAML deserialization
+#[derive(Debug, Deserialize)]
+struct PromptContainsYaml {
+    hat: String,
+    #[serde(default)]
+    substrings: Vec<String>,
 }
 
 #[allow(dead_code)] // Test infrastructure - fields used for YAML deserialization
@@ -182,12 +199,24 @@ fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
 
     let parser = EventParser::new();
 
+    // 2026-06-18-002 plan U8 (KTD-17): capture the **last prompt**
+    // each hat saw during the run. Stored by hat id so the
+    // `prompt_contains` assertions below can look up the right
+    // entry. Only the last prompt per hat is retained because the
+    // prompt grows monotonically and the asserts want the most
+    // representative state.
+    let mut last_prompts: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+
     for (idx, response) in yaml.mock_responses.iter().enumerate() {
         // Simulate hat execution so isolated mode scope enforcement is active.
         // build_prompt() consumes pending events from the bus, matching real loop behavior.
         if let Some(hat) = event_loop.next_hat() {
             let hat = hat.clone();
-            let _ = event_loop.build_prompt(&hat);
+            let prompt = event_loop.build_prompt(&hat);
+            if let Some(p) = prompt {
+                last_prompts.insert(hat.to_string(), p);
+            }
             let _ = event_loop.process_output(&hat, "", true);
         }
 
@@ -275,6 +304,28 @@ fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
             yaml.name,
             absent_event.topic
         );
+    }
+
+    // 2026-06-18-002 plan U8 (KTD-17): assert `prompt_contains` per
+    // hat. Each entry's substrings must appear in the **last** prompt
+    // captured for that hat. Skip silently when the hat was never
+    // activated (no entry in `last_prompts`); this keeps scenarios
+    // that don't exercise the prompt path passing without forcing
+    // every hat to be reached.
+    for pc in &yaml.expected.prompt_contains {
+        let Some(prompt) = last_prompts.get(&pc.hat) else {
+            continue;
+        };
+        for needle in &pc.substrings {
+            assert!(
+                prompt.contains(needle.as_str()),
+                "{}: prompt for hat `{}` is missing substring `{}`\n--- prompt (first 800 chars) ---\n{}\n---",
+                yaml.name,
+                pc.hat,
+                needle,
+                &prompt[..prompt.len().min(800)],
+            );
+        }
     }
 
     // Verify final workflow progress
@@ -881,12 +932,24 @@ fn test_isolated_with_event_projection() {
 
     let parser = EventParser::new();
 
+    // 2026-06-18-002 plan U8 (KTD-17): capture the **last prompt**
+    // each hat saw during the run. Stored by hat id so the
+    // `prompt_contains` assertions below can look up the right
+    // entry. Only the last prompt per hat is retained because the
+    // prompt grows monotonically and the asserts want the most
+    // representative state.
+    let mut last_prompts: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+
     for (idx, response) in yaml.mock_responses.iter().enumerate() {
         // Simulate hat execution so isolated mode scope enforcement is active.
         // build_prompt() consumes pending events from the bus, matching real loop behavior.
         if let Some(hat) = event_loop.next_hat() {
             let hat = hat.clone();
-            let _ = event_loop.build_prompt(&hat);
+            let prompt = event_loop.build_prompt(&hat);
+            if let Some(p) = prompt {
+                last_prompts.insert(hat.to_string(), p);
+            }
             let _ = event_loop.process_output(&hat, "", true);
         }
 
@@ -974,6 +1037,28 @@ fn test_isolated_with_event_projection() {
             yaml.name,
             absent_event.topic
         );
+    }
+
+    // 2026-06-18-002 plan U8 (KTD-17): assert `prompt_contains` per
+    // hat. Each entry's substrings must appear in the **last** prompt
+    // captured for that hat. Skip silently when the hat was never
+    // activated (no entry in `last_prompts`); this keeps scenarios
+    // that don't exercise the prompt path passing without forcing
+    // every hat to be reached.
+    for pc in &yaml.expected.prompt_contains {
+        let Some(prompt) = last_prompts.get(&pc.hat) else {
+            continue;
+        };
+        for needle in &pc.substrings {
+            assert!(
+                prompt.contains(needle.as_str()),
+                "{}: prompt for hat `{}` is missing substring `{}`\n--- prompt (first 800 chars) ---\n{}\n---",
+                yaml.name,
+                pc.hat,
+                needle,
+                &prompt[..prompt.len().min(800)],
+            );
+        }
     }
 
     // Verify final workflow progress
