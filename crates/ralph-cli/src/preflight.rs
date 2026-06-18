@@ -926,6 +926,32 @@ pub(crate) fn merge_hats_overlay(mut core: Value, hats: Value) -> Result<Value> 
                     // execution_contracts) — those are properties of the
                     // hat collection, not operator policy.
                     event_loop_mapping.insert(key.clone(), value.clone());
+                } else if key_str == "hat_handoff" {
+                    // 2026-06-19 fix: `hat_handoff` is opt-in per preset
+                    // (off by default; enabled by ce-executor-isolated /
+                    // serial / wave). Mirror the `state_projection`
+                    // pattern: when the operator ralph.yml has NOT
+                    // declared the key, fall through to the preset's
+                    // value (which is what makes "I enabled hat_handoff
+                    // in my preset" actually take effect). When the
+                    // operator HAS declared it (any value, including
+                    // `enabled: false`), the operator's value wins —
+                    // the preset is not allowed to override an explicit
+                    // operator decision.
+                    //
+                    // Symptom of the previous bug (root cause for
+                    // worktree 2026-06-10-003-...-bold-heron's missing
+                    // .ralph/agent/hat-handoff/): the
+                    // `else if !contains_key` branch below only printed
+                    // an eprintln warning, did NOT insert, so the
+                    // default-deserialize fell back to
+                    // `HatHandoffConfig::default() = enabled: false`.
+                    if !event_loop_mapping.contains_key(&key) {
+                        event_loop_mapping.insert(key.clone(), value.clone());
+                    }
+                    // else: operator's ralph.yml already declares
+                    // `event_loop.hat_handoff`; the operator's value
+                    // wins, no warning, no fallback.
                 } else if !event_loop_mapping.contains_key(&key) {
                     // Surface the silent-drop UX defect ONLY when the operator's
                     // ralph.yml has NOT already declared the key. If the operator
@@ -1435,6 +1461,104 @@ event_loop:
         assert!(!config.event_loop.enforce_hat_scope);
         // Whitelisted keys still merge through.
         assert_eq!(config.event_loop.completion_promise, "LOOP_COMPLETE");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // 2026-06-19 fix: preset `event_loop.hat_handoff` must fall through
+    // to the merged config when the operator's ralph.yml has NOT
+    // declared `hat_handoff` (mirrors the `state_projection` opt-in
+    // pattern at lines ~895-920). Without this, every preset that opts
+    // into the hat→hat roadmap handoff (ce-executor-isolated / serial /
+    // wave) is silently downgraded to `HatHandoffConfig::default()`
+    // (`enabled: false`) because `hat_handoff` is not in
+    // `ALLOWED_HATS_EVENT_LOOP_OVERLAY_KEYS`. Symptom:
+    // `.ralph/agent/hat-handoff/` never appears, and
+    // `## HAT HANDOFF EMIT REQUIREMENTS` is never prepended to the
+    // upstream hat prompt.
+    #[test]
+    fn merge_hats_overlay_preserves_preset_hat_handoff_when_operator_omits_it() {
+        let core: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  max_runtime_seconds: 28800
+  completion_promise: LOOP_COMPLETE
+  max_iterations: 500
+  prompt_file: PROMPT.md
+hats:
+  coordinator:
+    backend: claude
+",
+        )
+        .unwrap();
+
+        let hats: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  execution_mode: isolated
+  hat_handoff:
+    enabled: true
+hats:
+  coordinator:
+    name: Coordinator
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        // Operator's event_loop keys must survive.
+        assert_eq!(config.event_loop.max_runtime_seconds, 28800);
+        assert_eq!(config.event_loop.max_iterations, 500);
+        assert_eq!(config.event_loop.completion_promise, "LOOP_COMPLETE");
+        // Whitelisted key from preset still wins.
+        assert!(matches!(
+            config.event_loop.execution_mode,
+            ralph_core::config::HatExecutionMode::Isolated
+        ));
+        // The fix: preset's hat_handoff survives when operator omits it.
+        assert!(
+            config.event_loop.hat_handoff.enabled,
+            "preset hat_handoff.enabled=true must survive merge when operator omits it"
+        );
+    }
+
+    #[test]
+    fn merge_hats_overlay_lets_operator_override_preset_hat_handoff() {
+        // If the operator EXPLICITLY sets `hat_handoff` in ralph.yml,
+        // the operator's value wins (mirrors `state_projection` opt-in
+        // semantics: explicit operator decision is authoritative).
+        let core: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  hat_handoff:
+    enabled: false
+hats:
+  coordinator:
+    backend: claude
+",
+        )
+        .unwrap();
+
+        let hats: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  hat_handoff:
+    enabled: true
+hats:
+  coordinator:
+    name: Coordinator
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        assert!(
+            !config.event_loop.hat_handoff.enabled,
+            "operator's explicit hat_handoff.enabled=false must override preset"
+        );
     }
 
     #[test]
