@@ -1487,3 +1487,136 @@ fn test_ce_executor_serial_dimension_reviewer_disallowed_tools_pinned() {
         "U2 R2: HARD RULE must call out findings JSON as the only legal write"
     );
 }
+
+/// U7 (R7): in isolated mode, business topics without an explicit --source
+/// must default to the emitting hat's hat-id in the serialized JSONL record.
+/// Control topics (loop.cancel, task.resume, etc.) are unaffected.
+#[test]
+fn test_u7_business_topic_default_source_is_emitting_hat() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    // Isolated-mode preset (ce-executor-serial) + business topic + no --source flag
+    let output = ralph_emit(
+        temp_path,
+        &[
+            "-H",
+            "builtin:ce-executor-serial",
+            "emit",
+            "review.dimension.done",
+            "--json",
+            r#"{"dimension":"correctness","status":"done","findings_count":0,"findings_file":".agents/scratchpad/findings-c-t.json","plan_name":"p","task_id":"t","task_key":"k","step":"s"}"#,
+            "--hat",
+            "dimension-reviewer",
+        ],
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "isolated + business topic + hat must succeed: stderr={}",
+        stderr
+    );
+
+    let events_file = temp_path.join(".ralph/events.jsonl");
+    let events = std::fs::read_to_string(&events_file).expect("events file should exist");
+    // Source must default to the emitting hat
+    assert!(
+        events.contains("\"source\":\"dimension-reviewer\""),
+        "U7 R7: business topic without --source must default source=hat in isolated mode. Got: {}",
+        events
+    );
+    // hat field must still be present
+    assert!(
+        events.contains("\"hat\":\"dimension-reviewer\""),
+        "hat field must still be present: {}",
+        events
+    );
+}
+
+/// U7 (R7): explicit --source overrides the hat-default in isolated mode.
+#[test]
+fn test_u7_explicit_source_overrides_default() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    let output = ralph_emit(
+        temp_path,
+        &[
+            "-H",
+            "builtin:ce-executor-serial",
+            "emit",
+            "work.done",
+            "--json",
+            r#"{"plan_name":"p","plan_path":"x","task_id":"t","task_key":"k","step":"s","commit_count":1,"changed_lines":10}"#,
+            "--hat",
+            "executor",
+            "--source",
+            "my-agent",
+        ],
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "explicit --source must succeed: stderr={}",
+        stderr
+    );
+
+    let events_file = temp_path.join(".ralph/events.jsonl");
+    let events = std::fs::read_to_string(&events_file).expect("events file should exist");
+    // Explicit source must win over hat-default
+    assert!(
+        events.contains("\"source\":\"my-agent\""),
+        "U7 R7: explicit --source must override hat-default. Got: {}",
+        events
+    );
+    assert!(
+        !events.contains("\"source\":\"executor\""),
+        "U7 R7: hat must NOT appear as source when --source is given. Got: {}",
+        events
+    );
+}
+
+/// U7 (R7): control topics must NOT get a hat-derived source default
+/// (they are orchestrator-internal events; source field is left empty or absent).
+#[test]
+fn test_u7_control_topic_source_unchanged() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    // Without a preset (-H), isolated scope check is skipped, so any hat can emit.
+    // ce-executor-serial is isolated-mode but without -H the CLI runs without
+    // isolated scope enforcement — still valid for the "control topic bypasses
+    // hat-default source" assertion.
+    let output = ralph_emit(
+        temp_path,
+        &[
+            "emit",
+            "task.resume",
+            "--json",
+            r#"{"reason":"recovery","target_hat":"coordinator"}"#,
+            "--hat",
+            "coordinator",
+        ],
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "control topic emit must succeed: stderr={}",
+        stderr
+    );
+
+    let events_file = temp_path.join(".ralph/events.jsonl");
+    let events = std::fs::read_to_string(&events_file).expect("events file should exist");
+    // task.resume is in RALPH_CONTROL_TOPICS — source must NOT be defaulted to hat
+    assert!(
+        !events.contains("\"source\":\"coordinator\""),
+        "U7 R7: control topic must NOT get hat-default source. Got: {}",
+        events
+    );
+}

@@ -998,7 +998,7 @@ hats:
           "task_id": "<task_id>",
           "task_key": "<task_key>",
           "step": "<step>"
-        }'
+        }' --source dimension-reviewer
         ```
       - Emit `review.dimensions.complete` via `ralph emit`:
         ```bash
@@ -1013,7 +1013,7 @@ hats:
             {"dimension": "maintainability", "status": "failed", "reason": "timeout: worker hit dimension-reviewer.timeout without emitting review.dimension.done"},
             {"dimension": "requirements",    "status": "done",   "findings_file": ".agents/scratchpad/ce-executor/<plan>/findings-requirements-<task>.json"}
           ]
-        }'
+        }' --source dimension-reviewer
         ```
       - Do NOT use `ralph wave emit` — there is no wave in this preset.
       - MUST NOT append or write to `.ralph/events.jsonl` directly; use `ralph emit` only. Direct shell writes bypass the schema precheck and the loop will reject the event with `payload_contract_violation` (likely terminating the loop with `not_retriable`).

@@ -737,14 +737,28 @@ fn emit_command_with_root_and_hats(
     });
 
     // Add provenance fields only when they have values (preserve old simple schema)
-    if let Some(hat) = hat {
-        record["hat"] = serde_json::Value::String(hat);
+    if let Some(ref hat) = hat {
+        record["hat"] = serde_json::Value::String(hat.clone());
     }
     if let Some(triggered) = triggered {
         record["triggered"] = serde_json::Value::String(triggered);
     }
     if let Some(source) = source {
         record["source"] = serde_json::Value::String(source);
+    } else if source.is_none()
+        && config
+            .as_ref()
+            .is_some_and(|c| c.event_loop.execution_mode == HatExecutionMode::Isolated)
+        && !ralph_core::RALPH_CONTROL_TOPICS
+            .iter()
+            .any(|t| *t == args.topic.as_str())
+        && hat.is_some()
+    {
+        // U7 (2026-06-17-004 plan, R7): in isolated mode, when a business topic
+        // has no explicit --source and hat is known, default source to the emitting
+        // hat so downstream consumers always have a stable attribution field.
+        // Control topics (loop.cancel, task.resume, etc.) are unchanged.
+        record["source"] = serde_json::Value::String(hat.as_ref().expect("U7 R7: hat checked non-None above").clone());
     }
 
     // Auto-tag with wave metadata from env vars (set by loop runner on wave workers)
