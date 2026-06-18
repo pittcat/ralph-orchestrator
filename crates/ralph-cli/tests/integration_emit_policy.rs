@@ -1339,3 +1339,151 @@ fn test_ce_executor_serial_coordinator_review_passed_rejected_dimensions_complet
         events
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 2026-06-17-004 plan U2 (R2): dimension-reviewer is locked to a read-only
+// role. The preset now pins `disallowed_tools: ["Bash", "Edit"]` and a HARD
+// RULE in the instructions; this section verifies the contract from two
+// angles:
+//   - Happy path: dimension-reviewer emitting `review.dimension.done` with
+//     the published required fields still lands in events.jsonl. This
+//     proves the new restrictions did NOT accidentally over-block the
+//     legitimate emit path. The integration test mirrors
+//     `test_emit_t1_6_isolated_review_synthesizer_legal_emit_allowed` for
+//     the dimension-reviewer positive path.
+//   - Round-trip preset check: a fresh preset load deserializes the new
+//     `disallowed_tools` array, so the operator-visible preset manifest
+//     (and the `ralph preset check --strict` gate) confirm the
+//     configuration. This is the only assertion that does not require a
+//     live CLI invocation; it directly exercises the YAML schema.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// U2 (R2) Happy path: dimension-reviewer emitting `review.dimension.done`
+/// with a complete payload is accepted and lands in events.jsonl. This
+/// pins the positive path so future scope-tightening does not
+/// over-block legitimate reviewer emits. The new `disallowed_tools` array
+/// restricts the LLM agent's tool belt; it does NOT change the topic-level
+/// publish / precheck contract for `review.dimension.done` itself.
+#[test]
+fn test_ce_executor_serial_dimension_reviewer_review_done_lands() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    // `review.dimension.done` is in dimension-reviewer's declared
+    // `publishes` for ce-executor-serial; the schema requires
+    // [dimension, findings_count, findings_file, plan_name, task_id,
+    // task_key, step] (see `event_policy.schemas` in the preset YAML).
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "-H",
+            "builtin:ce-executor-serial",
+            "emit",
+            "review.dimension.done",
+            "--json",
+            r#"{"dimension":"testing","findings_count":0,"findings_file":".agents/scratchpad/ce-executor/p/findings-testing-t.json","plan_name":"p","task_id":"t","task_key":"k","step":"s","p0_count":0,"p1_count":0,"p2_count":0,"p3_count":0,"safe_auto_count":0,"gated_auto_count":0,"manual_count":0,"advisory_count":0}"#,
+            "--hat",
+            "dimension-reviewer",
+        ])
+        .env("RALPH_CURRENT_HAT", "dimension-reviewer")
+        .current_dir(temp_path)
+        .output()
+        .expect("Failed to execute ralph emit command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "U2 R2 positive path: dimension-reviewer + review.dimension.done \
+         must be accepted. stdout={stdout} stderr={stderr}"
+    );
+
+    // The event MUST land in events.jsonl with the dimension-reviewer
+    // hat provenance — this is the only write that U2 still allows.
+    let events_file = temp_path.join(".ralph/events.jsonl");
+    let events = std::fs::read_to_string(&events_file).unwrap();
+    assert!(
+        events.contains("\"topic\":\"review.dimension.done\""),
+        "review.dimension.done must land in events.jsonl, got: {}",
+        events
+    );
+    assert!(
+        events.contains("\"hat\":\"dimension-reviewer\""),
+        "hat provenance must be dimension-reviewer (U2 R2 write provenance), got: {}",
+        events
+    );
+    assert!(
+        events.contains("findings-testing-t.json"),
+        "findings_file path must be preserved in payload, got: {}",
+        events
+    );
+}
+
+/// U2 (R2) Round-trip: loading `builtin:ce-executor-serial` deserializes
+/// the new `disallowed_tools: ["Bash", "Edit"]` on the
+/// `dimension-reviewer` hat. This is the only assertion that does not
+/// need a live CLI invocation — it exercises the YAML schema directly
+/// via the same loader the operator uses (`ralph preset check --strict`).
+///
+/// Rationale: the CLI precheck enforces the publishes / topic / schema
+/// contract; the `disallowed_tools` array is enforced at three other
+/// layers (prompt injection, `audit_file_modifications`, and
+/// `TOOL RESTRICTIONS` block). None of those layers writes to
+/// events.jsonl, so a positive CLI path cannot pin them. This test pins
+/// the *configuration* — the array is in the preset, the loader sees it,
+/// the operator-visible `preset check --strict` will see it.
+#[test]
+fn test_ce_executor_serial_dimension_reviewer_disallowed_tools_pinned() {
+    use ralph_core::RalphConfig;
+
+    // Inline the canonical preset (same approach as
+    // `crates/ralph-core/tests/hat_explicit_routing.rs::load_ce_executor_registry`)
+    // so the assertion does not depend on the working directory or the
+    // `RALPH_HATS_SOURCE` env var.
+    let yaml = include_str!("../../../presets/en/ce-executor-serial.yml");
+    let config: RalphConfig = serde_yaml::from_str(yaml)
+        .expect("ce-executor-serial.yml must parse as RalphConfig for the round-trip assertion");
+
+    let dr = config
+        .hats
+        .get("dimension-reviewer")
+        .expect("dimension-reviewer must be present in ce-executor-serial preset");
+
+    // The exact ordered list is part of the U2 R2 contract:
+    //   - `Bash` — soft ban, prevents reviewer from running
+    //     cargo test / build / clippy / shell pipelines.
+    //   - `Edit` — hard ban, runtime git-diff audit detects any
+    //     source-file edit and emits a scope_violation event.
+    //   - `Write` MUST remain in the allowed set so the reviewer can
+    //     still emit the findings JSON file.
+    assert_eq!(
+        dr.disallowed_tools,
+        vec!["Bash".to_string(), "Edit".to_string()],
+        "U2 R2: dimension-reviewer.disallowed_tools must be exactly \
+         [\"Bash\", \"Edit\"]; got {:?}",
+        dr.disallowed_tools
+    );
+
+    // The HARD RULE block in the instructions must mention the three
+    // contract guarantees: no shell, no source edits, findings JSON is
+    // the only legal write. We do a substring probe rather than a
+    // structural assertion so the wording can evolve without breaking
+    // the test, but the three anchor phrases must remain.
+    let instr = dr.instructions.as_str();
+    assert!(
+        instr.contains("HARD RULE"),
+        "U2 R2: dimension-reviewer instructions must declare a HARD RULE block"
+    );
+    assert!(
+        instr.contains("Bash") || instr.contains("shell"),
+        "U2 R2: HARD RULE must reference Bash / shell ban"
+    );
+    assert!(
+        instr.contains("Edit") || instr.contains("修改") || instr.contains("修改任何源码"),
+        "U2 R2: HARD RULE must reference Edit / source-edit ban"
+    );
+    assert!(
+        instr.contains("findings") && instr.contains("JSON"),
+        "U2 R2: HARD RULE must call out findings JSON as the only legal write"
+    );
+}
