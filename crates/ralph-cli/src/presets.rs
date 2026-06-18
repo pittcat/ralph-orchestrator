@@ -1387,6 +1387,60 @@ mod tests {
         });
     }
 
+    /// U4 (2026-06-18-004 plan, R1, R6): serial preset plan-gate
+    /// negative assertion. Mirrors the isolated preset's
+    /// `plan_gate_must_not_listen_to_fix_applied` test but for
+    /// `ce-executor-serial`. The perky-maple diagnosis initially
+    /// proposed ADDING `fix.applied` to plan-gate triggers as
+    /// the P1-1 fix — KTD1 of the 2026-06-18-004 plan REJECTED
+    /// that approach because (a) it would skip the re-review
+    /// walk and (b) it violates the orchestrator's "plan-gate
+    /// only dispatches on terminal review verdicts"
+    /// invariant. The correct fix is the U1 dedup prune + U3
+    /// obligations + U5 complete dedup, all of which keep
+    /// plan-gate strictly downstream of `review.passed`. This
+    /// test pins the invariant so a future fix attempt does
+    /// not silently re-introduce it.
+    #[test]
+    fn test_ce_executor_serial_plan_gate_must_not_listen_to_fix_applied() {
+        let preset =
+            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
+        let config = RalphConfig::parse_yaml(preset.content)
+            .expect("ce-executor-serial YAML should parse");
+
+        let plan_gate = config
+            .hats
+            .get("plan-gate")
+            .expect("ce-executor-serial must define a 'plan-gate' hat");
+
+        assert!(
+            plan_gate.triggers.contains(&"review.passed".to_string()),
+            "plan-gate must trigger on review.passed"
+        );
+        assert!(
+            plan_gate.triggers.contains(&"review.complete".to_string()),
+            "plan-gate must trigger on review.complete"
+        );
+        assert!(
+            plan_gate.triggers.contains(&"work.failed".to_string()),
+            "plan-gate must trigger on work.failed so failures route to plan.blocked"
+        );
+
+        // KTD1: plan-gate MUST NOT listen to fix.applied. Adding
+        // it would dispatch plan-gate before the re-review walk
+        // completes, skipping `review.passed` and producing a
+        // silent out-of-order handoff. The correct fix for the
+        // perky-maple P1-3 is U1/U3/U5.
+        assert!(
+            !plan_gate.triggers.contains(&"fix.applied".to_string()),
+            "plan-gate MUST NOT trigger on fix.applied (KTD1: orchestrator invariant; the perky-maple P1-3 fix is U1/U3/U5, not adding this trigger)"
+        );
+        assert!(
+            !plan_gate.triggers.contains(&"review.failed".to_string()),
+            "plan-gate MUST NOT trigger on review.failed (KTD1: plan-gate only dispatches on terminal verdicts)"
+        );
+    }
+
     #[test]
     fn test_ce_executor_zh_dimension_reviewer_timeout_is_900() {
         let content = read_root_preset("ce-executor-isolated-zh.yml");
