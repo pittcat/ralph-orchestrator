@@ -399,13 +399,11 @@ impl PolicyRuntimeState {
                 state.terminal_observed = true;
             }
             // U4: Extract current_plan_name from work.ready events
-            if event.topic == "work.ready" {
-                if let Some(ref payload) = event.payload {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(payload) {
-                        if let Some(name) = val.get("plan_name").and_then(|v| v.as_str()) {
-                            state.current_plan_name = Some(name.to_string());
-                        }
-                    }
+            if event.topic == "work.ready"
+                && let Some(obj) = Self::payload_object(event.payload.as_deref())
+            {
+                if let Some(name) = obj.get("plan_name").and_then(|v| v.as_str()) {
+                    state.current_plan_name = Some(name.to_string());
                 }
             }
             // U5 (2026-06-17-003 plan, R6): replay prior
@@ -414,23 +412,19 @@ impl PolicyRuntimeState {
             // restart or in a new process_output batch) are
             // still rejected. The key shape matches the
             // in-batch check: `{plan_name}::{step}::{task_id}::{dimension}`.
-            if event.topic == "review.dimension.ready" {
-                if let Some(ref payload) = event.payload {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(payload) {
-                        if let Value::Object(obj) = &val {
-                            let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
-                            let step = obj.get("step").and_then(|v| v.as_str());
-                            let task_id = obj.get("task_id").and_then(|v| v.as_str());
-                            let dimension = obj.get("dimension").and_then(|v| v.as_str());
-                            if let (Some(pn), Some(st), Some(ti), Some(dim)) =
-                                (plan_name, step, task_id, dimension)
-                            {
-                                state
-                                    .review_dimension_ready_seen_keys
-                                    .insert(format!("{pn}::{st}::{ti}::{dim}"));
-                            }
-                        }
-                    }
+            if event.topic == "review.dimension.ready"
+                && let Some(obj) = Self::payload_object(event.payload.as_deref())
+            {
+                let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
+                let step = obj.get("step").and_then(|v| v.as_str());
+                let task_id = obj.get("task_id").and_then(|v| v.as_str());
+                let dimension = obj.get("dimension").and_then(|v| v.as_str());
+                if let (Some(pn), Some(st), Some(ti), Some(dim)) =
+                    (plan_name, step, task_id, dimension)
+                {
+                    state
+                        .review_dimension_ready_seen_keys
+                        .insert(format!("{pn}::{st}::{ti}::{dim}"));
                 }
             }
             // U1 (2026-06-18-004 plan, KTD1): replay prior
@@ -441,20 +435,16 @@ impl PolicyRuntimeState {
             // for the same `(plan, step, task)` because
             // `validate_event_with_hat` only consults
             // `PolicyRuntimeState::work_done_seen_keys`.
-            if event.topic == "work.done" {
-                if let Some(ref payload) = event.payload {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(payload) {
-                        if let Value::Object(obj) = &val {
-                            let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
-                            let step = obj.get("step").and_then(|v| v.as_str());
-                            let task_id = obj.get("task_id").and_then(|v| v.as_str());
-                            if let (Some(pn), Some(st), Some(ti)) = (plan_name, step, task_id) {
-                                state
-                                    .work_done_seen_keys
-                                    .insert(format!("{pn}::{st}::{ti}"));
-                            }
-                        }
-                    }
+            if event.topic == "work.done"
+                && let Some(obj) = Self::payload_object(event.payload.as_deref())
+            {
+                let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
+                let step = obj.get("step").and_then(|v| v.as_str());
+                let task_id = obj.get("task_id").and_then(|v| v.as_str());
+                if let (Some(pn), Some(st), Some(ti)) = (plan_name, step, task_id) {
+                    state
+                        .work_done_seen_keys
+                        .insert(format!("{pn}::{st}::{ti}"));
                 }
             }
             // U1 (2026-06-18-004 plan, KTD1, symmetry fix):
@@ -466,30 +456,26 @@ impl PolicyRuntimeState {
             // pruning in `event_loop/mod.rs` — both paths must
             // execute the same prune or loop rehydrate would
             // re-introduce the perky-maple P1-3 dedup block.
-            if event.topic == "fix.applied" {
-                if let Some(ref payload) = event.payload {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(payload) {
-                        if let Value::Object(obj) = &val {
-                            let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
-                            let step = obj.get("step").and_then(|v| v.as_str());
-                            let task_id = obj.get("task_id").and_then(|v| v.as_str());
-                            if let (Some(pn), Some(st), Some(ti)) = (plan_name, step, task_id) {
-                                state.prune_review_dimension_ready_bucket(pn, st, ti);
-                                state.prune_work_done_bucket(pn, st);
-                                // U5 (2026-06-18-004 plan, R4):
-                                // also prune the
-                                // `review.dimensions.complete`
-                                // bucket so the next round's
-                                // `review.dimensions.complete`
-                                // with `fix_round=N+1` lands
-                                // without colliding with the
-                                // prior round's
-                                // `fix_round=N` entry.
-                                state
-                                    .prune_review_dimensions_complete_bucket(pn, st, ti);
-                            }
-                        }
-                    }
+            if event.topic == "fix.applied"
+                && let Some(obj) = Self::payload_object(event.payload.as_deref())
+            {
+                let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
+                let step = obj.get("step").and_then(|v| v.as_str());
+                let task_id = obj.get("task_id").and_then(|v| v.as_str());
+                if let (Some(pn), Some(st), Some(ti)) = (plan_name, step, task_id) {
+                    state.prune_review_dimension_ready_bucket(pn, st, ti);
+                    state.prune_work_done_bucket(pn, st);
+                    // U5 (2026-06-18-004 plan, R4):
+                    // also prune the
+                    // `review.dimensions.complete`
+                    // bucket so the next round's
+                    // `review.dimensions.complete`
+                    // with `fix_round=N+1` lands
+                    // without colliding with the
+                    // prior round's
+                    // `fix_round=N` entry.
+                    state
+                        .prune_review_dimensions_complete_bucket(pn, st, ti);
                 }
             }
             // U5 (2026-06-18-004 plan, R4): replay prior
@@ -499,24 +485,20 @@ impl PolicyRuntimeState {
             // `fix_round` defaults to `0` so legacy emitters
             // are deduped against the same key the live
             // accept site would record.
-            if event.topic == "review.dimensions.complete" {
-                if let Some(ref payload) = event.payload {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(payload) {
-                        if let Value::Object(obj) = &val {
-                            let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
-                            let step = obj.get("step").and_then(|v| v.as_str());
-                            let task_id = obj.get("task_id").and_then(|v| v.as_str());
-                            let fix_round = obj
-                                .get("fix_round")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0);
-                            if let (Some(pn), Some(st), Some(ti)) = (plan_name, step, task_id) {
-                                state
-                                    .review_dimensions_complete_seen_keys
-                                    .insert(format!("{pn}::{st}::{ti}::{fix_round}"));
-                            }
-                        }
-                    }
+            if event.topic == "review.dimensions.complete"
+                && let Some(obj) = Self::payload_object(event.payload.as_deref())
+            {
+                let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
+                let step = obj.get("step").and_then(|v| v.as_str());
+                let task_id = obj.get("task_id").and_then(|v| v.as_str());
+                let fix_round = obj
+                    .get("fix_round")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                if let (Some(pn), Some(st), Some(ti)) = (plan_name, step, task_id) {
+                    state
+                        .review_dimensions_complete_seen_keys
+                        .insert(format!("{pn}::{st}::{ti}::{fix_round}"));
                 }
             }
             // U1 (2026-06-18-004 plan, KTD1, symmetry fix):
@@ -524,24 +506,39 @@ impl PolicyRuntimeState {
             // step-boundary events that should clear the
             // work_done mirror on rehydrate (matches the live
             // accept-site behavior).
-            if event.topic == "queue.advance" || event.topic == "review.failed" {
-                if let Some(ref payload) = event.payload {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(payload) {
-                        if let Value::Object(obj) = &val {
-                            let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
-                            let step = obj
-                                .get("completed_step")
-                                .or_else(|| obj.get("step"))
-                                .and_then(|v| v.as_str());
-                            if let (Some(pn), Some(st)) = (plan_name, step) {
-                                state.prune_work_done_bucket(pn, st);
-                            }
-                        }
-                    }
+            if (event.topic == "queue.advance" || event.topic == "review.failed")
+                && let Some(obj) = Self::payload_object(event.payload.as_deref())
+            {
+                let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
+                let step = obj
+                    .get("completed_step")
+                    .or_else(|| obj.get("step"))
+                    .and_then(|v| v.as_str());
+                if let (Some(pn), Some(st)) = (plan_name, step) {
+                    state.prune_work_done_bucket(pn, st);
                 }
             }
         }
         Ok(state)
+    }
+
+    /// Parse an event payload string into an owned JSON object map.
+    ///
+    /// Returns `Some(map)` only when the payload is a valid JSON object
+    /// (i.e. `{...}`). String payloads, null, arrays, and malformed
+    /// JSON all return `None`. The map is owned because
+    /// `serde_json::from_str` produces owned `Value`s — we cannot
+    /// borrow into the transient `Value` while the caller lives.
+    /// 2026-06-18-006 plan U7 (R7, KTD3): collapses six near-identical
+    /// payload-parsing blocks in `from_events` into one helper.
+    fn payload_object(payload: Option<&str>) -> Option<serde_json::Map<String, Value>> {
+        let p = payload?;
+        let val = serde_json::from_str::<Value>(p).ok()?;
+        if let Value::Object(obj) = val {
+            Some(obj)
+        } else {
+            None
+        }
     }
 }
 
@@ -931,17 +928,27 @@ pub fn validate_event_with_hat(
         }
     }
 
-    // U5 (2026-06-18-004 plan, R4, KTD3): duplicate
-    // `review.dimensions.complete` detection. The dedup key
-    // is `(plan_name, step, task_id, fix_round)`. A 2nd emit
-    // with the same key is rejected as `RejectWithResume` so
-    // the runner publishes a `task.resume` with `fix_hint`.
-    // The `fix_round` segment distinguishes re-review rounds
-    // so a `fix.applied`-pruned bucket (U1) lets a 2nd
+    // U5 (2026-06-18-004 plan, R4, KTD3) + U6 (2026-06-18-006
+    // plan, R6, KTD4): duplicate `review.dimensions.complete`
+    // detection. The dedup key is
+    // `(plan_name, step, task_id, fix_round)`. A 2nd emit with
+    // the same key is rejected as `RejectWithResume` so the
+    // runner publishes a `task.resume` with `fix_hint`. The
+    // `fix_round` segment distinguishes re-review rounds so a
+    // `fix.applied`-pruned bucket (U1) lets a 2nd
     // `review.dimensions.complete` land for `fix_round=N+1`
-    // without colliding with `fix_round=N`. Missing
-    // `fix_round` defaults to `0` so legacy emitters still
-    // get deduped.
+    // without colliding with `fix_round=N`.
+    //
+    // U6 (KTD4): `fix_round` is required by the schema
+    // (2026-06-18-004 plan U0 made it required). The dedup
+    // layer now mirrors that requirement — missing or
+    // non-numeric `fix_round` falls through without recording
+    // the dedup key, so the schema validator reports
+    // `missing_required_field` (or `type_mismatch`) instead of
+    // the dedup layer hiding the failure behind
+    // `DuplicateWorkDone`. The previous behavior (defaults
+    // `0`, silent dedup) masked schema-invalid emits behind a
+    // misleading "duplicate" recovery hint.
     //
     // We reuse the `DuplicateWorkDone` variant for parity
     // with the `review.dimension.ready` check above — same
@@ -953,12 +960,23 @@ pub fn validate_event_with_hat(
         let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
         let step = obj.get("step").and_then(|v| v.as_str());
         let task_id = obj.get("task_id").and_then(|v| v.as_str());
-        let fix_round = obj
-            .get("fix_round")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        if let (Some(pn), Some(st), Some(ti)) = (plan_name, step, task_id) {
-            let dedup_key = format!("{pn}::{st}::{ti}::{fix_round}");
+        // U6 (KTD4): only treat the dedup key as a real
+        // dimension-complete when `fix_round` is a present
+        // u64. Missing or non-numeric `fix_round` falls
+        // through — the event will be rejected by the schema
+        // layer with `missing_required_field` (or
+        // `type_mismatch`), which is the correct error
+        // message for the agent. Deduping a schema-invalid
+        // event hides the real failure mode behind
+        // `DuplicateWorkDone`.
+        let fix_round = match obj.get("fix_round") {
+            Some(Value::Number(n)) => n.as_u64(),
+            _ => None, // missing or non-numeric → None (not Some(0))
+        };
+        if let (Some(pn), Some(st), Some(ti), Some(fr)) =
+            (plan_name, step, task_id, fix_round)
+        {
+            let dedup_key = format!("{pn}::{st}::{ti}::{fr}");
             if state
                 .review_dimensions_complete_seen_keys
                 .contains(&dedup_key)
@@ -982,6 +1000,11 @@ pub fn validate_event_with_hat(
                 .review_dimensions_complete_seen_keys
                 .insert(dedup_key);
         }
+        // else: any of `plan_name`/`step`/`task_id`/`fix_round`
+        // missing or non-string/non-u64 → no dedup mirror write,
+        // no `DuplicateWorkDone` rejection. The downstream schema
+        // validator is responsible for emitting the precise
+        // `missing_required_field` / `type_mismatch` message.
     }
 
     // WAC-U7 R10 (2026-06-12-002): null payloads on the
@@ -3353,6 +3376,87 @@ mod tests {
         );
     }
 
+    #[test]
+    fn u4_no_prune_blocks_re_review_ready() {
+        // 2026-06-18-006 plan U4 (R4): negative counterpart of
+        // `u1_dedup_helper_prunes_allow_fix_round_rereview`.
+        // Without the U1 prune (which is triggered when `fix.applied`
+        // is accepted via `prune_review_dimension_ready_bucket`),
+        // re-emitting a `review.dimension.ready` for the same
+        // `(plan, step, task, dimension)` MUST be rejected as
+        // `DuplicateWorkDone` — the dedup mirror still holds the
+        // round-0 key. This pins that U1's prune is the load-bearing
+        // step that lets the re-review round walk. The
+        // `review_dimension_ready_dedup_*` cluster above already
+        // covers the first/second emit round-trip on a fresh
+        // state; this test isolates the specific post-accept
+        // failure mode (round 1 emit blocked because round 0
+        // still lingers).
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = review_dimension_ready_payload("p1", "step-01", "t1", "correctness");
+
+        // Round 0: accept once so the dedup mirror learns the key.
+        let first = validate_event(
+            "review.dimension.ready",
+            Some(&payload),
+            &config,
+            &mut state,
+        );
+        assert_eq!(
+            first,
+            PolicyDecision::Accept,
+            "round 0 review.dimension.ready must be accepted, got {:?}",
+            first
+        );
+        assert!(
+            state
+                .review_dimension_ready_seen_keys
+                .contains("p1::step-01::t1::correctness"),
+            "dedup mirror must hold round 0 key after accept, got {:?}",
+            state.review_dimension_ready_seen_keys
+        );
+
+        // Intentionally DO NOT call
+        // `state.prune_review_dimension_ready_bucket("p1", "step-01", "t1")`.
+        // This simulates the bug scenario where the `fix.applied`
+        // acceptance path (which normally prunes the bucket) is
+        // missing — the in-batch mirror still holds the round-0 key.
+
+        // Round 1 (re-review): re-emit the same ready. Without
+        // the prune, this must be rejected as `DuplicateWorkDone`.
+        let second = validate_event(
+            "review.dimension.ready",
+            Some(&payload),
+            &config,
+            &mut state,
+        );
+        assert!(
+            matches!(
+                second,
+                PolicyDecision::RejectWithResume(PolicyFinding {
+                    violation_type: ViolationType::DuplicateWorkDone { ref key, .. },
+                    ..
+                }) if key == "p1::step-01::t1::correctness"
+            ),
+            "without U1 prune, re-review ready must be rejected as DuplicateWorkDone, got {:?}",
+            second
+        );
+
+        // The dedup mirror must STILL hold the round-0 key after
+        // the rejection — that's exactly the load the prune is
+        // meant to lift. Pinning this prevents a future "helpful"
+        // edit from clearing the mirror on rejection and silently
+        // re-enabling duplicate work-done emits.
+        assert!(
+            state
+                .review_dimension_ready_seen_keys
+                .contains("p1::step-01::t1::correctness"),
+            "dedup mirror must keep round-0 key when prune is skipped, got {:?}",
+            state.review_dimension_ready_seen_keys
+        );
+    }
+
     // -------------------------------------------------------------------------
     // U5 (2026-06-18-004 plan, R4, KTD3):
     // `review.dimensions.complete` dedup keyed on
@@ -3510,23 +3614,103 @@ mod tests {
     }
 
     #[test]
-    fn u5_review_dimensions_complete_dedup_missing_fix_round_defaults_to_zero() {
-        // Backwards compat: legacy emitters without `fix_round`
-        // default to `0` so they collide with the new SSOT key
-        // and get the same protection as a fresh emit.
+    fn u6_review_dimensions_complete_missing_fix_round_skips_dedup() {
+        // U6 (2026-06-18-006 plan, R6, KTD4): missing `fix_round`
+        // no longer silently defaults to `0`. The dedup layer
+        // must skip recording the key so the schema validator
+        // (downstream of `validate_event`) reports the precise
+        // `missing_required_field` error to the agent, rather
+        // than the dedup layer hiding the failure behind a
+        // misleading `DuplicateWorkDone` rejection.
+        //
+        // This test replaces the prior U5 assertion that
+        // expected missing `fix_round` to default to `0` and
+        // dedup against the round-0 key. U6 reverses that
+        // behavior now that `fix_round` is a required schema
+        // field (2026-06-18-004 plan U0).
         let config = test_config();
         let mut state = PolicyRuntimeState::default();
-        let payload = r#"{"plan_name":"p1","step":"step-01","task_id":"t1","dimensions":[]}"#;
+        // Intentionally omit `fix_round` — schema invalid.
+        let payload =
+            r#"{"plan_name":"p1","step":"step-01","task_id":"t1","dimensions":[]}"#;
+
         let first = validate_event(
             "review.dimensions.complete",
             Some(payload),
             &config,
             &mut state,
         );
-        assert_eq!(first, PolicyDecision::Accept);
+        // First emit also doesn't get a dedup key written —
+        // dedup layer is silent on schema-invalid emits.
+        // (Schema validation is downstream; we assert the dedup
+        // layer's contract here: it does NOT insert a key.)
+        assert_eq!(
+            first, PolicyDecision::Accept,
+            "missing fix_round must NOT be dedup-rejected by the policy layer (schema layer reports the real error), got {:?}",
+            first
+        );
+        assert!(
+            state
+                .review_dimensions_complete_seen_keys
+                .is_empty(),
+            "missing fix_round must NOT populate the dedup mirror, got {:?}",
+            state.review_dimensions_complete_seen_keys
+        );
+
         let second = validate_event(
             "review.dimensions.complete",
             Some(payload),
+            &config,
+            &mut state,
+        );
+        // 2nd emit with the same invalid payload: still no
+        // dedup, no `DuplicateWorkDone`. The dedup layer's
+        // contract is to stay out of the way when the event is
+        // schema-invalid.
+        assert!(
+            !matches!(second, PolicyDecision::RejectWithResume(_)),
+            "missing fix_round must NOT trigger DuplicateWorkDone on a 2nd emit — schema layer owns the error, got {:?}",
+            second
+        );
+        assert!(
+            state
+                .review_dimensions_complete_seen_keys
+                .is_empty(),
+            "seen_keys must still be empty after 2nd schema-invalid emit, got {:?}",
+            state.review_dimensions_complete_seen_keys
+        );
+    }
+
+    #[test]
+    fn u6_review_dimensions_complete_same_fix_round_still_dedups() {
+        // U6 regression guard: the KTD4 change must NOT break
+        // the round-0 dedup contract. Two emits both carrying
+        // `fix_round=0` for the same `(plan, step, task)` must
+        // still be dedup-rejected — only schema-invalid emits
+        // are exempted.
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload =
+            review_dimensions_complete_payload("p1", "step-01", "t1", 0);
+
+        let first = validate_event(
+            "review.dimensions.complete",
+            Some(&payload),
+            &config,
+            &mut state,
+        );
+        assert_eq!(first, PolicyDecision::Accept);
+        assert!(
+            state
+                .review_dimensions_complete_seen_keys
+                .contains("p1::step-01::t1::0"),
+            "round-0 emit must populate the dedup mirror, got {:?}",
+            state.review_dimensions_complete_seen_keys
+        );
+
+        let second = validate_event(
+            "review.dimensions.complete",
+            Some(&payload),
             &config,
             &mut state,
         );
@@ -3538,8 +3722,60 @@ mod tests {
                     ..
                 }) if key == "p1::step-01::t1::0"
             ),
-            "missing fix_round must default to 0 and dedup against the round-0 key, got {:?}",
+            "2nd round-0 emit must STILL be rejected as DuplicateWorkDone, got {:?}",
             second
+        );
+    }
+
+    #[test]
+    fn u6_review_dimensions_complete_string_fix_round_skips_dedup() {
+        // U6 (KTD4): non-numeric `fix_round` (e.g. string `"1"`)
+        // is also treated as schema-invalid. The dedup layer
+        // must not write a key for it, leaving the schema
+        // validator free to report `type_mismatch`. This is the
+        // same root-cause class as missing `fix_round` — a
+        // schema-level error that must not be hidden behind
+        // `DuplicateWorkDone`.
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = r#"{"plan_name":"p1","step":"step-01","task_id":"t1","fix_round":"1","dimensions":[]}"#;
+
+        let first = validate_event(
+            "review.dimensions.complete",
+            Some(payload),
+            &config,
+            &mut state,
+        );
+        assert_eq!(
+            first, PolicyDecision::Accept,
+            "string fix_round must NOT be dedup-rejected (schema layer reports type_mismatch), got {:?}",
+            first
+        );
+        assert!(
+            state
+                .review_dimensions_complete_seen_keys
+                .is_empty(),
+            "string fix_round must NOT populate the dedup mirror, got {:?}",
+            state.review_dimensions_complete_seen_keys
+        );
+
+        let second = validate_event(
+            "review.dimensions.complete",
+            Some(payload),
+            &config,
+            &mut state,
+        );
+        assert!(
+            !matches!(second, PolicyDecision::RejectWithResume(_)),
+            "string fix_round must NOT trigger DuplicateWorkDone on 2nd emit, got {:?}",
+            second
+        );
+        assert!(
+            state
+                .review_dimensions_complete_seen_keys
+                .is_empty(),
+            "seen_keys must still be empty after 2nd string fix_round emit, got {:?}",
+            state.review_dimensions_complete_seen_keys
         );
     }
 

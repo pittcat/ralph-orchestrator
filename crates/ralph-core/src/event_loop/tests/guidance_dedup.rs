@@ -621,3 +621,75 @@ fn u2_apply_robot_guidance_clears_stale_cache_when_suppress_on() {
         collected
     );
 }
+
+// -------------------------------------------------------------------------
+// U5 (2026-06-18-006 plan, R5, KTD): the suppress early-return
+// inside `apply_robot_guidance` previously only cleared the
+// EventLoop-level `self.robot_guidance` cache. Any guidance
+// already cached in `self.ralph.robot_guidance` (e.g. from a
+// prior non-suppress cycle, or from a mid-loop config edit that
+// flipped the flag) survived and would leak into the next
+// prompt via `collect_robot_guidance`. The fix pairs the
+// existing `self.robot_guidance.clear()` with
+// `self.ralph.clear_robot_guidance()` on the suppress branch,
+// mirroring the collect/clear symmetry in isolated
+// `build_prompt` at line 4543.
+// -------------------------------------------------------------------------
+
+#[test]
+fn u5_apply_robot_guidance_clears_ralph_cache_under_suppress() {
+    // Pin the U5 contract: when suppress is on AND the
+    // EventLoop-level cache holds a fresh entry (so the
+    // early-return at the top of `apply_robot_guidance` does
+    // NOT short-circuit), the suppress branch MUST drain
+    // BOTH `self.robot_guidance` AND `self.ralph.robot_guidance`
+    // — the latter being the source of the `## ROBOT GUIDANCE`
+    // block in the next prompt.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut event_loop = make_suppress_human_guidance_loop(temp_dir.path());
+
+    // Pre-populate `self.ralph.robot_guidance` with stale
+    // guidance that pre-dates the suppress flip. This
+    // simulates the post-config-flip state where ralph
+    // already has cached guidance from a prior non-suppress
+    // cycle. We bypass `apply_robot_guidance` for the
+    // pre-population (it would route through the same
+    // suppress branch we're testing) by using the ralph's
+    // public setter directly.
+    event_loop
+        .ralph
+        .set_robot_guidance(vec!["stale guidance cached before suppress flip".to_string()]);
+    assert!(
+        !event_loop.ralph.collect_robot_guidance().is_empty(),
+        "precondition: ralph MUST have stale guidance cached before suppress flip"
+    );
+
+    // Also push a fresh entry into the EventLoop-level
+    // cache. Without this, the early-return at line 4926
+    // (`if self.robot_guidance.is_empty()`) would short-circuit
+    // before we ever reach the suppress branch. The payload
+    // itself is irrelevant — the contract under test is the
+    // drain invariant on the suppress branch.
+    event_loop
+        .robot_guidance
+        .push("post-flip guidance queued in EventLoop cache".to_string());
+
+    event_loop.apply_robot_guidance();
+
+    // EventLoop-level cache drained (U2 contract).
+    assert!(
+        event_loop.robot_guidance.is_empty(),
+        "suppress branch MUST drain EventLoop cache, got {:?}",
+        event_loop.robot_guidance
+    );
+
+    // Ralph-level cache ALSO drained (U5 fix). Without this,
+    // the next `build_prompt` would prepend a stale
+    // `## ROBOT GUIDANCE` block to the active hat's prompt.
+    let collected = event_loop.ralph.collect_robot_guidance();
+    assert!(
+        collected.is_empty(),
+        "suppress branch MUST drain ralph cache (U5 fix); got {:?}",
+        collected
+    );
+}

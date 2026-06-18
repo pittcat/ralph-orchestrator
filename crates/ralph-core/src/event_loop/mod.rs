@@ -4935,8 +4935,20 @@ impl EventLoop {
         // hat prompt NEVER contains a `## ROBOT GUIDANCE` block
         // under suppress mode. The scratchpad still records the
         // raw guidance for audit.
+        //
+        // 2026-06-18-006 plan U5 (R5, KTD): also drain
+        // `self.ralph.robot_guidance` so any guidance cached
+        // BEFORE the suppress flip (e.g. a mid-loop config edit
+        // that went non-suppress → suppress) does NOT leak into
+        // the next prompt. Mirrors the isolated `build_prompt`
+        // symmetry at line 4543 where `collect_robot_guidance()`
+        // is paired with `clear_robot_guidance()` — the same
+        // collector/clear invariant must hold on the suppress
+        // path so a stale `## ROBOT GUIDANCE` block never survives
+        // a `suppress_human_guidance` opt-in.
         if self.human_guidance_suppressed() {
             self.robot_guidance.clear();
+            self.ralph.clear_robot_guidance();
             return;
         }
 
