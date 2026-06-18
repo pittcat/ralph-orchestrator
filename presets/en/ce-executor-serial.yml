@@ -117,7 +117,13 @@ event_loop:
         step: "step"
       queue.advance:
         kind: advance_step
-        current_step: "step"
+        # serial preset's plan-gate emit (see plan-gate instructions)
+        # carries `next_step` (not `step`) as the new current step.
+        # Without this override the projector drops every queue.advance
+        # event with `event.state_projection.rejected` and progress.md
+        # stops advancing — the step_handoff gate then has nothing to
+        # gate against. P0 fix for ce-executor-serial.
+        current_step: "next_step"
         completed_step: "completed_step"
       plan.complete:
         kind: plan_complete
@@ -315,7 +321,11 @@ event_loop:
         required_fields: [dimension, reason, plan_name, task_id, task_key, step]
         payload: json_object
       review.dimensions.complete:
-        required_fields: [plan_name, task_id, task_key, step, dimensions]
+        # 2026-06-18-006 plan U1: inline `fix_round` mirrors the SSOT at
+        # presets/schemas/ce-executor-serial.yml (KTD1). The `build.rs`
+        # wholesale override for sequence types means this inline entry
+        # is what embedded presets actually enforce.
+        required_fields: [plan_name, task_id, task_key, step, dimensions, fix_round]
         payload: json_object
       review.passed:
         # skip_reason is a hard audit field — every review.passed MUST

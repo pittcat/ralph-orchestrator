@@ -5066,6 +5066,66 @@ mod tests {
         }
     }
 
+    /// P0 regression (2026-06-18, ce-executor-serial step_handoff):
+    /// the `state_projection.actions.queue.advance.current_step` pointer
+    /// in `presets/en/ce-executor-serial.yml` MUST point at a field
+    /// that the preset's own plan-gate actually emits. The plan-gate
+    /// emit shape (see plan-gate instructions in the same file) carries
+    /// `next_step` (not `step`), so `current_step: "step"` causes the
+    /// projector to drop every queue.advance with
+    /// `event.state_projection.rejected` and `progress.md` never
+    /// advances. This lock test fails loudly if anyone reverts the
+    /// pointer to a field the plan-gate does not emit.
+    ///
+    /// Companion test: `serial_preset_queue_advance_payload_drives_progress_with_next_step_pointer`
+    /// in `state_projector/tests.rs` proves the pointer override works
+    /// end-to-end; this test pins the preset file itself.
+    #[test]
+    fn ce_executor_serial_state_projection_queue_advance_uses_next_step_pointer() {
+        let preset =
+            get_preset("ce-executor-serial").expect("ce-executor-serial preset must exist");
+        let config: RalphConfig = serde_yaml::from_str(preset.content)
+            .expect("ce-executor-serial preset must parse as RalphConfig");
+
+        let action = config
+            .event_loop
+            .state_projection
+            .actions
+            .get("queue.advance")
+            .expect("ce-executor-serial must declare queue.advance state_projection action");
+
+        let (current_step, completed_step) = match action {
+            ralph_core::config::StateProjectionAction::AdvanceStep {
+                current_step,
+                completed_step,
+            } => (
+                current_step.as_deref().unwrap_or("step"),
+                completed_step.as_deref().unwrap_or("completed_step"),
+            ),
+            other => panic!(
+                "queue.advance state_projection must be AdvanceStep, got {other:?}"
+            ),
+        };
+
+        // Mirror the plan-gate payload shape from
+        // `presets/en/ce-executor-serial.yml` plan-gate instructions.
+        // The plan-gate does NOT emit a top-level `step` field; it
+        // emits `completed_step` and `next_step`. Therefore the
+        // `current_step` pointer must point at `next_step`, not `step`.
+        assert_eq!(
+            current_step, "next_step",
+            "queue.advance state_projection.current_step must be 'next_step' to match \
+             the plan-gate emit shape (no `step` field). \
+             current_step='{current_step}' would cause every queue.advance to be \
+             dropped by the projector with `event.state_projection.rejected`."
+        );
+        assert_eq!(
+            completed_step, "completed_step",
+            "queue.advance state_projection.completed_step must be 'completed_step' to \
+             match the plan-gate emit shape. Got '{completed_step}'."
+        );
+    }
+
     #[test]
     fn ce_executor_isolated_dimension_reviewer_mentions_assigned_dimension() {
         // U6 (2026-06-17-002): The dimension-reviewer hat's instructions

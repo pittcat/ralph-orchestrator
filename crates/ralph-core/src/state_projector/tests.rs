@@ -184,6 +184,69 @@ fn unprojected_topic_is_inert() {
     assert_eq!(report.rejected, 0);
 }
 
+// P0 regression (2026-06-18, ce-executor-serial step_handoff):
+// the serial preset's plan-gate emits `queue.advance` with
+// `{plan_name, completed_step, next_step, reviewed_task_id, reviewed_task_key}`
+// (no `step` field). When `state_projection.actions.queue.advance.current_step`
+// points at `step`, every queue.advance is dropped with
+// `event.state_projection.rejected` and `progress.md` stops advancing.
+// This test pins the fix: a pointer override to `next_step` lets the
+// serial emit shape actually project. If anyone reverts
+// `current_step: "step"` in `presets/en/ce-executor-serial.yml`,
+// this test still passes (it uses its own config), but the
+// companion preset-lint test in `crates/ralph-cli/src/presets.rs`
+// catches the preset regression directly.
+#[test]
+fn serial_preset_queue_advance_payload_drives_progress_with_next_step_pointer() {
+    let tmp = workspace();
+    let mut actions = std::collections::HashMap::new();
+    // Mirror the post-fix ce-executor-serial state_projection block.
+    actions.insert(
+        "queue.advance".to_string(),
+        StateProjectionAction::AdvanceStep {
+            current_step: Some("next_step".to_string()),
+            completed_step: Some("completed_step".to_string()),
+        },
+    );
+    let mut proj = StateProjector::new(ProjectionContext::new_legacy(
+        tmp.path(),
+        StateProjectionConfig {
+            enabled: true,
+            actions,
+        },
+    ));
+
+    // Real serial preset payload shape (no `step` field).
+    let event = make_event(
+        "queue.advance",
+        json!({
+            "plan_name": "demo",
+            "completed_step": "step-01",
+            "next_step": "step-02",
+            "reviewed_task_id": "task-1",
+            "reviewed_task_key": "ce-executor:demo:step-01:u1-impl"
+        })
+        .to_string(),
+    );
+    let report = proj.apply(&[event]);
+    assert_eq!(
+        report.rejected, 0,
+        "queue.advance must not be rejected under serial payload shape: {:?}",
+        report.rejections
+    );
+    assert_eq!(report.applied, 1);
+
+    let progress = std::fs::read_to_string(tmp.path().join(".ralph/agent/progress.md")).unwrap();
+    assert!(
+        progress.contains("step-02"),
+        "Current Step must advance to next_step value, got:\n{progress}"
+    );
+    assert!(
+        progress.contains("- step-01"),
+        "Completed Steps must include completed_step value, got:\n{progress}"
+    );
+}
+
 #[test]
 fn projected_topics_list_is_locked() {
     // R6 (2026-06-17-005 fix plan): review/plan-blocked topics

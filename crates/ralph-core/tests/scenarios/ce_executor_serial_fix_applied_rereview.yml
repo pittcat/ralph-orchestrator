@@ -1,4 +1,5 @@
-# ce_executor_serial_fix_applied_rereview: fix → re-review → review.passed → plan-gate
+# ce_executor_serial_fix_applied_rereview: fix → re-review → review.passed →
+# plan-gate dual-publish handoff (AE5, multi-step)
 #
 # 2026-06-18-004 plan U4 (R1, R6): BDD scenario pinning the
 # fix→re-review→`review.passed`→plan-gate handoff that the
@@ -7,22 +8,31 @@
 # sequence (U1 policy prune + U3 obligations close the
 # perky-maple shortcut paths), the 2nd round's
 # `review.dimensions.complete` carries the next `fix_round`
-# (U0 schema SSOT, U5 dedup), and `plan-gate` dispatches
-# `queue.advance` + `work.ready` for the next step.
+# (U0 schema SSOT, U5 dedup), and `plan-gate` dispatches the
+# **AE5 dual-publish** (`queue.advance` + `work.ready` for the
+# next step) in a single iteration, then the executor picks up
+# step-02 and walks its own review chain before plan-gate finally
+# emits `plan.complete(completed_steps=[step-01, step-02])`.
 #
-# This scenario is the structural smoke alarm: any future
-# change that closes the re-review window or breaks the
-# plan-gate handoff must fail this BDD before integration
+# The plan is intentionally multi-step (`step-01` then `step-02`)
+# so plan-gate's decision logic routes through the dual-publish
+# branch (`next_step != null`) instead of the single-step
+# `plan.complete` shortcut. This is the structural smoke alarm
+# for AE5: any future change that closes the re-review window,
+# breaks the dual-publish handoff, or short-circuits step-02's
+# executor + review pass must fail this BDD before integration
 # tests do.
 
 name: ce_executor_serial_fix_applied_rereview
 description: |
-  ce-executor-serial fix → re-review → review.passed → plan-gate handoff.
-  Pin U0/U1/U3/U5 contracts end-to-end with stub events.
+  ce-executor-serial fix → re-review → review.passed → plan-gate AE5
+  dual-publish handoff (multi-step plan). Pin U0/U1/U3/U5 contracts
+  end-to-end with stub events, including step-02's executor run and
+  review pass so the dual-publish is observable instead of short-circuited.
 
 config:
   prompt_file: PROMPT.md
-  max_iterations: 30
+  max_iterations: 50
   hats:
     coordinator:
       subscribes_to:
@@ -82,10 +92,17 @@ config:
 # Round 1 (fix_round=0): work.done → 4×(ready→done) → complete
 # (fix_round=0) → review.failed → fix.applied(fix_round=1).
 # Round 2 (fix_round=1): 4×(ready→done) → complete(fix_round=1)
-# → review.passed → plan-gate → queue.advance + work.ready
-# (single-step plan; plan.complete + REVIEW_COMPLETE + LOOP_COMPLETE).
+# → review.passed (step-01) → plan-gate **dual-publishes**
+# `queue.advance` + `work.ready` for step-02 (AE5 carve-out: both
+# events in the same iteration).
+# Step-02 (no fix): executor → work.done → 4×(ready→done) →
+# complete(fix_round=0) → review.passed (step-02) → plan-gate →
+# `plan.complete(completed_steps=[step-01, step-02])` →
+# shipper → REVIEW_COMPLETE → reporter → LOOP_COMPLETE.
 #
-# 30 iterations covers 19 stub events + transport hops.
+# 39 iterations covers 39 stub events (one event emitted per
+# iteration, except the AE5 dual-publish iter which carries two
+# events in one turn).
 mock_responses:
   # 0. coordinator parses plan
   - |
@@ -208,29 +225,90 @@ mock_responses:
     <event topic="review.passed" plan_name="plan-r" plan_path="docs/plans/r.md" task_id="t1" task_key="k1" step="step-01" findings_count="0" fix_round="1" verdict="pass" skip_reason="dimensions_complete">
     Round 2 passed.
     </event>
-  # 24. plan-gate dual-publishes queue.advance + work.ready (single-step plan)
+  # 24. plan-gate AE5 dual-publish: queue.advance + work.ready for step-02
+  # in the SAME iteration. The dual-publish carve-out (WAC-U4 / KTD-12)
+  # admits this exact pair in one turn; only `queue.advance` is audited,
+  # only `work.ready` wakes the executor.
   - |
     <event topic="queue.advance" plan_name="plan-r" completed_step="step-01" next_step="step-02" reviewed_task_id="t1" reviewed_task_key="k1">
     Advance.
     </event>
-  # 25. plan-gate emits plan.complete (single-step plan)
+    <event topic="work.ready" plan_name="plan-r" plan_path="docs/plans/r.md" task_id="t2" task_key="k2" step="step-02" complexity="small" reviewed_task_id="t1" reviewed_task_key="k1" completed_step="step-01" next_step="step-02">
+    Step-02 ready.
+    </event>
+  # 25. executor completes step-02 (1 commit)
   - |
-    <event topic="plan.complete" plan_name="plan-r" completed_steps="[step-01]" task_id="t1" task_key="k1" verdict="pass">
+    <event topic="work.done" plan_name="plan-r" plan_path="docs/plans/r.md" task_id="t2" task_key="k2" step="step-02" commit_count="1" changed_lines="8">
+    Step-02 done.
+    </event>
+  # 26. review-coordinator kicks correctness (step-02, round 1)
+  - |
+    <event topic="review.dimension.ready" plan_name="plan-r" plan_path="docs/plans/r.md" task_id="t2" task_key="k2" step="step-02" dimension="correctness" focus="logic" depth="standard" diff_base="HEAD~1" intent_summary="Step-02 round 1" changed_files="src/bar.rs">
+    Step-02 dim 1.
+    </event>
+  # 27. dimension-reviewer completes correctness (step-02)
+  - |
+    <event topic="review.dimension.done" plan_name="plan-r" plan_path="docs/plans/r.md" task_id="t2" task_key="k2" step="step-02" dimension="correctness" findings_count="0" findings_file=".agents/scratchpad/ce-executor/plan-r/findings-correctness-t2.json">
+    Step-02 correctness done.
+    </event>
+  # 28. review-coordinator kicks testing (step-02)
+  - |
+    <event topic="review.dimension.ready" plan_name="plan-r" plan_path="docs/plans/r.md" task_id="t2" task_key="k2" step="step-02" dimension="testing" focus="coverage" depth="standard" diff_base="HEAD~1" intent_summary="Step-02 round 1" changed_files="src/bar.rs">
+    Step-02 dim 2.
+    </event>
+  # 29. dimension-reviewer completes testing (step-02)
+  - |
+    <event topic="review.dimension.done" plan_name="plan-r" plan_path="docs/plans/r.md" task_id="t2" task_key="k2" step="step-02" dimension="testing" findings_count="0" findings_file=".agents/scratchpad/ce-executor/plan-r/findings-testing-t2.json">
+    Step-02 testing done.
+    </event>
+  # 30. review-coordinator kicks maintainability (step-02)
+  - |
+    <event topic="review.dimension.ready" plan_name="plan-r" plan_path="docs/plans/r.md" task_id="t2" task_key="k2" step="step-02" dimension="maintainability" focus="structure" depth="standard" diff_base="HEAD~1" intent_summary="Step-02 round 1" changed_files="src/bar.rs">
+    Step-02 dim 3.
+    </event>
+  # 31. dimension-reviewer completes maintainability (step-02)
+  - |
+    <event topic="review.dimension.done" plan_name="plan-r" plan_path="docs/plans/r.md" task_id="t2" task_key="k2" step="step-02" dimension="maintainability" findings_count="0" findings_file=".agents/scratchpad/ce-executor/plan-r/findings-maintainability-t2.json">
+    Step-02 maintainability done.
+    </event>
+  # 32. review-coordinator kicks requirements (step-02)
+  - |
+    <event topic="review.dimension.ready" plan_name="plan-r" plan_path="docs/plans/r.md" task_id="t2" task_key="k2" step="step-02" dimension="requirements" focus="R-IDs" depth="standard" diff_base="HEAD~1" intent_summary="Step-02 round 1" changed_files="src/bar.rs">
+    Step-02 dim 4.
+    </event>
+  # 33. dimension-reviewer completes requirements (step-02)
+  - |
+    <event topic="review.dimension.done" plan_name="plan-r" plan_path="docs/plans/r.md" task_id="t2" task_key="k2" step="step-02" dimension="requirements" findings_count="0" findings_file=".agents/scratchpad/ce-executor/plan-r/findings-requirements-t2.json">
+    Step-02 requirements done.
+    </event>
+  # 34. review-coordinator closes step-02 round 1 (fix_round=0, no findings)
+  - |
+    <event topic="review.dimensions.complete" plan_name="plan-r" plan_path="docs/plans/r.md" task_id="t2" task_key="k2" step="step-02" fix_round="0" dimensions='[{"dimension":"correctness","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-r/findings-correctness-t2.json"},{"dimension":"testing","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-r/findings-testing-t2.json"},{"dimension":"maintainability","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-r/findings-maintainability-t2.json"},{"dimension":"requirements","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-r/findings-requirements-t2.json"}]'>
+    Step-02 round 1 closed.
+    </event>
+  # 35. review-synthesizer emits review.passed for step-02 (round 1, no fix)
+  - |
+    <event topic="review.passed" plan_name="plan-r" plan_path="docs/plans/r.md" task_id="t2" task_key="k2" step="step-02" findings_count="0" fix_round="0" verdict="pass" skip_reason="dimensions_complete">
+    Step-02 passed.
+    </event>
+  # 36. plan-gate emits plan.complete (both steps)
+  - |
+    <event topic="plan.complete" plan_name="plan-r" completed_steps="[step-01,step-02]" task_id="t2" task_key="k2" verdict="pass">
     Plan complete.
     </event>
-  # 26. shipper emits REVIEW_COMPLETE
+  # 37. shipper emits REVIEW_COMPLETE
   - |
-    <event topic="REVIEW_COMPLETE" plan_name="plan-r" task_id="t1" task_key="k1" pass_or_fail="pass">
+    <event topic="REVIEW_COMPLETE" plan_name="plan-r" verdict="pass" pass_or_fail="pass" residual_findings_summary="none">
     Reviewed.
     </event>
-  # 27. reporter emits LOOP_COMPLETE
+  # 38. reporter emits LOOP_COMPLETE
   - |
-    <event topic="LOOP_COMPLETE" plan_name="plan-r" reason="fix-applied re-review success">
+    <event topic="LOOP_COMPLETE" plan_name="plan-r" reason="fix-applied re-review success + step-02 pass">
     Done.
     </event>
 
 expected:
-  iterations: 28
+  iterations: 39
   events:
     - topic: work.start
     - topic: work.ready
@@ -258,8 +336,22 @@ expected:
     - topic: review.dimension.done
     - topic: review.dimensions.complete
     - topic: review.passed
-    # Plan-gate handoff (queue.advance + plan.complete single-step)
+    # AE5 plan-gate dual-publish: queue.advance + work.ready (step-02)
     - topic: queue.advance
+    - topic: work.ready
+    # Step-02 executor + Round 1 review (no fix)
+    - topic: work.done
+    - topic: review.dimension.ready
+    - topic: review.dimension.done
+    - topic: review.dimension.ready
+    - topic: review.dimension.done
+    - topic: review.dimension.ready
+    - topic: review.dimension.done
+    - topic: review.dimension.ready
+    - topic: review.dimension.done
+    - topic: review.dimensions.complete
+    - topic: review.passed
+    # Plan-gate completion (both steps)
     - topic: plan.complete
     - topic: REVIEW_COMPLETE
     - topic: LOOP_COMPLETE
