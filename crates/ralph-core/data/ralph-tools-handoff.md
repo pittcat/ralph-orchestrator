@@ -261,6 +261,44 @@ jq '.' .ralph/diagnostics/latest/recovery.jsonl
 ralph diagnose --session latest
 ```
 
+## 6.5 2026-06-18-001 plan 新增机制（U1-U8）
+
+下列机制来自 plan `docs/plans/2026-06-18-001-fix-ce-executor-serial-recovery-handoff-plan.md`，CLI/runtime 行为变化要点：
+
+### 6.5.1 CLI `hat=None` 不再早返（U1）
+
+`ralph emit` 缺少 `--hat` 时,`check_hat_handoff_gate_with_env` 不再直接放过宏观边 topic。如果该 topic 在 `HandoffIndex::consumer_of` 中有唯一下游消费者(宏观边),且无合法 `handoff_path`,会被拒收为 `hat_handoff_missing_path` 或 `hat_handoff_filename_mismatch`。
+
+新增 `GateInputs::skip_filename_owner_check` 字段(`crates/ralph-core/src/hat_handoff/gate.rs`)，CLI `hat=None` 时设 `true` 让 filename owner 校验跳过;runtime gate 仍为 `false`,行为不变。
+
+### 6.5.2 EventBus `human.*` target 路由（U2）
+
+`human.guidance(target=progress-steward)` 等带显式 `target` 的 `human.*` 事件优先路由到 target hat,不再被 `human.*` 前缀拦截到 `human_pending`。无 target 的 `human.*` 仍走 `human_pending`(原行为)。
+
+### 6.5.3 runtime 拒收摘要注入 prompt（U6）
+
+`LoopState::recent_rejection_digest: BTreeMap<String, RejectionDigestEntry>` 累积 runtime 拒收(origin guard / topic format / hat_handoff gate / isolated_anonymous_business_topic),build_prompt 在 isolated 路径注入 `## RECENT REJECTIONS` 块,让 agent 看到最近拒收原因而不重复用同一 payload 探测。CLI 拒收仍写入 `.ralph/diagnostics/latest/recovery.jsonl`,agent 通过 instructions / 本文档指引读取。
+
+agent 收到 `## RECENT REJECTIONS` 块后的处理:
+1. 读 block 中每个 `(reason_code, count, last_topic, last_ts)` 条目
+2. 对照 §5.5.3 reason_code 表修复 payload
+3. **不要**用相同 payload 反复 `ralph emit` 探测
+
+### 6.5.4 suppress_human_guidance 对 progress-steward 豁免（U7）
+
+`suppress_human_guidance: true` 模式下,`human.guidance(target=progress-steward)` 仍会被注入到 steward prompt(`## ROBOT GUIDANCE` 块)。`ProgressStewardConfig.exempt_from_suppress_human_guidance` 默认 `true`(backward-compatible);需要切回严格 suppress 时显式设 `false`。
+
+### 6.5.5 handoff 产物审计（U8）
+
+新增 `ralph audit hat-handoff` 子命令(Rust 实现 + bash 薄包装 `scripts/audit-hat-handoff-artifacts.sh`),扫描 `.ralph/agent/hat-handoff/`:
+- 退出码 0 = pass / handoff disabled
+- 退出码 1 = `.ralph/agent/hat-handoff/` 不存在
+- 退出码 2 = handoff enabled 但 0 文件
+- 退出码 3 = 文件名格式不匹配 `^\d+-\d+-[A-Za-z0-9_-]+-[A-Za-z0-9_-]+\.md$`
+- 退出码 4 = iter/seq 单调性违反(同 iter 内 seq 严格递增)
+
+CI 接入:在 `scripts/ci-rust-gate.sh` 加 `RUN_AUDIT=1` 开关。
+
 ## 7. 相关文档
 
 - `docs/plans/2026-06-17-002-feat-ce-executor-step-handoff-plan.md` — step handoff 机制完整设计

@@ -28,6 +28,11 @@ fn guidance_event(payload: &str) -> Event {
     Event::new("human.guidance", payload)
 }
 
+/// 2026-06-18-001 plan U7: 带显式 target 的 human.guidance helper。
+fn guidance_event_targeted(payload: &str, target: &str) -> Event {
+    Event::new("human.guidance", payload).with_target(target)
+}
+
 /// Write a synthetic scratchpad with a guidance block, a
 /// following unrelated section, and (optionally) some bytes
 /// after the last guidance. Returns the absolute scratchpad
@@ -604,7 +609,7 @@ fn u2_apply_robot_guidance_clears_stale_cache_when_suppress_on() {
         .robot_guidance
         .push("stale guidance from before config flip".to_string());
 
-    event_loop.apply_robot_guidance();
+    event_loop.apply_robot_guidance(&ralph_proto::HatId::new("executor"));
 
     assert!(
         event_loop.robot_guidance.is_empty(),
@@ -674,7 +679,7 @@ fn u5_apply_robot_guidance_clears_ralph_cache_under_suppress() {
         .robot_guidance
         .push("post-flip guidance queued in EventLoop cache".to_string());
 
-    event_loop.apply_robot_guidance();
+    event_loop.apply_robot_guidance(&ralph_proto::HatId::new("executor"));
 
     // EventLoop-level cache drained (U2 contract).
     assert!(
@@ -690,6 +695,116 @@ fn u5_apply_robot_guidance_clears_ralph_cache_under_suppress() {
     assert!(
         collected.is_empty(),
         "suppress branch MUST drain ralph cache (U5 fix); got {:?}",
+        collected
+    );
+}
+
+// ── 2026-06-18-001 plan U7: progress-steward 豁免行为测试 ──────────
+
+fn build_event_loop_with_steward(suppress: bool) -> EventLoop {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let cfg_yaml = format!(
+        r#"
+core:
+  scratchpad:
+    enabled: false
+  workspace_root: {}
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  suppress_human_guidance: {suppress}
+  progress_steward:
+    enabled: true
+    steward_hat_id: "progress-steward"
+    exempt_from_suppress_human_guidance: true
+"#,
+        temp_dir.path().display()
+    );
+    let config: crate::config::RalphConfig = serde_yaml::from_str(&cfg_yaml).unwrap();
+    EventLoop::new(config)
+}
+
+/// U7: suppress=true + target=progress-steward 时,`update_robot_guidance`
+/// 仍把 payload 推入 `self.robot_guidance`(不丢弃)。
+#[test]
+fn u7_suppress_target_steward_kept_in_robot_guidance() {
+    let mut event_loop = build_event_loop_with_steward(true);
+    let event = guidance_event_targeted("wake up steward", "progress-steward");
+    event_loop.update_robot_guidance(vec![event]);
+    let robot = event_loop.robot_guidance_for_test();
+    assert_eq!(
+        robot,
+        vec!["wake up steward".to_string()],
+        "U7: target=steward 即使 suppress 也必须保留"
+    );
+}
+
+/// U7: suppress=true + 无 target 时,`update_robot_guidance` 仍丢弃 payload
+/// (符合 U2 原意,只豁免目标 hat)。
+#[test]
+fn u7_suppress_no_target_dropped() {
+    let mut event_loop = build_event_loop_with_steward(true);
+    let event = guidance_event("no target guidance");
+    event_loop.update_robot_guidance(vec![event]);
+    let robot = event_loop.robot_guidance_for_test();
+    assert!(
+        robot.is_empty(),
+        "U7: 无 target 即便 suppress 默认仍丢弃;got {:?}",
+        robot
+    );
+}
+
+/// U7 (P0 修复):suppress=true + apply_robot_guidance(steer_hat) 时,
+/// guidance 仍被推入 ralph.cache;非 steward hat 仍被 drain。
+#[test]
+fn u7_apply_robot_guidance_steward_exempt_keeps_in_ralph() {
+    let mut event_loop = build_event_loop_with_steward(true);
+    // 先模拟一次 update_robot_guidance(target=steward) 进入 cache
+    event_loop.update_robot_guidance(vec![guidance_event_targeted(
+        "steward guidance",
+        "progress-steward",
+    )]);
+    // apply_robot_guidance 时 hat_id=progress-steward
+    let steward = ralph_proto::HatId::new("progress-steward");
+    event_loop.apply_robot_guidance(&steward);
+    let collected = event_loop.ralph.collect_robot_guidance();
+    assert!(
+        collected.contains("steward guidance"),
+        "U7 (P0 修复): steward 在 suppress 下仍应看到 guidance;got {:?}",
+        collected
+    );
+}
+
+/// U7 (P0 修复):suppress=true + apply_robot_guidance(非 steward) 时,
+/// guidance 必须被 drain(防止泄漏到 executor 等 hot hat)。
+#[test]
+fn u7_apply_robot_guidance_non_steward_drained() {
+    let mut event_loop = build_event_loop_with_steward(true);
+    event_loop.update_robot_guidance(vec![guidance_event_targeted(
+        "steward guidance",
+        "progress-steward",
+    )]);
+    // 非 steward hat 的 build_prompt
+    let executor = ralph_proto::HatId::new("executor");
+    event_loop.apply_robot_guidance(&executor);
+    let collected = event_loop.ralph.collect_robot_guidance();
+    assert!(
+        !collected.contains("steward guidance"),
+        "U7: 非 steward hat 即便有 target=steward guidance 也必须被 drain;got {:?}",
+        collected
+    );
+}
+
+/// U7: suppress=false 时,不论 target 与 hat_id,正常 push 到 ralph.cache。
+#[test]
+fn u7_no_suppress_always_pushes() {
+    let mut event_loop = build_event_loop_with_steward(false);
+    event_loop.update_robot_guidance(vec![guidance_event("free guidance")]);
+    let executor = ralph_proto::HatId::new("executor");
+    event_loop.apply_robot_guidance(&executor);
+    let collected = event_loop.ralph.collect_robot_guidance();
+    assert!(
+        collected.contains("free guidance"),
+        "无 suppress 时任何 hat 都应收到 guidance;got {:?}",
         collected
     );
 }

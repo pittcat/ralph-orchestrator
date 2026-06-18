@@ -108,24 +108,33 @@ impl EventBus {
             observer(&event);
         }
 
-        if event.topic.as_str().starts_with("human.") {
-            self.human_pending.push(event);
-            return Vec::new();
-        }
-
-        let mut recipients = Vec::new();
-
-        // If there's a direct target, route only to that hat
+        // U2 fix: explicit `target` takes precedence over the `human.*`
+        // prefix interception. Without this, a `human.guidance(target=...)`
+        // event would be silently absorbed into `human_pending` and never
+        // reach the intended hat. With it, any event with a target that
+        // resolves to a registered hat is routed directly to that hat —
+        // regardless of whether its topic starts with `human.`.
         if let Some(ref target) = event.target {
             if self.hats.contains_key(target) {
                 self.pending
                     .entry(target.clone())
                     .or_default()
                     .push(event.clone());
-                recipients.push(target.clone());
+                return vec![target.clone()];
             }
-            return recipients;
+            // Target set but unregistered: keep the original direct-target
+            // contract (empty recipients, no human_pending absorption).
+            return Vec::new();
         }
+
+        // No explicit target: `human.*` events go to the dedicated queue
+        // (preserved original behavior).
+        if event.topic.as_str().starts_with("human.") {
+            self.human_pending.push(event);
+            return Vec::new();
+        }
+
+        let mut recipients = Vec::new();
 
         // Route with priority: specific subscriptions > fallback wildcards
         // Per spec: "If event has subscriber → Select that hat's backend"
@@ -1077,6 +1086,87 @@ mod tests {
             sel.as_str(),
             "gamma",
             "after priority pre-emption, cursor must advance to the priority hat, so the next scan starts at its successor"
+        );
+    }
+
+    // ─── U2: human.* with explicit target routes to target hat ─────────────
+
+    /// U2 (R-REP2): `human.guidance(target=progress-steward)` must route
+    /// to the target hat instead of being absorbed into `human_pending`.
+    #[test]
+    fn test_human_guidance_with_target_routes_to_target_hat() {
+        let mut bus = EventBus::new();
+        let steward = Hat::new("progress-steward", "Steward").subscribe("*");
+        let ralph = Hat::new("ralph", "Ralph").subscribe("*");
+        bus.register(steward);
+        bus.register(ralph);
+
+        let event =
+            Event::new("human.guidance", "guidance content").with_target("progress-steward");
+        let recipients = bus.publish(event);
+
+        assert_eq!(recipients.len(), 1);
+        assert_eq!(recipients[0].as_str(), "progress-steward");
+        assert!(
+            bus.peek_human_pending().is_empty(),
+            "human.* with target must NOT enter human_pending"
+        );
+        assert_eq!(
+            bus.peek_pending(&HatId::new("progress-steward"))
+                .map(|v| v.len())
+                .unwrap_or(0),
+            1,
+            "target hat must hold the event in its pending queue"
+        );
+        assert_eq!(
+            bus.peek_pending(&HatId::new("ralph"))
+                .map(|v| v.len())
+                .unwrap_or(0),
+            0,
+            "non-target hats must not receive the event"
+        );
+    }
+
+    /// U2: `human.*` without target preserves original behavior — absorbed
+    /// into `human_pending`, no hat receives it directly.
+    #[test]
+    fn test_human_guidance_without_target_still_human_pending() {
+        let mut bus = EventBus::new();
+        let ralph = Hat::new("ralph", "Ralph").subscribe("*");
+        bus.register(ralph);
+
+        let event = Event::new("human.guidance", "no target");
+        let recipients = bus.publish(event);
+
+        assert!(recipients.is_empty());
+        assert_eq!(bus.peek_human_pending().len(), 1);
+        assert_eq!(
+            bus.peek_pending(&HatId::new("ralph"))
+                .map(|v| v.len())
+                .unwrap_or(0),
+            0
+        );
+    }
+
+    /// U2: `human.*` with target pointing to an unregistered hat must
+    /// return empty recipients (matching the existing direct-target
+    /// contract) and must NOT silently fall back to `human_pending`.
+    #[test]
+    fn test_human_target_unregistered_returns_empty() {
+        let mut bus = EventBus::new();
+        let ralph = Hat::new("ralph", "Ralph").subscribe("*");
+        bus.register(ralph);
+
+        let event = Event::new("human.guidance", "to unknown").with_target("nonexistent");
+        let recipients = bus.publish(event);
+
+        assert!(
+            recipients.is_empty(),
+            "unregistered target must yield empty recipients"
+        );
+        assert!(
+            bus.peek_human_pending().is_empty(),
+            "unregistered target must NOT silently fall back to human_pending"
         );
     }
 }

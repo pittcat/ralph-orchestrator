@@ -338,6 +338,19 @@ pub struct ProgressStewardConfig {
     /// terminates cleanly through shipper → reporter.
     #[serde(default = "default_progress_steward_max_iterations")]
     pub max_steward_iterations: u32,
+
+    /// 2026-06-18-001 plan U7: 即使 `event_loop.suppress_human_guidance`
+    /// 为 true,progress-steward 是否仍能收到 `human.guidance` 内容。
+    ///
+    /// 默认 `true`(backward-compatible):旧 preset 缺失该字段时
+    /// steward 仍被豁免,不被 suppress 误伤。需要切回严格 suppress
+    /// 行为时显式设为 `false`。
+    #[serde(default = "default_progress_steward_exempt_suppress")]
+    pub exempt_from_suppress_human_guidance: bool,
+}
+
+fn default_progress_steward_exempt_suppress() -> bool {
+    true
 }
 
 fn default_progress_steward_enabled() -> bool {
@@ -358,6 +371,8 @@ impl Default for ProgressStewardConfig {
             enabled: default_progress_steward_enabled(),
             steward_hat_id: default_progress_steward_hat_id(),
             max_steward_iterations: default_progress_steward_max_iterations(),
+            // 2026-06-18-001 plan U7: 默认豁免
+            exempt_from_suppress_human_guidance: default_progress_steward_exempt_suppress(),
         }
     }
 }
@@ -517,5 +532,49 @@ impl Default for WarmupConfig {
             exit_quiet_rounds: 3,
             stop_on_exit: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 2026-06-18-001 plan U7: 默认豁免 suppress(backward-compatible)。
+    #[test]
+    fn u7_progress_steward_exempt_from_suppress_default_true() {
+        let cfg = ProgressStewardConfig::default();
+        assert!(
+            cfg.exempt_from_suppress_human_guidance,
+            "默认豁免(backward-compatible):旧 preset 缺失该字段时 steward 仍可见 guidance"
+        );
+        assert_eq!(cfg.steward_hat_id, "progress-steward");
+    }
+
+    #[test]
+    fn u7_progress_steward_config_serializes_with_exempt_field() {
+        let yaml = r#"
+enabled: true
+steward_hat_id: "progress-steward"
+max_steward_iterations: 3
+exempt_from_suppress_human_guidance: false
+"#;
+        let cfg: ProgressStewardConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(!cfg.exempt_from_suppress_human_guidance);
+        assert_eq!(cfg.max_steward_iterations, 3);
+    }
+
+    /// 缺字段时 serde default 兜底为 true
+    #[test]
+    fn u7_progress_steward_config_missing_field_uses_default_true() {
+        let yaml = r#"
+enabled: true
+steward_hat_id: "progress-steward"
+max_steward_iterations: 3
+"#;
+        let cfg: ProgressStewardConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            cfg.exempt_from_suppress_human_guidance,
+            "缺字段时 default = true"
+        );
     }
 }

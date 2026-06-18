@@ -5,7 +5,8 @@
 //! timing, and hat activation tracking.
 
 use ralph_proto::{Event, HatId};
-use std::collections::{HashMap, HashSet};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::{Duration, Instant};
 
@@ -58,6 +59,20 @@ impl ProgressFingerprint {
         self.sm_transition_count.hash(&mut hasher);
         hasher.finish()
     }
+}
+
+/// 2026-06-18-001 plan U6: 单条 runtime 拒收摘要,记一次拒收事件。
+///
+/// - `count`: 同一 reason_code 的累计拒收次数
+/// - `last_message`: 最近一次拒收 message(给 agent 看的)
+/// - `last_ts`: 最近一次拒收的事件 ts
+/// - `last_topic`: 拒收时事件 topic(供 agent 定位 payload 字段)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RejectionDigestEntry {
+    pub count: u32,
+    pub last_message: String,
+    pub last_ts: String,
+    pub last_topic: String,
 }
 
 /// Current state of the event loop.
@@ -151,6 +166,15 @@ pub struct LoopState {
     /// the recovery responder (U6) to de-duplicate recovery envelopes
     /// written for the same key across adjacent iterations.
     pub rejection_last_iteration: HashMap<String, u32>,
+
+    /// 2026-06-18-001 plan U6: runtime 拒收摘要,按 reason_code 聚合,
+    /// 注入到当前 hat prompt 的 `## RECENT REJECTIONS` 块。
+    ///
+    /// 每次 origin guard / policy check / hat_handoff gate 拒收一个
+    /// business 事件时,**仅** 累加 (count, last_ts, last_message);
+    /// 保留最近 5 个不同 reason_code。recovery topic 自身
+    /// (`task.resume` / `human.guidance`) 不生成摘要,避免循环。
+    pub recent_rejection_digest: BTreeMap<String, RejectionDigestEntry>,
 
     /// Consecutive times the same event signature was emitted (for stale loop detection).
     pub consecutive_same_signature: u32,
@@ -457,6 +481,8 @@ impl Default for LoopState {
             rejection_retry_counts: HashMap::new(),
             scope_violation_circuit_breaker_tripped: None,
             rejection_last_iteration: HashMap::new(),
+            // 2026-06-18-001 plan U6: 空 digest,运行时累积。
+            recent_rejection_digest: BTreeMap::new(),
             invariant_violation_count: 0,
             last_invariant_violation: None,
             review_step_tracker: super::review_step_state::ReviewStepTracker::default(),
@@ -631,6 +657,70 @@ impl LoopState {
     /// Increment the per-rejection-key retry counter and return the
     /// post-increment value.  When the result exceeds
     /// [`U2_REJECTION_RETRY_LIMIT`] the caller must mark the rejection
+    /// 2026-06-18-001 plan U6: 累积一次 runtime 拒收到 digest。
+    ///
+    /// - `reason_code` 用于聚合键
+    /// - `message` 与 `topic` 给 agent 看的最近一次上下文
+    /// - `ts` 用事件 timestamp
+    /// - 最多保留 5 个不同 reason_code,超限后淘汰最旧(按 insertion order 用 BTreeMap 不直接 FIFO,
+    ///   因此采用"超限清空"——拒绝数本来就不应密集,5 条覆盖常见场景即可)。
+    ///
+    /// recovery topic (`task.resume` / `human.guidance` / control topics)
+    /// 不应进入 digest,调用方负责过滤。
+    pub fn record_rejection_digest(
+        &mut self,
+        reason_code: &str,
+        message: &str,
+        topic: &str,
+        ts: &str,
+    ) {
+        const MAX_DIGEST_ENTRIES: usize = 5;
+        let entry = self
+            .recent_rejection_digest
+            .entry(reason_code.to_string())
+            .or_insert_with(|| RejectionDigestEntry {
+                count: 0,
+                last_message: String::new(),
+                last_ts: String::new(),
+                last_topic: String::new(),
+            });
+        entry.count = entry.count.saturating_add(1);
+        entry.last_message = message.to_string();
+        entry.last_ts = ts.to_string();
+        entry.last_topic = topic.to_string();
+        if self.recent_rejection_digest.len() > MAX_DIGEST_ENTRIES {
+            // 超限清空(BTreeMap 不直接给 FIFO,简单起见全清,重新累积)
+            // 这种极端场景只在 agent 反复跨多类错误时出现,清空让 agent 重读恢复信号
+            self.recent_rejection_digest.clear();
+        }
+    }
+
+    /// 2026-06-18-001 plan U6: 把 digest 格式化成 markdown 注入块。
+    /// 空 digest 时返回空字符串。
+    pub fn format_rejection_digest_block(&self) -> String {
+        if self.recent_rejection_digest.is_empty() {
+            return String::new();
+        }
+        let mut out = String::from("## RECENT REJECTIONS\n\n");
+        out.push_str(
+            "Your recent emits have been rejected by the runtime. Read each reason and adjust:\n\n",
+        );
+        for (code, entry) in &self.recent_rejection_digest {
+            out.push_str(&format!(
+                "- `{code}` × {count} (last at {ts}, topic `{topic}`): {msg}\n",
+                code = code,
+                count = entry.count,
+                ts = entry.last_ts,
+                topic = entry.last_topic,
+                msg = entry.last_message,
+            ));
+        }
+        out.push_str(
+            "\nDo NOT retry the same payload. Read `recovery.jsonl` for full structured reason_code, fix the payload, then re-emit.\n",
+        );
+        out
+    }
+
     /// as fail-closed (R2: bounded retry to prevent infinite loops).
     pub fn record_rejection_key(&mut self, key: &str) -> u32 {
         let entry = self
@@ -1239,5 +1329,80 @@ mod tests {
         let mut state = LoopState::new();
         state.prune_work_done_bucket("p1", "step-01");
         assert!(state.work_done_seen_tasks.is_empty());
+    }
+
+    // ── 2026-06-18-001 plan U6: rejection digest ──────────
+
+    #[test]
+    fn u6_record_rejection_digest_increments_count() {
+        let mut state = LoopState::new();
+        state.record_rejection_digest(
+            "hat_handoff_missing_path",
+            "no handoff_path in payload",
+            "work.ready",
+            "t1",
+        );
+        state.record_rejection_digest(
+            "hat_handoff_missing_path",
+            "still no handoff_path",
+            "work.ready",
+            "t2",
+        );
+        let entry = state
+            .recent_rejection_digest
+            .get("hat_handoff_missing_path")
+            .unwrap();
+        assert_eq!(entry.count, 2);
+        assert_eq!(entry.last_ts, "t2");
+        assert_eq!(entry.last_topic, "work.ready");
+    }
+
+    #[test]
+    fn u6_record_rejection_digest_different_codes_kept() {
+        let mut state = LoopState::new();
+        state.record_rejection_digest("code_a", "msg_a", "topic_a", "t1");
+        state.record_rejection_digest("code_b", "msg_b", "topic_b", "t2");
+        assert_eq!(state.recent_rejection_digest.len(), 2);
+    }
+
+    #[test]
+    fn u6_format_block_empty_digest_returns_empty() {
+        let state = LoopState::new();
+        assert!(state.format_rejection_digest_block().is_empty());
+    }
+
+    #[test]
+    fn u6_format_block_includes_recent_rejections_header() {
+        let mut state = LoopState::new();
+        state.record_rejection_digest(
+            "isolated_scope_violation",
+            "executor cannot publish review.passed",
+            "review.passed",
+            "t1",
+        );
+        let block = state.format_rejection_digest_block();
+        assert!(block.contains("## RECENT REJECTIONS"));
+        assert!(block.contains("isolated_scope_violation"));
+        assert!(block.contains("review.passed"));
+        assert!(block.contains("recovery.jsonl"));
+    }
+
+    #[test]
+    fn u6_record_rejection_digest_caps_at_max_entries() {
+        let mut state = LoopState::new();
+        // MAX_DIGEST_ENTRIES=5, 第 6 个不同 code 后触发清空
+        for i in 0..6 {
+            state.record_rejection_digest(
+                &format!("code_{i}"),
+                "msg",
+                "topic",
+                "t",
+            );
+        }
+        // 第 6 个 code 写入后 len=6 > 5,触发清空
+        assert!(
+            state.recent_rejection_digest.is_empty(),
+            "digest 应在第 6 个不同 code 时清空,避免无限增长"
+        );
     }
 }

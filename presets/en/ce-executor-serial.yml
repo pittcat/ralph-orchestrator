@@ -1139,6 +1139,11 @@ hats:
   dimension-reviewer:
     name: "🔬 Dimension Reviewer (Serial)"
     description: "Reviews a single dimension. Emits review.dimension.done with the findings file, or review.dimension.failed with the reason. No concurrency, no wave dispatcher."
+    # 注:`task.resume` 是 reserved trigger(保留给 ralph pseudo-hat),
+    # 不放在 dimension-reviewer 的 triggers 中。runtime 通过
+    # `task.resume(target=dimension-reviewer)` 路由到该 hat 的 pending
+    # 队列,只在 agent 视角"下一次 build_prompt"会看到 task.resume
+    # 信号;agent 在 instructions 中识别并响应。
     triggers: ["review.dimension.ready"]
     publishes: ["review.dimension.done", "review.dimension.failed"]
     terminal_events: ["review.dimension.done", "review.dimension.failed"]
@@ -1187,12 +1192,29 @@ hats:
       `review.dimension.done(...)` or `review.dimension.failed(...)`.
       You MUST NOT re-emit the same terminal within the same
       activation. The `isolated mode: extra business event dropped`
-      rule in `event_loop/mod.rs:7265` is the runtime guard; if
+      rule in `event_loop/mod.rs:7552` is the runtime guard; if
       you find yourself wanting to emit a duplicate, stop and
       treat the request as already-satisfied. This rule is the
       source of the perky-maple P2-2 dimension-reviewer double
       emit (05:42:33 / 05:43:33 maintainability) and closes that
       drift path.
+
+      ### Recovery Signals (2026-06-18-001 plan U3)
+      When you are activated and your prompt includes a recent
+      `task.resume(target=dimension-reviewer, reason=...)` event,
+      it means the runtime rejected your last emit. Read
+      `.ralph/recovery.jsonl` (the last entry's `reason_code` and
+      `message`) to understand what to fix. Common cases:
+      - `review.dimension.done` rejected with `isolated_scope_violation` →
+        your payload has wrong scope (e.g. wrong iteration field).
+      - `review.dimension.failed` rejected with `payload_type_mismatch` →
+        payload missing `dimension` or `reason` fields.
+      - `## RECENT REJECTIONS` block at the top of the prompt
+        summarizes recent runtime rejections — read it first.
+      Re-emit ONLY ONE terminal event for the current activation —
+      do not switch dimensions or emit a topic outside your
+      `publishes` list. If you cannot fix the payload, emit
+      `review.dimension.failed(dimension=<current>, reason="...")`.
 
       ### HARD RULE — Read-Only Role (2026-06-17-004 U2, R2)
 

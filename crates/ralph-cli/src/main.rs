@@ -167,6 +167,9 @@ enum Commands {
 
     /// Build an offline diagnosis report from `.ralph/diagnostics/<session>/` (U7)
     Diagnose(commands::diagnose::DiagnoseArgs),
+
+    /// Audit runtime artifacts (hat handoff, ...) (U8)
+    AuditHatHandoff(commands::audit_hat_handoff::AuditHatHandoffArgs),
 }
 
 /// Returns true if the given command is eligible for diagnostics session creation.
@@ -493,6 +496,9 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Completions(args)) => commands::completions::completions_command(args),
         Some(Commands::Diagnose(args)) => commands::diagnose::diagnose_command(cli.color, args),
+        Some(Commands::AuditHatHandoff(args)) => {
+            commands::audit_hat_handoff::audit_hat_handoff_command(args)
+        }
         None => {
             let args = commands::run::RunArgs {
                 prompt_text: None,

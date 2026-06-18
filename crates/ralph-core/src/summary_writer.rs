@@ -529,6 +529,8 @@ mod tests {
             rejection_retry_counts: std::collections::HashMap::new(),
             scope_violation_circuit_breaker_tripped: None,
             rejection_last_iteration: std::collections::HashMap::new(),
+            // 2026-06-18-001 plan U6: 测试 fixture 用空 digest
+            recent_rejection_digest: std::collections::BTreeMap::new(),
             invariant_violation_count: 0,
             last_invariant_violation: None,
             review_step_tracker: crate::event_loop::review_step_state::ReviewStepTracker::default(),

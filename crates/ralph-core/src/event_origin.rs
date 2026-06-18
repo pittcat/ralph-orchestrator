@@ -119,6 +119,84 @@ pub fn is_orchestrator_diagnostic_topic(topic: &str) -> bool {
     ORCHESTRATOR_DIAGNOSTIC_TOPICS.contains(&topic)
 }
 
+/// 2026-06-18-001 plan U5: 判断 business topic 是否因缺乏 provenance
+/// 应被 fail-closed 拒收。
+///
+/// 在 isolated 模式下,JSONL 读入的事件至少要能追溯到一个注册 hat。
+/// 可接受的 provenance 形式(按优先级):
+/// 1. `event.hat` 字段**非空**(已注册的交给 scope enforcement,
+///    未注册的触发 `isolated_scope_violation` recovery envelope)
+/// 2. `event.source` 字段指向注册 hat
+/// 3. `event.triggered` 字段指向注册 hat
+/// 4. topic 本身就是 orchestrator control / diagnostic
+///
+/// 不满足以上任意条件且 topic 不是 control/diagnostic 的
+/// 事件,被认为"匿名 business topic",需要在 scope enforcement
+/// 之前 fail-closed(原因:`isolated_anonymous_business_topic`)。
+///
+/// 注意:这与 "agent backend 无 hat 但会 fallback 到 `current_isolated_hat`"
+/// 放行路径**不冲突**——fallback 仅在 isolated mode +
+/// `current_isolated_hat` 存在时启动,这里要求的事件完全没
+/// hat/source/triggered 且 topic 是非控制诊断类的"双重缺失"才拦截。
+///
+/// `current_isolated_hat` 参数:`Some(id)` 表示 isolated 模式当前 hat,
+/// 若事件既无 provenance 又存在 current_isolated_hat,scope enforcement
+/// 会用 current_isolated_hat 作 fallback —— 这种情形**不**判匿名
+/// (与既有 scenario 测试 / mock agent 输出兼容)。`None` 视为
+/// 非 isolated 模式,直接放行。
+pub fn is_anonymous_business_topic(
+    event: &JsonlEvent,
+    registered_hats: &HatRegistry,
+    cancellation_topic: &str,
+    current_isolated_hat: Option<&str>,
+) -> bool {
+    let topic = event.topic.as_str();
+    // 1) 任何 control / diagnostic topic 都不是 business,不需要 provenance
+    if is_orchestrator_control_topic(topic, cancellation_topic) {
+        return false;
+    }
+    if is_orchestrator_diagnostic_topic(topic) {
+        return false;
+    }
+    // 2) 非 isolated 模式:不做此 fail-closed 拦截(coordinator 模式按既有逻辑)
+    let Some(isolated_hat) = current_isolated_hat else {
+        return false;
+    };
+    // 3) hat 字段存在:交给 scope enforcement
+    //    (不论 hat 注册与否,scope_hat = event.hat 路径已被覆盖)
+    if let Some(ref hat) = event.hat {
+        if !hat.is_empty() {
+            return false;
+        }
+    }
+    // 4) source / triggered 字段指向注册 hat → 有 provenance,放行
+    if let Some(ref source) = event.source {
+        if !source.is_empty()
+            && registered_hats.ids().any(|h| h.as_str() == source)
+        {
+            return false;
+        }
+    }
+    if let Some(ref trig) = event.triggered {
+        if !trig.is_empty() && registered_hats.ids().any(|h| h.as_str() == trig) {
+            return false;
+        }
+    }
+    // 5) isolated 模式下,若 isolated_hat 是注册 hat(几乎都是),
+    //    scope enforcement 会 fallback 到 isolated_hat——属于既有的
+    //    "agent backend 无 hat 但 fallback 到 current_isolated_hat"
+    //    路径,**不**判匿名。这一拆分避免 scenario 测试 / mock agent
+    //    输出被 U5 误杀。
+    if !isolated_hat.is_empty()
+        && registered_hats.ids().any(|h| h.as_str() == isolated_hat)
+    {
+        return false;
+    }
+    // 6) 所有 provenance 字段缺失、isolated_hat 也不在 registry 中、
+    //    topic 又是 business → 真正的匿名,拒收
+    true
+}
+
 /// Source identifier stamped on `human.response` events produced by the trusted
 /// in-process channel of an active Robot service (e.g., Telegram). The waiter
 /// rejects JSONL events without this marker when a Robot service is active.
@@ -1062,6 +1140,163 @@ hats:
         assert!(!is_orchestrator_control_topic(
             "plan.blocked",
             "loop.cancel"
+        ));
+    }
+
+    // ── 2026-06-18-001 plan U5: is_anonymous_business_topic ──────────
+
+    /// 构造一个含 hat_a、hat_b 两 hat 的 registry。
+    fn two_hat_registry() -> HatRegistry {
+        registry_with_hats(
+            r#"
+hats:
+  hat_a:
+    name: "HatA"
+    triggers: ["a.ready"]
+    publishes: ["a.done"]
+  hat_b:
+    name: "HatB"
+    triggers: ["b.ready"]
+    publishes: ["b.done"]
+"#,
+        )
+    }
+
+    /// U5: 完全无 hat/source/triggered 的 business topic + 非 isolated 模式 → 放行。
+    #[test]
+    fn u5_non_isolated_mode_passes() {
+        let registry = two_hat_registry();
+        let event = make_event("work.ready", None);
+        assert!(!is_anonymous_business_topic(
+            &event,
+            &registry,
+            "loop.cancel",
+            None,
+        ));
+    }
+
+    /// U5: 完全无 hat/source/triggered + isolated_hat 在 registry → 放行
+    /// (走既有 scope enforcement fallback 路径)。
+    #[test]
+    fn u5_isolated_with_known_isolated_hat_passes() {
+        let registry = two_hat_registry();
+        let event = make_event("work.ready", None);
+        assert!(!is_anonymous_business_topic(
+            &event,
+            &registry,
+            "loop.cancel",
+            Some("hat_a"),
+        ));
+    }
+
+    /// U5: 完全无 hat/source/triggered + isolated_hat 不在 registry → 拒收。
+    #[test]
+    fn u5_isolated_with_unknown_isolated_hat_anonymous() {
+        let registry = two_hat_registry();
+        let event = make_event("work.ready", None);
+        assert!(is_anonymous_business_topic(
+            &event,
+            &registry,
+            "loop.cancel",
+            Some("nonexistent-isolated-hat"),
+        ));
+    }
+
+    /// U5: hat 字段存在但指向未注册 hat → **不**判匿名,交给 scope enforcement
+    /// 触发 `isolated_scope_violation` recovery envelope。
+    #[test]
+    fn u5_unknown_hat_field_falls_through_to_scope_enforcement() {
+        let registry = two_hat_registry();
+        let mut ev = make_event("work.ready", None);
+        ev.hat = Some("nonexistent-hat".to_string());
+        // U5 修订:hat 字段存在(即使未注册)由 scope enforcement 处理,
+        // 此处不判匿名,避免双门覆盖导致 recovery envelope 路径被绕开。
+        assert!(!is_anonymous_business_topic(
+            &ev,
+            &registry,
+            "loop.cancel",
+            Some("hat_a"),
+        ));
+    }
+
+    /// U5: hat 字段指向注册 hat → 放行。
+    #[test]
+    fn u5_known_hat_field_passes() {
+        let registry = two_hat_registry();
+        let event = make_event("work.ready", Some("hat_a"));
+        assert!(!is_anonymous_business_topic(
+            &event,
+            &registry,
+            "loop.cancel",
+            Some("hat_a"),
+        ));
+    }
+
+    /// U5: source 字段指向注册 hat → 放行。
+    #[test]
+    fn u5_known_source_field_passes() {
+        let registry = two_hat_registry();
+        let mut ev = make_event("work.ready", None);
+        ev.source = Some("hat_b".to_string());
+        assert!(!is_anonymous_business_topic(
+            &ev,
+            &registry,
+            "loop.cancel",
+            Some("hat_a"),
+        ));
+    }
+
+    /// U5: triggered 字段指向注册 hat → 放行。
+    #[test]
+    fn u5_known_triggered_field_passes() {
+        let registry = two_hat_registry();
+        let mut ev = make_event("work.ready", None);
+        ev.triggered = Some("hat_a".to_string());
+        assert!(!is_anonymous_business_topic(
+            &ev,
+            &registry,
+            "loop.cancel",
+            Some("hat_a"),
+        ));
+    }
+
+    /// U5: control topic 即使无 provenance 也放行(不属 business)。
+    #[test]
+    fn u5_control_topic_passes_without_provenance() {
+        let registry = two_hat_registry();
+        let event = make_event("human.guidance", None);
+        assert!(!is_anonymous_business_topic(
+            &event,
+            &registry,
+            "loop.cancel",
+            Some("hat_a"),
+        ));
+    }
+
+    /// U5: diagnostic topic 即使无 provenance 也放行。
+    #[test]
+    fn u5_diagnostic_topic_passes_without_provenance() {
+        let registry = two_hat_registry();
+        let event = make_event("event.isolation.boundary_violation", None);
+        assert!(!is_anonymous_business_topic(
+            &event,
+            &registry,
+            "loop.cancel",
+            Some("hat_a"),
+        ));
+    }
+
+    /// U5: empty isolated_hat 字符串视作"无 isolated_hat"。
+    #[test]
+    fn u5_empty_isolated_hat_falls_back_to_anonymous_check() {
+        let registry = two_hat_registry();
+        let event = make_event("work.ready", None);
+        // isolated_hat="" 既不非空也不在 registry → 仍判匿名
+        assert!(is_anonymous_business_topic(
+            &event,
+            &registry,
+            "loop.cancel",
+            Some(""),
         ));
     }
 }

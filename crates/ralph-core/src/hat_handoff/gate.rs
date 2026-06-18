@@ -99,6 +99,13 @@ pub struct GateInputs<'a> {
     /// 缺失时(独立调用场景)降级为不校验 seq/iter,避免误杀合法 emit。
     /// runtime gate 始终 `false`,行为不变。
     pub skip_seq_check: bool,
+    /// 2026-06-18-001 plan U1: 跳过文件名 `from`/`to` 所有者校验。
+    ///
+    /// CLI `hat=None` 时 caller 不知道真实 emit hat,无法构造匹配的
+    /// `from_hat`;filename 形状的 owner 校验在 `evaluate_event` 内部
+    /// 改为可选跳过。path jail / 文件存在 / R15 / 结构校验等不依赖
+    /// 真实 from_hat 的检查仍然执行。runtime gate 始终 `false`。
+    pub skip_filename_owner_check: bool,
 }
 
 /// 纯函数:对单一 event 做 hat_handoff gate 判定。
@@ -171,20 +178,25 @@ pub fn evaluate_event(inputs: &GateInputs<'_>, file_content: &FileContent) -> Ga
         };
     }
     // from/to 一致性:emit hat 与 downstream hat(由 consumer_of 推出)
-    if let Some(consumer) = inputs.index.consumer_of(inputs.topic) {
-        let from_ok = file_from == allocator::sanitize(inputs.from_hat);
-        let to_ok = file_to == allocator::sanitize(consumer);
-        if !from_ok || !to_ok {
-            return GateDecision::Reject {
-                reason_code: REASON_CODE_HAT_HANDOFF_FILENAME_MISMATCH,
-                message: format!(
-                    "handoff_path `{handoff_path}` from/to mismatch: expected `{exp_from}-{exp_to}`, got `{got_from}-{got_to}`",
-                    exp_from = allocator::sanitize(inputs.from_hat),
-                    exp_to = allocator::sanitize(consumer),
-                    got_from = file_from,
-                    got_to = file_to,
-                ),
-            };
+    // 2026-06-18-001 plan U1: hat=None 场景下 caller 无法构造真实
+    // from_hat,跳过 owner 校验;path jail / R15 / 结构校验等不依赖
+    // 真实 from_hat 的检查仍按原顺序执行。
+    if !inputs.skip_filename_owner_check {
+        if let Some(consumer) = inputs.index.consumer_of(inputs.topic) {
+            let from_ok = file_from == allocator::sanitize(inputs.from_hat);
+            let to_ok = file_to == allocator::sanitize(consumer);
+            if !from_ok || !to_ok {
+                return GateDecision::Reject {
+                    reason_code: REASON_CODE_HAT_HANDOFF_FILENAME_MISMATCH,
+                    message: format!(
+                        "handoff_path `{handoff_path}` from/to mismatch: expected `{exp_from}-{exp_to}`, got `{got_from}-{got_to}`",
+                        exp_from = allocator::sanitize(inputs.from_hat),
+                        exp_to = allocator::sanitize(consumer),
+                        got_from = file_from,
+                        got_to = file_to,
+                    ),
+                };
+            }
         }
     }
 
@@ -344,6 +356,7 @@ hats:
             downstream_publishes: DOWNSTREAM,
             repo_root,
             skip_seq_check: false,
+            skip_filename_owner_check: false,
         }
     }
 

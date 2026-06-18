@@ -1,3 +1,4 @@
+pub mod audit_hat_handoff;
 pub mod clean;
 pub mod code_task;
 pub mod completions;

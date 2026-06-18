@@ -509,9 +509,12 @@ pub fn check_hat_handoff_gate_with_env(
     if config.event_loop.execution_mode != HatExecutionMode::Isolated {
         return Ok(());
     }
-    let Some(hat_id) = hat else {
-        return Ok(());
-    };
+
+    // 2026-06-18-001 plan U1: 不再因 `hat=None` 早返。`from_hat` 缺失
+    // 时后续校验改用 `HandoffIndex::consumer_of(topic)` 判定宏观边
+    // 存在性,直接复用 `evaluate_event` 的 path-jail / R15 / 结构校验
+    // 链路,file-iter/file-seq/file-from/file-to 一致性因 `from_hat`
+    // 不可知而跳过(见 `skip_filename_owner_check`)。
 
     // 解析 payload 中的 handoff_path(与 runtime 同语义,走 SSOT)。
     // 2026-06-18 P1-1: 改用 `hat_handoff::payload::extract_handoff_path`,
@@ -548,16 +551,20 @@ pub fn check_hat_handoff_gate_with_env(
 
     // 2026-06-18-005 U2 (R1): env 存在时按真实值校验;缺失时降级
     // (skip_seq_check=true),只保留 path jail / R15 / 结构校验。
-    let (iteration, current_seq, skip_seq_check) = match env_state {
-        Some((iter, seq)) => (iter, seq, false),
-        None => (1u32, 0u32, true),
+    // 2026-06-18-001 plan U1: hat=None 时 from_hat 不可知,文件名
+    // owner 校验 (from/to) 同步跳过;其余校验仍然执行。
+    let (iteration, current_seq, skip_seq_check, skip_filename_owner_check) = match (hat, env_state) {
+        (Some(_), Some((iter, seq))) => (iter, seq, false, false),
+        (Some(_), None) => (1u32, 0u32, true, false),
+        (None, _) => (1u32, 0u32, true, true),
     };
+    let from_hat_id: &str = hat.unwrap_or("");
 
     let inputs = GateInputs {
         config: handoff_config,
         execution_mode: config.event_loop.execution_mode.clone(),
         index: &index,
-        from_hat: hat_id,
+        from_hat: from_hat_id,
         topic,
         iteration,
         current_seq,
@@ -565,6 +572,7 @@ pub fn check_hat_handoff_gate_with_env(
         downstream_publishes: &downstream_publishes,
         repo_root: workspace_root.as_path(),
         skip_seq_check,
+        skip_filename_owner_check,
     };
 
     match gate::evaluate_event(&inputs, &file_content) {
@@ -785,6 +793,79 @@ hats:
             None
         )
         .is_ok());
+    }
+
+    // ── 2026-06-18-001 plan U1: hat=None 不再早返 ─────────────────────
+    //
+    // 删除 hat=None 早返后,宏观边 topic 必须仍然校验;微观边或未注册
+    // topic 直接放行。文件名 owner 校验在 hat=None 时跳过,但其余
+    // path jail / 文件存在 / R15 / 结构校验仍然执行。
+
+    /// U1: hat=None + 宏观边 + 无 handoff_path → 拒收(不再早返)。
+    #[test]
+    fn hat_none_macro_edge_missing_path_rejected() {
+        let yaml = isolated_two_hat_yaml("  hat_handoff:\n    enabled: true\n");
+        let mut cfg = parse_cfg(&yaml);
+        cfg.core.workspace_root = tempfile::tempdir().unwrap().path().to_path_buf();
+        // work.ready 是 plan_gate → executor 的宏观边(consumer_of 唯一)
+        let err = check_hat_handoff_gate_with_env(None, "work.ready", None, &cfg, None)
+            .expect_err("hat=None + 宏观边 + 无 path 必须拒收");
+        assert_eq!(err.reason_code, REASON_CODE_HAT_HANDOFF_MISSING_PATH);
+    }
+
+    /// U1: hat=None + 非宏观边(未注册 topic)→ 直接通过。
+    #[test]
+    fn hat_none_non_macro_edge_passes() {
+        let yaml = isolated_two_hat_yaml("  hat_handoff:\n    enabled: true\n");
+        let mut cfg = parse_cfg(&yaml);
+        cfg.core.workspace_root = tempfile::tempdir().unwrap().path().to_path_buf();
+        // "review.dimension.ready" 在两 hat 配置中既不被任何 hat publish,
+        // consumer_of 返回 None,属于非宏观边。
+        assert!(
+            check_hat_handoff_gate_with_env(None, "review.dimension.ready", None, &cfg, None)
+                .is_ok(),
+            "hat=None + 非宏观边应直接通过"
+        );
+    }
+
+    /// U1: hat=None + 宏观边 + 合法 handoff_path(文件存在 + 五段式结构)→ 通过。
+    #[test]
+    fn hat_none_macro_edge_with_valid_handoff_path_accepts() {
+        let yaml = isolated_two_hat_yaml("  hat_handoff:\n    enabled: true\n");
+        let mut cfg = parse_cfg(&yaml);
+        let dir = tempfile::tempdir().unwrap();
+        cfg.core.workspace_root = dir.path().to_path_buf();
+        // hat=None 时跳过 owner 校验,所以文件名 from/to 与实际 hat 不一致也允许
+        let abs = dir
+            .path()
+            .join(".ralph/agent/hat-handoff/1-1-plan_gate-executor.md");
+        fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        fs::write(
+            &abs,
+            "# Handoff: plan_gate → executor\n## context\nx\n## changed\ny\n## verify\nz\n## next\n**动作**: emit work.done after completion\n**阻塞**: 无\n## notes\n无\n",
+        )
+        .unwrap();
+        let payload =
+            r#"{"handoff_path":".ralph/agent/hat-handoff/1-1-plan_gate-executor.md"}"#;
+        assert!(
+            check_hat_handoff_gate_with_env(None, "work.ready", Some(payload), &cfg, None)
+                .is_ok(),
+            "hat=None + 宏观边 + 合法 handoff_path 必须通过"
+        );
+    }
+
+    /// U1: hat=None + 宏观边 + 非法 handoff_path(path escape)→ 拒收,
+    /// 即便 owner 校验被跳过,path-jail 仍生效。
+    #[test]
+    fn hat_none_macro_edge_path_escape_still_rejected() {
+        let yaml = isolated_two_hat_yaml("  hat_handoff:\n    enabled: true\n");
+        let mut cfg = parse_cfg(&yaml);
+        let dir = tempfile::tempdir().unwrap();
+        cfg.core.workspace_root = dir.path().to_path_buf();
+        let payload = r#"{"handoff_path":"../../etc/passwd"}"#;
+        let err = check_hat_handoff_gate_with_env(None, "work.ready", Some(payload), &cfg, None)
+            .expect_err("path escape 必须被 path-jail 拒收");
+        assert_eq!(err.reason_code, "hat_handoff_path_escape");
     }
 }
 

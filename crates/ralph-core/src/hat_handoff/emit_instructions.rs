@@ -89,6 +89,26 @@ pub fn build_emit_instructions(
             .to_string(),
     );
 
+    // 2026-06-18-001 plan U4: 显式执行契约 + 拒收自愈指引。
+    // 让 agent 看到 emit 后会被如何处理(诊断事件 + tracing)以及失败后
+    // 还能从 `recovery.jsonl` / `ralph diagnose` 读到结构化 reason_code。
+    lines.push(String::new());
+    lines.push(
+        "### Failure diagnostics (U4)".to_string(),
+    );
+    lines.push(
+        "- Success path: prompt 中会 prepend `## HAT HANDOFF` 块,并在 `ralph::hat_handoff` tracing target 记录 `injected ## HAT HANDOFF block into prompt`。"
+            .to_string(),
+    );
+    lines.push(
+        "- Failure path: 文件缺失/不可读 → 发布 `event.hat_handoff.inject_failed` orchestrator diagnostic;payload 字段缺失或不合法 → CLI/runtime 拒收并写入 `recovery.jsonl`,reason_code 形如 `hat_handoff_missing_path` / `hat_handoff_file_not_found` / `hat_handoff_filename_mismatch` / `hat_handoff_path_escape`。"
+            .to_string(),
+    );
+    lines.push(
+        "- 收到 `task.resume(target=<this-hat>, reason=hat_handoff_*)` 时:读 `recovery.jsonl` 末尾行获取具体 reason_code,按上面的语义修正 payload,**不要反复用相同 payload 探测**。"
+            .to_string(),
+    );
+
     Some(lines.join("\n"))
 }
 
@@ -199,5 +219,21 @@ hats:
         assert!(text.contains("**动作**: ..."));
         assert!(text.contains("**阻塞**: ..."));
         assert!(text.contains("task.resume(reason_code=hat_handoff_*)"));
+    }
+
+    /// 2026-06-18-001 plan U4: 失败诊断契约 + reason_code 表 + 拒收自愈指引
+    #[test]
+    fn includes_failure_diagnostics_contract() {
+        let (config, handoff_config) = isolated_config_with_hats();
+        let index = HandoffIndex::from_config(&config);
+        let h = hat("plan-gate", &["work.ready"]);
+        let text = build_emit_instructions(&h, &handoff_config, &config.event_loop.execution_mode, &index).unwrap();
+        assert!(text.contains("### Failure diagnostics (U4)"));
+        assert!(text.contains("event.hat_handoff.inject_failed"));
+        assert!(text.contains("hat_handoff_missing_path"));
+        assert!(text.contains("hat_handoff_file_not_found"));
+        assert!(text.contains("hat_handoff_filename_mismatch"));
+        assert!(text.contains("hat_handoff_path_escape"));
+        assert!(text.contains("recovery.jsonl"));
     }
 }

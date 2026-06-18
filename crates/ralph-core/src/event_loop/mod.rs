@@ -4163,7 +4163,7 @@ impl EventLoop {
                 } else {
                     // Persist and inject human guidance into prompt if present
                     self.update_robot_guidance(guidance_events);
-                    self.apply_robot_guidance();
+                    self.apply_robot_guidance(hat_id);
                 }
 
                 // Build base prompt and prepend memories + scratchpad + ready tasks
@@ -4326,7 +4326,7 @@ impl EventLoop {
                     // Persist and inject human guidance after scratchpad resolution
                     // (must also happen before immutable borrows from determine_active_hats)
                     self.update_robot_guidance(guidance_events);
-                    self.apply_robot_guidance();
+                    self.apply_robot_guidance(hat_id);
                 }
 
                 let active_hats = self.determine_active_hats(&regular_events);
@@ -4494,7 +4494,7 @@ impl EventLoop {
             if !skip_guidance {
                 // Handle guidance
                 self.update_robot_guidance(guidance_events);
-                self.apply_robot_guidance();
+                self.apply_robot_guidance(hat_id);
             } else {
                 drop(guidance_events);
             }
@@ -4593,6 +4593,10 @@ impl EventLoop {
             // plan's "isolated hat mode 下 alert 只注入目标 hat"
             // contract is enforced inside `apply_runtime_diagnosis_prompt`.
             let base_prompt = self.apply_runtime_diagnosis_prompt(base_prompt, hat_id);
+            // 2026-06-18-001 plan U6: 注入 `## RECENT REJECTIONS` 块
+            // 告诉 agent 最近哪些 emit 被 runtime 拒收。让 agent
+            // 看到 backpressure,避免用同一 payload 反复探测。
+            let base_prompt = self.prepend_rejection_digest(base_prompt);
             let with_skills = self.prepend_auto_inject_skills(base_prompt);
             let with_scratchpad = self.prepend_scratchpad(with_skills, Some(hat_id));
             let with_state_files = self.prepend_state_files(with_scratchpad);
@@ -4746,6 +4750,25 @@ impl EventLoop {
         // human.guidance text — the source of the perky-maple
         // P1-2 probe storm.
         let suppress = self.human_guidance_suppressed();
+        // 2026-06-18-001 plan U7: 当 suppress=true 时,progress-steward
+        // 仍能收到 `human.guidance` 内容——`suppress` 设计本意是防止
+        // executor 探测风暴,误伤了依赖 guidance 的 steward。
+        // 豁免条件:
+        // - 事件显式 target=progress-steward(由 EventBus U2 修复路由到位)
+        // - progress_steward.exempt_from_suppress_human_guidance=true(默认)
+        //   且事件无 target 但当前在 steward 上下文(如下一轮 build_prompt
+        //   时 hat_id=progress-steward)
+        let exempt_steward_hat_id = self
+            .config
+            .event_loop
+            .progress_steward
+            .steward_hat_id
+            .clone();
+        let exempt_enabled = self
+            .config
+            .event_loop
+            .progress_steward
+            .exempt_from_suppress_human_guidance;
 
         // Persist new guidance to scratchpad before caching
         self.persist_guidance_to_scratchpad(&guidance_events);
@@ -4763,6 +4786,7 @@ impl EventLoop {
         // `apply_robot_guidance` → `## ROBOT GUIDANCE` block).
         // The scratchpad persistence above already happened so
         // the event survives for audit.
+        // 2026-06-18-001 plan U7: progress-steward 豁免。
         let mut seen_in_batch: std::collections::HashSet<String> = std::collections::HashSet::new();
         for event in guidance_events {
             // Move the payload out so we can dedup by owned String
@@ -4771,9 +4795,21 @@ impl EventLoop {
             // dedup check; otherwise dropped.
             let payload = event.payload;
             if suppress {
-                // Drop the payload on the floor — already
-                // persisted above.
-                continue;
+                // U7 豁免:target=steward 或 exempt_enabled + 事件无
+                // target 但下一轮将进入 steward 上下文,跳过 suppress
+                let targeted_to_steward = event
+                    .target
+                    .as_ref()
+                    .map(|t| t.as_str() == exempt_steward_hat_id)
+                    .unwrap_or(false);
+                if !(exempt_enabled && targeted_to_steward) {
+                    // Drop the payload on the floor — already
+                    // persisted above.
+                    continue;
+                }
+                debug!(
+                    "U7: human.guidance exempt from suppress for progress-steward"
+                );
             }
             if seen_in_batch.insert(payload.clone()) {
                 let already = self.robot_guidance.iter().any(|p| p == &payload);
@@ -4935,7 +4971,7 @@ impl EventLoop {
     }
 
     /// Injects cached guidance into the next prompt build.
-    fn apply_robot_guidance(&mut self) {
+    fn apply_robot_guidance(&mut self, hat_id: &HatId) {
         if self.robot_guidance.is_empty() {
             return;
         }
@@ -4959,7 +4995,39 @@ impl EventLoop {
         // collector/clear invariant must hold on the suppress
         // path so a stale `## ROBOT GUIDANCE` block never survives
         // a `suppress_human_guidance` opt-in.
+        // 2026-06-18-001 plan U7 (R-REP2 / R-D3):
+        // suppress 模式下仍保留 progress-steward 的 guidance。
+        // 既要保留"target=steward"的针对性 guidance（由
+        // `update_robot_guidance` 已过滤保留），
+        // 也要保留"无 target 但当前正在 build_prompt 的 hat_id
+        // 就是 progress-steward"的兜底 guidance。
+        // 豁免时仍要把 robot_guidance 推入 ralph,但**不**
+        // 清空 `self.ralph.robot_guidance`——让 steward 在 suppress
+        // 下能持续看到跨 turn 累积的 guidance。
         if self.human_guidance_suppressed() {
+            let steward_hat_id = self
+                .config
+                .event_loop
+                .progress_steward
+                .steward_hat_id
+                .as_str();
+            let exempt = self
+                .config
+                .event_loop
+                .progress_steward
+                .exempt_from_suppress_human_guidance
+                && hat_id.as_str() == steward_hat_id;
+            if exempt {
+                tracing::debug!(
+                    target: "ralph::human_guidance",
+                    hat_id = %hat_id.as_str(),
+                    "U7: progress-steward exempt from suppress — pushing guidance to ralph"
+                );
+                self.ralph.set_robot_guidance(self.robot_guidance.clone());
+                // 与非 suppress 路径一致:推入后清空本层 cache
+                self.robot_guidance.clear();
+                return;
+            }
             self.robot_guidance.clear();
             self.ralph.clear_robot_guidance();
             return;
@@ -5594,9 +5662,27 @@ impl EventLoop {
             &self.config.event_loop.hat_handoff,
             handoff_path.as_deref(),
         ) {
-            Some(block) => format!("{block}{prompt}"),
+            Some(block) => {
+                // 2026-06-18-001 plan U4: 注入成功时记录 tracing +
+                // 供 `ralph diagnose` 读取的 last_injected_hat_handoff_path。
+                // 让 operator 与 agent 都能确认"本 turn 真的把 handoff 块
+                // 注入到了 prompt"。
+                tracing::info!(
+                    target: "ralph::hat_handoff",
+                    hat_id = %hat_id.as_str(),
+                    handoff_path = handoff_path.as_deref().unwrap_or(""),
+                    "injected ## HAT HANDOFF block into prompt"
+                );
+                format!("{block}{prompt}")
+            }
             None => {
                 if handoff_path.is_some() {
+                    tracing::warn!(
+                        target: "ralph::hat_handoff",
+                        hat_id = %hat_id.as_str(),
+                        handoff_path = handoff_path.as_deref().unwrap_or(""),
+                        "## HAT HANDOFF inject failed: file missing or unreadable"
+                    );
                     self.bus.publish(ralph_proto::Event::new(
                         "event.hat_handoff.inject_failed",
                         format!(
@@ -5608,6 +5694,18 @@ impl EventLoop {
                 }
                 prompt
             }
+        }
+    }
+
+    /// 2026-06-18-001 plan U6: prepend `## RECENT REJECTIONS` 块。
+    /// 复用 `LoopState::format_rejection_digest_block`,空 digest
+    /// 时返回空字符串,no-op 行为。
+    fn prepend_rejection_digest(&self, prompt: String) -> String {
+        let block = self.state.format_rejection_digest_block();
+        if block.is_empty() {
+            prompt
+        } else {
+            format!("{block}\n{prompt}")
         }
     }
 
@@ -6956,6 +7054,49 @@ impl EventLoop {
                     continue;
                 }
 
+                // 2026-06-18-001 plan U5: 对**完全没有 provenance**的
+                // business topic fail-closed,reason=`isolated_anonymous_business_topic`。
+                // 这是 CLI gate(U1) + EventBus source guard 的 runtime
+                // 侧封堵——直接文件 append 或 loop-runner 内部 publish
+                // 绕过 CLI 的路径在这里拦截。
+                if crate::event_origin::is_anonymous_business_topic(
+                    &event,
+                    &self.registry,
+                    cancellation,
+                    Some(isolated_hat.as_str()),
+                ) {
+                    warn!(
+                        topic = %event.topic,
+                        ts = event.ts,
+                        "U5: isolated anonymous business topic rejected (no hat/source/triggered provenance)"
+                    );
+                    // 2026-06-18-001 plan U6: 累加到 digest
+                    self.state.record_rejection_digest(
+                        "isolated_anonymous_business_topic",
+                        "no hat/source/triggered provenance; supply --hat or use a registered hat backend",
+                        &event.topic,
+                        &event.ts,
+                    );
+                    let violation = Event::new(
+                        "event.isolation.boundary_violation",
+                        format!(
+                            "{{\"hat\":\"<anonymous>\",\"topic\":\"{}\",\"violation\":\"isolated_anonymous_business_topic: no hat/source/triggered provenance\"}}",
+                            event.topic
+                        ),
+                    );
+                    self.bus.publish(violation);
+                    // 触发 task.resume(target=ralph) 走 orchestrator 恢复路径
+                    let resume = Event::new(
+                        "task.resume",
+                        format!(
+                            "{{\"target_hat\":\"ralph\",\"reason\":\"isolated_anonymous_business_topic\",\"topic\":\"{}\"}}",
+                            event.topic
+                        ),
+                    );
+                    self.bus.publish(resume);
+                    continue;
+                }
+
                 // 2026-06-13-004 U2 (P0-1): prefer the event's own
                 // `hat` field as the scope-anchor. The wave merge
                 // layer (see `merge_wave_results_to_events_file`)
@@ -7497,6 +7638,16 @@ impl EventLoop {
             &self.config.event_loop.completion_promise,
         );
         let had_origin_rejections = !origin_rejections.is_empty();
+        // 2026-06-18-001 plan U6: 把 origin guard 拒收累加到 digest,
+        // 让 agent 在下一轮 prompt 中看到 `## RECENT REJECTIONS`。
+        for rej in &origin_rejections {
+            self.state.record_rejection_digest(
+                rej.reason,
+                &format!("origin guard rejected topic `{}` from hat {:?}", rej.topic, rej.source_hat),
+                &rej.topic,
+                "",
+            );
+        }
         // --- End origin guard ---
 
         // --- Topic format check (U5 / R9): reject unknown topics before policy ---
@@ -7535,6 +7686,13 @@ impl EventLoop {
                         topic = %event.topic,
                         hat = ?event.hat,
                         "Topic format rejection: unknown topic not in whitelist"
+                    );
+                    // 2026-06-18-001 plan U6: 累加到 digest
+                    self.state.record_rejection_digest(
+                        "topic_format_rejected",
+                        &format!("topic `{}` is not in the whitelist of known topics", event.topic),
+                        &event.topic,
+                        &event.ts,
                     );
                     // Backwards-compat diagnostic event (R10: no retry).
                     let diagnostic = Event::new(
@@ -7943,6 +8101,9 @@ impl EventLoop {
                     downstream_publishes: &downstream_publishes,
                     repo_root: self.config.core.workspace_root.as_path(),
                     skip_seq_check: false,
+                    // 2026-06-18-001 plan U1: runtime gate 始终不跳过
+                    // owner 校验——从 event.hat 一定能拿到真实 from_hat。
+                    skip_filename_owner_check: false,
                 };
                 // 2026-06-18-005 U6: tri-state read result so
                 // gate can distinguish not_found vs read_fail.
@@ -7976,6 +8137,14 @@ impl EventLoop {
                         // policy-accept time so it doesn't escalate.
                         let event_id = format!("{}:{}", ev.ts, ev.topic);
                         self.state.handoff_tracker.cancel_pending(&event_id);
+                        // 2026-06-18-001 plan U6: 累加到 digest,
+                        // 让 agent 在下一轮 prompt 中看到拒收摘要
+                        self.state.record_rejection_digest(
+                            reason_code,
+                            &message,
+                            &ev.topic,
+                            &ev.ts,
+                        );
                         let diag = ralph_proto::Event::new(
                             "diagnostic.hat_handoff.rejected",
                             format!(
