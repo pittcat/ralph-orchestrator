@@ -22,6 +22,7 @@
 //! (R1-R19, KTD-1..18).
 
 pub mod allocator;
+pub mod emit_instructions;
 pub mod gate;
 pub mod inject;
 pub mod macro_edges;

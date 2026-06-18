@@ -538,15 +538,6 @@ hats:
       - <50：选择安全默认值并记录到 `decisions.md`
       - `decisions.md` 格式：ID（DEC-NNN）、confidence、alternatives、reasoning、reversibility
 
-      ## 2026-06-18-002 计划：HAT HANDOFF（roadmap）`work.done` 宏观边
-      当 `event_loop.hat_handoff.enabled: true`（Phase 3+）时，
-      `work.done` 是宏观边（executor → review-coordinator）。
-      发布前必须：
-      1. 跑 `ralph tools handoff prepare --from executor --to review-coordinator --topic work.done`。
-      2. 填写返回的 `handoff_path`（五段式 markdown）。
-      3. 发送 `work.done` 时 payload 字段必须带 `handoff_path: <返回的路径>`。
-      4. 拒收时读 `task.resume(reason_code=hat_handoff_*)`，可修复后 `--force` 同 path 覆盖，或重新 prepare 取下一个 seq。
-
   review-coordinator:
     name: "🔍 审查协调器"
     description: "diff 分析、intent 发现、条件 dimension 选择、wave 发射。"
@@ -1397,17 +1388,6 @@ hats:
       - `queue.advance` 的 payload 必须包含 `reviewed_task_id` 和 `reviewed_task_key`，用于对账。
       - 步骤推进时发布 `queue.advance` **必须**同时发布带下一步 `task_id`/`task_key` 的 `work.ready`。
       - **禁止**步骤推进时只发 `work.ready` 而不发对应的 `queue.advance` 审计事件。
-
-      ## 2026-06-18-002 计划：HAT HANDOFF（roadmap）`work.ready` 宏观边
-      当 `event_loop.hat_handoff.enabled: true`（Phase 3+）时，
-      `work.ready` 是宏观边（plan-gate → executor，唯一消费者）。
-      发布前必须：
-      1. 跑 `ralph tools handoff prepare --from plan-gate --to executor --topic work.ready`（或显式传 `--current-seq` / `--iteration`，详见 `ralph tools handoff prepare --help`）。
-      2. 填写返回的 `handoff_path`（五段式 markdown：
-         `## context / ## changed / ## verify / ## next / ## notes`）。
-         `## next` 段必须含 `**动作**: ...`（下游具体动作）和 `**阻塞**: ...`。
-      3. 发送 `work.ready` 时 payload 字段必须带 `handoff_path: <返回的路径>`。
-      4. `queue.advance` **不是**宏观边（自环豁免），无需 handoff；只有 `work.ready` 需要。
 
   shipper:
     name: "📦 交付器"

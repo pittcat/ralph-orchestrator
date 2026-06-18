@@ -4539,6 +4539,19 @@ impl EventLoop {
                 format!("{guidance_section}{base_prompt}")
             };
 
+            // 2026-06-18-002 plan: auto-generate upstream handoff emit
+            // instructions from the hat topology, instead of repeating
+            // nearly identical blocks in every hat's preset instructions.
+            let base_prompt = match crate::hat_handoff::emit_instructions::build_emit_instructions(
+                hat,
+                &self.config.event_loop.hat_handoff,
+                &self.config.event_loop.execution_mode,
+                &self.handoff_index,
+            ) {
+                Some(block) => format!("{block}\n\n{base_prompt}"),
+                None => base_prompt,
+            };
+
             // Apply prepend pipeline (SAME order as coordinator path)
             self.ralph.clear_robot_guidance();
             // R1: `## WAVE CONTEXT` block lives at the very top of the
