@@ -7652,6 +7652,17 @@ impl EventLoop {
                                                 .prune_review_dimension_ready_bucket(
                                                     pn, st, ti,
                                                 );
+                                            // U5 (2026-06-18-004 plan, R4):
+                                            // also prune the
+                                            // `review.dimensions.complete`
+                                            // mirror so the
+                                            // next-round complete
+                                            // (with fix_round=N+1)
+                                            // lands cleanly.
+                                            policy_state
+                                                .prune_review_dimensions_complete_bucket(
+                                                    pn, st, ti,
+                                                );
                                             // Symmetry fix: also prune
                                             // the `PolicyRuntimeState`
                                             // `work_done_seen_keys`
