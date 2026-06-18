@@ -58,6 +58,16 @@ event_loop:
   # `.ralph/agent/tasks.jsonl` 与 `.ralph/agent/progress.md` 的
   # 唯一 writer；hat 通过 `## ORCHESTRATOR CONTEXT` 块读取运行时
   # 状态，禁止手工改 ledger。
+  #
+  # 2026-06-17-005 R3 同步：与英文 preset 对等的跨 hat HARD RULE。
+  # - 权威读源：`## ORCHESTRATOR CONTEXT` 块携带的 `current_step` /
+  #   `completed_steps` / `open_tasks` 字段。
+  # - 禁止 CLI（hat 侧，operator 仍可用）：`ralph tools task
+  #   ensure|start|close|fail|reopen`。orchestrator 在 `work.ready`
+  #   / `work.done` 之后自动更新 `tasks.jsonl`。
+  # - 禁止行为：直接 `tee` / `cat` / `echo` 写入
+  #   `.ralph/agent/tasks.jsonl` 或 `.ralph/agent/progress.md`；
+  #   `tail -F` / `tail -n` `.ralph/events.jsonl` 推导状态。
   state_projection:
     enabled: true
     actions:
