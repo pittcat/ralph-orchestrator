@@ -38,6 +38,7 @@ mod recovery_envelope_u7_u8;
 mod replay_light_integration;
 mod review_step_gate;
 mod robot_skill;
+mod runtime_state_injection;
 mod scope_enforcement;
 mod scratchpad;
 mod stale_breaker;
