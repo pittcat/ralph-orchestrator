@@ -474,11 +474,55 @@ fn task_resume_payload_matches_topic(payload: &str, topic: &str) -> bool {
 /// `Some(&mut event_loop)`. The signature is intentionally
 /// `Option<&mut EventLoop>` to keep backwards compatibility with the
 /// legacy callers that did not have an EventLoop handle available.
+///
+/// 2026-06-17-004 U4 (R1): this function is now a thin wrapper
+/// over [`inject_hard_gate_guidance_with_triggers`] that passes an
+/// empty trigger snapshot.  Callers that have an `EventLoop`
+/// handle available should prefer the `_with_triggers` form so
+/// the resume payload can carry the original obligation trigger
+/// topic + payload (e.g. `review.dimension.ready(dimension=testing)`)
+/// forward to the next activation.  When the wrapper is used the
+/// `original_trigger_topic` / `original_trigger_payload` fields
+/// are absent from the resume JSON — fine for legacy callers that
+/// have no `last_activation_events` to snapshot, but the runner's
+/// primary call site (claim-but-no-write path in `runner.rs`)
+/// MUST use the `_with_triggers` form so the recovery can land
+/// back on the right `review.dimension` for `dimension-reviewer`.
+///
+/// `#[allow(dead_code)]` — kept for backwards compatibility
+/// (legacy callers + tests) but the runner now invokes
+/// `inject_hard_gate_guidance_with_triggers` directly.
+#[allow(dead_code)]
 pub fn inject_hard_gate_guidance(
     ctx: &LoopContext,
     event_loop: Option<&mut EventLoop>,
     hat_id: &HatId,
     expected_topics: &[String],
+) {
+    inject_hard_gate_guidance_with_triggers(ctx, event_loop, hat_id, expected_topics, &[])
+}
+
+/// 2026-06-17-004 U4 (R1): internal entry point that takes the
+/// obligation-trigger snapshot for the claim-but-no-write hard
+/// gate.  Mirrors the
+/// [`inject_missing_event_hard_gate_guidance_with_triggers`]
+/// shape: embeds the first trigger's `topic` + `payload` into
+/// the resume JSON (`original_trigger_topic` /
+/// `original_trigger_payload`) and stashes the full snapshot
+/// into `LoopState::pending_obligation_triggers` so the runner's
+/// `replay_obligation_triggers_to_activation_state` can drain it
+/// into `last_activation_events` for the next activation.
+///
+/// The `target` field on the JSONL record is set to `hat_id` so
+/// the `EventBus` re-reader routes the resume to the gated hat
+/// without parsing the payload (matches the missing-event path's
+/// `Event::with_target` contract from 2026-06-17-003 plan R5).
+pub fn inject_hard_gate_guidance_with_triggers(
+    ctx: &LoopContext,
+    event_loop: Option<&mut EventLoop>,
+    hat_id: &HatId,
+    expected_topics: &[String],
+    obligation_triggers: &[ralph_proto::Event],
 ) {
     let events_path = resolve_current_events_path(ctx);
     let topics_str = if expected_topics.is_empty() {
@@ -498,16 +542,23 @@ pub fn inject_hard_gate_guidance(
         topics = topics_str
     );
 
-    // U3: build a structured `task.resume` payload.  `enrich_task_resume_payload_with_stage`
-    // wraps the free-form message and adds schema-required `reason` + `target_hat`.
-    // We then add `allowed_topics` and `hint` fields so the agent can read the
-    // concrete recovery instructions from the event payload itself.
+    // U3: build a structured `task.resume` payload.
+    // `enrich_task_resume_payload_with_stage` wraps the free-form
+    // message and adds schema-required `reason` + `target_hat`.
+    //
+    // U4 (R1): pass the new `RejectionStage::EmitClaimedButNotWritten`
+    // variant so the drift detector can distinguish "agent forgot
+    // to emit" (MissingEvent) from "agent claimed to emit but the
+    // run fell off the rails" (this variant).  Both share the same
+    // recovery shape but the operator-actionable root cause is
+    // different — the new stage value keeps the failure-bucket
+    // counters stable across the two paths.
     let hat_name = hat_id.as_str();
     let resume_payload = enrich_task_resume_payload_with_stage(
         &free_form_message,
         "emit_claimed_but_not_written",
         Some(hat_name),
-        None,
+        Some(RejectionStage::EmitClaimedButNotWritten),
     );
     let resume_value: serde_json::Value = serde_json::from_str(&resume_payload)
         .expect("enrich_task_resume_payload must produce valid JSON");
@@ -529,6 +580,25 @@ pub fn inject_hard_gate_guidance(
         "triggered".into(),
         serde_json::Value::String(hat_name.to_string()),
     );
+    // 2026-06-17-004 U4 (R1): embed the original obligation
+    // trigger topic + payload so the resumed hat sees the same
+    // context it saw on the first dispatch.  When multiple
+    // triggers are pending (e.g. `work.done` + `fix.applied`),
+    // the first trigger is used for the embedded payload; the
+    // rest are still replayed into `last_activation_events` so
+    // the obligation check sees them on the next activation.
+    // When `obligation_triggers` is empty (legacy caller) the
+    // fields are simply omitted — the resume remains a valid
+    // `task.resume` event with the schema-required fields only.
+    if let Some(first_trigger) = obligation_triggers.first() {
+        resume_obj.insert(
+            "original_trigger_topic".into(),
+            serde_json::Value::String(first_trigger.topic.to_string()),
+        );
+        let trigger_payload = serde_json::from_str::<serde_json::Value>(&first_trigger.payload)
+            .unwrap_or_else(|_| serde_json::Value::String(first_trigger.payload.clone()));
+        resume_obj.insert("original_trigger_payload".into(), trigger_payload);
+    }
     let payload_str = serde_json::Value::Object(resume_obj).to_string();
 
     let timestamp = chrono::Utc::now().to_rfc3339();
@@ -580,6 +650,15 @@ pub fn inject_hard_gate_guidance(
     // land on a hat that does not own the expected topics.
     if let Some(event_loop) = event_loop {
         event_loop.state_mut().pending_recovery_hat = Some(hat_id.clone());
+        // 2026-06-17-004 U4 (R1): stash the obligation-trigger
+        // snapshot so the runner's
+        // `replay_obligation_triggers_to_activation_state` can
+        // drain it into `last_activation_events` for the next
+        // activation.  Same pattern as the missing-event path
+        // (see `inject_missing_event_hard_gate_guidance_with_triggers`).
+        if !obligation_triggers.is_empty() {
+            event_loop.state_mut().pending_obligation_triggers = obligation_triggers.to_vec();
+        }
     }
 }
 

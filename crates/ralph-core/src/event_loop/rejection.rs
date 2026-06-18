@@ -49,6 +49,18 @@ pub enum RejectionStage {
     /// (rather than collapsing them into the generic `policy` or
     /// `execution_contract` buckets).
     MissingEvent,
+    /// 2026-06-17-004 U4 (R1): synthesised by the claim-but-no-write
+    /// hard gate (`hard_gate::inject_hard_gate_guidance_with_triggers`).
+    /// The agent's output mentioned `ralph emit` but no event was
+    /// actually written to the events file.  The gate injects a
+    /// `task.resume` with the original trigger topic + payload
+    /// embedded so the next activation lands on the right
+    /// `review.dimension`.  The `stage` value in the resume
+    /// payload is `"emit_claimed_but_not_written"` so the drift
+    /// detector can distinguish "I forgot to emit" from "I tried
+    /// to emit but the run fell off the rails" (different root
+    /// causes, different recovery shapes).
+    EmitClaimedButNotWritten,
 }
 
 impl RejectionStage {
@@ -60,6 +72,7 @@ impl RejectionStage {
             RejectionStage::ExecutionContract => "execution_contract",
             RejectionStage::PayloadContract => "payload_contract",
             RejectionStage::MissingEvent => "missing_event",
+            RejectionStage::EmitClaimedButNotWritten => "emit_claimed_but_not_written",
         }
     }
 }
