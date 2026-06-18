@@ -1,10 +1,10 @@
 ---
 title: 拆分 event_loop/mod.rs 与 loop_runner/tests.rs（零回归分模块）
 type: refactor
-status: stalled-after-U1
+status: draft-after-v11
 date: 2026-06-10
-baseline_refreshed: 2026-06-15
-baseline_head: eb5a49a
+baseline_refreshed: 2026-06-18
+baseline_head: c556a846
 baseline_head_v1: 37bd281
 baseline_head_v2: 918192a
 baseline_head_v3: 9799bf9
@@ -12,27 +12,31 @@ baseline_head_v4: dbe6f35
 baseline_head_v5: 40b856c
 baseline_head_v6: ab44494
 baseline_head_v7: eb5a49a
+baseline_head_v8: 30ceaf5
+baseline_head_v9: fb40414
+baseline_head_v10: 9a2a87e
+baseline_head_v11: c556a846
 completion:
-  - U1: scaffold 仅在 `ralph/2026-06-10-003-...-merry-wren` 分支 commit `b11d9f0` 落地，**未合并**到 pittcat-dev / main
-  - U2-U7: 未开工
+  - U1: scaffold 仅在历史分支 `merry-wren` commit `b11d9f0` 落地，**未合并**到 pittcat-dev / main；当前 HEAD `c556a846` 已漂移，U1 必须重做
+  - U2a-U2h / U3 / U4a-U4b / U4.5 / U5a-U5e / U6a-U6f / U7: 未开工
 landed_in_HEAD:
-  - event_loop/mod.rs 仍为单文件 (7 536 行)
-  - loop_runner/tests.rs 仍为单文件 (11 800 行 / 203 测试)
-  - audit-file-sizes.sh 仅 wc event_loop/tests/* (未含 event_loop/ 根子文件)
+  - event_loop/mod.rs 仍为单文件 (9 574 行)
+  - loop_runner/tests.rs 仍为单文件 (13 602 行 / 238 测试)
+  - review_step_state.rs 1 254 行 / loop_state.rs 1 232 行 / rejection.rs 1 051 行 均破 R1 1 000 行红线
+  - audit-file-sizes.sh 仍仅 wc event_loop/tests/* (未含 event_loop/ 根子文件)
 ---
 
-> ⚠️ **2026-06-15 状态确认**：
+> ⚠️ **2026-06-18 状态确认（v11 baseline）**：
 >
 > 1. **U1 scaffold 未进 HEAD**：`git merge-base --is-ancestor b11d9f0 HEAD` → false；
 >    commit `b11d9f0` 只活在分支 `ralph/2026-06-10-003-refactor-event-loop-and-loop-runner-tests-split-plan-merry-wren`，
->    没有 rebase / merge 到 `pittcat-dev`。早期文档（baseline v3 之前）写的
->    "U1 scaffold 已在分支 `lucky-reed` 落地" 也是历史分支命名，**当前实际分支是 `merry-wren`**。
-> 2. **U2-U7 全部未启动**：当前 HEAD `eb5a49a` 上
+>    没有 rebase / merge 到 `pittcat-dev` / main。**当前 HEAD `c556a846` 与历史 scaffold 已严重漂移，必须重做 U1**。
+> 2. **U2a-U7 全部未启动**：当前 HEAD `c556a846` 上
 >    `crates/ralph-core/src/event_loop/` 只有 `loop_state.rs / mod.rs / rejection.rs / review_step_state.rs / tests/`，
 >    没有任何新的 placeholder 子文件（`types.rs / workflow_guard.rs / policy.rs / ...` 全部不存在）。
->    `crates/ralph-cli/src/loop_runner/tests.rs` 仍是单文件 11 800 行。
-> 3. **baseline 已漂到 v7（HEAD = `eb5a49a`）**：v4 → v7 期间累计 +5 个关键变更（v5 R1/R3/R4/R5 + circuit breaker / v6 plan 001 schema-aware / v7 plan-gate dual-publish 修复），
->    本计划的 enum / struct / 行号锚点全部需要重新校准（详见下面 v5 / v6 / v7 baseline refresh 段）。
+>    `crates/ralph-cli/src/loop_runner/tests.rs` 仍是单文件 13 602 行 / 238 测试。
+> 3. **baseline 已漂到 v11（HEAD = `c556a846`）**：v4 → v11 期间累计大量关键变更（R1/R3/R4/R5、circuit breaker、schema-aware、plan-gate dual-publish、状态投影修复、emit 默认 source 等），
+>    本计划的 enum / struct / 行号锚点全部按 v11 重新校准（详见下面 v5 / v6 / v7 / v8 / v9 / v10 / v11 baseline refresh 段）。
 
 ## v5 Baseline 实测数据（2026-06-15，HEAD = `40b856c`）
 
@@ -77,63 +81,71 @@ landed_in_HEAD:
 
 把项目里两个最大的源文件按职责拆成多个子模块，全程零回归：
 
-- `crates/ralph-core/src/event_loop/mod.rs`（**7 171 行**（baseline @ commit dbe6f35；2026-06-10 立项时为 5 733 行、2026-06-12 v1 baseline @ 37bd281 时为 6 361 行、2026-06-12 v2 baseline @ 918192a 时为 6 501 行、2026-06-13 v3 baseline @ 9799bf9 时为 6 723 行；v4 推进 +448 行来自 wave attribution 修复 `e695b6c` + CLI emit policy gate `7225aab`），主要是 ~6 153 行的 `impl EventLoop` 块（mod.rs:962-7114））拆为 **10 个新建子文件**（`types` / `workflow_guard` / `policy` / `lifecycle` / `termination` / `dispatch` / `prompt` / `diagnostics` / `process` / `wave`；`payload_contract` ~70 行并入 `policy.rs`；保留**已存在**的 `loop_state` / `rejection` / `review_step_state` / `tests` **四个** mod 声明；**U1 scaffold 已在分支 `ralph/2026-06-10-003-refactor-event-loop-and-loop-runner-tests-split-plan-lucky-reed` 落地为 commit `464b4d6`，10 个 placeholder 子文件已就位**；早期 plan 曾考虑把 `process` 作为 `prompt.rs` 内的嵌套 mod，但 U1 scaffold 已创建独立 `process.rs`，U6 将在此文件内填充 6 个 `validate_*` 自由函数）。
-- `crates/ralph-cli/src/loop_runner/tests.rs`（**11 796 行、203 个测试** + 大量 helper）拆为 **17 个 `.rs`**：1 个 `tests/mod.rs`（保留 mutex 文档 + tests.rs 内**仅 2 个** `FAKE_PATH_BACKEND_*` Mutex；`MOCK_ACP_*` 已迁到 `crates/ralph-cli/src/loop_runner/wave/acp_mock.rs:97-104` 为 `pub static`，本轮**不动**）+ 1 个 `tests/common.rs`（真正跨子文件共享的 helper）+ 15 个主题子文件（user_interactive + pty 合并、output_processing + state_machine 合并等，**0 个子文件 < 200 行**）。
+- `crates/ralph-core/src/event_loop/mod.rs`（**9 574 行**，v11 baseline @ `c556a846`；v10 9 364 / v8 8 886 / v5 7 496 / v4 7 171，持续增长主要来自 wave attribution / R1-R5 接入 / flow-reliability / step-handoff / ce-executor-serial 等并行计划），主要是 ~7 600 行的 `impl EventLoop` 块（v11: mod.rs:1766-9347），拆为 **10 个新建子文件**（`types` / `workflow_guard` / `policy` / `lifecycle` / `termination` / `dispatch` / `prompt` / `diagnostics` / `process` / `wave`；`payload_contract` 内容并入 `policy.rs`）。保留**已存在**的 `loop_state` / `rejection` / `review_step_state` / `tests` 四个 mod 声明，但 v11 baseline 显示 `rejection.rs`（1 051 行）、`loop_state.rs`（1 232 行）、`review_step_state.rs`（1 254 行）均已破 R1 1 000 行红线，U1 scaffold 阶段需为它们预留 placeholder 子模块。**U1 历史 scaffold（`b11d9f0` / `464b4d6`）均未合并且已严重漂移，必须重做**。
+- `crates/ralph-cli/src/loop_runner/tests.rs`（**13 602 行、238 个测试** + 大量 helper，v11 baseline）拆为 **20 个 `.rs`**：1 个 `tests/mod.rs`（保留 mutex 文档）+ 1 个 `tests/common.rs`（真正跨子文件共享 helper）+ 1 个 `tests/fake_path.rs`（Mutex + fake PATH helper）+ 17 个主题子文件（按测试族主题拆分，单文件 ≤ 2 200 行）。tests.rs 内**仅 2 个** `FAKE_PATH_BACKEND_*` Mutex 迁到 `tests/fake_path.rs`；`MOCK_ACP_*` 已迁到 `wave/acp_mock.rs:97-104` 为 `pub static`，本轮**不动**。
 
-采用 **U1→U7 分阶段**执行：U1 建公共基础设施、U2 拆 tests 的 5 个子文件、U3 锁 types、U4 拆自由函数子模块、U5 拆 `impl EventLoop` 块（**包含 `process_parse_result` 归 `prompt.rs`**）、U6 拆 wave 辅助（**唯一**允许字节级改写 6 个 inline validation 层为自由函数，由 characterization test 锁定行为）、U7 验证 + 文档同步。
-每 U 独立 commit、独立跑全套 nextest 套件作为回滚点；**禁止**改公开 API、行为、日志、错误信息、依赖、nextest 配置、process-global Mutex 形式。
+采用 **U1 + U2a-U2h + U3 + U4a-U4b + U4.5 + U5a-U5e + U6a-U6f + U7** 的细粒度分阶段执行：每个子单元只改 1-3 个目标文件，单 commit review 面控制在 500 行以内；失败时只 revert 该子单元。核心大单元进一步拆分：
+- `loop_runner/tests.rs` 拆分从原 U2（5 文件）+ U7（14 文件）改为 **U2a-U2h 八个子单元**；
+- `event_loop` 自由函数拆分从原 U4 改为 **U4a + U4b**；
+- `impl EventLoop` 拆分从原 U5 改为 **U5a-U5e**；
+- `process_parse_result` validation 层抽取从原 U6 改为 **U6a-U6f**（先写 characterization test，再拆 wave，再按层抽 8 个 `validate_*`）。
+
+每子单元独立 commit、独立跑 nextest 作为回滚点；**禁止**改公开 API、行为、日志、错误信息、依赖、nextest 配置、process-global Mutex 形式。
 
 ## Problem Frame
 
-项目目前两个文件显著超出 5 000 行，阻碍可读性、code review 局部性、新人 onboarding。
-`event_loop/mod.rs` 的 ~6 153 行 `impl EventLoop` 块（mod.rs:962-7114，v4 baseline @ dbe6f35）尤其难维护——单文件改动 PR 难以快速 review、容易误碰无关逻辑、且子方法之间的领域边界（lifecycle / policy / dispatch / diagnostics）已经清晰可见。
-`loop_runner/tests.rs` 把 **203** 个跨多个领域的测试挤在一个文件里，无法按领域局部 review；新加测试时需要 1 万行单文件编辑。
+项目目前两个文件显著超出 5 000 行，且 v11 baseline 下继续恶化，阻碍可读性、code review 局部性、新人 onboarding。
+`event_loop/mod.rs` 的 ~7 600 行 `impl EventLoop` 块（v11: mod.rs:1766-9347）尤其难维护——单文件改动 PR 难以快速 review、容易误碰无关逻辑、且子方法之间的领域边界（lifecycle / policy / dispatch / diagnostics / prompt）已经清晰可见。
+`loop_runner/tests.rs` 把 **238** 个跨多个领域的测试挤在一个文件里（13 602 行），无法按领域局部 review；新加测试时需要 1.3 万行单文件编辑。tests.rs 在 v10→v11 期间暴涨 +1 277 行 / +27 测试，进一步证明必须细粒度拆分。
 
 项目在 `docs/achieved/plan/2026-06-03-002-refactor-split-large-files-plan.md` 已经做过一轮同样模式的拆分（拆 `loop_runner.rs` / `main.rs` / `config.rs`），并明确了可复用的 KTD1-8（多文件 `impl` 块、re-export 兼容、process-global Mutex 不可动、serde 顺序敏感、文档反向验证、U1→U6 风险递增）。**注意**：6-03-002 U1-U6 已**完成**，`crates/ralph-cli/src/loop_runner/` 现在已经是 18 个子模块的目录结构（`event_logging / execution / exit_conditions / hard_gate / hooks/ / late_events / loop_owner / merge_queue / output_parsing / paths / payload_contract_gate / payload_inputs / preset_lint_gate / prompt / runner / start_loop / suspend / wave/`），但 `tests.rs` 与 `event_loop/mod.rs` 仍是单文件，是本轮聚焦的两个**剩余热点**。
 本轮是该模式的**第二轮 follow-up**：专门承接 R3 未达标项（`loop_runner/tests.rs` + `event_loop/mod.rs` 主 `impl EventLoop` 块），复用 6-03-002 全部已有模式与禁忌（详见 KTD13 对照表）。
 
-零回归意味着**所有 203 个测试（v4 baseline @ dbe6f35 实测，v3 baseline @ 9799bf9 写 201，v4 +2 来自 wave attribution 修复 `e695b6c` + CLI emit policy gate `7225aab`）+ 44 个 `event_loop/tests/` 子文件（v4 新增 3 个：`guidance_dedup.rs` / `incident_fixture.rs` / `recovery_envelope_u7_u8.rs`，v3 baseline 41）+ 所有使用 `EventLoop` 的下游代码（`runner.rs` / `mod.rs` / `operation_guard.rs` / `adapters/pty_executor.rs`）必须保持编译并通过全部测试**。
+零回归意味着**所有 238 个 `loop_runner/tests.rs` 测试（v11 baseline @ c556a846）+ 53 个 `event_loop/tests/` 子文件 + 所有使用 `EventLoop` 的下游代码（`runner.rs` / `mod.rs` / `operation_guard.rs` / `adapters/pty_executor.rs`）必须保持编译并通过全部测试**。
 任何序列化、状态机、错误信息、日志格式、退出码改动都属于回归（U6 例外条款见 R2.b）。
 
 ## Requirements
 
-- R1. `event_loop/mod.rs` 与 `loop_runner/tests/mod.rs` 拆分后**总行数显著下降**（目标：两个主文件都 ≤ 1 000 行；新子文件单文件 ≤ 2 000 行，最大不超过 2 200 行；总新建子文件数 27 个左右：event_loop 10 + tests 17）。
-- R2. **零行为变化**：所有现有 `#[test]` 函数签名 / 断言 / 输出 / 错误信息**逐字节不变**；`TerminationReason` **16 变体**顺序 + 3 处 `match` 表达式覆盖顺序（`exit_code` mod.rs:206-223 / `as_str` mod.rs:233-248 / `is_success` mod.rs:254）不变；`EventLoop` **14 字段**（v4 baseline @ dbe6f35 实测，与 v3 一致）顺序不变。
-- R2.b（U6 唯一例外）：U6 把 `process_parse_result` 内部 6 个 inline validation 层抽为 `event_loop/process/*` 自由函数**允许字节级改写**，但**行为不变**（由 characterization test 锁定，详见 R-Refactor-10 缓解策略）。
-- R3. **零公开 API 破坏**：`lib.rs:80` 的 `pub use config::{...}` 列表（v3 baseline 与 v2 一致，v1 baseline 写 79）、**`lib.rs:104` 的 `pub use event_loop::{...}` 列表**（v3 baseline 与 v2 一致，v1 baseline 写 103）、`event_loop::*` / `loop_runner::*` 全部 `pub` 与 `pub use` 路径**保持不变**；`runner.rs` / `summary_writer.rs` / `drift/engine.rs` / `diagnostics/integration_tests.rs` / `event_loop/tests/replay_light_integration.rs` 等下游文件不修改 import。**注**：v2→v3 期间 commit `a722fe0` 在 `lib.rs` 调整了 1 个 `use` 重排（`PolicyRejection` re-export），与 R3 公开 API 列表本身不冲突——本计划范围**不**涉及该 re-export 的二次调整。
-- R4. **测试基础设施保留**（doc-review 校正）：`crates/ralph-cli/src/loop_runner/tests.rs` 头部 **1-40 行的 mutex 文档**（`// ────` 包围的 contributor-facing 块，描述 4 个 process-global Mutex + `cli-serial` test group + `--test-threads=1` 串行运行约束）**整段复制**到拆分后 `crates/ralph-cli/src/loop_runner/tests/mod.rs` 顶部，作为 rustdoc 注释。**修正**：原 plan 写"头部 55 行"——实测 tests.rs:41-55 行不是 mutex 文档（是 use 段末尾 + U5 payload contract hard gate 段注释 + 第一个 `#[test] fn hard_gate_passes_when_no_hats`），"逐字节一致" 的 verification 范围应明确为 **1-40 行**。
-- R5. **2 个 process-global Mutex 不变**（修正：原计划写 4 个，但 `MOCK_ACP_EXECUTIONS` / `MOCK_ACP_EXECUTION_SERIAL` 已经在 `crates/ralph-cli/src/loop_runner/wave/acp_mock.rs:97-104` 作为 `pub static` 存在，本轮**不动**；本计划只关注 `tests.rs` 内的 2 个 `FAKE_PATH_BACKEND_*`）：拆分后形式 `static LazyLock<Mutex<...>>`（**实测为 private `static`，非 `pub(crate)`**）逐字节不变；**不**改 `serial_test`、**不**改 `.config/nextest.toml` 的 `cli-serial` test group、不改 Mutex 公共可见性。`wave/acp_mock.rs` 内的 2 个 `pub static MOCK_ACP_*` 同样**禁止修改**（虽然不在 `tests.rs` 内，但 tests 头部文档仍引用它们）。
-- R6. **每 U 独立 commit、独立验证**：每个 Implementation Unit 完成后必须 `cargo nextest run --workspace --exclude ralph-e2e --no-fail-fast` 全绿才能进入下一个 U；失败时 `git revert` 即可。
-- R7. **拆分后行数审计通过**（adversarial finding #12 校正）：`bash scripts/audit-file-sizes.sh` 通过；新增子文件全部落在 R1 行数阈值内（脚本本身**无阈值断言**，需手动 `awk '$1>2200{print}'` 校验）。**审计脚本覆盖范围校正**（实测 37bd281 baseline）：当前 `scripts/audit-file-sizes.sh` 只 wc `event_loop/tests/*.rs` 不含 `event_loop/*.rs`（根目录子文件），新拆的 10 个 `event_loop/` 根子文件完全不在自动化审计范围。**U1 / U7 必做的两件事**：(a) 在 audit 脚本中追加 `wc -l crates/ralph-core/src/event_loop/*.rs` 段（与 `loop_runner/` / `config/` 段同等待遇）；(b) U7 步骤 10 手动 `awk '$1>2200{print}' crates/ralph-core/src/event_loop/*.rs crates/ralph-cli/src/loop_runner/tests/*.rs` 校验所有新子文件。
-- R8. **文档反向验证**：每个 U 完成后用 `git grep -nE "event_loop/mod\.rs:|loop_runner/tests\.rs:|event_loop::[a-z_]+|loop_runner::tests::" docs/ crates/ --include="*.md" --include="*.rs" 2>/dev/null` 列出所有引用，逐条同步；**每 U 完成后立即追加 "U<n> Drift Sub-Note"**（U7 时合并为完整 Repo Drift Note）。
-- R9. **CLAUDE.md ↔ AGENTS.md 同步**：U7 完成时 `diff -u CLAUDE.md AGENTS.md` 必须 0 差异（CLAUDE.md 顶部 "IMPORTANT" 段已有硬约束）。
+- R1. `event_loop/mod.rs` 与 `loop_runner/tests/mod.rs` 拆分后**总行数显著下降**（目标：两个主文件都 ≤ 1 000 行；新子文件单文件 ≤ 2 000 行，最大不超过 2 200 行；总新建子文件数约 30 个：event_loop 10 + tests 20）。
+- R2. **零行为变化**：所有现有 `#[test]` 函数签名 / 断言 / 输出 / 错误信息**逐字节不变**；`TerminationReason` **18 变体**（v11 baseline）顺序 + 3 处 `match` 表达式覆盖顺序不变；`EventLoop` **15 字段**（v11 baseline）顺序不变。
+- R2.b（U6a-U6f 唯一例外）：把 `process_parse_result` 内部 8 个 inline validation 层抽为 `event_loop/process::validate_*` 自由函数**允许字节级改写**，但**行为不变**（由 U6a characterization test 锁定，详见 R-Refactor-10 缓解策略）。
+- R3. **零公开 API 破坏**：`lib.rs:89` 的 `pub use config::{...}` 列表、`lib.rs:113` 的 `pub use event_loop::{...}` 列表、`lib.rs:38` 的 `pub use emit_schema_hint::{...}` 列表、`lib.rs:121` 的 `pub use event_origin::{...}` 列表、`lib.rs:127` 的 `pub use event_policy::{...}` 列表、`event_loop::*` / `loop_runner::*` 全部 `pub` 与 `pub use` 路径**保持不变**；下游文件不修改 import。
+- R4. **测试基础设施保留**：`crates/ralph-cli/src/loop_runner/tests.rs` 头部 **1-40 行的 mutex 文档**整段复制到拆分后 `crates/ralph-cli/src/loop_runner/tests/mod.rs` 顶部。
+- R5. **2 个 process-global Mutex 不变**：`tests.rs` 内 `FAKE_PATH_BACKEND_SERIAL` / `FAKE_PATH_BACKEND_BIN`（private `static`）拆分后形式逐字节不变，位置迁到 `tests/fake_path.rs`；`wave/acp_mock.rs` 的 2 个 `pub static MOCK_ACP_*` **不动**。
+- R6. **每子单元独立 commit、独立验证**：每个 Implementation Unit / 子单元完成后必须 `cargo nextest run --workspace --exclude ralph-e2e --no-fail-fast` 全绿才能进入下一个子单元；失败时 `git revert` 即可。
+- R7. **拆分后行数审计通过**：`bash scripts/audit-file-sizes.sh` 通过；新增子文件全部落在 R1 行数阈值内（脚本本身**无阈值断言**，需手动 `awk '$1>2200{print}'` 校验）。**U1 必做**：在 audit 脚本中追加 `wc -l crates/ralph-core/src/event_loop/*.rs` 段。**U7 必做**：手动 `awk '$1>2200{print}' crates/ralph-core/src/event_loop/*.rs crates/ralph-cli/src/loop_runner/tests/*.rs`。
+- R8. **文档反向验证**：每个子单元完成后用 `git grep -nE "event_loop/mod\.rs\b|loop_runner/tests\.rs\b|event_loop::[a-z_]+|loop_runner::tests::" docs/ crates/ --include="*.md" --include="*.rs" 2>/dev/null` 列出所有引用，逐条同步；每子单元完成后立即追加 "U<n> Drift Sub-Note"（U7 时合并为完整 Repo Drift Note）。
+- R9. **CLAUDE.md ↔ AGENTS.md 同步**：U7 完成时 `diff -u CLAUDE.md AGENTS.md` 必须 0 差异。
 - R10. **E2E 与 smoke 全绿**：`cargo run -p ralph-e2e -- --mock` 与 `cargo test -p ralph-core scenarios` 通过；`cargo clippy --workspace --all-targets` 0 warning；`cargo fmt --check` 通过；`cargo test --workspace --exclude ralph-e2e --doc` 全绿。
 
 ## Key Technical Decisions
 
-- KTD1. **多文件 `impl EventLoop` 块模式**：Rust 允许同一 struct 在多个模块加 `impl`，5 个 `impl EventLoop { ... }` 子块各自落到 `event_loop/{lifecycle, termination, dispatch, prompt, diagnostics}.rs`，**不**在 `mod.rs` 留 forwarder。这样 `&self` / `&mut self` 调用语义保持完整（同 crate 内 inherent impl 跨文件 OK），IDE 跳转直达方法体，下游 `runner.rs` 调用 `ralph_core::EventLoop::check_termination()` 等无需 forwarder。**同 crate 内多文件 inherent impl 零成本、无 orphan rule 冲突**，但需注意：跨文件**不允许同名方法**（即使签名不同）——U5 实施时按 KTD12 边界规则判定。
-- KTD2. **re-export 兼容策略**：`event_loop/mod.rs` 顶部继续用 `pub use` 集中重新导出（参考已有 `loop_runner/mod.rs:26-58` 模式）；自由函数与子结构体**默认 `pub(crate)`**，只对外部确实需要的项用 `pub use` 提升；`lib.rs:80` 公开 API 列表（v2 baseline）**禁止修改**；`lib.rs:104` 的 `pub use event_loop::{...}` 列表（v2 baseline）**禁止修改**。
-- KTD3. **测试代码随生产代码迁移**：`loop_runner/tests.rs` → `crates/ralph-cli/src/loop_runner/tests/{mod.rs, common.rs, fake_path.rs, wave.rs, hooks.rs, suspend.rs, hard_gate.rs, hard_gate_payload_contract.rs, pty_user_interactive.rs, resolve_loop_id_and_iteration.rs, loop_termination.rs, async_pty.rs, diagnostics.rs, recovery.rs, preset_lint_gate.rs, merge_queue.rs, prompt_handling.rs, event_logging_and_planning_session.rs, late_events_and_hat_selection.rs, event_pipeline.rs}.rs` 共 19 个 .rs（mod 1 + common 1 + 主题 17）；**不**集中到顶层 `tests/`（编译为独立 crate，启动慢）；子文件用 `use super::common::*;` 引用 helper。
-- KTD4. **共享 helper 拓扑**（doc-review 校正）：`loop_runner/tests/common.rs` 用 `pub(super)` 限定真正跨子文件共享的 helper。原 plan 把 `install_mock_acp_executions` / `MockAcpExecutionGuard` / `MockAcpExecution` 划为 wave 专属是**错的**——实测在 tests.rs:4848/4901/5519/6449/6466/6608/6809 共 7 处调用，覆盖 wave / hard_gate / async_pty / preset_lint_gate 等多主题，U2 实施时若把它放 `tests/wave.rs` 内的 `pub(super) within wave`，其他子文件会触发"function is private"编译错误。**修正归类**：(a) `install_mock_acp_executions` / `MockAcpExecutionGuard` / `MockAcpExecution` 放 `tests/common.rs`（pub(super)，跨子文件可用）；(b) `acp_test_payload` / `make_worker_event` 等 wave 特定 helper 放 `tests/wave.rs` 模块内；(c) `write_fake_executable` / `FakePathBackendsGuard` / `install_fake_path_backends` 放 `tests/fake_path.rs` 模块内。**真正跨子文件共享的 helper** 还有：`dispatch_test_event_loop*` / `suspend_outcome*` / `build_*_payload_input` / `empty_hook_metadata` / `block_on_test_future` 等统一放 `common.rs`。
-- KTD5. **类型/字段顺序敏感（修正伪风险）**：抽 `event_loop/types.rs` 时**整段声明原封不动复制**；`TerminationReason` **16 变体**顺序 + 3 处 `match` 表达式覆盖顺序（`exit_code` 行 206-223 / `as_str` 行 233-248 / `is_success` 行 254）不变；`EventLoop` **14 字段**（v4 baseline @ dbe6f35 实测，含 `pub(crate)` 与辅助字段；v0/v1 baseline 写 13 是早期错算，v2 baseline 写 14 是 v1 校正后稳定，v3 维持 14）顺序不变。**注**：`event_loop/mod.rs` 中**无任何 `#[serde(...)]` / `#[serde(flatten)]` / `#[serde(default)]` / `#[serde(untagged)]` 标注**（grep 验证为空），KTD 早期草稿中的 "serde attribute 位置不变" 是伪风险——已删除。U3 / U4 完成后用 `git diff` 字节级 + `git grep -A 1 "TerminationReason" types.rs | head -50` 验证变体顺序。**baseline 变更说明（v4 校正）**：v0 plan 写 "17 变体 / 14 字段" 是 2026-06-10 立项时的早期错算（v1 时已校正为 16 / 13），v2 baseline 实测 16 / 14——`EventLoop` 在 v0→v2 期间新增 1 个字段（最可能为 `hat_lifecycle_tracker` 或 `recovery_responder`，v1→v2 之间 `recovery_responder` 由 ce-executor-isolated 闭环 commit `f8887ed`/`fe9ae37` 引入）；v3/v4 baseline 字段数维持 14（v2→v4 期间未新增字段，新增逻辑全部落在 `process_parse_result` 与 dispatcher / gate / attribution 边界）。U3 / U5 实施前必须**重新跑** `awk '/^pub struct EventLoop/{f=1;next} f && /^}/{exit} f && /^    [a-z_]+:/{c++} END{print c}' crates/ralph-core/src/event_loop/mod.rs` 确认输出 14（v4 baseline）。
-- KTD6. **U1→U7 风险递增顺序**：
-  1. **U1**：建公共基础设施（`event_loop/mod.rs` 顶部加 10 个 `mod xxx;` 声明 + 10 个空 placeholder 子文件 + 顶部 1 个 `pub use` 转发占位 + 全套测试基线建立）—— 仅有 placeholder 文件，无逻辑改动
-  2. **U2**：拆 `loop_runner/tests.rs` 为 `tests/{mod.rs, common.rs, fake_path.rs, wave.rs, hooks.rs}.rs`（5 个子文件）—— 仅测试，零公开 API 影响
-  3. **U3**：抽 `event_loop/types.rs`（数据结构 + `TerminationReason` 锁定）—— `TerminationReason` **16 变体**顺序风险点
-  4. **U4**：拆 `event_loop/{workflow_guard.rs, policy.rs}.rs`（自由函数子模块；`payload_contract.rs` 70 行内容并入 `policy.rs`）—— 编译期可保证
-  5. **U5**：拆 `event_loop/{lifecycle.rs, termination.rs, dispatch.rs, prompt.rs, diagnostics.rs}.rs`（`impl EventLoop` 块按方法域分块；**`process_parse_result` 1 860 行单方法归 `prompt.rs`**（v4 baseline mod.rs:4921-6780，v3 baseline 1 617 行 → v4 +243 行，主要来自 wave attribution 修复），因 prompt 域是它主语义归属）—— 主体改动
-  6. **U6**：拆 `event_loop/wave.rs`（wave 辅助独立子模块）+ 在 `event_loop/process.rs`（或 `prompt.rs` 内的嵌套 `pub(crate) mod process`）中**新增** 6 个 `event_loop::process::*` 自由函数（仅声明 + 调用，方法体迁移到 U5 的 `prompt.rs::process_parse_result` 调用点处抽 6 个内联块为 `process::validate_*`）
-  7. **U7**：完整验证 + 文档反向验证 + `audit-file-sizes.sh` + Repo Drift Note 合并
-- KTD7. **process-global Mutex 拓扑与可见性**（修正）：本计划**只动 `tests.rs` 内的 2 个** Mutex（`FAKE_PATH_BACKEND_SERIAL` / `FAKE_PATH_BACKEND_BIN`，均为 private `static`，**非** `pub(crate)`）：拆分后形式 `static LazyLock<Mutex<...>>` 逐字节不变；位置从 `tests.rs:605-609` 迁到 `tests/fake_path.rs` 模块内。`MOCK_ACP_EXECUTIONS` / `MOCK_ACP_EXECUTION_SERIAL` 已在上一轮（commit 不详，本计划立项前）作为 `pub static` 迁到 `crates/ralph-cli/src/loop_runner/wave/acp_mock.rs:97-104`（`MOCK_ACP_EXECUTIONS` 97-100 / `MOCK_ACP_EXECUTION_SERIAL` 102-104，两者都在 `#[cfg(test)]` 守卫下，仅测试构建可见），并由 `wave/mod.rs:10` 通过 `pub use acp_mock::{MOCK_ACP_EXECUTION_SERIAL, MOCK_ACP_EXECUTIONS, MockAcpExecution};` 暴露——**本计划完全不动这两个**，但 tests `mod.rs` 顶部文档需引用它们以保留 contributor 上下文；`cli-serial` test group 保留；不引入 `serial_test` crate。
-- KTD8. **nextest 配置不可改**：`.config/nextest.toml` 的 `cli-serial` / `max-threads = 1` 是项目硬约束；`event_loop` 包仍并行运行（无 process-global Mutex），`ralph-cli` 包仍走 `cli-serial` 串行组。
-- KTD9. **文档反向验证（每 U 立即 + U7 合并）**（doc-review 校正）：每 U 完成后立即用 `git grep -nE "event_loop/mod\.rs\b|loop_runner/tests\.rs\b|event_loop::[a-z_]+|loop_runner::tests::" docs/ crates/ --include="*.md" --include="*.rs" 2>/dev/null` 列出本 U 引入的失效引用，并**立即追加** "U<n> Drift Sub-Note" 段（本 plan 文档 `## Repo Drift Note` 之前的子段）；U7 完成时合并为完整 Repo Drift Note。**grep 模式修正**：原 plan 的 `event_loop/mod\.rs:|loop_runner/tests\.rs:` 模式带尾冒号实际命中 0 行（实测 37bd281 baseline），改用 `\b` 词边界符后才能匹配 `event_loop/mod.rs)` / `event_loop/mod.rs,` / 裸 `event_loop/mod.rs` 等所有行号 / 链接 / 注释引用形式。**引用规模估计**（实测 37bd281 baseline）：`event_loop/mod.rs` 252 处引用 / 59 个文件；`loop_runner/tests.rs` 68 处引用 / 20 个文件；U7 文档同步工作量原 plan 估"14+ 引用文档"严重低估（实测 70+ 引用文件，U7 步骤 13 必须用上述 grep 列出**完整**清单后逐条处理，不可凭印象抽样）。
-- KTD10. **不切 `process_parse_result` 内部单方法**：U5 把它整体迁到 `event_loop/prompt.rs`（`impl EventLoop` 块内），方法体不切。U6 在 `prompt.rs::process_parse_result` 调用点处把 6 个 inline validation 层（origin guard / topic format / event policy / state machine / workflow guard / execution contract）抽为 `event_loop::process::validate_*` 自由函数（可放在 `event_loop/process.rs` 或 `prompt.rs` 内的嵌套 `pub(crate) mod process`，由 R-Refactor-10 characterization test 锁定行为）。
+- KTD1. **多文件 `impl EventLoop` 块模式**：Rust 允许同一 struct 在多个模块加 `impl`，5 个 `impl EventLoop { ... }` 子块各自落到 `event_loop/{lifecycle, termination, dispatch, prompt, diagnostics}.rs`，**不**在 `mod.rs` 留 forwarder。跨文件**不允许同名方法**——U5a-U5e 实施时按 KTD12 边界规则判定。
+- KTD2. **re-export 兼容策略**：`event_loop/mod.rs` 顶部继续用 `pub use` 集中重新导出；自由函数与子结构体**默认 `pub(crate)`**，只对外部确实需要的项用 `pub use` 提升；`lib.rs:38 / 89 / 113 / 121 / 127` 公开 API 列表**禁止修改**。
+- KTD3. **测试代码随生产代码迁移**：`loop_runner/tests.rs` → `crates/ralph-cli/src/loop_runner/tests/{mod.rs, common.rs, fake_path.rs, wave.rs, hooks.rs, suspend.rs, hard_gate.rs, hard_gate_payload_contract.rs, pty_user_interactive.rs, resolve_loop_id_and_iteration.rs, loop_termination.rs, async_pty.rs, diagnostics.rs, recovery.rs, preset_lint_gate.rs, merge_queue.rs, prompt_handling.rs, event_logging_and_planning_session.rs, late_events_and_hat_selection.rs, event_pipeline.rs}.rs` 共 **20 个 .rs**（mod 1 + common 1 + fake_path 1 + 主题 17）；**不**集中到顶层 `tests/`；子文件用 `use super::common::*;` 引用 helper。
+- KTD4. **共享 helper 拓扑**：`loop_runner/tests/common.rs` 用 `pub(super)` 限定真正跨子文件共享的 helper。修正归类：(a) `install_mock_acp_executions` / `MockAcpExecutionGuard` / `MockAcpExecution` 放 `tests/common.rs`；(b) `acp_test_payload` / `make_worker_event` 等 wave 特定 helper 放 `tests/wave.rs`；(c) `write_fake_executable` / `FakePathBackendsGuard` / `install_fake_path_backends` 放 `tests/fake_path.rs`。**真正跨子文件共享的 helper** 还有：`dispatch_test_event_loop*` / `suspend_outcome*` / `build_*_payload_input` / `empty_hook_metadata` / `block_on_test_future` 等统一放 `common.rs`。
+- KTD5. **类型/字段顺序敏感**：抽 `event_loop/types.rs` 时**整段声明原封不动复制**；`TerminationReason` **18 变体**（v11 baseline）顺序 + 3 处 `match` 表达式覆盖顺序不变；`EventLoop` **15 字段**（v11 baseline）顺序不变。U3 / U4a / U4b 完成后用 `git diff` 字节级 + `git grep -A 1 "TerminationReason" types.rs | head -60` 验证变体顺序。U3 实施前必须重新跑字段数 awk 确认输出 15。
+- KTD6. **U1 + U2a-U2h + U3 + U4a-U4b + U4.5 + U5a-U5e + U6a-U6f + U7 风险递增顺序**：
+  1. **U1**：建公共基础设施（10 个 event_loop placeholder + tests 目录占位 + audit 扩展）—— 仅有 placeholder，无逻辑改动
+  2. **U2a-U2h**：按主题分批拆 `loop_runner/tests.rs`（每次 1-3 个子文件）—— 仅测试，零公开 API 影响
+  3. **U3**：抽 `event_loop/types.rs` —— `TerminationReason` 18 变体顺序风险点
+  4. **U4a / U4b**：拆 `workflow_guard.rs` / `policy.rs` —— 编译期可保证
+  5. **U4.5**：确认 8 个 validation 层 KTD12 归属矩阵 —— plan-level 可证伪性
+  6. **U5a-U5e**：分 5 个子文件拆 `impl EventLoop` 块（`process_parse_result` ~2 700 行整体归 `prompt.rs`）—— 主体改动
+  7. **U6a**：写 characterization tests —— 行为锁定
+  8. **U6b**：拆 `wave.rs` —— wave 辅助独立
+  9. **U6c-U6f**：分 4 步子抽 8 个 `validate_*` 自由函数 —— 唯一允许字节级改写
+  10. **U7**：完整验证 + 文档反向验证 + Repo Drift Note 合并
+- KTD7. **process-global Mutex 拓扑与可见性**：本计划**只动 `tests.rs` 内的 2 个** Mutex（`FAKE_PATH_BACKEND_SERIAL` / `FAKE_PATH_BACKEND_BIN`，private `static`）：拆分后形式逐字节不变；位置迁到 `tests/fake_path.rs`。`MOCK_ACP_*` 在 `wave/acp_mock.rs:97-104` 为 `pub static`，**本计划完全不动**。
+- KTD8. **nextest 配置不可改**：`.config/nextest.toml` 的 `cli-serial` / `max-threads = 1` 是项目硬约束。
+- KTD9. **文档反向验证（每子单元立即 + U7 合并）**：每子单元完成后立即用 `git grep -nE "event_loop/mod\.rs\b|loop_runner/tests\.rs\b|event_loop::[a-z_]+|loop_runner::tests::" docs/ crates/ --include="*.md" --include="*.rs" 2>/dev/null` 列出失效引用，并立即追加 "U<n> Drift Sub-Note"；U7 合并。v11 引用面粗估 ~520 / ~180，U7 必须列出完整清单后逐条处理。
+- KTD10. **不切 `process_parse_result` 内部单方法**：U5d 把它整体迁到 `event_loop/prompt.rs`，方法体不切。U6c-U6f 在 `prompt.rs::process_parse_result` 调用点处把 8 个 inline validation 层（scope enforcement → origin guard → topic format → event policy → state machine → step handoff gate → workflow guard → execution contract）抽为 `event_loop::process::validate_*` 自由函数，由 U6a characterization test 锁定行为。
 - KTD11. **不引入新依赖**：拆分不引入任何 `Cargo.toml` 依赖变更；不升级 `cargo-nextest`、不引入 `serial_test`、不动 `tokio` / `serde` 版本。
 - KTD12. **5 个 `impl EventLoop` 域的边界规则**（U5 实施时遵循）：
   - **lifecycle.rs**：方法主返回是 `LoopState` / `WorkflowProgress` / 涉及 `activate` / `next` / 状态机转换的，归属 lifecycle
   - **termination.rs**：方法主返回是 `TerminationReason` / 涉及 `check_termination` / `is_terminal` / `mark_terminated` 的，归属 termination
   - **dispatch.rs**：方法主返回是 hat 选择 / 订阅匹配 / 队列派发的，归属 dispatch
-  - **prompt.rs**：方法主返回是 `UserPrompt` / `process_parse_result` / 涉及 prompt 构建与解析的，归属 prompt（**`process_parse_result` 1 860 行整体归 prompt**（v4 baseline mod.rs:4921-6780；v3 baseline 1 617 行 / v2 baseline 1 618 行 / v1 baseline 1 564 行 → v4 较 v3 +243 行 / 较 v1 +296 行），因它是 prompt 解析主入口）
+  - **prompt.rs**：方法主返回是 `UserPrompt` / `process_parse_result` / 涉及 prompt 构建与解析的，归属 prompt（**`process_parse_result` ~2 700 行整体归 prompt**（v11 baseline mod.rs:6618-9318；v4 baseline 1 860 行 / v3 baseline 1 617 行），因它是 prompt 解析主入口）
   - **diagnostics.rs**：方法主返回是 telemetry / metrics / recovery 信号的，归属 diagnostics
   - **跨域方法**：若方法同时影响 ≥ 2 个域（例如 `activate` 改 lifecycle 也写 diagnostics），**以方法主返回 / 主副作用归属**，并在 PR description 中标注 "跨域"；不可调和的歧义记入 R3 follow-up
 - KTD13. **6-03-002 KTD 对照表**（平移 + 调整）：
@@ -144,7 +156,7 @@ landed_in_HEAD:
   | KTD2 re-export 兼容 | KTD2 | **新增 `lib.rs:104` 公开 re-export 列表覆盖**（v2 baseline，v1 baseline 写 103） |
   | KTD3 测试代码迁移 | KTD3 | **新增** `tests/{mod, common}` 子目录 vs `tests.rs` 同名处理（Rust 自动把 `tests.rs` 视为 `tests/mod.rs`） |
   | KTD4 共享 helper | KTD4 | **调整**为"按主题就近"（wave / fake_path 特定 helper 移到子文件内） |
-  | KTD5 serde 顺序 | KTD5 | **修正**：删除 `#[serde(flatten)]` 伪风险，改为 `TerminationReason` **16 变体** + 3 处 match + `EventLoop` **14 字段**顺序（**v4 baseline @ dbe6f35 实测**，v0 立项 17 / 14 中 17 为早期错算，14→13 由 v1 doc-review 触发，**v2 校正回 14**——`hat_lifecycle_tracker` / `recovery_responder` 等 v0→v2 期间增量字段；**v3/v4 维持 14**，v2→v4 期间未新增字段） |
+  | KTD5 serde 顺序 | KTD5 | **修正**：删除 `#[serde(flatten)]` 伪风险，改为 `TerminationReason` **18 变体**（v11 baseline） + 3 处 match + `EventLoop` **15 字段**（v11 baseline）顺序。历史：v0 立项 17 / 14 中 17 为早期错算；v1 doc-review 校正为 14 字段；v2 维持 14；v4 baseline @ dbe6f35 实测 `TerminationReason` 16 变体 / `EventLoop` 14 字段；v5 +1 变体 / +1 字段；v8 +1 变体；v11 实测 18 变体 / 15 字段 |
   | KTD6 U1→U6 风险递增 | KTD6 | **扩展**到 U1→U7（tests 拆两批：U2 + U7） |
   | KTD7 4 个 Mutex 不可动 | KTD7 | **大幅修正**：实测只有 2 个 Mutex 在 `tests.rs` 内（`FAKE_PATH_BACKEND_SERIAL` / `FAKE_PATH_BACKEND_BIN`，均 private `static`），`MOCK_ACP_*` 已在 `wave/acp_mock.rs` 为 `pub static` 由上一轮迁出，本计划不动；只需把 `tests.rs` 内 2 个迁到 `tests/fake_path.rs` |
   | KTD8 nextest 配置不可改 | KTD8 | 完全沿用 |
@@ -162,19 +174,20 @@ landed_in_HEAD:
 flowchart TB
   subgraph event_loop["event_loop/"]
     mod_rs["mod.rs<br/>≈ 80 行<br/>模块声明 + re-exports"]
-    types["types.rs<br/>≈ 270 行<br/>数据结构 + TerminationReason (16 变体)<br/>🆕 新建"]
-    workflow["workflow_guard.rs<br/>≈ 260 行<br/>apply_workflow_guard_validation<br/>🆕 新建"]
-    policy["policy.rs<br/>≈ 600 行<br/>apply_event_policy_validation<br/>+ finding_to_payload_contract_violation<br/>🆕 新建"]
-    lifecycle["lifecycle.rs<br/>≈ 1 360 行<br/>impl EventLoop 生命周期<br/>🆕 新建"]
-    termination["termination.rs<br/>≈ 960 行<br/>impl EventLoop 终止条件<br/>🆕 新建"]
-    dispatch["dispatch.rs<br/>≈ 700 行<br/>impl EventLoop 调度<br/>🆕 新建"]
-    prompt["prompt.rs<br/>≈ 3 520 行<br/>impl EventLoop prompt 处理<br/>+ process_parse_result 1 860 行<br/>🆕 新建"]
-    diagnostics["diagnostics.rs<br/>≈ 420 行<br/>impl EventLoop 诊断 + review_aggregate_timeouts<br/>🆕 新建"]
-    wave["wave.rs<br/>≈ 160 行<br/>wave 辅助 + 6 个 validate_*<br/>🆕 新建"]
-    loop_state["loop_state.rs<br/>= 已存在 (845 行), 不动"]
-    rejection["rejection.rs<br/>= 已存在 (593 行), 不动"]
-    review_step["review_step_state.rs<br/>= 已存在 (605 行, commit 37bd281), 不动"]
-    tests["tests/<br/>= 已存在 (44 个子文件), 不动"]
+    types["types.rs<br/>≈ 300 行<br/>数据结构 + TerminationReason (18 变体)<br/>🆕 新建"]
+    workflow["workflow_guard.rs<br/>≈ 300 行<br/>apply_workflow_guard_validation<br/>🆕 新建"]
+    policy["policy.rs<br/>≈ 800 行<br/>apply_event_policy_validation<br/>+ finding_to_payload_contract_violation<br/>+ publish_policy_rejection_resume<br/>🆕 新建"]
+    lifecycle["lifecycle.rs<br/>≈ 1 500 行<br/>impl EventLoop 生命周期<br/>🆕 新建"]
+    termination["termination.rs<br/>≈ 1 000 行<br/>impl EventLoop 终止条件<br/>🆕 新建"]
+    dispatch["dispatch.rs<br/>≈ 800 行<br/>impl EventLoop 调度<br/>🆕 新建"]
+    prompt["prompt.rs<br/>≈ 3 800 行<br/>impl EventLoop prompt 处理<br/>+ process_parse_result ~2 700 行<br/>🆕 新建"]
+    diagnostics["diagnostics.rs<br/>≈ 500 行<br/>impl EventLoop 诊断<br/>🆕 新建"]
+    process["process.rs<br/>≈ 900 行<br/>8 个 validate_* 自由函数<br/>🆕 新建"]
+    wave["wave.rs<br/>≈ 200 行<br/>wave 辅助<br/>🆕 新建"]
+    loop_state["loop_state.rs<br/>= 已存在 (1 232 行), 本 plan 不拆"]
+    rejection["rejection.rs<br/>= 已存在 (1 051 行), 本 plan 不拆"]
+    review_step["review_step_state.rs<br/>= 已存在 (1 254 行), 本 plan 不拆"]
+    tests["tests/<br/>= 已存在 (53 个子文件), 不动"]
   end
   mod_rs --> types
   mod_rs --> workflow
@@ -184,42 +197,43 @@ flowchart TB
   mod_rs --> dispatch
   mod_rs --> prompt
   mod_rs --> diagnostics
+  mod_rs --> process
   mod_rs --> wave
   mod_rs --> loop_state
   mod_rs --> rejection
   mod_rs --> review_step
   mod_rs --> tests
-  prompt -.抽 6 个 free fn.-> wave
+  prompt -.抽 8 个 free fn.-> process
 ```
 
-图例：🆕 新建 10 个独立子文件（含 `process.rs`，U6 将填充 6 个 `validate_*` 自由函数）；= 已存在 4 个（含 2026-06-12 新加入清单的 `review_step_state.rs`）。`payload_contract.rs` 内容并入 `policy.rs`。
-**预估行数依据（v4 baseline @ dbe6f35）**：mod.rs 当前 7 171 行 - types 270 - workflow_guard 260 - policy 600 = ~6 041 行属于 `impl EventLoop` 块（实测 6 153 行），按 lifecycle 1 360 + termination 960 + dispatch 700 + prompt 3 520 + diagnostics 420 = 6 960 行（含 use 段重复 + 跨域方法的小量复制冗余 ~1 007 行，符合实际多文件 impl 拆分的开销；v1 baseline 行数估 6 430 行，v2 +120，v3 +30，v4 +320）。
+图例：🆕 新建 10 个独立子文件；= 已存在 4 个。`payload_contract.rs` 内容并入 `policy.rs`。`loop_state.rs` / `rejection.rs` / `review_step_state.rs` 本 plan 不拆，但 v11 均已破 R1 1 000 行红线，U1 scaffold 阶段需为它们预留 placeholder。
+**预估行数依据（v11 baseline @ c556a846）**：mod.rs 当前 9 574 行 - types ~300 - workflow_guard ~300 - policy ~800 - impl 块 ~7 600，按 lifecycle 1 500 + termination 1 000 + dispatch 800 + prompt 3 800 + diagnostics 500 = 7 600 行（含 use 段重复 + 跨域方法的小量复制冗余）。
 
 ### `loop_runner/tests.rs` 拆分后的最终结构
 
 ```mermaid
 flowchart TB
   subgraph tests_dir["loop_runner/tests/"]
-    mod_rs["mod.rs<br/>≈ 200 行<br/>顶部 mutex 文档 + 子模块 mod 声明<br/>🆕 新建"]
-    common["common.rs<br/>≈ 250 行<br/>真正跨子文件共享 helper<br/>🆕 新建"]
-    fake_path["fake_path.rs<br/>≈ 220 行<br/>write_fake_executable +<br/>FakePathBackendsGuard +<br/>FAKE_PATH_BACKEND_* Mutex (2 个)<br/>🆕 新建"]
-    wave["wave.rs<br/>≈ 2 200 行<br/>wave 相关测试<br/>(MOCK_ACP_* 引用 wave/acp_mock.rs,<br/>不持有 Mutex)<br/>🆕 新建"]
-    hooks["hooks.rs<br/>≈ 1 800 行<br/>dispatch_phase_event_hooks 测试族<br/>🆕 新建"]
-    suspend["suspend.rs<br/>≈ 380 行<br/>🆕 U7"]
-    hard_gate["hard_gate.rs<br/>≈ 750 行<br/>🆕 U7"]
-    hard_gate_payload["hard_gate_payload_contract.rs<br/>≈ 900 行<br/>U5 硬门 + U6 payload 报告<br/>🆕 U7"]
-    pty_user["pty_user_interactive.rs<br/>≈ 280 行<br/>pty + user_interactive 合并<br/>🆕 U7"]
-    resolve_iter["resolve_loop_id_and_iteration.rs<br/>≈ 550 行<br/>resolve_loop_id + iteration 合并<br/>🆕 U7"]
-    loop_termination["loop_termination.rs<br/>≈ 280 行<br/>🆕 U7"]
-    async_pty["async_pty.rs<br/>≈ 500 行<br/>🆕 U7"]
-    diagnostics["diagnostics.rs<br/>≈ 500 行<br/>🆕 U7"]
-    recovery["recovery.rs<br/>≈ 600 行<br/>recovery 测试族<br/>🆕 U7"]
-    preset_lint["preset_lint_gate.rs<br/>≈ 600 行<br/>preset_lint_gate 测试族<br/>🆕 U7"]
-    merge_queue["merge_queue.rs<br/>≈ 400 行<br/>🆕 U7"]
-    prompt_handling["prompt_handling.rs<br/>≈ 280 行<br/>🆕 U7"]
-    event_log_ps["event_logging_and_planning_session.rs<br/>≈ 550 行<br/>🆕 U7"]
-    late_hat["late_events_and_hat_selection.rs<br/>≈ 550 行<br/>🆕 U7"]
-    event_pipeline["event_pipeline.rs<br/>≈ 350 行<br/>output_processing + state_machine +<br/>inject_hat_execution_env 合并<br/>🆕 U7"]
+    mod_rs["mod.rs<br/>≈ 200 行<br/>顶部 mutex 文档 + 子模块 mod 声明<br/>🆕 U2a"]
+    common["common.rs<br/>≈ 250 行<br/>真正跨子文件共享 helper<br/>🆕 U2a"]
+    fake_path["fake_path.rs<br/>≈ 220 行<br/>write_fake_executable +<br/>FakePathBackendsGuard +<br/>FAKE_PATH_BACKEND_* Mutex (2 个)<br/>🆕 U2a"]
+    wave["wave.rs<br/>≈ 2 500 行<br/>wave 相关测试<br/>🆕 U2b"]
+    hooks["hooks.rs<br/>≈ 1 900 行<br/>dispatch_phase_event_hooks 测试族<br/>🆕 U2c"]
+    suspend["suspend.rs<br/>≈ 400 行<br/>🆕 U2e"]
+    hard_gate["hard_gate.rs<br/>≈ 800 行<br/>🆕 U2d"]
+    hard_gate_payload["hard_gate_payload_contract.rs<br/>≈ 950 行<br/>🆕 U2d"]
+    pty_user["pty_user_interactive.rs<br/>≈ 300 行<br/>🆕 U2f"]
+    resolve_iter["resolve_loop_id_and_iteration.rs<br/>≈ 600 行<br/>🆕 U2g"]
+    loop_termination["loop_termination.rs<br/>≈ 300 行<br/>🆕 U2e"]
+    async_pty["async_pty.rs<br/>≈ 550 行<br/>🆕 U2f"]
+    diagnostics["diagnostics.rs<br/>≈ 550 行<br/>🆕 U2f"]
+    recovery["recovery.rs<br/>≈ 700 行<br/>recovery 测试族<br/>🆕 U2e"]
+    preset_lint["preset_lint_gate.rs<br/>≈ 650 行<br/>preset_lint_gate 测试族<br/>🆕 U2h"]
+    merge_queue["merge_queue.rs<br/>≈ 450 行<br/>🆕 U2g"]
+    prompt_handling["prompt_handling.rs<br/>≈ 350 行<br/>🆕 U2g"]
+    event_log_ps["event_logging_and_planning_session.rs<br/>≈ 600 行<br/>🆕 U2h"]
+    late_hat["late_events_and_hat_selection.rs<br/>≈ 600 行<br/>🆕 U2h"]
+    event_pipeline["event_pipeline.rs<br/>≈ 400 行<br/>🆕 U2h"]
   end
   mod_rs --> common
   mod_rs --> fake_path
@@ -242,325 +256,467 @@ flowchart TB
   mod_rs --> event_pipeline
 ```
 
-共 19 个 `.rs`：1 mod + 1 common + 17 主题（**0 个 < 200 行**）。
-**预估行数依据（v4 baseline @ dbe6f35）**：tests.rs 当前 11 796 行 / 203 个测试（v3 baseline 11 606 行 / 201 个测试，v2 baseline 11 015 行 / 192 个测试，v1 baseline 10 993 行 / 193 个测试；v3→v4 +190 行 / +2 测试，v2→v3 +591 行 / +9 测试，v1→v2 +22 行 / -1 测试，v3→v4 主要来自 wave attribution 修复 `e695b6c` + CLI emit policy gate `7225aab`），按主题聚类的平均规模 50-60 行/测试 + helper（fake_path 占 220、wave 占 2 350、hooks 占 1 800、其余按行数分布）。
+共 20 个 `.rs`：1 mod + 1 common + 1 fake_path + 17 主题（单文件 ≤ 2 200 行）。
+**预估行数依据（v11 baseline @ c556a846）**：tests.rs 当前 13 602 行 / 238 个测试，按主题聚类拆分后 wave 约 2 500、hooks 约 1 900、hard_gate 族约 1 750，其余主题 300-700 行不等。
 
-### 拆分顺序（U1→U7）流水图
+### 拆分顺序（U1→U7 及子单元）流水图
 
 ```mermaid
 flowchart LR
-  U1[U1 公共基础设施<br/>10 个 placeholder] --> U2[U2 拆 tests 5 个]
-  U2 --> U3[U3 抽 types.rs]
-  U3 --> U4[U4 拆 workflow/policy]
-  U4 --> U5[U5 拆 impl EventLoop 分块<br/>+ process_parse_result 归 prompt]
-  U5 --> U6[U6 拆 wave.rs<br/>+ 抽 6 个 validate_* 自由函数]
-  U6 --> U7[U7 补全剩余 14 个<br/>tests 子文件 + 文档同步]
+  U1[U1 公共基础设施<br/>event_loop placeholder] --> U2a[U2a tests 骨架<br/>mod / common / fake_path]
+  U2a --> U2b[U2b wave 测试]
+  U2a --> U2c[U2c hooks 测试]
+  U2b --> U2d[U2d hard_gate 族]
+  U2c --> U2e[U2e suspend / termination / recovery]
+  U2d --> U2f[U2f async_pty / pty / diagnostics]
+  U2e --> U2g[U2g resolve / merge / prompt]
+  U2f --> U2h[U2h logging / late / pipeline / lint]
+  U2h --> U3[U3 抽 types.rs]
+  U3 --> U4a[U4a workflow_guard.rs]
+  U4a --> U4b[U4b policy.rs]
+  U4b --> U4p5[U4.5 validation 归属矩阵]
+  U4p5 --> U5a[U5a lifecycle.rs]
+  U5a --> U5b[U5b termination.rs]
+  U5b --> U5c[U5c dispatch.rs]
+  U5c --> U5d[U5d prompt.rs]
+  U5d --> U5e[U5e diagnostics.rs]
+  U5e --> U6a[U6a char tests]
+  U6a --> U6b[U6b wave.rs]
+  U6b --> U6c[U6c validate scope / origin]
+  U6c --> U6d[U6d validate topic / policy]
+  U6d --> U6e[U6e validate state / handoff]
+  U6e --> U6f[U6f validate workflow / execution]
+  U6f --> U7[U7 验证 + 文档同步]
   U7 -.失败可逆.-> Revert[git revert 单 U commit]
 ```
 
+> **子单元设计原则**：每个 commit 只动 1-3 个目标文件，单 PR review 面控制在 500 行以内；任何子单元失败只 revert 该子单元，不波及其他已落地子单元。
+
 ## Implementation Units
 
-> 📌 **2026-06-15 接力指引**（在 v5 baseline 之上重启时必读）：
+> 📌 **2026-06-18 v11 接力指引**（在当前 HEAD `c556a846` 上重启时必读）：
 >
-> - **U1 必须重做**：`b11d9f0` 不能直接 cherry-pick（与 R1/R3/R4/R5 接入 commit `5929fcd`/`6b03b92` 冲突）。
->   直接在 pittcat-dev 上重新 scaffold 10 个 placeholder + audit-script 扩展 + `mod xxx;` 声明即可（< 1 小时）。
-> - **U3 重做前**：用 `awk '/^pub struct EventLoop/{f=1;next} f && /^}/{exit} f && /^    [a-z_]+:/{c++} END{print c}' crates/ralph-core/src/event_loop/mod.rs`
->   重新校准字段数（v5 = **15**），并把 `TerminationReason` v5 = **17** 变体的新 variant `ScopeViolationCircuitBreakerTripped` 加入字节级锁定清单。
-> - **U4 重做前**：`grep -nE "^fn (extract_correlation_key|apply_workflow_guard|apply_event_policy|finding_to_payload_contract|publish_policy_rejection_resume)"`
->   重新对齐 v5 行号（粗值：390 / 473 / 652 / 950 + **新增** `publish_policy_rejection_resume` 在 344）。
->   **新决策点**：`publish_policy_rejection_resume` 应归 `policy.rs` 还是 `diagnostics.rs`？根据 KTD12 主副作用规则
->   （写 `task.resume` 到 bus + 路由到源 hat），建议归 `policy.rs`（与 `apply_event_policy_validation` 同域）。
-> - **U5 重做前**：`process_parse_result` v5 行号区间 = **5184-7102（~1918 行）**；v5 因 R5 在内多了 ~9 处
->   `publish_policy_rejection_resume(...)` 调用点，确认这些调用是否随方法整段进 `prompt.rs`（建议：随，符合 KTD10）。
-> - **U6 仍保留**：`run_ephemeral_isolation` / `inject_review_aggregate_timeouts` 等 R1/R3 方法在 v5 新增，
->   按 KTD12 应归 **diagnostics**（telemetry + 副作用是写 `.ralph/agent/scratchpad-{loop_id}.md` + 注入 `## EPHEMERAL RELOCATED` prompt 块，
->   主副作用属于 diagnostics + prompt 跨域，按 KTD12 主副作用归 diagnostics）。
+> - **U1 必须重做**：历史 scaffold `b11d9f0` 已完全不能 cherry-pick。直接在 `pittcat-dev` 上重新 scaffold：10 个 event_loop 子模块 + tests 目录占位 + audit-script 扩展 + `mod xxx;` 声明（**预算 ~3 小时**，因 mod.rs 已破 9 000 行，且 `rejection.rs` / `loop_state.rs` / `review_step_state.rs` 均已破/逼近 R1 红线，需在 scaffold 阶段为它们预留占位或列入必拆清单）。
+> - **v11 关键漂移**：`TerminationReason` **18 变体**（v10 新增 `RecoverablePayloadExhausted`），`EventLoop` **15 字段**，`process_parse_result` 当前行号区间 **6618-9318**（method 体 ~2 700 行，含 8 个 inline validation 层），`impl EventLoop` 方法数 **131**，`event_loop/tests/` 子文件数 **53**，`loop_runner/tests.rs` 测试数 **238**。
+> - **U3 重做前**：按 v11 行号 **135-236** 锚定 `TerminationReason`；字节级锁定清单必须包含 `RecoverablePayloadExhausted { recoverable, retry_key, ... }`。
+> - **U4 重做前**：5 个自由函数行号已漂移到 **393 / 569 / 652 / 1162 / 1690**（`publish_policy_rejection_resume` / `extract_correlation_key` / `apply_workflow_guard_validation` / `apply_event_policy_validation` / `finding_to_payload_contract_violation`），必须重新 grep 对齐，不可再用 v10 数字。
+> - **U4.5 矩阵**：v11 保持 **8 个 inline validation 层**（scope enforcement → origin guard → topic format → event policy → state machine → step handoff gate → workflow guard → execution contract），矩阵按 v10 已落地 8 行执行，无需新增层。
+> - **U5 重做前**：`process_parse_result` v11 行号区间 = **6618-9318**；method 体较 v10 显著膨胀（v10 约 2 085 行 → v11 约 2 700 行），主要来自 2026-06-17-004 plan 收尾 commit `c556a846` 及前序 commit 对 policy / serial / state-projector 的增量。U5d 将变成本轮最大单 commit，建议 review 时逐层对照 8 个 validation 层边界标记。
+> - **新增红线文件**：`rejection.rs` 1 051 行、`loop_state.rs` 1 232 行均已破 R1 1 000 行红线。本 plan **原 scope 不拆它们**，但 U1 scaffold 阶段应为其创建 placeholder 或至少预留 mod 声明；若后续 baseline 继续漂移，再开独立 follow-up plan。
 >
-> 上面 5 条只是 v4 → v5 baseline 漂移引起的局部修订，**KTD1-KTD13 / R1-R10 全部主体仍然有效**，本次重启不需要重新设计架构。
+> 上面修订是 v10 → v11 baseline 漂移引起，**KTD1-KTD13 / R1-R10 主体仍然有效**；本次重启不需要重新设计架构，只需按 v11 数字重新对齐切片。
 
 ## Implementation Units（细则）
 
 ### U1. 公共基础设施：建立拆分脚手架 + 全套测试基线
 
-- **状态**：**已在分支 `ralph/2026-06-10-003-refactor-event-loop-and-loop-runner-tests-split-plan-lucky-reed` 落地为 commit `464b4d6`**，但尚未 rebase 到 v4 baseline `dbe6f35`。进入 U2 前必须先把该分支 rebase 到 `dbe6f35`，并处理 `process.rs` placeholder 文件（见下方 Files 第 3 项）。
-- **Goal**: 在 `crates/ralph-core/src/event_loop/mod.rs` 顶部（在**已存在**的 `mod loop_state; pub mod review_step_state; pub mod rejection; #[cfg(test)] mod tests;` 声明**之后**）预声明 10 个目标子模块（`mod types;` / `mod workflow_guard;` / `mod policy;` / `mod lifecycle;` / `mod termination;` / `mod dispatch;` / `mod prompt;` / `mod diagnostics;` / `mod process;` / `mod wave;`），每个子模块暂为空 placeholder；记录**全套测试基线快照**为后续 U 提供零回归锚点。
-- **Requirements**: R6 / R8（基线建立）
+- **状态**：历史 scaffold `b11d9f0` / `464b4d6` 均未合并到当前 HEAD `c556a846`，**必须重做**。
+- **Goal**: 在 `crates/ralph-core/src/event_loop/mod.rs` 顶部预声明 10 个目标子模块（`types` / `workflow_guard` / `policy` / `lifecycle` / `termination` / `dispatch` / `prompt` / `diagnostics` / `process` / `wave`），每个子模块暂为空 placeholder；**同时为 3 个已破 R1 红线的现有子模块（`loop_state` / `rejection` / `review_step_state`）预留 6 个后续占位**（`loop_state_active` / `loop_state_history` / `rejection_payload` / `rejection_envelope` / `review_step_gate` / `flow_lifecycle`），本 plan 不填充内容；同步在 `crates/ralph-cli/src/loop_runner/` 下创建 `tests/` 目录占位；扩展 `scripts/audit-file-sizes.sh` 使其覆盖 `event_loop/*.rs`；记录全套测试基线快照。
+- **Requirements**: R6 / R7 / R8
 - **Dependencies**: 无（最优先）
 - **Files**:
-  - 创建 `crates/ralph-core/src/event_loop/{types,workflow_guard,policy,lifecycle,termination,dispatch,prompt,diagnostics,process,wave}.rs`（10 个 placeholder，每个文件 5-10 行 `// placeholder, will be populated in U<N>`）
-  - **注意**：U1 scaffold commit `464b4d6` 把 `process.rs` 也创建为独立 placeholder 文件（与早期 plan "不新增 `process.rs`" 略有调整），文件内注释说明 U6 将填充 6 个 `validate_*` 自由函数。U6 实施时可选择：(a) 在 `process.rs` 内实现；或 (b) 把内容迁到 `prompt.rs` 内的嵌套 `pub(crate) mod process`。无论哪种，必须保证 `mod.rs` 的 `pub use process::*;` 路径不变。
-  - 修改 `crates/ralph-core/src/event_loop/mod.rs` 顶部 5-19 行的 `mod xxx;` / `pub use` 段（在已存在的 `mod loop_state; pub mod review_step_state; pub mod rejection; mod tests;` **之后**加 10 个 `mod xxx;` 声明 + 10 个 `pub use xxx::*;` 转发占位）
+  - 创建 `crates/ralph-core/src/event_loop/{types,workflow_guard,policy,lifecycle,termination,dispatch,prompt,diagnostics,process,wave}.rs`（10 个 placeholder，5-10 行注释说明后续填充子单元）
+  - 创建 `crates/ralph-core/src/event_loop/{loop_state_active,loop_state_history,rejection_payload,rejection_envelope,review_step_gate,flow_lifecycle}.rs`（6 个 placeholder，仅含注释，为后续 follow-up plan 预留编译路径）
+  - 创建 `crates/ralph-cli/src/loop_runner/tests/` 目录 + 空 `mod.rs` 占位（仅含 `// U2 填充` 注释）
+  - 修改 `crates/ralph-core/src/event_loop/mod.rs`：在已有 `mod loop_state; pub mod review_step_state; pub mod rejection; #[cfg(test)] mod tests;` 之后追加 10 个目标子模块 `mod xxx;` 声明 + 10 个 `pub use xxx::*;` 转发占位；**追加** 6 个红线预留子模块 `mod xxx;` 声明（不 pub use）
+  - 修改 `scripts/audit-file-sizes.sh`：追加 `wc -l crates/ralph-core/src/event_loop/*.rs` 段，与 `loop_runner/` / `config/` 段同等待遇
   - 临时文件 `/tmp/event-loop-split-baseline.txt`（不提交）记录全套测试基线输出
-- **Approach**: 仅添加 `mod xxx;` 声明和 `pub use` re-export 转发点，不删除 `mod.rs` 任何现有代码；**不动**已存在的 4 个 mod 声明（`loop_state` / `review_step_state` / `rejection` / `tests`）。
-- **Patterns to follow**:
-  - `crates/ralph-cli/src/loop_runner/mod.rs:7-24` 的 `mod xxx;` 声明顺序
-  - `crates/ralph-cli/src/loop_runner/mod.rs:26-58` 的 `pub use` 重新导出模式
-  - 2026-06-03-002 plan 的 U1（commit `4ba6e37`）建 `crates/ralph-core/src/event_loop/tests/common/mod.rs` 的"复制不删"模式
+- **Approach**: 仅添加 placeholder / mod 声明 / audit 扩展，不删除 `mod.rs` 任何现有代码；不动已有 4 个 mod 声明；6 个红线预留文件**本 plan 不填充内容**。
 - **Test scenarios**:
-  - **Happy path**: `cargo build -p ralph-core` 通过；`cargo build -p ralph-cli` 通过
-  - **Regression baseline**: `cargo nextest run --workspace --exclude ralph-e2e --no-fail-fast` 全绿；记录 passed/failed 数字快照到 `/tmp/event-loop-split-baseline.txt`
-  - **No new failures**: 与拆分前基线对比，新文件不能引入任何编译错误或测试失败
-  - **Existing mods untouched**: `git diff` 显示已存在的 4 行 mod 声明（`mod loop_state;` / `pub mod review_step_state;` / `pub mod rejection;` / `#[cfg(test)] mod tests;`）字节级未动
-- **Verification**:
   - `cargo build -p ralph-core` 与 `cargo build -p ralph-cli` 0 error / 0 warning
-  - `cargo nextest run --workspace --exclude ralph-e2e --no-fail-fast` 与基线数字完全一致
-  - `git diff --stat` 仅显示 10 个新空文件 + `mod.rs` 顶部 mod 声明变化（< 50 行变更）
-  - 临时基线文件 `/tmp/event-loop-split-baseline.txt` 已生成
-
-### U2. 拆 `loop_runner/tests.rs` 为 `tests/{mod.rs, common.rs, fake_path.rs, wave.rs, hooks.rs}.rs`（5 个子文件）
-
-- **Goal**: 把 `tests.rs` 拆为 `crates/ralph-cli/src/loop_runner/tests/` 子目录，包含 `mod.rs`（顶部 mutex 文档 + 子模块 mod 声明）+ `common.rs`（真正跨子文件共享 helper）+ `fake_path.rs`（FAKE_PATH 后端 + `FAKE_PATH_BACKEND_*` Mutex，**仅 2 个**）+ `wave.rs`（wave 测试；**通过 `use super::*` 或 `use crate::loop_runner::wave::{...}` 引用 `wave/acp_mock.rs` 的 `pub static MOCK_ACP_*`，不在 wave.rs 持有 Mutex 声明**）+ `hooks.rs`（dispatch_phase_event_hooks 测试族）。其余 14 个测试子文件留到 U7 实施。
-- **Requirements**: R1 / R2 / R3 / R4 / R5 / R6
-- **Dependencies**: U1（子模块声明已就绪）
-- **Files**:
-  - 创建 `crates/ralph-cli/src/loop_runner/tests/mod.rs`（~200 行：mutex 文档 + `mod common; mod fake_path; mod wave; mod hooks;` 声明；**mod.rs 内不持有任何 `static LazyLock<Mutex<...>>` 声明**——所有 Mutex 都在子文件或 `wave/acp_mock.rs`）
-  - 创建 `crates/ralph-cli/src/loop_runner/tests/common.rs`（~250 行：`pub(super) fn` 真正跨子文件共享的 helper）
-  - 创建 `crates/ralph-cli/src/loop_runner/tests/fake_path.rs`（~220 行：`write_fake_executable` / `FakePathBackendsGuard` / `install_fake_path_backends` + **2 个** `FAKE_PATH_BACKEND_SERIAL` / `FAKE_PATH_BACKEND_BIN` private `static` Mutex，从原 `tests.rs:605-609` 迁过来）
-  - 创建 `crates/ralph-cli/src/loop_runner/tests/wave.rs`（~2200 行：所有 `wave_*` / `acp_*` / `MockAcpExecution` / `forced_test_wave_pty_failure` 测试 + wave 特定 helper（`MockAcpExecution` 构造器 / `acp_test_payload`）；**通过 `use crate::loop_runner::wave::{MOCK_ACP_EXECUTIONS, MOCK_ACP_EXECUTION_SERIAL, MockAcpExecution};` 引用 `wave/acp_mock.rs` 的 `pub static`，不重新声明**）
-  - 创建 `crates/ralph-cli/src/loop_runner/tests/hooks.rs`（~1800 行：所有 `dispatch_phase_event_hooks` / `loop_start_dispatch` / `iteration_start_dispatch` / `plan_created_lifecycle_hooks` / `human_interact_lifecycle_hooks` / `loop_termination_lifecycle_hooks` / `iteration_start_suspend` / `dispatch_phase_event_hooks_retry_backoff` 测试）
-  - 删除 `crates/ralph-cli/src/loop_runner/tests.rs`（改为目录 `tests/`）
-- **Approach**:
-  1. `mkdir crates/ralph-cli/src/loop_runner/tests/`
-  2. 把 `tests.rs` 头部 1-55 行的 mutex 文档**完整复制**到 `tests/mod.rs` 顶部
-  3. `FAKE_PATH_BACKEND_SERIAL` / `FAKE_PATH_BACKEND_BIN`（仅这 2 个）从 `tests.rs:605-609` 整段迁到 `tests/fake_path.rs` 顶层
-  4. `MOCK_ACP_EXECUTIONS` / `MOCK_ACP_EXECUTION_SERIAL` 在 `wave/acp_mock.rs:97-104` 中**保持不动**；wave.rs 子文件只用 `use crate::loop_runner::wave::{...}` 引用
-  5. wave 特定 helper（`MockAcpExecution` 构造器 / `acp_test_payload` 等）放到 `tests/wave.rs` 模块内
-  6. fake_path 特定 helper 放到 `tests/fake_path.rs` 模块内
-  7. 真正跨子文件共享的 helper 放到 `tests/common.rs`
-  8. fake-path / wave / hooks 三个主题测试族分别迁出
-  9. 剩余 14 个主题（suspend / hard_gate / hard_gate_payload / pty_user / resolve_iter / loop_termination / async_pty / diagnostics / recovery / preset_lint / merge_queue / prompt_handling / event_log_ps / late_hat / event_pipeline）暂时保留在 `tests/mod.rs` 末尾，U7 实施
-  10. 删除 `crates/ralph-cli/src/loop_runner/tests.rs`
-  11. **U2 step 11**（doc-review 派生）：更新 `.config/nextest.toml:2` 注释——把原文"touch four process-global Mutexes (MOCK_ACP_EXECUTIONS, MOCK_ACP_EXECUTION_SERIAL, FAKE_PATH_BACKEND_SERIAL, FAKE_PATH_BACKEND_BIN)" 改写为分账说明："touch four process-global Mutexes: FAKE_PATH_BACKEND_SERIAL/FAKE_PATH_BACKEND_BIN (in tests/fake_path.rs) + MOCK_ACP_EXECUTIONS/MOCK_ACP_EXECUTION_SERIAL (in wave/acp_mock.rs) — 2 in-scope + 2 adjacent, all `#[cfg(test)]` guarded"
-  12. **U2 step 12**（adversarial finding #15 实际落地为 step 11，#13 引用工作量为 U7 单独负责——已记入 U7 步骤 13）
-- **Patterns to follow**:
-  - `loop_runner/tests/mod.rs` 顶部 mutex 文档的 `--test-threads=1` 模式
-  - `crates/ralph-core/src/event_loop/tests/` 已有的 44 个子文件 + `common/mod.rs` 模式（参考 2026-06-03-002 U1）
-  - `pub(super)` 限定 + 子文件 `use super::common::*;` 模式（KTD3 / KTD4）
-  - KTD7 Mutex 拓扑修正（只动 tests.rs 内 2 个 fake_path Mutex；wave Mutex 已在 `wave/acp_mock.rs` 由上一轮处理）
-- **Test scenarios**:
-  - **Happy path**: `cargo build -p ralph-cli` 通过
-  - **Regression baseline**: `cargo nextest run -p ralph-cli -E 'test(loop_runner::)' --no-fail-fast` 与基线数字完全一致
-  - **Mutex preservation (tests.rs side)**: 2 个 `FAKE_PATH_BACKEND_*` Mutex 形式 `static LazyLock<Mutex<...>>` 逐字节不变（位置从 `tests.rs:605-609` 改为 `tests/fake_path.rs` 顶层）
-  - **Mutex preservation (wave/acp_mock.rs side)**: `git diff -- crates/ralph-cli/src/loop_runner/wave/acp_mock.rs` 显示 0 行变更
-  - **No new test failures**: 14 个暂留主题测试族全部通过
-  - **Test documentation preserved**: `tests/mod.rs` 顶部 1-40 行的 mutex 文档**整段**与原 `crates/ralph-cli/src/loop_runner/tests.rs:1-40` 一致（修正：原 plan 写 1-55 行包含 `U5: payload contract hard gate` 段标记 + 第一个 test 函数，verification 命令无法稳定 0 差异）
+  - `cargo nextest run --workspace --exclude ralph-e2e --no-fail-fast` 全绿，记录 passed/failed 数字
+  - `git diff --stat` 仅显示新空文件 + `mod.rs` 顶部声明 + audit 脚本（< 120 行变更）
 - **Verification**:
-  - `cargo nextest run -p ralph-cli -E 'test(loop_runner::)' --no-fail-fast` 全绿，passed 数字与基线完全一致
-  - `git diff` 显示 `tests.rs` 删除 + 5 个新文件 + 14 个暂留测试仍在 `mod.rs` 末尾
-  - 2 个 fake_path Mutex 形式不变（`grep -A3 "static FAKE_PATH_BACKEND" crates/ralph-cli/src/loop_runner/tests/fake_path.rs`）
-  - `git diff --stat -- crates/ralph-cli/src/loop_runner/wave/acp_mock.rs` 显示 0 行变更
+  - 16 个 placeholder 文件存在且可编译
+  - `bash scripts/audit-file-sizes.sh` 现在输出 `event_loop/*.rs` 行数
+  - `/tmp/event-loop-split-baseline.txt` 已生成
+
+### U2a. 拆 `loop_runner/tests.rs` 骨架：`tests/mod.rs` + `tests/common.rs` + `tests/fake_path.rs`
+
+- **Goal**: 建立 tests 目录骨架，把 mutex 文档 + 跨子文件共享 helper + fake_path Mutex 迁出；**不迁任何测试函数**，保持 `tests/mod.rs` 通过 `include!` 或暂时保留原 `tests.rs` 整体内容以保证编译。
+- **Requirements**: R1 / R4 / R5 / R6
+- **Dependencies**: U1
+- **Files**:
+  - 创建 `crates/ralph-cli/src/loop_runner/tests/mod.rs`（~40 行：mutex 文档 1-40 行逐字节复制 + `mod common; mod fake_path;` 声明；**自身不持有 Mutex**）
+  - 创建 `crates/ralph-cli/src/loop_runner/tests/common.rs`（~250 行：真正跨子文件共享 helper，如 `dispatch_test_event_loop*` / `suspend_outcome*` / `build_*_payload_input` / `empty_hook_metadata` / `block_on_test_future` / `install_mock_acp_executions` / `MockAcpExecutionGuard` 等）
+  - 创建 `crates/ralph-cli/src/loop_runner/tests/fake_path.rs`（~220 行：`write_fake_executable` / `FakePathBackendsGuard` / `install_fake_path_backends` + **2 个** `FAKE_PATH_BACKEND_*` private `static` Mutex，从 `tests.rs:606-610` 迁出）
+  - 修改 `crates/ralph-cli/src/loop_runner/tests.rs`：删除已迁出的 1-40 行文档 + helper + Mutex 段，剩余测试函数暂时保留在文件顶部或改为 `#[path = "tests/temp.rs"]` 过渡；**本单元不删除 `tests.rs`**
+- **Approach**:
+  1. 新建 `tests/` 目录与 3 个文件
+  2. 把 `tests.rs` 头部 1-40 行 mutex 文档复制到 `tests/mod.rs`
+  3. 把共享 helper 复制到 `tests/common.rs`（用 `pub(super)`）
+  4. 把 `FAKE_PATH_BACKEND_*`  Mutex 与 fake_path helper 复制到 `tests/fake_path.rs`
+  5. 在 `tests.rs` 中删除已迁出段，顶部改为 `pub mod tests;` 或临时 `include!("tests/mod.rs");` 以保持编译
+  6. 更新 `.config/nextest.toml:2` 注释为分账说明（同原 U2 step 11）
+- **Test scenarios**:
+  - `cargo build -p ralph-cli` 通过
+  - `cargo nextest run -p ralph-cli -E 'test(loop_runner::)' --no-fail-fast` 数字与基线一致
+  - 2 个 `FAKE_PATH_BACKEND_*` Mutex 形式逐字节不变
+- **Verification**:
+  - `diff <(sed -n '1,40p' crates/ralph-cli/src/loop_runner/tests/mod.rs) <(sed -n '1,40p' crates/ralph-cli/src/loop_runner/tests.rs)` 0 差异
+  - `grep -A3 "static FAKE_PATH_BACKEND" crates/ralph-cli/src/loop_runner/tests/fake_path.rs` 形式不变
+  - `git diff --stat -- crates/ralph-cli/src/loop_runner/wave/acp_mock.rs` 0 行变更
+
+### U2b. 拆 `loop_runner/tests.rs` → `tests/wave.rs`
+
+- **Goal**: 把所有 wave / acp / MockAcpExecution / forced_test_wave_pty_failure 测试 + wave 特定 helper 迁到 `tests/wave.rs`。
+- **Requirements**: R1 / R2 / R3 / R6
+- **Dependencies**: U2a
+- **Files**:
+  - 创建 `crates/ralph-cli/src/loop_runner/tests/wave.rs`（~2 500 行）
+  - 修改 `crates/ralph-cli/src/loop_runner/tests/mod.rs`：追加 `mod wave;`
+  - 修改 `crates/ralph-cli/src/loop_runner/tests.rs`：删除已迁出的 wave 段
+- **Approach**:
+  - wave 特定 helper（`acp_test_payload` / `make_worker_event` / `MockAcpExecution` 构造器等）放到 `tests/wave.rs` 模块内
+  - 通过 `use crate::loop_runner::wave::{MOCK_ACP_EXECUTIONS, MOCK_ACP_EXECUTION_SERIAL, MockAcpExecution};` 引用 acp_mock.rs 的 `pub static`，不在 wave.rs 重新声明 Mutex
+- **Test scenarios**:
+  - `cargo build -p ralph-cli` 通过
+  - `cargo nextest run -p ralph-cli -E 'test(loop_runner::tests::wave)' --no-fail-fast` 全绿
+- **Verification**:
+  - wave 相关测试 passed 数字与基线一致
+  - `wave/acp_mock.rs` 0 变更
+
+### U2c. 拆 `loop_runner/tests.rs` → `tests/hooks.rs`
+
+- **Goal**: 把所有 dispatch_phase_event_hooks 测试族迁到 `tests/hooks.rs`。
+- **Requirements**: R1 / R2 / R6
+- **Dependencies**: U2a
+- **Files**:
+  - 创建 `crates/ralph-cli/src/loop_runner/tests/hooks.rs`（~1 900 行）
+  - 修改 `tests/mod.rs`：追加 `mod hooks;`
+  - 修改 `tests.rs`：删除已迁出的 hooks 段
+- **Test scenarios**:
+  - `cargo nextest run -p ralph-cli -E 'test(loop_runner::tests::hooks)' --no-fail-fast` 全绿
+
+### U2d. 拆 `loop_runner/tests.rs` → `tests/hard_gate.rs` + `tests/hard_gate_payload_contract.rs`
+
+- **Goal**: 把 hard_gate 与 payload_contract 相关测试按主题拆到 2 个子文件。
+- **Requirements**: R1 / R2 / R6
+- **Dependencies**: U2b（部分 hard_gate 测试可能依赖 wave helper）或 U2a
+- **Files**:
+  - 创建 `crates/ralph-cli/src/loop_runner/tests/hard_gate.rs`（~800 行）
+  - 创建 `crates/ralph-cli/src/loop_runner/tests/hard_gate_payload_contract.rs`（~950 行）
+  - 修改 `tests/mod.rs`：追加 `mod hard_gate; mod hard_gate_payload_contract;`
+  - 修改 `tests.rs`：删除已迁出段
+
+### U2e. 拆 `loop_runner/tests.rs` → `tests/suspend.rs` + `tests/loop_termination.rs` + `tests/recovery.rs`
+
+- **Goal**: 把 suspend / loop_termination / recovery 三个主题测试迁出。
+- **Requirements**: R1 / R2 / R6
+- **Dependencies**: U2a
+- **Files**:
+  - 创建 `crates/ralph-cli/src/loop_runner/tests/suspend.rs`（~400 行）
+  - 创建 `crates/ralph-cli/src/loop_runner/tests/loop_termination.rs`（~300 行）
+  - 创建 `crates/ralph-cli/src/loop_runner/tests/recovery.rs`（~700 行）
+  - 修改 `tests/mod.rs`：追加 3 个 `mod` 声明
+  - 修改 `tests.rs`：删除已迁出段
+
+### U2f. 拆 `loop_runner/tests.rs` → `tests/async_pty.rs` + `tests/pty_user_interactive.rs` + `tests/diagnostics.rs`
+
+- **Goal**: 把 pty / async_pty / diagnostics 测试迁出。
+- **Requirements**: R1 / R2 / R6
+- **Dependencies**: U2a
+- **Files**:
+  - 创建 `crates/ralph-cli/src/loop_runner/tests/async_pty.rs`（~550 行）
+  - 创建 `crates/ralph-cli/src/loop_runner/tests/pty_user_interactive.rs`（~300 行）
+  - 创建 `crates/ralph-cli/src/loop_runner/tests/diagnostics.rs`（~550 行）
+  - 修改 `tests/mod.rs`：追加 3 个 `mod` 声明
+  - 修改 `tests.rs`：删除已迁出段
+
+### U2g. 拆 `loop_runner/tests.rs` → `tests/resolve_loop_id_and_iteration.rs` + `tests/merge_queue.rs` + `tests/prompt_handling.rs`
+
+- **Goal**: 把 resolve_loop_id / iteration / merge_queue / prompt_handling 测试迁出。
+- **Requirements**: R1 / R2 / R6
+- **Dependencies**: U2a
+- **Files**:
+  - 创建 `crates/ralph-cli/src/loop_runner/tests/resolve_loop_id_and_iteration.rs`（~600 行）
+  - 创建 `crates/ralph-cli/src/loop_runner/tests/merge_queue.rs`（~450 行）
+  - 创建 `crates/ralph-cli/src/loop_runner/tests/prompt_handling.rs`（~350 行）
+  - 修改 `tests/mod.rs`：追加 3 个 `mod` 声明
+  - 修改 `tests.rs`：删除已迁出段
+
+### U2h. 拆 `loop_runner/tests.rs` → 剩余 4 个主题子文件
+
+- **Goal**: 把 event_logging / late_events / event_pipeline / preset_lint_gate 测试迁出；**删除 `tests.rs`**，完成 loop_runner/tests/ 拆分。
+- **Requirements**: R1 / R2 / R3 / R6
+- **Dependencies**: U2a-U2g
+- **Files**:
+  - 创建 `crates/ralph-cli/src/loop_runner/tests/event_logging_and_planning_session.rs`（~600 行）
+  - 创建 `crates/ralph-cli/src/loop_runner/tests/late_events_and_hat_selection.rs`（~600 行）
+  - 创建 `crates/ralph-cli/src/loop_runner/tests/event_pipeline.rs`（~400 行）
+  - 创建 `crates/ralph-cli/src/loop_runner/tests/preset_lint_gate.rs`（~650 行）
+  - 修改 `tests/mod.rs`：追加 4 个 `mod` 声明；清空临时保留的 `tests.rs` 内容
+  - **删除** `crates/ralph-cli/src/loop_runner/tests.rs`
+- **Test scenarios**:
+  - `cargo nextest run -p ralph-cli -E 'test(loop_runner::)' --no-fail-fast` 全绿，passed 数字与 U1 基线完全一致
+  - `git diff --stat -- crates/ralph-cli/src/loop_runner/tests.rs` 显示文件已删除
 
 ### U3. 抽 `event_loop/types.rs`（数据结构 + TerminationReason 锁定）
 
-- **Goal**: 把 `crates/ralph-core/src/event_loop/mod.rs:59-323`（v4 baseline @ dbe6f35，实测：`TerminationReason` 枚举在 131 行 / 枚举段 131-194 / `impl TerminationReason` 196 行起 / `EventLoop` struct 266 行起 / `extract_correlation_key` 起点 324；v3 baseline 59-192 / enum 129-192 / impl 194 起 / extract_correlation_key 322）抽到 `crates/ralph-core/src/event_loop/types.rs`。U5 实施前必须**重新跑** `grep -nE "^pub (enum|struct) (ProcessedEvents|ProcessedEventsWithWaves|TerminationReason|WorkflowGuardRejection)" crates/ralph-core/src/event_loop/mod.rs` 确认行号未漂移。
+- **Goal**: 把 `crates/ralph-core/src/event_loop/mod.rs:135-?` 的 types 段（`TerminationReason` 18 变体 / `EventLoop` 15 字段 / 相关 impl / `ProcessedEvents*`）抽到 `event_loop/types.rs`。
 - **Requirements**: R1 / R2 / R3 / R5
-- **Dependencies**: U1；U2（分离关注点）
+- **Dependencies**: U1
 - **Files**:
-  - 修改 `crates/ralph-core/src/event_loop/types.rs`（从 placeholder 改为实质内容，~270 行）
-  - 修改 `crates/ralph-core/src/event_loop/mod.rs:59-323` 段（删除 + 顶部 `pub use types::{ProcessedEvents, ProcessedEventsWithWaves, TerminationReason};`；v4 baseline types 段 59-323、enum 131-194、impl 196 起、EventLoop 266 起、extract_correlation_key 324 起点，比 v3 baseline types 段末 192 +131 行——主要来自 attribution / recovery 新增数据结构）
+  - 修改 `crates/ralph-core/src/event_loop/types.rs`（~300 行，实际按 v11 行号填充）
+  - 修改 `crates/ralph-core/src/event_loop/mod.rs`：删除 types 段，顶部加 `pub use types::{ProcessedEvents, ProcessedEventsWithWaves, TerminationReason};`
 - **Approach**:
-  1. 整段（动手前重新 grep 定位）原封不动复制到 `types.rs`
-  2. `mod.rs` 顶部加 `pub use types::{ProcessedEvents, ProcessedEventsWithWaves, TerminationReason};`
-  3. `mod.rs` 删除原 59-323 段（v4 baseline，到 extract_correlation_key 起点 324 之前）
-  4. `git diff` 字节级验证 `TerminationReason` **16 变体**顺序、3 处 `match` 表达式覆盖顺序（`exit_code` / `as_str` / `is_success`）字节级未变
-- **Test scenarios**:
-  - **Happy path**: `cargo build -p ralph-core` 通过
-  - **Regression baseline**: `cargo nextest run -p ralph-core --no-fail-fast` 全绿
-  - **Variant order preservation**: `git grep -A 1 "TerminationReason" crates/ralph-core/src/event_loop/types.rs | head -50` **16 个变体**顺序未变（修正：原 plan 写 17 是早期错算）
-  - **Public API stable**: `lib.rs:104` 的 `pub use event_loop::{...}` 列表（v2 baseline，v1 baseline 写 103）+ `git grep "ralph_core::event_loop::" crates/ ralph-cli/ --include="*.rs" 2>/dev/null` 所有引用 `TerminationReason` / `ProcessedEvents` / `ProcessedEventsWithWaves` 的路径不变
+  1. 动手前 `grep -nE "^pub (enum|struct) (ProcessedEvents|ProcessedEventsWithWaves|TerminationReason|WorkflowGuardRejection)" crates/ralph-core/src/event_loop/mod.rs` 重新确认段边界
+  2. 整段原封不动复制到 `types.rs`
+  3. `mod.rs` 删除原段 + 加 `pub use`
+  4. `git diff` 字节级验证 18 个 `TerminationReason` 变体顺序、3 处 `match` 表达式覆盖顺序未变
 - **Verification**:
-  - `cargo nextest run --workspace --exclude ralph-e2e --no-fail-fast` 全绿
-  - `wc -l crates/ralph-core/src/event_loop/{mod,types}.rs` 显示 `mod.rs` 减约 220 行，`types.rs` 约 230 行
-  - `cargo doc --no-deps` 0 warning
+  - `cargo nextest run -p ralph-core --no-fail-fast` 全绿
+  - `wc -l crates/ralph-core/src/event_loop/{mod,types}.rs` 显示 mod.rs 减约 250 行
   - 追加 U3 Drift Sub-Note
 
-### U4. 拆自由函数子模块：`workflow_guard.rs` / `policy.rs`（含 `payload_contract` 内容）
+### U4a. 拆 `event_loop/workflow_guard.rs`
 
-- **Goal**: 把 `crates/ralph-core/src/event_loop/mod.rs:324-961`（v4 baseline @ dbe6f35，实测：`extract_correlation_key` 324 / `apply_workflow_guard_validation` 407 / `apply_event_policy_validation` 587 / `finding_to_payload_contract_violation` 893 / `impl EventLoop` 起点 962；v3 baseline 322-959 / extract 322 / workflow 405 / policy 585 / payload 891 / impl 960）的自由函数抽到 2 个新子文件（`payload_contract` ~70 行内容并入 `policy.rs`）。U4 实施前必须**重新跑** `grep -nE "^fn (extract_correlation_key|apply_workflow_guard|apply_event_policy|finding_to_payload_contract)" crates/ralph-core/src/event_loop/mod.rs` 确认行号未漂移。
+- **Goal**: 把 `extract_correlation_key` + `WorkflowGuardRejectionDetail` / `WorkflowGuardOutcome` + `apply_workflow_guard_validation` 整段抽到 `workflow_guard.rs`。
 - **Requirements**: R1 / R2 / R3
 - **Dependencies**: U3
 - **Files**:
-  - 修改 `crates/ralph-core/src/event_loop/workflow_guard.rs`（~280 行：`extract_correlation_key` + `WorkflowGuardRejectionDetail` + `WorkflowGuardOutcome` + `apply_workflow_guard_validation`，对应 mod.rs:324-586）
-  - 修改 `crates/ralph-core/src/event_loop/policy.rs`（~620 行：`apply_event_policy_validation` + `finding_to_payload_contract_violation` + 相关 helper，对应 mod.rs:587-961）
-  - 修改 `crates/ralph-core/src/event_loop/mod.rs:324-961` 段（删除 + 顶部 `pub use` 重新导出）
-- **Approach**:
-  1. 按函数段整段复制：324-586 → `workflow_guard.rs`；587-961 → `policy.rs`（含原 893-961 payload_contract 段）
-  2. 函数内 `use crate::*` 引用按需保留或重写为 `use super::*`（如果跨子模块）
-  3. `mod.rs` 顶部加 `pub use workflow_guard::*; pub use policy::*;`
-  4. `mod.rs` 删除原 322-959 段
-  5. `git diff` 验证每段字节级未变
-- **Test scenarios**:
-  - **Happy path**: `cargo build -p ralph-core` 通过
-  - **Regression baseline**: `cargo nextest run -p ralph-core --no-fail-fast` 全绿；`crates/ralph-core/src/event_loop/tests/` 下 44 个子文件全部测试通过
-  - **Byte-level preservation**: `git diff` 中 2 个新子文件内容字节级 = 原 `mod.rs` 对应段
-  - **No dead code**: `cargo build -p ralph-core` 0 `dead_code` / 0 `unused_imports` warning
+  - 修改 `crates/ralph-core/src/event_loop/workflow_guard.rs`（~300 行）
+  - 修改 `crates/ralph-core/src/event_loop/mod.rs`：删除对应段，顶部加 `pub use workflow_guard::*;`
+- **Approach**: 按函数段整段复制；`use super::*;` 按需调整；`git diff` 验证字节级未变。
 - **Verification**:
   - `cargo nextest run --workspace --exclude ralph-e2e --no-fail-fast` 全绿
-  - `wc -l crates/ralph-core/src/event_loop/{mod,workflow_guard,policy}.rs` 显示 `mod.rs` 减约 640 行，2 个新子文件总和 ~900 行
-  - `cargo clippy -p ralph-core --all-targets` 0 warning
-  - 追加 U4 Drift Sub-Note
+  - 追加 U4a Drift Sub-Note
 
-### U4.5. pre-U5 设计 review：6 个 `process_parse_result` validation 层在 KTD12 五域中的归属矩阵（adversarial finding #8 补救）
+### U4b. 拆 `event_loop/policy.rs`（含 `payload_contract` 内容）
 
-- **Goal**: 在 U5 实施 **1 860 行** `process_parse_result`（v4 baseline mod.rs:4921-6780，v3 baseline 1 617 行 → v4 +243 行，主要来自 wave attribution 修复）整体归 `prompt.rs` 之前，先在 plan 中显式列出 6 个 inline validation 层（origin guard / topic format / event policy / state machine / workflow guard / execution contract）的 KTD12 归属矩阵，让 reviewer 提前判定是否真的能按"主返回 / 主副作用归属 prompt 域"统一处理；如有歧义记入 R3 follow-up 而非在 PR 中临时判定（避免 R-Refactor-9 "U5 主体改动 1 860 行方法归错域后无法在不动业务的前提下重新分块" 风险）。
-- **Requirements**: KTD12 可证伪性（plan-level 校正 adversarial finding #8）
-- **Dependencies**: U4
-- **Files**:
-  - 修改本 plan 文档追加 "U4.5 归属矩阵" 段（实施前在 U5 之前完成），格式：
-    ```
-    | validation 层 | 主返回 | 主副作用 | KTD12 目标子模块 | 跨域标记 |
-    | origin guard | () | 拒绝 + emit rejection envelope | prompt.rs | 跨 dispatch（reject 后 hat 不激活）|
-    | topic format | () | 拒绝 unknown topic | prompt.rs | 跨 lifecycle（state 不前进）|
-    | event policy | PolicyDecision | 修改 self.bus（forward event） | prompt.rs | 跨 diagnostics（写 recovery envelope）|
-    | state machine | StateMachineDecision | 修改 self.state | prompt.rs | 跨 lifecycle（直接 state transition）|
-    | workflow guard | Vec<PolicyFinding> | 拒绝 + 写 self.diagnostics | prompt.rs | 跨 diagnostics（直接写 collector）|
-    | execution contract | ExecutionContractDecision | 拒绝 + 写 self.diagnostics | prompt.rs | 跨 diagnostics + lifecycle |
-    ```
-- **Approach**:
-  1. U4.5 实施时（U4 commit 之后 / U5 commit 之前）用 `grep -nE "origin guard|topic format|event policy|state machine|workflow guard|execution contract" crates/ralph-core/src/event_loop/mod.rs` 验证 6 个 inline 块位置
-  2. 由 plan author + 1 名 reviewer 共同审核矩阵（reviewer 可在 PR 评论区逐行 approve/reject）
-  3. 矩阵任一行未达成共识时，U5 暂停：要么把 process_parse_result 改归"跨域"标注（KTD12 例外：process_parse_result 因体量过大需独立 review），要么增加 U5a/U5b 拆分
-- **Verification**:
-  - 本 plan 文档 "U4.5 归属矩阵" 段 6 行 + 1 共识签字
-  - U5 实施时 grep 6 个 inline 块位置与矩阵匹配
-  - U5 commit message 引用 "U4.5 矩阵" 作为过程证据
-
-### U5. 拆 `impl EventLoop` 块按方法域：5 个子文件（含 `process_parse_result` 归 `prompt.rs`）
-
-- **Goal**: 把 `crates/ralph-core/src/event_loop/mod.rs:962-7115`（v4 baseline @ dbe6f35，实测：`impl EventLoop` 主块 962-7114（6 153 行）；尾部 `format_duration` 7128 / `termination_status_text` 7144 作为自由函数随 `termination.rs` 一并迁出）的 ~6 153 行按方法域拆到 5 个新子文件（lifecycle / termination / dispatch / prompt / diagnostics）；**`process_parse_result` 1 860 行单方法（mod.rs:4921-6780）整体归 `prompt.rs`**（按 KTD12 边界规则：方法主语义是 prompt 解析；v4 较 v3 baseline +243 行，主要来自 wave attribution 修复）。**新增方法注意**：commit `37bd281` 引入的 `inject_review_aggregate_timeouts` 归 **diagnostics**（KTD12 规则：返回 bool + 副作用是 telemetry / 注入 recovery，diagnostics 域）；`review_step_tracker.check_semantic_gates` / `observe_accepted` 由 `review_step_state` 模块自管，不在本拆分范围。U5 实施前必须**重新 grep** `impl EventLoop` 起止 + 所有 120 个方法名（`awk '/^impl EventLoop/{f=1;next} f && /^}/{exit} f && /^    (pub |pub\(crate\) )?fn /{c++} END{print c}'`，v4 baseline @ dbe6f35 实测输出 120，比 v3 baseline 118 +2——v3→v4 期间 wave attribution 修复 `e695b6c` 新增 2 个方法，大概率在 `process_parse_result` 内或 `next_hat` / attribution 路径），确认与 KTD12 规则对应一致。
+- **Goal**: 把 `apply_event_policy_validation` + `finding_to_payload_contract_violation` + `publish_policy_rejection_resume` + 相关 helper 整段抽到 `policy.rs`。
 - **Requirements**: R1 / R2 / R3
-- **Dependencies**: U4
+- **Dependencies**: U4a
 - **Files**:
-  - 修改 `crates/ralph-core/src/event_loop/lifecycle.rs`（~1 360 行：生命周期方法 + KTD12 规则；v4 较 v3 +20）
-  - 修改 `crates/ralph-core/src/event_loop/termination.rs`（~960 行：终止条件方法 + `format_duration` + `termination_status_text` + KTD12 规则；v4 +20）
-  - 修改 `crates/ralph-core/src/event_loop/dispatch.rs`（~700 行：调度方法 + KTD12 规则；v4 +20）
-  - 修改 `crates/ralph-core/src/event_loop/prompt.rs`（~3 520 行：prompt 处理方法 + **`process_parse_result` 1 860 行整体方法体**）
-  - 修改 `crates/ralph-core/src/event_loop/diagnostics.rs`（~420 行：诊断方法 + `inject_review_aggregate_timeouts` + KTD12 规则；v4 +20）
-  - 修改 `crates/ralph-core/src/event_loop/mod.rs:962-7115` 段（删除整块 impl + 末尾两个自由函数；v4 baseline mod.rs 7 171 行）
+  - 修改 `crates/ralph-core/src/event_loop/policy.rs`（~800 行）
+  - 修改 `crates/ralph-core/src/event_loop/mod.rs`：删除对应段，顶部加 `pub use policy::*;`
 - **Approach**:
-  1. 按方法名（`grep '    pub fn' / '    fn' crates/ralph-core/src/event_loop/mod.rs`）聚合到 5 个域，遵循 KTD12 边界规则
-  2. 每个子文件顶部 `use super::*; use crate::...` 按需
-  3. 每个子文件结构：`//! <域描述>` 顶部 rustdoc + `use` 段 + `impl EventLoop { ... }` 块
-  4. `mod.rs` 顶部已有 `mod lifecycle; mod termination; mod dispatch; mod prompt; mod diagnostics;` 声明（U1 已加）
-  5. `mod.rs` 删除原 962-7115 整段 impl + 末尾两个自由函数
-  6. `git diff` 验证每个方法体字节级未变（`diff -u <(sed -n '962,7115p' mod.rs.bak) <(cat lifecycle.rs termination.rs dispatch.rs prompt.rs diagnostics.rs)`）
-  7. 跨文件 `self.method()` 解析验证：`cargo build -p ralph-cli` 0 error
-- **Test scenarios**:
-  - **Happy path**: `cargo build -p ralph-core` 通过
-  - **Regression baseline**: `cargo nextest run --workspace --exclude ralph-e2e --no-fail-fast` 全绿
-  - **Method-level byte preservation**: 5 个子文件方法体总字节 = 原 `mod.rs:962-7115` 段
-  - **Method visibility preserved**: **120 个方法**（v4 baseline @ dbe6f35 实测，比 v3 baseline 118 +2）的 `pub` / `pub(crate)` / private 可见性逐个未变
-  - **Cross-module call preserved**: `grep -nE "fn check_termination|fn activate|fn dispatch_hat|fn build_prompt|fn emit_telemetry|fn inject_review_aggregate_timeouts" crates/ralph-core/src/event_loop/{lifecycle,termination,dispatch,prompt,diagnostics}.rs` 全部能找到（同名方法冲突检测）
-  - **`process_parse_result` 完整性**: `crates/ralph-core/src/event_loop/prompt.rs` 中 `process_parse_result` 方法体**未切**（U5 仅迁位置，U6 才抽 6 个 free fn）
-  - **review_step_state 不动**: `git diff -- crates/ralph-core/src/event_loop/review_step_state.rs` 0 行变更（v2 baseline 605 行，比 v1 +93 行，但本计划依然不动）
+  1. 动手前 `grep -nE "^fn (extract_correlation_key|apply_workflow_guard|apply_event_policy|finding_to_payload_contract|publish_policy_rejection_resume)" crates/ralph-core/src/event_loop/mod.rs` 重新对齐 v11 行号
+  2. 整段复制到 `policy.rs`
+  3. `mod.rs` 删除对应段 + 加 `pub use`
+  4. `git diff` 验证字节级未变
 - **Verification**:
   - `cargo nextest run --workspace --exclude ralph-e2e --no-fail-fast` 全绿
-  - `wc -l crates/ralph-core/src/event_loop/{mod,lifecycle,termination,dispatch,prompt,diagnostics}.rs` 显示 `mod.rs` 减约 6 153 行，5 个新子文件总和 ~6 960 行（v4 较 v3 baseline 估 +320）
+  - `cargo clippy -p ralph-core --all-targets` 0 warning
+  - 追加 U4b Drift Sub-Note
+
+### U4.5. pre-U5 设计 review：8 个 `process_parse_result` validation 层归属矩阵
+
+- **Goal**: 在 U5d 实施 `process_parse_result` 整体归 `prompt.rs` 之前，先在 plan 中显式列出 8 个 inline validation 层的 KTD12 归属矩阵，让 reviewer 提前判定。
+- **Requirements**: KTD12 可证伪性
+- **Dependencies**: U4b
+- **Files**: 修改本 plan 文档追加矩阵段
+- **矩阵模板**：
+
+| validation 层 | 主返回 | 主副作用 | KTD12 目标子模块 | 跨域标记 |
+|---|---|---|---|---|
+| scope enforcement | () | 拒绝越 scope event | prompt.rs | 跨 dispatch |
+| origin guard | () | 拒绝 + emit rejection envelope | prompt.rs | 跨 dispatch |
+| topic format | () | 拒绝 unknown topic | prompt.rs | 跨 lifecycle |
+| event policy | PolicyDecision | 修改 self.bus（forward event） | prompt.rs | 跨 diagnostics |
+| state machine | StateMachineDecision | 修改 self.state | prompt.rs | 跨 lifecycle |
+| step handoff gate | () | 拒绝 + 路由 handoff | prompt.rs | 跨 lifecycle + dispatch |
+| workflow guard | Vec<PolicyFinding> | 拒绝 + 写 self.diagnostics | prompt.rs | 跨 diagnostics |
+| execution contract | ExecutionContractDecision | 拒绝 + 写 self.diagnostics | prompt.rs | 跨 diagnostics + lifecycle |
+
+- **Approach**:
+  1. 用 `grep -nE "scope enforcement|origin guard|topic format|event policy|state machine|step handoff|workflow guard|execution contract" crates/ralph-core/src/event_loop/mod.rs` 验证 8 个 inline 块位置
+  2. plan author + reviewer 共同审核矩阵
+  3. 未达成共识时 U5d 暂停
+- **Verification**: 矩阵 8 行 + 1 共识签字；U5d commit message 引用本矩阵。
+
+### U5a. 拆 `event_loop/lifecycle.rs`
+
+- **Goal**: 把 `impl EventLoop` 中返回 `LoopState` / `WorkflowProgress` / 涉及 `activate` / `next` / 状态机转换的方法抽到 `lifecycle.rs`。
+- **Requirements**: R1 / R2 / R3
+- **Dependencies**: U4b
+- **Files**:
+  - 修改 `crates/ralph-core/src/event_loop/lifecycle.rs`（~1 500 行）
+  - 修改 `crates/ralph-core/src/event_loop/mod.rs`：删除对应方法段
+- **Approach**:
+  1. `grep '    pub fn' / '    fn' crates/ralph-core/src/event_loop/mod.rs` 列出方法名，按 KTD12 归属 lifecycle 域
+  2. 整段复制到 `lifecycle.rs`，顶部 `use super::*;`
+  3. `git diff` 验证方法体字节级未变
+- **Verification**:
+  - `cargo build -p ralph-core` 与 `cargo build -p ralph-cli` 0 error
+  - `cargo nextest run -p ralph-core --no-fail-fast` 全绿
+  - 追加 U5a Drift Sub-Note
+
+### U5b. 拆 `event_loop/termination.rs`
+
+- **Goal**: 把 `impl EventLoop` 中返回 `TerminationReason` / 涉及 `check_termination` / `is_terminal` / `mark_terminated` 的方法 + 自由函数 `format_duration` / `termination_status_text` 抽到 `termination.rs`。
+- **Requirements**: R1 / R2 / R3
+- **Dependencies**: U5a
+- **Files**:
+  - 修改 `crates/ralph-core/src/event_loop/termination.rs`（~1 000 行）
+  - 修改 `crates/ralph-core/src/event_loop/mod.rs`：删除对应段
+- **Verification**:
+  - `cargo nextest run -p ralph-core --no-fail-fast` 全绿
+  - 追加 U5b Drift Sub-Note
+
+### U5c. 拆 `event_loop/dispatch.rs`
+
+- **Goal**: 把 `impl EventLoop` 中涉及 hat 选择 / 订阅匹配 / 队列派发的方法抽到 `dispatch.rs`。
+- **Requirements**: R1 / R2 / R3
+- **Dependencies**: U5b
+- **Files**:
+  - 修改 `crates/ralph-core/src/event_loop/dispatch.rs`（~800 行）
+  - 修改 `crates/ralph-core/src/event_loop/mod.rs`：删除对应段
+- **Verification**:
+  - `cargo nextest run -p ralph-core --no-fail-fast` 全绿
+  - 追加 U5c Drift Sub-Note
+
+### U5d. 拆 `event_loop/prompt.rs`（含 `process_parse_result` 整体迁移）
+
+- **Goal**: 把 `impl EventLoop` 中返回 `UserPrompt` / 涉及 prompt 构建与解析的方法 + **`process_parse_result` 单方法整体**抽到 `prompt.rs`。
+- **Requirements**: R1 / R2 / R3
+- **Dependencies**: U5c
+- **Files**:
+  - 修改 `crates/ralph-core/src/event_loop/prompt.rs`（~3 800 行，含 `process_parse_result` ~2 700 行）
+  - 修改 `crates/ralph-core/src/event_loop/mod.rs`：删除对应段
+- **Approach**:
+  1. 按 v11 行号 `6618-9318` 锚定 `process_parse_result` 起止（动手前重新 grep）
+  2. 整段复制到 `prompt.rs`，**方法体不切**（U6 才抽 validation 层）
+  3. `git diff` 验证方法体字节级未变
+- **Verification**:
+  - `cargo nextest run --workspace --exclude ralph-e2e --no-fail-fast` 全绿
+  - `process_parse_result` 在 `prompt.rs` 中完整存在
+  - 追加 U5d Drift Sub-Note
+
+### U5e. 拆 `event_loop/diagnostics.rs`
+
+- **Goal**: 把 `impl EventLoop` 中涉及 telemetry / metrics / recovery 信号的方法（含 `inject_review_aggregate_timeouts` / `run_ephemeral_isolation` 等）抽到 `diagnostics.rs`。
+- **Requirements**: R1 / R2 / R3
+- **Dependencies**: U5d
+- **Files**:
+  - 修改 `crates/ralph-core/src/event_loop/diagnostics.rs`（~500 行）
+  - 修改 `crates/ralph-core/src/event_loop/mod.rs`：删除对应段
+- **Verification**:
   - `cargo build -p ralph-cli` 0 error
-  - `cargo clippy -p ralph-core --all-targets` 0 warning
-  - 追加 U5 Drift Sub-Note
-
-### U6. 拆 `event_loop/wave.rs` + 抽 6 个 validate_* 自由函数（含 characterization test）
-
-- **Goal**: 在 U5 把 `process_parse_result` 迁到 `prompt.rs` 后，**新增** `event_loop/wave.rs`（wave 辅助独立子模块）+ 在 `prompt.rs::process_parse_result` 调用点把 6 个 inline validation 层（origin guard / topic format / event policy / state machine / workflow guard / execution contract）抽为 `event_loop::process::validate_*` 自由函数（在 `event_loop/process.rs` placeholder 内实现，或 `prompt.rs` 内的嵌套 `pub(crate) mod process`；U1 scaffold 已创建 `process.rs` placeholder，优先复用该文件）。`process_parse_result` 方法体在 U6 中**字节级改写**（行为不变，U6 唯一例外）。
-- **Requirements**: R1 / R2.b（U6 例外条款）/ R3
-- **Dependencies**: U5
-- **Execution note**: U6 实施前**必须先**写 characterization test 锁定 `process_parse_result` 当前行为的 golden sample（输入 → 输出快照），否则 6 个 free fn 抽取后**没有 golden 对照**——R-Refactor-9 描述的 "nextest 全绿" 不能保证行为等价（nextest 只测"通过"，不测"等价"）。
-- **Files**:
-  - 修改 `crates/ralph-core/src/event_loop/wave.rs`（~160 行：wave 辅助从 `prompt.rs` 末尾或其他位置迁出）
-  - 修改 `crates/ralph-core/src/event_loop/process.rs`（从 U1 placeholder 改为实质内容：6 个 `validate_*` 自由函数；若选择嵌套 mod 方案，则改为在 `prompt.rs` 内实现并删除 `process.rs`）
-  - 修改 `crates/ralph-core/src/event_loop/prompt.rs`（`process_parse_result` 方法体**字节级改写**：6 个 inline validation 层抽为 `fn validate_origin_guard(&mut self, ...) -> Result<(), ...>` 等 6 个 `pub(crate)` 自由函数，`process_parse_result` 主体改为调用这 6 个函数）
-  - 新增 `crates/ralph-core/src/event_loop/tests/process_characterization.rs`（U6 实施前先写，记录 `process_parse_result` 行为的 golden sample，U6 完成后用此测试验证行为不变）
-  - 修改 `crates/ralph-core/src/event_loop/mod.rs` 顶部加 `pub mod wave;` 等（`process` mod 声明已由 U1 就位）
-- **Approach**:
-  1. **U6 步骤 0**（characterization test 先行，**adversarial finding #9 三步扩展**）：
-     - **步骤 0a**（mutation 分数基线）：用 mutation 引擎（参考 `scripts/hooks-mutation-gate.sh`）跑 `process_parse_result` 当前 mutation 分数作为基线；U6 完成后 mutation 分数不得显著下降（>5% 下降视为 silent regression）
-     - **步骤 0b**（间接调用链补充）：用 `git grep -nE "process_parse_result|validate_.*\(.*&mut" crates/ --include="*.rs" --include="*.md"` 列出 6 个 validation 层的所有 helper；为每层补充 ≥3 个 characterization test（happy / edge / error 三类）共 ≥18 个新测试，覆盖：payload 截断 / 并发 race / unicode 边界 / serde 反序列化失败后 state 残留 / `Ok(Some(internal))` 与 `Ok(Some(internal_dup))` 字符串 typo 等 edge case
-     - **步骤 0c**（golden sample 记录）：在 `crates/ralph-core/src/event_loop/tests/process_characterization.rs` 中写 golden sample 测试，记录 `process_parse_result` 当前所有输入 → 输出的快照（用 `insta` crate 或同等 snapshot diff 工具显式存储，U6 完成后 reviewer 必须逐条 review 每一处 `Ok(...)` payload 字符串）
-  2. U6 步骤 1：在 `wave.rs`（新建）中加 wave 辅助代码（从 `prompt.rs` 末尾或其他位置迁出）
-  3. U6 步骤 2：在 `process.rs`（U1 placeholder）内实现 6 个 `validate_*` 自由函数；若选择嵌套 mod 方案，则在 `prompt.rs` 内声明 `pub(crate) mod process` 并把函数体放入其中
-  4. **U6 步骤 2.5**（adversarial finding #10 硬规则——U6 字节级改写护栏）：
-     - **6 个 `validate_*` 自由函数签名由本 plan 在 U6 启动前一次性锁定**（参数名 / 参数类型 / 返回类型逐字预定义），U6 实施时不允许改签名（除非 reviewer 在 U6 commit message 显式签字）
-     - **每个 `validate_*` 函数体与原 inline 块**通过 `diff -u <(echo "原 inline 块") <(echo "新 fn 体")` 显示 0 行差异（仅允许缩进变化，函数体外任何 token 改动都需在 commit message 列出 1 行 rationale）
-     - **`process_parse_result` 主体调用顺序**显式预定义为：`origin_guard → topic_format → event_policy → state_machine → workflow_guard → execution_contract`，U6 实施时用 `grep -nE "validate_(origin|topic|event|state|workflow|execution)" prompt.rs` 验证顺序字节级匹配
-     - **anti-pattern 联合校验**：若任一 `validate_*` 函数体被改的同时又修改了 6 层之外的代码（如修一个 unicode 路径 bug / 把 `if let Some(x) = y` 换成 `if y.is_some() { let x = y.unwrap() }`），U6 commit 视为违反"拆分时'顺手优化'或'乘机修 bug'"（2026-06-03-002 R4 明确禁止），强制 `git revert` 并把改动拆到独立 commit
-  5. U6 步骤 3：把 `process_parse_result` 方法体内 6 个 inline validation 块**整段抽出**到 6 个自由函数（**字节级不保留**，U6 唯一例外）；`process_parse_result` 主体改为调用这 6 个函数（**调用顺序严格保持**：origin → topic → policy → state → workflow → execution）
-  5. U6 步骤 4：跑 `process_characterization.rs` 验证行为不变；不通过立即 `git revert U6 commit`
-  6. U6 步骤 5：`git diff` 中 `process_parse_result` 调用顺序、参数传递、返回结果需逐处 review
-- **Patterns to follow**:
-  - KTD10 不切 `process_parse_result` 内部单方法（U6 抽 6 个 free fn 不算"切"单方法，仍是单一 `process_parse_result` 入口）
-  - 2026-06-03-002 plan 对 `run_loop_impl` 2 950 行的处理（同样不切单方法内部）
-- **Test scenarios**:
-  - **Happy path**: `cargo build -p ralph-core` 通过
-  - **Characterization test passes**: `process_characterization.rs` 全绿（这是 U6 的"零行为变化"硬保证）
-  - **Regression baseline**: `cargo nextest run -p ralph-core --no-fail-fast` 全绿
-  - **Free fn call order**: 6 个 `validate_*` 调用顺序与原 inline 块顺序逐处一致（grep 验证）
-  - **Free fn signatures**: 6 个自由函数入参、出参与原 inline 块使用的 `&mut self` 字段 + 局部变量对应
-- **Verification**:
   - `cargo nextest run --workspace --exclude ralph-e2e --no-fail-fast` 全绿
-  - `process_characterization.rs` 全绿（U6 行为不变性硬保证）
-  - `wc -l crates/ralph-core/src/event_loop/{mod,prompt,process,wave}.rs` 显示 `mod.rs` ≤ 100 行、`process.rs` ≤ 600 行
-  - `cargo clippy -p ralph-core --all-targets` 0 warning
-  - 追加 U6 Drift Sub-Note
+  - `wc -l crates/ralph-core/src/event_loop/mod.rs` 显示 ≤ 100 行
+  - 追加 U5e Drift Sub-Note
 
-### U7. 补全剩余 14 个 tests 子文件 + 完整验证 + 文档反向验证 + Repo Drift Note
+### U6a. 写 `process_parse_result` characterization tests
 
-- **Goal**: 把 U2 末尾保留在 `tests/mod.rs` 的 14 个主题测试族全部迁出到独立子文件；跑完整验证套件（E2E mock / smoke / scenarios / clippy / fmt / doctest / audit-file-sizes）；执行文档反向验证 + Repo Drift Note 追加。
-- **Requirements**: R1 / R2 / R3 / R4 / R5 / R6 / R7 / R8 / R9 / R10
-- **Dependencies**: U6
+- **Goal**: 在改动 `process_parse_result` 之前，先写 golden sample 测试锁定当前行为。
+- **Requirements**: R2.b / R6
+- **Dependencies**: U5d
 - **Files**:
-  - 创建 `crates/ralph-cli/src/loop_runner/tests/{suspend.rs, hard_gate.rs, hard_gate_payload_contract.rs, pty_user_interactive.rs, resolve_loop_id_and_iteration.rs, loop_termination.rs, async_pty.rs, diagnostics.rs, recovery.rs, preset_lint_gate.rs, merge_queue.rs, prompt_handling.rs, event_logging_and_planning_session.rs, late_events_and_hat_selection.rs, event_pipeline.rs}.rs`（14 个新子文件，把 U2 末尾保留在 `tests/mod.rs` 的测试族全部迁出）
-  - 修改 `crates/ralph-cli/src/loop_runner/tests/mod.rs`（删除迁出的测试段，保留 mutex 文档 + mod 声明 + 14 个 `mod xxx;` 声明）
-  - 修改本 plan 文档追加 `## Repo Drift Note` 段（合并 U3-U6 的 Sub-Note）
-  - 修改 `CLAUDE.md` / `AGENTS.md`（如有必要）
-  - 修改 `docs/achieved/plan/2026-06-03-002-refactor-split-large-files-plan.md`（追加 Implementation Status 更新）
-  - 修改 `docs/achieved/plan/2026-05-12-001-feat-harness-extension-plan.md` 等 70+ 个引用文件（实测 v2 baseline 37bd281：`event_loop/mod.rs` 252 处引用 / 59 个文件 + `loop_runner/tests.rs` 68 处引用 / 20 个文件；v3 增量 commits 不涉及 `event_loop::*` / `loop_runner::*` 公开 API 名变更，引用面维持 70+）
+  - 新增 `crates/ralph-core/src/event_loop/tests/process_characterization.rs`
 - **Approach**:
-  1. U2 末尾 `tests/mod.rs` 保留的 14 个测试族按主题迁出到独立子文件（按 KTD3 列表的 14 个主题）
-  2. 每个子文件用 `use super::*; use super::common::*;` 引用共享 helper
-  3. `tests/mod.rs` 末尾的测试段清空（仅保留 mutex 文档 + mod 声明）
-  4. 跑 `cargo nextest run --workspace --exclude ralph-e2e --no-fail-fast`
-  5. 跑 `cargo run -p ralph-e2e -- --mock`
-  6. 跑 `cargo test -p ralph-core scenarios`
-  7. 跑 `cargo clippy --workspace --all-targets`
-  8. 跑 `cargo fmt --check`
-  9. 跑 `cargo test --workspace --exclude ralph-e2e --doc`
-  10. 跑 `bash scripts/audit-file-sizes.sh` + 手动 `awk '$1>2200{print}' crates/ralph-core/src/event_loop/*.rs crates/ralph-cli/src/loop_runner/tests/*.rs`（脚本无阈值断言）
-  11. 跑 `diff -u CLAUDE.md AGENTS.md`（必须 0 差异）
-  12. `git grep -nE "event_loop/mod\.rs:|loop_runner/tests\.rs:" docs/ crates/ --include="*.md" --include="*.rs" 2>/dev/null` 列出所有引用
-  13. 逐条更新失效引用
-  14. 在本 plan 文档 `## Repo Drift Note` 段合并 U3-U6 Sub-Note 为完整表格
-- **Test scenarios**:
-  - **Full regression suite**: 所有 10 个验证命令全绿
-  - **Audit script**: `bash scripts/audit-file-sizes.sh` 通过，2 个主文件 ≤ 1 000 行
-  - **Documentation sync**: `diff -u CLAUDE.md AGENTS.md` 0 差异
-  - **Drift note complete**: `git grep -nE "event_loop/mod\.rs:|loop_runner/tests\.rs:" docs/ crates/ --include="*.md" --include="*.rs" 2>/dev/null` 输出全部已被处理
+  1. 用现有测试数据构造输入 → 输出快照
+  2. 覆盖 8 个 validation 层的 happy / edge / error 路径，每个层 ≥2 个 case
+  3. 先提交 characterization test（不改动生产代码），确保其在本单元**全绿**
 - **Verification**:
-  - 所有 10 个验证命令（步骤 4-13）全绿
-  - `wc -l crates/ralph-core/src/event_loop/{mod,types,workflow_guard,policy,lifecycle,termination,dispatch,prompt,diagnostics,wave}.rs` 显示 `mod.rs` ≤ 100 行
+  - `cargo nextest run -p ralph-core --test process_characterization` 全绿
+  - 追加 U6a Drift Sub-Note
+
+### U6b. 拆 `event_loop/wave.rs`
+
+- **Goal**: 把 `prompt.rs` 末尾或其他位置的 wave 辅助函数迁到 `wave.rs`。
+- **Requirements**: R1 / R2 / R3
+- **Dependencies**: U5d
+- **Files**:
+  - 修改 `crates/ralph-core/src/event_loop/wave.rs`（~200 行）
+  - 修改 `crates/ralph-core/src/event_loop/prompt.rs`：删除迁出的 wave 辅助段
+- **Verification**:
+  - `cargo nextest run -p ralph-core --no-fail-fast` 全绿
+  - 追加 U6b Drift Sub-Note
+
+### U6c. 抽 `process::validate_scope_enforcement` + `process::validate_origin_guard`
+
+- **Goal**: 把 `process_parse_result` 中 scope enforcement 与 origin guard 两个 inline 块抽为 `event_loop::process::validate_*` 自由函数。
+- **Requirements**: R2.b / R3
+- **Dependencies**: U6b
+- **Files**:
+  - 修改 `crates/ralph-core/src/event_loop/process.rs`
+  - 修改 `crates/ralph-core/src/event_loop/prompt.rs`
+- **Approach**:
+  - 函数签名在 U6 启动前锁定
+  - 函数体与原 inline 块 `diff` 仅允许缩进差异
+  - `process_parse_result` 主体改为调用这 2 个函数，调用顺序不变
+- **Verification**:
+  - `process_characterization.rs` 全绿
+  - `cargo nextest run --workspace --exclude ralph-e2e --no-fail-fast` 全绿
+
+### U6d. 抽 `process::validate_topic_format` + `process::validate_event_policy`
+
+- **Goal**: 同上，针对 topic format 与 event policy 两层。
+- **Requirements**: R2.b / R3
+- **Dependencies**: U6c
+- **Files**: `process.rs` / `prompt.rs`
+- **Verification**: 同 U6c
+
+### U6e. 抽 `process::validate_state_machine` + `process::validate_step_handoff_gate`
+
+- **Goal**: 同上，针对 state machine 与 step handoff gate 两层。
+- **Requirements**: R2.b / R3
+- **Dependencies**: U6d
+- **Files**: `process.rs` / `prompt.rs`
+- **Verification**: 同 U6c
+
+### U6f. 抽 `process::validate_workflow_guard` + `process::validate_execution_contract`
+
+- **Goal**: 同上，针对 workflow guard 与 execution contract 两层；完成全部 8 个 validation 层抽取。
+- **Requirements**: R2.b / R3
+- **Dependencies**: U6e
+- **Files**: `process.rs` / `prompt.rs`
+- **Verification**:
+  - 全部 8 个 `validate_*` 调用顺序与原始 inline 块顺序一致（grep 验证）
+  - `process_characterization.rs` 全绿
+  - `cargo nextest run --workspace --exclude ralph-e2e --no-fail-fast` 全绿
+  - `wc -l crates/ralph-core/src/event_loop/{mod,prompt,process,wave}.rs` 显示 `mod.rs` ≤ 100 行、`process.rs` ≤ 900 行
+  - 追加 U6f Drift Sub-Note
+
+### U7. 完整验证 + 文档反向验证 + Repo Drift Note
+
+- **Goal**: 跑完整验证套件；执行文档反向验证；合并 U3-U6 的 Sub-Note 为完整 Repo Drift Note。
+- **Requirements**: R1 / R2 / R3 / R4 / R5 / R6 / R7 / R8 / R9 / R10
+- **Dependencies**: U2h / U3 / U4b / U4.5 / U5e / U6f
+- **Files**:
+  - 修改本 plan 文档追加 `## Repo Drift Note` 段
+  - 修改 `CLAUDE.md` / `AGENTS.md`（如有必要）
+  - 同步更新 80+ 引用文档中的失效 `event_loop/mod.rs` / `loop_runner/tests.rs` 行号引用
+- **Approach**:
+  1. `cargo nextest run --workspace --exclude ralph-e2e --no-fail-fast`
+  2. `cargo run -p ralph-e2e -- --mock`
+  3. `cargo test -p ralph-core scenarios`
+  4. `cargo clippy --workspace --all-targets`
+  5. `cargo fmt --check`
+  6. `cargo test --workspace --exclude ralph-e2e --doc`
+  7. `bash scripts/audit-file-sizes.sh` + 手动 `awk '$1>2200{print}' crates/ralph-core/src/event_loop/*.rs crates/ralph-cli/src/loop_runner/tests/*.rs`
+  8. `diff -u CLAUDE.md AGENTS.md` 0 差异
+  9. `git grep -nE "event_loop/mod\.rs\b|loop_runner/tests\.rs\b" docs/ crates/ --include="*.md" --include="*.rs" 2>/dev/null` 列出所有引用
+  10. 逐条更新失效引用
+  11. 合并 Sub-Note 为完整表格
+- **Verification**:
+  - 全部 11 个验证命令全绿
+  - `wc -l crates/ralph-core/src/event_loop/*.rs` 显示所有子文件 ≤ 2 200 行
   - `wc -l crates/ralph-cli/src/loop_runner/tests/*.rs` 显示 `mod.rs` ≤ 250 行
-  - `bash scripts/audit-file-sizes.sh` PASS
   - `diff -u CLAUDE.md AGENTS.md` 0 差异
   - 本 plan 文档 `## Repo Drift Note` 段已追加
-  - 70+ 引用文档已同步（实测 37bd281 baseline grep 命中 252+68=320 引用位置，去重后约 70 个文件）
+  - 80+ 引用文档已同步
 
 ## Scope Boundaries
 
 ### 范围内（in-scope）
 
-- `crates/ralph-core/src/event_loop/mod.rs` 拆为 **10 个新建**子模块（types / workflow_guard / policy / lifecycle / termination / dispatch / prompt / diagnostics / process / wave；`payload_contract` 70 行内容并入 `policy.rs`）
-- `crates/ralph-cli/src/loop_runner/tests.rs` 拆为 **19 个** `tests/*.rs` 子文件（mod + common + 17 主题；按主题合并使 0 个 < 200 行）
-- 6 个 inline validation 层从 `process_parse_result` 抽为 `event_loop::process::validate_*` 自由函数（**U6 唯一允许的字节级改写**；行为不变，由 characterization test 锁定）
+- `crates/ralph-core/src/event_loop/mod.rs` 拆为 **10 个新建**子模块（types / workflow_guard / policy / lifecycle / termination / dispatch / prompt / diagnostics / process / wave；`payload_contract` 内容并入 `policy.rs`）
+- `crates/ralph-cli/src/loop_runner/tests.rs` 拆为 **20 个** `tests/*.rs` 子文件（mod + common + fake_path + 17 主题；单文件 ≤ 2 200 行）
+- 8 个 inline validation 层从 `process_parse_result` 抽为 `event_loop::process::validate_*` 自由函数（**U6c-U6f 唯一允许的字节级改写**；行为不变，由 U6a characterization test 锁定）
 - **2 个** `tests.rs` 内 process-global Mutex 按 KTD7 拓扑迁到 `tests/fake_path.rs` 模块内（位置改变但形式不变）；`wave/acp_mock.rs` 的 2 个 `MOCK_ACP_*` 完全**不动**
-- 文档反向验证 + Repo Drift Note 追加（U3-U6 每 U 追加 Sub-Note，U7 合并）
+- U1 scaffold 阶段为 `loop_state.rs` / `rejection.rs` / `review_step_state.rs` 创建 placeholder 子模块（不填充内容，仅为后续 follow-up 预留编译路径）
+- 文档反向验证 + Repo Drift Note 追加（每子单元追加 Sub-Note，U7 合并）
 - CLAUDE.md ↔ AGENTS.md 同步检查
 - `audit-file-sizes.sh` 阈值复检（手动 `awk` 校验）
 
 ### 范围外（out-of-scope）
 
-- 任何公开行为、错误信息、日志、退出码、`TerminationReason` **16 变体**顺序、`EventLoop` **14 字段**（v4 baseline 与 v3 一致）顺序改动（U6 字节级改写除外）
+- 任何公开行为、错误信息、日志、退出码、`TerminationReason` **18 变体**顺序、`EventLoop` **15 字段**（v11 baseline）顺序改动（U6c-U6f 字节级改写除外）
 - 任何当前已通过的测试或运行时 bug 修复
-- 重构 `crates/ralph-core/src/event_loop/loop_state.rs`（845 行）或 `crates/ralph-core/src/event_loop/rejection.rs`（593 行）或 `crates/ralph-core/src/event_loop/review_step_state.rs`（605 行，commit 37bd281 引入）或 `crates/ralph-core/src/event_loop/tests/`（44 个子文件）内部组织
+- 填充 `loop_state.rs` / `rejection.rs` / `review_step_state.rs` 的 placeholder 子模块（v11 均已破 R1 红线，但内容拆分留作后续 follow-up plan）
+- 重构 `crates/ralph-core/src/event_loop/tests/`（53 个子文件）内部组织
 - 拆分 `crates/ralph-cli/src/loop_runner/runner.rs`（170 KB 主 runner）—— 仅核对 imports 兼容，不拆
 - 拆分 `crates/ralph-cli/src/loop_runner/runner.rs` 中的 `run_loop_impl` 2 950 行（2026-06-03-002 已决策不切）
 - 拆分 `crates/ralph-cli/src/loop_runner/hard_gate.rs`（24 KB）/ `preset_lint_gate.rs`（20 KB）
@@ -574,34 +730,37 @@ flowchart LR
 - `crates/ralph-cli/src/loop_runner/runner.rs`（170 KB）拆分：留作 R3 第二轮
 - `crates/ralph-core/src/config/ralph_config.rs`（3 660 行）拆分：留作 R3 第二轮
 - `crates/ralph-cli/src/commands/{run.rs, emit.rs}`（1 500-1 700 行）拆分：留作 R3 第二轮
-- **未来**：本 plan U5 创建的 `crates/ralph-core/src/event_loop/prompt.rs`（含 `process_parse_result` 后约 3 000 行）若 R1 阈值被改写，可进一步拆为 `prompt/{build.rs, sections/}` —— 留作 R3 第二轮
+- `crates/ralph-core/src/event_loop/loop_state.rs`（1 232 行）拆分：留作 R3 第二轮
+- `crates/ralph-core/src/event_loop/rejection.rs`（1 051 行）拆分：留作 R3 第二轮
+- `crates/ralph-core/src/event_loop/review_step_state.rs`（1 254 行）拆分：留作 R3 第二轮
+- **未来**：本 plan U5d 创建的 `crates/ralph-core/src/event_loop/prompt.rs`（含 `process_parse_result` 后约 3 800 行）若 R1 阈值被改写，可进一步拆为 `prompt/{build.rs, sections/}` —— 留作 R3 第二轮
 - `crates/ralph-cli/src/loop_runner/{hard_gate.rs, preset_lint_gate.rs, wave/}` 拆分：留作 R3 第二轮
-- `crates/ralph-core/src/event_loop/prompt.rs` 中 `process_parse_result` 的 6 个 `validate_*` 自由函数已在 U1 预留给 `event_loop/process.rs`；U6 将在此文件（或 `prompt.rs` 嵌套 mod）中实现
+- `crates/ralph-core/src/event_loop/prompt.rs` 中 `process_parse_result` 的 8 个 `validate_*` 自由函数已在 U1 预留给 `event_loop/process.rs`；U6c-U6f 将在此文件中实现
 
 ## Risks & Dependencies
 
 ### Risks
 
-- **R-Refactor-1**（高）：`TerminationReason` **16 变体**顺序 + 3 处 `match` 表达式覆盖顺序（`exit_code` 行 168-191 / `as_str` 行 198-215 / `is_success` 行 218-220）在 U3 抽 `types.rs` 时漂移 → `match` 行为变化。**检测机制**：U3 完成后用 `git grep -A 1 "TerminationReason" crates/ralph-core/src/event_loop/types.rs | head -50` + 字节级 `git diff` 验证。**Escape hatch**：若真发现变体顺序错（历史 bug），决策树是"report-only 不修"（保持零回归）而非"fix-with-rationale"（引入逻辑变更）。任何 attribute 位置变动立即 `git revert`。
-- **R-Refactor-2**（高）：`EventLoop` **14 字段**顺序在 U5 拆 impl 时漂移 → `Default` / `Debug` / `PartialEq` 派生输出变化。**检测机制**：U5 完成后用 `git diff` 字节级 + `awk '/^pub struct EventLoop/{f=1;next} f && /^}/{exit} f && /^    [a-z_]+:/{c++} END{print c}' crates/ralph-core/src/event_loop/mod.rs` 输出 **14** 验证（v4 baseline @ dbe6f35 实测，与 v3 一致；v0 baseline 写 13 是早期错算，v1 baseline 也写 13 是 doc-review 触发后仍未补正，**v2 校正回 14** 并在 v3/v4 维持）。Escape hatch 同 R-Refactor-1。
-- **R-Refactor-3**（中）：**2 个** `tests.rs` 内 process-global Mutex（`FAKE_PATH_BACKEND_SERIAL` / `FAKE_PATH_BACKEND_BIN`）在 U2 拆分时形式变化（`pub` ↔ private 改 `static` ↔ 改 `Mutex<...>` 不带 `LazyLock`）→ `cli-serial` test group 失效。**检测机制**：U2 完成后用 `grep -A3 "static FAKE_PATH_BACKEND" crates/ralph-cli/src/loop_runner/tests/fake_path.rs` 验证 2 个 Mutex 形式逐字节不变（**实测为 private `static`，非 `pub(crate)`**）。`wave/acp_mock.rs:97-104` 的 2 个 `pub static MOCK_ACP_*` **不在本计划范围**，但 U2 必须验证 `git diff --stat -- crates/ralph-cli/src/loop_runner/wave/acp_mock.rs` 0 行变更。
-- **R-Refactor-4**（中）：`tests.rs` 头部 1-40 行的 contributor-facing mutex 文档在 U2 拆分时被裁剪或移位 → 后续贡献者跑测试时踩坑。**检测机制**：U2 完成后用 `git diff` 验证 `tests/mod.rs` 顶部 1-40 行**整段**与原 `tests.rs` 头部 1-40 行一致（`diff <(sed -n '1,40p' tests/mod.rs) <(git show HEAD:tests.rs | sed -n '1,40p')` 0 差异，**修正原 plan "1-55p" 因实测 1-40 行才是 mutex 文档范围**）。**额外缓解**：U7 时考虑在 `README.md` 或 `CONTRIBUTING.md` 顶部也放同样警告（双写）。
-- **R-Refactor-5**（中）：runner.rs 中 `event_loop.check_termination()` 等方法调用在 U5 拆 impl 后找不到（多文件 impl 解析失败 / 同名方法冲突）。**检测机制**：U5 完成后跑 `cargo build -p ralph-cli` 必须 0 error；同名方法冲突用 `grep -nE "fn <method_name>" crates/ralph-core/src/event_loop/{lifecycle,termination,dispatch,prompt,diagnostics}.rs` 快速定位。
-- **R-Refactor-6**（中）：文档反向验证遗漏某些 `event_loop::xxx` 引用 → docs 漂移。**检测机制**：U3-U7 每 U 用 `git grep -nE "event_loop/mod\.rs:|loop_runner/tests\.rs:|event_loop::[a-z_]+|loop_runner::tests::" docs/ crates/ --include="*.md" --include="*.rs" 2>/dev/null` 完整列出引用并逐条处理；立即追加 Sub-Note。
-- **R-Refactor-7**（低）：`scripts/audit-file-sizes.sh` 阈值在 U7 时发现不满足（2 个主文件 > 1 000 行）。**检测机制**：脚本本身**无阈值断言**，U7 必跑 + 手动 `awk '$1>2200{print}' crates/ralph-core/src/event_loop/*.rs crates/ralph-cli/src/loop_runner/tests/*.rs` 校验子文件行数；如不满足，调整 `mod.rs` 顶部注释 / 删除冗余 import 把 `mod.rs` 压到 ≤ 100 行。
-- **R-Refactor-8**（低）：U6 抽 6 个 validation 层为自由函数时引入逻辑 bug（参数传递、调用顺序、返回结果偏差）。**检测机制**：U6 步骤 0 先写 characterization test 锁定 `process_parse_result` 当前行为的 golden sample（输入 → 输出快照）；U6 步骤 5 跑 `process_characterization.rs` 验证行为不变；不通过立即 `git revert U6 commit`。
-- **R-Refactor-9**（低）：5 个 `impl EventLoop` 域边界判定歧义（跨域方法归属）。**检测机制**：U5 实施时严格按 KTD12 规则；以方法主返回 / 主副作用归属；不可调和的歧义记入 R3 follow-up，**不**在 PR 中临时判定。
-- **R-Refactor-10**（低）：`tests/common.rs` helper 修改影响 17 个子文件（耦合放大）。**检测机制**：U2 / U7 实施时把 wave 特定 / fake_path 特定 helper 移到子文件模块内（KTD4），仅在 `common.rs` 留真正跨子文件共享的 helper。
+- **R-Refactor-1**（高）：`TerminationReason` **18 变体**顺序 + 3 处 `match` 表达式覆盖顺序在 U3 抽 `types.rs` 时漂移 → `match` 行为变化。**检测机制**：U3 完成后用 `git grep -A 1 "TerminationReason" crates/ralph-core/src/event_loop/types.rs | head -60` + 字节级 `git diff` 验证。**Escape hatch**：若真发现变体顺序错（历史 bug），决策树是"report-only 不修"（保持零回归）而非"fix-with-rationale"。任何 attribute 位置变动立即 `git revert`。
+- **R-Refactor-2**（高）：`EventLoop` **15 字段**顺序在 U5a-U5e 拆 impl 时漂移 → `Default` / `Debug` / `PartialEq` 派生输出变化。**检测机制**：U5e 完成后用 `git diff` 字节级 + `awk '/^pub struct EventLoop/{f=1;next} f && /^}/{exit} f && /^    [a-z_]+:/{c++} END{print c}' crates/ralph-core/src/event_loop/mod.rs` 输出 **15** 验证（v11 baseline）。Escape hatch 同 R-Refactor-1。
+- **R-Refactor-3**（中）：**2 个** `tests.rs` 内 process-global Mutex（`FAKE_PATH_BACKEND_SERIAL` / `FAKE_PATH_BACKEND_BIN`）在 U2a 拆分时形式变化 → `cli-serial` test group 失效。**检测机制**：U2a 完成后用 `grep -A3 "static FAKE_PATH_BACKEND" crates/ralph-cli/src/loop_runner/tests/fake_path.rs` 验证 2 个 Mutex 形式逐字节不变（private `static`）。`wave/acp_mock.rs:97-104` 的 2 个 `pub static MOCK_ACP_*` **不在本计划范围**。
+- **R-Refactor-4**（中）：`tests.rs` 头部 1-40 行的 contributor-facing mutex 文档在 U2a 拆分时被裁剪或移位 → 后续贡献者跑测试时踩坑。**检测机制**：U2a 完成后用 `git diff` 验证 `tests/mod.rs` 顶部 1-40 行**整段**与原 `tests.rs` 头部 1-40 行一致。**额外缓解**：U7 时考虑在 `README.md` 或 `CONTRIBUTING.md` 顶部也放同样警告（双写）。
+- **R-Refactor-5**（中）：runner.rs 中 `event_loop.check_termination()` 等方法调用在 U5a-U5e 拆 impl 后找不到（多文件 impl 解析失败 / 同名方法冲突）。**检测机制**：U5e 完成后跑 `cargo build -p ralph-cli` 必须 0 error；同名方法冲突用 `grep -nE "fn <method_name>" crates/ralph-core/src/event_loop/{lifecycle,termination,dispatch,prompt,diagnostics}.rs` 快速定位。
+- **R-Refactor-6**（中）：文档反向验证遗漏某些 `event_loop::xxx` 引用 → docs 漂移。**检测机制**：U2a-U6f 每子单元用 `git grep -nE "event_loop/mod\.rs\b|loop_runner/tests\.rs\b|event_loop::[a-z_]+|loop_runner::tests::" docs/ crates/ --include="*.md" --include="*.rs" 2>/dev/null` 完整列出引用并逐条处理；立即追加 Sub-Note。
+- **R-Refactor-7**（低）：`scripts/audit-file-sizes.sh` 阈值在 U7 时发现不满足。**检测机制**：脚本本身**无阈值断言**，U7 必跑 + 手动 `awk '$1>2200{print}' crates/ralph-core/src/event_loop/*.rs crates/ralph-cli/src/loop_runner/tests/*.rs` 校验子文件行数；如不满足，调整 `mod.rs` 顶部注释 / 删除冗余 import 把 `mod.rs` 压到 ≤ 100 行。
+- **R-Refactor-8**（低）：U6c-U6f 抽 8 个 validation 层为自由函数时引入逻辑 bug（参数传递、调用顺序、返回结果偏差）。**检测机制**：U6a 先写 characterization test 锁定 `process_parse_result` 当前行为的 golden sample；U6f 完成后跑 `process_characterization.rs` 验证行为不变；不通过立即 `git revert U6f commit`。
+- **R-Refactor-9**（低）：5 个 `impl EventLoop` 域边界判定歧义（跨域方法归属）。**检测机制**：U5a-U5e 实施时严格按 KTD12 规则；以方法主返回 / 主副作用归属；不可调和的歧义记入 R3 follow-up，**不**在 PR 中临时判定。
+- **R-Refactor-10**（低）：`tests/common.rs` helper 修改影响 18 个子文件（耦合放大）。**检测机制**：U2a / U2h 实施时把 wave 特定 / fake_path 特定 helper 移到子文件模块内（KTD4），仅在 `common.rs` 留真正跨子文件共享的 helper。
 
 ### Dependencies
 
-- **D-Refactor-1**（外部）：项目 `cli-serial` test group + **4 个 process-global Mutex**（2 个 `FAKE_PATH_BACKEND_*` 在 `tests.rs` 内 **本计划范围内**，U2 迁移到 `tests/fake_path.rs`；2 个 `MOCK_ACP_*` 在 `wave/acp_mock.rs` 内 **不在本计划范围**，由上一轮处理，本计划完全不动）配置不变（项目硬约束，由 `.config/nextest.toml` + `docs/achieved/plan/2026-06-01-001-feat-parallel-test-execution-plan.md` 锁定）
-- **D-Refactor-2**（内部）：U1 公共子模块声明必须先于 U2-U7（提供占位 + pub use 转发点）
-- **D-Refactor-3**（内部）：U2 必须先于 U3-U7 完成（tests 拆分是隔离关注点的第一步）
-- **D-Refactor-4**（内部）：U3（types 锁定）必须先于 U4-U6（自由函数引用 types）
-- **D-Refactor-5**（内部）：U4（自由函数）必须先于 U5（impl 块）—— impl 块中的方法调用自由函数，需先就位
-- **D-Refactor-6**（内部）：U5（impl 块）必须先于 U6（wave + 6 个自由函数）—— `process_parse_result` 必须在 `prompt.rs` 就位
-- **D-Refactor-7**（跨 crate 并行可能性）：U2 改 `loop_runner/tests.rs`（`ralph-cli` 包）与 U3 改 `event_loop/mod.rs`（`ralph-core` 包）可并行，**但** U3 依赖 U1 的 mod 声明、U2 依赖 U1 的 mod 声明——所以 U1 → (U2 || U3) → U4 → U5 → U6 → U7 是更紧凑的依赖链。本 plan 保持 U1→U7 顺序不并行化（验证命令**单 commit** 更易 review）。
+- **D-Refactor-1**（外部）：项目 `cli-serial` test group + **4 个 process-global Mutex**（2 个 `FAKE_PATH_BACKEND_*` 在 `tests.rs` 内 **本计划范围内**，U2a 迁移到 `tests/fake_path.rs`；2 个 `MOCK_ACP_*` 在 `wave/acp_mock.rs` 内 **不在本计划范围**）配置不变（项目硬约束，由 `.config/nextest.toml` + `docs/achieved/plan/2026-06-01-001-feat-parallel-test-execution-plan.md` 锁定）
+- **D-Refactor-2**（内部）：U1 公共子模块声明必须先于所有子单元（提供占位 + pub use 转发点）
+- **D-Refactor-3**（内部）：U2a 必须先于 U2b-U2h（tests 骨架建立后才能迁主题测试）
+- **D-Refactor-4**（内部）：U3（types 锁定）必须先于 U4a-U4b（自由函数引用 types）
+- **D-Refactor-5**（内部）：U4b（policy 自由函数）必须先于 U5a-U5e（impl 块中的方法调用自由函数，需先就位）
+- **D-Refactor-6**（内部）：U5d（prompt.rs 含 `process_parse_result`）必须先于 U6a-U6f（validation 层抽取）
+- **D-Refactor-7**（跨 crate 并行可能性）：原则上 U2a-U2h 与 U3 / U4a-U4b 可并行（不同 crate），但本 plan 推荐顺序执行以便 review；每个子单元独立验证。
 
 ## Verification（plan-level）
 
@@ -614,15 +773,15 @@ flowchart LR
 - **Scenarios**: `cargo test -p ralph-core scenarios` 全绿
 - **Audit script**: `bash scripts/audit-file-sizes.sh` PASS + 手动 `awk '$1>2200{print}' crates/ralph-core/src/event_loop/*.rs crates/ralph-cli/src/loop_runner/tests/*.rs` 0 输出
 - **Documentation sync**: `diff -u CLAUDE.md AGENTS.md` 0 差异
-- **Repo drift**: `git grep -nE "event_loop/mod\.rs:|loop_runner/tests\.rs:" docs/ crates/ --include="*.md" --include="*.rs" 2>/dev/null` 输出全部已被处理
-- **Process-global Mutex**: `grep -A3 "static FAKE_PATH_BACKEND" crates/ralph-cli/src/loop_runner/tests/fake_path.rs` **2 个** Mutex 形式不变；`git diff --stat -- crates/ralph-cli/src/loop_runner/wave/acp_mock.rs` 0 行变更（确认 `MOCK_ACP_*` 未受本计划影响）
-- **Test infrastructure doc**: `diff <(sed -n '1,40p' crates/ralph-cli/src/loop_runner/tests/mod.rs) <(git show HEAD:crates/ralph-cli/src/loop_runner/tests.rs | sed -n '1,40p')` 0 差异（修正：原 plan 写 `1,55p`——实测 mutex 文档在 1-40 行，55 行范围包含 U5 段标记 + 第一个 test 函数，verification 命令无法稳定 0 差异）
+- **Repo drift**: `git grep -nE "event_loop/mod\.rs\b|loop_runner/tests\.rs\b" docs/ crates/ --include="*.md" --include="*.rs" 2>/dev/null` 输出全部已被处理
+- **Process-global Mutex**: `grep -A3 "static FAKE_PATH_BACKEND" crates/ralph-cli/src/loop_runner/tests/fake_path.rs` **2 个** Mutex 形式不变；`git diff --stat -- crates/ralph-cli/src/loop_runner/wave/acp_mock.rs` 0 行变更
+- **Test infrastructure doc**: `diff <(sed -n '1,40p' crates/ralph-cli/src/loop_runner/tests/mod.rs) <(git show HEAD:crates/ralph-cli/src/loop_runner/tests.rs | sed -n '1,40p')` 0 差异
 - **Public API stable**: `cargo doc --no-deps` 0 warning；`git grep "ralph_core::event_loop::" crates/ ralph-cli/ --include="*.rs" 2>/dev/null` 全部可达
-- **lib.rs:104 stable**（v4 baseline 与 v3 一致，均为 104；v1 baseline 写 103）：`git diff HEAD~1 -- crates/ralph-core/src/lib.rs | grep -E "^\+.*pub use event_loop::|^-.*pub use event_loop::"` 0 输出
-- **TerminationReason order**: `git grep -A 1 "TerminationReason" crates/ralph-core/src/event_loop/types.rs | head -50` **16 个变体**顺序未变
-- **EventLoop field order**: `awk '/^pub struct EventLoop/{f=1;next} f && /^}/{exit} f && /^    [a-z_]+:/{c++} END{print c}' crates/ralph-core/src/event_loop/mod.rs` 输出 **14**（v4 baseline @ dbe6f35 实测，与 v3 一致）+ `git diff HEAD -- crates/ralph-core/src/event_loop/mod.rs` 字节级验证字段顺序未变
-- **process_parse_result behavior**: U6 后 `process_characterization.rs` 全绿
-- **review_step_state 不动**: `git diff HEAD~7 -- crates/ralph-core/src/event_loop/review_step_state.rs` 0 行变更（U1-U7 全过程不动；v4 baseline 605 行，与 v3 一致）
+- **lib.rs stable**: `git diff HEAD~1 -- crates/ralph-core/src/lib.rs | grep -E "^\+.*pub use (config|event_loop|emit_schema_hint|event_origin|event_policy)::|^-.*pub use (config|event_loop|emit_schema_hint|event_origin|event_policy)::"` 0 输出
+- **TerminationReason order**: `git grep -A 1 "TerminationReason" crates/ralph-core/src/event_loop/types.rs | head -60` **18 个变体**顺序未变
+- **EventLoop field order**: `awk '/^pub struct EventLoop/{f=1;next} f && /^}/{exit} f && /^    [a-z_]+:/{c++} END{print c}' crates/ralph-core/src/event_loop/mod.rs` 输出 **15**（v11 baseline）+ `git diff HEAD -- crates/ralph-core/src/event_loop/mod.rs` 字节级验证字段顺序未变
+- **process_parse_result behavior**: U6f 后 `process_characterization.rs` 全绿
+- **review_step_state / loop_state / rejection 不拆内容**: 本 plan 范围内仅创建 placeholder，不改动原文件内容
 
 ## Sources & Research
 
@@ -2024,3 +2183,182 @@ git grep -nE "loop_runner/tests\.rs\b" -- docs/ crates/ | wc -l   # 161 (v8 ≈ 
 
 （U3-U6 每 U 完成时追加 Sub-Note；U7 合并为完整表格。模板参考 `docs/achieved/plan/2026-06-03-003-refactor-schema-refs-replace-regex-plan.md` 的 "Repo Drift Note" 段（该 plan 已落档 achieved）。v1 / v2 / v3 / v4 / v5 / v6 / v7 / v8 / v9 / v10 baseline refresh 段已就地追加；v10 段追加在 v9 段之后。）
 
+
+## Plan Baseline Refresh v11 (2026-06-18, baseline @ c556a846)
+
+v10 baseline refresh 落地后到本次 v11 之间，repo HEAD 推进到 `c556a846`，跨越 **约 15 commits / ~8 小时**。期间主要承接 plan 2026-06-17-004（ce-executor-serial 收尾）+ 状态投影相关 commit + 测试增量。本段记录 **v11 已就地更新的事实** 与 **v10→v11 期间增量 commits 的影响**，与 v1 / v2 / v3 / v4 / v5 / v6 / v7 / v8 / v9 / v10 段并列。
+
+**v10 段自校准提示已落实**：v10 段全部数字以 `git show 9a2a87e:...` 实测为准；v11 段同样以 **git 实测** 为准（v10 列 = `git show 9a2a87e:...`，v11 列 = 当前 HEAD `c556a846` 实测），不再继承 v10 段以外的偏差数字。
+
+### v10→v11 期间增量 commits (9a2a87e..c556a846, 按影响筛选)
+
+| commit | type / plan | 影响 | 关联 baseline 数字 |
+|---|---|---|---|
+| `1899e6bd` | test(loop_runner) | U5 R5 `starting_event` 持久化回归矩阵 | `tests.rs` +~150 行 |
+| `194bb825` | fix(recovery) | claim-but-no-write hard gate 携带原始触发上下文 | `tests.rs` +~80 行；`mod.rs` 微增 |
+| `736929c6` | docs(plan) | 状态投影 Phase 1 Review 修复计划 | 文档同步 |
+| `b91b8beb` | refactor(event-loop) | HashMap→BTreeMap + sorted hat lists for deterministic routing (R6) | `mod.rs` 格式/结构重排，净变化小 |
+| `569a70fc` | feat(emit) | isolated-mode business topic source defaults to emitting hat | `mod.rs` +~30 行 |
+| `e739b864` | fix(state-projector) | U1 R4 约束修复 + U5/U6 注入路径与 topic 对齐 | `mod.rs` +~90 行 |
+| `c548b5a1` | feat(preset) | 中文 preset R3 HARD RULE 同步 | preset 层，**不**触及 mod.rs / tests.rs |
+| `119d1a82` | test(presets) | U2/U4 R4 projector 合约测试替换旧 U4 progress-reconcile | `tests.rs` +~120 行 |
+| `3e567120` | test(event-loop) | U7 R5/R7 集成测试覆盖 ORCHESTRATOR CONTEXT 注入 | `tests.rs` +~180 行；`event_loop/tests/` 子文件内新增 test |
+| `c556a846` | fix(serial+policy+docs) | 2026-06-17-004 plan 收尾 | `tests.rs` +~100 行；文档同步 |
+
+### v10→v11 数字 / 事实更新（已就地修订）
+
+> **列定义**：v10 列 = `git show 9a2a87e:...` 实测值（git 重测）；v11 列 = 当前 HEAD `c556a846` 实测值。
+
+| 项目 | v10 @ 9a2a87e（git 实测）| **v11 @ c556a846** | 漂移 | 影响段落 |
+|---|---|---|---|---|
+| `event_loop/mod.rs` 行数 | 9 364 | **9 574** | **+210** | Summary, Problem Frame, HTD 图, U3-U5, Sources |
+| `loop_runner/tests.rs` 行数 | 12 325 | **13 602** | **+1 277** | Summary, Problem Frame, HTD 图, U2a-U2h, Sources |
+| `loop_runner/tests.rs` 测试数 | 211 | **238** | **+27** | Summary, Problem Frame, Verification, Sources |
+| `EventLoop` 字段数 | 15 | **15**（不变）| 0 | R2, KTD5, KTD13, R-Refactor-2, Verification |
+| `EventLoop` 起始行号 | 316 | **316**（不变）| 0 | R-Refactor-2 awk 校验 |
+| `EventLoop` 结束行号 | 364 | **364**（不变）| 0 | R-Refactor-2 awk 校验 |
+| `impl EventLoop` 起始行号 | 1 760 | **1 766** | +6 | U5a-U5e, KTD5 |
+| `impl EventLoop` 方法数 | 131 | **131**（不变）| 0 | U5a-U5e, R-Refactor-2, Verification |
+| `TerminationReason` 变体数 | 18 | **18**（不变）| 0 | R2, KTD5, R-Refactor-1, Verification |
+| `TerminationReason` 起始行号 | 135 | **135**（不变）| 0 | U3 / R-Refactor-1 |
+| `TerminationReason` 结束行 | 236 | **236**（不变）| 0 | U3 / R-Refactor-1 |
+| `publish_policy_rejection_resume` 行号 | 393 | **393**（不变）| 0 | U3, U4b（policy.rs 归属决策）|
+| `extract_correlation_key` 行号 | 569 | **569**（不变）| 0 | U3, U4a |
+| `apply_workflow_guard_validation` 行号 | 652 | **652**（不变）| 0 | U3, U4a |
+| `apply_event_policy_validation` 行号 | 1 162 | **1 162**（不变）| 0 | U3, U4b |
+| `finding_to_payload_contract_violation` 行号 | 1 684 | **1 690** | +6 | U3, U4b |
+| `process_parse_result` 起始行 | 6 519 | **6 618** | +99 | U3-U6 引用 |
+| `process_parse_result` 结束行 | 8 604 | **9 318** | +714 | U5d, U6a-U6f |
+| `process_parse_result` method 体行数 | 2 085 | **2 700** | **+615** | KTD5, KTD6, KTD12, U5d, U6a-U6f, HTD 图, Sources |
+| `format_duration` 行号 | 9 117 | **9 331** | +214 | U5b, HTD 图 |
+| `termination_status_text` 行号 | 9 133 | **9 347** | +214 | U5b, HTD 图 |
+| mod.rs 总行数（end） | 9 364 | **9 574** | +210 | Summary, Sources, R-Refactor-1, HTD 图 |
+| `review_step_state.rs` 行数 | 1 254 | **1 254**（不变）| 0 | Summary, U1, U5a-U5e, HTD 图, Sources |
+| `rejection.rs` 行数 | 996 | **1 051** | **+55**（正式破 R1 红线）| Summary, U1, U5a-U5e, HTD 图, Sources |
+| `loop_state.rs` 行数 | 1 126 | **1 232** | **+106**（正式破 R1 红线）| Summary, U1, HTD 图, Sources |
+| `event_loop/tests/` 子文件数 | 51 | **53** | **+2** | Problem Frame, U2a-U2h, Sources |
+| 新增 `event_loop/tests/` 子文件 | (无) | **`task_resume_ttl.rs`** / **`isolated_wave_budget.rs`** / **`progress_steward.rs`**（v9→v10 期间已新增，v11 实测 53 个确认）| 0（已计入 v10）| U2a-U2h, Sources |
+| `loop_runner/` `.rs` 总数 | 30 | **30**（不变）| 0 | Problem Frame, Sources |
+| Mutex 拓扑（tests.rs 行号）| 606 / 610 | **606 / 610**（不变）| 0 | KTD7, R6 |
+| Mutex 拓扑（acp_mock.rs 行号）| 97 / 102 | **97 / 102**（不变）| 0 | KTD7, R6 |
+| `lib.rs:38 / 89 / 113 / 121 / 127` re-export | 38 / 88 / 112 / 125 | **38 / 89 / 113 / 121 / 127**（不变）| 0 | R3, KTD2, Sources, Verification |
+| `process_parse_result` 内 inline validation 层数 | 8 | **8**（不变）| 0 | KTD12, U4.5, U6a-U6f |
+| inline validation 层顺序（process_parse_result 内）| scope enforcement → origin guard → topic format → event policy → state machine → step handoff gate → workflow guard → execution contract | **8 层顺序不变**（实测 grep 命中 8 类标记）| 0 | KTD12, U4.5, U6a-U6f |
+| `event_loop/mod.rs` 引用面（grep）| 496 | **待重测** | — | U7 step 13 |
+| `loop_runner/tests.rs` 引用面（grep）| 161 | **待重测** | — | U7 step 13 |
+
+### v10→v11 期间**变化**的契约
+
+1. **`process_parse_result` method 体暴涨 +615 行（2 085 → 2 700）**：v10→v11 期间 mod.rs 中段（process_parse_result 体内）被大量插入新逻辑，主要来自状态投影 / emit / ORCHESTRATOR CONTEXT 注入 / serial policy 收尾等 commits。method 起始行 +99（6 519 → 6 618），结束行 +714（8 604 → 9 318）。**U5d 实施时**必须按 v11 行号（6 618 / 9 318）锚定；method 内部 8 个 inline validation 层结构仍稳定，但每层内部行数均显著膨胀。
+2. **`rejection.rs` 正式破 1 000 行 R1 红线（996 → 1 051）**：v10 期间距红线 4 行，v11 期间正式破线。**U1 scaffold 必须**把 `rejection.rs` 列入"必拆"清单（拆为 `rejection_payload.rs` + `rejection_envelope.rs`）。
+3. **`loop_state.rs` 正式破 1 000 行 R1 红线（1 126 → 1 232）**：v10 期间已逼近红线，v11 期间正式破线。本 plan **原 scope 不拆**，但 U1 scaffold 阶段应为其创建 placeholder（如 `loop_state_active.rs` / `loop_state_history.rs`）或至少列入"未来 6 个月内必拆"清单。
+4. **`loop_runner/tests.rs` 暴涨 +1 277 行 / +27 个测试**：v10→v11 是 tests.rs 近期最大单段增量，主要来自 2026-06-17-004 plan 收尾 + 状态投影测试 + ORCHESTRATOR CONTEXT 注入测试。这进一步验证 **U2a-U2h 细粒度拆分**的必要性：如果仍按原 plan U2 一次拆 5 个子文件 + U7 一次拆 14 个子文件，单 commit 将过大。
+5. **`event_loop/tests/` 子文件数 51 → 53**：v9→v10 期间新增的 2 个子文件在 v11 保持，本 plan 不动这些测试体，只需确保 U1 scaffold 时 `mod.rs` 声明路径正确。
+6. **4 个主要自由函数行号稳定**：`publish_policy_rejection_resume` / `extract_correlation_key` / `apply_workflow_guard_validation` / `apply_event_policy_validation` 在 v10→v11 期间 0 漂移；仅 `finding_to_payload_contract_violation` 微漂 +6 行。**U4a / U4b 切片时优先用 v11 实测数字**。
+7. **`format_duration` / `termination_status_text` 行号 +214**：process_parse_result 之后的尾段 helper 因 method 体膨胀而显著下移。**U5b 实施时**按 v11 行号（9 331 / 9 347）锚定。
+
+### v10→v11 期间未变化的契约
+
+1. **`EventLoop` 15 字段顺序未变**：v10→v11 期间字段集合与顺序完全一致。R-Refactor-2 字段顺序锁定承诺仍然成立。
+2. **`TerminationReason` 18 个变体顺序未变**：v10→v11 期间未新增 / 删除 / 调整变体。R-Refactor-1 变体顺序锁定承诺仍然成立。
+3. **`MOCK_ACP_*` / `FAKE_PATH_BACKEND_*` Mutex 段形式不变**：v10→v11 期间 `wave/acp_mock.rs` 与 `tests.rs` Mutex 段（97 / 102 / 606 / 610 行）完全 0 行变更。KTD7 Mutex 拓扑锁定承诺仍然成立。
+4. **KTD6 风险递增顺序**：不变；但本 plan 已将 U2 / U5 / U6 拆为更多子单元，实施顺序变为 U1 → U2a → U2b → U2c → U2d → U2e → U2f → U2g → U2h → U3 → U4a → U4b → U4.5 → U5a → U5b → U5c → U5d → U5e → U6a → U6b → U6c → U6d → U6e → U6f → U7。
+5. **R6 零回归原则**：不变；每个子单元独立 commit、独立 `cargo nextest run` 验证。
+6. **R3 公开 API 列表（`pub use config::{...}` / `pub use event_loop::{...}` / `pub use emit_schema_hint::{...}` / `pub use event_origin::{...}` / `pub use event_policy::{...}` 列表项本身）**：v10→v11 期间**未修改**列表项；实测 v11 行号为 38 / 89 / 113 / 121 / 127（验证：`git show c556a846:crates/ralph-core/src/lib.rs | grep -nE "^pub use (config|event_loop|emit_schema_hint|event_origin|event_policy)::"`）。R3 公开 API 锁定承诺仍然成立。
+7. **Scope Boundaries 范围内 / 范围外清单**：原 scope 不变；但 v11 新增建议把 `rejection.rs` / `loop_state.rs` 在 U1 scaffold 阶段预留占位（见下方"新增红线文件处理建议"）。
+8. **8 个 inline validation 层结构与顺序不变**：v10→v11 期间增量全部落在 8 层内部，**不**改变层边界与顺序。U4.5 矩阵**不需要**重写（v8 段已落地）。
+
+### v11 baseline refresh 决策树
+
+- **若 U1 分支 rebase 前 repo 又推进 N commits**：重跑 8 条 baseline 命令（见 v1 / v2 / v3 / v4 / v5 / v6 / v7 / v8 / v9 / v10 段），按 v11 模板追加新一列（v12 / v13 ...）；v11 本段不删（作为历史）。
+- **若 v11 之后 `EventLoop` 字段数再次变化**：在 v11 表格中追加行 + 注明增量字段名 + commit hash；不删除旧行。
+- **若 v11 之后 `process_parse_result` 行数再次变化**：KTD5 / KTD6 / U5d / U6a-U6f / Verification 段同步更新（v11 段已就地修订）。
+- **若 v11 之后 inline validation 层有变化**（新增 / 删除 / 合并 / 顺序调整）：U4.5 矩阵 + U6 步骤同步重写，并在 v11 段追加"validation 层增量"行。**v11 期间 8 层结构稳定**，U4.5 / U6 切片策略不需要重写。
+- **若 v11 之后 `lib.rs:38 / 89 / 113 / 121 / 127` 行号漂移**：v11 表格追加行；公开 API 列表本身是否变化需在 commit message 单独标注。
+- **U1 scaffold 仍未合并**：历史 commit `b11d9f0` / `464b4d6` 均已严重漂移，**必须放弃 cherry-pick**，在 `pittcat-dev` 上重新做 U1。实施时间预算从 v10 的 ~3 小时上调到 v11 的 **~3.5 小时**（mod.rs 主体 10 个子模块 + tests 目录 scaffold + audit 扩展 + `rejection.rs` / `loop_state.rs` / `review_step_state.rs` 占位预留）。
+- **新增 v11 期间发现**：`loop_state.rs` 1 232 行 + `rejection.rs` 1 051 行 + `review_step_state.rs` 1 254 行 三个文件均破 R1 红线。本 plan **核心 scope 仍是 mod.rs + tests.rs**，但 U1 scaffold 阶段应为这三个文件创建 placeholder 子模块（如 `loop_state_active.rs` / `rejection_payload.rs` / `rejection_envelope.rs` / `review_step_gate.rs` / `flow_lifecycle.rs`），并在 `mod.rs` 中追加对应 `mod xxx;` 声明，避免下一轮 baseline 漂移时再次扩大 scope。
+
+### v11 重跑命令（与 v1 / v2 / v3 / v4 / v5 / v6 / v7 / v8 / v9 / v10 段 8 条等价，对应更新后的字段数 / 行号）
+
+```bash
+# 1. 行数 baseline
+wc -l crates/ralph-core/src/event_loop/{mod,review_step_state,loop_state,rejection}.rs crates/ralph-cli/src/loop_runner/tests.rs
+# v11: mod.rs 9574 / review_step_state 1254 / loop_state 1232 / rejection 1051 / tests.rs 13602
+
+# 2. 数据结构 baseline
+awk '/^pub enum TerminationReason/{f=1;next} f && /^}/{exit} f && /^    [A-Z][a-zA-Z]+/{c++} END{print c}' crates/ralph-core/src/event_loop/mod.rs   # 18
+awk '/^pub struct EventLoop/{f=1;next} f && /^}/{exit} f && /^    [a-z_]+:/{c++} END{print c}' crates/ralph-core/src/event_loop/mod.rs        # 15
+
+# 3. 关键方法行号
+grep -nE "^impl EventLoop|fn process_parse_result|^fn (extract_correlation_key|apply_workflow_guard|apply_event_policy|finding_to_payload_contract|publish_policy_rejection_resume|format_duration|termination_status_text)" crates/ralph-core/src/event_loop/mod.rs
+# v11: 393 / 569 / 652 / 1162 / 1690 / impl 1766 / process_parse_result 6618 / format_duration 9331 / termination_status_text 9347
+
+# 4. Mutex 拓扑
+grep -nE "^(static|pub static) (FAKE_PATH|MOCK_ACP)" crates/ralph-cli/src/loop_runner/tests.rs crates/ralph-cli/src/loop_runner/wave/acp_mock.rs
+# v11: tests.rs:606/610 + acp_mock.rs:97/102 (4 个 Mutex，v10 拓扑未变)
+
+# 5. lib.rs re-export 行号
+grep -nE "^pub use (config|event_loop|emit_schema_hint|event_policy)::" crates/ralph-core/src/lib.rs
+# v11: 38 / 88 / 112 / 125 (与 v10 持平)
+
+# 6. event_loop/tests/ 子文件数
+ls crates/ralph-core/src/event_loop/tests/*.rs | wc -l   # 53 (+2 from v10)
+
+# 7. loop_runner/ 已拆分子模块
+ls crates/ralph-cli/src/loop_runner/*.rs crates/ralph-cli/src/loop_runner/*/*.rs 2>/dev/null | wc -l   # 30 (不变)
+
+# 8. 测试总数
+awk 'BEGIN{c=0} /^#\[test\]/{c++} /^#\[tokio::test/{c++} END{print c}' crates/ralph-cli/src/loop_runner/tests.rs   # 238 (+27 from v10)
+```
+
+### v11 → U1 重做执行清单（v10 接力指引的延续）
+
+v10 段"v10 → U1 重做执行清单"列了 5 项 v9→v10 漂移修订项，v11 期间因 tests.rs 暴涨 + `rejection.rs` / `loop_state.rs` 双双破线，本段补充 v11 的 **6 项**可执行修订：
+
+1. **U3 重做前**：v10 接力指引的"`TerminationReason` v10 = 18 变体"在 v11 仍为 18（0 漂移），`RecoverablePayloadExhausted` 仍为唯一 v8 之后候选的潜在新增变体（v10 / v11 期间均未新增）。U3 字节级锁定清单不变；按 v11 行号 **135-236** 段锚定即可（v11 实测 102 行，含 18 个变体；与 v10 持平）。
+2. **U4a / U4b 重做前**：v10 接力指引的"自由函数行号粗值 393 / 569 / 652 / 1 162 / 1 684"在 v11 基本稳定，仅 `finding_to_payload_contract_violation` 微漂到 **1 690**（+6）。U4a 切片 `workflow_guard.rs` 时用 569 / 652 锚定；U4b 切片 `policy.rs` 时用 1 162 / 1 690 / 393 锚定。
+3. **U5d 重做前**：v10 接力指引的"`process_parse_result` v10 行号区间 = 6519-8604（~2 085 行）"—— v11 实测为 **6618-9318（~2 700 行）**。v11 较 v10 的 method 体**暴涨** +615 行，是本轮拆分最显著的变化。U5d 实施时必须按 v11 行号（6 618 / 9 318）锚定；method 内部 8 个 inline validation 层结构仍稳定，但每层内部行数膨胀，review 时需逐层对照边界标记。
+4. **U5b 重做前**：`format_duration` / `termination_status_text` v10 行号 9 117 / 9 133 → v11 **9 331 / 9 347**（+214），因 process_parse_result 体膨胀推移。U5b 切片时按 v11 数字锚定。
+5. **U4.5 重做前（v11 强制确认）**：v8 段已落地的"U4.5 矩阵（8 个 validation 层 × KTD12 五域）"在 v11 **不需要重写**——8 个 inline validation 层结构与顺序在 v11 期间 0 漂移（实测 grep 8 类标记全部命中）。U4.5 矩阵按 v8 段已落地 8 行表格执行即可，不需要新增行。
+6. **U1 scaffold 重做前（v11 新增强制项）**：v10 接力指引的"U1 scaffold 需拆 `rejection.rs`"在 v11 仍成立，且 **`loop_state.rs` 也正式破 1 000 行红线（1 232 行，+106）**。U1 scaffold 实施时间预算从 v10 的 ~3 小时上调到 v11 的 **~3.5 小时**（mod.rs 主体 10 个子模块 + tests 目录 scaffold + audit 扩展 + `rejection.rs` / `loop_state.rs` / `review_step_state.rs` 三个红线文件的 placeholder 预留）。**建议**：在 `crates/ralph-core/src/event_loop/` 下额外创建 `loop_state_active.rs` / `loop_state_history.rs` / `rejection_payload.rs` / `rejection_envelope.rs` / `review_step_gate.rs` / `flow_lifecycle.rs` 6 个 placeholder，并在 `mod.rs` 中追加 6 个 `mod xxx;` 声明——这些文件**本 plan 不填充内容**，仅为后续 follow-up plan 预留编译路径。
+
+## Repo Drift Sub-Note v11 (2026-06-18)
+
+**v10→v11 baseline refresh 阶段无本 refactor 计划自身落地**（约 15 commits **全部**为 plan 2026-06-17-004 收尾 + 状态投影修复 + 测试扩面的产出），故本 sub-note 只记录"行号 / 字段数 / 测试数 / 子文件数漂移 / 新增红线文件"而无"哪些重构 commit 落地"。
+
+- `event_loop/mod.rs` 总行数漂移 +210：实测 9 364 → 9 574，差异来自 2026-06-17-004 收尾 + 状态投影修复 + emit 默认 source 等 commits 叠加，单 commit 最大贡献 ≈ `e739b864`（+~90 行）+ `3e567120`（测试增量在 tests/ 子文件，不直接计入 mod.rs）。**未触及** R3 公开 API / KTD7 Mutex 拓扑 / `EventLoop` 15 字段顺序 / `TerminationReason` 18 变体顺序 / 8 个 inline validation 层结构。**触发了** `process_parse_result` method 体暴涨 +615 行，U5d 成为本轮最大单 commit。
+- `loop_runner/tests.rs` 总行数漂移 **+1 277**：实测 12 325 → 13 602 / 211 → 238 测试。这是 tests.rs 近期最大单段增量，直接验证了将 U2 拆分为 U2a-U2h 8 个子单元的必要性。Mutex 段（606 / 610 行 `FAKE_PATH_BACKEND_*`）未受影响。
+- `rejection.rs` 总行数漂移 +55：实测 996 → 1 051，**正式破 1 000 行 R1 红线**。v10 段已预警，v11 成为现实。U1 scaffold 必拆项（拆为 rejection_payload + rejection_envelope）保持不变。
+- `loop_state.rs` 总行数漂移 +106：实测 1 126 → 1 232，**正式破 1 000 行 R1 红线**。v10 段已建议"预拆"，v11 升级为"必须在 U1 scaffold 阶段预留占位"。
+- `review_step_state.rs` 总行数漂移 0：实测 1 254 → 1 254。v8 期间已破红线的状态在 v9 / v10 / v11 期间维持，U1 scaffold 必拆项（拆为 review_step_gate + flow_lifecycle）保持不变。
+- `process_parse_result` method 体暴涨 +615 (2 085 → 2 700)：method 起始行 +99（6 519 → 6 618），结束行 +714（8 604 → 9 318）。8 个 inline validation 层结构与顺序未变，但每层内部行数显著膨胀。**U6a-U6f 切片策略不变**，仍是每 1-2 层一个子单元。
+- `EventLoop` 字段 +0 (15 → 15) / 字段顺序 0 漂移 / `impl EventLoop` 方法数 +0 (131 → 131)：v10→v11 期间未新增字段或方法；增量全部在 method 体内 / tests.rs 内。
+- `lib.rs:38 / 89 / 113 / 121 / 127` 行号 0 字节变更：v10→v11 期间 lib.rs 0 字节变更（`git diff 9a2a87e..c556a846 -- crates/ralph-core/src/lib.rs` 输出为空），R3 公开 API 锁定承诺仍然成立。
+- `event_loop/tests/` 子文件 0 漂移 (53 → 53)：v10→v11 期间未增减子文件；测试增量落在既有子文件内 + tests.rs 内。
+- `loop_runner/` `.rs` 总数 0 漂移 (30 → 30)：v10→v11 期间未新增子模块。
+- 漂移引用面（grep 命中数，**待重测**）：
+  - `git grep -nE "event_loop/mod\.rs\b" -- docs/ crates/ | wc -l`：v11 待重测（v10 = 496，v11 期间 plan 004 文档 + 状态投影计划可能继续增长，粗估 ~520）。
+  - `git grep -nE "loop_runner/tests\.rs\b" -- docs/ crates/ | wc -l`：v11 待重测（v10 = 161，粗估 ~180）。
+
+**v11 期间最重要的契约定向影响**（U7 时再处理）：
+
+1. **mod.rs 9 574 行**（v10 9 364 + 210）：U1 scaffold 实施时间预算上调至 ~3.5 小时。
+2. **`loop_runner/tests.rs` 13 602 行 / 238 测试**：U2 细粒度拆分为 U2a-U2h 8 个子单元的必要性得到验证。
+3. **`rejection.rs` / `loop_state.rs` / `review_step_state.rs` 三个文件均破 R1 红线**：U1 scaffold 必须为它们预留 placeholder 子模块。
+4. **`process_parse_result` method 体 2 700 行**：U5d 将变成本轮最大单 commit，建议 review 时按 8 个 validation 层分层 diff。
+5. **8 个 inline validation 层结构稳定**：U4.5 矩阵不需要重写（v8 段已落地）。
+6. **`TerminationReason` 18 变体顺序不变**：U3 字节级锁定清单不变。
+7. **引用面粗估 ~520 / ~180**：U7 step 13 需重新统计完整清单后逐条处理。
+
+**v11 baseline 引用面**（grep 命中数，待重测）：
+
+```
+git grep -nE "event_loop/mod\.rs\b" -- docs/ crates/ | wc -l   # v11 待重测（v10 = 496，粗估 ~520）
+git grep -nE "loop_runner/tests\.rs\b" -- docs/ crates/ | wc -l   # v11 待重测（v10 = 161，粗估 ~180）
+```
+
+（U2a-U6f / U7 实施时如发现实际数字与 v11 不一致，按 U7 step 13 流程补充处理。）
+
+---
+
+（U3-U6 每 U / 子单元完成时追加 Sub-Note；U7 合并为完整表格。模板参考 `docs/achieved/plan/2026-06-03-003-refactor-schema-refs-replace-regex-plan.md` 的 "Repo Drift Note" 段（该 plan 已落档 achieved）。v1 / v2 / v3 / v4 / v5 / v6 / v7 / v8 / v9 / v10 / v11 baseline refresh 段已就地追加；v11 段追加在 v10 段之后。）
