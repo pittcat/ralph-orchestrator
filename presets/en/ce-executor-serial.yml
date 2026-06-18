@@ -1058,6 +1058,24 @@ hats:
     triggers: ["review.dimension.ready"]
     publishes: ["review.dimension.done", "review.dimension.failed"]
     terminal_events: ["review.dimension.done", "review.dimension.failed"]
+    # 2026-06-17-004 U2 (R2): 锁定 reviewer 为只读角色。
+    #
+    # - `Bash` 软禁:reviewer 不得运行 `cargo test` / `cargo nextest` /
+    #   `cargo build` / `cargo clippy` / `ralph emit <business>` 等 shell
+    #   命令。验证归 executor/shipper,不是 reviewer。工具列表注入
+    #   TOOL RESTRICTIONS 段(prompt-level enforcement)。
+    # - `Edit` 硬禁:reviewer 不得修改任何源码。runtime 在每次
+    #   `audit_file_modifications()` 之后用 `git diff --stat HEAD` 检
+    #   测,若发现新增则 emit `<hat>.scope_violation` 事件,触发
+    #   scope_violation circuit breaker;`recovery.jsonl` 记录 violation
+    #   原因。
+    # - `Write` 故意保留:reviewer 唯一可写的是 findings JSON
+    #   (`.agents/scratchpad/ce-executor/{plan}/findings-{dim}-{task_id}.json`),
+    #   通过 `Write` 工具产出。`git diff --stat` 会把该新文件也视为
+    #   modification,因此 reviewer 必须把 findings 写到 plan 的
+    #   scratchpad 子目录(`.agents/scratchpad/...`)而非仓内源码
+    #   路径——scratchpad 路径通常被 gitignore,审计不触发。
+    disallowed_tools: ["Bash", "Edit"]
     # Per-worker hard limit: a single dimension reviewer may run up to
     # 30 min. The serial path has NO aggregate block — the coordinator
     # walks one dimension per turn, so the per-instance timeout is the
@@ -1077,6 +1095,35 @@ hats:
     missing_event_grace_secs: 540
     instructions: |
       ## DIMENSION REVIEWER MODE — Focused {dimension} Review
+
+      ### HARD RULE — Read-Only Role (2026-06-17-004 U2, R2)
+
+      你是**只读**代码 reviewer。**禁止**运行任何 shell 命令(包括 `cargo test` /
+      `cargo nextest` / `cargo build` / `cargo clippy` / `cargo fmt` / 任何
+      `ralph` 子命令直接调用)。**禁止**修改任何源码或仓内文件。**禁止**在
+      README / 配置 / 文档 / 测试中留下"顺手改"的痕迹。
+
+      验证是 **executor / shipper** 的职责,不是你的;reviewer 给出 findings
+      让下游 agent 决定如何处置。如果你需要复现某个 bug、读日志或跑命令,
+      把它写成 `manual` owner + `requires_verification: true` 的 finding,
+      由 executor 在下一轮跑。
+
+      唯一可写的文件是 findings JSON
+      (`.agents/scratchpad/ce-executor/{plan_name}/findings-{dimension}-{task_id}.json`),
+      通过 `Write` 工具产出,落到 plan scratchpad 子目录(通常被 gitignore,
+      不会被 `git diff --stat` 计入"修改")。**绝对不要**把 findings 写到仓内
+      源码路径或 `findings.md`(那会触发 `<hat>.scope_violation` 硬审计)。
+
+      越权调用后果:
+      - 工具列表已被 preset 锁为 `disallowed_tools: ["Bash", "Edit"]`,TOOL
+        RESTRICTIONS 段会注入 prompt(软约束)。
+      - `Edit` 一旦在仓内路径触发,runtime 的
+        `audit_file_modifications()` 用 `git diff --stat HEAD` 检出
+        modification,emit `<hat>.scope_violation` 事件,触发
+        scope_violation circuit breaker,并写入 `recovery.jsonl` 留痕。
+      - 同一 hat 内 `task.resume` 重试不会改变该结论。
+
+      ---
 
       You are a specialized code reviewer focused on ONE dimension only.
       Your dimension is from the event payload's `dimension` field.
