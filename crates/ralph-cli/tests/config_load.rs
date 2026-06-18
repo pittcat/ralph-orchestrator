@@ -61,8 +61,12 @@ fn ralph_yml_dimension_reviewer_backend_is_claude() {
 
 #[test]
 fn ralph_yml_no_hat_uses_pi_backend() {
-    // Regression: `pi` is no longer a valid backend in the effective project
-    // config after U3 cut it off the dimension-reviewer.
+    // Regression: only `review-synthesizer` is allowed to opt into the
+    // `pi` backend (added in `f146e621` for `builtin:ce-executor-isolated`).
+    // Every other hat must use a non-`pi` backend. The
+    // `dimension-reviewer` case is also pinned by
+    // `ralph_yml_dimension_reviewer_backend_is_claude`; this test is the
+    // broader net for any *other* hat that tries to follow suit.
     let yaml = load_project_yaml();
 
     let hats = yaml
@@ -79,10 +83,22 @@ fn ralph_yml_no_hat_uses_pi_backend() {
         let name = backend.to_cli_backend();
         let hat_id = hat_id
             .as_str()
-            .expect("hat id under `hats:` must be a string");
+            .expect("hat id under `hats:` must be string");
+
+        if hat_id == "review-synthesizer" {
+            assert_eq!(
+                name, "pi",
+                "review-synthesizer is the only hat allowed to use `pi` \
+                 (see f146e621 / builtin:ce-executor-isolated)"
+            );
+            continue;
+        }
+
         assert_ne!(
             name, "pi",
-            "hat `{hat_id}` must not use the `pi` backend; U3 cut it off dimension-reviewer"
+            "hat `{hat_id}` must not use the `pi` backend; \
+             only `review-synthesizer` is exempted \
+             (dimension-reviewer is pinned to `claude` per 2026-06-17-004 U3 / R4)"
         );
     }
 }
