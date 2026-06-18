@@ -41,7 +41,9 @@ core:
     - "Run targeted tests per crate via `cargo nextest run -p <crate>` during subtasks; full `./scripts/run-tests.sh` (nextest + doctest) only at final step. 若全量基线出现竞态/时序 flake（如 ralph-cli loop_runner Mutex/timeout 错误），先用 `RALPH_BASELINE_SERIAL=1 ./scripts/run-tests.sh` 强制单线程 cargo test 兜底；serial 仍失败才是真失败。详见 CLAUDE.md / AGENTS.md「Build & Test」段 HARD RULE 1+2、「并行 vs 串行分级表」与「开发基线 vs CI 基线」段。"
 
 # Per-hat backend overrides for builtin:ce-executor-serial (merged on top of preset).
-# Implementation chain → claude; review / gate / ship / report → claude (pi disabled for dimension-reviewer due to event contract drift).
+# 不同的 hat 可以指向不同的 backend(本项目允许 agent / operator 自由选择);
+# 没有"必须 X 只能用 Y backend"的项目级硬约束。如果某些 hat 选了不寻常的
+# backend(例如 dimension-reviewer 选 pi),那是 *配置选择*,不是 bug。
 hats:
   coordinator:
     backend: claude
@@ -54,7 +56,7 @@ hats:
   review-coordinator:
     backend: claude
   dimension-reviewer:
-    backend: claude
+    backend: pi
   review-synthesizer:
     backend: claude
   plan-gate:
