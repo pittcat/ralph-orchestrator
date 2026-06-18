@@ -12917,3 +12917,223 @@ fn u4_recovery_count_falls_back_to_workspace_when_session_empty() {
         seed.recovery_count
     );
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// 2026-06-17-004 plan U2 (R2): dimension-reviewer read-only enforcement.
+//
+// The plan layers the read-only contract at four enforcement points; this
+// module already pinned the configuration layer in
+// `integration_emit_policy::test_ce_executor_serial_dimension_reviewer_disallowed_tools_pinned`.
+// This test pins the **runtime hard-audit** layer: the per-iteration
+// `audit_file_modifications(hat_id)` callback that runs `git diff --stat
+// HEAD` after each iteration. If the hat has `Edit` or `Write` in
+// `disallowed_tools` and a file changed, the runtime publishes
+// `<hat_id>.scope_violation` to the bus, which the missing-event gate
+// then routes to `task.resume` (U1 contract) — eventually tripping the
+// scope_violation_circuit_breaker after enough retries.
+//
+// The test reproduces the audit path with a real git workspace and a
+// mock `dimension-reviewer` hat that mirrors the production preset's
+// `disallowed_tools: ["Bash", "Edit"]` configuration. We then check that
+// `process_output(...)` (the public entry point that calls
+// `audit_file_modifications` last) produces a `dimension-reviewer.scope_violation`
+// event on the bus. This is the smallest possible reproduction of the
+// production audit code path without spinning up a real LLM backend.
+// ──────────────────────────────────────────────────────────────────────────
+
+/// U2 (R2) Hard-audit: `dimension-reviewer` with `disallowed_tools: ["Edit"]`
+/// MUST emit a `dimension-reviewer.scope_violation` event when a tracked
+/// file is modified (so the runtime can route a `task.resume` per the
+/// existing scope_violation contract and trip the circuit breaker after
+/// enough retries). This pins the audit hook in
+/// `EventLoop::audit_file_modifications(hat_id)` — called from
+/// `process_output` after every iteration.
+#[cfg(unix)] // git + bash commands; Windows fs semantics differ
+#[test]
+fn u2_dimension_reviewer_edit_disallowed_triggers_scope_violation_audit() {
+    use ralph_core::{EventLoop, HatRegistry, RalphConfig};
+    use ralph_proto::HatId;
+    use std::process::Command;
+    use std::sync::{Arc, Mutex};
+    use tempfile::TempDir;
+
+    // 1. Set up a real git workspace with a clean HEAD baseline.
+    let tmp = TempDir::new().expect("temp dir");
+    let workspace = tmp.path().to_path_buf();
+
+    let run = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(&workspace)
+            .status()
+            .unwrap_or_else(|e| panic!("git {:?} failed to spawn: {e}", args));
+        assert!(status.success(), "git {:?} must succeed", args);
+    };
+
+    run(&["init", "--quiet"]);
+    run(&["config", "user.email", "u2@ralph.test"]);
+    run(&["config", "user.name", "u2-test"]);
+    // A baseline tracked file so HEAD has at least one commit.
+    std::fs::write(workspace.join("baseline.txt"), "clean\n").expect("write baseline");
+    run(&["add", "baseline.txt"]);
+    run(&["commit", "--quiet", "-m", "baseline"]);
+
+    // 2. Modify a tracked file AFTER the baseline commit, so
+    //    `git diff --stat HEAD` returns a non-empty diff and the audit
+    //    fires.
+    std::fs::write(workspace.join("baseline.txt"), "modified\n").expect("modify");
+
+    // 3. Build a minimal `RalphConfig` with a `dimension-reviewer` hat
+    //    carrying the U2 R2 contract: `disallowed_tools: ["Bash", "Edit"]`.
+    //    The audit hook only checks for "Edit" or "Write" in the
+    //    disallowed list — including "Bash" alongside "Edit" is a no-op
+    //    for the audit but matches the production preset exactly.
+    let mut config: RalphConfig = serde_yaml::from_str(
+        r#"
+event_loop:
+  enforce_hat_scope: false
+hats:
+  dimension-reviewer:
+    name: "Dimension Reviewer"
+    description: "U2 hard-audit test fixture"
+    triggers: ["review.dimension.ready"]
+    publishes: ["review.dimension.done"]
+    disallowed_tools: ["Bash", "Edit"]
+"#,
+    )
+    .expect("fixture yaml must parse");
+    // `workspace_root` is `#[serde(skip)]` on `CoreConfig`, so it does
+    // not flow through YAML. Set it directly so the audit runs
+    // `git diff --stat HEAD` against the test tmp dir, not the
+    // worker's CWD.
+    config.core.workspace_root = workspace.clone();
+
+    let registry = HatRegistry::from_runtime_config(&config);
+    let mut event_loop =
+        EventLoop::with_context(config, ralph_core::LoopContext::primary(workspace.clone()));
+    // Re-register the registry (from_runtime_config is independent of
+    // EventLoop::new which builds its own).
+    *event_loop.registry_mut() = registry;
+
+    // 4. Collect any `<hat>.scope_violation` events that hit the bus.
+    //    We register a synchronous observer on the bus before invoking
+    //    `process_output` so the capture survives any later routing
+    //    steps.
+    let observed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let observed = Arc::clone(&observed);
+        event_loop.bus().add_observer(move |event| {
+            let topic = event.topic.as_str().to_string();
+            if topic == "dimension-reviewer.scope_violation" {
+                observed.lock().unwrap().push(topic);
+            }
+        });
+    }
+
+    // 5. Drive the audit hook via the public `process_output` entry
+    //    point. The exact `output` string and `success` flag do not
+    //    matter for the audit — they only matter for the prior
+    //    parsing / completion steps, which we do not assert on. The
+    //    audit runs unconditionally at the end of every
+    //    `process_output` call.
+    let hat_id = HatId::new("dimension-reviewer");
+    let _ = event_loop.process_output(&hat_id, "", true);
+
+    // 6. The audit MUST have fired: the bus received a
+    //    `dimension-reviewer.scope_violation` event. This is the hard
+    //    enforcement half of the U2 R2 contract — without it, a
+    //    reviewer could freely edit source files and the runtime
+    //    would never trip.
+    let seen = observed.lock().unwrap().clone();
+    assert!(
+        seen.iter()
+            .any(|t| t == "dimension-reviewer.scope_violation"),
+        "U2 R2: hard audit must publish dimension-reviewer.scope_violation when \
+         tracked files were modified under disallowed_tools=[Bash, Edit]. \
+         observed topics: {seen:?}"
+    );
+}
+
+/// U2 (R2) Soft-audit negative: a hat WITHOUT `Edit`/`Write` in
+/// `disallowed_tools` must NOT trigger the audit even after a file
+/// modification. This pins the audit's selectivity: a hat that
+/// legitimately edits files (e.g., `executor`) must not produce
+/// false-positive `scope_violation` events. The companion positive
+/// test above (`u2_dimension_reviewer_edit_disallowed_triggers_scope_violation_audit`)
+/// covers the inverse; together they pin the audit's IF-MODIFIED-AND-DISALLOWED
+/// precondition, which the plan calls out as a precondition for the
+/// `recovery.jsonl` audit trail (the negative path is "no violation →
+/// no journal entry").
+#[cfg(unix)]
+#[test]
+fn u2_dimension_reviewer_no_disallowed_tools_does_not_audit() {
+    use ralph_core::{EventLoop, HatRegistry, RalphConfig};
+    use ralph_proto::HatId;
+    use std::process::Command;
+    use std::sync::{Arc, Mutex};
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("temp dir");
+    let workspace = tmp.path().to_path_buf();
+
+    let run = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(&workspace)
+            .status()
+            .unwrap_or_else(|e| panic!("git {:?} failed to spawn: {e}", args));
+        assert!(status.success(), "git {:?} must succeed", args);
+    };
+
+    run(&["init", "--quiet"]);
+    run(&["config", "user.email", "u2-neg@ralph.test"]);
+    run(&["config", "user.name", "u2-neg-test"]);
+    std::fs::write(workspace.join("baseline.txt"), "clean\n").expect("write baseline");
+    run(&["add", "baseline.txt"]);
+    run(&["commit", "--quiet", "-m", "baseline"]);
+
+    // Modify AFTER baseline so `git diff --stat HEAD` is non-empty.
+    std::fs::write(workspace.join("baseline.txt"), "modified\n").expect("modify");
+
+    let mut config: RalphConfig = serde_yaml::from_str(
+        r#"
+event_loop:
+  enforce_hat_scope: false
+hats:
+  executor:
+    name: "Executor (no restrictions)"
+    description: "U2 negative test fixture"
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+"#,
+    )
+    .expect("fixture yaml must parse");
+    config.core.workspace_root = workspace.clone();
+
+    let registry = HatRegistry::from_runtime_config(&config);
+    let mut event_loop =
+        EventLoop::with_context(config, ralph_core::LoopContext::primary(workspace.clone()));
+    *event_loop.registry_mut() = registry;
+
+    // Capture every scope_violation event reaching the bus for any hat.
+    let observed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let observed = Arc::clone(&observed);
+        event_loop.bus().add_observer(move |event| {
+            let topic = event.topic.as_str().to_string();
+            if topic.ends_with(".scope_violation") {
+                observed.lock().unwrap().push(topic);
+            }
+        });
+    }
+
+    let hat_id = HatId::new("executor");
+    let _ = event_loop.process_output(&hat_id, "", true);
+
+    let seen = observed.lock().unwrap().clone();
+    assert!(
+        seen.is_empty(),
+        "U2 R2 negative: hat without disallowed Edit/Write MUST NOT trigger the \
+         file-modification audit. observed scope_violation topics: {seen:?}"
+    );
+}
