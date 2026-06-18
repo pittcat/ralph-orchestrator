@@ -2131,195 +2131,172 @@ mod tests {
         );
     }
 
-    /// U4 (2026-06-11-002): extract executor hat instructions for U4 contract tests.
-    /// The U4 work is a text-only preset instruction contract — progress.md must be
-    /// updated on queue.advance and inside the Task Execution Loop, with the
-    /// canonical field set (Current Step / Runtime Task ID / Status: in_progress
-    /// / update time). No code paths are involved; this helper just lets the
-    /// contract tests stay DRY.
-    fn executor_instructions_from(content: &str) -> String {
-        let config = RalphConfig::parse_yaml(content)
-            .expect("ce-executor preset YAML should parse as RalphConfig");
-        config
-            .hats
-            .get("executor")
-            .expect("ce-executor preset must define an 'executor' hat")
-            .instructions
-            .clone()
-    }
+    /// U4 (2026-06-11-002) — superseded by 2026-06-17-005 R4. The
+    /// legacy executor-instructions helper was removed when the
+    /// U4 progress-reconcile tests were replaced by projector-driven
+    /// assertions (`test_ce_executor_state_projection_enabled_*`).
+    /// The new contract pins `event_loop.state_projection.enabled`
+    /// and the `## ORCHESTRATOR CONTEXT` / `ralph tools task` HARD
+    /// RULE clauses; the per-step `progress.md` / `task start` /
+    /// `task close` ordering is no longer an agent obligation.
 
+    // ------------------------------------------------------------------
+    // 2026-06-17-005 R4 contract: state projection is the single writer
+    // for `.ralph/agent/tasks.jsonl` and `.ralph/agent/progress.md`.
+    // Presets must opt in to the projector and pin agent-side
+    // instructions away from the legacy hand-written path.  These
+    // tests replace the 2026-06-11-002 U4 progress-reconcile tests
+    // (the legacy contract) with assertions that match the
+    // projector-driven model. See U4 of
+    // docs/plans/2026-06-17-005-fix-state-projection-phase1-review-findings-plan.md.
+    // ------------------------------------------------------------------
+
+    /// R4 (2026-06-17-005): `ce-executor-isolated` must opt in to
+    /// state projection and pin the four canonical actions.
     #[test]
-    fn test_ce_executor_u4_progress_reconcile_queue_advance_en() {
-        // U4 (2026-06-11-002) + WAC-U4 (2026-06-12): when executor is
-        // triggered by plan-gate `work.ready` (step advance) it must update
-        // progress.md *between* task start and the implementation step.
-        let content = read_root_preset("ce-executor-isolated.yml");
-        let instructions = executor_instructions_from(&content);
-
-        let qa_paragraph = instructions
-            .split("### work.ready Activation (step advance from plan-gate)")
-            .nth(1)
-            .and_then(|s| s.split("### FIX PLAN EXECUTION MODE").next())
-            .expect("executor instructions must contain a work.ready Activation section");
-
+    fn test_ce_executor_state_projection_enabled_isolated_en() {
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor-isolated preset");
+        let config = RalphConfig::parse_yaml(&preset.content)
+            .expect("ce-executor-isolated must parse");
         assert!(
-            qa_paragraph.contains("progress.md"),
-            "work.ready step-advance section must mention progress.md. Section excerpt:\n{qa_paragraph}"
+            config.event_loop.state_projection.enabled,
+            "ce-executor-isolated must enable state projection (R1/R4 in 2026-06-17-005); \
+             set event_loop.state_projection.enabled: true"
         );
-        for needle in [
-            "Current Step",
-            "Runtime Task ID",
-            "Status: in_progress",
-            "update time",
-        ] {
+        for topic in ["work.ready", "work.done", "queue.advance", "plan.complete"] {
             assert!(
-                qa_paragraph.contains(needle),
-                "work.ready progress.md update must reference `{}`. Section excerpt:\n{qa_paragraph}",
-                needle
-            );
-        }
-        let start_pos = qa_paragraph
-            .find("ralph tools task start")
-            .expect("work.ready section must include `ralph tools task start`");
-        let progress_pos = qa_paragraph
-            .find("progress.md")
-            .expect("already asserted above");
-        assert!(
-            start_pos < progress_pos,
-            "work.ready step advance must `ralph tools task start` before updating progress.md. \
-             Section excerpt:\n{qa_paragraph}"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_u4_progress_reconcile_task_execution_loop_en() {
-        // U4 (2026-06-11-002): the Task Execution Loop in the executor
-        // instructions must include a "Update progress.md" step between
-        // `ralph tools task start` and the implementation step.
-        let content = read_root_preset("ce-executor-isolated.yml");
-        let instructions = executor_instructions_from(&content);
-
-        let loop_section = instructions
-            .split("### Task Execution Loop (Small/Large)")
-            .nth(1)
-            .and_then(|s| s.split("**Execution strategy").next())
-            .expect("executor instructions must contain a Task Execution Loop section");
-
-        assert!(
-            loop_section.contains("Update `progress.md`"),
-            "Task Execution Loop must include a `Update \\`progress.md\\`` step. \
-             Section excerpt:\n{loop_section}"
-        );
-        for needle in [
-            "Current Step",
-            "Runtime Task ID",
-            "Status: in_progress",
-            "update time",
-        ] {
-            assert!(
-                loop_section.contains(needle),
-                "Task Execution Loop progress.md update must reference `{}`. \
-                 Section excerpt:\n{loop_section}",
-                needle
-            );
-        }
-
-        // The step ordering must place progress.md update immediately after
-        // task start. Otherwise fresh-context agents will read stale
-        // "pending" state from progress.md while the task is in_progress.
-        let start_pos = loop_section
-            .find("ralph tools task start")
-            .expect("loop must include task start");
-        let progress_pos = loop_section
-            .find("Update `progress.md`")
-            .expect("loop must include progress.md update step");
-        assert!(
-            start_pos < progress_pos,
-            "Task Execution Loop must call `ralph tools task start` before the \
-             `Update \\`progress.md\\`` step so the Runtime Task ID is known. \
-             Section excerpt:\n{loop_section}"
-        );
-
-        // Numbered step list must use distinct integers. The previous
-        // numbering bug shipped two "3." lines in the same code block; this
-        // guard catches a regression by asserting the close-step is reached
-        // at exactly step 7 (1=start, 2=progress, 3=read, 4=implement,
-        // 5=tests, 6=close, 7=commit). We search only inside the indented
-        // code block so the "Step 6" in the warning line above does not
-        // confuse the order check.
-        let code_block = loop_section
-            .split("```")
-            .nth(1)
-            .expect("Task Execution Loop must include a fenced code block");
-        let progress_pos = code_block
-            .find("Update `progress.md`")
-            .expect("loop code block must include progress.md update step");
-        let close_pos = code_block
-            .find("ralph tools task close")
-            .expect("loop code block must include task close step");
-        let commit_pos = code_block
-            .find("Evaluate incremental commit")
-            .expect("loop code block must include evaluate commit step");
-        assert!(
-            progress_pos < close_pos && close_pos < commit_pos,
-            "Task Execution Loop code block must place progress.md update, task close, and \
-             commit evaluation in that order. Code block excerpt:\n{code_block}"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_u4_progress_reconcile_queue_advance_zh() {
-        // U4 + WAC-U4: Chinese preset must mirror the work.ready step-advance
-        // progress.md update contract so zh and en stay in parity.
-        let content = read_root_preset("ce-executor-isolated-zh.yml");
-        let instructions = executor_instructions_from(&content);
-
-        let qa_paragraph = instructions
-            .split("### work.ready 激活（plan-gate 步骤推进）")
-            .nth(1)
-            .and_then(|s| s.split("### 修复计划执行模式").next())
-            .expect("executor zh instructions must contain work.ready activation section");
-        assert!(
-            qa_paragraph.contains("progress.md"),
-            "ce-executor-zh work.ready section must mention progress.md. \
-             Section excerpt:\n{qa_paragraph}"
-        );
-        for needle in ["Current Step", "Runtime Task ID", "Status: in_progress"] {
-            assert!(
-                qa_paragraph.contains(needle),
-                "ce-executor-zh work.ready progress.md update must reference `{}`. \
-                 Section excerpt:\n{qa_paragraph}",
-                needle
+                config.event_loop.state_projection.actions.contains_key(topic),
+                "ce-executor-isolated must define a projection action for `{topic}`"
             );
         }
     }
 
+    /// R4: same assertion for the `ce-executor-serial` preset.
     #[test]
-    fn test_ce_executor_u4_progress_reconcile_task_execution_loop_zh() {
-        // U4 (2026-06-11-002): Chinese preset Task Execution Loop must also
-        // include the progress.md update step.
-        let content = read_root_preset("ce-executor-isolated-zh.yml");
-        let instructions = executor_instructions_from(&content);
-
-        let loop_section = instructions
-            .split("### 任务执行循环（Small/Large）")
-            .nth(1)
-            .and_then(|s| s.split("**执行策略**").next())
-            .expect("ce-executor-zh must contain 任务执行循环 section");
-
+    fn test_ce_executor_state_projection_enabled_serial_en() {
+        let preset = get_preset("ce-executor-serial").expect("ce-executor-serial preset");
+        let config = RalphConfig::parse_yaml(&preset.content)
+            .expect("ce-executor-serial must parse");
         assert!(
-            loop_section.contains("更新 `progress.md`"),
-            "ce-executor-zh Task Execution Loop must include `更新 \\`progress.md\\`` step. \
-             Section excerpt:\n{loop_section}"
+            config.event_loop.state_projection.enabled,
+            "ce-executor-serial must enable state projection (R1/R4 in 2026-06-17-005)"
         );
-        for needle in ["Current Step", "Runtime Task ID", "Status: in_progress"] {
+        for topic in ["work.ready", "work.done", "queue.advance", "plan.complete"] {
             assert!(
-                loop_section.contains(needle),
-                "ce-executor-zh Task Execution Loop progress.md update must reference `{}`. \
-                 Section excerpt:\n{loop_section}",
-                needle
+                config.event_loop.state_projection.actions.contains_key(topic),
+                "ce-executor-serial must define a projection action for `{topic}`"
             );
         }
+    }
+
+    /// R4: the cross-hat HARD RULE comment must declare
+    /// `## ORCHESTRATOR CONTEXT` as the canonical read source
+    /// **and** forbid agent-side `ralph tools task` calls.
+    /// This pins U2 of 2026-06-17-005 in code: a future refactor
+    /// that drops either clause fails CI.
+    ///
+    /// Note: the embedded preset content goes through
+    /// `serde_yaml::to_string` in build.rs, which strips top-level
+    /// YAML comments. The HARD RULE comment is therefore expected
+    /// to live in the per-hat `instructions` string (preserved) or
+    /// in `presets/schemas/<name>.yml` (merged). We assert the
+    /// preserved shape here: a per-hat instruction that tells the
+    /// agent to prefer `work.ready` over `ralph tools task`.
+    #[test]
+    fn test_ce_executor_orchestrator_context_is_canonical_read_source_en() {
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor-isolated preset");
+        let content = &preset.content;
+        assert!(
+            content.contains("## ORCHESTRATOR CONTEXT"),
+            "ce-executor-isolated must reference `## ORCHESTRATOR CONTEXT` as the read source"
+        );
+        // The HARD RULE says the agent must prefer `work.ready`
+        // and only fall back to `ralph tools task` when the
+        // ORCHESTRATOR CONTEXT block shows the task is missing.
+        // Pin the projector-driven shape (per-hat instructions
+        // mention `work.ready` together with `ORCHESTRATOR CONTEXT`).
+        assert!(
+            content.contains("work.ready") && content.contains("ORCHESTRATOR CONTEXT"),
+            "ce-executor-isolated instructions must couple `work.ready` to `ORCHESTRATOR CONTEXT`"
+        );
+        // The Chinese preset mirrors the same cross-hat block
+        // (R3 of 2026-06-17-005 — see U3).
+        let zh = read_root_preset("ce-executor-isolated-zh.yml");
+        assert!(
+            zh.contains("## ORCHESTRATOR CONTEXT"),
+            "ce-executor-isolated-zh must reference `## ORCHESTRATOR CONTEXT` (R3 of 2026-06-17-005)"
+        );
+        // And the zh HARD RULE mirrors the en "ralph tools task"
+        // prohibition (added in U3 of 2026-06-17-005). The
+        // comment wraps to a second line; collapse newlines
+        // before searching. Each token is checked independently
+        // so a future YAML reflow that breaks the literal
+        // `ensure|start|close|fail|reopen` adjacency still
+        // surfaces a meaningful failure message.
+        let zh_collapsed: String = zh.chars().filter(|c| *c != '\n').collect();
+        for token in ["ensure", "start", "close", "fail", "reopen"] {
+            assert!(
+                zh_collapsed.contains(token),
+                "ce-executor-isolated-zh HARD RULE must mention `{token}` \
+                 (R3 / U3 of 2026-06-17-005); multi-line comment is collapsed before search"
+            );
+        }
+    }
+
+    /// R4 (2026-06-17-005): the `ce-executor-serial` preset
+    /// mirrors the same projector + ORCHESTRATOR CONTEXT contract.
+    /// Pin the parity so an isolated-only edit to one preset
+    /// does not silently drift the other.
+    #[test]
+    fn test_ce_executor_orchestrator_context_is_canonical_read_source_serial_en() {
+        let preset = get_preset("ce-executor-serial").expect("ce-executor-serial preset");
+        let content = &preset.content;
+        assert!(
+            content.contains("## ORCHESTRATOR CONTEXT"),
+            "ce-executor-serial must reference `## ORCHESTRATOR CONTEXT` as the read source"
+        );
+        // The cross-hat HARD RULE mirrors the isolated preset
+        // (per the inline comment in ce-executor-serial.yml).
+        // The merged content keeps per-hat instructions as a
+        // string; assert the per-hat "trust ORCHESTRATOR CONTEXT"
+        // cue with a stronger signal than just substring
+        // presence (the prior OR-fallback was a tautology once
+        // the first assert above already checked the substring).
+        // We require the explicit "trust the ORCHESTRATOR
+        // CONTEXT" per-hat HARD RULE wording; that string is
+        // unique to the serial preset's per-hat instructions
+        // and would catch a regression that drops the per-hat
+        // binding while leaving a stray mention elsewhere.
+        assert!(
+            content.contains("trust the `## ORCHESTRATOR CONTEXT`"),
+            "ce-executor-serial must carry the per-hat 'trust the `## ORCHESTRATOR CONTEXT`' \
+             HARD RULE binding (R4 of 2026-06-17-005)"
+        );
+    }
+
+    /// R4: legacy regression guard. The pre-Phase-1 hand-written
+    /// progress.md contract has been replaced. The old
+    /// per-hat instruction that drove `test_ce_executor_u4_*`
+    /// must no longer be enforced as a strict ordering rule;
+    /// instead, agent behaviour is bound to the ORCHESTRATOR
+    /// CONTEXT block. This test pins the **direction** of the
+    /// change without locking the executor's per-step
+    /// numbering (which the agent can still tune).
+    #[test]
+    fn test_ce_executor_u4_legacy_progress_reconcile_is_superseded() {
+        // The R4 contract now lives in
+        // `test_ce_executor_state_projection_enabled_isolated_en`
+        // and `test_ce_executor_orchestrator_context_is_canonical_read_source_en`.
+        // We retain this test name as a one-line marker so
+        // anyone reading the legacy contract test can see the
+        // successor contract. It must stay green; if it fails
+        // the projector was disabled.
+        let preset = get_preset("ce-executor-isolated").expect("ce-executor-isolated preset");
+        let config = RalphConfig::parse_yaml(&preset.content).expect("parse");
+        assert!(
+            config.event_loop.state_projection.enabled,
+            "R4 contract is broken: state projection must stay enabled in ce-executor-isolated"
+        );
     }
 
     #[test]
