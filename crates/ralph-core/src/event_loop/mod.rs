@@ -4520,6 +4520,12 @@ impl EventLoop {
             // prompt for `review-synthesizer` so the agent cannot miss
             // it.  The block is a no-op for any other hat.
             let base_prompt = self.prepend_wave_context(base_prompt, hat_id);
+            // 2026-06-18-002 plan U6 (KTD-6): `## HAT HANDOFF` block
+            // is inserted **between** `## WAVE CONTEXT` and
+            // `## ORCHESTRATOR CONTEXT` so the navigation block
+            // sits at the top alongside the wave header. Fail-closed:
+            // missing/unreadable file → no block + diagnostic.
+            let base_prompt = self.prepend_hat_handoff(base_prompt, hat_id);
             // 2026-06-17-003 U4 / 2026-06-17-005 R5:
             // `## ORCHESTRATOR CONTEXT` block is the canonical
             // view of the run. The block is always emitted
@@ -5450,6 +5456,55 @@ impl EventLoop {
             return prompt;
         };
         format!("{}{prompt}", ctx.to_prompt_block())
+    }
+
+    /// 2026-06-18-002 plan U6 (KTD-16): prepend the `## HAT HANDOFF`
+    /// navigation block. Fail-closed: missing/unreadable file →
+    /// no block + diagnostic event. Skip when disabled or in
+    /// coordinator mode or when the hat is `ralph`.
+    fn prepend_hat_handoff(&mut self, prompt: String, hat_id: &HatId) -> String {
+        use crate::hat_handoff::inject;
+        if !self.config.event_loop.hat_handoff.enabled {
+            return prompt;
+        }
+        if !matches!(
+            self.config.event_loop.execution_mode,
+            crate::config::HatExecutionMode::Isolated
+        ) {
+            return prompt;
+        }
+        if hat_id.as_str() == "ralph" {
+            return prompt;
+        }
+        // peek(不要 take,避免污染 hat pending):bus 没有 peek 接口,
+        // 我们用 take 后 publish 回去——这里是 build_prompt 入口,
+        // pending 还未被消费,所以是安全的(同上 take_pending 用法)。
+        let pending = self.bus.take_pending(hat_id);
+        let handoff_path = inject::find_pending_handoff_path(&pending);
+        for ev in pending {
+            self.bus.publish(ev);
+        }
+        let workspace_root = self.config.core.workspace_root.as_path();
+        match inject::build_block(
+            workspace_root,
+            &self.config.event_loop.hat_handoff,
+            handoff_path.as_deref(),
+        ) {
+            Some(block) => format!("{block}{prompt}"),
+            None => {
+                if handoff_path.is_some() {
+                    self.bus.publish(ralph_proto::Event::new(
+                        "event.hat_handoff.inject_failed",
+                        format!(
+                            "{{\"hat\":\"{}\",\"reason\":\"file_missing_or_unreadable\",\"handoff_path\":\"{}\"}}",
+                            hat_id.as_str(),
+                            handoff_path.as_deref().unwrap_or(""),
+                        ),
+                    ));
+                }
+                prompt
+            }
+        }
     }
 
     /// 2026-06-17-003 U4: prepend the `## ORCHESTRATOR CONTEXT`
