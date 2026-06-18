@@ -44,6 +44,7 @@ metadata:
 | `ralph tools memory` | 记忆管理 | 已注入（`ralph-tools-memories` skill，仅当 `memories.enabled`） |
 | `ralph tools skill` | 加载 skill | `ralph tools skill load ralph-tools-cmdref` |
 | `ralph tools interact` | Telegram 通知 | `ralph tools skill load ralph-tools-cmdref` |
+| `ralph tools handoff prepare` | hat→hat roadmap handoff 路径分配（2026-06-18-002） | `ralph tools handoff prepare --help`（默认 disabled；详情见 `ralph-tools-handoff` §5.5） |
 
 ### 顶层命令（按需加载对应 skill）
 

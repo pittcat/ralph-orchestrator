@@ -81,6 +81,150 @@ review wave `received_count < expected_dimensions` 时的两条路径：
 
 不要绕：若需表达「我无法推进」，发 `human.guidance`（等人类决策）而非 `plan.blocked`。
 
+## 5.5 Hat→hat roadmap handoff（2026-06-18-002 plan）
+
+> **2026-06-18 状态**：机制已落地（`hat_handoff` 模块 + CLI `ralph tools handoff prepare` + `gate` + `inject`），但**默认 disabled**（`event_loop.hat_handoff.enabled: false`）。U11 开启 `ce-executor-*` 留作 follow-up，需先跑通 `ralph-e2e --mock` 全量（计划 KTD-11 / U9 全绿门槛）。本文档供按需 load 后查阅。
+
+### 5.5.1 概念
+
+**宏观边** = 唯一消费者 topic ∧ 非自环 ∧ 非豁免。`ce-executor-isolated` 下的典型宏观边：
+
+| 起点 hat | topic | 终点 hat |
+|---|---|---|
+| `plan-gate` | `work.ready` | `executor` |
+| `executor` | `work.done` | `review-coordinator` |
+| `review-coordinator` | `review.wave.ready` | dimension-reviewer wave |
+| `review-synthesizer` | `review.complete` | `plan-gate` |
+
+**微观边**（豁免，无需 roadmap）：
+
+- `review.dimension.{ready,done,failed}`（同一 wave 内多 reviewer 之间）
+- `queue.advance` 自环（plan-gate → plan-gate，KTD-9 显式豁免）
+
+### 5.5.2 操作流程
+
+发布宏观边前：
+
+1. **Prepare**（拿确定性路径 + 五段式 skeleton）：
+
+   ```bash
+   ralph tools handoff prepare \
+     --from executor \
+     --to review-coordinator \
+     --topic work.done \
+     --iteration "$RALPH_LOOP_ITERATION" \
+     --current-seq "$RALPH_HAT_HANDOFF_SEQ" \
+     --json
+   ```
+
+   返回 `handoff_path: .ralph/agent/hat-handoff/{iter}-{seq+1}-{from}-{to}.md`。
+   `-` / `.` / ` ` 等在文件名中会被 sanitize 为 `_`，保证 4 段拆分稳定。
+
+2. **填写五段式 markdown**：
+
+   ```markdown
+   # Handoff: executor → review-coordinator
+   ## context
+   <从 executor 上下文复制>
+
+   ## changed
+   <本 step 改了哪些文件 / 行>
+
+   ## verify
+   <已完成的自检 / 测试结果>
+
+   ## next
+   **动作**: emit review.wave.ready after dimension list assembly
+   **阻塞**: 无
+
+   ## notes
+   无
+   ```
+
+3. **Emit 时带 payload 字段**：
+
+   ```bash
+   ralph emit --hat executor --topic work.done \
+     --payload "$(jq -nc --arg hp '.ralph/agent/hat-handoff/1-2-executor-review_coordinator.md' \
+       '{task_id:"task-real-001", handoff_path:$hp}')"
+   ```
+
+4. **CLI 镜像预检**：`ralph emit --policy-check` 走 `gate::evaluate_event` 纯函数（reason_code SSOT 与 runtime 共享）。
+
+### 5.5.3 拒收 reason_code 表
+
+| reason_code | 含义 | 修复 |
+|---|---|---|
+| `hat_handoff_missing_path` | 宏观边 payload 无 `handoff_path` | 跑 `ralph tools handoff prepare` 拿路径 |
+| `hat_handoff_path_escape` | 路径含 `..` 或绝对路径 | 使用 repo-相对路径 |
+| `hat_handoff_filename_mismatch` | 文件名 iter / seq / from / to 与 caller 不一致 | 重新 prepare 或 `--force` 同 path 覆盖（KTD-14） |
+| `hat_handoff_file_not_found` | 路径存在但文件缺失 | 跑 prepare 让它写 skeleton，再填 |
+| `hat_handoff_file_read_fail` | 文件存在但不可读 | 检查 workspace 权限 |
+| `hat_handoff_structure_invalid` | 五段式 / `## next` 不合法 | 填齐五段 + `**动作**:` / `**阻塞**:` 必填 |
+| `hat_handoff_illegal_emit_topic` | `## next` 动作行引用的 topic 不在下游 hat publishes | 改为下游 hat 能发的 topic，或纯阅读类动作 |
+
+### 5.5.4 同 path 重试（KTD-14）
+
+拒收 → 修复内容 → `ralph tools handoff prepare --force ...`：覆盖**同一 seq 路径**。禁止写已 accept 的旧 seq(防 history 覆写)。
+
+### 5.5.5 修复流程（agent 视角）
+
+收到 `task.resume(reason_code=hat_handoff_*)` 后：
+
+1. 读 payload `message` 字段拿到具体 reason_code
+2. 按上表对应修复
+3. 同 path `--force` 覆盖（KTD-14）或重新 prepare 取下一个 seq
+4. 重发原 topic（不要绕过 gate）
+
+KTD-5 保护：拒收时 `HandoffTracker::cancel_pending(event_id)` 会抹掉 policy-accept 时记录的 phantom pending，不会触发 30s escalation 假阳性。
+
+### 5.5.6 plan-gate 双发场景（KTD-9）
+
+`plan-gate` 在每 step 同时发 `queue.advance` + `work.ready`：
+
+- `queue.advance`：**自环** → **无需** handoff（KTD-9 豁免）
+- `work.ready`：**宏观边** → **必须** handoff
+
+不要给 `queue.advance` 写 plan-gate→plan-gate 的废话 handoff。
+
+### 5.5.7 注入块（KTD-6, KTD-16）
+
+下游 hat `build_prompt` 会在 `## WAVE CONTEXT` 与 `## ORCHESTRATOR CONTEXT` 之间注入 `## HAT HANDOFF` 块。**fail-closed**：文件缺失 / 不可读 / path 与 pending 不一致 → **不注入** + 发 `event.hat_handoff.inject_failed` diagnostic。
+
+超 `max_bytes`（默认 2048）截断时**完整保留 `## next`** 段。
+
+### 5.5.8 调试命令
+
+```bash
+# 看当前 hat pending 是否含 handoff_path
+ralph tools handoff prepare --from <self> --to <consumer> --topic <topic> --no-write
+
+# CLI 预检（与 runtime 同 reason_code）
+ralph emit --hat <self> --topic <topic> \
+  --payload "$(cat payload.json)" --policy-check
+
+# 看 gate 拒收历史
+jq 'select(.topic == "diagnostic.hat_handoff.rejected")' \
+  .ralph/events.jsonl | tail -5
+```
+
+### 5.5.9 U11 开启步骤（follow-up）
+
+```yaml
+# presets/en/ce-executor-isolated.yml
+event_loop:
+  hat_handoff:
+    enabled: true
+```
+
+开启前必须：
+
+1. `cargo nextest run -p ralph-core --test scenarios hat_handoff` 全绿
+2. `cargo run -p ralph-e2e -- --mock` 全量通过
+3. 在小流量 preset 上 dot release 1 个完整 plan，验证 `findings.md` 中无新增 `hat_handoff_*` 拒收
+
+若开 enable 后出现批量拒收，立即回滚为 `enabled: false` 并按 5.5.3 reason_code 表排查 agent 操作问题（不要临时改 gate 逻辑）。
+
 ## 6. 校验命令速查
 
 ```bash
