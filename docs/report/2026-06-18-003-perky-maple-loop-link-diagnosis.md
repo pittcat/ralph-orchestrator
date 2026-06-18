@@ -39,9 +39,22 @@
 - `memory/review-coordinator-aggregate-timeout-handling.md` + `memory/review-coordinator-isolated-scope-recovery.md`:**`aggregate_timeout` 是 review-synthesizer 专属,executor 写入端被 policy 拒**(本次 04:54 那 6 轮 `skip_reason=aggregate_timeout` 由 executor 试发,policy 正确拒绝,**与历史同构,行为符合预期**)
 - `memory/ce-executor-isolated-dispatch-gap.md`:**plan-gate→executor 桥接缺口**(本次是 serial preset 而非 isolated,但 `plan-gate.triggers` 缺 `fix.applied` / `review.failed` 是**完全同根**:fixer 路径不在 plan-gate 触发列表)
 
-**根因(主)**:`presets/en/ce-executor-serial.yml:1624` 的 `plan-gate.triggers` 列表未包含 `fix.applied` 和 `review.failed`。fixer.applied 后 EventBus 不 dispatch plan-gate,`queue.advance` 永不发出,loop 卡在 step-01 闭环而无法推进 step-02。**这是 preset 编排层 1 行可修的 bug**。
-**根因(次-1)**:`executor.instructions` 缺 isolated-mode hard-rules 段(允许 publish 的 topic 白名单 / `aggregate_timeout` 单所有权说明),导致 executor 在 human guidance 注入后用 6×22+ 种变体"摸黑"试错,recovery.jsonl 噪声 135 条。
-**根因(次-2,增量发现)**:即使补上 plan-gate triggers,**fix→re-review 仍被 policy dedup 阻断**——`review.dimension.ready` dedup key `{plan}::{step}::{task}::{dim}` 在 loop 生命周期内永久有效,fix_round≥1 时 review-coordinator 无法重发 readiness(06:19/06:25 CLI 拒 + 06:26 HARD GATE)。需 policy 层 fix_round-aware key 或 fix.applied 时 prune dedup set(见 `.ralph/agent/memories.md` mem-1781763958-323d)。
+**根因(主,2026-06-18 修订)**:`fix.applied` policy-accept 时未 prune
+`PolicyRuntimeState::review_dimension_ready_seen_keys`,导致
+fix_round≥1 时 review-coordinator 重发 `review.dimension.ready` 永久被
+`DuplicateWorkDone` 拒。loop 因此从未到达 `review.passed`,plan-gate
+永不 dispatch。修复见
+`docs/plans/2026-06-18-004-fix-ce-executor-serial-perky-maple-orchestration-gaps-plan.md`
+U0/U1/U3/U5/U6。**初版归因为 plan-gate triggers 缺 `fix.applied`(P1-1)已被对抗性审查否决(KTD1),正确根因是 dedup prune(P1-3)。**
+
+**根因(次-1,2026-06-18 修订)**:`ce-executor-serial` 下 executor 收到
+human guidance 后盲试 emit,根因是 preset 让 guidance 进 prompt。
+修复(U2)改用 `event_loop.suppress_human_guidance: true` 抑制
+guidance 进 prompt,非 instructions 妥协。
+
+**根因(次-2,2026-06-18 修订)**:`fix.applied` 报 `commit_count=0` 而
+git 已有 `5ded762e`(~25min 后落盘);`fix.applied` execution contract
+缺 `require_git_change.mode: commit_only` 校验。修复见 U6。
 
 ---
 
@@ -215,6 +228,14 @@ executor 在收到 human guidance "Focus on error handling" 后,在 `executor` �
 
 ## 6. 修复建议(按优先级)
 
+> **2026-06-18 修订**:P1-1「补 plan-gate triggers」已被对抗性审查
+> **否决**(KTD1,见 `docs/plans/2026-06-18-004-…/plan.md` §KTD1)。
+> 正确修复路径是 P1-3(dedup prune)+ P1-2(改用 `suppress_human_guidance`
+> 而非 instructions 妥协)+ 新增 U3/U5/U6。merry-lotus / noble-peacock
+> 的"plan-gate triggers 缺 fix.applied"分析同误。修复实施见
+> `docs/plans/2026-06-18-004-…` 和 worktree 分支
+> `fix/ce-executor-serial-perky-maple-orchestration-gaps`。
+
 ### P1-1:补 plan-gate triggers 包含 fix.applied + review.failed
 
 - **目标文件**:
@@ -297,13 +318,13 @@ executor 在收到 human guidance "Focus on error handling" 后,在 `executor` �
 
 ---
 
-## 7. 关键结论
+## 7. 关键结论(2026-06-18 修订)
 
 - **ralph 基座**:**没有发现误拒 bug**。policy 层 135 条拒绝全部符合设计;但 **dedup key 不含 fix_round 是 re-review 路径的设计缺口**(P1-3),不是误拒而是**过严**。
-- **preset 编排**:**1 个真实 bug**(P1-1 plan-gate triggers 缺 fix.applied/review.failed) + **1 个与 policy 交叉的缺口**(fix→re-review 需 P1-3 配套) + 教学/contract 改进项。
+- **preset 编排(2026-06-18 修订)**:**初版"1 个真实 bug"(P1-1 plan-gate triggers 缺 fix.applied/review.failed) 经对抗性审查否决(KTD1)**。正确归因是 policy 缺口(dedup key 缺 fix_round)+ preset obligations 缺口(review-coordinator 在 fix.applied 上允许 complete 捷径)+ contract 缺口(fix.applied 缺 commit_only 校验)。修复见 `docs/plans/2026-06-18-004-…`。
 - **agent 执行**:executor 探针噪声占 recovery 133/135;fix 后 review-coordinator 进入 **HARD GATE spiral**(06:26 → 06:35 误 complete → 06:41 synthesizer HARD GATE → 06:49 用户 abort)。
 - **loop 状态**:进程已于 **06:49:33 用户 abort** 退出(PID 3590878 不存在);`loops.json` **仍残留 stale 条目**,需 `ralph loops clean`。
-- **业务产出**:worktree 内 **2 个 commit** — `32555b75` U1 scaffold + `5ded762e` review-fix F1-F8。U1 代码已落盘,但 **orchestration 未闭环**(无 queue.advance / LOOP_COMPLETE)。
+- **业务产出**:worktree 内 **2 个 commit** — `32555b75` U1 scaffold + `5ded762e` review-fix F1-F8。U1 代码已落盘,但 **orchestration 未闭环**(无 queue.advance / LOOP_COMPLETE)。2026-06-18 修复在 `fix/ce-executor-serial-perky-maple-orchestration-gaps` 分支,通过 7 个 commit 落地(U0/U1/U2/U3/U4/U5/U6)。
 
 ---
 
@@ -355,10 +376,13 @@ executor 在收到 human guidance "Focus on error handling" 后,在 `executor` �
 | commit 状态 | 无 commit / commit_count=0 | **已有 `5ded762e`**(06:41:25),但 fix.applied emit 仍报 0 |
 | fix 后行为 | 仅 duplicate 拒 1 次 | **HARD GATE spiral**:06:26 review-coordinator → 06:35 第 5 次 complete → 06:41 review-synthesizer → 06:49 abort |
 | 新发现 | — | **P1-3**: dedup key 不含 fix_round,fix→re-review 路径 policy 层阻断(mem-1781763958-323d) |
+| **2026-06-18 修订** | — | **P1-1 「plan-gate triggers 缺 fix.applied」 经对抗性审查否决(KTD1)**。正确根因是 P1-3 dedup prune + preset obligations + contract 缺口(U3/U5/U6)。修复实施见 `docs/plans/2026-06-18-004-…` + worktree 分支 `fix/ce-executor-serial-perky-maple-orchestration-gaps`(7 个 commit: U0/U1/U2/U3/U4/U5/U6)。merry-lotus / noble-peacock 同误,反模式「勿给 plan-gate 加 fix.applied trigger」已写入 solutions 文档。 |
 
-**建议下一步**(按阻塞优先级):
+**建议下一步**(按阻塞优先级,2026-06-18 修订):
 
 1. `ralph loops clean`(清理 stale `loops.json`)
-2. 修 P1-1 plan-gate triggers + P1-3 dedup policy(两项需配套,否则 fix 后仍卡)
-3. 修 P1-2 executor isolated 硬规则(降噪)
-4. 在 preset 修好后重新跑 step-01→step-02 推进验证
+2. **已修**(worktree `fix/ce-executor-serial-perky-maple-orchestration-gaps`):
+   U0 schema + U1 dedup prune + U2 suppress guidance + U3 obligations + U4 BDD + U5 complete dedup + U6 commit_only contract
+3. **不修**:plan-gate triggers 加 `fix.applied`(KTD1 否决,违反 plan-gate 终态 dispatcher 约定)
+4. 在 preset 修好后重新跑 step-01→step-02 推进验证(replay perky-maple 对照原 04:54 注入后无 135 探针拒模式)
+5. P3 项:`loops.json` cleanup(U7)、hat_lifecycle WARN(U8)、hat-channel 路由(U9)
