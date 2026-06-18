@@ -29,7 +29,7 @@ pub enum MacroEdge {
 ///   `HatHandoffConfig`,供 `is_exempt` / `is_explicit_macro` 使用。
 pub fn requires_handoff(
     enabled: bool,
-    execution_mode: HatExecutionMode,
+    execution_mode: &HatExecutionMode,
     index: &HandoffIndex,
     topic: &str,
     from_hat: &str,
@@ -104,7 +104,7 @@ hats:
         let idx = two_hat_index();
         let r = requires_handoff(
             false,
-            HatExecutionMode::Isolated,
+            &HatExecutionMode::Isolated,
             &idx,
             "work.ready",
             "plan-gate",
@@ -119,7 +119,7 @@ hats:
         let idx = two_hat_index();
         let r = requires_handoff(
             true,
-            HatExecutionMode::Coordinator,
+            &HatExecutionMode::Coordinator,
             &idx,
             "work.ready",
             "plan-gate",
@@ -135,7 +135,7 @@ hats:
         // work.ready: plan_gate → executor, unique consumer.
         let r = requires_handoff(
             true,
-            HatExecutionMode::Isolated,
+            &HatExecutionMode::Isolated,
             &idx,
             "work.ready",
             "plan-gate",
@@ -151,7 +151,7 @@ hats:
         // queue.advance: plan-gate → plan-gate (self loop).
         let r = requires_handoff(
             true,
-            HatExecutionMode::Isolated,
+            &HatExecutionMode::Isolated,
             &idx,
             "queue.advance",
             "plan-gate",
@@ -166,7 +166,7 @@ hats:
         let idx = two_hat_index();
         let r = requires_handoff(
             true,
-            HatExecutionMode::Isolated,
+            &HatExecutionMode::Isolated,
             &idx,
             "review.dimension.done",
             "review-coordinator",
@@ -204,7 +204,7 @@ hats:
         // it must be Required (unless exempted).
         let r = requires_handoff(
             true,
-            HatExecutionMode::Isolated,
+            &HatExecutionMode::Isolated,
             &idx,
             "x",
             "a",
@@ -238,7 +238,7 @@ hats:
         // exempt list contain "x" → exempt wins.
         let r = requires_handoff(
             true,
-            HatExecutionMode::Isolated,
+            &HatExecutionMode::Isolated,
             &idx,
             "x",
             "a",

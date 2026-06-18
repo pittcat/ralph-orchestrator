@@ -6614,6 +6614,38 @@ impl EventLoop {
         self.process_parse_result(result)
     }
 
+    /// 2026-06-18-002 plan U5: parse `handoff_path` out of a JSON
+    /// payload. The convention is a top-level string field
+    /// `"handoff_path"`. Missing/malformed → `None` (the gate will
+    /// reject macro-edge emits that omit it).
+    fn parse_handoff_path_from_payload(payload: Option<&str>) -> Option<String> {
+        let raw = payload?;
+        let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+        value
+            .get("handoff_path")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    }
+
+    /// 2026-06-18-002 plan U5: look up the downstream hat's
+    /// declared `publishes` list for the gate's R15 topic check.
+    /// `from_hat` is unused for this lookup — the gate resolves the
+    /// downstream via `HandoffIndex::consumer_of(topic)`.
+    fn preset_hats_publishes(&self, _from_hat: &str, _topic: &str) -> Vec<String> {
+        // Resolution happens via `HandoffIndex::consumer_of` in
+        // the gate, which only needs the index. The downstream's
+        // publishes are looked up here from the preset `hats` map.
+        let consumer = match self.handoff_index.consumer_of(_topic) {
+            Some(c) => c,
+            None => return Vec::new(),
+        };
+        self.config
+            .hats
+            .get(consumer)
+            .map(|h| h.publishes.clone())
+            .unwrap_or_default()
+    }
+
     /// Inner event processing that operates on an already-parsed `ParseResult`.
     ///
     /// This is the single source of truth for event validation, backpressure,
@@ -7659,6 +7691,70 @@ impl EventLoop {
             events = accepted;
         }
         // --- End state machine validation ---
+
+        // --- Hat-handoff gate (2026-06-18-002 plan U5, KTD-4) ---
+        // Inserted **between state machine and state_projection** so
+        // a reject does not poison the projector with a handoff
+        // that the agent will have to re-emit. The gate is a
+        // **minimum-surprise passthrough** when `hat_handoff.enabled`
+        // is false (T15/T20 coverage): events flow through, the
+        // tracker is untouched, no diagnostic is published. When
+        // enabled in `isolated` mode, the gate consumes only the
+        // macro-edge accept/reject bookkeeping (seq++, cancel,
+        // diagnostic) and **does not yet reroute events** to/from
+        // `state_projection` — that full wiring lands in a
+        // follow-up commit (the unit-level gate is exercised by
+        // `hat_handoff::gate::tests`; the runtime integration is
+        // deliberately staged).
+        if self.config.event_loop.hat_handoff.enabled
+            && matches!(
+                self.config.event_loop.execution_mode,
+                crate::config::HatExecutionMode::Isolated
+            )
+        {
+            use crate::hat_handoff::gate::{self, GateDecision, GateInputs};
+            for ev in events.iter() {
+                let from_hat = ev.hat.as_deref().unwrap_or("");
+                if from_hat.is_empty() {
+                    continue;
+                }
+                let handoff_path = Self::parse_handoff_path_from_payload(ev.payload.as_deref());
+                let downstream_publishes: Vec<String> =
+                    self.preset_hats_publishes(from_hat, &ev.topic);
+                let inputs = GateInputs {
+                    config: &self.config.event_loop.hat_handoff,
+                    execution_mode: self.config.event_loop.execution_mode.clone(),
+                    index: &self.handoff_index,
+                    from_hat,
+                    topic: &ev.topic,
+                    iteration: self.state.iteration,
+                    current_seq: self.state.hat_handoff_seq,
+                    handoff_path: handoff_path.as_deref(),
+                    downstream_publishes: &downstream_publishes,
+                    repo_root: self.config.core.workspace_root.as_path(),
+                };
+                match gate::evaluate_event(&inputs, None) {
+                    GateDecision::NotRequired => {}
+                    GateDecision::Accept { .. } => {
+                        self.state.hat_handoff_seq += 1;
+                    }
+                    GateDecision::Reject { reason_code, message } => {
+                        // KTD-5: cancel the pending record we set at
+                        // policy-accept time so it doesn't escalate.
+                        let event_id = format!("{}:{}", ev.ts, ev.topic);
+                        self.state.handoff_tracker.cancel_pending(&event_id);
+                        self.bus.publish(ralph_proto::Event::new(
+                            "diagnostic.hat_handoff.rejected",
+                            format!(
+                                "{{\"reason_code\":\"{reason_code}\",\"message\":\"{}\",\"from_hat\":\"{from_hat}\",\"topic\":\"{}\"}}",
+                                message.replace('"', "'"),
+                                ev.topic,
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
 
         // --- State projection (U1 of 2026-06-17-003 plan): ---
         // SP-R8 mandates that the projector runs **after** the

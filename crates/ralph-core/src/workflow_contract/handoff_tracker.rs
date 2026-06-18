@@ -160,6 +160,17 @@ impl HandoffTracker {
         self.pending.insert(entry.event_id.clone(), entry);
     }
 
+    /// 2026-06-18-002 plan U5 (KTD-5): cancel a pending handoff
+    /// by its `event_id`. Used by the hat_handoff gate to roll
+    /// back the policy-accept `on_handoff_accepted` record when
+    /// the gate rejects the same event for missing/invalid
+    /// handoff content (phantom pending protection).
+    ///
+    /// Returns `true` if a pending entry was removed.
+    pub fn cancel_pending(&mut self, event_id: &str) -> bool {
+        self.pending.remove(event_id).is_some()
+    }
+
     /// Remove all pending entries that point to `consumer` —
     /// called when a hat is activated and its pending queue is
     /// drained. If multiple handoffs were queued for the same
@@ -340,5 +351,30 @@ mod tests {
                 ("zeta".to_string(), "evt-2".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn cancel_pending_removes_entry() {
+        let mut tracker = HandoffTracker::new();
+        tracker.on_handoff_accepted("work.ready", "executor", "evt-1", t(0));
+        assert_eq!(tracker.pending_count(), 1);
+        assert!(tracker.cancel_pending("evt-1"));
+        assert_eq!(tracker.pending_count(), 0);
+        // 二次 cancel 不报错,只返回 false。
+        assert!(!tracker.cancel_pending("evt-1"));
+    }
+
+    #[test]
+    fn cancel_pending_does_not_touch_other_entries() {
+        let mut tracker = HandoffTracker::new();
+        tracker.on_handoff_accepted("work.ready", "executor", "evt-1", t(0));
+        tracker.on_handoff_accepted("work.failed", "fixer", "evt-2", t(0));
+        assert!(tracker.cancel_pending("evt-1"));
+        assert_eq!(tracker.pending_count(), 1);
+        assert!(!tracker.cancel_pending("evt-1"));
+        // evt-2 仍然在,直到 expired() 或 on_hat_activated。
+        let escalations = tracker.expired(t(100));
+        assert_eq!(escalations.len(), 1);
+        assert_eq!(escalations[0].event_id, "evt-2");
     }
 }
