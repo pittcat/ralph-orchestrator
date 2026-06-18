@@ -56,7 +56,7 @@ hats:
   dimension-reviewer:
     backend: claude
   review-synthesizer:
-    backend: claude
+    backend: pi
   plan-gate:
     backend: claude
   shipper:
