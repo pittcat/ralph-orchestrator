@@ -2240,6 +2240,20 @@ impl EventLoop {
         !self.state.bootstrap_complete && !self.state.bootstrap_failed
     }
 
+    /// U2 (2026-06-18-004 plan, R2, KTD2): returns `true` when
+    /// `human.guidance` injection MUST be suppressed for the
+    /// current loop. Driven by the `event_loop.suppress_human_guidance`
+    /// config flag — used by `ce-executor-serial` to prevent the
+    /// perky-maple P1-2 probe storm. Mirrors the
+    /// `coordinator_bootstrap_gate_closed` access pattern so the
+    /// four guidance injection sites
+    /// (`update_robot_guidance` / `apply_robot_guidance` /
+    /// `collect_robot_guidance` / `prepend_scratchpad`) can each
+    /// short-circuit through a single helper.
+    pub fn human_guidance_suppressed(&self) -> bool {
+        self.config.event_loop.suppress_human_guidance
+    }
+
     /// Unit 3 (2026-06-16-002 plan): `true` when `hat_id ==
     /// "coordinator"` AND the loop is still in the bootstrap
     /// window.  The gate only applies to the `coordinator`
@@ -4685,6 +4699,16 @@ impl EventLoop {
             return;
         }
 
+        // U2 (2026-06-18-004 plan, R2, KTD2): when
+        // `suppress_human_guidance` is set, the loop persists
+        // guidance to the scratchpad for audit but does NOT
+        // cache it in `robot_guidance` (which is the source for
+        // `apply_robot_guidance` → prompt injection). ce-executor-serial
+        // opts into this so the active hat's prompt never sees
+        // human.guidance text — the source of the perky-maple
+        // P1-2 probe storm.
+        let suppress = self.human_guidance_suppressed();
+
         // Persist new guidance to scratchpad before caching
         self.persist_guidance_to_scratchpad(&guidance_events);
 
@@ -4695,6 +4719,12 @@ impl EventLoop {
         // otherwise add the same payload twice to the prompt.
         // Dedup against the existing vec and within the current
         // batch; persist layer has already dedup'd against disk.
+        // U2: when `suppress_human_guidance` is set, the loop
+        // does NOT push the deduped payload into the in-memory
+        // cache (which is the source for prompt injection via
+        // `apply_robot_guidance` → `## ROBOT GUIDANCE` block).
+        // The scratchpad persistence above already happened so
+        // the event survives for audit.
         let mut seen_in_batch: std::collections::HashSet<String> = std::collections::HashSet::new();
         for event in guidance_events {
             // Move the payload out so we can dedup by owned String
@@ -4702,6 +4732,11 @@ impl EventLoop {
             // moved into `robot_guidance` when it survives the
             // dedup check; otherwise dropped.
             let payload = event.payload;
+            if suppress {
+                // Drop the payload on the floor — already
+                // persisted above.
+                continue;
+            }
             if seen_in_batch.insert(payload.clone()) {
                 let already = self.robot_guidance.iter().any(|p| p == &payload);
                 if !already {
@@ -4864,6 +4899,19 @@ impl EventLoop {
     /// Injects cached guidance into the next prompt build.
     fn apply_robot_guidance(&mut self) {
         if self.robot_guidance.is_empty() {
+            return;
+        }
+
+        // U2 (2026-06-18-004 plan, R2, KTD2): when
+        // `suppress_human_guidance` is set, drain the in-memory
+        // cache without pushing to `ralph.robot_guidance`. This
+        // catches stale entries that pre-date the opt-in flip
+        // (e.g. a config edit mid-loop) and ensures the active
+        // hat prompt NEVER contains a `## ROBOT GUIDANCE` block
+        // under suppress mode. The scratchpad still records the
+        // raw guidance for audit.
+        if self.human_guidance_suppressed() {
+            self.robot_guidance.clear();
             return;
         }
 
@@ -5222,10 +5270,19 @@ impl EventLoop {
         // header detection as `persist_guidance_to_scratchpad` so
         // a line in `## NOTES` that happens to look like a
         // guidance block is not falsely stripped.
+        //
+        // U2 (2026-06-18-004 plan, R2, KTD2): when the loop
+        // opts into `suppress_human_guidance` (ce-executor-serial),
+        // strip the same blocks for the active hat regardless of
+        // bootstrap state. This is the source of the perky-maple
+        // P1-2 probe storm — the executor hat saw `### HUMAN
+        // GUIDANCE: Focus on error handling` and went into a
+        // 6-round emit-probing spiral.
         let gate_closed = active_hat_id_for_filter
             .map(|hat| self.coordinator_bootstrap_gate_closed(hat))
             .unwrap_or(false);
-        let content = if gate_closed {
+        let suppress_active = self.human_guidance_suppressed();
+        let content = if gate_closed || suppress_active {
             filter_human_guidance_blocks(&content)
         } else {
             content

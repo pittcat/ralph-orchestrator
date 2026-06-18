@@ -88,6 +88,15 @@ event_loop:
   # Same single-U contract as ce-executor-isolated. Coordinator must
   # only create the current U's task.
   enforce_current_unit: true
+  # 2026-06-18-004 plan U2 (R2, KTD2): suppress human guidance
+  # injection for all hats in this preset. Free-text guidance
+  # caused the perky-maple P1-2 probe storm where the executor
+  # went into a 6-round emit-probing spiral after `human.guidance`
+  # injection. We persist guidance to the scratchpad and the
+  # events JSONL for audit, but the active hat's prompt NEVER
+  # contains the text. TUI / Telegram ingestion is unchanged.
+  # Set `false` to restore guidance injection.
+  suppress_human_guidance: true
   # 2026-06-17-003 plan U1: enable state projection. Same
   # semantics as ce-executor-isolated: the orchestrator is the
   # canonical writer for `.ralph/agent/tasks.jsonl` and

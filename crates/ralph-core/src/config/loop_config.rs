@@ -283,6 +283,28 @@ pub struct EventLoopConfig {
     /// `event_loop.state_projection.enabled: true` (SP-R18).
     #[serde(default)]
     pub state_projection: StateProjectionConfig,
+
+    /// U2 (2026-06-18-004 plan, R2, KTD2): suppress `human.guidance`
+    /// injection for the active hat. When `true`, the event loop
+    /// MUST skip:
+    ///   - `update_robot_guidance` (no `human.guidance` cache)
+    ///   - `apply_robot_guidance` (no `ralph.robot_guidance` push)
+    ///   - `collect_robot_guidance` (no `## ROBOT GUIDANCE` block)
+    ///   - scratchpad `### HUMAN GUIDANCE` block inclusion
+    ///     (handled in `prepend_scratchpad` via
+    ///     `filter_human_guidance_blocks`)
+    ///
+    /// `human.guidance` events are STILL accepted into the events
+    /// JSONL and the scratchpad for audit purposes — this only
+    /// stops the guidance from reaching the prompt of the active
+    /// hat. Used by `ce-executor-serial` to prevent the perky-maple
+    /// P1-2 probe storm where the executor went into a 6-round
+    /// emit-probing spiral after `human.guidance` injection. TUI /
+    /// Telegram ingestion is unchanged.
+    ///
+    /// Default: `false`. Opt-in per preset.
+    #[serde(default)]
+    pub suppress_human_guidance: bool,
 }
 
 /// 2026-06-16-001 U5: per-preset configuration for the loop-level
@@ -374,6 +396,11 @@ impl Default for EventLoopConfig {
             // 2026-06-17-003 U1: state projection opt-in. Disabled
             // by default; presets opt in via YAML.
             state_projection: StateProjectionConfig::default(),
+            // 2026-06-18-004 plan U2 (R2, KTD2): suppress
+            // human guidance injection by default is OFF so
+            // existing presets are unaffected. ce-executor-serial
+            // opts in via YAML.
+            suppress_human_guidance: false,
         }
     }
 }
