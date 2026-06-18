@@ -7569,8 +7569,46 @@ impl EventLoop {
                                 .or_else(|| obj.get("step"))
                                 .and_then(|v| v.as_str())
                                 .map(String::from);
-                            if let (Some(pn), Some(st)) = (plan_name, step) {
-                                self.state.prune_work_done_bucket(&pn, &st);
+                            if let (Some(pn), Some(st)) = (&plan_name, &step) {
+                                self.state.prune_work_done_bucket(pn, st);
+                                // U1 (2026-06-18-004 plan, KTD1):
+                                // `fix.applied` opens the re-review
+                                // window — prune the in-batch
+                                // `review.dimension.ready` mirror so
+                                // `review-coordinator` can legally
+                                // emit `review.dimension.ready` for
+                                // the same `(plan, step, task)` in a
+                                // new fix round. The original dedup
+                                // key lacks `fix_round`; without this
+                                // prune a fix → re-review attempt
+                                // always gets `DuplicateWorkDone`.
+                                if accepted.topic == "fix.applied" {
+                                    let task_id = obj
+                                        .get("task_id")
+                                        .and_then(|v| v.as_str())
+                                        .map(String::from);
+                                    if let Some(ti) = task_id.as_deref() {
+                                        if let Some(ref mut policy_state) =
+                                            self.state.policy_runtime_state
+                                        {
+                                            policy_state
+                                                .prune_review_dimension_ready_bucket(
+                                                    pn, st, ti,
+                                                );
+                                            // Symmetry fix: also prune
+                                            // the `PolicyRuntimeState`
+                                            // `work_done_seen_keys`
+                                            // mirror so the next
+                                            // process_output batch can
+                                            // accept a fresh
+                                            // `work.done` (the loop
+                                            // boundary alone is not
+                                            // enough).
+                                            policy_state
+                                                .prune_work_done_bucket(pn, st);
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

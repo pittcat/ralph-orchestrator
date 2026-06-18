@@ -1007,6 +1007,7 @@ hats:
           "task_id": "<task_id>",
           "task_key": "<task_key>",
           "step": "<step>",
+          "fix_round": "<0 for first round; increment after each fixer.applied accept>",
           "dimensions": [
             {"dimension": "correctness",     "status": "done",   "findings_file": ".agents/scratchpad/ce-executor/<plan>/findings-correctness-<task>.json"},
             {"dimension": "testing",         "status": "done",   "findings_file": ".agents/scratchpad/ce-executor/<plan>/findings-testing-<task>.json"},
@@ -1015,6 +1016,7 @@ hats:
           ]
         }' --source dimension-reviewer
         ```
+      - `fix_round` MUST match the value carried by `review.dimension.ready` payloads in the same sequence (it stays constant across the 4-dim walk). After `fix.applied(fix_round=N)` is accepted, the next round MUST use `fix_round: N+1` and emit a fresh `review.dimension.ready` first — NEVER re-emit `review.dimensions.complete` with the same `fix_round` (U5 dedup rejects it).
       - Do NOT use `ralph wave emit` — there is no wave in this preset.
       - MUST NOT append or write to `.ralph/events.jsonl` directly; use `ralph emit` only. Direct shell writes bypass the schema precheck and the loop will reject the event with `payload_contract_violation` (likely terminating the loop with `not_retriable`).
       - **HARD RULE — never assume `ralph emit` succeeded.** This preset enables strict policy precheck (`event_policy.require_policy_check_for_cli_emit: true`, `allow_unsafe_cli_emit: false`), so an emit with missing required fields is rejected BEFORE the event is written. If the CLI exits non-zero, the event did NOT happen — no record was appended to jsonl. Always re-run with `--output json` and parse the response to fix the payload. Never proceed as if the event succeeded; the runner will hard-gate you on `missing_event_gate` instead.
