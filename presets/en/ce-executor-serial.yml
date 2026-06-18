@@ -88,6 +88,15 @@ event_loop:
   # Same single-U contract as ce-executor-isolated. Coordinator must
   # only create the current U's task.
   enforce_current_unit: true
+  # 2026-06-18-004 plan U2 (R2, KTD2): suppress human guidance
+  # injection for all hats in this preset. Free-text guidance
+  # caused the perky-maple P1-2 probe storm where the executor
+  # went into a 6-round emit-probing spiral after `human.guidance`
+  # injection. We persist guidance to the scratchpad and the
+  # events JSONL for audit, but the active hat's prompt NEVER
+  # contains the text. TUI / Telegram ingestion is unchanged.
+  # Set `false` to restore guidance injection.
+  suppress_human_guidance: true
   # 2026-06-17-003 plan U1: enable state projection. Same
   # semantics as ce-executor-isolated: the orchestrator is the
   # canonical writer for `.ralph/agent/tasks.jsonl` and
@@ -167,6 +176,33 @@ event_loop:
         require_test_evidence:
           mode: "optional"  # "optional" | "required_payload_field"
           payload_field: "tests"  # field name to check when mode is "required_payload_field"
+      # U6 (2026-06-18-004 plan, R3): `fix.applied` execution
+      # contract. Pins the perky-maple P2-3 commit-count drift
+      # path — the agent emitted `commit_count=0` while the
+      # real commit was still in flight (or hadn't run yet).
+      # `commit_only` requires a real new commit since loop
+      # start; uncommitted diff alone is insufficient because
+      # the fixer might emit before `git commit` lands.
+      fix.applied:
+        require_payload_fields:
+          - plan_name
+          - task_id
+          - task_key
+          - step
+          - fix_round
+          - applied_count
+          - failed_count
+          - commit_count
+          - changed_lines
+        require_git_change:
+          # `commit_only` (NOT a fictional `strict`): a real
+          # commit must exist since loop start. `diff_or_commit`
+          # would admit the uncommitted-diff-but-payload-claims-0
+          # drift. `commit_count_min` in the payload is checked
+          # separately by the schema (U0); this rule is the
+          # git-evidence half.
+          mode: "commit_only"
+          allow_empty_for_steps: ["trivial"]
   # U5 (2026-06-17-001): progress_steward defaults to disabled; enable
   # it here. The runtime wakes progress-steward when no business event
   # has advanced for max_steward_iterations consecutive turns; the hat
@@ -775,14 +811,23 @@ hats:
           - when: { has_untracked: true }
             must_emit_any_of: ["review.dimension.ready", "review.dimensions.complete"]
       - on_trigger: "fix.applied"
-        must_emit_any_of: ["review.dimension.ready", "review.dimensions.complete"]
+        # U3 (2026-06-18-004 plan, R1, KTD3): after `fix.applied`
+        # we MUST walk the 4-dim sequence again via
+        # `review.dimension.ready`. The previous
+        # `review.dimensions.complete` shortcut allowed the
+        # perky-maple P2-5 spiral where the agent emitted the
+        # 5th `review.dimensions.complete` without a fresh
+        # walk. Closing the shortcut here is a structural fix
+        # that complements the U1 policy prune and the U5
+        # complete dedup.
+        must_emit_any_of: ["review.dimension.ready"]
         conditional_must_emit:
           - when: { commit_count_min: 1 }
-            must_emit_any_of: ["review.dimension.ready", "review.dimensions.complete"]
+            must_emit_any_of: ["review.dimension.ready"]
           - when: { changed_lines_min: 50 }
-            must_emit_any_of: ["review.dimension.ready", "review.dimensions.complete"]
+            must_emit_any_of: ["review.dimension.ready"]
           - when: { has_untracked: true }
-            must_emit_any_of: ["review.dimension.ready", "review.dimensions.complete"]
+            must_emit_any_of: ["review.dimension.ready"]
       - on_trigger: "review.dimension.done"
         must_emit_any_of: ["review.dimension.ready", "review.dimensions.complete"]
       - on_trigger: "review.dimension.failed"
@@ -792,6 +837,24 @@ hats:
 
       You own the review-sequence.json state machine. Do not review code yourself.
       Do not implement fixes. Walk the dimension sequence one step at a time.
+
+      ### U3 (2026-06-18-004 plan) — fix.applied → RE-WALK, do NOT shortcut
+      When your trigger is `fix.applied(fix_round=N)` you MUST re-walk
+      the full 4-dimension sequence starting from `correctness`,
+      regardless of whether you have just walked it. Concretely:
+        1. Update `fix_round` in `review-sequence.json` to `N+1`.
+        2. Reset the per-dimension terminal status fields.
+        3. Emit `review.dimension.ready(correctness, fix_round=N+1)`
+           on the FIRST activation after `fix.applied`.
+      You MUST NOT emit `review.dimensions.complete` after
+      `fix.applied` — that path is closed at the
+      `obligations.on_trigger` level and the CLI will reject it
+      if attempted. The `work.done` empty-diff fast path is the
+      only `review.dimensions.complete` shortcut that remains
+      legal (and only on the very first review cycle, fix_round=0).
+      This rule is the structural complement to the U1 policy
+      prune + U5 complete dedup — together they close the
+      perky-maple P2-5 fix→re-review spiral.
 
       ### Sequence contract (HARD RULE)
       The sequence is **always** 4 dimensions in this fixed order:
@@ -1007,6 +1070,7 @@ hats:
           "task_id": "<task_id>",
           "task_key": "<task_key>",
           "step": "<step>",
+          "fix_round": "<0 for first round; increment after each fixer.applied accept>",
           "dimensions": [
             {"dimension": "correctness",     "status": "done",   "findings_file": ".agents/scratchpad/ce-executor/<plan>/findings-correctness-<task>.json"},
             {"dimension": "testing",         "status": "done",   "findings_file": ".agents/scratchpad/ce-executor/<plan>/findings-testing-<task>.json"},
@@ -1015,6 +1079,7 @@ hats:
           ]
         }' --source dimension-reviewer
         ```
+      - `fix_round` MUST match the value carried by `review.dimension.ready` payloads in the same sequence (it stays constant across the 4-dim walk). After `fix.applied(fix_round=N)` is accepted, the next round MUST use `fix_round: N+1` and emit a fresh `review.dimension.ready` first — NEVER re-emit `review.dimensions.complete` with the same `fix_round` (U5 dedup rejects it).
       - Do NOT use `ralph wave emit` — there is no wave in this preset.
       - MUST NOT append or write to `.ralph/events.jsonl` directly; use `ralph emit` only. Direct shell writes bypass the schema precheck and the loop will reject the event with `payload_contract_violation` (likely terminating the loop with `not_retriable`).
       - **HARD RULE — never assume `ralph emit` succeeded.** This preset enables strict policy precheck (`event_policy.require_policy_check_for_cli_emit: true`, `allow_unsafe_cli_emit: false`), so an emit with missing required fields is rejected BEFORE the event is written. If the CLI exits non-zero, the event did NOT happen — no record was appended to jsonl. Always re-run with `--output json` and parse the response to fix the payload. Never proceed as if the event succeeded; the runner will hard-gate you on `missing_event_gate` instead.
@@ -1096,6 +1161,19 @@ hats:
     missing_event_grace_secs: 540
     instructions: |
       ## DIMENSION REVIEWER MODE — Focused {dimension} Review
+
+      ### HARD RULE — One Terminal Emit Per Activation (2026-06-18-004 plan U3, R5)
+      Each activation triggered by `review.dimension.ready({dimension}, …)`
+      MUST emit EXACTLY ONE terminal: either
+      `review.dimension.done(...)` or `review.dimension.failed(...)`.
+      You MUST NOT re-emit the same terminal within the same
+      activation. The `isolated mode: extra business event dropped`
+      rule in `event_loop/mod.rs:7265` is the runtime guard; if
+      you find yourself wanting to emit a duplicate, stop and
+      treat the request as already-satisfied. This rule is the
+      source of the perky-maple P2-2 dimension-reviewer double
+      emit (05:42:33 / 05:43:33 maintainability) and closes that
+      drift path.
 
       ### HARD RULE — Read-Only Role (2026-06-17-004 U2, R2)
 

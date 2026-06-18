@@ -262,10 +262,21 @@ event_loop:
 /// hat.  The scratchpad is rooted at the test tempdir so the
 /// guidance filter test can write to a known path.
 fn make_isolated_coordinator_loop(workspace: &std::path::Path) -> EventLoop {
+    make_isolated_coordinator_loop_with_suppress(workspace, false)
+}
+
+/// Build an isolated-mode EventLoop with the
+/// `event_loop.suppress_human_guidance` flag set to the given
+/// value. Used by the U2 (2026-06-18-004 plan) tests.
+fn make_isolated_coordinator_loop_with_suppress(
+    workspace: &std::path::Path,
+    suppress_human_guidance: bool,
+) -> EventLoop {
     let yaml = format!(
         r#"
 event_loop:
   execution_mode: isolated
+  suppress_human_guidance: {suppress_human_guidance}
 core:
   scratchpad:
     enabled: true
@@ -449,4 +460,164 @@ fn test_coordinator_work_failed_marks_bootstrap_failed() {
     event_loop.state_mut().bootstrap_failed = true;
     assert!(!event_loop.in_bootstrap_phase());
     assert!(!event_loop.coordinator_bootstrap_gate_closed(&HatId::new("coordinator")));
+}
+
+// -------------------------------------------------------------------------
+// U2 (2026-06-18-004 plan, R2, KTD2): `suppress_human_guidance`
+// drops the `### HUMAN GUIDANCE` block from the active hat's
+// scratchpad snapshot AND drains the in-memory
+// `robot_guidance` cache without injecting it. Pin the three
+// contract surfaces:
+//   1. `human_guidance_suppressed()` reflects config
+//   2. `prepend_scratchpad` filters the `### HUMAN GUIDANCE`
+//      block for any hat (not just coordinator)
+//   3. `update_robot_guidance` does not push to
+//      `self.robot_guidance` when suppress is on
+//   4. `apply_robot_guidance` clears the cache instead of
+//      pushing it to `ralph.set_robot_guidance` when suppress
+//      is on
+// -------------------------------------------------------------------------
+
+fn make_suppress_human_guidance_loop(
+    workspace: &std::path::Path,
+) -> super::EventLoop {
+    make_isolated_coordinator_loop_with_suppress(workspace, true)
+}
+
+#[test]
+fn u2_human_guidance_suppressed_reflects_config() {
+    // The flag mirrors the YAML setting. Defaults to `false`.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let loop_default = make_isolated_coordinator_loop(temp_dir.path());
+    assert!(
+        !loop_default.human_guidance_suppressed(),
+        "default config must NOT suppress human guidance (preserves backward compat)"
+    );
+
+    let temp_dir2 = tempfile::tempdir().unwrap();
+    let loop_suppressed = make_suppress_human_guidance_loop(temp_dir2.path());
+    assert!(
+        loop_suppressed.human_guidance_suppressed(),
+        "config flag must drive human_guidance_suppressed()"
+    );
+}
+
+#[test]
+fn u2_prepend_scratchpad_strips_human_guidance_block_post_bootstrap() {
+    // Pin the contract: with suppress on AND bootstrap gate
+    // closed (post-bootstrap steady state, what `ce-executor-serial`
+    // runs in 99% of the time), the active hat's prompt MUST NOT
+    // contain `### HUMAN GUIDANCE` blocks. We exercise the
+    // coordinator hat here because that is what the helper
+    // builds; the suppression path is hat-agnostic (the gate is
+    // checked against `self.human_guidance_suppressed()`, not
+    // the hat id) so this still pins the contract for any
+    // downstream hat that calls `build_prompt`.
+    //
+    // Note: this also documents that the suppress flag is
+    // strictly stronger than the bootstrap gate — a hat that
+    // has already left the bootstrap window still has guidance
+    // filtered out when suppress is on.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut event_loop = make_suppress_human_guidance_loop(temp_dir.path());
+
+    // Force the loop out of bootstrap so the only gate in
+    // effect is `suppress_human_guidance`. This mirrors the
+    // post-bootstrap steady state where most `work.done`
+    // activity happens.
+    event_loop.state_mut().bootstrap_complete = true;
+    assert!(!event_loop.in_bootstrap_phase());
+
+    let _ = write_scratchpad_with_sections(
+        temp_dir.path(),
+        &[
+            "# Plan",
+            "",
+            "## NOTES",
+            "Unrelated working notes.",
+            "",
+            "### HUMAN GUIDANCE (2026-06-18 04:54:00 UTC)",
+            "",
+            "Focus on error handling",
+            "",
+            "### HUMAN GUIDANCE (2026-06-18 05:00:00 UTC)",
+            "",
+            "Keep this in mind",
+            "",
+        ],
+    );
+
+    let coordinator_id = HatId::new("coordinator");
+    let prompt = event_loop
+        .build_prompt(&coordinator_id)
+        .expect("coordinator prompt must build");
+    assert!(
+        !prompt.contains("Focus on error handling"),
+        "suppress mode MUST strip guidance payloads post-bootstrap, got prompt:\n{prompt}"
+    );
+    assert!(
+        !prompt.contains("### HUMAN GUIDANCE"),
+        "suppress mode MUST strip the ### HUMAN GUIDANCE header post-bootstrap, got prompt:\n{prompt}"
+    );
+    // The unrelated `## NOTES` block MUST still flow through —
+    // suppress only removes guidance, not arbitrary scratchpad
+    // content.
+    assert!(
+        prompt.contains("Unrelated working notes."),
+        "suppress must NOT remove unrelated scratchpad content, got prompt:\n{prompt}"
+    );
+}
+
+#[test]
+fn u2_update_robot_guidance_does_not_cache_when_suppress_on() {
+    // Pin the contract: `update_robot_guidance` skips the
+    // in-memory `robot_guidance` push when suppress is on.
+    // The scratchpad persistence path still runs (we exercise
+    // that separately).
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut event_loop = make_suppress_human_guidance_loop(temp_dir.path());
+
+    let payload = "Focus on error handling".to_string();
+    let events = vec![guidance_event(&payload)];
+
+    // Force-flush robot_guidance so the test is independent of
+    // any prior state.
+    event_loop.robot_guidance.clear();
+    event_loop.update_robot_guidance(events);
+
+    assert!(
+        event_loop.robot_guidance.is_empty(),
+        "suppress mode MUST NOT push guidance into robot_guidance, got {:?}",
+        event_loop.robot_guidance
+    );
+}
+
+#[test]
+fn u2_apply_robot_guidance_clears_stale_cache_when_suppress_on() {
+    // Defensive: even if `robot_guidance` somehow holds stale
+    // entries (e.g. a config flip mid-loop), `apply_robot_guidance`
+    // MUST drain them without injecting into `ralph.set_robot_guidance`.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut event_loop = make_suppress_human_guidance_loop(temp_dir.path());
+
+    event_loop
+        .robot_guidance
+        .push("stale guidance from before config flip".to_string());
+
+    event_loop.apply_robot_guidance();
+
+    assert!(
+        event_loop.robot_guidance.is_empty(),
+        "apply_robot_guidance MUST drain stale cache under suppress, got {:?}",
+        event_loop.robot_guidance
+    );
+    // The ralph side MUST not have any guidance block queued
+    // — `apply_robot_guidance` short-circuited, so the
+    // previous Vec<String> value (empty default) is preserved.
+    let collected = event_loop.ralph.collect_robot_guidance();
+    assert!(
+        collected.is_empty(),
+        "ralph.collect_robot_guidance MUST return empty under suppress, got {:?}",
+        collected
+    );
 }

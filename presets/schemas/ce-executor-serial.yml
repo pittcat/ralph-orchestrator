@@ -132,12 +132,19 @@ review.dimension.failed:
 # instructions, not by EventSchema, because the current EventSchema only
 # validates top-level fields and has no nested array-element validation.
 review.dimensions.complete:
+  # 2026-06-18-004 plan U0 (R4, KTD3): fix_round is the dedup SSOT for
+  # `review.dimensions.complete`. The policy layer keys dedup on
+  # `{plan}::{step}::{task}::{fix_round}` (U5), and `fix.applied` prune
+  # (U1) clears the matching bucket so a re-review round can legally
+  # close a new `review.dimensions.complete`. Default to 0 for the
+  # empty-diff fast path / pre-fix round.
   required_fields:
     - plan_name
     - task_id
     - task_key
     - step
     - dimensions
+    - fix_round
   payload: json_object
 
 review.passed:

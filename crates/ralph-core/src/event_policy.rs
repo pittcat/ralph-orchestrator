@@ -289,9 +289,89 @@ pub struct PolicyRuntimeState {
     /// the per-loop lifetime set is also populated in
     /// `from_events` for cross-batch replay.
     pub review_dimension_ready_seen_keys: HashSet<String>,
+    /// U5 (2026-06-18-004 plan, R4, KTD3): dedup set for
+    /// `review.dimensions.complete` events. Key format:
+    /// `{plan_name}::{step}::{task_id}::{fix_round}`. Populated
+    /// when a `review.dimensions.complete` is accepted by
+    /// `validate_event_with_hat`; a 2nd emit with the same key
+    /// is rejected as `DuplicateWorkDone`. The `fix_round`
+    /// segment distinguishes re-review rounds so a
+    /// `fix.applied`-pruned bucket allows a 2nd
+    /// `review.dimensions.complete` to land for a new fix round
+    /// without colliding with the 1st round's key. Defaults to
+    /// `0` when the payload omits `fix_round` so legacy emitters
+    /// still get deduped.
+    pub review_dimensions_complete_seen_keys: HashSet<String>,
 }
 
 impl PolicyRuntimeState {
+    /// U1 (2026-06-18-004 plan, R1, KTD1): prune every
+    /// `review_dimension_ready_seen_keys` entry that belongs to a
+    /// given `(plan_name, step, task_id)` bucket. Called when
+    /// `fix.applied` is policy-accepted so that
+    /// `review-coordinator` can legally re-emit
+    /// `review.dimension.ready` for the same `(plan, step, task)`
+    /// in a new fix round (the original dedup key lacks
+    /// `fix_round`, so without this prune a fix → re-review
+    /// attempt always gets `DuplicateWorkDone` — this is the
+    /// root cause of the perky-maple P1-3 / P2-5 spiral).
+    ///
+    /// The companion `LoopState::prune_work_done_bucket` (callers
+    /// in `event_loop/mod.rs`) handles the per-loop lifetime
+    /// mirror; this method only touches the in-batch
+    /// `PolicyRuntimeState` mirror. Both must be pruned
+    /// together at the `fix.applied` accept site.
+    pub fn prune_review_dimension_ready_bucket(
+        &mut self,
+        plan_name: &str,
+        step: &str,
+        task_id: &str,
+    ) {
+        let prefix = format!("{plan_name}::{step}::{task_id}::");
+        self.review_dimension_ready_seen_keys
+            .retain(|key| !key.starts_with(&prefix));
+    }
+
+    /// U1 (2026-06-18-004 plan, KTD1, symmetry fix): mirror of
+    /// `LoopState::prune_work_done_bucket` for the
+    /// `PolicyRuntimeState::work_done_seen_keys` mirror. Prior
+    /// to this addition the in-batch mirror was never pruned on
+    /// step-boundary events, leaving a 1-batch stale window
+    /// after `queue.advance` / `review.failed` / `fix.applied`
+    /// where a re-emit would still be rejected by
+    /// `validate_event_with_hat`. Always pair with the
+    /// `LoopState::prune_work_done_bucket` call at the accept
+    /// site.
+    pub fn prune_work_done_bucket(&mut self, plan_name: &str, step: &str) {
+        let prefix = format!("{plan_name}::{step}::");
+        self.work_done_seen_keys
+            .retain(|key| !key.starts_with(&prefix));
+    }
+
+    /// U5 (2026-06-18-004 plan, R4): prune every
+    /// `review_dimensions_complete_seen_keys` entry that
+    /// belongs to a given `(plan_name, step, task_id)` bucket
+    /// across ALL `fix_round` values. Called when `fix.applied`
+    /// is policy-accepted so that the next round's
+    /// `review.dimensions.complete` (carrying `fix_round=N+1`)
+    /// lands without colliding with the previous round's
+    /// `fix_round=N` entry. The implementation deliberately
+    /// does NOT scope the prune to a single `fix_round` —
+    /// scoping would require re-doing the dedup key for every
+    /// possible round, and the per-task bucket is small
+    /// enough (4 dims × at most a handful of rounds) that
+    /// over-pruning has no observable blast radius.
+    pub fn prune_review_dimensions_complete_bucket(
+        &mut self,
+        plan_name: &str,
+        step: &str,
+        task_id: &str,
+    ) {
+        let prefix = format!("{plan_name}::{step}::{task_id}::");
+        self.review_dimensions_complete_seen_keys
+            .retain(|key| !key.starts_with(&prefix));
+    }
+
     /// Replays events from a JSONL file to build up the policy runtime state.
     ///
     /// Reads all events from the file, tracking which terminal topics have been
@@ -348,6 +428,113 @@ impl PolicyRuntimeState {
                                 state
                                     .review_dimension_ready_seen_keys
                                     .insert(format!("{pn}::{st}::{ti}::{dim}"));
+                            }
+                        }
+                    }
+                }
+            }
+            // U1 (2026-06-18-004 plan, KTD1): replay prior
+            // `work.done` events so the in-batch mirror mirrors
+            // `LoopState::work_done_seen_tasks`. Without this,
+            // the very next `process_output` batch after a
+            // loop rehydrate would accept a duplicate `work.done`
+            // for the same `(plan, step, task)` because
+            // `validate_event_with_hat` only consults
+            // `PolicyRuntimeState::work_done_seen_keys`.
+            if event.topic == "work.done" {
+                if let Some(ref payload) = event.payload {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(payload) {
+                        if let Value::Object(obj) = &val {
+                            let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
+                            let step = obj.get("step").and_then(|v| v.as_str());
+                            let task_id = obj.get("task_id").and_then(|v| v.as_str());
+                            if let (Some(pn), Some(st), Some(ti)) = (plan_name, step, task_id) {
+                                state
+                                    .work_done_seen_keys
+                                    .insert(format!("{pn}::{st}::{ti}"));
+                            }
+                        }
+                    }
+                }
+            }
+            // U1 (2026-06-18-004 plan, KTD1, symmetry fix):
+            // when a `fix.applied` is replayed, also prune the
+            // `(plan, step, task)` bucket for both
+            // `review_dimension_ready_seen_keys` and
+            // `work_done_seen_keys` mirrors. This is the
+            // `from_events` analog of the live accept-site
+            // pruning in `event_loop/mod.rs` — both paths must
+            // execute the same prune or loop rehydrate would
+            // re-introduce the perky-maple P1-3 dedup block.
+            if event.topic == "fix.applied" {
+                if let Some(ref payload) = event.payload {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(payload) {
+                        if let Value::Object(obj) = &val {
+                            let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
+                            let step = obj.get("step").and_then(|v| v.as_str());
+                            let task_id = obj.get("task_id").and_then(|v| v.as_str());
+                            if let (Some(pn), Some(st), Some(ti)) = (plan_name, step, task_id) {
+                                state.prune_review_dimension_ready_bucket(pn, st, ti);
+                                state.prune_work_done_bucket(pn, st);
+                                // U5 (2026-06-18-004 plan, R4):
+                                // also prune the
+                                // `review.dimensions.complete`
+                                // bucket so the next round's
+                                // `review.dimensions.complete`
+                                // with `fix_round=N+1` lands
+                                // without colliding with the
+                                // prior round's
+                                // `fix_round=N` entry.
+                                state
+                                    .prune_review_dimensions_complete_bucket(pn, st, ti);
+                            }
+                        }
+                    }
+                }
+            }
+            // U5 (2026-06-18-004 plan, R4): replay prior
+            // `review.dimensions.complete` events so the
+            // in-batch mirror reflects the dedup key shape
+            // `{plan}::{step}::{task}::{fix_round}`. Missing
+            // `fix_round` defaults to `0` so legacy emitters
+            // are deduped against the same key the live
+            // accept site would record.
+            if event.topic == "review.dimensions.complete" {
+                if let Some(ref payload) = event.payload {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(payload) {
+                        if let Value::Object(obj) = &val {
+                            let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
+                            let step = obj.get("step").and_then(|v| v.as_str());
+                            let task_id = obj.get("task_id").and_then(|v| v.as_str());
+                            let fix_round = obj
+                                .get("fix_round")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            if let (Some(pn), Some(st), Some(ti)) = (plan_name, step, task_id) {
+                                state
+                                    .review_dimensions_complete_seen_keys
+                                    .insert(format!("{pn}::{st}::{ti}::{fix_round}"));
+                            }
+                        }
+                    }
+                }
+            }
+            // U1 (2026-06-18-004 plan, KTD1, symmetry fix):
+            // `queue.advance` and `review.failed` are the other
+            // step-boundary events that should clear the
+            // work_done mirror on rehydrate (matches the live
+            // accept-site behavior).
+            if event.topic == "queue.advance" || event.topic == "review.failed" {
+                if let Some(ref payload) = event.payload {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(payload) {
+                        if let Value::Object(obj) = &val {
+                            let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
+                            let step = obj
+                                .get("completed_step")
+                                .or_else(|| obj.get("step"))
+                                .and_then(|v| v.as_str());
+                            if let (Some(pn), Some(st)) = (plan_name, step) {
+                                state.prune_work_done_bucket(pn, st);
                             }
                         }
                     }
@@ -741,6 +928,59 @@ pub fn validate_event_with_hat(
             // `from_events` on restart so cross-batch replays
             // honor the dedup.
             state.review_dimension_ready_seen_keys.insert(dedup_key);
+        }
+    }
+
+    // U5 (2026-06-18-004 plan, R4, KTD3): duplicate
+    // `review.dimensions.complete` detection. The dedup key
+    // is `(plan_name, step, task_id, fix_round)`. A 2nd emit
+    // with the same key is rejected as `RejectWithResume` so
+    // the runner publishes a `task.resume` with `fix_hint`.
+    // The `fix_round` segment distinguishes re-review rounds
+    // so a `fix.applied`-pruned bucket (U1) lets a 2nd
+    // `review.dimensions.complete` land for `fix_round=N+1`
+    // without colliding with `fix_round=N`. Missing
+    // `fix_round` defaults to `0` so legacy emitters still
+    // get deduped.
+    //
+    // We reuse the `DuplicateWorkDone` variant for parity
+    // with the `review.dimension.ready` check above — same
+    // recovery shape, same hint bucket.
+    if topic == "review.dimensions.complete"
+        && let Some(p) = payload
+        && let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p)
+    {
+        let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
+        let step = obj.get("step").and_then(|v| v.as_str());
+        let task_id = obj.get("task_id").and_then(|v| v.as_str());
+        let fix_round = obj
+            .get("fix_round")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        if let (Some(pn), Some(st), Some(ti)) = (plan_name, step, task_id) {
+            let dedup_key = format!("{pn}::{st}::{ti}::{fix_round}");
+            if state
+                .review_dimensions_complete_seen_keys
+                .contains(&dedup_key)
+            {
+                let finding = PolicyFinding {
+                    topic: topic.to_string(),
+                    violation_type: ViolationType::DuplicateWorkDone {
+                        key: dedup_key.clone(),
+                        hint: DuplicateWorkDoneHint::DuplicateSameStep,
+                    },
+                    message: format!(
+                        "duplicate_dimensions_complete: review.dimensions.complete for key \
+                         '{dedup_key}' was already accepted for the same fix_round. \
+                         After fix.applied the next round must use fix_round=N+1 and walk \
+                         review.dimension.ready first (see U3 obligations)."
+                    ),
+                };
+                return PolicyDecision::RejectWithResume(finding);
+            }
+            state
+                .review_dimensions_complete_seen_keys
+                .insert(dedup_key);
         }
     }
 
@@ -2859,6 +3099,532 @@ mod tests {
                 .contains("p1::step-01::t1::correctness"),
             "from_events must populate dedup set from prior review.dimension.ready, got {:?}",
             state.review_dimension_ready_seen_keys
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // U1 (2026-06-18-004 plan, R1, KTD1):
+    // `fix.applied` prunes the `(plan, step, task)` bucket of
+    // `review_dimension_ready_seen_keys` so a fix → re-review
+    // walk can legally emit `review.dimension.ready` for the
+    // same `(plan, step, task, dimension)` tuple. Without this
+    // prune the perky-maple run falls into a HARD GATE spiral
+    // (P1-3 / P2-5 in the diagnosis report).
+    //
+    // Both paths must execute the same prune:
+    //   1. Live accept site in `event_loop/mod.rs`
+    //      (paired with `LoopState::prune_work_done_bucket`).
+    //   2. `PolicyRuntimeState::from_events` replay path so a
+    //      loop rehydrate does not re-introduce the dedup
+    //      block.
+    // Both are covered by the unit tests below.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn u1_prune_review_dimension_ready_bucket_clears_matching_prefix() {
+        let mut state = PolicyRuntimeState::default();
+        state
+            .review_dimension_ready_seen_keys
+            .insert("p1::step-01::t1::correctness".into());
+        state
+            .review_dimension_ready_seen_keys
+            .insert("p1::step-01::t1::testing".into());
+        state
+            .review_dimension_ready_seen_keys
+            .insert("p1::step-02::t1::correctness".into());
+
+        state.prune_review_dimension_ready_bucket("p1", "step-01", "t1");
+
+        assert!(
+            !state
+                .review_dimension_ready_seen_keys
+                .contains("p1::step-01::t1::correctness"),
+            "matching-prefix entry should be pruned, got {:?}",
+            state.review_dimension_ready_seen_keys
+        );
+        assert!(
+            !state
+                .review_dimension_ready_seen_keys
+                .contains("p1::step-01::t1::testing"),
+            "matching-prefix entry should be pruned, got {:?}",
+            state.review_dimension_ready_seen_keys
+        );
+        assert!(
+            state
+                .review_dimension_ready_seen_keys
+                .contains("p1::step-02::t1::correctness"),
+            "non-matching-prefix entry should remain, got {:?}",
+            state.review_dimension_ready_seen_keys
+        );
+    }
+
+    #[test]
+    fn u1_prune_work_done_bucket_mirror_clears_matching_prefix() {
+        let mut state = PolicyRuntimeState::default();
+        state.work_done_seen_keys.insert("p1::step-01::t1".into());
+        state.work_done_seen_keys.insert("p1::step-02::t1".into());
+        state.work_done_seen_keys.insert("p2::step-01::t1".into());
+
+        state.prune_work_done_bucket("p1", "step-01");
+
+        assert!(!state.work_done_seen_keys.contains("p1::step-01::t1"));
+        assert!(state.work_done_seen_keys.contains("p1::step-02::t1"));
+        assert!(state.work_done_seen_keys.contains("p2::step-01::t1"));
+    }
+
+    #[test]
+    fn u1_fix_applied_replay_prunes_dimension_ready_keys() {
+        use std::io::Write;
+
+        let jsonl = r#"{"topic":"review.dimension.ready","hat":"review-coordinator","payload":"{\"plan_name\":\"p1\",\"step\":\"step-01\",\"task_id\":\"t1\",\"dimension\":\"correctness\"}"}
+{"topic":"review.dimension.done","hat":"dimension-reviewer","payload":"{\"plan_name\":\"p1\",\"step\":\"step-01\",\"task_id\":\"t1\",\"dimension\":\"correctness\"}"}
+{"topic":"fix.applied","hat":"fixer","payload":"{\"plan_name\":\"p1\",\"step\":\"step-01\",\"task_id\":\"t1\",\"fix_round\":1,\"applied_count\":8,\"failed_count\":0,\"commit_count\":1,\"changed_lines\":96}"}
+"#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        tmp.write_all(jsonl.as_bytes()).unwrap();
+        tmp.flush().unwrap();
+
+        let state = PolicyRuntimeState::from_events(tmp.path(), &test_config()).unwrap();
+        assert!(
+            !state
+                .review_dimension_ready_seen_keys
+                .contains("p1::step-01::t1::correctness"),
+            "from_events replay of fix.applied must prune the bucket, got {:?}",
+            state.review_dimension_ready_seen_keys
+        );
+    }
+
+    #[test]
+    fn u1_fix_applied_replay_populates_work_done_seen_keys_for_prior_work_done() {
+        use std::io::Write;
+
+        let jsonl = r#"{"topic":"work.done","hat":"executor","payload":"{\"plan_name\":\"p1\",\"step\":\"step-01\",\"task_id\":\"t1\",\"commit_count\":1}"}
+"#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        tmp.write_all(jsonl.as_bytes()).unwrap();
+        tmp.flush().unwrap();
+
+        let state = PolicyRuntimeState::from_events(tmp.path(), &test_config()).unwrap();
+        assert!(
+            state.work_done_seen_keys.contains("p1::step-01::t1"),
+            "from_events must mirror prior work.done into work_done_seen_keys, got {:?}",
+            state.work_done_seen_keys
+        );
+    }
+
+    #[test]
+    fn u1_fix_applied_replay_then_rereview_ready_accepted() {
+        use std::io::Write;
+
+        let jsonl = r#"{"topic":"review.dimension.ready","hat":"review-coordinator","payload":"{\"plan_name\":\"p1\",\"step\":\"step-01\",\"task_id\":\"t1\",\"dimension\":\"correctness\"}"}
+{"topic":"fix.applied","hat":"fixer","payload":"{\"plan_name\":\"p1\",\"step\":\"step-01\",\"task_id\":\"t1\",\"fix_round\":1,\"applied_count\":8,\"failed_count\":0,\"commit_count\":1,\"changed_lines\":96}"}
+"#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        tmp.write_all(jsonl.as_bytes()).unwrap();
+        tmp.flush().unwrap();
+
+        let mut state = PolicyRuntimeState::from_events(tmp.path(), &test_config()).unwrap();
+        let payload = review_dimension_ready_payload("p1", "step-01", "t1", "correctness");
+        let decision = validate_event(
+            "review.dimension.ready",
+            Some(&payload),
+            &test_config(),
+            &mut state,
+        );
+        assert_eq!(
+            decision,
+            PolicyDecision::Accept,
+            "Re-review ready after fix.applied must be accepted, got {:?}",
+            decision
+        );
+    }
+
+    #[test]
+    fn u1_fix_applied_prune_helper_keeps_other_task_keys() {
+        let mut state = PolicyRuntimeState::default();
+        state
+            .review_dimension_ready_seen_keys
+            .insert("p1::step-01::t1::correctness".into());
+        state
+            .review_dimension_ready_seen_keys
+            .insert("p1::step-01::t2::correctness".into());
+
+        state.prune_review_dimension_ready_bucket("p1", "step-01", "t1");
+
+        assert!(!state.review_dimension_ready_seen_keys.contains("p1::step-01::t1::correctness"));
+        assert!(state.review_dimension_ready_seen_keys.contains("p1::step-01::t2::correctness"));
+    }
+
+    #[test]
+    fn u1_fix_applied_replay_does_not_prune_other_task_dimension_ready() {
+        // Defensive: `fix.applied` payload's task_id bounds the
+        // prune scope. A sibling task in the same (plan, step)
+        // must keep its dedup key.
+        use std::io::Write;
+
+        let jsonl = r#"{"topic":"review.dimension.ready","hat":"review-coordinator","payload":"{\"plan_name\":\"p1\",\"step\":\"step-01\",\"task_id\":\"t1\",\"dimension\":\"correctness\"}"}
+{"topic":"review.dimension.ready","hat":"review-coordinator","payload":"{\"plan_name\":\"p1\",\"step\":\"step-01\",\"task_id\":\"t2\",\"dimension\":\"correctness\"}"}
+{"topic":"fix.applied","hat":"fixer","payload":"{\"plan_name\":\"p1\",\"step\":\"step-01\",\"task_id\":\"t1\",\"fix_round\":1,\"applied_count\":8,\"failed_count\":0,\"commit_count\":1,\"changed_lines\":96}"}
+"#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        tmp.write_all(jsonl.as_bytes()).unwrap();
+        tmp.flush().unwrap();
+
+        let state = PolicyRuntimeState::from_events(tmp.path(), &test_config()).unwrap();
+        assert!(
+            !state
+                .review_dimension_ready_seen_keys
+                .contains("p1::step-01::t1::correctness"),
+            "fix.applied on t1 must prune t1 bucket, got {:?}",
+            state.review_dimension_ready_seen_keys
+        );
+        assert!(
+            state
+                .review_dimension_ready_seen_keys
+                .contains("p1::step-01::t2::correctness"),
+            "fix.applied on t1 must NOT prune t2 bucket, got {:?}",
+            state.review_dimension_ready_seen_keys
+        );
+    }
+
+    #[test]
+    fn u1_prune_review_dimension_ready_does_not_affect_other_steps() {
+        // Defensive: prune is scoped to (plan, step, task). A
+        // different step in the same plan must keep its key.
+        let mut state = PolicyRuntimeState::default();
+        state
+            .review_dimension_ready_seen_keys
+            .insert("p1::step-01::t1::correctness".into());
+        state
+            .review_dimension_ready_seen_keys
+            .insert("p1::step-02::t1::correctness".into());
+
+        state.prune_review_dimension_ready_bucket("p1", "step-01", "t1");
+
+        assert!(!state.review_dimension_ready_seen_keys.contains("p1::step-01::t1::correctness"));
+        assert!(state.review_dimension_ready_seen_keys.contains("p1::step-02::t1::correctness"));
+    }
+
+    #[test]
+    fn u1_dedup_helper_prunes_allow_fix_round_rereview() {
+        // End-to-end happy path: first ready accept, second
+        // emit blocked, fix.applied prune, third emit (re-review)
+        // accepted.
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = review_dimension_ready_payload("p1", "step-01", "t1", "correctness");
+
+        let first = validate_event(
+            "review.dimension.ready",
+            Some(&payload),
+            &config,
+            &mut state,
+        );
+        assert_eq!(first, PolicyDecision::Accept);
+
+        let second = validate_event(
+            "review.dimension.ready",
+            Some(&payload),
+            &config,
+            &mut state,
+        );
+        assert!(matches!(
+            second,
+            PolicyDecision::RejectWithResume(PolicyFinding {
+                violation_type: ViolationType::DuplicateWorkDone { ref key, .. },
+                ..
+            }) if key == "p1::step-01::t1::correctness"
+        ));
+
+        // fix.applied accept path runs prune.
+        state.prune_review_dimension_ready_bucket("p1", "step-01", "t1");
+
+        let third = validate_event(
+            "review.dimension.ready",
+            Some(&payload),
+            &config,
+            &mut state,
+        );
+        assert_eq!(
+            third,
+            PolicyDecision::Accept,
+            "after fix.applied prune the re-review ready must be accepted, got {:?}",
+            third
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // U5 (2026-06-18-004 plan, R4, KTD3):
+    // `review.dimensions.complete` dedup keyed on
+    // `(plan_name, step, task_id, fix_round)`. A 2nd emit with
+    // the same key is rejected as `DuplicateWorkDone`. After
+    // `fix.applied` the bucket is pruned so the next round's
+    // `review.dimensions.complete` (with `fix_round=N+1`) can
+    // land without colliding with the prior round's entry.
+    //
+    // Mirrors the U5 `review.dimension.ready` test cluster
+    // above. Together they pin the re-review dedup contract
+    // end-to-end.
+    // -------------------------------------------------------------------------
+
+    fn review_dimensions_complete_payload(
+        plan: &str,
+        step: &str,
+        task: &str,
+        fix_round: u32,
+    ) -> String {
+        format!(
+            r#"{{"plan_name":"{plan}","step":"{step}","task_id":"{task}","fix_round":{fix_round},"dimensions":[]}}"#
+        )
+    }
+
+    #[test]
+    fn u5_review_dimensions_complete_dedup_first_accepted() {
+        // Happy path: first emit with `fix_round=0` is accepted.
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload =
+            review_dimensions_complete_payload("p1", "step-01", "t1", 0);
+        let decision = validate_event(
+            "review.dimensions.complete",
+            Some(&payload),
+            &config,
+            &mut state,
+        );
+        assert_eq!(
+            decision,
+            PolicyDecision::Accept,
+            "first review.dimensions.complete must be accepted, got {:?}",
+            decision
+        );
+        assert!(
+            state
+                .review_dimensions_complete_seen_keys
+                .contains("p1::step-01::t1::0"),
+            "seen_keys must include the round-0 entry, got {:?}",
+            state.review_dimensions_complete_seen_keys
+        );
+    }
+
+    #[test]
+    fn u5_review_dimensions_complete_dedup_rejects_second_emit_same_round() {
+        // Error path: 2nd emit with the same `fix_round` is
+        // rejected as `DuplicateWorkDone` (the perky-maple
+        // P2-1 shape: 4× duplicate `review.dimensions.complete`
+        // events being silently dropped).
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload =
+            review_dimensions_complete_payload("p1", "step-01", "t1", 0);
+
+        let first = validate_event(
+            "review.dimensions.complete",
+            Some(&payload),
+            &config,
+            &mut state,
+        );
+        assert_eq!(first, PolicyDecision::Accept);
+
+        let second = validate_event(
+            "review.dimensions.complete",
+            Some(&payload),
+            &config,
+            &mut state,
+        );
+        assert!(
+            matches!(
+                second,
+                PolicyDecision::RejectWithResume(PolicyFinding {
+                    violation_type: ViolationType::DuplicateWorkDone { ref key, .. },
+                    ..
+                }) if key == "p1::step-01::t1::0"
+            ),
+            "2nd review.dimensions.complete same round must reject as DuplicateWorkDone, got {:?}",
+            second
+        );
+    }
+
+    #[test]
+    fn u5_review_dimensions_complete_dedup_different_fix_round_accepted() {
+        // Edge case: 1st round (fix_round=0) accepted, 2nd
+        // round (fix_round=1) accepted (after fix.applied
+        // prune) — the fix_round segment keeps them distinct.
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+
+        let first = review_dimensions_complete_payload("p1", "step-01", "t1", 0);
+        let first_decision = validate_event(
+            "review.dimensions.complete",
+            Some(&first),
+            &config,
+            &mut state,
+        );
+        assert_eq!(first_decision, PolicyDecision::Accept);
+
+        // Simulate fix.applied accept site (U1 path).
+        state.prune_review_dimensions_complete_bucket("p1", "step-01", "t1");
+
+        let second = review_dimensions_complete_payload("p1", "step-01", "t1", 1);
+        let second_decision = validate_event(
+            "review.dimensions.complete",
+            Some(&second),
+            &config,
+            &mut state,
+        );
+        assert_eq!(
+            second_decision,
+            PolicyDecision::Accept,
+            "fix_round=1 must be accepted after fix.applied prune, got {:?}",
+            second_decision
+        );
+    }
+
+    #[test]
+    fn u5_review_dimensions_complete_dedup_disabled_policy_accepts_all() {
+        // When policy is disabled, dedup must NOT fire.
+        let mut config = test_config();
+        config.enabled = false;
+        let mut state = PolicyRuntimeState::default();
+        let payload =
+            review_dimensions_complete_payload("p1", "step-01", "t1", 0);
+
+        let first = validate_event(
+            "review.dimensions.complete",
+            Some(&payload),
+            &config,
+            &mut state,
+        );
+        let second = validate_event(
+            "review.dimensions.complete",
+            Some(&payload),
+            &config,
+            &mut state,
+        );
+        assert_eq!(first, PolicyDecision::Accept);
+        assert_eq!(
+            second,
+            PolicyDecision::Accept,
+            "disabled policy must NOT dedup review.dimensions.complete, got {:?}",
+            second
+        );
+    }
+
+    #[test]
+    fn u5_review_dimensions_complete_dedup_missing_fix_round_defaults_to_zero() {
+        // Backwards compat: legacy emitters without `fix_round`
+        // default to `0` so they collide with the new SSOT key
+        // and get the same protection as a fresh emit.
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = r#"{"plan_name":"p1","step":"step-01","task_id":"t1","dimensions":[]}"#;
+        let first = validate_event(
+            "review.dimensions.complete",
+            Some(payload),
+            &config,
+            &mut state,
+        );
+        assert_eq!(first, PolicyDecision::Accept);
+        let second = validate_event(
+            "review.dimensions.complete",
+            Some(payload),
+            &config,
+            &mut state,
+        );
+        assert!(
+            matches!(
+                second,
+                PolicyDecision::RejectWithResume(PolicyFinding {
+                    violation_type: ViolationType::DuplicateWorkDone { ref key, .. },
+                    ..
+                }) if key == "p1::step-01::t1::0"
+            ),
+            "missing fix_round must default to 0 and dedup against the round-0 key, got {:?}",
+            second
+        );
+    }
+
+    #[test]
+    fn u5_prune_helper_keeps_other_task_keys() {
+        // Defensive: prune is scoped to (plan, step, task). A
+        // sibling task in the same (plan, step) must keep its
+        // dedup key.
+        let mut state = PolicyRuntimeState::default();
+        state
+            .review_dimensions_complete_seen_keys
+            .insert("p1::step-01::t1::0".into());
+        state
+            .review_dimensions_complete_seen_keys
+            .insert("p1::step-01::t2::0".into());
+
+        state.prune_review_dimensions_complete_bucket("p1", "step-01", "t1");
+
+        assert!(
+            !state
+                .review_dimensions_complete_seen_keys
+                .contains("p1::step-01::t1::0")
+        );
+        assert!(
+            state
+                .review_dimensions_complete_seen_keys
+                .contains("p1::step-01::t2::0")
+        );
+    }
+
+    #[test]
+    fn u5_review_dimensions_complete_replay_populates_seen_keys() {
+        // KTD3 / KTD1 symmetry: `from_events` mirrors the
+        // dedup set from prior `review.dimensions.complete`
+        // events so loop rehydrate does not accept a
+        // duplicate.
+        use std::io::Write;
+
+        let jsonl = r#"{"topic":"review.dimensions.complete","hat":"review-coordinator","payload":"{\"plan_name\":\"p1\",\"step\":\"step-01\",\"task_id\":\"t1\",\"fix_round\":0,\"dimensions\":[]}"}
+{"topic":"review.dimensions.complete","hat":"review-coordinator","payload":"{\"plan_name\":\"p1\",\"step\":\"step-01\",\"task_id\":\"t1\",\"fix_round\":1,\"dimensions\":[]}"}
+"#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        tmp.write_all(jsonl.as_bytes()).unwrap();
+        tmp.flush().unwrap();
+
+        let state = PolicyRuntimeState::from_events(tmp.path(), &test_config()).unwrap();
+        assert!(
+            state
+                .review_dimensions_complete_seen_keys
+                .contains("p1::step-01::t1::0"),
+            "from_events must mirror round-0 complete into the dedup set, got {:?}",
+            state.review_dimensions_complete_seen_keys
+        );
+        assert!(
+            state
+                .review_dimensions_complete_seen_keys
+                .contains("p1::step-01::t1::1"),
+            "from_events must mirror round-1 complete into the dedup set, got {:?}",
+            state.review_dimensions_complete_seen_keys
+        );
+    }
+
+    #[test]
+    fn u5_fix_applied_replay_prunes_dimensions_complete_keys() {
+        // KTD1 symmetry for the complete dedup: replay of
+        // `fix.applied` MUST also clear the
+        // `review.dimensions.complete` bucket so the next
+        // round's complete (fix_round=N+1) does not collide
+        // with the prior round's entry on rehydrate.
+        use std::io::Write;
+
+        let jsonl = r#"{"topic":"review.dimensions.complete","hat":"review-coordinator","payload":"{\"plan_name\":\"p1\",\"step\":\"step-01\",\"task_id\":\"t1\",\"fix_round\":0,\"dimensions\":[]}"}
+{"topic":"fix.applied","hat":"fixer","payload":"{\"plan_name\":\"p1\",\"step\":\"step-01\",\"task_id\":\"t1\",\"fix_round\":1,\"applied_count\":1,\"failed_count\":0,\"commit_count\":1,\"changed_lines\":5}"}
+"#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        tmp.write_all(jsonl.as_bytes()).unwrap();
+        tmp.flush().unwrap();
+
+        let state = PolicyRuntimeState::from_events(tmp.path(), &test_config()).unwrap();
+        assert!(
+            !state
+                .review_dimensions_complete_seen_keys
+                .contains("p1::step-01::t1::0"),
+            "from_events replay of fix.applied MUST prune the complete bucket, got {:?}",
+            state.review_dimensions_complete_seen_keys
         );
     }
 

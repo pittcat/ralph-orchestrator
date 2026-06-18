@@ -295,9 +295,12 @@ fn validate_payload(
                 kind: ExecutionContractViolationKind::MissingPayloadField {
                     field: rule.require_payload_fields[0].clone(),
                 },
+                // U6 (2026-06-18-004 plan): dynamic topic so
+                // the same message works for both `work.done`
+                // and `fix.applied`.
                 message: format!(
-                    "work.done payload is empty but contract requires fields: {:?}",
-                    rule.require_payload_fields
+                    "{} payload is empty but contract requires fields: {:?}",
+                    event.topic, rule.require_payload_fields
                 ),
                 topic: event.topic.to_string(),
                 ..Default::default()
@@ -309,7 +312,8 @@ fn validate_payload(
         return Some(ExecutionContractFinding {
             kind: ExecutionContractViolationKind::InvalidPayload,
             message: format!(
-                "work.done payload is not valid JSON: {:?}",
+                "{} payload is not valid JSON: {:?}",
+                event.topic,
                 payload_str.chars().take(100).collect::<String>()
             ),
             topic: event.topic.to_string(),
@@ -320,7 +324,7 @@ fn validate_payload(
     let Value::Object(map) = &payload else {
         return Some(ExecutionContractFinding {
             kind: ExecutionContractViolationKind::InvalidPayload,
-            message: "work.done payload must be a JSON object".to_string(),
+            message: format!("{} payload must be a JSON object", event.topic),
             topic: event.topic.to_string(),
             ..Default::default()
         });
@@ -332,7 +336,7 @@ fn validate_payload(
                 kind: ExecutionContractViolationKind::MissingPayloadField {
                     field: field.clone(),
                 },
-                message: format!("work.done payload is missing required field: '{}'", field),
+                message: format!("{} payload is missing required field: '{}'", event.topic, field),
                 topic: event.topic.to_string(),
                 ..Default::default()
             });
@@ -614,9 +618,15 @@ fn validate_git_change(
 
         return Some(ExecutionContractFinding {
             kind: ExecutionContractViolationKind::NoGitEvidence { step },
+            // U6 (2026-06-18-004 plan): dynamic topic — the
+            // previous hardcoded `work.done requires git
+            // evidence` was misleading for `fix.applied` (which
+            // uses the same `require_git_change` field). The
+            // recovered agent reads the topic from the finding
+            // to know which hat's contract fired.
             message: format!(
-                "work.done requires git evidence before review can proceed. {}",
-                detail
+                "{} requires git evidence before downstream review can proceed. {}",
+                event.topic, detail
             ),
             topic: event.topic.to_string(),
             ..Default::default()

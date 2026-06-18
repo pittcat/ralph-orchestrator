@@ -1352,6 +1352,27 @@ fn test_ce_executor_serial_review_silent_reviewer_recovers_scenario() {
 }
 
 // ──────────────────────────────────────────────────────────────────────
+// 2026-06-18-004 plan U4 (R1, R6): fix → re-review → review.passed →
+// plan-gate handoff for ce-executor-serial.
+//
+// Pins the wire-level contract end-to-end: after `fix.applied(fix_round=1)`
+// is accepted, `review-coordinator` walks a fresh 4-dim sequence, the
+// 2nd `review.dimensions.complete` carries `fix_round=1`, and
+// `review-synthesizer` emits `review.passed`. `plan-gate` then
+// dispatches `queue.advance` + (single-step plan) `plan.complete`.
+//
+// This is the structural smoke alarm for U0/U1/U3/U5: any future
+// change that closes the re-review window or breaks the plan-gate
+// handoff must fail this BDD before integration tests do.
+// ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_ce_executor_serial_fix_applied_rereview_scenario() {
+    let yaml = load_scenario("tests/scenarios/ce_executor_serial_fix_applied_rereview.yml");
+    run_scenario(yaml);
+}
+
+// ──────────────────────────────────────────────────────────────────────
 // 2026-06-16-002 plan U6: coordinator build.deny deny rule
 // ──────────────────────────────────────────────────────────────────────
 
