@@ -2905,6 +2905,31 @@ async fn run_loop_impl_inner(
                 .push(("RALPH_WAVE_CONTEXT".into(), json));
         }
 
+        // 2026-06-18-005 U1 (KTD-1): expose loop iteration and handoff
+        // seq as env vars so the agent / `ralph emit --policy-check`
+        // running inside the loop can validate seq/iteration against
+        // the canonical loop state without re-reading events.jsonl.
+        // Only injected when `hat_handoff.enabled` + `isolated` so
+        // coordinator/disabled presets are not polluted.
+        if event_loop
+            .config()
+            .event_loop
+            .hat_handoff
+            .enabled
+            && matches!(
+                event_loop.config().event_loop.execution_mode,
+                ralph_core::config::HatExecutionMode::Isolated
+            )
+        {
+            effective_backend
+                .env_vars
+                .push(("RALPH_LOOP_ITERATION".into(), event_loop.state().iteration.to_string()));
+            effective_backend.env_vars.push((
+                "RALPH_HAT_HANDOFF_SEQ".into(),
+                event_loop.state().hat_handoff_seq.to_string(),
+            ));
+        }
+
         // Step 3: Get timeout from config based on actual backend being used
         let timeout_secs = config.adapter_settings(&backend_name_for_timeout).timeout;
         let timeout = adapter_timeout_duration(timeout_secs);

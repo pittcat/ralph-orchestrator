@@ -43,6 +43,35 @@ pub enum GateDecision {
     Reject { reason_code: &'static str, message: String },
 }
 
+/// Handoff 文件读盘结果(2026-06-18-005 U6,R5)。
+///
+/// 区分「文件不存在」、「存在且可读」、「存在但读失败」三种状态,
+/// 使 `hat_handoff_file_read_fail` reason_code 在 runtime 与 CLI 共享
+/// 同一路径可被触发。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileContent {
+    /// handoff_path 缺失(非宏观边 / payload 无 path 时不会进入本函数)。
+    Missing,
+    /// 读盘成功,文件内容。
+    Read(String),
+    /// 文件存在但读取失败(权限 / IO 错误等)。
+    ReadError(String),
+}
+
+impl FileContent {
+    /// 从 `std::fs::read_to_string` 的结果构造。把 `NotFound` 折叠为
+    /// `Missing`(文件不存在),其余 IO 错误折叠为 `ReadError`。
+    /// `resolve_jailed` 失败已经在外层映射为 `Missing`,所以这里的
+    /// `Ok(Err)` 必然是「路径存在但读不到」的场景。
+    pub fn from_read_result(result: std::io::Result<String>) -> Self {
+        match result {
+            Ok(content) => FileContent::Read(content),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => FileContent::Missing,
+            Err(e) => FileContent::ReadError(e.to_string()),
+        }
+    }
+}
+
 /// 输入参数(纯函数,便于 CLI 镜像)。
 #[derive(Debug, Clone)]
 pub struct GateInputs<'a> {
@@ -63,13 +92,21 @@ pub struct GateInputs<'a> {
     pub downstream_publishes: &'a [String],
     /// 仓库根路径,用于读盘与 jail。
     pub repo_root: &'a Path,
+    /// 2026-06-18-005 U2 (R1): 跳过文件名 seq / iter 校验。
+    ///
+    /// CLI `ralph emit --policy-check` 在 loop 子进程内读到
+    /// `RALPH_LOOP_ITERATION` / `RALPH_HAT_HANDOFF_SEQ` 时按真实值校验;
+    /// 缺失时(独立调用场景)降级为不校验 seq/iter,避免误杀合法 emit。
+    /// runtime gate 始终 `false`,行为不变。
+    pub skip_seq_check: bool,
 }
 
 /// 纯函数:对单一 event 做 hat_handoff gate 判定。
 ///
 /// **不读盘**:交给 caller(`event_loop::mod.rs`)决定是同步读盘还是
-/// 异步 IO;本函数签名只接受 `&str` 内容以便 CLI 单测。
-pub fn evaluate_event(inputs: &GateInputs<'_>, file_content: Option<&str>) -> GateDecision {
+/// 异步 IO;本函数签名只接受 [`FileContent`] 以便 CLI 单测并区分
+/// not_found / read_fail(2026-06-18-005 U6)。
+pub fn evaluate_event(inputs: &GateInputs<'_>, file_content: &FileContent) -> GateDecision {
     // 1) 宏观边判定
     let is_macro = macro_edges::requires_handoff(
         inputs.config.enabled,
@@ -121,7 +158,7 @@ pub fn evaluate_event(inputs: &GateInputs<'_>, file_content: Option<&str>) -> Ga
             }
         };
     let expected_seq = inputs.current_seq + 1;
-    if file_iter != inputs.iteration || file_seq != expected_seq {
+    if !inputs.skip_seq_check && (file_iter != inputs.iteration || file_seq != expected_seq) {
         return GateDecision::Reject {
             reason_code: REASON_CODE_HAT_HANDOFF_FILENAME_MISMATCH,
             message: format!(
@@ -151,10 +188,9 @@ pub fn evaluate_event(inputs: &GateInputs<'_>, file_content: Option<&str>) -> Ga
         }
     }
 
-    // 5) 文件读盘(由 caller 提供;None → not found)
+    // 5) 文件读盘(由 caller 提供)
     let content = match file_content {
-        Some(c) => c,
-        None => {
+        FileContent::Missing => {
             return GateDecision::Reject {
                 reason_code: REASON_CODE_HAT_HANDOFF_FILE_NOT_FOUND,
                 message: format!(
@@ -164,6 +200,19 @@ pub fn evaluate_event(inputs: &GateInputs<'_>, file_content: Option<&str>) -> Ga
                 ),
             };
         }
+        FileContent::ReadError(err) => {
+            // 2026-06-18-005 U6 (R5): 文件存在但不可读时返回
+            // `hat_handoff_file_read_fail`,与 `file_not_found` 区分。
+            // caller 已经把 resolve_jailed 失败 (path 越界) 折叠成 Missing,
+            // 所以这里 ReadError 只会是权限/IO 等"真读不到"。
+            return GateDecision::Reject {
+                reason_code: REASON_CODE_HAT_HANDOFF_FILE_READ_FAIL,
+                message: format!(
+                    "handoff file `{handoff_path}` exists but could not be read: {err}; check workspace permissions"
+                ),
+            };
+        }
+        FileContent::Read(c) => c,
     };
 
     // 6) 结构校验
@@ -294,6 +343,7 @@ hats:
             handoff_path,
             downstream_publishes: DOWNSTREAM,
             repo_root,
+            skip_seq_check: false,
         }
     }
 
@@ -303,7 +353,7 @@ hats:
         let idx = two_hat_index();
         let cfg = HatHandoffConfig::default(); // disabled
         let inputs = make_inputs(repo.path(), &idx, &cfg, None);
-        match evaluate_event(&inputs, None) {
+        match evaluate_event(&inputs, &FileContent::Missing) {
             GateDecision::NotRequired => {}
             other => panic!("expected NotRequired, got {other:?}"),
         }
@@ -316,7 +366,7 @@ hats:
         let mut cfg = HatHandoffConfig::default();
         cfg.enabled = true;
         let inputs = make_inputs(repo.path(), &idx, &cfg, None);
-        match evaluate_event(&inputs, None) {
+        match evaluate_event(&inputs, &FileContent::Missing) {
             GateDecision::Reject { reason_code, .. } => {
                 assert_eq!(reason_code, REASON_CODE_HAT_HANDOFF_MISSING_PATH);
             }
@@ -331,7 +381,7 @@ hats:
         let mut cfg = HatHandoffConfig::default();
         cfg.enabled = true;
         let inputs = make_inputs(repo.path(), &idx, &cfg, Some("../escape.md"));
-        match evaluate_event(&inputs, None) {
+        match evaluate_event(&inputs, &FileContent::Missing) {
             GateDecision::Reject { reason_code, .. } => {
                 assert_eq!(reason_code, REASON_CODE_HAT_HANDOFF_PATH_ESCAPE);
             }
@@ -352,7 +402,7 @@ hats:
             &cfg,
             Some(".ralph/agent/hat-handoff/3-3-plan_gate-executor.md"),
         );
-        match evaluate_event(&inputs, None) {
+        match evaluate_event(&inputs, &FileContent::Missing) {
             GateDecision::Reject { reason_code, .. } => {
                 assert_eq!(reason_code, REASON_CODE_HAT_HANDOFF_FILENAME_MISMATCH);
             }
@@ -372,9 +422,33 @@ hats:
             &cfg,
             Some(".ralph/agent/hat-handoff/3-2-plan_gate-executor.md"),
         );
-        match evaluate_event(&inputs, None) {
+        match evaluate_event(&inputs, &FileContent::Missing) {
             GateDecision::Reject { reason_code, .. } => {
                 assert_eq!(reason_code, REASON_CODE_HAT_HANDOFF_FILE_NOT_FOUND);
+            }
+            other => panic!("expected Reject, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_read_error_rejected() {
+        // 2026-06-18-005 U6: 区分 file_not_found 与 file_read_fail。
+        let repo = temp_repo();
+        let idx = two_hat_index();
+        let mut cfg = HatHandoffConfig::default();
+        cfg.enabled = true;
+        let inputs = make_inputs(
+            repo.path(),
+            &idx,
+            &cfg,
+            Some(".ralph/agent/hat-handoff/3-2-plan_gate-executor.md"),
+        );
+        match evaluate_event(
+            &inputs,
+            &FileContent::ReadError("permission denied".to_string()),
+        ) {
+            GateDecision::Reject { reason_code, .. } => {
+                assert_eq!(reason_code, REASON_CODE_HAT_HANDOFF_FILE_READ_FAIL);
             }
             other => panic!("expected Reject, got {other:?}"),
         }
@@ -401,7 +475,7 @@ hats:
             Some(".ralph/agent/hat-handoff/3-2-plan_gate-executor.md"),
         );
         let content = std::fs::read_to_string(&abs).unwrap();
-        match evaluate_event(&inputs, Some(&content)) {
+        match evaluate_event(&inputs, &FileContent::Read(content)) {
             GateDecision::Reject { reason_code, .. } => {
                 assert_eq!(reason_code, REASON_CODE_HAT_HANDOFF_STRUCTURE);
             }
@@ -429,7 +503,7 @@ hats:
         let content = std::fs::read_to_string(&abs).unwrap();
         let mut inputs = make_inputs(repo.path(), &idx, &cfg, Some(path));
         inputs.downstream_publishes = &downstream;
-        match evaluate_event(&inputs, Some(&content)) {
+        match evaluate_event(&inputs, &FileContent::Read(content)) {
             GateDecision::Reject { reason_code, .. } => {
                 assert_eq!(reason_code, REASON_CODE_HAT_HANDOFF_ILLEGAL_EMIT_TOPIC);
             }
@@ -451,12 +525,53 @@ hats:
         let content = std::fs::read_to_string(&abs).unwrap();
         let mut inputs = make_inputs(repo.path(), &idx, &cfg, Some(path));
         inputs.downstream_publishes = &downstream;
-        match evaluate_event(&inputs, Some(&content)) {
+        match evaluate_event(&inputs, &FileContent::Read(content)) {
             GateDecision::Accept { handoff_path } => {
                 assert_eq!(handoff_path, path);
             }
             other => panic!("expected Accept, got {other:?}"),
         }
+    }
+
+    // 2026-06-18-005 U7 (T9): policy-accept 记录 phantom pending
+    // → hat_handoff gate 拒收 → cancel_pending 把 phantom 抹掉。
+    // 模拟 event_loop 的两步调用:`on_handoff_accepted` + gate reject。
+    #[test]
+    fn t9_policy_accept_then_gate_reject_clears_phantom() {
+        use crate::workflow_contract::handoff_tracker::HandoffTracker;
+        use std::time::Instant;
+
+        let repo = temp_repo();
+        let idx = two_hat_index();
+        let mut cfg = HatHandoffConfig::default();
+        cfg.enabled = true;
+        let mut tracker = HandoffTracker::new();
+
+        // Step 1: policy accept adds a pending entry
+        let event_id = "2026-06-18T00:00:00Z:work.ready".to_string();
+        tracker.on_handoff_accepted("work.ready", "executor", &event_id, Instant::now());
+        assert_eq!(tracker.pending_count(), 1, "policy accept must record pending");
+
+        // Step 2: gate evaluates the same event but handoff_path
+        // is missing → Reject
+        let inputs = make_inputs(repo.path(), &idx, &cfg, None);
+        let decision = evaluate_event(&inputs, &FileContent::Missing);
+        match decision {
+            GateDecision::Reject { reason_code, .. } => {
+                assert_eq!(reason_code, REASON_CODE_HAT_HANDOFF_MISSING_PATH);
+            }
+            other => panic!("expected Reject, got {other:?}"),
+        }
+
+        // Step 3: caller cancels the pending record (mimicking
+        // event_loop's gate reject branch)
+        let removed = tracker.cancel_pending(&event_id);
+        assert!(removed, "cancel_pending must remove the phantom");
+        assert_eq!(
+            tracker.pending_count(),
+            0,
+            "after cancel_pending no phantom should remain"
+        );
     }
 
     #[test]

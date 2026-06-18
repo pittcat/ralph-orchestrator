@@ -4421,19 +4421,20 @@ impl EventLoop {
         // Non-ralph hat requested
         if self.config.event_loop.execution_mode == HatExecutionMode::Isolated {
             // Isolated mode: build focused prompt for this hat only.
-            // 2026-06-18-002 U6 (KTD-16): take pending **once** at
+                        // 2026-06-18-002 U6 (KTD-16): take pending **once** at
             // the top so both `events_context` below and
-            // `prepend_hat_handoff` see the same payload (the
-            // `take_pending` API removes by hat_id, so the second
-            // call would otherwise return empty).
+            // `prepend_hat_handoff_from_pending` see the same
+            // payload (the `take_pending` API removes by hat_id,
+            // so the second call would otherwise return empty).
             let mut events = self.bus.take_pending(&hat_id.clone());
             let mut human_events = self.bus.take_human_pending();
             events.append(&mut human_events);
 
-            // 2026-06-18-002 U6: capture the handoff path **before**
+                        // 2026-06-18-002 U6: capture the handoff path **before**
             // `events` is consumed by `events_context` so
-            // `prepend_hat_handoff` (called later in the pipeline)
-            // can still resolve `handoff_path` from this batch.
+            // `prepend_hat_handoff_from_pending` (called later in
+            // the pipeline) can still resolve `handoff_path` from
+            // this batch.
             let pending_for_handoff: Vec<ralph_proto::Event> = events.clone();
             let (guidance_events, regular_events): (Vec<_>, Vec<_>) = events
                 .into_iter()
@@ -5537,18 +5538,9 @@ impl EventLoop {
     /// navigation block. Fail-closed: missing/unreadable file →
     /// no block + diagnostic event. Skip when disabled or in
     /// coordinator mode or when the hat is `ralph`.
-    fn prepend_hat_handoff(&mut self, prompt: String, hat_id: &HatId) -> String {
-        // peek(不要 take,避免污染 hat pending):bus 没有 peek 接口,
-        // 我们用 take 后 publish 回去——这里是 build_prompt 入口,
-        // pending 还未被消费,所以是安全的(同上 take_pending 用法)。
-        let pending = self.bus.take_pending(hat_id);
-        self.prepend_hat_handoff_from_pending(prompt, hat_id, &pending)
-    }
-
-    /// 2026-06-18-002 U6: same as [`prepend_hat_handoff`] but takes
-    /// the pending events directly so it can run after the
-    /// `events_context` has already drained the bus in the
-    /// isolated-path prepend pipeline.
+    /// 2026-06-18-005 U7: 删除死代码 `prepend_hat_handoff` 包装
+    /// (只有 `prepend_hat_handoff_from_pending` 是真实调用点,
+    /// 见 `build_prompt` 内的 isolated path)。
     fn prepend_hat_handoff_from_pending(
         &mut self,
         prompt: String,
@@ -5615,7 +5607,18 @@ impl EventLoop {
             return prompt;
         }
         let snap = if let Some(p) = self.state.state_projection.as_ref() {
-            crate::runtime_state::RuntimeStateSnapshot::build(p)
+            // 2026-06-18-005 U3 (R3): 把 handoff 状态折进 snapshot。
+            crate::runtime_state::RuntimeStateSnapshot::build(
+                p,
+                Some(crate::runtime_state::HandoffSnapshotState {
+                    enabled: self.config.event_loop.hat_handoff.enabled
+                        && matches!(
+                            self.config.event_loop.execution_mode,
+                            crate::config::HatExecutionMode::Isolated
+                        ),
+                    current_seq: self.state.hat_handoff_seq,
+                }),
+            )
         } else {
             crate::runtime_state::RuntimeStateSnapshot::disabled_stub()
         };
@@ -7914,17 +7917,27 @@ impl EventLoop {
                     handoff_path: handoff_path.as_deref(),
                     downstream_publishes: &downstream_publishes,
                     repo_root: self.config.core.workspace_root.as_path(),
+                    skip_seq_check: false,
                 };
-                let file_content: Option<String> = handoff_path.as_deref().and_then(|path| {
+                // 2026-06-18-005 U6: tri-state read result so
+                // gate can distinguish not_found vs read_fail.
+                let file_content = if let Some(path) = handoff_path.as_deref() {
                     use crate::hat_handoff::allocator;
-                    allocator::resolve_jailed(
+                    match allocator::resolve_jailed(
                         self.config.core.workspace_root.as_path(),
                         path,
-                    )
-                    .ok()
-                    .and_then(|abs| std::fs::read_to_string(&abs).ok())
-                });
-                match gate::evaluate_event(&inputs, file_content.as_deref()) {
+                    ) {
+                        Ok(abs) => {
+                            crate::hat_handoff::gate::FileContent::from_read_result(
+                                std::fs::read_to_string(&abs),
+                            )
+                        }
+                        Err(_) => crate::hat_handoff::gate::FileContent::Missing,
+                    }
+                } else {
+                    crate::hat_handoff::gate::FileContent::Missing
+                };
+                match gate::evaluate_event(&inputs, &file_content) {
                     GateDecision::NotRequired => true,
                     GateDecision::Accept { .. } => {
                         self.state.hat_handoff_seq += 1;
@@ -7954,6 +7967,44 @@ impl EventLoop {
                         // gate, so we record it explicitly here.
                         self.state.record_event(&diag);
                         rejected_diagnostics.push(diag);
+
+                        // 2026-06-18-005 U5 (R2): 通过 Rejection
+                        // 系统向 emit hat 发 `task.resume`,使拒收
+                        // 进入标准 retry 预算 + recovery envelope。
+                        // retry_key 包含 stage+reason_code+from_hat+topic,
+                        // 不会与其它 rejection 合并。
+                        let rejection = crate::event_loop::rejection::Rejection {
+                            stage: crate::event_loop::rejection::RejectionStage::HatHandoff,
+                            source_hat: Some(from_hat.to_string()),
+                            business_hat: Some(from_hat.to_string()),
+                            topic: ev.topic.clone(),
+                            violation: message.clone(),
+                            retry_key: format!(
+                                "hat_handoff:{from_hat}:{}:{reason_code}",
+                                ev.topic
+                            ),
+                            retry_eligible: true,
+                            non_retryable_reason: None,
+                            target_hat: Some(from_hat.to_string()),
+                            original_event_id: Some(event_id.clone()),
+                            original_ts: Some(ev.ts.clone()),
+                        };
+                        let resume_payload =
+                            crate::event_loop::rejection::build_task_resume_payload(
+                                &rejection,
+                                &[],
+                                &[],
+                                None,
+                                ev.payload.as_deref(),
+                                None,
+                            );
+                        let resume_evt = ralph_proto::Event::new(
+                            "task.resume",
+                            resume_payload,
+                        )
+                        .with_target(ralph_proto::HatId::new(from_hat));
+                        self.state.record_event(&resume_evt);
+                        rejected_diagnostics.push(resume_evt);
                         false
                     }
                 }

@@ -107,6 +107,26 @@ review wave `received_count < expected_dimensions` 时的两条路径：
 
 1. **Prepare**（拿确定性路径 + 五段式 skeleton）：
 
+   两种等效方式选一种即可：
+
+   **方式 A：从 `## ORCHESTRATOR CONTEXT` 读**（U3，enabled 时上下文自带）：
+
+   ```bash
+   # 解析 ORCHESTRATOR CONTEXT 块里的 hat_handoff_seq / hat_handoff_next_seq
+   # 提取脚本示例（伪）：
+   ITER=$(grep -E '^- current_step: ' prompt.txt | head -1 | awk '{print $2}' | tr -d 'step-')
+   # 实际上:loop 注入的 ORCHESTRATOR CONTEXT 含 hat_handoff_seq 直接用
+   ralph tools handoff prepare \
+     --from executor \
+     --to review-coordinator \
+     --topic work.done \
+     --iteration "$ITER" \
+     --current-seq "$HAT_HANDOFF_SEQ" \
+     --json
+   ```
+
+   **方式 B：从 env var 读**（U1,loop 子进程内 runner 注入）：
+
    ```bash
    ralph tools handoff prepare \
      --from executor \

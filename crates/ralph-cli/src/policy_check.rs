@@ -453,6 +453,17 @@ pub fn check_isolated_scope(
     })
 }
 
+/// 2026-06-18-005 U2 (R1): 读取 runner 注入的 loop 状态 env vars。
+///
+/// 仅当两个 env 同时存在且能解析为 `u32` 时返回 `Some`;否则返回
+/// `None`,caller 走降级路径(skip_seq_check=true,保留 path jail /
+/// R15 / 结构校验)。
+fn read_loop_state_from_env() -> Option<(u32, u32)> {
+    let iter = std::env::var("RALPH_LOOP_ITERATION").ok()?.parse().ok()?;
+    let seq = std::env::var("RALPH_HAT_HANDOFF_SEQ").ok()?.parse().ok()?;
+    Some((iter, seq))
+}
+
 /// 2026-06-18-002 plan U7: CLI-side mirror of the runtime hat-handoff
 /// gate. Wraps `ralph_core::hat_handoff::gate::evaluate_event` so the
 /// `ralph emit --policy-check` path and the runtime gate share the
@@ -470,6 +481,23 @@ pub fn check_hat_handoff_gate(
     topic: &str,
     payload_str: Option<&str>,
     config: &RalphConfig,
+) -> std::result::Result<(), ValidationError> {
+    // 2026-06-18-005 U2:env-only read happens in the thin wrapper so
+    // tests can call the inner helper with explicit env values
+    // (`forbid(unsafe_code)` 禁止在测试里 set_var / remove_var)。
+    let env_state = read_loop_state_from_env();
+    check_hat_handoff_gate_with_env(hat, topic, payload_str, config, env_state)
+}
+
+/// Inner helper, env value is an explicit parameter to keep
+/// unit tests env-free (workspace `forbid(unsafe_code)` blocks
+/// `set_var` / `remove_var` in tests).
+pub fn check_hat_handoff_gate_with_env(
+    hat: Option<&str>,
+    topic: &str,
+    payload_str: Option<&str>,
+    config: &RalphConfig,
+    env_state: Option<(u32, u32)>,
 ) -> std::result::Result<(), ValidationError> {
     use ralph_core::hat_handoff::gate::{self, GateDecision, GateInputs};
     use ralph_core::workflow_contract::HandoffIndex;
@@ -504,15 +532,25 @@ pub fn check_hat_handoff_gate(
     let workspace_root = &config.core.workspace_root;
 
     // 读 handoff 文件(如有)。不在 gate 里 panic。
+    // 2026-06-18-005 U6: tri-state FileContent,区分 missing / read_fail。
     let file_content = match handoff_path.as_deref() {
         Some(path) => match ralph_core::hat_handoff::allocator::resolve_jailed(
             workspace_root,
             path,
         ) {
-            Ok(abs) => std::fs::read_to_string(&abs).ok(),
-            Err(_) => None,
+            Ok(abs) => ralph_core::hat_handoff::gate::FileContent::from_read_result(
+                std::fs::read_to_string(&abs),
+            ),
+            Err(_) => ralph_core::hat_handoff::gate::FileContent::Missing,
         },
-        None => None,
+        None => ralph_core::hat_handoff::gate::FileContent::Missing,
+    };
+
+    // 2026-06-18-005 U2 (R1): env 存在时按真实值校验;缺失时降级
+    // (skip_seq_check=true),只保留 path jail / R15 / 结构校验。
+    let (iteration, current_seq, skip_seq_check) = match env_state {
+        Some((iter, seq)) => (iter, seq, false),
+        None => (1u32, 0u32, true),
     };
 
     let inputs = GateInputs {
@@ -521,14 +559,15 @@ pub fn check_hat_handoff_gate(
         index: &index,
         from_hat: hat_id,
         topic,
-        iteration: 1, // CLI 不在 loop 内,默认值;仅影响文件名 seq 校验。
-        current_seq: 0,
+        iteration,
+        current_seq,
         handoff_path: handoff_path.as_deref(),
         downstream_publishes: &downstream_publishes,
         repo_root: workspace_root.as_path(),
+        skip_seq_check,
     };
 
-    match gate::evaluate_event(&inputs, file_content.as_deref()) {
+    match gate::evaluate_event(&inputs, &file_content) {
         GateDecision::NotRequired | GateDecision::Accept { .. } => Ok(()),
         GateDecision::Reject { reason_code, message } => Err(ValidationError {
             payload_index: 0,
@@ -623,6 +662,129 @@ hats:
         let payload =
             r#"{"handoff_path":".ralph/agent/hat-handoff/1-1-plan_gate-executor.md"}"#;
         assert!(check_hat_handoff_gate(Some("plan-gate"), "work.ready", Some(payload), &cfg).is_ok());
+    }
+
+    // 2026-06-18-005 U2 (R1): 真实 loop 状态下的 seq/iter 校验。
+    // env vars 存在时,文件名与 env 不一致应被 reject;
+    // env vars 缺失时,降级为不校验 seq/iter(只保留 path/R15/结构)。
+    // 使用 check_hat_handoff_gate_with_env 直接传 env_state,避免
+    // set_var/remove_var(forbid(unsafe_code) 禁止在测试里用)。
+
+    #[test]
+    fn env_present_valid_seq_accepts() {
+        let yaml = isolated_two_hat_yaml("  hat_handoff:\n    enabled: true\n");
+        let mut cfg = parse_cfg(&yaml);
+        let dir = tempfile::tempdir().unwrap();
+        cfg.core.workspace_root = dir.path().to_path_buf();
+        // iteration=3, current_seq=1 期望文件名 seq=2
+        let abs = dir
+            .path()
+            .join(".ralph/agent/hat-handoff/3-2-plan_gate-executor.md");
+        fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        fs::write(
+            &abs,
+            "# Handoff: plan_gate → executor\n## context\nx\n## changed\ny\n## verify\nz\n## next\n**动作**: emit work.done after completion\n**阻塞**: 无\n## notes\n无\n",
+        )
+        .unwrap();
+        let payload =
+            r#"{"handoff_path":".ralph/agent/hat-handoff/3-2-plan_gate-executor.md"}"#;
+        assert!(check_hat_handoff_gate_with_env(
+            Some("plan-gate"),
+            "work.ready",
+            Some(payload),
+            &cfg,
+            Some((3, 1))
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn env_present_seq_mismatch_rejected() {
+        let yaml = isolated_two_hat_yaml("  hat_handoff:\n    enabled: true\n");
+        let mut cfg = parse_cfg(&yaml);
+        let dir = tempfile::tempdir().unwrap();
+        cfg.core.workspace_root = dir.path().to_path_buf();
+        // 期望 3-2,实际 3-3 → 拒收
+        let abs = dir
+            .path()
+            .join(".ralph/agent/hat-handoff/3-3-plan_gate-executor.md");
+        fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        fs::write(
+            &abs,
+            "# Handoff: plan_gate → executor\n## context\nx\n## changed\ny\n## verify\nz\n## next\n**动作**: emit work.done after completion\n**阻塞**: 无\n## notes\n无\n",
+        )
+        .unwrap();
+        let payload =
+            r#"{"handoff_path":".ralph/agent/hat-handoff/3-3-plan_gate-executor.md"}"#;
+        let err = check_hat_handoff_gate_with_env(
+            Some("plan-gate"),
+            "work.ready",
+            Some(payload),
+            &cfg,
+            Some((3, 1)),
+        )
+        .expect_err("expected Reject");
+        assert_eq!(err.reason_code, "hat_handoff_filename_mismatch");
+    }
+
+    #[test]
+    fn env_absent_skips_seq_check() {
+        let yaml = isolated_two_hat_yaml("  hat_handoff:\n    enabled: true\n");
+        let mut cfg = parse_cfg(&yaml);
+        let dir = tempfile::tempdir().unwrap();
+        cfg.core.workspace_root = dir.path().to_path_buf();
+        // env 缺失,即使文件名是 3-3(seq mismatch)也应通过
+        let abs = dir
+            .path()
+            .join(".ralph/agent/hat-handoff/3-3-plan_gate-executor.md");
+        fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        fs::write(
+            &abs,
+            "# Handoff: plan_gate → executor\n## context\nx\n## changed\ny\n## verify\nz\n## next\n**动作**: emit work.done after completion\n**阻塞**: 无\n## notes\n无\n",
+        )
+        .unwrap();
+        let payload =
+            r#"{"handoff_path":".ralph/agent/hat-handoff/3-3-plan_gate-executor.md"}"#;
+        assert!(
+            check_hat_handoff_gate_with_env(
+                Some("plan-gate"),
+                "work.ready",
+                Some(payload),
+                &cfg,
+                None
+            )
+            .is_ok(),
+            "env absent must skip seq/iter check"
+        );
+    }
+
+    #[test]
+    fn env_partial_falls_back_to_skip() {
+        // wrapper 行为: env_state 缺失即降级
+        let yaml = isolated_two_hat_yaml("  hat_handoff:\n    enabled: true\n");
+        let mut cfg = parse_cfg(&yaml);
+        let dir = tempfile::tempdir().unwrap();
+        cfg.core.workspace_root = dir.path().to_path_buf();
+        let abs = dir
+            .path()
+            .join(".ralph/agent/hat-handoff/3-3-plan_gate-executor.md");
+        fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        fs::write(
+            &abs,
+            "# Handoff: plan_gate → executor\n## context\nx\n## changed\ny\n## verify\nz\n## next\n**动作**: emit work.done after completion\n**阻塞**: 无\n## notes\n无\n",
+        )
+        .unwrap();
+        let payload =
+            r#"{"handoff_path":".ralph/agent/hat-handoff/3-3-plan_gate-executor.md"}"#;
+        // None 表示两个 env 都缺(模拟 partial 情形)— wrapper 都会用 None
+        assert!(check_hat_handoff_gate_with_env(
+            Some("plan-gate"),
+            "work.ready",
+            Some(payload),
+            &cfg,
+            None
+        )
+        .is_ok());
     }
 }
 

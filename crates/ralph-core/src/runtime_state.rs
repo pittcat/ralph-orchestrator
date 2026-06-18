@@ -48,6 +48,15 @@ pub struct RuntimeStateSnapshot {
     /// True when state projection is disabled for this run; the
     /// agent is told so it does not invent its own ledger.
     pub projection_disabled: bool,
+    /// 2026-06-18-005 U3 (R3): hat_handoff 已 accept 的 seq
+    /// (`LoopState.hat_handoff_seq`)。None when `hat_handoff.enabled=false`。
+    pub hat_handoff_seq: Option<u32>,
+    /// 2026-06-18-005 U3 (R3): 下一个应使用的 seq
+    /// (= `hat_handoff_seq + 1`)。None when disabled。
+    pub hat_handoff_next_seq: Option<u32>,
+    /// 2026-06-18-005 U3 (R3): handoff 文件目录,固定
+    /// `.ralph/agent/hat-handoff`。None when disabled。
+    pub hat_handoff_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,7 +78,15 @@ impl RuntimeStateSnapshot {
     /// the cache is empty (cold cache, no bootstrap), the function
     /// falls back to reading the canonical ledgers directly — the
     /// loop runs in a single process so disk reads are cheap.
-    pub fn build(projector: &StateProjector) -> Self {
+    ///
+    /// `hat_handoff_state` carries `(enabled, current_seq)` from
+    /// `LoopState` so the snapshot can expose the U3 handoff fields
+    /// without coupling `runtime_state` to the event loop. Pass
+    /// `None` to omit handoff fields (default / disabled / tests).
+    pub fn build(
+        projector: &StateProjector,
+        hat_handoff_state: Option<HandoffSnapshotState>,
+    ) -> Self {
         let ctx = projector.context();
         let (tasks, _) = if ctx.tasks_cache.is_empty() {
             // Cold cache; try disk before giving up. The progress
@@ -79,6 +96,7 @@ impl RuntimeStateSnapshot {
         } else {
             (ctx.tasks_cache.clone(), ProgressSnapshot::default())
         };
+        let handoff = hat_handoff_state.and_then(|h| h.into_fields());
         Self {
             plan_name: derive_plan_name(&tasks),
             current_step: ctx.progress_cache.current_step.clone(),
@@ -91,6 +109,9 @@ impl RuntimeStateSnapshot {
             //            one. Both blocks remain
             //            available side-by-side.
             projection_disabled: !ctx.config.enabled,
+            hat_handoff_seq: handoff.as_ref().map(|(s, _)| *s),
+            hat_handoff_next_seq: handoff.as_ref().map(|(_, n)| *n),
+            hat_handoff_dir: handoff.map(|_| HAT_HANDOFF_DEFAULT_DIR.to_string()),
         }
     }
 
@@ -107,6 +128,9 @@ impl RuntimeStateSnapshot {
             open_tasks: Vec::new(),
             wave: None,
             projection_disabled: true,
+            hat_handoff_seq: None,
+            hat_handoff_next_seq: None,
+            hat_handoff_dir: None,
         }
     }
 
@@ -167,10 +191,49 @@ impl RuntimeStateSnapshot {
                 wave.wave_id, wave.received, wave.total
             );
         }
+        // 2026-06-18-005 U3 (R3): hat_handoff 三行,enabled 时输出。
+        if let (Some(seq), Some(next), Some(dir)) = (
+            self.hat_handoff_seq,
+            self.hat_handoff_next_seq,
+            self.hat_handoff_dir.as_ref(),
+        ) {
+            let _ = writeln!(buf, "- hat_handoff_seq: {seq}");
+            let _ = writeln!(buf, "- hat_handoff_next_seq: {next}");
+            let _ = writeln!(buf, "- hat_handoff_dir: {dir}");
+        }
         let _ = writeln!(buf);
         buf
     }
 }
+
+/// 2026-06-18-005 U3 (R3): handoff 状态输入参数。
+///
+/// caller(`EventLoop::prepend_orchestrator_context`)负责把
+/// `LoopState.hat_handoff_seq` 与 `event_loop.hat_handoff.enabled`
+/// 折叠成这个轻量结构,避免 `runtime_state` 反向依赖 event_loop。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandoffSnapshotState {
+    pub enabled: bool,
+    pub current_seq: u32,
+}
+
+impl HandoffSnapshotState {
+    /// `None` 表示 handoff 字段完全不输出(enabled=false)。
+    /// `Some((current_seq, current_seq + 1))` 表示输出三行。
+    fn into_fields(self) -> Option<(u32, u32)> {
+        if self.enabled {
+            Some((self.current_seq, self.current_seq + 1))
+        } else {
+            None
+        }
+    }
+}
+
+/// 2026-06-18-005 U3 (R3): handoff 文件目录常量,SSOT 之一。
+///
+/// 与 `hat_handoff::allocator::DEFAULT_HANDOFF_DIR` 同值,这里
+/// 复制一份常量字符串避免 runtime_state 依赖 allocator(防止循环依赖)。
+pub const HAT_HANDOFF_DEFAULT_DIR: &str = ".ralph/agent/hat-handoff";
 
 fn derive_plan_name(tasks: &[Task]) -> Option<String> {
     // Phase 1 heuristic: the projector stamps every task with a
@@ -233,6 +296,9 @@ pub fn snapshot_from_disk(workspace: &Path) -> RuntimeStateSnapshot {
         open_tasks: open_task_summaries(&tasks),
         wave: None,
         projection_disabled: true,
+        hat_handoff_seq: None,
+        hat_handoff_next_seq: None,
+        hat_handoff_dir: None,
     }
 }
 
@@ -262,7 +328,7 @@ mod tests {
         let tmp = workspace();
         let cfg = StateProjectionConfig::default();
         let proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
-        let snap = RuntimeStateSnapshot::build(&proj);
+        let snap = RuntimeStateSnapshot::build(&proj, None);
         // projection_disabled reflects the config (default false
         // because config.enabled defaults to false → !false = true
         // → we mark the snapshot as "disabled" so the agent sees
@@ -298,6 +364,9 @@ mod tests {
             }],
             wave: None,
             projection_disabled: false,
+            hat_handoff_seq: None,
+            hat_handoff_next_seq: None,
+            hat_handoff_dir: None,
         };
         let block = snap.to_prompt_block();
         assert!(block.starts_with(ORCHESTRATOR_CONTEXT_HEADING));
@@ -373,5 +442,69 @@ mod tests {
             ..RuntimeStateSnapshot::default()
         };
         assert_eq!(snap.plan_name.as_deref(), Some("trusted-plan"));
+    }
+
+    // 2026-06-18-005 U3 (R3): hat_handoff 三行在 enabled 时输出,
+    // disabled 时不出现。
+
+    #[test]
+    fn handoff_enabled_emits_three_lines() {
+        let tmp = workspace();
+        let cfg = StateProjectionConfig::default();
+        let proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        let snap = RuntimeStateSnapshot::build(
+            &proj,
+            Some(HandoffSnapshotState {
+                enabled: true,
+                current_seq: 1,
+            }),
+        );
+        assert_eq!(snap.hat_handoff_seq, Some(1));
+        assert_eq!(snap.hat_handoff_next_seq, Some(2));
+        assert_eq!(snap.hat_handoff_dir.as_deref(), Some(".ralph/agent/hat-handoff"));
+        let block = snap.to_prompt_block();
+        assert!(block.contains("hat_handoff_seq: 1"));
+        assert!(block.contains("hat_handoff_next_seq: 2"));
+        assert!(block.contains("hat_handoff_dir: .ralph/agent/hat-handoff"));
+    }
+
+    #[test]
+    fn handoff_disabled_omits_three_lines() {
+        let tmp = workspace();
+        let cfg = StateProjectionConfig::default();
+        let proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        let snap = RuntimeStateSnapshot::build(
+            &proj,
+            Some(HandoffSnapshotState {
+                enabled: false,
+                current_seq: 0,
+            }),
+        );
+        assert_eq!(snap.hat_handoff_seq, None);
+        assert_eq!(snap.hat_handoff_next_seq, None);
+        assert_eq!(snap.hat_handoff_dir, None);
+        let block = snap.to_prompt_block();
+        assert!(!block.contains("hat_handoff_seq"));
+        assert!(!block.contains("hat_handoff_next_seq"));
+        assert!(!block.contains("hat_handoff_dir"));
+    }
+
+    #[test]
+    fn handoff_state_none_omits_three_lines() {
+        let tmp = workspace();
+        let cfg = StateProjectionConfig::default();
+        let proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        let snap = RuntimeStateSnapshot::build(&proj, None);
+        assert!(snap.hat_handoff_seq.is_none());
+        let block = snap.to_prompt_block();
+        assert!(!block.contains("hat_handoff_seq"));
+    }
+
+    #[test]
+    fn handoff_disabled_stub_omits_fields() {
+        let snap = RuntimeStateSnapshot::disabled_stub();
+        assert!(snap.hat_handoff_seq.is_none());
+        assert!(snap.hat_handoff_next_seq.is_none());
+        assert!(snap.hat_handoff_dir.is_none());
     }
 }

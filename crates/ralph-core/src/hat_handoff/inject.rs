@@ -1,6 +1,6 @@
 //! 2026-06-18-002 plan U6: `## HAT HANDOFF` 注入块(KTD-16 fail-closed)。
 //!
-//! 实际注入逻辑由 `crate::event_loop::EventLoop::prepend_hat_handoff`
+//! 实际注入逻辑由 `crate::event_loop::EventLoop::prepend_hat_handoff_from_pending`
 //! 实现(需要访问私有的 `bus` / `config`)。本模块仅暴露:
 //! - 纯函数 `format_block` / `truncate_preserving_next`(测试覆盖)
 //! - `build_block`(供 caller 在简单场景下使用)
