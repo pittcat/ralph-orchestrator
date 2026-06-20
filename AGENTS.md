@@ -239,6 +239,27 @@ rtk git add . && rtk git commit -m "msg" && rtk git push
    - grep -n "keyword" <file> | head -50
 
 5. Every external command that may block must have timeout.
+
+6. Background processes must be bounded. `cmd &` without a kill switch leaks
+   when the parent shell exits abnormally (Ctrl-C, timeout, panic, parent
+   kill). On 2026-06-20, fourteen `yes > /dev/null` processes survived a
+   debug session and drove the box to 100% CPU for hours; `pkill -f
+   "yes > /dev/null"` did not match because `>` was interpreted as a shell
+   redirect, leaving the pattern as a literal substring that none of the
+   processes actually carried in their argv.
+   - For CPU/IO stress during debugging, use `timeout` to bound the
+     lifetime: `timeout 30s yes > /dev/null`. The `timeout` binary
+     reaps the child whether you Ctrl-C the parent or the deadline fires.
+   - To clean up leaked `yes` (or any process whose argv you cannot
+     predict), use `pkill -9 -x yes`. The `-x` flag matches the process
+     name exactly, bypassing the regex / substring trap.
+   - When wrapping a script that itself spawns N workers, give the
+     script a `trap 'pkill -9 -x yes 2>/dev/null' EXIT INT TERM` and a
+     `timeout` outer wrapper, so every exit path (clean, signal,
+     parent-kill) reaps the children.
+   - Treat any backgrounded CPU/disk/network loop (`yes`, `stress-ng`,
+     `dd if=/dev/zero`, `nc -l`, `redis-server --daemonize yes`,
+     `python3 -m http.server`) as a leak risk by default.
 <!-- ralph:end hang-prevention -->
 
 OUTPUT STYLE: concise
