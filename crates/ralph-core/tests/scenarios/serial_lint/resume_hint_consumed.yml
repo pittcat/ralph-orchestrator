@@ -1,0 +1,76 @@
+# Plan 2026-06-20-001 R7-4 / U4b / KTD-8: lint failure hint
+# consumption. Verifies the end-to-end path:
+#
+#   1. Hat emits an event missing a required_field
+#   2. Engine gate rejects (FAIL-CLOSED) — event never lands
+#      on the bus; `state.pending_lint_resume` is set
+#   3. Hat retries with a correctly-shaped payload
+#   4. Next `build_prompt` injects `## LINT MIRROR` +
+#      `## LINT RESUME REQUIRED` (R12)
+#   5. After consumption, the hint is cleared (consume-on-use)
+#
+# Review P0 #1 + #4 fix: this scenario exercises the in-loop
+# path (the cross-process CLI-to-loop file handoff was
+# removed). The hint flows entirely through
+# `engine_required_field_filter` → `state.pending_lint_resume`
+# → `inject_pending_lint_resume`.
+name: serial_lint_resume_hint_consumed
+description: "R7-4: engine gate rejects missing-required-field event, hint is consumed by next build_prompt, then cleared"
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 5
+  hats:
+    executor:
+      subscribes_to:
+        - task.start
+      publishes:
+        - work.done
+  event_loop:
+    execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
+    starting_event: "task.start"
+    hat_handoff:
+      enabled: true
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        work.done:
+          required_fields:
+            - plan_name
+            - step
+            - commit_count
+
+mock_responses:
+  # Iteration 1: emit work.done with MISSING required_fields
+  # (no plan_name, no step). Engine gate rejects — the event
+  # is dropped, pending_lint_resume is seeded with the
+  # PayloadError class hint.
+  - text: |
+      <event topic="work.done">
+      commit_count: 1
+      </event>
+    hat: executor
+  # Iteration 2: emit work.done with ALL required_fields
+  # present. Engine gate accepts. The next build_prompt must
+  # inject the resume blocks (consume-on-use). After the
+  # prompt is consumed, the hint slot is empty.
+  - text: |
+      <event topic="work.done">
+      plan_name: "feat-x"
+      step: "step-1"
+      commit_count: 1
+      </event>
+    hat: executor
+
+expected:
+  iterations: 2
+  completion: false
+  prompt_contains:
+    - hat: executor
+      substrings:
+        - "## LINT MIRROR"
+        - "## LINT RESUME REQUIRED"
+        - "missing required fields: plan_name,step"

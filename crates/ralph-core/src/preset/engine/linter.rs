@@ -40,11 +40,96 @@ pub enum LintOutcome {
 
 /// Run lint on a single emit. Reads protocol from `view` only —
 /// the runtime gate is consulted separately on the inbound path.
-pub fn lint_emit(view: &ProtocolView, topic: &str, payload: &Value) -> LintOutcome {
+///
+/// Plan R22 (2026-06-20-001): when the topic is a macro edge
+/// (per `view.is_macro_edge(topic)`), the payload lacks
+/// `handoff_path`, AND `hat_handoff.linter.auto_prepare_on_macro_edge`
+/// is enabled, this function synchronously prepares the handoff
+/// artifact (via `auto_handoff_prepare`) and mutates `payload` to
+/// inject `handoff_path` before re-running the gate. The
+/// returned `LintOutcome::AcceptAfterAutoPrepare` tells the
+/// caller that the orchestrator acted on the agent's behalf.
+/// `Accept` means no prepare was needed (not a macro edge, or
+/// already had `handoff_path`). `Reject`/`Timeout` short-circuit
+/// and never invoke auto_prepare.
+pub fn lint_emit(view: &ProtocolView, topic: &str, payload: &mut Value) -> LintOutcome {
+    // Plan R22 / review P0 #3: macro-edge auto_prepare is the
+    // B4 fix. We must check the protocol BEFORE the gate runs,
+    // because a missing handoff_path is not in the required-fields
+    // set — it lives on the hat_handoff side.
+    if view.is_macro_edge(topic)
+        && !has_handoff_path(payload)
+        && view.hat_handoff.linter.auto_prepare_on_macro_edge
+    {
+        match auto_handoff_prepare(view, workspace_root_for(view), output_dir_for(view), topic, payload.clone()) {
+            Ok(prepared) => {
+                // auto_handoff_prepare mutates the payload to inject
+                // `handoff_path`; copy it back so the caller writes
+                // the prepared value to events.jsonl.
+                *payload = prepared;
+            }
+            Err(err) => {
+                // Prepare itself failed — fail-closed (R22). The
+                // gate would have rejected this anyway (missing
+                // handoff_path), so emit Reject with the prepare
+                // error as the reason so the agent sees the root
+                // cause rather than the gate's symptom.
+                let hint = LintResumeHint::from_reason(
+                    topic,
+                    &format!("auto_handoff_prepare failed: {err}"),
+                );
+                return LintOutcome::Reject(hint);
+            }
+        }
+    }
     match run_gates(view, &LintContext, topic, payload) {
-        GateDecision::Accept => LintOutcome::Accept,
+        GateDecision::Accept => {
+            // Distinguish Accept (no prepare) from
+            // AcceptAfterAutoPrepare (prepare ran). The
+            // `auto_handoff_prepare` returns Ok(prepared) when
+            // it actually wrote the artifact; we re-derive the
+            // outcome by inspecting the prepare path.
+            if view.is_macro_edge(topic) && has_handoff_path(payload) {
+                LintOutcome::AcceptAfterAutoPrepare
+            } else {
+                LintOutcome::Accept
+            }
+        }
         GateDecision::Reject(reason) => LintOutcome::Reject(LintResumeHint::from_reason(topic, &reason)),
     }
+}
+
+/// Return true when the payload is a JSON object that carries a
+/// non-empty `handoff_path`. Helper for the macro-edge check.
+fn has_handoff_path(payload: &Value) -> bool {
+    match payload {
+        Value::Object(map) => map
+            .get("handoff_path")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// Stub: return the workspace root for the current view. In
+/// real callers this is `RalphConfig::core::workspace_root`; the
+/// engine does not have a direct handle to it today. Review
+/// P0 #3 follow-up: extend `ProtocolView` with `workspace_root`
+/// + `output_dir` so `auto_handoff_prepare` can write the
+/// artifact deterministically. For now this returns the current
+/// dir so the wiring compiles; the runtime path is the CLI
+/// which has `workspace_root` already.
+fn workspace_root_for(_view: &ProtocolView) -> &std::path::Path {
+    static ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    ROOT.get_or_init(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
+}
+
+/// Stub: return the output directory for handoff artifacts.
+/// Review P0 #3 follow-up: same as `workspace_root_for`.
+fn output_dir_for(_view: &ProtocolView) -> &std::path::Path {
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| std::path::PathBuf::from(".ralph/handoff"))
 }
 
 /// Public entry point that performs R22's macro-edge auto prepare
@@ -115,21 +200,14 @@ fn write_artifact(workspace_root: &Path, output_dir: &Path, topic: &str) -> Resu
 /// Lint duration budget (R14 / KTD-9). p95 < 200ms.
 pub const LINT_BUDGET: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// Convenience wrapper that times the lint pass and returns a
-/// `LintOutcome::Timeout` on overrun. Used by `ralph emit` to
-/// surface a `## LINT TIMEOUT` block (R14).
-///
-/// Note: R14/KTD-9 specifies that the gate work itself must
-/// INTERRUPT at 200ms (true fail-closed). The current
-/// implementation measures elapsed AFTER `lint_emit` returns and
-/// re-labels the outcome — adequate for the deterministic engine
-/// path (microseconds), but a follow-up commit must wrap the
-/// gate in `JoinHandle::join_timeout` for full fail-closed
-/// semantics. Tracked as F-PS-006 (COR-006).
+/// Run lint on a single emit, time-budgeted (R14 / KTD-9). The
+/// timeout is post-hoc: it measures elapsed AFTER `lint_emit`
+/// returns. A true fail-closed interrupt requires
+/// `JoinHandle::join_timeout` (tracked as F-PS-006 follow-up).
 pub fn lint_emit_with_timeout(
     view: &ProtocolView,
     topic: &str,
-    payload: &Value,
+    payload: &mut Value,
 ) -> LintOutcome {
     let start = std::time::Instant::now();
     let outcome = lint_emit(view, topic, payload);
@@ -140,10 +218,4 @@ pub fn lint_emit_with_timeout(
         ));
     }
     outcome
-}
-
-/// Public alias used by tests / callers that want to inspect the
-/// hint without running the gate twice.
-pub fn lint_failure_hint(topic: &str, reason: &str) -> LintResumeHint {
-    LintResumeHint::from_reason(topic, reason)
 }

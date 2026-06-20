@@ -259,8 +259,19 @@ fn handle_lint_outcome(
             Ok(payload)
         }
         LintOutcome::Reject(hint) => {
-            write_pending_lint_resume(workspace_root, topic, &hint)
-                .context("write .ralph/pending_lint_resume.json")?;
+            // R9: lint failures do NOT write recovery.jsonl.
+            // Plan 2026-06-20-001 review P0 #2: the cross-process
+            // `pending_lint_resume.json` hand-off was broken
+            // (write-only, no reader). The function is now a
+            // no-op stub (see `write_pending_lint_resume`). The
+            // in-loop feedback path lives in
+            // `engine_required_field_filter` which DOES populate
+            // `state.pending_lint_resume` so the agent's next
+            // `build_prompt` sees `## LINT RESUME REQUIRED`. The
+            // CLI emit failure is a fast-feedback channel: print
+            // the blocks, exit non-zero, the agent retries
+            // through the same in-loop path.
+            let _ = write_pending_lint_resume(workspace_root, topic, &hint);
             print_lint_failure_blocks(view, &hint);
             Err(lint_failure_exit_code(&hint))
         }
@@ -273,8 +284,7 @@ fn handle_lint_outcome(
             // the source hat. Operators can correlate with the
             // `reason` string.
             let hint = LintResumeHint::from_reason(topic, &reason);
-            write_pending_lint_resume(workspace_root, topic, &hint)
-                .context("write .ralph/pending_lint_resume.json on lint timeout")?;
+            let _ = write_pending_lint_resume(workspace_root, topic, &hint);
             eprintln!(
                 "## LINT TIMEOUT\n\
                  topic: `{topic}`\n\
@@ -292,30 +302,28 @@ fn handle_lint_outcome(
 }
 
 /// Persist the lint hint so the loop's next `build_prompt` call
-/// can inject `## LINT RESUME REQUIRED` (R13 / KTD-8). The file is
-/// the cross-process handoff between the CLI emit and the loop's
-/// in-memory `LoopState.pending_lint_resume`. Overwriting the file
-/// is intentional — a fresher lint failure supersedes the stale
-/// hint, matching the loop's single-slot semantics.
+/// CLI emit does NOT persist the lint hint to disk (reviewer P0
+/// finding #2 — cross-process hand-off was broken end-to-end).
+/// The hint now flows purely through the in-loop
+/// `engine_required_field_filter` path: when `ralph emit` rejects
+/// an event, the hint is printed to stderr and the process exits
+/// non-zero. The agent that retries gets a fresh prompt without
+/// any stale resume state because the next `ralph emit` call
+/// re-runs the engine gate from scratch. Plan R13 / KTD-8 is
+/// satisfied by the in-loop path (`event_loop/mod.rs`); the CLI
+/// is a fast-feedback channel only.
 ///
-/// The file lives at `<workspace_root>/.ralph/pending_lint_resume.json`.
-/// `loop_runner` reads it on loop startup (and on each iteration
-/// in U4b) to seed the LoopState.
+/// If a future feature needs cross-process resume state, route
+/// the file through a dedicated `PendingLintResumeStore` type
+/// that owns both read and write — do NOT reintroduce the
+/// dangling write here.
+#[allow(dead_code)]
 fn write_pending_lint_resume(
-    workspace_root: &Path,
-    topic: &str,
-    hint: &LintResumeHint,
+    _workspace_root: &Path,
+    _topic: &str,
+    _hint: &LintResumeHint,
 ) -> std::io::Result<()> {
-    let dir = workspace_root.join(".ralph");
-    fs::create_dir_all(&dir)?;
-    let payload = serde_json::json!({
-        "topic": topic,
-        "class": hint.class,
-        "target": hint.target,
-        "reason": hint.reason,
-        "ts": chrono::Utc::now().to_rfc3339(),
-    });
-    fs::write(dir.join("pending_lint_resume.json"), payload.to_string())
+    Ok(())
 }
 
 /// Print `## LINT FAILED` + `## LINT MIRROR` + `## LINT RESUME
@@ -946,8 +954,15 @@ fn emit_command_with_root_and_hats(
     // does not replace).
     let payload_value = if should_run_lint(config.as_ref()) {
         let view = ProtocolView::from_event_loop(&config.as_ref().unwrap().event_loop);
-        let outcome = lint_emit_with_timeout(&view, &args.topic, &payload_value);
-        match handle_lint_outcome(outcome, &workspace_root, &view, &args.topic, payload_value) {
+        // Plan R22: lint_emit now takes &mut Value so the
+        // orchestrator can synchronously inject `handoff_path`
+        // for macro edges lacking one. We pass the payload by
+        // mutable reference and let lint_emit either leave it
+        // alone (Accept) or mutate it (AcceptAfterAutoPrepare)
+        // before the gate.
+        let mut payload_mut = payload_value;
+        let outcome = lint_emit_with_timeout(&view, &args.topic, &mut payload_mut);
+        match handle_lint_outcome(outcome, &workspace_root, &view, &args.topic, payload_mut) {
             Ok(v) => v,
             Err(e) => return Err(e),
         }

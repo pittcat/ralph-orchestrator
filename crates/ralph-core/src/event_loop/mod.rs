@@ -5945,15 +5945,24 @@ impl EventLoop {
     /// d623c09. The rejection reason is logged via `tracing::warn`
     /// so operators have the same audit trail they get from
     /// policy-rejected events.
+    ///
+    /// 2026-06-20-001 review P0 #1 + #4: the filter is now
+    /// `&mut self` and writes the rejection to
+    /// `state.pending_lint_resume` so the agent's next
+    /// `build_prompt` sees `## LINT RESUME REQUIRED`. The
+    /// `MalformedLine` is the cross-bookkeeping signal; the
+    /// `pending_lint_resume` is the agent-feedback signal. Both
+    /// must fire for the rejection to be observable.
     fn engine_required_field_filter(
-        &self,
+        &mut self,
         mut result: crate::event_reader::ParseResult,
     ) -> crate::event_reader::ParseResult {
         use crate::event_reader::MalformedLine;
-        use crate::preset::engine::{GateDecision, LintContext, run_gates};
+        use crate::preset::engine::{GateDecision, LintContext, LintResumeHint, run_gates};
         let view = ProtocolView::from_event_loop(&self.config.event_loop);
         let ctx = LintContext;
         let mut rejected = 0usize;
+        let mut last_rejection: Option<(String, String)> = None;
         let mut kept = Vec::with_capacity(result.events.len());
         for event in result.events.drain(..) {
             let topic = event.topic.to_string();
@@ -5989,6 +5998,14 @@ impl EventLoop {
                         &raw,
                         format!("engine_rejected: {reason}"),
                     ));
+                    // Review P0 #4: the agent's next prompt must
+                    // see `## LINT RESUME REQUIRED` for this
+                    // rejection. We accumulate the most recent
+                    // rejection; a batch with multiple rejections
+                    // surfaces the LAST one to the agent (the
+                    // CLI can iterate over `recent_rejection_digest`
+                    // separately).
+                    last_rejection = Some((topic.clone(), reason));
                 }
             }
         }
@@ -5999,6 +6016,17 @@ impl EventLoop {
                 kept = result.events.len(),
                 "engine gate filter result"
             );
+            // Review P0 #4: seed the in-memory resume hint so
+            // `inject_pending_lint_resume` injects the failure
+            // block on the next `build_prompt`. This is the
+            // single source of truth for the lint resume path;
+            // the CLI emit file-write (now a no-op stub) is no
+            // longer part of the contract.
+            if let Some((topic, reason)) = last_rejection {
+                self.state.pending_lint_resume = Some(LintResumeHint::from_reason(
+                    &topic, &reason,
+                ));
+            }
         }
         result
     }
@@ -7133,27 +7161,6 @@ impl EventLoop {
             crate::payload_contract::PayloadContractViolation,
         > = None;
 
-        // Handle malformed lines with backpressure
-        for malformed in &result.malformed {
-            let payload = format!(
-                "Line {}: {}\nContent: {}",
-                malformed.line_number, malformed.error, &malformed.content
-            );
-            let event = Event::new("event.malformed", &payload);
-            self.bus.publish(event);
-            self.state.consecutive_malformed_events += 1;
-            warn!(
-                line = malformed.line_number,
-                consecutive = self.state.consecutive_malformed_events,
-                "Malformed event line detected"
-            );
-        }
-
-        // Reset counter when valid events are parsed
-        if !result.events.is_empty() {
-            self.state.consecutive_malformed_events = 0;
-        }
-
         // U2 (plan 2026-06-20-001, R15 / KTD-10): engine-backed
         // fail-fast gate. Runs *before* d623c09's policy / scope
         // gates so the loop and the CLI emit share the SAME
@@ -7161,6 +7168,25 @@ impl EventLoop {
         // Rust, per KTD-10). The engine uses the same
         // `ProtocolView` the linter reads, so the two layers
         // cannot drift.
+        //
+        // 2026-06-20-001 review P0 #1: the engine filter MUST
+        // run *before* the malformed-handling loop below, so
+        // engine-rejected events are converted into
+        // `MalformedLine` entries that the existing
+        // bookkeeping loop (publish event.malformed + increment
+        // consecutive_malformed_events) actually observes. The
+        // previous placement ran the filter AFTER the
+        // bookkeeping loop, so engine rejections were silently
+        // dropped without any bus signal.
+        //
+        // 2026-06-20-001 review P0 #4: the filter also seeds
+        // `state.pending_lint_resume` (via the helper
+        // `engine_required_field_filter`) so the agent's next
+        // `build_prompt` sees `## LINT RESUME REQUIRED`. The
+        // `state.pending_lint_resume` slot is the single source
+        // of truth for the lint resume path; the CLI's
+        // `pending_lint_resume.json` write was a no-op stub as
+        // of the same review.
         //
         // Scope of U2 phase 1 (this commit): the engine gate
         // ONLY short-circuits on `required_fields` missing —
@@ -7183,6 +7209,32 @@ impl EventLoop {
         } else {
             result
         };
+
+        // Handle malformed lines with backpressure. The engine
+        // gate above (review P0 #1) appends `MalformedLine`
+        // entries with `line_number=0` for engine rejections;
+        // this loop publishes them as `event.malformed` and
+        // increments `consecutive_malformed_events` so the
+        // existing termination backstop still fires.
+        for malformed in &result.malformed {
+            let payload = format!(
+                "Line {}: {}\nContent: {}",
+                malformed.line_number, malformed.error, &malformed.content
+            );
+            let event = Event::new("event.malformed", &payload);
+            self.bus.publish(event);
+            self.state.consecutive_malformed_events += 1;
+            warn!(
+                line = malformed.line_number,
+                consecutive = self.state.consecutive_malformed_events,
+                "Malformed event line detected"
+            );
+        }
+
+        // Reset counter when valid events are parsed
+        if !result.events.is_empty() {
+            self.state.consecutive_malformed_events = 0;
+        }
 
         if result.events.is_empty() && result.malformed.is_empty() {
             // 2026-06-16-001 U5: a turn with no events is the

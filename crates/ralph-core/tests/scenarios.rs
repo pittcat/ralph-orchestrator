@@ -593,6 +593,44 @@ fn test_hat_handoff_work_done_rejected_blocks_projection() {
     run_workflow_guard_scenario(yaml);
 }
 
+// 2026-06-20-001 plan U6: serial-lint BDD scenarios.
+//
+// R7-4: engine gate rejection seeds `pending_lint_resume`; the
+// next `build_prompt` injects `## LINT MIRROR` + `## LINT RESUME
+// REQUIRED`. This pins the in-loop feedback path (review P0 #1
+// + #4 fix).
+#[test]
+fn test_serial_lint_resume_hint_consumed() {
+    let yaml = load_scenario(
+        "tests/scenarios/serial_lint/resume_hint_consumed.yml",
+    );
+    run_scenario(yaml);
+}
+
+// R7-6 / R22 / B4: macro edge lacking `handoff_path` triggers
+// `auto_handoff_prepare` — the orchestrator writes the artifact
+// and injects the path. Pins the previously-dead
+// `AcceptAfterAutoPrepare` branch (review P0 #3 fix).
+#[test]
+fn test_serial_lint_handoff_auto_prepare() {
+    let yaml = load_scenario(
+        "tests/scenarios/serial_lint/handoff_auto_prepare.yml",
+    );
+    run_scenario(yaml);
+}
+
+// R14 / KTD-9: lint timeout wrapper fails closed. This scenario
+// exercises the happy path (under-budget). The actual fail-closed
+// interruption requires JoinHandle::join_timeout replacement,
+// tracked as F-PS-006 follow-up.
+#[test]
+fn test_serial_lint_timeout_fail_closed() {
+    let yaml = load_scenario(
+        "tests/scenarios/serial_lint/timeout_fail_closed.yml",
+    );
+    run_scenario(yaml);
+}
+
 #[test]
 fn test_plan_gate_dual_publish_inverse_rejected() {
     // 2026-06-17-002 U3 regression: the dual-publish carve-out is an

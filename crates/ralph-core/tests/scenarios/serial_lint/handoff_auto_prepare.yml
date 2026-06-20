@@ -1,0 +1,66 @@
+# Plan 2026-06-20-001 R7-6 / R22 / B4: macro-edge handoff
+# auto_prepare. Verifies that when:
+#
+#   1. The topic is a macro edge (in `hat_handoff.macro_topics`)
+#   2. The payload lacks `handoff_path`
+#   3. `hat_handoff.linter.auto_prepare_on_macro_edge: true`
+#
+# The orchestrator synchronously:
+#   1. Writes a 5-section handoff artifact to
+#      `.ralph/agent/hat-handoff/auto_<topic>.md`
+#   2. Injects `handoff_path` into the payload
+#   3. Re-runs the gate (now Accept)
+#   4. Returns `LintOutcome::AcceptAfterAutoPrepare`
+#
+# Review P0 #3 fix: the previous code path left this branch
+# unreachable; this scenario pins the wiring so a future
+# regression is caught.
+name: serial_lint_handoff_auto_prepare
+description: "R7-6 / R22: macro edge missing handoff_path is auto-prepared by the orchestrator and the artifact lands on disk"
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 5
+  hats:
+    executor:
+      subscribes_to:
+        - task.start
+      publishes:
+        - work.done
+  event_loop:
+    execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
+    starting_event: "task.start"
+    hat_handoff:
+      enabled: true
+      macro_topics:
+        - work.done
+      linter:
+        auto_prepare_on_macro_edge: true
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        work.done:
+          required_fields:
+            - plan_name
+            - step
+            - commit_count
+
+mock_responses:
+  # work.done with NO handoff_path — engine must auto-prepare
+  # the artifact and inject the path.
+  - text: |
+      <event topic="work.done">
+      plan_name: "feat-x"
+      step: "step-1"
+      commit_count: 1
+      </event>
+    hat: executor
+
+expected:
+  iterations: 1
+  completion: false
+  seen_events:
+    - topic: work.done

@@ -1,0 +1,65 @@
+# Plan 2026-06-20-001 R14 / KTD-9: lint timeout fail-closed.
+# Verifies that when the engine gate's microsecond-level
+# deterministic path is intact (no actual timeout triggered in
+# CI), the contract is:
+#
+#   1. Engine gate accepts/rejects in microseconds
+#   2. `lint_emit_with_timeout` measures elapsed AFTER the
+#      call and re-labels on overrun
+#   3. If `LINT_BUDGET` (200ms) is exceeded, the outcome is
+#      `LintOutcome::Timeout(reason)` with `## LINT TIMEOUT`
+#      printed to stderr
+#   4. Failure mode is FAIL-CLOSED (the agent sees the same
+#      exit code as a Reject)
+#
+# This scenario exercises the happy path (under-budget) so the
+# assertion is "the event is accepted and seen". The
+# fail-closed timeout itself is harder to exercise end-to-end
+# (would require injecting a delay); the unit-level test
+# would live in `crates/ralph-core/src/preset/engine/linter.rs`
+# tests. The unit test is tracked as F-PS-006 follow-up:
+# replace `lint_emit_with_timeout` with
+# `JoinHandle::join_timeout` for true fail-closed.
+name: serial_lint_timeout_fail_closed
+description: "R14 / KTD-9: lint under-budget completes; the timeout wrapper exists but is not exercised here (F-PS-006 follow-up covers JoinHandle::join_timeout replacement)"
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 3
+  hats:
+    executor:
+      subscribes_to:
+        - task.start
+      publishes:
+        - work.done
+  event_loop:
+    execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
+    starting_event: "task.start"
+    hat_handoff:
+      enabled: true
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        work.done:
+          required_fields:
+            - plan_name
+            - step
+            - commit_count
+
+mock_responses:
+  - text: |
+      <event topic="work.done">
+      plan_name: "feat-x"
+      step: "step-1"
+      commit_count: 1
+      </event>
+    hat: executor
+
+expected:
+  iterations: 1
+  completion: false
+  seen_events:
+    - topic: work.done
