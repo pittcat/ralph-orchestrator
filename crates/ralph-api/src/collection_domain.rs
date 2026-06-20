@@ -345,12 +345,17 @@ impl CollectionDomain {
 
         let pid = child.id();
 
-        // Wait briefly to check if the process died immediately. A single
-        // sleep can miss fast wrapper processes on busy CI machines, so poll
-        // for a short bounded window before treating the child as a live loop.
+        // Wait briefly to check if the process died immediately. The previous
+        // 2-second window was tight enough to be defeated by slow interpreter
+        // cold starts on macOS (a `/bin/sh` wrapper with dyld cache miss can
+        // legitimately take 1-2s to even reach `echo ...; exit 1`), which
+        // produced flaky `run_surfaces_stderr_from_failed_spawn` failures in
+        // workspace-wide `cargo nextest run` runs. A 5-second window with a
+        // 25ms cadence leaves a 200x headroom for cold-start wrapper scripts
+        // while still rejecting wrappers that fail to launch at all.
         let mut child = child;
         let startup_status = {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             loop {
                 match child.try_wait() {
                     Ok(Some(status)) => break Ok(Some(status)),
