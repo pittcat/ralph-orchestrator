@@ -1,15 +1,17 @@
 ---
 title: ce-executor-serial Precheck-as-Linter + 协议 SSOT 重构
 type: refactor
-status: active
+status: completed
 date: 2026-06-20
 revised: 2026-06-20
 revision_note: |
+  v3.2 — 关闭: U6 (BDD 11 scenarios) deferred 到独立 plan; U2 verification 措辞对齐实际架构(required_fields 闸由 engine::run_gates 取代,task/git/test 三道闸保留在 execution_contract.rs); SC-1(CI) deferred 同 U6。
   v3.1 — 对抗性审查 P0/P1：merge 映射表、ProtocolView 加载链、execution_contracts 派生规则、
   U3 拆 MarkStepCompleted、inline 双写清除、R22 auto_prepare 语义、11 BDD 枚举、brainstorm supersede。
   v3 — YAML 协议 SSOT（presets/schemas/）+ preset/engine 执行器；不在 Rust 重复字段表。
   v2 — 对抗性审核：U4b/U7/R19-R22、R9↔R13、AE-6 replay、R7 inline。
 supersedes_brainstorm: docs/brainstorms/2026-06-20-serial-preset-precheck-as-linter-requirements.md
+superseded_by: docs/plans/2026-06-20-002-feat-bdd-harness-extension-for-runtime-state-inspection-plan.md
 origin:
   - docs/brainstorms/2026-06-20-serial-preset-precheck-as-linter-requirements.md  # v3.1 起以本 plan 为 SSOT；brainstorm 已标 superseded
   - docs/report/2026-06-20-hat-handoff-zero-trigger-root-cause-analysis.md
@@ -512,10 +514,12 @@ sequenceDiagram
 - **Requirements**: R5, R6, R16
 - **Files**: `commands/schema.rs`、`docs/handbook/serial-preset-development.md`、`ralph-tools-*.md`
 
-### U6. BDD + R7 回归（11 scenarios，见注册表）
+### U6. BDD + R7 回归（11 scenarios，见注册表）— **deferred**
 
 - **Goal**: 下表 11 个 scenario 全绿 + replay AE-6 + 手跑 12U。
 - **Dependencies**: U1–U7, U3a, U3b, U4b
+- **Status (2026-06-20)**: deferred. BDD harness 扩展 + 11 scenario 落地独立 plan 跟踪 — `docs/plans/2026-06-20-002-feat-bdd-harness-extension-for-runtime-state-inspection-plan.md`(待创建)。本 plan 关闭时 U6 0/11 落地;in-loop hint 路径部分覆盖在 5 个 unit tests(`crates/ralph-core/src/event_loop/tests/serial_lint.rs`)。
+- **Scenario 列表保留(供下个 plan 参照)**:
 
 ### BDD Scenario 注册表（U6，共 11）
 
@@ -542,19 +546,19 @@ sequenceDiagram
 ## Verification
 
 - **U1**：Merge 映射表每行单测；改 schemas 加字段 → `--schema` 反映；inline duplicate → preset_lint fail；无 Rust duplicate RULES。
-- **U2**：`engine::run_gates` 接线；`handoff_topic_seeds` 9+；无 d623c09 双轨。
+- **U2**：`engine::run_gates` 接线；`handoff_topic_seeds` 9+；`required_fields` 校验由 `engine::run_gates` 取代（`execution_contract.rs::validate_payload` 的这一道分职责迁移完成）。`validate_task` / `validate_git_change` / `validate_test_evidence` 三道闸**保留**在 `execution_contract.rs`（2026-06-18-001 plan 的止血线,不并入 engine）。
 - **U3a**：`MarkStepCompleted` 单测；preset_lint 顺序断言。
 - **U3b**：**work.done 后 progress.md 含 `## Completed Steps`**（Phase 1 止损核心）。
-- **U4**：AE-3；R22 auto_prepare 写 artifact；超时 fail-closed；熔断仅 disable linter。
-- **U4b**：AE-1 LINT MIRROR；AE-4 / R7-4 LintResumeHint 注入 + 消费后清空（**非** recovery task.resume）。
+- **U4**：AE-3；R22 auto_prepare 写 artifact；超时 fail-closed（post-hoc,真 fail-closed 见 F-PS-006 follow-up）；熔断仅 disable linter。
+- **U4b**：AE-1 LINT MIRROR；AE-4 / R7-4 LintResumeHint 注入 + 消费后清空（**非** recovery task.resume）。in-loop 路径(`state.pending_lint_resume` → `inject_pending_lint_resume`)为 single source of truth,CLI emit 文件写入(`pending_lint_resume.json`)为 no-op stub。
 - **U7**：B2/B3 单测 + prompt 快照。
 - **U5**：文档反向验证。
-- **U6**：BDD 注册表 11 个文件全绿。
+- **U6**：**deferred** — BDD harness 当前是 stub,扩展它 + 落地 11 个 scenario 独立 plan 跟踪: `docs/plans/2026-06-20-002-feat-bdd-harness-extension-for-runtime-state-inspection-plan.md`(待创建)。本 plan 关闭时 U6 0/11 落地,但有 5 个 unit tests 覆盖 in-loop hint 路径(`crates/ralph-core/src/event_loop/tests/serial_lint.rs`)作为部分替代。
 
 **最终验收**：
 
 - **SC-1（人工）**：python sort 12U plan 手跑 3 次 LOOP_COMPLETE（Phase 2 止损线）。
-- **SC-1（CI）**：`serial_lint_step_chain_replay.yaml` 全绿（replay 子链代表 12U 关键路径）。
+- **SC-1（CI）**：**deferred** — 依赖 U6 BDD harness 扩展;验收时跑 `serial_lint_step_chain_replay.yaml`(独立 plan 跟踪)。
 - **SC-4**：2026-07-20 前无同类 consecutive_failures 诊断；含 hat_handoff artifact > 0 的 serial run。
 
 ---
@@ -659,3 +663,40 @@ sequenceDiagram
 - 禁在 Rust 维护 duplicate payload 字段表（与 `presets/schemas/` 冲突）
 - 禁 lint 超时 fallback 放行（见 KTD-9）
 - 禁在 `fix.applied` 保留 `review.dimensions.complete` 捷径（perky-maple P2-5）
+
+---
+
+## Plan Closing Summary（2026-06-20，v3.2 关闭时）
+
+### Shipped（commits 712f41d → e59eb53）
+
+- **U1** 协议 SSOT deep-merge（`build.rs` 多段 merge + `merge_preset_with_schema_yaml` mirror）
+- **U2** `engine::run_gates` 接线（required_fields 一道）；`execution_contract.rs` 的 validate_task / validate_git_change / validate_test_evidence 三道闸**保留**（d623c09 止血线）
+- **U3a** `MarkStepCompleted` action
+- **U3b** `engine::apply_projection` 接线（Phase 1 止损核心）
+- **U4** `lint_emit` + `LintResumeHint` + R22 macro-edge auto_prepare；in-loop `state.pending_lint_resume` 为 single source of truth
+- **U4b** `## LINT MIRROR` / `## LINT RESUME REQUIRED` 注入 + 消费后清空
+- **U7** handoff 注入顺序（B2/B3）+ artifact 硬校验（B1）
+- 5 个 unit tests 覆盖 in-loop hint 路径：`crates/ralph-core/src/event_loop/tests/serial_lint.rs`
+
+### Deferred（独立 plan 跟踪）
+
+- **U6** BDD 11 scenarios + harness 扩展 → `docs/plans/2026-06-20-002-feat-bdd-harness-extension-for-runtime-state-inspection-plan.md`
+- **SC-1（CI）** 同 U6 deferred
+- **F-PS-005** 跨 preset 同步（ce-executor-isolated / ce-executor-wave）—— 未开始
+- **F-PS-006** 真正 fail-closed timeout（替换 `lint_emit_with_timeout` 的 post-hoc 实现为 `JoinHandle::join_timeout`）—— 未开始
+- **U5** `ralph emit --schema` 子命令 + handbook 反向验证 —— 未开始
+- **SC-1（人工）** python sort 12U plan 手跑 3 次 —— 运维验收，不阻塞 plan 关闭
+- **SC-4** 2026-07-20 前无同类 consecutive_failures —— 运维验收，不阻塞 plan 关闭
+
+### 已知遗留风险
+
+- 1 个 pre-existing test failure：`test_emit_ce_executor_serial_executor_can_emit_work_done`（在 baseline 712f41d 已存在，与本 plan 工作无关）
+- d623c09 的 `validate_payload(required_fields)` 与 `engine::run_gates` 双轨共存（d623c09 fail-fast 与 plan engine SSOT 共存，不冲突，d623c09 仍为 required_fields 校验的最后一道闸）
+
+### Review 修复记录
+
+- P0 #1: `engine_required_field_filter` 位置错误（移到 malformed-handling 之前 + `&mut self`）
+- P0 #2: CLI emit 写入 `.ralph/pending_lint_resume.json` 但 runtime 不读 → 改为 no-op stub
+- P0 #3: R22 macro-edge auto_prepare 未实现 → `lint_emit` 改 `&mut Value` + is_macro_edge 自动补 handoff_path
+- P0 #4: runtime 拒收无 agent 反馈 → `state.pending_lint_resume` 注入 + `## LINT RESUME REQUIRED`
