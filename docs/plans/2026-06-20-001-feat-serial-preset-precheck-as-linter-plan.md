@@ -5,7 +5,7 @@ status: completed
 date: 2026-06-20
 revised: 2026-06-20
 revision_note: |
-  v3.3 — 关闭: U5 (`ralph emit --schema <TOPIC>` + handbook) shipped; Files 路径从 `commands/schema.rs` 调整为 `commands/emit.rs::schema_view`(R6 字面要求挂在 emit 下)。
+  v3.3 — 关闭: U5 (`ralph emit --schema <TOPIC>` + handbook) shipped; F-PS-006 (bounded-wait fail-closed timeout) shipped,linter 改为 std::thread + mpsc::sync_channel + recv_timeout; Files 路径从 `commands/schema.rs` 调整为 `commands/emit.rs::schema_view`(R6 字面要求挂在 emit 下)。
   v3.2 — 关闭: U6 (BDD 11 scenarios) deferred 到独立 plan; U2 verification 措辞对齐实际架构(required_fields 闸由 engine::run_gates 取代,task/git/test 三道闸保留在 execution_contract.rs); SC-1(CI) deferred 同 U6。
   v3.1 — 对抗性审查 P0/P1：merge 映射表、ProtocolView 加载链、execution_contracts 派生规则、
   U3 拆 MarkStepCompleted、inline 双写清除、R22 auto_prepare 语义、11 BDD 枚举、brainstorm supersede。
@@ -680,14 +680,15 @@ sequenceDiagram
 - **U4b** `## LINT MIRROR` / `## LINT RESUME REQUIRED` 注入 + 消费后清空
 - **U5** `ralph emit --schema <TOPIC>` 子命令(挂在 emit 下,R6 字面要求;实现为 `commands/emit.rs::schema_view` 子模块)+ 5 个测试 + `docs/handbook/serial-preset-development.md` + `ralph-tools-emit.md` 反向验证
 - **U7** handoff 注入顺序(B2/B3)+ artifact 硬校验(B1)
+- **F-PS-006** fail-closed timeout 重写:`lint_emit_with_timeout` 改为 `std::thread::Builder` + `mpsc::sync_channel(1)` + `recv_timeout(LINT_BUDGET)` 的 bounded-wait 实现;5 个单元测试覆盖 fast path / slow path / panic isolation / payload round-trip / subsequent calls 独立性。**Caveat**:Rust stable 无法强制 kill thread,timeout 时 lint thread 在后台继续跑(leak 直至自然结束,典型 < 1s)。
 - 5 个 unit tests 覆盖 in-loop hint 路径:`crates/ralph-core/src/event_loop/tests/serial_lint.rs`
+- 5 个 bounded_wait unit tests:`crates/ralph-core/src/preset/engine/linter.rs::tests`
 
 ### Deferred(独立 plan 跟踪)
 
 - **U6** BDD 11 scenarios + harness 扩展 → `docs/plans/2026-06-20-002-feat-bdd-harness-extension-for-runtime-state-inspection-plan.md`
 - **SC-1(CI)** 同 U6 deferred
 - **F-PS-005** 跨 preset 同步(ce-executor-isolated / ce-executor-wave)—— 未开始
-- **F-PS-006** 真正 fail-closed timeout(替换 `lint_emit_with_timeout` 的 post-hoc 实现为 `JoinHandle::join_timeout`)—— 未开始
 - **SC-1(人工)** python sort 12U plan 手跑 3 次 —— 运维验收,不阻塞 plan 关闭
 - **SC-4** 2026-07-20 前无同类 consecutive_failures —— 运维验收,不阻塞 plan 关闭
 
