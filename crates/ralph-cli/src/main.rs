@@ -628,7 +628,7 @@ mod tests {
     #[test]
     fn test_diagnostics_not_eligible_for_emit_command() {
         let command = Some(Commands::Emit(EmitArgs {
-            topic: "test.event".to_string(),
+            topic: Some("test.event".to_string()),
             payload: String::new(),
             json: false,
             file: PathBuf::from(".ralph/events.jsonl"),
@@ -637,6 +637,7 @@ mod tests {
             hat: None,
             triggered: None,
             source: None,
+            schema: None,
         }));
         assert!(!is_diagnostics_eligible_command(command.as_ref()));
     }

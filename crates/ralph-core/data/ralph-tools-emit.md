@@ -37,6 +37,19 @@ ralph emit [OPTIONS] <TOPIC> [PAYLOAD]
 | `--hat <HAT>` | string | 否 | `$RALPH_CURRENT_HAT` | 发布此事件的 hat |
 | `--triggered <TRIGGERED>` | string | 否 | `$RALPH_TRIGGERED_HAT` | 被此事件触发的目标 hat |
 | `--source <SOURCE>` | string | 否 | `$RALPH_EVENT_SOURCE` | 事件来源标识 |
+| `--schema <TOPIC>` | string | 否 | — | 打印 `<TOPIC>` 的 embedded 协议 JSON 视图 + `protocol_hash`(U5 / R6,plan 2026-06-20-001);**只读,不写 events.jsonl,不消耗 iteration,不触发 lint**;与 `payload` / `--json` / `--policy-check` 互斥。常见用途:检测 authoring YAML 与 embedded 协议 drift、查 `required_fields` / `is_macro_edge` / `hat_handoff.macro_topics`。详见 [`docs/handbook/serial-preset-development.md`](../../../docs/handbook/serial-preset-development.md) §"`ralph emit --schema <TOPIC>`"。 |
+
+**Schema 模式示例：**
+```bash
+# 查 work.done 协议视图
+ralph emit --schema work.done
+
+# 检测 drift:build 前后 protocol_hash 必变
+ralph emit --schema work.done | jq -r .protocol_hash   # 改前
+# 改 presets/schemas/ce-executor-serial.yml 后
+cargo build
+ralph emit --schema work.done | jq -r .protocol_hash   # 改后
+```
 
 **环境变量：**
 

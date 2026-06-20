@@ -30,8 +30,15 @@ use std::path::{Path, PathBuf};
 /// Arguments for the emit subcommand.
 #[derive(Parser, Debug)]
 pub struct EmitArgs {
-    /// Event topic (e.g., "build.done", "review.complete")
-    pub topic: String,
+    /// Event topic (e.g., "build.done", "review.complete").
+    ///
+    /// Required when emitting an event; ignored when `--schema <TOPIC>`
+    /// is set, because the schema mode already names its topic via the
+    /// flag. We model it as `Option<String>` because clap forbids
+    /// `required = true` together with `required_unless_present` on a
+    /// positional argument; the handler enforces "topic must be set"
+    /// for the emit path.
+    pub topic: Option<String>,
 
     /// Event payload - string or JSON (optional, defaults to empty)
     #[arg(default_value = "")]
@@ -64,6 +71,13 @@ pub struct EmitArgs {
     /// Source identifier for this event (falls back to $RALPH_EVENT_SOURCE)
     #[arg(long)]
     pub source: Option<String>,
+
+    /// Print the embedded protocol JSON view for `TOPIC` (plan 2026-06-20-001
+    /// U5 / R6). When set, no event is emitted, no events file is touched,
+    /// and no iteration is consumed. Mutually exclusive with payload / json
+    /// because schema mode is read-only.
+    #[arg(long, value_name = "TOPIC", conflicts_with_all = ["payload", "json"])]
+    pub schema: Option<String>,
 }
 
 /// Plan 001 §4.3 C3: build the hat-scoped fix hint shown to the agent when
@@ -474,6 +488,50 @@ fn emit_command_with_root_and_hats(
     let workspace_root = resolve_workspace_root(root);
     let current_events_marker = workspace_root.join(".ralph/current-events");
 
+    // U5 / R6: --schema <TOPIC> short-circuits to a read-only protocol
+    // view. No event is emitted, no events file is touched, no policy
+    // check or lint phase runs.
+    //
+    // Schema mode requires a real ralph.yml — `load_config_for_preflight_sync`
+    // happily returns a default `RalphConfig` when the file is missing,
+    // but operators inspecting the protocol expect the embedded view
+    // of *their* preset, not an empty default.
+    //
+    // The schema branch sits at the very top of the handler — before
+    // urgent-steer handling, before the shared `should_load_config`
+    // gate, before any other validation. Operators pipe
+    // `ralph emit --schema <TOPIC>` into `jq` and expect a hermetic,
+    // side-effect-free read.
+    if let Some(ref schema_topic) = args.schema {
+        let config_path = config_resolution::find_workspace_config_path(&workspace_root)
+            .unwrap_or_else(|| workspace_root.join("ralph.yml"));
+        if !config_path.exists() {
+            anyhow::bail!(
+                "Cannot render protocol view for `{schema_topic}`: no ralph.yml \
+                 found at {}. The schema view is built from the loaded preset, \
+                 so the workspace must have a discoverable ralph.yml.",
+                config_path.display()
+            );
+        }
+        let config_sources = vec![ConfigSource::File(config_path)];
+        let cfg = crate::preflight::load_config_for_preflight_sync(
+            &config_sources,
+            hats_source,
+            &workspace_root,
+        )
+        .with_context(|| {
+            format!(
+                "Failed to load config for schema view of `{schema_topic}`. \
+                 Fix the ralph.yml errors or remove --schema."
+            )
+        })?;
+        let view = ProtocolView::from_event_loop(&cfg.event_loop);
+        let pretty = schema_view::render_pretty(&view, schema_topic)
+            .context("Failed to serialise protocol view")?;
+        println!("{pretty}");
+        return Ok(());
+    }
+
     if std::env::var("RALPH_WAVE_ID").is_err() {
         let urgent_steer_store = UrgentSteerStore::new(urgent_steer_path_from_workspace(root));
         if let Some(record) = urgent_steer_store
@@ -544,6 +602,20 @@ fn emit_command_with_root_and_hats(
         None
     };
 
+// (U5 / R6 schema branch moved to the top of the handler —
+// see the early `if let Some(ref schema_topic) = args.schema`
+// block above. This duplicate is intentional-deleted to avoid
+// double-printing the protocol view.)
+
+    // Schema mode short-circuits above. Below this point we are
+    // in *emit* mode and `args.topic` is mandatory; clap cannot
+    // express `required_unless_present = "schema"` on a positional
+    // argument, so we enforce the precondition here.
+    let topic = args
+        .topic
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("missing event topic (required unless --schema is set)"))?;
+
     // Determine whether policy validation is required.
     let check_mode = should_policy_check_emit(&args, config.as_ref());
 
@@ -606,8 +678,8 @@ fn emit_command_with_root_and_hats(
             // smart gate catches business-topic cases below.
             let is_control = ralph_core::RALPH_CONTROL_TOPICS
                 .iter()
-                .any(|t| *t == args.topic.as_str());
-            let is_diagnostic = ralph_core::is_orchestrator_diagnostic_topic(&args.topic);
+                .any(|t| *t == topic);
+            let is_diagnostic = ralph_core::is_orchestrator_diagnostic_topic(&topic);
             if !is_control && !is_diagnostic {
                 anyhow::bail!(
                     "Event provenance required: --hat <hat-id> or RALPH_CURRENT_HAT must be set."
@@ -628,7 +700,7 @@ fn emit_command_with_root_and_hats(
         && hat_id == "ralph"
         && !ralph_core::event_origin::RALPH_CONTROL_TOPICS
             .iter()
-            .any(|t| *t == args.topic.as_str())
+            .any(|t| *t == topic)
     {
         anyhow::bail!(
             "Builtin ralph hat may only emit control topics: {:?}. \
@@ -636,7 +708,7 @@ fn emit_command_with_root_and_hats(
              Set --hat to a registered workflow hat (e.g. coordinator, executor, \
              review-synthesizer) instead.",
             ralph_core::event_origin::RALPH_CONTROL_TOPICS,
-            args.topic
+            topic
         );
     }
 
@@ -671,7 +743,7 @@ fn emit_command_with_root_and_hats(
 
             // Enforce topic-deny rules at CLI emit time so a forbidden
             // (hat, topic) pair never reaches the events file.
-            if let Some(decision) = check_topic_deny_rules(hat.as_deref(), &args.topic, policy) {
+            if let Some(decision) = check_topic_deny_rules(hat.as_deref(), &topic, policy) {
                 match decision {
                     ralph_core::PolicyDecision::Accept => {}
                     ralph_core::PolicyDecision::Warn(findings) => {
@@ -685,14 +757,14 @@ fn emit_command_with_root_and_hats(
                     | ralph_core::PolicyDecision::Ignore(finding) => {
                         record_cli_emit_rejection(
                             &workspace_root,
-                            &args.topic,
+                            &topic,
                             hat.as_deref(),
                             &finding,
                         );
                         anyhow::bail!(
                             "Event rejected by policy: {}. Fix the issue before emitting.\n\n{}",
                             finding.message,
-                            format_fix_hint(config.as_ref().unwrap(), hat.as_deref(), &args.topic)
+                            format_fix_hint(config.as_ref().unwrap(), hat.as_deref(), &topic)
                         );
                     }
                 }
@@ -700,7 +772,7 @@ fn emit_command_with_root_and_hats(
 
             // Run schema validation with hat-aware restrictions.
             let decision = validate_event_with_hat(
-                &args.topic,
+                &topic,
                 Some(&args.payload),
                 policy,
                 &mut state,
@@ -719,14 +791,14 @@ fn emit_command_with_root_and_hats(
                 | ralph_core::PolicyDecision::Ignore(finding) => {
                     record_cli_emit_rejection(
                         &workspace_root,
-                        &args.topic,
+                        &topic,
                         hat.as_deref(),
                         &finding,
                     );
                     anyhow::bail!(
                         "Event rejected by policy: {}. Fix the issue before emitting.\n\n{}",
                         finding.message,
-                        format_fix_hint(config.as_ref().unwrap(), hat.as_deref(), &args.topic)
+                        format_fix_hint(config.as_ref().unwrap(), hat.as_deref(), &topic)
                     );
                 }
             }
@@ -747,7 +819,7 @@ fn emit_command_with_root_and_hats(
     // path. Together they form the full isolated-mode CLI guard.
     if let Some(cfg) = config.as_ref() {
         if let Err(err) =
-            crate::policy_check::check_emit_provenance(hat.as_deref(), &args.topic, cfg)
+            crate::policy_check::check_emit_provenance(hat.as_deref(), &topic, cfg)
         {
             use ralph_core::{PolicyFinding, ViolationType};
             let finding = PolicyFinding {
@@ -755,10 +827,10 @@ fn emit_command_with_root_and_hats(
                     gate: "missing_provenance".to_string(),
                     context: err.message.clone(),
                 },
-                topic: args.topic.clone(),
+                topic: topic.to_string(),
                 message: err.message.clone(),
             };
-            record_cli_emit_rejection(&workspace_root, &args.topic, hat.as_deref(), &finding);
+            record_cli_emit_rejection(&workspace_root, &topic, hat.as_deref(), &finding);
             anyhow::bail!(
                 "Event rejected by missing-provenance guard: {}",
                 err.message
@@ -782,7 +854,7 @@ fn emit_command_with_root_and_hats(
     // guard (which rejects unknown/missing provenance).
     if let Some(cfg) = config.as_ref() {
         if let Err(err) =
-            crate::policy_check::check_isolated_scope(hat.as_deref(), &args.topic, cfg)
+            crate::policy_check::check_isolated_scope(hat.as_deref(), &topic, cfg)
         {
             use ralph_core::{PolicyFinding, ViolationType};
             let finding = PolicyFinding {
@@ -790,10 +862,10 @@ fn emit_command_with_root_and_hats(
                     gate: "isolated_scope".to_string(),
                     context: err.message.clone(),
                 },
-                topic: args.topic.clone(),
+                topic: topic.to_string(),
                 message: err.message.clone(),
             };
-            record_cli_emit_rejection(&workspace_root, &args.topic, hat.as_deref(), &finding);
+            record_cli_emit_rejection(&workspace_root, &topic, hat.as_deref(), &finding);
             anyhow::bail!("Event rejected by isolated scope guard: {}", err.message);
         }
     }
@@ -804,7 +876,7 @@ fn emit_command_with_root_and_hats(
     // env var is set by the loop runner on `review.dimension.done`
     // workers; non-wave callers (env unset) pass through unchanged.
     if let Err(err) =
-        crate::policy_check::check_wave_dimension_assignment(&args.topic, &args.payload)
+        crate::policy_check::check_wave_dimension_assignment(&topic, &args.payload)
     {
         use ralph_core::{PolicyFinding, ViolationType};
         let finding = PolicyFinding {
@@ -812,10 +884,10 @@ fn emit_command_with_root_and_hats(
                 gate: "wave_dimension_assignment".to_string(),
                 context: err.message.clone(),
             },
-            topic: args.topic.clone(),
+            topic: topic.to_string(),
             message: err.message.clone(),
         };
-        record_cli_emit_rejection(&workspace_root, &args.topic, hat.as_deref(), &finding);
+        record_cli_emit_rejection(&workspace_root, &topic, hat.as_deref(), &finding);
         anyhow::bail!("Event rejected by wave dimension guard: {}", err.message);
     }
 
@@ -826,11 +898,11 @@ fn emit_command_with_root_and_hats(
     // `progress_task_mismatch` backpressure before writing the event
     // to disk. The CLI is *additive* — it never replaces the loop
     // gate, it surfaces the same reason earlier.
-    if ralph_core::step_handoff::progress_task_gate::is_gated_topic(&args.topic)
+    if ralph_core::step_handoff::progress_task_gate::is_gated_topic(&topic)
         && check_mode != PolicyCheckMode::Skip
     {
         match crate::policy_check::check_step_handoff_gate(
-            &args.topic,
+            &topic,
             &args.payload,
             &workspace_root,
         ) {
@@ -838,21 +910,21 @@ fn emit_command_with_root_and_hats(
             Err(err) => {
                 record_cli_emit_rejection(
                     &workspace_root,
-                    &args.topic,
+                    &topic,
                     hat.as_deref(),
                     &ralph_core::PolicyFinding {
                         violation_type: ViolationType::SemanticGateViolation {
                             gate: "progress_task_gate".to_string(),
                             context: err.message.clone(),
                         },
-                        topic: args.topic.clone(),
+                        topic: topic.to_string(),
                         message: err.message.clone(),
                     },
                 );
                 let failure = ValidationFailure {
                     ok: false,
                     error: "policy_validation_failed",
-                    topic: args.topic.clone(),
+                    topic: topic.to_string(),
                     validation_errors: vec![err],
                 };
                 crate::policy_check::emit_policy_validation_failure(
@@ -884,7 +956,7 @@ fn emit_command_with_root_and_hats(
     if let Some(cfg) = config.as_ref() {
         if let Err(err) = crate::policy_check::check_hat_handoff_gate(
             hat.as_deref(),
-            &args.topic,
+            &topic,
             Some(&payload),
             cfg,
         ) {
@@ -894,13 +966,13 @@ fn emit_command_with_root_and_hats(
                     gate: "hat_handoff".to_string(),
                     context: err.message.clone(),
                 },
-                topic: args.topic.clone(),
+                topic: topic.to_string(),
                 message: format!(
                     "{} (reason_code: {})",
                     err.message, err.reason_code
                 ),
             };
-            record_cli_emit_rejection(&workspace_root, &args.topic, hat.as_deref(), &finding);
+            record_cli_emit_rejection(&workspace_root, &topic, hat.as_deref(), &finding);
             anyhow::bail!(
                 "Event rejected by hat-handoff gate ({}): {}",
                 err.reason_code,
@@ -961,8 +1033,8 @@ fn emit_command_with_root_and_hats(
         // alone (Accept) or mutate it (AcceptAfterAutoPrepare)
         // before the gate.
         let mut payload_mut = payload_value;
-        let outcome = lint_emit_with_timeout(&view, &args.topic, &mut payload_mut);
-        match handle_lint_outcome(outcome, &workspace_root, &view, &args.topic, payload_mut) {
+        let outcome = lint_emit_with_timeout(&view, &topic, &mut payload_mut);
+        match handle_lint_outcome(outcome, &workspace_root, &view, &topic, payload_mut) {
             Ok(v) => v,
             Err(e) => return Err(e),
         }
@@ -991,7 +1063,7 @@ fn emit_command_with_root_and_hats(
             .is_some_and(|c| c.event_loop.execution_mode == HatExecutionMode::Isolated)
         && !ralph_core::RALPH_CONTROL_TOPICS
             .iter()
-            .any(|t| *t == args.topic.as_str())
+            .any(|t| *t == topic)
         && hat.is_some()
     {
         // U7 (2026-06-17-004 plan, R7): in isolated mode, when a business topic
@@ -1043,10 +1115,10 @@ fn emit_command_with_root_and_hats(
             "{}✓{} Event emitted: {}",
             colors::GREEN,
             colors::RESET,
-            args.topic
+            topic
         );
     } else {
-        println!("Event emitted: {}", args.topic);
+        println!("Event emitted: {}", topic);
     }
 
     Ok(())
@@ -1072,7 +1144,7 @@ mod tests {
         emit_command_with_root(
             ColorMode::Never,
             EmitArgs {
-                topic: "debug.step".to_string(),
+                topic: Some("debug.step".to_string()),
                 payload: "task_id=demo".to_string(),
                 json: false,
                 file: PathBuf::from(".ralph/events.jsonl"),
@@ -1081,6 +1153,7 @@ mod tests {
                 hat: None,
                 triggered: None,
                 source: None,
+                schema: None,
             },
             Some(&workspace),
         )
@@ -1104,7 +1177,7 @@ mod tests {
         let err = emit_command_with_root(
             ColorMode::Never,
             EmitArgs {
-                topic: "debug.step".to_string(),
+                topic: Some("debug.step".to_string()),
                 payload: "task_id=demo".to_string(),
                 json: false,
                 file: PathBuf::from(".ralph/events.jsonl"),
@@ -1113,6 +1186,7 @@ mod tests {
                 hat: None,
                 triggered: None,
                 source: None,
+                schema: None,
             },
             Some(&workspace),
         )
@@ -1173,7 +1247,7 @@ event_loop:
         let err = emit_command_with_root(
             ColorMode::Never,
             EmitArgs {
-                topic: "experiment.planned".to_string(),
+                topic: Some("experiment.planned".to_string()),
                 payload: "{}".to_string(),
                 json: true,
                 file: PathBuf::from(".ralph/events.jsonl"),
@@ -1182,6 +1256,7 @@ event_loop:
                 hat: None,
                 triggered: None,
                 source: None,
+                schema: None,
             },
             Some(&workspace),
         )
@@ -1232,7 +1307,7 @@ event_loop:
         emit_command_with_root(
             ColorMode::Never,
             EmitArgs {
-                topic: "experiment.planned".to_string(),
+                topic: Some("experiment.planned".to_string()),
                 payload: "{}".to_string(),
                 json: true,
                 file: events_file.clone(),
@@ -1241,6 +1316,7 @@ event_loop:
                 hat: None,
                 triggered: None,
                 source: None,
+                schema: None,
             },
             Some(&workspace),
         )
@@ -1285,7 +1361,7 @@ event_loop:
         let err = emit_command_with_root(
             ColorMode::Never,
             EmitArgs {
-                topic: "experiment.planned".to_string(),
+                topic: Some("experiment.planned".to_string()),
                 payload: "{}".to_string(),
                 json: true,
                 file: events_file.clone(),
@@ -1294,6 +1370,7 @@ event_loop:
                 hat: None,
                 triggered: None,
                 source: None,
+                schema: None,
             },
             Some(&workspace),
         )
@@ -1322,7 +1399,7 @@ event_loop:
         emit_command_with_root(
             ColorMode::Never,
             EmitArgs {
-                topic: "experiment.planned".to_string(),
+                topic: Some("experiment.planned".to_string()),
                 payload: r#"{"task_key":"x"}"#.to_string(),
                 json: true,
                 file: events_file.clone(),
@@ -1331,6 +1408,7 @@ event_loop:
                 hat: Some("strategist".to_string()),
                 triggered: Some("implementer".to_string()),
                 source: Some("cli".to_string()),
+                schema: None,
             },
             Some(&workspace),
         )
@@ -1400,7 +1478,7 @@ event_loop:
         let err = emit_command_with_root(
             ColorMode::Never,
             EmitArgs {
-                topic: "review.passed".to_string(),
+                topic: Some("review.passed".to_string()),
                 payload: r#"{"plan_name":"p","task_id":"t","task_key":"k","step":"s","findings_count":0,"fix_round":0,"verdict":"pass","skip_reason":"empty_diff"}"#.to_string(),
                 json: true,
                 file: events_file.clone(),
@@ -1409,6 +1487,7 @@ event_loop:
                 hat: Some("ralph".to_string()),
                 triggered: None,
                 source: None,
+                schema: None,
             },
             Some(&workspace),
         )
@@ -1438,7 +1517,7 @@ event_loop:
         let err = emit_command_with_root(
             ColorMode::Never,
             EmitArgs {
-                topic: "work.start".to_string(),
+                topic: Some("work.start".to_string()),
                 payload: String::new(),
                 json: false,
                 file: events_file.clone(),
@@ -1447,6 +1526,7 @@ event_loop:
                 hat: Some("ralph".to_string()),
                 triggered: None,
                 source: None,
+                schema: None,
             },
             Some(&workspace),
         )
@@ -1466,7 +1546,7 @@ event_loop:
         emit_command_with_root(
             ColorMode::Never,
             EmitArgs {
-                topic: "LOOP_COMPLETE".to_string(),
+                topic: Some("LOOP_COMPLETE".to_string()),
                 payload: r#"{"reason":"done"}"#.to_string(),
                 json: true,
                 file: events_file.clone(),
@@ -1475,6 +1555,7 @@ event_loop:
                 hat: Some("ralph".to_string()),
                 triggered: None,
                 source: None,
+                schema: None,
             },
             Some(&workspace),
         )
@@ -1495,7 +1576,7 @@ event_loop:
         emit_command_with_root(
             ColorMode::Never,
             EmitArgs {
-                topic: "human.guidance".to_string(),
+                topic: Some("human.guidance".to_string()),
                 payload: r#"{"messages":["continue"]}"#.to_string(),
                 json: true,
                 file: events_file.clone(),
@@ -1504,6 +1585,7 @@ event_loop:
                 hat: Some("ralph".to_string()),
                 triggered: None,
                 source: None,
+                schema: None,
             },
             Some(&workspace),
         )
@@ -1523,7 +1605,7 @@ event_loop:
         emit_command_with_root(
             ColorMode::Never,
             EmitArgs {
-                topic: "task.resume".to_string(),
+                topic: Some("task.resume".to_string()),
                 payload: r#"{"reason":"recover"}"#.to_string(),
                 json: true,
                 file: events_file.clone(),
@@ -1532,6 +1614,7 @@ event_loop:
                 hat: Some("ralph".to_string()),
                 triggered: None,
                 source: None,
+                schema: None,
             },
             Some(&workspace),
         )
@@ -1553,7 +1636,7 @@ event_loop:
         emit_command_with_root(
             ColorMode::Never,
             EmitArgs {
-                topic: "work.done".to_string(),
+                topic: Some("work.done".to_string()),
                 payload: r#"{"plan_name":"p","plan_path":"x.md","task_id":"t","task_key":"k","step":"s","commit_count":1,"changed_lines":10}"#.to_string(),
                 json: true,
                 file: events_file.clone(),
@@ -1562,6 +1645,7 @@ event_loop:
                 hat: Some("executor".to_string()),
                 triggered: None,
                 source: None,
+                schema: None,
             },
             Some(&workspace),
         )
@@ -1584,7 +1668,7 @@ event_loop:
         emit_command_with_root(
             ColorMode::Never,
             EmitArgs {
-                topic: "debug.step".to_string(),
+                topic: Some("debug.step".to_string()),
                 payload: "task_id=demo".to_string(),
                 json: false,
                 file: events_file.clone(),
@@ -1593,6 +1677,7 @@ event_loop:
                 hat: None,
                 triggered: None,
                 source: None,
+                schema: None,
             },
             Some(&workspace),
         )
@@ -1637,7 +1722,7 @@ event_loop:
         let err = emit_command_with_root(
             ColorMode::Never,
             EmitArgs {
-                topic: "build.done".to_string(),
+                topic: Some("build.done".to_string()),
                 payload: String::new(),
                 json: false,
                 file: events_file.clone(),
@@ -1646,6 +1731,7 @@ event_loop:
                 hat: None,
                 triggered: None,
                 source: None,
+                schema: None,
             },
             Some(&workspace),
         )
@@ -1686,7 +1772,7 @@ event_loop:
         emit_command_with_root(
             ColorMode::Never,
             EmitArgs {
-                topic: "build.done".to_string(),
+                topic: Some("build.done".to_string()),
                 payload: String::new(),
                 json: false,
                 file: events_file.clone(),
@@ -1695,6 +1781,7 @@ event_loop:
                 hat: Some("strategist".to_string()),
                 triggered: None,
                 source: None,
+                schema: None,
             },
             Some(&workspace),
         )
@@ -1736,7 +1823,7 @@ event_loop:
         let err = emit_command_with_root(
             ColorMode::Never,
             EmitArgs {
-                topic: "experiment.planned".to_string(),
+                topic: Some("experiment.planned".to_string()),
                 payload: r#"{"task_key":"x"}"#.to_string(),
                 json: true,
                 file: events_file.clone(),
@@ -1745,6 +1832,7 @@ event_loop:
                 hat: None,
                 triggered: None,
                 source: None,
+                schema: None,
             },
             Some(&workspace),
         )
@@ -1798,7 +1886,7 @@ event_loop:
         let err = emit_command_with_root(
             ColorMode::Never,
             EmitArgs {
-                topic: "LOOP_COMPLETE".to_string(),
+                topic: Some("LOOP_COMPLETE".to_string()),
                 payload: r#"{"reason":"done"}"#.to_string(),
                 json: true,
                 file: events_file.clone(),
@@ -1807,6 +1895,7 @@ event_loop:
                 hat: None,
                 triggered: None,
                 source: None,
+                schema: None,
             },
             Some(&workspace),
         )
@@ -1851,7 +1940,7 @@ event_loop:
         emit_command_with_root(
             ColorMode::Never,
             EmitArgs {
-                topic: "build.done".to_string(),
+                topic: Some("build.done".to_string()),
                 payload: String::new(),
                 json: false,
                 file: events_file.clone(),
@@ -1860,6 +1949,7 @@ event_loop:
                 hat: None,
                 triggered: None,
                 source: None,
+                schema: None,
             },
             Some(&workspace),
         )
@@ -1906,7 +1996,7 @@ event_loop:
         let err = emit_command_with_root(
             ColorMode::Never,
             EmitArgs {
-                topic: "experiment.planned".to_string(),
+                topic: Some("experiment.planned".to_string()),
                 payload: "{}".to_string(),
                 json: true,
                 file: events_file.clone(),
@@ -1915,6 +2005,7 @@ event_loop:
                 hat: None,
                 triggered: None,
                 source: None,
+                schema: None,
             },
             Some(&workspace),
         )
@@ -1960,7 +2051,7 @@ event_loop:
         emit_command_with_root(
             ColorMode::Never,
             EmitArgs {
-                topic: "LOOP_COMPLETE".to_string(),
+                topic: Some("LOOP_COMPLETE".to_string()),
                 payload: r#"{"reason":"retry"}"#.to_string(),
                 json: true,
                 file: events_file.clone(),
@@ -1969,6 +2060,7 @@ event_loop:
                 hat: None,
                 triggered: None,
                 source: None,
+                schema: None,
             },
             Some(&workspace),
         )
@@ -2014,7 +2106,7 @@ event_loop:
         let err = emit_command_with_root(
             ColorMode::Never,
             EmitArgs {
-                topic: "LOOP_COMPLETE".to_string(),
+                topic: Some("LOOP_COMPLETE".to_string()),
                 payload: r#"{"reason":"retry"}"#.to_string(),
                 json: true,
                 file: events_file.clone(),
@@ -2023,6 +2115,7 @@ event_loop:
                 hat: None,
                 triggered: None,
                 source: None,
+                schema: None,
             },
             Some(&workspace),
         )
@@ -2125,7 +2218,7 @@ event_loop:
         emit_command_with_root(
             ColorMode::Never,
             EmitArgs {
-                topic,
+                topic: Some(topic),
                 payload,
                 json,
                 file: events_file.clone(),
@@ -2134,6 +2227,7 @@ event_loop:
                 hat: Some("strategist".to_string()),
                 triggered: None,
                 source: Some("cli".to_string()),
+                schema: None,
             },
             Some(&workspace),
         )
@@ -2161,7 +2255,7 @@ event_loop:
         let err = emit_command_with_root(
             ColorMode::Never,
             EmitArgs {
-                topic,
+                topic: Some(topic),
                 payload,
                 json,
                 file: events_file.clone(),
@@ -2170,6 +2264,7 @@ event_loop:
                 hat: Some("strategist".to_string()),
                 triggered: None,
                 source: None,
+                schema: None,
             },
             Some(&workspace),
         )
@@ -2204,7 +2299,7 @@ event_loop:
         let err = emit_command_with_root(
             ColorMode::Never,
             EmitArgs {
-                topic,
+                topic: Some(topic),
                 payload,
                 json,
                 file: events_file.clone(),
@@ -2213,6 +2308,7 @@ event_loop:
                 hat: Some("strategist".to_string()),
                 triggered: None,
                 source: None,
+                schema: None,
             },
             Some(&workspace),
         )
@@ -2241,7 +2337,7 @@ event_loop:
         let err = emit_command_with_root(
             ColorMode::Never,
             EmitArgs {
-                topic,
+                topic: Some(topic),
                 payload,
                 json,
                 file: events_file.clone(),
@@ -2250,6 +2346,7 @@ event_loop:
                 hat: None, // missing provenance
                 triggered: None,
                 source: None,
+                schema: None,
             },
             Some(&workspace),
         )
@@ -2314,7 +2411,7 @@ event_loop:
             let cli_result = emit_command_with_root(
                 ColorMode::Never,
                 EmitArgs {
-                    topic: cli_topic,
+                    topic: Some(cli_topic),
                     payload: cli_payload,
                     json: cli_json,
                     file: events_file.clone(),
@@ -2323,6 +2420,7 @@ event_loop:
                     hat: Some("strategist".to_string()),
                     triggered: None,
                     source: None,
+                    schema: None,
                 },
                 Some(&workspace),
             );
@@ -2346,7 +2444,7 @@ event_loop:
         emit_command_with_root(
             ColorMode::Never,
             EmitArgs {
-                topic: "experiment.planned".to_string(),
+                topic: Some("experiment.planned".to_string()),
                 payload: r#"{"task_key":"x"}"#.to_string(),
                 json: true,
                 file: events_file.clone(),
@@ -2355,6 +2453,7 @@ event_loop:
                 hat: Some("strategist".to_string()),
                 triggered: Some("implementer".to_string()),
                 source: Some("cli".to_string()),
+                schema: None,
             },
             Some(&workspace),
         )
@@ -2566,7 +2665,7 @@ event_loop:
         let events_file = workspace.join(".ralph/events.jsonl");
 
         let args = EmitArgs {
-            topic: "work.done".to_string(),
+            topic: Some("work.done".to_string()),
             payload: r#"{"plan_name":"test","task_id":"t1"}"#.to_string(),
             json: false,
             file: events_file.clone(),
@@ -2575,6 +2674,7 @@ event_loop:
             hat: None,
             triggered: None,
             source: None,
+            schema: None,
         };
 
         emit_command_with_root(ColorMode::Never, args, Some(&workspace)).unwrap();
@@ -2598,7 +2698,7 @@ event_loop:
         let events_file = workspace.join(".ralph/events.jsonl");
 
         let args = EmitArgs {
-            topic: "build.done".to_string(),
+            topic: Some("build.done".to_string()),
             payload: "Build succeeded".to_string(),
             json: false,
             file: events_file.clone(),
@@ -2607,6 +2707,7 @@ event_loop:
             hat: None,
             triggered: None,
             source: None,
+            schema: None,
         };
 
         emit_command_with_root(ColorMode::Never, args, Some(&workspace)).unwrap();
@@ -2623,5 +2724,372 @@ event_loop:
         assert!(!looks_like_json("hello world"));
         assert!(!looks_like_json(""));
         assert!(!looks_like_json("  plain text"));
+    }
+
+    // ------------------------------------------------------------------
+    // U5 / R6: `ralph emit --schema <TOPIC>` smoke tests.
+    //
+    // The handler short-circuits to a read-only JSON dump of the
+    // embedded protocol view (KTD-10) before any policy / scope /
+    // handoff gate runs. These tests pin that contract: no events
+    // file is touched, no policy decision is required, the output
+    // is valid JSON carrying `protocol_hash` and the requested
+    // topic's `required_fields`.
+    // ------------------------------------------------------------------
+
+    /// Minimal preset fixture mirroring the section layout that
+    /// `build.rs` produces for `ce-executor-serial`. We only need
+    /// `event_policy.schemas.work.done` + `hat_handoff` to exercise
+    /// the macro-edge + required-fields surfaces.
+    const SCHEMA_FIXTURE_YAML: &str = r#"
+event_loop:
+  execution_mode: isolated
+  event_policy:
+    enabled: true
+    mode: enforce
+    schemas:
+      work.done:
+        required_fields:
+          - plan_name
+          - task_id
+          - task_key
+  hat_handoff:
+    enabled: true
+    auto_prepare_on_macro_edge: true
+    macro_topics:
+      - work.done
+    exempt_topics: []
+    artifact:
+      required_sections: 2
+      require_next_marker: true
+      max_bytes: 65536
+"#;
+
+    fn setup_schema_workspace(tmp: &TempDir, yaml: &str) -> PathBuf {
+        let workspace = tmp.path().to_path_buf();
+        std::fs::create_dir_all(workspace.join(".ralph")).unwrap();
+        std::fs::write(workspace.join("ralph.yml"), yaml).unwrap();
+        workspace
+    }
+
+    /// (1) `ralph emit --schema <topic>` prints a JSON view carrying
+    /// `protocol_hash` and the topic's `required_fields`. The view
+    /// is the only stdout payload; the events file is not created.
+    #[test]
+    fn test_emit_schema_prints_protocol_view_without_writing_events() {
+        let tmp = TempDir::new().expect("temp dir");
+        let workspace = setup_schema_workspace(&tmp, SCHEMA_FIXTURE_YAML);
+        let events_file = workspace.join(".ralph/events.jsonl");
+
+        let args = EmitArgs {
+            topic: Some("work.done".to_string()),
+            payload: String::new(),
+            json: false,
+            file: events_file.clone(),
+            policy_check: false,
+            no_policy_check: false,
+            hat: None,
+            triggered: None,
+            source: None,
+            schema: Some("work.done".to_string()),
+        };
+
+        // R6: read-only mode must succeed without producing an event.
+        emit_command_with_root(ColorMode::Never, args, Some(&workspace))
+            .expect("schema mode should succeed");
+
+        // Events file must NOT have been created — `--schema` is
+        // strictly read-only and the operator's toolchain relies on
+        // "no events file = no event was emitted".
+        assert!(
+            !events_file.exists() || std::fs::read_to_string(&events_file).unwrap().is_empty(),
+            "schema mode must not write to events.jsonl"
+        );
+    }
+
+    /// (2) Required fields for the topic come from the embedded
+    /// `event_policy.schemas`, and `is_macro_edge` reflects
+    /// `hat_handoff.macro_topics`. Operators use these to confirm
+    /// drift between the authoring YAML and the embedded copy.
+    #[test]
+    fn test_emit_schema_view_reflects_required_fields_and_macro_edge() {
+        let tmp = TempDir::new().expect("temp dir");
+        let workspace = setup_schema_workspace(&tmp, SCHEMA_FIXTURE_YAML);
+        let events_file = workspace.join(".ralph/events.jsonl");
+
+        // Render via the public path the CLI uses, then introspect
+        // the resulting JSON. We build the view the same way the
+        // handler does (RalphConfig + hats_source=None +
+        // ProtocolView::from_event_loop) and assert on its fields
+        // directly — keeps the test hermetic and pins the rendering
+        // contract without coupling to stdout capture.
+        let config_path = workspace.join("ralph.yml");
+        let config_sources = vec![ConfigSource::File(config_path)];
+        let cfg = crate::preflight::load_config_for_preflight_sync(
+            &config_sources,
+            None,
+            &workspace,
+        )
+        .expect("load fixture config");
+        let view = ProtocolView::from_event_loop(&cfg.event_loop);
+        let value =
+            schema_view::render_topic(&view, "work.done").expect("render view");
+
+        assert_eq!(value["topic"], "work.done");
+        let required = value["required_fields"]
+            .as_array()
+            .expect("required_fields is array");
+        let required: std::collections::HashSet<&str> =
+            required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(required.contains("plan_name"));
+        assert!(required.contains("task_id"));
+        assert!(required.contains("task_key"));
+        assert_eq!(required.len(), 3);
+
+        assert_eq!(value["is_macro_edge"], serde_json::Value::Bool(true));
+        assert!(value["protocol_hash"].as_str().is_some());
+        assert!(
+            !value["protocol_hash"].as_str().unwrap().is_empty(),
+            "protocol_hash must be non-empty"
+        );
+    }
+
+    /// (3) Unknown topics return an empty `required_fields` array
+    /// instead of erroring. This matches `ProtocolView::required_fields`
+    /// semantics and lets operators probe the protocol without
+    /// having to pre-check the topic table.
+    #[test]
+    fn test_emit_schema_view_for_unknown_topic_returns_empty_required_fields() {
+        let tmp = TempDir::new().expect("temp dir");
+        let workspace = setup_schema_workspace(&tmp, SCHEMA_FIXTURE_YAML);
+
+        let config_path = workspace.join("ralph.yml");
+        let config_sources = vec![ConfigSource::File(config_path)];
+        let cfg = crate::preflight::load_config_for_preflight_sync(
+            &config_sources,
+            None,
+            &workspace,
+        )
+        .expect("load fixture config");
+        let view = ProtocolView::from_event_loop(&cfg.event_loop);
+        let value = schema_view::render_topic(&view, "totally.unknown.topic")
+            .expect("render view for unknown topic");
+
+        assert_eq!(value["topic"], "totally.unknown.topic");
+        let required = value["required_fields"]
+            .as_array()
+            .expect("required_fields is array");
+        assert!(
+            required.is_empty(),
+            "unknown topic must yield empty required_fields, got: {required:?}"
+        );
+        // is_macro_edge should be false because the topic is not in
+        // the macro list and not in the exempt list.
+        assert_eq!(value["is_macro_edge"], serde_json::Value::Bool(false));
+    }
+
+    /// (4) Without a discoverable ralph.yml AND without a `.ralph/`
+    /// marker, schema mode fails closed with a clear error — the
+    /// `should_load_config` gate in the handler skips config
+    /// resolution, so `config` is `None` and the schema branch
+    /// must surface a friendly error instead of rendering an empty
+    /// default view.
+    #[test]
+    fn test_emit_schema_fails_closed_when_no_config() {
+        let tmp = TempDir::new().expect("temp dir");
+        let workspace = tmp.path().to_path_buf();
+        // No ralph.yml, no .ralph — operator forgot to cd into a
+        // preset-bearing workspace. Without `.ralph/` the
+        // `should_load_config` gate is false, so config resolution
+        // is skipped entirely and the schema branch sees `config =
+        // None`, which it must turn into a clear fail-closed error.
+        let events_file = workspace.join(".ralph/events.jsonl");
+
+        let args = EmitArgs {
+            topic: Some("work.done".to_string()),
+            payload: String::new(),
+            json: false,
+            file: events_file.clone(),
+            policy_check: false,
+            no_policy_check: false,
+            hat: None,
+            triggered: None,
+            source: None,
+            schema: Some("work.done".to_string()),
+        };
+
+        let err = emit_command_with_root(ColorMode::Never, args, Some(&workspace))
+            .expect_err("schema mode must fail closed when no config is discoverable");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("no ralph.yml")
+                || message.contains("Cannot render protocol view"),
+            "expected clear fail-closed message, got: {message}"
+        );
+        // And of course no event was written.
+        assert!(!events_file.exists() || std::fs::read_to_string(&events_file).unwrap().is_empty());
+    }
+
+    /// (5) Protocol hash is stable across two renders of the same
+    /// config — this is the property operators rely on to detect
+    /// drift between the authoring YAML and the embedded copy.
+    #[test]
+    fn test_emit_schema_hash_is_stable_across_renders() {
+        let tmp = TempDir::new().expect("temp dir");
+        let workspace = setup_schema_workspace(&tmp, SCHEMA_FIXTURE_YAML);
+
+        let config_path = workspace.join("ralph.yml");
+        let config_sources = vec![ConfigSource::File(config_path)];
+        let cfg = crate::preflight::load_config_for_preflight_sync(
+            &config_sources,
+            None,
+            &workspace,
+        )
+        .expect("load fixture config");
+        let view1 = ProtocolView::from_event_loop(&cfg.event_loop);
+        let view2 = ProtocolView::from_event_loop(&cfg.event_loop);
+        assert_eq!(view1.protocol_hash, view2.protocol_hash);
+
+        let v1 = schema_view::render_topic(&view1, "work.done").unwrap();
+        let v2 = schema_view::render_topic(&view2, "work.done").unwrap();
+        assert_eq!(v1["protocol_hash"], v2["protocol_hash"]);
+    }
+}
+
+/// Schema-view rendering for `ralph emit --schema <TOPIC>` (U5 / R6).
+///
+/// The view is a JSON-serialisable snapshot of the embedded protocol
+/// SSOT for one topic. Operators and agents use it to verify:
+///   * which fields the gate will require for `TOPIC`
+///   * whether `TOPIC` is a macro edge (handoff required)
+///   * the stable protocol hash, so a drift between the authoring
+///     `presets/schemas/<name>.yml` and the embedded copy is detectable
+///     without rebuilding
+///
+/// The submodule lives inside `commands/emit.rs` rather than a separate
+/// `commands/schema.rs` so it can reuse the same `RalphConfig` /
+/// `ProtocolView` plumbing without re-resolving the workspace.
+pub mod schema_view {
+    use super::ProtocolView;
+    use anyhow::{Context, Result};
+    use ralph_core::preset::engine::protocol::payload_field_set;
+    use std::collections::BTreeMap;
+
+    /// Render the protocol JSON view for `topic`.
+    ///
+    /// `topic` may be a topic that is *not* in the protocol — the
+    /// returned `required_fields` will simply be empty and the
+    /// other sections (`verdict_gate`, `workflow_contract`, ...)
+    /// remain populated so operators can see the protocol-wide
+    /// settings without changing the gate behaviour.
+    pub fn render_topic(view: &ProtocolView, topic: &str) -> Result<serde_json::Value> {
+        let mut payload_keys: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+        for (t, schema) in &view.effective_required_fields {
+            // Per-topic entry keeps the SSOT visible when an operator
+            // inspects multiple topics at once. The serialised `schema`
+            // is the *embedded* copy, post build.rs merge.
+            let fields_vec: Vec<&String> = {
+                let mut v: Vec<&String> = schema.iter().collect();
+                v.sort();
+                v
+            };
+            payload_keys.insert(
+                t.clone(),
+                serde_json::json!({
+                    "required_fields": fields_vec,
+                }),
+            );
+        }
+
+        // Topic-scoped required fields (empty when topic is unknown).
+        let required_fields: Vec<String> = {
+            let mut v: Vec<String> = view.required_fields(topic).into_iter().collect();
+            v.sort();
+            v
+        };
+
+        let mut out = serde_json::json!({
+            "topic": topic,
+            "protocol_hash": view.protocol_hash,
+            "is_macro_edge": view.is_macro_edge(topic),
+            "required_fields": required_fields,
+            "all_topics": payload_keys,
+        });
+
+        // Protocol-wide sections. Each is `null` when absent so the
+        // operator can see at a glance whether the loaded config
+        // enables the corresponding gate / projection / handoff
+        // machinery.
+        let obj = out.as_object_mut().expect("json!() returns object");
+
+        if let Some(vg) = &view.verdict_gate {
+            obj.insert(
+                "verdict_gate".to_string(),
+                serde_json::to_value(vg).context("serialise verdict_gate")?,
+            );
+        } else {
+            obj.insert("verdict_gate".to_string(), serde_json::Value::Null);
+        }
+
+        if let Some(wc) = &view.workflow_contract {
+            obj.insert(
+                "workflow_contract".to_string(),
+                serde_json::to_value(wc).context("serialise workflow_contract")?,
+            );
+        } else {
+            obj.insert("workflow_contract".to_string(), serde_json::Value::Null);
+        }
+
+        if let Some(sp) = &view.state_projection {
+            obj.insert(
+                "state_projection".to_string(),
+                serde_json::to_value(sp).context("serialise state_projection")?,
+            );
+        } else {
+            obj.insert("state_projection".to_string(), serde_json::Value::Null);
+        }
+
+        if let Some(ec) = &view.execution_contracts {
+            obj.insert(
+                "execution_contracts".to_string(),
+                serde_json::to_value(ec).context("serialise execution_contracts")?,
+            );
+        } else {
+            obj.insert(
+                "execution_contracts".to_string(),
+                serde_json::Value::Null,
+            );
+        }
+
+        obj.insert(
+            "hat_handoff".to_string(),
+            serde_json::to_value(&view.hat_handoff).context("serialise hat_handoff")?,
+        );
+
+        Ok(out)
+    }
+
+    /// Pretty-printed variant for human reading. Uses 2-space indent
+    /// to match the project's other JSON dumps (`recovery.jsonl`
+    /// envelopes, `protocol_view` debug output).
+    pub fn render_pretty(view: &ProtocolView, topic: &str) -> Result<String> {
+        let value = render_topic(view, topic)?;
+        Ok(serde_json::to_string_pretty(&value)?)
+    }
+
+    // Re-export for tests that want to introspect the view without
+    // going through the rendered JSON.
+    #[allow(dead_code)]
+    pub(crate) fn topic_field_set(view: &ProtocolView, topic: &str) -> std::collections::HashSet<String> {
+        view.required_fields(topic)
+    }
+
+    // Silence the unused import warning when `payload_field_set` is
+    // not referenced from tests (kept for future schema-aware payload
+    // introspection helpers, e.g. "show which fields an event with
+    // this shape would pass / fail").
+    #[allow(dead_code)]
+    fn _unused_payload_field_set(payload: &serde_json::Value) -> std::collections::HashSet<String> {
+        payload_field_set(payload)
     }
 }

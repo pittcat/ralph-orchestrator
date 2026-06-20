@@ -5,6 +5,7 @@ status: completed
 date: 2026-06-20
 revised: 2026-06-20
 revision_note: |
+  v3.3 — 关闭: U5 (`ralph emit --schema <TOPIC>` + handbook) shipped; Files 路径从 `commands/schema.rs` 调整为 `commands/emit.rs::schema_view`(R6 字面要求挂在 emit 下)。
   v3.2 — 关闭: U6 (BDD 11 scenarios) deferred 到独立 plan; U2 verification 措辞对齐实际架构(required_fields 闸由 engine::run_gates 取代,task/git/test 三道闸保留在 execution_contract.rs); SC-1(CI) deferred 同 U6。
   v3.1 — 对抗性审查 P0/P1：merge 映射表、ProtocolView 加载链、execution_contracts 派生规则、
   U3 拆 MarkStepCompleted、inline 双写清除、R22 auto_prepare 语义、11 BDD 枚举、brainstorm supersede。
@@ -512,7 +513,8 @@ sequenceDiagram
 
 - **Goal**: `ralph emit --schema` 输出 `ProtocolView` JSON 视图 + protocol hash；handbook 指向 `presets/schemas/ce-executor-serial.yml`。
 - **Requirements**: R5, R6, R16
-- **Files**: `commands/schema.rs`、`docs/handbook/serial-preset-development.md`、`ralph-tools-*.md`
+- **Files**: `commands/emit.rs::schema_view`(原 `commands/schema.rs` 路径,实施时落到 emit 子模块)、`docs/handbook/serial-preset-development.md`、`ralph-tools-*.md`
+- **Status (2026-06-20)**: **shipped**。R6 严格按字面 `ralph emit --schema <topic>` 落地,handler 在 config 加载/urgent-steer 之前短路返回;`schema_view` 子模块在 `commands/emit.rs` 内(plan 原路径 `commands/schema.rs` 因 R6 字面要求,实际包到 emit 模块)。
 
 ### U6. BDD + R7 回归（11 scenarios，见注册表）— **deferred**
 
@@ -666,28 +668,28 @@ sequenceDiagram
 
 ---
 
-## Plan Closing Summary（2026-06-20，v3.2 关闭时）
+## Plan Closing Summary（2026-06-20，v3.3 关闭时）
 
-### Shipped（commits 712f41d → e59eb53）
+### Shipped（commits 712f41d → e59eb53,本次 session）
 
 - **U1** 协议 SSOT deep-merge（`build.rs` 多段 merge + `merge_preset_with_schema_yaml` mirror）
-- **U2** `engine::run_gates` 接线（required_fields 一道）；`execution_contract.rs` 的 validate_task / validate_git_change / validate_test_evidence 三道闸**保留**（d623c09 止血线）
+- **U2** `engine::run_gates` 接线（required_fields 一道）；`execution_contract.rs` 的 validate_task / validate_git_change / validate_test_evidence 三道闸**保留**(d623c09 止血线)
 - **U3a** `MarkStepCompleted` action
-- **U3b** `engine::apply_projection` 接线（Phase 1 止损核心）
-- **U4** `lint_emit` + `LintResumeHint` + R22 macro-edge auto_prepare；in-loop `state.pending_lint_resume` 为 single source of truth
+- **U3b** `engine::apply_projection` 接线(Phase 1 止损核心)
+- **U4** `lint_emit` + `LintResumeHint` + R22 macro-edge auto_prepare;in-loop `state.pending_lint_resume` 为 single source of truth
 - **U4b** `## LINT MIRROR` / `## LINT RESUME REQUIRED` 注入 + 消费后清空
-- **U7** handoff 注入顺序（B2/B3）+ artifact 硬校验（B1）
-- 5 个 unit tests 覆盖 in-loop hint 路径：`crates/ralph-core/src/event_loop/tests/serial_lint.rs`
+- **U5** `ralph emit --schema <TOPIC>` 子命令(挂在 emit 下,R6 字面要求;实现为 `commands/emit.rs::schema_view` 子模块)+ 5 个测试 + `docs/handbook/serial-preset-development.md` + `ralph-tools-emit.md` 反向验证
+- **U7** handoff 注入顺序(B2/B3)+ artifact 硬校验(B1)
+- 5 个 unit tests 覆盖 in-loop hint 路径:`crates/ralph-core/src/event_loop/tests/serial_lint.rs`
 
-### Deferred（独立 plan 跟踪）
+### Deferred(独立 plan 跟踪)
 
 - **U6** BDD 11 scenarios + harness 扩展 → `docs/plans/2026-06-20-002-feat-bdd-harness-extension-for-runtime-state-inspection-plan.md`
-- **SC-1（CI）** 同 U6 deferred
-- **F-PS-005** 跨 preset 同步（ce-executor-isolated / ce-executor-wave）—— 未开始
-- **F-PS-006** 真正 fail-closed timeout（替换 `lint_emit_with_timeout` 的 post-hoc 实现为 `JoinHandle::join_timeout`）—— 未开始
-- **U5** `ralph emit --schema` 子命令 + handbook 反向验证 —— 未开始
-- **SC-1（人工）** python sort 12U plan 手跑 3 次 —— 运维验收，不阻塞 plan 关闭
-- **SC-4** 2026-07-20 前无同类 consecutive_failures —— 运维验收，不阻塞 plan 关闭
+- **SC-1(CI)** 同 U6 deferred
+- **F-PS-005** 跨 preset 同步(ce-executor-isolated / ce-executor-wave)—— 未开始
+- **F-PS-006** 真正 fail-closed timeout(替换 `lint_emit_with_timeout` 的 post-hoc 实现为 `JoinHandle::join_timeout`)—— 未开始
+- **SC-1(人工)** python sort 12U plan 手跑 3 次 —— 运维验收,不阻塞 plan 关闭
+- **SC-4** 2026-07-20 前无同类 consecutive_failures —— 运维验收,不阻塞 plan 关闭
 
 ### 已知遗留风险
 
