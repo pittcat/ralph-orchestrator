@@ -1,0 +1,147 @@
+# serial_lint_8: AE-6 / SC-1 CI — step-chain replay
+#
+# 12U plan 的 SC-1（CI）验收准则是本场景在
+# `cargo nextest run -p ralph-core --test scenarios
+# test_serial_lint_8_step_chain_replay` 中跑绿。这是 11 个场景
+# 中最复杂的一个:在单次运行中串起 scenarios 1-5 的四条契约
+# 不变式,并断言其间的过渡。
+#
+# 接线路径:
+#   iter 1: task.start（唤醒 executor）
+#   iter 2: work.done 基线合法（scenario 1 的契约）
+#   iter 3: work.done 缺字段（scenario 4 的种子）
+#   iter 4: task.start（消费 hint → scenario 4 的清空）
+#   iter 5: work.done fix-applied（scenario 5 的 dedup）
+#   iter 6: work.done 又一次 schema-invalid（重新播种）
+#   iter 7: task.start（再次消费 hint）
+#   iter 8: work.done 最终合法
+#
+# 8 迭代的形态让每次过渡彼此独立,任何一步的回归都会在失败
+# 信息中精确指向那一行。
+#
+# 2026-06-20-002 plan U6:SC-1 验收场景。
+
+name: serial_lint_8_step_chain_replay
+description: 完整 in-loop lint feedback 链路——8 迭代覆盖 scenarios 1/4/5 不变式
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 8
+  hats:
+    executor:
+      name: "Executor"
+      subscribes_to:
+        - task.start
+      publishes:
+        - work.done
+  event_loop:
+    execution_mode: isolated
+    starting_event: "task.start"
+    completion_promise: "LOOP_COMPLETE"
+    hat_handoff:
+      enabled: true
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        work.done:
+          required_fields:
+            - plan_name
+            - step
+            - commit_count
+
+mock_responses:
+  - text: |
+      <event topic="task.start">
+      {"plan_name":"plan-s","task_id":"t1","step":"step-01"}
+      </event>
+    hat: executor
+  # iter 2: valid work.done (scenarios 1 + 4 baseline)
+  - text: |
+      <event topic="work.done">
+      {"plan_name":"plan-s","step":"step-01","commit_count":1}
+      </event>
+    hat: executor
+  # iter 3: invalid work.done (scenario 4 seed)
+  - text: |
+      <event topic="work.done">
+      {"commit_count":2}
+      </event>
+    hat: executor
+  # iter 4: task.start (scenario 4 consume)
+  - text: |
+      <event topic="task.start">
+      {"plan_name":"plan-s","task_id":"t1","step":"step-02"}
+      </event>
+    hat: executor
+  # iter 5: valid "fix applied" work.done (scenario 5 dedup)
+  - text: |
+      <event topic="work.done">
+      {"plan_name":"plan-s","step":"step-02","commit_count":3}
+      </event>
+    hat: executor
+  # iter 6: another invalid work.done (re-seed)
+  - text: |
+      <event topic="work.done">
+      {"commit_count":4}
+      </event>
+    hat: executor
+  # iter 7: task.start (consume again)
+  - text: |
+      <event topic="task.start">
+      {"plan_name":"plan-s","task_id":"t1","step":"step-03"}
+      </event>
+    hat: executor
+  # iter 8: valid final work.done
+  - text: |
+      <event topic="work.done">
+      {"plan_name":"plan-s","step":"step-03","commit_count":5}
+      </event>
+    hat: executor
+
+expected:
+  iterations: 8
+  # work.done 至少在一次合法 emit（iter 2、5、8）落到 seen_topics。
+  # 某次回归若丢弃所有合法 work.done emit,本断言会失败。
+  events:
+    - topic: work.done
+  completion: false
+  # 每个迭代的契约断言。期望的不变式从本目录的 5 个契约场景推导;
+  # 任何一项的回归都会被捕获在出错的精确迭代上。
+  assert_state:
+    # iter 1:清洁基线（scenario 1 不变式）。
+    - at_iteration: 1
+      pending_lint_resume_cleared: {}
+    # iter 2:合法 emit 后仍清洁（scenario 1 + 5 基线不变式）。
+    - at_iteration: 2
+      pending_lint_resume_cleared: {}
+    # iter 3:hint 由 engine gate reject 播种（scenario 4 不变式——
+  # 负载级的那条）。
+    - at_iteration: 3
+      pending_lint_resume:
+        topic: work.done
+        reason_contains: "missing required fields"
+    # iter 4:hint 被消费 + 清空（scenario 4 不变式）。
+    - at_iteration: 4
+      prompt_injects:
+        hat: ralph
+        block: "## LINT RESUME REQUIRED"
+    - at_iteration: 4
+      pending_lint_resume_cleared: {}
+    # iter 5:fix-applied work.done 之后 hint 保持清空
+  # （scenario 5 不变式）。
+    - at_iteration: 5
+      pending_lint_resume_cleared: {}
+    # iter 6:hint 由第二次 invalid emit 重新播种
+  # （scenario 4 重入不变式）。
+    - at_iteration: 6
+      pending_lint_resume:
+        topic: work.done
+        reason_contains: "missing"
+    # iter 7:hint 再次被消费（scenario 4 第二轮）。
+    - at_iteration: 7
+      pending_lint_resume_cleared: {}
+    # iter 8:hint 在最终合法 emit 期间保持清空。
+    - at_iteration: 8
+      pending_lint_resume_cleared: {}

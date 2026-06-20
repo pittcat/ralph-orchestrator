@@ -1,0 +1,88 @@
+# serial_lint_1: R7-1 / AE-5 partial — internal source bypass
+#
+# 断言 executor 自身发布的 `work.done` 事件**不会**被 engine gate
+# 的 source-check 错误拒绝（gate 必须接受那些由 hat registry 中
+# registered 且 `publishes` 列表含该 topic 的 hat 所发布的事件）。
+#
+# 2026-06-20-002 plan U4:本场景是 scenario 2（rejection_digest）
+# 与 scenario 4（resume_hint_consumed）的正向对照。若 engine gate
+# 未来误把 executor 发布的 work.done 归类为 malformed（例如对事件
+# 来源加了过激的 `from_hat` 检查），`expected.events: [work.done]`
+# 断言会在 `assert_state` 之前触发失败。
+#
+# engine gate 的 required-fields 检查要求 JSON payload
+# （event_loop `parse_event_payload_value`），具体说明参见
+# assert_state_harness_smoke.yaml。
+
+name: serial_lint_1_internal_source_bypass
+description: executor 发布的 work.done 必须通过 engine gate（无误报 scope_violation、未因失误禁用 linter）
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 3
+  hats:
+    executor:
+      name: "Executor"
+      subscribes_to:
+        - task.start
+      publishes:
+        - work.done
+  event_loop:
+    execution_mode: isolated
+    starting_event: "task.start"
+    completion_promise: "LOOP_COMPLETE"
+    hat_handoff:
+      enabled: true
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        work.done:
+          required_fields:
+            - plan_name
+            - step
+            - commit_count
+
+mock_responses:
+  - text: |
+      <event topic="task.start">
+      {"plan_name":"plan-s","task_id":"t1","step":"step-01"}
+      </event>
+    hat: executor
+  # iter 2: schema-valid work.done from the registered
+  # `executor` hat. The engine gate must accept this and
+  # the loop's seen_topics must record `work.done`.
+  - text: |
+      <event topic="work.done">
+      {"plan_name":"plan-s","step":"step-01","commit_count":1}
+      </event>
+    hat: executor
+  # iter 3: another schema-valid work.done. Doubles as
+  # the "still not bypassed" sanity check — a regression
+  # that triggered the bypass on the first emit would still
+  # fire here.
+  - text: |
+      <event topic="work.done">
+      {"plan_name":"plan-s","step":"step-01","commit_count":2}
+      </event>
+    hat: executor
+
+expected:
+  iterations: 3
+  events:
+    - topic: work.done
+  # R7-1:engine gate **不得**为 executor 发布的 `work.done`
+  # 发出 scope_violation 诊断。若未来回归引入过激 scope 检查,
+  # `*.scope_violation` 会出现在 seen_topics 中,本断言立即失败。
+  absent_events:
+    - topic: executor.scope_violation
+    - topic: ralph.scope_violation
+  completion: false
+  assert_state:
+    - at_iteration: 1
+      pending_lint_resume_cleared: {}
+    - at_iteration: 2
+      pending_lint_resume_cleared: {}
+    - at_iteration: 3
+      pending_lint_resume_cleared: {}

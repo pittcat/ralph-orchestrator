@@ -1,0 +1,124 @@
+# serial_lint_10: circuit_breaker — 连续 lint rejections 保持有界
+#
+# Plan 2026-06-20-002（以及原 2026-06-20-001 U6 表）曾要求就
+# `consecutive_lint_rejections >= 3 → linter_disabled` 转移做
+# circuit-breaker 断言。当前 `LoopState`（event_loop::loop_state
+# 类型）中没有这一字段——最接近的相关信号是
+# `scope_violation_circuit_breaker_tripped`,但属于另一个域
+# （scope enforcement,不是 lint）。
+#
+# 据用户在 plan review（2026-06-20）时的明确决定:"只断言已存在
+# 字段"。本场景因此断言 circuit-breaker 提案本意保护的**最小**
+# 不变式:经过三次连续 engine-gate rejection 后,loop 仍然健康
+# （无虚假终止、slot 仍被正确设置、后续合法 emit 仍被接受）。
+#
+# 若将来 `consecutive_lint_rejections` 专用字段落地（F-PS-007
+# 后续工作）,本场景可扩展,在 iter 4 处加
+# `assert_state.consecutive_lint_rejections.gte: 3` 块。
+#
+# 2026-06-20-002 plan U6:scenario 10 of 11。
+
+name: serial_lint_10_circuit_breaker
+description: 三次连续 engine-gate rejection 保持有界——无终止、hint 仍播种、合法 emit 仍接受
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 6
+  hats:
+    executor:
+      name: "Executor"
+      subscribes_to:
+        - task.start
+      publishes:
+        - work.done
+  event_loop:
+    execution_mode: isolated
+    starting_event: "task.start"
+    completion_promise: "LOOP_COMPLETE"
+    hat_handoff:
+      enabled: true
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        work.done:
+          required_fields:
+            - plan_name
+            - step
+            - commit_count
+
+mock_responses:
+  - text: |
+      <event topic="task.start">
+      {"plan_name":"plan-s","task_id":"t1","step":"step-01"}
+      </event>
+    hat: executor
+  # iter 2: invalid #1
+  - text: |
+      <event topic="work.done">
+      {"commit_count":1}
+      </event>
+    hat: executor
+  # iter 3: invalid #2
+  - text: |
+      <event topic="work.done">
+      {"commit_count":2}
+      </event>
+    hat: executor
+  # iter 4:invalid #3——负载级迭代。此时 hint 必须仍被设置。
+  # 引入过激 circuit-breaker 的回归会要么 (a) 跳过 hint 播种,
+  # 要么 (b) 提前终止 loop;两种都在本场景失败。
+  - text: |
+      <event topic="work.done">
+      {"commit_count":3}
+      </event>
+    hat: executor
+  # iter 5:task.start 用于消费。验证在多次连续 reject 后
+  # consume 路径仍工作。
+  - text: |
+      <event topic="task.start">
+      {"plan_name":"plan-s","task_id":"t1","step":"step-02"}
+      </event>
+    hat: executor
+  # iter 6:合法 work.done。engine gate accept 路径必须继续工作;
+  # hint 在消费后保持清空。
+  - text: |
+      <event topic="work.done">
+      {"plan_name":"plan-s","step":"step-02","commit_count":4}
+      </event>
+    hat: executor
+
+expected:
+  iterations: 6
+  events:
+    - topic: work.done
+  completion: false
+  assert_state:
+    - at_iteration: 1
+      pending_lint_resume_cleared: {}
+    # iters 2/3/4:每次 rejection 播种 hint（累积不变式:hint 在
+  # **每次** engine-gate reject 之后都被设置,与连续次数无关）。
+    - at_iteration: 2
+      pending_lint_resume:
+        topic: work.done
+        reason_contains: "missing"
+    - at_iteration: 3
+      pending_lint_resume:
+        topic: work.done
+        reason_contains: "missing"
+    - at_iteration: 4
+      pending_lint_resume:
+        topic: work.done
+        reason_contains: "missing"
+    # iter 5:在 3 次 reject 之后 consume-on-use 仍工作。
+    - at_iteration: 5
+      prompt_injects:
+        hat: ralph
+        block: "## LINT RESUME REQUIRED"
+    - at_iteration: 5
+      pending_lint_resume_cleared: {}
+    # iter 6:消费后,合法 emit 被接受,hint 保持清空。引入过早终止
+  # 或粘性 hint 的回归在此失败。
+    - at_iteration: 6
+      pending_lint_resume_cleared: {}

@@ -1,0 +1,117 @@
+# serial_lint_4: R7-4 / AE-4 — resume hint 设置后被消费
+#
+# 这是 in-loop lint feedback 路径的负载级场景。断言
+# `pending_lint_resume` 的完整生命周期:
+#
+#   iter N:    engine gate 拒绝 work.done（缺字段）
+#              → 播种 pending_lint_resume
+#   iter N+1:  next_hat 的 build_prompt 注入
+#              `## LINT RESUME REQUIRED` 到 prompt
+#              → 消费即清空
+#
+# 这是 review P0 #4 新增、2026-06-20-001 plan 收尾（U4b / KTD-8）
+# 的契约。若未来重构删掉 `inject_pending_lint_resume` 中的
+# `take()` 或 `engine_required_field_filter` 中的 `set`,
+# 本场景即为回归告警。
+#
+# 2026-06-20-002 plan U4:scenario 4 是验证 consume-on-use 不变式
+# 的唯一 BDD 测试。本目录其他场景覆盖互补不变式,但不都断言
+# consume 后的清空细节。
+
+name: serial_lint_4_resume_hint_consumed
+description: engine gate reject 播种 hint;下一次 build_prompt 注入并清空 slot（consume-on-use）
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 4
+  hats:
+    executor:
+      name: "Executor"
+      subscribes_to:
+        - task.start
+      publishes:
+        - work.done
+  event_loop:
+    execution_mode: isolated
+    starting_event: "task.start"
+    completion_promise: "LOOP_COMPLETE"
+    hat_handoff:
+      enabled: true
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        work.done:
+          required_fields:
+            - plan_name
+            - step
+            - commit_count
+
+mock_responses:
+  # 2026-06-20-002 plan U4 / scenario 4:负载级 consume-on-use 不变式。
+  # 所有事件都打 `hat: executor`,使得
+  # `inject_pending_lint_resume` 中的 source-hat 分发能把 hint
+  # 路由到 source hat 的下一次 prompt。EventParser 会剥掉 `<event>`
+  # 标签中的 XML 属性——只有 `<event ...>` 与 `</event>` 之间的
+  # 文本会成为 payload。因此我们使用 **JSON payload**,让 engine
+  # gate 的 required-fields 检查（event_loop `parse_event_payload_value`）
+  # 看到 JSON 对象；非 JSON payload 会被包成 Value::String,engine
+  # gate 的 `missing_fields` 辅助函数（engine::gates::missing_fields）
+  # 会把它当成所有 required fields 都缺失,从而 fail-close 检查。
+  - text: |
+      <event topic="task.start">
+      {"plan_name":"plan-s","task_id":"t1","step":"step-01"}
+      </event>
+    hat: executor
+  # iter 2:schema-valid work.done（基线）。让 `seen_topics` 路径热身,
+  # 保证 engine gate accept 路径在 reject 之前被至少跑过一次。
+  - text: |
+      <event topic="work.done">
+      {"plan_name":"plan-s","step":"step-01","commit_count":1}
+      </event>
+    hat: executor
+  # iter 3:schema-INVALID work.done。engine gate 拒绝,
+  # 以 topic=work.done、reason="missing required fields: ..."
+  # 播种 `pending_lint_resume`。
+  - text: |
+      <event topic="work.done">
+      {"commit_count":2}
+      </event>
+    hat: executor
+  # iter 4:emit task.start（而非 work.done）,避免 engine gate
+  # 在本迭代重新播种 hint。iter 4 开头的 build_prompt 必须消费
+  # 该 hint 并清空 slot。
+  - text: |
+      <event topic="task.start">
+      {"plan_name":"plan-s","task_id":"t1","step":"step-02"}
+      </event>
+    hat: executor
+
+expected:
+  iterations: 4
+  completion: false
+  assert_state:
+    # iter 1:清洁基线,hint 为 None。
+    - at_iteration: 1
+      pending_lint_resume_cleared: {}
+    # iter 2:仍清洁（合法 emit 不播种）。
+    - at_iteration: 2
+      pending_lint_resume_cleared: {}
+    # iter 3:hint 现已填充失败 topic 与规范的 "missing required fields"
+  # reason。
+    - at_iteration: 3
+      pending_lint_resume:
+        topic: work.done
+        reason_contains: "missing required fields"
+    # iter 4:下一个被选 hat 的 build_prompt 注入
+  # `## LINT RESUME REQUIRED`。本最小单 hat 拓扑下被选 hat 为
+  # `ralph`（dispatch 说明见 smoke 场景）。
+    - at_iteration: 4
+      prompt_injects:
+        hat: ralph
+        block: "## LINT RESUME REQUIRED"
+    # iter 4:注入之后,slot 被清空。这正是 consume-on-use 断言——
+  # 如果 prompt build 后 hint 仍保留,feedback 路径即坏。
+    - at_iteration: 4
+      pending_lint_resume_cleared: {}

@@ -1,0 +1,93 @@
+# serial_lint_9: R14 / KTD-9 — timeout fail-closed（事后 digest 条目）
+#
+# 断言:payload 的 `reason` 字段携带 `timeout` 标记（不是 wire-level
+# 的 completion_promise,而是合成的 payload 标签）的 `work.done`,
+# 在 runtime 因缺 required fields 拒绝后,在
+# `recent_rejection_digest` 中留下痕迹。
+#
+# 据 2026-06-20-001 plan,engine gate 在 timeout 上的真正
+# fail-closed 语义由 F-PS-006 单独跟踪——本场景仅验证 rejection
+# 路径**记录**了失败至 digest,而不验证 runtime 在 timeout 上
+# 终止循环。
+#
+# 2026-06-20-002 plan U6:scenario 9 of 11。
+
+name: serial_lint_9_timeout_fail_closed
+description: 带 timeout 标签 reason 的 engine gate rejection 写入 rejection_digest
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 3
+  hats:
+    executor:
+      name: "Executor"
+      subscribes_to:
+        - task.start
+      publishes:
+        - work.done
+  # coordinator 模式:必须,用于走 origin-guard digest 路径
+  # （同 serial_lint_2 的依据）。engine gate 要求
+  # `execution_mode != Coordinator`,但即便 engine gate 关闭,
+  # 一旦配置了 `event_policy` schemas,`required_fields` 检查
+  # 仍会跑。我们保留 schema 以触发 missing-fields reject；origin
+  # guard 会二次记录 timeout 标签的 reason。
+  event_loop:
+    execution_mode: coordinator
+    starting_event: "task.start"
+    completion_promise: "LOOP_COMPLETE"
+    hat_handoff:
+      enabled: true
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        work.done:
+          required_fields:
+            - plan_name
+            - step
+            - commit_count
+
+mock_responses:
+  - text: |
+      <event topic="task.start">
+      {"plan_name":"plan-s","task_id":"t1","step":"step-01"}
+      </event>
+    hat: executor
+  # iter 2:含 timeout 标签的 invalid work.done。origin guard
+  # 拒绝未知 source hat（`outsider`）；digest 记录该 rejection,
+  # last_topic=work.done。F-PS-006（后续工作）将收紧为基于
+  # `timeout` reason 的 fail-closed 循环终止；本场景仅断言
+  # digest 记录了它。
+  - text: |
+      <event topic="work.done">
+      {"reason":"timeout: deadline exceeded"}
+      </event>
+    hat: outsider
+  # iter 3:同一模式,第二次 emit。确认 digest 在迭代之间**只增不删**。
+  - text: |
+      <event topic="work.done">
+      {"reason":"timeout: deadline exceeded"}
+      </event>
+    hat: outsider
+
+expected:
+  iterations: 3
+  events: []
+  completion: false
+  assert_state:
+    # iter 1:digest 起始为空。
+    - at_iteration: 1
+      rejection_digest_contains: {}
+    # iter 2:digest 现含 last_topic=`work.done` 的条目。
+  # digest 的 `last_message` 是 origin guard 格式化出的 rejection
+  # 字符串（其中**不**含 payload 的 `reason` 字段——该字段由
+  # engine gate 消费,而非 origin guard）。F-PS-006 后续工作
+  # 会把 payload reason 暴露到 digest,以便 fail-closed 终止。
+    - at_iteration: 2
+      rejection_digest_contains:
+        contains_topic: work.done
+    # iter 3:digest 持续存在（迭代之间不清空）。
+    - at_iteration: 3
+      rejection_digest_contains:
+        contains_topic: work.done
