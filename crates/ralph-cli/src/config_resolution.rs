@@ -50,6 +50,35 @@ pub(crate) fn default_core_value() -> Result<Value> {
         let events_key = Value::String("events".to_string());
         mapping.remove(&hats_key);
         mapping.remove(&events_key);
+
+        // 2026-06-20 fix: strip opt-in key placeholders under
+        // `event_loop` so `merge_hats_overlay` can detect "operator
+        // omitted" via `contains_key`. Without this, the default
+        // placeholders (e.g. `state_projection: {enabled: false,
+        // actions: {}}`, `hat_handoff: {enabled: false}`,
+        // `suppress_human_guidance: false`) survive
+        // `default_core_value()` and make the `!contains_key` guard
+        // in `merge_hats_overlay` always true on those keys, silently
+        // dropping the preset opt-in (perky-maple + bold-heron
+        // regressions). Operator's explicit declaration still wins
+        // because `merge_yaml_values` keeps the operator's value
+        // when declared; only the default placeholder is stripped.
+        const PRESET_OPT_IN_KEYS: &[&str] = &[
+            "state_projection",
+            "hat_handoff",
+            "suppress_human_guidance",
+            "workflow_contract",
+            "ephemeral_isolation",
+            "enforce_current_unit",
+        ];
+        if let Some(event_loop) = mapping
+            .get_mut(&Value::String("event_loop".to_string()))
+            .and_then(|v| v.as_mapping_mut())
+        {
+            for key in PRESET_OPT_IN_KEYS {
+                event_loop.remove(&Value::String((*key).to_string()));
+            }
+        }
     }
 
     Ok(value)

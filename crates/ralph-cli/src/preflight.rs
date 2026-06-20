@@ -1881,6 +1881,55 @@ hats:
         );
     }
 
+    /// 2026-06-20 regression: existing `merge_hats_overlay_*` tests
+    /// build `core` from raw YAML, which bypasses
+    /// `default_core_value()`. Production goes through
+    /// `default_core_value()` (which serializes `RalphConfig::default()`)
+    /// → `event_loop` carries a `state_projection: {enabled: false,
+    /// actions: {}}` placeholder. The old `!contains_key` guard in
+    /// `merge_hats_overlay` then always evaluates false on that
+    /// placeholder, silently dropping the preset opt-in. This test
+    /// mirrors the production path by sourcing `core` from
+    /// `default_core_value()`; with the fix in `default_core_value`
+    /// the test PASSES, without the fix it FAILS with
+    /// `state_projection.enabled == false`.
+    #[test]
+    fn merge_hats_overlay_preserves_state_projection_when_core_comes_from_default_core_value() {
+        let core = crate::config_resolution::default_core_value()
+            .expect("default_core_value must succeed");
+        let hats: Value = serde_yaml::from_str(
+            r#"
+event_loop:
+  state_projection:
+    enabled: true
+    actions:
+      work.ready: {kind: ensure_task, key: task_key, title: step}
+      work.done: {kind: close_task, task_id: task_id, step: step}
+      queue.advance: {kind: advance_step, current_step: step, completed_step: completed_step}
+      plan.complete: {kind: plan_complete, final_step: step}
+hats:
+  coordinator: {name: Coordinator}
+"#,
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        assert!(
+            config.event_loop.state_projection.enabled,
+            "preset state_projection.enabled must survive merge_hats_overlay when core \
+             comes from default_core_value() (production path); currently dropped silently \
+             because the default placeholder is mistaken for an operator declaration"
+        );
+        for topic in ["work.ready", "work.done", "queue.advance", "plan.complete"] {
+            assert!(
+                config.event_loop.state_projection.actions.contains_key(topic),
+                "preset action `{topic}` must survive the production-path merge"
+            );
+        }
+    }
+
     /// End-to-end regression guard for the U5 bug. The user's ralph.yml
     /// uses uppercase `LOOP_COMPLETE` to match the ce-executor preset's
     /// completion contract. After the real merge, the preset's
