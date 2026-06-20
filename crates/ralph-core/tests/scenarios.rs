@@ -13,6 +13,18 @@ use ralph_core::{EventLoop, EventParser, HatConfig, LoopContext, RalphConfig};
 use serde::Deserialize;
 use std::fs;
 
+/// 2026-06-20-002 plan U3 review: production-side prompt headings
+/// (preset/engine/lint_mirror.rs:28, :52) hoisted to test-side
+/// constants so fixtures cannot drift when production rewrites
+/// the heading. YAML fixtures may either write the literal or
+/// omit `block:` to use the default.
+pub const LINT_MIRROR_HEADING: &str = "## LINT MIRROR";
+pub const LINT_RESUME_REQUIRED_HEADING: &str = "## LINT RESUME REQUIRED";
+
+fn default_lint_resume_required() -> String {
+    LINT_RESUME_REQUIRED_HEADING.to_string()
+}
+
 #[derive(Debug, Deserialize)]
 struct ScenarioYaml {
     name: String,
@@ -22,9 +34,10 @@ struct ScenarioYaml {
     /// (the LLM's emitted text) or a `{text, hat}` object. The
     /// `hat` field, when present, is stamped on every event parsed
     /// from the response as the JSONL `hat` field. The runtime
-    /// handoff gate (`event_loop/mod.rs:7788`) requires a non-empty
-    /// `from_hat` to evaluate macro edges, so scenarios that exercise
-    /// the gate need to set `hat` on their mock events.
+    /// handoff gate (`event_loop::hat_handoff_gate from_hat check`)
+    /// requires a non-empty `from_hat` to evaluate macro edges,
+    /// so scenarios that exercise the gate need to set `hat` on
+    /// their mock events.
     #[serde(default, deserialize_with = "deserialize_mock_responses")]
     mock_responses: Vec<MockResponseYaml>,
     #[serde(default)]
@@ -124,6 +137,134 @@ struct ExpectedYaml {
     /// prompt assertions.
     #[serde(default)]
     prompt_contains: Vec<PromptContainsYaml>,
+    /// 2026-06-20-002 plan U1 (R-H1 ~ R-H6): assert runtime
+    /// **memory state** at specific iterations. Each entry has an
+    /// `at_iteration` field (1-indexed) selecting which snapshot
+    /// to evaluate against. Empty list = no state assertions.
+    /// The runner records `LoopStateSnapshot` + `BuildPromptSnapshot`
+    /// at the end of every iteration, then evaluates the list in
+    /// order after the loop completes (read-only; the runner
+    /// itself never mutates state from `assert_state`).
+    #[serde(default)]
+    assert_state: Vec<AssertionYaml>,
+}
+
+/// One entry in `ExpectedYaml.assert_state` (2026-06-20-002 plan U1).
+///
+/// Exactly one variant field is set per entry. The discriminator
+/// is the field name; serde's untagged enum on the
+/// `Mapping`-shaped entries lets YAML files write either of:
+///
+///   - pending_lint_resume: { at_iteration: 3, topic: work.done, reason_contains: "missing" }
+///   - pending_lint_resume_cleared: { at_iteration: 4 }
+///   - rejection_digest_contains: { at_iteration: 5, contains_topic: work.done, contains_reason: "missing" }
+///   - prompt_injects: { at_iteration: 4, hat: executor, block: "## LINT RESUME REQUIRED" }
+///
+/// `at_iteration` is mandatory on every variant and must satisfy
+/// `1 <= at_iteration <= actual_iterations` (R-H3). Out-of-range
+/// values are reported as `at_iteration=N out of range [1, M]`
+/// before evaluating.
+#[allow(dead_code)] // Test infrastructure - fields used for YAML deserialization
+#[derive(Debug, Deserialize)]
+struct AssertionYaml {
+    at_iteration: usize,
+    // pending_lint_resume: state.pending_lint_resume is Some
+    // matching the optional topic / reason predicates.
+    #[serde(default)]
+    pending_lint_resume: Option<PendingLintResumeYaml>,
+    #[serde(default)]
+    pending_lint_resume_cleared: Option<PendingLintResumeClearedYaml>,
+    #[serde(default)]
+    rejection_digest_contains: Option<RejectionDigestContainsYaml>,
+    #[serde(default)]
+    prompt_injects: Option<PromptInjectsYaml>,
+}
+
+#[allow(dead_code)] // Test infrastructure - fields used for YAML deserialization
+#[derive(Debug, Deserialize, Default)]
+struct PendingLintResumeYaml {
+    #[serde(default)]
+    topic: Option<String>,
+    #[serde(default)]
+    reason_contains: Option<String>,
+}
+
+#[allow(dead_code)] // Test infrastructure - fields used for YAML deserialization
+#[derive(Debug, Deserialize, Default)]
+struct PendingLintResumeClearedYaml {}
+
+#[allow(dead_code)] // Test infrastructure - fields used for YAML deserialization
+#[derive(Debug, Deserialize, Default)]
+struct RejectionDigestContainsYaml {
+    #[serde(default)]
+    contains_topic: Option<String>,
+    #[serde(default)]
+    contains_reason: Option<String>,
+}
+
+#[allow(dead_code)] // Test infrastructure - fields used for YAML deserialization
+#[derive(Debug, Deserialize)]
+struct PromptInjectsYaml {
+    hat: String,
+    #[serde(default = "default_lint_resume_required")]
+    block: String,
+}
+
+/// Read-only snapshot of `LoopState` taken at the end of each
+/// iteration (2026-06-20-002 plan U2 / R-H2). Cloned so that
+/// `assert_state` evaluation does not borrow the live `&mut
+/// EventLoop` past the iteration loop. Fields deliberately
+/// mirror only what `assert_state` predicates need; no new
+/// EventLoop API required.
+#[allow(dead_code)] // Test infrastructure - fields used for YAML deserialization
+#[derive(Debug, Clone)]
+struct LoopStateSnapshot {
+    iteration: u32,
+    /// Clone of `state.pending_lint_resume` (Option<LintResumeHint>).
+    /// We store only the fields the predicates inspect; deep
+    /// cloning the full hint struct would not buy anything and
+    /// would couple the test to engine internals.
+    pending_lint_resume: Option<PendingLintResumeSummary>,
+    /// Snapshot of `state.recent_rejection_digest` (BTreeMap<String,
+    /// RejectionDigestEntry>) flattened into `(topic, reason)`
+    /// pairs that the predicates can match on.
+    rejection_digest_entries: Vec<RejectionDigestSummary>,
+    /// Snapshot of `state.scope_violation_circuit_breaker_tripped`
+    /// being Some. The serial-lint domain does not have its own
+    /// circuit breaker (plan 2026-06-20-002 U1 review: this
+    /// field is the closest existing analog), so scenarios that
+    /// need a "linter tripped" signal use this via the
+    /// `circuit_breaker_tripped` assertion (added in U6 if needed).
+    /// Tracked here for future extensibility.
+    #[allow(dead_code)]
+    scope_violation_circuit_breaker_tripped: bool,
+}
+
+#[allow(dead_code)] // Test infrastructure
+#[derive(Debug, Clone)]
+struct PendingLintResumeSummary {
+    topic: String,
+    reason: String,
+}
+
+#[allow(dead_code)] // Test infrastructure
+#[derive(Debug, Clone)]
+struct RejectionDigestSummary {
+    code: String,
+    last_topic: String,
+    last_message: String,
+}
+
+/// Read-only snapshot of one `build_prompt` invocation's output
+/// (2026-06-20-002 plan U2). The runner already records the
+/// **last** prompt per hat; `assert_state` needs iteration-level
+/// access, so we also push per-iteration `(hat, prompt)` pairs.
+#[allow(dead_code)] // Test infrastructure - fields used for YAML deserialization
+#[derive(Debug, Clone)]
+struct BuildPromptSnapshot {
+    iteration: u32,
+    hat: String,
+    prompt: String,
 }
 
 /// `ExpectedYaml.prompt_contains` 元素:断言 hat 的 prompt 含
@@ -170,50 +311,39 @@ fn load_scenario(path: &str) -> ScenarioYaml {
     serde_yaml::from_str(&content).unwrap_or_else(|e| panic!("Failed to parse {}: {}", path, e))
 }
 
-fn run_scenario(yaml: ScenarioYaml) {
-    let backend = MockBackend::new(
-        yaml.mock_responses
-            .iter()
-            .map(|r| r.text.clone())
-            .collect(),
-    );
-    let runner = ScenarioRunner::new(backend.clone());
-
-    let mut config = RalphConfig::default();
-    config.max_iterations = Some(yaml.config.max_iterations);
-    config.prompt_file = Some(yaml.config.prompt_file);
-
-    let scenario =
-        Scenario::new(yaml.name.clone(), config).with_iterations(yaml.expected.iterations);
-
-    let trace = runner.run(&scenario);
-
-    // Verify iteration count
-    assert_eq!(
-        trace.iterations, yaml.expected.iterations,
-        "{}: Expected {} iterations, got {}",
-        yaml.name, yaml.expected.iterations, trace.iterations
-    );
-
-    // Verify backend was called
-    assert!(
-        backend.execution_count() > 0,
-        "{}: Backend should have been called",
-        yaml.name
-    );
-
-    println!("✓ {} passed", yaml.description);
-}
-
-/// Runs a scenario that validates workflow guard behavior by feeding parsed
-/// events through a real EventLoop and asserting on workflow progress.
-fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
+/// Shared scenario runner used by both the workflow-guard
+/// harness and the in-line `test_isolated_with_event_projection`
+/// test. (2026-06-20-002 plan U2/R-H2 + U3/Q-3: extracted from
+/// the two near-duplicate bodies.)
+///
+/// Sets up the tempdir, pre-stages fixture files, builds a
+/// baseline `RalphConfig`, runs the iteration loop while
+/// recording per-iteration `LoopStateSnapshot` and
+/// `BuildPromptSnapshot` records, and evaluates all common
+/// assertions (`expected.events`, `absent_events`,
+/// `prompt_contains`, `workflow_progress`, completion, and
+/// `assert_state`).
+///
+/// The caller supplies `extra_config` for scenario-specific
+/// overrides (hat map, `event_loop` block, `core` block, etc.).
+/// The baseline config sets `task_resume_ttl_seconds = Some(0)`
+/// AFTER `extra_config` runs so scenario fixtures using a
+/// hardcoded `2024-01-01T00:00:00Z` timestamp continue to pass
+/// the freshness filter (2026-06-16-001 U3).
+///
+/// Returns the `TempDir` guard so callers that need to inspect
+/// out-of-band artifacts (e.g. `projected-events.jsonl`) keep the
+/// directory alive through their post-loop assertions.
+fn run_scenario_with_snapshots(
+    yaml: &ScenarioYaml,
+    extra_config: impl FnOnce(&mut RalphConfig, &ScenarioYaml),
+) -> tempfile::TempDir {
     use std::io::Write;
-
     let temp_dir = tempfile::tempdir().unwrap();
     let ralph_dir = temp_dir.path().join(".ralph");
     std::fs::create_dir_all(&ralph_dir).unwrap();
     let events_path = ralph_dir.join("events.jsonl");
+
     // 2026-06-18-002 plan U9: write fixture files (e.g. handoff
     // markdown files) to the temp workspace before the run. These
     // are scenario fixtures, not loop state.
@@ -228,46 +358,36 @@ fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
     // Build RalphConfig from the YAML config section
     let mut config = RalphConfig::default();
     config.max_iterations = Some(yaml.config.max_iterations);
-    config.prompt_file = Some(yaml.config.prompt_file);
+    config.prompt_file = Some(yaml.config.prompt_file.clone());
     // Pin the workspace to the temp dir so the projector and
     // the event reader resolve `.ralph/...` from there. Without
     // this the projector would point at the cwd of the test
     // runner and the scenario would silently no-op.
     config.core.workspace_root = temp_dir.path().to_path_buf();
-    // Parse hats if present (inject map key as name if missing)
-    if !yaml.config.hats.is_null() {
-        if let Ok(hat_map) = serde_yaml::from_value::<
-            std::collections::HashMap<String, serde_yaml::Value>,
-        >(yaml.config.hats.clone())
-        {
-            let mut hats = std::collections::HashMap::new();
-            for (hat_id, mut hat_value) in hat_map {
-                if let Some(map) = hat_value.as_mapping_mut() {
-                    if !map.contains_key(&serde_yaml::Value::String("name".to_string())) {
-                        map.insert(
-                            serde_yaml::Value::String("name".to_string()),
-                            serde_yaml::Value::String(hat_id.clone()),
-                        );
-                    }
-                }
-                let hat_config: HatConfig = serde_yaml::from_value(hat_value).unwrap_or_else(|e| {
-                    panic!("Failed to parse hat config for '{}': {}", hat_id, e)
-                });
-                hats.insert(hat_id, hat_config);
-            }
-            config.hats = hats;
-        }
-    }
-    if !yaml.config.event_loop.is_null() {
-        config.event_loop = serde_yaml::from_value(yaml.config.event_loop).unwrap();
-    }
+
+    // Apply caller-specific config overrides (hats, event_loop, core, ...).
+    extra_config(&mut config, yaml);
+
     // 2026-06-16-001 U3: scenario fixtures use a hardcoded
     // `2024-01-01T00:00:00Z` timestamp, which is older than the
     // default 300s TTL. Disable the freshness filter so the
     // fixtures continue to exercise the workflow-guard path without
     // being classified as stale rejections. The U3 TTL behavior
-    // is covered by `event_loop/tests/task_resume_ttl.rs`.
+    // is covered by `event_loop/tests/task_resume_ttl.rs`. Applied
+    // AFTER `extra_config` so a caller's `event_loop` parse wins
+    // on every other field; only `task_resume_ttl_seconds` is
+    // force-disabled.
     config.event_loop.task_resume_ttl_seconds = Some(0);
+
+    // Re-pin the workspace to the helper's tempdir AFTER
+    // `extra_config`. Some scenarios (e.g.
+    // `isolated_with_event_projection`) overwrite `config.core`
+    // wholesale from a YAML block; that overwrite nulls the
+    // `workspace_root` we just set, so we re-pin here. The
+    // helper owns the tempdir, so its path is the single
+    // source of truth for `workspace_root` regardless of
+    // what callers did in `extra_config`.
+    config.core.workspace_root = temp_dir.path().to_path_buf();
 
     let context = LoopContext::primary(temp_dir.path().to_path_buf());
 
@@ -285,6 +405,25 @@ fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
     let mut last_prompts: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
 
+    // 2026-06-20-002 plan U2 (R-H2): record per-iteration
+    // snapshots of `LoopState` (read-only clone) and the most
+    // recent `build_prompt` output. Snapshots are pushed **after
+    // process_events_from_jsonl** so the state captured reflects
+    // the iteration's terminal position (i.e. after rejection
+    // digest accumulation and any consume-on-use of
+    // `pending_lint_resume`). The runner itself never mutates
+    // state from `assert_state` (R-H4); snapshotting is the only
+    // borrow of `state()` we need outside the iteration loop.
+    let mut state_snapshots: Vec<LoopStateSnapshot> =
+        Vec::with_capacity(yaml.mock_responses.len());
+    let mut prompt_snapshots: Vec<BuildPromptSnapshot> = Vec::new();
+    // 2026-06-20-002 plan U2: holds the (hat, prompt) pair from
+    // the most-recent `build_prompt` in the current iteration,
+    // drained into `prompt_snapshots` at iteration end. Stays in
+    // sync with `last_prompts` (hat-scoped last-only map) but
+    // preserves the per-iteration pairing `assert_state` needs.
+    let mut last_prompt_for_iter: Option<(String, String)> = None;
+
     for (idx, response) in yaml.mock_responses.iter().enumerate() {
         // Simulate hat execution so isolated mode scope enforcement is active.
         // build_prompt() consumes pending events from the bus, matching real loop behavior.
@@ -292,6 +431,13 @@ fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
             let hat = hat.clone();
             let prompt = event_loop.build_prompt(&hat);
             if let Some(p) = prompt {
+                // 2026-06-20-002 plan U2: also stash the
+                // most-recent prompt for `assert_state.prompt_injects`
+                // (per-iteration) before we overwrite the
+                // hat-scoped `last_prompts` map. Note the move of
+                // `p` here is safe because `last_prompts` only
+                // keeps the last value per hat.
+                last_prompt_for_iter = Some((hat.to_string(), p.clone()));
                 last_prompts.insert(hat.to_string(), p);
             }
             let _ = event_loop.process_output(&hat, "", true);
@@ -361,20 +507,61 @@ fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
         if sleep_after_response > 0 {
             std::thread::sleep(std::time::Duration::from_millis(sleep_after_response));
         }
+
+        // 2026-06-20-002 plan U2 (R-H2): snapshot LoopState +
+        // BuildPrompt at the end of each iteration. Pushed AFTER
+        // process_events_from_jsonl so the captured state is the
+        // iteration's terminal position (post-rejection-digest
+        // accumulation and post-consume-on-use of
+        // pending_lint_resume). Pushed BEFORE the iteration's
+        // checkpoint assertions so a checkpoint failure does not
+        // produce a half-built snapshot list.
+        let snapshot = capture_state_snapshot(event_loop.state());
+        state_snapshots.push(snapshot);
+        if let Some((hat, prompt)) = last_prompt_for_iter.take() {
+            prompt_snapshots.push(BuildPromptSnapshot {
+                iteration: (idx + 1) as u32,
+                hat,
+                prompt,
+            });
+        } else {
+            // No prompt was built this iteration (no hat
+            // activated); still push a marker so `at_iteration`
+            // indexing lines up 1:1 with the iteration count for
+            // scenarios that need to assert "no prompt was built
+            // at iteration N".
+            prompt_snapshots.push(BuildPromptSnapshot {
+                iteration: (idx + 1) as u32,
+                hat: String::new(),
+                prompt: String::new(),
+            });
+        }
     }
 
     // Verify all expected events were seen (accepted) at least once
     for expected_event in &yaml.expected.events {
+        let seen = event_loop.state().seen_topics.clone();
         assert!(
-            event_loop
-                .state()
-                .seen_topics
-                .contains(&expected_event.topic),
-            "{}: Expected event '{}' to be seen (accepted), but it was not recorded",
+            seen.contains(&expected_event.topic),
+            "{}: Expected event '{}' to be seen (accepted), but it was not recorded. seen_topics: {:?}",
             yaml.name,
-            expected_event.topic
+            expected_event.topic,
+            seen
         );
     }
+
+    // 2026-06-20-002 plan U1 (R-H1): evaluate the optional
+    // `assert_state` list. Each entry picks one snapshot by
+    // `at_iteration` (1-indexed) and runs a single predicate.
+    // Order matches YAML; failures include the iteration index,
+    // the predicate name, and the actual snapshot state so the
+    // developer can locate the bug without re-running.
+    evaluate_assert_state(
+        &yaml.name,
+        &yaml.expected.assert_state,
+        &state_snapshots,
+        &prompt_snapshots,
+    );
 
     // Verify explicitly absent events were NOT accepted by the event loop
     for absent_event in &yaml.expected.absent_events {
@@ -455,6 +642,89 @@ fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
     );
 
     println!("✓ {} passed", yaml.description);
+
+    temp_dir
+}
+
+/// Apply the per-scenario YAML `config.hats` block to a
+/// `RalphConfig`, injecting the map key as the hat `name` when
+/// the inline entry omits one. (2026-06-20-002 plan U3/Q-3:
+/// extracted from the two near-duplicate wrappers.)
+fn apply_yaml_hats(yaml: &ScenarioYaml, config: &mut RalphConfig) {
+    if yaml.config.hats.is_null() {
+        return;
+    }
+    let hat_map: std::collections::HashMap<String, serde_yaml::Value> = match serde_yaml::from_value(
+        yaml.config.hats.clone(),
+    ) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    let mut hats = std::collections::HashMap::new();
+    for (hat_id, mut hat_value) in hat_map {
+        if let serde_yaml::Value::Mapping(ref mut map) = hat_value {
+            if !map.contains_key(&serde_yaml::Value::String("name".to_string())) {
+                map.insert(
+                    serde_yaml::Value::String("name".to_string()),
+                    serde_yaml::Value::String(hat_id.clone()),
+                );
+            }
+        }
+        let hat_config: HatConfig = serde_yaml::from_value(hat_value).unwrap_or_else(|e| {
+            panic!("Failed to parse hat config for '{}': {}", hat_id, e)
+        });
+        hats.insert(hat_id, hat_config);
+    }
+    config.hats = hats;
+}
+
+fn run_scenario(yaml: ScenarioYaml) {
+    let backend = MockBackend::new(
+        yaml.mock_responses
+            .iter()
+            .map(|r| r.text.clone())
+            .collect(),
+    );
+    let runner = ScenarioRunner::new(backend.clone());
+
+    let mut config = RalphConfig::default();
+    config.max_iterations = Some(yaml.config.max_iterations);
+    config.prompt_file = Some(yaml.config.prompt_file);
+
+    let scenario =
+        Scenario::new(yaml.name.clone(), config).with_iterations(yaml.expected.iterations);
+
+    let trace = runner.run(&scenario);
+
+    // Verify iteration count
+    assert_eq!(
+        trace.iterations, yaml.expected.iterations,
+        "{}: Expected {} iterations, got {}",
+        yaml.name, yaml.expected.iterations, trace.iterations
+    );
+
+    // Verify backend was called
+    assert!(
+        backend.execution_count() > 0,
+        "{}: Backend should have been called",
+        yaml.name
+    );
+
+    println!("✓ {} passed", yaml.description);
+}
+
+/// Runs a scenario that validates workflow guard behavior by feeding parsed
+/// events through a real EventLoop and asserting on workflow progress.
+/// (2026-06-20-002 plan U3/Q-3: thin wrapper around the shared
+/// `run_scenario_with_snapshots` helper; previously duplicated
+/// the entire runner body.)
+fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
+    run_scenario_with_snapshots(&yaml, |config, yaml| {
+        apply_yaml_hats(yaml, config);
+        if !yaml.config.event_loop.is_null() {
+            config.event_loop = serde_yaml::from_value(yaml.config.event_loop.clone()).unwrap();
+        }
+    });
 }
 
 #[test]
@@ -1042,254 +1312,30 @@ fn test_workflow_activation_contract_handoff_priority_dispatch() {
 
 #[test]
 fn test_isolated_with_event_projection() {
-    use std::io::Write;
-
+    // (2026-06-20-002 plan U3/Q-3: was a 340+ line in-line
+    // duplicate of the workflow-guard runner. Now delegates to
+    // the shared `run_scenario_with_snapshots` helper; only the
+    // `core.event_projection` config block and the post-loop
+    // `projected-events.jsonl` content check remain test-specific.)
     let yaml = load_scenario("tests/scenarios/isolated_with_event_projection.yml");
 
-    let temp_dir = tempfile::tempdir().unwrap();
-    let ralph_dir = temp_dir.path().join(".ralph");
-    std::fs::create_dir_all(&ralph_dir).unwrap();
-    let events_path = ralph_dir.join("events.jsonl");
-
-    // 2026-06-18-002 plan U9: write fixture files (e.g. handoff
-    // markdown files) to the temp workspace before the run. These
-    // are scenario fixtures, not loop state.
-    for fixture in &yaml.fixture_files {
-        let abs = temp_dir.path().join(&fixture.path);
-        if let Some(parent) = abs.parent() {
-            std::fs::create_dir_all(parent).unwrap();
+    let temp_dir = run_scenario_with_snapshots(&yaml, |config, yaml| {
+        apply_yaml_hats(yaml, config);
+        if !yaml.config.event_loop.is_null() {
+            config.event_loop = serde_yaml::from_value(yaml.config.event_loop.clone()).unwrap();
         }
-        std::fs::write(&abs, &fixture.content).unwrap();
-    }
-
-    // Build RalphConfig from the YAML config section
-    let mut config = RalphConfig::default();
-    config.max_iterations = Some(yaml.config.max_iterations);
-    config.prompt_file = Some(yaml.config.prompt_file);
-    // Pin the workspace to the temp dir so the projector and
-    // the event reader resolve `.ralph/...` from there. Without
-    // this the projector would point at the cwd of the test
-    // runner and the scenario would silently no-op.
-    config.core.workspace_root = temp_dir.path().to_path_buf();
-    // Parse hats if present (inject map key as name if missing)
-    if !yaml.config.hats.is_null() {
-        if let Ok(hat_map) = serde_yaml::from_value::<
-            std::collections::HashMap<String, serde_yaml::Value>,
-        >(yaml.config.hats.clone())
-        {
-            let mut hats = std::collections::HashMap::new();
-            for (hat_id, mut hat_value) in hat_map {
-                if let Some(map) = hat_value.as_mapping_mut() {
-                    if !map.contains_key(&serde_yaml::Value::String("name".to_string())) {
-                        map.insert(
-                            serde_yaml::Value::String("name".to_string()),
-                            serde_yaml::Value::String(hat_id.clone()),
-                        );
-                    }
-                }
-                let hat_config: HatConfig = serde_yaml::from_value(hat_value).unwrap_or_else(|e| {
-                    panic!("Failed to parse hat config for '{}': {}", hat_id, e)
-                });
-                hats.insert(hat_id, hat_config);
-            }
-            config.hats = hats;
+        if !yaml.config.core.is_null() {
+            config.core = serde_yaml::from_value(yaml.config.core.clone()).unwrap();
         }
-    }
-    if !yaml.config.event_loop.is_null() {
-        config.event_loop = serde_yaml::from_value(yaml.config.event_loop).unwrap();
-    }
-    if !yaml.config.core.is_null() {
-        config.core = serde_yaml::from_value(yaml.config.core.clone()).unwrap();
-    }
-    config.core.workspace_root = temp_dir.path().to_path_buf();
-
-    let context = LoopContext::primary(temp_dir.path().to_path_buf());
-
-    let mut event_loop = EventLoop::with_context(config, context);
-    event_loop.initialize("Test");
-
-    let parser = EventParser::new();
-
-    // 2026-06-18-002 plan U8 (KTD-17): capture the **last prompt**
-    // each hat saw during the run. Stored by hat id so the
-    // `prompt_contains` assertions below can look up the right
-    // entry. Only the last prompt per hat is retained because the
-    // prompt grows monotonically and the asserts want the most
-    // representative state.
-    let mut last_prompts: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-
-    for (idx, response) in yaml.mock_responses.iter().enumerate() {
-        // Simulate hat execution so isolated mode scope enforcement is active.
-        // build_prompt() consumes pending events from the bus, matching real loop behavior.
-        if let Some(hat) = event_loop.next_hat() {
-            let hat = hat.clone();
-            let prompt = event_loop.build_prompt(&hat);
-            if let Some(p) = prompt {
-                last_prompts.insert(hat.to_string(), p);
-            }
-            let _ = event_loop.process_output(&hat, "", true);
-        }
-
-        let events = parser.parse(&response.text);
-        {
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&events_path)
-                .unwrap();
-            for event in &events {
-                let mut entry = serde_json::json!({
-                    "topic": event.topic,
-                    "payload": event.payload,
-                    "ts": "2024-01-01T00:00:00Z",
-                });
-                if let Some(ref hat) = response.hat {
-                    entry["hat"] = serde_json::Value::String(hat.clone());
-                }
-                writeln!(file, "{}", entry).unwrap();
-            }
-        }
-
-        let _result = event_loop.process_events_from_jsonl();
-
-        // Evaluate checkpoints tied to this response index (1-based in YAML)
-        let mut sleep_after_response = 0u64;
-        for checkpoint in &yaml.checkpoints {
-            if checkpoint.after_response == idx + 1 {
-                for progress in &checkpoint.workflow_progress {
-                    let instance = progress.instance.as_deref();
-                    let actual_phase = event_loop
-                        .state()
-                        .workflow_progress
-                        .get_phase(&progress.chain, instance);
-                    assert_eq!(
-                        actual_phase,
-                        Some(progress.phase),
-                        "{}: After response {}, expected workflow progress phase {} for chain '{}', got {:?}",
-                        yaml.name,
-                        idx + 1,
-                        progress.phase,
-                        progress.chain,
-                        actual_phase
-                    );
-                }
-
-                if checkpoint.completion_rejected {
-                    let reason = event_loop.check_completion_event();
-                    assert!(
-                        reason.is_none(),
-                        "{}: After response {}, expected LOOP_COMPLETE to be rejected, but got {:?}",
-                        yaml.name,
-                        idx + 1,
-                        reason
-                    );
-                }
-
-                if checkpoint.sleep_ms > sleep_after_response {
-                    sleep_after_response = checkpoint.sleep_ms;
-                }
-            }
-        }
-
-        if sleep_after_response > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(sleep_after_response));
-        }
-    }
-
-    // Verify all expected events were seen (accepted) at least once
-    for expected_event in &yaml.expected.events {
-        assert!(
-            event_loop
-                .state()
-                .seen_topics
-                .contains(&expected_event.topic),
-            "{}: Expected event '{}' to be seen (accepted), but it was not recorded",
-            yaml.name,
-            expected_event.topic
-        );
-    }
-
-    // Verify explicitly absent events were NOT accepted by the event loop
-    for absent_event in &yaml.expected.absent_events {
-        assert!(
-            !event_loop.state().seen_topics.contains(&absent_event.topic),
-            "{}: Expected event '{}' to be rejected/dropped, but it was accepted",
-            yaml.name,
-            absent_event.topic
-        );
-    }
-
-    // 2026-06-18-002 plan U8 (KTD-17): assert `prompt_contains` per
-    // hat. Each entry's substrings must appear in the **last** prompt
-    // captured for that hat. Skip silently when the hat was never
-    // activated (no entry in `last_prompts`); this keeps scenarios
-    // that don't exercise the prompt path passing without forcing
-    // every hat to be reached.
-    for pc in &yaml.expected.prompt_contains {
-        let Some(prompt) = last_prompts.get(&pc.hat) else {
-            continue;
-        };
-        for needle in &pc.substrings {
-            assert!(
-                prompt.contains(needle.as_str()),
-                "{}: prompt for hat `{}` is missing substring `{}`\n--- prompt (first 800 chars) ---\n{}\n---",
-                yaml.name,
-                pc.hat,
-                needle,
-                &prompt[..prompt.len().min(800)],
-            );
-        }
-    }
-
-    // Verify final workflow progress
-    for progress in &yaml.expected.workflow_progress {
-        let instance = progress.instance.as_deref();
-        let actual_phase = event_loop
-            .state()
-            .workflow_progress
-            .get_phase(&progress.chain, instance);
-        assert_eq!(
-            actual_phase,
-            Some(progress.phase),
-            "{}: Expected final workflow progress phase {} for chain '{}', got {:?}",
-            yaml.name,
-            progress.phase,
-            progress.chain,
-            actual_phase
-        );
-    }
-
-    // Verify completion behavior
-    if yaml.expected.completion {
-        let reason = event_loop.check_completion_event();
-        assert!(
-            reason.is_some(),
-            "{}: Expected LOOP_COMPLETE to be accepted, but it was rejected or not present",
-            yaml.name
-        );
-    } else {
-        let reason = event_loop.check_completion_event();
-        assert!(
-            reason.is_none(),
-            "{}: Expected LOOP_COMPLETE to be rejected, but got {:?}",
-            yaml.name,
-            reason
-        );
-    }
-
-    // Verify iteration count matches the number of mock responses
-    assert_eq!(
-        yaml.mock_responses.len(),
-        yaml.expected.iterations,
-        "{}: Expected {} iterations, but scenario has {} mock responses",
-        yaml.name,
-        yaml.expected.iterations,
-        yaml.mock_responses.len()
-    );
+        // `config.core.workspace_root` is re-pinned by the helper
+        // AFTER `extra_config` returns; this scenario's YAML
+        // `core` block overwrites `workspace_root` (it doesn't
+        // ship one), so the helper's re-pin is what actually
+        // points the projector at the test's tempdir.
+    });
 
     // Verify projection file was created and contains expected events
-    let projection_path = ralph_dir.join("projected-events.jsonl");
+    let projection_path = temp_dir.path().join(".ralph").join("projected-events.jsonl");
     assert!(
         projection_path.exists(),
         "{}: Expected projection file to exist at {:?}",
@@ -1363,6 +1409,137 @@ fn test_ce_executor_serial_review_scenario() {
     // `expected.events` will fire before integration tests do.
     let yaml = load_scenario("tests/scenarios/ce_executor_serial_review.yml");
     run_scenario(yaml);
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 2026-06-20-002 plan U3: harness self-test for `assert_state`
+//
+// This scenario does **not** exercise the serial preset — it
+// exists to prove the new `assert_state` block is wired correctly
+// end-to-end (R-H1, R-H5, R-H6). If this test fails after a
+// harness refactor, the harness is broken; the serial preset
+// scenarios in `serial_lint/` are not the right diagnostic
+// surface for harness regressions.
+#[test]
+fn test_assert_state_harness_smoke() {
+    let yaml =
+        load_scenario("tests/scenarios/serial_lint/assert_state_harness_smoke.yaml");
+    run_workflow_guard_scenario(yaml);
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 2026-06-20-002 plan U4: serial_lint scenario 1-5 (contract
+// invariants). Each scenario targets a single contract that
+// the in-loop lint feedback path (U4b of plan
+// 2026-06-20-001) must satisfy. The five scenarios share a
+// 1-hat executor topology so next_hat() round-robin does
+// not interfere with the assertions; the production serial
+// preset path is exercised by serial_lint scenarios 6+ and
+// 8 (`step_chain_replay`).
+//
+// Scenario 4 (`resume_hint_consumed`) is the load-bearing
+// one — it covers the consume-on-use invariant that review
+// P0 #4 added.
+
+#[test]
+fn test_serial_lint_1_internal_source_bypass() {
+    let yaml = load_scenario(
+        "tests/scenarios/serial_lint/serial_lint_1_internal_source_bypass.yaml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_serial_lint_2_rejection_digest() {
+    let yaml = load_scenario(
+        "tests/scenarios/serial_lint/serial_lint_2_rejection_digest.yaml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_serial_lint_3_steward_guidance_exempt() {
+    let yaml = load_scenario(
+        "tests/scenarios/serial_lint/serial_lint_3_steward_guidance_exempt.yaml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_serial_lint_4_resume_hint_consumed() {
+    let yaml = load_scenario(
+        "tests/scenarios/serial_lint/serial_lint_4_resume_hint_consumed.yaml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_serial_lint_5_fix_applied_dedup() {
+    let yaml = load_scenario(
+        "tests/scenarios/serial_lint/serial_lint_5_fix_applied_dedup.yaml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 2026-06-20-002 plan U5: serial_lint scenarios 6-7 (handoff
+// coverage). Scenario 6 exercises the cross-hat consume
+// invariant; scenario 7 is the runtime smoke for the
+// preset-side seed-coverage check that backs the auto-
+// prepare hook.
+
+#[test]
+fn test_serial_lint_6_handoff_auto_prepare() {
+    let yaml = load_scenario(
+        "tests/scenarios/serial_lint/serial_lint_6_handoff_auto_prepare.yaml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_serial_lint_7_handoff_seeds_coverage() {
+    let yaml = load_scenario(
+        "tests/scenarios/serial_lint/serial_lint_7_handoff_seeds_coverage.yaml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 2026-06-20-002 plan U6: serial_lint scenarios 8-11 (boundary
+// + replay). Scenario 8 is the SC-1 (CI) acceptance
+// scenario for the 12U plan; it chains the contract
+// invariants from scenarios 1-5 in a single 8-iteration run.
+
+#[test]
+fn test_serial_lint_8_step_chain_replay() {
+    let yaml = load_scenario(
+        "tests/scenarios/serial_lint/serial_lint_8_step_chain_replay.yaml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_serial_lint_9_timeout_fail_closed() {
+    let yaml = load_scenario(
+        "tests/scenarios/serial_lint/serial_lint_9_timeout_fail_closed.yaml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_serial_lint_10_circuit_breaker() {
+    let yaml = load_scenario(
+        "tests/scenarios/serial_lint/serial_lint_10_circuit_breaker.yaml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_serial_lint_11_isolated_unaffected() {
+    let yaml = load_scenario(
+        "tests/scenarios/serial_lint/serial_lint_11_isolated_unaffected.yaml",
+    );
+    run_workflow_guard_scenario(yaml);
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -2052,5 +2229,246 @@ fn test_u6_zippy_sparrow_replay_fixture() {
         !tracker.is_wave_closed("u6-fixture", "u6-replay-task", "step-01"),
         "U6-P1: tracker must report wave open for the 4-of-11 stalled step \
          (U5 gate query is consistent with the U1 gate's precondition)"
+    );
+}
+
+// =====================================================================
+// 2026-06-20-002 plan U1/U2: assert_state harness extension
+// =====================================================================
+//
+// `capture_state_snapshot` and `evaluate_assert_state` are the
+// runtime-state inspection path for BDD scenarios. They sit
+// BELOW the production code path: the runner records read-only
+// clones of `LoopState` + `BuildPromptSnapshot`s at the end of
+// every iteration, then walks `ExpectedYaml.assert_state` in
+// declaration order. No production code in
+// `crates/ralph-core/src/` was changed.
+//
+// Design summary (plan 2026-06-20-002 U1):
+//   R-H1  ExpectedYaml.assert_state is `Vec<AssertionYaml>`;
+//         missing field = no assertion (back-compat with the 27
+//         existing scenarios).
+//   R-H2  Snapshot recording is read-only (`&LoopState -> Clone`).
+//         The runner never mutates state from `assert_state`.
+//   R-H3  `at_iteration` is mandatory. Out-of-range values fail
+//         fast with a clear message rather than being silently
+//         clamped or skipped.
+//   R-H4  Existing scenarios (no `assert_state` field) pass
+//         unchanged — the eval loop is a no-op when the list is
+//         empty.
+//   R-H5  Assertion failures report the predicate name + actual
+//         snapshot state. See `evaluate_assert_state` below.
+//   R-H6  Predicate variants reference runtime fields that are
+//         shared by the broader event-loop (e.g. `pending_lint_resume`,
+//         `recent_rejection_digest`). They are not specific to
+//         the serial preset and are available to any future
+//         scenario that needs them.
+
+/// Build a read-only `LoopStateSnapshot` from a `&LoopState`.
+/// (2026-06-20-002 plan U2). Pulls the minimum fields the
+/// predicates need; deeper cloning would couple the test to
+/// engine internals that can change.
+#[allow(dead_code)]
+fn capture_state_snapshot(state: &ralph_core::event_loop::LoopState) -> LoopStateSnapshot {
+    let pending_lint_resume = state.pending_lint_resume.as_ref().map(|hint| {
+        PendingLintResumeSummary {
+            topic: hint.topic.clone(),
+            reason: hint.reason.clone(),
+        }
+    });
+    let rejection_digest_entries = state
+        .recent_rejection_digest
+        .iter()
+        .map(|(code, entry)| RejectionDigestSummary {
+            code: code.clone(),
+            last_topic: entry.last_topic.clone(),
+            last_message: entry.last_message.clone(),
+        })
+        .collect();
+    LoopStateSnapshot {
+        iteration: state.iteration,
+        pending_lint_resume,
+        rejection_digest_entries,
+        scope_violation_circuit_breaker_tripped: state
+            .scope_violation_circuit_breaker_tripped
+            .is_some(),
+    }
+}
+
+/// Walk `assert_state` in order, dispatching each entry to the
+/// appropriate predicate (2026-06-20-002 plan U1). Each
+/// predicate receives the snapshot at the requested
+/// `at_iteration` (1-indexed) and the matching
+/// `BuildPromptSnapshot` (same index). The list is iterated in
+/// YAML order, so a scenario that wants to assert "set at N,
+/// cleared at N+1" can list the two entries adjacent.
+fn evaluate_assert_state(
+    scenario_name: &str,
+    assertions: &[AssertionYaml],
+    state_snapshots: &[LoopStateSnapshot],
+    prompt_snapshots: &[BuildPromptSnapshot],
+) {
+    if assertions.is_empty() {
+        return;
+    }
+    let max_iter = state_snapshots.len();
+    for (idx, assertion) in assertions.iter().enumerate() {
+        let at = assertion.at_iteration;
+        // R-H3: out-of-range at_iteration fails fast with a
+        // clear pointer to the offending entry (1-based
+        // assertion index in the YAML list).
+        if at < 1 || at > max_iter {
+            panic!(
+                "{}: assert_state[{}].at_iteration = {} is out of range [1, {}] \
+                 (scenario produced {} iterations; check the YAML `expected.iterations`)",
+                scenario_name, idx, at, max_iter, max_iter
+            );
+        }
+        let state_snap = &state_snapshots[at - 1];
+        let prompt_snap = prompt_snapshots
+            .get(at - 1)
+            .expect("prompt_snapshots length must match state_snapshots length");
+
+        // Exactly one of the variant fields is set; the rest are
+        // None. We dispatch on the first non-None. A scenario
+        // that wants to assert multiple state dimensions at the
+        // same iteration should list them as separate YAML
+        // entries — keeping the dispatch single-predicate keeps
+        // failure messages precise.
+        if let Some(ref p) = assertion.pending_lint_resume {
+            evaluate_pending_lint_resume(scenario_name, idx, at, p, state_snap);
+        } else if assertion.pending_lint_resume_cleared.is_some() {
+            evaluate_pending_lint_resume_cleared(scenario_name, idx, at, state_snap);
+        } else if let Some(ref r) = assertion.rejection_digest_contains {
+            evaluate_rejection_digest_contains(scenario_name, idx, at, r, state_snap);
+        } else if let Some(ref pi) = assertion.prompt_injects {
+            evaluate_prompt_injects(scenario_name, idx, at, pi, prompt_snap);
+        } else {
+            panic!(
+                "{}: assert_state[{}] at_iteration={} has no predicate set \
+                 (expected one of pending_lint_resume, pending_lint_resume_cleared, \
+                 rejection_digest_contains, prompt_injects)",
+                scenario_name, idx, at
+            );
+        }
+    }
+}
+
+fn evaluate_pending_lint_resume(
+    scenario_name: &str,
+    assertion_idx: usize,
+    at: usize,
+    expected: &PendingLintResumeYaml,
+    snap: &LoopStateSnapshot,
+) {
+    let actual = snap
+        .pending_lint_resume
+        .as_ref()
+        .unwrap_or_else(|| {
+            panic!(
+                "{}: assert_state[{}] pending_lint_resume at_iteration={} \
+                 expected Some, got None (rejection did not seed the hint)",
+                scenario_name, assertion_idx, at
+            )
+        });
+    if let Some(ref topic) = expected.topic {
+        assert_eq!(
+            actual.topic, *topic,
+            "{}: assert_state[{}] pending_lint_resume at_iteration={} \
+             expected topic={:?}, got {:?}",
+            scenario_name, assertion_idx, at, topic, actual.topic
+        );
+    }
+    if let Some(ref needle) = expected.reason_contains {
+        assert!(
+            actual.reason.contains(needle.as_str()),
+            "{}: assert_state[{}] pending_lint_resume at_iteration={} \
+             expected reason to contain {:?}, got {:?}",
+            scenario_name,
+            assertion_idx,
+            at,
+            needle,
+            actual.reason
+        );
+    }
+}
+
+fn evaluate_pending_lint_resume_cleared(
+    scenario_name: &str,
+    assertion_idx: usize,
+    at: usize,
+    snap: &LoopStateSnapshot,
+) {
+    assert!(
+        snap.pending_lint_resume.is_none(),
+        "{}: assert_state[{}] pending_lint_resume_cleared at_iteration={} \
+         expected None, got Some({:?}) — consume-on-use did not clear the slot",
+        scenario_name,
+        assertion_idx,
+        at,
+        snap.pending_lint_resume
+    );
+}
+
+fn evaluate_rejection_digest_contains(
+    scenario_name: &str,
+    assertion_idx: usize,
+    at: usize,
+    expected: &RejectionDigestContainsYaml,
+    snap: &LoopStateSnapshot,
+) {
+    let entries = &snap.rejection_digest_entries;
+    if let Some(ref topic) = expected.contains_topic {
+        let hit = entries.iter().any(|e| e.last_topic == *topic);
+        assert!(
+            hit,
+            "{}: assert_state[{}] rejection_digest_contains at_iteration={} \
+             expected an entry with last_topic={:?}, got entries: {:?}",
+            scenario_name, assertion_idx, at, topic, entries
+        );
+    }
+    if let Some(ref needle) = expected.contains_reason {
+        let hit = entries.iter().any(|e| e.last_message.contains(needle.as_str()));
+        assert!(
+            hit,
+            "{}: assert_state[{}] rejection_digest_contains at_iteration={} \
+             expected an entry with last_message containing {:?}, got entries: {:?}",
+            scenario_name, assertion_idx, at, needle, entries
+        );
+    }
+}
+
+fn evaluate_prompt_injects(
+    scenario_name: &str,
+    assertion_idx: usize,
+    at: usize,
+    expected: &PromptInjectsYaml,
+    snap: &BuildPromptSnapshot,
+) {
+    if snap.hat.is_empty() {
+        panic!(
+            "{}: assert_state[{}] prompt_injects at_iteration={} \
+             expected a prompt for hat {:?}, but no prompt was built this iteration \
+             (no hat activated)",
+            scenario_name, assertion_idx, at, expected.hat
+        );
+    }
+    assert_eq!(
+        snap.hat, expected.hat,
+        "{}: assert_state[{}] prompt_injects at_iteration={} \
+         expected hat={:?}, got {:?}",
+        scenario_name, assertion_idx, at, expected.hat, snap.hat
+    );
+    assert!(
+        snap.prompt.contains(expected.block.as_str()),
+        "{}: assert_state[{}] prompt_injects at_iteration={} \
+         expected the prompt for hat {:?} to contain {:?}, but it does not. \
+         First 400 chars of the prompt:\n---\n{}\n---",
+        scenario_name,
+        assertion_idx,
+        at,
+        expected.hat,
+        expected.block,
+        &snap.prompt[..snap.prompt.len().min(400)]
     );
 }

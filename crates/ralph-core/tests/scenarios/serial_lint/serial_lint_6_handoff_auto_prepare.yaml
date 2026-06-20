@@ -1,0 +1,116 @@
+# serial_lint_6: R7-6 / R22 / B4 — handoff auto-prepare 消费 pending hint
+#
+# 验证 `pending_lint_resume` hint 跨越 hat-handoff 边界仍然保留:
+# 由 source hat（executor）播种的 hint,被**下一个** hat 的
+# build_prompt 消费,无论 `next_hat()` 选中哪个 hat。
+#
+# 这是 consume-on-use 不变式的 cross-hat 维度。scenario 4 验证
+# 单 hat 拓扑；scenario 6 验证 2-hat 拓扑,消费 hat 与 source hat
+# 不同。
+#
+# 2026-06-20-002 plan U5:handoff-coverage 两个场景之一,与
+# serial_lint_7（handoff_seeds_coverage）配对——后者检查驱动
+# auto-prepare hook 的 seeds。
+
+name: serial_lint_6_handoff_auto_prepare
+description: pending_lint_resume hint 跨 hat-handoff 仍保留,由下一个 hat 的 build_prompt 消费
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 5
+  hats:
+    executor:
+      name: "Executor"
+      subscribes_to:
+        - task.start
+      publishes:
+        - work.done
+    reviewer:
+      name: "Reviewer"
+      subscribes_to:
+        - work.done
+      publishes:
+        - review.done
+  event_loop:
+    execution_mode: isolated
+    starting_event: "task.start"
+    completion_promise: "LOOP_COMPLETE"
+    hat_handoff:
+      enabled: true
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        work.done:
+          required_fields:
+            - plan_name
+            - step
+            - commit_count
+
+mock_responses:
+  # iter 1:由 executor emit task.start,唤醒整个拓扑。
+  - text: |
+      <event topic="task.start">
+      {"plan_name":"plan-s","task_id":"t1","step":"step-01"}
+      </event>
+    hat: executor
+  # iter 2:来自 executor 的 schema-INVALID work.done。
+  # engine gate 拒绝,以 topic=work.done（SourceHat → executor）
+  # 播种 `pending_lint_resume`。
+  - text: |
+      <event topic="work.done">
+      {"commit_count":1}
+      </event>
+    hat: executor
+  # iter 3:task.start,让 next_hat 被选中,从而 pending hint 在
+  # 下一次 build_prompt 被消费。（避免 emit work.done,以保持
+  # seed-consume 边界干净。）
+  - text: |
+      <event topic="task.start">
+      {"plan_name":"plan-s","task_id":"t1","step":"step-02"}
+      </event>
+    hat: executor
+  # iter 4:来自 executor 的 schema-VALID work.done。验证先前
+  # rejection 之后 engine gate accept 路径未受影响。
+  - text: |
+      <event topic="work.done">
+      {"plan_name":"plan-s","step":"step-02","commit_count":2}
+      </event>
+    hat: executor
+  # iter 5:由 reviewer emit review.done,展示拓扑可端到端
+  # handoff（此处 smoke 是第二个 hat 的 `publishes` 已接线；
+  # runtime 完整循环由 scenario 8 的完整链路覆盖）。
+  - text: |
+      <event topic="review.done">
+      {"plan_name":"plan-s","step":"step-02","verdict":"pass"}
+      </event>
+    hat: reviewer
+
+expected:
+  iterations: 5
+  completion: false
+  assert_state:
+    # iter 1:清洁基线。
+    - at_iteration: 1
+      pending_lint_resume_cleared: {}
+    # iter 2:hint 由 executor 的 invalid work.done 播种。
+    - at_iteration: 2
+      pending_lint_resume:
+        topic: work.done
+        reason_contains: "missing"
+    # iter 3:hint 被下一次 build_prompt 消费。
+  # 被选 hat 为 `ralph`（isolated 模式下最小 2-hat 拓扑的
+  # round-robin 胜出者——dispatch 说明见 smoke 场景）。
+    - at_iteration: 3
+      prompt_injects:
+        hat: ralph
+        block: "## LINT RESUME REQUIRED"
+    - at_iteration: 3
+      pending_lint_resume_cleared: {}
+    # iter 4:消费后稳定——合法 emit 不会重新播种 hint。
+    - at_iteration: 4
+      pending_lint_resume_cleared: {}
+    # iter 5:第二个 hat 激活后,hint 仍保持清空。
+    - at_iteration: 5
+      pending_lint_resume_cleared: {}

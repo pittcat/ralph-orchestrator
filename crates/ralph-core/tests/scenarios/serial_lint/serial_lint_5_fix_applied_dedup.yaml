@@ -1,0 +1,100 @@
+# serial_lint_5: R7-5 — fix-applied emit 不得重新播种 hint
+#
+# 一次 schema-INVALID work.done 触发 hint 后,后续
+# schema-valid 的 fix-applied work.done 必须**不**重新播种
+# `pending_lint_resume`。hint 在下一次 build_prompt 被消费,
+# agent 下一次 emit 被接受后保持清空。
+#
+# 本场景与 scenario 4（set then consume）互补,检查 *consume 后*
+# 的稳定性:scenario 4 单独无法捕获"在每次 work.done 上都错误
+# 重新播种"的回归。
+#
+# 2026-06-20-002 plan U4:5/11 契约场景之一,本场景收尾
+# "consume-on-use 保持清空"的环。
+#
+# engine gate 要求 JSON payload,详见 smoke 场景说明。
+
+name: serial_lint_5_fix_applied_dedup
+description: consume-on-use 之后,后续合法 emit **不得**重新播种 pending_lint_resume
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 5
+  hats:
+    executor:
+      name: "Executor"
+      subscribes_to:
+        - task.start
+      publishes:
+        - work.done
+  event_loop:
+    execution_mode: isolated
+    starting_event: "task.start"
+    completion_promise: "LOOP_COMPLETE"
+    hat_handoff:
+      enabled: true
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        work.done:
+          required_fields:
+            - plan_name
+            - step
+            - commit_count
+
+mock_responses:
+  - text: |
+      <event topic="task.start">
+      {"plan_name":"plan-s","task_id":"t1","step":"step-01"}
+      </event>
+    hat: executor
+  # iter 2:schema-INVALID。engine gate 拒绝,播种 hint。
+  - text: |
+      <event topic="work.done">
+      {"commit_count":1}
+      </event>
+    hat: executor
+  # iter 3:task.start,唤醒 next_hat 以触发消费。
+  - text: |
+      <event topic="task.start">
+      {"plan_name":"plan-s","task_id":"t1","step":"step-02"}
+      </event>
+    hat: executor
+  # iter 4:schema-VALID work.done（即 "fix applied"）。
+  - text: |
+      <event topic="work.done">
+      {"plan_name":"plan-s","step":"step-02","commit_count":2}
+      </event>
+    hat: executor
+  # iter 5:又一次 schema-VALID work.done。slot 必须跨多次合法
+  # emit 保持清空。
+  - text: |
+      <event topic="work.done">
+      {"plan_name":"plan-s","step":"step-03","commit_count":3}
+      </event>
+    hat: executor
+
+expected:
+  iterations: 5
+  # work.done 必须进入 seen_topics 至少一次合法 emit（iter 4 或 5）。
+  # engine gate fail-close iter 2 的 malformed payload,因此我们
+  # 期望 >=1 个 work.done 落到 seen 中。把合法 work.done 转成
+  # task.resume recovery envelope 的回归会在此触发。
+  events:
+    - topic: work.done
+  completion: false
+  assert_state:
+    - at_iteration: 1
+      pending_lint_resume_cleared: {}
+    - at_iteration: 2
+      pending_lint_resume:
+        topic: work.done
+        reason_contains: "missing"
+    - at_iteration: 3
+      pending_lint_resume_cleared: {}
+    - at_iteration: 4
+      pending_lint_resume_cleared: {}
+    - at_iteration: 5
+      pending_lint_resume_cleared: {}

@@ -1,0 +1,104 @@
+# assert_state harness smoke (2026-06-20-002 plan U3)
+#
+# 本场景不验证 serial preset 本身,仅证明 `assert_state` harness
+# 扩展（R-H1 ~ R-H6）端到端接线正确:
+#
+#   1. 缺字段 rejection 后,`pending_lint_resume` 在 at_iteration=3
+#      被设置（topic=work.done,reason 含 "missing required fields"）
+#   2. at_iteration=4 时 build_prompt 注入 `## LINT RESUME REQUIRED`
+#   3. at_iteration=4 时 hint 已被消费清空
+#
+# 迭代 1 emit `task.start` 唤醒 executor;迭代 2 emit schema-valid
+# work.done;迭代 3 emit schema-INVALID work.done 触发 engine gate
+# reject;迭代 4 emit task.start 让 build_prompt 消费 hint。
+
+name: assert_state_harness_smoke
+description: Harness 自检——assert_state 接线（pending_lint_resume + 消费 + prompt_injects + 清空）
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 4
+  hats:
+    executor:
+      name: "Executor"
+      subscribes_to:
+        - task.start
+      publishes:
+        - work.done
+  event_loop:
+    execution_mode: isolated
+    starting_event: "task.start"
+    completion_promise: "LOOP_COMPLETE"
+    # Required by `EventLoop::should_run_engine_gate`:
+    # the engine gate only runs when both execution_mode is
+    # NOT Coordinator AND hat_handoff is enabled. Without this
+    # `pending_lint_resume` would never be seeded.
+    hat_handoff:
+      enabled: true
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        work.done:
+          required_fields:
+            - plan_name
+            - step
+            - commit_count
+
+mock_responses:
+  - text: |
+      <event topic="task.start">
+      {"plan_name":"plan-s","task_id":"t1","step":"step-01"}
+      </event>
+    hat: executor
+  - text: |
+      <event topic="work.done">
+      {"plan_name":"plan-s","step":"step-01","commit_count":1}
+      </event>
+    hat: executor
+  # iter 3: schema-INVALID work.done (only commit_count).
+  - text: |
+      <event topic="work.done">
+      {"commit_count":2}
+      </event>
+    hat: executor
+  # iter 4: emit task.start (NOT work.done) so the engine
+  # gate does not re-seed the hint in this iteration.
+  - text: |
+      <event topic="task.start">
+      {"plan_name":"plan-s","task_id":"t1","step":"step-02"}
+      </event>
+    hat: executor
+
+expected:
+  iterations: 4
+  # Wire-level `events` check is intentionally omitted. The
+  # engine gate fail-closes malformed payloads and the
+  # `seen_topics` bookkeeping depends on hat subscription /
+  # workflow chain wiring that is orthogonal to the harness
+  # itself. The harness surface is `assert_state`; if a future
+  # regression breaks the wire-level surface it will fire on
+  # the existing serial-preset scenarios, not here.
+  completion: false
+  # The load-bearing surface: every variant of the new
+  # `assert_state` block is exercised below EXCEPT
+  # `rejection_digest_contains`, which the engine gate does
+  # not feed (engine-gate rejections seed `pending_lint_resume`
+  # but route through `MalformedLine` rather than
+  # `recent_rejection_digest`). The digest predicate is
+  # covered by serial_lint scenario 2 (`rejection_digest`)
+  # which exercises a policy-gate rejection path.
+  assert_state:
+    - at_iteration: 1
+      pending_lint_resume_cleared: {}
+    - at_iteration: 3
+      pending_lint_resume:
+        topic: work.done
+        reason_contains: "missing required fields"
+    - at_iteration: 4
+      prompt_injects:
+        hat: ralph
+        block: "## LINT RESUME REQUIRED"
+    - at_iteration: 4
+      pending_lint_resume_cleared: {}

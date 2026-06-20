@@ -1,0 +1,104 @@
+# serial_lint_2: R7-2 — rejection_digest 累积 policy-gate rejects
+#
+# 验证 runtime `recent_rejection_digest` 集成路径。engine gate
+# 拒绝缺 `required_fields` 的 payload、播种 `pending_lint_resume`、
+# 并把 rejection 路由到 `MalformedLine`。malformed-line 记账调用
+# `record_rejection_digest` 处理 **policy-gate** 拒绝（engine gate
+# 的 malformed 条目并不直接喂入 digest,详见
+# assert_state_harness_smoke.yaml 的说明）。
+#
+# 因此为驱动 digest,我们通过 emit 一个 source hat 在 hat registry
+# 中未知的 `work.done` 来触发 *policy* rejection。
+# hat_handoff_gate 识别未知 source 并 emit
+# `diagnostic.hat_handoff.rejected`,同时以 reason_code
+# `hat_handoff_source_mismatch` 调用 `record_rejection_digest`。
+#
+# 2026-06-20-002 plan U4:本场景是
+# `assert_state.rejection_digest_contains` 的负载级 harness 覆盖。
+# 若未来重构停止从 hat_handoff_gate reject 路径调用
+# `record_rejection_digest`,本场景会立即失败。
+#
+# engine gate 要求 JSON payload,详见 smoke 场景说明。
+
+name: serial_lint_2_rejection_digest
+description: policy-gate rejection 将 failing topic 写入 recent_rejection_digest
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 3
+  hats:
+    executor:
+      name: "Executor"
+      subscribes_to:
+        - task.start
+      publishes:
+        - work.done
+  # 2026-06-20-002 plan U4:coordinator 模式（非 isolated）。
+  # serial_lint_2 验证 origin-guard rejection 路径,该路径喂入
+  # `record_rejection_digest`（event_loop::filter_events_by_origin
+  # 调用点）。isolated 模式下 scope-enforcement gate 先于 origin guard
+  # 运行（event_loop scope-drop diagnostic envelope 构造点）,会把
+  # "outsider hat" emit 转成 scope_drop 后 origin guard 才看到 —
+  # 该路径**不**喂入 digest,只有 origin guard rejection 喂入。
+  # coordinator 模式保留 origin guard 对 outsider emit 的响应路径。
+  event_loop:
+    execution_mode: coordinator
+    starting_event: "task.start"
+    completion_promise: "LOOP_COMPLETE"
+    # Note:hat_handoff.enabled=true 一般也会激活 engine gate,
+    # 但 engine gate 检查要求 `execution_mode != Coordinator`,
+    # 故本场景的 coordinator 模式关闭 engine gate。这是有意
+    # 的:本场景验证的是 origin-guard rejection,不是 engine-gate
+    # rejection。
+    hat_handoff:
+      enabled: true
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        work.done:
+          required_fields:
+            - plan_name
+            - step
+            - commit_count
+
+mock_responses:
+  - text: |
+      <event topic="task.start">
+      {"plan_name":"plan-s","task_id":"t1","step":"step-01"}
+      </event>
+    hat: executor
+  # iter 2:以 `hat: outsider` emit work.done。
+  # hat_handoff_gate（event_loop::hat_handoff_gate reject 分支）
+  # 识别未知 source hat,emit `diagnostic.hat_handoff.rejected`,
+  # 同时以 reason_code `hat_handoff_source_mismatch` 调用
+  # `record_rejection_digest`。
+  - text: |
+      <event topic="work.done">
+      {"plan_name":"plan-s","step":"step-01","commit_count":1}
+      </event>
+    hat: outsider
+  # iter 3:再次 outsider emit,验证 digest 在迭代之间**只增不删**。
+  - text: |
+      <event topic="work.done">
+      {"plan_name":"plan-s","step":"step-02","commit_count":2}
+      </event>
+    hat: outsider
+
+expected:
+  iterations: 3
+  events: []
+  completion: false
+  assert_state:
+    # iter 1:尚无 rejection。
+    - at_iteration: 1
+      rejection_digest_contains: {}
+    # iter 2:digest 现含一条 topic 为 `work.done` 的条目。
+    - at_iteration: 2
+      rejection_digest_contains:
+        contains_topic: work.done
+    # iter 3:条目持续存在（digest 不会在迭代间清空）。
+    - at_iteration: 3
+      rejection_digest_contains:
+        contains_topic: work.done

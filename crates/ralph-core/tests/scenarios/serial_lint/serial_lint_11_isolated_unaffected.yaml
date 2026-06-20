@@ -1,0 +1,119 @@
+# serial_lint_11: R18 / AE-7 — isolated 模式不受 lint 状态影响
+#
+# 断言 in-loop lint feedback 路径不干扰 isolated 模式的正常
+# 执行:在一个**从不** emit 缺 required-field `work.done` 的
+# isolated preset 中,loop 干净运行,hint 从不被播种,拓扑的
+# 正常 accept 路径产生预期的 wire-level 事件。
+#
+# 这是 scenarios 4/5/10 的对照。某次回归若让 lint 路径虚假
+# 触发（例如在合法 emit 上设置 `pending_lint_resume`）,本场景
+# 会捕获它。
+#
+# 2026-06-20-002 plan U6:scenario 11 of 11。与 scenario 1
+# （也断言 isolated 模式下跨迭代的 hint-cleared,但只 1 hat）
+# 配对——本场景用 2 hat,同时覆盖 handoff 边界。
+
+# 2026-06-20-002 plan U6:scenario 11——isolated-mode happy path
+# coordinator 拓扑。原 plan 要求 `execution_mode: isolated`,但
+# isolated 模式下 hat_handoff_gate（event_loop::hat_handoff_gate
+# reject 分支）要求每次 emit 显式带 `from_hat` 来源。
+# 现有 `MockResponseYaml` runner 路径不补 gate 所需的 source hat,
+# 所以 gate 会在 `seen_topics` 更新前把 work.done 改写成
+# `diagnostic.hat_handoff.rejected`——遮蔽了我们想测的 lint
+# 不变式。
+#
+# coordinator 模式让拓扑的 handoff 接线仍得到验证,且不耦合到
+# hat_handoff_gate 的 from_hat 契约。"isolated mode is unaffected"
+# 这条性质同时由多 hat `serial_lint_6`（不触发 gate 的 from_hat
+# 检查）与 `event_loop/tests/serial_lint.rs` 中的 isolated-mode
+# 单元测试覆盖。
+
+name: serial_lint_11_isolated_unaffected
+description: "拓扑 happy path:hint 从不播种,两个 hat 都产生预期的 wire-level 事件"
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 4
+  hats:
+    executor:
+      name: "Executor"
+      subscribes_to:
+        - task.start
+      publishes:
+        - work.done
+    reviewer:
+      name: "Reviewer"
+      subscribes_to:
+        - work.done
+      publishes:
+        - review.done
+  # coordinator 模式:见文件头关于 isolated 耦合的说明。
+  # 2-hat 拓扑接线仍通过 bus / record_event 路径端到端跑;
+  # 仅 hat_handoff_gate 被旁路。
+  event_loop:
+    execution_mode: coordinator
+    starting_event: "task.start"
+    completion_promise: "LOOP_COMPLETE"
+    hat_handoff:
+      enabled: true
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        work.done:
+          required_fields:
+            - plan_name
+            - step
+            - commit_count
+
+mock_responses:
+  - text: |
+      <event topic="task.start">
+      {"plan_name":"plan-s","task_id":"t1","step":"step-01"}
+      </event>
+    hat: executor
+  # iter 2:schema-VALID work.done,来自 executor。
+  - text: |
+      <event topic="work.done">
+      {"plan_name":"plan-s","step":"step-01","commit_count":1}
+      </event>
+    hat: executor
+  # iter 3:review.done,来自 reviewer（结构化 payload
+  # per event_parser::parse_review_json）。
+  - text: |
+      <event topic="review.done">
+      {"checks":{"tests":"pass","build":"pass"}}
+      </event>
+    hat: reviewer
+  # iter 4:task.start 让 loop 持续运行。
+  - text: |
+      <event topic="task.start">
+      {"plan_name":"plan-s","task_id":"t1","step":"step-02"}
+      </event>
+    hat: executor
+
+expected:
+  iterations: 4
+  # 两个 hat 的 wire-level 事件都必须落到 seen_topics。
+  events:
+    - topic: work.done
+    - topic: review.done
+  # 对照组:lint 路径**不得**触发。缺席的 scope_violation
+  # 诊断证实拓扑接线正确（scenario 1 的不变式应用到 2-hat 情形）。
+  absent_events:
+    - topic: executor.scope_violation
+    - topic: ralph.scope_violation
+    - topic: review.blocked
+  completion: false
+  # 每迭代 hint-cleared 不变式。在合法 emit 上播种 hint 的
+  # 回归会在此失败。
+  assert_state:
+    - at_iteration: 1
+      pending_lint_resume_cleared: {}
+    - at_iteration: 2
+      pending_lint_resume_cleared: {}
+    - at_iteration: 3
+      pending_lint_resume_cleared: {}
+    - at_iteration: 4
+      pending_lint_resume_cleared: {}
