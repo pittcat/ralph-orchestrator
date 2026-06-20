@@ -70,6 +70,82 @@ pub struct HatHandoffConfig {
     /// 注入块最大字节数。超长截断但**完整保留 `## next`**(KTD-7)。
     #[serde(default = "default_hat_handoff_max_bytes")]
     pub max_bytes: usize,
+
+    /// Artifact 校验规则 (R21, plan 2026-06-20-001)。
+    /// `required_sections` 期望 `## next` 之前的标题段数;
+    /// `require_next_marker` 强制存在 `## next`。
+    /// 当 SSOT 协议节 (`hat_handoff.artifact:`) 通过 `build.rs`
+    /// merge 进 `event_loop.hat_handoff`,注入器 (`inject.rs`)
+    /// 在 fail-closed 路径上会调用 `ArtifactRule::validate`,
+    /// 不通过则阻断 handoff 注入并记录 diagnostic。
+    #[serde(default)]
+    pub artifact: ArtifactRule,
+
+    /// Linter 子节 (R8, R22)。当 `linter.auto_prepare_on_macro_edge`
+    /// 为 `true`,lint 阶段会在 payload 缺 `handoff_path` 时
+    /// **同步** 调用 prepare (写 artifact + 注入 path),而不是
+    /// 仅提示 agent。Operator 通过 schemas 文件 (`presets/schemas/
+    /// ce-executor-serial.yml`) 的 `hat_handoff.linter` 节启用。
+    #[serde(default)]
+    pub linter: LinterRule,
+}
+
+/// Artifact shape requirements (R21). Defaults to a permissive
+/// shape — `required_sections = 0` and `require_next_marker =
+/// false` — so existing presets do not regress.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactRule {
+    /// Required number of `## section` headings before the
+    /// `## next` marker. Plan SSOT pins 5 for `ce-executor-serial`.
+    #[serde(default)]
+    pub required_sections: u32,
+
+    /// Whether `## next` marker MUST be present.
+    #[serde(default)]
+    pub require_next_marker: bool,
+}
+
+impl ArtifactRule {
+    /// Validate a handoff artifact's markdown body. Returns the
+    /// first failing rule as `Err(String)` so the engine can
+    /// surface it through LintResumeHint (U4) or runtime gate (U2).
+    pub fn validate(&self, content: &str) -> Result<(), String> {
+        if self.required_sections > 0 {
+            let mut headings = 0u32;
+            for line in content.lines() {
+                if line.starts_with("## ") {
+                    if line.starts_with("## next") {
+                        break;
+                    }
+                    headings += 1;
+                }
+            }
+            if headings < self.required_sections {
+                return Err(format!(
+                    "hat_handoff.artifact: expected at least {} `## section` headings before `## next`, found {}",
+                    self.required_sections, headings
+                ));
+            }
+        }
+        if self.require_next_marker && !content.contains("## next") {
+            return Err(
+                "hat_handoff.artifact: required `## next` marker not found in artifact body"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Linter-side configuration (R8, R22).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LinterRule {
+    /// When `true`, the linter synchronously prepares a handoff
+    /// artifact on macro edges if the payload lacks
+    /// `handoff_path`. Defaults to `false` to preserve legacy
+    /// behaviour — `ce-executor-serial` opts in via SSOT.
+    #[serde(default)]
+    pub auto_prepare_on_macro_edge: bool,
 }
 
 fn default_hat_handoff_max_bytes() -> usize {
@@ -83,6 +159,8 @@ impl Default for HatHandoffConfig {
             macro_topics: Vec::new(),
             exempt_topics: Vec::new(),
             max_bytes: default_hat_handoff_max_bytes(),
+            artifact: ArtifactRule::default(),
+            linter: LinterRule::default(),
         }
     }
 }

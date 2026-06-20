@@ -41,9 +41,30 @@ pub struct StateProjectionConfig {
     /// narrow: we can ship the projector with an empty map and
     /// presets opt into specific topics only.
     ///
+    /// `actions` is the legacy single-action form: the projector
+    /// wraps each entry in a one-element chain and dispatches in
+    /// insertion order. The chain form (`actions_chain`) is
+    /// preferred for any topic that needs ordered multi-step
+    /// projection (e.g. `work.done` → `close_task` →
+    /// `mark_step_completed`); plan 2026-06-20-001 U3b.
+    ///
     /// See [`StateProjectionAction`] for the available actions.
     #[serde(default)]
     pub actions: HashMap<String, StateProjectionAction>,
+
+    /// Per-topic action chain (plan 2026-06-20-001 U3b).
+    /// When present for a topic, the projector dispatches each
+    /// `StateProjectionAction` in array order. Order is semantic:
+    /// for `work.done`, `close_task` MUST run before
+    /// `mark_step_completed` so the progress gate always finds the
+    /// step. `preset_lint` asserts the order at build time
+    /// (KTD-3).
+    ///
+    /// Topics present in `actions_chain` take precedence over the
+    /// legacy `actions` map (engine reads `actions_chain` first
+    /// and falls back to `actions` for missing keys only).
+    #[serde(default)]
+    pub actions_chain: HashMap<String, Vec<StateProjectionAction>>,
 }
 
 /// One projection rule. Each variant maps a topic to a single
@@ -100,5 +121,23 @@ pub enum StateProjectionAction {
         /// Optional JSON pointer for the final step label.
         #[serde(default)]
         final_step: Option<String>,
+    },
+    /// Mark a step as completed in `progress.md`'s
+    /// `## Completed Steps` heading without closing any task.
+    ///
+    /// Plan ref: U3a of `docs/plans/2026-06-20-001-feat-serial-preset-precheck-as-linter-plan.md`
+    /// (P0-A fix for `ce-executor-serial-primary-20260619`).
+    ///
+    /// Distinct from `CloseTask` (which closes a task AND appends
+    /// the step). `MarkStepCompleted` is the orchestrator's safety
+    /// net: even when a `CloseTask` action would have written the
+    /// step, a subsequent `MarkStepCompleted` re-pins it so
+    /// `progress_task_gate` always finds the step. The `work.done`
+    /// action chain is `close_task` → `mark_step_completed`
+    /// (R3/R4, KTD-3 order assertion).
+    MarkStepCompleted {
+        /// JSON pointer for the step label. Defaults to `step`.
+        #[serde(default)]
+        step: Option<String>,
     },
 }

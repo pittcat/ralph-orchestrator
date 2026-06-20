@@ -329,3 +329,127 @@ human.guidance:
   required_fields:
     - message
   payload: json_object
+
+# =============================================================================
+# Protocol SSOT extensions (plan 2026-06-20-001 v3.1)
+# Top-level topic keys above remain the payload SSOT (plan 2026-06-16-002).
+# Sections below extend the schemas file into the *full serial protocol*:
+# `build.rs` deep-merges them into the embedded preset at `event_loop.*`
+# paths (see Merge 映射表 in plan). Operators edit ONLY this file +
+# `cargo build` to change behavior. Rust does NOT maintain a duplicate
+# field table — engine reads these values via `ProtocolView`.
+#
+# Merge mapping (KTD-1, U1 spike):
+#   execution_contracts:   → event_loop.execution_contracts
+#   verdict_gate:          → event_loop.verdict_gate
+#   workflow_contract:     → event_loop.workflow_contract
+#   state_projection:      → event_loop.state_projection
+#   hat_handoff:           → event_loop.hat_handoff
+#
+# Per KTD-12, `execution_contracts.rules.<topic>` MUST NOT redeclare
+# `require_payload_fields`; engine derives required fields from
+# `event_policy.schemas[topic].required_fields ∪
+#  execution_contracts.rules[topic].extra_required_fields` at runtime.
+# =============================================================================
+
+# R2 / R7-5: Execution contract rules per topic. SSOT for
+# `event_loop.execution_contracts`. KTD-12 enforces no
+# `require_payload_fields` here; payload field requirements
+# come from the top-level topic keys above.
+execution_contracts:
+  enabled: true
+  rules:
+    work.done:
+      require_git_change: true
+      require_task:
+        id_field: "task_id"
+        key_field: "task_key"
+        loop_scoped: true
+        allowed_terminal_statuses: ["closed"]
+        auto_close_on_valid: false
+      require_test_evidence:
+        mode: "optional"
+        payload_field: "tests"
+    fix.applied:
+      # R7-5: dedup_key for fix.applied events. Plan 2026-06-18-004
+      # identified that perky-maple's 135 duplicate emissions were caused
+      # by missing dedup dimensions. Dedup runs through
+      # `engine::run_gates` against `effective_required_fields`.
+      dedup_key: ["plan_name", "task_id", "fix_round", "commit_count", "applied_count"]
+      require_git_change:
+        mode: "commit_only"
+        allow_empty_for_steps: ["trivial"]
+
+# R2: Verdict gate configuration (REVIEW_COMPLETE fails the loop if
+# pass_or_fail == "fail"). Mirrors what ce-executor-isolated declares
+# inline; bringing it into SSOT removes a hand-maintained inline copy.
+verdict_gate:
+  topic: "REVIEW_COMPLETE"
+  fail_field: "pass_or_fail"
+  fail_value: "fail"
+  additional_topics: ["report.done"]
+
+# R2 / R19: Workflow contract — seeds, step_handoff.
+# `handoff_topic_seeds` is the SSOT list that `HandoffIndex` checks
+# against `macro_edges.required`. Builders must keep this ⊇
+# `HANDOFF_TOPIC_SEEDS` const at compile time (asserted by
+# `WorkflowContractConfig::validate_seeds_coverage`).
+workflow_contract:
+  incomplete_wave_gate:
+    enabled: false
+  step_handoff:
+    progress_task_gate: true
+  handoff_topic_seeds:
+    - queue.advance
+    - work.ready
+    - work.done
+    - work.failed
+    - review.dimension.ready
+    - review.dimension.done
+    - review.dimension.failed
+    - review.dimensions.complete
+    - review.passed
+    - review.failed
+    - review.complete
+    - fix.applied
+    - fix.exhausted
+    - fix.plan.ready
+    - debug.exhausted
+    - plan.complete
+    - plan.blocked
+    - REPORT_COMPLETE
+
+# R3 / R4: State projection action chain. Order is semantic —
+# `close_task` MUST precede `mark_step_completed` on `work.done`.
+# `preset_lint` asserts this order at build time (KTD-3).
+state_projection:
+  enabled: true
+  actions:
+    work.ready:
+      - kind: ensure_task
+        key: "task_key"
+        title: "step"
+    work.done:
+      - kind: close_task
+        task_id: "task_id"
+        step: "step"
+      - kind: mark_step_completed
+        step: "step"
+    queue.advance:
+      - kind: advance_step
+        current_step: "next_step"
+        completed_step: "completed_step"
+    plan.complete:
+      - kind: plan_complete
+        final_step: "step"
+
+# R20 / R21 / R22: Hat handoff configuration. `artifact` is enforced
+# by the engine's hard validation (U7); `linter.auto_prepare_on_macro_edge`
+# enables the orchestrator-side handoff preparation at lint time (B4).
+hat_handoff:
+  enabled: true
+  artifact:
+    required_sections: 5
+    require_next_marker: true
+  linter:
+    auto_prepare_on_macro_edge: true

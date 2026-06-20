@@ -64,6 +64,7 @@ fn make_config() -> StateProjectionConfig {
     StateProjectionConfig {
         enabled: true,
         actions,
+        actions_chain: std::collections::HashMap::new(),
     }
 }
 
@@ -88,6 +89,7 @@ fn empty_actions_map_is_a_noop() {
     let cfg = StateProjectionConfig {
         enabled: true,
         actions: Default::default(),
+        actions_chain: Default::default(),
     };
     let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
     let event = make_event("work.ready", json!({"task_key": "x"}).to_string());
@@ -213,6 +215,7 @@ fn serial_preset_queue_advance_payload_drives_progress_with_next_step_pointer() 
         StateProjectionConfig {
             enabled: true,
             actions,
+            actions_chain: Default::default(),
         },
     ));
 

@@ -58,6 +58,29 @@ pub(crate) fn project_close_step(ctx: &mut ProjectionContext, step: &str) -> Res
     write_progress(&ctx.progress_path, &ctx.progress_cache)
 }
 
+/// Append a step to the `## Completed Steps` heading. Idempotent:
+/// re-pinning the same step is a no-op. Distinct from
+/// `project_close_step` only in the call site — both write the
+/// same heading. Kept as a separate function so the
+/// `state_projection.actions.work.done` chain can express the
+/// `close_task` → `mark_step_completed` order explicitly (R4,
+/// KTD-3).
+///
+/// Plan ref: U3a of
+/// `docs/plans/2026-06-20-001-feat-serial-preset-precheck-as-linter-plan.md`.
+pub(crate) fn project_mark_step_completed(
+    ctx: &mut ProjectionContext,
+    payload: &serde_json::Value,
+    step_pointer: Option<&str>,
+) -> Result<(), String> {
+    let pointer = step_pointer.unwrap_or("step");
+    let step = crate::state_projector::json_pointer(payload, pointer)
+        .ok_or_else(|| format!("mark_step_completed: missing pointer '{pointer}'"))?
+        .to_string();
+    push_completed(&mut ctx.progress_cache, &step);
+    write_progress(&ctx.progress_path, &ctx.progress_cache)
+}
+
 /// Finalize the plan. Closes any open tasks in `tasks.jsonl`
 /// and updates the progress banner. P1 fix (review 2026-06-17-003):
 /// the docstring previously promised "closes all open tasks" but

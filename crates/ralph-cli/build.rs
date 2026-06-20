@@ -269,7 +269,7 @@ fn parse_embedded_names(text: &str) -> Result<Vec<String>, String> {
 /// Deep-merge a `presets/schemas/<name>.yml` (SSOT) into a
 /// `presets/en/<name>.yml` (preset) and return the merged YAML text.
 ///
-/// Merge semantics (plan 2026-06-16-002 Unit 1):
+/// Merge semantics (plan 2026-06-16-002 Unit 1, plan 2026-06-20-001 U1):
 ///   * Parse both files as `serde_yaml::Value`.
 ///   * Read the SSOT's top-level `schemas` mapping and the preset's
 ///     `event_loop.event_policy.schemas` mapping.
@@ -284,6 +284,21 @@ fn parse_embedded_names(text: &str) -> Result<Vec<String>, String> {
 ///     This is acceptable because the embedded YAML is consumed by
 ///     serde_yaml on read; downstream comparison goes through
 ///     `serde_yaml::Value` (see `canonicalize_schemas` in presets.rs).
+///
+/// Plan 2026-06-20-001 U1 (KTD-1) extends the SSOT from `schemas` only
+/// into the *full* serial protocol. The mapping table is:
+///
+///   SSOT key                      → event_loop.* target path
+///   -----------------------------------------------------------
+///   schemas                       → event_loop.event_policy.schemas
+///   execution_contracts           → event_loop.execution_contracts
+///   verdict_gate                  → event_loop.verdict_gate
+///   workflow_contract             → event_loop.workflow_contract
+///   state_projection              → event_loop.state_projection
+///   hat_handoff                   → event_loop.hat_handoff
+///
+/// Inline preset blocks under these paths act as per-key override
+/// layers during the transition (same semantics as `schemas`).
 fn merge_preset_with_schema(
     preset_text: &str,
     ssot_text: &str,
@@ -294,42 +309,87 @@ fn merge_preset_with_schema(
     let ssot: serde_yaml::Value =
         serde_yaml::from_str(ssot_text).map_err(|e| format!("SSOT YAML: {e}"))?;
 
-    // Extract SSOT schemas (top-level mapping under SSOT file). A missing
-    // or non-mapping `schemas` block is treated as "no SSOT override",
-    // which is unusual for a SSOT file but we tolerate it gracefully.
-    let ssot_schemas = match ssot.get("schemas") {
-        Some(serde_yaml::Value::Mapping(m)) => m.clone(),
-        Some(other) => {
-            return Err(format!(
-                "SSOT `schemas` must be a mapping of topic → schema, found {}",
-                yaml_value_kind(other)
-            ));
-        }
-        None => serde_yaml::Mapping::new(),
-    };
+    // 1) Top-level `schemas` → `event_loop.event_policy.schemas`
+    //    (existing behaviour preserved verbatim).
+    if let Some(ssot_schemas) = ssot.get("schemas") {
+        let ssot_schemas = match ssot_schemas {
+            serde_yaml::Value::Mapping(m) => m.clone(),
+            other => {
+                return Err(format!(
+                    "SSOT `schemas` must be a mapping of topic → schema, found {}",
+                    yaml_value_kind(other)
+                ));
+            }
+        };
+        let event_loop = ensure_mapping(&mut preset, &["event_loop"])?;
+        let event_policy = ensure_mapping(event_loop, &["event_policy"])?;
+        let inline_schemas_mapping = event_policy
+            .get("schemas")
+            .and_then(|v| v.as_mapping())
+            .cloned()
+            .unwrap_or_default();
+        let merged = merge_schema_mappings(&ssot_schemas, &inline_schemas_mapping);
+        let event_policy_mapping = event_policy
+            .as_mapping_mut()
+            .expect("ensure_mapping returned a non-mapping Value");
+        event_policy_mapping.insert(
+            serde_yaml::Value::String("schemas".to_string()),
+            serde_yaml::Value::Mapping(merged),
+        );
+    }
 
-    // Locate `event_loop.event_policy` in the preset. If absent or
-    // `event_policy` is not a mapping, we synthesise the minimum
-    // structure to host the merged schemas. This matches
-    // `EventPolicyConfig`'s deserialisation defaults.
-    let event_loop = ensure_mapping(&mut preset, &["event_loop"])?;
-    let event_policy = ensure_mapping(event_loop, &["event_policy"])?;
-    let inline_schemas_mapping = event_policy
-        .get("schemas")
-        .and_then(|v| v.as_mapping())
-        .cloned()
-        .unwrap_or_default();
+    // 2) Multi-section protocol merge (plan 2026-06-20-001 U1, KTD-1).
+    //    Each SSOT top-level key (other than `schemas`) maps to a
+    //    target path under `event_loop.*`. Inline presets MAY carry
+    //    override blocks; merge semantics are identical to schemas
+    //    (SSOT base, inline per-key override). Targets are created
+    //    on demand — a preset that has no `event_loop.<section>` yet
+    //    gets one synthesised.
+    let section_targets: &[(&str, &[&str])] = &[
+        ("execution_contracts", &["event_loop", "execution_contracts"]),
+        ("verdict_gate", &["event_loop", "verdict_gate"]),
+        ("workflow_contract", &["event_loop", "workflow_contract"]),
+        ("state_projection", &["event_loop", "state_projection"]),
+        ("hat_handoff", &["event_loop", "hat_handoff"]),
+    ];
+    for (ssot_key, target_path) in section_targets {
+        let ssot_value = match ssot.get(*ssot_key) {
+            Some(v) => v,
+            None => continue,
+        };
+        let ssot_mapping = match ssot_value {
+            serde_yaml::Value::Mapping(m) => m.clone(),
+            other => {
+                return Err(format!(
+                    "SSOT `{ssot_key}` must be a mapping, found {}",
+                    yaml_value_kind(other)
+                ));
+            }
+        };
 
-    // Deep-merge: SSOT base, inline overrides per-key.
-    let merged: serde_yaml::Mapping = merge_schema_mappings(&ssot_schemas, &inline_schemas_mapping);
+        // Locate (or create) the target mapping in the preset.
+        let parent_path = &target_path[..target_path.len() - 1];
+        let leaf_key = target_path[target_path.len() - 1];
+        let parent = ensure_mapping(&mut preset, parent_path)?;
+        let leaf = ensure_mapping(parent, &[leaf_key])?;
+        let inline_mapping = leaf.as_mapping().cloned().unwrap_or_default();
 
-    let event_policy_mapping = event_policy
-        .as_mapping_mut()
-        .expect("ensure_yaml_mapping returned a non-mapping Value");
-    event_policy_mapping.insert(
-        serde_yaml::Value::String("schemas".to_string()),
-        serde_yaml::Value::Mapping(merged),
-    );
+        // Drop a stale inline mapping so deep-merge starts from the
+        // SSOT base cleanly. We re-insert under the same key after
+        // merge below.
+        let leaf_mapping = leaf
+            .as_mapping_mut()
+            .expect("ensure_mapping returned a non-mapping Value");
+        leaf_mapping.insert(
+            serde_yaml::Value::String(leaf_key.to_string()),
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        );
+        let merged = merge_schema_mappings(&ssot_mapping, &inline_mapping);
+        leaf_mapping.insert(
+            serde_yaml::Value::String(leaf_key.to_string()),
+            serde_yaml::Value::Mapping(merged),
+        );
+    }
 
     serde_yaml::to_string(&preset)
         .map_err(|e| format!("re-serialise merged preset `{preset_name}`: {e}"))

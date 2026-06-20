@@ -273,14 +273,22 @@ impl StateProjector {
             if !PROJECTED_TOPICS.contains(&event.topic.as_str()) {
                 continue;
             }
-            // Copy the action out of the map so we can drop the
-            // immutable borrow before mutating `self.ctx` further
-            // down (Rust 2021's NLL is not enough here because the
-            // action holds a reference into the config map).
-            let action = match self.ctx.config.actions.get(event.topic.as_str()) {
-                Some(a) => a.clone(),
-                None => continue,
-            };
+            // Resolve the action chain for this topic.
+            // `actions_chain` (plan 2026-06-20-001 U3b) takes
+            // precedence over the legacy `actions` map; missing
+            // keys fall back to wrapping the legacy single action
+            // in a one-element vec. Order of the chain is
+            // semantic — `preset_lint` asserts `work.done`'s
+            // `close_task` precedes `mark_step_completed`.
+            let topic_str = event.topic.to_string();
+            let chain: Vec<crate::config::StateProjectionAction> =
+                if let Some(chain) = self.ctx.config.actions_chain.get(&topic_str) {
+                    chain.clone()
+                } else if let Some(single) = self.ctx.config.actions.get(&topic_str) {
+                    vec![single.clone()]
+                } else {
+                    continue;
+                };
             let payload = event.payload.as_deref().unwrap_or("");
             let parsed: serde_json::Value = match serde_json::from_str(payload) {
                 Ok(v) => v,
@@ -294,52 +302,73 @@ impl StateProjector {
                     continue;
                 }
             };
-            let outcome = match action {
-                crate::config::StateProjectionAction::EnsureTask { key, title } => {
-                    crate::state_projector::task::project_ensure_task(
+            // Dispatch the chain in order. Failure of any step
+            // short-circuits the rest of the chain (best-effort
+            // commit) and is recorded against the topic. KTD-3
+            // ensures the YAML order is correct, so the typical
+            // chain (close_task → mark_step_completed) only
+            // reaches `mark_step_completed` after the task close
+            // succeeded.
+            let mut chain_failed = false;
+            for action in chain {
+                if chain_failed {
+                    break;
+                }
+                let outcome = match action {
+                    crate::config::StateProjectionAction::EnsureTask { key, title } => {
+                        crate::state_projector::task::project_ensure_task(
+                            &mut self.ctx,
+                            &parsed,
+                            &key,
+                            title.as_deref(),
+                        )
+                    }
+                    crate::config::StateProjectionAction::CloseTask { task_id, step } => {
+                        crate::state_projector::task::project_close_task(
+                            &mut self.ctx,
+                            &parsed,
+                            &task_id,
+                            step.as_deref(),
+                        )
+                    }
+                    crate::config::StateProjectionAction::AdvanceStep {
+                        current_step,
+                        completed_step,
+                    } => crate::state_projector::progress::project_advance_step(
                         &mut self.ctx,
                         &parsed,
-                        &key,
-                        title.as_deref(),
-                    )
-                }
-                crate::config::StateProjectionAction::CloseTask { task_id, step } => {
-                    crate::state_projector::task::project_close_task(
-                        &mut self.ctx,
-                        &parsed,
-                        &task_id,
-                        step.as_deref(),
-                    )
-                }
-                crate::config::StateProjectionAction::AdvanceStep {
-                    current_step,
-                    completed_step,
-                } => crate::state_projector::progress::project_advance_step(
-                    &mut self.ctx,
-                    &parsed,
-                    current_step.as_deref(),
-                    completed_step.as_deref(),
-                ),
-                crate::config::StateProjectionAction::PlanComplete { final_step } => {
-                    crate::state_projector::progress::project_plan_complete(
-                        &mut self.ctx,
-                        &parsed,
-                        final_step.as_deref(),
-                    )
-                }
-            };
-            match outcome {
-                Ok(()) => {
-                    report.applied += 1;
-                }
-                Err(reason) => {
-                    warn!(topic = %event.topic, reason, "state projection rejected event");
-                    report.rejections.push(Rejection {
-                        topic: event.topic.clone(),
-                        reason,
-                        payload: event.payload.clone(),
-                    });
-                    report.rejected += 1;
+                        current_step.as_deref(),
+                        completed_step.as_deref(),
+                    ),
+                    crate::config::StateProjectionAction::PlanComplete { final_step } => {
+                        crate::state_projector::progress::project_plan_complete(
+                            &mut self.ctx,
+                            &parsed,
+                            final_step.as_deref(),
+                        )
+                    }
+                    crate::config::StateProjectionAction::MarkStepCompleted { step } => {
+                        crate::state_projector::progress::project_mark_step_completed(
+                            &mut self.ctx,
+                            &parsed,
+                            step.as_deref(),
+                        )
+                    }
+                };
+                match outcome {
+                    Ok(()) => {
+                        report.applied += 1;
+                    }
+                    Err(reason) => {
+                        warn!(topic = %event.topic, reason, "state projection rejected event");
+                        report.rejections.push(Rejection {
+                            topic: event.topic.clone(),
+                            reason,
+                            payload: event.payload.clone(),
+                        });
+                        report.rejected += 1;
+                        chain_failed = true;
+                    }
                 }
             }
         }
