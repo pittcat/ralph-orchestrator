@@ -688,7 +688,7 @@ sequenceDiagram
 
 - **U6** BDD 11 scenarios + harness 扩展 → `docs/plans/2026-06-20-002-feat-bdd-harness-extension-for-runtime-state-inspection-plan.md`
 - **SC-1(CI)** 同 U6 deferred
-- **F-PS-005** 跨 preset 同步(ce-executor-isolated / ce-executor-wave)—— 未开始
+- **F-PS-005** 跨 preset 同步(ce-executor-isolated / ce-executor-wave)—— **不再跟进**:`ce-executor-isolated` / `ce-executor-wave` 后续会被舍弃(2026-06-20 user 决策),serial 是唯一长期 preset;SSOT 重构只在 serial 上完成即可
 - **SC-1(人工)** python sort 12U plan 手跑 3 次 —— 运维验收,不阻塞 plan 关闭
 - **SC-4** 2026-07-20 前无同类 consecutive_failures —— 运维验收,不阻塞 plan 关闭
 
