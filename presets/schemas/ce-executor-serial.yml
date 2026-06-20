@@ -424,7 +424,7 @@ workflow_contract:
 # `preset_lint` asserts this order at build time (KTD-3).
 state_projection:
   enabled: true
-  actions:
+  actions_chain:
     work.ready:
       - kind: ensure_task
         key: "task_key"

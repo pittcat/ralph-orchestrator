@@ -248,7 +248,9 @@ impl StateProjector {
     /// caller decides whether to drop those events from the bus
     /// (Phase 1: drop + emit `event.state_projection.rejected`).
     pub fn apply(&mut self, events: &[Event]) -> ApplyReport {
-        if !self.ctx.config.enabled || self.ctx.config.actions.is_empty() {
+        if !self.ctx.config.enabled
+            || (self.ctx.config.actions.is_empty() && self.ctx.config.actions_chain.is_empty())
+        {
             return ApplyReport::default();
         }
 

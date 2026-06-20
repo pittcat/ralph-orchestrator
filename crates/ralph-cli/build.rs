@@ -368,24 +368,28 @@ fn merge_preset_with_schema(
         };
 
         // Locate (or create) the target mapping in the preset.
+        // `parent` is the parent of the leaf key (e.g.
+        // `event_loop`), `leaf_key` is the section name (e.g.
+        // `state_projection`). We capture the existing inline
+        // mapping at `event_loop.<leaf_key>` for the per-key
+        // override layer, then *replace* that key in `parent`
+        // with the SSOT-base + inline-merged mapping. Doing the
+        // replace at the parent level (not on `leaf`) avoids the
+        // doubly-nested `<parent>.<leaf_key>.<leaf_key>` shape
+        // an earlier draft produced (COR-004).
         let parent_path = &target_path[..target_path.len() - 1];
         let leaf_key = target_path[target_path.len() - 1];
         let parent = ensure_mapping(&mut preset, parent_path)?;
-        let leaf = ensure_mapping(parent, &[leaf_key])?;
-        let inline_mapping = leaf.as_mapping().cloned().unwrap_or_default();
-
-        // Drop a stale inline mapping so deep-merge starts from the
-        // SSOT base cleanly. We re-insert under the same key after
-        // merge below.
-        let leaf_mapping = leaf
+        let parent_mapping = parent
             .as_mapping_mut()
             .expect("ensure_mapping returned a non-mapping Value");
-        leaf_mapping.insert(
-            serde_yaml::Value::String(leaf_key.to_string()),
-            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
-        );
+        let inline_mapping = parent_mapping
+            .get(leaf_key)
+            .and_then(|v| v.as_mapping())
+            .cloned()
+            .unwrap_or_default();
         let merged = merge_schema_mappings(&ssot_mapping, &inline_mapping);
-        leaf_mapping.insert(
+        parent_mapping.insert(
             serde_yaml::Value::String(leaf_key.to_string()),
             serde_yaml::Value::Mapping(merged),
         );

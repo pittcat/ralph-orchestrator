@@ -16,11 +16,10 @@
 
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::gates::{GateDecision, LintContext, run_gates};
-use super::hint::{LintFailureClass, LintResumeHint, classify_lint_failure};
+use super::hint::LintResumeHint;
 use super::protocol::ProtocolView;
 
 /// Outcome of a single lint pass.
@@ -101,6 +100,7 @@ fn write_artifact(workspace_root: &Path, output_dir: &Path, topic: &str) -> Resu
          ## intent\nauto-prepared handoff per protocol rule.\n\n\
          ## current_state\nstep in flight, awaiting next hat.\n\n\
          ## proposed_action\ncontinue with the planned action.\n\n\
+         ## rationale\norchestrator-side auto-prepare satisfies the R22 macro-edge contract.\n\n\
          ## next\n\
          next: {topic}\n"
     );
@@ -118,6 +118,14 @@ pub const LINT_BUDGET: std::time::Duration = std::time::Duration::from_millis(20
 /// Convenience wrapper that times the lint pass and returns a
 /// `LintOutcome::Timeout` on overrun. Used by `ralph emit` to
 /// surface a `## LINT TIMEOUT` block (R14).
+///
+/// Note: R14/KTD-9 specifies that the gate work itself must
+/// INTERRUPT at 200ms (true fail-closed). The current
+/// implementation measures elapsed AFTER `lint_emit` returns and
+/// re-labels the outcome — adequate for the deterministic engine
+/// path (microseconds), but a follow-up commit must wrap the
+/// gate in `JoinHandle::join_timeout` for full fail-closed
+/// semantics. Tracked as F-PS-006 (COR-006).
 pub fn lint_emit_with_timeout(
     view: &ProtocolView,
     topic: &str,
@@ -138,20 +146,4 @@ pub fn lint_emit_with_timeout(
 /// hint without running the gate twice.
 pub fn lint_failure_hint(topic: &str, reason: &str) -> LintResumeHint {
     LintResumeHint::from_reason(topic, reason)
-}
-
-// Avoid `Dead_code` warnings for the helper used by the writer.
-#[allow(dead_code)]
-#[derive(Debug, Serialize, Deserialize)]
-struct ArtifactMetadata {
-    topic: String,
-    prepared_at: String,
-    prepared_by: &'static str,
-    class: String,
-}
-
-// Reference the class name to keep `classify_lint_failure` exported.
-#[allow(dead_code)]
-fn _touch_classify() -> LintFailureClass {
-    classify_lint_failure("unused")
 }

@@ -19,8 +19,10 @@
 use super::hint::{LintResumeHint, LintResumeTarget};
 use super::protocol::ProtocolView;
 
-/// `## LINT MIRROR` block. Returns `None` when there is no
-/// pending lint resume — callers can no-op on `None`.
+/// `## LINT MIRROR` block. Returns the rendered markdown. The
+/// caller is responsible for skipping the block when there is
+/// no `pending_lint_resume` (the engine's `LintResumeHint` is
+/// `Option`-wrapped at the loop-state layer).
 pub fn build_lint_mirror_block(view: &ProtocolView, hint: &LintResumeHint) -> String {
     format!(
         "## LINT MIRROR\n\
