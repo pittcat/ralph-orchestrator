@@ -593,43 +593,39 @@ fn test_hat_handoff_work_done_rejected_blocks_projection() {
     run_workflow_guard_scenario(yaml);
 }
 
-// 2026-06-20-001 plan U6: serial-lint BDD scenarios.
+// 2026-06-20-001 plan U6: serial-lint BDD scenarios were
+// considered but deferred. The first iteration (commit
+// 0083f5b) shipped 3 YAML scenarios + 3 #[test] functions, but
+// the review v2 (20260620-164253-6e112e43) caught:
+//   - F1: `run_scenario` is a stub that never boots an
+//     EventLoop, so the engine gate path was not exercised.
+//   - F2: YAML used `seen_events:` (silently dropped) instead
+//     of `events:`.
+//   - F3: scenario runner's `next_hat()` returns the fallback
+//     `ralph` hat on iteration 2 (because the executor's
+//     rejected event never lands on the bus), making the
+//     `## LINT MIRROR` injection unreachable from the
+//     SourceHat routing check.
 //
-// R7-4: engine gate rejection seeds `pending_lint_resume`; the
-// next `build_prompt` injects `## LINT MIRROR` + `## LINT RESUME
-// REQUIRED`. This pins the in-loop feedback path (review P0 #1
-// + #4 fix).
-#[test]
-fn test_serial_lint_resume_hint_consumed() {
-    let yaml = load_scenario(
-        "tests/scenarios/serial_lint/resume_hint_consumed.yml",
-    );
-    run_scenario(yaml);
-}
-
-// R7-6 / R22 / B4: macro edge lacking `handoff_path` triggers
-// `auto_handoff_prepare` — the orchestrator writes the artifact
-// and injects the path. Pins the previously-dead
-// `AcceptAfterAutoPrepare` branch (review P0 #3 fix).
-#[test]
-fn test_serial_lint_handoff_auto_prepare() {
-    let yaml = load_scenario(
-        "tests/scenarios/serial_lint/handoff_auto_prepare.yml",
-    );
-    run_scenario(yaml);
-}
-
-// R14 / KTD-9: lint timeout wrapper fails closed. This scenario
-// exercises the happy path (under-budget). The actual fail-closed
-// interruption requires JoinHandle::join_timeout replacement,
-// tracked as F-PS-006 follow-up.
-#[test]
-fn test_serial_lint_timeout_fail_closed() {
-    let yaml = load_scenario(
-        "tests/scenarios/serial_lint/timeout_fail_closed.yml",
-    );
-    run_scenario(yaml);
-}
+// The review v2 fix attempts (run_workflow_guard_scenario +
+// events: rename + JSON payload) uncovered a deeper issue:
+// the in-loop feedback path (engine gate →
+// `state.pending_lint_resume` → `inject_pending_lint_resume`)
+// is a *single* per-process state machine, and the scenario
+// runner's per-iteration `next_hat` is not designed to drive
+// the lint feedback path end-to-end.
+//
+// The cleanest path forward is unit tests in
+// `crates/ralph-core/src/event_loop/tests/serial_lint.rs` and
+// `crates/ralph-core/src/preset/engine/linter.rs` that
+// exercise the in-loop path with explicit
+// `engine_required_field_filter` and `inject_pending_lint_resume`
+// calls. Those unit tests do not need a full EventLoop boot,
+// so the scenario runner's hat-routing is not a factor. The
+// U6 BDD scenarios remain in `docs/plans/2026-06-20-001-...-plan.md`
+// for a future commit that pairs them with a BDD framework
+// extension (e.g., a "lint feedback" runner that drives the
+// loop in a single hat so the SourceHat routing matches).
 
 #[test]
 fn test_plan_gate_dual_publish_inverse_rejected() {

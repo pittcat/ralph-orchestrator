@@ -41,6 +41,7 @@ mod robot_skill;
 mod runtime_state_injection;
 mod scope_enforcement;
 mod scratchpad;
+mod serial_lint;
 mod stale_breaker;
 mod state_machine;
 mod structured_evidence;
