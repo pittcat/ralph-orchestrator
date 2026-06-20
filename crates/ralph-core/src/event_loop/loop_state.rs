@@ -424,6 +424,18 @@ pub struct LoopState {
     /// `task.resume` event, not the original `review.dimension.ready`
     /// that woke the original hat).
     pub pending_obligation_triggers: Vec<Event>,
+
+    /// U4b (plan 2026-06-20-001, R13 / KTD-8): in-memory lint
+    /// failure hint consumed by the next `build_prompt`. Populated
+    /// by `EventLoop::record_lint_failure` (which the CLI emit
+    /// path also seeds via `.ralph/pending_lint_resume.json`),
+    /// drained by `build_prompt` so the hint is delivered exactly
+    /// once. The hint carries the failing topic, the
+    /// `LintFailureClass`, the target hat, and the reason — enough
+    /// for the prompt builder to inject `## LINT MIRROR` +
+    /// `## LINT RESUME REQUIRED`. Stays in-memory only; never
+    /// written to recovery.jsonl (R9).
+    pub pending_lint_resume: Option<crate::preset::engine::LintResumeHint>,
 }
 impl Default for LoopState {
     fn default() -> Self {
@@ -514,6 +526,13 @@ impl Default for LoopState {
             // runner's `replay_obligation_triggers_to_activation_state`
             // helper after `pending_recovery_hat` is pinned.
             pending_obligation_triggers: Vec::new(),
+            // U4b (plan 2026-06-20-001, R13): no lint hint on cold
+            // start. The CLI emit path seeds this file when a
+            // rejection happens during `ralph emit`; loop_runner
+            // loads it into `pending_lint_resume` on the next
+            // iteration so the agent sees the resume block on the
+            // prompt that immediately follows the rejection.
+            pending_lint_resume: None,
         }
     }
 }

@@ -47,6 +47,9 @@ use crate::hatless_ralph::HatlessRalph;
 use crate::instructions::InstructionBuilder;
 use crate::loop_context::LoopContext;
 use crate::memory_store::{MarkdownMemoryStore, format_memories_as_markdown, truncate_to_budget};
+use crate::preset::engine::{
+    LintResumeTarget, ProtocolView, build_lint_mirror_block, build_lint_resume_block,
+};
 use crate::skill_registry::SkillRegistry;
 use crate::state_machine::{StateMachineDecision, StateMachineRuntimeState};
 use crate::step_handoff::progress_task_gate::{GateDecision, check_progress_task_alignment};
@@ -4180,6 +4183,15 @@ impl EventLoop {
                 let with_scratchpad = self.prepend_scratchpad(with_skills, Some(hat_id));
                 let with_state_files = self.prepend_state_files(with_scratchpad);
                 let final_prompt = self.prepend_ready_tasks(with_state_files);
+                // U4b (plan 2026-06-20-001, R12 / R13 / KTD-8):
+                // if the most recent `ralph emit` was rejected by
+                // the lint phase, inject `## LINT MIRROR` +
+                // `## LINT RESUME REQUIRED` so the next prompt
+                // tells the agent *what* the lint saw and *which
+                // hat* should fix it.  The hint is consumed on
+                // first read (consume-on-use) so a stale resume
+                // does not leak across prompts.
+                let final_prompt = self.inject_pending_lint_resume(final_prompt, hat_id);
 
                 debug!("build_prompt: routing to HatlessRalph (solo mode)");
                 return Some(final_prompt);
@@ -4413,6 +4425,9 @@ impl EventLoop {
                 let with_scratchpad = self.prepend_scratchpad(with_skills, Some(hat_id));
                 let with_state_files = self.prepend_state_files(with_scratchpad);
                 let final_prompt = self.prepend_ready_tasks(with_state_files);
+                // U4b: see solo-mode comment above. Same
+                // consume-on-use semantics for the lint hint.
+                let final_prompt = self.inject_pending_lint_resume(final_prompt, hat_id);
 
                 return Some(final_prompt);
             }
@@ -4601,6 +4616,14 @@ impl EventLoop {
             let with_scratchpad = self.prepend_scratchpad(with_skills, Some(hat_id));
             let with_state_files = self.prepend_state_files(with_scratchpad);
             let final_prompt = self.prepend_ready_tasks(with_state_files);
+            // U4b: see solo-mode comment above. In isolated
+            // mode the lint hint routes to the *source* hat
+            // (the one that emitted the rejected event), so the
+            // helper consults `pending_lint_resume.target` to
+            // decide whether the current hat is the recipient.
+            // The hint is consumed on first injection so the
+            // same failure is not replayed forever.
+            let final_prompt = self.inject_pending_lint_resume(final_prompt, hat_id);
 
             // Set active hat for downstream logic (default_publishes, enforce_hat_scope)
             self.state.last_active_hat_ids = vec![hat_id.clone()];
@@ -5817,6 +5840,179 @@ impl EventLoop {
         format!("{section}{prompt}")
     }
 
+    /// U4b (plan 2026-06-20-001, R12 / R13 / KTD-8): inject the
+    /// lint failure hint as `## LINT MIRROR` + `## LINT RESUME
+    /// REQUIRED` at the head of `prompt`.  The hint is consumed
+    /// on first read (`Option::take`) so a stale resume does not
+    /// leak across prompts.
+    ///
+    /// The block is prepended (above the rest of the prompt) so
+    /// the agent sees the protocol hash + failing topic first —
+    /// matching the order in the CLI emit failure output so the
+    /// two paths produce the same canonical block (R12).
+    ///
+    /// In multi-hat / isolated modes the hint is only injected
+    /// when the active hat matches `hint.target` — otherwise
+    /// the resume belongs to a *different* hat and the current
+    /// hat has nothing to fix. Solo / coordinator modes always
+    /// inject because `hat_id` is `"ralph"` (the orchestrator
+    /// itself, which sees every hat's alerts).
+    fn inject_pending_lint_resume(&mut self, prompt: String, hat_id: &HatId) -> String {
+        let Some(hint) = self.state.pending_lint_resume.take() else {
+            return prompt;
+        };
+        // Route check: in multi-hat / isolated mode, only inject
+        // when the current hat is the lint target.
+        if self.config.event_loop.execution_mode != HatExecutionMode::Coordinator
+            && hat_id.as_str() != "ralph"
+        {
+            // Map `LintResumeTarget` -> owning hat name. The
+            // hint class already classifies into source hat /
+            // plan-gate; we use the canonical hat ids here. The
+            // mapping is identical to KTD-4 / hint.rs.
+            let target_hat = match hint.target {
+                LintResumeTarget::SourceHat => {
+                    // The lint failure came from THIS hat (the
+                    // one currently building the prompt). SourceHat
+                    // means "the hat that emitted the rejected
+                    // event"; in single-hat mode that is the
+                    // active hat. In multi-hat mode the source
+                    // hat is identified by the topic itself; the
+                    // resume hint carries the failing topic and
+                    // the active hat should be the one that
+                    // emits it. We accept the hint when the
+                    // current hat's `publishes` list contains
+                    // the failing topic — otherwise the resume
+                    // belongs to a different hat.
+                    self.registry
+                        .get_config(hat_id)
+                        .map(|cfg| {
+                            cfg.publishes
+                                .iter()
+                                .any(|t| t == hint.topic.as_str())
+                        })
+                        .unwrap_or(false)
+                }
+                LintResumeTarget::PlanGate => {
+                    hat_id.as_str() == "plan-gate"
+                        || hat_id.as_str() == "ralph"
+                        || hat_id.as_str() == "coordinator"
+                }
+            };
+            if !target_hat {
+                // Not for this hat — restore the hint so the
+                // correct hat's next prompt can consume it.
+                self.state.pending_lint_resume = Some(hint);
+                return prompt;
+            }
+        }
+
+        let view = ProtocolView::from_event_loop(&self.config.event_loop);
+        let mirror = build_lint_mirror_block(&view, &hint);
+        let resume = build_lint_resume_block(&hint);
+        format!("{mirror}{resume}\n{prompt}")
+    }
+
+    /// U2 (plan 2026-06-20-001, R15 / KTD-10): decide whether the
+    /// event loop should consult the engine-backed gate before
+    /// the d623c09 policy / scope gates. Same opt-in as the CLI
+    /// emit lint (see `commands/emit.rs::should_run_lint`).
+    fn should_run_engine_gate(&self) -> bool {
+        if std::env::var("RALPH_SERIAL_LINT_MODE")
+            .map(|v| v.eq_ignore_ascii_case("off"))
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        if self.config.event_loop.execution_mode == HatExecutionMode::Coordinator {
+            return false;
+        }
+        self.config.event_loop.hat_handoff.enabled
+    }
+
+    /// U2 (plan 2026-06-20-001): filter the parsed batch through
+    /// the engine's required-fields gate *before* handing the
+    /// batch to the d623c09 policy / scope / recovery stack.
+    /// Returns a fresh `ParseResult` with rejected events
+    /// reported as malformed (so the existing rejection
+    /// bookkeeping fires the same way it does for
+    /// `event.malformed`) and the accepted events proceeding
+    /// through the d623c09 path unchanged.
+    ///
+    /// Fail-closed semantics: when the engine rejects an event
+    /// (because `required_fields` are missing), the event is
+    /// **dropped** — it never lands on the bus and never sees
+    /// d623c09. The rejection reason is logged via `tracing::warn`
+    /// so operators have the same audit trail they get from
+    /// policy-rejected events.
+    fn engine_required_field_filter(
+        &self,
+        mut result: crate::event_reader::ParseResult,
+    ) -> crate::event_reader::ParseResult {
+        use crate::event_reader::MalformedLine;
+        use crate::preset::engine::{GateDecision, LintContext, run_gates};
+        let view = ProtocolView::from_event_loop(&self.config.event_loop);
+        let ctx = LintContext;
+        let mut rejected = 0usize;
+        let mut kept = Vec::with_capacity(result.events.len());
+        for event in result.events.drain(..) {
+            let topic = event.topic.to_string();
+            let payload_value = match event.payload.as_deref() {
+                Some(s) if !s.is_empty() => Self::parse_event_payload_value(s),
+                _ => serde_json::Value::Null,
+            };
+            let decision = run_gates(&view, &ctx, &topic, &payload_value);
+            match decision {
+                GateDecision::Accept => kept.push(event),
+                GateDecision::Reject(reason) => {
+                    rejected += 1;
+                    tracing::warn!(
+                        topic = %topic,
+                        reason = %reason,
+                        hat = ?event.hat.as_deref(),
+                        "engine gate rejected event (U2 fail-fast, required-fields)"
+                    );
+                    // Surface the rejection as a `MalformedLine`
+                    // entry so the existing event-loop rejection
+                    // bookkeeping (consecutive_malformed_events,
+                    // publish event.malformed) fires identically
+                    // to the d623c09 path. The original payload
+                    // string is preserved as the line content so
+                    // operators can still inspect the raw event.
+                    // `line_number = 0` marks the entry as an
+                    // engine rejection rather than a parser
+                    // rejection (1+ are reserved for JSONL parse
+                    // failures).
+                    let raw = event.payload.clone().unwrap_or_default();
+                    result.malformed.push(MalformedLine::new(
+                        0,
+                        &raw,
+                        format!("engine_rejected: {reason}"),
+                    ));
+                }
+            }
+        }
+        result.events = kept;
+        if rejected > 0 {
+            tracing::debug!(
+                rejected,
+                kept = result.events.len(),
+                "engine gate filter result"
+            );
+        }
+        result
+    }
+
+    /// Parse the JSON value from an event's payload string,
+    /// returning `Value::Null` when the payload is empty.
+    /// Non-JSON payloads are wrapped as `Value::String` so the
+    /// engine's required-field check still operates (the
+    /// required-field set is empty for non-object payloads, so
+    /// any JSON object missing fields is correctly rejected).
+    fn parse_event_payload_value(raw: &str) -> serde_json::Value {
+        serde_json::from_str(raw).unwrap_or(serde_json::Value::String(raw.to_string()))
+    }
+
     /// R1: helper that consults the resolver only when the hat is the
     /// synthesizer.  Returning `Option<WaveContext>` keeps the prepend
     /// helper a one-liner.
@@ -6957,6 +7153,36 @@ impl EventLoop {
         if !result.events.is_empty() {
             self.state.consecutive_malformed_events = 0;
         }
+
+        // U2 (plan 2026-06-20-001, R15 / KTD-10): engine-backed
+        // fail-fast gate. Runs *before* d623c09's policy / scope
+        // gates so the loop and the CLI emit share the SAME
+        // required-field check (no duplicate field tables in
+        // Rust, per KTD-10). The engine uses the same
+        // `ProtocolView` the linter reads, so the two layers
+        // cannot drift.
+        //
+        // Scope of U2 phase 1 (this commit): the engine gate
+        // ONLY short-circuits on `required_fields` missing —
+        // the heavier d623c09 checks (terminal monotonicity,
+        // semantic gate, recovery) keep running afterwards. The
+        // fail-fast is opt-in: the same gate is skipped when
+        // `hat_handoff.enabled == false`, when the execution_mode
+        // is `Coordinator`, and when the engine budget env
+        // `RALPH_SERIAL_LINT_MODE=off` is set. Disabling the
+        // engine gate does NOT disable the d623c09 gates — the
+        // engine is a fail-fast addition, not a replacement.
+        //
+        // Phase 2 (separate commit) replaces the d623c09
+        // required-fields path with the engine entirely. That
+        // commit will delete `validate_event_with_hat` for
+        // required-fields handling and have `apply_event_policy_validation`
+        // use the engine's `GateContext::pre_check`.
+        let result = if self.should_run_engine_gate() {
+            self.engine_required_field_filter(result)
+        } else {
+            result
+        };
 
         if result.events.is_empty() && result.malformed.is_empty() {
             // 2026-06-16-001 U5: a turn with no events is the

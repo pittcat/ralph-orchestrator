@@ -563,6 +563,10 @@ mod tests {
             // 2026-06-17-004 U3 (R4+R5): obligation-trigger
             // snapshot for the missing-event gate. Empty by default.
             pending_obligation_triggers: Vec::new(),
+            // 2026-06-20-001 U4b: no lint hint on cold start;
+            // populated by the CLI emit path or by the loop's
+            // own engine gate when a topic is rejected.
+            pending_lint_resume: None,
         }
     }
 

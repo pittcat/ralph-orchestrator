@@ -88,15 +88,11 @@ event_loop:
   # Same single-U contract as ce-executor-isolated. Coordinator must
   # only create the current U's task.
   enforce_current_unit: true
-  # 2026-06-18-002 plan U11: enable hat_handoff (roadmap hat→hat
-  # handoff). KTD-11 / Phased Delivery gate (U9 BDD green) is
-  # satisfied — all 6 hat_handoff scenarios pass on
-  # `cargo nextest run -p ralph-core --test scenarios hat_handoff`.
-  # Identical contract to ce-executor-isolated: the gate enforces
-  # `handoff_path` on macro edges; the inject step prepends
-  # `## HAT HANDOFF` to the downstream hat prompt.
-  hat_handoff:
-    enabled: true
+  # 2026-06-18-002 plan U11: hat_handoff is enabled in the SSOT
+  # (`presets/schemas/ce-executor-serial.yml`). The previous
+  # inline `hat_handoff: { enabled: true }` block was a duplicate
+  # of the SSOT value and was removed under F-PS-005.
+  #
   # 2026-06-18-004 plan U2 (R2, KTD2): suppress human guidance
   # injection for all hats in this preset. Free-text guidance
   # caused the perky-maple P1-2 probe storm where the executor
@@ -106,58 +102,27 @@ event_loop:
   # contains the text. TUI / Telegram ingestion is unchanged.
   # Set `false` to restore guidance injection.
   suppress_human_guidance: true
-  # 2026-06-17-003 plan U1: enable state projection. Same
-  # semantics as ce-executor-isolated: the orchestrator is the
-  # canonical writer for `.ralph/agent/tasks.jsonl` and
-  # `.ralph/agent/progress.md`; the agent reads the live values
-  # from the `## ORCHESTRATOR CONTEXT` block. The mapping table
-  # is identical to the isolated preset because the serial path
-  # inherits the same topic taxonomy.
-  state_projection:
-    enabled: true
-    actions:
-      work.ready:
-        kind: ensure_task
-        key: "task_key"
-        title: "step"
-      work.done:
-        kind: close_task
-        task_id: "task_id"
-        step: "step"
-      queue.advance:
-        kind: advance_step
-        # serial preset's plan-gate emit (see plan-gate instructions)
-        # carries `next_step` (not `step`) as the new current step.
-        # Without this override the projector drops every queue.advance
-        # event with `event.state_projection.rejected` and progress.md
-        # stops advancing — the step_handoff gate then has nothing to
-        # gate against. P0 fix for ce-executor-serial.
-        current_step: "next_step"
-        completed_step: "completed_step"
-      plan.complete:
-        kind: plan_complete
-        final_step: "step"
-  # Serial review path does NOT use the wave dispatcher, so the
-  # `incomplete_wave_gate` is meaningless here. The serial path relies
-  # on review-coordinator's own state machine + dimension-reviewer's
-  # explicit `review.dimension.failed` to make forward progress. If a
-  # dimension times out, the missing-event / progress-steward path
-  # covers recovery; there is no wave-level aggregate timeout to gate.
-  workflow_contract:
-    incomplete_wave_gate:
-      enabled: false
-    step_handoff:
-      progress_task_gate: true
-  verdict_gate:
-    # Reject LOOP_COMPLETE if the most recent REVIEW_COMPLETE event has
-    # pass_or_fail == "fail". Backstops the shipper+reporter chain when
-    # either hat misclassifies a P0 residual as a pass.
-    topic: "REVIEW_COMPLETE"
-    fail_field: "pass_or_fail"
-    fail_value: "fail"
-    # Mirror the wave preset's defense-in-depth: also gate on
-    # `report.done` carrying pass_or_fail="fail".
-    additional_topics: ["report.done"]
+  # Plan 2026-06-20-001 F-PS-005: state_projection moved to
+  # `presets/schemas/ce-executor-serial.yml` SSOT (uses the
+  # `actions_chain` form with `mark_step_completed`). The inline
+  # `actions:` map below would shadow the SSOT and break the
+  # engine dispatch (state_projector reads `actions_chain`
+  # first). It is intentionally removed; edit the SSOT file
+  # when the projection chain changes.
+  #
+  # Plan 2026-06-20-001 F-PS-005: workflow_contract seeds live
+  # in the SSOT. The `incomplete_wave_gate` is `false` by
+  # default and `step_handoff.progress_task_gate` is `true` —
+  # both are SSOT defaults so the inline override is redundant.
+  # `handoff_topic_seeds` (the 9+ entry list) is also SSOT.
+  # The inline `workflow_contract:` block was removed; operators
+  # who need a per-workspace override should set the full block
+  # in their project's ralph.yml, not here.
+  #
+  # Plan 2026-06-20-001 F-PS-005: verdict_gate is SSOT. The
+  # inline block here duplicated the SSOT fields exactly. It
+  # is intentionally removed; edit
+  # `presets/schemas/ce-executor-serial.yml` to change it.
   # 2026-06-17-003 U5: cross-hat HARD RULE (mirrors
   # ce-executor-isolated). Per-hat instructions below may still
   # mention hand-writing the ledgers (legacy phrasing); treat
@@ -167,8 +132,20 @@ event_loop:
   # writes to `.ralph/agent/tasks.jsonl` /
   # `.ralph/agent/progress.md`, and `tail` of `.ralph/events.jsonl`
   # to compute the current step.
-  # U7: Enable execution contract for work.done validation. Identical
-  # to ce-executor-isolated; the executor's contract is the same.
+  #
+  # U7: execution_contracts SSOT is the canonical ruleset. The
+  # inline block was a partial copy that included
+  # `require_payload_fields`, which is **explicitly forbidden**
+  # under KTD-12 (rule A) — those fields are joined from
+  # `event_policy.schemas` at engine runtime. The inline
+  # `require_payload_fields:` sub-keys are removed; the SSOT
+  # file at `presets/schemas/ce-executor-serial.yml` is the
+  # single source of truth for required payload fields. The
+  # other rules (`require_task`, `require_git_change`,
+  # `require_test_evidence`, `dedup_key`) are still inline
+  # overrides because they encode the executor's specific
+  # `loop_scoped` / `auto_close_on_valid` /
+  # `allow_empty_for_steps` policy that the SSOT does not pin.
   execution_contracts:
     enabled: true
     rules:
@@ -178,7 +155,6 @@ event_loop:
         # Trivial steps are exempt via allow_empty_for_steps; the
         # executor still reports commit_count=0, changed_lines=0 for
         # them so the schema stays consistent.
-        require_payload_fields: ["plan_name", "plan_path", "task_id", "task_key", "step", "commit_count", "changed_lines"]
         require_task:
           id_field: "task_id"
           key_field: "task_key"
@@ -199,16 +175,6 @@ event_loop:
       # start; uncommitted diff alone is insufficient because
       # the fixer might emit before `git commit` lands.
       fix.applied:
-        require_payload_fields:
-          - plan_name
-          - task_id
-          - task_key
-          - step
-          - fix_round
-          - applied_count
-          - failed_count
-          - commit_count
-          - changed_lines
         require_git_change:
           # `commit_only` (NOT a fictional `strict`): a real
           # commit must exist since loop start. `diff_or_commit`

@@ -735,6 +735,7 @@ mod tests {
         let ssot: serde_yaml::Value =
             serde_yaml::from_str(ssot_text).map_err(|e| format!("SSOT YAML: {e}"))?;
 
+        // 1) Schemas deep-merge into event_policy.schemas (U1).
         let ssot_schemas = match ssot.get("schemas") {
             Some(serde_yaml::Value::Mapping(m)) => m.clone(),
             Some(other) => {
@@ -753,7 +754,6 @@ mod tests {
             .and_then(|v| v.as_mapping())
             .cloned()
             .unwrap_or_default();
-
         let merged = deep_merge_yaml_mapping(&ssot_schemas, &inline_schemas_mapping);
         let event_policy_mapping = event_policy
             .as_mapping_mut()
@@ -762,6 +762,51 @@ mod tests {
             serde_yaml::Value::String("schemas".to_string()),
             serde_yaml::Value::Mapping(merged),
         );
+
+        // 2) Multi-section protocol merge (plan 2026-06-20-001
+        //    U1 / KTD-1). Mirrors `build.rs` exactly so the
+        //    embedded copy produced by `cargo build` matches
+        //    what this test computes. Each SSOT top-level key
+        //    (other than `schemas`) is deep-merged into
+        //    `event_loop.<section>`.
+        let section_targets: &[(&str, &[&str])] = &[
+            ("execution_contracts", &["event_loop", "execution_contracts"]),
+            ("verdict_gate", &["event_loop", "verdict_gate"]),
+            ("workflow_contract", &["event_loop", "workflow_contract"]),
+            ("state_projection", &["event_loop", "state_projection"]),
+            ("hat_handoff", &["event_loop", "hat_handoff"]),
+        ];
+        for (ssot_key, target_path) in section_targets {
+            let Some(ssot_value) = ssot.get(*ssot_key) else {
+                continue;
+            };
+            let ssot_mapping = match ssot_value {
+                serde_yaml::Value::Mapping(m) => m.clone(),
+                other => {
+                    return Err(format!(
+                        "SSOT `{ssot_key}` must be a mapping, found {:?}",
+                        other
+                    ));
+                }
+            };
+            let parent_path = &target_path[..target_path.len() - 1];
+            let leaf_key = target_path[target_path.len() - 1];
+            let parent = ensure_yaml_mapping(&mut preset, parent_path)?;
+            let parent_mapping = parent
+                .as_mapping_mut()
+                .expect("ensure_yaml_mapping returned a non-mapping Value");
+            let inline_mapping = parent_mapping
+                .get(leaf_key)
+                .and_then(|v| v.as_mapping())
+                .cloned()
+                .unwrap_or_default();
+            let section_merged = deep_merge_yaml_mapping(&ssot_mapping, &inline_mapping);
+            parent_mapping.insert(
+                serde_yaml::Value::String(leaf_key.to_string()),
+                serde_yaml::Value::Mapping(section_merged),
+            );
+        }
+
         serde_yaml::to_string(&preset).map_err(|e| format!("re-serialise: {e}"))
     }
 
@@ -2297,6 +2342,13 @@ mod tests {
     }
 
     /// R4: same assertion for the `ce-executor-serial` preset.
+    ///
+    /// 2026-06-20-001 F-PS-005: the inline `actions:` map was
+    /// removed (it shadowed the SSOT `actions_chain`). The
+    /// runtime projector reads `actions_chain` first; this
+    /// test now asserts `actions_chain` contains the four
+    /// canonical topics so a future regression that drops the
+    /// SSOT projection chain is caught immediately.
     #[test]
     fn test_ce_executor_state_projection_enabled_serial_en() {
         let preset = get_preset("ce-executor-serial").expect("ce-executor-serial preset");
@@ -2308,8 +2360,10 @@ mod tests {
         );
         for topic in ["work.ready", "work.done", "queue.advance", "plan.complete"] {
             assert!(
-                config.event_loop.state_projection.actions.contains_key(topic),
-                "ce-executor-serial must define a projection action for `{topic}`"
+                config.event_loop.state_projection.actions_chain.contains_key(topic),
+                "ce-executor-serial must define a projection chain for `{topic}` \
+                 (post-F-PS-005: the inline `actions:` map was removed; \
+                 `actions_chain` is the SSOT form).",
             );
         }
     }
@@ -5090,9 +5144,15 @@ mod tests {
         let action = config
             .event_loop
             .state_projection
-            .actions
+            .actions_chain
             .get("queue.advance")
-            .expect("ce-executor-serial must declare queue.advance state_projection action");
+            .and_then(|chain| chain.first())
+            .expect(
+                "ce-executor-serial must declare queue.advance state_projection action \
+                 in actions_chain (F-PS-005: the inline `actions:` map was removed; \
+                 the SSOT `presets/schemas/ce-executor-serial.yml` is the canonical \
+                 source).",
+            );
 
         let (current_step, completed_step) = match action {
             ralph_core::config::StateProjectionAction::AdvanceStep {

@@ -8,6 +8,12 @@ use crate::policy_check::{PolicyCheckFlags, ValidationFailure, resolve_policy_ch
 use anyhow::{Context, Result};
 use clap::Parser;
 use ralph_core::config::HatExecutionMode;
+use ralph_core::preset::engine::{
+    LintOutcome, LintResumeHint, ProtocolView, lint_emit_with_timeout,
+};
+use ralph_core::preset::engine::lint_mirror::{
+    build_lint_mirror_block, build_lint_resume_block,
+};
 use ralph_core::emit_schema_hint::fix_hint_for_hat_topic;
 use ralph_core::{
     RalphConfig, UrgentSteerStore, ViolationType,
@@ -185,6 +191,155 @@ pub fn should_policy_check_emit(args: &EmitArgs, config: Option<&RalphConfig>) -
 pub fn looks_like_json(payload: &str) -> bool {
     let trimmed = payload.trim_start();
     trimmed.starts_with('{') || trimmed.starts_with('[')
+}
+
+/// Decide whether the engine-backed linter (U4) should run for this
+/// `ralph emit`. Opt-in: lint is on when `hat_handoff.enabled` is
+/// true AND the execution_mode is not `coordinator`. The
+/// `RALPH_SERIAL_LINT_MODE=off` env var is the KTD-7 circuit
+/// breaker — it disables only the lint phase, not the policy /
+/// scope / handoff gates that lint runs *after*.
+///
+/// When `config` is `None` (no `ralph.yml` discoverable), the
+/// linter is skipped — a preset-less workspace does not have a
+/// protocol view to lint against, and the existing
+/// `unsafe-no-policy-check` path already handles unconfigured
+/// emits.
+fn should_run_lint(config: Option<&RalphConfig>) -> bool {
+    if std::env::var("RALPH_SERIAL_LINT_MODE")
+        .map(|v| v.eq_ignore_ascii_case("off"))
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    let Some(cfg) = config else {
+        return false;
+    };
+    if cfg.event_loop.execution_mode == HatExecutionMode::Coordinator {
+        return false;
+    }
+    cfg.event_loop.hat_handoff.enabled
+}
+
+/// Apply the linter's outcome to the in-flight emit.
+///
+///   * `Accept` — payload passes through unchanged.
+///   * `AcceptAfterAutoPrepare` — the linter synchronously wrote a
+///     handoff artifact and mutated the payload; we trust the
+///     engine's updated `Value` (R22 / B4 fix).
+///   * `Reject(hint)` — write `.ralph/pending_lint_resume.json`,
+///     print `## LINT FAILED` + `## LINT RESUME REQUIRED`, and
+///     return `Err` so the event never lands in `events.jsonl`.
+///     No recovery entry is written (R9).
+///   * `Timeout(reason)` — same fail-closed path with a
+///     `## LINT TIMEOUT` block (R14 / KTD-9).
+fn handle_lint_outcome(
+    outcome: LintOutcome,
+    workspace_root: &Path,
+    view: &ProtocolView,
+    topic: &str,
+    payload: serde_json::Value,
+) -> Result<serde_json::Value> {
+    match outcome {
+        LintOutcome::Accept => Ok(payload),
+        LintOutcome::AcceptAfterAutoPrepare => {
+            // R22: the engine prepared the artifact and rewrote the
+            // payload to inject `handoff_path`. Surface the fact so
+            // the agent can see what the orchestrator did on its
+            // behalf. The payload itself has already been mutated
+            // by `auto_handoff_prepare`; we trust it (fail-closed
+            // came first via the inner `lint_emit` call).
+            eprintln!(
+                "## LINT AUTO-PREPARE\n\
+                 topic: `{topic}`\n\
+                 orchestrator wrote the handoff artifact and injected \
+                 `handoff_path` into the payload. Resubmitting through \
+                 the gate.\n"
+            );
+            Ok(payload)
+        }
+        LintOutcome::Reject(hint) => {
+            write_pending_lint_resume(workspace_root, topic, &hint)
+                .context("write .ralph/pending_lint_resume.json")?;
+            print_lint_failure_blocks(view, &hint);
+            Err(lint_failure_exit_code(&hint))
+        }
+        LintOutcome::Timeout(reason) => {
+            // R14 / KTD-9: lint overrun is treated as a rejection so
+            // the agent sees the same fail-closed path. The hint
+            // uses `HandoffArtifact` because the timeout class is
+            // closer to "unknown / non-deterministic" than to a
+            // payload error; the resume block still routes back to
+            // the source hat. Operators can correlate with the
+            // `reason` string.
+            let hint = LintResumeHint::from_reason(topic, &reason);
+            write_pending_lint_resume(workspace_root, topic, &hint)
+                .context("write .ralph/pending_lint_resume.json on lint timeout")?;
+            eprintln!(
+                "## LINT TIMEOUT\n\
+                 topic: `{topic}`\n\
+                 reason: {reason}\n\
+                 \n\
+                 The lint phase exceeded its 200ms budget and is fail-\
+                 closed. The event is NOT written to events.jsonl. \
+                 Re-run `ralph emit` once the underlying cause is \
+                 resolved.\n"
+            );
+            print_lint_failure_blocks(view, &hint);
+            Err(lint_failure_exit_code(&hint))
+        }
+    }
+}
+
+/// Persist the lint hint so the loop's next `build_prompt` call
+/// can inject `## LINT RESUME REQUIRED` (R13 / KTD-8). The file is
+/// the cross-process handoff between the CLI emit and the loop's
+/// in-memory `LoopState.pending_lint_resume`. Overwriting the file
+/// is intentional — a fresher lint failure supersedes the stale
+/// hint, matching the loop's single-slot semantics.
+///
+/// The file lives at `<workspace_root>/.ralph/pending_lint_resume.json`.
+/// `loop_runner` reads it on loop startup (and on each iteration
+/// in U4b) to seed the LoopState.
+fn write_pending_lint_resume(
+    workspace_root: &Path,
+    topic: &str,
+    hint: &LintResumeHint,
+) -> std::io::Result<()> {
+    let dir = workspace_root.join(".ralph");
+    fs::create_dir_all(&dir)?;
+    let payload = serde_json::json!({
+        "topic": topic,
+        "class": hint.class,
+        "target": hint.target,
+        "reason": hint.reason,
+        "ts": chrono::Utc::now().to_rfc3339(),
+    });
+    fs::write(dir.join("pending_lint_resume.json"), payload.to_string())
+}
+
+/// Print `## LINT FAILED` + `## LINT MIRROR` + `## LINT RESUME
+/// REQUIRED` for the agent. Mirrored from `lint_mirror.rs` so the
+/// output is the same in CLI emit failure and in `build_prompt`
+/// injection — operators and agents see a single canonical
+/// format (R12).
+fn print_lint_failure_blocks(view: &ProtocolView, hint: &LintResumeHint) {
+    eprintln!("## LINT FAILED");
+    eprintln!();
+    eprint!("{}", build_lint_mirror_block(view, hint));
+    eprint!("{}", build_lint_resume_block(hint));
+}
+
+/// Convert a lint rejection into a non-zero anyhow exit so the
+/// shell can detect failure without parsing `## LINT FAILED`.
+fn lint_failure_exit_code(hint: &LintResumeHint) -> anyhow::Error {
+    anyhow::anyhow!(
+        "Event rejected by lint (class={:?}, target={:?}): {}\n\
+         See `## LINT FAILED` above for the canonical failure block.",
+        hint.class,
+        hint.target,
+        hint.reason
+    )
 }
 
 /// Write a recovery envelope to `.ralph/recovery.jsonl` when the CLI
@@ -762,6 +917,42 @@ fn emit_command_with_root_and_hats(
             .unwrap_or_else(|_| serde_json::Value::String(payload))
     } else {
         serde_json::Value::String(payload)
+    };
+
+    // U4 (plan 2026-06-20-001, R8–R13, R22): engine-backed precheck
+    // linter. Runs *after* policy / scope / dimension / handoff gates
+    // (so a topic that fails the legacy gates still gets the
+    // operator-facing message it always has) and *before* the event
+    // is written to disk. The lint phase:
+    //   1. builds a `ProtocolView` from the loaded event_loop config
+    //   2. mirrors the gate against the same protocol the loop uses
+    //      (KTD-10 — no duplicate field tables in Rust)
+    //   3. on macro edges lacking `handoff_path`, synchronously
+    //      prepares the handoff artifact and re-emits (R22 / B4 fix)
+    //   4. on rejection: writes `LoopState.pending_lint_resume`,
+    //      prints `## LINT FAILED` + `## LINT RESUME REQUIRED`, and
+    //      refuses to write to the events file (R9, R13, KTD-8)
+    //   5. on timeout (>200ms p95): same fail-closed path (R14,
+    //      KTD-9). The runtime check is post-hoc; full fail-closed
+    //      JoinHandle wrap is tracked as F-PS-006.
+    //
+    // Lint is opt-in: only when `hat_handoff.enabled == true` AND
+    // the resolved execution_mode is not `coordinator` (the
+    // coordinator preset routes through Ralph's hatless prompt and
+    // doesn't need per-event lint backpressure). The
+    // `RALPH_SERIAL_LINT_MODE=off` env var is the KTD-7 circuit
+    // breaker — set it to disable only the lint phase without
+    // rolling back the policy / scope / handoff gates (which lint
+    // does not replace).
+    let payload_value = if should_run_lint(config.as_ref()) {
+        let view = ProtocolView::from_event_loop(&config.as_ref().unwrap().event_loop);
+        let outcome = lint_emit_with_timeout(&view, &args.topic, &payload_value);
+        match handle_lint_outcome(outcome, &workspace_root, &view, &args.topic, payload_value) {
+            Ok(v) => v,
+            Err(e) => return Err(e),
+        }
+    } else {
+        payload_value
     };
 
     let mut record = serde_json::json!({
