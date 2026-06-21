@@ -27,8 +27,10 @@ cd "$REPO_ROOT"
 unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy NO_PROXY no_proxy 2>/dev/null || true
 
 # 全局总超时:防止意外卡住(例如 IPC deadlock、PTY 未释放)。
-# 10 分钟覆盖 workspace 全量 nextest + doctest 的实测耗时(~5-7 分钟)。
-TOTAL_TIMEOUT_SECONDS=${TOTAL_TIMEOUT_SECONDS:-600}
+# 25 分钟覆盖 workspace 全量基线:本地 macOS nextest ~3 分钟 + doctest ~2-3 分钟(已跳过空 crate)
+# + rustdoc 全量首跑开销;CI ubuntu-latest 上实测 ~5-7 分钟,本地 macOS 跳过 doctest 后 ~6-8 分钟。
+# 详见 docs/solutions/developer-experience/run-tests-doctest-timeout-and-skip-empty-crates-2026-06-21.md
+TOTAL_TIMEOUT_SECONDS=${TOTAL_TIMEOUT_SECONDS:-1500}
 
 # ---------------------------------------------------------------------------
 # 0. Fresh start:kill 当前进程组(PGID)的所有 cargo / rustc / nextest / ralph 子进程,
@@ -214,8 +216,39 @@ if [[ "$SERIAL" -ne 1 ]] && run_cargo nextest --version >/dev/null 2>&1; then
   run_cargo nextest run --workspace --exclude ralph-e2e
 
   echo
-  echo "📚 运行 doctest 覆盖(cargo test --doc)..."
-  run_cargo test --workspace --exclude ralph-e2e --doc
+  # doctest 阶段:rustdoc 对**没有** ```rust 代码块的 crate 仍会跑完整 lint + 编译 + 提取
+  # pipeline(单进程 ~1-3 分钟/crate),本地 macOS 全跑会超时。先用 rg 过滤,只跑真正有 doctest
+  # 的 crate。fallback 到 grep -rl(脚本在 PATH 不含 rg 时仍能自愈)。
+  # 详见 docs/solutions/developer-experience/run-tests-doctest-timeout-and-skip-empty-crates-2026-06-21.md
+  crates_with_doc=()
+  crates_skipped=()
+  for crate_dir in crates/*/; do
+    crate_name=$(basename "$crate_dir")
+    [[ "$crate_name" == "ralph-e2e" ]] && continue
+    if command -v rg >/dev/null 2>&1; then
+      if rg -q '```rust\b' "$crate_dir/src" 2>/dev/null; then
+        crates_with_doc+=("$crate_name")
+      else
+        crates_skipped+=("$crate_name")
+      fi
+    elif grep -rl '```rust' "$crate_dir/src" >/dev/null 2>&1; then
+      crates_with_doc+=("$crate_name")
+    else
+      crates_skipped+=("$crate_name")
+    fi
+  done
+
+  if [[ ${#crates_with_doc[@]} -eq 0 ]]; then
+    echo "📚 跳过 doctest:workspace 中 8 个非 e2e crate 均无 \`\`\`rust 代码块"
+  elif [[ ${#crates_skipped[@]} -gt 0 ]]; then
+    echo "📚 doctest:跳过 ${#crates_skipped[@]} 个无 doctest 的 crate($(IFS=,; echo "${crates_skipped[*]}")),只跑:$(IFS=,; echo "${crates_with_doc[*]}")"
+    for crate_name in "${crates_with_doc[@]}"; do
+      run_cargo test -p "$crate_name" --doc
+    done
+  else
+    echo "📚 运行 doctest 覆盖(cargo test --workspace --doc)..."
+    run_cargo test --workspace --exclude ralph-e2e --doc
+  fi
 
   echo
   echo "✅ 测试通过(nextest + doctest)"
