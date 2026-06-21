@@ -1953,6 +1953,16 @@ impl EventLoop {
         state.handoff_tracker = crate::workflow_contract::HandoffTracker::new()
             .with_default_timeout(std::time::Duration::from_secs(handoff_timeout));
 
+        // U2 (plan 2026-06-21-002): unified state ledger opt-in.
+        // `UNIFIED_STATE_LEDGER=1` enables the new code path; the
+        // default leaves `state.state_ledger = None` so the
+        // legacy `StateProjector::ProjectionContext` continues to
+        // own the in-memory caches. U9 will flip the default; for
+        // now the env var is the only switch.
+        if let Some(ledger) = build_state_ledger_from_env(context.workspace()) {
+            state.state_ledger = Some(ledger);
+        }
+
         Self {
             config: config.clone(),
             registry,
@@ -10519,4 +10529,35 @@ fn is_rejection_stale(
     }
     let age = now_unix.saturating_sub(source_unix);
     age > ttl_seconds as i64
+}
+
+/// U2 (plan 2026-06-21-002): construct a `StateLedger` from the
+/// `UNIFIED_STATE_LEDGER` env var, returning `None` when the flag
+/// is unset (legacy path) or invalid. This is the single env-var
+/// read site for the loop constructor; `with_context_and_diagnostics`
+/// is the only caller.
+///
+/// Flag rules:
+/// - unset, empty, or `0` → `None` (legacy).
+/// - `1` → feature on, fresh ledger rooted at `workspace`.
+/// - any other value → warn and treat as off (`None`).
+fn build_state_ledger_from_env(workspace: &std::path::Path) -> Option<crate::state::StateLedger> {
+    let raw = std::env::var("UNIFIED_STATE_LEDGER").ok()?;
+    let trimmed = raw.trim();
+    if trimmed == "1" {
+        debug!(
+            workspace = %workspace.display(),
+            "UNIFIED_STATE_LEDGER=1 — wiring fresh StateLedger into LoopState"
+        );
+        Some(crate::state::StateLedger::new(workspace, true))
+    } else if trimmed.is_empty() || trimmed == "0" {
+        None
+    } else {
+        warn!(
+            value = %raw,
+            "UNIFIED_STATE_LEDGER must be '1' (on) or '0'/unset (off); \
+             treating as off"
+        );
+        None
+    }
 }

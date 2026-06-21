@@ -3,7 +3,7 @@
 //!
 //! Plan ref: `docs/plans/2026-06-17-003-feat-hat-orchestrator-state-projection-phase1-plan.md`.
 //!
-//! The module has three public entry points:
+//! The module has four public entry points:
 //! - [`StateProjector::apply`] — main hook. Called from
 //!   `process_parse_result` **after** the state machine validates
 //!   the batch and **before** `apply_step_handoff_gate` (SP-R8).
@@ -12,6 +12,19 @@
 //! - [`StateProjector::bootstrap_from_disk`] — Unit 6 entry point
 //!   used on loop resume. Loads the canonical state into the
 //!   in-memory cache so the first emit only applies *deltas*.
+//! - [`StateProjector::apply_from_ledger`] — U2 (plan
+//!   2026-06-21-002) entry point. Drives the projector from a
+//!   [`crate::state::StateLedger`] commit log: the projector
+//!   writes the same canonical ledgers but reads the
+//!   authoritative state from [`crate::state::LedgerSnapshot`]
+//!   rather than its own `tasks_cache` / `progress_cache`. The
+//!   legacy caches become write-through mirrors that the
+//!   projector refreshes on every successful commit.
+//! - [`StateProjector::project_ledger_snapshot`] — U2 helper.
+//!   Equivalent to `bootstrap_from_disk` but reads from a
+//!   [`crate::state::LedgerSnapshot`], aligning the projector
+//!   caches with the ledger's view of the world before any
+//!   ledger-derived commits are applied.
 //! - [`StateProjector::snapshot`] — Unit 4 entry point. Builds a
 //!   read-only [`RuntimeStateSnapshot`] for the
 //!   `## ORCHESTRATOR CONTEXT` block. (Implemented in U4; here we
@@ -22,6 +35,21 @@
 //! [`progress::project`] (Unit 3). Both submodules share the same
 //! [`ProjectionContext`] so they see the same view of the
 //! workspace.
+//!
+//! ## U2 (plan 2026-06-21-002): ledger-driven reads
+//!
+//! `tasks_cache` / `progress_cache` remain on the
+//! [`ProjectionContext`] for backward compatibility with the
+//! legacy `StateProjector::apply` path and its ~150 tests, but
+//! they are now marked `#[deprecated]`. New read APIs
+//! ([`ProjectionContext::task_snapshot`] /
+//! [`ProjectionContext::progress_snapshot`]) return references
+//! to the underlying [`crate::state::LedgerSnapshot`], which is
+//! the unified source of truth. Callers wiring the U2 path
+//! populate the read-only view via
+//! [`ProjectionContext::set_ledger_snapshot`] before invoking
+//! [`StateProjector::apply_from_ledger`] /
+//! [`StateProjector::project_ledger_snapshot`].
 //!
 //! ## Known limitation: cross-loop cache staleness
 //!
@@ -34,7 +62,9 @@
 //! loops; cross-loop invalidation is a Phase 2 concern (see plan
 //! "Risks & Dependencies" table). The `project_ensure_task` and
 //! `project_close_task` helpers re-read disk on every call, which
-//! partially mitigates the risk for the most common path.
+//! partially mitigates the risk for the most common path. The U2
+//! ledger path closes this gap entirely: the snapshot is the
+//! authoritative state, the caches are write-through mirrors.
 
 use std::path::{Path, PathBuf};
 
@@ -43,6 +73,7 @@ use tracing::{debug, warn};
 
 use crate::config::StateProjectionConfig;
 use crate::event_reader::Event;
+use crate::state::LedgerSnapshot;
 use crate::step_handoff::ProgressSnapshot;
 
 /// Topics the projector inspects. Other topics are inert (no
@@ -83,6 +114,15 @@ pub fn progress_path(workspace: &Path) -> PathBuf {
 /// the projection config. The caches let the projector emit
 /// diff-only writes and feed the `ORCHESTRATOR CONTEXT` snapshot
 /// without re-reading disk.
+///
+/// ## U2 (plan 2026-06-21-002): read-side split
+///
+/// `tasks_cache` / `progress_cache` are now `#[deprecated]` —
+/// they survive only as write-through mirrors of the canonical
+/// ledgers, kept in sync by [`StateProjector::apply`]. New read
+/// code goes through [`Self::task_snapshot`] / [`Self::progress_snapshot`],
+/// which borrow from the underlying [`LedgerSnapshot`] (set via
+/// [`Self::set_ledger_snapshot`]).
 #[derive(Debug)]
 pub struct ProjectionContext {
     /// Workspace root (used to derive ledger paths when callers
@@ -108,10 +148,34 @@ pub struct ProjectionContext {
     /// In-memory cache of the tasks ledger. Populated by
     /// [`StateProjector::bootstrap_from_disk`] on loop resume; kept
     /// in sync by [`task::project`] on every apply.
+    ///
+    /// U2 (plan 2026-06-21-002): deprecated as the read-side
+    /// source of truth. The projector still refreshes this field
+    /// on every write so legacy callers and the ~150 pre-U2 tests
+    /// continue to observe the same in-memory view. New reads
+    /// must go through [`Self::task_snapshot`].
+    #[deprecated(
+        since = "0.2.0",
+        note = "U2: read from ProjectionContext::task_snapshot (LedgerSnapshot) instead"
+    )]
     pub tasks_cache: Vec<crate::task::Task>,
     /// In-memory cache of the progress ledger. Same lifecycle as
     /// `tasks_cache`.
+    ///
+    /// U2 (plan 2026-06-21-002): deprecated as the read-side
+    /// source of truth. See [`Self::tasks_cache`] for the
+    /// rationale.
+    #[deprecated(
+        since = "0.2.0",
+        note = "U2: read from ProjectionContext::progress_snapshot (LedgerSnapshot) instead"
+    )]
     pub progress_cache: ProgressSnapshot,
+    /// Optional reference to the unified [`LedgerSnapshot`] that
+    /// the U2 path reads from. `None` keeps the legacy path fully
+    /// working. The projector never mutates this field — the
+    /// caller (`EventLoop` or a test) is responsible for seeding
+    /// it via [`Self::set_ledger_snapshot`].
+    ledger_snapshot: Option<Box<LedgerSnapshot>>,
 }
 
 impl ProjectionContext {
@@ -140,6 +204,7 @@ impl ProjectionContext {
             enforce_current_unit,
             tasks_cache: Vec::new(),
             progress_cache: ProgressSnapshot::default(),
+            ledger_snapshot: None,
         }
     }
 
@@ -155,6 +220,57 @@ impl ProjectionContext {
     /// helper alongside the `enforce_current_unit` field itself.
     pub fn new_legacy(workspace_root: &Path, config: StateProjectionConfig) -> Self {
         Self::new(workspace_root, config, false)
+    }
+
+    /// U2 (plan 2026-06-21-002): wire the projector to read from
+    /// a [`LedgerSnapshot`]. The projector never mutates the
+    /// snapshot; subsequent writes via [`StateProjector::apply`]
+    /// only update the legacy `tasks_cache` / `progress_cache`
+    /// mirrors. Callers that want a fully ledger-driven view
+    /// must use [`StateProjector::apply_from_ledger`].
+    ///
+    /// The helper is idempotent; calling it twice replaces the
+    /// previous snapshot reference.
+    pub fn set_ledger_snapshot(&mut self, snapshot: LedgerSnapshot) {
+        self.ledger_snapshot = Some(Box::new(snapshot));
+    }
+
+    /// Borrow the wired [`LedgerSnapshot`]. Returns `None` when
+    /// the U2 path has not been enabled (legacy mode) or when
+    /// [`Self::set_ledger_snapshot`] has not been called.
+    pub fn ledger_snapshot(&self) -> Option<&LedgerSnapshot> {
+        self.ledger_snapshot.as_deref()
+    }
+
+    /// Read the projector's view of the task ledger. When the
+    /// U2 path is wired, returns the ledger snapshot's tasks;
+    /// otherwise falls back to the legacy `tasks_cache` mirror.
+    ///
+    /// Returns `(tasks, from_ledger)`: `from_ledger=true` means
+    /// the data is the unified authoritative state; `false`
+    /// means it is the legacy mirror. U2 callers should treat
+    /// `false` as "stale relative to the ledger" and prefer
+    /// `ledger_snapshot().tasks()` when available.
+    pub fn task_snapshot(&self) -> (&[crate::task::Task], bool) {
+        if let Some(snap) = self.ledger_snapshot.as_deref() {
+            (snap.tasks(), true)
+        } else {
+            #[allow(deprecated)]
+            let cache = &self.tasks_cache;
+            (cache, false)
+        }
+    }
+
+    /// Read the projector's view of the progress ledger. Same
+    /// dual-source pattern as [`Self::task_snapshot`].
+    pub fn progress_snapshot(&self) -> (&ProgressSnapshot, bool) {
+        if let Some(snap) = self.ledger_snapshot.as_deref() {
+            (snap.progress(), true)
+        } else {
+            #[allow(deprecated)]
+            let cache = &self.progress_cache;
+            (cache, false)
+        }
     }
 }
 
@@ -238,6 +354,268 @@ impl StateProjector {
     pub fn with_enforce_current_unit(mut self, enforce_current_unit: bool) -> Self {
         self.ctx.enforce_current_unit = enforce_current_unit;
         self
+    }
+
+    /// U2 (plan 2026-06-21-002): project a ledger snapshot onto
+    /// the canonical ledgers. Equivalent to
+    /// [`Self::bootstrap_from_disk`] but reads the authoritative
+    /// state from a [`LedgerSnapshot`] rather than re-parsing the
+    /// on-disk `tasks.jsonl` / `progress.md`. The legacy
+    /// `tasks_cache` / `progress_cache` mirrors are refreshed so
+    /// pre-U2 callers continue to observe the same view.
+    ///
+    /// Returns an [`ApplyReport`] describing how many rows were
+    /// written (or, in the cold-start case, zero — the ledgers
+    /// are already in sync with the snapshot).
+    ///
+    /// Callers that want the projector to keep reading from the
+    /// snapshot on every apply must wire it via
+    /// [`ProjectionContext::set_ledger_snapshot`] before invoking
+    /// this method; otherwise the projector falls back to the
+    /// legacy cache path.
+    pub fn project_ledger_snapshot(
+        &mut self,
+        snapshot: &LedgerSnapshot,
+    ) -> Result<ApplyReport, String> {
+        // Refresh the legacy mirrors so callers that still read
+        // `tasks_cache` / `progress_cache` see the same view.
+        #[allow(deprecated)]
+        {
+            self.ctx.tasks_cache = snapshot.tasks().to_vec();
+            self.ctx.progress_cache = snapshot.progress().clone();
+        }
+
+        // Replay-write the canonical ledgers from the snapshot.
+        // The atomic temp-file + rename pattern keeps partial
+        // writes from corrupting either file.
+        let mut report = ApplyReport::default();
+        if !snapshot.tasks().is_empty() {
+            let mut store = crate::task_store::TaskStore::load(&self.ctx.tasks_path)
+                .map_err(|e| format!("tasks_load: {e}"))?;
+            let current_ids: std::collections::HashSet<String> =
+                store.all().iter().map(|t| t.id.clone()).collect();
+            for task in snapshot.tasks() {
+                if !current_ids.contains(&task.id) {
+                    store.ensure(task.clone());
+                }
+            }
+            store
+                .save()
+                .map_err(|e| format!("tasks_save: {e}"))?;
+            debug!(
+                tasks = snapshot.tasks().len(),
+                "project_ledger_snapshot wrote tasks.jsonl"
+            );
+        }
+
+        // The progress ledger is the only "single file" view, so
+        // we re-emit it verbatim. The `write_progress` helper
+        // already round-trips the existing dialect.
+        self::progress::write_progress_external(
+            &self.ctx.progress_path,
+            snapshot.progress(),
+        )?;
+        report.applied = 1;
+        Ok(report)
+    }
+
+    /// U2 (plan 2026-06-21-002): apply a single ledger commit to
+    /// the canonical ledgers.
+    ///
+    /// The projector reads the authoritative state from the
+    /// [`LedgerSnapshot`] passed alongside the commit (the
+    /// snapshot is whatever `StateLedger::snapshot()` returns at
+    /// the call site — typically the *post-commit* snapshot so
+    /// the projector writes the up-to-date view).
+    ///
+    /// Returns an [`ApplyReport`] describing how many rows were
+    /// written (zero when the commit delta has no on-disk
+    /// effect, e.g. `RejectionRecorded`).
+    ///
+    /// Write failures surface as `Err(String)` so the caller can
+    /// publish a `state_projection.rejected` diagnostic and the
+    /// ledger can decide whether to roll back the commit.
+    pub fn apply_from_ledger(
+        &mut self,
+        commit: &crate::state::Commit,
+        snapshot: &LedgerSnapshot,
+    ) -> Result<ApplyReport, String> {
+        use crate::state::CommitDelta;
+
+        let mut report = ApplyReport::default();
+
+        // Refresh the legacy mirrors so pre-U2 callers see the
+        // same view the U2 path is writing.
+        #[allow(deprecated)]
+        {
+            self.ctx.tasks_cache = snapshot.tasks().to_vec();
+            self.ctx.progress_cache = snapshot.progress().clone();
+        }
+
+        match &commit.delta {
+            CommitDelta::NoOp => {
+                // No-op commits never reach this site in
+                // production; defensive no-op.
+            }
+            CommitDelta::TaskInserted { task } => {
+                let mut store = crate::task_store::TaskStore::load(&self.ctx.tasks_path)
+                    .map_err(|e| format!("tasks_load: {e}"))?;
+                store.ensure(task.clone());
+                store.save().map_err(|e| format!("tasks_save: {e}"))?;
+                debug!(
+                    task_id = %task.id,
+                    "apply_from_ledger inserted task"
+                );
+                report.applied = 1;
+            }
+            CommitDelta::TaskLifecycle {
+                task_id,
+                transition,
+            } => {
+                use crate::state::TaskTransition;
+                let mut store = crate::task_store::TaskStore::load(&self.ctx.tasks_path)
+                    .map_err(|e| format!("tasks_load: {e}"))?;
+                // Materialize the snapshot's tasks into the
+                // disk ledger before applying the delta. This
+                // closes the gap between the snapshot
+                // (authoritative) and the disk ledger
+                // (derived): when the loop resumes from a
+                // commit log, the disk may not yet know
+                // about the task that the snapshot says
+                // exists.
+                let pre_count = store.all().len();
+                materialize_snapshot_tasks(&mut store, snapshot.tasks());
+                let inserted = store.all().len() - pre_count;
+                let changed = match transition {
+                    TaskTransition::Closed => store.close(task_id).is_some(),
+                    TaskTransition::Failed => store.fail(task_id).is_some(),
+                    TaskTransition::Started
+                    | TaskTransition::Reopened
+                    | TaskTransition::Opened => {
+                        // Opened/Started/Reopened on an existing
+                        // task are pass-throughs; the projector
+                        // refreshes the row but does not change
+                        // the cache delta. `TaskInserted` is the
+                        // path for new tasks.
+                        store.all().iter().any(|t| t.id == *task_id)
+                    }
+                };
+                if changed || inserted > 0 {
+                    store.save().map_err(|e| format!("tasks_save: {e}"))?;
+                    debug!(
+                        task_id = %task_id,
+                        "apply_from_ledger updated task lifecycle"
+                    );
+                    report.applied = 1;
+                }
+            }
+            CommitDelta::ProgressUpdate {
+                completed_step,
+                current_step,
+            } => {
+                let mut snap = snapshot.progress().clone();
+                if let Some(done) = completed_step {
+                    let trimmed = done.trim();
+                    if !trimmed.is_empty()
+                        && !snap.completed_steps.iter().any(|s| s == trimmed)
+                    {
+                        snap.completed_steps.push(trimmed.to_string());
+                    }
+                }
+                if let Some(step) = current_step {
+                    snap.current_step = Some(step.clone());
+                }
+                self::progress::write_progress_external(&self.ctx.progress_path, &snap)?;
+                report.applied = 1;
+            }
+            CommitDelta::PlanComplete {
+                final_step,
+                closed_count: _,
+            } => {
+                let mut store = crate::task_store::TaskStore::load(&self.ctx.tasks_path)
+                    .map_err(|e| format!("tasks_load: {e}"))?;
+                materialize_snapshot_tasks(&mut store, snapshot.tasks());
+                let mut closed = 0usize;
+                for task in store.all().to_vec() {
+                    if !task.status.is_terminal() {
+                        store.close(&task.id);
+                        closed += 1;
+                    }
+                }
+                // Persist the materialized + closed tasks
+                // whenever the snapshot carries any tasks
+                // (materialized_snapshot_tasks may have
+                // inserted rows that need to reach disk, even
+                // when no further close happens).
+                if closed > 0 || !snapshot.tasks().is_empty() {
+                    store.save().map_err(|e| format!("tasks_save: {e}"))?;
+                }
+                let mut snap = snapshot.progress().clone();
+                if let Some(step) = final_step {
+                    let trimmed = step.trim();
+                    if !trimmed.is_empty()
+                        && !snap.completed_steps.iter().any(|s| s == trimmed)
+                    {
+                        snap.completed_steps.push(trimmed.to_string());
+                    }
+                    snap.current_step = Some(step.clone());
+                }
+                self::progress::write_progress_external(&self.ctx.progress_path, &snap)?;
+                report.applied = 1;
+            }
+            // The remaining deltas have no on-disk effect on the
+            // canonical `tasks.jsonl` / `progress.md` ledgers; the
+            // ledger is already the source of truth for them.
+            CommitDelta::RejectionRecorded { .. }
+            | CommitDelta::RejectionBudgetTripped { .. }
+            | CommitDelta::HandoffAccepted { .. }
+            | CommitDelta::WorkflowPhaseAdvanced { .. }
+            | CommitDelta::CounterChanged { .. }
+            | CommitDelta::SeenTopic { .. }
+            | CommitDelta::CompletionRequested
+            | CommitDelta::CompletionHonored
+            | CommitDelta::CancellationRequested
+            | CommitDelta::StewardWoken
+            | CommitDelta::SnapshotReset
+            | CommitDelta::HatActivationCounted { .. }
+            | CommitDelta::HatExhausted { .. }
+            | CommitDelta::RejectionLastIteration { .. }
+            | CommitDelta::StallRecoveryCounted { .. }
+            | CommitDelta::TaskBlockCounted { .. }
+            | CommitDelta::TaskAbandoned { .. }
+            | CommitDelta::ReviewStepUpdated { .. }
+            | CommitDelta::HandoffTrackerUpdated { .. }
+            | CommitDelta::FlowLifecycleUpdated { .. }
+            | CommitDelta::RejectionDigestUpdated { .. } => {
+                debug!(
+                    delta_kind = ?std::mem::discriminant(&commit.delta),
+                    "apply_from_ledger no-op for non-ledger delta"
+                );
+            }
+        }
+
+        // Refresh the legacy mirrors from the post-write state
+        // so the next apply() (in either path) sees the latest
+        // canonical view.
+        #[allow(deprecated)]
+        {
+            self.ctx.tasks_cache = snapshot.tasks().to_vec();
+            self.ctx.progress_cache = snapshot.progress().clone();
+        }
+        Ok(report)
+    }
+
+    /// U2 (plan 2026-06-21-002): build the `## ORCHESTRATOR
+    /// CONTEXT` block from a [`LedgerSnapshot`] rather than from
+    /// the projector's in-memory cache. The rendering shape
+    /// matches [`RuntimeStateSnapshot::to_prompt_block`] (defined
+    /// in `runtime_state.rs`) so the prompt is byte-identical
+    /// between the legacy and U2 paths.
+    pub fn build_orchestrator_context_from_ledger(
+        &self,
+        snapshot: &LedgerSnapshot,
+    ) -> String {
+        self::orchestrator_context::build_block(snapshot, &self.ctx.config)
     }
 
     /// Apply a batch of events to the ledgers. Events whose topic
@@ -411,8 +789,31 @@ pub(crate) fn json_pointer<'a>(value: &'a serde_json::Value, pointer: &str) -> O
     current.as_str()
 }
 
+/// U2 (plan 2026-06-21-002): bring the disk task ledger into
+/// sync with the snapshot's authoritative task list. Tasks
+/// whose `id` is already in the store are left untouched
+/// (their status transitions are governed by
+/// [`StateProjector::apply_from_ledger`] matching deltas).
+/// Tasks in the snapshot but missing on disk are inserted via
+/// `TaskStore::ensure`, which is idempotent.
+fn materialize_snapshot_tasks(
+    store: &mut crate::task_store::TaskStore,
+    snapshot_tasks: &[crate::task::Task],
+) {
+    let known: std::collections::HashSet<String> =
+        store.all().iter().map(|t| t.id.clone()).collect();
+    for task in snapshot_tasks {
+        if !known.contains(&task.id) {
+            store.ensure(task.clone());
+        }
+    }
+}
+
+pub mod orchestrator_context;
 pub mod progress;
 pub mod task;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod u2_tests;

@@ -732,6 +732,19 @@ impl LoopState {
         self.started_at.elapsed()
     }
 
+    /// 把 `started_at: Instant`（进程内 monotonic clock）映射为
+    /// `LedgerSnapshot::started_at_ts` 用的 RFC3339 wall-clock 字符串。
+    ///
+    /// `LoopState::started_at` 是 monotonic 的，跨进程不可序列化；
+    /// ledger 的 `started_at_ts` 字段是它的可序列化对照。两次取值
+    /// （一次 monotonic 一次 wall-clock）需要在同一调用点抓取，
+    /// 否则转换就会失真。这个 helper 在被调用时返回当前
+    /// wall-clock（`chrono::Utc::now().to_rfc3339()`），U2 在
+    /// `with_context_and_diagnostics` 处一次性塞进 snapshot 即可。
+    pub fn started_at_wall_clock(&self) -> String {
+        chrono::Utc::now().to_rfc3339()
+    }
+
     /// Increment the per-rejection-key retry counter and return the
     /// post-increment value.  When the result exceeds
     /// [`U2_REJECTION_RETRY_LIMIT`] the caller must mark the rejection

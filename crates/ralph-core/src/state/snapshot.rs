@@ -305,6 +305,15 @@ impl LedgerSnapshot {
             CommitDelta::TaskLifecycle { task_id, transition } => {
                 apply_task_lifecycle(&mut self.tasks, task_id, *transition);
             }
+            CommitDelta::TaskInserted { task } => {
+                // Append-only: existing tasks (matched by id) are
+                // not overwritten. The projector is responsible
+                // for emitting a separate `TaskLifecycle` delta
+                // when an existing task transitions.
+                if !self.tasks.iter().any(|t| t.id == task.id) {
+                    self.tasks.push(task.clone());
+                }
+            }
             CommitDelta::ProgressUpdate {
                 completed_step,
                 current_step,
@@ -462,6 +471,73 @@ impl LedgerSnapshot {
     /// the ledger path is preferred.
     pub fn review_step_tracker_mut(&mut self) -> &mut ReviewStepTracker {
         &mut self.review_step_tracker
+    }
+
+    /// Borrow the embedded `HandoffTracker` (WRC-U4). Same
+    /// rationale as [`Self::review_step_tracker`]: the runtime
+    /// mutates the tracker via its public API; the ledger path
+    /// records the diff for replay.
+    pub fn handoff_tracker(&self) -> &HandoffTracker {
+        &self.handoff_tracker
+    }
+
+    /// Mutable access to the embedded `HandoffTracker`. U2 calls
+    /// this from `apply_from_ledger` when rebuilding the tracker
+    /// from a `CommitDelta::HandoffTrackerUpdated` diff.
+    pub fn handoff_tracker_mut(&mut self) -> &mut HandoffTracker {
+        &mut self.handoff_tracker
+    }
+
+    /// Borrow the embedded `FlowLifecycleRegistry` (U6 flow phase
+    /// tracker). Same rationale as the other tracker accessors.
+    pub fn flow_lifecycle(&self) -> &FlowLifecycleRegistry {
+        &self.flow_lifecycle
+    }
+
+    /// Mutable access to the embedded `FlowLifecycleRegistry`.
+    /// U2 calls this from `apply_from_ledger` when rebuilding the
+    /// registry from a `CommitDelta::FlowLifecycleUpdated` diff.
+    pub fn flow_lifecycle_mut(&mut self) -> &mut FlowLifecycleRegistry {
+        &mut self.flow_lifecycle
+    }
+
+    /// Read-only access to the task ledger embedded in the
+    /// snapshot. U2's `apply_from_ledger` reads from this so the
+    /// projector can verify the snapshot is the source of truth.
+    pub fn tasks(&self) -> &[Task] {
+        &self.tasks
+    }
+
+    /// Borrow the embedded progress snapshot.
+    pub fn progress(&self) -> &ProgressSnapshot {
+        &self.progress
+    }
+
+    /// Borrow the rejection digest (`## REJECTION DIGEST` source).
+    /// U2 reads from this when generating the orchestrator context
+    /// prompt block; the digest entry's `last_message` /
+    /// `last_topic` / `count` fields round-trip directly into the
+    /// prompt lines.
+    pub fn rejection_digest(&self) -> &BTreeMap<String, RejectionDigestEntry> {
+        &self.recent_rejection_digest
+    }
+
+    /// Read the wall-clock start time as an RFC3339 string. U2
+    /// uses this to bridge from `LoopState::started_at`
+    /// (process-local `Instant`) into a serializable form. The
+    /// helper returns `None` when the snapshot was never seeded
+    /// with a start time (cold start or pre-loop record).
+    pub fn started_at_ts(&self) -> Option<&str> {
+        self.started_at_ts.as_deref()
+    }
+
+    /// Seed `started_at_ts` from an RFC3339 string. U2 calls this
+    /// when converting a `LoopState::started_at` `Instant` into a
+    /// ledger-friendly form (the runtime records the wall-clock
+    /// at the same moment the `Instant` is captured so the
+    /// conversion is one-shot and lossless).
+    pub fn set_started_at_ts(&mut self, ts: impl Into<String>) {
+        self.started_at_ts = Some(ts.into());
     }
 }
 

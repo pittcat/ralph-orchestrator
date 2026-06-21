@@ -87,6 +87,19 @@ pub enum CommitDelta {
         transition: TaskTransition,
     },
 
+    /// Insert a brand-new task into the task ledger. Emitted by
+    /// the projector on `work.ready` for tasks that the snapshot
+    /// does not yet know about. U2 of plan
+    /// 2026-06-21-002 closes the loop between
+    /// `apply_from_ledger` and the projector — the projector
+    /// previously inserted tasks implicitly via `TaskStore::ensure`
+    /// inside the event-batch path; the ledger path needs an
+    /// explicit delta so `replay_from_disk` can rebuild the same
+    /// state from the commit log alone.
+    TaskInserted {
+        task: crate::task::Task,
+    },
+
     /// Progress marker update. The `step` is appended to
     /// `LedgerSnapshot::progress.completed_steps` (idempotent).
     ProgressUpdate {
