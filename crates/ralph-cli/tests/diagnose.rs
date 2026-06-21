@@ -423,3 +423,166 @@ fn u4_diagnose_session_takes_precedence_over_workspace() {
         "U4: source must come from session journal"
     );
 }
+
+// -------------------------------------------------------------------------
+// U8 (2026-06-21-002 plan): `--from-ledger` / `--legacy` flag tests.
+// These exercise the binary-level CLI surface for the U8 view switch.
+
+/// Helper: write a single ledger-shaped rejection record into the
+/// workspace-level `.ralph/recovery.jsonl`.  The record uses the
+/// U7a schema (`{ts, hat, topic, reason_code, retry_count,
+/// terminal_reason}`) so the U8 reporter can parse it.
+fn write_workspace_rejection(workspace: &Path, line: &str) {
+    let path = workspace.join(".ralph").join("recovery.jsonl");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, format!("{line}\n")).unwrap();
+}
+
+/// T8.1 (Happy path, CLI side): `--from-ledger` against a workspace
+/// that carries a U7a rejection record emits the U8 schema
+/// (`u8-1`) and renders a root-cause row.
+#[test]
+fn u8_diagnose_from_ledger_renders_ledger_schema() {
+    let tmp = TempDir::new().unwrap();
+    let ralph_dir = tmp.path().join(".ralph");
+    fs::create_dir_all(&ralph_dir).unwrap();
+    let record = r#"{"ts":"2026-06-22T01:00:00Z","hat":"executor","topic":"work.done","reason_code":"execution_contract:missing_field","retry_count":1,"terminal_reason":null}"#;
+    write_workspace_rejection(tmp.path(), record);
+
+    let output = ralph_bin()
+        .arg("diagnose")
+        .arg("--from-ledger")
+        .arg("--format")
+        .arg("json")
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "--from-ledger should succeed (stderr: {})",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    // U8 schema (distinct from the session-level "1").
+    assert_eq!(value["schema_version"], "u8-1");
+    let causes = value["root_causes"]
+        .as_array()
+        .expect("root_causes array");
+    assert_eq!(causes.len(), 1);
+    assert_eq!(causes[0]["reason_code"], "execution_contract:missing_field");
+    assert_eq!(causes[0]["frequency"], 1);
+    assert_eq!(causes[0]["source"], "execution_contract");
+    assert!(value["used_ledger"].as_bool().unwrap_or(false));
+    assert_eq!(value["rejection_summary"]["record_count"], 1);
+}
+
+/// T8.2 (Edge, CLI side): no rejection log + no commit log → NoSession
+/// exit code (2).  The CLI must not silently fall back to the legacy
+/// view when the operator explicitly asked for the ledger view.
+#[test]
+fn u8_diagnose_from_ledger_with_empty_workspace_returns_no_session() {
+    let tmp = TempDir::new().unwrap();
+    let ralph_dir = tmp.path().join(".ralph");
+    fs::create_dir_all(&ralph_dir).unwrap();
+    // Empty `.ralph/` directory; no rejection.jsonl, no ledger.jsonl.
+    let output = ralph_bin()
+        .arg("diagnose")
+        .arg("--from-ledger")
+        .arg("--format")
+        .arg("json")
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "--from-ledger with no data should exit 2 (NoSession), stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("rejection log") || stderr.contains("commit log"),
+        "stderr should hint at missing log files, got: {stderr}"
+    );
+}
+
+/// T8.3 (Default fallback, CLI side): the default mode prefers the
+/// ledger view when the workspace has a rejection log.  The CLI
+/// must emit the U8 schema (`u8-1`) and surface the
+/// `root_causes` array, NOT the legacy `top_findings`.
+#[test]
+fn u8_diagnose_default_prefers_ledger_view() {
+    let tmp = TempDir::new().unwrap();
+    let ralph_dir = tmp.path().join(".ralph");
+    fs::create_dir_all(&ralph_dir).unwrap();
+    let record = r#"{"ts":"2026-06-22T02:00:00Z","hat":"reviewer","topic":"review.passed","reason_code":"policy:missing_field","retry_count":2,"terminal_reason":null}"#;
+    write_workspace_rejection(tmp.path(), record);
+
+    let output = ralph_bin()
+        .arg("diagnose")
+        .arg("--format")
+        .arg("json")
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "default mode should render the ledger view when present (stderr: {})",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    // U8 default: ledger view wins when the workspace has a
+    // rejection log.
+    assert_eq!(value["schema_version"], "u8-1");
+    let causes = value["root_causes"]
+        .as_array()
+        .expect("root_causes array");
+    assert_eq!(causes.len(), 1);
+    assert_eq!(causes[0]["reason_code"], "policy:missing_field");
+    // `source` comes from the validation_stage_to_source mapping:
+    // `policy` → `event_policy`.
+    assert_eq!(causes[0]["source"], "event_policy");
+    assert!(value["used_ledger"].as_bool().unwrap_or(false));
+}
+
+/// T8.4 (CLI side): `--legacy` forces the session view even when
+/// the workspace has a rejection log.  The result is the legacy
+/// schema (v1) with `top_findings` rather than `root_causes`.
+#[test]
+fn u8_diagnose_legacy_flag_uses_session_view() {
+    let tmp = TempDir::new().unwrap();
+    let ralph_dir = tmp.path().join(".ralph");
+    fs::create_dir_all(&ralph_dir).unwrap();
+    // Workspace rejection log present, BUT also populate a
+    // session-level recovery.jsonl so the legacy view has
+    // something to render.
+    let record = r#"{"ts":"2026-06-22T03:00:00Z","hat":"executor","topic":"work.done","reason_code":"execution_contract:missing_field","retry_count":1,"terminal_reason":null}"#;
+    write_workspace_rejection(tmp.path(), record);
+    let session = fresh_session(&tmp, "2026-06-05T10-20-30");
+    write_recovery_entry(&session);
+
+    let output = ralph_bin()
+        .arg("diagnose")
+        .arg("--legacy")
+        .arg("--format")
+        .arg("json")
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "--legacy should succeed (stderr: {})",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    // Legacy view: schema v1 + top_findings populated from the
+    // session journal (the workspace rejection log is ignored
+    // because of --legacy).
+    assert_eq!(value["schema_version"], "1");
+    let findings = value["top_findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 1, "legacy session view: 1 finding");
+    assert_eq!(findings[0]["source"], "missing_event_gate");
+}

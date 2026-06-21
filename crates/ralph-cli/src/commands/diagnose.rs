@@ -11,6 +11,19 @@
 //! - Missing session is a non-zero exit with a stderr hint that
 //!   points at `RALPH_DIAGNOSTICS=1 ralph run ...` or the
 //!   `telemetry.runtime_diagnosis.write_artifacts` config.
+//!
+//! U8 (2026-06-21-002 plan): adds ledger-aligned diagnosis via the
+//! `--from-ledger` / `--legacy` flags.
+//!
+//! - Default: try the workspace-level `.ralph/recovery.jsonl` +
+//!   `.ralph/ledger.jsonl` first (U7a deterministic-correction
+//!   path). Fall back to the legacy session-scoped view if the
+//!   workspace has no rejection log.
+//! - `--from-ledger`: force the ledger view. Error if the workspace
+//!   has no rejection log (legacy sessions would have no entries).
+//! - `--legacy`: skip the ledger view entirely; read the session
+//!   `recovery.jsonl` directly. Used by operators debugging
+//!   pre-U7a sessions.
 
 use crate::cli::ColorMode;
 use crate::display::colors;
@@ -18,7 +31,9 @@ use crate::operation_guard::read_loop_id_marker;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use ralph_core::diagnosis::{
-    Report, ReporterError, SessionSelector, build_report, render_json, render_markdown,
+    DiagnosisReport, Report, ReporterError, SessionSelector, build_report, render_json,
+    render_markdown, render_diagnosis_report_json, render_diagnosis_report_markdown,
+    report_from_ledger,
 };
 use ralph_core::loop_lock::{LockStatus, LoopLock};
 use ralph_core::loop_registry::LoopEntry;
@@ -60,6 +75,23 @@ pub struct DiagnoseArgs {
     /// with a list of available values.
     #[arg(long, value_name = "SOURCE")]
     pub source: Option<String>,
+
+    /// U8: force the ledger-aligned view. Reads
+    /// `<workspace>/.ralph/recovery.jsonl` and
+    /// `<workspace>/.ralph/ledger.jsonl`, aggregating rejection
+    /// records into structured root causes. The default mode
+    /// already prefers this view when the workspace has a
+    /// rejection log; pass `--from-ledger` to opt out of the
+    /// legacy fallback when the ledger view comes up empty.
+    #[arg(long, conflicts_with = "legacy")]
+    pub from_ledger: bool,
+
+    /// U8: force the legacy session-scoped view. Reads
+    /// `.ralph/diagnostics/<session>/recovery.jsonl` directly
+    /// (the U3 path). Use this when debugging pre-U7a sessions
+    /// that never wrote the workspace-level rejection log.
+    #[arg(long, conflicts_with = "from_ledger")]
+    pub legacy: bool,
 }
 
 /// Output format for `ralph diagnose`. Mirrors
@@ -139,15 +171,128 @@ pub fn try_diagnose(
         Some(p) => p.clone(),
         None => resolve_diagnostics_root_via_loops(&workspace_root),
     };
+    // U8: route between ledger and legacy views.  Default is
+    // "prefer ledger, fall back to legacy when the rejection
+    // log is empty".  `--from-ledger` forces ledger-only;
+    // `--legacy` forces legacy-only.
+    let report_kind = pick_report_kind(&args);
+    match report_kind {
+        ReportKind::LedgerOnly => {
+            let workspace = workspace_for_report(&diagnostics_root, &workspace_root);
+            return try_ledger_only(use_colors, &args, workspace, &workspace_root);
+        }
+        ReportKind::LegacyOnly => {
+            return try_legacy(use_colors, &args, &diagnostics_root);
+        }
+        ReportKind::LedgerOrLegacy => {
+            // 1) Try ledger first. If it yields at least one
+            //    rejection record or commit log entry, render it.
+            // 2) Otherwise fall back to legacy session view.
+            let workspace = workspace_for_report(&diagnostics_root, &workspace_root);
+            let ledger_report = report_from_ledger(&workspace).ok();
+            let ledger_used = ledger_report
+                .as_ref()
+                .is_some_and(|r| r.used_ledger);
+            if ledger_used
+                && let Some(report) = ledger_report
+            {
+                return emit_ledger_report(use_colors, &args, report);
+            }
+            // Fall back to legacy.
+            return try_legacy(use_colors, &args, &diagnostics_root);
+        }
+    }
+}
+
+/// U8: workspace resolution for the ledger view.  When the
+/// operator passes `--diagnostics-root`, treat the parent
+/// directory as the workspace (matching the legacy convention
+/// that diagnostics live under `<workspace>/.ralph/`).  Otherwise
+/// the current directory is the workspace.
+fn workspace_for_report(diagnostics_root: &Path, fallback_workspace: &Path) -> PathBuf {
+    if diagnostics_root
+        .file_name()
+        .is_some_and(|n| n == "diagnostics")
+    {
+        // diagnostics_root looks like `<workspace>/.ralph/diagnostics`
+        // → walk up to `<workspace>`.
+        if let Some(ralph) = diagnostics_root.parent() {
+            if let Some(ws) = ralph.parent() {
+                return ws.to_path_buf();
+            }
+        }
+    }
+    fallback_workspace.to_path_buf()
+}
+
+/// U8: dispatch on the `--from-ledger` / `--legacy` flags to pick
+/// a single report path.  When neither flag is set, the default
+/// is [`ReportKind::LedgerOrLegacy`].
+fn pick_report_kind(args: &DiagnoseArgs) -> ReportKind {
+    if args.from_ledger {
+        ReportKind::LedgerOnly
+    } else if args.legacy {
+        ReportKind::LegacyOnly
+    } else {
+        ReportKind::LedgerOrLegacy
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReportKind {
+    /// Force the ledger view; error when the rejection log is empty.
+    LedgerOnly,
+    /// Force the legacy session view; ignore the rejection log.
+    LegacyOnly,
+    /// Default: prefer ledger, fall back to legacy when empty.
+    LedgerOrLegacy,
+}
+
+/// U8: render a ledger-only report.  Errors when the workspace has
+/// no rejection log (the operator explicitly opted out of the
+/// fallback by passing `--from-ledger`).
+fn try_ledger_only(
+    use_colors: bool,
+    args: &DiagnoseArgs,
+    workspace: PathBuf,
+    workspace_root: &Path,
+) -> std::result::Result<(), DiagnoseExit> {
+    let report = match report_from_ledger(&workspace) {
+        Ok(report) => report,
+        Err(ralph_core::diagnosis::LedgerReportError::InvalidWorkspace(path)) => {
+            print_invalid_session(&path, use_colors);
+            return Err(DiagnoseExit::InvalidSession(path));
+        }
+        Err(ralph_core::diagnosis::LedgerReportError::Io(path, err)) => {
+            print_io_error(&path, &err, use_colors);
+            return Err(DiagnoseExit::Io(path, err));
+        }
+    };
+    if !report.used_ledger {
+        // No rejection log AND no commit log → nothing to report.
+        // Tell the operator which paths we tried so they can fix it.
+        print_no_ledger_hint(&workspace, use_colors);
+        return Err(DiagnoseExit::NoSession(workspace_root.to_path_buf()));
+    }
+    emit_ledger_report(use_colors, args, report)
+}
+
+/// U8: render a legacy session-level report (the original U7 flow).
+/// Kept verbatim so existing operator scripts keep working.
+fn try_legacy(
+    use_colors: bool,
+    args: &DiagnoseArgs,
+    diagnostics_root: &Path,
+) -> std::result::Result<(), DiagnoseExit> {
     let selector = if args.session.eq_ignore_ascii_case("latest") || args.session.is_empty() {
         SessionSelector::Latest
     } else {
         SessionSelector::Explicit(args.session.as_str())
     };
-    let report = match build_report(selector, &diagnostics_root) {
+    let report = match build_report(selector, diagnostics_root) {
         Ok(report) => report,
         Err(ReporterError::NoSession(path)) => {
-            print_no_session_hint(&diagnostics_root, &path, use_colors);
+            print_no_session_hint(diagnostics_root, &path, use_colors);
             return Err(DiagnoseExit::NoSession(path));
         }
         Err(ReporterError::InvalidSession(path)) => {
@@ -176,13 +321,98 @@ pub fn try_diagnose(
             }
         },
     };
-    emit_report(&report, &args, use_colors).map_err(|e| {
+    emit_report(&report, args, use_colors).map_err(|e| {
         DiagnoseExit::Io(
             report.session_path.clone(),
             std::io::Error::other(e.to_string()),
         )
     })?;
     Ok(())
+}
+
+/// U8: emit the ledger-aligned report through the same stdout /
+/// stderr discipline as the legacy flow.
+fn emit_ledger_report(
+    use_colors: bool,
+    args: &DiagnoseArgs,
+    report: DiagnosisReport,
+) -> std::result::Result<(), DiagnoseExit> {
+    let body = match args.format {
+        DiagnoseFormat::Markdown => render_diagnosis_report_markdown(&report),
+        DiagnoseFormat::Json => {
+            let value = render_diagnosis_report_json(&report);
+            serde_json::to_string_pretty(&value)
+                .context("failed to serialize diagnosis report to JSON")
+                .map_err(|e| {
+                    DiagnoseExit::Io(
+                        report.workspace.clone(),
+                        std::io::Error::other(e.to_string()),
+                    )
+                })?
+        }
+    };
+    if let Some(path) = args.output.as_ref() {
+        let create_dir_result: Result<()> = if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create output directory {}", parent.display()))
+        } else {
+            Ok(())
+        };
+        create_dir_result.map_err(|e| {
+            DiagnoseExit::Io(report.workspace.clone(), std::io::Error::other(e.to_string()))
+        })?;
+        std::fs::write(path, body.as_bytes())
+            .with_context(|| format!("failed to write report to {}", path.display()))
+            .map_err(|e| {
+                DiagnoseExit::Io(report.workspace.clone(), std::io::Error::other(e.to_string()))
+            })?;
+        let summary = match args.format {
+            DiagnoseFormat::Markdown => format!(
+                "wrote ledger markdown report to {}",
+                path.display()
+            ),
+            DiagnoseFormat::Json => format!(
+                "wrote ledger json report to {} (schema {})",
+                path.display(),
+                report.schema_version
+            ),
+        };
+        if use_colors {
+            println!("{}{}{}", colors::GREEN, summary, colors::RESET);
+        } else {
+            println!("{summary}");
+        }
+    } else {
+        println!("{body}");
+    }
+    Ok(())
+}
+
+fn print_no_ledger_hint(workspace: &Path, use_colors: bool) {
+    let recovery_path = workspace.join(".ralph").join("recovery.jsonl");
+    let ledger_path = workspace.join(".ralph").join("ledger.jsonl");
+    if use_colors {
+        eprintln!(
+            "{}error:{} no rejection log or commit log under {}",
+            colors::RED,
+            colors::RESET,
+            workspace.display()
+        );
+    } else {
+        eprintln!(
+            "error: no rejection log or commit log under {}",
+            workspace.display()
+        );
+    }
+    eprintln!("(looked for {})", recovery_path.display());
+    eprintln!("(looked for {})", ledger_path.display());
+    eprintln!(
+        "Hint: rerun with `--legacy` to read the session-scoped recovery.jsonl,\n\
+         or enable the deterministic-correction path so the loop writes\n\
+         `.ralph/recovery.jsonl` on every rejection."
+    );
 }
 
 /// D7: filter a [`Report`] to entries whose `source` matches `name`.
@@ -605,6 +835,8 @@ mod tests {
             output: None,
             diagnostics_root: Some(diagnostics_root.to_path_buf()),
             source: None,
+            from_ledger: false,
+            legacy: false,
         }
     }
 
@@ -616,6 +848,8 @@ mod tests {
             output: Some(PathBuf::new()),
             diagnostics_root: None,
             source: None,
+            from_ledger: false,
+            legacy: false,
         };
         assert!(validate_args(&args).is_err());
         args.output = None;
@@ -661,6 +895,8 @@ mod tests {
             output: Some(out.clone()),
             diagnostics_root: Some(diag),
             source: None,
+            from_ledger: false,
+            legacy: false,
         };
         try_diagnose(ColorMode::Never, args).expect("try_diagnose should succeed");
         assert!(out.exists(), "output file should be created");
@@ -681,6 +917,8 @@ mod tests {
             output: Some(out.clone()),
             diagnostics_root: Some(diag),
             source: None,
+            from_ledger: false,
+            legacy: false,
         };
         try_diagnose(ColorMode::Never, args).expect("try_diagnose should succeed");
         let content = std::fs::read_to_string(&out).unwrap();
@@ -702,6 +940,8 @@ mod tests {
             output: None,
             diagnostics_root: Some(diag),
             source: None,
+            from_ledger: false,
+            legacy: false,
         };
         let result = try_diagnose(ColorMode::Never, args);
         assert!(matches!(result, Err(DiagnoseExit::InvalidSession(_))));
@@ -717,6 +957,244 @@ mod tests {
         match try_diagnose(ColorMode::Never, args) {
             Err(exit) => assert_eq!(exit.code(), EXIT_NO_SESSION),
             Ok(()) => panic!("expected error"),
+        }
+    }
+
+    // ── U8 (2026-06-21-002) tests: --from-ledger / --legacy flags ────────
+
+    #[test]
+    fn u8_pick_report_kind_default_is_ledger_or_legacy() {
+        let args = DiagnoseArgs {
+            session: "latest".to_string(),
+            format: DiagnoseFormat::Markdown,
+            output: None,
+            diagnostics_root: None,
+            source: None,
+            from_ledger: false,
+            legacy: false,
+        };
+        assert_eq!(pick_report_kind(&args), ReportKind::LedgerOrLegacy);
+    }
+
+    #[test]
+    fn u8_pick_report_kind_legacy_overrides_default() {
+        let args = DiagnoseArgs {
+            session: "latest".to_string(),
+            format: DiagnoseFormat::Markdown,
+            output: None,
+            diagnostics_root: None,
+            source: None,
+            from_ledger: false,
+            legacy: true,
+        };
+        assert_eq!(pick_report_kind(&args), ReportKind::LegacyOnly);
+    }
+
+    #[test]
+    fn u8_pick_report_kind_from_ledger_overrides_default() {
+        let args = DiagnoseArgs {
+            session: "latest".to_string(),
+            format: DiagnoseFormat::Markdown,
+            output: None,
+            diagnostics_root: None,
+            source: None,
+            from_ledger: true,
+            legacy: false,
+        };
+        assert_eq!(pick_report_kind(&args), ReportKind::LedgerOnly);
+    }
+
+    #[test]
+    fn u8_workspace_for_report_walks_up_from_diagnostics_dir() {
+        // diagnostics_root looks like `<workspace>/.ralph/diagnostics`
+        // → walk up to `<workspace>`.
+        let tmp = tempfile::tempdir().unwrap();
+        let diag = tmp.path().join(".ralph").join("diagnostics");
+        std::fs::create_dir_all(&diag).unwrap();
+        let resolved = workspace_for_report(&diag, tmp.path());
+        assert_eq!(resolved, tmp.path());
+    }
+
+    #[test]
+    fn u8_workspace_for_report_falls_back_when_not_diagnostics() {
+        let tmp = tempfile::tempdir().unwrap();
+        let some_other = tmp.path().join("custom");
+        std::fs::create_dir_all(&some_other).unwrap();
+        let resolved = workspace_for_report(&some_other, tmp.path());
+        // Not the diagnostics dir, so fall back to the caller's
+        // workspace root.
+        assert_eq!(resolved, tmp.path());
+    }
+
+    #[test]
+    fn u8_ledger_only_with_empty_workspace_errors() {
+        // No rejection log, no commit log → --from-ledger must
+        // surface a NoSession error so operators see the empty
+        // state instead of a fake legacy report.
+        let tmp = tempfile::tempdir().unwrap();
+        let diag = tmp.path().join(".ralph").join("diagnostics");
+        std::fs::create_dir_all(&diag).unwrap();
+        let args = DiagnoseArgs {
+            session: "latest".to_string(),
+            format: DiagnoseFormat::Markdown,
+            output: None,
+            diagnostics_root: Some(diag),
+            source: None,
+            from_ledger: true,
+            legacy: false,
+        };
+        let result = try_diagnose(ColorMode::Never, args);
+        match result {
+            Err(DiagnoseExit::NoSession(_)) => {}
+            other => panic!("expected NoSession, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn u8_ledger_only_with_rejection_log_succeeds() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Workspace rejection log with one record.
+        let ralph_dir = tmp.path().join(".ralph");
+        std::fs::create_dir_all(&ralph_dir).unwrap();
+        let record = r#"{"ts":"2026-06-22T01:00:00Z","hat":"executor","topic":"work.done","reason_code":"execution_contract:missing_field","retry_count":1,"terminal_reason":null}"#;
+        std::fs::write(ralph_dir.join("recovery.jsonl"), format!("{record}\n")).unwrap();
+        // Diagnostics root walks up to the workspace so the
+        // reporter sees the rejection log.
+        let diag = tmp.path().join(".ralph").join("diagnostics");
+        std::fs::create_dir_all(&diag).unwrap();
+        let args = DiagnoseArgs {
+            session: "latest".to_string(),
+            format: DiagnoseFormat::Json,
+            output: None,
+            diagnostics_root: Some(diag),
+            source: None,
+            from_ledger: true,
+            legacy: false,
+        };
+        try_diagnose(ColorMode::Never, args).expect("u8 from-ledger should succeed");
+    }
+
+    #[test]
+    fn u8_legacy_flag_skips_ledger_view_even_when_present() {
+        // Workspace has a rejection log but `--legacy` forces the
+        // session view.  Since there is no session either, we
+        // must hit NoSession (not silently pick the ledger view).
+        let tmp = tempfile::tempdir().unwrap();
+        let ralph_dir = tmp.path().join(".ralph");
+        std::fs::create_dir_all(&ralph_dir).unwrap();
+        let record = r#"{"ts":"2026-06-22T01:00:00Z","hat":"executor","topic":"work.done","reason_code":"execution_contract:missing_field","retry_count":1,"terminal_reason":null}"#;
+        std::fs::write(ralph_dir.join("recovery.jsonl"), format!("{record}\n")).unwrap();
+        let diag = tmp.path().join(".ralph").join("diagnostics");
+        std::fs::create_dir_all(&diag).unwrap();
+        let args = DiagnoseArgs {
+            session: "latest".to_string(),
+            format: DiagnoseFormat::Markdown,
+            output: None,
+            diagnostics_root: Some(diag),
+            source: None,
+            from_ledger: false,
+            legacy: true,
+        };
+        let result = try_diagnose(ColorMode::Never, args);
+        // Legacy view: no session → NoSession (not the ledger
+        // view's success path).
+        match result {
+            Err(DiagnoseExit::NoSession(_)) => {}
+            other => panic!("expected NoSession for --legacy with no session, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn u8_default_prefers_ledger_then_falls_back_to_legacy_session() {
+        // Empty rejection log + empty session log → still
+        // NoSession (no spurious report), but the path is the
+        // legacy one (no rejection log at all).
+        let tmp = tempfile::tempdir().unwrap();
+        let diag = tmp.path().join(".ralph").join("diagnostics");
+        std::fs::create_dir_all(&diag).unwrap();
+        let args = base_args(&diag);
+        let result = try_diagnose(ColorMode::Never, args);
+        match result {
+            Err(DiagnoseExit::NoSession(_)) => {}
+            other => panic!("expected NoSession in default fallback, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn u8_default_with_only_session_log_renders_legacy_view() {
+        // No rejection log at workspace root, only the session
+        // recovery.jsonl.  Default mode falls back to legacy and
+        // renders the session view.
+        let tmp = tempfile::tempdir().unwrap();
+        let diag = tmp.path().join(".ralph").join("diagnostics");
+        let session = diag.join("2026-06-05T10-20-30");
+        std::fs::create_dir_all(&session).unwrap();
+        let entry = "{\"schema_version\":1,\"envelope\":{\"schema_version\":1,\"diagnosis_id\":\"d1\",\"iteration\":1,\"source\":\"missing_event_gate\",\"severity\":\"error\",\"reason_code\":\"r\",\"message\":\"m\",\"retry_key\":\"k:1:r:*\",\"retry_attempt\":0,\"safe_target\":true,\"outcome\":\"pending\",\"timestamp\":\"2026-06-05T10:20:30Z\"},\"iteration\":1,\"timestamp\":\"2026-06-05T10:20:30Z\"}\n";
+        std::fs::write(session.join("recovery.jsonl"), entry).unwrap();
+        let args = base_args(&diag);
+        try_diagnose(ColorMode::Never, args)
+            .expect("default mode should fall back to legacy session view");
+    }
+
+    #[test]
+    fn u8_ledger_only_with_corrupt_ledger_surfaces_warning() {
+        // A corrupt commit log must surface a warning in the
+        // report rather than aborting.  The headline counters
+        // may be partial (corruption flag = true).
+        let tmp = tempfile::tempdir().unwrap();
+        let ralph_dir = tmp.path().join(".ralph");
+        std::fs::create_dir_all(&ralph_dir).unwrap();
+        // Valid rejection record + corrupt commit log line.
+        let record = r#"{"ts":"2026-06-22T01:00:00Z","hat":"executor","topic":"work.done","reason_code":"execution_contract:missing_field","retry_count":1,"terminal_reason":null}"#;
+        std::fs::write(ralph_dir.join("recovery.jsonl"), format!("{record}\n")).unwrap();
+        std::fs::write(ralph_dir.join("ledger.jsonl"), "not-json\n").unwrap();
+        let diag = tmp.path().join(".ralph").join("diagnostics");
+        std::fs::create_dir_all(&diag).unwrap();
+        let out = tmp.path().join("report.md");
+        let args = DiagnoseArgs {
+            session: "latest".to_string(),
+            format: DiagnoseFormat::Markdown,
+            output: Some(out.clone()),
+            diagnostics_root: Some(diag),
+            source: None,
+            from_ledger: true,
+            legacy: false,
+        };
+        try_diagnose(ColorMode::Never, args).expect("ledger report should still render");
+        let content = std::fs::read_to_string(&out).unwrap();
+        // The rejection record is preserved; corruption is
+        // surfaced as a warning.
+        assert!(
+            content.contains("execution_contract:missing_field"),
+            "report missing rejection record. content:\n{content}"
+        );
+        assert!(
+            content.contains("commit log corruption"),
+            "report missing corruption warning. content:\n{content}"
+        );
+    }
+
+    #[test]
+    fn u8_ledger_only_invalid_workspace_returns_invalid_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bogus = tmp.path().join("does-not-exist");
+        let diag = bogus.join(".ralph").join("diagnostics");
+        let args = DiagnoseArgs {
+            session: "latest".to_string(),
+            format: DiagnoseFormat::Markdown,
+            output: None,
+            diagnostics_root: Some(diag),
+            source: None,
+            from_ledger: true,
+            legacy: false,
+        };
+        // Note: workspace_for_report walks up from `diag` only
+        // when `diag` ends with `diagnostics` AND the parent is
+        // `.ralph`. Here `bogus` does not exist → InvalidWorkspace.
+        let result = try_diagnose(ColorMode::Never, args);
+        match result {
+            Err(DiagnoseExit::InvalidSession(_)) | Err(DiagnoseExit::NoSession(_)) => {}
+            other => panic!("expected invalid/no-session, got {other:?}"),
         }
     }
 

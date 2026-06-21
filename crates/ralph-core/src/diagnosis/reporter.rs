@@ -1,4 +1,4 @@
-//! `ralph diagnose` offline report pipeline (U7).
+//! `ralph diagnose` offline report pipeline (U7 + U8).
 //!
 //! Reads the session artifacts written by U3 (recovery / drift /
 //! orchestration / errors JSONL plus the optional
@@ -16,11 +16,23 @@
 //! 3. [`render_markdown`] / [`render_json`] — render a stable, schema
 //!    versioned report from [`SessionData`].
 //!
+//! U8 (2026-06-21-002): the unified-state plan adds a ledger-first
+//! entry point, [`report_from_ledger`].  It reads the workspace-level
+//! `.ralph/recovery.jsonl` (written by the U7a
+//! `state::append_rejection` path) plus the
+//! `.ralph/ledger.jsonl` commit log, aggregates the rejection
+//! records into structured [`RootCause`]s, and renders a
+//! [`DiagnosisReport`].  Operators running `ralph diagnose` on a
+//! loop that used the deterministic-correction feature flag get
+//! the ledger-aligned view; legacy sessions without a
+//! `.ralph/recovery.jsonl` fall back to the session-level
+//! `recovery.jsonl` (the existing U3 behaviour).
+//!
 //! Aggregation, ranking, and the "Suggested next actions" heuristic
 //! all live in [`render_markdown`] / [`render_json`] so the reporter
 //! itself stays a thin I/O layer.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -239,6 +251,641 @@ impl Report {
             active_activations,
         }
     }
+}
+
+// ── U8 (2026-06-21-002 plan): ledger-aligned diagnosis ──────────────────
+//
+// The legacy `Report` is built from session-scoped JSONL files under
+// `.ralph/diagnostics/<id>/`.  U8 adds a second, ledger-aligned
+// entry point that reads the workspace-level
+// `.ralph/recovery.jsonl` (written by `state::append_rejection`)
+// plus the `.ralph/ledger.jsonl` commit log and emits a flat,
+// structured [`DiagnosisReport`].  The two views coexist:
+// `ralph diagnose --from-ledger` prefers the ledger view, and
+// `ralph diagnose --legacy` falls back to the session-scoped view
+// when the workspace has no rejection log.
+
+/// A single structured root cause, derived from one or more
+/// rejection records that share the same `reason_code`.
+///
+/// The reporter groups rejection records by
+/// `(stage, reason_code)` and lifts the common fields into a
+/// [`RootCause`].  The original records are not lost — see
+/// [`RejectionSummary::record_count`] for the raw count and
+/// [`DiagnosisReport::rejection_summary`] for the global
+/// counters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootCause {
+    /// The pipeline stage that produced the rejection (e.g.
+    /// `origin`, `policy`, `execution_contract`).  Drives
+    /// `source` via [`crate::diagnosis::validation_stage_to_source`].
+    pub stage: String,
+    /// The stable, machine-readable reason code
+    /// (e.g. `origin:missing_field`,
+    /// `execution_contract:type_mismatch`).
+    pub reason_code: String,
+    /// How many rejection records share this `reason_code`.
+    pub frequency: u32,
+    /// Earliest `ts` seen in the grouped records (RFC3339).
+    pub first_seen_ts: String,
+    /// Latest `ts` seen in the grouped records (RFC3339).
+    pub last_seen_ts: String,
+    /// Distinct `hat` values seen across the grouped records
+    /// (deduped, sorted).
+    pub affected_hats: Vec<String>,
+    /// Distinct `topic` values seen across the grouped records
+    /// (deduped, sorted).
+    pub affected_topics: Vec<String>,
+    /// Free-form remediation hint derived from the stage +
+    /// reason_code.  Kept short and operator-friendly; surfaced
+    /// in the Markdown "Root causes" section.
+    pub suggested_remediation: String,
+    /// True when the most recent record carried a
+    /// `terminal_reason` (R11 escalation).
+    pub escalated: bool,
+}
+
+/// Summary counters for the rejection log.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RejectionSummary {
+    /// Total number of records parsed (after skipping malformed
+    /// lines).  Mirrors the per-key counts but is the headline
+    /// metric for the report.
+    pub record_count: u32,
+    /// Number of distinct `(stage, reason_code)` pairs.
+    pub distinct_reason_codes: u32,
+    /// Number of records that tripped R11 escalation
+    /// (carried a non-`None` `terminal_reason`).
+    pub terminal_count: u32,
+    /// Oldest `ts` in the log (RFC3339, empty when the log is empty).
+    pub first_seen_ts: String,
+    /// Newest `ts` in the log (RFC3339, empty when the log is empty).
+    pub last_seen_ts: String,
+    /// Distinct hats seen (deduped, sorted).
+    pub affected_hats: Vec<String>,
+    /// Distinct topics seen (deduped, sorted).
+    pub affected_topics: Vec<String>,
+}
+
+/// Summary counters derived from the `.ralph/ledger.jsonl` commit
+/// log.  U8 uses these to surface "how many state mutations did
+/// this run persist" without re-replaying the full snapshot.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LedgerSummary {
+    /// Path of the commit log that was inspected.
+    pub commit_log_path: PathBuf,
+    /// Total number of commits parsed (after skipping malformed
+    /// lines).
+    pub commit_count: u32,
+    /// Number of `CommitDelta::RejectionRecorded` commits.
+    pub rejection_commits: u32,
+    /// Number of `CommitDelta::RejectionBudgetTripped` commits.
+    pub escalation_commits: u32,
+    /// Number of `CommitDelta::TaskLifecycle` commits.
+    pub task_lifecycle_commits: u32,
+    /// Number of `CommitDelta::HandoffAccepted` commits.
+    pub handoff_commits: u32,
+    /// True when the commit log could not be read because of a
+    /// parse error (replay stopped at the first bad line).  The
+    /// caller can then fall back to the legacy session view.
+    pub corruption: bool,
+    /// Free-form warnings (parse errors, I/O errors, etc.).
+    pub warnings: Vec<String>,
+}
+
+/// Ledger-aligned diagnosis report.  Built by
+/// [`report_from_ledger`] from a workspace root.
+///
+/// Distinct from the session-level [`Report`]: the session view
+/// preserves the full per-iteration timeline, while the
+/// ledger view is a flat, structured root-cause summary keyed
+/// off `.ralph/recovery.jsonl` + `.ralph/ledger.jsonl`.  The
+/// CLI renders either view through the same `render_markdown` /
+/// `render_json` pipeline, but the U8 `DiagnosisReport` has its
+/// own dedicated renderer to keep the schema separate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosisReport {
+    /// Schema version of the report.  Distinct from
+    /// [`DIAGNOSE_JSON_SCHEMA_VERSION`] (the session-level
+    /// report) so consumers can tell the two views apart.
+    pub schema_version: &'static str,
+    /// Workspace root the report was built from.
+    pub workspace: PathBuf,
+    /// True when the reporter successfully read at least one
+    /// rejection record from the workspace-level recovery log.
+    /// When `false`, the caller should fall back to the
+    /// session-level view.
+    pub used_ledger: bool,
+    /// Aggregated root causes, sorted by `frequency` descending
+    /// then `reason_code` ascending.
+    pub root_causes: Vec<RootCause>,
+    /// Summary counters for the rejection log.
+    pub rejection_summary: RejectionSummary,
+    /// Summary counters for the ledger commit log.
+    pub ledger_summary: LedgerSummary,
+}
+
+/// Schema version of the U8 [`DiagnosisReport`].  Distinct from
+/// the session-level report so CI consumers can branch on
+/// `schema_version`.
+pub const DIAGNOSIS_LEDGER_SCHEMA_VERSION: &str = "u8-1";
+
+/// Errors that abort `report_from_ledger` before any report is
+/// rendered.  Currently only used for "the rejection log is
+/// missing AND the session-scoped fallback also failed".  The
+/// `report_from_ledger` path is best-effort and returns an
+/// empty `DiagnosisReport` when neither source is available.
+#[derive(Debug, Error)]
+pub enum LedgerReportError {
+    /// The workspace is missing or unreadable.
+    #[error("workspace path {0} is not a directory")]
+    InvalidWorkspace(PathBuf),
+    /// I/O error reading the workspace.
+    #[error("failed to read workspace {0}: {1}")]
+    Io(PathBuf, io::Error),
+}
+
+/// Read the rejection log from `<workspace>/.ralph/recovery.jsonl`.
+///
+/// Public so the CLI can reuse the helper when `--from-ledger` is
+/// requested.  The session-level `ReporterError` is unaffected.
+pub fn read_rejection_records(workspace: &Path) -> std::io::Result<Vec<crate::state::RejectionRecord>> {
+    crate::state::read_rejection_log(workspace)
+}
+
+/// Build a [`DiagnosisReport`] from a workspace root.
+///
+/// Reads two artifacts:
+///
+/// 1. `<workspace>/.ralph/recovery.jsonl` (U7a
+///    `state::append_rejection` log) — every `RejectionRecord`
+///    is grouped by `(stage, reason_code)` to produce
+///    [`RootCause`] entries.
+/// 2. `<workspace>/.ralph/ledger.jsonl` (U1 commit log) — the
+///    per-commit counters feed [`LedgerSummary`].
+///
+/// When the workspace-level rejection log does not exist the
+/// function returns an empty report with `used_ledger = false`
+/// so the CLI can fall back to the session-level
+/// `ReporterError::NoSession` path.
+pub fn report_from_ledger(workspace: &Path) -> Result<DiagnosisReport, LedgerReportError> {
+    if !workspace.is_dir() {
+        return Err(LedgerReportError::InvalidWorkspace(workspace.to_path_buf()));
+    }
+
+    // 1) Rejection log.
+    let rejection_records = match read_rejection_records(workspace) {
+        Ok(records) => records,
+        Err(err) => {
+            return Err(LedgerReportError::Io(workspace.to_path_buf(), err));
+        }
+    };
+
+    // 2) Commit log (best-effort — a missing file is not an error).
+    let ledger_summary = read_ledger_summary(workspace);
+
+    // 3) Aggregate rejections into RootCause.
+    let (root_causes, rejection_summary) = aggregate_rejection_records(&rejection_records);
+
+    Ok(DiagnosisReport {
+        schema_version: DIAGNOSIS_LEDGER_SCHEMA_VERSION,
+        workspace: workspace.to_path_buf(),
+        used_ledger: !rejection_records.is_empty() || ledger_summary.commit_count > 0,
+        root_causes,
+        rejection_summary,
+        ledger_summary,
+    })
+}
+
+/// Internal: read the commit log and produce a [`LedgerSummary`].
+/// Parse errors are recorded in `warnings` and do not abort the
+/// summary (the caller still gets a report).
+fn read_ledger_summary(workspace: &Path) -> LedgerSummary {
+    let mut summary = LedgerSummary {
+        commit_log_path: workspace.join(crate::state::LEDGER_RELATIVE_PATH),
+        ..LedgerSummary::default()
+    };
+    let commits = match crate::state::read_commit_log(workspace) {
+        Ok(commits) => commits,
+        Err(err) => {
+            summary.warnings.push(format!(
+                "failed to read commit log {}: {err}",
+                summary.commit_log_path.display()
+            ));
+            // `LedgerError::Parse` carries the offending line;
+            // surface the corruption flag so the report can
+            // flag the data as partial.
+            if matches!(err, crate::state::LedgerError::Parse { .. }) {
+                summary.corruption = true;
+            }
+            return summary;
+        }
+    };
+    summary.commit_count = commits.len() as u32;
+    for commit in &commits {
+        match &commit.delta {
+            crate::state::CommitDelta::RejectionRecorded { .. } => {
+                summary.rejection_commits = summary.rejection_commits.saturating_add(1);
+            }
+            crate::state::CommitDelta::RejectionBudgetTripped { .. } => {
+                summary.escalation_commits = summary.escalation_commits.saturating_add(1);
+            }
+            crate::state::CommitDelta::TaskLifecycle { .. }
+            | crate::state::CommitDelta::TaskInserted { .. } => {
+                summary.task_lifecycle_commits = summary.task_lifecycle_commits.saturating_add(1);
+            }
+            crate::state::CommitDelta::HandoffAccepted { .. } => {
+                summary.handoff_commits = summary.handoff_commits.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+    summary
+}
+
+/// Internal: aggregate a slice of `RejectionRecord`s into
+/// `(Vec<RootCause>, RejectionSummary)`.  Split out for testability.
+fn aggregate_rejection_records(
+    records: &[crate::state::RejectionRecord],
+) -> (Vec<RootCause>, RejectionSummary) {
+    if records.is_empty() {
+        return (Vec::new(), RejectionSummary::default());
+    }
+    // Group by (stage, reason_code).  `stage` is the prefix of
+    // the `reason_code` string (U7a writes
+    // `"{stage}:{reason_class}"`); we split on the first `:`.
+    let mut order: Vec<(String, String)> = Vec::new();
+    let mut groups: HashMap<(String, String), RejectionGroup> = HashMap::new();
+    for record in records {
+        let (stage, reason_class) = split_reason_code(&record.reason_code);
+        let key = (stage.to_string(), reason_class.to_string());
+        let group = groups.entry(key.clone()).or_insert_with(|| {
+            order.push(key.clone());
+            RejectionGroup::default()
+        });
+        group.observe(record);
+    }
+    let mut summary = RejectionSummary::default();
+    summary.record_count = records.len() as u32;
+    summary.affected_hats = deduped_sorted(records.iter().map(|r| r.hat.clone()));
+    summary.affected_topics = deduped_sorted(records.iter().map(|r| r.topic.clone()));
+    // First/last seen timestamps (record.ts is RFC3339; lexical
+    // ordering matches chronological ordering for fixed-width
+    // RFC3339 strings).
+    if let Some(first) = records.iter().map(|r| r.ts.clone()).min() {
+        summary.first_seen_ts = first;
+    }
+    if let Some(last) = records.iter().map(|r| r.ts.clone()).max() {
+        summary.last_seen_ts = last;
+    }
+    summary.terminal_count = records
+        .iter()
+        .filter(|r| r.terminal_reason.is_some())
+        .count() as u32;
+    summary.distinct_reason_codes = groups.len() as u32;
+
+    let mut root_causes: Vec<RootCause> = order
+        .into_iter()
+        .filter_map(|key| groups.remove(&key).map(|group| group.finalize(key)))
+        .collect();
+    // Sort by frequency desc, then reason_code asc for stability.
+    root_causes.sort_by(|a, b| {
+        b.frequency
+            .cmp(&a.frequency)
+            .then_with(|| a.reason_code.cmp(&b.reason_code))
+    });
+    (root_causes, summary)
+}
+
+/// Split a `reason_code` like `"origin:missing_field"` into
+/// `("origin", "missing_field")`.  When the code has no `:`,
+/// the whole string is the `reason_class` and the `stage` is
+/// empty.
+fn split_reason_code(reason_code: &str) -> (&str, &str) {
+    match reason_code.split_once(':') {
+        Some((stage, class)) => (stage, class),
+        None => ("", reason_code),
+    }
+}
+
+fn deduped_sorted<I: Iterator<Item = String>>(iter: I) -> Vec<String> {
+    use std::collections::BTreeSet;
+    let set: BTreeSet<String> = iter.collect();
+    set.into_iter().collect()
+}
+
+#[derive(Debug, Clone, Default)]
+struct RejectionGroup {
+    frequency: u32,
+    first_seen_ts: String,
+    last_seen_ts: String,
+    hats: BTreeSet<String>,
+    topics: BTreeSet<String>,
+    escalated: bool,
+    last_message: String,
+}
+
+impl RejectionGroup {
+    fn observe(&mut self, record: &crate::state::RejectionRecord) {
+        self.frequency = self.frequency.saturating_add(1);
+        if self.first_seen_ts.is_empty() || record.ts < self.first_seen_ts {
+            self.first_seen_ts = record.ts.clone();
+        }
+        if record.ts > self.last_seen_ts {
+            self.last_seen_ts = record.ts.clone();
+        }
+        if record.terminal_reason.is_some() {
+            self.escalated = true;
+        }
+        self.hats.insert(record.hat.clone());
+        self.topics.insert(record.topic.clone());
+        // Keep the most recent message (highest `ts`); ties keep
+        // the previous value so the first observation wins.
+        if self.last_message.is_empty() || record.ts >= self.last_seen_ts {
+            self.last_message = format!(
+                "{}{}",
+                record.topic,
+                if let Some(reason) = &record.terminal_reason {
+                    format!(" [terminal: {reason}]")
+                } else {
+                    String::new()
+                }
+            );
+        }
+    }
+
+    fn finalize(self, key: (String, String)) -> RootCause {
+        let (stage, reason_class) = key;
+        let reason_code = if stage.is_empty() {
+            reason_class.clone()
+        } else {
+            format!("{stage}:{reason_class}")
+        };
+        let suggested_remediation = suggested_remediation_for(&stage, &reason_class);
+        let mut affected_hats: Vec<String> = self.hats.into_iter().collect();
+        affected_hats.sort();
+        let mut affected_topics: Vec<String> = self.topics.into_iter().collect();
+        affected_topics.sort();
+        RootCause {
+            stage,
+            reason_code,
+            frequency: self.frequency,
+            first_seen_ts: self.first_seen_ts,
+            last_seen_ts: self.last_seen_ts,
+            affected_hats,
+            affected_topics,
+            suggested_remediation,
+            escalated: self.escalated,
+        }
+    }
+}
+
+/// Free-form remediation hint keyed off `(stage, reason_class)`.
+/// Kept short so the report can render it as one row in the
+/// "Root causes" table.
+fn suggested_remediation_for(stage: &str, reason_class: &str) -> String {
+    match (stage, reason_class) {
+        ("origin", "unknown_hat") => {
+            "register the offending hat in the preset's `hats:` block".to_string()
+        }
+        ("origin", "out_of_scope") => {
+            "tighten the offending hat's `publishes:` whitelist or move the emit to a \
+             registered producer"
+                .to_string()
+        }
+        ("origin", "missing_field") => {
+            "ensure the offending event carries the schema-required field before publish"
+                .to_string()
+        }
+        ("policy", "missing_field") => {
+            "update the preset's `event_policy.schemas.<topic>.required_fields` for this topic"
+                .to_string()
+        }
+        ("policy", "type_mismatch") => {
+            "fix the payload to match the schema-declared type for this field".to_string()
+        }
+        ("policy", "invalid_topic_format") => {
+            "use a topic name from the registered hat `publishes:` set or the system-control set"
+                .to_string()
+        }
+        ("policy", "lint_failure") => {
+            "rerun `ralph preset lint`; resolve the lint finding before re-emitting".to_string()
+        }
+        ("execution_contract", "missing_field") => {
+            "add the schema-required field to the emitted payload".to_string()
+        }
+        ("execution_contract", "type_mismatch") => {
+            "fix the payload type for the offending field".to_string()
+        }
+        ("execution_contract", "task_state") => {
+            "ensure the referenced task is in the expected lifecycle state".to_string()
+        }
+        ("missing_event", _) => {
+            "the hat had a publish obligation but emitted nothing; add the missing emit".to_string()
+        }
+        ("emit_claimed_but_not_written", _) => {
+            "the agent mentioned `ralph emit` but no event was written; retry with an explicit \
+             `ralph emit` line"
+                .to_string()
+        }
+        ("hat_handoff", _) => {
+            "the macro-edge `*.handoff.accepted` event failed the gate; rerun with a valid \
+             handoff file"
+                .to_string()
+        }
+        _ => "inspect the originating event payload and the preset's contract for the topic"
+            .to_string(),
+    }
+}
+
+/// Render a [`DiagnosisReport`] as a Markdown document.  Used by
+/// `ralph diagnose --from-ledger` (U8) when the workspace-level
+/// rejection log is available.
+#[must_use]
+pub fn render_diagnosis_report_markdown(report: &DiagnosisReport) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "# Ralph Diagnosis Report (U8 ledger view, schema v{})\n\n",
+        report.schema_version
+    ));
+    out.push_str("## Workspace\n\n");
+    out.push_str(&format!("- path: `{}`\n", report.workspace.display()));
+    out.push_str(&format!(
+        "- ledger source: {}\n",
+        if report.used_ledger {
+            "primary (`.ralph/recovery.jsonl` + `.ralph/ledger.jsonl`)"
+        } else {
+            "fallback (no rejection / commit log; session-scoped view applies)"
+        }
+    ));
+
+    out.push_str("\n## Rejection summary\n\n");
+    if report.rejection_summary.record_count == 0 {
+        out.push_str("_No rejection records found._\n\n");
+    } else {
+        out.push_str(&format!(
+            "- records: {}\n",
+            report.rejection_summary.record_count
+        ));
+        out.push_str(&format!(
+            "- distinct reason codes: {}\n",
+            report.rejection_summary.distinct_reason_codes
+        ));
+        out.push_str(&format!(
+            "- terminal (R11): {}\n",
+            report.rejection_summary.terminal_count
+        ));
+        if !report.rejection_summary.first_seen_ts.is_empty() {
+            out.push_str(&format!(
+                "- first seen: {}\n",
+                report.rejection_summary.first_seen_ts
+            ));
+        }
+        if !report.rejection_summary.last_seen_ts.is_empty() {
+            out.push_str(&format!(
+                "- last seen: {}\n",
+                report.rejection_summary.last_seen_ts
+            ));
+        }
+        if !report.rejection_summary.affected_hats.is_empty() {
+            out.push_str(&format!(
+                "- affected hats: {}\n",
+                report.rejection_summary.affected_hats.join(", ")
+            ));
+        }
+        if !report.rejection_summary.affected_topics.is_empty() {
+            out.push_str(&format!(
+                "- affected topics: {}\n",
+                report.rejection_summary.affected_topics.join(", ")
+            ));
+        }
+        out.push('\n');
+    }
+
+    out.push_str("## Root causes\n\n");
+    if report.root_causes.is_empty() {
+        out.push_str("_No aggregated root causes._\n\n");
+    } else {
+        out.push_str("| reason_code | frequency | first→last | hats | topics | escalated | suggested remediation |\n");
+        out.push_str("|---|---|---|---|---|---|---|\n");
+        for rc in &report.root_causes {
+            let hats = if rc.affected_hats.is_empty() {
+                "*".to_string()
+            } else {
+                rc.affected_hats.join(", ")
+            };
+            let topics = if rc.affected_topics.is_empty() {
+                "*".to_string()
+            } else {
+                rc.affected_topics.join(", ")
+            };
+            let first_last = if rc.first_seen_ts == rc.last_seen_ts {
+                rc.first_seen_ts.clone()
+            } else {
+                format!("{} → {}", rc.first_seen_ts, rc.last_seen_ts)
+            };
+            out.push_str(&format!(
+                "| `{}` | {} | {} | {} | {} | {} | {} |\n",
+                rc.reason_code,
+                rc.frequency,
+                first_last,
+                hats,
+                topics,
+                if rc.escalated { "yes" } else { "no" },
+                truncate_md(&rc.suggested_remediation, 80),
+            ));
+        }
+        out.push('\n');
+    }
+
+    out.push_str("## Ledger summary\n\n");
+    if report.ledger_summary.commit_count == 0 && !report.ledger_summary.corruption {
+        out.push_str("_No commit log found (or empty)._\n\n");
+    } else {
+        out.push_str(&format!(
+            "- commit log: `{}`\n",
+            report.ledger_summary.commit_log_path.display()
+        ));
+        if report.ledger_summary.commit_count > 0 {
+            out.push_str(&format!(
+                "- total commits: {}\n",
+                report.ledger_summary.commit_count
+            ));
+            out.push_str(&format!(
+                "- rejection recorded: {}\n",
+                report.ledger_summary.rejection_commits
+            ));
+            out.push_str(&format!(
+                "- escalation (R11): {}\n",
+                report.ledger_summary.escalation_commits
+            ));
+            out.push_str(&format!(
+                "- task lifecycle: {}\n",
+                report.ledger_summary.task_lifecycle_commits
+            ));
+            out.push_str(&format!(
+                "- handoff accepted: {}\n",
+                report.ledger_summary.handoff_commits
+            ));
+        } else {
+            out.push_str("- total commits: 0 (commit log could not be parsed)\n");
+        }
+        if report.ledger_summary.corruption {
+            out.push_str("- **warning**: commit log corruption detected; counters may be partial\n");
+        }
+        out.push('\n');
+    }
+    if !report.ledger_summary.warnings.is_empty() {
+        out.push_str("## Ledger warnings\n\n");
+        for w in &report.ledger_summary.warnings {
+            out.push_str(&format!("- {w}\n"));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Render a [`DiagnosisReport`] as a stable JSON document.
+#[must_use]
+pub fn render_diagnosis_report_json(report: &DiagnosisReport) -> Value {
+    json!({
+        "schema_version": report.schema_version,
+        "workspace": report.workspace,
+        "used_ledger": report.used_ledger,
+        "rejection_summary": {
+            "record_count": report.rejection_summary.record_count,
+            "distinct_reason_codes": report.rejection_summary.distinct_reason_codes,
+            "terminal_count": report.rejection_summary.terminal_count,
+            "first_seen_ts": report.rejection_summary.first_seen_ts,
+            "last_seen_ts": report.rejection_summary.last_seen_ts,
+            "affected_hats": report.rejection_summary.affected_hats,
+            "affected_topics": report.rejection_summary.affected_topics,
+        },
+        "ledger_summary": {
+            "commit_log_path": report.ledger_summary.commit_log_path,
+            "commit_count": report.ledger_summary.commit_count,
+            "rejection_commits": report.ledger_summary.rejection_commits,
+            "escalation_commits": report.ledger_summary.escalation_commits,
+            "task_lifecycle_commits": report.ledger_summary.task_lifecycle_commits,
+            "handoff_commits": report.ledger_summary.handoff_commits,
+            "corruption": report.ledger_summary.corruption,
+            "warnings": report.ledger_summary.warnings,
+        },
+        "root_causes": report.root_causes.iter().map(|rc| {
+            json!({
+                "stage": rc.stage,
+                "reason_code": rc.reason_code,
+                "frequency": rc.frequency,
+                "first_seen_ts": rc.first_seen_ts,
+                "last_seen_ts": rc.last_seen_ts,
+                "affected_hats": rc.affected_hats,
+                "affected_topics": rc.affected_topics,
+                "suggested_remediation": rc.suggested_remediation,
+                "escalated": rc.escalated,
+                "source": crate::diagnosis::validation_stage_to_source(&rc.stage),
+            })
+        }).collect::<Vec<_>>(),
+    })
 }
 
 /// Resolve `--session` against a diagnostics root. Returns the
@@ -2336,5 +2983,284 @@ mod tests {
             via_system_time, via_datetime_utc,
             "format_system_time must delegate to format_datetime_utc (single source of truth)"
         );
+    }
+
+    // ── U8 (2026-06-21-002) tests ─────────────────────────────────────────
+
+    fn rejection(
+        hat: &str,
+        topic: &str,
+        reason_code: &str,
+        retry_count: u32,
+        ts: &str,
+    ) -> crate::state::RejectionRecord {
+        crate::state::RejectionRecord {
+            ts: ts.to_string(),
+            hat: hat.to_string(),
+            topic: topic.to_string(),
+            reason_code: reason_code.to_string(),
+            retry_count,
+            terminal_reason: None,
+        }
+    }
+
+    #[test]
+    fn validation_stage_to_source_covers_all_unified_stages() {
+        // Every stage in the unified validation pipeline must
+        // round-trip through the mapping.  Adding a new stage in
+        // U9+ requires extending this test (it is the SSOT
+        // contract for `validation_stage_to_source`).
+        use crate::diagnosis::validation_stage_to_source;
+        assert_eq!(validation_stage_to_source("origin"), "origin_guard");
+        assert_eq!(validation_stage_to_source("publisher"), "event_policy");
+        // Legacy alias: U7a rejection logs use "policy" (the
+        // `RejectionStage::Policy::as_str()` value) before U4a
+        // renamed the stage to "publisher".  Both must map to
+        // the same `event_policy` source so legacy records stay
+        // visible in the new reporter.
+        assert_eq!(validation_stage_to_source("policy"), "event_policy");
+        assert_eq!(validation_stage_to_source("required_fields"), "engine_required");
+        assert_eq!(
+            validation_stage_to_source("execution_contract"),
+            "execution_contract"
+        );
+        assert_eq!(validation_stage_to_source("workflow_guard"), "workflow_guard");
+        assert_eq!(validation_stage_to_source("step_handoff"), "step_handoff_gate");
+        assert_eq!(validation_stage_to_source("hat_handoff"), "hat_handoff_gate");
+        // Unknown stages fall back to "unknown" rather than
+        // panicking — the caller still gets a usable report.
+        assert_eq!(validation_stage_to_source("not_a_stage"), "unknown");
+        assert_eq!(validation_stage_to_source(""), "unknown");
+    }
+
+    #[test]
+    fn u8_empty_rejection_log_yields_empty_report() {
+        // Edge case: rejection log is absent → empty report, no
+        // panic.  `used_ledger` is false so the CLI knows to fall
+        // back to the session-level view.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let report = report_from_ledger(tmp.path()).expect("report");
+        assert!(report.root_causes.is_empty());
+        assert_eq!(report.rejection_summary.record_count, 0);
+        assert!(!report.used_ledger);
+        assert_eq!(report.workspace, tmp.path());
+    }
+
+    #[test]
+    fn u8_invalid_workspace_returns_err() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bogus = tmp.path().join("does-not-exist");
+        let err = report_from_ledger(&bogus).unwrap_err();
+        assert!(matches!(err, LedgerReportError::InvalidWorkspace(_)));
+    }
+
+    #[test]
+    fn u8_single_root_cause_groups_records_by_reason_code() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Three records on the same (stage, reason_code) tuple.
+        let r1 = rejection("executor", "work.done", "execution_contract:missing_field", 1, "2026-06-22T01:00:00Z");
+        let r2 = rejection(
+            "executor",
+            "work.done",
+            "execution_contract:missing_field",
+            2,
+            "2026-06-22T01:00:10Z",
+        );
+        let r3 = rejection(
+            "executor",
+            "work.done",
+            "execution_contract:missing_field",
+            3,
+            "2026-06-22T01:00:20Z",
+        );
+        for r in [&r1, &r2, &r3] {
+            crate::state::append_rejection(tmp.path(), r).unwrap();
+        }
+        let report = report_from_ledger(tmp.path()).unwrap();
+        assert!(report.used_ledger);
+        assert_eq!(report.rejection_summary.record_count, 3);
+        assert_eq!(report.rejection_summary.distinct_reason_codes, 1);
+        assert_eq!(report.root_causes.len(), 1);
+        let rc = &report.root_causes[0];
+        assert_eq!(rc.reason_code, "execution_contract:missing_field");
+        assert_eq!(rc.stage, "execution_contract");
+        assert_eq!(rc.frequency, 3);
+        assert_eq!(rc.affected_hats, vec!["executor".to_string()]);
+        assert_eq!(rc.affected_topics, vec!["work.done".to_string()]);
+        assert!(!rc.escalated);
+    }
+
+    #[test]
+    fn u8_root_cause_sorted_by_frequency_then_reason_code() {
+        let records = vec![
+            rejection("a", "t.x", "origin:missing_field", 1, "2026-06-22T00:00:00Z"),
+            rejection("b", "t.y", "origin:missing_field", 1, "2026-06-22T00:00:01Z"),
+            rejection("c", "t.z", "origin:missing_field", 1, "2026-06-22T00:00:02Z"),
+            rejection("d", "t.w", "execution_contract:type_mismatch", 1, "2026-06-22T00:00:03Z"),
+        ];
+        let (causes, summary) = aggregate_rejection_records(&records);
+        assert_eq!(summary.distinct_reason_codes, 2);
+        // `origin:missing_field` has frequency 3 > 1, so it wins.
+        assert_eq!(causes[0].reason_code, "origin:missing_field");
+        assert_eq!(causes[0].frequency, 3);
+        assert_eq!(causes[1].reason_code, "execution_contract:type_mismatch");
+        assert_eq!(causes[1].frequency, 1);
+    }
+
+    #[test]
+    fn u8_root_cause_flags_escalation_when_terminal_reason_present() {
+        let mut rec = rejection(
+            "executor",
+            "work.done",
+            "execution_contract:missing_field",
+            3,
+            "2026-06-22T02:00:00Z",
+        );
+        rec.terminal_reason = Some("retry budget exhausted".to_string());
+        let (causes, summary) = aggregate_rejection_records(&[rec]);
+        assert_eq!(summary.terminal_count, 1);
+        assert!(causes[0].escalated);
+    }
+
+    #[test]
+    fn u8_ledger_summary_counts_commit_deltas() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut ledger = crate::state::StateLedger::new(tmp.path(), true);
+        ledger
+            .commit(
+                crate::state::CommitDelta::RejectionRecorded {
+                    key: "policy::executor::work.done::missing_field".to_string(),
+                    message: None,
+                    topic: Some("work.done".to_string()),
+                },
+                Some("work.done".to_string()),
+            )
+            .unwrap();
+        ledger
+            .commit(
+                crate::state::CommitDelta::RejectionBudgetTripped {
+                    key: "policy::executor::work.done::missing_field".to_string(),
+                    terminal_reason: "retry budget exhausted".to_string(),
+                },
+                None,
+            )
+            .unwrap();
+        let summary = read_ledger_summary(tmp.path());
+        assert_eq!(summary.commit_count, 2);
+        assert_eq!(summary.rejection_commits, 1);
+        assert_eq!(summary.escalation_commits, 1);
+        assert!(!summary.corruption);
+        assert!(summary.warnings.is_empty());
+    }
+
+    #[test]
+    fn u8_render_markdown_contains_root_cause_table() {
+        let mut rec = rejection(
+            "executor",
+            "work.done",
+            "origin:missing_field",
+            1,
+            "2026-06-22T03:00:00Z",
+        );
+        rec.terminal_reason = Some("escalated".to_string());
+        let (causes, summary) = aggregate_rejection_records(&[rec]);
+        let report = DiagnosisReport {
+            schema_version: DIAGNOSIS_LEDGER_SCHEMA_VERSION,
+            workspace: PathBuf::from("/tmp/ws"),
+            used_ledger: true,
+            root_causes: causes,
+            rejection_summary: summary,
+            ledger_summary: LedgerSummary::default(),
+        };
+        let md = render_diagnosis_report_markdown(&report);
+        assert!(md.contains("# Ralph Diagnosis Report"));
+        assert!(md.contains("## Root causes"));
+        assert!(md.contains("`origin:missing_field`"));
+        assert!(md.contains("executor"));
+        assert!(md.contains("work.done"));
+        // Escalated flag rendered as "yes".
+        assert!(md.contains("| yes |"));
+    }
+
+    #[test]
+    fn u8_render_json_carries_schema_version_and_root_causes() {
+        let rec = rejection(
+            "executor",
+            "work.done",
+            "execution_contract:type_mismatch",
+            1,
+            "2026-06-22T04:00:00Z",
+        );
+        let (causes, summary) = aggregate_rejection_records(&[rec]);
+        let report = DiagnosisReport {
+            schema_version: DIAGNOSIS_LEDGER_SCHEMA_VERSION,
+            workspace: PathBuf::from("/tmp/ws"),
+            used_ledger: true,
+            root_causes: causes,
+            rejection_summary: summary,
+            ledger_summary: LedgerSummary::default(),
+        };
+        let value = render_diagnosis_report_json(&report);
+        assert_eq!(value["schema_version"], "u8-1");
+        let causes_json = value["root_causes"].as_array().unwrap();
+        assert_eq!(causes_json.len(), 1);
+        assert_eq!(causes_json[0]["reason_code"], "execution_contract:type_mismatch");
+        // `source` is the validation_stage_to_source mapping.
+        assert_eq!(causes_json[0]["source"], "execution_contract");
+        // JSON must NOT include markdown headings.
+        let serialized = serde_json::to_string(&value).unwrap();
+        assert!(!serialized.contains("## "));
+    }
+
+    #[test]
+    fn u8_corrupt_commit_log_surfaces_warning_and_corruption_flag() {
+        // A parse error in the commit log must surface as both
+        // a warning and the `corruption` flag — the report stays
+        // usable, just partial.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let log_path = tmp.path().join(".ralph").join("ledger.jsonl");
+        std::fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+        // First a valid commit, then garbage.
+        let mut ledger = crate::state::StateLedger::new(tmp.path(), true);
+        ledger
+            .commit(
+                crate::state::CommitDelta::RejectionRecorded {
+                    key: "x".into(),
+                    message: None,
+                    topic: None,
+                },
+                None,
+            )
+            .unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .unwrap();
+        use std::io::Write as _;
+        f.write_all(b"not-json\n").unwrap();
+        let summary = read_ledger_summary(tmp.path());
+        assert_eq!(summary.commit_count, 0, "parse error → zero commits");
+        assert!(summary.corruption);
+        assert!(!summary.warnings.is_empty());
+    }
+
+    #[test]
+    fn u8_empty_report_does_not_panic_in_render() {
+        let report = DiagnosisReport {
+            schema_version: DIAGNOSIS_LEDGER_SCHEMA_VERSION,
+            workspace: PathBuf::from("/tmp/ws"),
+            used_ledger: false,
+            root_causes: Vec::new(),
+            rejection_summary: RejectionSummary::default(),
+            ledger_summary: LedgerSummary::default(),
+        };
+        let md = render_diagnosis_report_markdown(&report);
+        assert!(md.contains("# Ralph Diagnosis Report"));
+        assert!(md.contains("No rejection records found"));
+        assert!(md.contains("No aggregated root causes"));
+        assert!(md.contains("No commit log found"));
+        let value = render_diagnosis_report_json(&report);
+        assert_eq!(value["used_ledger"], false);
+        assert_eq!(value["root_causes"].as_array().unwrap().len(), 0);
     }
 }
