@@ -53,6 +53,7 @@ fn make_work_done_event() -> crate::event_reader::Event {
         source: None,
         wave_index: None,
         wave_total: None,
+        system_injected: None,
     }
 }
 
@@ -136,6 +137,7 @@ event_loop:
                 source: None,
                 wave_index: None,
                 wave_total: None,
+                system_injected: None,
             }],
             malformed: vec![],
         })

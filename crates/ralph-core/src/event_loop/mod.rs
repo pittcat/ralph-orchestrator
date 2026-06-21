@@ -1017,6 +1017,7 @@ fn apply_step_handoff_gate(
     events: Vec<JsonlEvent>,
     workspace: &std::path::Path,
     bus: &mut EventBus,
+    iteration: u32,
 ) -> (
     Vec<JsonlEvent>,
     Vec<crate::diagnosis::RecoveryDiagnosisEnvelope>,
@@ -1089,6 +1090,7 @@ fn apply_step_handoff_gate(
                 let envelope = crate::diagnosis::RecoveryDiagnosisEnvelope::builder()
                     .source(crate::diagnosis::DiagnosisSource::PayloadContract)
                     .severity(crate::diagnosis::DiagnosisSeverity::Warning)
+                    .iteration(iteration)
                     .source_hat("plan-gate")
                     .target_hat("plan-gate")
                     .topic(event.topic.clone())
@@ -3106,7 +3108,9 @@ impl EventLoop {
             self.state.bootstrap_failed = false;
         }
 
-        let start_event = Event::new(topic, prompt_content);
+        let start_event = Event::new(topic, prompt_content)
+            .with_source("orchestrator")
+            .with_system_injected();
         self.bus.publish(start_event);
         debug!(topic = topic, "Published {} event", topic);
     }
@@ -5161,11 +5165,11 @@ impl EventLoop {
         self.diagnostics
             .log_recovery(RecoveryJournalEntry::from_envelope(envelope.clone(), notes));
         self.diagnostics.log_orchestration(
-            envelope.iteration,
+            envelope.iteration.unwrap_or(0),
             hat,
             OrchestrationEvent::from_recovery_envelope(envelope),
         );
-        let current_iteration = envelope.iteration.max(self.state.iteration);
+        let current_iteration = envelope.iteration.max(Some(self.state.iteration)).unwrap_or(0);
         self.recovery_responder
             .record_finding(envelope, current_iteration)
     }
@@ -7846,6 +7850,7 @@ impl EventLoop {
                             wave_id: None,
                             wave_index: None,
                             wave_total: None,
+                            system_injected: None,
                         };
                         accepted.push(resume_jsonl);
                     }
@@ -8676,6 +8681,7 @@ impl EventLoop {
                 events,
                 self.config.core.workspace_root.as_path(),
                 &mut self.bus,
+                self.state.iteration,
             );
             events = accepted_events;
             // Review fix #4 (code-review-2026-06-17-002): persist

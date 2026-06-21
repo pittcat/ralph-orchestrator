@@ -95,10 +95,13 @@ impl EventBus {
         // --- EventBus source guard: reject events with impossible source ---
         // If event.source is set, it must correspond to a registered hat.
         // Events with unknown sources are dropped before observers see them.
-        if let Some(ref source) = event.source {
-            if !self.hats.contains_key(source) {
-                // Unknown source — fail closed, return no recipients
-                return Vec::new();
+        // System-injected events bypass this guard (orchestrator bootstrap).
+        if event.system_injected != Some(true) {
+            if let Some(ref source) = event.source {
+                if !self.hats.contains_key(source) {
+                    // Unknown source — fail closed, return no recipients
+                    return Vec::new();
+                }
             }
         }
         // --- End EventBus source guard ---

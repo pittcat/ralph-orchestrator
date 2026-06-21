@@ -178,13 +178,13 @@ struct RetryState {
     /// current observation.
     attempt_count: u32,
     /// Loop iteration the key was first observed at.
-    first_iteration: u32,
+    first_iteration: Option<u32>,
     /// Loop iteration the key was last observed at. Used for the
     /// R7 "grace period" rule: a retry key CANNOT be marked
     /// `Recovered` on the same iteration it was just produced —
     /// the original event in the snapshot must come from a
     /// later iteration's accepted event stream.
-    last_iteration: u32,
+    last_iteration: Option<u32>,
     /// Most recent severity seen.
     last_severity: DiagnosisSeverity,
     /// Most recent outcome recorded.
@@ -573,13 +573,13 @@ impl RecoveryResponder {
         // R7: a finding cannot self-heal in the iteration it was
         // recorded. The drift snapshot and the next iteration's
         // accepted events must come from different iterations.
-        if current_iteration <= state.last_iteration {
+        if state.last_iteration.is_some_and(|li| current_iteration <= li) {
             // We still need to set the outcome so the engine's
             // transition detector does not flap. Pending is the
             // most informative default — the finding has not yet
             // had a chance to recover.
             state.last_outcome = DiagnosisOutcome::Pending;
-            state.last_iteration = current_iteration;
+            state.last_iteration = Some(current_iteration);
             return Some(DiagnosisOutcome::Pending);
         }
         // First, try the metric-specific rule. Drift findings
@@ -619,7 +619,7 @@ impl RecoveryResponder {
         } else {
             state.last_outcome = DiagnosisOutcome::Pending;
         }
-        state.last_iteration = current_iteration;
+        state.last_iteration = Some(current_iteration);
         Some(state.last_outcome)
     }
 
@@ -788,7 +788,7 @@ impl RecoveryResponder {
                 // callers that do not want to bump the counter).
                 let mut state = incoming;
                 state.first_iteration = envelope.iteration;
-                state.last_iteration = current_iteration;
+                state.last_iteration = Some(current_iteration);
                 state.attempt_count = 1;
                 self.state.insert(retry_key.clone(), state);
                 1
@@ -800,7 +800,7 @@ impl RecoveryResponder {
                 // the new observation as a fresh start. This keeps
                 // the state map bounded in long loops and prevents
                 // old findings from haunting the responder.
-                if current_iteration.saturating_sub(entry.first_iteration) > window
+                if current_iteration.saturating_sub(entry.first_iteration.unwrap_or(0)) > window
                     && !entry.escalated
                 {
                     entry.attempt_count = 1;
@@ -808,7 +808,7 @@ impl RecoveryResponder {
                 } else {
                     entry.attempt_count = entry.attempt_count.saturating_add(1);
                 }
-                entry.last_iteration = current_iteration;
+                entry.last_iteration = Some(current_iteration);
                 entry.last_severity = envelope.severity;
                 entry.target_hat = envelope.target_hat.clone();
                 entry.topic = envelope.topic.clone();
@@ -846,7 +846,7 @@ impl RecoveryResponder {
         let over_window = current_iteration.saturating_sub(
             self.state
                 .get(retry_key)
-                .map_or(current_iteration, |s| s.first_iteration),
+                .map_or(current_iteration, |s| s.first_iteration.unwrap_or(0)),
         ) >= window;
         if !over_threshold {
             return EscalationLevel::Soft;

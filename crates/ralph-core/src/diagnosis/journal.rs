@@ -40,7 +40,7 @@ pub struct RecoveryJournalEntry {
 
     /// Loop iteration. Mirrors [`RecoveryDiagnosisEnvelope::iteration`]
     /// for easy top-level sort.
-    pub iteration: u32,
+    pub iteration: Option<u32>,
 
     /// Wall-clock time. Mirrors [`RecoveryDiagnosisEnvelope::timestamp`].
     pub timestamp: DateTime<Utc>,
@@ -374,7 +374,7 @@ mod tests {
         let entry = RecoveryJournalEntry::from_envelope(env.clone(), vec!["note".to_string()]);
         assert_eq!(entry.schema_version, RECOVERY_JOURNAL_SCHEMA_VERSION);
         assert_eq!(entry.envelope, env);
-        assert_eq!(entry.iteration, 3);
+        assert_eq!(entry.iteration, Some(3));
         assert_eq!(entry.notes, vec!["note".to_string()]);
 
         let s = serde_json::to_string(&entry).unwrap();
@@ -399,7 +399,7 @@ mod tests {
         assert_eq!(env.source, DiagnosisSource::DriftMonitor);
         assert!(env.retry_key.starts_with("drift_monitor:"));
         assert_eq!(env.severity, DiagnosisSeverity::Warning);
-        assert_eq!(env.iteration, 7);
+        assert_eq!(env.iteration, Some(7));
         assert!(!env.evidence.is_empty());
     }
 

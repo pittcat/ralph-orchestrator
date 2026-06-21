@@ -109,6 +109,7 @@ fn work_done_event(task_id: &str) -> crate::event_reader::Event {
         source: None,
         wave_index: None,
         wave_total: None,
+        system_injected: None,
     }
 }
 

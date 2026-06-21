@@ -466,7 +466,7 @@ fn test_finding_to_envelope() {
     let f = dummy_finding();
     let env = finding_to_envelope(&f, Some("sess-1".to_string()));
     assert_eq!(env.source, DiagnosisSource::DriftMonitor);
-    assert_eq!(env.iteration, 7);
+    assert_eq!(env.iteration, Some(7));
     assert_eq!(env.reason_code, "drift_field_completeness");
     assert!(!env.safe_target);
     assert_eq!(

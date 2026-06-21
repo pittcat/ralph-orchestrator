@@ -1978,6 +1978,7 @@ fn test_u6_incomplete_wave_plan_blocked_mechanism() {
         wave_id: Some("w-u6bdd-0001".to_string()),
         wave_index: None,
         wave_total: Some(11),
+        system_injected: None,
     };
     tracker.observe_accepted(&wave);
 
@@ -1995,6 +1996,7 @@ fn test_u6_incomplete_wave_plan_blocked_mechanism() {
             wave_id: Some("w-u6bdd-0001".to_string()),
             wave_index: None,
             wave_total: Some(11),
+            system_injected: None,
         };
         tracker.observe_accepted(&dim_evt);
     }
@@ -2210,6 +2212,7 @@ fn test_u6_zippy_sparrow_replay_fixture() {
             wave_id,
             wave_index: None,
             wave_total,
+            system_injected: None,
         };
         // Walk the same accept-path the runtime uses: feed
         // wave / dimension events into the tracker so it

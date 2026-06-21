@@ -139,6 +139,7 @@ mod tests {
             wave_id: Some("w-test1234".to_string()),
             wave_index: Some(0),
             wave_total: Some(3),
+            system_injected: None,
         }
     }
 
@@ -273,6 +274,7 @@ mod tests {
             wave_id: Some("w-abc".to_string()),
             wave_index: Some(0),
             wave_total: Some(1),
+            system_injected: None,
         };
         let ctx = WaveWorkerContext {
             wave_id: "w-abc".to_string(),

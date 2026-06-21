@@ -519,6 +519,7 @@ mod tests {
                 wave_id: None,
                 wave_index: None,
                 wave_total: None,
+                system_injected: None,
             };
 
             match validate_event_origin(&unknown_event, &registry, cancellation, completion) {
@@ -672,6 +673,7 @@ mod tests {
                 wave_id: None,
                 wave_index: None,
                 wave_total: None,
+                system_injected: None,
             };
 
             let result = validate_event_origin(&event, &registry, cancellation, completion);
@@ -3616,6 +3618,7 @@ mod tests {
                 wave_id: None,
                 wave_index: None,
                 wave_total: None,
+                system_injected: None,
             };
 
             let result = validate_event_origin(&event, &registry, cancellation, completion);

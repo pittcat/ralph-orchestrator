@@ -29,6 +29,10 @@ pub struct Event {
     /// Total number of events in the wave.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wave_total: Option<u32>,
+
+    /// Whether this event was injected by the orchestrator (bypasses origin guard).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_injected: Option<bool>,
 }
 
 impl Event {
@@ -42,6 +46,7 @@ impl Event {
             wave_id: None,
             wave_index: None,
             wave_total: None,
+            system_injected: None,
         }
     }
 
@@ -56,6 +61,13 @@ impl Event {
     #[must_use]
     pub fn with_target(mut self, target: impl Into<HatId>) -> Self {
         self.target = Some(target.into());
+        self
+    }
+
+    /// Marks this event as system-injected (bypasses origin guard and EventBus source guard).
+    #[must_use]
+    pub fn with_system_injected(mut self) -> Self {
+        self.system_injected = Some(true);
         self
     }
 

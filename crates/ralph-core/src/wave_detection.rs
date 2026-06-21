@@ -528,6 +528,7 @@ mod tests {
             wave_id: Some(wave_id.to_string()),
             wave_index: Some(index),
             wave_total: Some(total),
+            system_injected: None,
         }
     }
 
@@ -589,6 +590,7 @@ mod tests {
             wave_id: None,
             wave_index: None,
             wave_total: None,
+            system_injected: None,
         }];
 
         assert!(detect_wave_events(&events, &registry, 64).is_none());
@@ -665,6 +667,7 @@ mod tests {
             wave_id: Some(wave_id.to_string()),
             wave_index: index,
             wave_total: total,
+            system_injected: None,
         }
     }
 

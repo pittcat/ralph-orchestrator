@@ -590,6 +590,7 @@ mod tests {
             wave_id: None,
             wave_index: None,
             wave_total: None,
+            system_injected: None,
         }
     }
 
@@ -943,6 +944,7 @@ mod tests {
             wave_id: None,
             wave_index: None,
             wave_total: None,
+            system_injected: None,
         };
         tracker.observe_accepted(&null_passed);
 

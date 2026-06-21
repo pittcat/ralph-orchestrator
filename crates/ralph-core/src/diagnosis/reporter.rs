@@ -131,9 +131,9 @@ pub struct RankedFinding {
     /// Number of envelopes aggregated into this group.
     pub occurrences: u32,
     /// First iteration the group was observed at.
-    pub first_iteration: u32,
+    pub first_iteration: Option<u32>,
     /// Latest iteration the group was observed at.
-    pub last_iteration: u32,
+    pub last_iteration: Option<u32>,
     /// Evidence refs from the latest entry.
     pub evidence: Vec<super::envelope::EvidenceRef>,
     /// True when the latest entry had a safe target.
@@ -145,7 +145,7 @@ pub struct RankedFinding {
 /// Per-source-hat aggregate used in the "Recovery timeline" section.
 #[derive(Debug, Clone)]
 pub struct TimelineRow {
-    pub iteration: u32,
+    pub iteration: Option<u32>,
     pub hat: String,
     pub severity: DiagnosisSeverity,
     pub outcome: DiagnosisOutcome,
@@ -595,8 +595,8 @@ fn aggregate_recovery(entries: &[RecoveryJournalEntry]) -> Vec<RankedFinding> {
 
 struct GroupState {
     occurrences: u32,
-    first_iteration: u32,
-    last_iteration: u32,
+    first_iteration: Option<u32>,
+    last_iteration: Option<u32>,
     latest: RecoveryDiagnosisEnvelope,
     escalated: bool,
     failure_count: u32,
@@ -795,8 +795,8 @@ fn push_top_findings_md(out: &mut String, findings: &[RankedFinding]) {
             f.target_hat.as_deref().unwrap_or("*"),
             f.topic.as_deref().unwrap_or("*"),
             f.occurrences,
-            f.first_iteration,
-            f.last_iteration,
+            f.first_iteration.map(|i| i.to_string()).unwrap_or_else(|| "pre".to_string()),
+            f.last_iteration.map(|i| i.to_string()).unwrap_or_else(|| "pre".to_string()),
             f.outcome.as_str(),
             f.retry_key,
         ));
@@ -816,7 +816,7 @@ fn push_recovery_timeline_md(out: &mut String, rows: &[TimelineRow]) {
         let message = truncate_md(&r.message, 120);
         out.push_str(&format!(
             "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
-            r.iteration,
+            r.iteration.map(|i| i.to_string()).unwrap_or_else(|| "pre".to_string()),
             r.hat,
             r.severity.as_str(),
             r.outcome.as_str(),
@@ -1120,8 +1120,8 @@ fn suggested_actions_for_finding(f: &RankedFinding) -> Vec<String> {
             "retry_key `{}` 已 escalation {} 次（{}→{}），建议人工介入或调高 `telemetry.runtime_diagnosis.max_repeated_recoveries`",
             f.retry_key,
             f.occurrences,
-            f.first_iteration,
-            f.last_iteration
+            f.first_iteration.map(|i| i.to_string()).unwrap_or_else(|| "pre".to_string()),
+            f.last_iteration.map(|i| i.to_string()).unwrap_or_else(|| "pre".to_string())
         ));
     }
     if !f.safe_target && matches!(f.outcome, DiagnosisOutcome::Failed) {
@@ -1633,8 +1633,8 @@ mod tests {
         assert_eq!(findings.len(), 2);
         let a = findings.iter().find(|f| f.retry_key == "a:1").unwrap();
         assert_eq!(a.occurrences, 2);
-        assert_eq!(a.first_iteration, 1);
-        assert_eq!(a.last_iteration, 2);
+        assert_eq!(a.first_iteration, Some(1));
+        assert_eq!(a.last_iteration, Some(2));
         assert_eq!(a.severity, DiagnosisSeverity::Error);
     }
 
@@ -1651,8 +1651,8 @@ mod tests {
                 reason_code: "r".into(),
                 message: "m".into(),
                 occurrences: 5,
-                first_iteration: 1,
-                last_iteration: 10,
+                first_iteration: Some(1),
+                last_iteration: Some(10),
                 evidence: vec![],
                 safe_target: false,
                 escalated: false,
@@ -1667,8 +1667,8 @@ mod tests {
                 reason_code: "missing_field".into(),
                 message: "m".into(),
                 occurrences: 3,
-                first_iteration: 1,
-                last_iteration: 9,
+                first_iteration: Some(1),
+                last_iteration: Some(9),
                 evidence: vec![],
                 safe_target: true,
                 escalated: false,
@@ -1692,8 +1692,8 @@ mod tests {
                 reason_code: "r".into(),
                 message: "m".into(),
                 occurrences: 1,
-                first_iteration: 1,
-                last_iteration: 1,
+                first_iteration: Some(1),
+                last_iteration: Some(1),
                 evidence: vec![],
                 safe_target: true,
                 escalated: false,
@@ -1708,8 +1708,8 @@ mod tests {
                 reason_code: "r".into(),
                 message: "m".into(),
                 occurrences: 1,
-                first_iteration: 1,
-                last_iteration: 1,
+                first_iteration: Some(1),
+                last_iteration: Some(1),
                 evidence: vec![],
                 safe_target: true,
                 escalated: true,

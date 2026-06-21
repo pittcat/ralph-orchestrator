@@ -3,6 +3,7 @@
 //! Ralph is always present, cannot be configured away, and acts as a universal fallback.
 
 use crate::config::{CoreConfig, ScratchpadConfig};
+use crate::event_origin::RALPH_CONTROL_TOPICS;
 use crate::hat_registry::HatRegistry;
 use ralph_proto::{HatId, Topic};
 use std::collections::HashMap;
@@ -637,14 +638,14 @@ Keep temporary artifacts where later steps can still inspect them, such as a rep
             if self.is_fresh_start() {
                 // Fast path: immediate delegation without planning
                 return format!(
-                    r#"## WORKFLOW
+                    r##"## WORKFLOW
 
-**FAST PATH**: You MUST publish `{}` immediately to start the hat workflow.
-You MUST use `ralph emit "{}" "<brief handoff>"` and stop immediately.
-You MUST NOT plan or analyze — delegate now.
+**FAST PATH**: The workflow will start automatically via `{}`.
+Wait for the coordinator to complete its task.
+You MUST NOT manually publish this event — the orchestrator injects it.
+You MUST NOT plan or analyze — the coordinator will handle the workflow.
 
-"#,
-                    self.starting_event.as_ref().unwrap(),
+"##,
                     self.starting_event.as_ref().unwrap()
                 );
             }
@@ -854,7 +855,7 @@ You MUST continue.\n\
             // Include starting_event instruction if configured
             if let Some(ref starting_event) = self.starting_event {
                 section.push_str(&format!(
-                    "**After coordination, publish `{}` to start the workflow.**\n\n",
+                    "**Workflow will start automatically via `{}` — do not publish it manually.**\n\n",
                     starting_event
                 ));
             }
@@ -909,10 +910,17 @@ You MUST continue.\n\
             if !ralph_publishes.is_empty() {
                 section.push_str(&format!(
                     "**CONSTRAINT:** You MUST only publish events from this list: `{}`\n\
-                     Publishing other events will have no effect - no hat will receive them.\n\n",
+                     Publishing other events will have no effect — no hat will receive them.\n\n",
                     ralph_publishes.join("`, `")
                 ));
             }
+
+            // P0-2: explicit warning that Ralph is restricted to control topics only
+            section.push_str(
+                "⚠️ **Ralph is restricted to control topics only.** Attempting to publish \
+                 workflow topics (e.g., `work.start`, `work.ready`) will be rejected by the \
+                 orchestrator.\n\n"
+            );
 
             // Validate topology and log warnings for unreachable hats
             self.validate_topology_reachability(topology);
@@ -1353,7 +1361,7 @@ hats:
 
         // Should include delegation instruction
         assert!(
-            prompt.contains("After coordination, publish `tdd.start` to start the workflow"),
+            prompt.contains("Workflow will start automatically via `tdd.start`"),
             "Prompt should include starting_event delegation instruction"
         );
     }
@@ -1522,12 +1530,12 @@ hats:
             "Prompt should indicate fast path when starting_event set and no scratchpad"
         );
         assert!(
-            prompt.contains("You MUST publish `tdd.start` immediately"),
-            "Prompt should instruct immediate event publishing with MUST"
+            prompt.contains("The workflow will start automatically via `tdd.start`"),
+            "Prompt should state starting event is auto-injected"
         );
         assert!(
-            prompt.contains("ralph emit \"tdd.start\""),
-            "Fast path should require explicit event emission"
+            prompt.contains("You MUST NOT manually publish this event"),
+            "Prompt should instruct not to manually publish starting event"
         );
         assert!(
             !prompt.contains("### 1. PLAN"),

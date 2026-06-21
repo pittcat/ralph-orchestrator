@@ -454,7 +454,7 @@ mod tests {
         let parsed: crate::diagnosis::RecoveryJournalEntry =
             serde_json::from_str(lines[0]).unwrap();
         assert_eq!(parsed.envelope.reason_code, "no_emit");
-        assert_eq!(parsed.envelope.iteration, 3);
+        assert_eq!(parsed.envelope.iteration, Some(3));
     }
 
     #[test]

@@ -262,6 +262,7 @@ fn unknown_hat_always_origin_rejected() {
         wave_id: None,
         wave_index: None,
         wave_total: None,
+        system_injected: None,
     };
     match validate_event_origin(&event, &registry, "loop.cancel", "LOOP_COMPLETE") {
         OriginCheck::Rejected { .. } => {}

@@ -291,7 +291,7 @@ pub struct RecoveryDiagnosisEnvelope {
     pub diagnosis_id: String,
 
     /// Loop iteration at which the envelope was produced.
-    pub iteration: u32,
+    pub iteration: Option<u32>,
 
     /// Origin subsystem.
     pub source: DiagnosisSource,
@@ -636,7 +636,7 @@ impl RecoveryDiagnosisEnvelopeBuilder {
         RecoveryDiagnosisEnvelope {
             schema_version: RECOVERY_ENVELOPE_SCHEMA_VERSION,
             diagnosis_id: uuid::Uuid::new_v4().to_string(),
-            iteration: self.iteration.unwrap_or(0),
+            iteration: self.iteration,
             source,
             severity,
             source_hat: self.source_hat,

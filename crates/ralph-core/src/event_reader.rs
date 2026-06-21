@@ -166,6 +166,10 @@ pub struct Event {
     /// Total number of events in the wave.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wave_total: Option<u32>,
+
+    /// Whether this event was injected by the orchestrator (bypasses origin guard).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_injected: Option<bool>,
 }
 
 impl Event {
@@ -192,6 +196,7 @@ impl From<Event> for ralph_proto::Event {
             let total = e.wave_total.unwrap_or(1);
             pe = pe.with_wave(wave_id, index, total);
         }
+        pe.system_injected = e.system_injected;
         pe
     }
 }
@@ -655,6 +660,7 @@ mod tests {
             wave_id: None,
             wave_index: None,
             wave_total: None,
+            system_injected: None,
         };
         let proto: ralph_proto::Event = event.into();
         assert_eq!(proto.topic.as_str(), "build.done");
@@ -674,6 +680,7 @@ mod tests {
             wave_id: Some("w-abc".to_string()),
             wave_index: Some(2),
             wave_total: Some(5),
+            system_injected: None,
         };
         let proto: ralph_proto::Event = event.into();
         assert_eq!(proto.topic.as_str(), "review.file");
@@ -696,6 +703,7 @@ mod tests {
             wave_id: None,
             wave_index: None,
             wave_total: None,
+            system_injected: None,
         };
         let proto: ralph_proto::Event = event.into();
         assert_eq!(proto.payload, "");
@@ -798,6 +806,7 @@ mod tests {
             wave_id: None,
             wave_index: None,
             wave_total: None,
+            system_injected: None,
         };
         let proto: ralph_proto::Event = event.into();
         assert_eq!(proto.topic.as_str(), "review.file");

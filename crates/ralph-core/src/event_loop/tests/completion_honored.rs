@@ -496,6 +496,7 @@ hats:
             wave_id: event.wave_id.clone(),
             wave_index: event.wave_index,
             wave_total: event.wave_total,
+            system_injected: event.system_injected,
         });
     });
 

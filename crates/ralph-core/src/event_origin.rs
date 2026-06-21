@@ -313,6 +313,11 @@ pub fn validate_event_origin(
     cancellation_topic: &str,
     _completion_promise: &str,
 ) -> OriginCheck {
+    // P0-1: system-injected events bypass the origin guard entirely.
+    if event.system_injected == Some(true) {
+        return OriginCheck::Accepted;
+    }
+
     let topic_str = event.topic.as_str();
     let is_control = is_jsonl_control_topic(topic_str, cancellation_topic);
 
@@ -448,6 +453,22 @@ mod tests {
             wave_id: None,
             wave_index: None,
             wave_total: None,
+            system_injected: None,
+        }
+    }
+
+    fn make_system_injected_event(topic: &str, hat: Option<&str>) -> JsonlEvent {
+        JsonlEvent {
+            topic: topic.to_string(),
+            payload: None,
+            ts: "2024-01-01T00:00:00Z".to_string(),
+            hat: hat.map(|s| s.to_string()),
+            triggered: None,
+            source: None,
+            wave_id: None,
+            wave_index: None,
+            wave_total: None,
+            system_injected: Some(true),
         }
     }
 
@@ -462,6 +483,7 @@ mod tests {
             wave_id: Some("w-test".to_string()),
             wave_index: Some(0),
             wave_total: Some(1),
+            system_injected: None,
         }
     }
 
@@ -1294,6 +1316,37 @@ hats:
             "loop.cancel",
             Some("hat_a"),
         ));
+    }
+
+    /// P0-1: system-injected events bypass the origin guard entirely, including
+    /// ralph_control_only and unknown-hat checks.
+    #[test]
+    fn test_system_injected_event_bypasses_origin_guard() {
+        let registry = runtime_registry_with_hats(
+            r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+"#,
+        );
+
+        // Even with hat=ralph and a business topic, system_injected=true bypasses
+        let event = make_system_injected_event("work.start", Some("ralph"));
+        assert_eq!(
+            validate_event_origin(&event, &registry, "", ""),
+            OriginCheck::Accepted,
+            "system_injected event must bypass ralph_control_only"
+        );
+
+        // Also bypasses unknown-hat check
+        let event = make_system_injected_event("work.start", Some("unknown"));
+        assert_eq!(
+            validate_event_origin(&event, &registry, "", ""),
+            OriginCheck::Accepted,
+            "system_injected event must bypass unknown-hat rejection"
+        );
     }
 
     /// P1-12: `is_ralph_control_topic` accepts existing control topics

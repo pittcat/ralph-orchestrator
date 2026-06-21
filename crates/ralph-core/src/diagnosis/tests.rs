@@ -185,7 +185,7 @@ fn builder_stamps_schema_version_id_and_timestamp() {
     assert!(!env.diagnosis_id.is_empty());
     assert_eq!(env.diagnosis_id.len(), 36); // UUIDv4 string length
     assert!(env.timestamp >= before && env.timestamp <= after);
-    assert_eq!(env.iteration, 7);
+    assert_eq!(env.iteration, Some(7));
     assert_eq!(env.outcome, DiagnosisOutcome::Pending);
     assert_eq!(env.retry_attempt, 0);
     assert!(!env.safe_target); // Default to false (fail closed)
@@ -225,7 +225,7 @@ fn recovery_journal_entry_from_envelope() {
     let entry = RecoveryJournalEntry::from_envelope(env.clone(), vec!["a".to_string()]);
     assert_eq!(entry.schema_version, 1);
     assert_eq!(entry.envelope, env);
-    assert_eq!(entry.iteration, 4);
+    assert_eq!(entry.iteration, Some(4));
     assert_eq!(entry.notes, vec!["a".to_string()]);
 }
 
@@ -246,7 +246,7 @@ fn drift_entry_into_envelope_uses_drift_source() {
     assert_eq!(env.source, DiagnosisSource::DriftMonitor);
     assert!(env.retry_key.starts_with("drift_monitor:"));
     assert_eq!(env.severity, DiagnosisSeverity::Warning);
-    assert_eq!(env.iteration, 7);
+    assert_eq!(env.iteration, Some(7));
     assert_eq!(env.evidence.len(), 1);
     assert_eq!(env.evidence[0].kind, EvidenceKind::Field);
     assert_eq!(env.evidence[0].ref_path, "plan_name");

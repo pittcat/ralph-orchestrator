@@ -23,6 +23,7 @@ fn make_event(topic: &str, payload: impl Into<String>) -> Event {
         wave_id: None,
         wave_index: None,
         wave_total: None,
+        system_injected: None,
     }
 }
 

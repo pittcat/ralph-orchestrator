@@ -4519,6 +4519,7 @@ fn make_test_wave_with_timeout_and_payload(
         wave_id: Some("w-test".to_string()),
         wave_index: Some(0),
         wave_total: Some(1),
+        system_injected: None,
     };
 
     ralph_core::DetectedWave {
@@ -4952,6 +4953,7 @@ fn make_worker_event(topic: &str, payload: &str) -> ralph_core::Event {
         wave_id: None,
         wave_index: None,
         wave_total: None,
+        system_injected: None,
     }
 }
 
@@ -10395,7 +10397,7 @@ fn u4_inject_missing_event_writes_recovery_envelope() {
     assert_eq!(env.target_hat.as_deref(), Some("builder"));
     assert_eq!(env.source_hat.as_deref(), Some("builder"));
     assert_eq!(env.reason_code, "missing_event");
-    assert_eq!(env.iteration, 4);
+    assert_eq!(env.iteration, Some(4));
     assert!(env.safe_target, "display_hat is a registered hat");
     assert!(
         env.evidence
@@ -11961,6 +11963,7 @@ fn make_wave_with_count(
             wave_id: Some(wave_id.to_string()),
             wave_index: Some(i),
             wave_total: Some(total),
+            system_injected: None,
         })
         .collect();
     ralph_core::DetectedWave {
@@ -12964,6 +12967,7 @@ fn test_u5_r5_last_reviewed_sha_written_when_wave_fully_closed_and_passed() {
         wave_id: Some("w-1".to_string()),
         wave_index: None,
         wave_total: Some(2),
+        system_injected: None,
     };
     tracker.observe_accepted(&wave);
 
@@ -12992,6 +12996,7 @@ fn test_u5_r5_last_reviewed_sha_written_when_wave_fully_closed_and_passed() {
         wave_id: None,
         wave_index: None,
         wave_total: None,
+        system_injected: None,
     };
     tracker.observe_accepted(&passed);
 
@@ -13025,6 +13030,7 @@ fn test_u5_r5_last_reviewed_sha_blocked_when_wave_open_4_of_11() {
         wave_id: Some("w-stall".to_string()),
         wave_index: None,
         wave_total: Some(11),
+        system_injected: None,
     };
     tracker.observe_accepted(&wave);
 
