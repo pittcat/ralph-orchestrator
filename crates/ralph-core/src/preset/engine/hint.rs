@@ -210,17 +210,28 @@ mod tests {
         assert_eq!(hint.target, LintResumeTarget::SourceHat);
     }
 
-    /// P1-1: UpstreamState routes to plan-gate even when the
-    /// message does NOT contain the words "progress" / "stale"
-    /// (the legacy `from_reason` heuristic required them).
+    /// P1-1: TopicOwnership routes to source-hat even when the
+    /// message does NOT contain the words "topic" / "ownership".
     #[test]
-    fn p1_1_upstream_state_routes_to_plan_gate_unconditionally() {
+    fn p1_1_topic_ownership_routes_to_source_hat_unconditionally() {
         let hint = LintResumeHint::from_typed_rejection(
-            "queue.advance",
-            RejectionKind::UpstreamState,
-            "tasks.jsonl has no open row for task_id=t",
+            "review.complete",
+            RejectionKind::TopicOwnership,
+            "hat executor is not authorized to publish review.complete",
         );
-        assert_eq!(hint.class, LintFailureClass::UpstreamStateMissing);
-        assert_eq!(hint.target, LintResumeTarget::PlanGate);
+        assert_eq!(hint.class, LintFailureClass::TopicOwnership);
+        assert_eq!(hint.target, LintResumeTarget::SourceHat);
+    }
+
+    /// P1-1: PreCheck routes to source-hat (same as MissingField).
+    #[test]
+    fn p1_1_pre_check_routes_to_source_hat() {
+        let hint = LintResumeHint::from_typed_rejection(
+            "work.done",
+            RejectionKind::PreCheck,
+            "runtime TTL exceeded for this event",
+        );
+        assert_eq!(hint.class, LintFailureClass::PayloadError);
+        assert_eq!(hint.target, LintResumeTarget::SourceHat);
     }
 }

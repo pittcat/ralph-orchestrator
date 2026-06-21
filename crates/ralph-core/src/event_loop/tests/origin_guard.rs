@@ -959,3 +959,74 @@ hats:
          event in the same turn would hit the boundary gate"
     );
 }
+
+/// R6/U2: publish_event guards ralph pseudo-hat business topics.
+#[test]
+fn test_publish_event_rejects_ralph_business_topic() {
+    let yaml = r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let observer_count = Arc::new(AtomicUsize::new(0));
+    let observer_count_clone = Arc::clone(&observer_count);
+    event_loop.bus.add_observer(move |_event: &ralph_proto::Event| {
+        observer_count_clone.fetch_add(1, Ordering::SeqCst);
+    });
+
+    // ralph hat publishing a business topic — must be rejected
+    let bad_event = ralph_proto::Event::new("work.done", "{}")
+        .with_source(ralph_proto::HatId::new("ralph"));
+    event_loop.publish_event(bad_event);
+
+    // The violation event should be published instead of the original business event
+    // Observer sees exactly 1 event (the boundary_violation event)
+    assert_eq!(
+        observer_count.load(Ordering::SeqCst),
+        1,
+        "ralph business topic must publish exactly one boundary_violation event"
+    );
+}
+
+/// R6/U2: publish_event allows ralph control topics.
+#[test]
+fn test_publish_event_accepts_ralph_control_topic() {
+    let yaml = r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let observer_count = Arc::new(AtomicUsize::new(0));
+    let observer_count_clone = Arc::clone(&observer_count);
+    event_loop.bus.add_observer(move |_event: &ralph_proto::Event| {
+        observer_count_clone.fetch_add(1, Ordering::SeqCst);
+    });
+
+    // ralph hat publishing a control topic — must be accepted
+    let control_event = ralph_proto::Event::new("loop.cancel", "{}")
+        .with_source(ralph_proto::HatId::new("ralph"));
+    event_loop.publish_event(control_event);
+
+    // Observer sees exactly 1 event (the control event itself)
+    assert_eq!(
+        observer_count.load(Ordering::SeqCst),
+        1,
+        "ralph control topic must be published directly"
+    );
+}

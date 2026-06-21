@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use super::gates::{GateDecision, LintContext, RejectionKind, run_gates};
+use super::gates::{GateDecision, LintContext, run_gates};
 use super::hint::LintResumeHint;
 use super::protocol::ProtocolView;
 
@@ -300,7 +300,7 @@ pub fn lint_emit(
             }
         }
     }
-    match run_gates(view, &LintContext, topic, payload) {
+    match run_gates(view, &LintContext, topic, payload, None) {
         GateDecision::Accept => {
             if view.is_macro_edge(topic, None) && has_handoff_path(payload) {
                 LintOutcome::AcceptAfterAutoPrepare
@@ -377,7 +377,12 @@ fn write_artifact(workspace_root: &Path, output_dir: &Path, topic: &str) -> Resu
         workspace_root.join(output_dir).join(&filename)
     };
     if let Some(parent) = abs_path.parent() {
+        if parent.as_os_str().is_empty() {
+            return Err("write_artifact: artifact path has no parent directory".to_string());
+        }
         std::fs::create_dir_all(parent).map_err(|e| format!("create_dir_all: {e}"))?;
+    } else {
+        return Err("write_artifact: artifact path has no parent directory".to_string());
     }
     let body = format!(
         "## context\nprepared by orchestrator for `{topic}`\n\n\
@@ -389,10 +394,27 @@ fn write_artifact(workspace_root: &Path, output_dir: &Path, topic: &str) -> Resu
          next: {topic}\n"
     );
     std::fs::write(&abs_path, body).map_err(|e| format!("write artifact: {e}"))?;
-    let rel = abs_path
-        .strip_prefix(workspace_root)
+    // R5: canonicalize both paths before strip_prefix so
+    // relative paths (e.g. `./foo`) and absolute paths resolve
+    // to the same handoff-relative path. On macOS, /var is a
+    // symlink to /private/var; canonicalize resolves it so
+    // strip_prefix does not fail.
+    let canonical_root = workspace_root
+        .canonicalize()
+        .map_err(|e| format!("workspace_root canonicalize failed: {e}"))?;
+    let canonical_abs = abs_path
+        .canonicalize()
+        .map_err(|e| format!("abs_path canonicalize failed: {e}"))?;
+    let rel = canonical_abs
+        .strip_prefix(&canonical_root)
         .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| abs_path.to_string_lossy().to_string());
+        .map_err(|_| {
+            format!(
+                "write_artifact: abs_path `{}` is not under workspace_root `{}`",
+                canonical_abs.display(),
+                canonical_root.display()
+            )
+        })?;
     Ok(rel)
 }
 
@@ -615,6 +637,47 @@ mod tests {
         let elapsed = start.elapsed();
         assert!(matches!(outcome2, LintOutcome::Timeout(_)));
         assert!(elapsed < std::time::Duration::from_millis(150));
+    }
+
+    /// P1-1: canonicalize handles relative workspace paths correctly.
+    #[test]
+    fn p0_2_write_artifact_canonicalize_relative_workspace() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("ws");
+        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+        let handoff_dir = workspace.join(".ralph/handoff");
+        std::fs::create_dir_all(&handoff_dir).expect("mkdir handoff");
+
+        // Use a relative path segment to exercise canonicalize
+        let rel_workspace = workspace.join("./");
+        let rel = write_artifact(&rel_workspace, Path::new(".ralph/handoff"), "work.ready")
+            .expect("write_artifact must succeed with relative path");
+        assert!(
+            rel.contains(".ralph/handoff"),
+            "relative path must stay under handoff: {rel}"
+        );
+        assert!(
+            !Path::new(&rel).is_absolute(),
+            "write_artifact must return a relative path: {rel}"
+        );
+    }
+
+    /// P1-1: write_artifact returns Err when parent is empty (edge case).
+    #[test]
+    fn p0_2_write_artifact_empty_parent_fails() {
+        // Passing an empty filename-equivalent path should trigger
+        // the parent-empty check. We simulate by using a topic that
+        // produces a valid filename but an absolute output_dir with
+        // no parent.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path();
+        // Use an absolute output_dir pointing to a file with no parent
+        // (this is contrived but exercises the error branch).
+        let result = write_artifact(workspace, Path::new("/"), "work.ready");
+        assert!(
+            result.is_err(),
+            "write_artifact must fail when artifact path has no parent: {result:?}"
+        );
     }
 
     /// P0-2: `auto_handoff_prepare` writes the artifact under

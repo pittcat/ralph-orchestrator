@@ -1105,11 +1105,6 @@ hats:
   dimension-reviewer:
     name: "🔬 Dimension Reviewer (Serial)"
     description: "Reviews a single dimension. Emits review.dimension.done with the findings file, or review.dimension.failed with the reason. No concurrency, no wave dispatcher."
-    # 注:`task.resume` 是 reserved trigger(保留给 ralph pseudo-hat),
-    # 不放在 dimension-reviewer 的 triggers 中。runtime 通过
-    # `task.resume(target=dimension-reviewer)` 路由到该 hat 的 pending
-    # 队列,只在 agent 视角"下一次 build_prompt"会看到 task.resume
-    # 信号;agent 在 instructions 中识别并响应。
     triggers: ["review.dimension.ready"]
     publishes: ["review.dimension.done", "review.dimension.failed"]
     terminal_events: ["review.dimension.done", "review.dimension.failed"]
@@ -2155,16 +2150,14 @@ hats:
       break the stall, NOT to do the underlying work.
 
       ### Step 1 — Read the state
-      Read these files in order:
-      1. `plan.md` — current step and required deliverables
-      2. `progress.md` — completed steps, open tasks, blockers
-      3. `.ralph/agent/tasks.jsonl` — task lifecycle (`open` → `active` → `closed`)
-      4. `.ralph/events.jsonl` — last 2000 lines of bus events
-         (look for `work.done`, `review.complete`, `plan.complete`,
-         `task.resume`, `loop.stalled`)
-      5. `.agents/scratchpad/ce-executor/{plan_name}/review-sequence.json`
-         — read the current sequence status to decide whether the
-         coordinator is mid-walk or stalled.
+      Your PRIMARY source of truth is the `## ORCHESTRATOR CONTEXT` block injected at the top of this prompt by the orchestrator. Use:
+      - `current_step` / `completed_steps` / `open_tasks` — to understand where the loop is.
+      - If `## ORCHESTRATOR CONTEXT` is missing or projection is disabled, fall back to reading `.ralph/agent/progress.md`.
+
+      OPTIONAL secondary reads (only when ORCHESTRATOR CONTEXT is insufficient):
+      - `plan.md` — current step and required deliverables
+      - `.ralph/events.jsonl` — last 200 lines of bus events (look for `work.done`, `review.complete`, `plan.complete`, `task.resume`, `loop.stalled`)
+      - `.agents/scratchpad/ce-executor/{plan_name}/review-sequence.json` — read the current sequence status to decide whether the coordinator is mid-walk or stalled.
 
       ### Step 2 — Choose ONE emit
 

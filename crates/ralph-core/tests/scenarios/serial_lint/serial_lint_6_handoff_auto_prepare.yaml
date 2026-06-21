@@ -48,6 +48,26 @@ config:
             - step
             - commit_count
 
+fixture_files:
+  - path: .ralph/agent/hat-handoff/1-1-executor-reviewer.md
+    content: |
+      # Handoff: executor → reviewer
+      ## context
+      test scenario handoff artifact
+
+      ## changed
+      none
+
+      ## verify
+      verify
+
+      ## next
+      **动作**: review
+      **阻塞**: none
+
+      ## notes
+      test
+
 mock_responses:
   # iter 1:由 executor emit task.start,唤醒整个拓扑。
   - text: |
@@ -75,7 +95,7 @@ mock_responses:
   # rejection 之后 engine gate accept 路径未受影响。
   - text: |
       <event topic="work.done">
-      {"plan_name":"plan-s","step":"step-02","commit_count":2}
+      {"plan_name":"plan-s","step":"step-02","commit_count":2,"handoff_path":".ralph/agent/hat-handoff/1-1-executor-reviewer.md"}
       </event>
     hat: executor
   # iter 5:由 reviewer emit review.done,展示拓扑可端到端
@@ -98,7 +118,7 @@ expected:
     - at_iteration: 2
       pending_lint_resume:
         topic: work.done
-        reason_contains: "missing"
+        reason_contains: "handoff_path"
     # iter 3:hint 被下一次 build_prompt 消费。
   # 被选 hat 为 `ralph`（isolated 模式下最小 2-hat 拓扑的
   # round-robin 胜出者——dispatch 说明见 smoke 场景）。

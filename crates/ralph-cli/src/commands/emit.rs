@@ -676,9 +676,7 @@ fn emit_command_with_root_and_hats(
             // produced by the loop itself and bypass the new
             // check_emit_provenance gate (see policy_check.rs). The
             // smart gate catches business-topic cases below.
-            let is_control = ralph_core::RALPH_CONTROL_TOPICS
-                .iter()
-                .any(|t| *t == topic);
+            let is_control = ralph_core::event_origin::is_ralph_control_topic(&topic);
             let is_diagnostic = ralph_core::is_orchestrator_diagnostic_topic(&topic);
             if !is_control && !is_diagnostic {
                 anyhow::bail!(
@@ -698,9 +696,7 @@ fn emit_command_with_root_and_hats(
     // surfaces several seconds later when the loop runner reads the JSONL).
     if let Some(hat_id) = hat.as_deref()
         && hat_id == "ralph"
-        && !ralph_core::event_origin::RALPH_CONTROL_TOPICS
-            .iter()
-            .any(|t| *t == topic)
+        && !ralph_core::event_origin::is_ralph_control_topic(&topic)
     {
         anyhow::bail!(
             "Builtin ralph hat may only emit control topics: {:?}. \
@@ -1069,9 +1065,7 @@ fn emit_command_with_root_and_hats(
         && config
             .as_ref()
             .is_some_and(|c| c.event_loop.execution_mode == HatExecutionMode::Isolated)
-        && !ralph_core::RALPH_CONTROL_TOPICS
-            .iter()
-            .any(|t| *t == topic)
+        && !ralph_core::event_origin::is_ralph_control_topic(&topic)
         && hat.is_some()
     {
         // U7 (2026-06-17-004 plan, R7): in isolated mode, when a business topic

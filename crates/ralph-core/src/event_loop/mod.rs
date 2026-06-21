@@ -4556,39 +4556,22 @@ impl EventLoop {
                 format!("{guidance_section}{base_prompt}")
             };
 
+            // Apply prepend pipeline (SAME order as coordinator path)
+            self.ralph.clear_robot_guidance();
+
             // 2026-06-18-002 plan: auto-generate upstream handoff emit
             // instructions from the hat topology, instead of repeating
             // nearly identical blocks in every hat's preset instructions.
-            let base_prompt = match crate::hat_handoff::emit_instructions::build_emit_instructions(
+            // We compute the block here (while `hat` is borrowed) but defer
+            // prepending it until after `prepend_wave_context` so the emit
+            // instructions sit at the very top (R4).
+            let emit_block = crate::hat_handoff::emit_instructions::build_emit_instructions(
                 hat,
                 &self.config.event_loop.hat_handoff,
                 &self.config.event_loop.execution_mode,
                 &self.handoff_index,
-            ) {
-                Some(block) => format!("{block}\n\n{base_prompt}"),
-                None => base_prompt,
-            };
-
-            // Apply prepend pipeline (SAME order as coordinator path)
-            self.ralph.clear_robot_guidance();
-            // R1: `## WAVE CONTEXT` block lives at the very top of the
-            // prompt for `review-synthesizer` so the agent cannot miss
-            // it.  The block is a no-op for any other hat.
-            let base_prompt = self.prepend_wave_context(base_prompt, hat_id);
-            // 2026-06-18-002 plan U6 (KTD-6): `## HAT HANDOFF` block
-            // is inserted **between** `## WAVE CONTEXT` and
-            // `## ORCHESTRATOR CONTEXT` so the navigation block
-            // sits at the top alongside the wave header. Fail-closed:
-            // missing/unreadable file → no block + diagnostic.
-            // We pass `pending_for_handoff` (cloned at the top of
-            // the isolated branch) instead of re-taking from the bus
-            // because `events_context` already consumed the live
-            // pending queue.
-            let base_prompt = self.prepend_hat_handoff_from_pending(
-                base_prompt,
-                hat_id,
-                &pending_for_handoff,
             );
+
             // 2026-06-17-003 U4 / 2026-06-17-005 R5:
             // `## ORCHESTRATOR CONTEXT` block is the canonical
             // view of the run. The block is always emitted
@@ -4600,7 +4583,38 @@ impl EventLoop {
             // **isolated** build_prompt path only — see the
             // Phase 1 scope note on `prepend_orchestrator_context`
             // and the backward-compat custom-hat path.
+            //
+            // P1-7 fix: orchestrator context is placed BEFORE
+            // wave context and handoff blocks so the prompt
+            // stack order is:
+            //   ## HAT HANDOFF / emit instructions
+            //   ## WAVE CONTEXT (synthesizer only)
+            //   ## ORCHESTRATOR CONTEXT
+            //   hat instructions
             let base_prompt = self.prepend_orchestrator_context(base_prompt, hat_id);
+
+            // R1: `## WAVE CONTEXT` block lives near the top for
+            // `review-synthesizer`; it is a no-op for any other hat.
+            let base_prompt = self.prepend_wave_context(base_prompt, hat_id);
+
+            // R4: prepend emit instructions ABOVE wave context.
+            let base_prompt = match emit_block {
+                Some(block) => format!("{block}\n\n{base_prompt}"),
+                None => base_prompt,
+            };
+            // 2026-06-18-002 plan U6 (KTD-6): `## HAT HANDOFF` block
+            // is inserted at the very top so the navigation block
+            // sits above emit instructions and wave header.
+            // Fail-closed: missing/unreadable file → no block + diagnostic.
+            // We pass `pending_for_handoff` (cloned at the top of
+            // the isolated branch) instead of re-taking from the bus
+            // because `events_context` already consumed the live
+            // pending queue.
+            let base_prompt = self.prepend_hat_handoff_from_pending(
+                base_prompt,
+                hat_id,
+                &pending_for_handoff,
+            );
             // R3: surface ephemeral relocations so the agent stops
             // recreating runtime artefacts inside the source tree.
             let base_prompt = self.prepend_ephemeral_relocations(base_prompt);
@@ -5909,7 +5923,7 @@ impl EventLoop {
             }
         }
 
-        let view = ProtocolView::from_event_loop(&self.config.event_loop);
+        let view = ProtocolView::from_event_loop_with_index(&self.config.event_loop, Some(&self.handoff_index));
         let mirror = build_lint_mirror_block(&view, &hint);
         let resume = build_lint_resume_block(&hint);
         format!("{mirror}{resume}\n{prompt}")
@@ -5999,7 +6013,7 @@ impl EventLoop {
         use crate::preset::engine::{
             GateDecision, LintContext, LintResumeHint, gates::RejectionKind, run_gates,
         };
-        let view = ProtocolView::from_event_loop(&self.config.event_loop);
+        let view = ProtocolView::from_event_loop_with_index(&self.config.event_loop, Some(&self.handoff_index));
         let ctx = LintContext;
         let mut rejected = 0usize;
         let mut last_rejection: Option<(String, RejectionKind, String)> = None;
@@ -6010,7 +6024,7 @@ impl EventLoop {
                 Some(s) if !s.is_empty() => Self::parse_event_payload_value(s),
                 _ => serde_json::Value::Null,
             };
-            let decision = run_gates(&view, &ctx, &topic, &payload_value);
+            let decision = run_gates(&view, &ctx, &topic, &payload_value, event.hat.as_deref());
             match decision {
                 GateDecision::Accept => kept.push(event),
                 GateDecision::Reject { kind, message } => {
@@ -6026,7 +6040,7 @@ impl EventLoop {
                     result.malformed.push(MalformedLine::new(
                         0,
                         &raw,
-                        format!("engine_rejected: {message}"),
+                        format!("engine_rejected:{}: {}", kind.reason_code(), message),
                     ));
                     last_rejection = Some((topic.clone(), kind, message));
                 }
@@ -7372,6 +7386,34 @@ impl EventLoop {
                     // consume the per-turn business-event budget.
                     accepted.push(event);
                     continue;
+                }
+
+                // R6/U2: ralph pseudo-hat may only publish control topics.
+                // Business topics from ralph are rejected here (fail-closed)
+                // so they do NOT count as progress toward the stall detector.
+                // P1-12: use prefix match so future `ralph.*` topics are recognised.
+                if event.hat.as_deref() == Some("ralph") {
+                    if !crate::event_origin::is_ralph_control_topic(topic) {
+                        warn!(
+                            topic = %topic,
+                            "ralph hat business topic rejected: ralph may only publish control topics"
+                        );
+                        self.state.record_rejection_digest(
+                            "ralph_business_topic_rejected",
+                            "ralph hat may only publish control topics",
+                            &event.topic,
+                            &event.ts,
+                        );
+                        let violation = Event::new(
+                            "event.isolation.boundary_violation",
+                            format!(
+                                "{{\"hat\":\"ralph\",\"topic\":\"{}\",\"violation\":\"ralph_business_topic_rejected: ralph hat may only publish control topics\"}}",
+                                event.topic
+                            ),
+                        );
+                        self.bus.publish(violation);
+                        continue;
+                    }
                 }
 
                 // 2026-06-18-001 plan U5: 对**完全没有 provenance**的
@@ -10118,7 +10160,34 @@ impl EventLoop {
     }
 
     /// Publish an event to the event bus.
+    ///
+    /// R6/U2: ralph pseudo-hat may only publish control topics. This
+    /// gate mirrors the `process_events_from_jsonl` check so that
+    /// orchestrator-internal publish paths (e.g. `inject_fallback_event`)
+    /// and external callers (`runner.rs`) share the same boundary.
     pub fn publish_event(&mut self, event: Event) {
+        if let Some(ref hat) = event.source {
+            if hat.as_str() == "ralph" {
+                let topic = event.topic.as_str();
+                // P1-12: uses prefix match so future `ralph.*` topics are
+                // recognized without updating the constant list.
+                if !crate::event_origin::is_ralph_control_topic(topic) {
+                    warn!(
+                        topic = %topic,
+                        "ralph hat business topic rejected in publish_event: ralph may only publish control topics"
+                    );
+                    let violation = Event::new(
+                        "event.isolation.boundary_violation",
+                        format!(
+                            "{{\"hat\":\"ralph\",\"topic\":\"{}\",\"violation\":\"ralph_business_topic_rejected: ralph hat may only publish control topics\"}}",
+                            topic
+                        ),
+                    );
+                    self.bus.publish(violation);
+                    return;
+                }
+            }
+        }
         self.bus.publish(event);
     }
 

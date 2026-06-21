@@ -98,6 +98,11 @@ pub struct ProtocolView {
     ///   * `DEFAULT_EXEMPT_TOPICS` and `hat_handoff.exempt_topics`
     pub macro_edges_resolved: HashSet<String>,
 
+    /// Topic → unique consumer hat, populated when a HandoffIndex
+    /// is supplied. Used by `is_macro_edge` for self-loop exclusion
+    /// (KTD-2). Empty when `from_event_loop` is used (no index).
+    pub macro_edge_consumers: HashMap<String, String>,
+
     /// Execution mode (isolated / coordinator). Macro-edge
     /// resolution is only meaningful in isolated mode; the
     /// caller must short-circuit when this is not `Isolated`.
@@ -148,7 +153,7 @@ impl ProtocolView {
         let hat_handoff = config.hat_handoff.clone();
         let execution_mode = config.execution_mode.clone();
 
-        let macro_edges_resolved = resolve_macro_edges(&hat_handoff, index);
+        let (macro_edges_resolved, macro_edge_consumers) = resolve_macro_edges(&hat_handoff, index);
 
         // P2-4: SHA-256 (stable across Rust versions). The previous
         // `DefaultHasher` was Rust-version-dependent and produced
@@ -164,6 +169,7 @@ impl ProtocolView {
             execution_contracts,
             hat_handoff,
             macro_edges_resolved,
+            macro_edge_consumers,
             execution_mode,
             protocol_hash,
         }
@@ -200,24 +206,31 @@ impl ProtocolView {
         if !matches!(self.execution_mode, HatExecutionMode::Isolated) {
             return false;
         }
+        // Orchestrator control and diagnostic topics are never macro edges
+        // (they are loop-internal signals, not hat-to-hat handoffs).
+        if crate::event_origin::is_orchestrator_control_topic(topic, "")
+            || crate::event_origin::is_orchestrator_diagnostic_topic(topic)
+        {
+            return false;
+        }
         if self.hat_handoff.is_exempt(topic) {
             return false;
         }
         if !self.macro_edges_resolved.contains(topic) {
             return false;
         }
-        // Self-loop exclusion (KTD-2). The runtime version
-        // reads the HandoffIndex's `consumer_of`; here we
-        // rely on the fact that the runtime consults the same
-        // resolved set we did, so a `true` from us is a `true`
-        // there too. When the caller supplies `from_hat`, the
-        // precise per-edge consumer check is performed by the
-        // runtime gate; the engine returns `true` when the
-        // topic is in the resolved set and the caller did
-        // not signal a self-loop.
+        // Self-loop exclusion (KTD-2). When the caller supplies
+        // `from_hat`, compare it with the unique consumer for this
+        // topic. If they match, this is a self-loop and NOT a macro
+        // edge (the handoff stays within the same hat).
         if let Some(from) = from_hat {
             if from.is_empty() {
                 return false;
+            }
+            if let Some(consumer) = self.macro_edge_consumers.get(topic) {
+                if from == consumer {
+                    return false;
+                }
             }
         }
         true
@@ -234,19 +247,24 @@ impl ProtocolView {
 ///   `HandoffIndex::consumer_of` is the same one
 ///   `requires_handoff` consults, so this function is the
 ///   engine's mirror of KTD-2.
+///
+/// Returns `(macro_edges, consumer_map)` where `consumer_map`
+/// holds `topic → consumer_hat` for self-loop exclusion.
 fn resolve_macro_edges(
     hat_handoff: &HatHandoffConfig,
     index: Option<&HandoffIndex>,
-) -> HashSet<String> {
-    let mut out: HashSet<String> = hat_handoff.macro_topics.iter().cloned().collect();
+) -> (HashSet<String>, HashMap<String, String>) {
+    let mut edges: HashSet<String> = hat_handoff.macro_topics.iter().cloned().collect();
+    let mut consumers: HashMap<String, String> = HashMap::new();
     if let Some(idx) = index {
         for topic in idx.topics() {
-            if idx.consumer_of(&topic).is_some() {
-                out.insert(topic);
+            if let Some(consumer) = idx.consumer_of(&topic) {
+                edges.insert(topic.clone());
+                consumers.insert(topic.clone(), consumer.to_string());
             }
         }
     }
-    out
+    (edges, consumers)
 }
 
 /// Join `event_policy.schemas[topic].required_fields` with
@@ -531,6 +549,31 @@ event_loop:
         assert_ne!(
             v1.protocol_hash, v2.protocol_hash,
             "protocol hash must reflect linter.auto_prepare_on_macro_edge"
+        );
+    }
+
+    /// P0-1: self-loop exclusion. When from_hat == consumer_of(topic),
+    /// the edge is NOT a macro edge (the handoff stays within the same hat).
+    #[test]
+    fn is_macro_edge_excludes_self_loop() {
+        let cfg = minimal_config();
+        let index = HandoffIndex::from_config(&cfg);
+        let view = ProtocolView::from_event_loop_with_index(&cfg.event_loop, Some(&index));
+        // Verify the consumer map is populated correctly for self-loop exclusion.
+        assert_eq!(
+            view.macro_edge_consumers.get("work.ready"),
+            Some(&"executor".to_string()),
+            "work.ready consumer must be executor"
+        );
+        assert_eq!(
+            view.macro_edge_consumers.get("work.done"),
+            Some(&"reviewer".to_string()),
+            "work.done consumer must be reviewer"
+        );
+        // Self-loop: from_hat == consumer should return false.
+        assert!(
+            !view.is_macro_edge("work.ready", Some("executor")),
+            "self-loop (executor -> work.ready -> executor) must NOT be a macro edge"
         );
     }
 }

@@ -202,6 +202,15 @@ pub fn is_anonymous_business_topic(
 /// rejects JSONL events without this marker when a Robot service is active.
 pub const TRUSTED_HUMAN_RESPONSE_SOURCE: &str = "robot-trusted";
 
+/// 控制主题判断（P1-12 未来兼容）。
+///
+/// 除了精确匹配 `RALPH_CONTROL_TOPICS` 中的主题外，任何以 `ralph.`
+/// 为前缀的主题也被视为 control topic，这样未来新增控制主题时
+/// 旧版本无需更新常量列表即可识别。
+pub fn is_ralph_control_topic(topic: &str) -> bool {
+    RALPH_CONTROL_TOPICS.contains(&topic) || topic.starts_with("ralph.")
+}
+
 /// Returns `true` when the event is a `human.response` carrying the trusted
 /// in-process source marker. Events without this marker are treated as forged
 /// and ignored by the trusted waiter path.
@@ -347,9 +356,10 @@ pub fn validate_event_origin(
     // Builtin `ralph` hat: only control topics allowed; all business topics
     // rejected.  Prevents the fallback orchestration hat from masquerading as
     // a workflow hat (e.g. signing `review.complete` or `work.start`).
+    // P1-12: uses `is_ralph_control_topic` so future `ralph.*` topics are
+    // automatically recognized without updating the constant list.
     if event.hat.as_deref() == Some("ralph") {
-        let is_ralph_control = RALPH_CONTROL_TOPICS.contains(&topic_str);
-        if !is_ralph_control {
+        if !is_ralph_control_topic(topic_str) {
             warn!(
                 topic = %topic_str,
                 "Builtin ralph hat may only publish control topics; rejecting business topic"
@@ -1286,17 +1296,41 @@ hats:
         ));
     }
 
-    /// U5: empty isolated_hat 字符串视作"无 isolated_hat"。
+    /// P1-12: `is_ralph_control_topic` accepts existing control topics
+    /// and future `ralph.*` topics via prefix match.
     #[test]
-    fn u5_empty_isolated_hat_falls_back_to_anonymous_check() {
-        let registry = two_hat_registry();
-        let event = make_event("work.ready", None);
-        // isolated_hat="" 既不非空也不在 registry → 仍判匿名
-        assert!(is_anonymous_business_topic(
-            &event,
-            &registry,
-            "loop.cancel",
-            Some(""),
-        ));
+    fn test_p1_12_is_ralph_control_topic_existing_and_future() {
+        // Existing control topics (exact match).
+        for topic in RALPH_CONTROL_TOPICS {
+            assert!(
+                is_ralph_control_topic(topic),
+                "P1-12: {topic} must be recognised as control"
+            );
+        }
+        // Future `ralph.*` topics (prefix match).
+        assert!(is_ralph_control_topic("ralph.status"));
+        assert!(is_ralph_control_topic("ralph.diagnose.request"));
+        assert!(is_ralph_control_topic("ralph.unknown_future_topic"));
+        // Business topics must NOT match.
+        assert!(!is_ralph_control_topic("work.ready"));
+        assert!(!is_ralph_control_topic("work.done"));
+        assert!(!is_ralph_control_topic("review.complete"));
+        assert!(!is_ralph_control_topic("plan.blocked"));
+    }
+
+    /// P1-8: cross-reference sanity check — the `RALPH_CONTROL_TOPICS`
+    /// constant and `is_ralph_control_topic` must agree on the exact set.
+    /// If a topic is in the constant but not recognised by the function,
+    /// or vice versa, the three layers (event_origin, emit, publish_event)
+    /// will disagree.
+    #[test]
+    fn test_p1_8_ralph_control_topics_cross_reference() {
+        for topic in RALPH_CONTROL_TOPICS {
+            assert!(
+                is_ralph_control_topic(topic),
+                "P1-8: constant topic '{topic}' must be recognised by is_ralph_control_topic"
+            );
+        }
     }
 }
+

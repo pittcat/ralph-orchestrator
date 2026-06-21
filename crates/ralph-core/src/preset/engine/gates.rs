@@ -158,11 +158,16 @@ impl GateContext for LintContext {
 /// function is used by lint (`LintContext`) and runtime (custom
 /// stateful contexts). The decision is derived from the
 /// `ProtocolView` so the two layers cannot diverge.
+///
+/// `from_hat` is the hat emitting the event; `None` when the caller
+/// does not have hat information (e.g. lint phase). Used for self-loop
+/// exclusion in the macro-edge handoff-path check.
 pub fn run_gates<C: GateContext>(
     view: &ProtocolView,
     ctx: &C,
     topic: &str,
     payload: &Value,
+    from_hat: Option<&str>,
 ) -> GateDecision {
     if !ctx.is_applicable(topic) {
         return GateDecision::Accept;
@@ -173,6 +178,17 @@ pub fn run_gates<C: GateContext>(
             message: rej.message,
         };
     }
+
+    // Handoff artifact check: macro edge must carry a non-empty handoff_path.
+    if view.is_macro_edge(topic, from_hat) && !has_handoff_path(payload) {
+        return GateDecision::Reject {
+            kind: RejectionKind::HandoffArtifact,
+            message: format!(
+                "macro edge '{topic}' requires payload field 'handoff_path'; use `ralph tools handoff prepare`"
+            ),
+        };
+    }
+
     let required = view.required_fields(topic);
     let missing = missing_fields(&required, payload);
     if !missing.is_empty() {
@@ -185,6 +201,18 @@ pub fn run_gates<C: GateContext>(
         };
     }
     GateDecision::Accept
+}
+
+fn has_handoff_path(payload: &Value) -> bool {
+    match payload {
+        Value::Object(map) => map
+            .get("handoff_path")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
+        Value::String(s) => crate::hat_handoff::payload::extract_handoff_path(s).is_some(),
+        _ => false,
+    }
 }
 
 /// Compute the set difference: `required - present_in_payload`.
@@ -215,6 +243,7 @@ mod tests {
             execution_contracts: Some(ExecutionContractsConfig::default()),
             hat_handoff: HatHandoffConfig::default(),
             macro_edges_resolved: HashSet::new(),
+            macro_edge_consumers: HashMap::new(),
             execution_mode: crate::config::HatExecutionMode::default(),
             protocol_hash: "0".to_string(),
         }
@@ -223,7 +252,7 @@ mod tests {
     #[test]
     fn accept_when_no_required_fields() {
         let view = empty_view();
-        let decision = run_gates(&view, &LintContext, "any", &json!({}));
+        let decision = run_gates(&view, &LintContext, "any", &json!({}), None);
         assert_eq!(decision, GateDecision::Accept);
     }
 
@@ -235,7 +264,7 @@ mod tests {
         reqs.insert("step".to_string());
         view.effective_required_fields
             .insert("work.done".to_string(), reqs);
-        let decision = run_gates(&view, &LintContext, "work.done", &json!({}));
+        let decision = run_gates(&view, &LintContext, "work.done", &json!({}), None);
         match decision {
             GateDecision::Reject { kind, message } => {
                 assert_eq!(kind, RejectionKind::MissingField);
@@ -258,6 +287,70 @@ mod tests {
             &LintContext,
             "work.done",
             &json!({"plan_name": "x", "step": "s"}),
+            None,
+        );
+        assert_eq!(decision, GateDecision::Accept);
+    }
+
+    /// P1-1: handoff artifact rejection — macro edge without
+    /// handoff_path is rejected with HandoffArtifact kind.
+    #[test]
+    fn reject_macro_edge_without_handoff_path() {
+        let mut view = empty_view();
+        view.execution_mode = crate::config::HatExecutionMode::Isolated;
+        view.hat_handoff.enabled = true;
+        view.macro_edges_resolved.insert("work.done".to_string());
+        let decision = run_gates(
+            &view,
+            &LintContext,
+            "work.done",
+            &json!({"plan_name": "x", "step": "s"}),
+            None,
+        );
+        match decision {
+            GateDecision::Reject { kind, message } => {
+                assert_eq!(kind, RejectionKind::HandoffArtifact);
+                assert!(message.contains("handoff_path"));
+            }
+            other => panic!("expected Reject, got {other:?}"),
+        }
+    }
+
+    /// P1-1: macro edge with handoff_path is accepted (missing-field
+    /// check still runs after the artifact check, but here all fields
+    /// are present).
+    #[test]
+    fn accept_macro_edge_with_handoff_path() {
+        let mut view = empty_view();
+        view.execution_mode = crate::config::HatExecutionMode::Isolated;
+        view.hat_handoff.enabled = true;
+        view.macro_edges_resolved.insert("work.done".to_string());
+        let decision = run_gates(
+            &view,
+            &LintContext,
+            "work.done",
+            &json!({"plan_name": "x", "step": "s", "handoff_path": ".ralph/handoff/test.md"}),
+            None,
+        );
+        assert_eq!(decision, GateDecision::Accept);
+    }
+
+    /// P1-1: self-loop exclusion — when from_hat == consumer, the
+    /// edge is NOT a macro edge even if the topic is in the resolved set.
+    #[test]
+    fn accept_self_loop_even_without_handoff_path() {
+        let mut view = empty_view();
+        view.execution_mode = crate::config::HatExecutionMode::Isolated;
+        view.hat_handoff.enabled = true;
+        view.macro_edges_resolved.insert("work.ready".to_string());
+        view.macro_edge_consumers
+            .insert("work.ready".to_string(), "executor".to_string());
+        let decision = run_gates(
+            &view,
+            &LintContext,
+            "work.ready",
+            &json!({"plan_name": "x"}),
+            Some("executor"),
         );
         assert_eq!(decision, GateDecision::Accept);
     }
