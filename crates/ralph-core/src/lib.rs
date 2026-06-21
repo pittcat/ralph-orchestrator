@@ -14,6 +14,10 @@ pub mod agent_doc_sync;
 #[cfg(feature = "recording")]
 mod cli_capture;
 pub mod config;
+/// U7a deterministic-correction injection — replaces
+/// `task.resume` events on the policy rejection path with
+/// in-prompt `## ORCHESTRATOR CORRECTION` blocks.
+pub mod correction;
 pub mod diagnosis;
 pub mod diagnostics;
 pub mod drift;

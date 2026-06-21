@@ -37,11 +37,20 @@ mod tests;
 
 mod commit;
 mod ledger;
+/// U7a persistent rejection log — `.ralph/recovery.jsonl` writer
+/// for the deterministic-correction path.  Mirrors the
+/// diagnostics `recovery.jsonl` line shape but lives at the
+/// workspace root so it survives `RALPH_DIAGNOSTICS=0`.
+pub mod recovery_log;
 mod snapshot;
 
 pub use commit::{Commit, CommitDelta, TaskTransition};
 pub use ledger::{
     read_commit_log, HandoffAcceptedInputs, HandoffCommitOutcome, LedgerError, StateLedger,
     LEDGER_RELATIVE_PATH,
+};
+pub use recovery_log::{
+    append_rejection, read_rejection_log, recovery_log_path, retry_count_for, RejectionRecord,
+    RECOVERY_LOG_RELATIVE_PATH,
 };
 pub use snapshot::{LedgerSnapshot, ObligationTriggerRecord, SerializedLintResumeHint};

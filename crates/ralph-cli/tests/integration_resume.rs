@@ -364,3 +364,42 @@ This scratchpad contains UNIQUE_CONTENT_MARKER for testing.
 
     Ok(())
 }
+
+// U7b (plan 2026-06-21-002): pin the contract that
+// `loop.resume` and `task.resume` topic constants are
+// stable.  This is a cheap unit-level test that does not
+// spawn the CLI; the full `--continue` integration test
+// (above) is what actually exercises the resume boot path.
+#[test]
+fn u7b_resume_topic_constants_are_stable() {
+    // The new control topic (used when
+    // `UNIFIED_DETERMINISTIC_CORRECTION=1`) is exposed in
+    // the ralph-proto API.
+    assert_eq!(ralph_proto::LOOP_RESUME, "loop.resume");
+    // The legacy resume topic remains the default boot
+    // event when the feature flag is off.
+    assert_eq!(ralph_proto::TASK_RESUME, "task.resume");
+    // Both topics are recognised as orchestrator control
+    // topics (so the origin guard lets them through).
+    assert!(ralph_proto::is_orchestrator_control(ralph_proto::LOOP_RESUME));
+    assert!(ralph_proto::is_orchestrator_control(ralph_proto::TASK_RESUME));
+}
+
+#[test]
+fn u7b_resume_block_renders_loop_metadata() {
+    // Pure unit test for the U7b `ResumeContext` rendering
+    // shape — no CLI spawn, no tempdir.
+    let rc = ralph_core::correction::ResumeContext::new(
+        "loop-xyz",
+        5,
+        "5/10 done",
+        12,
+        "scout -> plan",
+    );
+    let block = rc.render_block();
+    assert!(block.contains("Loop ID: loop-xyz"));
+    assert!(block.contains("Closed tasks: 5"));
+    assert!(block.contains("Last iteration: 12"));
+    assert!(block.contains("Progress summary: 5/10 done"));
+    assert!(block.contains("Scratchpad headline: scout -> plan"));
+}

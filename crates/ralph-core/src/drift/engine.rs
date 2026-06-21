@@ -421,6 +421,16 @@ impl DriftEngine {
 /// The `target` field is used by the bus's `targeted` routing
 /// path so the event reaches the right hat even when the
 /// recipient has a narrow `default_publishes` set.
+///
+/// **Deprecated (U7a, plan 2026-06-21-002).**  When the
+/// `UNIFIED_DETERMINISTIC_CORRECTION=1` env var is set, the
+/// drift engine should call
+/// [`crate::correction::emit_correction_context`] instead and
+/// let the loop runner prepend the `## ORCHESTRATOR CORRECTION`
+/// block to the next prompt.  U9 will migrate the drift engine
+/// to the new API; this function is preserved so the existing
+/// tests under `loop_runner/tests.rs` keep passing with the
+/// feature flag off.
 fn publish_hard_recovery_event(
     event_loop: &mut EventLoop,
     action: &crate::diagnosis::RecoveryAction,

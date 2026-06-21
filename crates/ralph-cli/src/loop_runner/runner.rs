@@ -2478,6 +2478,17 @@ async fn run_loop_impl_inner(
                     // targets the last active hat (or the generic
                     // "ralph" fallback when there is none); the
                     // `safe_target` flag follows the same rule.
+                    //
+                    // **U7b (plan 2026-06-21-002):** the
+                    // `inject_fallback_event` path is preserved
+                    // for backwards compatibility (the feature
+                    // flag `UNIFIED_DETERMINISTIC_CORRECTION`
+                    // is off by default). When the flag is on,
+                    // stall recovery should inject a
+                    // [`crate::correction::CorrectionContext`]
+                    // block in the next hat prompt instead of
+                    // publishing `task.resume`; U9 will migrate
+                    // the production code to the new API.
                     let fallback_hat_id = event_loop
                         .state()
                         .last_hat

@@ -49,6 +49,11 @@ mod task_resume_ttl;
 mod termination;
 mod text_fallback;
 mod topic_format_recovery;
+/// U7a / U7b (plan 2026-06-21-002): deterministic-correction
+/// integration tests for the `CorrectionContext` /
+/// `ResumeContext` prompt injection path.  See
+/// `correction::tests` for unit-level coverage.
+mod u7_correction;
 mod wave_context_env_var;
 mod wave_context_injection;
 mod wave_isolated_scope;

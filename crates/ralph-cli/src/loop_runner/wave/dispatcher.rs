@@ -551,6 +551,16 @@ pub async fn handle_wave_events(
                 // a single `write_all` (no separate
                 // `inject_dimension_retry_task_resume` file
                 // open / `writeln!` interleaving — fixes P0#4).
+                //
+                // **U7b (plan 2026-06-21-002):** the
+                // `pending_task_resumes` path is preserved for
+                // backwards compatibility (the feature flag
+                // `UNIFIED_DETERMINISTIC_CORRECTION` is off by
+                // default). When the flag is on, dimension
+                // mismatch should be expressed as a
+                // [`crate::correction::CorrectionContext`] block
+                // in the next hat prompt; U9 will migrate the
+                // production code to the new API.
                 let (mismatch_info, pending_task_resumes) = match merge_wave_results_to_events_file(
                     &completed,
                     &main_events_file,

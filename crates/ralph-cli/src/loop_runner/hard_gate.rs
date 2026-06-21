@@ -220,6 +220,17 @@ pub fn handle_execution_contract_rejections(
         // EventLoop owns publication of the targeted `task.resume`; this
         // layer only observes that routing and records diagnostics.
         //
+        // **U7b (plan 2026-06-21-002):** the
+        // `task.resume`-from-hard-gate path is preserved for
+        // backwards compatibility (the feature flag
+        // `UNIFIED_DETERMINISTIC_CORRECTION` is off by default).
+        // When the flag is on, contract rejections should
+        // populate a
+        // [`crate::correction::CorrectionContext`] on
+        // `state.prompt_context` instead of relying on
+        // `task.resume`; U9 will migrate the production code to
+        // the new API.
+        //
         // Provenance priority:
         //   1. `finding.source_hat` — stamped onto the finding by
         //      `validate_execution_contract` from the original JSONL

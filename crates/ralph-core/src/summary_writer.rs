@@ -575,6 +575,10 @@ mod tests {
             // is opt-in. The test fixture stays on the legacy
             // path by default.
             state_ledger: None,
+            // U7a (plan 2026-06-21-002): deterministic
+            // correction queue. Empty by default so the
+            // existing test path stays green.
+            prompt_context: crate::correction::PromptContext::default(),
         }
     }
 

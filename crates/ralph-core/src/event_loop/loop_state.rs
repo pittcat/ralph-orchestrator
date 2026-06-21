@@ -485,6 +485,19 @@ pub struct LoopState {
     /// commits through this ledger instead of the legacy
     /// `StateProjector::ProjectionContext` in-memory trackers.
     pub state_ledger: Option<crate::state::StateLedger>,
+
+    /// U7a (plan 2026-06-21-002): deterministic correction
+    /// queue.  The loop runner writes a [`CorrectionContext`]
+    /// here whenever a recoverable rejection fires
+    /// (`publish_policy_rejection_resume` internal hook);
+    /// the next `build_prompt` reads the queue and prepends the
+    /// `## ORCHESTRATOR CORRECTION` block to the prompt.
+    ///
+    /// U7a scope: only populated when the
+    /// `UNIFIED_DETERMINISTIC_CORRECTION=1` env var is set.
+    /// Default `Default::default()` is empty so the legacy
+    /// `task.resume` injection path keeps working.
+    pub prompt_context: crate::correction::PromptContext,
 }
 impl Default for LoopState {
     fn default() -> Self {
@@ -592,6 +605,11 @@ impl Default for LoopState {
             // `UNIFIED_STATE_LEDGER=1` and wires the ledger in
             // for opted-in runs.
             state_ledger: None,
+            // U7a: deterministic-correction queue. Empty by
+            // default so the legacy `task.resume` injection
+            // path keeps working. Populated only when
+            // `UNIFIED_DETERMINISTIC_CORRECTION=1`.
+            prompt_context: crate::correction::PromptContext::default(),
         }
     }
 }

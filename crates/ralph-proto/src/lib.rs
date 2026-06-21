@@ -17,6 +17,10 @@ mod hat;
 pub mod json_rpc;
 pub mod robot;
 mod topic;
+/// U7b: well-known event topic constants.  The new
+/// `LOOP_RESUME` constant replaces the legacy `task.resume`
+/// boot event on `--continue`.
+pub mod topics;
 mod ux_event;
 
 pub use daemon::{DaemonAdapter, StartLoopFn};
@@ -30,6 +34,10 @@ pub use json_rpc::{
 };
 pub use robot::{CheckinContext, RobotService};
 pub use topic::Topic;
+pub use topics::{
+    is_orchestrator_control, EVENT_ISOLATION_BOUNDARY_VIOLATION, HUMAN_GUIDANCE, LOOP_CANCEL,
+    LOOP_COMPLETE, LOOP_RESUME, TASK_RESUME,
+};
 pub use ux_event::{
     FrameCapture, TerminalColorMode, TerminalResize, TerminalWrite, TuiFrame, UxEvent,
 };

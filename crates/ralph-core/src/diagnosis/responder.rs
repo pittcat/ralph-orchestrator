@@ -49,6 +49,7 @@ use super::envelope::{
 };
 use super::journal::DriftMetric;
 use crate::config::RuntimeDiagnosisConfig;
+use crate::event_loop::rejection::extract_reason_code;
 
 /// Minimum number of accepted-event samples the responder needs
 /// to re-evaluate an `EmitCadence` finding. Mirrors
@@ -154,6 +155,44 @@ pub struct RecoveryAction {
     pub attempt: u32,
     /// The current severity bucket.
     pub severity: DiagnosisSeverity,
+}
+
+impl RecoveryAction {
+    /// U7a (plan 2026-06-21-002): convert a [`RecoveryAction`]
+    /// into a [`crate::correction::CorrectionContext`].  Used
+    /// by the drift engine's `drain_hard_escalations` path
+    /// when `UNIFIED_DETERMINISTIC_CORRECTION=1` — the
+    /// resulting context goes into
+    /// `LoopState::prompt_context` instead of triggering a
+    /// `task.resume` event on the bus.
+    ///
+    /// The `attempt` counter maps to `retry_count`; the
+    /// R11 tripwire (`needs_escalation`) flips at the
+    /// default 3-attempt threshold.
+    pub fn to_correction_context(&self) -> crate::correction::CorrectionContext {
+        let reason_code = format!(
+            "recovery:{}",
+            extract_reason_code(&self.retry_key)
+        );
+        let escalation_threshold = 3;
+        crate::correction::CorrectionContext {
+            reason_code,
+            stage: "drift".to_string(),
+            topic: self.topic_hint.clone().unwrap_or_default(),
+            source_hat: Some(self.target_hat.as_str().to_string()),
+            retry_key: self.retry_key.clone(),
+            retry_count: self.attempt,
+            escalation_threshold,
+            needs_escalation: self.attempt >= escalation_threshold,
+            last_message: format!(
+                "drift hard escalation: retry_key={}",
+                self.retry_key
+            ),
+            expected_payload_template: String::new(),
+            allowed_topics: Vec::new(),
+            required_fields: Vec::new(),
+        }
+    }
 }
 
 /// Advisory hint for the loop runner. The runner is free to ignore

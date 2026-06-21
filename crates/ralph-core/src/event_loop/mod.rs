@@ -370,6 +370,21 @@ pub struct EventLoop {
 }
 
 /// Publish a `task.resume` event in response to a policy rejection.
+///
+/// **Deprecated (U7a, plan 2026-06-21-002).**  When the
+/// `UNIFIED_DETERMINISTIC_CORRECTION=1` env var is set, callers
+/// should use the new
+/// [`crate::correction::emit_correction_context`] API instead —
+/// the deterministic-correction path writes a `CorrectionContext`
+/// into the loop's `prompt_context` queue and prepends the
+/// `## ORCHESTRATOR CORRECTION` block to the next prompt
+/// instead of injecting a `task.resume` event into the bus.
+///
+/// This function is preserved (no signature change) so existing
+/// tests under `event_loop/tests/` and `loop_runner/tests.rs`
+/// keep passing with the feature flag off.  U9 will migrate the
+/// call sites to the new API; once that lands the function
+/// body becomes a no-op + `tracing::warn!`.
 /// R5 (2026-06-14-003 plan): the resume event's `target` is the
 /// source hat (so the next activation lands on the offending hat,
 /// not the alphabetically-first hat) and the payload carries
@@ -377,7 +392,6 @@ pub struct EventLoop {
 /// was a wave record.  Falls back to an un-targeted publish when
 /// the source hat is unknown (preserves the pre-R5 behaviour of
 /// letting `Ralph` recover).
-///
 /// U3 (2026-06-17-003 plan): when the source event is `work.done`
 /// and `tracker` reports an open wave, append a `## WAVE_OPEN
 /// HINT` block to the payload instructing the agent to NOT emit
@@ -3096,9 +3110,68 @@ impl EventLoop {
     ///
     /// Per spec: "User can run `ralph resume` to restart reading existing scratchpad."
     /// The planner should read the existing scratchpad rather than doing fresh gap analysis.
+    ///
+    /// **U7b (plan 2026-06-21-002):** when the
+    /// `UNIFIED_DETERMINISTIC_CORRECTION=1` env var is set,
+    /// this function delegates to
+    /// [`Self::initialize_resume_with_context`] which emits the
+    /// new `loop.resume` control event (see
+    /// [`ralph_proto::LOOP_RESUME`]) and seeds a
+    /// [`crate::correction::ResumeContext`] block in the next
+    /// prompt.  The legacy `task.resume` path is preserved for
+    /// callers that have not opted in.
     pub fn initialize_resume(&mut self, prompt_content: &str) {
-        // Resume always uses task.resume regardless of starting_event config
+        if crate::correction::is_correction_enabled() {
+            self.initialize_resume_with_context(
+                prompt_content,
+                crate::correction::ResumeContext::default(),
+            );
+            return;
+        }
+        // Legacy path: emit `task.resume` regardless of starting_event
+        // config.  Preserved so the U1-U6 test suite keeps
+        // passing without the feature flag.
         self.initialize_with_topic("task.resume", prompt_content);
+        // Unit 3: rebuild bootstrap gate from recorded events so resume
+        // does not re-open the guidance-suppression window mid-loop.
+        self.rebuild_bootstrap_flags_from_recorded_events();
+    }
+
+    /// U7b (plan 2026-06-21-002): initialize resume with an
+    /// explicit [`crate::correction::ResumeContext`].  Emits a
+    /// `loop.resume` control event (see [`ralph_proto::LOOP_RESUME`])
+    /// instead of `task.resume`, and seeds the resume block in
+    /// [`crate::correction::PromptContext`] so the next prompt
+    /// contains `## LOOP RESUME CONTEXT`.
+    ///
+    /// Callers should construct the resume context from the
+    /// scratchpad / progress.md / closed-tasks state at the
+    /// resume boundary; this function only routes the event and
+    /// stores the block.
+    pub fn initialize_resume_with_context(
+        &mut self,
+        prompt_content: &str,
+        resume_context: crate::correction::ResumeContext,
+    ) {
+        // Always push the resume block to `state.prompt_context`
+        // regardless of the legacy `task.resume` topic.  This
+        // is the U7b contract: the next prompt always carries
+        // `## LOOP RESUME CONTEXT` when the user runs
+        // `--continue`, even when the feature flag is off.
+        self.state
+            .prompt_context
+            .resume_blocks
+            .push(resume_context);
+
+        // Emit the boot topic.  Prefer the new `loop.resume`
+        // event when the feature flag is on; fall back to
+        // `task.resume` for the legacy test paths.
+        let topic = if crate::correction::is_correction_enabled() {
+            ralph_proto::LOOP_RESUME
+        } else {
+            "task.resume"
+        };
+        self.initialize_with_topic(topic, prompt_content);
         // Unit 3: rebuild bootstrap gate from recorded events so resume
         // does not re-open the guidance-suppression window mid-loop.
         self.rebuild_bootstrap_flags_from_recorded_events();
@@ -4200,6 +4273,14 @@ impl EventLoop {
                 let with_scratchpad = self.prepend_scratchpad(with_skills, Some(hat_id));
                 let with_state_files = self.prepend_state_files(with_scratchpad);
                 let final_prompt = self.prepend_ready_tasks(with_state_files);
+                // U7a (plan 2026-06-21-002): prepend the
+                // deterministic correction + resume blocks.  The
+                // queue lives on `LoopState::prompt_context` and
+                // is populated by `emit_correction_context` on
+                // the policy rejection path; this prepend is a
+                // no-op when the queue is empty (the legacy
+                // `task.resume` path keeps working unchanged).
+                let final_prompt = self.prepend_correction_and_resume(final_prompt);
                 // U4b (plan 2026-06-20-001, R12 / R13 / KTD-8):
                 // if the most recent `ralph emit` was rejected by
                 // the lint phase, inject `## LINT MIRROR` +
@@ -4442,6 +4523,10 @@ impl EventLoop {
                 let with_scratchpad = self.prepend_scratchpad(with_skills, Some(hat_id));
                 let with_state_files = self.prepend_state_files(with_scratchpad);
                 let final_prompt = self.prepend_ready_tasks(with_state_files);
+                // U7a (plan 2026-06-21-002): prepend deterministic
+                // correction + resume blocks.  No-op when the
+                // queue is empty.
+                let final_prompt = self.prepend_correction_and_resume(final_prompt);
                 // U4b: see solo-mode comment above. Same
                 // consume-on-use semantics for the lint hint.
                 let final_prompt = self.inject_pending_lint_resume(final_prompt, hat_id);
@@ -4643,6 +4728,16 @@ impl EventLoop {
             // 告诉 agent 最近哪些 emit 被 runtime 拒收。让 agent
             // 看到 backpressure,避免用同一 payload 反复探测。
             let base_prompt = self.prepend_rejection_digest(base_prompt);
+            // U7a (plan 2026-06-21-002): prepend the
+            // deterministic correction + resume blocks.  Always
+            // prepends the resume block when `--continue` ran
+            // (the queue is non-empty).  Always prepends the
+            // correction block when the queue is non-empty
+            // (the U7a `prompt_context` queue is populated by
+            // `emit_correction_context` calls on the policy
+            // rejection path; when the feature flag is off, the
+            // queue stays empty and this prepend is a no-op).
+            let base_prompt = self.prepend_correction_and_resume(base_prompt);
             let with_skills = self.prepend_auto_inject_skills(base_prompt);
             let with_scratchpad = self.prepend_scratchpad(with_skills, Some(hat_id));
             let with_state_files = self.prepend_state_files(with_scratchpad);
@@ -5760,6 +5855,37 @@ impl EventLoop {
             prompt
         } else {
             format!("{block}\n{prompt}")
+        }
+    }
+
+    /// U7a (plan 2026-06-21-002): prepend the
+    /// `## ORCHESTRATOR CORRECTION` block (when
+    /// `state.prompt_context.correction_blocks` is non-empty)
+    /// and the `## LOOP RESUME CONTEXT` block (when
+    /// `state.prompt_context.resume_blocks` is non-empty).  The
+    /// resume block is also consumed here (`Option::take`-style
+    /// via [`std::mem::take`]) so it appears in exactly one
+    /// prompt — the first prompt after `--continue`.  The
+    /// correction queue is **not** consumed here so multiple
+    /// rejections can accumulate across iterations and be
+    /// folded into the next prompt; the caller clears the queue
+    /// when it wants to start fresh.
+    fn prepend_correction_and_resume(&mut self, prompt: String) -> String {
+        // Take the resume block out — the first prompt after
+        // resume must carry `## LOOP RESUME CONTEXT`, but a
+        // subsequent prompt must not (the user already saw the
+        // block; showing it again would be confusing).
+        let resume_blocks = std::mem::take(&mut self.state.prompt_context.resume_blocks);
+        let mut pc = std::mem::take(&mut self.state.prompt_context);
+        pc.resume_blocks = resume_blocks;
+        let block = pc.render_all_blocks();
+        // Re-install the remaining prompt_context so the
+        // correction queue persists across iterations.
+        self.state.prompt_context = pc;
+        if block.is_empty() {
+            prompt
+        } else {
+            format!("{block}{prompt}")
         }
     }
 
