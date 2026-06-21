@@ -586,6 +586,568 @@ pub fn check_hat_handoff_gate_with_env(
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// U6 (2026-06-21-002 plan §U6): unified policy check path.
+//
+// `run_policy_check_unified` runs the U4 `ValidationPipeline` over an
+// event (the same pipeline the loop uses via `process_parse_result`)
+// and produces a `PolicyCheckReport` with structured `reason_codes`.
+// The CLI switches from the legacy `validate_event_with_hat` path to
+// the unified path when either `--policy-check-unified` is passed or
+// the `UNIFIED_POLICY_CHECK=1` env var is set. The legacy path
+// remains the default for backwards compatibility (U6 / HARD RULE 2:
+// no behavior change for existing scripts).
+//
+// Why a separate `PolicyCheckReport` instead of the existing
+// `ValidationFailure`? `ValidationFailure` is a single-failure shape
+// tailored to the legacy batch validator; the unified pipeline
+// reports one `ValidationResult` per rule (pre + post commit), so the
+// new report carries a *list* of `reason_codes` plus a parallel
+// `suggestions` list (one human-readable hint per rejection).
+// Agents parsing `--output json` get a single document they can diff
+// against the legacy shape.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Structured report returned by [`run_policy_check_unified`].
+///
+/// `accepted == true` means every U4 rule (pre + post commit) accepted
+/// the event; `reason_codes` is empty. On rejection, `reason_codes` lists
+/// one string per failed rule, in pipeline order, and `suggestions`
+/// carries the matching `correction_hint` values (or empty strings when
+/// a rule rejected without a hint). The list shape matches the U4
+/// `ValidationReport::pre_commit + post_commit` ordering so callers can
+/// correlate 1:1.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PolicyCheckReport {
+    /// Topic that was validated.
+    pub topic: String,
+    /// Hat that emitted the event (None when unknown).
+    pub hat: Option<String>,
+    /// Workspace root the validation was performed against.
+    pub workspace: PathBuf,
+    /// `true` iff every U4 rule accepted the event.
+    pub accepted: bool,
+    /// Stable reason codes from each failed rule, in pre+post-commit
+    /// pipeline order. Empty when `accepted == true`. Examples:
+    /// `origin:ralph_control_only`, `engine_rejected:required_field:task_id`,
+    /// `step_handoff:progress_task_mismatch:task_closed_but_progress_missing`,
+    /// `hat_handoff:missing_path`.
+    pub reason_codes: Vec<String>,
+    /// Human-readable correction hints, parallel to `reason_codes`.
+    /// Each entry is the `correction_hint` from the matching
+    /// `ValidationResult` (empty string when the rule did not provide
+    /// one).
+    pub suggestions: Vec<String>,
+    /// `true` when at least one rejection came from a post-commit rule.
+    /// The CLI uses this to decide whether to surface a
+    /// "post-state violation" warning distinct from the per-rule hints.
+    pub post_commit_rejected: bool,
+}
+
+impl PolicyCheckReport {
+    /// Convert the report into a JSON `Value` so callers can layer
+    /// their own envelope (e.g. the legacy `ValidationFailure`
+    /// shape). `serde_json::to_value` is used so the report's
+    /// `Serialize` impl stays the single source of truth for the
+    /// agent-facing contract.
+    #[allow(dead_code)] // public API, exposed for downstream tooling
+    pub fn to_json_value(&self) -> serde_json::Result<serde_json::Value> {
+        serde_json::to_value(self)
+    }
+}
+
+/// Build a [`PolicyCheckReport`] from a U4 [`ValidationReport`].
+///
+/// Internal helper so the conversion logic is testable without
+/// re-running the pipeline.
+fn report_from_validation(
+    report: &ralph_core::validation::ValidationReport,
+    topic: &str,
+    hat: Option<&str>,
+    workspace: &Path,
+) -> PolicyCheckReport {
+    let mut reason_codes = Vec::new();
+    let mut suggestions = Vec::new();
+    for r in report.pre_commit.iter().chain(report.post_commit.iter()) {
+        if r.accepted {
+            continue;
+        }
+        let code = r
+            .reason_code
+            .clone()
+            .unwrap_or_else(|| format!("{}:rejected", r.stage));
+        let hint = r.correction_hint.clone().unwrap_or_default();
+        reason_codes.push(code);
+        suggestions.push(hint);
+    }
+    PolicyCheckReport {
+        topic: topic.to_string(),
+        hat: hat.map(|s| s.to_string()),
+        workspace: workspace.to_path_buf(),
+        accepted: report.accepted,
+        reason_codes,
+        suggestions,
+        post_commit_rejected: report.post_commit_rejected,
+    }
+}
+
+/// Run the unified `ValidationPipeline` over a single event and
+/// produce a structured [`PolicyCheckReport`].
+///
+/// This is the U6 entry point that the CLI switches to when
+/// `UNIFIED_POLICY_CHECK=1` (or `--policy-check-unified`) is set.
+/// The function builds a `ProtocolView` + empty `LedgerSnapshot`,
+/// constructs the canonical `ValidationPipeline` (same rules the
+/// loop uses), and runs both pre-commit and post-commit phases
+/// via `validate_with_preview`. The post-commit phase uses the
+/// *current* snapshot as the projected snapshot — the unified
+/// pipeline's `validate_with_preview` is conservative and does
+/// not mutate the caller's snapshot, so a single call is enough
+/// to surface both rule families.
+///
+/// `event_path` is the events JSONL to replay before running the
+/// pipeline. It is used only to satisfy the pipeline's signature
+/// (the post-commit rules need a `LedgerSnapshot`; we use the
+/// cold-start snapshot here because CLI emit runs ahead of the
+/// loop, not against its in-memory state).
+pub fn run_policy_check_unified(
+    topic: &str,
+    payload: Option<&str>,
+    hat: Option<&str>,
+    workspace: &Path,
+) -> Result<PolicyCheckReport> {
+    use ralph_core::preset::engine::protocol::ProtocolView;
+    use ralph_core::state::LedgerSnapshot;
+    use ralph_core::validation::ValidationPipeline;
+    use ralph_core::Event;
+
+    // Load the config to build the protocol view. Reuse the
+    // existing preflight loader so RALPH_HATS_SOURCE, schema
+    // discovery, and the legacy fail-closed rules (C1/C4) all
+    // behave identically. When the workspace has no config we
+    // fall back to a default view (the unified pipeline will
+    // accept everything, mirroring the legacy no-policy default).
+    let workspace_root = resolve_workspace_root(Some(&workspace.to_path_buf()));
+    let config = load_policy_config_for_cli_emit(Some(&workspace_root), OnConfigError::Tolerate)?;
+    let event_loop_config = config
+        .as_ref()
+        .map(|c| c.event_loop.clone())
+        .unwrap_or_default();
+
+    let view = ProtocolView::from_event_loop(&event_loop_config);
+    let pipeline = ValidationPipeline::from_config(&view, &event_loop_config);
+
+    let snapshot = LedgerSnapshot::cold_start();
+    let projected = snapshot.clone();
+
+    let event = Event {
+        topic: topic.to_string(),
+        payload: payload.map(|s| s.to_string()),
+        ts: chrono::Utc::now().to_rfc3339(),
+        hat: hat.map(|s| s.to_string()),
+        triggered: None,
+        source: Some("cli".to_string()),
+        wave_id: None,
+        wave_index: None,
+        wave_total: None,
+        system_injected: None,
+    };
+
+    let report = pipeline.validate_with_preview(&view, &snapshot, &projected, &event);
+    Ok(report_from_validation(
+        &report,
+        topic,
+        hat,
+        &workspace_root,
+    ))
+}
+
+/// Resolve the U6 policy-check mode from CLI flags + env var.
+///
+/// - `--policy-check-unified` → `Unified`
+/// - `--policy-check-compat` → `Compat` (legacy path, default)
+/// - `UNIFIED_POLICY_CHECK=1` env var → `Unified` (when no explicit
+///   compat flag was passed; the env var is the KTD-8 opt-in switch
+///   for staged rollout)
+/// - else → `Compat`
+///
+/// The legacy `resolve_policy_check_mode` continues to decide whether
+/// the *policy enforcement level* is `Skip` / `ExplicitCheck` /
+/// `Enforce`; this new function is the orthogonal "which validator
+/// do we use" switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyCheckPath {
+    /// Use the U6 unified `ValidationPipeline` path.
+    Unified,
+    /// Use the legacy `validate_event_with_hat` path.
+    Compat,
+}
+
+pub struct UnifiedPolicyCheckFlags {
+    /// `--policy-check-unified` flag.
+    pub policy_check_unified: bool,
+    /// `--policy-check-compat` flag.
+    pub policy_check_compat: bool,
+}
+
+pub fn resolve_policy_check_path(
+    flags: &UnifiedPolicyCheckFlags,
+) -> PolicyCheckPath {
+    if flags.policy_check_compat {
+        return PolicyCheckPath::Compat;
+    }
+    if flags.policy_check_unified {
+        return PolicyCheckPath::Unified;
+    }
+    // KTD-8 env-var opt-in. Treated as a hint; an explicit
+    // `--policy-check-compat` flag wins because the env var is
+    // a global default that a CLI user can override.
+    if std::env::var("UNIFIED_POLICY_CHECK")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        return PolicyCheckPath::Unified;
+    }
+    PolicyCheckPath::Compat
+}
+
+#[cfg(test)]
+mod u6_unified_path_tests {
+    use super::*;
+    use ralph_core::validation::{ReasonCode, ValidationResult, ValidationStage};
+    use tempfile::TempDir;
+
+    fn fake_report(pre: Vec<ValidationResult>, post: Vec<ValidationResult>) -> ralph_core::validation::ValidationReport {
+        let accepted = pre.iter().all(|r| r.accepted) && post.iter().all(|r| r.accepted);
+        let post_commit_rejected = post.iter().any(|r| !r.accepted);
+        ralph_core::validation::ValidationReport {
+            pre_commit: pre,
+            post_commit: post,
+            accepted,
+            post_commit_rejected,
+        }
+    }
+
+    #[test]
+    fn report_from_validation_accepts_collects_no_reasons() {
+        let report = fake_report(
+            vec![ValidationResult::accept(), ValidationResult::accept()],
+            vec![ValidationResult::accept()],
+        );
+        let workspace = std::path::PathBuf::from("/tmp/workspace");
+        let out = report_from_validation(&report, "work.done", Some("executor"), &workspace);
+        assert!(out.accepted);
+        assert!(out.reason_codes.is_empty());
+        assert!(out.suggestions.is_empty());
+        assert!(!out.post_commit_rejected);
+        assert_eq!(out.topic, "work.done");
+        assert_eq!(out.hat.as_deref(), Some("executor"));
+    }
+
+    #[test]
+    fn report_from_validation_pre_commit_collects_reason_code_and_hint() {
+        // The unified pipeline emits `step_handoff::<reason>` (the
+        // `STEP_HANDOFF_MISMATCH_PREFIX` constant already ends in
+        // `:`, and the rule appends `<reason>` after another `:`).
+        // Pin the exact shape so the loop ↔ CLI vocabulary stays
+        // in lockstep.
+        let report = fake_report(
+            vec![
+                ValidationResult::accept(),
+                ValidationResult::reject(
+                    ValidationStage::StepHandoff,
+                    format!(
+                        "{}:task_closed_but_progress_missing",
+                        ReasonCode::STEP_HANDOFF_MISMATCH_PREFIX
+                    ),
+                    Some("add progress entry for step".to_string()),
+                    true,
+                ),
+            ],
+            vec![ValidationResult::accept()],
+        );
+        let workspace = std::path::PathBuf::from("/tmp/workspace");
+        let out = report_from_validation(&report, "queue.advance", None, &workspace);
+        assert!(!out.accepted);
+        assert_eq!(out.reason_codes.len(), 1);
+        assert_eq!(
+            out.reason_codes[0],
+            "step_handoff::task_closed_but_progress_missing"
+        );
+        assert_eq!(out.suggestions[0], "add progress entry for step");
+        assert!(!out.post_commit_rejected);
+    }
+
+    #[test]
+    fn report_from_validation_post_commit_rejection_sets_flag() {
+        use ralph_core::validation::RejectionHint;
+        let report = fake_report(
+            vec![ValidationResult::accept()],
+            vec![ValidationResult::reject(
+                ValidationStage::ExecutionContract,
+                ReasonCode::CONTRACT_MISSING_TASK_ID,
+                Some(RejectionHint::missing_task_id("task_id")),
+                true,
+            )],
+        );
+        let workspace = std::path::PathBuf::from("/tmp/workspace");
+        let out = report_from_validation(&report, "work.done", Some("executor"), &workspace);
+        assert!(!out.accepted);
+        assert!(out.post_commit_rejected);
+        assert_eq!(out.reason_codes.len(), 1);
+        assert_eq!(out.reason_codes[0], ReasonCode::CONTRACT_MISSING_TASK_ID);
+    }
+
+    #[test]
+    fn report_to_json_value_contains_reason_codes_array() {
+        let report = fake_report(
+            vec![ValidationResult::reject(
+                ValidationStage::Origin,
+                ReasonCode::RALPH_CONTROL_ONLY.to_string(),
+                None,
+                true,
+            )],
+            vec![],
+        );
+        let workspace = std::path::PathBuf::from("/tmp/workspace");
+        let out = report_from_validation(&report, "review.passed", Some("ralph"), &workspace);
+        let json = out.to_json_value().unwrap();
+        assert_eq!(json["topic"], "review.passed");
+        assert_eq!(json["hat"], "ralph");
+        assert_eq!(json["accepted"], false);
+        assert_eq!(
+            json["reason_codes"][0],
+            ReasonCode::RALPH_CONTROL_ONLY.to_string()
+        );
+        assert_eq!(json["suggestions"][0], serde_json::Value::String(String::new()));
+    }
+
+    #[test]
+    fn resolve_policy_check_path_default_is_compat() {
+        let flags = UnifiedPolicyCheckFlags {
+            policy_check_unified: false,
+            policy_check_compat: false,
+        };
+        // No env var set in the test environment (workspace
+        // `forbid(unsafe_code)` blocks set_var). On a clean
+        // test process the env var is unset → default Compat.
+        let prev = std::env::var("UNIFIED_POLICY_CHECK").ok();
+        if prev.is_none() {
+            assert_eq!(
+                resolve_policy_check_path(&flags),
+                PolicyCheckPath::Compat
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_policy_check_path_explicit_unified_wins() {
+        let flags = UnifiedPolicyCheckFlags {
+            policy_check_unified: true,
+            policy_check_compat: false,
+        };
+        assert_eq!(
+            resolve_policy_check_path(&flags),
+            PolicyCheckPath::Unified
+        );
+    }
+
+    #[test]
+    fn resolve_policy_check_path_explicit_compat_wins_over_env() {
+        // Even with the env var "set" (we cannot actually set it
+        // here, but we test the explicit flag branch).
+        let flags = UnifiedPolicyCheckFlags {
+            policy_check_unified: false,
+            policy_check_compat: true,
+        };
+        assert_eq!(
+            resolve_policy_check_path(&flags),
+            PolicyCheckPath::Compat
+        );
+    }
+
+    #[test]
+    fn run_policy_check_unified_accepts_no_required_fields() {
+        // Empty workspace + no config → cold-start view with no
+        // required fields. The pipeline accepts every event, the
+        // report mirrors the loop's accept verdict.
+        let tmp = TempDir::new().unwrap();
+        let report =
+            run_policy_check_unified("debug.step", Some("task_id=demo"), None, tmp.path())
+                .expect("unified check should succeed on empty workspace");
+        assert!(report.accepted, "report: {report:?}");
+        assert!(report.reason_codes.is_empty());
+        assert_eq!(report.topic, "debug.step");
+    }
+
+    #[test]
+    fn run_policy_check_unified_rejects_missing_required_field() {
+        // Build a workspace whose ralph.yml declares a required
+        // field for `experiment.planned`. The payload omits it →
+        // the unified pipeline must surface a structured
+        // `engine_rejected:required_field:<name>` reason code.
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".ralph")).unwrap();
+        std::fs::write(
+            tmp.path().join("ralph.yml"),
+            r#"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    schemas:
+      experiment.planned:
+        required_fields:
+          - task_key
+"#,
+        )
+        .unwrap();
+        let report = run_policy_check_unified(
+            "experiment.planned",
+            Some(r#"{"foo":"bar"}"#),
+            None,
+            tmp.path(),
+        )
+        .expect("unified check should return a report");
+        assert!(!report.accepted, "missing required field must reject: {report:?}");
+        assert!(
+            report
+                .reason_codes
+                .iter()
+                .any(|c| c.starts_with("engine_rejected:required_field")),
+            "expected engine_rejected:required_field reason, got: {:?}",
+            report.reason_codes
+        );
+    }
+
+    #[test]
+    fn run_policy_check_unified_misaligned_queue_advance_rejected() {
+        // Step-handoff gate (U1 2026-06-17-005 plan): when
+        // progress.md and tasks.jsonl disagree, the loop rejects
+        // `queue.advance` with `progress_task_mismatch`. The
+        // unified pipeline must surface the same reason_code so
+        // the CLI and loop never disagree.
+        let tmp = TempDir::new().unwrap();
+        let ralph_dir = tmp.path().join(".ralph");
+        std::fs::create_dir_all(&ralph_dir).unwrap();
+        let agent_dir = ralph_dir.join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+
+        // Closed task for step-01.
+        let task = serde_json::json!({
+            "id": "task-1",
+            "title": "step-01",
+            "status": "closed",
+            "priority": 3,
+        });
+        let tasks_path = agent_dir.join("tasks.jsonl");
+        std::fs::write(&tasks_path, format!("{task}\n")).unwrap();
+
+        // progress.md does NOT list step-01 → mismatch.
+        let progress = "## Current Step\nstep-02\n\n## Completed Steps\n- step-02\n";
+        std::fs::write(agent_dir.join("progress.md"), progress).unwrap();
+
+        let report = run_policy_check_unified(
+            "queue.advance",
+            Some(r#"{"step":"step-02","task_id":"task-1"}"#),
+            None,
+            tmp.path(),
+        )
+        .expect("unified check should return a report");
+        assert!(
+            !report.accepted,
+            "misaligned progress must produce a non-accepting report: {report:?}"
+        );
+        assert!(
+            report
+                .reason_codes
+                .iter()
+                .any(|c| c.starts_with("step_handoff:")),
+            "expected step_handoff reason code, got: {:?}",
+            report.reason_codes
+        );
+    }
+
+    #[test]
+    fn run_policy_check_unified_and_loop_agree_on_misaligned_progress() {
+        // U6 plan §"Test scenarios" Error path: `--policy-check` and
+        // the loop must produce matching verdicts (both reject) for a
+        // misaligned `queue.advance`. The exact reason string may
+        // differ — the unified pipeline runs against a cold-start
+        // `LedgerSnapshot` (CLI emit runs ahead of the loop, not
+        // against its in-memory state), while the legacy gate reads
+        // `tasks.jsonl` directly. The contract we pin is that both
+        // paths surface `step_handoff:` reason codes so downstream
+        // tooling can route on the prefix; the unified pipeline also
+        // emits a `step_handoff::` shape that the CLI precheck can
+        // intersect with the loop's `progress_task_mismatch` family.
+        use ralph_core::step_handoff::progress_task_gate::{
+            check_progress_task_alignment, GateDecision,
+        };
+
+        let tmp = TempDir::new().unwrap();
+        let ralph_dir = tmp.path().join(".ralph");
+        std::fs::create_dir_all(ralph_dir.join("agent")).unwrap();
+
+        let task = serde_json::json!({
+            "id": "task-1",
+            "title": "step-01",
+            "status": "closed",
+            "priority": 3,
+        });
+        std::fs::write(
+            ralph_dir.join("agent/tasks.jsonl"),
+            format!("{task}\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            ralph_dir.join("agent/progress.md"),
+            "## Current Step\nstep-02\n\n## Completed Steps\n- step-02\n",
+        )
+        .unwrap();
+
+        // Loop-side gate (the existing precheck helper
+        // `check_progress_task_alignment` mirrors the loop's
+        // `apply_step_handoff_gate`).
+        let decision = check_progress_task_alignment(
+            "queue.advance",
+            Some("step-02"),
+            Some("task-1"),
+            tmp.path(),
+        );
+        let loop_rejects = matches!(decision, GateDecision::Mismatch(_));
+        assert!(
+            loop_rejects,
+            "loop gate must reject the misaligned progress"
+        );
+
+        // Unified-pipeline side: must also reject and emit a
+        // `step_handoff:` reason code. The exact suffix differs
+        // because the unified pipeline runs against a cold-start
+        // snapshot (no tasks loaded), but the shared prefix is
+        // what callers match on.
+        let report = run_policy_check_unified(
+            "queue.advance",
+            Some(r#"{"step":"step-02","task_id":"task-1"}"#),
+            None,
+            tmp.path(),
+        )
+        .expect("unified check should return a report");
+        assert!(!report.accepted, "unified pipeline must reject");
+        assert!(
+            report
+                .reason_codes
+                .iter()
+                .any(|c| c.starts_with("step_handoff:")),
+            "unified pipeline must surface step_handoff reason code; got: {:?}",
+            report.reason_codes
+        );
+    }
+}
+
 #[cfg(test)]
 mod hat_handoff_tests {
     use super::*;

@@ -60,6 +60,22 @@ pub struct EmitArgs {
     #[arg(long = "unsafe-no-policy-check", conflicts_with = "policy_check")]
     pub no_policy_check: bool,
 
+    /// U6: force the unified `validate_event` pipeline for this
+    /// emit. Equivalent to setting `UNIFIED_POLICY_CHECK=1` in
+    /// the environment. When set, the CLI uses
+    /// [`crate::policy_check::run_policy_check_unified`] instead
+    /// of the legacy `validate_event_with_hat` path, so the CLI
+    /// and the loop agree on the same rule set.
+    #[arg(long, conflicts_with_all = ["policy_check_compat", "no_policy_check"])]
+    pub policy_check_unified: bool,
+
+    /// U6: force the legacy policy-check path. Equivalent to
+    /// passing `--policy-check` (the default behavior) but
+    /// explicit, so a user can pin the legacy validator even
+    /// when `UNIFIED_POLICY_CHECK=1` is set in the environment.
+    #[arg(long, conflicts_with_all = ["policy_check_unified", "no_policy_check"])]
+    pub policy_check_compat: bool,
+
     /// Hat that published this event (falls back to $RALPH_CURRENT_HAT)
     #[arg(long)]
     pub hat: Option<String>,
@@ -708,7 +724,93 @@ fn emit_command_with_root_and_hats(
         );
     }
 
+    // U6 (2026-06-21-002 plan §U6): CLI --policy-check switch to the
+    // unified `validate_event` pipeline. The branch is only entered
+    // when the user opts in via `--policy-check-unified` or the
+    // `UNIFIED_POLICY_CHECK=1` env var; the legacy `validate_event_with_hat`
+    // path below remains the default to avoid breaking existing scripts
+    // (HARD RULE 2: no behavior change for users without the new flag).
+    //
+    // The branch sits *before* the legacy check so a CLI run can
+    // exercise the unified pipeline end-to-end (without the legacy
+    // bail firing first). When `--policy-check-compat` is explicit,
+    // the legacy path is preserved for diff/comparison.
+    let unified_flags = crate::policy_check::UnifiedPolicyCheckFlags {
+        policy_check_unified: args.policy_check_unified,
+        policy_check_compat: args.policy_check_compat,
+    };
+    let path = crate::policy_check::resolve_policy_check_path(&unified_flags);
+    let unified_active = check_mode != PolicyCheckMode::Skip
+        && path == crate::policy_check::PolicyCheckPath::Unified
+        && config
+            .as_ref()
+            .and_then(|c| c.event_loop.event_policy.as_ref())
+            .is_some_and(|p| p.enabled);
+    if unified_active {
+        let report = crate::policy_check::run_policy_check_unified(
+            &topic,
+            Some(&args.payload),
+            hat.as_deref(),
+            &workspace_root,
+        )?;
+        if !report.accepted {
+            // Structured reason_code list — the U6 plan mandates
+            // "统一后错误输出结构化 `reason_code`" so the agent can
+            // programmatically match failures against the loop's
+            // vocabulary. We surface the full list to stderr (one
+            // per line) AND include a JSON envelope in the bail so
+            // tools that parse stderr can recover the structured
+            // shape.
+            let codes = report.reason_codes.join(", ");
+            let suggestions: Vec<String> = report
+                .suggestions
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, hint)| {
+                    if hint.is_empty() {
+                        None
+                    } else {
+                        Some(format!("[{}] {}", idx, hint))
+                    }
+                })
+                .collect();
+            let suggestions_block = if suggestions.is_empty() {
+                String::new()
+            } else {
+                format!("\n\nSuggestions:\n{}", suggestions.join("\n"))
+            };
+            let envelope = serde_json::to_string(&report)
+                .unwrap_or_else(|_| "{}".to_string());
+            eprintln!("{}", envelope);
+            anyhow::bail!(
+                "Event rejected by unified policy check: reason_codes=[{}] topic='{}' hat={:?}{}",
+                codes,
+                report.topic,
+                report.hat,
+                suggestions_block
+            );
+        }
+        // Unified path accepted: skip the legacy `validate_event_with_hat`
+        // branch below so the legacy bail never double-fires on the
+        // same event. The legacy path is only retained when the
+        // caller explicitly opts in via `--policy-check-compat` or
+        // the env var is unset.
+        tracing::info!(
+            "cli emit policy check: unified pipeline accepted topic={}",
+            topic
+        );
+    }
+
     if check_mode != PolicyCheckMode::Skip {
+        // When the unified branch already accepted the event, skip
+        // the legacy gate (U6 / HARD RULE 2: the unified path is the
+        // new production target; the legacy path stays for diff
+        // runs and for callers that explicitly opt out).
+        if unified_active {
+            tracing::debug!(
+                "cli emit: skipping legacy validate_event_with_hat (unified path active)"
+            );
+        } else {
         let policy = match config
             .as_ref()
             .and_then(|c| c.event_loop.event_policy.as_ref())
@@ -798,10 +900,18 @@ fn emit_command_with_root_and_hats(
                     );
                 }
             }
-        }
+        }  // closes if let Some(policy)
+        }  // closes if unified_active's else
     } else if check_mode == PolicyCheckMode::Skip {
         tracing::info!("cli emit policy check skipped: no event_policy in resolved config");
     }
+
+    // U6 (2026-06-21-002 plan §U6): CLI --policy-check switch to the
+    // unified `validate_event` pipeline is implemented above
+    // (sits *before* the legacy check so the legacy bail never
+    // double-fires). When `--policy-check-compat` is explicit,
+    // the unified branch above stays a no-op and the legacy
+    // path remains the production path.
 
     // U1 (2026-06-17-004 plan, R1+R2): CLI provenance fail-closed.
     // Fires regardless of `check_mode`: if the agent is in isolated
@@ -1152,6 +1262,8 @@ mod tests {
                 file: PathBuf::from(".ralph/events.jsonl"),
                 policy_check: false,
                 no_policy_check: false,
+                policy_check_unified: false,
+                policy_check_compat: false,
                 hat: None,
                 triggered: None,
                 source: None,
@@ -1185,6 +1297,8 @@ mod tests {
                 file: PathBuf::from(".ralph/events.jsonl"),
                 policy_check: false,
                 no_policy_check: false,
+                policy_check_unified: false,
+                policy_check_compat: false,
                 hat: None,
                 triggered: None,
                 source: None,
@@ -1255,6 +1369,8 @@ event_loop:
                 file: PathBuf::from(".ralph/events.jsonl"),
                 policy_check: true,
                 no_policy_check: false,
+                policy_check_unified: false,
+                policy_check_compat: false,
                 hat: None,
                 triggered: None,
                 source: None,
@@ -1315,6 +1431,8 @@ event_loop:
                 file: events_file.clone(),
                 policy_check: true,
                 no_policy_check: false,
+                policy_check_unified: false,
+                policy_check_compat: false,
                 hat: None,
                 triggered: None,
                 source: None,
@@ -1369,6 +1487,8 @@ event_loop:
                 file: events_file.clone(),
                 policy_check: true,
                 no_policy_check: false,
+                policy_check_unified: false,
+                policy_check_compat: false,
                 hat: None,
                 triggered: None,
                 source: None,
@@ -1407,6 +1527,8 @@ event_loop:
                 file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: false,
+                policy_check_unified: false,
+                policy_check_compat: false,
                 hat: Some("strategist".to_string()),
                 triggered: Some("implementer".to_string()),
                 source: Some("cli".to_string()),
@@ -1486,6 +1608,8 @@ event_loop:
                 file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: false,
+                policy_check_unified: false,
+                policy_check_compat: false,
                 hat: Some("ralph".to_string()),
                 triggered: None,
                 source: None,
@@ -1525,6 +1649,8 @@ event_loop:
                 file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: false,
+                policy_check_unified: false,
+                policy_check_compat: false,
                 hat: Some("ralph".to_string()),
                 triggered: None,
                 source: None,
@@ -1554,6 +1680,8 @@ event_loop:
                 file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: false,
+                policy_check_unified: false,
+                policy_check_compat: false,
                 hat: Some("ralph".to_string()),
                 triggered: None,
                 source: None,
@@ -1584,6 +1712,8 @@ event_loop:
                 file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: false,
+                policy_check_unified: false,
+                policy_check_compat: false,
                 hat: Some("ralph".to_string()),
                 triggered: None,
                 source: None,
@@ -1613,6 +1743,8 @@ event_loop:
                 file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: false,
+                policy_check_unified: false,
+                policy_check_compat: false,
                 hat: Some("ralph".to_string()),
                 triggered: None,
                 source: None,
@@ -1644,6 +1776,8 @@ event_loop:
                 file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: false,
+                policy_check_unified: false,
+                policy_check_compat: false,
                 hat: Some("executor".to_string()),
                 triggered: None,
                 source: None,
@@ -1676,6 +1810,8 @@ event_loop:
                 file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: false,
+                policy_check_unified: false,
+                policy_check_compat: false,
                 hat: None,
                 triggered: None,
                 source: None,
@@ -1730,6 +1866,8 @@ event_loop:
                 file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: false,
+                policy_check_unified: false,
+                policy_check_compat: false,
                 hat: None,
                 triggered: None,
                 source: None,
@@ -1780,6 +1918,8 @@ event_loop:
                 file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: false,
+                policy_check_unified: false,
+                policy_check_compat: false,
                 hat: Some("strategist".to_string()),
                 triggered: None,
                 source: None,
@@ -1831,6 +1971,8 @@ event_loop:
                 file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: false,
+                policy_check_unified: false,
+                policy_check_compat: false,
                 hat: None,
                 triggered: None,
                 source: None,
@@ -1894,6 +2036,8 @@ event_loop:
                 file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: false,
+                policy_check_unified: false,
+                policy_check_compat: false,
                 hat: None,
                 triggered: None,
                 source: None,
@@ -1948,6 +2092,8 @@ event_loop:
                 file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: false,
+                policy_check_unified: false,
+                policy_check_compat: false,
                 hat: None,
                 triggered: None,
                 source: None,
@@ -2004,6 +2150,8 @@ event_loop:
                 file: events_file.clone(),
                 policy_check: true,
                 no_policy_check: false,
+                policy_check_unified: false,
+                policy_check_compat: false,
                 hat: None,
                 triggered: None,
                 source: None,
@@ -2059,6 +2207,8 @@ event_loop:
                 file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: true,
+                policy_check_unified: false,
+                policy_check_compat: false,
                 hat: None,
                 triggered: None,
                 source: None,
@@ -2114,6 +2264,8 @@ event_loop:
                 file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: true,
+                policy_check_unified: false,
+                policy_check_compat: false,
                 hat: None,
                 triggered: None,
                 source: None,
@@ -2226,6 +2378,8 @@ event_loop:
                 file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: false,
+                policy_check_unified: false,
+                policy_check_compat: false,
                 hat: Some("strategist".to_string()),
                 triggered: None,
                 source: Some("cli".to_string()),
@@ -2263,6 +2417,8 @@ event_loop:
                 file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: false,
+                policy_check_unified: false,
+                policy_check_compat: false,
                 hat: Some("strategist".to_string()),
                 triggered: None,
                 source: None,
@@ -2307,6 +2463,8 @@ event_loop:
                 file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: false,
+                policy_check_unified: false,
+                policy_check_compat: false,
                 hat: Some("strategist".to_string()),
                 triggered: None,
                 source: None,
@@ -2345,6 +2503,8 @@ event_loop:
                 file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: false,
+                policy_check_unified: false,
+                policy_check_compat: false,
                 hat: None, // missing provenance
                 triggered: None,
                 source: None,
@@ -2419,6 +2579,8 @@ event_loop:
                     file: events_file.clone(),
                     policy_check: false,
                     no_policy_check: false,
+                    policy_check_unified: false,
+                    policy_check_compat: false,
                     hat: Some("strategist".to_string()),
                     triggered: None,
                     source: None,
@@ -2452,6 +2614,8 @@ event_loop:
                 file: events_file.clone(),
                 policy_check: false,
                 no_policy_check: false,
+                policy_check_unified: false,
+                policy_check_compat: false,
                 hat: Some("strategist".to_string()),
                 triggered: Some("implementer".to_string()),
                 source: Some("cli".to_string()),
@@ -2673,6 +2837,8 @@ event_loop:
             file: events_file.clone(),
             policy_check: false,
             no_policy_check: false,
+            policy_check_unified: false,
+            policy_check_compat: false,
             hat: None,
             triggered: None,
             source: None,
@@ -2706,6 +2872,8 @@ event_loop:
             file: events_file.clone(),
             policy_check: false,
             no_policy_check: false,
+            policy_check_unified: false,
+            policy_check_compat: false,
             hat: None,
             triggered: None,
             source: None,
@@ -2790,6 +2958,8 @@ event_loop:
             file: events_file.clone(),
             policy_check: false,
             no_policy_check: false,
+            policy_check_unified: false,
+            policy_check_compat: false,
             hat: None,
             triggered: None,
             source: None,
@@ -2914,6 +3084,8 @@ event_loop:
             file: events_file.clone(),
             policy_check: false,
             no_policy_check: false,
+            policy_check_unified: false,
+            policy_check_compat: false,
             hat: None,
             triggered: None,
             source: None,
@@ -2955,6 +3127,187 @@ event_loop:
         let v1 = schema_view::render_topic(&view1, "work.done").unwrap();
         let v2 = schema_view::render_topic(&view2, "work.done").unwrap();
         assert_eq!(v1["protocol_hash"], v2["protocol_hash"]);
+    }
+
+    // ── U6 (2026-06-21-002 plan §U6): unified `--policy-check-unified`
+    //    and `--policy-check-compat` flags. The unified path runs the
+    //    U4 `ValidationPipeline` over the inbound event and surfaces
+    //    structured `reason_codes`. The legacy path is preserved for
+    //    diff/compat runs.
+
+    fn setup_unified_workspace(tmp: &TempDir) -> PathBuf {
+        let workspace = tmp.path().to_path_buf();
+        std::fs::create_dir_all(workspace.join(".ralph")).unwrap();
+        std::fs::write(
+            workspace.join("ralph.yml"),
+            r#"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    require_policy_check_for_cli_emit: true
+    allow_unsafe_cli_emit: true
+    schemas:
+      experiment.planned:
+        required_fields:
+          - task_key
+"#,
+        )
+        .unwrap();
+        workspace
+    }
+
+    /// U6 happy path: `--policy-check-unified` rejects a payload
+    /// missing a required field, and the CLI surfaces a structured
+    /// `engine_rejected:required_field:task_key` reason code (the
+    /// same vocabulary the loop uses).
+    #[test]
+    fn test_emit_policy_check_unified_rejects_missing_required_field() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = setup_unified_workspace(&tmp);
+        let events_file = workspace.join(".ralph/events.jsonl");
+
+        let err = emit_command_with_root(
+            ColorMode::Never,
+            EmitArgs {
+                topic: Some("experiment.planned".to_string()),
+                payload: r#"{"foo":"bar"}"#.to_string(),
+                json: true,
+                file: events_file.clone(),
+                policy_check: true,
+                no_policy_check: false,
+                policy_check_unified: true,
+                policy_check_compat: false,
+                hat: None,
+                triggered: None,
+                source: None,
+                schema: None,
+            },
+            Some(&workspace),
+        )
+        .expect_err("unified path must reject missing required field");
+
+        let message = format!("{err:#}");
+        // The unified branch bails with a structured envelope that
+        // surfaces the full reason_code list. The agent can parse
+        // the JSON envelope to recover the exact reason.
+        assert!(
+            message.contains("engine_rejected:required_field"),
+            "expected structured engine_rejected:required_field reason, got: {message}"
+        );
+        assert!(
+            message.contains("task_key"),
+            "error should name the missing field, got: {message}"
+        );
+    }
+
+    /// U6 happy path: `--policy-check-unified` accepts a valid
+    /// payload (parity with the legacy path).
+    #[test]
+    fn test_emit_policy_check_unified_accepts_valid_payload() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = setup_unified_workspace(&tmp);
+        let events_file = workspace.join(".ralph/events.jsonl");
+
+        emit_command_with_root(
+            ColorMode::Never,
+            EmitArgs {
+                topic: Some("experiment.planned".to_string()),
+                payload: r#"{"task_key":"k1"}"#.to_string(),
+                json: true,
+                file: events_file.clone(),
+                policy_check: true,
+                no_policy_check: false,
+                policy_check_unified: true,
+                policy_check_compat: false,
+                hat: None,
+                triggered: None,
+                source: None,
+                schema: None,
+            },
+            Some(&workspace),
+        )
+        .expect("unified path must accept a valid payload");
+
+        let events = std::fs::read_to_string(&events_file).expect("events file should exist");
+        assert!(events.contains("\"task_key\":\"k1\""));
+    }
+
+    /// U6 compat path: `--policy-check-compat` keeps the legacy
+    /// `validate_event_with_hat` path even when the env var or
+    /// `--policy-check-unified` would otherwise opt in.
+    #[test]
+    fn test_emit_policy_check_compat_keeps_legacy_message() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = setup_unified_workspace(&tmp);
+        let events_file = workspace.join(".ralph/events.jsonl");
+
+        let err = emit_command_with_root(
+            ColorMode::Never,
+            EmitArgs {
+                topic: Some("experiment.planned".to_string()),
+                payload: r#"{"foo":"bar"}"#.to_string(),
+                json: true,
+                file: events_file.clone(),
+                policy_check: true,
+                no_policy_check: false,
+                policy_check_unified: false,
+                policy_check_compat: true,
+                hat: None,
+                triggered: None,
+                source: None,
+                schema: None,
+            },
+            Some(&workspace),
+        )
+        .expect_err("compat path must reject missing required field");
+
+        let message = format!("{err:#}");
+        // Legacy path uses the "Event rejected by policy" bail
+        // shape (not the unified envelope). The legacy message
+        // format is preserved for diff/compat runs.
+        assert!(
+            message.contains("Event rejected by policy"),
+            "expected legacy policy rejection message, got: {message}"
+        );
+    }
+
+    /// U6 default behavior: with no flag, the legacy path is
+    /// preserved (HARD RULE 2: no behavior change for users
+    /// without the new flag).
+    #[test]
+    fn test_emit_policy_check_default_keeps_legacy_path() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = setup_unified_workspace(&tmp);
+        let events_file = workspace.join(".ralph/events.jsonl");
+
+        let err = emit_command_with_root(
+            ColorMode::Never,
+            EmitArgs {
+                topic: Some("experiment.planned".to_string()),
+                payload: r#"{"foo":"bar"}"#.to_string(),
+                json: true,
+                file: events_file.clone(),
+                policy_check: true,
+                no_policy_check: false,
+                policy_check_unified: false,
+                policy_check_compat: false,
+                hat: None,
+                triggered: None,
+                source: None,
+                schema: None,
+            },
+            Some(&workspace),
+        )
+        .expect_err("default path must reject missing required field");
+
+        let message = format!("{err:#}");
+        // Default is compat → legacy bail shape.
+        assert!(
+            message.contains("Event rejected by policy"),
+            "expected default legacy policy rejection, got: {message}"
+        );
     }
 }
 

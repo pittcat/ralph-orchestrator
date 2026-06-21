@@ -635,6 +635,8 @@ mod tests {
             file: PathBuf::from(".ralph/events.jsonl"),
             policy_check: false,
             no_policy_check: false,
+            policy_check_unified: false,
+            policy_check_compat: false,
             hat: None,
             triggered: None,
             source: None,
