@@ -277,7 +277,7 @@ pub fn lint_emit(
     // P0-1: the resolved macro set is now shared with the
     // runtime `hat_handoff::macro_edges::requires_handoff` so
     // the linter and the runtime gate cannot disagree.
-    if view.is_macro_edge(topic, None)
+    if view.is_macro_edge(topic)
         && !has_handoff_path(payload)
         && view.hat_handoff.linter.auto_prepare_on_macro_edge
     {
@@ -302,7 +302,7 @@ pub fn lint_emit(
     }
     match run_gates(view, &LintContext, topic, payload, None) {
         GateDecision::Accept => {
-            if view.is_macro_edge(topic, None) && has_handoff_path(payload) {
+            if view.is_macro_edge(topic) && has_handoff_path(payload) {
                 LintOutcome::AcceptAfterAutoPrepare
             } else {
                 LintOutcome::Accept
@@ -351,7 +351,7 @@ pub fn auto_handoff_prepare(
                 .to_string(),
         );
     }
-    if !view.is_macro_edge(topic, None) {
+    if !view.is_macro_edge(topic) {
         return Err(format!(
             "auto_handoff_prepare: `{topic}` is not a macro edge under current protocol"
         ));

@@ -42,3 +42,7 @@ jsonschema = { version = "0.18", features = ["draft202012"] }
 [[bench]]
 name = "performance"
 harness = false
+
+[[bench]]
+name = "protocol_view_bench"
+harness = false

@@ -3013,7 +3013,7 @@ pub mod schema_view {
         let mut out = serde_json::json!({
             "topic": topic,
             "protocol_hash": view.protocol_hash,
-            "is_macro_edge": view.is_macro_edge(topic, None),
+            "is_macro_edge": view.is_macro_edge(topic),
             "required_fields": required_fields,
             "all_topics": payload_keys,
         });

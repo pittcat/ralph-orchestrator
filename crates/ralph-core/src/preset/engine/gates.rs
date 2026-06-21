@@ -180,7 +180,7 @@ pub fn run_gates<C: GateContext>(
     }
 
     // Handoff artifact check: macro edge must carry a non-empty handoff_path.
-    if view.is_macro_edge(topic, from_hat) && !has_handoff_path(payload) {
+    if view.is_macro_edge_from(topic, from_hat) && !has_handoff_path(payload) {
         return GateDecision::Reject {
             kind: RejectionKind::HandoffArtifact,
             message: format!(
@@ -246,6 +246,7 @@ mod tests {
             macro_edge_consumers: HashMap::new(),
             execution_mode: crate::config::HatExecutionMode::default(),
             protocol_hash: "0".to_string(),
+            feature_flag_enabled: false,
         }
     }
 

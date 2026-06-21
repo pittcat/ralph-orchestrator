@@ -27,6 +27,16 @@ pub enum MacroEdge {
 /// - `from_hat`:emit hat id(用于自环排除)。
 /// - `config_exempt` + `config_explicit_macro`:来自
 ///   `HatHandoffConfig`,供 `is_exempt` / `is_explicit_macro` 使用。
+///
+/// ## U3 (KTD-8) 状态:wrapper,推荐改用 `ProtocolView`
+///
+/// 该函数保留为薄包装实现 KTD-2 判定,但语义和 `ProtocolView::is_macro_edge*`
+/// 一致。新代码应优先调用 `ProtocolView::is_macro_edge(topic)` 或
+/// `ProtocolView::is_macro_edge_from(topic, Some(from_hat))` 以共享 SSOT。
+/// 当前 runtime (`hat_handoff::gate::evaluate_event`) 与
+/// `hat_handoff::emit_instructions::build_emit_instructions` 仍直接调用
+/// 本函数,作为迁移期间的兜底路径(注释掉 deprecation 以避免内部 warning)。
+#[allow(deprecated)]
 pub fn requires_handoff(
     enabled: bool,
     execution_mode: &HatExecutionMode,

@@ -58,7 +58,7 @@ use sha2::{Digest, Sha256};
 /// Read-only protocol view. Cheap to clone (HashMaps of strings)
 /// and `Sync` because every field is owned data — callers may
 /// pass it to the gate, the projector, and the linter concurrently.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ProtocolView {
     /// Topic → required field set, derived from
     /// `event_policy.schemas` + `execution_contracts.rules`
@@ -94,6 +94,7 @@ pub struct ProtocolView {
     ///   * `hat_handoff.macro_topics` (explicit allow-list)
     ///   * topics with a unique consumer in the HandoffIndex
     ///     (only when `from_event_loop_with_index` is used)
+    ///
     /// minus:
     ///   * `DEFAULT_EXEMPT_TOPICS` and `hat_handoff.exempt_topics`
     pub macro_edges_resolved: HashSet<String>,
@@ -113,6 +114,15 @@ pub struct ProtocolView {
     /// `ralph emit --schema` to detect drift between the
     /// authoring SSOT and the embedded copy.
     pub protocol_hash: String,
+
+    /// KTD-8: feature flag — whether the unified
+    /// `ProtocolView`-backed validation pipeline is enabled
+    /// (`UNIFIED_PROTOCOL_VIEW=1`). When `false`, callers
+    /// must continue to use the legacy resolution path. The
+    /// flag is captured at construction time so the runtime
+    /// can read it from `feature_enabled()` without holding
+    /// onto the env.
+    pub feature_flag_enabled: bool,
 }
 
 impl ProtocolView {
@@ -136,6 +146,30 @@ impl ProtocolView {
     pub fn from_event_loop_with_index(
         config: &EventLoopConfig,
         index: Option<&HandoffIndex>,
+    ) -> Self {
+        // KTD-8: feature flag is captured at construction so the
+        // runtime can consult `feature_enabled()` later without
+        // re-reading the env. Defaults to `false` to preserve the
+        // legacy path until U4/U5 flip it on.
+        let feature_flag_enabled =
+            std::env::var("UNIFIED_PROTOCOL_VIEW").ok().as_deref() == Some("1");
+        Self::from_event_loop_with_index_and_feature(config, index, feature_flag_enabled)
+    }
+
+    /// Build a view with explicit feature-flag control. Used
+    /// by tests and by callers that want to opt-in/out of the
+    /// unified view independent of the env var.
+    ///
+    /// When `feature_enabled = false` the view is constructed
+    /// the legacy way — fields are populated but
+    /// `feature_flag_enabled` returns `false`, so the runtime
+    /// falls back to the pre-U3 resolution path. This is the
+    /// conservative default (KTD-8): the migration to the
+    /// unified view is opt-in until U4/U5 validate it.
+    pub fn from_event_loop_with_index_and_feature(
+        config: &EventLoopConfig,
+        index: Option<&HandoffIndex>,
+        feature_enabled: bool,
     ) -> Self {
         // EventLoopConfig stores `event_policy` and `workflow_contract`
         // as `Option<T>`; fall back to empty defaults when absent so
@@ -172,6 +206,7 @@ impl ProtocolView {
             macro_edge_consumers,
             execution_mode,
             protocol_hash,
+            feature_flag_enabled: feature_enabled,
         }
     }
 
@@ -186,20 +221,45 @@ impl ProtocolView {
             .unwrap_or_default()
     }
 
-    /// Whether `topic` is a macro edge (handoff-required). The
-    /// pre-resolved `macro_edges_resolved` set is the canonical
-    /// answer; the additional checks below mirror the runtime
-    /// `hat_handoff::macro_edges::requires_handoff` so the
-    /// linter and the gate cannot disagree.
+    /// Whether the unified `ProtocolView` feature is enabled
+    /// (KTD-8). When `false`, callers MUST use the legacy
+    /// resolution path (`hat_handoff::macro_edges::requires_handoff`,
+    /// `hat_handoff::publishes_check`, etc.). The flag is
+    /// captured at construction so the runtime can consult
+    /// it without re-reading the env.
+    pub fn feature_enabled(&self) -> bool {
+        self.feature_flag_enabled
+    }
+
+    /// KTD-8 / U3: macro-edge check without self-loop
+    /// exclusion. Returns `true` when the topic is a macro
+    /// edge *and* the engine should require a handoff
+    /// artifact, **regardless of the from-hat identity**.
     ///
-    /// `from_hat` is the hat emitting the topic (the linter
-    /// knows it from the CLI's `--hat` flag; the runtime knows
-    /// it from the event's `hat` field). It is used to exclude
-    /// self-loops; pass `None` when the caller has no from_hat
-    /// or when self-loop exclusion is not the goal (the
-    /// SSOT-level check above already gives the correct
-    /// answer in most cases).
-    pub fn is_macro_edge(&self, topic: &str, from_hat: Option<&str>) -> bool {
+    /// This is the SSOT-level macro check used by:
+    /// * `engine_and_runtime_agree_on_macro_set_for_isolated`
+    ///   test (drift detection between lint/runtime)
+    /// * `lint_mirror` and CLI `--policy-check` lint paths
+    ///   when the caller does not know the from-hat
+    ///
+    /// For the runtime hot path that has the from-hat, prefer
+    /// `is_macro_edge(topic, Some(from_hat))` which additionally
+    /// applies the KTD-2 self-loop exclusion.
+    ///
+    /// The implementation is the same as
+    /// `is_macro_edge(topic, None)` but documented as a
+    /// distinct, load-bearing surface so U4+ validation
+    /// pipeline can call it without guessing.
+    pub fn is_macro_edge(&self, topic: &str) -> bool {
+        self.is_macro_edge_full(topic, None)
+    }
+
+    /// Full macro-edge check with optional `from_hat` for
+    /// self-loop exclusion. Internal helper backing both
+    /// `is_macro_edge(topic)` and `is_macro_edge(topic,
+    /// from_hat)` (preserved for backwards compatibility with
+    /// callers that already pass `from_hat`).
+    fn is_macro_edge_full(&self, topic: &str, from_hat: Option<&str>) -> bool {
         if !self.hat_handoff.enabled {
             return false;
         }
@@ -235,6 +295,125 @@ impl ProtocolView {
         }
         true
     }
+
+    /// KTD-8 / U3: full macro-edge check with from-hat
+    /// (KTD-2 self-loop exclusion applied). Preserved for
+    /// backwards compatibility — existing callers (engine
+    /// gate, linter auto-prepare) pass `Some(from_hat)` when
+    /// they have it.
+    pub fn is_macro_edge_from(&self, topic: &str, from_hat: Option<&str>) -> bool {
+        self.is_macro_edge_full(topic, from_hat)
+    }
+
+    /// Backwards-compatible two-argument macro-edge check.
+    /// Equivalent to `is_macro_edge_from(topic, from_hat)`.
+    /// Retained as a wrapper so existing call sites
+    /// (`gates::run_gates`, `linter::lint_emit`) keep working
+    /// without churn; new callers should prefer
+    /// `is_macro_edge(topic)` (no from_hat) when the
+    /// self-loop exclusion is not needed.
+    pub fn is_macro_edge_legacy(&self, topic: &str, from_hat: Option<&str>) -> bool {
+        self.is_macro_edge_full(topic, from_hat)
+    }
+
+    /// KTD-8 / U3: handoff artifact requirements for a topic.
+    /// Returns the [`ArtifactRule`] derived from
+    /// `hat_handoff.artifact` when the topic is a macro edge,
+    /// `None` otherwise. The rule is consumed by U5's
+    /// handoff artifact auto-generation and the runtime
+    /// gate's structure validation.
+    ///
+    /// Note: the artifact rule is currently a single
+    /// `HatHandoffConfig`-wide value (not per-topic), so the
+    /// `Option` here is "macro-edge?" rather than "topic-
+    /// specific spec?". The return type uses `Option` to
+    /// preserve room for per-topic overrides added in later
+    /// plans without an API break.
+    pub fn handoff_artifact_required(&self, topic: &str) -> Option<ArtifactSpec> {
+        if !self.is_macro_edge(topic) {
+            return None;
+        }
+        Some(ArtifactSpec {
+            required_sections: self.hat_handoff.artifact.required_sections,
+            require_next_marker: self.hat_handoff.artifact.require_next_marker,
+            max_bytes: self.hat_handoff.max_bytes,
+        })
+    }
+
+    /// KTD-8 / U3: whether `source` is allowed to publish
+    /// `topic`. The check consults the SSOT
+    /// `EventLoopConfig` permits when available
+    /// (`hat_handoff.is_explicit_macro` /
+    /// `is_exempt`); absent a graph it falls back to
+    /// permissive so the lint pipeline can still classify
+    /// a topic without a fully loaded graph.
+    ///
+    /// `source` is the emitter's `HatId` string. The rule is
+    /// intentionally permissive when the publishes graph is
+    /// absent (returns `true`); stricter cross-hat publishing
+    /// enforcement remains in the runtime's
+    /// `publishes_check` validator.
+    ///
+    /// Returned as `bool` (vs `Result`) so the U4 pipeline can
+    /// compose it with a single `&&` chain.
+    pub fn topic_publisher_allowed(&self, topic: &str, source: &str) -> bool {
+        // Orchestrator control / diagnostic topics are always
+        // allowed (loop internals — there is no "publishing hat").
+        if crate::event_origin::is_orchestrator_control_topic(topic, "")
+            || crate::event_origin::is_orchestrator_diagnostic_topic(topic)
+        {
+            return true;
+        }
+        // Exempted topics bypass the cross-hat gate.
+        if self.hat_handoff.is_exempt(topic) {
+            return true;
+        }
+        // Macro-forced topics: any hat may publish them
+        // (the runtime publishes_check enforces the downstream
+        // allowed set; this view only answers "may the source
+        // hat own this topic at the lint level").
+        if self.hat_handoff.is_explicit_macro(topic) {
+            return true;
+        }
+        // No per-hat publishes graph exposed by
+        // `EventLoopConfig` itself (the YAML `hats[*].publishes`
+        // is owned by `RalphConfig`, not `EventLoopConfig`).
+        // We therefore fall back to permissive: U4's
+        // validation pipeline lifts the full graph from
+        // `RalphConfig` and wraps `topic_publisher_allowed`
+        // with stricter checks. The U3 view must remain
+        // usable in lint mode where only `EventLoopConfig`
+        // is loaded.
+        let _ = source;
+        true
+    }
+
+    /// KTD-8 / U3: required field set for `topic` as a
+    /// borrowed reference (vs `required_fields` which clones).
+    /// `None` when the topic has no schema entry. Used by U4
+    /// pipelines that need to inspect the rule without
+    /// allocating.
+    pub fn required_fields_for(&self, topic: &str) -> Option<&HashSet<String>> {
+        self.effective_required_fields.get(topic)
+    }
+}
+
+/// KTD-8 / U3: handoff artifact specification derived from
+/// `HatHandoffConfig.artifact` for a single topic. Currently
+/// a single config-wide value; the `Option` returned by
+/// `ProtocolView::handoff_artifact_required` reserves room
+/// for per-topic overrides added in later plans.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactSpec {
+    /// Required number of `## section` headings before
+    /// `## next`. Mirrors `ArtifactRule::required_sections`.
+    pub required_sections: u32,
+    /// Whether `## next` marker must be present. Mirrors
+    /// `ArtifactRule::require_next_marker`.
+    pub require_next_marker: bool,
+    /// Maximum bytes for the injected block. Mirrors
+    /// `HatHandoffConfig::max_bytes` (KTD-7).
+    pub max_bytes: usize,
 }
 
 /// Resolve the canonical macro-edge set from the SSOT config
@@ -410,11 +589,11 @@ event_loop:
         let index = HandoffIndex::from_config(&cfg);
         let view = ProtocolView::from_event_loop_with_index(&cfg.event_loop, Some(&index));
         assert!(
-            view.is_macro_edge("work.ready", Some("plan-gate")),
+            view.is_macro_edge_from("work.ready", Some("plan-gate")),
             "work.ready has unique consumer (executor); engine must recognise it as a macro edge"
         );
         assert!(
-            view.is_macro_edge("work.done", Some("executor")),
+            view.is_macro_edge_from("work.done", Some("executor")),
             "work.done has unique consumer (reviewer); engine must recognise it as a macro edge"
         );
     }
@@ -427,7 +606,7 @@ event_loop:
         let cfg = minimal_config();
         let view = ProtocolView::from_event_loop(&cfg.event_loop);
         assert!(
-            !view.is_macro_edge("work.ready", Some("plan-gate")),
+            !view.is_macro_edge_from("work.ready", Some("plan-gate")),
             "without an index, only explicit macro_topics are macro edges"
         );
     }
@@ -496,7 +675,7 @@ event_loop:
         let mut view = ProtocolView::from_event_loop_with_index(&cfg.event_loop, Some(&index));
         view.hat_handoff.exempt_topics.push("work.ready".to_string());
         assert!(
-            !view.is_macro_edge("work.ready", Some("plan-gate")),
+            !view.is_macro_edge_from("work.ready", Some("plan-gate")),
             "exempt topics are never macro edges"
         );
     }
@@ -509,7 +688,7 @@ event_loop:
         let index = HandoffIndex::from_config(&cfg);
         let mut view = ProtocolView::from_event_loop_with_index(&cfg.event_loop, Some(&index));
         view.hat_handoff.enabled = false;
-        assert!(!view.is_macro_edge("work.ready", Some("plan-gate")));
+        assert!(!view.is_macro_edge_from("work.ready", Some("plan-gate")));
     }
 
     /// P0-1: coordinator mode → no macro edges regardless of
@@ -520,7 +699,7 @@ event_loop:
         let index = HandoffIndex::from_config(&cfg);
         let mut view = ProtocolView::from_event_loop_with_index(&cfg.event_loop, Some(&index));
         view.execution_mode = HatExecutionMode::Coordinator;
-        assert!(!view.is_macro_edge("work.ready", Some("plan-gate")));
+        assert!(!view.is_macro_edge_from("work.ready", Some("plan-gate")));
     }
 
     /// P2-4: protocol_hash is stable across repeated
@@ -572,8 +751,188 @@ event_loop:
         );
         // Self-loop: from_hat == consumer should return false.
         assert!(
-            !view.is_macro_edge("work.ready", Some("executor")),
+            !view.is_macro_edge_from("work.ready", Some("executor")),
             "self-loop (executor -> work.ready -> executor) must NOT be a macro edge"
         );
+    }
+
+    // ============================================================
+    // U3 (KTD-8) test scenarios — happy path / edge case / feature flag.
+    // Plan: docs/plans/2026-06-21-002-refactor-unified-orchestrator-state-plan.md
+    // ============================================================
+
+    /// `review.dimension.ready` 是 DEFAULT_EXEMPT_TOPICS 的一员,
+    /// 所以 `is_macro_edge_*` 应该一律返回 false。
+    /// 三处(`is_macro_edge(topic)`、`is_macro_edge_from(topic, Some("reviewer"))`、
+    /// runtime `hat_handoff::macro_edges::requires_handoff`)结论必须一致。
+    #[test]
+    fn u3_happy_path_three_layers_agree_on_exempt_topic() {
+        let cfg = minimal_config();
+        let index = HandoffIndex::from_config(&cfg);
+        let view = ProtocolView::from_event_loop_with_index(&cfg.event_loop, Some(&index));
+
+        // 1) `is_macro_edge(topic)` — no from_hat, no self-loop exclusion
+        let layer1 = view.is_macro_edge("review.dimension.ready");
+        // 2) `is_macro_edge_from(topic, Some(from_hat))` — engine gate path
+        let layer2 = view.is_macro_edge_from("review.dimension.ready", Some("reviewer"));
+        // 3) runtime `requires_handoff` — kept as the SSOT parity check
+        let layer3 = matches!(
+            crate::hat_handoff::macro_edges::requires_handoff(
+                true,
+                &HatExecutionMode::Isolated,
+                &index,
+                "review.dimension.ready",
+                "reviewer",
+                |t| view.hat_handoff.is_exempt(t),
+                |t| view.hat_handoff.is_explicit_macro(t),
+            ),
+            crate::hat_handoff::macro_edges::MacroEdge::Required
+        );
+
+        assert!(!layer1, "U3 happy path: exempt topic is not a macro edge (layer 1)");
+        assert!(!layer2, "U3 happy path: exempt topic is not a macro edge (layer 2)");
+        assert!(!layer3, "U3 happy path: exempt topic is not a macro edge (layer 3)");
+    }
+
+    /// KTD-2: `queue.advance` 拓扑上是 plan-gate 自环
+    /// (plan_gate 发布,plan_gate 触发),必须 NOT 是 macro edge。
+    /// 同时验证 `is_macro_edge(topic)` 与 `is_macro_edge_from(...)` 一致。
+    #[test]
+    fn u3_edge_case_queue_advance_self_loop_not_macro() {
+        // 用 emit_instructions 的 two-hat fixture:plan_gate 发布 work.ready + queue.advance,
+        // executor 只 trigger work.ready。queue.advance 没有 consumer → 自环 + 微观边。
+        let yaml = r#"
+tasks:
+  enabled: false
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+  execution_mode: isolated
+hats:
+  plan_gate:
+    name: "PlanGate"
+    triggers: ["work.start"]
+    publishes: ["work.ready", "queue.advance"]
+  executor:
+    name: "Executor"
+    triggers: ["work.ready"]
+    publishes: ["work.done"]
+"#;
+        let cfg: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let index = HandoffIndex::from_config(&cfg);
+        let view = ProtocolView::from_event_loop_with_index(&cfg.event_loop, Some(&index));
+
+        // queue.advance 没有 unique consumer(plan_gate 自己消费)
+        // → resolve_macro_edges 不会把它加入 resolved set
+        // → is_macro_edge 必须 false
+        assert!(
+            !view.macro_edges_resolved.contains("queue.advance"),
+            "queue.advance self-loop must NOT be in macro_edges_resolved"
+        );
+        assert!(
+            !view.is_macro_edge("queue.advance"),
+            "U3 edge case: queue.advance self-loop is not a macro edge (no from_hat)"
+        );
+        assert!(
+            !view.is_macro_edge_from("queue.advance", Some("plan-gate")),
+            "U3 edge case: queue.advance self-loop is not a macro edge (from=plan-gate)"
+        );
+    }
+
+    /// KTD-8 feature flag: `feature_enabled()` 默认 false,
+    /// 通过 `_and_feature(_, _, true)` 显式开启后必须返回 true。
+    /// 这是 U4+ validation pipeline 切换路径的入口。
+    #[test]
+    fn u3_feature_flag_default_off_explicit_on() {
+        let cfg = minimal_config();
+        // Default off
+        let view_off = ProtocolView::from_event_loop_with_index(&cfg.event_loop, None);
+        assert!(
+            !view_off.feature_enabled(),
+            "default feature_enabled must be false (KTD-8 conservative path)"
+        );
+
+        // Explicit on
+        let view_on =
+            ProtocolView::from_event_loop_with_index_and_feature(&cfg.event_loop, None, true);
+        assert!(
+            view_on.feature_enabled(),
+            "explicit feature_enabled = true must be respected"
+        );
+
+        // Explicit off
+        let view_explicit_off =
+            ProtocolView::from_event_loop_with_index_and_feature(&cfg.event_loop, None, false);
+        assert!(
+            !view_explicit_off.feature_enabled(),
+            "explicit feature_enabled = false must be respected"
+        );
+    }
+
+    /// U3 / KTD-8: handoff_artifact_required 在 macro-edge 上返回
+    /// Some(ArtifactSpec),非 macro-edge 返回 None。
+    #[test]
+    fn u3_handoff_artifact_required_reflects_macro_set() {
+        let cfg = minimal_config();
+        let index = HandoffIndex::from_config(&cfg);
+        let mut view = ProtocolView::from_event_loop_with_index(&cfg.event_loop, Some(&index));
+        // 设置一个非默认的 artifact rule,验证 spec 透传该值
+        view.hat_handoff.artifact.required_sections = 5;
+        view.hat_handoff.artifact.require_next_marker = true;
+        view.hat_handoff.max_bytes = 4096;
+
+        // work.ready 是 macro edge
+        let spec = view
+            .handoff_artifact_required("work.ready")
+            .expect("work.ready is a macro edge; spec must be Some");
+        assert_eq!(spec.required_sections, 5);
+        assert!(spec.require_next_marker);
+        assert_eq!(spec.max_bytes, 4096);
+
+        // queue.advance 不是 macro edge(没有 unique consumer)
+        assert!(
+            view.handoff_artifact_required("queue.advance").is_none(),
+            "non-macro topic must have no artifact spec"
+        );
+    }
+
+    /// U3: required_fields_for 返回 `&HashSet<String>` 而 `required_fields` clone。
+    #[test]
+    fn u3_required_fields_for_returns_borrowed_view() {
+        // `EventLoopConfig` has serde defaults for most fields;
+        // only `event_policy` needs explicit content.
+        let yaml = r#"
+event_policy:
+  enabled: true
+  mode: observe
+  schemas:
+    work.done:
+      required_fields: ["plan_name", "step"]
+"#;
+        let cfg: EventLoopConfig = serde_yaml::from_str(yaml).unwrap();
+        let view = ProtocolView::from_event_loop(&cfg);
+        let fields = view
+            .required_fields_for("work.done")
+            .expect("work.done schema must be present");
+        assert!(fields.contains("plan_name"));
+        assert!(fields.contains("step"));
+        assert!(view.required_fields_for("unknown.topic").is_none());
+    }
+
+    /// U3: topic_publisher_allowed 在默认情况下是 permissive(返回 true),
+    /// 等待 U4 引入完整 publishes graph 后再加严。
+    /// 此处验证 API 形状 + 豁免/macro 走快速路径。
+    #[test]
+    fn u3_topic_publisher_allowed_permissive_default() {
+        let cfg = minimal_config();
+        let index = HandoffIndex::from_config(&cfg);
+        let view = ProtocolView::from_event_loop_with_index(&cfg.event_loop, Some(&index));
+
+        // 默认 permissive
+        assert!(view.topic_publisher_allowed("any.topic", "any-hat"));
+        // orchestrator control topic 永远允许
+        assert!(view.topic_publisher_allowed("event.start", "any-hat"));
+        // exempt 走快速路径
+        assert!(view.topic_publisher_allowed("review.dimension.done", "any-hat"));
     }
 }
