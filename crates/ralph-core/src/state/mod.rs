@@ -41,6 +41,7 @@ mod snapshot;
 
 pub use commit::{Commit, CommitDelta, TaskTransition};
 pub use ledger::{
-    read_commit_log, LedgerError, StateLedger, LEDGER_RELATIVE_PATH,
+    read_commit_log, HandoffAcceptedInputs, HandoffCommitOutcome, LedgerError, StateLedger,
+    LEDGER_RELATIVE_PATH,
 };
 pub use snapshot::{LedgerSnapshot, ObligationTriggerRecord, SerializedLintResumeHint};

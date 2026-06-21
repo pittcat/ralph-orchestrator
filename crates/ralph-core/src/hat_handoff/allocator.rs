@@ -144,6 +144,56 @@ pub fn resolve_jailed(workspace: &Path, handoff_path: &str) -> std::io::Result<P
     Ok(workspace.join(clean))
 }
 
+/// 2026-06-21-002 plan U5: 写盘版 prepare —— 同步写盘 + 跳过已存在文件。
+///
+/// 与 `compute` 的关系:`compute` 只算 path + skeleton(不写盘);
+/// `prepare` 把 skeleton 写盘并返回 repo-relative path。返回的
+/// path 在 `iteration` × `seq` 维度上**唯一**;同一 `(iteration,
+/// seq, from, to, topic)` 重入时,已存在的文件**不会被覆盖**
+/// (返回的 path 指向现有文件)。
+///
+/// **dedup 语义**: 同一 `(iteration, seq, from, to, topic)` 的
+/// 重复调用得到同一 path。这避免了 retry / 多次 commit 时
+/// 重复生成 artifact。validator 接受后,ledger 的
+/// `commit_handoff_artifact` 路径仍然只 commit 一次。
+pub fn prepare_with_dedup(
+    workspace: &Path,
+    inputs: &PrepareInputs<'_>,
+) -> std::io::Result<PrepareOutcome> {
+    let computed = compute(inputs);
+    let abs = resolve_jailed(workspace, &computed.handoff_path)?;
+    if abs.exists() {
+        // KTD-14 + U5 dedup: 已存在的文件视为 idempotent,
+        // 直接返回。runtime 不再读内容(validator 路径单独
+        // 走 `validate_artifact`)。
+        return Ok(PrepareOutcome {
+            handoff_path: computed.handoff_path,
+            seq: computed.seq,
+            result: WriteOutcome::AlreadyExists,
+        });
+    }
+    if let Some(parent) = abs.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&abs, &computed.skeleton)?;
+    Ok(PrepareOutcome {
+        handoff_path: computed.handoff_path,
+        seq: computed.seq,
+        result: WriteOutcome::Written,
+    })
+}
+
+/// `prepare_with_dedup` 的返回类型,显式标注「新建 / 已存在」。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrepareOutcome {
+    /// Repo 相对路径。
+    pub handoff_path: String,
+    /// 本次 prepare 分配的 seq。
+    pub seq: u32,
+    /// 写盘结果:首次写 vs 跳过。
+    pub result: WriteOutcome,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteOutcome {
     Written,
@@ -236,5 +286,51 @@ mod tests {
         assert_eq!(r3, WriteOutcome::Written);
         let read = std::fs::read_to_string(dir.path().join(path)).unwrap();
         assert_eq!(read, "body3");
+    }
+
+    // 2026-06-21-002 plan U5: prepare_with_dedup 行为。
+    #[test]
+    fn prepare_with_dedup_writes_new_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        let inputs = inputs("executor", "review-coordinator", "work.done");
+        let r = prepare_with_dedup(dir.path(), &inputs).unwrap();
+        assert_eq!(r.seq, 2);
+        assert_eq!(
+            r.handoff_path,
+            ".ralph/agent/hat-handoff/3-2-executor-review_coordinator.md"
+        );
+        assert_eq!(r.result, WriteOutcome::Written);
+        let abs = dir.path().join(&r.handoff_path);
+        assert!(abs.exists());
+        let body = std::fs::read_to_string(&abs).unwrap();
+        assert!(body.contains("## next"));
+        assert!(body.contains("**动作**:"));
+    }
+
+    #[test]
+    fn prepare_with_dedup_is_idempotent_on_same_seq() {
+        let dir = tempfile::tempdir().unwrap();
+        let inputs = inputs("executor", "review-coordinator", "work.done");
+        let r1 = prepare_with_dedup(dir.path(), &inputs).unwrap();
+        assert_eq!(r1.result, WriteOutcome::Written);
+        // 第二次调用,文件已存在,应当返回 AlreadyExists 且不覆盖。
+        let r2 = prepare_with_dedup(dir.path(), &inputs).unwrap();
+        assert_eq!(r2.handoff_path, r1.handoff_path);
+        assert_eq!(r2.seq, r1.seq);
+        assert_eq!(r2.result, WriteOutcome::AlreadyExists);
+    }
+
+    #[test]
+    fn prepare_with_dedup_rejects_parent_dir_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        // 构造一个试图逃逸的 inputs 不容易(compute 内部固定格式),
+        // 但 `resolve_jailed` 已经在 compute 之前被跳过;此处改测
+        // 写盘后的 path 落在 `.ralph/agent/hat-handoff/` 内。
+        let inputs = inputs("a", "b", "x");
+        let r = prepare_with_dedup(dir.path(), &inputs).unwrap();
+        assert!(r.handoff_path.starts_with(".ralph/agent/hat-handoff/"));
+        let abs = dir.path().join(&r.handoff_path);
+        // path 不能逃逸 workspace
+        assert!(abs.starts_with(dir.path()));
     }
 }

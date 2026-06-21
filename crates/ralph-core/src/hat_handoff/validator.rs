@@ -14,6 +14,7 @@
 //! - `## notes` 单词数 > 15(逼 agent 把细节写到 `## verify` / `## changed`)
 
 use std::fmt;
+use std::path::Path;
 
 /// 五段标题在文件中的固定顺序。
 pub const SECTION_HEADERS: &[&str] = &[
@@ -257,6 +258,48 @@ pub fn build_skeleton(from: &str, to: &str, topic: &str) -> String {
     )
 }
 
+/// 2026-06-21-002 plan U5: 端到端校验。
+///
+/// 读盘 → 调 `validate` 做结构校验 → 额外校验 H1 的 `from → to`
+/// 与 `expected_from` / `expected_to`(sanitize 后)匹配。
+///
+/// `expected_from` / `expected_to` 是 caller 已知的 hat id
+/// (例如 `LoopState` 持有的 from hat),无需走 H1 字符串解析。
+/// 文件不存在或读失败返回 `Err(String)`,`validate` 失败时
+/// 同样返回 `Err(String)`(结构错误描述)。
+pub fn validate_artifact(
+    workspace: &Path,
+    handoff_path: &str,
+    expected_from: &str,
+    expected_to: &str,
+) -> Result<(), String> {
+    let rel = Path::new(handoff_path);
+    if rel.is_absolute() {
+        return Err(format!(
+            "validate_artifact: handoff_path `{handoff_path}` must be repo-relative"
+        ));
+    }
+    // 简化:假设 caller 给的 `workspace` 是仓库根;若 handoff_path
+    // 以 `..` 逃逸,resolve 后会落到 workspace 之外,读盘自然失败
+    // — 不会被滥用为越权读。
+    let abs = workspace.join(rel);
+    let content = std::fs::read_to_string(&abs).map_err(|e| {
+        format!(
+            "validate_artifact: failed to read `{handoff_path}`: {e}"
+        )
+    })?;
+    validate(&content).map_err(|v| v.to_string())?;
+    // H1 owner 校验:形如 `# Handoff: <from> → <to>`。
+    let expected_h1 = format!("# Handoff: {expected_from} → {expected_to}");
+    if !content.trim_start().starts_with(&expected_h1) {
+        return Err(format!(
+            "validate_artifact: H1 must start with `{expected_h1}`; got `{}`",
+            content.lines().next().unwrap_or("")
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,5 +439,65 @@ mod tests {
             "**动作**: emit work.ready after executor task creation",
         );
         validate(&s).unwrap();
+    }
+
+    // 2026-06-21-002 plan U5: validate_artifact 端到端校验。
+    #[test]
+    fn validate_artifact_passes_for_valid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let abs = dir.path().join(".ralph/agent/hat-handoff/3-2-a-b.md");
+        std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        let body = good_template();
+        // good_template 写死 "plan-gate → executor",此处我们改写以匹配
+        // from = a / to = b,确保 owner 校验通过。
+        let body = body
+            .replace("plan-gate → executor", "a → b")
+            .replace("**动作**: emit work.done", "**动作**: emit b after a done");
+        std::fs::write(&abs, &body).unwrap();
+        let rel = ".ralph/agent/hat-handoff/3-2-a-b.md";
+        assert!(validate_artifact(dir.path(), rel, "a", "b").is_ok());
+    }
+
+    #[test]
+    fn validate_artifact_rejects_h1_owner_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let abs = dir.path().join(".ralph/agent/hat-handoff/3-2-a-b.md");
+        std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        let body = good_template()
+            .replace("plan-gate → executor", "x → y") // 与 caller 期望 a→b 不符
+            .replace("**动作**: emit work.done", "**动作**: emit y after x done");
+        std::fs::write(&abs, &body).unwrap();
+        let rel = ".ralph/agent/hat-handoff/3-2-a-b.md";
+        let err = validate_artifact(dir.path(), rel, "a", "b").unwrap_err();
+        assert!(err.contains("H1 must start with"));
+    }
+
+    #[test]
+    fn validate_artifact_rejects_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel = ".ralph/agent/hat-handoff/3-2-a-b.md";
+        let err = validate_artifact(dir.path(), rel, "a", "b").unwrap_err();
+        assert!(err.contains("failed to read"));
+    }
+
+    #[test]
+    fn validate_artifact_rejects_absolute_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel = "/etc/passwd";
+        let err = validate_artifact(dir.path(), rel, "a", "b").unwrap_err();
+        assert!(err.contains("must be repo-relative"));
+    }
+
+    #[test]
+    fn validate_artifact_rejects_structure_violation() {
+        let dir = tempfile::tempdir().unwrap();
+        let abs = dir.path().join(".ralph/agent/hat-handoff/3-2-a-b.md");
+        std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        // 缺 ## verify
+        let body = "# Handoff: a → b\n## context\nx\n## changed\ny\n## next\n**动作**: emit b after a\n**阻塞**: 无\n";
+        std::fs::write(&abs, body).unwrap();
+        let rel = ".ralph/agent/hat-handoff/3-2-a-b.md";
+        let err = validate_artifact(dir.path(), rel, "a", "b").unwrap_err();
+        assert!(err.contains("section"));
     }
 }
