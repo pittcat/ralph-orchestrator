@@ -89,6 +89,15 @@ event_loop:
   # for the full design.
   hat_handoff:
     enabled: true
+    # 2026-06-20: control topics bypass the macro-edge handoff gate.
+    # See presets/schemas/ce-executor-serial.yml for the rationale —
+    # loop.cancel / task.resume / human.guidance are loop lifecycle or
+    # operator-injection paths, not hat→hat business handoffs; the gate
+    # must not block them or the loop self-cancel path would deadlock.
+    exempt_topics:
+      - loop.cancel
+      - task.resume
+      - human.guidance
   # 2026-06-17-003 plan U1: enable state projection. The
   # orchestrator becomes the canonical writer for
   # `.ralph/agent/tasks.jsonl` and `.ralph/agent/progress.md`;

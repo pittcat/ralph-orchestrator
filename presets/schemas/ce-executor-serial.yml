@@ -453,3 +453,15 @@ hat_handoff:
     require_next_marker: true
   linter:
     auto_prepare_on_macro_edge: true
+  # 2026-06-20: control topics (loop lifecycle + operator injection) are
+  # not hat→hat business handoffs — they bypass the loop self-emit and
+  # the human operator paths. The runtime does not need a five-section
+  # handoff file for them; forcing the gate to require one would block
+  # `ralph emit loop.cancel --hat ralph` even when the loop runner itself
+  # is the source. Same applies to `task.resume` (loop → current hat
+  # diagnostic) and `human.guidance` (operator manual inject). Business
+  # edges (work.ready/work.done/review.passed/etc.) keep the gate.
+  exempt_topics:
+    - loop.cancel
+    - task.resume
+    - human.guidance

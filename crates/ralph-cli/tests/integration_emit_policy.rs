@@ -18,12 +18,104 @@ fn ralph_emit(temp_path: &std::path::Path, args: &[&str]) -> std::process::Outpu
         .expect("Failed to execute ralph emit command")
 }
 
+/// Run `ralph tools handoff prepare` to create a five-section handoff
+/// skeleton under `temp_path`, then rewrite its `## next` action line to a
+/// topic-free placeholder so the U4 publishes_check accepts it.
+///
+/// 2026-06-20: `ce-executor-serial` / `ce-executor-isolated` enable
+/// `hat_handoff`, so macro-edge emits (e.g. `work.done` from `executor`)
+/// require a `handoff_path` referring to a prepared handoff file. The
+/// default skeleton writes `**动作**: 待填写 (e.g. emit \`{topic}\` after
+/// <step>)` in `## next`, but the literal `{topic}` is usually NOT in
+/// the downstream hat's `publishes` list (consumers emit *their own*
+/// topics, not the one they consume) — so U4 rejects it. The rewrite
+/// below keeps U3 happy (the `**动作**:` + `**阻塞**:` shape is
+/// preserved) and lets U4 pass (no topic literal = U4 skips).
+fn ralph_handoff_prepare(
+    temp_path: &std::path::Path,
+    preset: &str,
+    from: &str,
+    to: &str,
+    topic: &str,
+) -> String {
+    let prepare_output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "-H",
+            preset,
+            "tools",
+            "handoff",
+            "prepare",
+            "--from",
+            from,
+            "--to",
+            to,
+            "--topic",
+            topic,
+            "--iteration",
+            "1",
+            "--current-seq",
+            "0",
+            "--json",
+        ])
+        .current_dir(temp_path)
+        .output()
+        .expect("Failed to execute ralph tools handoff prepare");
+    assert!(
+        prepare_output.status.success(),
+        "handoff prepare must succeed (preset={preset}, from={from}, to={to}, topic={topic}): stderr={}",
+        String::from_utf8_lossy(&prepare_output.stderr),
+    );
+    let prepare_json: serde_json::Value =
+        serde_json::from_slice(&prepare_output.stdout).expect("prepare JSON parse");
+    let handoff_path = prepare_json["handoff_path"]
+        .as_str()
+        .expect("handoff_path field")
+        .to_string();
+
+    // Rewrite the skeleton's `## next` action line to a topic-free
+    // placeholder. The default text we replace is exactly the form
+    // `build_skeleton(from, to, topic)` writes; if that ever changes,
+    // this test will fail loudly because the file's `## next` no longer
+    // has the expected antipattern form, which is a clearer signal than
+    // a downstream U4 rejection.
+    let abs_path = temp_path.join(&handoff_path);
+    let skeleton = std::fs::read_to_string(&abs_path).expect("read handoff file");
+    let old_line = format!("**动作**: 待填写 (e.g. emit `{topic}` after <step>)");
+    let new_line = format!("**动作**: 待填写 (downstream {to} 收到 handoff 后的实际动作)");
+    let rewritten = skeleton.replace(&old_line, &new_line);
+    assert_ne!(
+        skeleton, rewritten,
+        "handoff skeleton's `## next` action line did not match the expected default form; \
+         build_skeleton in crates/ralph-core/src/hat_handoff/validator.rs may have changed. \
+         topic={topic}"
+    );
+    std::fs::write(&abs_path, &rewritten).expect("write rewritten handoff");
+    handoff_path
+}
+
 /// Happy path: a conforming `work.done` payload is accepted and written.
+///
+/// 2026-06-20: `ce-executor-isolated` enables `hat_handoff`, so
+/// `work.done` from `executor` is a macro-edge that requires a
+/// `handoff_path` referring to a file previously prepared via
+/// `ralph tools handoff prepare`.
 #[test]
 fn test_emit_with_builtin_preset_accepts_valid_work_done() {
     let temp_dir = TempDir::new().expect("temp dir");
     let temp_path = temp_dir.path();
     std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    let handoff_path = ralph_handoff_prepare(
+        temp_path,
+        "builtin:ce-executor-isolated",
+        "executor",
+        "review-coordinator",
+        "work.done",
+    );
+    let payload = format!(
+        r#"{{"plan_name":"x","plan_path":"y","task_id":"z","task_key":"k","step":"s","commit_count":1,"changed_lines":10,"handoff_path":"{}"}}"#,
+        handoff_path.replace('\\', "\\\\").replace('"', "\\\""),
+    );
 
     let output = ralph_emit(
         temp_path,
@@ -33,7 +125,7 @@ fn test_emit_with_builtin_preset_accepts_valid_work_done() {
             "emit",
             "work.done",
             "--json",
-            r#"{"plan_name":"x","plan_path":"y","task_id":"z","task_key":"k","step":"s","commit_count":1,"changed_lines":10}"#,
+            &payload,
             "--hat",
             "executor",
         ],
@@ -314,13 +406,30 @@ fn test_emit_isolated_mode_allows_matching_hat() {
     let temp_path = temp_dir.path();
     std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
 
+    // 2026-06-20: `ce-executor-isolated` enables `hat_handoff`, so
+    // `review.passed` from `review-synthesizer` is a macro-edge and
+    // requires a `handoff_path`. The downstream consumer is
+    // `plan-gate` (which reacts to `review.passed` and emits
+    // `queue.advance` / `plan.complete`).
+    let handoff_path = ralph_handoff_prepare(
+        temp_path,
+        "builtin:ce-executor-isolated",
+        "review-synthesizer",
+        "plan-gate",
+        "review.passed",
+    );
+    let payload = format!(
+        r#"{{"plan_name":"p","task_id":"t","task_key":"k","step":"s","findings_count":0,"fix_round":0,"verdict":"pass","skip_reason":"aggregate_timeout","handoff_path":"{}"}}"#,
+        handoff_path.replace('\\', "\\\\").replace('"', "\\\""),
+    );
+
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ralph"))
         .args([
             "-H",
             "builtin:ce-executor-isolated",
             "emit",
             "review.passed",
-            r#"{"plan_name":"p","task_id":"t","task_key":"k","step":"s","findings_count":0,"fix_round":0,"verdict":"pass","skip_reason":"aggregate_timeout"}"#,
+            &payload,
             "--hat",
             "review-synthesizer",
         ])
@@ -355,19 +464,51 @@ fn test_emit_isolated_mode_allows_matching_hat() {
 /// P0 (testing reviewer): `ce-executor-serial` executor emits `work.done` →
 /// event lands in events.jsonl. Regression guard against the inverse of
 /// merry-lotus.
+///
+/// 2026-06-20: under the SSOT-driven hat-handoff gate (`ce-executor-serial`
+/// declares `hat_handoff.enabled: true` + isolated execution_mode),
+/// `work.done` from `executor` is a macro-edge and the payload must carry
+/// `handoff_path` referring to a handoff file previously created via
+/// `ralph tools handoff prepare`. The prepare call writes the five-section
+/// skeleton the gate's U3 validator accepts and emits the canonical path
+/// (`{iter}-{seq+1}-{from}-{to}.md`) the gate's filename checks expect.
 #[test]
 fn test_emit_ce_executor_serial_executor_can_emit_work_done() {
     let temp_dir = TempDir::new().expect("temp dir");
     let temp_path = temp_dir.path();
     std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
 
+    // Step 1: prepare the handoff file so the macro-edge gate has a real
+    // handoff_path + skeleton to validate. Without this the gate rejects
+    // the emit with `hat_handoff_missing_path`.
+    let handoff_path = ralph_handoff_prepare(
+        temp_path,
+        "builtin:ce-executor-serial",
+        "executor",
+        "review-coordinator",
+        "work.done",
+    );
+
+    // Step 2: emit work.done with the prepared handoff_path in the payload.
+    // The gate accepts because:
+    //   - macro-edge is satisfied by a non-empty handoff_path,
+    //   - path jail resolves under temp_path,
+    //   - filename `{iter}-{seq+1}-{from}-{to}.md` matches (1-1-executor-review-coordinator.md),
+    //   - from/to match `executor` / `review-coordinator`,
+    //   - file content passes U3 validator (prepare wrote the five-section
+    //     skeleton; helper rewrote `## next` to a topic-free form so U4 passes),
+    //   - U4 publishes_check has no topic literal to extract.
+    let payload = format!(
+        r#"{{"plan_name":"p","plan_path":"p.md","task_id":"t","task_key":"k","step":"s","commit_count":1,"changed_lines":10,"handoff_path":"{}"}}"#,
+        handoff_path.replace('\\', "\\\\").replace('"', "\\\""),
+    );
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ralph"))
         .args([
             "-H",
             "builtin:ce-executor-serial",
             "emit",
             "work.done",
-            r#"{"plan_name":"p","plan_path":"p.md","task_id":"t","task_key":"k","step":"s","commit_count":1,"changed_lines":10}"#,
+            &payload,
             "--hat",
             "executor",
         ])
@@ -591,18 +732,34 @@ fn test_emit_with_env_hats_source_rejects_string_payload_for_work_ready() {
 
 /// AC-3: with RALPH_HATS_SOURCE, a properly-formed JSON payload is
 /// accepted and written to the events file.
+///
+/// 2026-06-20: under the hat-handoff gate, `work.ready` from
+/// `coordinator` is a macro-edge requiring a `handoff_path`. The
+/// downstream consumer is `executor`.
 #[test]
 fn test_emit_with_env_hats_source_accepts_valid_json_payload() {
     let temp_dir = TempDir::new().expect("temp dir");
     let temp_path = temp_dir.path();
     std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
 
+    let handoff_path = ralph_handoff_prepare(
+        temp_path,
+        "builtin:ce-executor-isolated",
+        "coordinator",
+        "executor",
+        "work.ready",
+    );
+    let payload = format!(
+        r#"{{"plan_name":"p","plan_path":"/tmp/p","task_id":"t","task_key":"k","step":"s","complexity":3,"handoff_path":"{}"}}"#,
+        handoff_path.replace('\\', "\\\\").replace('"', "\\\""),
+    );
+
     let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
         .args([
             "emit",
             "work.ready",
             "--json",
-            r#"{"plan_name":"p","plan_path":"/tmp/p","task_id":"t","task_key":"k","step":"s","complexity":3}"#,
+            &payload,
             "--hat",
             "coordinator",
         ])
@@ -749,12 +906,31 @@ fn test_emit_rejection_hint_excludes_unauthorised_topics() {
 // -------------------------------------------------------------------------
 
 /// T1.1 Happy path: isolated + `--hat executor` + legal `work.done` → write.
+///
+/// 2026-06-20: `ce-executor-serial` declares `hat_handoff.enabled: true`
+/// (SSOT), so `work.done` from `executor` is a macro-edge that requires a
+/// `handoff_path` referring to a file previously prepared via
+/// `ralph tools handoff prepare`. Without prepare the gate rejects the
+/// emit with `hat_handoff_missing_path`; with prepare it accepts and the
+/// event lands in events.jsonl.
 #[test]
 fn test_emit_t1_1_isolated_with_hat_legal_work_done_succeeds() {
     let temp_dir = TempDir::new().expect("temp dir");
     let temp_path = temp_dir.path();
     std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
 
+    let handoff_path = ralph_handoff_prepare(
+        temp_path,
+        "builtin:ce-executor-serial",
+        "executor",
+        "review-coordinator",
+        "work.done",
+    );
+
+    let payload = format!(
+        r#"{{"plan_name":"p","plan_path":"p.md","task_id":"t","task_key":"k","step":"s","commit_count":1,"changed_lines":10,"handoff_path":"{}"}}"#,
+        handoff_path.replace('\\', "\\\\").replace('"', "\\\""),
+    );
     let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
         .args([
             "-H",
@@ -762,7 +938,7 @@ fn test_emit_t1_1_isolated_with_hat_legal_work_done_succeeds() {
             "emit",
             "work.done",
             "--json",
-            r#"{"plan_name":"p","plan_path":"p.md","task_id":"t","task_key":"k","step":"s","commit_count":1,"changed_lines":10}"#,
+            &payload,
             "--hat",
             "executor",
         ])
@@ -982,17 +1158,28 @@ fn test_emit_t1_6_isolated_review_synthesizer_legal_emit_allowed() {
     let temp_path = temp_dir.path();
     std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
 
-    // `review-synthesizer` is allowed `skip_reason=dimensions_complete`
-    // in ce-executor-serial (per the SSOT schema). Pass --hat
-    // explicitly to pin the positive path; the test confirms the new
-    // U1 gate does not over-block when provenance is supplied.
+    // 2026-06-20: under the hat-handoff gate, `review.passed` from
+    // `review-synthesizer` is a macro-edge requiring a `handoff_path`.
+    // The downstream consumer is `plan-gate`.
+    let handoff_path = ralph_handoff_prepare(
+        temp_path,
+        "builtin:ce-executor-serial",
+        "review-synthesizer",
+        "plan-gate",
+        "review.passed",
+    );
+    let payload = format!(
+        r#"{{"plan_name":"p","task_id":"t","task_key":"k","step":"s","findings_count":0,"fix_round":0,"verdict":"pass","skip_reason":"dimensions_complete","handoff_path":"{}"}}"#,
+        handoff_path.replace('\\', "\\\\").replace('"', "\\\""),
+    );
+
     let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
         .args([
             "-H",
             "builtin:ce-executor-serial",
             "emit",
             "review.passed",
-            r#"{"plan_name":"p","task_id":"t","task_key":"k","step":"s","findings_count":0,"fix_round":0,"verdict":"pass","skip_reason":"dimensions_complete"}"#,
+            &payload,
             "--hat",
             "review-synthesizer",
         ])
@@ -1538,11 +1725,29 @@ fn test_u7_business_topic_default_source_is_emitting_hat() {
 }
 
 /// U7 (R7): explicit --source overrides the hat-default in isolated mode.
+///
+/// 2026-06-20: under the hat-handoff gate, `work.done` from `executor`
+/// is a macro-edge requiring a `handoff_path` (downstream:
+/// `review-coordinator`). The U7 source-override assertion still
+/// applies; we just thread a handoff into the payload so the gate
+/// accepts the emit.
 #[test]
 fn test_u7_explicit_source_overrides_default() {
     let temp_dir = TempDir::new().expect("temp dir");
     let temp_path = temp_dir.path();
     std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    let handoff_path = ralph_handoff_prepare(
+        temp_path,
+        "builtin:ce-executor-serial",
+        "executor",
+        "review-coordinator",
+        "work.done",
+    );
+    let payload = format!(
+        r#"{{"plan_name":"p","plan_path":"x","task_id":"t","task_key":"k","step":"s","commit_count":1,"changed_lines":10,"handoff_path":"{}"}}"#,
+        handoff_path.replace('\\', "\\\\").replace('"', "\\\""),
+    );
 
     let output = ralph_emit(
         temp_path,
@@ -1552,7 +1757,7 @@ fn test_u7_explicit_source_overrides_default() {
             "emit",
             "work.done",
             "--json",
-            r#"{"plan_name":"p","plan_path":"x","task_id":"t","task_key":"k","step":"s","commit_count":1,"changed_lines":10}"#,
+            &payload,
             "--hat",
             "executor",
             "--source",
