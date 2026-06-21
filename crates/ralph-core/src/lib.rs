@@ -83,6 +83,10 @@ pub mod testing;
 mod text;
 mod urgent_steer;
 pub mod utils;
+/// U4 unified validation pipeline — wraps origin / publisher /
+/// required-fields / step-handoff / hat-handoff / execution-
+/// contract / workflow-guard as stateless [`ValidationRule`]s.
+pub mod validation;
 pub mod wave_context;
 pub mod wave_detection;
 pub mod wave_prompt;

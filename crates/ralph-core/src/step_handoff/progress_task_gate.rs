@@ -265,21 +265,132 @@ pub enum GateDecision {
     Mismatch(ProgressTaskMismatch),
 }
 
+/// Pure-function check that takes the snapshot directly instead
+/// of reading from disk. The U4 validation pipeline
+/// (`crates/ralph-core/src/validation/rules_step_handoff.rs`)
+/// consumes this signature so the gate stops touching
+/// `std::fs::*` from inside the validation hot path.
+///
+/// `progress` is the parsed markdown snapshot, `tasks` is the
+/// in-memory task ledger (lifted from `LedgerSnapshot`). All
+/// other behaviour mirrors [`check_progress_task_alignment`]
+/// including the cold-start exemption and fail-closed defaults.
+pub fn check_alignment_with_snapshot(
+    progress: &ProgressSnapshot,
+    tasks: &[Task],
+    topic: &str,
+    step: Option<&str>,
+    task_id: Option<&str>,
+) -> GateDecision {
+    if !is_gated_topic(topic) {
+        return GateDecision::Inert;
+    }
+
+    // 1. Empty / missing headings → fail-closed.
+    if progress.empty_headings {
+        return GateDecision::Mismatch(ProgressTaskMismatch {
+            reason: "progress_missing_headings".to_string(),
+            detail: format!("progress snapshot has no `Current Step` or `Completed Steps` headings"),
+            step: step.map(|s| s.to_string()),
+            task_id: task_id.map(|t| t.to_string()),
+        });
+    }
+
+    // 2. Step alignment.
+    if let Some(step_value) = step {
+        match progress.current_step.as_deref() {
+            None => {
+                return GateDecision::Mismatch(ProgressTaskMismatch {
+                    reason: "progress_missing_current_step".to_string(),
+                    detail: format!(
+                        "event step='{}' but progress.md has no Current Step heading",
+                        step_value
+                    ),
+                    step: Some(step_value.to_string()),
+                    task_id: task_id.map(|t| t.to_string()),
+                });
+            }
+            Some(current) if current.trim() != step_value.trim() => {
+                if !progress.is_step_completed(step_value) {
+                    return GateDecision::Mismatch(ProgressTaskMismatch {
+                        reason: "step_mismatch".to_string(),
+                        detail: format!(
+                            "event step='{}' but progress Current Step='{}' and '{}' is not in Completed Steps",
+                            step_value, current, step_value
+                        ),
+                        step: Some(step_value.to_string()),
+                        task_id: task_id.map(|t| t.to_string()),
+                    });
+                }
+            }
+            Some(_) => {}
+        }
+    }
+
+    // 3. Task alignment (closed-but-not-marked).
+    if let Some(task_id_value) = task_id {
+        match tasks.iter().find(|t| t.id == task_id_value) {
+            None => {
+                return GateDecision::Mismatch(ProgressTaskMismatch {
+                    reason: "task_not_found".to_string(),
+                    detail: format!("event references task_id='{}' which is not in the task ledger", task_id_value),
+                    step: step.map(|s| s.to_string()),
+                    task_id: Some(task_id_value.to_string()),
+                });
+            }
+            Some(task) if is_task_closed(task) => {
+                let step_to_check = if task.title.trim().is_empty() {
+                    step.map(|s| s.to_string())
+                } else {
+                    Some(task.title.clone())
+                };
+                if let Some(ref s) = step_to_check
+                    && !progress.is_step_completed(s)
+                {
+                    return GateDecision::Mismatch(ProgressTaskMismatch {
+                        reason: "task_closed_but_progress_missing".to_string(),
+                        detail: format!(
+                            "task '{}' is closed but step '{}' is not in progress.md Completed Steps",
+                            task_id_value, s
+                        ),
+                        step: step.map(|st| st.to_string()),
+                        task_id: Some(task_id_value.to_string()),
+                    });
+                }
+            }
+            Some(_) => {}
+        }
+    }
+
+    GateDecision::Aligned
+}
+
 /// Check progress.md vs tasks.jsonl alignment for the given step/task.
 ///
 /// Returns `Aligned` when both ledgers agree, `Mismatch` with the
 /// reason when they disagree, and `Inert` when the topic is not in
 /// [`GATED_TOPICS`] (the caller should skip the gate entirely).
 ///
-/// The function is **pure**: no filesystem side effects, no clock
-/// reads, no logging. The caller decides whether to surface the
-/// mismatch as `RejectWithResume` and emit `plan.blocked`.
+/// The function is **pure** (with respect to memory): it reads
+/// progress.md and tasks.jsonl from disk. The caller decides
+/// whether to surface the mismatch as `RejectWithResume` and emit
+/// `plan.blocked`.
 ///
 /// `step` and `task_id` come from the inbound event's payload. The
 /// function is lenient about `None` values: a `None` step means the
 /// gate cannot verify step-level alignment and falls back to the
 /// task-level check; a `None` task_id skips the closed-but-not-marked
 /// check and only verifies the `Current Step` field exists.
+///
+/// **U4c**: prefer [`check_alignment_with_snapshot`] when the
+/// caller already has a [`LedgerSnapshot`] (or any pre-loaded
+/// `ProgressSnapshot` + `&[Task]`). This function remains as a
+/// convenience for legacy callers that do not yet participate in
+/// the snapshot pipeline.
+#[deprecated(
+    since = "U4c (2026-06-21-002)",
+    note = "prefer check_alignment_with_snapshot (pure, no disk I/O)"
+)]
 pub fn check_progress_task_alignment(
     topic: &str,
     step: Option<&str>,
