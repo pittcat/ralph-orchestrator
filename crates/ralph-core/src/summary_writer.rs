@@ -571,6 +571,10 @@ mod tests {
             // circuit-breaker trip in the test fixture.
             consecutive_engine_gate_rejections: 0,
             lint_circuit_breaker_tripped: false,
+            // U1 (plan 2026-06-21-002): the unified state ledger
+            // is opt-in. The test fixture stays on the legacy
+            // path by default.
+            state_ledger: None,
         }
     }
 

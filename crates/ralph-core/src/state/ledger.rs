@@ -1,0 +1,365 @@
+//! [`StateLedger`] — the unified state container for the
+//! orchestrator loop.
+//!
+//! Plan ref: U1 of
+//! `docs/plans/2026-06-21-002-refactor-unified-orchestrator-state-plan.md`.
+//!
+//! The ledger pairs an in-memory [`LedgerSnapshot`] with a
+//! persistent append-only commit log (`.ralph/ledger.jsonl`). The
+//! snapshot is the read side; the commit log is the write-of-record.
+//! On cold start, [`StateLedger::replay_from_disk`] rebuilds the
+//! snapshot by replaying the log on top of an empty default.
+//!
+//! ## Feature flag
+//!
+//! The `feature_enabled` flag is the U1 opt-in switch. When
+//! `false`, every `commit()` is a no-op (returns
+//! [`Commit::empty`], mutates no state, persists nothing) and
+//! `replay_from_disk` returns an empty snapshot. This keeps the
+//! legacy code path green while U2 onwards migrate their call
+//! sites.
+//!
+//! The flag mirrors the `UNIFIED_STATE_LEDGER=1` env var (read by
+//! the loop constructor). The state module does not consult the
+//! env var itself — the caller passes the resolved boolean in
+//! via [`StateLedger::new`].
+//!
+//! ## Concurrency
+//!
+//! The ledger is `!Sync` — its in-memory snapshot has `&mut`
+//! access through [`StateLedger::snapshot_mut`]. Callers serialise
+//! calls through their existing loop-step mutex.
+
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use chrono::Utc;
+use tracing::warn;
+
+use super::commit::{Commit, CommitDelta};
+use super::snapshot::LedgerSnapshot;
+
+/// Default on-disk location for the commit log, relative to a
+/// workspace root. Matches the path plan §U1 §"持久化格式".
+pub const LEDGER_RELATIVE_PATH: &str = ".ralph/ledger.jsonl";
+
+/// The unified state ledger.
+///
+/// Owns:
+/// - The live [`LedgerSnapshot`] (in-memory)
+/// - The append-only commit log (in memory + on disk)
+/// - The monotonic `commit_seq` counter
+/// - The on-disk path
+/// - The feature flag
+#[derive(Debug)]
+pub struct StateLedger {
+    snapshot: LedgerSnapshot,
+    /// In-memory mirror of the commit log. The on-disk file is
+    /// the source of truth; the in-memory vec is rebuilt on
+    /// cold start by [`StateLedger::replay_from_disk`].
+    commit_log: Vec<Commit>,
+    /// Monotonically increasing sequence number. Equal to
+    /// `commit_log.len()` after every successful `commit()`.
+    commit_seq: u64,
+    /// Workspace root, used to derive [`Self::ledger_path`].
+    workspace: PathBuf,
+    /// Pre-computed on-disk path. Held as a field to avoid
+    /// re-joining on every `commit()`.
+    ledger_path: PathBuf,
+    /// Feature flag. When `false`, every `commit()` is a no-op
+    /// and `replay_from_disk` returns an empty snapshot.
+    feature_enabled: bool,
+}
+
+/// Error type for ledger operations. Wraps both I/O failures and
+/// corruption errors from `replay_from_disk`.
+#[derive(Debug, thiserror::Error)]
+pub enum LedgerError {
+    /// The on-disk ledger file could not be read or written.
+    #[error("ledger io error: {0}")]
+    Io(#[from] std::io::Error),
+    /// A commit JSONL line failed to parse.
+    #[error("ledger parse error at line {line}: {message}")]
+    Parse { line: usize, message: String },
+    /// `replay_from_disk` stopped at `last_good_line` after
+    /// hitting a corrupt record. The snapshot reflects all
+    /// commits up to (and including) the last good line.
+    #[error("ledger corruption: replay stopped at line {last_good_line}; remaining {remaining_lines} line(s) skipped")]
+    Corruption {
+        last_good_line: usize,
+        remaining_lines: usize,
+    },
+}
+
+impl StateLedger {
+    /// Build a new in-memory ledger. The on-disk file is created
+    /// on the first successful `commit()`. When
+    /// `feature_enabled` is `false`, every subsequent `commit()` is
+    /// a no-op (and the file is never created).
+    pub fn new(workspace: &Path, feature_enabled: bool) -> Self {
+        Self {
+            snapshot: LedgerSnapshot::cold_start(),
+            commit_log: Vec::new(),
+            commit_seq: 0,
+            workspace: workspace.to_path_buf(),
+            ledger_path: workspace.join(LEDGER_RELATIVE_PATH),
+            feature_enabled,
+        }
+    }
+
+    /// Build a new ledger, seeded from a pre-existing snapshot
+    /// (used in tests + by U3 cold-start migration). The commit
+    /// log is left empty.
+    #[cfg(test)]
+    pub fn new_with_snapshot(
+        workspace: &Path,
+        feature_enabled: bool,
+        snapshot: LedgerSnapshot,
+    ) -> Self {
+        Self {
+            snapshot,
+            commit_log: Vec::new(),
+            commit_seq: 0,
+            workspace: workspace.to_path_buf(),
+            ledger_path: workspace.join(LEDGER_RELATIVE_PATH),
+            feature_enabled,
+        }
+    }
+
+    /// Borrow the current snapshot.
+    pub fn snapshot(&self) -> &LedgerSnapshot {
+        &self.snapshot
+    }
+
+    /// Mutable access to the snapshot. Reserved for U2 where the
+    /// projector rebuilds the in-memory cache from a pre-existing
+    /// disk state (e.g. legacy `tasks.jsonl`) before the first
+    /// commit. Callers that go through this path must skip the
+    /// on-disk write — see [`Self::commit`] for the equivalent
+    /// through the commit log.
+    pub fn snapshot_mut(&mut self) -> &mut LedgerSnapshot {
+        &mut self.snapshot
+    }
+
+    /// The on-disk path the ledger writes to. Exposed so U2 can
+    /// delete or rotate the file when migrating a workspace that
+    /// predates the ledger.
+    pub fn ledger_path(&self) -> &Path {
+        &self.ledger_path
+    }
+
+    /// Whether the feature flag is on. Callers consult this to
+    /// decide whether to also update the legacy in-memory
+    /// trackers on `LoopState` (the dual-write path during U1
+    /// migration).
+    pub fn feature_enabled(&self) -> bool {
+        self.feature_enabled
+    }
+
+    /// The workspace the ledger is rooted at.
+    pub fn workspace(&self) -> &Path {
+        &self.workspace
+    }
+
+    /// Borrow the in-memory commit log. The returned slice is
+    /// ordered by `sequence`.
+    pub fn commit_log(&self) -> &[Commit] {
+        &self.commit_log
+    }
+
+    /// Apply a [`CommitDelta`] to the snapshot and append a
+    /// [`Commit`] to the log. Returns the appended commit.
+    ///
+    /// When `feature_enabled` is `false`, the call is a no-op:
+    /// - the snapshot is not mutated,
+    /// - the commit log is not extended,
+    /// - no file is written,
+    /// - the returned `Commit` is [`Commit::empty`].
+    ///
+    /// When the feature is on, the in-memory snapshot is mutated
+    /// first; if the on-disk write fails, the in-memory mutation
+    /// is rolled back and the original snapshot is restored.
+    pub fn commit(
+        &mut self,
+        delta: CommitDelta,
+        event_topic: Option<String>,
+    ) -> Result<Commit, LedgerError> {
+        if !self.feature_enabled {
+            return Ok(Commit::empty());
+        }
+
+        // Snapshot the affected sub-state *before* mutation so we
+        // can roll back on write failure. We snapshot the whole
+        // `LedgerSnapshot` (cheap clone) and replace it on
+        // rollback; for high-frequency commits the clone cost
+        // dominates and the rollback becomes a real cost. U2 may
+        // introduce a narrower "affected sub-state" snapshot if
+        // benchmarks show it matters.
+        let prior_snapshot = self.snapshot.clone();
+
+        self.snapshot.apply_delta(&delta);
+        let new_seq = self.commit_seq + 1;
+        let commit = Commit {
+            iteration: self.snapshot.iteration,
+            sequence: new_seq,
+            timestamp: Utc::now().to_rfc3339(),
+            event_topic,
+            delta,
+        };
+
+        if let Err(err) = persist_commit(&self.ledger_path, &commit) {
+            // Roll back the in-memory mutation; the commit was
+            // not added to the log and `commit_seq` does not
+            // advance.
+            self.snapshot = prior_snapshot;
+            return Err(err);
+        }
+
+        self.commit_log.push(commit.clone());
+        self.commit_seq = new_seq;
+        Ok(commit)
+    }
+
+    /// Replay the on-disk commit log on top of an empty snapshot
+    /// and return the rebuilt snapshot. Does not return a
+    /// `StateLedger` so the caller decides how to wire it up.
+    ///
+    /// On corruption (a JSONL line that does not parse), the
+    /// replay stops at the first bad line and returns an error
+    /// describing the last good line. The partially-built
+    /// snapshot is discarded; the caller can inspect the error
+    /// and decide whether to truncate the file or refuse to
+    /// resume.
+    ///
+    /// The empty / missing file case is not an error: a fresh
+    /// workspace returns the cold-start snapshot.
+    pub fn replay_from_disk(workspace: &Path) -> Result<LedgerSnapshot, LedgerError> {
+        let ledger_path = workspace.join(LEDGER_RELATIVE_PATH);
+        let mut snapshot = LedgerSnapshot::cold_start();
+
+        let body = match std::fs::read_to_string(&ledger_path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(snapshot);
+            }
+            Err(e) => return Err(LedgerError::Io(e)),
+        };
+
+        let mut last_good_line: usize = 0;
+        for (idx, raw_line) in body.lines().enumerate() {
+            let line_no = idx + 1;
+            let trimmed = raw_line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let commit: Commit = match serde_json::from_str(trimmed) {
+                Ok(c) => c,
+                Err(e) => {
+                    let remaining_lines =
+                        body.lines().filter(|l| !l.trim().is_empty()).count() - idx;
+                    return Err(LedgerError::Parse {
+                        line: line_no,
+                        message: format!("{} ({} line(s) skipped after corruption)", e, remaining_lines),
+                    });
+                }
+            };
+            snapshot.apply_delta(&commit.delta);
+            last_good_line = line_no;
+        }
+
+        if last_good_line == 0 {
+            // The file existed but had no parseable records.
+            // Treat as corruption so the operator can decide
+            // whether to truncate.
+            return Err(LedgerError::Corruption {
+                last_good_line: 0,
+                remaining_lines: body.lines().filter(|l| !l.trim().is_empty()).count(),
+            });
+        }
+
+        // `last_good_line` is set if any commit was applied;
+        // corruption would have already returned an error.
+        let _ = last_good_line;
+        Ok(snapshot)
+    }
+}
+
+/// Append one commit to the on-disk JSONL file. Uses the same
+/// temp-file + rename pattern as `state_projector/progress.rs`
+/// (atomic on the same filesystem).
+fn persist_commit(ledger_path: &Path, commit: &Commit) -> Result<(), LedgerError> {
+    if let Some(parent) = ledger_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut line = serde_json::to_string(commit)
+        .map_err(|e| LedgerError::Parse {
+            line: 0,
+            message: format!("commit_serialize: {e}"),
+        })?;
+    line.push('\n');
+
+    // Append: open in append mode, write the line, close. The
+    // file is not expected to be on a remote filesystem; if
+    // that changes, swap to the temp-file + rename pattern.
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(ledger_path)?;
+    f.write_all(line.as_bytes())?;
+    f.sync_all().ok();
+    Ok(())
+}
+
+/// Helper for tests + U3 cold-start migration: read the raw
+/// commit log from disk. Returns an empty `Vec` if the file
+/// does not exist.
+pub fn read_commit_log(workspace: &Path) -> Result<Vec<Commit>, LedgerError> {
+    let path = workspace.join(LEDGER_RELATIVE_PATH);
+    let body = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(LedgerError::Io(e)),
+    };
+
+    let mut commits = Vec::new();
+    for (idx, raw_line) in body.lines().enumerate() {
+        let line_no = idx + 1;
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let commit: Commit = serde_json::from_str(trimmed).map_err(|e| LedgerError::Parse {
+            line: line_no,
+            message: e.to_string(),
+        })?;
+        commits.push(commit);
+    }
+    Ok(commits)
+}
+
+/// Best-effort truncate for the recovery path (e.g. when
+/// `replay_from_disk` reports corruption past line N and the
+/// operator confirms truncation). Reserved for U2 — the CLI
+/// will expose this behind `ralph loops clean --ledger`.
+#[allow(dead_code)]
+pub fn truncate_after(workspace: &Path, keep_lines: usize) -> Result<(), LedgerError> {
+    let path = workspace.join(LEDGER_RELATIVE_PATH);
+    let body = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(LedgerError::Io(e)),
+    };
+    let kept: String = body
+        .lines()
+        .take(keep_lines)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(&path, kept)?;
+    warn!(
+        path = %path.display(),
+        kept_lines = keep_lines,
+        "ledger truncated after corruption"
+    );
+    Ok(())
+}

@@ -2,14 +2,15 @@
 //!
 //! The event loop coordinates the execution of hats via pub/sub messaging.
 
-mod loop_state;
+pub mod loop_state;
 pub mod rejection;
 pub mod review_step_state;
 #[cfg(test)]
 mod tests;
 
 pub use loop_state::{
-    LINT_CIRCUIT_BREAKER_LIMIT, LoopState, U2_REJECTION_RETRY_LIMIT, WorkflowProgress,
+    LINT_CIRCUIT_BREAKER_LIMIT, LoopState, RejectionDigestEntry, U2_REJECTION_RETRY_LIMIT,
+    WorkflowProgress,
 };
 // Items are also re-exported from `crate::*` via `lib.rs`. The lib-side
 // re-export keeps the public API stable; the `pub use` here is a

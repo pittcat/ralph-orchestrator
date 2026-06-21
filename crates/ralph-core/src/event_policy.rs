@@ -252,7 +252,7 @@ pub fn is_recoverable_policy_finding(finding: &PolicyFinding) -> Option<ReasonCl
 }
 
 /// Runtime state for policy validation across events.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct PolicyRuntimeState {
     pub terminal_observed: bool,
     pub observed_topics: HashSet<String>,

@@ -216,7 +216,7 @@ impl FlowLifecycleRecord {
 }
 
 /// In-memory registry of flow records.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct FlowLifecycleRegistry {
     records: HashMap<String, FlowLifecycleRecord>,
     /// Most-recent transition envelope ready to be appended to

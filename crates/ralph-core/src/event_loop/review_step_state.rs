@@ -54,7 +54,7 @@ struct StepReviewState {
     failed_pending_fix: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ReviewStepTracker {
     steps: HashMap<StepKey, StepReviewState>,
 }

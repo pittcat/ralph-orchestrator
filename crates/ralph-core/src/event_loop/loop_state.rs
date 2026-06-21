@@ -477,6 +477,14 @@ pub struct LoopState {
     /// disables the gate via a different code path) or by
     /// restarting the loop.
     pub lint_circuit_breaker_tripped: bool,
+
+    /// U1 (plan 2026-06-21-002): unified state ledger.
+    /// `None` when the `UNIFIED_STATE_LEDGER=1` opt-in is off
+    /// (the default; legacy path keeps working). `Some` on
+    /// loops that opted in to the new path; the runner drains
+    /// commits through this ledger instead of the legacy
+    /// `StateProjector::ProjectionContext` in-memory trackers.
+    pub state_ledger: Option<crate::state::StateLedger>,
 }
 impl Default for LoopState {
     fn default() -> Self {
@@ -578,6 +586,12 @@ impl Default for LoopState {
             // circuit breaker counter; no trip on iteration 1.
             consecutive_engine_gate_rejections: 0,
             lint_circuit_breaker_tripped: false,
+            // U1 (plan 2026-06-21-002): unified state ledger.
+            // Default `None` keeps the legacy code path green.
+            // The loop constructor resolves
+            // `UNIFIED_STATE_LEDGER=1` and wires the ledger in
+            // for opted-in runs.
+            state_ledger: None,
         }
     }
 }
