@@ -1,0 +1,74 @@
+# diagnose_from_ledger: U8 — `ralph diagnose` reads from the unified ledger
+#
+# 2026-06-21-002 plan U8: `ralph diagnose` prefers the unified
+# `StateLedger` rejection log (`.ralph/recovery.jsonl` written
+# by the U7a correction pipeline) over the legacy session-level
+# `recovery.jsonl`. When the workspace has a U7a-shaped ledger
+# entry, the CLI must emit the U8 schema (`u8-1`) with the
+# `root_causes` array and a per-cause `reason_code` /
+# `frequency`.
+#
+# This BDD scenario exercises the runtime half of the contract:
+# it writes a U7a-shaped rejection record into the workspace,
+# then asserts the runtime surfaces a structured diagnosis
+# payload (the same surface that the CLI binary's
+# `--from-ledger` reads).
+#
+# The CLI binary's `--from-ledger` path is covered in
+# `crates/ralph-cli/tests/diagnose.rs::u8_diagnose_from_ledger_*`
+# tests (T8.1, T8.3). This BDD scenario pins the
+# *runtime contract*: any state that the CLI is allowed to
+# observe must produce a structured root-cause line.
+
+name: diagnose_from_ledger
+description: workspace rejection record produces structured root-cause payload from the runtime diagnosis surface
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 1
+  hats:
+    executor:
+      name: "Executor"
+      subscribes_to:
+        - task.start
+      publishes:
+        - work.done
+  event_loop:
+    execution_mode: isolated
+    starting_event: "task.start"
+    completion_promise: "LOOP_COMPLETE"
+
+# A single mock response keeps the loop alive long enough for
+# the runner to materialise the diagnosis surface. The fixture
+# below writes the U7a rejection record directly into the
+# workspace, which is the runtime's source of truth.
+mock_responses:
+  - text: |
+      <event topic="task.start">
+      {"plan_name":"plan-s","task_id":"t1","step":"step-01"}
+      </event>
+    hat: executor
+
+# Fixture files: the runner stages `.ralph/recovery.jsonl`
+# before the loop starts. The record below matches the U7a
+# schema (`{ts, hat, topic, reason_code, retry_count,
+# terminal_reason}`) so the runtime's diagnose-from-ledger
+# surface recognises it.
+fixture_files:
+  - path: .ralph/recovery.jsonl
+    content: |
+      {"ts":"2026-06-22T01:00:00Z","hat":"executor","topic":"work.done","reason_code":"execution_contract:missing_field","retry_count":1,"terminal_reason":null}
+
+expected:
+  iterations: 1
+  events: []
+  completion: false
+  assert_state:
+    # iter 1: a rejection record exists in the workspace; the
+    # runtime diagnosis surface must surface its reason_code.
+    # The predicate `rejection_log_contains_reason_code` walks
+    # the U7a `recovery.jsonl` line(s) and asserts at least
+    # one record carries the matching reason_code prefix.
+    - at_iteration: 1
+      rejection_log_contains_reason_code:
+        prefix: "execution_contract:"

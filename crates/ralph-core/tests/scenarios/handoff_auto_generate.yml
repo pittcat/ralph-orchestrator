@@ -1,0 +1,81 @@
+# handoff_auto_generate: U5 — hat handoff artifact auto-generation
+#
+# 2026-06-21-002 plan U5: when the next hat in a handoff chain
+# is about to be activated and the required handoff artifact
+# (markdown file at `.ralph/agent/hat-handoff/<from>-<to>.md`)
+# does not exist, the orchestrator generates a stub artifact
+# with the previous hat's context rather than failing closed.
+#
+# This BDD scenario pins the auto-generate contract:
+#
+#   iter 1: executor emits `work.done` (no manual handoff file
+#           staged). The hat-handoff gate accepts because the
+#           auto-generate hook seeds the artifact before the
+#           gate validates it.
+#   iter 2: review-coordinator's `build_prompt` carries
+#           `## HAT HANDOFF` block — produced by auto-generate
+#           rather than by the operator's `--prepare-handoff`
+#           step.
+#
+# The legacy manual handoff artifact path is preserved
+# (`presets/.../prepare-handoff.md` scripts); this scenario
+# pins the *automatic* generation path that lives on the
+# orchestrator side. The CLI parity is covered in
+# `cli_runtime_parity.yml`.
+
+name: handoff_auto_generate
+description: hat-handoff artifact auto-generated when next hat activates without a pre-existing handoff file
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 3
+  hats:
+    executor:
+      subscribes_to:
+        - task.start
+      publishes:
+        - work.done
+    reviewer:
+      subscribes_to:
+        - work.done
+      publishes:
+        - LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
+    starting_event: "task.start"
+    hat_handoff:
+      enabled: true
+
+# NOTE: no fixture_files — the auto-generate path is what
+# creates the handoff markdown file.
+
+mock_responses:
+  # iter 1: executor emits work.done without a handoff_path
+  # field. Without U5 the hat-handoff gate would reject
+  # (missing required section). With U5 the auto-generate
+  # hook stages a stub artifact before the gate runs.
+  - text: |
+      <event topic="work.done">
+      task_id: "task-real-001"
+      </event>
+    hat: executor
+  # iter 2: reviewer's first response. build_prompt must
+  # carry ## HAT HANDOFF.
+  - text: |
+      <event topic="LOOP_COMPLETE">
+      Done.
+      </event>
+    hat: reviewer
+
+expected:
+  iterations: 2
+  completion: true
+  # Pin the handoff block via `prompt_contains` so the
+  # assertion is on the rendered prompt text. `task.start`
+  # is not part of `expected.events` because the runner
+  # doesn't assert on the boot event shape.
+  prompt_contains:
+    - hat: reviewer
+      substrings:
+        - "## HAT HANDOFF"

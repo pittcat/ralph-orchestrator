@@ -1,0 +1,120 @@
+# correction_three_escalation: U7a R11 — three rejections trigger escalation
+#
+# 2026-06-21-002 plan U7a / R11: when the same `retry_key` is
+# rejected 3 times in a row, the correction block's
+# `needs_escalation` flag flips to true. The R11 tripwire is
+# the deterministic counterpart to the legacy "human.guidance
+# after N retries" ladder — it works without the bus, in the
+# prompt itself.
+#
+# This BDD scenario pins the R11 contract end to end:
+#
+#   iter 1: clean baseline — correction queue empty, no
+#           escalation.
+#   iter 2: 1st rejection — correction block present with
+#           retry_count=1, needs_escalation=false.
+#   iter 3: 2nd rejection — correction block present with
+#           retry_count=2, needs_escalation=false.
+#   iter 4: 3rd rejection — correction block present with
+#           retry_count=3, needs_escalation=true (R11 trip).
+#   iter 5: prompt injection carries the ESCALATION line.
+#
+# The legacy "publish human.guidance event on retry budget
+# exhausted" path is preserved; this scenario asserts the
+# *new* deterministic prompt-side escalation marker.
+
+name: correction_three_escalation
+description: same retry_key rejected 3 times — correction block marks needs_escalation and renders ESCALATION line
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 6
+  hats:
+    executor:
+      name: "Executor"
+      subscribes_to:
+        - task.start
+      publishes:
+        - work.done
+  event_loop:
+    execution_mode: isolated
+    starting_event: "task.start"
+    completion_promise: "LOOP_COMPLETE"
+    hat_handoff:
+      enabled: true
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        work.done:
+          required_fields:
+            - plan_name
+            - step
+            - commit_count
+
+mock_responses:
+  # iter 1: clean baseline.
+  - text: |
+      <event topic="task.start">
+      {"plan_name":"plan-s","task_id":"t1","step":"step-01"}
+      </event>
+    hat: executor
+  # iter 2: 1st rejection (commit_count only).
+  - text: |
+      <event topic="work.done">
+      {"commit_count":1}
+      </event>
+    hat: executor
+  # iter 3: 2nd rejection.
+  - text: |
+      <event topic="work.done">
+      {"commit_count":2}
+      </event>
+    hat: executor
+  # iter 4: 3rd rejection — R11 tripwire. correction block
+  # needs_escalation flips to true here.
+  - text: |
+      <event topic="work.done">
+      {"commit_count":3}
+      </event>
+    hat: executor
+  # iter 5: emit task.start so the next build_prompt renders the
+  # escalated correction block to the prompt text.
+  - text: |
+      <event topic="task.start">
+      {"plan_name":"plan-s","task_id":"t1","step":"step-05"}
+      </event>
+    hat: executor
+  # iter 6: clean work.done.
+  - text: |
+      <event topic="work.done">
+      {"plan_name":"plan-s","step":"step-06","commit_count":6}
+      </event>
+    hat: executor
+
+expected:
+  iterations: 6
+  events: []
+  completion: false
+  assert_state:
+    # iter 2: 1 correction block, retry_count=1, no escalation.
+    - at_iteration: 2
+      correction_block_present:
+        retry_count: 1
+        needs_escalation: false
+    # iter 3: retry_count=2.
+    - at_iteration: 3
+      correction_block_present:
+        retry_count: 2
+        needs_escalation: false
+    # iter 4: retry_count=3 — R11 tripwire flips.
+    - at_iteration: 4
+      correction_block_present:
+        retry_count: 3
+        needs_escalation: true
+    # iter 5: prompt carries ESCALATION annotation line.
+    - at_iteration: 5
+      prompt_injects:
+        hat: executor
+        block: "ESCALATION"

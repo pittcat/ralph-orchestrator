@@ -54,6 +54,14 @@ mod topic_format_recovery;
 /// `ResumeContext` prompt injection path.  See
 /// `correction::tests` for unit-level coverage.
 mod u7_correction;
+/// U9 (plan 2026-06-21-002): migration test additions that
+/// pin the unified `correction_context` / `loop.resume`
+/// surface. The legacy `task.resume` tests in
+/// `task_resume_ttl.rs` and `loop_runner/tests.rs` continue
+/// to pass without these assertions — the new tests verify
+/// the *new* deterministic-correction path on top of the
+/// legacy task.resume injection.
+mod u9_correction_assertions;
 mod wave_context_env_var;
 mod wave_context_injection;
 mod wave_isolated_scope;

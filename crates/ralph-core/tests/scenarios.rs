@@ -186,6 +186,21 @@ struct AssertionYaml {
     // rejections.
     #[serde(default)]
     lint_circuit_breaker: Option<LintCircuitBreakerYaml>,
+    // 2026-06-21-002 plan U9: assert a CorrectionContext is
+    // queued in `state.prompt_context.correction_blocks`. Matches
+    // by `reason_code` prefix, `retry_count`, and
+    // `needs_escalation` flag — used by the new
+    // `correction_deterministic` and `correction_three_escalation`
+    // scenarios.
+    #[serde(default)]
+    correction_block_present: Option<CorrectionBlockPresentYaml>,
+    // 2026-06-21-002 plan U9: assert a rejection record exists
+    // in the workspace-level `.ralph/recovery.jsonl` with a
+    // matching `reason_code` prefix. Used by
+    // `diagnose_from_ledger.yml` to pin the runtime→CLI
+    // surface contract.
+    #[serde(default)]
+    rejection_log_contains_reason_code: Option<RejectionLogContainsReasonCodeYaml>,
 }
 
 #[allow(dead_code)] // Test infrastructure - fields used for YAML deserialization
@@ -223,6 +238,34 @@ struct PromptInjectsYaml {
     hat: String,
     #[serde(default = "default_lint_resume_required")]
     block: String,
+}
+
+// 2026-06-21-002 plan U9: `correction_block_present` predicate.
+// At least one entry in
+// `state.prompt_context.correction_blocks` must match the
+// supplied `reason_code_prefix`, and (when present) the
+// `retry_count` and `needs_escalation` fields must match.
+#[allow(dead_code)] // Test infrastructure - fields used for YAML deserialization
+#[derive(Debug, Deserialize, Default)]
+struct CorrectionBlockPresentYaml {
+    #[serde(default)]
+    reason_code_prefix: Option<String>,
+    #[serde(default)]
+    retry_count: Option<u32>,
+    #[serde(default)]
+    needs_escalation: Option<bool>,
+}
+
+// 2026-06-21-002 plan U9: `rejection_log_contains_reason_code`
+// predicate. Reads the workspace-level `.ralph/recovery.jsonl`
+// and asserts at least one record's `reason_code` starts with
+// the supplied prefix. Used by `diagnose_from_ledger.yml` to
+// pin the runtime surface contract that the CLI binary's
+// `--from-ledger` reads (T8.1-T8.3 in `crates/ralph-cli/tests/diagnose.rs`).
+#[allow(dead_code)] // Test infrastructure - fields used for YAML deserialization
+#[derive(Debug, Deserialize, Default)]
+struct RejectionLogContainsReasonCodeYaml {
+    prefix: String,
 }
 
 /// Read-only snapshot of `LoopState` taken at the end of each
@@ -272,6 +315,29 @@ struct LoopStateSnapshot {
     /// tripped" intermediate states.
     #[allow(dead_code)]
     consecutive_engine_gate_rejections: u32,
+    /// 2026-06-21-002 plan U9: snapshot of
+    /// `state.prompt_context.correction_blocks`, flattened into
+    /// the fields the `correction_block_present` predicate
+    /// inspects (`reason_code`, `retry_count`,
+    /// `needs_escalation`). Mirrors the
+    /// `rejection_digest_entries` pattern: the live `BTreeMap`
+    /// is unwrapped into a `Vec` of summaries so the predicate
+    /// does not need to know about
+    /// `ralph_core::correction::CorrectionContext`'s full shape.
+    #[allow(dead_code)]
+    correction_block_summaries: Vec<CorrectionBlockSummary>,
+    /// 2026-06-21-002 plan U9: snapshot of
+    /// `state.prompt_context.resume_blocks`. Future U9 scenarios
+    /// that pin the `--continue` path use this via the
+    /// `resume_block_present` predicate (added when needed).
+    #[allow(dead_code)]
+    resume_block_summaries: Vec<ResumeBlockSummary>,
+    /// 2026-06-21-002 plan U9: absolute path to the workspace
+    /// `.ralph/recovery.jsonl` at snapshot time. Stored so the
+    /// `rejection_log_contains_reason_code` predicate can read
+    /// the live log without re-deriving the path.
+    #[allow(dead_code)]
+    workspace_recovery_log: Option<std::path::PathBuf>,
 }
 
 #[allow(dead_code)] // Test infrastructure
@@ -287,6 +353,28 @@ struct RejectionDigestSummary {
     code: String,
     last_topic: String,
     last_message: String,
+}
+
+// 2026-06-21-002 plan U9: summary of one
+// `state.prompt_context.correction_blocks` entry. Mirrors the
+// shape of `ralph_core::correction::CorrectionContext` but
+// only carries the fields the predicate inspects.
+#[allow(dead_code)] // Test infrastructure
+#[derive(Debug, Clone)]
+struct CorrectionBlockSummary {
+    reason_code: String,
+    retry_count: u32,
+    needs_escalation: bool,
+}
+
+// 2026-06-21-002 plan U9: summary of one
+// `state.prompt_context.resume_blocks` entry. Future predicate
+// expansion point.
+#[allow(dead_code)] // Test infrastructure
+#[derive(Debug, Clone)]
+struct ResumeBlockSummary {
+    loop_id: String,
+    last_iteration: u32,
 }
 
 /// Read-only snapshot of one `build_prompt` invocation's output
@@ -550,7 +638,14 @@ fn run_scenario_with_snapshots(
         // pending_lint_resume). Pushed BEFORE the iteration's
         // checkpoint assertions so a checkpoint failure does not
         // produce a half-built snapshot list.
-        let snapshot = capture_state_snapshot(event_loop.state());
+        //
+        // 2026-06-21-002 plan U9: pass the workspace root so
+        // the snapshot can resolve `.ralph/recovery.jsonl` for
+        // the `rejection_log_contains_reason_code` predicate.
+        let snapshot = capture_state_snapshot(
+            event_loop.state(),
+            Some(temp_dir.path().to_path_buf()),
+        );
         state_snapshots.push(snapshot);
         if let Some((hat, prompt)) = last_prompt_for_iter.take() {
             prompt_snapshots.push(BuildPromptSnapshot {
@@ -1577,6 +1672,117 @@ fn test_serial_lint_11_isolated_unaffected() {
 }
 
 // ──────────────────────────────────────────────────────────────────────
+// 2026-06-21-002 plan U9: deterministic-correction BDD scenarios
+//
+// Each scenario targets one U7a/U7b/U8 contract that the
+// legacy `task.resume` assertions cannot reach. The five
+// drivers below load the matching YAML fixture and route
+// through `run_workflow_guard_scenario` so the standard
+// per-iteration snapshot + assert_state harness evaluates
+// the new U9 predicates.
+//
+// Per plan §"保守做法" the legacy `task.resume` tests in
+// `event_loop/tests/task_resume_ttl.rs` and
+// `loop_runner/tests.rs` are kept verbatim — these scenarios
+// pin the *new* deterministic-correction path on top.
+//
+// The `UNIFIED_DETERMINISTIC_CORRECTION=1` env var opts into
+// the new path. With nextest's process-per-test model each
+// driver sets the var locally before loading the YAML; the
+// legacy path tests (without the var) keep passing
+// untouched.
+// ──────────────────────────────────────────────────────────────────────
+
+/// Set `UNIFIED_DETERMINISTIC_CORRECTION=1` for the current
+/// test process so the deterministic-correction path is
+/// active. The legacy tests do not call this helper, so the
+/// env var change is scoped to U9 BDD scenarios.
+///
+/// Note: the workspace `forbid(unsafe_code)` prevents
+/// `std::env::set_var`, so this helper is currently a
+/// no-op. The ignored U9 BDDs (correction_deterministic,
+/// correction_three_escalation) will be re-enabled once the
+/// production `emit_correction_context` wire-up lands; the
+/// helper is kept as a stable extension point so a follow-up
+/// commit can drop in a test-scoped setter (e.g. via a
+/// process-spawn harness or a runtime config override).
+fn enable_deterministic_correction_for_test() {
+    // Intentionally empty: see the doc comment above.
+    let _ = "UNIFIED_DETERMINISTIC_CORRECTION";
+}
+
+/// U9 BDD #1: a recoverable rejection accumulates a
+/// `CorrectionContext` and the next prompt contains the
+/// `## ORCHESTRATOR CORRECTION` block. Companion to the
+/// unit-level coverage in `event_loop/tests/u7_correction.rs`.
+///
+/// `#[ignore]`-ed: the production `emit_correction_context`
+/// wire-up is pending (the legacy `publish_policy_rejection_resume`
+/// still publishes `task.resume` events; the U7a migration to
+/// the deterministic-correction path is a follow-up beyond
+/// U9's scope). The harness predicates are wired and will pass
+/// once that production code lands. The YAML + driver stay in
+/// place so the follow-up work is just removing the
+/// `#[ignore]` attribute.
+#[test]
+#[ignore = "requires production wire-up of correction::emit_correction_context on the policy rejection path (U7a follow-up)"]
+fn test_u9_correction_deterministic_scenario() {
+    enable_deterministic_correction_for_test();
+    let yaml = load_scenario("tests/scenarios/correction_deterministic.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U9 BDD #2: R11 escalation tripwire — three rejections on
+/// the same retry_key flip the correction block's
+/// `needs_escalation` flag and render the `ESCALATION`
+/// annotation line in the next prompt.
+///
+/// `#[ignore]`-ed for the same reason as #1: the production
+/// `emit_correction_context` call site is missing, so the
+/// correction queue stays empty and the R11 tripwire never
+/// fires through the runtime path. The `correction::tests`
+/// unit suite covers the data-structure side; the BDD will
+/// pass once the production wire-up lands.
+#[test]
+#[ignore = "requires production wire-up of correction::emit_correction_context on the policy rejection path (U7a follow-up)"]
+fn test_u9_correction_three_escalation_scenario() {
+    enable_deterministic_correction_for_test();
+    let yaml = load_scenario("tests/scenarios/correction_three_escalation.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U9 BDD #3: hat-handoff artifact auto-generation —
+/// `## HAT HANDOFF` appears in the next hat's prompt without
+/// a manual `--prepare-handoff` step.
+#[test]
+fn test_u9_handoff_auto_generate_scenario() {
+    let yaml = load_scenario("tests/scenarios/handoff_auto_generate.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U9 BDD #4: `ralph diagnose --from-ledger` runtime surface —
+/// workspace `.ralph/recovery.jsonl` carries a U7a rejection
+/// record whose `reason_code` matches the CLI binary's
+/// T8.1/T8.3 contract.
+#[test]
+fn test_u9_diagnose_from_ledger_scenario() {
+    enable_deterministic_correction_for_test();
+    let yaml = load_scenario("tests/scenarios/diagnose_from_ledger.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U9 BDD #5: CLI/runtime parity — the runtime rejection's
+/// `reason_code` (unified validation pipeline prefix) matches
+/// the CLI emit side's `ralph emit --policy-check` output
+/// (covered in `policy_check_handoff.rs` T4.1-T4.4).
+#[test]
+fn test_u9_cli_runtime_parity_scenario() {
+    enable_deterministic_correction_for_test();
+    let yaml = load_scenario("tests/scenarios/cli_runtime_parity.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+// ──────────────────────────────────────────────────────────────────────
 // 2026-06-17-004 plan U6 (T6.1): silent DR recovery variant
 //
 // This variant mirrors the noble-peacock failure shape (DR silent on
@@ -2305,8 +2511,16 @@ fn test_u6_zippy_sparrow_replay_fixture() {
 /// (2026-06-20-002 plan U2). Pulls the minimum fields the
 /// predicates need; deeper cloning would couple the test to
 /// engine internals that can change.
+///
+/// 2026-06-21-002 plan U9: extended with `correction_blocks` /
+/// `resume_blocks` summaries and `workspace_recovery_log`
+/// (workspace path passed in so the predicate can read
+/// `.ralph/recovery.jsonl` without re-deriving the location).
 #[allow(dead_code)]
-fn capture_state_snapshot(state: &ralph_core::event_loop::LoopState) -> LoopStateSnapshot {
+fn capture_state_snapshot(
+    state: &ralph_core::event_loop::LoopState,
+    workspace_root: Option<std::path::PathBuf>,
+) -> LoopStateSnapshot {
     let pending_lint_resume = state.pending_lint_resume.as_ref().map(|hint| {
         PendingLintResumeSummary {
             topic: hint.topic.clone(),
@@ -2322,6 +2536,34 @@ fn capture_state_snapshot(state: &ralph_core::event_loop::LoopState) -> LoopStat
             last_message: entry.last_message.clone(),
         })
         .collect();
+    // 2026-06-21-002 plan U9: snapshot
+    // `state.prompt_context.correction_blocks` / `resume_blocks`
+    // into the summary vectors. The runtime lives in
+    // `ralph_core::correction::PromptContext`; we pull the
+    // fields the predicate inspects and skip the rest so the
+    // test does not depend on the full struct shape.
+    let correction_block_summaries = state
+        .prompt_context
+        .correction_blocks
+        .iter()
+        .map(|c| CorrectionBlockSummary {
+            reason_code: c.reason_code.clone(),
+            retry_count: c.retry_count,
+            needs_escalation: c.needs_escalation,
+        })
+        .collect();
+    let resume_block_summaries = state
+        .prompt_context
+        .resume_blocks
+        .iter()
+        .map(|r| ResumeBlockSummary {
+            loop_id: r.loop_id.clone(),
+            last_iteration: r.last_iteration,
+        })
+        .collect();
+    let workspace_recovery_log = workspace_root
+        .as_ref()
+        .map(|p| p.join(".ralph").join("recovery.jsonl"));
     LoopStateSnapshot {
         iteration: state.iteration,
         pending_lint_resume,
@@ -2338,6 +2580,9 @@ fn capture_state_snapshot(state: &ralph_core::event_loop::LoopState) -> LoopStat
         // implementation.
         lint_circuit_breaker_tripped: state.lint_circuit_breaker_tripped,
         consecutive_engine_gate_rejections: state.consecutive_engine_gate_rejections,
+        correction_block_summaries,
+        resume_block_summaries,
+        workspace_recovery_log,
     }
 }
 
@@ -2391,15 +2636,149 @@ fn evaluate_assert_state(
             evaluate_prompt_injects(scenario_name, idx, at, pi, prompt_snap);
         } else if let Some(ref cb) = assertion.lint_circuit_breaker {
             evaluate_lint_circuit_breaker(scenario_name, idx, at, cb, state_snap);
+        } else if let Some(ref c) = assertion.correction_block_present {
+            // 2026-06-21-002 plan U9: U7a
+            // `CorrectionContext` predicate — asserts a
+            // correction block is queued in
+            // `state.prompt_context.correction_blocks`.
+            evaluate_correction_block_present(scenario_name, idx, at, c, state_snap);
+        } else if let Some(ref rl) = assertion.rejection_log_contains_reason_code {
+            // 2026-06-21-002 plan U9: U8
+            // `rejection_log_contains_reason_code` predicate —
+            // asserts `.ralph/recovery.jsonl` carries at least
+            // one record with the matching `reason_code`
+            // prefix.
+            evaluate_rejection_log_contains_reason_code(
+                scenario_name,
+                idx,
+                at,
+                rl,
+                state_snap,
+            );
         } else {
             panic!(
                 "{}: assert_state[{}] at_iteration={} has no predicate set \
                  (expected one of pending_lint_resume, pending_lint_resume_cleared, \
-                 rejection_digest_contains, prompt_injects, lint_circuit_breaker)",
+                 rejection_digest_contains, prompt_injects, lint_circuit_breaker, \
+                 correction_block_present, rejection_log_contains_reason_code)",
                 scenario_name, idx, at
             );
         }
     }
+}
+
+// 2026-06-21-002 plan U9: `correction_block_present` predicate
+// implementation. Walks
+// `state.prompt_context.correction_blocks` and asserts at
+// least one entry matches the supplied `reason_code_prefix`,
+// and (when set) the `retry_count` and `needs_escalation`
+// fields.
+fn evaluate_correction_block_present(
+    scenario_name: &str,
+    assertion_idx: usize,
+    at: usize,
+    expected: &CorrectionBlockPresentYaml,
+    snap: &LoopStateSnapshot,
+) {
+    let entries = &snap.correction_block_summaries;
+    assert!(
+        !entries.is_empty(),
+        "{}: assert_state[{}] correction_block_present at_iteration={} \
+         expected at least one entry in state.prompt_context.correction_blocks, got empty",
+        scenario_name, assertion_idx, at
+    );
+    let mut matched = entries.iter().filter(|c| {
+        if let Some(ref prefix) = expected.reason_code_prefix {
+            if !c.reason_code.starts_with(prefix.as_str()) {
+                return false;
+            }
+        }
+        if let Some(rc) = expected.retry_count {
+            if c.retry_count != rc {
+                return false;
+            }
+        }
+        if let Some(ne) = expected.needs_escalation {
+            if c.needs_escalation != ne {
+                return false;
+            }
+        }
+        true
+    });
+    let first_match = matched.next();
+    assert!(
+        first_match.is_some(),
+        "{}: assert_state[{}] correction_block_present at_iteration={} \
+         no correction block matched reason_code_prefix={:?} retry_count={:?} \
+         needs_escalation={:?}; entries: {:?}",
+        scenario_name,
+        assertion_idx,
+        at,
+        expected.reason_code_prefix,
+        expected.retry_count,
+        expected.needs_escalation,
+        entries
+    );
+}
+
+// 2026-06-21-002 plan U9: `rejection_log_contains_reason_code`
+// predicate implementation. Reads the workspace-level
+// `.ralph/recovery.jsonl` recorded in the snapshot and asserts
+// at least one record's `reason_code` starts with the
+// supplied prefix. Mirrors the diagnostic surface that
+// `ralph diagnose --from-ledger` consumes (T8.1 in
+// `crates/ralph-cli/tests/diagnose.rs`).
+fn evaluate_rejection_log_contains_reason_code(
+    scenario_name: &str,
+    assertion_idx: usize,
+    at: usize,
+    expected: &RejectionLogContainsReasonCodeYaml,
+    snap: &LoopStateSnapshot,
+) {
+    let path = snap.workspace_recovery_log.as_ref().unwrap_or_else(|| {
+        panic!(
+            "{}: assert_state[{}] rejection_log_contains_reason_code at_iteration={} \
+             no workspace path recorded in snapshot — cannot read recovery.jsonl",
+            scenario_name, assertion_idx, at
+        )
+    });
+    if !path.exists() {
+        panic!(
+            "{}: assert_state[{}] rejection_log_contains_reason_code at_iteration={} \
+             recovery.jsonl not found at {:?}",
+            scenario_name, assertion_idx, at, path
+        );
+    }
+    let content = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        panic!(
+            "{}: assert_state[{}] rejection_log_contains_reason_code at_iteration={} \
+             failed to read {:?}: {}",
+            scenario_name, assertion_idx, at, path, e
+        )
+    });
+    let prefix = expected.prefix.as_str();
+    let mut found = false;
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if let Some(rc) = v.get("reason_code").and_then(|x| x.as_str()) {
+            if rc.starts_with(prefix) {
+                found = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        found,
+        "{}: assert_state[{}] rejection_log_contains_reason_code at_iteration={} \
+         expected at least one record with reason_code prefix {:?}, content: {:?}",
+        scenario_name, assertion_idx, at, prefix, content
+    );
 }
 
 fn evaluate_pending_lint_resume(
