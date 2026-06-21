@@ -28,6 +28,7 @@ pub mod finding_id;
 pub mod multi_hat;
 pub mod ownership;
 pub mod schema_parity;
+pub mod state_projection;
 pub mod topic_format;
 pub mod workflow_activation;
 
@@ -42,6 +43,7 @@ pub use finding_id::{
     FINDING_MISSING_TOPIC_OWNER, FINDING_MULTI_HAT_REQUIRES_ISOLATED, FINDING_OWNER_NOT_PUBLISHER,
     FINDING_OWNER_UNKNOWN_HAT, FINDING_RE_EMIT_TRAP, FINDING_TASK_PUBLISHER_NOT_COORDINATED,
     FINDING_TRIGGER_PUBLISH_ASYMMETRY, FINDING_WHITELIST_EXEMPT_TOPIC,
+    FINDING_WORK_DONE_ACTION_CHAIN_ORDER,
 };
 
 // Re-export the WAC top-level entry point so callers (and the
@@ -56,6 +58,7 @@ pub use finding_id::{
 // (KTD-2: WAC always-on, severity by strictness).
 pub use multi_hat::check_multi_hat_isolation;
 pub use ownership::{check_owner_references, check_ownership_rules};
+pub use state_projection::check_work_done_action_chain_order;
 pub use topic_format::{
     TopicFormatResult, TopicOccurrence, TopicSurface, enumerate_topics, suggest_topic_fix,
     validate_all_topics, validate_topic_format,
@@ -349,6 +352,19 @@ pub fn run_preset_lint(
     let wac_findings =
         run_workflow_activation_contract(config, wac_strict, source_is_builtin_embedded);
     findings.extend(lint_findings_to_contract_findings(&wac_findings));
+
+    // Plan 2026-06-20-001 U1 KTD-3: state_projection work.done action
+    // chain order assertion. Always-on — order is semantic; the
+    // engine typestate in `state_projector/mod.rs` is the
+    // secondary check (catches Rust-side dispatch bugs only).
+    // Reversed chains reintroduce the
+    // `ce-executor-serial-primary-20260619` 死循环 by letting
+    // `progress_task_gate` reject the next emit after a successful
+    // task close. Findings are `Error` severity regardless of
+    // `strictness` because the rule is purely structural.
+    findings.extend(lint_findings_to_contract_findings(
+        &check_work_done_action_chain_order(config),
+    ));
 
     // Plan 001 §4.5 R1: every hat `publishes` topic must have a schema
     // entry under `event_policy.schemas`. Without this gate, the CLI

@@ -345,6 +345,13 @@ fn merge_preset_with_schema(
     //    (SSOT base, inline per-key override). Targets are created
     //    on demand — a preset that has no `event_loop.<section>` yet
     //    gets one synthesised.
+    //
+    //    P2-6: the SSOT for this table is
+    //    `src/preset_merge_table.rs` (shared with presets.rs).
+    //    This array MUST match that const. If you add/rename a
+    //    section here, update `preset_merge_table.rs` too; the
+    //    runtime test `p2_6_ssot_section_targets_match_build_rs`
+    //    in `presets.rs` catches drift at `cargo test` time.
     let section_targets: &[(&str, &[&str])] = &[
         ("execution_contracts", &["event_loop", "execution_contracts"]),
         ("verdict_gate", &["event_loop", "verdict_gate"]),

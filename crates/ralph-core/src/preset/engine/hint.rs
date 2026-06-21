@@ -7,8 +7,21 @@
 //! linter still records an audit event but does not gate.
 //!
 //! Plan ref: R8–R13, plan 2026-06-20-001.
+//!
+//! ## P1-1: typed rejection classification
+//!
+//! The preferred constructor is
+//! [`LintResumeHint::from_typed_rejection`], which takes a
+//! [`crate::preset::engine::gates::RejectionKind`] and maps it
+//! to the failure class. The legacy
+//! [`LintResumeHint::from_reason`] is still available for
+//! callers that do not yet have a typed kind (it degrades to
+//! the previous string-substring matching); new code MUST use
+//! the typed constructor.
 
 use serde::Serialize;
+
+use super::gates::RejectionKind;
 
 /// Failure classification used to pick the right target hat
 /// (KTD-4). The linter carries the classification forward to
@@ -32,16 +45,23 @@ pub enum LintFailureClass {
 }
 
 impl LintFailureClass {
-    /// Infer the failure class from a reason string. Mirrors the
-    /// reasons produced by `run_gates` / `lint_emit` so callers
-    /// can pipe the rejection reason through without an extra
-    /// classification layer.
+    /// Infer the failure class from a reason string. Legacy
+    /// path — new code should construct the hint from a typed
+    /// [`RejectionKind`] via
+    /// [`LintResumeHint::from_typed_rejection`]. Kept for
+    /// callers that only have a reason string (notably the
+    /// runtime gate path, which appends to a JSONL log and
+    /// then re-reads it).
     pub fn from_reason(reason: &str) -> Self {
         let lower = reason.to_ascii_lowercase();
         // Check artifact first — its `## next` token is unique.
         if lower.contains("artifact") || lower.contains("## next") {
             Self::HandoffArtifact
-        } else if lower.contains("topic") && (lower.contains("ownership") || lower.contains("deny") || lower.contains("unauthorized")) {
+        } else if lower.contains("topic")
+            && (lower.contains("ownership")
+                || lower.contains("deny")
+                || lower.contains("unauthorized"))
+        {
             Self::TopicOwnership
         } else if lower.contains("progress") && lower.contains("stale") {
             // Only the very specific "progress stale" phrase maps to
@@ -89,6 +109,29 @@ pub struct LintResumeHint {
 }
 
 impl LintResumeHint {
+    /// Construct from a typed [`RejectionKind`] (P1-1).
+    /// Preferred entry point for callers that already have a
+    /// structured rejection — the routing target is decided by
+    /// the kind, not by string matching on the message.
+    pub fn from_typed_rejection(
+        topic: &str,
+        kind: RejectionKind,
+        message: &str,
+    ) -> Self {
+        let class = kind.to_lint_class();
+        let target = LintResumeTarget::from_class(&class);
+        Self {
+            class,
+            target,
+            topic: topic.to_string(),
+            reason: message.to_string(),
+        }
+    }
+
+    /// Legacy constructor that infers the class from the reason
+    /// string. Use [`Self::from_typed_rejection`] for new code
+    /// — string matching is fragile and bypassable by any
+    /// reason containing the keyword.
     pub fn from_reason(topic: &str, reason: &str) -> Self {
         let class = LintFailureClass::from_reason(reason);
         let target = LintResumeTarget::from_class(&class);
@@ -110,6 +153,7 @@ pub fn classify_lint_failure(reason: &str) -> LintFailureClass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::preset::engine::gates::RejectionKind;
 
     #[test]
     fn payload_error_routes_to_source() {
@@ -130,5 +174,53 @@ mod tests {
         let hint = LintResumeHint::from_reason("review.passed", "## next marker missing in artifact");
         assert_eq!(hint.class, LintFailureClass::HandoffArtifact);
         assert_eq!(hint.target, LintResumeTarget::SourceHat);
+    }
+
+    /// P1-1: the typed constructor picks the right class
+    /// *regardless* of the message text. A missing-field
+    /// rejection whose message accidentally contains the
+    /// word "artifact" is still classified as a payload error,
+    /// not a handoff artifact error. This is the regression
+    /// that the old `from_reason` could not catch.
+    #[test]
+    fn p1_1_typed_rejection_ignores_message_keywords() {
+        let hint = LintResumeHint::from_typed_rejection(
+            "work.done",
+            RejectionKind::MissingField,
+            "missing required fields: handoff_path, commit_sha (an artifact of the run)",
+        );
+        assert_eq!(
+            hint.class,
+            LintFailureClass::PayloadError,
+            "missing-field rejection must stay a payload error even when the message mentions 'artifact'"
+        );
+        assert_eq!(hint.target, LintResumeTarget::SourceHat);
+    }
+
+    /// P1-1: a handoff-artifact rejection whose message
+    /// mentions "topic" still classifies as HandoffArtifact.
+    #[test]
+    fn p1_1_typed_rejection_classifies_by_kind_not_text() {
+        let hint = LintResumeHint::from_typed_rejection(
+            "review.passed",
+            RejectionKind::HandoffArtifact,
+            "artifact body missing ## next marker; topic route unchanged",
+        );
+        assert_eq!(hint.class, LintFailureClass::HandoffArtifact);
+        assert_eq!(hint.target, LintResumeTarget::SourceHat);
+    }
+
+    /// P1-1: UpstreamState routes to plan-gate even when the
+    /// message does NOT contain the words "progress" / "stale"
+    /// (the legacy `from_reason` heuristic required them).
+    #[test]
+    fn p1_1_upstream_state_routes_to_plan_gate_unconditionally() {
+        let hint = LintResumeHint::from_typed_rejection(
+            "queue.advance",
+            RejectionKind::UpstreamState,
+            "tasks.jsonl has no open row for task_id=t",
+        );
+        assert_eq!(hint.class, LintFailureClass::UpstreamStateMissing);
+        assert_eq!(hint.target, LintResumeTarget::PlanGate);
     }
 }

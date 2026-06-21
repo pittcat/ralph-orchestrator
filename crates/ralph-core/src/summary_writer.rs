@@ -567,6 +567,10 @@ mod tests {
             // populated by the CLI emit path or by the loop's
             // own engine gate when a topic is rejected.
             pending_lint_resume: None,
+            // Plan 2026-06-20-001 KTD-7: cold start; no
+            // circuit-breaker trip in the test fixture.
+            consecutive_engine_gate_rejections: 0,
+            lint_circuit_breaker_tripped: false,
         }
     }
 

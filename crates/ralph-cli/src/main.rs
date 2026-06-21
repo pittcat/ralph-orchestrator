@@ -34,6 +34,7 @@ mod operation_guard;
 mod policy_check;
 mod preflight;
 mod preset_templates;
+mod preset_merge_table;
 mod presets;
 mod rpc_stdin;
 mod skill_cli;

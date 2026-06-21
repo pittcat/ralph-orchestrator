@@ -178,6 +178,21 @@ struct AssertionYaml {
     rejection_digest_contains: Option<RejectionDigestContainsYaml>,
     #[serde(default)]
     prompt_injects: Option<PromptInjectsYaml>,
+    // Plan 2026-06-20-001 KTD-7: lint circuit breaker assertion.
+    // Predicate matches when `state.lint_circuit_breaker_tripped`
+    // equals the supplied `tripped` value. Used by scenario 10
+    // (`serial_lint_circuit_breaker.yaml`) to assert the
+    // breaker tripped at iter 4 after 3 consecutive engine-gate
+    // rejections.
+    #[serde(default)]
+    lint_circuit_breaker: Option<LintCircuitBreakerYaml>,
+}
+
+#[allow(dead_code)] // Test infrastructure - fields used for YAML deserialization
+#[derive(Debug, Deserialize, Default)]
+struct LintCircuitBreakerYaml {
+    #[serde(default)]
+    tripped: Option<bool>,
 }
 
 #[allow(dead_code)] // Test infrastructure - fields used for YAML deserialization
@@ -238,6 +253,25 @@ struct LoopStateSnapshot {
     /// Tracked here for future extensibility.
     #[allow(dead_code)]
     scope_violation_circuit_breaker_tripped: bool,
+    /// Snapshot of `state.lint_circuit_breaker_tripped`. Plan
+    /// 2026-06-20-001 KTD-7 / RISK-6: when the engine gate
+    /// rejects every event for
+    /// `LINT_CIRCUIT_BREAKER_LIMIT` consecutive iterations,
+    /// this latches. Scenarios use
+    /// `lint_circuit_breaker_tripped: { tripped: true }` to
+    /// assert the trip happened. Distinct from
+    /// `scope_violation_circuit_breaker_tripped` (different
+    /// domain).
+    #[allow(dead_code)]
+    lint_circuit_breaker_tripped: bool,
+    /// Snapshot of `state.consecutive_engine_gate_rejections`.
+    /// Scenarios use `lint_circuit_breaker_counter: { gte: N }`
+    /// to assert the breaker counter crossed a threshold. This
+    /// is the raw counter, not the trip latch — useful for
+    /// asserting "counter climbed to N but breaker had not yet
+    /// tripped" intermediate states.
+    #[allow(dead_code)]
+    consecutive_engine_gate_rejections: u32,
 }
 
 #[allow(dead_code)] // Test infrastructure
@@ -2292,6 +2326,15 @@ fn capture_state_snapshot(state: &ralph_core::event_loop::LoopState) -> LoopStat
         scope_violation_circuit_breaker_tripped: state
             .scope_violation_circuit_breaker_tripped
             .is_some(),
+        // Plan 2026-06-20-001 KTD-7: capture the lint circuit
+        // breaker state so scenario 10 (and future scenarios)
+        // can assert the trip directly. The pre-existing
+        // scenario 10 YAML was authored before this field
+        // landed and asserted `pending_lint_resume` at iter 4
+        // instead; it has been updated in lockstep with the
+        // implementation.
+        lint_circuit_breaker_tripped: state.lint_circuit_breaker_tripped,
+        consecutive_engine_gate_rejections: state.consecutive_engine_gate_rejections,
     }
 }
 
@@ -2343,11 +2386,13 @@ fn evaluate_assert_state(
             evaluate_rejection_digest_contains(scenario_name, idx, at, r, state_snap);
         } else if let Some(ref pi) = assertion.prompt_injects {
             evaluate_prompt_injects(scenario_name, idx, at, pi, prompt_snap);
+        } else if let Some(ref cb) = assertion.lint_circuit_breaker {
+            evaluate_lint_circuit_breaker(scenario_name, idx, at, cb, state_snap);
         } else {
             panic!(
                 "{}: assert_state[{}] at_iteration={} has no predicate set \
                  (expected one of pending_lint_resume, pending_lint_resume_cleared, \
-                 rejection_digest_contains, prompt_injects)",
+                 rejection_digest_contains, prompt_injects, lint_circuit_breaker)",
                 scenario_name, idx, at
             );
         }
@@ -2408,6 +2453,28 @@ fn evaluate_pending_lint_resume_cleared(
         at,
         snap.pending_lint_resume
     );
+}
+
+fn evaluate_lint_circuit_breaker(
+    scenario_name: &str,
+    assertion_idx: usize,
+    at: usize,
+    expected: &LintCircuitBreakerYaml,
+    snap: &LoopStateSnapshot,
+) {
+    if let Some(want_tripped) = expected.tripped {
+        assert_eq!(
+            snap.lint_circuit_breaker_tripped, want_tripped,
+            "{}: assert_state[{}] lint_circuit_breaker.tripped at_iteration={} \
+             expected {}, got {} (consecutive_engine_gate_rejections={})",
+            scenario_name,
+            assertion_idx,
+            at,
+            want_tripped,
+            snap.lint_circuit_breaker_tripped,
+            snap.consecutive_engine_gate_rejections,
+        );
+    }
 }
 
 fn evaluate_rejection_digest_contains(

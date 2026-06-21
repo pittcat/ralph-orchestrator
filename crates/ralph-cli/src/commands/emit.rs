@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use ralph_core::config::HatExecutionMode;
 use ralph_core::preset::engine::{
-    LintOutcome, LintResumeHint, ProtocolView, lint_emit_with_timeout,
+    LintOutcome, LintPaths, LintResumeHint, ProtocolView, lint_emit_with_timeout,
 };
 use ralph_core::preset::engine::lint_mirror::{
     build_lint_mirror_block, build_lint_resume_block,
@@ -1025,15 +1025,23 @@ fn emit_command_with_root_and_hats(
     // rolling back the policy / scope / handoff gates (which lint
     // does not replace).
     let payload_value = if should_run_lint(config.as_ref()) {
-        let view = ProtocolView::from_event_loop(&config.as_ref().unwrap().event_loop);
+        // P0-1: pass the HandoffIndex so the engine's macro-edge
+        // set matches the runtime's `requires_handoff` exactly.
+        // Without this, R22 auto_prepare missed the default
+        // unique-consumer edges (work.ready, work.done).
+        let config_ref = config.as_ref().unwrap();
+        let index = ralph_core::workflow_contract::handoff_index::HandoffIndex::from_config(
+            config_ref,
+        );
+        let view = ProtocolView::from_event_loop_with_index(&config_ref.event_loop, Some(&index));
+        // P0-2: pass workspace paths so auto-prepare artifact
+        // lands under the loop's own directory.
+        let paths = LintPaths::under_handoff_dir(workspace_root.clone());
         // Plan R22: lint_emit now takes &mut Value so the
         // orchestrator can synchronously inject `handoff_path`
-        // for macro edges lacking one. We pass the payload by
-        // mutable reference and let lint_emit either leave it
-        // alone (Accept) or mutate it (AcceptAfterAutoPrepare)
-        // before the gate.
+        // for macro edges lacking one.
         let mut payload_mut = payload_value;
-        let outcome = lint_emit_with_timeout(&view, &topic, &mut payload_mut);
+        let outcome = lint_emit_with_timeout(&view, &paths, &topic, &mut payload_mut);
         match handle_lint_outcome(outcome, &workspace_root, &view, &topic, payload_mut) {
             Ok(v) => v,
             Err(e) => return Err(e),
@@ -3011,7 +3019,7 @@ pub mod schema_view {
         let mut out = serde_json::json!({
             "topic": topic,
             "protocol_hash": view.protocol_hash,
-            "is_macro_edge": view.is_macro_edge(topic),
+            "is_macro_edge": view.is_macro_edge(topic, None),
             "required_fields": required_fields,
             "all_topics": payload_keys,
         });

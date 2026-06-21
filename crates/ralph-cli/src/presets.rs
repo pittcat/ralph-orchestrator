@@ -116,6 +116,14 @@ pub fn preset_names() -> Vec<&'static str> {
         .collect()
 }
 
+/// P2-6: SSOT multi-section merge table (KTD-1, plan 2026-06-20-001 U1).
+///
+/// The table itself lives in [`crate::preset_merge_table`] so
+/// `build.rs` and this crate can share one source of truth
+/// (build.rs uses `include!` because the build script and
+/// the library are separate compilation units).
+pub use crate::preset_merge_table::SSOT_SECTION_TARGETS;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -766,16 +774,12 @@ mod tests {
         // 2) Multi-section protocol merge (plan 2026-06-20-001
         //    U1 / KTD-1). Mirrors `build.rs` exactly so the
         //    embedded copy produced by `cargo build` matches
-        //    what this test computes. Each SSOT top-level key
-        //    (other than `schemas`) is deep-merged into
-        //    `event_loop.<section>`.
-        let section_targets: &[(&str, &[&str])] = &[
-            ("execution_contracts", &["event_loop", "execution_contracts"]),
-            ("verdict_gate", &["event_loop", "verdict_gate"]),
-            ("workflow_contract", &["event_loop", "workflow_contract"]),
-            ("state_projection", &["event_loop", "state_projection"]),
-            ("hat_handoff", &["event_loop", "hat_handoff"]),
-        ];
+        //    what this test computes. The mapping table lives
+        //    in `super::SSOT_SECTION_TARGETS` (P2-6) so the
+        //    build script and the test can share one source
+        //    of truth. Each SSOT top-level key (other than
+        //    `schemas`) is deep-merged into `event_loop.<section>`.
+        let section_targets = super::SSOT_SECTION_TARGETS;
         for (ssot_key, target_path) in section_targets {
             let Some(ssot_value) = ssot.get(*ssot_key) else {
                 continue;

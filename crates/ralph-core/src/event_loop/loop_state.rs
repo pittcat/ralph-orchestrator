@@ -20,6 +20,23 @@ use crate::flow_lifecycle::FlowLifecycleRegistry;
 /// a single, consistent retry budget across failure modes.
 pub const U2_REJECTION_RETRY_LIMIT: u32 = 3;
 
+/// Plan 2026-06-20-001 KTD-7 / RISK-6: when the engine gate
+/// rejects this many *consecutive* iterations, the linter
+/// auto-disables itself for the rest of the run. d623c09's
+/// runtime gates keep running, and the existing
+/// `consecutive_malformed_events >= 3` termination check
+/// remains as the final backstop. The breaker is *strictly
+/// less than* the termination threshold (3) so it trips
+/// *before* the loop dies, giving the runtime gates one
+/// iteration to record the rejection before the existing
+/// safety net fires.
+///
+/// We use a *separate* counter (`consecutive_engine_gate_rejections`)
+/// rather than `consecutive_malformed_events` because the
+/// termination check already owns that field and conflating
+/// the two would couple lint backoff to loop death.
+pub const LINT_CIRCUIT_BREAKER_LIMIT: u32 = 2;
+
 /// Fingerprint of the last emitted event for stale loop detection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventSignature {
@@ -436,6 +453,30 @@ pub struct LoopState {
     /// `## LINT RESUME REQUIRED`. Stays in-memory only; never
     /// written to recovery.jsonl (R9).
     pub pending_lint_resume: Option<crate::preset::engine::LintResumeHint>,
+
+    /// Plan 2026-06-20-001 KTD-7 / RISK-6: count of *consecutive*
+    /// iterations in which the engine gate rejected every event.
+    /// Reset to 0 on any iteration where the gate accepted at
+    /// least one event. When this reaches
+    /// [`LINT_CIRCUIT_BREAKER_LIMIT`] the engine gate
+    /// auto-disables for the remainder of the run (set
+    /// [`Self::lint_circuit_breaker_tripped`]).
+    ///
+    /// Distinct from `consecutive_malformed_events` (which
+    /// tracks JSONL parse failures and feeds the
+    /// `ValidationFailure` termination check); conflating the
+    /// two would couple lint backoff to loop termination.
+    pub consecutive_engine_gate_rejections: u32,
+
+    /// Plan 2026-06-20-001 KTD-7 / RISK-6: latch set when
+    /// [`Self::consecutive_engine_gate_rejections`] reaches
+    /// [`LINT_CIRCUIT_BREAKER_LIMIT`]. While `true`, the
+    /// engine gate short-circuits in `should_run_engine_gate`
+    /// and d623c09's runtime gates keep running. Operators
+    /// can override with `RALPH_SERIAL_LINT_MODE=off` (also
+    /// disables the gate via a different code path) or by
+    /// restarting the loop.
+    pub lint_circuit_breaker_tripped: bool,
 }
 impl Default for LoopState {
     fn default() -> Self {
@@ -533,6 +574,10 @@ impl Default for LoopState {
             // iteration so the agent sees the resume block on the
             // prompt that immediately follows the rejection.
             pending_lint_resume: None,
+            // Plan 2026-06-20-001 KTD-7: cold start with a fresh
+            // circuit breaker counter; no trip on iteration 1.
+            consecutive_engine_gate_rejections: 0,
+            lint_circuit_breaker_tripped: false,
         }
     }
 }

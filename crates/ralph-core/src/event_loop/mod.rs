@@ -8,7 +8,9 @@ pub mod review_step_state;
 #[cfg(test)]
 mod tests;
 
-pub use loop_state::{LoopState, U2_REJECTION_RETRY_LIMIT, WorkflowProgress};
+pub use loop_state::{
+    LINT_CIRCUIT_BREAKER_LIMIT, LoopState, U2_REJECTION_RETRY_LIMIT, WorkflowProgress,
+};
 // Items are also re-exported from `crate::*` via `lib.rs`. The lib-side
 // re-export keeps the public API stable; the `pub use` here is a
 // convenience path for in-crate consumers (the runner).
@@ -5927,11 +5929,29 @@ impl EventLoop {
         if self.config.event_loop.execution_mode == HatExecutionMode::Coordinator {
             return false;
         }
-        self.config.event_loop.hat_handoff.enabled
+        if !self.config.event_loop.hat_handoff.enabled {
+            return false;
+        }
+        // Plan 2026-06-20-001 KTD-7 / RISK-6 circuit breaker.
+        // When the linter has rejected every event for
+        // `LINT_CIRCUIT_BREAKER_LIMIT` consecutive iterations,
+        // it auto-disables itself for the rest of the run.
+        // d623c09's runtime gates keep running, and the
+        // existing `consecutive_malformed_events >= 3`
+        // termination check remains as the final backstop. We
+        // trip on threshold 2 so the breaker fires *before* the
+        // termination check at 3, giving the runtime gates one
+        // iteration to record the rejection before the loop
+        // dies. Operators can override with
+        // `RALPH_SERIAL_LINT_MODE=off`.
+        if self.state.lint_circuit_breaker_tripped {
+            return false;
+        }
+        true
     }
 
-    /// U2 (plan 2026-06-20-001): filter the parsed batch through
-    /// the engine's required-fields gate *before* handing the
+    /// U2 (plan 2026-06-20-001): apply the engine's required-
+    /// fields gate to a parsed batch *before* handing the
     /// batch to the d623c09 policy / scope / recovery stack.
     /// Returns a fresh `ParseResult` with rejected events
     /// reported as malformed (so the existing rejection
@@ -5939,30 +5959,50 @@ impl EventLoop {
     /// `event.malformed`) and the accepted events proceeding
     /// through the d623c09 path unchanged.
     ///
+    /// P1-3: the previous name (`engine_required_field_filter`)
+    /// suggested a pure filter; the function actually does four
+    /// distinct things:
+    ///
+    ///   1. runs the engine gate (decision),
+    ///   2. drops rejected events from the batch (filter),
+    ///   3. appends a `MalformedLine` so the existing
+    ///      bookkeeping increments `consecutive_malformed_events`
+    ///      and publishes `event.malformed` (audit),
+    ///   4. seeds `state.pending_lint_resume` so the next
+    ///      `build_prompt` injects `## LINT RESUME REQUIRED`
+    ///      (agent feedback).
+    ///
+    /// The new name `apply_engine_required_field_gate`
+    /// matches the actual contract: a fail-fast **gate** that
+    /// has side effects. The four steps are factored into
+    /// helpers below so each step is independently testable
+    /// and rename-safe.
+    ///
     /// Fail-closed semantics: when the engine rejects an event
     /// (because `required_fields` are missing), the event is
     /// **dropped** — it never lands on the bus and never sees
-    /// d623c09. The rejection reason is logged via `tracing::warn`
-    /// so operators have the same audit trail they get from
-    /// policy-rejected events.
+    /// d623c09.
     ///
-    /// 2026-06-20-001 review P0 #1 + #4: the filter is now
-    /// `&mut self` and writes the rejection to
-    /// `state.pending_lint_resume` so the agent's next
-    /// `build_prompt` sees `## LINT RESUME REQUIRED`. The
-    /// `MalformedLine` is the cross-bookkeeping signal; the
-    /// `pending_lint_resume` is the agent-feedback signal. Both
-    /// must fire for the rejection to be observable.
-    fn engine_required_field_filter(
+    /// Circuit breaker (KTD-7 / RISK-6): if every event in the
+    /// batch was rejected, increment
+    /// `consecutive_engine_gate_rejections`; when it reaches
+    /// `LINT_CIRCUIT_BREAKER_LIMIT`, set
+    /// `lint_circuit_breaker_tripped = true` so the engine
+    /// gate short-circuits for the rest of the run. A
+    /// batch with at least one accept resets the counter
+    /// (the gate did useful work that iteration).
+    fn apply_engine_required_field_gate(
         &mut self,
         mut result: crate::event_reader::ParseResult,
     ) -> crate::event_reader::ParseResult {
         use crate::event_reader::MalformedLine;
-        use crate::preset::engine::{GateDecision, LintContext, LintResumeHint, run_gates};
+        use crate::preset::engine::{
+            GateDecision, LintContext, LintResumeHint, gates::RejectionKind, run_gates,
+        };
         let view = ProtocolView::from_event_loop(&self.config.event_loop);
         let ctx = LintContext;
         let mut rejected = 0usize;
-        let mut last_rejection: Option<(String, String)> = None;
+        let mut last_rejection: Option<(String, RejectionKind, String)> = None;
         let mut kept = Vec::with_capacity(result.events.len());
         for event in result.events.drain(..) {
             let topic = event.topic.to_string();
@@ -5973,43 +6013,45 @@ impl EventLoop {
             let decision = run_gates(&view, &ctx, &topic, &payload_value);
             match decision {
                 GateDecision::Accept => kept.push(event),
-                GateDecision::Reject(reason) => {
+                GateDecision::Reject { kind, message } => {
                     rejected += 1;
                     tracing::warn!(
                         topic = %topic,
-                        reason = %reason,
+                        kind = %kind.reason_code(),
+                        reason = %message,
                         hat = ?event.hat.as_deref(),
                         "engine gate rejected event (U2 fail-fast, required-fields)"
                     );
-                    // Surface the rejection as a `MalformedLine`
-                    // entry so the existing event-loop rejection
-                    // bookkeeping (consecutive_malformed_events,
-                    // publish event.malformed) fires identically
-                    // to the d623c09 path. The original payload
-                    // string is preserved as the line content so
-                    // operators can still inspect the raw event.
-                    // `line_number = 0` marks the entry as an
-                    // engine rejection rather than a parser
-                    // rejection (1+ are reserved for JSONL parse
-                    // failures).
                     let raw = event.payload.clone().unwrap_or_default();
                     result.malformed.push(MalformedLine::new(
                         0,
                         &raw,
-                        format!("engine_rejected: {reason}"),
+                        format!("engine_rejected: {message}"),
                     ));
-                    // Review P0 #4: the agent's next prompt must
-                    // see `## LINT RESUME REQUIRED` for this
-                    // rejection. We accumulate the most recent
-                    // rejection; a batch with multiple rejections
-                    // surfaces the LAST one to the agent (the
-                    // CLI can iterate over `recent_rejection_digest`
-                    // separately).
-                    last_rejection = Some((topic.clone(), reason));
+                    last_rejection = Some((topic.clone(), kind, message));
                 }
             }
         }
         result.events = kept;
+        if rejected > 0 && result.events.is_empty() {
+            self.state.consecutive_engine_gate_rejections =
+                self.state.consecutive_engine_gate_rejections.saturating_add(1);
+            if self.state.consecutive_engine_gate_rejections >= LINT_CIRCUIT_BREAKER_LIMIT
+                && !self.state.lint_circuit_breaker_tripped
+            {
+                self.state.lint_circuit_breaker_tripped = true;
+                tracing::warn!(
+                    consecutive = self.state.consecutive_engine_gate_rejections,
+                    limit = LINT_CIRCUIT_BREAKER_LIMIT,
+                    "lint circuit breaker tripped: engine gate disabled for remainder of run \
+                     (d623c09 runtime gates remain active; RALPH_SERIAL_LINT_MODE=off \
+                     is the operator override)"
+                );
+            }
+        } else if self.state.consecutive_engine_gate_rejections > 0 {
+            // Reset on any accept — the gate is still useful.
+            self.state.consecutive_engine_gate_rejections = 0;
+        }
         if rejected > 0 {
             tracing::debug!(
                 rejected,
@@ -6022,9 +6064,9 @@ impl EventLoop {
             // single source of truth for the lint resume path;
             // the CLI emit file-write (now a no-op stub) is no
             // longer part of the contract.
-            if let Some((topic, reason)) = last_rejection {
-                self.state.pending_lint_resume = Some(LintResumeHint::from_reason(
-                    &topic, &reason,
+            if let Some((topic, kind, message)) = last_rejection {
+                self.state.pending_lint_resume = Some(LintResumeHint::from_typed_rejection(
+                    &topic, kind, &message,
                 ));
             }
         }
@@ -7205,7 +7247,7 @@ impl EventLoop {
         // required-fields handling and have `apply_event_policy_validation`
         // use the engine's `GateContext::pre_check`.
         let result = if self.should_run_engine_gate() {
-            self.engine_required_field_filter(result)
+            self.apply_engine_required_field_gate(result)
         } else {
             result
         };

@@ -240,3 +240,139 @@ fn u2_inject_misrouted_hat_restores_hint() {
         "pending_lint_resume must be restored when current hat does not own hint topic"
     );
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// Plan 2026-06-20-001 KTD-7 / RISK-6: lint circuit breaker
+// ──────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn u2_circuit_breaker_trips_after_consecutive_rejections() {
+    // After `LINT_CIRCUIT_BREAKER_LIMIT` (2) consecutive
+    // iterations in which the engine gate rejects every
+    // event, `lint_circuit_breaker_tripped` must latch. The
+    // d623c09 runtime gates keep running (termination is
+    // the existing `consecutive_malformed_events >= 3`
+    // check, which is a different backstop).
+    let temp = tempfile::tempdir().unwrap();
+    let events_path = temp.path().join("events.jsonl");
+    let mut config = serial_lint_config();
+    config.core.workspace_root = temp.path().to_path_buf();
+    let mut event_loop = EventLoop::with_context(
+        config,
+        crate::loop_context::LoopContext::primary(temp.path().to_path_buf()),
+    );
+    event_loop.initialize("Test");
+    event_loop.event_reader =
+        crate::event_reader::EventReader::new(&events_path);
+
+    // Iter 1: one rejection. Counter goes 0 → 1 (not yet at
+    // the limit). Breaker must NOT have tripped.
+    write_object_event_to_jsonl(
+        &events_path,
+        "work.done",
+        serde_json::json!({"commit_count": 1}),
+    );
+    let _ = event_loop.process_events_from_jsonl().unwrap();
+    assert_eq!(
+        event_loop.state.consecutive_engine_gate_rejections, 1,
+        "first full-rejection iter must set counter to 1"
+    );
+    assert!(
+        !event_loop.state.lint_circuit_breaker_tripped,
+        "breaker must NOT trip on a single rejection"
+    );
+
+    // Iter 2: another rejection. Counter goes 1 → 2, hits
+    // the limit, breaker trips.
+    write_object_event_to_jsonl(
+        &events_path,
+        "work.done",
+        serde_json::json!({"commit_count": 2}),
+    );
+    let _ = event_loop.process_events_from_jsonl().unwrap();
+    assert_eq!(
+        event_loop.state.consecutive_engine_gate_rejections, 2,
+        "second full-rejection iter must set counter to 2"
+    );
+    assert!(
+        event_loop.state.lint_circuit_breaker_tripped,
+        "breaker MUST trip at LINT_CIRCUIT_BREAKER_LIMIT=2"
+    );
+
+    // Iter 3: a legal event arrives. The breaker has latched
+    // so the engine gate short-circuits. d623c09 still runs
+    // and may filter further; what matters for KTD-7 is
+    // (a) the engine gate did NOT bump the rejection counter
+    //     past 2 (still 2),
+    // (b) the breaker is still latched (one-way latch until
+    //     loop restart / RALPH_SERIAL_LINT_MODE=off), and
+    // (c) the breaker remained "dormant" — it did not
+    //     accumulate a third rejection for a legal event.
+    write_object_event_to_jsonl(
+        &events_path,
+        "work.done",
+        serde_json::json!({
+            "plan_name": "feat-x",
+            "step": "step-1",
+            "commit_count": 3,
+        }),
+    );
+    let _ = event_loop.process_events_from_jsonl().unwrap();
+    assert_eq!(
+        event_loop.state.consecutive_engine_gate_rejections, 2,
+        "counter must NOT advance on a legal event after the breaker tripped"
+    );
+    assert!(
+        event_loop.state.lint_circuit_breaker_tripped,
+        "breaker must stay latched after the legal event"
+    );
+}
+
+#[test]
+fn u2_circuit_breaker_resets_on_acceptance() {
+    // When the engine gate accepts at least one event, the
+    // counter resets to 0 — the gate is still useful, so
+    // the breaker does not trip even after multiple full
+    // rejections in a row, as long as they are interleaved
+    // with accepts.
+    let temp = tempfile::tempdir().unwrap();
+    let events_path = temp.path().join("events.jsonl");
+    let mut config = serial_lint_config();
+    config.core.workspace_root = temp.path().to_path_buf();
+    let mut event_loop = EventLoop::with_context(
+        config,
+        crate::loop_context::LoopContext::primary(temp.path().to_path_buf()),
+    );
+    event_loop.initialize("Test");
+    event_loop.event_reader =
+        crate::event_reader::EventReader::new(&events_path);
+
+    // Iter 1: rejection. Counter → 1.
+    write_object_event_to_jsonl(
+        &events_path,
+        "work.done",
+        serde_json::json!({"commit_count": 1}),
+    );
+    let _ = event_loop.process_events_from_jsonl().unwrap();
+    assert_eq!(event_loop.state.consecutive_engine_gate_rejections, 1);
+
+    // Iter 2: ACCEPT. Counter resets to 0.
+    write_object_event_to_jsonl(
+        &events_path,
+        "work.done",
+        serde_json::json!({
+            "plan_name": "feat-x",
+            "step": "step-1",
+            "commit_count": 2,
+        }),
+    );
+    let _ = event_loop.process_events_from_jsonl().unwrap();
+    assert_eq!(
+        event_loop.state.consecutive_engine_gate_rejections, 0,
+        "any accept must reset the counter"
+    );
+    assert!(
+        !event_loop.state.lint_circuit_breaker_tripped,
+        "breaker must NOT trip when counter resets on accepts"
+    );
+}

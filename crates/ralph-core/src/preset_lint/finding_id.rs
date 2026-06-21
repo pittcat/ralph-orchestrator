@@ -128,3 +128,20 @@ pub const FINDING_PUBLISHES_MISSING_SCHEMA: &str = "preset.publishes_missing_sch
 /// `Error` — checked by the `ce_executor_*_reference_schema_matches_inline`
 /// tests in `crates/ralph-cli/src/presets.rs`.
 pub const FINDING_SCHEMA_REFERENCE_PARITY: &str = "preset.schema_reference_parity";
+
+// ──────────────────────────────────────────────────────────────────────────
+// Plan 2026-06-20-001 U1 KTD-3: state_projection actions_chain order
+// ──────────────────────────────────────────────────────────────────────────
+
+/// `state_projection.actions_chain.work.done` does not place
+/// `close_task` *before* `mark_step_completed`. The progress gate
+/// (`progress_task_gate`) would then see the step **after** the
+/// task close and reject the next emit, reintroducing the
+/// `ce-executor-serial-primary-20260619` 死循环.
+///
+/// Always `Error` severity — order is semantic; the engine
+/// typestate in `state_projector/mod.rs` is the secondary
+/// defence (catches Rust-side dispatch bugs only). Plan
+/// 2026-06-20-001 R3 / KTD-3 "主 (primary)" line.
+pub const FINDING_WORK_DONE_ACTION_CHAIN_ORDER: &str =
+    "preset.state_projection_work_done_order";

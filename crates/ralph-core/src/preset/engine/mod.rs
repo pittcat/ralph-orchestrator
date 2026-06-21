@@ -30,6 +30,8 @@ pub use hint::{
     LintFailureClass, LintResumeHint, LintResumeTarget, classify_lint_failure,
 };
 pub use lint_mirror::{build_lint_mirror_block, build_lint_resume_block};
-pub use linter::{LintOutcome, auto_handoff_prepare, lint_emit, lint_emit_with_timeout};
+pub use linter::{
+    LintOutcome, LintPaths, auto_handoff_prepare, lint_emit, lint_emit_with_timeout,
+};
 pub use projection::apply_projection;
 pub use protocol::ProtocolView;
