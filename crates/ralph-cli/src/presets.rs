@@ -96,7 +96,6 @@ pub fn preset_names() -> Vec<&'static str> {
 /// `build.rs` and this crate can share one source of truth
 /// (build.rs uses `include!` because the build script and
 /// the library are separate compilation units).
-pub use crate::preset_merge_table::SSOT_SECTION_TARGETS;
 
 #[cfg(test)]
 mod tests {
@@ -1427,26 +1426,6 @@ mod tests {
             content.contains("preflight check failed"),
             "ce-executor must reference preflight check failure"
         );
-    }
-
-    /// Pulls `review-coordinator`'s `instructions` block out of a ce-executor
-    /// preset YAML so that callers can assert on prose contents.
-    ///
-    /// Pinned in 2026-06: review-coordinator's "Wave Emission" section used
-    /// to read "Use `ralph wave emit` for each selected dimension", which
-    /// produces N independent `wave_total=1` waves that the dispatcher then
-    /// serializes back-to-back (wall time ≈ N × single-worker cost). The
-    /// contract is: emit ONE wave with N payloads so dimension-reviewer's
-    /// `concurrency: 9` actually runs N workers in parallel.
-    fn review_coordinator_instructions_from(content: &str) -> String {
-        let config = RalphConfig::parse_yaml(content)
-            .expect("ce-executor preset YAML should parse as RalphConfig");
-        config
-            .hats
-            .get("review-coordinator")
-            .expect("ce-executor preset must define a 'review-coordinator' hat")
-            .instructions
-            .clone()
     }
 
     #[test]

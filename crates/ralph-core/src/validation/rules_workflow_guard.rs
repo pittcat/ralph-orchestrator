@@ -18,7 +18,7 @@
 //! progress and (b) advances progress on accept.
 
 use crate::config::WorkflowChain;
-use crate::config::workflow_guards::{CorrelationConfig, WorkflowChainMode};
+use crate::config::workflow_guards::WorkflowChainMode;
 use crate::event_reader::Event;
 use crate::preset::engine::protocol::ProtocolView;
 

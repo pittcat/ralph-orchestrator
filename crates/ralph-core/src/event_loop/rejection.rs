@@ -551,11 +551,11 @@ pub fn resolve_target_hat(business_hat: Option<&str>, source_hat: Option<&str>) 
 }
 
 /// Returns `true` when the JSON payload string contains both
-/// `reason` and `target_hat` as string fields.  Used by
-/// `publish_policy_rejection_resume` and other `task.resume`
-/// injection points to fail-closed when the schema-required
-/// fields are missing — the drift detector would otherwise
-/// report `0%` field completeness for the `task.resume` topic.
+/// `reason` and `target_hat` as string fields.  Used by all
+/// orchestrator-injected `task.resume` paths to fail-closed when
+/// the schema-required fields are missing — the drift detector
+/// would otherwise report `0%` field completeness for the
+/// `task.resume` topic.
 ///
 /// `payload` is the JSON-serialised payload (the value passed
 /// to `Event::new("task.resume", payload)`).  Returns `false`

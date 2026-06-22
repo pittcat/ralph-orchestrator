@@ -8,7 +8,6 @@
 //! - 单调性:iter 必须严格递增(否则视为违规);同 iter 内 seq 严格递增。
 //! - 与现有 `RalphConfig` 解析器复用,不重新解析 YAML。
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};

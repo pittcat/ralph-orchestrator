@@ -23,7 +23,7 @@ use crate::event_reader::Event;
 use crate::preset::engine::protocol::ProtocolView;
 
 use super::context::ValidationContext;
-use super::result::{ValidationResult, ValidationStage};
+use super::result::ValidationResult;
 
 /// Which phase a [`ValidationRule`] runs in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

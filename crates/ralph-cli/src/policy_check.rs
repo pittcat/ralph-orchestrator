@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use crate::cli::{ConfigSource, load_config_with_overrides, resolve_workspace_root};
 use crate::config_resolution;
 use ralph_core::config::HatExecutionMode;
+#[allow(deprecated)]
 use ralph_core::step_handoff::progress_task_gate::{
     GateDecision, ProgressTaskMismatch, check_progress_task_alignment, is_gated_topic,
 };
@@ -595,11 +596,9 @@ pub fn check_hat_handoff_gate_with_env(
 // `run_policy_check_unified` runs the U4 `ValidationPipeline` over an
 // event (the same pipeline the loop uses via `process_parse_result`)
 // and produces a `PolicyCheckReport` with structured `reason_codes`.
-// The CLI switches from the legacy `validate_event_with_hat` path to
-// the unified path when either `--policy-check-unified` is passed or
-// the `UNIFIED_POLICY_CHECK=1` env var is set. The legacy path
-// remains the default for backwards compatibility (U6 / HARD RULE 2:
-// no behavior change for existing scripts).
+// The CLI `--policy-check` always routes through this path; the
+// legacy `validate_event_with_hat` path is preserved only for diff /
+// no-policy fallback runs.
 //
 // Why a separate `PolicyCheckReport` instead of the existing
 // `ValidationFailure`? `ValidationFailure` is a single-failure shape
@@ -727,9 +726,9 @@ fn report_from_validation(
 /// Run the unified `ValidationPipeline` over a single event and
 /// produce a structured [`PolicyCheckReport`].
 ///
-/// This is the U6 entry point that the CLI switches to when
-/// `UNIFIED_POLICY_CHECK=1` (or `--policy-check-unified`) is set.
-/// The function builds a `ProtocolView` + empty `LedgerSnapshot`,
+/// This is the U6 entry point that the CLI `--policy-check` always
+/// routes through. The function builds a `ProtocolView` + the
+/// current `LedgerSnapshot` (replayed from `.ralph/events.jsonl`),
 /// constructs the canonical `ValidationPipeline` (same rules the
 /// loop uses), and runs both pre-commit and post-commit phases
 /// via `validate_with_preview`. The post-commit phase uses the
@@ -802,10 +801,9 @@ pub fn run_policy_check_unified(
     // the legacy helper and short-circuit with a synthetic reject
     // when the legacy gate flags the event. This keeps the CLI's
     // terminal-monotonicity / duplicate-terminal contract intact
-    // when users flip `UNIFIED_POLICY_CHECK` to its new default
-    // (ON); without this fallback, the unified path would silently
-    // accept events that the loop would later reject on the same
-    // events.jsonl replay.
+    // across the unified path; without this fallback, the unified
+    // path would silently accept events that the loop would later
+    // reject on the same events.jsonl replay.
     if let Some(policy) = event_loop_config.event_policy.as_ref()
         && policy.enabled
         && events_path.exists()
@@ -1109,6 +1107,7 @@ event_loop:
         // tooling can route on the prefix; the unified pipeline also
         // emits a `step_handoff::` shape that the CLI precheck can
         // intersect with the loop's `progress_task_mismatch` family.
+        #[allow(deprecated)]
         use ralph_core::step_handoff::progress_task_gate::{
             GateDecision, check_progress_task_alignment,
         };

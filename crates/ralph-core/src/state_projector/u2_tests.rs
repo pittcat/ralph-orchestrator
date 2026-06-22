@@ -182,7 +182,6 @@ fn apply_from_ledger_batch_matches_legacy_event_apply() {
     // --- U2 path: ledger-driven
     let tmp_u2 = workspace();
     let mut ledger = StateLedger::new(tmp_u2.path(), true);
-    let mut snap = LedgerSnapshot::cold_start();
     let mut task = Task::new("step-01".to_string(), 1);
     task.id = "task-A".to_string();
     task.key = Some("ce-executor:p:step-01:u1-impl".to_string());

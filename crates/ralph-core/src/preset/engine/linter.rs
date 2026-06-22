@@ -129,7 +129,7 @@ fn max_concurrent_lint_threads() -> i64 {
 /// always uses the non-blocking variant and fails-closed when
 /// saturated. Adding a blocking acquire would re-introduce the
 /// resource-exhaustion risk this semaphore is meant to bound.
-struct LintThreadSemaphore {
+pub struct LintThreadSemaphore {
     counter: std::sync::atomic::AtomicI64,
     init_cap: i64,
 }

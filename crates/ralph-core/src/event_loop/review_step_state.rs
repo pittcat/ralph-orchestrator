@@ -25,7 +25,7 @@ pub struct StepKey {
 }
 
 /// U3 (2026-06-17-003 plan): minimal projection of an open wave
-/// used by `publish_policy_rejection_resume` to print the
+/// used by the rejection-hint formatter to print the
 /// `## WAVE_OPEN HINT` block. Carries no time information — the
 /// textual hint only needs the wave id + receive/total counts.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -431,7 +431,7 @@ impl ReviewStepTracker {
     /// U3 (2026-06-17-003 plan): return a small snapshot of the
     /// first open review wave tracked by the registry, or `None`
     /// if every wave is closed. The snapshot carries the fields
-    /// `publish_policy_rejection_resume` needs to print the
+    /// the rejection-hint formatter needs to print the
     /// `## WAVE_OPEN HINT` block on a `work.done` rejection —
     /// `wave_id`, `received` (`dimensions_received.len()`),
     /// `expected` (`wave_expected`). Used only for the textual

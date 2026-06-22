@@ -629,6 +629,7 @@ fn is_cold_start_step(step: &str) -> bool {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 

@@ -338,10 +338,9 @@ impl ResumeContext {
 /// for callers that have not yet wired up the unified ledger
 /// (test fixtures, single-shot CLI runs).
 ///
-/// This is the U7a replacement for the legacy
-/// `publish_policy_rejection_resume` flow.  When the feature
-/// flag is off the caller MUST still publish a `task.resume`
-/// event (the legacy path) so existing tests under
+/// This is the U7a replacement for the legacy completion-rejection
+/// path.  When the feature flag is off the caller MUST still publish
+/// a `task.resume` event (the legacy path) so existing tests under
 /// `event_loop/tests/` keep passing.
 ///
 /// Returns `needs_escalation = true` when the retry count
@@ -623,16 +622,13 @@ impl RetryCounter {
 }
 
 /// Whether the unified deterministic-correction path is
-/// enabled.  Single source of truth for the env var read.
+/// enabled.  Single source of truth — no env var is read.
 ///
-/// U11-T7: default stays OFF. The default-on flip was attempted
-/// but reverted because 10+ legacy `task.resume` tests in
-/// `event_loop/tests/` pin the legacy
-/// `publish_policy_rejection_resume` wire format. Tracking
-/// The deterministic-correction path is always on.  The test
-/// override (set via `set_correction_enabled_for_test`) is kept
-/// so unit / BDD suites can still exercise the legacy path when
-/// needed, but production code no longer reads an env var.
+/// U11-T7: the deterministic-correction path is always on in
+/// production. The test override (set via
+/// `set_correction_enabled_for_test`) lets unit / BDD suites
+/// exercise the legacy `task.resume` wire format when needed,
+/// but production code never reads an env var to toggle this.
 pub fn is_correction_enabled() -> bool {
     if let Some(cell) = TEST_CORRECTION_ENABLED.get() {
         return cell.load(std::sync::atomic::Ordering::Relaxed);

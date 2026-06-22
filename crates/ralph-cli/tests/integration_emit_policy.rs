@@ -460,11 +460,11 @@ fn test_emit_isolated_mode_allows_matching_hat() {
     let temp_path = temp_dir.path();
     std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
 
-/// 2026-06-20: `ce-executor-serial` enables `hat_handoff`, so
-    /// `review.passed` from `review-synthesizer` is a macro-edge and
-    /// requires a `handoff_path`. The downstream consumer is
-    /// `plan-gate` (which reacts to `review.passed` and emits
-    /// `queue.advance` / `plan.complete`).
+    // 2026-06-20: `ce-executor-serial` enables `hat_handoff`, so
+    // `review.passed` from `review-synthesizer` is a macro-edge and
+    // requires a `handoff_path`. The downstream consumer is
+    // `plan-gate` (which reacts to `review.passed` and emits
+    // `queue.advance` / `plan.complete`).
     let handoff_path = ralph_handoff_prepare(
         temp_path,
         "builtin:ce-executor-serial",

@@ -181,3 +181,4 @@ crates/ralph-core/tests/scenarios/ce_executor_serial_review.yml
 3. 不允许"先注释掉回头再处理"——要么迁移完成,要么带明确 follow-up issue
 4. 完成后必须反向验证文档/源码引用一致性
 
+

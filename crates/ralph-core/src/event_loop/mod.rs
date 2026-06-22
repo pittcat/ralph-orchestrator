@@ -34,9 +34,7 @@ use crate::event_parser::{
     BuildStatus, EventParser, MutationEvidence, MutationStatus, ReviewStatus,
     parse_backpressure_json, parse_review_json,
 };
-use crate::event_policy::{
-    PolicyDecision, PolicyFinding, PolicyRuntimeState, ReasonClass, check_completion_guard,
-};
+use crate::event_policy::{PolicyDecision, PolicyRuntimeState, check_completion_guard};
 use crate::event_reader::{Event as JsonlEvent, EventReader};
 use crate::execution_contract::{
     DefaultGitEvidenceProvider, ExecutionContractDecision, ExecutionContractFinding,
@@ -487,13 +485,6 @@ fn publish_correction_via_context(
     }
 }
 
-// `publish_policy_rejection_resume` was the legacy bridge that
-// routed workflow-guard / step-handoff rejections through
-// `publish_correction_via_context`. It is no longer called by any
-// runtime code path: workflow-guard rejections now flow through
-// the unified post-commit loop (U11-T4) and use
-// `publish_correction_via_context` directly. The function was
-// deleted in U11-T4.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoverableExhaustion {
     /// Hat that emitted the (hat, topic) pair whose budget just
@@ -8040,7 +8031,7 @@ impl EventLoop {
                         );
                         if let Some(ref mut ledger) = self.state.state_ledger {
                             let inputs = crate::state::HandoffAcceptedInputs {
-                                from: consumer.clone().into(),
+                                from: consumer.into(),
                                 to: accepted
                                     .hat
                                     .clone()
@@ -8165,8 +8156,8 @@ impl EventLoop {
         // pre-commit / post-commit loop above (U11-T4). The legacy
         // `apply_workflow_guard_validation` call site, the legacy
         // `WorkflowGuardOutcome` / `WorkflowGuardRejectionDetail`
-        // types, and the `publish_policy_rejection_resume` helper
-        // have all been deleted; the `WorkflowGuardRule` in
+        // types, and the legacy workflow-guard → `task.resume`
+        // bridge have all been deleted; the `WorkflowGuardRule` in
         // `validation::rules_workflow_guard` is the single source
         // of truth for out-of-order / correlation-extraction
         // rejections. ---

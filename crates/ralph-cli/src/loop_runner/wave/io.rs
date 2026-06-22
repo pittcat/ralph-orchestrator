@@ -22,10 +22,13 @@ use ratatui::text::Line;
 #[derive(Debug, Clone)]
 pub struct DimensionMismatchInfo {
     /// Worker index in the wave (0-based).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub wave_index: u32,
     /// The dimension the dispatcher assigned to this slot.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub expected_dimension: String,
     /// The dimension the worker actually emitted.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub actual_dimension: String,
 }
 

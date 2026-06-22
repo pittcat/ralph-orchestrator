@@ -708,18 +708,14 @@ fn emit_command_with_root_and_hats(
         );
     }
 
-    // U6 (2026-06-21-002 plan §U6): CLI --policy-check switch to the
-    // unified `validate_event` pipeline. The branch is only entered
-    // when the user opts in via `--policy-check-unified` or the
-    // `UNIFIED_POLICY_CHECK=1` env var; the legacy `validate_event_with_hat`
-    // path below remains the default to avoid breaking existing scripts
-    // (HARD RULE 2: no behavior change for users without the new flag).
-    //
-    // The unified pipeline is always the active path (the legacy
-    // `validate_event_with_hat` has been removed). The
-    // `--policy-check-unified` and `--policy-check-compat` CLI
-    // flags are now no-ops (kept only to avoid breaking user
-    // scripts that pass them).
+    // U6 (2026-06-21-002 plan §U6): CLI `--policy-check` always
+    // routes through the unified `validate_event` pipeline. The
+    // legacy `validate_event_with_hat` path below is preserved as
+    // a structural fallback for diff / comparison runs and is
+    // only entered when `unified_active` is false. The unified
+    // path surfaces structured `reason_codes` (and per-rule
+    // `suggestions`) so agents can programmatically match failures
+    // against the loop's vocabulary.
     let unified_active = check_mode != PolicyCheckMode::Skip
         && config
             .as_ref()
@@ -770,9 +766,8 @@ fn emit_command_with_root_and_hats(
         }
         // Unified path accepted: skip the legacy `validate_event_with_hat`
         // branch below so the legacy bail never double-fires on the
-        // same event. The legacy path is only retained when the
-        // caller explicitly opts in via `--policy-check-compat` or
-        // the env var is unset.
+        // same event. The legacy path is only entered when
+        // `unified_active` is false (no event_policy configured).
         tracing::info!(
             "cli emit policy check: unified pipeline accepted topic={}",
             topic
@@ -781,9 +776,9 @@ fn emit_command_with_root_and_hats(
 
     if check_mode != PolicyCheckMode::Skip {
         // When the unified branch already accepted the event, skip
-        // the legacy gate (U6 / HARD RULE 2: the unified path is the
-        // new production target; the legacy path stays for diff
-        // runs and for callers that explicitly opt out).
+        // the legacy gate (U6: unified is the production path; the
+        // legacy path stays only for diff runs when no event_policy
+        // is configured).
         if unified_active {
             tracing::debug!(
                 "cli emit: skipping legacy validate_event_with_hat (unified path active)"
@@ -886,12 +881,11 @@ fn emit_command_with_root_and_hats(
         tracing::info!("cli emit policy check skipped: no event_policy in resolved config");
     }
 
-    // U6 (2026-06-21-002 plan §U6): CLI --policy-check switch to the
-    // unified `validate_event` pipeline is implemented above
-    // (sits *before* the legacy check so the legacy bail never
-    // double-fires). When `--policy-check-compat` is explicit,
-    // the unified branch above stays a no-op and the legacy
-    // path remains the production path.
+    // U6 (2026-06-21-002 plan §U6): the unified `validate_event`
+    // pipeline is the production path and runs before the legacy
+    // check above, so the legacy bail never double-fires. The
+    // legacy path below only runs when no event_policy is
+    // configured (diff / no-policy fallback).
 
     // U1 (2026-06-17-004 plan, R1+R2): CLI provenance fail-closed.
     // Fires regardless of `check_mode`: if the agent is in isolated
@@ -2894,7 +2888,7 @@ event_loop:
     fn test_emit_schema_view_reflects_required_fields_and_macro_edge() {
         let tmp = TempDir::new().expect("temp dir");
         let workspace = setup_schema_workspace(&tmp, SCHEMA_FIXTURE_YAML);
-        let events_file = workspace.join(".ralph/events.jsonl");
+        let _events_file = workspace.join(".ralph/events.jsonl");
 
         // Render via the public path the CLI uses, then introspect
         // the resulting JSON. We build the view the same way the
@@ -3023,11 +3017,11 @@ event_loop:
         assert_eq!(v1["protocol_hash"], v2["protocol_hash"]);
     }
 
-    // ── U6 (2026-06-21-002 plan §U6): unified `--policy-check-unified`
-    //    and `--policy-check-compat` flags. The unified path runs the
-    //    U4 `ValidationPipeline` over the inbound event and surfaces
-    //    structured `reason_codes`. The legacy path is preserved for
-    //    diff/compat runs.
+    // ── U6 (2026-06-21-002 plan §U6): the unified `--policy-check`
+    //    path runs the U4 `ValidationPipeline` over the inbound event
+    //    and surfaces structured `reason_codes`. The legacy path is
+    //    preserved only when no event_policy is configured
+    //    (diff / no-policy fallback).
 
     fn setup_unified_workspace(tmp: &TempDir) -> PathBuf {
         let workspace = tmp.path().to_path_buf();

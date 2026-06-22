@@ -8,9 +8,9 @@
 //! context so the caller can emit them.
 
 use crate::event_policy::{
-    DuplicateWorkDoneHint, EventPolicyConfig, EventPolicyMode, PolicyDecision, PolicyFinding,
-    PolicyRejection, ReasonClass, ViolationAction, ViolationType, check_completion_honored,
-    check_topic_deny_rules, is_recoverable_policy_finding, validate_event_with_hat,
+    DuplicateWorkDoneHint, EventPolicyConfig, PolicyDecision, PolicyFinding, PolicyRejection,
+    ViolationType, check_completion_honored, check_topic_deny_rules,
+    is_recoverable_policy_finding, validate_event_with_hat,
 };
 use crate::event_reader::Event;
 use crate::payload_contract::{PayloadContractViolation, PayloadContractViolationKind};

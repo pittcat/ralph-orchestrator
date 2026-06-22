@@ -3,7 +3,6 @@
 //! Ralph is always present, cannot be configured away, and acts as a universal fallback.
 
 use crate::config::{CoreConfig, ScratchpadConfig};
-use crate::event_origin::RALPH_CONTROL_TOPICS;
 use crate::hat_registry::HatRegistry;
 use ralph_proto::{HatId, Topic};
 use std::collections::HashMap;
