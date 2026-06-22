@@ -795,6 +795,75 @@ pub fn run_policy_check_unified(
     };
     let projected = snapshot.clone();
 
+    // U11-T7-R12b: legacy `validate_topic_payload_against_config` is
+    // the canonical path for **terminal-monotonicity** and
+    // **duplicate-terminal** enforcement. The unified pipeline does
+    // not yet model these stateful rules (terminal_observed comes
+    // from `PolicyRuntimeState::from_events`, not from
+    // `LedgerSnapshot`), so we replay events.jsonl once more via
+    // the legacy helper and short-circuit with a synthetic reject
+    // when the legacy gate flags the event. This keeps the CLI's
+    // terminal-monotonicity / duplicate-terminal contract intact
+    // when users flip `UNIFIED_POLICY_CHECK` to its new default
+    // (ON); without this fallback, the unified path would silently
+    // accept events that the loop would later reject on the same
+    // events.jsonl replay.
+    if let Some(policy) = event_loop_config.event_policy.as_ref()
+        && policy.enabled
+        && events_path.exists()
+    {
+        match validate_topic_payload_against_config(
+            topic,
+            payload.unwrap_or(""),
+            policy,
+            &events_path,
+        ) {
+            Ok(Some(legacy_error)) => {
+                // Build a synthetic pre-rejected ValidationReport so
+                // `report_from_validation` produces the same shape
+                // downstream callers already parse. The legacy
+                // `terminal_monotonicity_violation` /
+                // `duplicate_terminal_event` /
+                // `business_event_after_completion` reason codes
+                // are surfaced verbatim — they are part of the
+                // public CLI surface and tests pin them.
+                use ralph_core::validation::ValidationReport;
+                use ralph_core::validation::{ValidationResult, ValidationStage};
+                let wrapped_reason = format!(
+                    "engine_rejected:legacy_policy:{}",
+                    legacy_error.reason_code
+                );
+                let reject = ValidationResult::reject(
+                    ValidationStage::ExecutionContract,
+                    wrapped_reason,
+                    Some(legacy_error.message),
+                    true,
+                );
+                let report = ValidationReport {
+                    pre_commit: vec![reject],
+                    post_commit: vec![],
+                    accepted: false,
+                    post_commit_rejected: false,
+                };
+                return Ok(report_from_validation(
+                    &report,
+                    topic,
+                    hat,
+                    &workspace_root,
+                ));
+            }
+            Ok(None) => {
+                // Legacy gate accepted; fall through to the unified
+                // ValidationPipeline for the rest of the rules.
+            }
+            Err(e) => {
+                eprintln!(
+                    "Warning: legacy policy check failed for unified path: {e}. Falling back to unified pipeline only."
+                );
+            }
+        }
+    }
+
     let event = Event {
         topic: topic.to_string(),
         payload: payload.map(|s| s.to_string()),
@@ -980,17 +1049,20 @@ mod u6_unified_path_tests {
     }
 
     #[test]
-    fn resolve_policy_check_path_default_is_compat() {
+    fn resolve_policy_check_path_default_is_unified() {
         let flags = UnifiedPolicyCheckFlags {
             policy_check_unified: false,
             policy_check_compat: false,
         };
-        // No env var set in the test environment (workspace
-        // `forbid(unsafe_code)` blocks set_var). On a clean
-        // test process the env var is unset → default Compat.
+        // U11-T7: default flipped from Compat to Unified. The
+        // test workspace's `forbid(unsafe_code)` blocks
+        // `set_var`, so on a clean process the env var is unset →
+        // default Unified. Callers that need the legacy path
+        // must opt in explicitly via `--policy-check-compat` or
+        // `UNIFIED_POLICY_CHECK=0`.
         let prev = std::env::var("UNIFIED_POLICY_CHECK").ok();
         if prev.is_none() {
-            assert_eq!(resolve_policy_check_path(&flags), PolicyCheckPath::Compat);
+            assert_eq!(resolve_policy_check_path(&flags), PolicyCheckPath::Unified);
         }
     }
 

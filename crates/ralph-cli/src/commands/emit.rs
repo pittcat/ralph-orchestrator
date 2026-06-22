@@ -782,7 +782,7 @@ fn emit_command_with_root_and_hats(
             let envelope = serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string());
             eprintln!("{}", envelope);
             anyhow::bail!(
-                "Event rejected by unified policy check: reason_codes=[{}] topic='{}' hat={:?}{}",
+                "Event rejected by policy: reason_codes=[{}] topic='{}' hat={:?}{}",
                 codes,
                 report.topic,
                 report.hat,
