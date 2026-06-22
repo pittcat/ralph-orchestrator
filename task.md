@@ -111,3 +111,73 @@ crates/ralph-core/tests/scenarios/ce_executor_serial_review.yml
 4. **历史文档分析不可省略**，必须输出历史问题知识库，即使本次未发现直接关联。
 5. **主 Agent 只做汇总和格式整理**，不重新分析原始数据。
 
+
+## 任务 3：老编排状态代码清零（迁移到 Unified State Ledger）
+
+### 状态：✅ 已完成
+
+### 背景
+计划 `docs/plans/2026-06-21-002-refactor-unified-orchestrator-state-plan.md`（"Ralph 编排状态统一化重构"）已实现。
+
+- **新架构终态**：统一编排状态，所有状态推进走统一 `validate_event` / `LedgerSnapshot` / 统一 reason_code。特性开关 env var 已全部移除。
+- **本次清零结果**：
+  - ✅ 删除 `policy_check_compat` / `policy_check_unified` 废弃 flag（`EmitArgs` / `policy_check.rs`）
+  - ✅ 删除 `UnifiedPolicyCheckFlags` struct 及 `resolve_policy_check_path` 函数
+  - ✅ 清理过时 deprecated 注释（`drift/engine.rs`、`event_loop/mod.rs`、`loop_state.rs`、`state/ledger.rs`、`state/mod.rs`、`correction/mod.rs`）
+  - ✅ 清理过时 `UNIFIED_STATE_LEDGER` / `UNIFIED_DETERMINISTIC_CORRECTION` 注释引用
+  - ✅ 修复 `scenarios.rs` 中误导性 `#[ignore]` 注释
+  - ✅ 重写 3 个 `test_emit_policy_check_*` 测试为统一路径测试
+  - ⚠️ `test_b4_cross_wave_id_recovery_does_not_propagate` 保留 `#[ignore]`（responder 扩展项，follow-up issue 已记录）
+
+### 目标
+**严查 + 全面转向**：确认项目内是否仍残留上述老方式/老路径；若存在，必须迁移或删除，确保 codebase 全面适配新架构。
+
+### 执行步骤
+
+**Step 1：盘点（基于 U0 迁移矩阵思路）**
+- 用 `ast-grep --lang rust -p '<pattern>'` 与 `rg` 在 `crates/` 下扫描：
+  - `task.resume` 残留调用
+  - `process_parse_result` 老入口
+  - 老 reason_code 字符串
+  - `UNIFIED_STATE_LEDGER=0` / legacy path 引用
+  - `#[ignore]` 标记的测试 + follow-up issue 列表
+- 输出：《老代码残留清单》（文件:行号 + 用途 + 评估：迁移/删除/保留理由）
+
+**Step 2：分类处置（按 KTD-7 / KTD-8 / U9 规则）**
+- 可直接迁移 → 改写为新 API
+- 测试带 follow-up 的 `#[ignore]` → 评估是否已具备迁移条件
+- 兼容 fallback（`--policy-check-compat` 等）→ 检查 `validate_event` 覆盖度，全覆盖后删除 fallback
+- 真正无主孤岛代码 → 直接删除
+
+**Step 3：迁移执行**
+- 优先复用 P0-2 / P1-3 / P1-5 / P1-6 已建立的迁移模式（见 commits `7561875` `ee05f87` `308322e` `88eb3ee`）
+- 每步遵循：① 写测试 → ② 改实现 → ③ `./scripts/run-tests.sh` 验证绿
+
+**Step 4：验证 + 文档同步**
+- 跑 `./scripts/run-tests.sh` 全量（nextest + doctest）
+- 若出现竞态/时序 flake,走 `RALPH_BASELINE_SERIAL=1 ./scripts/run-tests.sh` 兜底（仅 flake 兜底,不是默认）
+- 更新 `CLAUDE.md` / `AGENTS.md` / `.cursor/rules/architecture-modules.mdc` 移除"legacy path 仍存在"的描述
+- 同步更新 `ralph-tools*.md` 反向验证（行号引用核对）
+
+### 输出格式
+
+#### 1. 残留清单（表格）
+| 优先级 | 文件:行号 | 老方式类型 | 现状 | 处置方案 | 风险 |
+|---|---|---|---|---|---|
+
+#### 2. 处置记录
+- 每条残留的：迁移/删除前后 diff、对应新 API、测试覆盖
+
+#### 3. 验证证据
+- `./scripts/run-tests.sh` 输出（必须绿）
+- 反向验证结果（`ralph-tools*.md` 行号一致性）
+
+#### 4. 文档同步清单
+- 列出所有同步更新的文件与变更要点
+
+### 约束
+1. 不可新增 legacy fallback;发现一处迁移一处
+2. 每步迁移必须先有测试,后有实现（TDD）
+3. 不允许"先注释掉回头再处理"——要么迁移完成,要么带明确 follow-up issue
+4. 完成后必须反向验证文档/源码引用一致性
+

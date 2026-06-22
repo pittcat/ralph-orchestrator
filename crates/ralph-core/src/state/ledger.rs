@@ -12,17 +12,10 @@
 //!
 //! ## Feature flag
 //!
-//! The `feature_enabled` flag is the U1 opt-in switch. When
-//! `false`, every `commit()` is a no-op (returns
-//! [`Commit::empty`], mutates no state, persists nothing) and
-//! `replay_from_disk` returns an empty snapshot. This keeps the
-//! legacy code path green while U2 onwards migrate their call
-//! sites.
-//!
-//! The flag mirrors the `UNIFIED_STATE_LEDGER=1` env var (read by
-//! the loop constructor). The state module does not consult the
-//! env var itself — the caller passes the resolved boolean in
-//! via [`StateLedger::new`].
+//! The `feature_enabled` flag is always `true`. The legacy no-op
+//! path has been removed — every `commit()` updates the ledger
+//! and `replay_from_disk` reconstructs the snapshot from the
+//! commit log.
 //!
 //! ## Commit scope (P1-2 decision)
 //!

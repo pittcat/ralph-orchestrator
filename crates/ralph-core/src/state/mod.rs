@@ -17,12 +17,8 @@
 //!
 //! ## Feature flag
 //!
-//! The `UNIFIED_STATE_LEDGER=1` env var is the U1 opt-in switch.
-//! The state module does not consult the env var itself — the
-//! loop constructor resolves the boolean and passes it via
-//! [`StateLedger::new`]. When the flag is off, every `commit()` is
-//! a no-op and `replay_from_disk` returns an empty snapshot, so
-//! the legacy code path is fully preserved.
+//! The unified state ledger is always enabled. The legacy no-op
+//! fallback has been removed.
 //!
 //! ## U1 scope
 //!

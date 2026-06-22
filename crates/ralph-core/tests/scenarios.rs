@@ -1684,15 +1684,6 @@ fn enable_deterministic_correction_for_test() {
 /// `CorrectionContext` and the next prompt contains the
 /// `## ORCHESTRATOR CORRECTION` block. Companion to the
 /// unit-level coverage in `event_loop/tests/u7_correction.rs`.
-///
-/// `#[ignore]`-ed: the production `emit_correction_context`
-/// wire-up is pending (the legacy `publish_policy_rejection_resume`
-/// still publishes `task.resume` events; the U7a migration to
-/// the deterministic-correction path is a follow-up beyond
-/// U9's scope). The harness predicates are wired and will pass
-/// once that production code lands. The YAML + driver stay in
-/// place so the follow-up work is just removing the
-/// `#[ignore]` attribute.
 #[test]
 fn test_u9_correction_deterministic_scenario() {
     enable_deterministic_correction_for_test();

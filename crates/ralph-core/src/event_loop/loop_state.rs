@@ -531,24 +531,14 @@ pub struct LoopState {
     pub lint_circuit_breaker_tripped: bool,
 
     /// U1 (plan 2026-06-21-002): unified state ledger.
-    /// `None` when the `UNIFIED_STATE_LEDGER=1` opt-in is off
-    /// (the default; legacy path keeps working). `Some` on
-    /// loops that opted in to the new path; the runner drains
-    /// commits through this ledger instead of the legacy
-    /// `StateProjector::ProjectionContext` in-memory trackers.
+    /// `None` until the loop constructor wires it in.
     pub state_ledger: Option<crate::state::StateLedger>,
 
-    /// U7a (plan 2026-06-21-002): deterministic correction
-    /// queue.  The loop runner writes a [`CorrectionContext`]
-    /// here whenever a recoverable rejection fires
-    /// (`publish_policy_rejection_resume` internal hook);
-    /// the next `build_prompt` reads the queue and prepends the
-    /// `## ORCHESTRATOR CORRECTION` block to the prompt.
-    ///
-    /// U7a scope: only populated when the
-    /// `UNIFIED_DETERMINISTIC_CORRECTION=1` env var is set.
-    /// Default `Default::default()` is empty so the legacy
-    /// `task.resume` injection path keeps working.
+    /// Deterministic correction queue.  The loop runner writes a
+    /// [`CorrectionContext`] here whenever a recoverable
+    /// rejection fires; the next `build_prompt` reads the
+    /// queue and prepends the `## ORCHESTRATOR CORRECTION`
+    /// block to the prompt.
     pub prompt_context: crate::correction::PromptContext,
 }
 impl Default for LoopState {
@@ -652,15 +642,9 @@ impl Default for LoopState {
             consecutive_engine_gate_rejections: 0,
             lint_circuit_breaker_tripped: false,
             // U1 (plan 2026-06-21-002): unified state ledger.
-            // Default `None` keeps the legacy code path green.
-            // The loop constructor resolves
-            // `UNIFIED_STATE_LEDGER=1` and wires the ledger in
-            // for opted-in runs.
+            // `None` until the loop constructor wires it in.
             state_ledger: None,
-            // U7a: deterministic-correction queue. Empty by
-            // default so the legacy `task.resume` injection
-            // path keeps working. Populated only when
-            // `UNIFIED_DETERMINISTIC_CORRECTION=1`.
+            // U7a: deterministic correction queue.
             prompt_context: crate::correction::PromptContext::default(),
         }
     }

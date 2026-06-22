@@ -29,9 +29,6 @@
 //! The deterministic-correction path is always on.  The legacy
 //! `task.resume` event injection has been removed; recoverable
 //! rejections are now injected into `PromptContext` directly.
-//!
-//! U7a only writes the new structures; U7b switches the loop to
-//! read from `PromptContext` instead of the bus.
 
 use std::collections::BTreeMap;
 

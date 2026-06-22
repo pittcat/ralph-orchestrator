@@ -874,28 +874,6 @@ pub fn run_policy_check_unified(
     Ok(report_from_validation(&report, topic, hat, &workspace_root))
 }
 
-/// U6 policy-check path resolver. The unified `ValidationPipeline`
-/// is now the only validator; the legacy `validate_event_with_hat`
-/// path and its env/CLI escape hatches have been removed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PolicyCheckPath {
-    /// Use the U6 unified `ValidationPipeline` path.
-    Unified,
-}
-
-/// Kept for source compatibility at call sites. Both fields are
-/// ignored; the unified path is always used.
-pub struct UnifiedPolicyCheckFlags {
-    /// Deprecated `--policy-check-unified` flag.
-    pub policy_check_unified: bool,
-    /// Deprecated `--policy-check-compat` flag.
-    pub policy_check_compat: bool,
-}
-
-pub fn resolve_policy_check_path(_flags: &UnifiedPolicyCheckFlags) -> PolicyCheckPath {
-    PolicyCheckPath::Unified
-}
-
 #[cfg(test)]
 mod u6_unified_path_tests {
     use super::*;
@@ -1011,24 +989,6 @@ mod u6_unified_path_tests {
             json["suggestions"][0],
             serde_json::Value::String(String::new())
         );
-    }
-
-    #[test]
-    fn resolve_policy_check_path_is_always_unified() {
-        let flags = UnifiedPolicyCheckFlags {
-            policy_check_unified: false,
-            policy_check_compat: false,
-        };
-        assert_eq!(resolve_policy_check_path(&flags), PolicyCheckPath::Unified);
-    }
-
-    #[test]
-    fn resolve_policy_check_path_ignores_legacy_compat_flag() {
-        let flags = UnifiedPolicyCheckFlags {
-            policy_check_unified: false,
-            policy_check_compat: true,
-        };
-        assert_eq!(resolve_policy_check_path(&flags), PolicyCheckPath::Unified);
     }
 
     #[test]

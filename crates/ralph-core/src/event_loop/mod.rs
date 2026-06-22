@@ -367,61 +367,6 @@ pub struct EventLoop {
     ephemeral_isolation: crate::ephemeral_isolation::EphemeralIsolation,
 }
 
-/// Publish a `task.resume` event in response to a policy rejection.
-///
-/// **Deprecated (U7a, plan 2026-06-21-002).**  When the
-/// `UNIFIED_DETERMINISTIC_CORRECTION=1` env var is set, callers
-/// should use the new
-/// [`crate::correction::emit_correction_context`] API instead —
-/// the deterministic-correction path writes a `CorrectionContext`
-/// into the loop's `prompt_context` queue and prepends the
-/// `## ORCHESTRATOR CORRECTION` block to the next prompt
-/// instead of injecting a `task.resume` event into the bus.
-///
-/// This function is preserved (no signature change) so existing
-/// tests under `event_loop/tests/` and `loop_runner/tests.rs`
-/// keep passing with the feature flag off.  U9 will migrate the
-/// call sites to the new API; once that lands the function
-/// body becomes a no-op + `tracing::warn!`.
-/// R5 (2026-06-14-003 plan): the resume event's `target` is the
-/// source hat (so the next activation lands on the offending hat,
-/// not the alphabetically-first hat) and the payload carries
-/// `wave_id` / `wave_index` / `wave_total` when the source event
-/// was a wave record.  Falls back to an un-targeted publish when
-/// the source hat is unknown (preserves the pre-R5 behaviour of
-/// letting `Ralph` recover).
-/// U3 (2026-06-17-003 plan): when the source event is `work.done`
-/// and `tracker` reports an open wave, append a `## WAVE_OPEN
-/// HINT` block to the payload instructing the agent to NOT emit
-/// `review.passed(empty_diff)` while a wave is in progress and
-/// NOT to repeat `work.done` (both are hard semantic violations
-/// — the `review_passed_while_wave_open` gate is recoverable but
-/// `work.done` dedup is the U4 sibling). This is the textual
-/// counterpart to the mechanism: the gate rejects, the hint
-/// explains why.
-///
-/// U2 (2026-06-17-003 plan): the payload is wrapped in a JSON
-/// object that carries the schema-required `reason` and
-/// `target_hat` fields.  Before publish, the wrapped payload is
-/// audited via `task_resume_payload_has_required_fields`; if
-/// either field is missing, the `task.resume` event is NOT
-/// published and a `event.isolation.boundary_violation`
-/// diagnostic is emitted instead (drift would otherwise flag the
-/// injected event as `field_completeness=0%`).
-/// A3 (002-adversarial-review): when the unified
-/// deterministic-correction flag is on, route a rejection
-/// through [`crate::correction::emit_correction_context`]
-/// instead of publishing a `task.resume` event. The helper
-/// takes a `&mut EventBus` so the existing call sites do
-/// not need a signature change.
-///
-/// **Hook caveat (see the inner call site)**: the live
-/// `LoopState::prompt_context` cannot be reached from here
-/// without a signature change. The caller's dispatcher
-/// (typically `process_parse_result`) is responsible for
-/// reading the side effect (the `CorrectionContext` is logged
-/// to `tracing::info!`) and merging the correction block into
-/// the next prompt.
 /// A4 (002-adversarial-review): pull a `handoff_path` string
 /// out of a macro-edge event payload. Returns `None` when the
 /// payload is missing / non-JSON / does not carry a
