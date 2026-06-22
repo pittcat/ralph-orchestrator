@@ -928,7 +928,7 @@ pub fn inject_missing_event_hard_gate_guidance_with_triggers(
 /// conversion will happen in the isolated wave stability follow-up
 /// using the same `enrich_task_resume_payload` pattern that U3 applies
 /// to `inject_hard_gate_guidance` / `inject_missing_event_hard_gate_guidance`.
-/// See `docs/plans/2026-06-17-003-fix-ce-executor-serial-precheck-recovery-gates-plan.md`
+/// See `docs/achieved/plan/2026-06-17-003-fix-ce-executor-serial-precheck-recovery-gates-plan.md`
 /// → "Deferred to Follow-Up Work" for the rationale.
 ///
 /// This is the schema-level cousin of `inject_missing_event_hard_gate_guidance`.
