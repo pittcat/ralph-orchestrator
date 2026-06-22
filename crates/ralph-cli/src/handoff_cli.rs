@@ -144,16 +144,15 @@ fn execute_prepare(root: &std::path::Path, args: &PrepareArgs) -> Result<()> {
         println!("topic:        {}", args.topic);
         println!("written:      {written}");
         if !written && !args.no_write {
-            eprintln!(
-                "(file already exists; pass --force to overwrite. KTD-14 retry path.)"
-            );
+            eprintln!("(file already exists; pass --force to overwrite. KTD-14 retry path.)");
         }
     }
     Ok(())
 }
 
 fn resolve_root(root: Option<PathBuf>) -> Result<PathBuf> {
-    let resolved = root.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let resolved =
+        root.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     Ok(resolved)
 }
 
@@ -207,7 +206,9 @@ mod tests {
             json: false,
         };
         execute_prepare(dir.path(), &args).unwrap();
-        let path = dir.path().join(".ralph/agent/hat-handoff/3-2-executor-review_coordinator.md");
+        let path = dir
+            .path()
+            .join(".ralph/agent/hat-handoff/3-2-executor-review_coordinator.md");
         assert!(path.exists(), "skeleton file must exist at {path:?}");
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("# Handoff: executor → review-coordinator"));

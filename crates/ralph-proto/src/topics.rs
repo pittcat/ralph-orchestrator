@@ -42,8 +42,7 @@ pub const HUMAN_GUIDANCE: &str = "human.guidance";
 
 /// Orchestrator diagnostic topic published whenever a boundary
 /// (origin / scope / pseudo-hat) gate fires.
-pub const EVENT_ISOLATION_BOUNDARY_VIOLATION: &str =
-    "event.isolation.boundary_violation";
+pub const EVENT_ISOLATION_BOUNDARY_VIOLATION: &str = "event.isolation.boundary_violation";
 
 /// Return `true` when `topic` is one of the well-known
 /// orchestrator control topics.  Mirrors the U2/U4b allowlist

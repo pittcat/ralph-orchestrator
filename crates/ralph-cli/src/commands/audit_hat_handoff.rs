@@ -97,8 +97,7 @@ pub fn audit_hat_handoff_command(args: AuditHatHandoffArgs) -> Result<()> {
         AuditFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&report)
-                    .context("serialize audit report")?
+                serde_json::to_string_pretty(&report).context("serialize audit report")?
             );
         }
     }
@@ -112,7 +111,10 @@ pub fn audit_hat_handoff_command(args: AuditHatHandoffArgs) -> Result<()> {
 
 /// 纯函数入口(便于测试)。
 pub fn try_audit_hat_handoff(args: &AuditHatHandoffArgs) -> AuditExit {
-    let workspace = args.workspace.canonicalize().unwrap_or_else(|_| args.workspace.clone());
+    let workspace = args
+        .workspace
+        .canonicalize()
+        .unwrap_or_else(|_| args.workspace.clone());
     let enabled = audit_handoff_enabled(&workspace);
 
     if !enabled && !args.force {
@@ -135,8 +137,8 @@ pub fn try_audit_hat_handoff(args: &AuditHatHandoffArgs) -> AuditExit {
     }
 
     // 校验每个文件名格式
-    let re = Regex::new(r"^(\d+)-(\d+)-([A-Za-z0-9_-]+)-([A-Za-z0-9_-]+)\.md$")
-        .expect("valid regex");
+    let re =
+        Regex::new(r"^(\d+)-(\d+)-([A-Za-z0-9_-]+)-([A-Za-z0-9_-]+)\.md$").expect("valid regex");
     let mut invalid: Vec<String> = Vec::new();
     let mut parsed: Vec<(u32, u32, String)> = Vec::new();
 
@@ -244,9 +246,7 @@ fn audit_handoff_enabled(workspace: &Path) -> bool {
                         // 缩进回到 hat_handoff 段或更浅,退出
                         hat_handoff_indent = None;
                         // 重新检查本行是否开启新的 hat_handoff 段
-                        if trimmed == "hat_handoff:"
-                            || trimmed.starts_with("hat_handoff:")
-                        {
+                        if trimmed == "hat_handoff:" || trimmed.starts_with("hat_handoff:") {
                             hat_handoff_indent = Some(indent);
                         }
                     }
@@ -311,7 +311,11 @@ mod tests {
 
     fn write_handoff(dir: &Path, name: &str) -> PathBuf {
         let abs = dir.join(name);
-        fs::write(&abs, "# Handoff: a → b\n## next\n**动作**: x\n**阻塞**: 无\n").unwrap();
+        fs::write(
+            &abs,
+            "# Handoff: a → b\n## next\n**动作**: x\n**阻塞**: 无\n",
+        )
+        .unwrap();
         abs
     }
 

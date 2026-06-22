@@ -290,7 +290,9 @@ pub fn check_alignment_with_snapshot(
     if progress.empty_headings {
         return GateDecision::Mismatch(ProgressTaskMismatch {
             reason: "progress_missing_headings".to_string(),
-            detail: format!("progress snapshot has no `Current Step` or `Completed Steps` headings"),
+            detail: format!(
+                "progress snapshot has no `Current Step` or `Completed Steps` headings"
+            ),
             step: step.map(|s| s.to_string()),
             task_id: task_id.map(|t| t.to_string()),
         });
@@ -333,7 +335,10 @@ pub fn check_alignment_with_snapshot(
             None => {
                 return GateDecision::Mismatch(ProgressTaskMismatch {
                     reason: "task_not_found".to_string(),
-                    detail: format!("event references task_id='{}' which is not in the task ledger", task_id_value),
+                    detail: format!(
+                        "event references task_id='{}' which is not in the task ledger",
+                        task_id_value
+                    ),
                     step: step.map(|s| s.to_string()),
                     task_id: Some(task_id_value.to_string()),
                 });

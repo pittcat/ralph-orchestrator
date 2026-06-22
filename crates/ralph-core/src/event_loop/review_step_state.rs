@@ -359,6 +359,47 @@ impl ReviewStepTracker {
         }
     }
 
+    /// B2 (002-adversarial-review): apply a
+    /// `CommitDelta::ReviewStepUpdated` payload to the tracker.
+    /// The previous `apply_delta` path was a no-op for this
+    /// variant, so `replay_from_disk` never rebuilt the
+    /// review-step state. The runtime kept working because the
+    /// live `LoopState::review_step_tracker` was mutated by the
+    /// legacy path; the snapshot stayed empty across cold
+    /// start.
+    ///
+    /// The method takes the **scalar** fields the delta carries
+    /// (synth_pass / synth_terminal) and applies them to the
+    /// matching `StepReviewState`. Unknown plan / task / step
+    /// triples are inserted as a fresh entry — replay
+    /// reconstructs the state from the commit log alone.
+    pub fn apply_review_step_delta(
+        &mut self,
+        plan_name: &str,
+        task_id: &str,
+        step: &str,
+        synth_pass: bool,
+        synth_terminal: Option<&str>,
+    ) {
+        let key = StepKey {
+            plan_name: plan_name.to_string(),
+            task_id: task_id.to_string(),
+            step: step.to_string(),
+        };
+        let state = self.steps.entry(key).or_default();
+        state.synth_pass = synth_pass;
+        if let Some(term) = synth_terminal {
+            state.synth_terminal = Some(term.to_string());
+            // A terminal event implicitly closes the wave;
+            // `wave_open` (the `!state.open_wave_id.is_some()
+            // || dimensions_received.len() >= wave_expected`
+            // check) keys off `open_wave_id`; the legacy
+            // `observe_accepted` clears it on `review.passed` /
+            // `review.complete` so we mirror that here.
+            state.open_wave_id = None;
+        }
+    }
+
     /// True when any tracked step still has an incomplete review wave.
     pub fn has_open_review_wave(&self) -> bool {
         self.steps.values().any(wave_open)

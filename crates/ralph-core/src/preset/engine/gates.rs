@@ -362,9 +362,15 @@ mod tests {
     #[test]
     fn reason_codes_are_stable() {
         assert_eq!(RejectionKind::MissingField.reason_code(), "missing_field");
-        assert_eq!(RejectionKind::TopicOwnership.reason_code(), "topic_ownership");
+        assert_eq!(
+            RejectionKind::TopicOwnership.reason_code(),
+            "topic_ownership"
+        );
         assert_eq!(RejectionKind::UpstreamState.reason_code(), "upstream_state");
-        assert_eq!(RejectionKind::HandoffArtifact.reason_code(), "handoff_artifact");
+        assert_eq!(
+            RejectionKind::HandoffArtifact.reason_code(),
+            "handoff_artifact"
+        );
         assert_eq!(RejectionKind::PreCheck.reason_code(), "pre_check");
     }
 

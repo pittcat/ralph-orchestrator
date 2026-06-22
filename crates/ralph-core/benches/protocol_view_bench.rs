@@ -69,10 +69,7 @@ fn main() {
     let (cfg, index) = serial_fixture();
 
     println!(">>> ProtocolView construction benchmark (KTD-8 / U3)");
-    println!(
-        "    iterations: {}, warmups: {}",
-        ITERATIONS, WARMUPS
-    );
+    println!("    iterations: {}, warmups: {}", ITERATIONS, WARMUPS);
     println!("    fixture:    ce-executor-serial (3 hats, isolated)");
 
     // Both paths are constructed via the explicit
@@ -153,7 +150,10 @@ fn main() {
     }
 
     let mean_legacy = summarise("protocol_view_construction_legacy", &mut samples_legacy);
-    let mean_feature = summarise("protocol_view_construction_feature_on", &mut samples_feature);
+    let mean_feature = summarise(
+        "protocol_view_construction_feature_on",
+        &mut samples_feature,
+    );
 
     let delta_pct = ((mean_feature - mean_legacy) / mean_legacy) * 100.0;
     println!(">>> Summary");
@@ -162,9 +162,7 @@ fn main() {
     println!("    legacy   mean: {mean_legacy:.2} ns/op");
     println!("    feature  mean: {mean_feature:.2} ns/op");
     println!("    delta:        {delta_pct:+.2}%");
-    println!(
-        "    target:       < 5% per-batch overhead (plan 2026-06-21-002 U3 §Performance)"
-    );
+    println!("    target:       < 5% per-batch overhead (plan 2026-06-21-002 U3 §Performance)");
     if delta_pct.abs() < 5.0 {
         println!("    STATUS:       PASS (delta within 5% baseline)");
     } else {

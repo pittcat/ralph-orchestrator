@@ -919,7 +919,7 @@ You MUST continue.\n\
             section.push_str(
                 "⚠️ **Ralph is restricted to control topics only.** Attempting to publish \
                  workflow topics (e.g., `work.start`, `work.ready`) will be rejected by the \
-                 orchestrator.\n\n"
+                 orchestrator.\n\n",
             );
 
             // Validate topology and log warnings for unreachable hats

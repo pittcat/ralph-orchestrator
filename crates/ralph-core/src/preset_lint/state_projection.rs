@@ -144,10 +144,7 @@ event_loop:
         assert_eq!(f.severity, LintSeverity::Error);
         assert_eq!(f.topic.as_deref(), Some("work.done"));
         assert!(
-            f.action_hint
-                .as_deref()
-                .unwrap()
-                .contains("close_task"),
+            f.action_hint.as_deref().unwrap().contains("close_task"),
             "action_hint must mention close_task, got {:?}",
             f.action_hint
         );

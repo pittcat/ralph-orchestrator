@@ -46,7 +46,7 @@ impl ValidationRule for RequiredFieldsRule {
             .cloned()
             .unwrap_or_default();
         if required.is_empty() {
-            return ValidationResult::accept();
+            return ValidationResult::accept_with(ValidationStage::RequiredFields);
         }
 
         let payload = match event.payload.as_deref() {
@@ -72,7 +72,7 @@ impl ValidationRule for RequiredFieldsRule {
             // Malformed JSON: defer to the execution-contract /
             // payload-contract layers; this rule is not the
             // authoritative place for parse failures.
-            Err(_) => return ValidationResult::accept(),
+            Err(_) => return ValidationResult::accept_with(ValidationStage::RequiredFields),
         };
 
         let Value::Object(map) = parsed else {
@@ -106,6 +106,6 @@ impl ValidationRule for RequiredFieldsRule {
             }
         }
 
-        ValidationResult::accept()
+        ValidationResult::accept_with(ValidationStage::RequiredFields)
     }
 }

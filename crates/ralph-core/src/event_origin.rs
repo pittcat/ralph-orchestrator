@@ -171,9 +171,7 @@ pub fn is_anonymous_business_topic(
     }
     // 4) source / triggered 字段指向注册 hat → 有 provenance,放行
     if let Some(ref source) = event.source {
-        if !source.is_empty()
-            && registered_hats.ids().any(|h| h.as_str() == source)
-        {
+        if !source.is_empty() && registered_hats.ids().any(|h| h.as_str() == source) {
             return false;
         }
     }
@@ -187,9 +185,7 @@ pub fn is_anonymous_business_topic(
     //    "agent backend 无 hat 但 fallback 到 current_isolated_hat"
     //    路径,**不**判匿名。这一拆分避免 scenario 测试 / mock agent
     //    输出被 U5 误杀。
-    if !isolated_hat.is_empty()
-        && registered_hats.ids().any(|h| h.as_str() == isolated_hat)
-    {
+    if !isolated_hat.is_empty() && registered_hats.ids().any(|h| h.as_str() == isolated_hat) {
         return false;
     }
     // 6) 所有 provenance 字段缺失、isolated_hat 也不在 registry 中、
@@ -1386,4 +1382,3 @@ hats:
         }
     }
 }
-

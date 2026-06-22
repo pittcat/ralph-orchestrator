@@ -53,10 +53,8 @@ hats:
     // snapshot has a non-empty `open_tasks` field.
     let tasks_path = workspace.join(".ralph/agent/tasks.jsonl");
     fs::create_dir_all(tasks_path.parent().unwrap()).unwrap();
-    let mut ctx = ProjectionContext::new_legacy(
-        workspace,
-        config.event_loop.state_projection.clone(),
-    );
+    let mut ctx =
+        ProjectionContext::new_legacy(workspace, config.event_loop.state_projection.clone());
     project_ensure_task(
         &mut ctx,
         &json!({"task_key": "ce-executor:p:step-01:u1-impl", "step": "step-01"}),

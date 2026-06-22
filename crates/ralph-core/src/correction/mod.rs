@@ -39,8 +39,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::event_loop::rejection::{extract_reason_code, Rejection, RejectionStage};
 use crate::event_loop::loop_state::RejectionDigestEntry;
+use crate::event_loop::rejection::{Rejection, RejectionStage, extract_reason_code};
 use crate::preset::engine::LintResumeHint;
 use crate::state::CommitDelta;
 
@@ -161,11 +161,7 @@ impl CorrectionContext {
     /// code is `lint:<reason>`; stage is `policy`; the retry
     /// key carries the failing topic so escalation logic
     /// converges with policy rejections.
-    pub fn from_lint_hint(
-        topic: &str,
-        hint_message: &str,
-        retry_count: u32,
-    ) -> Self {
+    pub fn from_lint_hint(topic: &str, hint_message: &str, retry_count: u32) -> Self {
         let escalation_threshold = 3;
         Self {
             reason_code: format!("lint:{}", extract_reason_code(hint_message)),
@@ -638,8 +634,8 @@ pub fn maybe_escalate_to_human_guidance(
         correction.reason_code,
         correction.retry_count,
     );
-    let event = ralph_proto::Event::new(ralph_proto::HUMAN_GUIDANCE, message)
-        .with_system_injected();
+    let event =
+        ralph_proto::Event::new(ralph_proto::HUMAN_GUIDANCE, message).with_system_injected();
     bus.publish(event);
     true
 }
@@ -648,7 +644,12 @@ pub fn maybe_escalate_to_human_guidance(
 /// `(stage, hat, topic, reason_hint)` tuple.  Mirrors
 /// [`Rejection::compute_retry_key`] for callers that have not
 /// built a full `Rejection`.
-pub fn derive_retry_key(stage: RejectionStage, hat: &str, topic: &str, reason_hint: &str) -> String {
+pub fn derive_retry_key(
+    stage: RejectionStage,
+    hat: &str,
+    topic: &str,
+    reason_hint: &str,
+) -> String {
     let violation_class = extract_reason_code(reason_hint);
     format!("{}:{}:{}:{}", stage.as_str(), hat, topic, violation_class)
 }
@@ -728,16 +729,8 @@ mod tests {
     #[test]
     fn prompt_context_correction_block_is_sorted() {
         let mut pc = PromptContext::default();
-        let r1 = Rejection::from_origin(
-            Some("zeta".into()),
-            "topic.a".into(),
-            "missing field",
-        );
-        let r2 = Rejection::from_origin(
-            Some("alpha".into()),
-            "topic.b".into(),
-            "missing field",
-        );
+        let r1 = Rejection::from_origin(Some("zeta".into()), "topic.a".into(), "missing field");
+        let r2 = Rejection::from_origin(Some("alpha".into()), "topic.b".into(), "missing field");
         pc.push_correction(CorrectionContext::from_rejection(&r1, 1));
         pc.push_correction(CorrectionContext::from_rejection(&r2, 1));
         let keys: Vec<_> = pc
@@ -913,8 +906,7 @@ mod tests {
         let mut ledger = StateLedger::new(dir.path(), false);
         let r = sample_rejection();
         let mut pc = PromptContext::default();
-        let ctx =
-            emit_correction_context(Some(&mut ledger), &r, 1, Some(dir.path()), &mut pc);
+        let ctx = emit_correction_context(Some(&mut ledger), &r, 1, Some(dir.path()), &mut pc);
         // No commits on a feature-disabled ledger.
         assert_eq!(ledger.commit_log().len(), 0);
         // Recovery log still written (legacy path).
@@ -925,8 +917,8 @@ mod tests {
 
     #[test]
     fn recovery_action_converts_to_correction_context() {
-        use crate::diagnosis::RecoveryAction;
         use crate::diagnosis::DiagnosisSeverity;
+        use crate::diagnosis::RecoveryAction;
         let action = RecoveryAction {
             retry_key: "policy:executor:work.done:missing_field".to_string(),
             target_hat: ralph_proto::HatId::new("executor".to_string()),
@@ -944,8 +936,8 @@ mod tests {
 
     #[test]
     fn recovery_action_with_attempt_3_trips_escalation() {
-        use crate::diagnosis::RecoveryAction;
         use crate::diagnosis::DiagnosisSeverity;
+        use crate::diagnosis::RecoveryAction;
         let action = RecoveryAction {
             retry_key: "x".into(),
             target_hat: ralph_proto::HatId::new("h"),

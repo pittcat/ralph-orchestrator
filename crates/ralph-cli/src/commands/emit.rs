@@ -8,13 +8,11 @@ use crate::policy_check::{PolicyCheckFlags, ValidationFailure, resolve_policy_ch
 use anyhow::{Context, Result};
 use clap::Parser;
 use ralph_core::config::HatExecutionMode;
+use ralph_core::emit_schema_hint::fix_hint_for_hat_topic;
+use ralph_core::preset::engine::lint_mirror::{build_lint_mirror_block, build_lint_resume_block};
 use ralph_core::preset::engine::{
     LintOutcome, LintPaths, LintResumeHint, ProtocolView, lint_emit_with_timeout,
 };
-use ralph_core::preset::engine::lint_mirror::{
-    build_lint_mirror_block, build_lint_resume_block,
-};
-use ralph_core::emit_schema_hint::fix_hint_for_hat_topic;
 use ralph_core::{
     RalphConfig, UrgentSteerStore, ViolationType,
     diagnosis::{
@@ -541,7 +539,9 @@ fn emit_command_with_root_and_hats(
                  Fix the ralph.yml errors or remove --schema."
             )
         })?;
-        let view = ProtocolView::from_event_loop(&cfg.event_loop);
+        // P2-#6 (002-adversarial-review): production-only env
+        // read; tests must use `from_event_loop` (env-free).
+        let view = ProtocolView::from_event_loop_with_index_for_env(&cfg.event_loop, None);
         let pretty = schema_view::render_pretty(&view, schema_topic)
             .context("Failed to serialise protocol view")?;
         println!("{pretty}");
@@ -618,10 +618,10 @@ fn emit_command_with_root_and_hats(
         None
     };
 
-// (U5 / R6 schema branch moved to the top of the handler —
-// see the early `if let Some(ref schema_topic) = args.schema`
-// block above. This duplicate is intentional-deleted to avoid
-// double-printing the protocol view.)
+    // (U5 / R6 schema branch moved to the top of the handler —
+    // see the early `if let Some(ref schema_topic) = args.schema`
+    // block above. This duplicate is intentional-deleted to avoid
+    // double-printing the protocol view.)
 
     // Schema mode short-circuits above. Below this point we are
     // in *emit* mode and `args.topic` is mandatory; clap cannot
@@ -779,8 +779,7 @@ fn emit_command_with_root_and_hats(
             } else {
                 format!("\n\nSuggestions:\n{}", suggestions.join("\n"))
             };
-            let envelope = serde_json::to_string(&report)
-                .unwrap_or_else(|_| "{}".to_string());
+            let envelope = serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string());
             eprintln!("{}", envelope);
             anyhow::bail!(
                 "Event rejected by unified policy check: reason_codes=[{}] topic='{}' hat={:?}{}",
@@ -811,26 +810,28 @@ fn emit_command_with_root_and_hats(
                 "cli emit: skipping legacy validate_event_with_hat (unified path active)"
             );
         } else {
-        let policy = match config
-            .as_ref()
-            .and_then(|c| c.event_loop.event_policy.as_ref())
-        {
-            Some(p) if p.enabled => Some(p),
-            _ => {
-                if check_mode == PolicyCheckMode::ExplicitCheck {
-                    eprintln!(
-                        "Warning: --policy-check was requested but no event policy is configured or enabled."
-                    );
+            let policy = match config
+                .as_ref()
+                .and_then(|c| c.event_loop.event_policy.as_ref())
+            {
+                Some(p) if p.enabled => Some(p),
+                _ => {
+                    if check_mode == PolicyCheckMode::ExplicitCheck {
+                        eprintln!(
+                            "Warning: --policy-check was requested but no event policy is configured or enabled."
+                        );
+                    }
+                    None
                 }
-                None
-            }
-        };
-        if let Some(policy) = policy {
-            use ralph_core::{PolicyRuntimeState, check_topic_deny_rules, validate_event_with_hat};
-            let events_path = fs::read_to_string(&current_events_marker)
-                .map(|s| resolve_marker_target(&workspace_root, &s))
-                .unwrap_or_else(|_| args.file.clone());
-            let mut state =
+            };
+            if let Some(policy) = policy {
+                use ralph_core::{
+                    PolicyRuntimeState, check_topic_deny_rules, validate_event_with_hat,
+                };
+                let events_path = fs::read_to_string(&current_events_marker)
+                    .map(|s| resolve_marker_target(&workspace_root, &s))
+                    .unwrap_or_else(|_| args.file.clone());
+                let mut state =
                 PolicyRuntimeState::from_events(&events_path, policy).unwrap_or_else(|e| {
                     eprintln!(
                         "Warning: Failed to replay events for policy check: {}. Using empty state.",
@@ -839,9 +840,43 @@ fn emit_command_with_root_and_hats(
                     PolicyRuntimeState::default()
                 });
 
-            // Enforce topic-deny rules at CLI emit time so a forbidden
-            // (hat, topic) pair never reaches the events file.
-            if let Some(decision) = check_topic_deny_rules(hat.as_deref(), &topic, policy) {
+                // Enforce topic-deny rules at CLI emit time so a forbidden
+                // (hat, topic) pair never reaches the events file.
+                if let Some(decision) = check_topic_deny_rules(hat.as_deref(), &topic, policy) {
+                    match decision {
+                        ralph_core::PolicyDecision::Accept => {}
+                        ralph_core::PolicyDecision::Warn(findings) => {
+                            for finding in findings {
+                                eprintln!("Policy warning: {}", finding.message);
+                            }
+                        }
+                        ralph_core::PolicyDecision::RejectWithResume(finding)
+                        | ralph_core::PolicyDecision::Hold(finding)
+                        | ralph_core::PolicyDecision::Block(finding)
+                        | ralph_core::PolicyDecision::Ignore(finding) => {
+                            record_cli_emit_rejection(
+                                &workspace_root,
+                                &topic,
+                                hat.as_deref(),
+                                &finding,
+                            );
+                            anyhow::bail!(
+                                "Event rejected by policy: {}. Fix the issue before emitting.\n\n{}",
+                                finding.message,
+                                format_fix_hint(config.as_ref().unwrap(), hat.as_deref(), &topic)
+                            );
+                        }
+                    }
+                }
+
+                // Run schema validation with hat-aware restrictions.
+                let decision = validate_event_with_hat(
+                    &topic,
+                    Some(&args.payload),
+                    policy,
+                    &mut state,
+                    hat.as_deref(),
+                );
                 match decision {
                     ralph_core::PolicyDecision::Accept => {}
                     ralph_core::PolicyDecision::Warn(findings) => {
@@ -866,42 +901,8 @@ fn emit_command_with_root_and_hats(
                         );
                     }
                 }
-            }
-
-            // Run schema validation with hat-aware restrictions.
-            let decision = validate_event_with_hat(
-                &topic,
-                Some(&args.payload),
-                policy,
-                &mut state,
-                hat.as_deref(),
-            );
-            match decision {
-                ralph_core::PolicyDecision::Accept => {}
-                ralph_core::PolicyDecision::Warn(findings) => {
-                    for finding in findings {
-                        eprintln!("Policy warning: {}", finding.message);
-                    }
-                }
-                ralph_core::PolicyDecision::RejectWithResume(finding)
-                | ralph_core::PolicyDecision::Hold(finding)
-                | ralph_core::PolicyDecision::Block(finding)
-                | ralph_core::PolicyDecision::Ignore(finding) => {
-                    record_cli_emit_rejection(
-                        &workspace_root,
-                        &topic,
-                        hat.as_deref(),
-                        &finding,
-                    );
-                    anyhow::bail!(
-                        "Event rejected by policy: {}. Fix the issue before emitting.\n\n{}",
-                        finding.message,
-                        format_fix_hint(config.as_ref().unwrap(), hat.as_deref(), &topic)
-                    );
-                }
-            }
-        }  // closes if let Some(policy)
-        }  // closes if unified_active's else
+            } // closes if let Some(policy)
+        } // closes if unified_active's else
     } else if check_mode == PolicyCheckMode::Skip {
         tracing::info!("cli emit policy check skipped: no event_policy in resolved config");
     }
@@ -924,9 +925,7 @@ fn emit_command_with_root_and_hats(
     // `check_emit_provenance` is the matching gate for the `hat = None`
     // path. Together they form the full isolated-mode CLI guard.
     if let Some(cfg) = config.as_ref() {
-        if let Err(err) =
-            crate::policy_check::check_emit_provenance(hat.as_deref(), &topic, cfg)
-        {
+        if let Err(err) = crate::policy_check::check_emit_provenance(hat.as_deref(), &topic, cfg) {
             use ralph_core::{PolicyFinding, ViolationType};
             let finding = PolicyFinding {
                 violation_type: ViolationType::SemanticGateViolation {
@@ -959,9 +958,7 @@ fn emit_command_with_root_and_hats(
     // enforcement. Without `--hat` the call defers to the origin
     // guard (which rejects unknown/missing provenance).
     if let Some(cfg) = config.as_ref() {
-        if let Err(err) =
-            crate::policy_check::check_isolated_scope(hat.as_deref(), &topic, cfg)
-        {
+        if let Err(err) = crate::policy_check::check_isolated_scope(hat.as_deref(), &topic, cfg) {
             use ralph_core::{PolicyFinding, ViolationType};
             let finding = PolicyFinding {
                 violation_type: ViolationType::SemanticGateViolation {
@@ -981,9 +978,7 @@ fn emit_command_with_root_and_hats(
     // emits the wrong dimension never reaches the events file. The
     // env var is set by the loop runner on `review.dimension.done`
     // workers; non-wave callers (env unset) pass through unchanged.
-    if let Err(err) =
-        crate::policy_check::check_wave_dimension_assignment(&topic, &args.payload)
-    {
+    if let Err(err) = crate::policy_check::check_wave_dimension_assignment(&topic, &args.payload) {
         use ralph_core::{PolicyFinding, ViolationType};
         let finding = PolicyFinding {
             violation_type: ViolationType::SemanticGateViolation {
@@ -1007,11 +1002,7 @@ fn emit_command_with_root_and_hats(
     if ralph_core::step_handoff::progress_task_gate::is_gated_topic(&topic)
         && check_mode != PolicyCheckMode::Skip
     {
-        match crate::policy_check::check_step_handoff_gate(
-            &topic,
-            &args.payload,
-            &workspace_root,
-        ) {
+        match crate::policy_check::check_step_handoff_gate(&topic, &args.payload, &workspace_root) {
             Ok(()) => {}
             Err(err) => {
                 record_cli_emit_rejection(
@@ -1060,12 +1051,9 @@ fn emit_command_with_root_and_hats(
     // decision shape. Disabled by default; opt-in via
     // `event_loop.hat_handoff.enabled`.
     if let Some(cfg) = config.as_ref() {
-        if let Err(err) = crate::policy_check::check_hat_handoff_gate(
-            hat.as_deref(),
-            &topic,
-            Some(&payload),
-            cfg,
-        ) {
+        if let Err(err) =
+            crate::policy_check::check_hat_handoff_gate(hat.as_deref(), &topic, Some(&payload), cfg)
+        {
             use ralph_core::{PolicyFinding, ViolationType};
             let finding = PolicyFinding {
                 violation_type: ViolationType::SemanticGateViolation {
@@ -1073,10 +1061,7 @@ fn emit_command_with_root_and_hats(
                     context: err.message.clone(),
                 },
                 topic: topic.to_string(),
-                message: format!(
-                    "{} (reason_code: {})",
-                    err.message, err.reason_code
-                ),
+                message: format!("{} (reason_code: {})", err.message, err.reason_code),
             };
             record_cli_emit_rejection(&workspace_root, &topic, hat.as_deref(), &finding);
             anyhow::bail!(
@@ -1136,9 +1121,8 @@ fn emit_command_with_root_and_hats(
         // Without this, R22 auto_prepare missed the default
         // unique-consumer edges (work.ready, work.done).
         let config_ref = config.as_ref().unwrap();
-        let index = ralph_core::workflow_contract::handoff_index::HandoffIndex::from_config(
-            config_ref,
-        );
+        let index =
+            ralph_core::workflow_contract::handoff_index::HandoffIndex::from_config(config_ref);
         let view = ProtocolView::from_event_loop_with_index(&config_ref.event_loop, Some(&index));
         // P0-2: pass workspace paths so auto-prepare artifact
         // lands under the loop's own directory.
@@ -1182,7 +1166,11 @@ fn emit_command_with_root_and_hats(
         // has no explicit --source and hat is known, default source to the emitting
         // hat so downstream consumers always have a stable attribution field.
         // Control topics (loop.cancel, task.resume, etc.) are unchanged.
-        record["source"] = serde_json::Value::String(hat.as_ref().expect("U7 R7: hat checked non-None above").clone());
+        record["source"] = serde_json::Value::String(
+            hat.as_ref()
+                .expect("U7 R7: hat checked non-None above")
+                .clone(),
+        );
     }
 
     // Auto-tag with wave metadata from env vars (set by loop runner on wave workers)
@@ -2997,15 +2985,11 @@ event_loop:
         // contract without coupling to stdout capture.
         let config_path = workspace.join("ralph.yml");
         let config_sources = vec![ConfigSource::File(config_path)];
-        let cfg = crate::preflight::load_config_for_preflight_sync(
-            &config_sources,
-            None,
-            &workspace,
-        )
-        .expect("load fixture config");
+        let cfg =
+            crate::preflight::load_config_for_preflight_sync(&config_sources, None, &workspace)
+                .expect("load fixture config");
         let view = ProtocolView::from_event_loop(&cfg.event_loop);
-        let value =
-            schema_view::render_topic(&view, "work.done").expect("render view");
+        let value = schema_view::render_topic(&view, "work.done").expect("render view");
 
         assert_eq!(value["topic"], "work.done");
         let required = value["required_fields"]
@@ -3037,12 +3021,9 @@ event_loop:
 
         let config_path = workspace.join("ralph.yml");
         let config_sources = vec![ConfigSource::File(config_path)];
-        let cfg = crate::preflight::load_config_for_preflight_sync(
-            &config_sources,
-            None,
-            &workspace,
-        )
-        .expect("load fixture config");
+        let cfg =
+            crate::preflight::load_config_for_preflight_sync(&config_sources, None, &workspace)
+                .expect("load fixture config");
         let view = ProtocolView::from_event_loop(&cfg.event_loop);
         let value = schema_view::render_topic(&view, "totally.unknown.topic")
             .expect("render view for unknown topic");
@@ -3096,8 +3077,7 @@ event_loop:
             .expect_err("schema mode must fail closed when no config is discoverable");
         let message = format!("{err:#}");
         assert!(
-            message.contains("no ralph.yml")
-                || message.contains("Cannot render protocol view"),
+            message.contains("no ralph.yml") || message.contains("Cannot render protocol view"),
             "expected clear fail-closed message, got: {message}"
         );
         // And of course no event was written.
@@ -3114,12 +3094,9 @@ event_loop:
 
         let config_path = workspace.join("ralph.yml");
         let config_sources = vec![ConfigSource::File(config_path)];
-        let cfg = crate::preflight::load_config_for_preflight_sync(
-            &config_sources,
-            None,
-            &workspace,
-        )
-        .expect("load fixture config");
+        let cfg =
+            crate::preflight::load_config_for_preflight_sync(&config_sources, None, &workspace)
+                .expect("load fixture config");
         let view1 = ProtocolView::from_event_loop(&cfg.event_loop);
         let view2 = ProtocolView::from_event_loop(&cfg.event_loop);
         assert_eq!(view1.protocol_hash, view2.protocol_hash);
@@ -3410,10 +3387,7 @@ pub mod schema_view {
                 serde_json::to_value(ec).context("serialise execution_contracts")?,
             );
         } else {
-            obj.insert(
-                "execution_contracts".to_string(),
-                serde_json::Value::Null,
-            );
+            obj.insert("execution_contracts".to_string(), serde_json::Value::Null);
         }
 
         obj.insert(
@@ -3435,7 +3409,10 @@ pub mod schema_view {
     // Re-export for tests that want to introspect the view without
     // going through the rendered JSON.
     #[allow(dead_code)]
-    pub(crate) fn topic_field_set(view: &ProtocolView, topic: &str) -> std::collections::HashSet<String> {
+    pub(crate) fn topic_field_set(
+        view: &ProtocolView,
+        topic: &str,
+    ) -> std::collections::HashSet<String> {
         view.required_fields(topic)
     }
 

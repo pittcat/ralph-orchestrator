@@ -113,10 +113,7 @@ pub fn recovery_log_path(workspace: &Path) -> PathBuf {
 /// Append a single record to the rejection log.  Best-effort:
 /// any I/O error is returned so the caller can log it (the loop
 /// runner calls this inside `tracing::warn!`).
-pub fn append_rejection(
-    workspace: &Path,
-    record: &RejectionRecord,
-) -> std::io::Result<()> {
+pub fn append_rejection(workspace: &Path, record: &RejectionRecord) -> std::io::Result<()> {
     let path = recovery_log_path(workspace);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -258,8 +255,8 @@ mod tests {
 
     #[test]
     fn with_terminal_reason_serialises_field() {
-        let r = RejectionRecord::new("a", "x", "r", 3)
-            .with_terminal_reason("retry budget exhausted");
+        let r =
+            RejectionRecord::new("a", "x", "r", 3).with_terminal_reason("retry budget exhausted");
         let s = serde_json::to_string(&r).unwrap();
         assert!(s.contains("terminal_reason"));
         assert!(s.contains("retry budget exhausted"));

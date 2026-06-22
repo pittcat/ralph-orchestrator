@@ -67,8 +67,7 @@ fn u2_engine_gate_rejection_seeds_pending_lint_resume() {
         crate::loop_context::LoopContext::primary(temp.path().to_path_buf()),
     );
     event_loop.initialize("Test");
-    event_loop.event_reader =
-        crate::event_reader::EventReader::new(&events_path);
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
 
     // Emit `work.done` missing `plan_name` + `step` (only
     // `commit_count`). Engine gate should reject and seed the
@@ -110,8 +109,7 @@ fn u2_engine_gate_acceptance_does_not_seed_hint() {
         crate::loop_context::LoopContext::primary(temp.path().to_path_buf()),
     );
     event_loop.initialize("Test");
-    event_loop.event_reader =
-        crate::event_reader::EventReader::new(&events_path);
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
 
     write_object_event_to_jsonl(
         &events_path,
@@ -262,8 +260,7 @@ fn u2_circuit_breaker_trips_after_consecutive_rejections() {
         crate::loop_context::LoopContext::primary(temp.path().to_path_buf()),
     );
     event_loop.initialize("Test");
-    event_loop.event_reader =
-        crate::event_reader::EventReader::new(&events_path);
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
 
     // Iter 1: one rejection. Counter goes 0 → 1 (not yet at
     // the limit). Breaker must NOT have tripped.
@@ -344,8 +341,7 @@ fn u2_circuit_breaker_resets_on_acceptance() {
         crate::loop_context::LoopContext::primary(temp.path().to_path_buf()),
     );
     event_loop.initialize("Test");
-    event_loop.event_reader =
-        crate::event_reader::EventReader::new(&events_path);
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
 
     // Iter 1: rejection. Counter → 1.
     write_object_event_to_jsonl(

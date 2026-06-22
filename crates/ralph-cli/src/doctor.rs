@@ -759,9 +759,7 @@ pub(crate) fn check_plan_sync(plan_path: &Path, tasks_path: &Path) -> CheckResul
 
     let mut issues: Vec<String> = Vec::new();
 
-    if !ALLOWED_PLAN_STATUSES.contains(&status.as_str())
-        && !is_pattern_allowed_status(&status)
-    {
+    if !ALLOWED_PLAN_STATUSES.contains(&status.as_str()) && !is_pattern_allowed_status(&status) {
         issues.push(format!(
             "status '{}' not in allowed enum: {}",
             status,

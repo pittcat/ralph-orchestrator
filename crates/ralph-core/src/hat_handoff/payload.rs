@@ -93,8 +93,7 @@ mod tests {
 
     #[test]
     fn extract_json_with_extra_fields() {
-        let payload =
-            r#"{"task_id":"42","handoff_path":"foo.md","from":"a","to":"b"}"#;
+        let payload = r#"{"task_id":"42","handoff_path":"foo.md","from":"a","to":"b"}"#;
         assert_eq!(extract_handoff_path(payload).as_deref(), Some("foo.md"));
     }
 
@@ -194,10 +193,7 @@ handoff_path: "ok.md"
 
     #[test]
     fn find_in_pending_raw_form() {
-        let pending = vec![Event::new(
-            "work.ready",
-            "handoff_path: \".ralph/x.md\"",
-        )];
+        let pending = vec![Event::new("work.ready", "handoff_path: \".ralph/x.md\"")];
         assert_eq!(find_in_pending(&pending).as_deref(), Some(".ralph/x.md"));
     }
 

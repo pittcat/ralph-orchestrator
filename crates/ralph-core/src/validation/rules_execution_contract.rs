@@ -11,9 +11,7 @@
 //! the `ReasonCode` constants in [`super::result`].
 
 use crate::event_reader::Event;
-use crate::execution_contract::{
-    self, ExecutionContractDecision, ExecutionContractViolationKind,
-};
+use crate::execution_contract::{self, ExecutionContractDecision, ExecutionContractViolationKind};
 use crate::preset::engine::protocol::ProtocolView;
 use crate::state::LedgerSnapshot;
 
@@ -42,13 +40,13 @@ impl ValidationRule for ExecutionContractRule {
         // configured. `ProtocolView::execution_contracts` is the
         // SSOT; `enabled = false` short-circuits.
         let Some(contracts) = protocol_view.execution_contracts.as_ref() else {
-            return ValidationResult::accept();
+            return ValidationResult::accept_with(ValidationStage::ExecutionContract);
         };
         if !contracts.enabled {
-            return ValidationResult::accept();
+            return ValidationResult::accept_with(ValidationStage::ExecutionContract);
         }
         let Some(rule) = contracts.rules.get(event.topic.as_str()) else {
-            return ValidationResult::accept();
+            return ValidationResult::accept_with(ValidationStage::ExecutionContract);
         };
 
         // Post-commit contract validation requires reading the
@@ -65,7 +63,9 @@ impl ValidationRule for ExecutionContractRule {
         // path through the pipeline.
         let decision = execution_contract_check(rule, event, ledger_snapshot);
         match decision {
-            ExecutionContractDecision::Accept => ValidationResult::accept(),
+            ExecutionContractDecision::Accept => {
+                ValidationResult::accept_with(ValidationStage::ExecutionContract)
+            }
             ExecutionContractDecision::Reject(findings) => {
                 // Pick the first finding; the legacy path emits
                 // one diagnostic per finding so the unified
@@ -98,43 +98,53 @@ fn execution_contract_check(
             .first()
             .cloned()
             .unwrap_or_default();
-        return ExecutionContractDecision::Reject(vec![execution_contract::ExecutionContractFinding {
-            kind: ExecutionContractViolationKind::MissingPayloadField { field },
-            message: format!(
-                "{} payload is empty but contract requires fields: {:?}",
-                event.topic, rule.require_payload_fields
-            ),
-            topic: event.topic.to_string(),
-            source_hat: None,
-        }]);
-    }
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload_str) else {
-        return ExecutionContractDecision::Reject(vec![execution_contract::ExecutionContractFinding {
-            kind: ExecutionContractViolationKind::InvalidPayload,
-            message: format!("{} payload is not valid JSON", event.topic),
-            topic: event.topic.to_string(),
-            source_hat: None,
-        }]);
-    };
-    let serde_json::Value::Object(map) = value else {
-        return ExecutionContractDecision::Reject(vec![execution_contract::ExecutionContractFinding {
-            kind: ExecutionContractViolationKind::InvalidPayload,
-            message: format!("{} payload must be a JSON object", event.topic),
-            topic: event.topic.to_string(),
-            source_hat: None,
-        }]);
-    };
-    for field in &rule.require_payload_fields {
-        if !map.contains_key(field) {
-            return ExecutionContractDecision::Reject(vec![execution_contract::ExecutionContractFinding {
-                kind: ExecutionContractViolationKind::MissingPayloadField { field: field.clone() },
+        return ExecutionContractDecision::Reject(vec![
+            execution_contract::ExecutionContractFinding {
+                kind: ExecutionContractViolationKind::MissingPayloadField { field },
                 message: format!(
-                    "{} payload is missing required field: '{}'",
-                    event.topic, field
+                    "{} payload is empty but contract requires fields: {:?}",
+                    event.topic, rule.require_payload_fields
                 ),
                 topic: event.topic.to_string(),
                 source_hat: None,
-            }]);
+            },
+        ]);
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload_str) else {
+        return ExecutionContractDecision::Reject(vec![
+            execution_contract::ExecutionContractFinding {
+                kind: ExecutionContractViolationKind::InvalidPayload,
+                message: format!("{} payload is not valid JSON", event.topic),
+                topic: event.topic.to_string(),
+                source_hat: None,
+            },
+        ]);
+    };
+    let serde_json::Value::Object(map) = value else {
+        return ExecutionContractDecision::Reject(vec![
+            execution_contract::ExecutionContractFinding {
+                kind: ExecutionContractViolationKind::InvalidPayload,
+                message: format!("{} payload must be a JSON object", event.topic),
+                topic: event.topic.to_string(),
+                source_hat: None,
+            },
+        ]);
+    };
+    for field in &rule.require_payload_fields {
+        if !map.contains_key(field) {
+            return ExecutionContractDecision::Reject(vec![
+                execution_contract::ExecutionContractFinding {
+                    kind: ExecutionContractViolationKind::MissingPayloadField {
+                        field: field.clone(),
+                    },
+                    message: format!(
+                        "{} payload is missing required field: '{}'",
+                        event.topic, field
+                    ),
+                    topic: event.topic.to_string(),
+                    source_hat: None,
+                },
+            ]);
         }
     }
     ExecutionContractDecision::Accept

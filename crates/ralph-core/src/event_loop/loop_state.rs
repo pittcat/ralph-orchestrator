@@ -1501,12 +1501,7 @@ mod tests {
         let mut state = LoopState::new();
         // MAX_DIGEST_ENTRIES=5, 第 6 个不同 code 后触发清空
         for i in 0..6 {
-            state.record_rejection_digest(
-                &format!("code_{i}"),
-                "msg",
-                "topic",
-                "t",
-            );
+            state.record_rejection_digest(&format!("code_{i}"), "msg", "topic", "t");
         }
         // 第 6 个 code 写入后 len=6 > 5,触发清空
         assert!(

@@ -519,8 +519,8 @@ pub fn check_hat_handoff_gate_with_env(
     // 解析 payload 中的 handoff_path(与 runtime 同语义,走 SSOT)。
     // 2026-06-18 P1-1: 改用 `hat_handoff::payload::extract_handoff_path`,
     // 与 runtime gate / inject 共用同一函数,避免 SSOT 漂移。
-    let handoff_path = payload_str
-        .and_then(|raw| ralph_core::hat_handoff::payload::extract_handoff_path(raw));
+    let handoff_path =
+        payload_str.and_then(|raw| ralph_core::hat_handoff::payload::extract_handoff_path(raw));
 
     // 用 preset 配置构造 HandoffIndex。
     let index = HandoffIndex::from_config(config);
@@ -537,15 +537,14 @@ pub fn check_hat_handoff_gate_with_env(
     // 读 handoff 文件(如有)。不在 gate 里 panic。
     // 2026-06-18-005 U6: tri-state FileContent,区分 missing / read_fail。
     let file_content = match handoff_path.as_deref() {
-        Some(path) => match ralph_core::hat_handoff::allocator::resolve_jailed(
-            workspace_root,
-            path,
-        ) {
-            Ok(abs) => ralph_core::hat_handoff::gate::FileContent::from_read_result(
-                std::fs::read_to_string(&abs),
-            ),
-            Err(_) => ralph_core::hat_handoff::gate::FileContent::Missing,
-        },
+        Some(path) => {
+            match ralph_core::hat_handoff::allocator::resolve_jailed(workspace_root, path) {
+                Ok(abs) => ralph_core::hat_handoff::gate::FileContent::from_read_result(
+                    std::fs::read_to_string(&abs),
+                ),
+                Err(_) => ralph_core::hat_handoff::gate::FileContent::Missing,
+            }
+        }
         None => ralph_core::hat_handoff::gate::FileContent::Missing,
     };
 
@@ -553,7 +552,8 @@ pub fn check_hat_handoff_gate_with_env(
     // (skip_seq_check=true),只保留 path jail / R15 / 结构校验。
     // 2026-06-18-001 plan U1: hat=None 时 from_hat 不可知,文件名
     // owner 校验 (from/to) 同步跳过;其余校验仍然执行。
-    let (iteration, current_seq, skip_seq_check, skip_filename_owner_check) = match (hat, env_state) {
+    let (iteration, current_seq, skip_seq_check, skip_filename_owner_check) = match (hat, env_state)
+    {
         (Some(_), Some((iter, seq))) => (iter, seq, false, false),
         (Some(_), None) => (1u32, 0u32, true, false),
         (None, _) => (1u32, 0u32, true, true),
@@ -577,7 +577,10 @@ pub fn check_hat_handoff_gate_with_env(
 
     match gate::evaluate_event(&inputs, &file_content) {
         GateDecision::NotRequired | GateDecision::Accept { .. } => Ok(()),
-        GateDecision::Reject { reason_code, message } => Err(ValidationError {
+        GateDecision::Reject {
+            reason_code,
+            message,
+        } => Err(ValidationError {
             payload_index: 0,
             field: "handoff_path".to_string(),
             reason_code: reason_code.to_string(),
@@ -746,10 +749,10 @@ pub fn run_policy_check_unified(
     hat: Option<&str>,
     workspace: &Path,
 ) -> Result<PolicyCheckReport> {
+    use ralph_core::Event;
     use ralph_core::preset::engine::protocol::ProtocolView;
     use ralph_core::state::LedgerSnapshot;
     use ralph_core::validation::ValidationPipeline;
-    use ralph_core::Event;
 
     // Load the config to build the protocol view. Reuse the
     // existing preflight loader so RALPH_HATS_SOURCE, schema
@@ -764,7 +767,10 @@ pub fn run_policy_check_unified(
         .map(|c| c.event_loop.clone())
         .unwrap_or_default();
 
-    let view = ProtocolView::from_event_loop(&event_loop_config);
+    // P2-#6 (002-adversarial-review): production-only env
+    // read; tests must use `ProtocolView::from_event_loop`
+    // (env-free) to stay isolated under `cargo nextest`.
+    let view = ProtocolView::from_event_loop_with_index_for_env(&event_loop_config, None);
     let pipeline = ValidationPipeline::from_config(&view, &event_loop_config);
 
     let snapshot = LedgerSnapshot::cold_start();
@@ -784,12 +790,7 @@ pub fn run_policy_check_unified(
     };
 
     let report = pipeline.validate_with_preview(&view, &snapshot, &projected, &event);
-    Ok(report_from_validation(
-        &report,
-        topic,
-        hat,
-        &workspace_root,
-    ))
+    Ok(report_from_validation(&report, topic, hat, &workspace_root))
 }
 
 /// Resolve the U6 policy-check mode from CLI flags + env var.
@@ -820,9 +821,7 @@ pub struct UnifiedPolicyCheckFlags {
     pub policy_check_compat: bool,
 }
 
-pub fn resolve_policy_check_path(
-    flags: &UnifiedPolicyCheckFlags,
-) -> PolicyCheckPath {
+pub fn resolve_policy_check_path(flags: &UnifiedPolicyCheckFlags) -> PolicyCheckPath {
     if flags.policy_check_compat {
         return PolicyCheckPath::Compat;
     }
@@ -849,7 +848,10 @@ mod u6_unified_path_tests {
     use ralph_core::validation::{ReasonCode, ValidationResult, ValidationStage};
     use tempfile::TempDir;
 
-    fn fake_report(pre: Vec<ValidationResult>, post: Vec<ValidationResult>) -> ralph_core::validation::ValidationReport {
+    fn fake_report(
+        pre: Vec<ValidationResult>,
+        post: Vec<ValidationResult>,
+    ) -> ralph_core::validation::ValidationReport {
         let accepted = pre.iter().all(|r| r.accepted) && post.iter().all(|r| r.accepted);
         let post_commit_rejected = post.iter().any(|r| !r.accepted);
         ralph_core::validation::ValidationReport {
@@ -951,7 +953,10 @@ mod u6_unified_path_tests {
             json["reason_codes"][0],
             ReasonCode::RALPH_CONTROL_ONLY.to_string()
         );
-        assert_eq!(json["suggestions"][0], serde_json::Value::String(String::new()));
+        assert_eq!(
+            json["suggestions"][0],
+            serde_json::Value::String(String::new())
+        );
     }
 
     #[test]
@@ -965,10 +970,7 @@ mod u6_unified_path_tests {
         // test process the env var is unset → default Compat.
         let prev = std::env::var("UNIFIED_POLICY_CHECK").ok();
         if prev.is_none() {
-            assert_eq!(
-                resolve_policy_check_path(&flags),
-                PolicyCheckPath::Compat
-            );
+            assert_eq!(resolve_policy_check_path(&flags), PolicyCheckPath::Compat);
         }
     }
 
@@ -978,10 +980,7 @@ mod u6_unified_path_tests {
             policy_check_unified: true,
             policy_check_compat: false,
         };
-        assert_eq!(
-            resolve_policy_check_path(&flags),
-            PolicyCheckPath::Unified
-        );
+        assert_eq!(resolve_policy_check_path(&flags), PolicyCheckPath::Unified);
     }
 
     #[test]
@@ -992,10 +991,7 @@ mod u6_unified_path_tests {
             policy_check_unified: false,
             policy_check_compat: true,
         };
-        assert_eq!(
-            resolve_policy_check_path(&flags),
-            PolicyCheckPath::Compat
-        );
+        assert_eq!(resolve_policy_check_path(&flags), PolicyCheckPath::Compat);
     }
 
     #[test]
@@ -1004,9 +1000,8 @@ mod u6_unified_path_tests {
         // required fields. The pipeline accepts every event, the
         // report mirrors the loop's accept verdict.
         let tmp = TempDir::new().unwrap();
-        let report =
-            run_policy_check_unified("debug.step", Some("task_id=demo"), None, tmp.path())
-                .expect("unified check should succeed on empty workspace");
+        let report = run_policy_check_unified("debug.step", Some("task_id=demo"), None, tmp.path())
+            .expect("unified check should succeed on empty workspace");
         assert!(report.accepted, "report: {report:?}");
         assert!(report.reason_codes.is_empty());
         assert_eq!(report.topic, "debug.step");
@@ -1042,7 +1037,10 @@ event_loop:
             tmp.path(),
         )
         .expect("unified check should return a report");
-        assert!(!report.accepted, "missing required field must reject: {report:?}");
+        assert!(
+            !report.accepted,
+            "missing required field must reject: {report:?}"
+        );
         assert!(
             report
                 .reason_codes
@@ -1115,7 +1113,7 @@ event_loop:
         // emits a `step_handoff::` shape that the CLI precheck can
         // intersect with the loop's `progress_task_mismatch` family.
         use ralph_core::step_handoff::progress_task_gate::{
-            check_progress_task_alignment, GateDecision,
+            GateDecision, check_progress_task_alignment,
         };
 
         let tmp = TempDir::new().unwrap();
@@ -1128,11 +1126,7 @@ event_loop:
             "status": "closed",
             "priority": 3,
         });
-        std::fs::write(
-            ralph_dir.join("agent/tasks.jsonl"),
-            format!("{task}\n"),
-        )
-        .unwrap();
+        std::fs::write(ralph_dir.join("agent/tasks.jsonl"), format!("{task}\n")).unwrap();
         std::fs::write(
             ralph_dir.join("agent/progress.md"),
             "## Current Step\nstep-02\n\n## Completed Steps\n- step-02\n",
@@ -1237,8 +1231,7 @@ hats:
         let mut cfg = parse_cfg(&yaml);
         let dir = tempfile::tempdir().unwrap();
         cfg.core.workspace_root = dir.path().to_path_buf();
-        let payload =
-            r#"{"handoff_path":".ralph/agent/hat-handoff/1-1-plan_gate-executor.md"}"#;
+        let payload = r#"{"handoff_path":".ralph/agent/hat-handoff/1-1-plan_gate-executor.md"}"#;
         let err = check_hat_handoff_gate(Some("plan-gate"), "work.ready", Some(payload), &cfg)
             .expect_err("expected Reject");
         assert_eq!(err.reason_code, REASON_CODE_HAT_HANDOFF_FILE_NOT_FOUND);
@@ -1259,9 +1252,10 @@ hats:
             "# Handoff: plan_gate → executor\n## context\nx\n## changed\ny\n## verify\nz\n## next\n**动作**: emit work.done after completion\n**阻塞**: 无\n## notes\n无\n",
         )
         .unwrap();
-        let payload =
-            r#"{"handoff_path":".ralph/agent/hat-handoff/1-1-plan_gate-executor.md"}"#;
-        assert!(check_hat_handoff_gate(Some("plan-gate"), "work.ready", Some(payload), &cfg).is_ok());
+        let payload = r#"{"handoff_path":".ralph/agent/hat-handoff/1-1-plan_gate-executor.md"}"#;
+        assert!(
+            check_hat_handoff_gate(Some("plan-gate"), "work.ready", Some(payload), &cfg).is_ok()
+        );
     }
 
     // 2026-06-18-005 U2 (R1): 真实 loop 状态下的 seq/iter 校验。
@@ -1286,16 +1280,17 @@ hats:
             "# Handoff: plan_gate → executor\n## context\nx\n## changed\ny\n## verify\nz\n## next\n**动作**: emit work.done after completion\n**阻塞**: 无\n## notes\n无\n",
         )
         .unwrap();
-        let payload =
-            r#"{"handoff_path":".ralph/agent/hat-handoff/3-2-plan_gate-executor.md"}"#;
-        assert!(check_hat_handoff_gate_with_env(
-            Some("plan-gate"),
-            "work.ready",
-            Some(payload),
-            &cfg,
-            Some((3, 1))
-        )
-        .is_ok());
+        let payload = r#"{"handoff_path":".ralph/agent/hat-handoff/3-2-plan_gate-executor.md"}"#;
+        assert!(
+            check_hat_handoff_gate_with_env(
+                Some("plan-gate"),
+                "work.ready",
+                Some(payload),
+                &cfg,
+                Some((3, 1))
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -1314,8 +1309,7 @@ hats:
             "# Handoff: plan_gate → executor\n## context\nx\n## changed\ny\n## verify\nz\n## next\n**动作**: emit work.done after completion\n**阻塞**: 无\n## notes\n无\n",
         )
         .unwrap();
-        let payload =
-            r#"{"handoff_path":".ralph/agent/hat-handoff/3-3-plan_gate-executor.md"}"#;
+        let payload = r#"{"handoff_path":".ralph/agent/hat-handoff/3-3-plan_gate-executor.md"}"#;
         let err = check_hat_handoff_gate_with_env(
             Some("plan-gate"),
             "work.ready",
@@ -1343,8 +1337,7 @@ hats:
             "# Handoff: plan_gate → executor\n## context\nx\n## changed\ny\n## verify\nz\n## next\n**动作**: emit work.done after completion\n**阻塞**: 无\n## notes\n无\n",
         )
         .unwrap();
-        let payload =
-            r#"{"handoff_path":".ralph/agent/hat-handoff/3-3-plan_gate-executor.md"}"#;
+        let payload = r#"{"handoff_path":".ralph/agent/hat-handoff/3-3-plan_gate-executor.md"}"#;
         assert!(
             check_hat_handoff_gate_with_env(
                 Some("plan-gate"),
@@ -1374,17 +1367,18 @@ hats:
             "# Handoff: plan_gate → executor\n## context\nx\n## changed\ny\n## verify\nz\n## next\n**动作**: emit work.done after completion\n**阻塞**: 无\n## notes\n无\n",
         )
         .unwrap();
-        let payload =
-            r#"{"handoff_path":".ralph/agent/hat-handoff/3-3-plan_gate-executor.md"}"#;
+        let payload = r#"{"handoff_path":".ralph/agent/hat-handoff/3-3-plan_gate-executor.md"}"#;
         // None 表示两个 env 都缺(模拟 partial 情形)— wrapper 都会用 None
-        assert!(check_hat_handoff_gate_with_env(
-            Some("plan-gate"),
-            "work.ready",
-            Some(payload),
-            &cfg,
-            None
-        )
-        .is_ok());
+        assert!(
+            check_hat_handoff_gate_with_env(
+                Some("plan-gate"),
+                "work.ready",
+                Some(payload),
+                &cfg,
+                None
+            )
+            .is_ok()
+        );
     }
 
     // ── 2026-06-18-001 plan U1: hat=None 不再早返 ─────────────────────
@@ -1437,11 +1431,9 @@ hats:
             "# Handoff: plan_gate → executor\n## context\nx\n## changed\ny\n## verify\nz\n## next\n**动作**: emit work.done after completion\n**阻塞**: 无\n## notes\n无\n",
         )
         .unwrap();
-        let payload =
-            r#"{"handoff_path":".ralph/agent/hat-handoff/1-1-plan_gate-executor.md"}"#;
+        let payload = r#"{"handoff_path":".ralph/agent/hat-handoff/1-1-plan_gate-executor.md"}"#;
         assert!(
-            check_hat_handoff_gate_with_env(None, "work.ready", Some(payload), &cfg, None)
-                .is_ok(),
+            check_hat_handoff_gate_with_env(None, "work.ready", Some(payload), &cfg, None).is_ok(),
             "hat=None + 宏观边 + 合法 handoff_path 必须通过"
         );
     }
@@ -1460,7 +1452,6 @@ hats:
         assert_eq!(err.reason_code, "hat_handoff_path_escape");
     }
 }
-
 
 /// U1 (2026-06-17-004 plan, R1+R2): CLI provenance fail-closed.
 ///

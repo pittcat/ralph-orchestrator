@@ -483,9 +483,7 @@ fn test_coordinator_work_failed_marks_bootstrap_failed() {
 //      is on
 // -------------------------------------------------------------------------
 
-fn make_suppress_human_guidance_loop(
-    workspace: &std::path::Path,
-) -> super::EventLoop {
+fn make_suppress_human_guidance_loop(workspace: &std::path::Path) -> super::EventLoop {
     make_isolated_coordinator_loop_with_suppress(workspace, true)
 }
 
@@ -661,9 +659,9 @@ fn u5_apply_robot_guidance_clears_ralph_cache_under_suppress() {
     // pre-population (it would route through the same
     // suppress branch we're testing) by using the ralph's
     // public setter directly.
-    event_loop
-        .ralph
-        .set_robot_guidance(vec!["stale guidance cached before suppress flip".to_string()]);
+    event_loop.ralph.set_robot_guidance(vec![
+        "stale guidance cached before suppress flip".to_string(),
+    ]);
     assert!(
         !event_loop.ralph.collect_robot_guidance().is_empty(),
         "precondition: ralph MUST have stale guidance cached before suppress flip"

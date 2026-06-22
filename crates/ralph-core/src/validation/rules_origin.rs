@@ -15,6 +15,15 @@
 //! passes that field through `LedgerSnapshot`, the rule relies on
 //! the event's own `hat` field (legacy `process_parse_result`
 //! path also accepts no-hat business events).
+//!
+//! P1-#4 (002-adversarial-review): the previous unit-struct
+//! `OriginRule` derived an empty `HatRegistry` at every call,
+//! which made `event_origin::validate_event_origin` fall back to
+//! the solo / hatless mode and accept every event. The rule is
+//! now generic over the registry: callers that need real
+//! per-hat origin enforcement construct the rule with
+//! [`OriginRule::with_registry`] and pass an
+//! `Arc<HatRegistry>` built from the runtime's `RalphConfig`.
 
 use std::sync::Arc;
 
@@ -28,22 +37,30 @@ use super::pipeline::{RulePhase, ValidationRule};
 use super::result::{ReasonCode, ValidationResult, ValidationStage};
 
 /// `OriginRule` — pre-commit origin guard.
-pub struct OriginRule;
+///
+/// The unit struct `OriginRule` defaults to an empty registry
+/// (the legacy solo / hatless mode). Production callers that
+/// have a real `HatRegistry` should construct
+/// `OriginRule::with_registry(arc_registry)` so unknown-hat
+/// events are rejected.
+pub struct OriginRule {
+    registry: Arc<HatRegistry>,
+}
+
+impl Default for OriginRule {
+    fn default() -> Self {
+        Self {
+            registry: Arc::new(HatRegistry::default()),
+        }
+    }
+}
 
 impl OriginRule {
-    /// Build a registry from the protocol view. The view does
-    /// not currently expose a hat registry, so the default empty
-    /// registry is used. The runtime is expected to pass a
-    /// non-empty registry through the [`super::pipeline::ValidationPipeline`]
-    /// builder in production.
-    fn registry(_view: &ProtocolView) -> Arc<HatRegistry> {
-        // Until `ProtocolView` carries a hat registry (U6
-        // wiring), the rule uses an empty registry. The legacy
-        // `validate_event_origin` path treats empty registry as
-        // solo / hatless mode and accepts all events — exactly
-        // the legacy no-hats behaviour the orchestrator has
-        // always had.
-        Arc::new(HatRegistry::default())
+    /// Build an `OriginRule` with the supplied `HatRegistry`.
+    /// The registry is `Arc`-shared so the rule can be cloned
+    /// into multiple pipelines without re-reading the config.
+    pub fn with_registry(registry: Arc<HatRegistry>) -> Self {
+        Self { registry }
     }
 }
 
@@ -58,21 +75,20 @@ impl ValidationRule for OriginRule {
 
     fn validate(
         &self,
-        protocol_view: &ProtocolView,
+        _protocol_view: &ProtocolView,
         _ledger_snapshot: &LedgerSnapshot,
         event: &Event,
     ) -> ValidationResult {
-        let registry = Self::registry(protocol_view);
         let cancellation_topic = ""; // resolved via `LoopState` in legacy path
         let completion_promise = ""; // same — kept empty for symmetry
         let verdict = event_origin::validate_event_origin(
             event,
-            &registry,
+            &self.registry,
             cancellation_topic,
             completion_promise,
         );
         match verdict {
-            OriginCheck::Accepted => ValidationResult::accept(),
+            OriginCheck::Accepted => ValidationResult::accept_with(ValidationStage::Origin),
             OriginCheck::Rejected { reason, .. } => {
                 let stage = ValidationStage::Origin;
                 let code = match reason {

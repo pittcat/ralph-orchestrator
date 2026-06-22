@@ -14,9 +14,8 @@ use crate::event_reader::Event;
 use crate::preset::engine::protocol::ProtocolView;
 use crate::state::LedgerSnapshot;
 use crate::step_handoff::progress_task_gate::{
-    check_alignment_with_snapshot, GateDecision, GATED_TOPICS,
+    GATED_TOPICS, GateDecision, check_alignment_with_snapshot,
 };
-use crate::task::Task;
 use ralph_proto::HatId;
 
 use super::pipeline::{RulePhase, ValidationRule};
@@ -41,29 +40,31 @@ impl ValidationRule for StepHandoffRule {
         event: &Event,
     ) -> ValidationResult {
         if !GATED_TOPICS.contains(&event.topic.as_str()) {
-            return ValidationResult::accept();
+            return ValidationResult::accept_with(ValidationStage::StepHandoff);
         }
         let (step, task_id) = extract_step_task(event);
-        let progress = ledger_snapshot.progress.clone();
-        let tasks: Vec<Task> = ledger_snapshot.tasks.clone();
+        // P1-#9 (002-adversarial-review): borrow progress +
+        // tasks from the snapshot instead of cloning them on
+        // every validation. `check_alignment_with_snapshot`
+        // already takes `&ProgressSnapshot` and `&[Task]`, so
+        // the legacy clone was pure waste. The borrow checker
+        // is happy because `extract_step_task` consumes only
+        // `&Event` (no overlap with the snapshot accessors).
         let decision = check_alignment_with_snapshot(
-            &progress,
-            &tasks,
+            &ledger_snapshot.progress,
+            &ledger_snapshot.tasks,
             event.topic.as_str(),
             step.as_deref(),
             task_id.as_deref(),
         );
         match decision {
-            GateDecision::Inert | GateDecision::Aligned => ValidationResult::accept(),
+            GateDecision::Inert | GateDecision::Aligned => {
+                ValidationResult::accept_with(ValidationStage::StepHandoff)
+            }
             GateDecision::Mismatch(m) => {
                 let code = format!("{}:{}", ReasonCode::STEP_HANDOFF_MISMATCH_PREFIX, m.reason);
                 let hint = m.detail.clone();
-                ValidationResult::reject(
-                    ValidationStage::StepHandoff,
-                    code,
-                    Some(hint),
-                    true,
-                )
+                ValidationResult::reject(ValidationStage::StepHandoff, code, Some(hint), true)
             }
         }
     }

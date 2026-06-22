@@ -143,6 +143,28 @@ impl ValidationPipeline {
     /// We do not gate rule construction on the flag because tests
     /// exercise both paths.
     pub fn from_config(protocol_view: &ProtocolView, _config: &EventLoopConfig) -> Self {
+        // P1-#4 (002-adversarial-review): the pipeline's default
+        // constructor still uses the empty `HatRegistry` (solo /
+        // hatless mode) for the `OriginRule` because `EventLoopConfig`
+        // does not carry hat definitions. Production callers that
+        // have a `RalphConfig` in hand should follow up with
+        // [`Self::with_origin_registry`] so the `OriginRule` runs
+        // against the real registry. The pipeline stores the
+        // registry behind an `Option` so this default path keeps
+        // compiling for callers without a registry.
+        Self::from_registry(protocol_view, None)
+    }
+
+    /// Build a pipeline with an explicit `HatRegistry` for
+    /// `OriginRule`. P1-#4 (002-adversarial-review): this is the
+    /// path production callers must take so unknown-hat events
+    /// are rejected. The registry is `Arc`-shared so the rule
+    /// can be cloned into multiple pipelines without re-reading
+    /// the config.
+    pub fn from_registry(
+        protocol_view: &ProtocolView,
+        registry: Option<std::sync::Arc<crate::hat_registry::HatRegistry>>,
+    ) -> Self {
         use super::rules_execution_contract::ExecutionContractRule;
         use super::rules_hat_handoff::HatHandoffRule;
         use super::rules_origin::OriginRule;
@@ -151,17 +173,20 @@ impl ValidationPipeline {
         use super::rules_step_handoff::StepHandoffRule;
         use super::rules_workflow_guard::WorkflowGuardRule;
 
+        let origin_rule: Arc<dyn ValidationRule> = match registry {
+            Some(reg) => Arc::new(OriginRule::with_registry(reg)),
+            None => Arc::new(OriginRule::default()),
+        };
+
         let pre_commit_rules: Vec<Arc<dyn ValidationRule>> = vec![
-            Arc::new(OriginRule),
+            origin_rule,
             Arc::new(PublisherRule),
             Arc::new(RequiredFieldsRule),
             Arc::new(StepHandoffRule),
             Arc::new(HatHandoffRule),
         ];
-        let post_commit_rules: Vec<Arc<dyn ValidationRule>> = vec![
-            Arc::new(ExecutionContractRule),
-            Arc::new(WorkflowGuardRule),
-        ];
+        let post_commit_rules: Vec<Arc<dyn ValidationRule>> =
+            vec![Arc::new(ExecutionContractRule), Arc::new(WorkflowGuardRule)];
 
         Self {
             pre_commit_rules,
@@ -182,36 +207,19 @@ impl ValidationPipeline {
     /// Returns one [`ValidationResult`] per rule, in pipeline
     /// order. The caller decides what to do with rejections
     /// (typically short-circuit on the first one).
-    pub fn validate_pre_commit(
-        &self,
-        snapshot: &LedgerSnapshot,
-        event: &Event,
-    ) -> Vec<ValidationResult> {
-        self.pre_commit_rules
-            .iter()
-            .map(|rule| {
-                // The trait takes `&ProtocolView` but the pipeline
-                // does not own one — pass an empty protocol view.
-                // PreCommit rules are designed to operate without
-                // a fully-loaded `ProtocolView`: `OriginRule` reads
-                // the registry via the event's hat, `PublisherRule`
-                // only needs `topic_publisher_allowed` (default
-                // permissive), and `RequiredFieldsRule` consults
-                // the schema set provided via the snapshot's
-                // `recent_rejection_digest` augmentation. The
-                // `with_view` builder below is the production
-                // path that supplies the real view.
-                let empty = ProtocolView::default();
-                rule.validate(&empty, snapshot, event)
-            })
-            .collect()
-    }
-
-    /// Same as [`Self::validate_pre_commit`] but with a caller-
-    /// supplied `ProtocolView`. This is the production entry
-    /// point — `process_parse_result` builds the view once per
-    /// batch and passes it in so every rule sees the same
-    /// configuration snapshot.
+    ///
+    /// P2-#2 (002-adversarial-review): the legacy
+    /// `validate_pre_commit` (without view) used an empty
+    /// `ProtocolView`, which silently disabled
+    /// `RequiredFieldsRule` and other view-aware checks. The
+    /// method is removed; callers must use
+    /// [`Self::validate_pre_commit_with_view`] and supply the
+    /// runtime's real `ProtocolView` instance.
+    /// Run the pre-commit rules against the current snapshot
+    /// with a caller-supplied `ProtocolView`. This is the
+    /// production entry point — `process_parse_result` builds
+    /// the view once per batch and passes it in so every rule
+    /// sees the same configuration snapshot.
     pub fn validate_pre_commit_with_view(
         &self,
         view: &ProtocolView,

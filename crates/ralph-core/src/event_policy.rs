@@ -474,8 +474,7 @@ impl PolicyRuntimeState {
                     // without colliding with the
                     // prior round's
                     // `fix_round=N` entry.
-                    state
-                        .prune_review_dimensions_complete_bucket(pn, st, ti);
+                    state.prune_review_dimensions_complete_bucket(pn, st, ti);
                 }
             }
             // U5 (2026-06-18-004 plan, R4): replay prior
@@ -491,10 +490,7 @@ impl PolicyRuntimeState {
                 let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
                 let step = obj.get("step").and_then(|v| v.as_str());
                 let task_id = obj.get("task_id").and_then(|v| v.as_str());
-                let fix_round = obj
-                    .get("fix_round")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
+                let fix_round = obj.get("fix_round").and_then(|v| v.as_u64()).unwrap_or(0);
                 if let (Some(pn), Some(st), Some(ti)) = (plan_name, step, task_id) {
                     state
                         .review_dimensions_complete_seen_keys
@@ -973,9 +969,7 @@ pub fn validate_event_with_hat(
             Some(Value::Number(n)) => n.as_u64(),
             _ => None, // missing or non-numeric → None (not Some(0))
         };
-        if let (Some(pn), Some(st), Some(ti), Some(fr)) =
-            (plan_name, step, task_id, fix_round)
-        {
+        if let (Some(pn), Some(st), Some(ti), Some(fr)) = (plan_name, step, task_id, fix_round) {
             let dedup_key = format!("{pn}::{st}::{ti}::{fr}");
             if state
                 .review_dimensions_complete_seen_keys
@@ -996,9 +990,7 @@ pub fn validate_event_with_hat(
                 };
                 return PolicyDecision::RejectWithResume(finding);
             }
-            state
-                .review_dimensions_complete_seen_keys
-                .insert(dedup_key);
+            state.review_dimensions_complete_seen_keys.insert(dedup_key);
         }
         // else: any of `plan_name`/`step`/`task_id`/`fix_round`
         // missing or non-string/non-u64 → no dedup mirror write,
@@ -3274,8 +3266,16 @@ mod tests {
 
         state.prune_review_dimension_ready_bucket("p1", "step-01", "t1");
 
-        assert!(!state.review_dimension_ready_seen_keys.contains("p1::step-01::t1::correctness"));
-        assert!(state.review_dimension_ready_seen_keys.contains("p1::step-01::t2::correctness"));
+        assert!(
+            !state
+                .review_dimension_ready_seen_keys
+                .contains("p1::step-01::t1::correctness")
+        );
+        assert!(
+            state
+                .review_dimension_ready_seen_keys
+                .contains("p1::step-01::t2::correctness")
+        );
     }
 
     #[test]
@@ -3324,8 +3324,16 @@ mod tests {
 
         state.prune_review_dimension_ready_bucket("p1", "step-01", "t1");
 
-        assert!(!state.review_dimension_ready_seen_keys.contains("p1::step-01::t1::correctness"));
-        assert!(state.review_dimension_ready_seen_keys.contains("p1::step-02::t1::correctness"));
+        assert!(
+            !state
+                .review_dimension_ready_seen_keys
+                .contains("p1::step-01::t1::correctness")
+        );
+        assert!(
+            state
+                .review_dimension_ready_seen_keys
+                .contains("p1::step-02::t1::correctness")
+        );
     }
 
     #[test]
@@ -3487,8 +3495,7 @@ mod tests {
         // Happy path: first emit with `fix_round=0` is accepted.
         let config = test_config();
         let mut state = PolicyRuntimeState::default();
-        let payload =
-            review_dimensions_complete_payload("p1", "step-01", "t1", 0);
+        let payload = review_dimensions_complete_payload("p1", "step-01", "t1", 0);
         let decision = validate_event(
             "review.dimensions.complete",
             Some(&payload),
@@ -3518,8 +3525,7 @@ mod tests {
         // events being silently dropped).
         let config = test_config();
         let mut state = PolicyRuntimeState::default();
-        let payload =
-            review_dimensions_complete_payload("p1", "step-01", "t1", 0);
+        let payload = review_dimensions_complete_payload("p1", "step-01", "t1", 0);
 
         let first = validate_event(
             "review.dimensions.complete",
@@ -3589,8 +3595,7 @@ mod tests {
         let mut config = test_config();
         config.enabled = false;
         let mut state = PolicyRuntimeState::default();
-        let payload =
-            review_dimensions_complete_payload("p1", "step-01", "t1", 0);
+        let payload = review_dimensions_complete_payload("p1", "step-01", "t1", 0);
 
         let first = validate_event(
             "review.dimensions.complete",
@@ -3631,8 +3636,7 @@ mod tests {
         let config = test_config();
         let mut state = PolicyRuntimeState::default();
         // Intentionally omit `fix_round` — schema invalid.
-        let payload =
-            r#"{"plan_name":"p1","step":"step-01","task_id":"t1","dimensions":[]}"#;
+        let payload = r#"{"plan_name":"p1","step":"step-01","task_id":"t1","dimensions":[]}"#;
 
         let first = validate_event(
             "review.dimensions.complete",
@@ -3645,14 +3649,13 @@ mod tests {
         // (Schema validation is downstream; we assert the dedup
         // layer's contract here: it does NOT insert a key.)
         assert_eq!(
-            first, PolicyDecision::Accept,
+            first,
+            PolicyDecision::Accept,
             "missing fix_round must NOT be dedup-rejected by the policy layer (schema layer reports the real error), got {:?}",
             first
         );
         assert!(
-            state
-                .review_dimensions_complete_seen_keys
-                .is_empty(),
+            state.review_dimensions_complete_seen_keys.is_empty(),
             "missing fix_round must NOT populate the dedup mirror, got {:?}",
             state.review_dimensions_complete_seen_keys
         );
@@ -3673,9 +3676,7 @@ mod tests {
             second
         );
         assert!(
-            state
-                .review_dimensions_complete_seen_keys
-                .is_empty(),
+            state.review_dimensions_complete_seen_keys.is_empty(),
             "seen_keys must still be empty after 2nd schema-invalid emit, got {:?}",
             state.review_dimensions_complete_seen_keys
         );
@@ -3690,8 +3691,7 @@ mod tests {
         // are exempted.
         let config = test_config();
         let mut state = PolicyRuntimeState::default();
-        let payload =
-            review_dimensions_complete_payload("p1", "step-01", "t1", 0);
+        let payload = review_dimensions_complete_payload("p1", "step-01", "t1", 0);
 
         let first = validate_event(
             "review.dimensions.complete",
@@ -3738,7 +3738,8 @@ mod tests {
         // `DuplicateWorkDone`.
         let config = test_config();
         let mut state = PolicyRuntimeState::default();
-        let payload = r#"{"plan_name":"p1","step":"step-01","task_id":"t1","fix_round":"1","dimensions":[]}"#;
+        let payload =
+            r#"{"plan_name":"p1","step":"step-01","task_id":"t1","fix_round":"1","dimensions":[]}"#;
 
         let first = validate_event(
             "review.dimensions.complete",
@@ -3747,14 +3748,13 @@ mod tests {
             &mut state,
         );
         assert_eq!(
-            first, PolicyDecision::Accept,
+            first,
+            PolicyDecision::Accept,
             "string fix_round must NOT be dedup-rejected (schema layer reports type_mismatch), got {:?}",
             first
         );
         assert!(
-            state
-                .review_dimensions_complete_seen_keys
-                .is_empty(),
+            state.review_dimensions_complete_seen_keys.is_empty(),
             "string fix_round must NOT populate the dedup mirror, got {:?}",
             state.review_dimensions_complete_seen_keys
         );
@@ -3771,9 +3771,7 @@ mod tests {
             second
         );
         assert!(
-            state
-                .review_dimensions_complete_seen_keys
-                .is_empty(),
+            state.review_dimensions_complete_seen_keys.is_empty(),
             "seen_keys must still be empty after 2nd string fix_round emit, got {:?}",
             state.review_dimensions_complete_seen_keys
         );

@@ -88,12 +88,8 @@ use crate::step_handoff::ProgressSnapshot;
 /// Phase 2 unit that needs them must add the matching
 /// `StateProjectionAction` variant *and* the topic here in the
 /// same commit.
-pub const PROJECTED_TOPICS: &[&str] = &[
-    "work.ready",
-    "work.done",
-    "queue.advance",
-    "plan.complete",
-];
+pub const PROJECTED_TOPICS: &[&str] =
+    &["work.ready", "work.done", "queue.advance", "plan.complete"];
 
 /// Build the canonical path to the task ledger under a workspace
 /// root. Phase 1 mandates the legacy `.ralph/agent/tasks.jsonl`
@@ -399,9 +395,7 @@ impl StateProjector {
                     store.ensure(task.clone());
                 }
             }
-            store
-                .save()
-                .map_err(|e| format!("tasks_save: {e}"))?;
+            store.save().map_err(|e| format!("tasks_save: {e}"))?;
             debug!(
                 tasks = snapshot.tasks().len(),
                 "project_ledger_snapshot wrote tasks.jsonl"
@@ -411,10 +405,7 @@ impl StateProjector {
         // The progress ledger is the only "single file" view, so
         // we re-emit it verbatim. The `write_progress` helper
         // already round-trips the existing dialect.
-        self::progress::write_progress_external(
-            &self.ctx.progress_path,
-            snapshot.progress(),
-        )?;
+        self::progress::write_progress_external(&self.ctx.progress_path, snapshot.progress())?;
         report.applied = 1;
         Ok(report)
     }
@@ -489,9 +480,7 @@ impl StateProjector {
                 let changed = match transition {
                     TaskTransition::Closed => store.close(task_id).is_some(),
                     TaskTransition::Failed => store.fail(task_id).is_some(),
-                    TaskTransition::Started
-                    | TaskTransition::Reopened
-                    | TaskTransition::Opened => {
+                    TaskTransition::Started | TaskTransition::Reopened | TaskTransition::Opened => {
                         // Opened/Started/Reopened on an existing
                         // task are pass-throughs; the projector
                         // refreshes the row but does not change
@@ -516,9 +505,7 @@ impl StateProjector {
                 let mut snap = snapshot.progress().clone();
                 if let Some(done) = completed_step {
                     let trimmed = done.trim();
-                    if !trimmed.is_empty()
-                        && !snap.completed_steps.iter().any(|s| s == trimmed)
-                    {
+                    if !trimmed.is_empty() && !snap.completed_steps.iter().any(|s| s == trimmed) {
                         snap.completed_steps.push(trimmed.to_string());
                     }
                 }
@@ -553,9 +540,7 @@ impl StateProjector {
                 let mut snap = snapshot.progress().clone();
                 if let Some(step) = final_step {
                     let trimmed = step.trim();
-                    if !trimmed.is_empty()
-                        && !snap.completed_steps.iter().any(|s| s == trimmed)
-                    {
+                    if !trimmed.is_empty() && !snap.completed_steps.iter().any(|s| s == trimmed) {
                         snap.completed_steps.push(trimmed.to_string());
                     }
                     snap.current_step = Some(step.clone());
@@ -576,7 +561,6 @@ impl StateProjector {
             | CommitDelta::CompletionHonored
             | CommitDelta::CancellationRequested
             | CommitDelta::StewardWoken
-            | CommitDelta::SnapshotReset
             | CommitDelta::HatActivationCounted { .. }
             | CommitDelta::HatExhausted { .. }
             | CommitDelta::RejectionLastIteration { .. }
@@ -611,10 +595,7 @@ impl StateProjector {
     /// matches [`RuntimeStateSnapshot::to_prompt_block`] (defined
     /// in `runtime_state.rs`) so the prompt is byte-identical
     /// between the legacy and U2 paths.
-    pub fn build_orchestrator_context_from_ledger(
-        &self,
-        snapshot: &LedgerSnapshot,
-    ) -> String {
+    pub fn build_orchestrator_context_from_ledger(&self, snapshot: &LedgerSnapshot) -> String {
         self::orchestrator_context::build_block(snapshot, &self.ctx.config)
     }
 

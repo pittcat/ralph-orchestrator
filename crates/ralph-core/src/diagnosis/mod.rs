@@ -46,7 +46,7 @@ pub use envelope::{
 };
 pub use journal::{DriftJournalEntry, DriftMetric, RecoveryJournalEntry};
 pub use reporter::{
-    DIAGNOSIS_LEDGER_SCHEMA_VERSION, DIAGNOSE_JSON_SCHEMA_VERSION, DiagnosisReport,
+    DIAGNOSE_JSON_SCHEMA_VERSION, DIAGNOSIS_LEDGER_SCHEMA_VERSION, DiagnosisReport,
     LedgerReportError, LedgerSummary, RankedFinding, RejectionSummary, Report, ReporterError,
     RootCause, SessionData, SessionSelector, build_report, load_session, read_rejection_records,
     render_diagnosis_report_json, render_diagnosis_report_markdown, render_json, render_markdown,

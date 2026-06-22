@@ -979,13 +979,15 @@ hats:
     use std::sync::atomic::{AtomicUsize, Ordering};
     let observer_count = Arc::new(AtomicUsize::new(0));
     let observer_count_clone = Arc::clone(&observer_count);
-    event_loop.bus.add_observer(move |_event: &ralph_proto::Event| {
-        observer_count_clone.fetch_add(1, Ordering::SeqCst);
-    });
+    event_loop
+        .bus
+        .add_observer(move |_event: &ralph_proto::Event| {
+            observer_count_clone.fetch_add(1, Ordering::SeqCst);
+        });
 
     // ralph hat publishing a business topic — must be rejected
-    let bad_event = ralph_proto::Event::new("work.done", "{}")
-        .with_source(ralph_proto::HatId::new("ralph"));
+    let bad_event =
+        ralph_proto::Event::new("work.done", "{}").with_source(ralph_proto::HatId::new("ralph"));
     event_loop.publish_event(bad_event);
 
     // The violation event should be published instead of the original business event
@@ -1015,13 +1017,15 @@ hats:
     use std::sync::atomic::{AtomicUsize, Ordering};
     let observer_count = Arc::new(AtomicUsize::new(0));
     let observer_count_clone = Arc::clone(&observer_count);
-    event_loop.bus.add_observer(move |_event: &ralph_proto::Event| {
-        observer_count_clone.fetch_add(1, Ordering::SeqCst);
-    });
+    event_loop
+        .bus
+        .add_observer(move |_event: &ralph_proto::Event| {
+            observer_count_clone.fetch_add(1, Ordering::SeqCst);
+        });
 
     // ralph hat publishing a control topic — must be accepted
-    let control_event = ralph_proto::Event::new("loop.cancel", "{}")
-        .with_source(ralph_proto::HatId::new("ralph"));
+    let control_event =
+        ralph_proto::Event::new("loop.cancel", "{}").with_source(ralph_proto::HatId::new("ralph"));
     event_loop.publish_event(control_event);
 
     // Observer sees exactly 1 event (the control event itself)

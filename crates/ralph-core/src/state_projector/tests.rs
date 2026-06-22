@@ -265,12 +265,7 @@ fn projected_topics_list_is_locked() {
     // Phase 2 re-introduction protocol.
     assert_eq!(
         PROJECTED_TOPICS,
-        &[
-            "work.ready",
-            "work.done",
-            "queue.advance",
-            "plan.complete",
-        ]
+        &["work.ready", "work.done", "queue.advance", "plan.complete",]
     );
     // Belt-and-suspenders reverse check: if a future refactor
     // ever widens the list without the corresponding
@@ -607,19 +602,13 @@ fn p2_repeated_apply_keeps_cache_warm() {
 // cannot silently re-introduce the P0 regression.
 // ---------------------------------------------------------------------------
 
-fn make_projector_with_r4(
-    tmp: &TempDir,
-    enforce_current_unit: bool,
-) -> StateProjector {
-    StateProjector::new(ProjectionContext::new_legacy(
-        tmp.path(),
-        make_config(),
-    ))
-    // Mirror what `EventLoop` does on first use: thread the loop's
-    // R4 setting into the projector. The new path is exercised in
-    // `event_loop` integration tests; here we toggle the field
-    // directly so the unit test stays focused on the projector.
-    .with_enforce_current_unit(enforce_current_unit)
+fn make_projector_with_r4(tmp: &TempDir, enforce_current_unit: bool) -> StateProjector {
+    StateProjector::new(ProjectionContext::new_legacy(tmp.path(), make_config()))
+        // Mirror what `EventLoop` does on first use: thread the loop's
+        // R4 setting into the projector. The new path is exercised in
+        // `event_loop` integration tests; here we toggle the field
+        // directly so the unit test stays focused on the projector.
+        .with_enforce_current_unit(enforce_current_unit)
 }
 
 /// R1 happy path — `enforce_current_unit=true`. Two `work.ready`
@@ -741,11 +730,13 @@ fn r1_enforce_current_unit_true_allows_same_unit_refresh() {
 /// unchanged (legacy semantics preserved).
 #[test]
 fn r1_default_enforce_current_unit_is_false() {
-    assert!(!ProjectionContext::new_legacy(
-        std::env::temp_dir().as_path(),
-        StateProjectionConfig::default(),
-    )
-    .enforce_current_unit);
+    assert!(
+        !ProjectionContext::new_legacy(
+            std::env::temp_dir().as_path(),
+            StateProjectionConfig::default(),
+        )
+        .enforce_current_unit
+    );
 }
 
 /// R1 boundary — R4 must not collide across `loop_id` boundaries.
@@ -777,8 +768,7 @@ fn r1_enforce_current_unit_true_different_loop_id_no_collision() {
     });
     std::fs::write(&tasks_path, format!("{foreign_row}\n")).unwrap();
     // Bootstrap so the cache mirrors the seeded row.
-    let _ = proj
-        .bootstrap_from_disk();
+    let _ = proj.bootstrap_from_disk();
 
     // A work.ready for the same key+unit+step under a
     // different loop_id (we pass `loop_id` in the payload

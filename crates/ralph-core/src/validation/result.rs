@@ -41,12 +41,27 @@ pub struct ValidationResult {
 }
 
 impl ValidationResult {
-    /// Convenience constructor for an accepted result.
+    /// Convenience constructor for an accepted result. The
+    /// `stage` defaults to [`ValidationStage::Origin`] to keep
+    /// existing call sites compiling; new call sites should use
+    /// [`Self::accept_with`] so the `stage` reflects the rule
+    /// that emitted the verdict. Mismatched stages are a known
+    /// source of misleading diagnostic logs (see
+    /// `2026-06-21-002-adversarial-review.md` P2-#1) — the
+    /// default stays only as a compatibility shim, not a
+    /// recommendation.
     pub fn accept() -> Self {
+        Self::accept_with(ValidationStage::Origin)
+    }
+
+    /// Build an accepted result tagged with the rule's stage.
+    /// Prefer this over [`Self::accept`] so the `stage` field
+    /// matches the rule that produced the verdict.
+    pub fn accept_with(stage: ValidationStage) -> Self {
         Self {
             accepted: true,
             reason_code: None,
-            stage: ValidationStage::Origin,
+            stage,
             correction_hint: None,
             retry_eligible: false,
         }
@@ -203,20 +218,14 @@ mod tests {
         // would silently break downstream tooling.
         assert_eq!(ValidationStage::Origin.as_str(), "origin");
         assert_eq!(ValidationStage::Publisher.as_str(), "publisher");
-        assert_eq!(
-            ValidationStage::RequiredFields.as_str(),
-            "required_fields"
-        );
+        assert_eq!(ValidationStage::RequiredFields.as_str(), "required_fields");
         assert_eq!(
             ValidationStage::ExecutionContract.as_str(),
             "execution_contract"
         );
         assert_eq!(ValidationStage::StepHandoff.as_str(), "step_handoff");
         assert_eq!(ValidationStage::HatHandoff.as_str(), "hat_handoff");
-        assert_eq!(
-            ValidationStage::WorkflowGuard.as_str(),
-            "workflow_guard"
-        );
+        assert_eq!(ValidationStage::WorkflowGuard.as_str(), "workflow_guard");
     }
 
     #[test]
@@ -242,5 +251,12 @@ mod tests {
         let r = ValidationResult::accept();
         assert!(r.accepted);
         assert!(r.reason_code.is_none());
+        // P2-#1: `accept_with(stage)` lets the rule tag its
+        // own stage. The default `accept()` still returns
+        // `Origin` (compat shim) — verified below.
+        assert_eq!(r.stage, ValidationStage::Origin);
+        let r = ValidationResult::accept_with(ValidationStage::WorkflowGuard);
+        assert!(r.accepted);
+        assert_eq!(r.stage, ValidationStage::WorkflowGuard);
     }
 }

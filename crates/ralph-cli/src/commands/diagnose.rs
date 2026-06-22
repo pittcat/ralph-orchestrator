@@ -31,8 +31,8 @@ use crate::operation_guard::read_loop_id_marker;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use ralph_core::diagnosis::{
-    DiagnosisReport, Report, ReporterError, SessionSelector, build_report, render_json,
-    render_markdown, render_diagnosis_report_json, render_diagnosis_report_markdown,
+    DiagnosisReport, Report, ReporterError, SessionSelector, build_report,
+    render_diagnosis_report_json, render_diagnosis_report_markdown, render_json, render_markdown,
     report_from_ledger,
 };
 use ralph_core::loop_lock::{LockStatus, LoopLock};
@@ -190,12 +190,8 @@ pub fn try_diagnose(
             // 2) Otherwise fall back to legacy session view.
             let workspace = workspace_for_report(&diagnostics_root, &workspace_root);
             let ledger_report = report_from_ledger(&workspace).ok();
-            let ledger_used = ledger_report
-                .as_ref()
-                .is_some_and(|r| r.used_ledger);
-            if ledger_used
-                && let Some(report) = ledger_report
-            {
+            let ledger_used = ledger_report.as_ref().is_some_and(|r| r.used_ledger);
+            if ledger_used && let Some(report) = ledger_report {
                 return emit_ledger_report(use_colors, &args, report);
             }
             // Fall back to legacy.
@@ -361,18 +357,23 @@ fn emit_ledger_report(
             Ok(())
         };
         create_dir_result.map_err(|e| {
-            DiagnoseExit::Io(report.workspace.clone(), std::io::Error::other(e.to_string()))
+            DiagnoseExit::Io(
+                report.workspace.clone(),
+                std::io::Error::other(e.to_string()),
+            )
         })?;
         std::fs::write(path, body.as_bytes())
             .with_context(|| format!("failed to write report to {}", path.display()))
             .map_err(|e| {
-                DiagnoseExit::Io(report.workspace.clone(), std::io::Error::other(e.to_string()))
+                DiagnoseExit::Io(
+                    report.workspace.clone(),
+                    std::io::Error::other(e.to_string()),
+                )
             })?;
         let summary = match args.format {
-            DiagnoseFormat::Markdown => format!(
-                "wrote ledger markdown report to {}",
-                path.display()
-            ),
+            DiagnoseFormat::Markdown => {
+                format!("wrote ledger markdown report to {}", path.display())
+            }
             DiagnoseFormat::Json => format!(
                 "wrote ledger json report to {} (schema {})",
                 path.display(),

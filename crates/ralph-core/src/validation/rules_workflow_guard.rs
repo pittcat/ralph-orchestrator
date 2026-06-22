@@ -66,6 +66,6 @@ impl ValidationRule for WorkflowGuardRule {
         // enabled without the view wiring. U6 will close the
         // gap.
         let _ = WorkflowChainMode::Strict;
-        ValidationResult::accept()
+        ValidationResult::accept_with(ValidationStage::WorkflowGuard)
     }
 }

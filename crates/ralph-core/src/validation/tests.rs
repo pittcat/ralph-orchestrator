@@ -74,8 +74,9 @@ fn rule_phase_classification_matches_pipeline() {
     use crate::validation::rules_step_handoff::StepHandoffRule;
     use crate::validation::rules_workflow_guard::WorkflowGuardRule;
 
+    let origin = OriginRule::default();
     let pre: Vec<&dyn ValidationRule> = vec![
-        &OriginRule,
+        &origin,
         &PublisherRule,
         &RequiredFieldsRule,
         &StepHandoffRule,
@@ -101,8 +102,9 @@ fn rule_names_match_stage_constants() {
     use crate::validation::rules_step_handoff::StepHandoffRule;
     use crate::validation::rules_workflow_guard::WorkflowGuardRule;
 
+    let origin = OriginRule::default();
     let cases: Vec<(&dyn ValidationRule, ValidationStage)> = vec![
-        (&OriginRule, ValidationStage::Origin),
+        (&origin, ValidationStage::Origin),
         (&PublisherRule, ValidationStage::Publisher),
         (&RequiredFieldsRule, ValidationStage::RequiredFields),
         (&ExecutionContractRule, ValidationStage::ExecutionContract),
@@ -139,7 +141,7 @@ fn origin_rule_accepts_solo_mode_event() {
     let view = ProtocolView::from_event_loop(&minimal_config());
     let snap = minimal_snapshot();
     let event = make_event("any.topic", "{}", Some("any-hat"));
-    let result = OriginRule.validate(&view, &snap, &event);
+    let result = OriginRule::default().validate(&view, &snap, &event);
     assert!(
         result.accepted,
         "solo-mode origin rule should accept: {result:?}"
@@ -156,7 +158,7 @@ fn origin_rule_handles_ralph_pseudo_hat_event() {
     // rule's reason_code surface is exercised by the legacy
     // `event_origin` tests. This test pins that the rule
     // *runs* without panicking on the ralph-pseudo-hat path.
-    let _ = OriginRule.validate(&view, &snap, &event);
+    let _ = OriginRule::default().validate(&view, &snap, &event);
 }
 
 // ============================================================
@@ -195,7 +197,9 @@ fn required_fields_rule_rejects_missing_field_with_engine_prefix() {
     let event = make_event("work.done", r#"{"step":"s1"}"#, None);
     let result = RequiredFieldsRule.validate(&view, &snap, &event);
     assert!(!result.accepted);
-    let code = result.reason_code.expect("reason_code must be set on rejection");
+    let code = result
+        .reason_code
+        .expect("reason_code must be set on rejection");
     assert!(
         code.starts_with(ReasonCode::REQUIRED_FIELD_MISSING),
         "unexpected reason_code: {code}"
@@ -211,11 +215,13 @@ fn required_fields_rule_rejects_empty_payload() {
     let event = make_event("work.done", "", None);
     let result = RequiredFieldsRule.validate(&view, &snap, &event);
     assert!(!result.accepted, "empty payload should be rejected");
-    assert!(result
-        .reason_code
-        .as_deref()
-        .unwrap_or("")
-        .starts_with(ReasonCode::REQUIRED_FIELD_MISSING));
+    assert!(
+        result
+            .reason_code
+            .as_deref()
+            .unwrap_or("")
+            .starts_with(ReasonCode::REQUIRED_FIELD_MISSING)
+    );
 }
 
 #[test]
@@ -321,10 +327,10 @@ fn execution_contract_rule_accepts_when_contracts_disabled() {
 
 #[test]
 fn execution_contract_rule_rejects_invalid_payload() {
+    use crate::config::execution_contracts::ExecutionContractRule as Ecr;
     use crate::config::execution_contracts::{
         ExecutionContractRule as EcrRule, ExecutionContractsConfig,
     };
-    use crate::config::execution_contracts::ExecutionContractRule as Ecr;
     use crate::validation::rules_execution_contract::ExecutionContractRule;
     let mut config = minimal_config();
     let mut ecr = Ecr::default();
@@ -419,14 +425,8 @@ fn reason_code_prefixes_match_stages() {
     let stage_prefixes: &[(&str, &[&str])] = &[
         ("origin", &["origin:"]),
         ("publisher", &["publisher:"]),
-        (
-            "required_fields",
-            &["required_fields:", "engine_rejected:"],
-        ),
-        (
-            "execution_contract",
-            &["execution_contract:", "contract:"],
-        ),
+        ("required_fields", &["required_fields:", "engine_rejected:"]),
+        ("execution_contract", &["execution_contract:", "contract:"]),
         ("step_handoff", &["step_handoff:"]),
         ("hat_handoff", &["hat_handoff:"]),
         ("workflow_guard", &["workflow_guard:"]),
@@ -434,7 +434,10 @@ fn reason_code_prefixes_match_stages() {
     let pairs = [
         (ReasonCode::ORIGIN_UNKNOWN_HAT, ValidationStage::Origin),
         (ReasonCode::ORIGIN_OUT_OF_SCOPE, ValidationStage::Origin),
-        (ReasonCode::PUBLISHER_NOT_ALLOWED, ValidationStage::Publisher),
+        (
+            ReasonCode::PUBLISHER_NOT_ALLOWED,
+            ValidationStage::Publisher,
+        ),
         (
             ReasonCode::REQUIRED_FIELD_MISSING,
             ValidationStage::RequiredFields,
@@ -501,5 +504,11 @@ fn validate_with_preview_rejects_missing_required_field() {
     let report = pipeline.validate_with_preview(&view, &snap, &snap, &event);
     assert!(!report.accepted);
     let first = report.first_rejection().expect("rejection present");
-    assert!(first.reason_code.as_deref().unwrap_or("").contains("required_field"));
+    assert!(
+        first
+            .reason_code
+            .as_deref()
+            .unwrap_or("")
+            .contains("required_field")
+    );
 }

@@ -47,6 +47,7 @@
 //! 仍保留 `commit()` 主流程不动;U5 集成通过单独 API 完成,避免
 //! 影响 U1 的 16 个测试。
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -85,6 +86,15 @@ pub struct StateLedger {
     /// Feature flag. When `false`, every `commit()` is a no-op
     /// and `replay_from_disk` returns an empty snapshot.
     feature_enabled: bool,
+    /// P2-#4 (002-adversarial-review): tracks whether a
+    /// [`StateLedger::snapshot_mut`] borrow is currently active.
+    /// `commit()` refuses to run while this is `true` so callers
+    /// cannot silently bypass the commit log. The flag is
+    /// `Cell<bool>` (not plain `bool`) so the RAII guard
+    /// [`Self::snapshot_mut`] can flip it without taking a
+    /// `&mut` on the whole ledger (which would conflict with
+    /// the `&mut self` borrow on `commit`).
+    bypass_active: Cell<bool>,
 }
 
 /// Error type for ledger operations. Wraps both I/O failures and
@@ -100,11 +110,23 @@ pub enum LedgerError {
     /// `replay_from_disk` stopped at `last_good_line` after
     /// hitting a corrupt record. The snapshot reflects all
     /// commits up to (and including) the last good line.
-    #[error("ledger corruption: replay stopped at line {last_good_line}; remaining {remaining_lines} line(s) skipped")]
+    #[error(
+        "ledger corruption: replay stopped at line {last_good_line}; remaining {remaining_lines} line(s) skipped"
+    )]
     Corruption {
         last_good_line: usize,
         remaining_lines: usize,
     },
+    /// P2-#4 (002-adversarial-review): a `commit()` was issued
+    /// while a `snapshot_mut` borrow is still active. This is
+    /// the invariant guard against the "callers that go through
+    /// this path must skip the on-disk write" footgun in the
+    /// previous `snapshot_mut` docs: the only correct way to
+    /// mutate the snapshot is via a `CommitDelta`.
+    #[error(
+        "ledger bypass active: `commit()` refused because `snapshot_mut` borrow is still alive; close the borrow before committing"
+    )]
+    BypassActive,
 }
 
 /// 2026-06-21-002 plan U5: `commit_handoff_artifact` 的入参。
@@ -150,6 +172,7 @@ impl StateLedger {
             workspace: workspace.to_path_buf(),
             ledger_path: workspace.join(LEDGER_RELATIVE_PATH),
             feature_enabled,
+            bypass_active: Cell::new(false),
         }
     }
 
@@ -169,6 +192,7 @@ impl StateLedger {
             workspace: workspace.to_path_buf(),
             ledger_path: workspace.join(LEDGER_RELATIVE_PATH),
             feature_enabled,
+            bypass_active: Cell::new(false),
         }
     }
 
@@ -180,11 +204,23 @@ impl StateLedger {
     /// Mutable access to the snapshot. Reserved for U2 where the
     /// projector rebuilds the in-memory cache from a pre-existing
     /// disk state (e.g. legacy `tasks.jsonl`) before the first
-    /// commit. Callers that go through this path must skip the
-    /// on-disk write — see [`Self::commit`] for the equivalent
-    /// through the commit log.
-    pub fn snapshot_mut(&mut self) -> &mut LedgerSnapshot {
-        &mut self.snapshot
+    /// commit.
+    ///
+    /// **P2-#4 (002-adversarial-review)**: the previous
+    /// `snapshot_mut()` let callers bypass the commit log
+    /// without any runtime check — the docs only asked politely
+    /// that they skip the on-disk write. The new API returns an
+    /// RAII guard ([`BypassGuard`]) that flips the ledger's
+    /// `bypass_active` flag for the lifetime of the borrow;
+    /// [`Self::commit`] refuses to run while the flag is set
+    /// and returns `LedgerError::BypassActive`. The only way to
+    /// mutate the snapshot after the guard drops is through a
+    /// `CommitDelta`, so a forgotten `commit()` after a raw
+    /// mutation can no longer silently desync the snapshot and
+    /// the commit log.
+    pub fn snapshot_mut(&mut self) -> BypassGuard<'_> {
+        self.bypass_active.set(true);
+        BypassGuard { ledger: self }
     }
 
     /// The on-disk path the ledger writes to. Exposed so U2 can
@@ -234,6 +270,22 @@ impl StateLedger {
     /// partial line. The append-only pattern was dropped because
     /// it could leave half a JSONL line on disk after a process
     /// crash.
+    ///
+    /// **P1-#8 (002-adversarial-review)**: the previous
+    /// implementation cloned the entire `LedgerSnapshot` on
+    /// every commit for rollback safety. The clone was O(N) in
+    /// task / progress / workflow size and ran on every
+    /// successful commit. The new strategy is:
+    /// - the in-memory `commit_log` is the source of truth, so
+    ///   the snapshot is just a projection;
+    /// - on the happy path, no extra allocation happens — the
+    ///   delta is applied, the commit is pushed to `commit_log`,
+    ///   and the on-disk file is written;
+    /// - on a failed on-disk write, the new commit is popped
+    ///   from `commit_log` and the snapshot is rebuilt by
+    ///   replaying the now-shorter log on top of a cold start.
+    ///   The replay is O(N) but only fires on the rare
+    ///   persist-error path.
     pub fn commit(
         &mut self,
         delta: CommitDelta,
@@ -243,12 +295,13 @@ impl StateLedger {
             return Ok(Commit::empty());
         }
 
-        // Snapshot the affected sub-state *before* mutation so we
-        // can roll back on write failure. We snapshot both the
-        // `LedgerSnapshot` and the in-memory `commit_log` (cheap
-        // clones) and restore them on rename failure.
-        let prior_snapshot = self.snapshot.clone();
-        let prior_commit_log = self.commit_log.clone();
+        // P2-#4 (002-adversarial-review): refuse to commit
+        // while a `snapshot_mut` borrow is still alive. The
+        // caller almost certainly forgot to drop the guard and
+        // is about to desync the snapshot from the commit log.
+        if self.bypass_active.get() {
+            return Err(LedgerError::BypassActive);
+        }
 
         self.snapshot.apply_delta(&delta);
         let new_seq = self.commit_seq + 1;
@@ -260,20 +313,32 @@ impl StateLedger {
             delta,
         };
 
-        // FIX-1: rebuild the on-disk log under a `.tmp` sibling
-        // and rename it into place atomically. We append the new
-        // commit to the in-memory `commit_log` *only after* the
-        // rename succeeds so a failed rename leaves both on-disk
-        // and in-memory state unchanged.
+        // Push the commit to the in-memory log *before* the
+        // on-disk write so the post-failure replay path can
+        // observe the new commit, pop it, and rebuild the
+        // snapshot from the surviving log.
         self.commit_log.push(commit.clone());
         if let Err(err) = persist_commit_log(&self.ledger_path, &self.commit_log) {
-            // Roll back both the snapshot and the in-memory
-            // log. The on-disk file is intact (rename never
-            // happened) so no `truncate_after_path` call is
-            // needed; we just need to make sure no stale `.tmp`
-            // sibling is left behind.
-            self.commit_log = prior_commit_log;
-            self.snapshot = prior_snapshot;
+            // Roll back: pop the new commit and rebuild the
+            // snapshot from the surviving log on top of a cold
+            // start. This is O(N) but only fires on the rare
+            // on-disk write failure path; the happy path no
+            // longer pays for a full snapshot clone.
+            //
+            // FIX-10 parity: re-derive `snapshot.iteration` from
+            // the surviving log's max `commit.iteration`, exactly
+            // like `replay_from_disk` does. Without this, the
+            // rollback would leave `iteration` at 0 even when the
+            // surviving log still records the last successful
+            // iteration count.
+            self.commit_log.pop();
+            self.snapshot = LedgerSnapshot::cold_start();
+            let mut iterations: Vec<u32> = Vec::with_capacity(self.commit_log.len());
+            for c in &self.commit_log {
+                self.snapshot.apply_delta(&c.delta);
+                iterations.push(c.iteration);
+            }
+            self.snapshot.iteration = iterations.iter().copied().max().unwrap_or(0);
             // Best-effort cleanup of any stale `.tmp` left by an
             // interrupted rename.
             if let Some(tmp) = temp_sibling_path(&self.ledger_path) {
@@ -339,7 +404,10 @@ impl StateLedger {
                         body.lines().filter(|l| !l.trim().is_empty()).count() - idx;
                     return Err(LedgerError::Parse {
                         line: line_no,
-                        message: format!("{} ({} line(s) skipped after corruption)", e, remaining_lines),
+                        message: format!(
+                            "{} ({} line(s) skipped after corruption)",
+                            e, remaining_lines
+                        ),
                     });
                 }
             };
@@ -454,6 +522,18 @@ fn resolve_handoff_path(
         Some(p) if !p.is_empty() => p,
         _ => {
             let outcome = allocator::prepare_with_dedup(workspace, &prepare_inputs)?;
+            // P2-#8 (002-adversarial-review): surface the
+            // auto-generated handoff path to operators so
+            // silent file creation is visible. Without this
+            // the agent never sees the file unless it reads
+            // the ledger or its commit topic.
+            tracing::info!(
+                canonical = outcome.handoff_path.as_str(),
+                from = inputs.from.as_str(),
+                to = inputs.to.as_str(),
+                topic = inputs.topic.as_str(),
+                "U5: auto-generated handoff skeleton (no agent-provided path)"
+            );
             return Ok(outcome.handoff_path);
         }
     };
@@ -467,17 +547,31 @@ fn resolve_handoff_path(
     )
     .is_ok()
     {
+        tracing::debug!(
+            provided = provided,
+            from = inputs.from.as_str(),
+            to = inputs.to.as_str(),
+            "U5: reusing agent-provided handoff_path (validator passed)"
+        );
         return Ok(provided.to_string());
     }
 
     // 分支 3: 降级为 regenerate。覆盖写入 canonical path
     // (而不是 provided hint),保证 filename 形状稳定 + 内容合法。
-    warn!(
+    //
+    // P2-#8 (002-adversarial-review): escalate to `error!`
+    // because we are about to overwrite an agent-written file
+    // that the validator rejected. Downgrading this to
+    // `warn!` would make the destructive overwrite look
+    // routine; `error!` makes the action visible in default
+    // `tracing_subscriber` output (RUST_LOG=info hides it
+    // only if the operator explicitly opts in).
+    tracing::error!(
         provided = provided,
         canonical = computed.handoff_path.as_str(),
         from = inputs.from.as_str(),
         to = inputs.to.as_str(),
-        "provided handoff_path failed validation; regenerating canonical artifact (U5)"
+        "U5: provided handoff_path failed validation; regenerating canonical artifact and OVERWRITING provided path with skeleton"
     );
     allocator::write_skeleton(workspace, &computed.handoff_path, &computed.skeleton, true)?;
     Ok(computed.handoff_path)
@@ -510,11 +604,10 @@ fn persist_commit_log(ledger_path: &Path, log: &[Commit]) -> Result<(), LedgerEr
         std::fs::create_dir_all(parent)?;
     }
 
-    let tmp_path = temp_sibling_path(ledger_path)
-        .ok_or_else(|| LedgerError::Parse {
-            line: 0,
-            message: "ledger_persist: cannot derive temp sibling path".to_string(),
-        })?;
+    let tmp_path = temp_sibling_path(ledger_path).ok_or_else(|| LedgerError::Parse {
+        line: 0,
+        message: "ledger_persist: cannot derive temp sibling path".to_string(),
+    })?;
 
     // Serialize the full log to a buffer first so a JSON error
     // surfaces *before* we touch the filesystem.
@@ -576,12 +669,7 @@ fn truncate_after_path(ledger_path: &Path, keep_lines: usize) -> Result<(), Ledg
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(LedgerError::Io(e)),
     };
-    let kept: String = body
-        .lines()
-        .take(keep_lines)
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n";
+    let kept: String = body.lines().take(keep_lines).collect::<Vec<_>>().join("\n") + "\n";
     std::fs::write(ledger_path, kept)?;
     warn!(
         path = %ledger_path.display(),
@@ -629,4 +717,46 @@ pub fn read_commit_log(workspace: &Path) -> Result<Vec<Commit>, LedgerError> {
 pub fn truncate_after(workspace: &Path, keep_lines: usize) -> Result<(), LedgerError> {
     let path = workspace.join(LEDGER_RELATIVE_PATH);
     truncate_after_path(&path, keep_lines)
+}
+
+/// RAII guard returned by [`StateLedger::snapshot_mut`].
+///
+/// The guard flips the ledger's `bypass_active` flag on
+/// construction and clears it on drop. While the guard is
+/// alive, [`StateLedger::commit`] refuses to run and returns
+/// [`LedgerError::BypassActive`] — the only correct way to
+/// mutate the snapshot after the guard drops is via a
+/// `CommitDelta`.
+///
+/// P2-#4 (002-adversarial-review): the previous API returned a
+/// bare `&mut LedgerSnapshot` with no runtime check. Callers
+/// could `snapshot_mut().field = X; commit(...)` and the
+/// mutation would silently desync the snapshot from the
+/// commit log. The guard's `commit` refusal makes the mistake
+/// loud.
+pub struct BypassGuard<'a> {
+    ledger: &'a mut StateLedger,
+}
+
+impl std::ops::Deref for BypassGuard<'_> {
+    type Target = LedgerSnapshot;
+
+    fn deref(&self) -> &Self::Target {
+        &self.ledger.snapshot
+    }
+}
+
+impl std::ops::DerefMut for BypassGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: the guard's lifetime is tied to `&mut
+        // self.ledger`, which outlives the `&mut` borrow on
+        // the snapshot.
+        &mut self.ledger.snapshot
+    }
+}
+
+impl Drop for BypassGuard<'_> {
+    fn drop(&mut self) {
+        self.ledger.bypass_active.set(false);
+    }
 }

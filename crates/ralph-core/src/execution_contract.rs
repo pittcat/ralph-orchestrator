@@ -336,7 +336,10 @@ fn validate_payload(
                 kind: ExecutionContractViolationKind::MissingPayloadField {
                     field: field.clone(),
                 },
-                message: format!("{} payload is missing required field: '{}'", event.topic, field),
+                message: format!(
+                    "{} payload is missing required field: '{}'",
+                    event.topic, field
+                ),
                 topic: event.topic.to_string(),
                 ..Default::default()
             });

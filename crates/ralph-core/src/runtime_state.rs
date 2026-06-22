@@ -461,7 +461,10 @@ mod tests {
         );
         assert_eq!(snap.hat_handoff_seq, Some(1));
         assert_eq!(snap.hat_handoff_next_seq, Some(2));
-        assert_eq!(snap.hat_handoff_dir.as_deref(), Some(".ralph/agent/hat-handoff"));
+        assert_eq!(
+            snap.hat_handoff_dir.as_deref(),
+            Some(".ralph/agent/hat-handoff")
+        );
         let block = snap.to_prompt_block();
         assert!(block.contains("hat_handoff_seq: 1"));
         assert!(block.contains("hat_handoff_next_seq: 2"));

@@ -2922,19 +2922,16 @@ async fn run_loop_impl_inner(
         // the canonical loop state without re-reading events.jsonl.
         // Only injected when `hat_handoff.enabled` + `isolated` so
         // coordinator/disabled presets are not polluted.
-        if event_loop
-            .config()
-            .event_loop
-            .hat_handoff
-            .enabled
+        if event_loop.config().event_loop.hat_handoff.enabled
             && matches!(
                 event_loop.config().event_loop.execution_mode,
                 ralph_core::config::HatExecutionMode::Isolated
             )
         {
-            effective_backend
-                .env_vars
-                .push(("RALPH_LOOP_ITERATION".into(), event_loop.state().iteration.to_string()));
+            effective_backend.env_vars.push((
+                "RALPH_LOOP_ITERATION".into(),
+                event_loop.state().iteration.to_string(),
+            ));
             effective_backend.env_vars.push((
                 "RALPH_HAT_HANDOFF_SEQ".into(),
                 event_loop.state().hat_handoff_seq.to_string(),

@@ -27,10 +27,7 @@ const ORCHESTRATOR_CONTEXT_HEADING: &str = "## ORCHESTRATOR CONTEXT";
 /// `RuntimeStateSnapshot::to_prompt_block()` produces, so
 /// `runtime_state_injection.rs` integration tests remain valid
 /// when the loop switches to the U2 read path.
-pub(crate) fn build_block(
-    snapshot: &LedgerSnapshot,
-    config: &StateProjectionConfig,
-) -> String {
+pub(crate) fn build_block(snapshot: &LedgerSnapshot, config: &StateProjectionConfig) -> String {
     let tasks = snapshot.tasks();
     let progress = snapshot.progress();
     let mut buf = String::new();
@@ -81,10 +78,7 @@ fn render_open_tasks(buf: &mut String, tasks: &[Task]) {
         let _ = writeln!(buf, "- open_tasks: (none)");
         return;
     }
-    let open: Vec<&Task> = tasks
-        .iter()
-        .filter(|t| !t.status.is_terminal())
-        .collect();
+    let open: Vec<&Task> = tasks.iter().filter(|t| !t.status.is_terminal()).collect();
     if open.is_empty() {
         let _ = writeln!(buf, "- open_tasks: (none)");
         return;
@@ -181,9 +175,7 @@ mod tests {
         task.id = "t-1".to_string();
         snap.tasks.push(task);
         snap.progress.current_step = Some("step-01".to_string());
-        snap.progress
-            .completed_steps
-            .push("step-00".to_string());
+        snap.progress.completed_steps.push("step-00".to_string());
 
         let block = build_block(&snap, &StateProjectionConfig::default());
         assert!(block.starts_with("## ORCHESTRATOR CONTEXT"));

@@ -72,7 +72,9 @@ pub fn truncate_preserving_next(content: &str, max_bytes: usize) -> String {
         }
         None => String::new(),
     };
-    let budget = max_bytes.saturating_sub(next_block.len()).saturating_sub(64);
+    let budget = max_bytes
+        .saturating_sub(next_block.len())
+        .saturating_sub(64);
     let head = if budget == 0 {
         String::new()
     } else if content.len() <= budget {

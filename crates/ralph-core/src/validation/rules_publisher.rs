@@ -51,7 +51,7 @@ impl ValidationRule for PublisherRule {
         let topic = event.topic.as_str();
         let source = event.hat.as_deref().unwrap_or("");
         if protocol_view.topic_publisher_allowed(topic, source) {
-            ValidationResult::accept()
+            ValidationResult::accept_with(ValidationStage::Publisher)
         } else {
             ValidationResult::reject(
                 ValidationStage::Publisher,

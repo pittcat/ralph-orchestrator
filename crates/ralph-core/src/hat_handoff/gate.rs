@@ -40,7 +40,10 @@ pub enum GateDecision {
     /// 校验通过:event 应被接受。
     Accept { handoff_path: String },
     /// 校验失败:event 应被拒收并向 emit hat 发 `task.resume`。
-    Reject { reason_code: &'static str, message: String },
+    Reject {
+        reason_code: &'static str,
+        message: String,
+    },
 }
 
 /// Handoff 文件读盘结果(2026-06-18-005 U6,R5)。
@@ -147,23 +150,24 @@ pub fn evaluate_event(inputs: &GateInputs<'_>, file_content: &FileContent) -> Ga
     if let Err(err) = allocator::resolve_jailed(inputs.repo_root, handoff_path) {
         return GateDecision::Reject {
             reason_code: REASON_CODE_HAT_HANDOFF_PATH_ESCAPE,
-            message: format!("handoff_path `{handoff_path}` is not a safe repo-relative path: {err}"),
+            message: format!(
+                "handoff_path `{handoff_path}` is not a safe repo-relative path: {err}"
+            ),
         };
     }
 
     // 4) 文件名解析(iter/seq/from/to)
-    let (file_iter, file_seq, file_from, file_to) =
-        match allocator::parse_filename(handoff_path) {
-            Some(parts) => parts,
-            None => {
-                return GateDecision::Reject {
-                    reason_code: REASON_CODE_HAT_HANDOFF_FILENAME_MISMATCH,
-                    message: format!(
-                        "handoff_path `{handoff_path}` does not match `{{iter}}-{{seq+1}}-{{from}}-{{to}}.md` shape",
-                    ),
-                };
-            }
-        };
+    let (file_iter, file_seq, file_from, file_to) = match allocator::parse_filename(handoff_path) {
+        Some(parts) => parts,
+        None => {
+            return GateDecision::Reject {
+                reason_code: REASON_CODE_HAT_HANDOFF_FILENAME_MISMATCH,
+                message: format!(
+                    "handoff_path `{handoff_path}` does not match `{{iter}}-{{seq+1}}-{{from}}-{{to}}.md` shape",
+                ),
+            };
+        }
+    };
     let expected_seq = inputs.current_seq + 1;
     if !inputs.skip_seq_check && (file_iter != inputs.iteration || file_seq != expected_seq) {
         return GateDecision::Reject {
@@ -286,7 +290,10 @@ pub fn reject_to_task_resume(
     target_hat: &str,
 ) -> Option<(String, &'static str)> {
     let (reason_code, message) = match decision {
-        GateDecision::Reject { reason_code, message } => (*reason_code, message.clone()),
+        GateDecision::Reject {
+            reason_code,
+            message,
+        } => (*reason_code, message.clone()),
         _ => return None,
     };
     let payload = format!(
@@ -474,7 +481,9 @@ hats:
         let mut cfg = HatHandoffConfig::default();
         cfg.enabled = true;
         // 写一个文件但内容不合法(缺 ## verify)
-        let abs = repo.path().join(".ralph/agent/hat-handoff/3-2-plan_gate-executor.md");
+        let abs = repo
+            .path()
+            .join(".ralph/agent/hat-handoff/3-2-plan_gate-executor.md");
         std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
         std::fs::write(
             &abs,
@@ -563,7 +572,11 @@ hats:
         // Step 1: policy accept adds a pending entry
         let event_id = "2026-06-18T00:00:00Z:work.ready".to_string();
         tracker.on_handoff_accepted("work.ready", "executor", &event_id, Instant::now());
-        assert_eq!(tracker.pending_count(), 1, "policy accept must record pending");
+        assert_eq!(
+            tracker.pending_count(),
+            1,
+            "policy accept must record pending"
+        );
 
         // Step 2: gate evaluates the same event but handoff_path
         // is missing → Reject

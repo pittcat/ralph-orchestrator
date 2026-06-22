@@ -1532,8 +1532,7 @@ hats:
     }
 
     #[test]
-    fn merge_hats_overlay_preserves_preset_opt_in_event_loop_keys_when_operator_omits_them(
-    ) {
+    fn merge_hats_overlay_preserves_preset_opt_in_event_loop_keys_when_operator_omits_them() {
         // bold-heron (2026-06-19): ce-executor-serial declares these keys
         // but operator ralph.yml typically omits them; they must not fall
         // back to framework defaults.
@@ -1835,7 +1834,11 @@ hats:
         );
         for topic in ["work.ready", "work.done", "queue.advance", "plan.complete"] {
             assert!(
-                config.event_loop.state_projection.actions.contains_key(topic),
+                config
+                    .event_loop
+                    .state_projection
+                    .actions
+                    .contains_key(topic),
                 "preset-declared action `{topic}` must survive `merge_hats_overlay`"
             );
         }
@@ -1924,7 +1927,11 @@ hats:
         );
         for topic in ["work.ready", "work.done", "queue.advance", "plan.complete"] {
             assert!(
-                config.event_loop.state_projection.actions.contains_key(topic),
+                config
+                    .event_loop
+                    .state_projection
+                    .actions
+                    .contains_key(topic),
                 "preset action `{topic}` must survive the production-path merge"
             );
         }

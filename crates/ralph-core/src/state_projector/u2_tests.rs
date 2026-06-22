@@ -101,10 +101,7 @@ fn apply_from_ledger_closes_task_in_disk_ledger() {
             Some("work.done".to_string()),
         )
         .expect("commit");
-    let mut proj = StateProjector::new(ProjectionContext::new_legacy(
-        tmp.path(),
-        make_config(),
-    ));
+    let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), make_config()));
     let snapshot_after = ledger.snapshot().clone();
     let report = proj
         .apply_from_ledger(&commit, &snapshot_after)
@@ -165,10 +162,8 @@ fn apply_from_ledger_batch_matches_legacy_event_apply() {
         )
         .unwrap();
 
-    let mut proj_u2 = StateProjector::new(ProjectionContext::new_legacy(
-        tmp_u2.path(),
-        make_config(),
-    ));
+    let mut proj_u2 =
+        StateProjector::new(ProjectionContext::new_legacy(tmp_u2.path(), make_config()));
     let snap_after_1 = ledger.snapshot().clone();
     proj_u2.apply_from_ledger(&c1, &snap_after_1).unwrap();
     let snap_after_2 = ledger.snapshot().clone();
@@ -176,8 +171,7 @@ fn apply_from_ledger_batch_matches_legacy_event_apply() {
     let snap_after_3 = ledger.snapshot().clone();
     proj_u2.apply_from_ledger(&c3, &snap_after_3).unwrap();
 
-    let body_u2 =
-        std::fs::read_to_string(tmp_u2.path().join(".ralph/agent/tasks.jsonl")).unwrap();
+    let body_u2 = std::fs::read_to_string(tmp_u2.path().join(".ralph/agent/tasks.jsonl")).unwrap();
     let progress_u2 =
         std::fs::read_to_string(tmp_u2.path().join(".ralph/agent/progress.md")).unwrap();
 
@@ -210,9 +204,7 @@ fn apply_from_ledger_batch_matches_legacy_event_apply() {
     proj_legacy.apply(&[ready]);
     let advance = Event {
         topic: "queue.advance".to_string(),
-        payload: Some(
-            json!({"step": "step-02", "completed_step": "step-01"}).to_string(),
-        ),
+        payload: Some(json!({"step": "step-02", "completed_step": "step-01"}).to_string()),
         ts: String::new(),
         hat: None,
         triggered: None,
@@ -250,14 +242,10 @@ fn apply_from_ledger_batch_matches_legacy_event_apply() {
     };
     proj_legacy.apply(&[done]);
 
-    let body_legacy = std::fs::read_to_string(
-        tmp_legacy.path().join(".ralph/agent/tasks.jsonl"),
-    )
-    .unwrap();
-    let progress_legacy = std::fs::read_to_string(
-        tmp_legacy.path().join(".ralph/agent/progress.md"),
-    )
-    .unwrap();
+    let body_legacy =
+        std::fs::read_to_string(tmp_legacy.path().join(".ralph/agent/tasks.jsonl")).unwrap();
+    let progress_legacy =
+        std::fs::read_to_string(tmp_legacy.path().join(".ralph/agent/progress.md")).unwrap();
 
     // Both bodies must contain the canonical fields; legacy
     // uses the projector-generated id `t-1` whereas U2 uses the
@@ -308,10 +296,7 @@ fn apply_from_ledger_write_failure_returns_err_and_preserves_snapshot() {
         .expect("commit");
 
     let snapshot_before = ledger.snapshot().clone();
-    let mut proj = StateProjector::new(ProjectionContext::new_legacy(
-        tmp.path(),
-        make_config(),
-    ));
+    let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), make_config()));
     let result = proj.apply_from_ledger(&commit, &ledger.snapshot());
     // Restore the permissions before asserting so cleanup can
     // remove the tempdir.
@@ -342,10 +327,7 @@ fn apply_from_ledger_write_failure_returns_err_and_preserves_snapshot() {
 #[test]
 fn build_orchestrator_context_from_ledger_matches_legacy_shape() {
     let tmp = workspace();
-    let proj = StateProjector::new(ProjectionContext::new_legacy(
-        tmp.path(),
-        make_config(),
-    ));
+    let proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), make_config()));
     let mut snap = LedgerSnapshot::cold_start();
     let mut task = Task::new("step-01".to_string(), 1);
     task.id = "task-A".to_string();
@@ -371,10 +353,7 @@ fn build_orchestrator_context_from_ledger_matches_legacy_shape() {
 #[test]
 fn project_ledger_snapshot_writes_tasks_and_progress() {
     let tmp = workspace();
-    let mut proj = StateProjector::new(ProjectionContext::new_legacy(
-        tmp.path(),
-        make_config(),
-    ));
+    let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), make_config()));
     let mut snap = LedgerSnapshot::cold_start();
     let mut task = Task::new("step-01".to_string(), 1);
     task.id = "task-A".to_string();
@@ -388,16 +367,14 @@ fn project_ledger_snapshot_writes_tasks_and_progress() {
 
     proj.project_ledger_snapshot(&snap).unwrap();
 
-    let tasks_body = std::fs::read_to_string(
-        tmp.path().join(".ralph").join("agent").join("tasks.jsonl"),
-    )
-    .unwrap();
+    let tasks_body =
+        std::fs::read_to_string(tmp.path().join(".ralph").join("agent").join("tasks.jsonl"))
+            .unwrap();
     assert!(tasks_body.contains("task-A"));
     assert!(tasks_body.contains("\"open\""));
-    let progress_body = std::fs::read_to_string(
-        tmp.path().join(".ralph").join("agent").join("progress.md"),
-    )
-    .unwrap();
+    let progress_body =
+        std::fs::read_to_string(tmp.path().join(".ralph").join("agent").join("progress.md"))
+            .unwrap();
     assert!(progress_body.contains("step-01"));
     assert!(progress_body.contains("- step-00"));
 }
@@ -519,10 +496,7 @@ fn runtime_state_snapshot_legacy_path_still_works_with_ledger_snapshot_wired() {
 #[test]
 fn project_ledger_snapshot_is_idempotent() {
     let tmp = workspace();
-    let mut proj = StateProjector::new(ProjectionContext::new_legacy(
-        tmp.path(),
-        make_config(),
-    ));
+    let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), make_config()));
     let mut snap = LedgerSnapshot::cold_start();
     seed_task(&mut snap, "ce-executor:demo:step-01:u1-impl", "task-A");
 
@@ -556,10 +530,7 @@ fn apply_from_ledger_rejection_recorded_is_noop_on_disk() {
             None,
         )
         .unwrap();
-    let mut proj = StateProjector::new(ProjectionContext::new_legacy(
-        tmp.path(),
-        make_config(),
-    ));
+    let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), make_config()));
     let snap = ledger.snapshot().clone();
     let report = proj.apply_from_ledger(&commit, &snap).unwrap();
     assert_eq!(report.applied, 0);
@@ -585,16 +556,12 @@ fn apply_from_ledger_progress_update_writes_progress_file() {
             Some("queue.advance".to_string()),
         )
         .unwrap();
-    let mut proj = StateProjector::new(ProjectionContext::new_legacy(
-        tmp.path(),
-        make_config(),
-    ));
+    let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), make_config()));
     let snap = ledger.snapshot().clone();
     proj.apply_from_ledger(&commit, &snap).unwrap();
-    let progress = std::fs::read_to_string(
-        tmp.path().join(".ralph").join("agent").join("progress.md"),
-    )
-    .unwrap();
+    let progress =
+        std::fs::read_to_string(tmp.path().join(".ralph").join("agent").join("progress.md"))
+            .unwrap();
     assert!(progress.contains("step-02"));
     assert!(progress.contains("- step-01"));
 }
@@ -628,17 +595,12 @@ fn apply_from_ledger_plan_complete_closes_open_tasks() {
             Some("plan.complete".to_string()),
         )
         .unwrap();
-    let mut proj = StateProjector::new(ProjectionContext::new_legacy(
-        tmp.path(),
-        make_config(),
-    ));
+    let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), make_config()));
     let snap = ledger.snapshot().clone();
     proj.apply_from_ledger(&commit, &snap).unwrap();
 
-    let body = std::fs::read_to_string(
-        tmp.path().join(".ralph").join("agent").join("tasks.jsonl"),
-    )
-    .unwrap();
+    let body = std::fs::read_to_string(tmp.path().join(".ralph").join("agent").join("tasks.jsonl"))
+        .unwrap();
     // Both tasks must be closed. Each task has both
     // `"status":"closed"` and a `"closed":...` timestamp
     // field, so the substring "closed" appears twice per
@@ -653,15 +615,10 @@ fn apply_from_ledger_plan_complete_closes_open_tasks() {
 #[test]
 fn deprecated_tasks_cache_still_works_for_legacy_caller() {
     let tmp = workspace();
-    let mut proj = StateProjector::new(ProjectionContext::new_legacy(
-        tmp.path(),
-        make_config(),
-    ));
+    let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), make_config()));
     let event = Event {
         topic: "work.ready".to_string(),
-        payload: Some(
-            json!({"task_key": "k1", "step": "step-01"}).to_string(),
-        ),
+        payload: Some(json!({"task_key": "k1", "step": "step-01"}).to_string()),
         ts: String::new(),
         hat: None,
         triggered: None,
@@ -701,10 +658,7 @@ fn ledger_replay_then_apply_produces_consistent_state() {
 
     // Step 2: simulate process restart — create a fresh
     // projector; replay the commit log via apply_from_ledger.
-    let mut proj = StateProjector::new(ProjectionContext::new_legacy(
-        tmp.path(),
-        make_config(),
-    ));
+    let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), make_config()));
     let snap_after_c1 = ledger.snapshot().clone();
     proj.apply_from_ledger(&c1, &snap_after_c1).unwrap();
 
@@ -721,16 +675,13 @@ fn ledger_replay_then_apply_produces_consistent_state() {
     let snap_after_c2 = ledger.snapshot().clone();
     proj.apply_from_ledger(&c2, &snap_after_c2).unwrap();
 
-    let body = std::fs::read_to_string(
-        tmp.path().join(".ralph").join("agent").join("tasks.jsonl"),
-    )
-    .unwrap();
+    let body = std::fs::read_to_string(tmp.path().join(".ralph").join("agent").join("tasks.jsonl"))
+        .unwrap();
     assert!(body.contains("task-A"));
     assert!(body.contains("\"open\""));
-    let progress = std::fs::read_to_string(
-        tmp.path().join(".ralph").join("agent").join("progress.md"),
-    )
-    .unwrap();
+    let progress =
+        std::fs::read_to_string(tmp.path().join(".ralph").join("agent").join("progress.md"))
+            .unwrap();
     assert!(progress.contains("step-02"));
     assert!(progress.contains("- step-01"));
 }
@@ -742,20 +693,15 @@ fn ledger_replay_then_apply_produces_consistent_state() {
 #[test]
 fn progress_md_written_from_ledger_round_trips() {
     let tmp = workspace();
-    let mut proj = StateProjector::new(ProjectionContext::new_legacy(
-        tmp.path(),
-        make_config(),
-    ));
+    let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), make_config()));
     let mut snap = LedgerSnapshot::cold_start();
     snap.progress.current_step = Some("step-03".to_string());
     snap.progress.completed_steps.push("step-01".to_string());
     snap.progress.completed_steps.push("step-02".to_string());
     proj.project_ledger_snapshot(&snap).unwrap();
 
-    let body = std::fs::read_to_string(
-        tmp.path().join(".ralph").join("agent").join("progress.md"),
-    )
-    .unwrap();
+    let body = std::fs::read_to_string(tmp.path().join(".ralph").join("agent").join("progress.md"))
+        .unwrap();
     // Legacy `ProgressSnapshot::parse` is the canonical reader
     // for this dialect; running it back on the body must
     // yield an equivalent snapshot.

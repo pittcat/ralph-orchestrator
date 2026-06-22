@@ -381,21 +381,20 @@ fn u7b_resume_topic_constants_are_stable() {
     assert_eq!(ralph_proto::TASK_RESUME, "task.resume");
     // Both topics are recognised as orchestrator control
     // topics (so the origin guard lets them through).
-    assert!(ralph_proto::is_orchestrator_control(ralph_proto::LOOP_RESUME));
-    assert!(ralph_proto::is_orchestrator_control(ralph_proto::TASK_RESUME));
+    assert!(ralph_proto::is_orchestrator_control(
+        ralph_proto::LOOP_RESUME
+    ));
+    assert!(ralph_proto::is_orchestrator_control(
+        ralph_proto::TASK_RESUME
+    ));
 }
 
 #[test]
 fn u7b_resume_block_renders_loop_metadata() {
     // Pure unit test for the U7b `ResumeContext` rendering
     // shape — no CLI spawn, no tempdir.
-    let rc = ralph_core::correction::ResumeContext::new(
-        "loop-xyz",
-        5,
-        "5/10 done",
-        12,
-        "scout -> plan",
-    );
+    let rc =
+        ralph_core::correction::ResumeContext::new("loop-xyz", 5, "5/10 done", 12, "scout -> plan");
     let block = rc.render_block();
     assert!(block.contains("Loop ID: loop-xyz"));
     assert!(block.contains("Closed tasks: 5"));

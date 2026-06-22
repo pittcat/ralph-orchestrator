@@ -60,12 +60,12 @@ pub mod merge_queue;
 pub mod payload_contract;
 pub mod planning_session;
 pub mod preflight;
-pub mod preset_lint;
 /// `preset::engine` — preset-agnostic execution engine (plan
 /// 2026-06-20-001 U1/U2). Reads protocol SSOT from the embedded
 /// `EventLoopConfig`; performs gate / projection / lint operations
 /// without duplicating payload field tables in Rust.
 pub mod preset;
+pub mod preset_lint;
 pub mod preset_validator;
 pub mod runtime_contract;
 #[cfg(feature = "recording")]
@@ -74,10 +74,10 @@ mod session_player;
 mod session_recorder;
 pub mod skill;
 pub mod skill_registry;
+pub mod state;
 mod state_file_injector;
 pub mod state_machine;
 pub mod state_projector;
-pub mod state;
 pub mod step_handoff;
 mod summary_writer;
 pub mod task;

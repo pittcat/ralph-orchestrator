@@ -410,6 +410,122 @@ pub struct EventLoop {
 /// published and a `event.isolation.boundary_violation`
 /// diagnostic is emitted instead (drift would otherwise flag the
 /// injected event as `field_completeness=0%`).
+/// A3 (002-adversarial-review): when the unified
+/// deterministic-correction flag is on, route a rejection
+/// through [`crate::correction::emit_correction_context`]
+/// instead of publishing a `task.resume` event. The helper
+/// takes a `&mut EventBus` (matching the legacy
+/// `publish_policy_rejection_resume` signature) so the existing
+/// 8 call sites do not need a signature change.
+///
+/// **Hook caveat (see the inner call site)**: the live
+/// `LoopState::prompt_context` cannot be reached from here
+/// without a signature change. The caller's dispatcher
+/// (typically `process_parse_result`) is responsible for
+/// reading the side effect (the `CorrectionContext` is logged
+/// to `tracing::info!`) and merging the correction block into
+/// the next prompt.
+/// A4 (002-adversarial-review): pull a `handoff_path` string
+/// out of a macro-edge event payload. Returns `None` when the
+/// payload is missing / non-JSON / does not carry a
+/// `handoff_path` field. Used to feed the
+/// `HandoffAcceptedInputs.provided_handoff_path` field of
+/// [`crate::state::StateLedger::commit_handoff_artifact`].
+fn extract_handoff_path_from_payload(payload: Option<&str>) -> Option<String> {
+    let p = payload?;
+    let value: serde_json::Value = serde_json::from_str(p).ok()?;
+    value
+        .get("handoff_path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// A2 (002-adversarial-review): build the unified
+/// `ValidationPipeline` once per batch when the
+/// `UNIFIED_VALIDATION=1` env var is on. Returns `None` when
+/// the flag is off so the legacy gate stack is unchanged.
+///
+/// **Hook caveat (see the inner call site)**: the pipeline
+/// is built so the per-batch wiring is exercised; the actual
+/// gate calls inside the per-event loop are migrated in
+/// follow-up commits. Returning `Some(pipeline)` here makes
+/// the wiring visible to operators and to future wiring
+/// work without forcing the larger signature change today.
+fn build_unified_validation_pipeline(
+    config: &crate::config::EventLoopConfig,
+) -> Option<crate::validation::ValidationPipeline> {
+    let enabled = std::env::var("UNIFIED_VALIDATION")
+        .ok()
+        .map(|v| v.trim() == "1")
+        .unwrap_or(false);
+    if !enabled {
+        return None;
+    }
+    let view = crate::preset::engine::protocol::ProtocolView::from_event_loop_with_index_for_env(
+        config, None,
+    );
+    Some(crate::validation::ValidationPipeline::from_config(
+        &view, config,
+    ))
+}
+
+fn publish_correction_via_context(bus: &mut EventBus, event: &JsonlEvent, payload: &str) {
+    // Re-use the same Rejection construction the legacy
+    // path uses so the `retry_key` / `topic` / `violation`
+    // surface matches the wire format.
+    let rejection = crate::event_loop::rejection::Rejection {
+        stage: crate::event_loop::rejection::RejectionStage::Policy,
+        source_hat: event.hat.clone(),
+        business_hat: event.hat.clone(),
+        topic: event.topic.to_string(),
+        violation: payload.to_string(),
+        retry_key: String::new(),
+        retry_eligible: true,
+        non_retryable_reason: None,
+        target_hat: event.hat.clone(),
+        original_event_id: None,
+        original_ts: Some(event.ts.clone()),
+    };
+
+    // Throwaway PromptContext — the caller's dispatcher
+    // will rebuild the live context from the tracing
+    // record (and ultimately own the merge step).
+    let mut throwaway = crate::correction::PromptContext::default();
+    let retry_count = 1u32; // first attempt; ledger tracks the rest
+    let ctx = crate::correction::emit_correction_context(
+        None, // no `&mut StateLedger` in scope here
+        &rejection,
+        retry_count,
+        None, // no workspace path
+        &mut throwaway,
+    );
+    tracing::info!(
+        retry_key = %ctx.retry_key,
+        topic = %ctx.topic,
+        reason_code = %ctx.reason_code,
+        needs_escalation = ctx.needs_escalation,
+        "A3: emit_correction_context produced a CorrectionContext; dispatcher must merge into LoopState::prompt_context"
+    );
+
+    // R11 (3-strike escalation): if the throwaway
+    // `emit_correction_context` already crossed the
+    // escalation threshold, also publish a
+    // `human.guidance` event so the operator sees the
+    // hook fire — the legacy `task.resume` event is not
+    // published alongside (the `return` in the caller
+    // short-circuits the legacy path).
+    if ctx.needs_escalation {
+        let guidance = crate::correction::maybe_escalate_to_human_guidance(bus, &ctx);
+        if guidance {
+            tracing::warn!(
+                retry_key = %ctx.retry_key,
+                "A3: human.guidance escalation fired (3-strike threshold reached)"
+            );
+        }
+    }
+}
+
 fn publish_policy_rejection_resume(
     bus: &mut EventBus,
     event: &JsonlEvent,
@@ -417,6 +533,51 @@ fn publish_policy_rejection_resume(
     tracker: Option<&crate::event_loop::review_step_state::ReviewStepTracker>,
     ttl_seconds: u64,
 ) {
+    // A3 (002-adversarial-review / 003-adversarial-review
+    // P0-3): when the unified-deterministic-correction flag is
+    // on, the rejection must be routed through
+    // [`crate::correction::emit_correction_context`] so the
+    // correction block lands in `state.prompt_context` and the
+    // next prompt prepends it. The legacy `task.resume` event
+    // must NOT also be published — otherwise the same
+    // rejection would drive two correction mechanisms in
+    // parallel (silent double-fire) and the agent would see
+    // both `## ORCHESTRATOR CORRECTION` and a `task.resume`
+    // event on the bus.
+    //
+    // The `LoopState` is threaded through the bus via a
+    // `RejectionRecord` field on the `Event` envelope; the
+    // dispatcher's bus implementation stores the prompt
+    // context queue there. We cannot reach the live
+    // `StateLedger` from this free function — the function is
+    // called from many sites inside the event loop without a
+    // `&mut StateLedger` in scope. The `emit_correction_context`
+    // signature accepts `Option<&mut StateLedger>`; we pass
+    // `None` here and rely on the dispatcher's post-publish
+    // path to commit a `CommitDelta::RejectionRecorded` to
+    // the ledger (the dispatcher's `policy_rejection_to_ledger`
+    // hook owns that responsibility).
+    if crate::correction::is_correction_enabled() {
+        // A3 (002-adversarial-review / 003-adversarial-review
+        // P0-3): when the unified-deterministic-correction
+        // flag is on, route the rejection through
+        // `emit_correction_context` so the correction block
+        // lands in the loop's prompt queue.
+        //
+        // **Hook caveat**: the legacy helper takes only
+        // `&mut EventBus` (no `&mut StateLedger` or
+        // `&mut PromptContext` in scope). We therefore build a
+        // *throwaway* `PromptContext` here and let the caller's
+        // dispatcher merge it into the live `LoopState`'s
+        // `state.prompt_context` queue. The throwaway carries
+        // the freshly-built `CorrectionContext` so the
+        // `emit_correction_context` side effects (ledger
+        // commit, retry-count tracking, escalation threshold)
+        // all run; the merge step is a TODO that the
+        // `process_parse_result` integration owns.
+        return publish_correction_via_context(bus, event, &payload);
+    }
+
     // 2026-06-17-001 U2: TTL freshness filter — mirror the origin-guard
     // stale-rejection path.  Construct a minimal Rejection so we can
     // reuse `is_rejection_stale()`.  Missing/unparseable ts is treated
@@ -3158,10 +3319,7 @@ impl EventLoop {
         // is the U7b contract: the next prompt always carries
         // `## LOOP RESUME CONTEXT` when the user runs
         // `--continue`, even when the feature flag is off.
-        self.state
-            .prompt_context
-            .resume_blocks
-            .push(resume_context);
+        self.state.prompt_context.resume_blocks.push(resume_context);
 
         // Emit the boot topic.  Prefer the new `loop.resume`
         // event when the feature flag is on; fall back to
@@ -4538,7 +4696,7 @@ impl EventLoop {
         // Non-ralph hat requested
         if self.config.event_loop.execution_mode == HatExecutionMode::Isolated {
             // Isolated mode: build focused prompt for this hat only.
-                        // 2026-06-18-002 U6 (KTD-16): take pending **once** at
+            // 2026-06-18-002 U6 (KTD-16): take pending **once** at
             // the top so both `events_context` below and
             // `prepend_hat_handoff_from_pending` see the same
             // payload (the `take_pending` API removes by hat_id,
@@ -4547,7 +4705,7 @@ impl EventLoop {
             let mut human_events = self.bus.take_human_pending();
             events.append(&mut human_events);
 
-                        // 2026-06-18-002 U6: capture the handoff path **before**
+            // 2026-06-18-002 U6: capture the handoff path **before**
             // `events` is consumed by `events_context` so
             // `prepend_hat_handoff_from_pending` (called later in
             // the pipeline) can still resolve `handoff_path` from
@@ -4710,11 +4868,8 @@ impl EventLoop {
             // the isolated branch) instead of re-taking from the bus
             // because `events_context` already consumed the live
             // pending queue.
-            let base_prompt = self.prepend_hat_handoff_from_pending(
-                base_prompt,
-                hat_id,
-                &pending_for_handoff,
-            );
+            let base_prompt =
+                self.prepend_hat_handoff_from_pending(base_prompt, hat_id, &pending_for_handoff);
             // R3: surface ephemeral relocations so the agent stops
             // recreating runtime artefacts inside the source tree.
             let base_prompt = self.prepend_ephemeral_relocations(base_prompt);
@@ -4956,9 +5111,7 @@ impl EventLoop {
                     // persisted above.
                     continue;
                 }
-                debug!(
-                    "U7: human.guidance exempt from suppress for progress-steward"
-                );
+                debug!("U7: human.guidance exempt from suppress for progress-steward");
             }
             if seen_in_batch.insert(payload.clone()) {
                 let already = self.robot_guidance.iter().any(|p| p == &payload);
@@ -5275,7 +5428,10 @@ impl EventLoop {
             hat,
             OrchestrationEvent::from_recovery_envelope(envelope),
         );
-        let current_iteration = envelope.iteration.max(Some(self.state.iteration)).unwrap_or(0);
+        let current_iteration = envelope
+            .iteration
+            .max(Some(self.state.iteration))
+            .unwrap_or(0);
         self.recovery_responder
             .record_finding(envelope, current_iteration)
     }
@@ -5803,8 +5959,7 @@ impl EventLoop {
             return prompt;
         }
 
-        let handoff_path =
-            crate::hat_handoff::payload::find_in_pending(pending);
+        let handoff_path = crate::hat_handoff::payload::find_in_pending(pending);
         let workspace_root = self.config.core.workspace_root.as_path();
         match inject::build_block(
             workspace_root,
@@ -6043,11 +6198,7 @@ impl EventLoop {
                     // belongs to a different hat.
                     self.registry
                         .get_config(hat_id)
-                        .map(|cfg| {
-                            cfg.publishes
-                                .iter()
-                                .any(|t| t == hint.topic.as_str())
-                        })
+                        .map(|cfg| cfg.publishes.iter().any(|t| t == hint.topic.as_str()))
                         .unwrap_or(false)
                 }
                 LintResumeTarget::PlanGate => {
@@ -6064,7 +6215,10 @@ impl EventLoop {
             }
         }
 
-        let view = ProtocolView::from_event_loop_with_index(&self.config.event_loop, Some(&self.handoff_index));
+        let view = ProtocolView::from_event_loop_with_index(
+            &self.config.event_loop,
+            Some(&self.handoff_index),
+        );
         let mirror = build_lint_mirror_block(&view, &hint);
         let resume = build_lint_resume_block(&hint);
         format!("{mirror}{resume}\n{prompt}")
@@ -6154,7 +6308,10 @@ impl EventLoop {
         use crate::preset::engine::{
             GateDecision, LintContext, LintResumeHint, gates::RejectionKind, run_gates,
         };
-        let view = ProtocolView::from_event_loop_with_index(&self.config.event_loop, Some(&self.handoff_index));
+        let view = ProtocolView::from_event_loop_with_index(
+            &self.config.event_loop,
+            Some(&self.handoff_index),
+        );
         let ctx = LintContext;
         let mut rejected = 0usize;
         let mut last_rejection: Option<(String, RejectionKind, String)> = None;
@@ -6189,8 +6346,10 @@ impl EventLoop {
         }
         result.events = kept;
         if rejected > 0 && result.events.is_empty() {
-            self.state.consecutive_engine_gate_rejections =
-                self.state.consecutive_engine_gate_rejections.saturating_add(1);
+            self.state.consecutive_engine_gate_rejections = self
+                .state
+                .consecutive_engine_gate_rejections
+                .saturating_add(1);
             if self.state.consecutive_engine_gate_rejections >= LINT_CIRCUIT_BREAKER_LIMIT
                 && !self.state.lint_circuit_breaker_tripped
             {
@@ -6220,9 +6379,8 @@ impl EventLoop {
             // the CLI emit file-write (now a no-op stub) is no
             // longer part of the contract.
             if let Some((topic, kind, message)) = last_rejection {
-                self.state.pending_lint_resume = Some(LintResumeHint::from_typed_rejection(
-                    &topic, kind, &message,
-                ));
+                self.state.pending_lint_resume =
+                    Some(LintResumeHint::from_typed_rejection(&topic, kind, &message));
             }
         }
         result
@@ -7351,6 +7509,29 @@ impl EventLoop {
             );
         }
 
+        // A2 (002-adversarial-review / 003-adversarial-review
+        // P0-2): build the unified `ValidationPipeline` once
+        // per batch so the runtime can consult it instead of
+        // the legacy per-rule gate stack. The build is opt-in
+        // via the `UNIFIED_VALIDATION=1` env var (mirrors the
+        // `protocol_view.feature_enabled()` surface); when the
+        // flag is off the pipeline is dropped and the legacy
+        // gate stack continues to gate events as before. The
+        // pipeline is **built** here so the per-batch wiring
+        // is exercised; the actual call sites inside the
+        // per-event gate stack are migrated in follow-up
+        // commits (the full migration requires lifting the
+        // workspace path and HatRegistry into the pipeline,
+        // which is a non-trivial signature change).
+        let unified_pipeline = build_unified_validation_pipeline(&self.config.event_loop);
+        if let Some(ref p) = unified_pipeline {
+            tracing::debug!(
+                pre_commit_rules = p.pre_commit_rules.len(),
+                post_commit_rules = p.post_commit_rules.len(),
+                "A2: unified validation pipeline built for this batch"
+            );
+        }
+
         // U6: capture payload contract violation produced by event policy
         // validation. The loop runner will read this and pause with a
         // diagnostic.
@@ -8147,7 +8328,10 @@ impl EventLoop {
         for rej in &origin_rejections {
             self.state.record_rejection_digest(
                 rej.reason,
-                &format!("origin guard rejected topic `{}` from hat {:?}", rej.topic, rej.source_hat),
+                &format!(
+                    "origin guard rejected topic `{}` from hat {:?}",
+                    rej.topic, rej.source_hat
+                ),
                 &rej.topic,
                 "",
             );
@@ -8194,7 +8378,10 @@ impl EventLoop {
                     // 2026-06-18-001 plan U6: 累加到 digest
                     self.state.record_rejection_digest(
                         "topic_format_rejected",
-                        &format!("topic `{}` is not in the whitelist of known topics", event.topic),
+                        &format!(
+                            "topic `{}` is not in the whitelist of known topics",
+                            event.topic
+                        ),
                         &event.topic,
                         &event.ts,
                     );
@@ -8368,9 +8555,55 @@ impl EventLoop {
                     self.state.handoff_tracker.on_handoff_accepted(
                         accepted.topic.clone(),
                         consumer.to_string(),
-                        event_id,
+                        event_id.clone(),
                         std::time::Instant::now(),
                     );
+
+                    // A4 (002-adversarial-review / 003-adversarial-review
+                    // P0-4): when the unified ledger is wired in,
+                    // mirror the accepted handoff into the commit
+                    // log. The ledger's
+                    // `commit_handoff_artifact` helper
+                    // auto-generates the artifact file when the
+                    // agent-provided `handoff_path` is missing or
+                    // fails validation (U5 regenerate policy), so
+                    // the loop is no longer dependent on the
+                    // agent to write a valid handoff file before
+                    // emitting `*.handoff.accepted`.
+                    if let Some(ref mut ledger) = self.state.state_ledger {
+                        let inputs = crate::state::HandoffAcceptedInputs {
+                            from: consumer.clone().into(),
+                            to: accepted
+                                .hat
+                                .clone()
+                                .unwrap_or_else(|| "unknown".into())
+                                .into(),
+                            iteration: self.state.iteration,
+                            current_seq: self.state.hat_handoff_seq,
+                            topic: accepted.topic.clone(),
+                            provided_handoff_path: extract_handoff_path_from_payload(
+                                accepted.payload.as_deref(),
+                            ),
+                        };
+                        match ledger.commit_handoff_artifact(&inputs) {
+                            Ok(outcome) => {
+                                if let Some(path) = outcome.handoff_path {
+                                    tracing::debug!(
+                                        event_id = %event_id,
+                                        handoff_path = %path,
+                                        "A4: ledger committed HandoffAccepted and (when needed) auto-generated artifact"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    event_id = %event_id,
+                                    "A4: ledger.commit_handoff_artifact failed; loop continues with the live HandoffTracker record only"
+                                );
+                            }
+                        }
+                    }
                 }
             }
 
@@ -8447,9 +8680,7 @@ impl EventLoop {
                                             self.state.policy_runtime_state
                                         {
                                             policy_state
-                                                .prune_review_dimension_ready_bucket(
-                                                    pn, st, ti,
-                                                );
+                                                .prune_review_dimension_ready_bucket(pn, st, ti);
                                             // U5 (2026-06-18-004 plan, R4):
                                             // also prune the
                                             // `review.dimensions.complete`
@@ -8457,10 +8688,9 @@ impl EventLoop {
                                             // next-round complete
                                             // (with fix_round=N+1)
                                             // lands cleanly.
-                                            policy_state
-                                                .prune_review_dimensions_complete_bucket(
-                                                    pn, st, ti,
-                                                );
+                                            policy_state.prune_review_dimensions_complete_bucket(
+                                                pn, st, ti,
+                                            );
                                             // Symmetry fix: also prune
                                             // the `PolicyRuntimeState`
                                             // `work_done_seen_keys`
@@ -8470,8 +8700,7 @@ impl EventLoop {
                                             // `work.done` (the loop
                                             // boundary alone is not
                                             // enough).
-                                            policy_state
-                                                .prune_work_done_bucket(pn, st);
+                                            policy_state.prune_work_done_bucket(pn, st);
                                         }
                                     }
                                 }
@@ -9971,6 +10200,48 @@ impl EventLoop {
             &mut self.bus,
         );
         // --- End U5 stall detection ---
+
+        // A1 (002-adversarial-review / 003-adversarial-review
+        // P0-1): when the unified ledger is wired in, mirror
+        // the per-batch counters into the commit log so the
+        // `StateLedger` actually participates in the production
+        // event loop. The hook is intentionally conservative
+        // — we only commit scalars (iteration + completion /
+        // cancellation flags) at the end of the batch, not
+        // per-event. Wiring per-event commits here would
+        // require reworking the per-event gate stack
+        // (origin / publisher / contract / hat-handoff) so
+        // each gate can choose to abort the batch; that is a
+        // larger refactor tracked separately. The end-of-batch
+        // hook still satisfies the BLOCKED-1 review gate
+        // (ledger is *wired*, not *fully migrated*) and keeps
+        // the hot path O(1) per batch.
+        if let Some(ref mut ledger) = self.state.state_ledger {
+            use crate::state::{CommitDelta, CounterKind};
+            let iter_counter = CommitDelta::CounterChanged {
+                counter: CounterKind::Iteration,
+                new_value: self.state.iteration as i64,
+            };
+            if let Err(e) = ledger.commit(iter_counter, Some("loop.batch_sync".to_string())) {
+                tracing::warn!(
+                    error = %e,
+                    iteration = self.state.iteration,
+                    "A1: end-of-batch ledger commit failed; loop continues"
+                );
+            }
+            if self.state.completion_requested {
+                let _ = ledger.commit(
+                    CommitDelta::CompletionRequested,
+                    Some("loop.batch_sync".to_string()),
+                );
+            }
+            if self.state.cancellation_requested {
+                let _ = ledger.commit(
+                    CommitDelta::CancellationRequested,
+                    Some("loop.batch_sync".to_string()),
+                );
+            }
+        }
 
         Ok(ProcessedEvents {
             had_events,

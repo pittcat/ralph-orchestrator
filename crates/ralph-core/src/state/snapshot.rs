@@ -28,15 +28,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::event_loop::review_step_state::ReviewStepTracker;
 use crate::event_loop::{RejectionDigestEntry, TerminationReason};
+use crate::event_policy::PolicyRuntimeState;
 use crate::flow_lifecycle::FlowLifecycleRegistry;
+use crate::state_machine::StateMachineRuntimeState;
 use crate::state_projector::ProjectionContext;
 use crate::step_handoff::ProgressSnapshot;
 use crate::task::Task;
 use crate::workflow_contract::HandoffTracker;
-use crate::event_policy::PolicyRuntimeState;
-use crate::state_machine::StateMachineRuntimeState;
 
-use super::commit::{CommitDelta, TaskTransition};
+use super::commit::{CommitDelta, CounterKind, TaskTransition};
 
 /// Single source of truth for the loop's runtime state.
 ///
@@ -252,6 +252,77 @@ pub struct LedgerSnapshot {
     /// Last drift engine action. U6 wires the engine; U1 models
     /// the storage only.
     pub last_drift_action: Option<String>,
+
+    // ---- handoff accepted audit log (B1) ----------------------
+    /// Per-`HandoffAccepted` delta, recorded with the wall-clock
+    /// timestamp so replay can rebuild an equivalent audit trail
+    /// (the in-memory `HandoffTracker` is `Instant`-keyed and
+    /// therefore not replayable from disk; this is the durable
+    /// mirror).
+    ///
+    /// B1 (002-adversarial-review): the previous
+    /// `apply_delta` for `HandoffAccepted` was a no-op, so the
+    /// commit log recorded the event but the snapshot stayed
+    /// empty after `replay_from_disk`. The runtime kept working
+    /// because the live `LoopState::handoff_tracker` was
+    /// mutated by the legacy path; replay lost the audit trail.
+    /// The new path appends an immutable record here on every
+    /// `HandoffAccepted` so the audit trail survives cold start.
+    pub handoff_accepted_log: Vec<AcceptedHandoffRecord>,
+
+    // ---- handoff tracker audit log (B3) ----------------------
+    /// Per-`HandoffTrackerUpdated` delta. Mirrors the audit
+    /// shape used by `handoff_accepted_log`; tracks the
+    /// `event_id` and `accepted` flag (plus the optional
+    /// `escalation_reason` for failures) so cold start can
+    /// reconstruct which event ids were ever accepted and which
+    /// were escalated. The live `HandoffTracker` (in
+    /// `LoopState`) remains the source of truth for **pending**
+    /// handoffs because it is `Instant`-keyed; this log is the
+    /// replayable audit trail.
+    pub handoff_tracker_log: Vec<HandoffTrackerUpdateRecord>,
+
+    // ---- flow lifecycle audit log (B4) -----------------------
+    /// Per-`FlowLifecycleUpdated` delta, capturing the
+    /// `(flow_unit_id, phase)` tuple in order. The live
+    /// `FlowLifecycleRegistry` is rebuilt from the dispatcher's
+    /// own path; this log is the replayable mirror so a cold
+    /// start can reconstruct the sequence of phase transitions
+    /// even when the live registry is gone.
+    pub flow_lifecycle_log: Vec<FlowLifecycleUpdateRecord>,
+}
+
+/// One `FlowLifecycleUpdated` delta, captured in
+/// [`LedgerSnapshot::flow_lifecycle_log`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlowLifecycleUpdateRecord {
+    pub flow_unit_id: String,
+    pub phase: String,
+    pub recorded_at_ts: String,
+}
+
+/// One `HandoffTrackerUpdated` delta, captured in
+/// [`LedgerSnapshot::handoff_tracker_log`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandoffTrackerUpdateRecord {
+    pub event_id: String,
+    pub accepted: bool,
+    pub escalation_reason: Option<String>,
+    pub recorded_at_ts: String,
+}
+
+/// One accepted handoff. Stored in
+/// [`LedgerSnapshot::handoff_accepted_log`]; the
+/// `accepted_at_ts` is the wall-clock equivalent of the
+/// `Instant::now()` call the runtime uses to seed
+/// `HandoffTracker::on_handoff_accepted` — the tracker is
+/// `Instant`-keyed and therefore not replayable, this log is.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcceptedHandoffRecord {
+    pub from: HatId,
+    pub to: HatId,
+    pub handoff_path: Option<String>,
+    pub accepted_at_ts: String,
 }
 
 /// Serialized form of an obligation trigger event. We do not
@@ -302,7 +373,10 @@ impl LedgerSnapshot {
     pub fn apply_delta(&mut self, delta: &CommitDelta) {
         match delta {
             CommitDelta::NoOp => {}
-            CommitDelta::TaskLifecycle { task_id, transition } => {
+            CommitDelta::TaskLifecycle {
+                task_id,
+                transition,
+            } => {
                 apply_task_lifecycle(&mut self.tasks, task_id, *transition);
             }
             CommitDelta::TaskInserted { task } => {
@@ -321,11 +395,7 @@ impl LedgerSnapshot {
                 if let Some(done) = completed_step {
                     let trimmed = done.trim();
                     if !trimmed.is_empty()
-                        && !self
-                            .progress
-                            .completed_steps
-                            .iter()
-                            .any(|s| s == trimmed)
+                        && !self.progress.completed_steps.iter().any(|s| s == trimmed)
                     {
                         self.progress.completed_steps.push(trimmed.to_string());
                     }
@@ -341,11 +411,7 @@ impl LedgerSnapshot {
                 if let Some(step) = final_step {
                     let trimmed = step.trim();
                     if !trimmed.is_empty()
-                        && !self
-                            .progress
-                            .completed_steps
-                            .iter()
-                            .any(|s| s == trimmed)
+                        && !self.progress.completed_steps.iter().any(|s| s == trimmed)
                     {
                         self.progress.completed_steps.push(trimmed.to_string());
                     }
@@ -365,11 +431,26 @@ impl LedgerSnapshot {
                 // The runner consumes the trip directly off the
                 // commit log; the snapshot is not mutated.
             }
-            CommitDelta::HandoffAccepted { .. } => {
-                // The handoff tracker is updated via the runtime's
-                // own `on_handoff_accepted` call; the commit log
-                // records the diff for replay. U2 will wire the
-                // replay path to `HandoffTracker::on_handoff_accepted`.
+            CommitDelta::HandoffAccepted {
+                from,
+                to,
+                handoff_path,
+            } => {
+                // B1 (002-adversarial-review): record an
+                // immutable audit entry. The legacy
+                // `HandoffTracker::on_handoff_accepted` path is
+                // still wired by the runtime (the tracker
+                // remains the source of truth for *pending*
+                // handoffs), but the snapshot's audit log is
+                // the only thing that survives `replay_from_disk`
+                // — the tracker is `Instant`-keyed so it cannot
+                // be rebuilt from disk state.
+                self.handoff_accepted_log.push(AcceptedHandoffRecord {
+                    from: from.clone(),
+                    to: to.clone(),
+                    handoff_path: handoff_path.clone(),
+                    accepted_at_ts: chrono::Utc::now().to_rfc3339(),
+                });
             }
             CommitDelta::WorkflowPhaseAdvanced {
                 chain_name,
@@ -395,9 +476,6 @@ impl LedgerSnapshot {
             CommitDelta::CompletionHonored => self.completion_honored = true,
             CommitDelta::CancellationRequested => self.cancellation_requested = true,
             CommitDelta::StewardWoken => self.steward_woken_this_turn = true,
-            CommitDelta::SnapshotReset => {
-                // No-op (see variant docs).
-            }
             CommitDelta::HatActivationCounted { hat, new_count } => {
                 self.hat_activation_counts.insert(hat.clone(), *new_count);
             }
@@ -405,7 +483,8 @@ impl LedgerSnapshot {
                 self.exhausted_hats.insert(hat.clone());
             }
             CommitDelta::RejectionLastIteration { key, iteration } => {
-                self.rejection_last_iteration.insert(key.clone(), *iteration);
+                self.rejection_last_iteration
+                    .insert(key.clone(), *iteration);
             }
             CommitDelta::StallRecoveryCounted { key, new_count } => {
                 self.stall_recovery_counts.insert(key.clone(), *new_count);
@@ -418,16 +497,63 @@ impl LedgerSnapshot {
                     self.abandoned_tasks.push(task_id.clone());
                 }
             }
-            CommitDelta::ReviewStepUpdated { .. } => {
-                // The review step tracker is updated via the
-                // runtime's own `observe_accepted` call; the
-                // commit log records the diff for replay.
+            CommitDelta::ReviewStepUpdated {
+                plan_name,
+                task_id,
+                step,
+                synth_pass,
+                synth_terminal,
+            } => {
+                // B2 (002-adversarial-review): the review step
+                // tracker is now replayable. The previous
+                // no-op left the tracker empty after
+                // `replay_from_disk`; the live `LoopState`
+                // remained the source of truth but cold start
+                // was a desync waiting to happen.
+                self.review_step_tracker.apply_review_step_delta(
+                    plan_name,
+                    task_id,
+                    step,
+                    *synth_pass,
+                    synth_terminal.as_deref(),
+                );
             }
-            CommitDelta::HandoffTrackerUpdated { .. } => {
-                // See `HandoffAccepted` above.
+            CommitDelta::HandoffTrackerUpdated {
+                event_id,
+                accepted,
+                escalation_reason,
+            } => {
+                // B3 (002-adversarial-review): record the
+                // audit entry. The live `HandoffTracker`
+                // remains the source of truth for pending
+                // handoffs (`Instant`-keyed; not replayable);
+                // this log is the durable mirror so a cold
+                // start knows which event ids were ever
+                // accepted/escalated.
+                self.handoff_tracker_log.push(HandoffTrackerUpdateRecord {
+                    event_id: event_id.clone(),
+                    accepted: *accepted,
+                    escalation_reason: escalation_reason.clone(),
+                    recorded_at_ts: chrono::Utc::now().to_rfc3339(),
+                });
             }
-            CommitDelta::FlowLifecycleUpdated { .. } => {
-                // See `ReviewStepUpdated` above.
+            CommitDelta::FlowLifecycleUpdated {
+                flow_unit_id,
+                phase,
+            } => {
+                // B4 (002-adversarial-review): record the
+                // audit entry. The live
+                // `FlowLifecycleRegistry` is rebuilt from the
+                // dispatcher's own path (which is `Instant`-
+                // aware and not replayable from disk); this
+                // log is the durable mirror so a cold start
+                // can reconstruct the phase-transition
+                // sequence.
+                self.flow_lifecycle_log.push(FlowLifecycleUpdateRecord {
+                    flow_unit_id: flow_unit_id.clone(),
+                    phase: phase.clone(),
+                    recorded_at_ts: chrono::Utc::now().to_rfc3339(),
+                });
             }
             CommitDelta::RejectionDigestUpdated {
                 reason_code,
@@ -566,33 +692,48 @@ fn apply_task_lifecycle(tasks: &mut [Task], task_id: &str, transition: TaskTrans
     }
 }
 
-fn apply_counter_change(snap: &mut LedgerSnapshot, counter: &str, new_value: i64) {
+fn apply_counter_change(snap: &mut LedgerSnapshot, counter: &CounterKind, new_value: i64) {
     // Saturating cast: counters are non-negative; clamp at i64
     // boundary. Negative values (e.g. from corrupt commits) are
     // clipped to 0 to avoid surprising downstream code.
-    let v = if new_value < 0 { 0u64 } else { new_value as u64 };
+    let v = if new_value < 0 {
+        0u64
+    } else {
+        new_value as u64
+    };
     match counter {
-        "iteration" => snap.iteration = v as u32,
-        "hat_handoff_seq" => snap.hat_handoff_seq = v as u32,
-        "consecutive_failures" => snap.consecutive_failures = v as u32,
-        "consecutive_blocked" => snap.consecutive_blocked = v as u32,
-        "abandoned_task_redispatches" => snap.abandoned_task_redispatches = v as u32,
-        "consecutive_malformed_events" => snap.consecutive_malformed_events = v as u32,
-        "consecutive_hard_gates" => snap.consecutive_hard_gates = v as u32,
-        "consecutive_same_signature" => snap.consecutive_same_signature = v as u32,
-        "consecutive_no_progress_turns" => snap.consecutive_no_progress_turns = v as u32,
-        "consecutive_steward_activations" => snap.consecutive_steward_activations = v as u32,
-        "consecutive_completion_rejections" => snap.consecutive_completion_rejections = v as u32,
-        "consecutive_engine_gate_rejections" => snap.consecutive_engine_gate_rejections = v as u32,
-        "invariant_violation_count" => snap.invariant_violation_count = v as u32,
-        "last_rejection_fingerprint" => snap.last_rejection_fingerprint = v,
-        "cumulative_cost" => snap.cumulative_cost = new_value as f64,
-        _ => {
-            // Unknown counter: ignore. The exhaustive match is
-            // enforced by the `apply_delta_is_exhaustive` test,
-            // but unknown strings (e.g. from a future commit
-            // version) are best-effort no-ops so replay does not
-            // abort on version skew.
+        CounterKind::Iteration => snap.iteration = v as u32,
+        CounterKind::HatHandoffSeq => snap.hat_handoff_seq = v as u32,
+        CounterKind::ConsecutiveFailures => snap.consecutive_failures = v as u32,
+        CounterKind::ConsecutiveBlocked => snap.consecutive_blocked = v as u32,
+        CounterKind::AbandonedTaskRedispatches => snap.abandoned_task_redispatches = v as u32,
+        CounterKind::ConsecutiveMalformedEvents => snap.consecutive_malformed_events = v as u32,
+        CounterKind::ConsecutiveHardGates => snap.consecutive_hard_gates = v as u32,
+        CounterKind::ConsecutiveSameSignature => snap.consecutive_same_signature = v as u32,
+        CounterKind::ConsecutiveNoProgressTurns => snap.consecutive_no_progress_turns = v as u32,
+        CounterKind::ConsecutiveStewardActivations => {
+            snap.consecutive_steward_activations = v as u32
+        }
+        CounterKind::ConsecutiveCompletionRejections => {
+            snap.consecutive_completion_rejections = v as u32
+        }
+        CounterKind::ConsecutiveEngineGateRejections => {
+            snap.consecutive_engine_gate_rejections = v as u32
+        }
+        CounterKind::InvariantViolationCount => snap.invariant_violation_count = v as u32,
+        CounterKind::LastRejectionFingerprint => snap.last_rejection_fingerprint = v,
+        CounterKind::CumulativeCost => snap.cumulative_cost = new_value as f64,
+        // P2-#3 (002-adversarial-review): unknown counters
+        // (forward-compat from a future enum extension) are
+        // still best-effort no-ops so replay does not abort on
+        // version skew. The original snake_case string is
+        // preserved in the `Unknown` variant so the loss is
+        // bounded to "ignore", not "corrupt the log line".
+        CounterKind::Unknown(_) => {
+            tracing::debug!(
+                counter = counter.as_str(),
+                "ignoring unknown counter on replay (forward-compat)"
+            );
         }
     }
 }

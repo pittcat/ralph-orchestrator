@@ -536,8 +536,7 @@ fn run_scenario_with_snapshots(
     // `pending_lint_resume`). The runner itself never mutates
     // state from `assert_state` (R-H4); snapshotting is the only
     // borrow of `state()` we need outside the iteration loop.
-    let mut state_snapshots: Vec<LoopStateSnapshot> =
-        Vec::with_capacity(yaml.mock_responses.len());
+    let mut state_snapshots: Vec<LoopStateSnapshot> = Vec::with_capacity(yaml.mock_responses.len());
     let mut prompt_snapshots: Vec<BuildPromptSnapshot> = Vec::new();
     // 2026-06-20-002 plan U2: holds the (hat, prompt) pair from
     // the most-recent `build_prompt` in the current iteration,
@@ -642,10 +641,8 @@ fn run_scenario_with_snapshots(
         // 2026-06-21-002 plan U9: pass the workspace root so
         // the snapshot can resolve `.ralph/recovery.jsonl` for
         // the `rejection_log_contains_reason_code` predicate.
-        let snapshot = capture_state_snapshot(
-            event_loop.state(),
-            Some(temp_dir.path().to_path_buf()),
-        );
+        let snapshot =
+            capture_state_snapshot(event_loop.state(), Some(temp_dir.path().to_path_buf()));
         state_snapshots.push(snapshot);
         if let Some((hat, prompt)) = last_prompt_for_iter.take() {
             prompt_snapshots.push(BuildPromptSnapshot {
@@ -783,12 +780,11 @@ fn apply_yaml_hats(yaml: &ScenarioYaml, config: &mut RalphConfig) {
     if yaml.config.hats.is_null() {
         return;
     }
-    let hat_map: std::collections::HashMap<String, serde_yaml::Value> = match serde_yaml::from_value(
-        yaml.config.hats.clone(),
-    ) {
-        Ok(m) => m,
-        Err(_) => return,
-    };
+    let hat_map: std::collections::HashMap<String, serde_yaml::Value> =
+        match serde_yaml::from_value(yaml.config.hats.clone()) {
+            Ok(m) => m,
+            Err(_) => return,
+        };
     let mut hats = std::collections::HashMap::new();
     for (hat_id, mut hat_value) in hat_map {
         if let serde_yaml::Value::Mapping(ref mut map) = hat_value {
@@ -799,21 +795,15 @@ fn apply_yaml_hats(yaml: &ScenarioYaml, config: &mut RalphConfig) {
                 );
             }
         }
-        let hat_config: HatConfig = serde_yaml::from_value(hat_value).unwrap_or_else(|e| {
-            panic!("Failed to parse hat config for '{}': {}", hat_id, e)
-        });
+        let hat_config: HatConfig = serde_yaml::from_value(hat_value)
+            .unwrap_or_else(|e| panic!("Failed to parse hat config for '{}': {}", hat_id, e));
         hats.insert(hat_id, hat_config);
     }
     config.hats = hats;
 }
 
 fn run_scenario(yaml: ScenarioYaml) {
-    let backend = MockBackend::new(
-        yaml.mock_responses
-            .iter()
-            .map(|r| r.text.clone())
-            .collect(),
-    );
+    let backend = MockBackend::new(yaml.mock_responses.iter().map(|r| r.text.clone()).collect());
     let runner = ScenarioRunner::new(backend.clone());
 
     let mut config = RalphConfig::default();
@@ -976,8 +966,7 @@ fn test_hat_handoff_disabled_passthrough() {
 // flows through the macro-edge gate; queue.advance is exempt.
 #[test]
 fn test_hat_handoff_dual_publish_work_ready_only() {
-    let yaml =
-        load_scenario("tests/scenarios/hat_handoff/dual_publish_work_ready_only.yml");
+    let yaml = load_scenario("tests/scenarios/hat_handoff/dual_publish_work_ready_only.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -986,9 +975,8 @@ fn test_hat_handoff_dual_publish_work_ready_only() {
 // `absent_events` and `events` in seen_topics.
 #[test]
 fn test_hat_handoff_work_done_rejected_blocks_projection() {
-    let yaml = load_scenario(
-        "tests/scenarios/hat_handoff/work_done_rejected_blocks_projection.yml",
-    );
+    let yaml =
+        load_scenario("tests/scenarios/hat_handoff/work_done_rejected_blocks_projection.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -1464,7 +1452,10 @@ fn test_isolated_with_event_projection() {
     });
 
     // Verify projection file was created and contains expected events
-    let projection_path = temp_dir.path().join(".ralph").join("projected-events.jsonl");
+    let projection_path = temp_dir
+        .path()
+        .join(".ralph")
+        .join("projected-events.jsonl");
     assert!(
         projection_path.exists(),
         "{}: Expected projection file to exist at {:?}",
@@ -1551,8 +1542,7 @@ fn test_ce_executor_serial_review_scenario() {
 // surface for harness regressions.
 #[test]
 fn test_assert_state_harness_smoke() {
-    let yaml =
-        load_scenario("tests/scenarios/serial_lint/assert_state_harness_smoke.yaml");
+    let yaml = load_scenario("tests/scenarios/serial_lint/assert_state_harness_smoke.yaml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -1572,41 +1562,33 @@ fn test_assert_state_harness_smoke() {
 
 #[test]
 fn test_serial_lint_1_internal_source_bypass() {
-    let yaml = load_scenario(
-        "tests/scenarios/serial_lint/serial_lint_1_internal_source_bypass.yaml",
-    );
+    let yaml =
+        load_scenario("tests/scenarios/serial_lint/serial_lint_1_internal_source_bypass.yaml");
     run_workflow_guard_scenario(yaml);
 }
 
 #[test]
 fn test_serial_lint_2_rejection_digest() {
-    let yaml = load_scenario(
-        "tests/scenarios/serial_lint/serial_lint_2_rejection_digest.yaml",
-    );
+    let yaml = load_scenario("tests/scenarios/serial_lint/serial_lint_2_rejection_digest.yaml");
     run_workflow_guard_scenario(yaml);
 }
 
 #[test]
 fn test_serial_lint_3_steward_guidance_exempt() {
-    let yaml = load_scenario(
-        "tests/scenarios/serial_lint/serial_lint_3_steward_guidance_exempt.yaml",
-    );
+    let yaml =
+        load_scenario("tests/scenarios/serial_lint/serial_lint_3_steward_guidance_exempt.yaml");
     run_workflow_guard_scenario(yaml);
 }
 
 #[test]
 fn test_serial_lint_4_resume_hint_consumed() {
-    let yaml = load_scenario(
-        "tests/scenarios/serial_lint/serial_lint_4_resume_hint_consumed.yaml",
-    );
+    let yaml = load_scenario("tests/scenarios/serial_lint/serial_lint_4_resume_hint_consumed.yaml");
     run_workflow_guard_scenario(yaml);
 }
 
 #[test]
 fn test_serial_lint_5_fix_applied_dedup() {
-    let yaml = load_scenario(
-        "tests/scenarios/serial_lint/serial_lint_5_fix_applied_dedup.yaml",
-    );
+    let yaml = load_scenario("tests/scenarios/serial_lint/serial_lint_5_fix_applied_dedup.yaml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -1619,17 +1601,14 @@ fn test_serial_lint_5_fix_applied_dedup() {
 
 #[test]
 fn test_serial_lint_6_handoff_auto_prepare() {
-    let yaml = load_scenario(
-        "tests/scenarios/serial_lint/serial_lint_6_handoff_auto_prepare.yaml",
-    );
+    let yaml = load_scenario("tests/scenarios/serial_lint/serial_lint_6_handoff_auto_prepare.yaml");
     run_workflow_guard_scenario(yaml);
 }
 
 #[test]
 fn test_serial_lint_7_handoff_seeds_coverage() {
-    let yaml = load_scenario(
-        "tests/scenarios/serial_lint/serial_lint_7_handoff_seeds_coverage.yaml",
-    );
+    let yaml =
+        load_scenario("tests/scenarios/serial_lint/serial_lint_7_handoff_seeds_coverage.yaml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -1641,33 +1620,25 @@ fn test_serial_lint_7_handoff_seeds_coverage() {
 
 #[test]
 fn test_serial_lint_8_step_chain_replay() {
-    let yaml = load_scenario(
-        "tests/scenarios/serial_lint/serial_lint_8_step_chain_replay.yaml",
-    );
+    let yaml = load_scenario("tests/scenarios/serial_lint/serial_lint_8_step_chain_replay.yaml");
     run_workflow_guard_scenario(yaml);
 }
 
 #[test]
 fn test_serial_lint_9_timeout_fail_closed() {
-    let yaml = load_scenario(
-        "tests/scenarios/serial_lint/serial_lint_9_timeout_fail_closed.yaml",
-    );
+    let yaml = load_scenario("tests/scenarios/serial_lint/serial_lint_9_timeout_fail_closed.yaml");
     run_workflow_guard_scenario(yaml);
 }
 
 #[test]
 fn test_serial_lint_10_circuit_breaker() {
-    let yaml = load_scenario(
-        "tests/scenarios/serial_lint/serial_lint_10_circuit_breaker.yaml",
-    );
+    let yaml = load_scenario("tests/scenarios/serial_lint/serial_lint_10_circuit_breaker.yaml");
     run_workflow_guard_scenario(yaml);
 }
 
 #[test]
 fn test_serial_lint_11_isolated_unaffected() {
-    let yaml = load_scenario(
-        "tests/scenarios/serial_lint/serial_lint_11_isolated_unaffected.yaml",
-    );
+    let yaml = load_scenario("tests/scenarios/serial_lint/serial_lint_11_isolated_unaffected.yaml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -2521,12 +2492,14 @@ fn capture_state_snapshot(
     state: &ralph_core::event_loop::LoopState,
     workspace_root: Option<std::path::PathBuf>,
 ) -> LoopStateSnapshot {
-    let pending_lint_resume = state.pending_lint_resume.as_ref().map(|hint| {
-        PendingLintResumeSummary {
-            topic: hint.topic.clone(),
-            reason: hint.reason.clone(),
-        }
-    });
+    let pending_lint_resume =
+        state
+            .pending_lint_resume
+            .as_ref()
+            .map(|hint| PendingLintResumeSummary {
+                topic: hint.topic.clone(),
+                reason: hint.reason.clone(),
+            });
     let rejection_digest_entries = state
         .recent_rejection_digest
         .iter()
@@ -2648,13 +2621,7 @@ fn evaluate_assert_state(
             // asserts `.ralph/recovery.jsonl` carries at least
             // one record with the matching `reason_code`
             // prefix.
-            evaluate_rejection_log_contains_reason_code(
-                scenario_name,
-                idx,
-                at,
-                rl,
-                state_snap,
-            );
+            evaluate_rejection_log_contains_reason_code(scenario_name, idx, at, rl, state_snap);
         } else {
             panic!(
                 "{}: assert_state[{}] at_iteration={} has no predicate set \
@@ -2685,7 +2652,9 @@ fn evaluate_correction_block_present(
         !entries.is_empty(),
         "{}: assert_state[{}] correction_block_present at_iteration={} \
          expected at least one entry in state.prompt_context.correction_blocks, got empty",
-        scenario_name, assertion_idx, at
+        scenario_name,
+        assertion_idx,
+        at
     );
     let mut matched = entries.iter().filter(|c| {
         if let Some(ref prefix) = expected.reason_code_prefix {
@@ -2788,16 +2757,13 @@ fn evaluate_pending_lint_resume(
     expected: &PendingLintResumeYaml,
     snap: &LoopStateSnapshot,
 ) {
-    let actual = snap
-        .pending_lint_resume
-        .as_ref()
-        .unwrap_or_else(|| {
-            panic!(
-                "{}: assert_state[{}] pending_lint_resume at_iteration={} \
+    let actual = snap.pending_lint_resume.as_ref().unwrap_or_else(|| {
+        panic!(
+            "{}: assert_state[{}] pending_lint_resume at_iteration={} \
                  expected Some, got None (rejection did not seed the hint)",
-                scenario_name, assertion_idx, at
-            )
-        });
+            scenario_name, assertion_idx, at
+        )
+    });
     if let Some(ref topic) = expected.topic {
         assert_eq!(
             actual.topic, *topic,
@@ -2846,7 +2812,8 @@ fn evaluate_lint_circuit_breaker(
 ) {
     if let Some(want_tripped) = expected.tripped {
         assert_eq!(
-            snap.lint_circuit_breaker_tripped, want_tripped,
+            snap.lint_circuit_breaker_tripped,
+            want_tripped,
             "{}: assert_state[{}] lint_circuit_breaker.tripped at_iteration={} \
              expected {}, got {} (consecutive_engine_gate_rejections={})",
             scenario_name,
@@ -2877,7 +2844,9 @@ fn evaluate_rejection_digest_contains(
         );
     }
     if let Some(ref needle) = expected.contains_reason {
-        let hit = entries.iter().any(|e| e.last_message.contains(needle.as_str()));
+        let hit = entries
+            .iter()
+            .any(|e| e.last_message.contains(needle.as_str()));
         assert!(
             hit,
             "{}: assert_state[{}] rejection_digest_contains at_iteration={} \

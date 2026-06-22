@@ -466,9 +466,7 @@ fn u8_diagnose_from_ledger_renders_ledger_schema() {
     let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     // U8 schema (distinct from the session-level "1").
     assert_eq!(value["schema_version"], "u8-1");
-    let causes = value["root_causes"]
-        .as_array()
-        .expect("root_causes array");
+    let causes = value["root_causes"].as_array().expect("root_causes array");
     assert_eq!(causes.len(), 1);
     assert_eq!(causes[0]["reason_code"], "execution_contract:missing_field");
     assert_eq!(causes[0]["frequency"], 1);
@@ -536,9 +534,7 @@ fn u8_diagnose_default_prefers_ledger_view() {
     // U8 default: ledger view wins when the workspace has a
     // rejection log.
     assert_eq!(value["schema_version"], "u8-1");
-    let causes = value["root_causes"]
-        .as_array()
-        .expect("root_causes array");
+    let causes = value["root_causes"].as_array().expect("root_causes array");
     assert_eq!(causes.len(), 1);
     assert_eq!(causes[0]["reason_code"], "policy:missing_field");
     // `source` comes from the validation_stage_to_source mapping:

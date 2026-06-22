@@ -26,8 +26,8 @@ use std::path::Path;
 use ralph_proto::HatId;
 use tempfile::TempDir;
 
-use super::commit::{CommitDelta, TaskTransition};
-use super::ledger::{read_commit_log, HandoffAcceptedInputs, StateLedger, LEDGER_RELATIVE_PATH};
+use super::commit::{CommitDelta, CounterKind, TaskTransition};
+use super::ledger::{HandoffAcceptedInputs, LEDGER_RELATIVE_PATH, StateLedger, read_commit_log};
 use super::snapshot::LedgerSnapshot;
 use crate::hat_handoff::HAT_HANDOFF_DIR;
 use crate::task::Task;
@@ -58,10 +58,7 @@ fn commit_task_lifecycle_closed_updates_snapshot() {
     // the production route; tests go through the snapshot for
     // terseness).
     let task = Task::new("hello".to_string(), 1).with_key(Some("K1".to_string()));
-    ledger
-        .snapshot_mut()
-        .tasks
-        .push(task);
+    ledger.snapshot_mut().tasks.push(task);
 
     let commit = ledger
         .commit(
@@ -125,12 +122,15 @@ fn failed_commit_preserves_snapshot() {
 
     let commit = ledger.commit(
         CommitDelta::CounterChanged {
-            counter: "consecutive_failures".to_string(),
+            counter: CounterKind::ConsecutiveFailures,
             new_value: 7,
         },
         None,
     );
-    assert!(commit.is_err(), "commit must fail when the file path is a directory");
+    assert!(
+        commit.is_err(),
+        "commit must fail when the file path is a directory"
+    );
 
     // Snapshot is rolled back — the counter must be 0.
     assert_eq!(ledger.snapshot().consecutive_failures, 0);
@@ -138,11 +138,7 @@ fn failed_commit_preserves_snapshot() {
     assert!(ledger.commit_log().is_empty());
     // Sequence number did not advance.
     assert_eq!(
-        ledger
-            .commit_log()
-            .last()
-            .map(|c| c.sequence)
-            .unwrap_or(0),
+        ledger.commit_log().last().map(|c| c.sequence).unwrap_or(0),
         0
     );
 }
@@ -160,7 +156,7 @@ fn replay_from_disk_rebuilds_snapshot() {
     ledger
         .commit(
             CommitDelta::CounterChanged {
-                counter: "consecutive_failures".to_string(),
+                counter: CounterKind::ConsecutiveFailures,
                 new_value: 4,
             },
             None,
@@ -258,7 +254,7 @@ fn process_restart_recovers_full_state() {
     first
         .commit(
             CommitDelta::CounterChanged {
-                counter: "iteration".to_string(),
+                counter: CounterKind::Iteration,
                 new_value: 3,
             },
             None,
@@ -308,15 +304,8 @@ fn process_restart_recovers_full_state() {
     // only assert on the log-replayed fields here.
     let snap = second.snapshot();
     assert_eq!(snap.iteration, 3);
-    assert_eq!(
-        snap.progress.current_step.as_deref(),
-        Some("implement")
-    );
-    assert!(snap
-        .progress
-        .completed_steps
-        .iter()
-        .any(|s| s == "plan"));
+    assert_eq!(snap.progress.current_step.as_deref(), Some("implement"));
+    assert!(snap.progress.completed_steps.iter().any(|s| s == "plan"));
     assert_eq!(snap.rejection_retry_counts.get("scope").copied(), Some(1));
 }
 
@@ -335,7 +324,7 @@ fn replay_from_disk_reports_corruption() {
     ledger
         .commit(
             CommitDelta::CounterChanged {
-                counter: "consecutive_failures".to_string(),
+                counter: CounterKind::ConsecutiveFailures,
                 new_value: 1,
             },
             None,
@@ -396,9 +385,7 @@ fn fix10_replay_restores_iteration_from_commit_log() {
     // non-counter delta so the only signal the replay path sees
     // is `commit.iteration`.
     for i in 1..=5u32 {
-        ledger
-            .snapshot_mut()
-            .iteration = i;
+        ledger.snapshot_mut().iteration = i;
         ledger
             .commit(
                 CommitDelta::SeenTopic {
@@ -487,7 +474,7 @@ fn fix1_persist_is_atomic_after_many_commits() {
         ledger
             .commit(
                 CommitDelta::CounterChanged {
-                    counter: "consecutive_failures".to_string(),
+                    counter: CounterKind::ConsecutiveFailures,
                     new_value: i as i64,
                 },
                 None,
@@ -521,7 +508,7 @@ fn fix1_replay_reports_partial_line_as_parse_error_not_panic() {
     ledger
         .commit(
             CommitDelta::CounterChanged {
-                counter: "consecutive_failures".to_string(),
+                counter: CounterKind::ConsecutiveFailures,
                 new_value: 1,
             },
             None,
@@ -560,7 +547,7 @@ fn fix1_truncate_after_keeps_first_n_lines() {
     ledger
         .commit(
             CommitDelta::CounterChanged {
-                counter: "consecutive_failures".to_string(),
+                counter: CounterKind::ConsecutiveFailures,
                 new_value: 1,
             },
             None,
@@ -573,7 +560,8 @@ fn fix1_truncate_after_keeps_first_n_lines() {
         .append(true)
         .open(path)
         .expect("open");
-    f.write_all(b"this is not valid json\n").expect("write junk");
+    f.write_all(b"this is not valid json\n")
+        .expect("write junk");
     drop(f);
 
     // Truncate to 1 line.
@@ -598,7 +586,7 @@ fn feature_disabled_commit_is_noop() {
     let commit = ledger
         .commit(
             CommitDelta::CounterChanged {
-                counter: "consecutive_failures".to_string(),
+                counter: CounterKind::ConsecutiveFailures,
                 new_value: 42,
             },
             Some("work.done".to_string()),
@@ -616,7 +604,10 @@ fn feature_disabled_commit_is_noop() {
     assert!(ledger.commit_log().is_empty());
     // No on-disk file was created.
     let on_disk = dir.path().join(LEDGER_RELATIVE_PATH);
-    assert!(!on_disk.exists(), "feature off must not create ledger.jsonl");
+    assert!(
+        !on_disk.exists(),
+        "feature off must not create ledger.jsonl"
+    );
 }
 
 #[test]
@@ -712,7 +703,7 @@ fn apply_delta_is_exhaustive() {
         new_phase: 2,
     });
     snap.apply_delta(&CommitDelta::CounterChanged {
-        counter: "consecutive_failures".to_string(),
+        counter: CounterKind::ConsecutiveFailures,
         new_value: 1,
     });
     snap.apply_delta(&CommitDelta::SeenTopic {
@@ -722,7 +713,6 @@ fn apply_delta_is_exhaustive() {
     snap.apply_delta(&CommitDelta::CompletionHonored);
     snap.apply_delta(&CommitDelta::CancellationRequested);
     snap.apply_delta(&CommitDelta::StewardWoken);
-    snap.apply_delta(&CommitDelta::SnapshotReset);
 
     snap.apply_delta(&CommitDelta::HatActivationCounted {
         hat: HatId::from("h"),
@@ -803,7 +793,7 @@ fn counter_change_updates_each_field() {
 
     for (name, value) in counters {
         snap.apply_delta(&CommitDelta::CounterChanged {
-            counter: (*name).to_string(),
+            counter: CounterKind::from_str_lossy(name),
             new_value: *value,
         });
     }
@@ -828,7 +818,7 @@ fn counter_change_updates_each_field() {
 fn counter_change_negative_clamps_to_zero() {
     let mut snap = LedgerSnapshot::cold_start();
     snap.apply_delta(&CommitDelta::CounterChanged {
-        counter: "consecutive_failures".to_string(),
+        counter: CounterKind::ConsecutiveFailures,
         new_value: -5,
     });
     assert_eq!(snap.consecutive_failures, 0);
@@ -875,7 +865,10 @@ fn ledger_path_is_canonical() {
     let ledger = StateLedger::new(dir.path(), true);
     let expected = dir.path().join(LEDGER_RELATIVE_PATH);
     assert_eq!(ledger.ledger_path(), expected);
-    assert_eq!(Path::new(LEDGER_RELATIVE_PATH), Path::new(".ralph/ledger.jsonl"));
+    assert_eq!(
+        Path::new(LEDGER_RELATIVE_PATH),
+        Path::new(".ralph/ledger.jsonl")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -921,7 +914,12 @@ fn seen_topic_dedup() {
             .expect("commit");
     }
     assert_eq!(
-        ledger.snapshot().seen_topics.iter().filter(|t| *t == "work.ready").count(),
+        ledger
+            .snapshot()
+            .seen_topics
+            .iter()
+            .filter(|t| *t == "work.ready")
+            .count(),
         1
     );
 }
@@ -960,10 +958,17 @@ fn u5_commit_handoff_artifact_auto_generates_when_missing() {
     assert!(handoff_path.starts_with(HAT_HANDOFF_DIR));
     // delta 落 commit log
     assert_eq!(outcome.commit.sequence, 1);
-    if let CommitDelta::HandoffAccepted { handoff_path: logged, .. } = &outcome.commit.delta {
+    if let CommitDelta::HandoffAccepted {
+        handoff_path: logged,
+        ..
+    } = &outcome.commit.delta
+    {
         assert_eq!(logged.as_deref(), Some(handoff_path.as_str()));
     } else {
-        panic!("expected HandoffAccepted delta, got: {:?}", outcome.commit.delta);
+        panic!(
+            "expected HandoffAccepted delta, got: {:?}",
+            outcome.commit.delta
+        );
     }
     // 文件已写盘
     let abs = ledger.workspace().join(&handoff_path);

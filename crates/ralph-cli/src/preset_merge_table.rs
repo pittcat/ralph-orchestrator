@@ -19,7 +19,10 @@
 // are disjoint under `event_loop.*`, so order is irrelevant;
 // preserve the alphabetical-ish layout for readability.
 pub const SSOT_SECTION_TARGETS: &[(&str, &[&str])] = &[
-    ("execution_contracts", &["event_loop", "execution_contracts"]),
+    (
+        "execution_contracts",
+        &["event_loop", "execution_contracts"],
+    ),
     ("verdict_gate", &["event_loop", "verdict_gate"]),
     ("workflow_contract", &["event_loop", "workflow_contract"]),
     ("state_projection", &["event_loop", "state_projection"]),

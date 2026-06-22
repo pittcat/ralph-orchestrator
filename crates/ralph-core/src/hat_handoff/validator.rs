@@ -17,12 +17,7 @@ use std::fmt;
 use std::path::Path;
 
 /// 五段标题在文件中的固定顺序。
-pub const SECTION_HEADERS: &[&str] = &[
-    "## context",
-    "## changed",
-    "## verify",
-    "## next",
-];
+pub const SECTION_HEADERS: &[&str] = &["## context", "## changed", "## verify", "## next"];
 
 /// `## next` 必填字段。
 pub const NEXT_REQUIRED_FIELDS: &[&str] = &["**动作**:", "**阻塞**:"];
@@ -283,11 +278,8 @@ pub fn validate_artifact(
     // 以 `..` 逃逸,resolve 后会落到 workspace 之外,读盘自然失败
     // — 不会被滥用为越权读。
     let abs = workspace.join(rel);
-    let content = std::fs::read_to_string(&abs).map_err(|e| {
-        format!(
-            "validate_artifact: failed to read `{handoff_path}`: {e}"
-        )
-    })?;
+    let content = std::fs::read_to_string(&abs)
+        .map_err(|e| format!("validate_artifact: failed to read `{handoff_path}`: {e}"))?;
     validate(&content).map_err(|v| v.to_string())?;
     // H1 owner 校验:形如 `# Handoff: <from> → <to>`。
     let expected_h1 = format!("# Handoff: {expected_from} → {expected_to}");

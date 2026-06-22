@@ -353,7 +353,10 @@ fn merge_preset_with_schema(
     //    runtime test `p2_6_ssot_section_targets_match_build_rs`
     //    in `presets.rs` catches drift at `cargo test` time.
     let section_targets: &[(&str, &[&str])] = &[
-        ("execution_contracts", &["event_loop", "execution_contracts"]),
+        (
+            "execution_contracts",
+            &["event_loop", "execution_contracts"],
+        ),
         ("verdict_gate", &["event_loop", "verdict_gate"]),
         ("workflow_contract", &["event_loop", "workflow_contract"]),
         ("state_projection", &["event_loop", "state_projection"]),

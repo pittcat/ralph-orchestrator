@@ -34,9 +34,7 @@
 
 use ralph_proto::HatId;
 
-use crate::correction::{
-    self, CorrectionContext, PromptContext, ResumeContext,
-};
+use crate::correction::{self, CorrectionContext, PromptContext, ResumeContext};
 
 use super::common::*;
 
@@ -53,13 +51,7 @@ fn u7a_recoverable_rejection_writes_correction_and_log() {
     let temp = tempfile::tempdir().unwrap();
     let rejection = rejection_with_origin("executor", "work.done", "missing field plan_path");
     let mut pc = PromptContext::default();
-    let ctx = correction::emit_correction_context(
-        None,
-        &rejection,
-        1,
-        Some(temp.path()),
-        &mut pc,
-    );
+    let ctx = correction::emit_correction_context(None, &rejection, 1, Some(temp.path()), &mut pc);
     assert_eq!(pc.correction_blocks.len(), 1);
     assert_eq!(pc.correction_blocks[0].reason_code, ctx.reason_code);
     assert!(!ctx.needs_escalation);
@@ -163,12 +155,8 @@ fn u7a_pseudo_hat_business_violation_does_not_publish_task_resume() {
 #[test]
 fn u7a_rejection_log_line_shape_is_stable() {
     let temp = tempfile::tempdir().unwrap();
-    let record = crate::state::RejectionRecord::new(
-        "executor",
-        "work.done",
-        "policy:missing_field",
-        2,
-    );
+    let record =
+        crate::state::RejectionRecord::new("executor", "work.done", "policy:missing_field", 2);
     crate::state::append_rejection(temp.path(), &record).unwrap();
     let path = crate::state::recovery_log_path(temp.path());
     let content = std::fs::read_to_string(&path).unwrap();
@@ -200,8 +188,12 @@ fn u7b_resume_block_renders_loop_resume_topic_constants() {
     // Topic constants expose both legacy and new control topics.
     assert_eq!(ralph_proto::LOOP_RESUME, "loop.resume");
     assert_eq!(ralph_proto::TASK_RESUME, "task.resume");
-    assert!(ralph_proto::is_orchestrator_control(ralph_proto::LOOP_RESUME));
-    assert!(ralph_proto::is_orchestrator_control(ralph_proto::TASK_RESUME));
+    assert!(ralph_proto::is_orchestrator_control(
+        ralph_proto::LOOP_RESUME
+    ));
+    assert!(ralph_proto::is_orchestrator_control(
+        ralph_proto::TASK_RESUME
+    ));
     // Non-control topics are not matched.
     assert!(!ralph_proto::is_orchestrator_control("work.done"));
 }
@@ -214,8 +206,10 @@ fn u7b_resume_block_renders_loop_resume_topic_constants() {
 #[test]
 fn u7b_resume_block_preserves_multiple_entries() {
     let mut pc = PromptContext::default();
-    pc.resume_blocks.push(ResumeContext::new("loop-1", 0, "", 5, ""));
-    pc.resume_blocks.push(ResumeContext::new("loop-2", 1, "1/5", 10, "scout"));
+    pc.resume_blocks
+        .push(ResumeContext::new("loop-1", 0, "", 5, ""));
+    pc.resume_blocks
+        .push(ResumeContext::new("loop-2", 1, "1/5", 10, "scout"));
     let block = pc.render_resume_block();
     assert!(block.contains("Loop ID: loop-1"));
     assert!(block.contains("Loop ID: loop-2"));
@@ -271,9 +265,5 @@ fn rejection_with_origin(
     topic: &str,
     violation: &str,
 ) -> crate::event_loop::rejection::Rejection {
-    crate::event_loop::rejection::Rejection::from_origin(
-        Some(hat.into()),
-        topic.into(),
-        violation,
-    )
+    crate::event_loop::rejection::Rejection::from_origin(Some(hat.into()), topic.into(), violation)
 }

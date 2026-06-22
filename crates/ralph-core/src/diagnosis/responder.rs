@@ -170,10 +170,7 @@ impl RecoveryAction {
     /// R11 tripwire (`needs_escalation`) flips at the
     /// default 3-attempt threshold.
     pub fn to_correction_context(&self) -> crate::correction::CorrectionContext {
-        let reason_code = format!(
-            "recovery:{}",
-            extract_reason_code(&self.retry_key)
-        );
+        let reason_code = format!("recovery:{}", extract_reason_code(&self.retry_key));
         let escalation_threshold = 3;
         crate::correction::CorrectionContext {
             reason_code,
@@ -184,10 +181,7 @@ impl RecoveryAction {
             retry_count: self.attempt,
             escalation_threshold,
             needs_escalation: self.attempt >= escalation_threshold,
-            last_message: format!(
-                "drift hard escalation: retry_key={}",
-                self.retry_key
-            ),
+            last_message: format!("drift hard escalation: retry_key={}", self.retry_key),
             expected_payload_template: String::new(),
             allowed_topics: Vec::new(),
             required_fields: Vec::new(),
@@ -612,7 +606,10 @@ impl RecoveryResponder {
         // R7: a finding cannot self-heal in the iteration it was
         // recorded. The drift snapshot and the next iteration's
         // accepted events must come from different iterations.
-        if state.last_iteration.is_some_and(|li| current_iteration <= li) {
+        if state
+            .last_iteration
+            .is_some_and(|li| current_iteration <= li)
+        {
             // We still need to set the outcome so the engine's
             // transition detector does not flap. Pending is the
             // most informative default — the finding has not yet

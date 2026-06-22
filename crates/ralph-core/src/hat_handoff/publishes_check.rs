@@ -19,7 +19,10 @@ impl std::fmt::Display for TopicViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::IllegalEmitTopic { topic, allowed } => {
-                write!(f, "next action line references topic `{topic}` but downstream hat publishes only {allowed:?}")
+                write!(
+                    f,
+                    "next action line references topic `{topic}` but downstream hat publishes only {allowed:?}"
+                )
             }
         }
     }
@@ -114,8 +117,7 @@ mod tests {
     fn executor_cannot_emit_queue_advance() {
         // executor downstream publishes 不含 queue.advance → 拒收。
         let downstream = vec!["work.done".to_string(), "report.done".to_string()];
-        let err =
-            validate("emit `queue.advance` after summary", &downstream).unwrap_err();
+        let err = validate("emit `queue.advance` after summary", &downstream).unwrap_err();
         assert_eq!(
             err,
             TopicViolation::IllegalEmitTopic {
@@ -127,10 +129,7 @@ mod tests {
 
     #[test]
     fn review_coordinator_can_emit_review_wave_ready() {
-        let downstream = vec![
-            "review.wave.ready".to_string(),
-            "report.done".to_string(),
-        ];
+        let downstream = vec!["review.wave.ready".to_string(), "report.done".to_string()];
         validate("emit `review.wave.ready`", &downstream).unwrap();
     }
 

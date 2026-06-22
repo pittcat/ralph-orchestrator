@@ -316,8 +316,7 @@ fn test_source_target_index_is_btreemap_with_sorted_vec_values() {
 
     // 3) target_hats_by_topic is also sorted.
     let target_hats = target_hats_by_topic.get("work.start").unwrap();
-    let mut expected_target: Vec<String> =
-        target_hats.iter().cloned().collect::<Vec<_>>().clone();
+    let mut expected_target: Vec<String> = target_hats.iter().cloned().collect::<Vec<_>>().clone();
     expected_target.sort();
     assert_eq!(target_hats, &expected_target);
 }

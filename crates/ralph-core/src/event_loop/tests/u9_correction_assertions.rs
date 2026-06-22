@@ -28,17 +28,11 @@
 //! continue to pass without any of these new assertions.
 
 use super::*;
-use crate::correction::{
-    self, CorrectionContext, PromptContext, ResumeContext,
-};
+use crate::correction::{self, CorrectionContext, PromptContext, ResumeContext};
 use crate::event_loop::rejection::Rejection;
 
 /// Helper: build a deterministic origin rejection.
-fn rejection_with_origin(
-    hat: &str,
-    topic: &str,
-    violation: &str,
-) -> Rejection {
+fn rejection_with_origin(hat: &str, topic: &str, violation: &str) -> Rejection {
     Rejection::from_origin(Some(hat.into()), topic.into(), violation)
 }
 
@@ -162,12 +156,7 @@ fn u9_prompt_context_renders_correction_and_resume_headings() {
 fn u9_correction_retry_key_matches_rejection_shape() {
     let r = rejection_with_origin("executor", "work.done", "missing plan_path");
     let stage = r.stage;
-    let derived = correction::derive_retry_key(
-        stage,
-        "executor",
-        "work.done",
-        &r.violation,
-    );
+    let derived = correction::derive_retry_key(stage, "executor", "work.done", &r.violation);
     assert_eq!(derived, r.retry_key);
 }
 
@@ -306,8 +295,12 @@ fn u9_drift_recovery_action_converts_to_correction_context() {
 fn u9_loop_resume_topic_constant_is_stable() {
     assert_eq!(ralph_proto::LOOP_RESUME, "loop.resume");
     assert_eq!(ralph_proto::TASK_RESUME, "task.resume");
-    assert!(ralph_proto::is_orchestrator_control(ralph_proto::LOOP_RESUME));
-    assert!(ralph_proto::is_orchestrator_control(ralph_proto::TASK_RESUME));
+    assert!(ralph_proto::is_orchestrator_control(
+        ralph_proto::LOOP_RESUME
+    ));
+    assert!(ralph_proto::is_orchestrator_control(
+        ralph_proto::TASK_RESUME
+    ));
     // Sanity: business topics are NOT control topics.
     assert!(!ralph_proto::is_orchestrator_control("work.done"));
 }

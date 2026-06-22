@@ -130,8 +130,15 @@ impl ProtocolView {
     /// `HandoffIndex`. The macro-edge set falls back to the
     /// explicit `macro_topics` only — useful for `--schema`
     /// (R6) where the full graph is not relevant.
+    ///
+    /// **P2-#6 (002-adversarial-review)**: this entry point no
+    /// longer reads the `UNIFIED_PROTOCOL_VIEW` env var. Tests
+    /// using this helper stay env-independent; production
+    /// callers that need the env-gated behaviour must use
+    /// [`Self::from_event_loop_with_index_for_env`] so the
+    /// env read happens at one well-known call site.
     pub fn from_event_loop(config: &EventLoopConfig) -> Self {
-        Self::from_event_loop_with_index(config, None)
+        Self::from_event_loop_with_index_and_feature(config, None, false)
     }
 
     /// Build a view from a loaded `EventLoopConfig` and an
@@ -143,7 +150,34 @@ impl ProtocolView {
     /// CLI emit (R22) and the runtime `process_events_from_jsonl`
     /// both pass `Some(&HandoffIndex)` so the two layers cannot
     /// drift; tests and `--schema` pass `None`.
+    ///
+    /// **P2-#6 (002-adversarial-review)**: this entry point no
+    /// longer reads the `UNIFIED_PROTOCOL_VIEW` env var.
+    /// Reading the env here made the test suite non-deterministic
+    /// under `cargo nextest` (process-per-test cannot isolate
+    /// `std::env` because the OS env is inherited at process
+    /// start, and a parallel test that *does* call `set_var`
+    /// races with this reader). The flag now defaults to
+    /// `false`; callers that need the env-gated behaviour must
+    /// go through [`Self::from_event_loop_with_index_and_feature`]
+    /// (the production `LoopRunner` does) or
+    /// [`Self::from_event_loop_with_index_for_env`] (a thin
+    /// wrapper that reads the env at a single, well-known call
+    /// site).
     pub fn from_event_loop_with_index(
+        config: &EventLoopConfig,
+        index: Option<&HandoffIndex>,
+    ) -> Self {
+        Self::from_event_loop_with_index_and_feature(config, index, false)
+    }
+
+    /// Build a view with the `UNIFIED_PROTOCOL_VIEW` env var
+    /// read at the call site. Production-only — tests must not
+    /// use this helper because the env is process-global and
+    /// cannot be reset safely across `cargo nextest` workers.
+    /// The CLI / runtime invoke this *once* at startup so the
+    /// rest of the pipeline can stay env-free.
+    pub fn from_event_loop_with_index_for_env(
         config: &EventLoopConfig,
         index: Option<&HandoffIndex>,
     ) -> Self {
@@ -192,8 +226,11 @@ impl ProtocolView {
         // P2-4: SHA-256 (stable across Rust versions). The previous
         // `DefaultHasher` was Rust-version-dependent and produced
         // false-positive drift warnings after `cargo update`.
-        let protocol_hash =
-            compute_protocol_hash(&effective_required_fields, &hat_handoff, &macro_edges_resolved);
+        let protocol_hash = compute_protocol_hash(
+            &effective_required_fields,
+            &hat_handoff,
+            &macro_edges_resolved,
+        );
 
         Self {
             effective_required_fields,
@@ -455,16 +492,17 @@ fn compute_effective_required_fields(
 ) -> HashMap<String, HashSet<String>> {
     let mut out: HashMap<String, HashSet<String>> = HashMap::new();
     for (topic, schema) in schemas {
-        out.insert(topic.clone(), schema.required_fields.iter().cloned().collect());
+        out.insert(
+            topic.clone(),
+            schema.required_fields.iter().cloned().collect(),
+        );
     }
     if let Some(contracts) = contracts {
         if contracts.enabled {
             for (topic, rule) in &contracts.rules {
                 let extras = extra_required_fields_from_rule(rule);
                 if !extras.is_empty() {
-                    out.entry(topic.clone())
-                        .or_default()
-                        .extend(extras);
+                    out.entry(topic.clone()).or_default().extend(extras);
                 }
             }
         }
@@ -509,7 +547,13 @@ fn compute_protocol_hash(
     hasher.update(b"|hat_handoff|");
     hasher.update(hat_handoff.enabled.to_string().as_bytes());
     hasher.update(hat_handoff.artifact.required_sections.to_le_bytes());
-    hasher.update(hat_handoff.artifact.require_next_marker.to_string().as_bytes());
+    hasher.update(
+        hat_handoff
+            .artifact
+            .require_next_marker
+            .to_string()
+            .as_bytes(),
+    );
     hasher.update(
         hat_handoff
             .linter
@@ -673,7 +717,9 @@ event_loop:
         let index = HandoffIndex::from_config(&cfg);
         // Mark work.ready as exempt.
         let mut view = ProtocolView::from_event_loop_with_index(&cfg.event_loop, Some(&index));
-        view.hat_handoff.exempt_topics.push("work.ready".to_string());
+        view.hat_handoff
+            .exempt_topics
+            .push("work.ready".to_string());
         assert!(
             !view.is_macro_edge_from("work.ready", Some("plan-gate")),
             "exempt topics are never macro edges"
@@ -723,7 +769,10 @@ event_loop:
         let cfg = minimal_config();
         let v1 = ProtocolView::from_event_loop(&cfg.event_loop);
         let mut cfg2 = cfg.clone();
-        cfg2.event_loop.hat_handoff.linter.auto_prepare_on_macro_edge = true;
+        cfg2.event_loop
+            .hat_handoff
+            .linter
+            .auto_prepare_on_macro_edge = true;
         let v2 = ProtocolView::from_event_loop(&cfg2.event_loop);
         assert_ne!(
             v1.protocol_hash, v2.protocol_hash,
@@ -789,9 +838,18 @@ event_loop:
             crate::hat_handoff::macro_edges::MacroEdge::Required
         );
 
-        assert!(!layer1, "U3 happy path: exempt topic is not a macro edge (layer 1)");
-        assert!(!layer2, "U3 happy path: exempt topic is not a macro edge (layer 2)");
-        assert!(!layer3, "U3 happy path: exempt topic is not a macro edge (layer 3)");
+        assert!(
+            !layer1,
+            "U3 happy path: exempt topic is not a macro edge (layer 1)"
+        );
+        assert!(
+            !layer2,
+            "U3 happy path: exempt topic is not a macro edge (layer 2)"
+        );
+        assert!(
+            !layer3,
+            "U3 happy path: exempt topic is not a macro edge (layer 3)"
+        );
     }
 
     /// KTD-2: `queue.advance` 拓扑上是 plan-gate 自环

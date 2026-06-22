@@ -178,9 +178,6 @@ fn write_progress(path: &Path, snap: &ProgressSnapshot) -> Result<(), String> {
 /// [`super::StateProjector::project_ledger_snapshot`] can
 /// re-emit the progress file from a [`crate::state::LedgerSnapshot`]
 /// without going through the event-driven path.
-pub(crate) fn write_progress_external(
-    path: &Path,
-    snap: &ProgressSnapshot,
-) -> Result<(), String> {
+pub(crate) fn write_progress_external(path: &Path, snap: &ProgressSnapshot) -> Result<(), String> {
     write_progress(path, snap)
 }

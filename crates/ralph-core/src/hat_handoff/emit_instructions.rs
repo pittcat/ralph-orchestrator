@@ -93,9 +93,7 @@ pub fn build_emit_instructions(
     // 让 agent 看到 emit 后会被如何处理(诊断事件 + tracing)以及失败后
     // 还能从 `recovery.jsonl` / `ralph diagnose` 读到结构化 reason_code。
     lines.push(String::new());
-    lines.push(
-        "### Failure diagnostics (U4)".to_string(),
-    );
+    lines.push("### Failure diagnostics (U4)".to_string());
     lines.push(
         "- Success path: prompt 中会 prepend `## HAT HANDOFF` 块,并在 `ralph::hat_handoff` tracing target 记录 `injected ## HAT HANDOFF block into prompt`。"
             .to_string(),
@@ -165,7 +163,15 @@ hats:
         handoff_config.enabled = false;
         let index = HandoffIndex::from_config(&config);
         let h = hat("plan-gate", &["work.ready"]);
-        assert!(build_emit_instructions(&h, &handoff_config, &config.event_loop.execution_mode, &index).is_none());
+        assert!(
+            build_emit_instructions(
+                &h,
+                &handoff_config,
+                &config.event_loop.execution_mode,
+                &index
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -175,7 +181,15 @@ hats:
         coord_config.event_loop.execution_mode = HatExecutionMode::Coordinator;
         let index = HandoffIndex::from_config(&coord_config);
         let h = hat("plan-gate", &["work.ready"]);
-        assert!(build_emit_instructions(&h, &handoff_config, &coord_config.event_loop.execution_mode, &index).is_none());
+        assert!(
+            build_emit_instructions(
+                &h,
+                &handoff_config,
+                &coord_config.event_loop.execution_mode,
+                &index
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -183,10 +197,18 @@ hats:
         let (config, handoff_config) = isolated_config_with_hats();
         let index = HandoffIndex::from_config(&config);
         let h = hat("plan-gate", &["work.ready", "queue.advance"]);
-        let text = build_emit_instructions(&h, &handoff_config, &config.event_loop.execution_mode, &index).unwrap();
+        let text = build_emit_instructions(
+            &h,
+            &handoff_config,
+            &config.event_loop.execution_mode,
+            &index,
+        )
+        .unwrap();
         assert!(text.contains("## HAT HANDOFF EMIT REQUIREMENTS"));
         assert!(text.contains("`work.ready` (→ executor)"));
-        assert!(text.contains("ralph tools handoff prepare --from plan-gate --to executor --topic work.ready"));
+        assert!(text.contains(
+            "ralph tools handoff prepare --from plan-gate --to executor --topic work.ready"
+        ));
         assert!(!text.contains("queue.advance"));
     }
 
@@ -195,9 +217,17 @@ hats:
         let (config, handoff_config) = isolated_config_with_hats();
         let index = HandoffIndex::from_config(&config);
         let h = hat("executor", &["work.done"]);
-        let text = build_emit_instructions(&h, &handoff_config, &config.event_loop.execution_mode, &index).unwrap();
+        let text = build_emit_instructions(
+            &h,
+            &handoff_config,
+            &config.event_loop.execution_mode,
+            &index,
+        )
+        .unwrap();
         assert!(text.contains("`work.done` (→ review-coordinator)"));
-        assert!(text.contains("ralph tools handoff prepare --from executor --to review-coordinator --topic work.done"));
+        assert!(text.contains(
+            "ralph tools handoff prepare --from executor --to review-coordinator --topic work.done"
+        ));
     }
 
     #[test]
@@ -206,7 +236,15 @@ hats:
         let index = HandoffIndex::from_config(&config);
         // dimension-reviewer 只发微观边（默认豁免），但这里用自定义 hat 演示无宏观边。
         let h = hat("observer", &["debug.log"]);
-        assert!(build_emit_instructions(&h, &handoff_config, &config.event_loop.execution_mode, &index).is_none());
+        assert!(
+            build_emit_instructions(
+                &h,
+                &handoff_config,
+                &config.event_loop.execution_mode,
+                &index
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -214,7 +252,13 @@ hats:
         let (config, handoff_config) = isolated_config_with_hats();
         let index = HandoffIndex::from_config(&config);
         let h = hat("plan-gate", &["work.ready"]);
-        let text = build_emit_instructions(&h, &handoff_config, &config.event_loop.execution_mode, &index).unwrap();
+        let text = build_emit_instructions(
+            &h,
+            &handoff_config,
+            &config.event_loop.execution_mode,
+            &index,
+        )
+        .unwrap();
         assert!(text.contains("## context / ## changed / ## verify / ## next / ## notes"));
         assert!(text.contains("**动作**: ..."));
         assert!(text.contains("**阻塞**: ..."));
@@ -227,7 +271,13 @@ hats:
         let (config, handoff_config) = isolated_config_with_hats();
         let index = HandoffIndex::from_config(&config);
         let h = hat("plan-gate", &["work.ready"]);
-        let text = build_emit_instructions(&h, &handoff_config, &config.event_loop.execution_mode, &index).unwrap();
+        let text = build_emit_instructions(
+            &h,
+            &handoff_config,
+            &config.event_loop.execution_mode,
+            &index,
+        )
+        .unwrap();
         assert!(text.contains("### Failure diagnostics (U4)"));
         assert!(text.contains("event.hat_handoff.inject_failed"));
         assert!(text.contains("hat_handoff_missing_path"));

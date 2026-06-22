@@ -113,11 +113,7 @@ impl LintResumeHint {
     /// Preferred entry point for callers that already have a
     /// structured rejection — the routing target is decided by
     /// the kind, not by string matching on the message.
-    pub fn from_typed_rejection(
-        topic: &str,
-        kind: RejectionKind,
-        message: &str,
-    ) -> Self {
+    pub fn from_typed_rejection(topic: &str, kind: RejectionKind, message: &str) -> Self {
         let class = kind.to_lint_class();
         let target = LintResumeTarget::from_class(&class);
         Self {
@@ -171,7 +167,8 @@ mod tests {
 
     #[test]
     fn artifact_routes_to_source() {
-        let hint = LintResumeHint::from_reason("review.passed", "## next marker missing in artifact");
+        let hint =
+            LintResumeHint::from_reason("review.passed", "## next marker missing in artifact");
         assert_eq!(hint.class, LintFailureClass::HandoffArtifact);
         assert_eq!(hint.target, LintResumeTarget::SourceHat);
     }

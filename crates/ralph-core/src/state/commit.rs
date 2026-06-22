@@ -96,9 +96,7 @@ pub enum CommitDelta {
     /// inside the event-batch path; the ledger path needs an
     /// explicit delta so `replay_from_disk` can rebuild the same
     /// state from the commit log alone.
-    TaskInserted {
-        task: crate::task::Task,
-    },
+    TaskInserted { task: crate::task::Task },
 
     /// Progress marker update. The `step` is appended to
     /// `LedgerSnapshot::progress.completed_steps` (idempotent).
@@ -149,11 +147,16 @@ pub enum CommitDelta {
 
     /// Generic counter mutation. Used for all `u32` / `i64` /
     /// `f64` scalar fields in `LedgerSnapshot` that do not warrant
-    /// a dedicated variant. The `counter` key is the field name
+    /// a dedicated variant. The `counter` is the field name
     /// in the snapshot (e.g. `"consecutive_failures"`,
-    /// `"cumulative_cost"`).
+    /// `"cumulative_cost"`); the runtime uses [`CounterKind`] so
+    /// callers cannot fat-finger a counter name. The on-disk
+    /// representation is still a snake_case string (one-per-line
+    /// in `ledger.jsonl`) so the wire format is unchanged across
+    /// the U1→U1.1 migration; only the Rust API becomes
+    /// type-safe.
     CounterChanged {
-        counter: String,
+        counter: CounterKind,
         new_value: i64,
     },
 
@@ -173,16 +176,6 @@ pub enum CommitDelta {
     /// The progress-steward hat was woken this turn.
     StewardWoken,
 
-    /// A coarse-grained `SnapshotReset` marker emitted on cold
-    /// start (no data; just an anchor for log inspection).
-    ///
-    /// Not currently produced by the runtime; reserved for U3
-    /// migration where the legacy `tasks.jsonl` will be replayed
-    /// to seed the ledger and the resulting commits will be
-    /// folded into a single `SnapshotReset` for forensic
-    /// accounting.
-    SnapshotReset,
-
     // ---- HashMap-shaped state: serialized as deltas on top of an
     // always-empty default snapshot. The replay loop applies the
     // delta on top of the running snapshot.
@@ -193,10 +186,7 @@ pub enum CommitDelta {
     HatExhausted { hat: HatId },
 
     /// Update a per-rejection-key last-iteration dedup entry.
-    RejectionLastIteration {
-        key: String,
-        iteration: u32,
-    },
+    RejectionLastIteration { key: String, iteration: u32 },
 
     /// Increment a per-stall recovery counter.
     StallRecoveryCounted { key: String, new_count: u32 },
@@ -229,10 +219,7 @@ pub enum CommitDelta {
     },
 
     /// FlowLifecycle registry mutation.
-    FlowLifecycleUpdated {
-        flow_unit_id: String,
-        phase: String,
-    },
+    FlowLifecycleUpdated { flow_unit_id: String, phase: String },
 
     /// `recent_rejection_digest` mutation. Carries the full
     /// entry (the digest is BTreeMap-shaped with at most 5 keys,
@@ -261,4 +248,126 @@ pub enum TaskTransition {
     Failed,
     /// Task was reopened (transient failure → retry).
     Reopened,
+}
+
+/// Type-safe handle on a [`CommitDelta::CounterChanged`] target
+/// field.
+///
+/// Each variant corresponds 1:1 to a counter on
+/// [`crate::state::snapshot::LedgerSnapshot`]. The on-disk wire
+/// format is the snake_case variant name (one string per
+/// commit), so old log files keep replaying without a migration
+/// step. The Rust API now rejects mistyped counter names at
+/// compile time — a regression observed in
+/// `2026-06-21-002-adversarial-review.md` P2-#3 where the
+/// previous `&str` dispatch silently no-op'd on unknown
+/// strings.
+///
+/// Use [`CounterKind::from_str_lossy`] to convert a raw string
+/// (e.g. one read from a log file outside the typed API) into
+/// the enum; unknown strings map to [`CounterKind::Unknown`]
+/// (also serialized as the original string) so the rule of
+/// "unknown counter is best-effort no-op" is preserved.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CounterKind {
+    /// `LedgerSnapshot::iteration`.
+    Iteration,
+    /// `LedgerSnapshot::hat_handoff_seq`.
+    HatHandoffSeq,
+    /// `LedgerSnapshot::consecutive_failures`.
+    ConsecutiveFailures,
+    /// `LedgerSnapshot::consecutive_blocked`.
+    ConsecutiveBlocked,
+    /// `LedgerSnapshot::abandoned_task_redispatches`.
+    AbandonedTaskRedispatches,
+    /// `LedgerSnapshot::consecutive_malformed_events`.
+    ConsecutiveMalformedEvents,
+    /// `LedgerSnapshot::consecutive_hard_gates`.
+    ConsecutiveHardGates,
+    /// `LedgerSnapshot::consecutive_same_signature`.
+    ConsecutiveSameSignature,
+    /// `LedgerSnapshot::consecutive_no_progress_turns`.
+    ConsecutiveNoProgressTurns,
+    /// `LedgerSnapshot::consecutive_steward_activations`.
+    ConsecutiveStewardActivations,
+    /// `LedgerSnapshot::consecutive_completion_rejections`.
+    ConsecutiveCompletionRejections,
+    /// `LedgerSnapshot::consecutive_engine_gate_rejections`.
+    ConsecutiveEngineGateRejections,
+    /// `LedgerSnapshot::invariant_violation_count`.
+    InvariantViolationCount,
+    /// `LedgerSnapshot::last_rejection_fingerprint`.
+    LastRejectionFingerprint,
+    /// `LedgerSnapshot::cumulative_cost`. Stored as `i64` in the
+    /// commit log and widened to `f64` on apply.
+    CumulativeCost,
+    /// Catch-all for unknown / forward-compat counter names.
+    /// Serialized as the original snake_case string so the
+    /// replay is lossless even when the typed enum gains new
+    /// variants in a future release.
+    #[serde(untagged)]
+    Unknown(String),
+}
+
+impl CounterKind {
+    /// Parse a counter name from a raw `&str`. Unknown names map
+    /// to [`CounterKind::Unknown`].
+    pub fn from_str_lossy(s: &str) -> Self {
+        match s {
+            "iteration" => Self::Iteration,
+            "hat_handoff_seq" => Self::HatHandoffSeq,
+            "consecutive_failures" => Self::ConsecutiveFailures,
+            "consecutive_blocked" => Self::ConsecutiveBlocked,
+            "abandoned_task_redispatches" => Self::AbandonedTaskRedispatches,
+            "consecutive_malformed_events" => Self::ConsecutiveMalformedEvents,
+            "consecutive_hard_gates" => Self::ConsecutiveHardGates,
+            "consecutive_same_signature" => Self::ConsecutiveSameSignature,
+            "consecutive_no_progress_turns" => Self::ConsecutiveNoProgressTurns,
+            "consecutive_steward_activations" => Self::ConsecutiveStewardActivations,
+            "consecutive_completion_rejections" => Self::ConsecutiveCompletionRejections,
+            "consecutive_engine_gate_rejections" => Self::ConsecutiveEngineGateRejections,
+            "invariant_violation_count" => Self::InvariantViolationCount,
+            "last_rejection_fingerprint" => Self::LastRejectionFingerprint,
+            "cumulative_cost" => Self::CumulativeCost,
+            other => Self::Unknown(other.to_string()),
+        }
+    }
+
+    /// Borrow the wire-format string. For `Unknown` variants the
+    /// original string is returned verbatim.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Iteration => "iteration",
+            Self::HatHandoffSeq => "hat_handoff_seq",
+            Self::ConsecutiveFailures => "consecutive_failures",
+            Self::ConsecutiveBlocked => "consecutive_blocked",
+            Self::AbandonedTaskRedispatches => "abandoned_task_redispatches",
+            Self::ConsecutiveMalformedEvents => "consecutive_malformed_events",
+            Self::ConsecutiveHardGates => "consecutive_hard_gates",
+            Self::ConsecutiveSameSignature => "consecutive_same_signature",
+            Self::ConsecutiveNoProgressTurns => "consecutive_no_progress_turns",
+            Self::ConsecutiveStewardActivations => "consecutive_steward_activations",
+            Self::ConsecutiveCompletionRejections => "consecutive_completion_rejections",
+            Self::ConsecutiveEngineGateRejections => "consecutive_engine_gate_rejections",
+            Self::InvariantViolationCount => "invariant_violation_count",
+            Self::LastRejectionFingerprint => "last_rejection_fingerprint",
+            Self::CumulativeCost => "cumulative_cost",
+            Self::Unknown(s) => s.as_str(),
+        }
+    }
+}
+
+impl std::fmt::Display for CounterKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for CounterKind {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::from_str_lossy(s))
+    }
 }

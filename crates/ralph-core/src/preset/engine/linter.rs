@@ -205,9 +205,8 @@ static LINT_THREAD_SEMAPHORE: std::sync::LazyLock<LintThreadSemaphore> =
     std::sync::LazyLock::new(|| LintThreadSemaphore::new(max_concurrent_lint_threads()));
 
 #[cfg(test)]
-pub static TEST_LINT_SEMAPHORE_OVERRIDE: std::sync::Mutex<
-    Option<&'static LintThreadSemaphore>,
-> = std::sync::Mutex::new(None);
+pub static TEST_LINT_SEMAPHORE_OVERRIDE: std::sync::Mutex<Option<&'static LintThreadSemaphore>> =
+    std::sync::Mutex::new(None);
 
 fn lint_thread_semaphore() -> &'static LintThreadSemaphore {
     #[cfg(test)]
@@ -311,9 +310,7 @@ pub fn lint_emit(
         // P1-1: classify by the typed `kind`, not by string
         // substring matching on the message.
         GateDecision::Reject { kind, message } => {
-            LintOutcome::Reject(LintResumeHint::from_typed_rejection(
-                topic, kind, &message,
-            ))
+            LintOutcome::Reject(LintResumeHint::from_typed_rejection(topic, kind, &message))
         }
     }
 }

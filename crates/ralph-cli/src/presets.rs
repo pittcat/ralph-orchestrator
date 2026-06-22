@@ -1456,8 +1456,8 @@ mod tests {
     fn test_ce_executor_serial_plan_gate_must_not_listen_to_fix_applied() {
         let preset =
             get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
-        let config = RalphConfig::parse_yaml(preset.content)
-            .expect("ce-executor-serial YAML should parse");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor-serial YAML should parse");
 
         let plan_gate = config
             .hats
@@ -2332,8 +2332,8 @@ mod tests {
     #[test]
     fn test_ce_executor_state_projection_enabled_isolated_en() {
         let preset = get_preset("ce-executor-isolated").expect("ce-executor-isolated preset");
-        let config = RalphConfig::parse_yaml(&preset.content)
-            .expect("ce-executor-isolated must parse");
+        let config =
+            RalphConfig::parse_yaml(&preset.content).expect("ce-executor-isolated must parse");
         assert!(
             config.event_loop.state_projection.enabled,
             "ce-executor-isolated must enable state projection (R1/R4 in 2026-06-17-005); \
@@ -2341,7 +2341,11 @@ mod tests {
         );
         for topic in ["work.ready", "work.done", "queue.advance", "plan.complete"] {
             assert!(
-                config.event_loop.state_projection.actions.contains_key(topic),
+                config
+                    .event_loop
+                    .state_projection
+                    .actions
+                    .contains_key(topic),
                 "ce-executor-isolated must define a projection action for `{topic}`"
             );
         }
@@ -2358,15 +2362,19 @@ mod tests {
     #[test]
     fn test_ce_executor_state_projection_enabled_serial_en() {
         let preset = get_preset("ce-executor-serial").expect("ce-executor-serial preset");
-        let config = RalphConfig::parse_yaml(&preset.content)
-            .expect("ce-executor-serial must parse");
+        let config =
+            RalphConfig::parse_yaml(&preset.content).expect("ce-executor-serial must parse");
         assert!(
             config.event_loop.state_projection.enabled,
             "ce-executor-serial must enable state projection (R1/R4 in 2026-06-17-005)"
         );
         for topic in ["work.ready", "work.done", "queue.advance", "plan.complete"] {
             assert!(
-                config.event_loop.state_projection.actions_chain.contains_key(topic),
+                config
+                    .event_loop
+                    .state_projection
+                    .actions_chain
+                    .contains_key(topic),
                 "ce-executor-serial must define a projection chain for `{topic}` \
                  (post-F-PS-005: the inline `actions:` map was removed; \
                  `actions_chain` is the SSOT form).",
@@ -5169,9 +5177,7 @@ mod tests {
                 current_step.as_deref().unwrap_or("step"),
                 completed_step.as_deref().unwrap_or("completed_step"),
             ),
-            other => panic!(
-                "queue.advance state_projection must be AdvanceStep, got {other:?}"
-            ),
+            other => panic!("queue.advance state_projection must be AdvanceStep, got {other:?}"),
         };
 
         // Mirror the plan-gate payload shape from

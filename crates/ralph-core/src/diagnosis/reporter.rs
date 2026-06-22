@@ -409,7 +409,9 @@ pub enum LedgerReportError {
 ///
 /// Public so the CLI can reuse the helper when `--from-ledger` is
 /// requested.  The session-level `ReporterError` is unaffected.
-pub fn read_rejection_records(workspace: &Path) -> std::io::Result<Vec<crate::state::RejectionRecord>> {
+pub fn read_rejection_records(
+    workspace: &Path,
+) -> std::io::Result<Vec<crate::state::RejectionRecord>> {
     crate::state::read_rejection_log(workspace)
 }
 
@@ -831,7 +833,9 @@ pub fn render_diagnosis_report_markdown(report: &DiagnosisReport) -> String {
             out.push_str("- total commits: 0 (commit log could not be parsed)\n");
         }
         if report.ledger_summary.corruption {
-            out.push_str("- **warning**: commit log corruption detected; counters may be partial\n");
+            out.push_str(
+                "- **warning**: commit log corruption detected; counters may be partial\n",
+            );
         }
         out.push('\n');
     }
@@ -1442,8 +1446,12 @@ fn push_top_findings_md(out: &mut String, findings: &[RankedFinding]) {
             f.target_hat.as_deref().unwrap_or("*"),
             f.topic.as_deref().unwrap_or("*"),
             f.occurrences,
-            f.first_iteration.map(|i| i.to_string()).unwrap_or_else(|| "pre".to_string()),
-            f.last_iteration.map(|i| i.to_string()).unwrap_or_else(|| "pre".to_string()),
+            f.first_iteration
+                .map(|i| i.to_string())
+                .unwrap_or_else(|| "pre".to_string()),
+            f.last_iteration
+                .map(|i| i.to_string())
+                .unwrap_or_else(|| "pre".to_string()),
             f.outcome.as_str(),
             f.retry_key,
         ));
@@ -1463,7 +1471,9 @@ fn push_recovery_timeline_md(out: &mut String, rows: &[TimelineRow]) {
         let message = truncate_md(&r.message, 120);
         out.push_str(&format!(
             "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
-            r.iteration.map(|i| i.to_string()).unwrap_or_else(|| "pre".to_string()),
+            r.iteration
+                .map(|i| i.to_string())
+                .unwrap_or_else(|| "pre".to_string()),
             r.hat,
             r.severity.as_str(),
             r.outcome.as_str(),
@@ -3019,14 +3029,26 @@ mod tests {
         // the same `event_policy` source so legacy records stay
         // visible in the new reporter.
         assert_eq!(validation_stage_to_source("policy"), "event_policy");
-        assert_eq!(validation_stage_to_source("required_fields"), "engine_required");
+        assert_eq!(
+            validation_stage_to_source("required_fields"),
+            "engine_required"
+        );
         assert_eq!(
             validation_stage_to_source("execution_contract"),
             "execution_contract"
         );
-        assert_eq!(validation_stage_to_source("workflow_guard"), "workflow_guard");
-        assert_eq!(validation_stage_to_source("step_handoff"), "step_handoff_gate");
-        assert_eq!(validation_stage_to_source("hat_handoff"), "hat_handoff_gate");
+        assert_eq!(
+            validation_stage_to_source("workflow_guard"),
+            "workflow_guard"
+        );
+        assert_eq!(
+            validation_stage_to_source("step_handoff"),
+            "step_handoff_gate"
+        );
+        assert_eq!(
+            validation_stage_to_source("hat_handoff"),
+            "hat_handoff_gate"
+        );
         // Unknown stages fall back to "unknown" rather than
         // panicking — the caller still gets a usable report.
         assert_eq!(validation_stage_to_source("not_a_stage"), "unknown");
@@ -3058,7 +3080,13 @@ mod tests {
     fn u8_single_root_cause_groups_records_by_reason_code() {
         let tmp = tempfile::TempDir::new().unwrap();
         // Three records on the same (stage, reason_code) tuple.
-        let r1 = rejection("executor", "work.done", "execution_contract:missing_field", 1, "2026-06-22T01:00:00Z");
+        let r1 = rejection(
+            "executor",
+            "work.done",
+            "execution_contract:missing_field",
+            1,
+            "2026-06-22T01:00:00Z",
+        );
         let r2 = rejection(
             "executor",
             "work.done",
@@ -3093,10 +3121,34 @@ mod tests {
     #[test]
     fn u8_root_cause_sorted_by_frequency_then_reason_code() {
         let records = vec![
-            rejection("a", "t.x", "origin:missing_field", 1, "2026-06-22T00:00:00Z"),
-            rejection("b", "t.y", "origin:missing_field", 1, "2026-06-22T00:00:01Z"),
-            rejection("c", "t.z", "origin:missing_field", 1, "2026-06-22T00:00:02Z"),
-            rejection("d", "t.w", "execution_contract:type_mismatch", 1, "2026-06-22T00:00:03Z"),
+            rejection(
+                "a",
+                "t.x",
+                "origin:missing_field",
+                1,
+                "2026-06-22T00:00:00Z",
+            ),
+            rejection(
+                "b",
+                "t.y",
+                "origin:missing_field",
+                1,
+                "2026-06-22T00:00:01Z",
+            ),
+            rejection(
+                "c",
+                "t.z",
+                "origin:missing_field",
+                1,
+                "2026-06-22T00:00:02Z",
+            ),
+            rejection(
+                "d",
+                "t.w",
+                "execution_contract:type_mismatch",
+                1,
+                "2026-06-22T00:00:03Z",
+            ),
         ];
         let (causes, summary) = aggregate_rejection_records(&records);
         assert_eq!(summary.distinct_reason_codes, 2);
@@ -3204,7 +3256,10 @@ mod tests {
         assert_eq!(value["schema_version"], "u8-1");
         let causes_json = value["root_causes"].as_array().unwrap();
         assert_eq!(causes_json.len(), 1);
-        assert_eq!(causes_json[0]["reason_code"], "execution_contract:type_mismatch");
+        assert_eq!(
+            causes_json[0]["reason_code"],
+            "execution_contract:type_mismatch"
+        );
         // `source` is the validation_stage_to_source mapping.
         assert_eq!(causes_json[0]["source"], "execution_contract");
         // JSON must NOT include markdown headings.

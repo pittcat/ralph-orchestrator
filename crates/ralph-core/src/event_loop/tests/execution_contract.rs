@@ -633,8 +633,7 @@ fn u6_fix_applied_contract_present_in_ce_executor_serial_preset() {
     // the canonical payload fields every `fix.applied` event
     // must carry.
     let ssot_text = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../presets/schemas/ce-executor-serial.yml"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../presets/schemas/ce-executor-serial.yml"),
     )
     .expect("schemas/ce-executor-serial.yml must be readable");
     let ssot: serde_yaml::Value =
@@ -666,12 +665,10 @@ fn u6_fix_applied_contract_present_in_ce_executor_serial_preset() {
     // not part of the schemas SSOT). Verify the inline rule
     // matches.
     let yaml_text = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../presets/en/ce-executor-serial.yml"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../presets/en/ce-executor-serial.yml"),
     )
     .expect("ce-executor-serial.yml must be readable");
-    let config = RalphConfig::parse_yaml(&yaml_text)
-        .expect("ce-executor-serial.yml must parse");
+    let config = RalphConfig::parse_yaml(&yaml_text).expect("ce-executor-serial.yml must parse");
     let contract = config
         .event_loop
         .execution_contracts

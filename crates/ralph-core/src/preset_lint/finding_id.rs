@@ -143,5 +143,4 @@ pub const FINDING_SCHEMA_REFERENCE_PARITY: &str = "preset.schema_reference_parit
 /// typestate in `state_projector/mod.rs` is the secondary
 /// defence (catches Rust-side dispatch bugs only). Plan
 /// 2026-06-20-001 R3 / KTD-3 "主 (primary)" line.
-pub const FINDING_WORK_DONE_ACTION_CHAIN_ORDER: &str =
-    "preset.state_projection_work_done_order";
+pub const FINDING_WORK_DONE_ACTION_CHAIN_ORDER: &str = "preset.state_projection_work_done_order";
