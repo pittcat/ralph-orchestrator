@@ -9241,6 +9241,19 @@ impl EventLoop {
                     pipeline.validate_pre_commit_with_view(&view, &snapshot, evt);
                 for r in &results {
                     if !r.accepted {
+                        // StepHandoffRule is intentionally skipped
+                        // here: it reads `ledger_snapshot.progress`
+                        // which is cold-start empty, while legacy
+                        // `apply_step_handoff_gate` (line 9288) reads
+                        // the disk-side `progress.md` written by
+                        // state_projection (line 9134). Skipping
+                        // avoids double-filtering that drops events
+                        // the legacy gate would accept.
+                        if r.stage
+                            == crate::validation::ValidationStage::StepHandoff
+                        {
+                            continue;
+                        }
                         let reason = format!(
                             "{}:{}",
                             r.stage.as_str(),
