@@ -8977,6 +8977,74 @@ impl EventLoop {
                         reason_code,
                         message,
                     } => {
+                        // U11-T4: when the gate rejects because the
+                        // handoff file is missing
+                        // (`REASON_CODE_HAT_HANDOFF_FILE_NOT_FOUND`),
+                        // try to auto-generate the artifact via the
+                        // unified ledger's `commit_handoff_artifact`.
+                        // The ledger's U5 regenerate policy writes a
+                        // skeleton to the canonical path
+                        // (`prepare_with_dedup`) when
+                        // `provided_handoff_path` is `None`, so the
+                        // loop no longer rejects the event outright.
+                        //
+                        // If auto-generation succeeds, treat the
+                        // event as accepted (bump seq, keep in batch)
+                        // and log the recovery. If it fails, fall
+                        // through to the standard rejection path
+                        // (digest + diagnostic + task.resume).
+                        if reason_code
+                            == crate::hat_handoff::gate::REASON_CODE_HAT_HANDOFF_FILE_NOT_FOUND
+                        {
+                            if let Some(ref mut ledger) = self.state.state_ledger {
+                                // Consumer (downstream hat) is
+                                // needed to derive the canonical
+                                // artifact path. Fall back to
+                                // `from_hat` when the index has no
+                                // entry (coordinator mode / ad-hoc
+                                // topic), matching the A4 hook's
+                                // tolerance at line 8685+.
+                                let consumer_hat = self
+                                    .handoff_index
+                                    .consumer_of(&ev.topic)
+                                    .unwrap_or(from_hat);
+                                let inputs = crate::state::HandoffAcceptedInputs {
+                                    from: consumer_hat.to_string().into(),
+                                    to: ev
+                                        .hat
+                                        .clone()
+                                        .unwrap_or_else(|| "unknown".into())
+                                        .into(),
+                                    iteration: self.state.iteration,
+                                    current_seq: self.state.hat_handoff_seq,
+                                    topic: ev.topic.clone(),
+                                    provided_handoff_path: None,
+                                };
+                                match ledger.commit_handoff_artifact(&inputs) {
+                                    Ok(outcome) => {
+                                        if let Some(path) = outcome.handoff_path {
+                                            tracing::info!(
+                                                handoff_path = %path,
+                                                from_hat = %from_hat,
+                                                topic = %ev.topic,
+                                                "U11-T4: auto-generated handoff artifact for macro-edge missing path; event accepted"
+                                            );
+                                        }
+                                        self.state.hat_handoff_seq += 1;
+                                        return true;
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            from_hat = %from_hat,
+                                            topic = %ev.topic,
+                                            "U11-T4: auto-generation failed; falling back to rejection"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
                         // KTD-5: cancel the pending record we set at
                         // policy-accept time so it doesn't escalate.
                         let event_id = format!("{}:{}", ev.ts, ev.topic);
