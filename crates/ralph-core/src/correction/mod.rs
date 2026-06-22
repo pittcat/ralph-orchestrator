@@ -250,13 +250,11 @@ impl CorrectionContext {
 /// `## ORCHESTRATOR CORRECTION` block. A malicious or buggy hat
 /// can otherwise inject HTML-style comment delimiters or
 /// angle-bracketed directives that confuse the downstream
-/// agent or the prompt-rendering layer. The escape replaces:
-/// - `&` → `&amp;` (must run first to avoid double-escaping)
-/// - `<` → `&lt;`
-/// - `>` → `&gt;`
-/// - `<!--` → `&lt;!--` (HTML-comment opener, common prompt
-///   smuggling vector)
-/// - `-->` → `--&gt;` (HTML-comment closer)
+/// agent or the prompt-rendering layer. The escape replaces
+/// `&`, `<`, `>` with HTML entities (the single-char
+/// substitutions also cover the multi-char `<!--` / `-->`
+/// vectors — after escaping `<` and `>`, those patterns are
+/// already neutralised).
 ///
 /// The escape is intentionally narrow: we do NOT touch other
 /// control characters or unicode so legitimate messages stay
@@ -265,8 +263,6 @@ fn escape_for_prompt(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
-        .replace("<!--", "&lt;!--")
-        .replace("-->", "--&gt;")
 }
 
 /// Resume context injected on `--continue`.  Replaces the

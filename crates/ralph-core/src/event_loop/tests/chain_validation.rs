@@ -123,7 +123,7 @@ fn test_chain_validation_empty_required_events_allows_completion() {
 }
 
 #[test]
-fn test_chain_validation_injects_task_resume_on_rejection() {
+fn test_chain_validation_injects_correction_on_rejection() {
     use tempfile::TempDir;
 
     let temp_dir = TempDir::new().unwrap();
