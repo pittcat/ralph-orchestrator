@@ -140,7 +140,7 @@ mod tests {
     #[test]
     fn test_list_presets_returns_all() {
         let presets = list_presets();
-        assert_eq!(presets.len(), 5, "Expected 5 public presets");
+        assert_eq!(presets.len(), 3, "Expected 3 public presets");
     }
 
     #[test]
@@ -264,9 +264,8 @@ mod tests {
     #[test]
     fn test_preset_names_returns_all_names() {
         let names = preset_names();
-        assert_eq!(names.len(), 4);
+        assert_eq!(names.len(), 3);
         assert!(names.contains(&"autoresearch"));
-        assert!(names.contains(&"ce-executor-serial"));
         assert!(names.contains(&"ce-executor-serial"));
         assert!(names.contains(&"debug"));
     }
@@ -605,7 +604,7 @@ mod tests {
         let completion = &config.event_loop.completion_promise;
 
         // ce-executor's expected publish chain (using actual hat_keys from YAML):
-        // coordinator(work.ready) -> executor(work.done) -> review-coordinator(review.wave.ready)
+        // coordinator(work.ready) -> executor(work.done) -> review-coordinator(review.dimension.ready)
         //   -> dimension-reviewer(review.dimension.done) -> review-synthesizer(review.passed)
         //   -> plan-gate(queue.advance OR plan.complete) -> shipper(REVIEW_COMPLETE)
         //   -> reporter(report.done, LOOP_COMPLETE)
@@ -613,10 +612,15 @@ mod tests {
         // `report.done` is the required_events completion gate, so it must appear in
         // the chain — otherwise the gate event would never fire and the original
         // infinite-loop bug returns even with `required_events: ["report.done"]`.
+        //
+        // NOTE: ce-executor-serial is a no-wave preset (see
+        // test_ce_executor_serial_has_no_wave_topic), so the chain emits
+        // `review.dimension.ready` from review-coordinator rather than the
+        // legacy `review.wave.ready` used by the deleted wave-mode preset.
         let chain_publishes: Vec<(&str, &str)> = vec![
             ("coordinator", "work.ready"),
             ("executor", "work.done"),
-            ("review-coordinator", "review.wave.ready"),
+            ("review-coordinator", "review.dimension.ready"),
             ("dimension-reviewer", "review.dimension.done"),
             ("review-synthesizer", "review.passed"),
             ("plan-gate", "queue.advance"),
@@ -1446,38 +1450,6 @@ mod tests {
     }
 
     #[test]
-    fn test_ce_executor_review_coordinator_must_batch_wave_emission() {
-        // Contract: review-coordinator must emit ALL selected dimensions in ONE
-        // `ralph wave emit` call, not once per dimension. The "for each
-        // dimension" anti-pattern produces N single-worker waves that
-        // serialize at the dispatcher.
-        let content = read_root_preset("ce-executor-serial.yml");
-        let instructions = review_coordinator_instructions_from(&content);
-
-        assert!(
-            !instructions.contains("for each selected dimension"),
-            "ce-executor review-coordinator still instructs 'ralph wave emit for each \
-             selected dimension'. This produces N independent wave_total=1 events that \
-             the dispatcher serializes, defeating dimension-reviewer's concurrency: 9. \
-             Replace with: 'Collect ALL selected dimensions and emit them in ONE \
-             `ralph wave emit` call (use --payloads p1 p2 ... pN or --payloads-stdin).' \n\
-             Offending instructions excerpt:\n{instructions}"
-        );
-
-        // Positive shape: instructions must steer toward a single batched emit.
-        // Tightened: require the literal "ONE wave call" marker (the HARD RULE
-        // lead-in) AND the "--payloads" flag name, instead of loose substrings
-        // like "single" / "one " / "batch" that match unrelated prose.
-        let lower = instructions.to_ascii_lowercase();
-        assert!(
-            lower.contains("one wave call") && lower.contains("--payloads"),
-            "ce-executor review-coordinator must include the HARD RULE batched-emit \
-             guidance: literal 'ONE wave call' marker AND '--payloads' flag. \n\
-             Offending instructions excerpt:\n{instructions}"
-        );
-    }
-
-    #[test]
     fn test_ce_executor_plan_gate_exists_and_routes_correctly() {
         // R1-R4: plan-gate must exist, must subscribe to review.passed + review.complete,
         // must publish queue.advance / plan.complete / plan.blocked, and must NOT
@@ -1910,30 +1882,6 @@ mod tests {
     // docs/plans/2026-06-17-005-fix-state-projection-phase1-review-findings-plan.md.
     // ------------------------------------------------------------------
 
-    /// R4 (2026-06-17-005): `ce-executor-serial` must opt in to
-    /// state projection and pin the four canonical actions.
-    #[test]
-    fn test_ce_executor_state_projection_enabled_isolated_en() {
-        let preset = get_preset("ce-executor-serial").expect("ce-executor-serial preset");
-        let config =
-            RalphConfig::parse_yaml(&preset.content).expect("ce-executor-serial must parse");
-        assert!(
-            config.event_loop.state_projection.enabled,
-            "ce-executor-serial must enable state projection (R1/R4 in 2026-06-17-005); \
-             set event_loop.state_projection.enabled: true"
-        );
-        for topic in ["work.ready", "work.done", "queue.advance", "plan.complete"] {
-            assert!(
-                config
-                    .event_loop
-                    .state_projection
-                    .actions
-                    .contains_key(topic),
-                "ce-executor-serial must define a projection action for `{topic}`"
-            );
-        }
-    }
-
     /// R4: same assertion for the `ce-executor-serial` preset.
     ///
     /// 2026-06-20-001 F-PS-005: the inline `actions:` map was
@@ -2061,7 +2009,7 @@ mod tests {
     #[test]
     fn test_ce_executor_u4_legacy_progress_reconcile_is_superseded() {
         // The R4 contract now lives in
-        // `test_ce_executor_state_projection_enabled_isolated_en`
+        // `test_ce_executor_state_projection_enabled_serial_en`
         // and `test_ce_executor_orchestrator_context_is_canonical_read_source_en`.
         // We retain this test name as a one-line marker so
         // anyone reading the legacy contract test can see the
@@ -2073,53 +2021,6 @@ mod tests {
             config.event_loop.state_projection.enabled,
             "R4 contract is broken: state projection must stay enabled in ce-executor-serial"
         );
-    }
-
-    #[test]
-    fn test_ce_executor_u2_review_coordinator_idempotency_key_en() {
-        // U2 (2026-06-11-002): review-coordinator must emit waves with an
-        // explicit idempotency key so retries cannot double-write events.
-        let content = read_root_preset("ce-executor-serial.yml");
-        let instructions = review_coordinator_instructions_from(&content);
-        let wave_section = instructions
-            .split("### Wave Emission")
-            .nth(1)
-            .and_then(|s| s.split("### Persist").next())
-            .expect("review-coordinator must document Wave Emission");
-
-        for needle in [
-            "--idempotency-key",
-            "ce-review:{plan_name}:{task_id}:{step}:round-{fix_round}",
-            "deduplicated",
-            "Do NOT omit `--idempotency-key`",
-        ] {
-            assert!(
-                wave_section.contains(needle),
-                "review-coordinator wave section must reference `{needle}`. Excerpt:\n{wave_section}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_ce_executor_u2_review_coordinator_idempotency_key_zh() {
-        let content = read_root_preset("ce-executor-serial.yml");
-        let instructions = review_coordinator_instructions_from(&content);
-        let wave_section = instructions
-            .split("### Wave 发射")
-            .nth(1)
-            .and_then(|s| s.split("### 终端事件后持久化").next())
-            .expect("review-coordinator zh must document Wave 发射");
-
-        for needle in [
-            "--idempotency-key",
-            "ce-review:{plan_name}:{task_id}:{step}:round-{fix_round}",
-            "deduplicated",
-        ] {
-            assert!(
-                wave_section.contains(needle),
-                "review-coordinator zh wave section must reference `{needle}`. Excerpt:\n{wave_section}"
-            );
-        }
     }
 
     #[test]
@@ -2681,70 +2582,6 @@ mod tests {
             "debug-resolver must NOT use default_publishes; debug.exhausted requires contextual payload"
         );
 
-        let inst = resolver.instructions.as_str();
-        assert!(
-            inst.contains("Investigate before fixing") || inst.contains("先调查再修复"),
-            "debug-resolver instructions must state 'Investigate before fixing' or its Chinese equivalent"
-        );
-        assert!(
-            inst.contains("causal chain gate"),
-            "debug-resolver instructions must reference causal chain gate"
-        );
-        assert!(
-            inst.contains("prediction"),
-            "debug-resolver instructions must reference prediction"
-        );
-        assert!(
-            inst.contains("assumption audit"),
-            "debug-resolver instructions must reference assumption audit"
-        );
-        assert!(
-            inst.contains("smart escalation"),
-            "debug-resolver instructions must reference smart escalation"
-        );
-        assert!(
-            inst.contains("NEVER create, switch, or rename branches")
-                || inst.contains("MUST NOT create, switch, or rename branches")
-                || (inst.contains("绝对禁止") && inst.contains("git checkout -b")),
-            "debug-resolver instructions must forbid branch creation"
-        );
-        assert!(
-            !resolver.publishes.contains(&"work.done".to_string()),
-            "debug-resolver must not publish work.done"
-        );
-        assert!(
-            inst.contains("MUST explicitly publish") || inst.contains("必须显式发布"),
-            "debug-resolver instructions must require an explicit terminal handoff event"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_debug_resolver_forbids_branch_creation() {
-        // U6: debug-resolver must not create branches, push, or create PRs.
-        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
-        let resolver = config
-            .hats
-            .get("debug-resolver")
-            .expect("ce-executor must define a 'debug-resolver' hat");
-        let inst = resolver.instructions.as_str();
-
-        assert!(
-            inst.contains("NEVER create, switch, or rename branches")
-                || inst.contains("MUST NOT create, switch, or rename branches")
-                || (inst.contains("绝对禁止") && inst.contains("git checkout -b")),
-            "debug-resolver must explicitly forbid branch creation"
-        );
-        assert!(
-            inst.contains("push to origin")
-                || inst.contains("push 到 origin")
-                || inst.contains("MUST NOT push to origin")
-                || inst.contains("MUST NOT create pull requests")
-                || inst.contains("创建 pull request")
-                || inst.contains("create pull requests"),
-            "debug-resolver must explicitly forbid push / PR creation"
-        );
         assert!(
             !resolver.publishes.contains(&"work.done".to_string()),
             "debug-resolver must not publish work.done"

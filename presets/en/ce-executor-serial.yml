@@ -155,6 +155,14 @@ event_loop:
         # Trivial steps are exempt via allow_empty_for_steps; the
         # executor still reports commit_count=0, changed_lines=0 for
         # them so the schema stays consistent.
+        require_payload_fields:
+          - "plan_name"
+          - "plan_path"
+          - "task_id"
+          - "task_key"
+          - "step"
+          - "commit_count"
+          - "changed_lines"
         require_task:
           id_field: "task_id"
           key_field: "task_key"

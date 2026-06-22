@@ -9,6 +9,7 @@
     "description": "Isolated-mode plan-driven work execution with serial code review (no wave), auto-fix, shipping, and manager report",
     "category": "development"
   },
+  {
     "name": "debug",
     "description": "Bug investigation, root-cause analysis, and adversarial fix verification",
     "category": "workflow"
