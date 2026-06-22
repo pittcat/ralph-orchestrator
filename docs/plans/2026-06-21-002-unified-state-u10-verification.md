@@ -177,11 +177,12 @@ BDD scenarios 和 smoke replay 在 flags=on 下也全过，证明 U1-U9 的新�
 > "特性开关默认开启，旧路径代码在 U10 后标记为 deprecated 并在后续版本中移除。"
 
 **当前状态**：
-- `UNIFIED_VALIDATION` / `UNIFIED_HANDOFF_AUTO`：源码里没有 env var 读取（注释过时），等价于**默认启用**。U4 validation pipeline 已替换所有 runtime 路径。
-- `UNIFIED_STATE_LEDGER`：env-var opt-in；U1 实现已 commit，但**默认关闭**（runtime production wiring 仍走 StateProjector + tasks_cache / progress_cache，已 deprecated 但保留兼容）。
-- `UNIFIED_PROTOCOL_VIEW`：env-var opt-in；U3 实现已 commit，但**默认关闭**（preset engine 仍用 `from_event_loop` 内部默认行为）。
-- `UNIFIED_POLICY_CHECK`：env-var opt-in；U6 实现已 commit，但**默认关闭**（CLI emit 仍走 legacy `validate_event_with_hat`）。
-- `UNIFIED_DETERMINISTIC_CORRECTION`：env-var opt-in；U7 实现已 commit，但**默认关闭**（publish_policy_rejection_resume 仍发 `task.resume`）。
+- `UNIFIED_VALIDATION`:源码有 env var 读取(`event_loop/mod.rs:458`),`process_parse_result` 在 step handoff gate 之前已按 per-event 调用 `ValidationPipeline::validate_pre_commit_with_view`(commit `76e409db`)。env var 默认值仍在反转前(T7 负责)。
+- `UNIFIED_HANDOFF_AUTO`:源码里没有 env var 读取(注释过时);`commit_handoff_artifact` 在 macro-edge 缺失 path 时已自动调用(commit `63af596c`)。
+- `UNIFIED_STATE_LEDGER`:env-var opt-in;`StateLedger::new` 已接入 `replay_from_disk`(commit `df7dcae3`),`process_parse_result` 末尾已 commit scalars(原有 A1 hook)。env var 默认值仍在反转前。
+- `UNIFIED_PROTOCOL_VIEW`:env-var opt-in;U3 实现已 commit,**默认关闭**(preset engine 仍用 `from_event_loop` 内部默认行为)。
+- `UNIFIED_POLICY_CHECK`:env-var opt-in;U6 实现已 commit,但 `run_policy_check_unified` 用 `LedgerSnapshot::cold_start()`(不读 events.jsonl),**默认关闭**。
+- `UNIFIED_DETERMINISTIC_CORRECTION`:env-var opt-in;U7 实现已 commit。`publish_correction_via_context` 已接入真实 `LoopState::prompt_context` + `StateLedger::commit`(commit `d568437e`),1 条 BDD `#[ignore]` 已移除并通过(原 2 条中 `correction_three_escalation_scenario` 因 `LINT_CIRCUIT_BREAKER_LIMIT=2` 限制保留 `#[ignore]` 作为已知 follow-up)。env var 默认值仍在反转前。
 
 **建议（U10 范围内不动源码，仅记录）**：
 
