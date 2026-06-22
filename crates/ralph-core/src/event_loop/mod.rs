@@ -9224,6 +9224,24 @@ impl EventLoop {
         // unchanged — backward compatibility per the A2
         // opt-in design.
         if let Some(ref pipeline) = unified_pipeline {
+            // U11-T9 (P0-3 follow-up): mirror the state
+            // projector's in-memory `tasks_cache` /
+            // `progress_cache` into the `LedgerSnapshot` so the
+            // unified pre-commit `StepHandoffRule` sees the
+            // same view as the legacy disk-side
+            // `apply_step_handoff_gate` (which reads the
+            // `progress.md` / `tasks.jsonl` that the projector
+            // just wrote). Without this sync, the rule would
+            // see a cold-start empty snapshot and silently
+            // miss the projected work-done, leading to either
+            // a missed accept or, before the temporary skip in
+            // `36a68306`, a spurious reject.
+            if let Some(ref mut projector) = self.state.state_projection {
+                if let Some(ref mut ledger) = self.state.state_ledger {
+                    let mut guard = ledger.snapshot_mut();
+                    projector.sync_to_ledger_snapshot(&mut guard);
+                }
+            }
             let mut state_ledger = std::mem::take(&mut self.state.state_ledger);
             let snapshot = state_ledger
                 .as_ref()
@@ -9241,16 +9259,32 @@ impl EventLoop {
                     pipeline.validate_pre_commit_with_view(&view, &snapshot, evt);
                 for r in &results {
                     if !r.accepted {
-                        // StepHandoffRule is intentionally skipped
-                        // here: it reads `ledger_snapshot.progress`
-                        // which is cold-start empty, while legacy
-                        // `apply_step_handoff_gate` (line 9288) reads
-                        // the disk-side `progress.md` written by
-                        // state_projection (line 9134). Skipping
-                        // avoids double-filtering that drops events
-                        // the legacy gate would accept.
+                        // U11-T9 (P0-3 follow-up): the previous
+                        // `if r.stage == ValidationStage::StepHandoff { continue; }`
+                        // skip was a temporary workaround (commit
+                        // `36a68306`) for the cold-start
+                        // `LedgerSnapshot` desync. The projector's
+                        // cache is now mirrored into the snapshot
+                        // before this filter runs, so
+                        // `StepHandoffRule` produces the same
+                        // verdict here as the legacy disk-side
+                        // `apply_step_handoff_gate` (line ~9301)
+                        // — but only when the state projector is
+                        // actually wiring those ledgers. When
+                        // `state_projection.enabled` is false, the
+                        // unified `StepHandoffRule` runs against a
+                        // cold-start snapshot with no task ledger
+                        // and would spuriously reject
+                        // `plan.complete` / `queue.advance` for
+                        // `task_not_found` even though the legacy
+                        // `apply_step_handoff_gate` is opt-in and
+                        // would not run. Mirror the legacy gate's
+                        // opt-in semantics: skip the unified
+                        // `StepHandoffRule` verdict when no
+                        // projector is active.
                         if r.stage
                             == crate::validation::ValidationStage::StepHandoff
+                            && !self.config.event_loop.state_projection.enabled
                         {
                             continue;
                         }

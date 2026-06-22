@@ -599,6 +599,45 @@ impl StateProjector {
         self::orchestrator_context::build_block(snapshot, &self.ctx.config)
     }
 
+    /// U11-T9 (P0-3 follow-up): push the projector's in-memory
+    /// `tasks_cache` and `progress_cache` into a [`LedgerSnapshot`].
+    ///
+    /// The unified pre-commit `StepHandoffRule` reads
+    /// `ledger_snapshot.tasks` / `ledger_snapshot.progress` (rather
+    /// than the projector's private caches), so the cache view
+    /// must be mirrored into the snapshot **after every batch's
+    /// `projector.apply`** and **before** the unified pre-commit
+    /// filter runs in [`EventLoop::process_parse_result`].
+    ///
+    /// This is the inverse of [`Self::project_ledger_snapshot`]:
+    ///   * `project_ledger_snapshot`: ledger → disk (refresh
+    ///     caches from a `LedgerSnapshot`, then replay-write disk)
+    ///   * `sync_to_ledger_snapshot`: projector cache → ledger
+    ///     (refresh the snapshot from the just-written cache)
+    ///
+    /// The helper is pure: it does not touch disk, does not call
+    /// `commit()`, and does not set `bypass_active`. Callers that
+    /// need a persistent record must commit a `CommitDelta`
+    /// separately.
+    pub fn sync_to_ledger_snapshot(&self, snapshot: &mut LedgerSnapshot) {
+        #[allow(deprecated)]
+        {
+            snapshot.tasks = self.ctx.tasks_cache.clone();
+            snapshot.progress = self.ctx.progress_cache.clone();
+        }
+        // Mirror `ProgressSnapshot::parse`'s `empty_headings`
+        // recomputation so downstream rules that read
+        // `snapshot.progress` see the same view as the disk-side
+        // `ProgressSnapshot::parse(&content)` call would produce.
+        // Without this, a `push_completed` that adds a step without
+        // rewriting `empty_headings` would carry `true` from the
+        // cold-start default and `StepHandoffRule` would reject
+        // with `progress_missing_headings` even though the
+        // projected `progress.md` is well-formed on disk.
+        snapshot.progress.empty_headings = snapshot.progress.current_step.is_none()
+            && snapshot.progress.completed_steps.is_empty();
+    }
+
     /// Apply a batch of events to the ledgers. Events whose topic
     /// is not in [`PROJECTED_TOPICS`] (or for which the config has
     /// no matching action) are passed through without touching

@@ -67,6 +67,51 @@ fn make_config() -> StateProjectionConfig {
     }
 }
 
+/// T9 config: identical to [`make_config`] but `work.done` drives
+/// a `close_task → mark_step_completed` chain so the in-memory
+/// `progress_cache` is updated. The plain [`make_config`] config
+/// only runs `close_task`, which leaves progress.md untouched.
+fn make_config_with_step_chain() -> StateProjectionConfig {
+    let mut actions_chain = std::collections::HashMap::new();
+    actions_chain.insert(
+        "work.ready".to_string(),
+        vec![StateProjectionAction::EnsureTask {
+            key: "task_key".to_string(),
+            title: Some("step".to_string()),
+        }],
+    );
+    actions_chain.insert(
+        "work.done".to_string(),
+        vec![
+            StateProjectionAction::CloseTask {
+                task_id: "task_id".to_string(),
+                step: Some("step".to_string()),
+            },
+            StateProjectionAction::MarkStepCompleted {
+                step: Some("step".to_string()),
+            },
+        ],
+    );
+    actions_chain.insert(
+        "queue.advance".to_string(),
+        vec![StateProjectionAction::AdvanceStep {
+            current_step: Some("step".to_string()),
+            completed_step: Some("completed_step".to_string()),
+        }],
+    );
+    actions_chain.insert(
+        "plan.complete".to_string(),
+        vec![StateProjectionAction::PlanComplete {
+            final_step: Some("step".to_string()),
+        }],
+    );
+    StateProjectionConfig {
+        enabled: true,
+        actions: std::collections::HashMap::new(),
+        actions_chain,
+    }
+}
+
 fn seed_task(snapshot: &mut LedgerSnapshot, key: &str, id: &str) {
     let mut task = Task::new("step-01".to_string(), 1);
     task.id = id.to_string();
@@ -710,5 +755,228 @@ fn progress_md_written_from_ledger_round_trips() {
     assert_eq!(
         parsed.completed_steps,
         vec!["step-01".to_string(), "step-02".to_string()]
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────
+// U11-T9 (P0-3 follow-up): projector → ledger sync so the unified
+// pre-commit `StepHandoffRule` sees the same `progress` / `tasks`
+// view as the legacy disk-side `apply_step_handoff_gate`.
+//
+// Without `sync_to_ledger_snapshot`, the unified path runs against
+// a cold-start `LedgerSnapshot` even when the projector's in-memory
+// cache holds the just-written `progress.md` / `tasks.jsonl` —
+// producing a silent desync. The fix is a single sync call after
+// `projector.apply(&events)`; this test pins the contract.
+// ────────────────────────────────────────────────────────────────────
+
+/// Scenario: project `work.done` (which closes the task and writes
+/// `step-01` into the in-memory progress cache), then `sync_to_ledger_snapshot`,
+/// then drive a unified `StepHandoffRule::validate` with a `queue.advance`
+/// for `step-02`. The rule must see the projector cache and accept
+/// the advance (step-01 is in `completed_steps`).
+#[test]
+fn u11_t9_sync_to_ledger_snapshot_picks_up_projector_progress_cache() {
+    let tmp = workspace();
+    let mut proj = StateProjector::new(ProjectionContext::new_legacy(
+        tmp.path(),
+        make_config_with_step_chain(),
+    ));
+
+    // U3 (2026-06-17-003 plan): `work.ready` first creates the
+    // task in `tasks.jsonl`, then `work.done` closes it and
+    // (with the step chain) marks the step completed in
+    // `progress.md`, then `queue.advance` advances the current
+    // step pointer. Apply all three events so the in-memory
+    // `tasks_cache` + `progress_cache` reflect the post-batch
+    // state on disk AND the snapshot's `current_step` matches
+    // what the next `queue.advance` would assert.
+    let work_ready = Event {
+        topic: "work.ready".to_string(),
+        payload: Some(
+            r#"{"task_id":"task-step-01","task_key":"ce-executor:demo-plan:step-01:u1-impl","plan_name":"demo-plan","step":"step-01"}"#
+                .to_string(),
+        ),
+        ts: chrono::Utc::now().to_rfc3339(),
+        hat: Some("executor".to_string()),
+        triggered: None,
+        source: Some("test".to_string()),
+        wave_id: None,
+        wave_index: None,
+        wave_total: None,
+        system_injected: None,
+    };
+    let work_done = Event {
+        topic: "work.done".to_string(),
+        payload: Some(
+            r#"{"step":"step-01","task_id":"task-step-01","task_key":"ce-executor:demo-plan:step-01:u1-impl","plan_name":"demo-plan","commit_count":0,"changed_lines":0}"#
+                .to_string(),
+        ),
+        ts: chrono::Utc::now().to_rfc3339(),
+        hat: Some("executor".to_string()),
+        triggered: None,
+        source: Some("test".to_string()),
+        wave_id: None,
+        wave_index: None,
+        wave_total: None,
+        system_injected: None,
+    };
+    let queue_advance_projection = Event {
+        topic: "queue.advance".to_string(),
+        payload: Some(
+            r#"{"step":"step-02","completed_step":"step-01","task_id":"task-step-01","message":"Advancing."}"#
+                .to_string(),
+        ),
+        ts: chrono::Utc::now().to_rfc3339(),
+        hat: Some("plan-gate".to_string()),
+        triggered: None,
+        source: Some("test".to_string()),
+        wave_id: None,
+        wave_index: None,
+        wave_total: None,
+        system_injected: None,
+    };
+    let report = proj.apply(&[work_ready, work_done, queue_advance_projection]);
+    assert!(
+        report.rejections.is_empty(),
+        "projector rejected events: {:?}",
+        report.rejections
+    );
+    // Sanity: the projector's cache was actually updated.
+    assert_eq!(proj.ctx.tasks_cache.len(), 1, "task not in cache");
+    assert!(
+        proj.ctx.progress_cache.completed_steps.iter().any(|s| s == "step-01"),
+        "step-01 not in progress_cache.completed_steps: {:?}",
+        proj.ctx.progress_cache.completed_steps
+    );
+
+    // Now build a `LedgerSnapshot` that is *cold-start* (simulating
+    // the pre-T9 state where the snapshot in `state.state_ledger`
+    // is empty at unified pre-commit time).
+    let mut snap = LedgerSnapshot::cold_start();
+    assert!(snap.tasks.is_empty(), "cold-start must have no tasks");
+    assert!(
+        snap.progress.completed_steps.is_empty(),
+        "cold-start must have no completed_steps"
+    );
+
+    // After sync, the snapshot must mirror the projector cache.
+    proj.sync_to_ledger_snapshot(&mut snap);
+    assert_eq!(snap.tasks.len(), 1, "ledger snapshot missing tasks");
+    assert_eq!(snap.tasks[0].id, "task-step-01");
+    assert!(
+        snap.progress
+            .completed_steps
+            .iter()
+            .any(|s| s == "step-01"),
+        "ledger snapshot missing progress.completed_steps"
+    );
+
+    // Drive the unified `StepHandoffRule` with a `queue.advance`
+    // for `step-02`. Because the ledger snapshot now reflects the
+    // projector cache, the rule must accept the advance (step-01
+    // is in `completed_steps`).
+    use crate::config::EventLoopConfig;
+    use crate::preset::engine::protocol::ProtocolView;
+    use crate::validation::{ValidationPipeline, ValidationStage};
+
+    let pipeline = ValidationPipeline::from_config(
+        &ProtocolView::from_event_loop(&EventLoopConfig::default()),
+        &EventLoopConfig::default(),
+    );
+    assert_eq!(pipeline.pre_commit_rules.len(), 5);
+    let queue_advance = Event {
+        topic: "queue.advance".to_string(),
+        payload: Some(
+            r#"{"step":"step-02","completed_step":"step-01","task_id":"task-step-01","message":"Advancing."}"#
+                .to_string(),
+        ),
+        ts: chrono::Utc::now().to_rfc3339(),
+        hat: Some("plan-gate".to_string()),
+        triggered: None,
+        source: Some("test".to_string()),
+        wave_id: None,
+        wave_index: None,
+        wave_total: None,
+        system_injected: None,
+    };
+    let view = ProtocolView::from_event_loop(&EventLoopConfig::default());
+    let results = pipeline.validate_pre_commit_with_view(&view, &snap, &queue_advance);
+    let step_handoff = results
+        .iter()
+        .find(|r| r.stage == ValidationStage::StepHandoff)
+        .expect("StepHandoffRule must run");
+    assert!(
+        step_handoff.accepted,
+        "StepHandoffRule must accept queue.advance after sync; got: {:?}",
+        step_handoff
+    );
+}
+
+/// Negative counterpart: a `queue.advance` for `step-99` (NOT in
+/// `completed_steps`, and `current_step` is unset) must be rejected
+/// by the unified `StepHandoffRule` once the sync has populated
+/// the snapshot. This pins the rejection path, not just the accept.
+#[test]
+fn u11_t9_sync_to_ledger_snapshot_step_mismatch_rejected() {
+    let tmp = workspace();
+    let mut proj = StateProjector::new(ProjectionContext::new_legacy(
+        tmp.path(),
+        make_config_with_step_chain(),
+    ));
+
+    let work_done = Event {
+        topic: "work.done".to_string(),
+        payload: Some(
+            r#"{"step":"step-01","task_id":"task-step-01","task_key":"k1","plan_name":"p","commit_count":0,"changed_lines":0}"#
+                .to_string(),
+        ),
+        ts: chrono::Utc::now().to_rfc3339(),
+        hat: Some("executor".to_string()),
+        triggered: None,
+        source: Some("test".to_string()),
+        wave_id: None,
+        wave_index: None,
+        wave_total: None,
+        system_injected: None,
+    };
+    let _ = proj.apply(&[work_done]);
+
+    let mut snap = LedgerSnapshot::cold_start();
+    proj.sync_to_ledger_snapshot(&mut snap);
+
+    use crate::config::EventLoopConfig;
+    use crate::preset::engine::protocol::ProtocolView;
+    use crate::validation::{ValidationPipeline, ValidationStage};
+
+    let pipeline = ValidationPipeline::from_config(
+        &ProtocolView::from_event_loop(&EventLoopConfig::default()),
+        &EventLoopConfig::default(),
+    );
+    let bad_advance = Event {
+        topic: "queue.advance".to_string(),
+        payload: Some(
+            r#"{"step":"step-99","completed_step":"step-01","task_id":"task-step-01","message":"Jump."}"#
+                .to_string(),
+        ),
+        ts: chrono::Utc::now().to_rfc3339(),
+        hat: Some("plan-gate".to_string()),
+        triggered: None,
+        source: Some("test".to_string()),
+        wave_id: None,
+        wave_index: None,
+        wave_total: None,
+        system_injected: None,
+    };
+    let view = ProtocolView::from_event_loop(&EventLoopConfig::default());
+    let results = pipeline.validate_pre_commit_with_view(&view, &snap, &bad_advance);
+    let step_handoff = results
+        .iter()
+        .find(|r| r.stage == ValidationStage::StepHandoff)
+        .expect("StepHandoffRule must run");
+    assert!(
+        !step_handoff.accepted,
+        "StepHandoffRule must reject step-99 jump; got: {:?}",
+        step_handoff
     );
 }
