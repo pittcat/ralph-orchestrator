@@ -11,10 +11,13 @@
 
 use std::collections::BTreeMap;
 
+use crate::event_loop::WorkflowProgress;
 use crate::event_loop::review_step_state::ReviewStepTracker;
 use crate::event_policy::{PolicyRejection, PolicyRuntimeState};
 use crate::payload_contract::PayloadContractViolation;
 use crate::state::LedgerSnapshot;
+
+use super::result::WorkflowGuardRejectionDetail;
 
 /// Mutable context passed to every [`crate::validation::ValidationRule`].
 pub struct ValidationContext<'a> {
@@ -27,6 +30,11 @@ pub struct ValidationContext<'a> {
     /// Optional override for the review-step tracker. When set, it
     /// shadows the snapshot's `review_step_tracker` field.
     review_step_tracker: Option<&'a mut ReviewStepTracker>,
+    /// Optional override for the workflow progress tracker. When
+    /// set, it shadows the snapshot's `workflow_phases` field so
+    /// `WorkflowGuardRule` can advance the in-loop tracker without
+    /// committing a `CommitDelta` per event.
+    workflow_progress: Option<&'a mut WorkflowProgress>,
     /// Optional accumulator for the first non-recoverable payload
     /// contract violation detected by the event-policy rule. The
     /// event loop uses this to decide whether to pause the loop.
@@ -34,6 +42,10 @@ pub struct ValidationContext<'a> {
     /// Optional accumulator for policy rejections. The wave partition
     /// uses this to surface wave-specific rejections to the runner.
     policy_rejections: Option<&'a mut Vec<PolicyRejection>>,
+    /// Optional accumulator for `WorkflowGuardRule` rejection details.
+    /// The event loop drains this vector to write one recovery
+    /// envelope per rejected event.
+    workflow_guard_details: Option<&'a mut Vec<WorkflowGuardRejectionDetail>>,
     /// Optional source-hat attribution per topic, used when building
     /// a structured `PayloadContractViolation`.
     source_hats_by_topic: Option<&'a BTreeMap<String, Vec<String>>>,
@@ -49,8 +61,10 @@ impl<'a> ValidationContext<'a> {
             snapshot,
             policy_runtime_state: None,
             review_step_tracker: None,
+            workflow_progress: None,
             payload_contract_violation: None,
             policy_rejections: None,
+            workflow_guard_details: None,
             source_hats_by_topic: None,
             target_hats_by_topic: None,
         }
@@ -70,6 +84,16 @@ impl<'a> ValidationContext<'a> {
         self
     }
 
+    /// Use a caller-supplied `WorkflowProgress` instead of the
+    /// snapshot's `workflow_phases` map. The event loop's working
+    /// `LoopState::workflow_progress` is the canonical instance; the
+    /// snapshot's field is the durable fallback used when no override
+    /// is supplied.
+    pub fn with_workflow_progress(mut self, progress: &'a mut WorkflowProgress) -> Self {
+        self.workflow_progress = Some(progress);
+        self
+    }
+
     /// Accumulate the first non-recoverable payload contract violation
     /// into a caller-supplied slot.
     pub fn with_payload_contract_violation(
@@ -83,6 +107,18 @@ impl<'a> ValidationContext<'a> {
     /// Accumulate policy rejections into a caller-supplied vector.
     pub fn with_policy_rejections(mut self, vec: &'a mut Vec<PolicyRejection>) -> Self {
         self.policy_rejections = Some(vec);
+        self
+    }
+
+    /// Accumulate `WorkflowGuardRule` rejection details into a
+    /// caller-supplied vector. The event loop drains this vector
+    /// after the per-event loop to write a recovery envelope per
+    /// rejected event.
+    pub fn with_workflow_guard_details(
+        mut self,
+        vec: &'a mut Vec<WorkflowGuardRejectionDetail>,
+    ) -> Self {
+        self.workflow_guard_details = Some(vec);
         self
     }
 
@@ -131,6 +167,16 @@ impl<'a> ValidationContext<'a> {
         &mut self.snapshot.review_step_tracker
     }
 
+    /// Mutable access to the `WorkflowProgress` that this validation
+    /// should mutate. Returns `None` when the caller did not supply
+    /// an override — `WorkflowGuardRule` requires mutable access to
+    /// advance progress, so it short-circuits with an error result
+    /// when no override is supplied. Rules that do not need to
+    /// mutate workflow progress should ignore this accessor.
+    pub fn workflow_progress_mut(&mut self) -> Option<&mut WorkflowProgress> {
+        self.workflow_progress.as_deref_mut()
+    }
+
     /// Record the first non-recoverable payload contract violation.
     /// Later violations are ignored so the loop surfaces only the
     /// first one.
@@ -147,6 +193,16 @@ impl<'a> ValidationContext<'a> {
     pub fn record_policy_rejection(&mut self, rejection: PolicyRejection) {
         if let Some(vec) = self.policy_rejections.as_deref_mut() {
             vec.push(rejection);
+        }
+    }
+
+    /// Record a `WorkflowGuardRule` rejection detail. The event loop
+    /// drains the accumulator after the per-event loop to write one
+    /// recovery envelope per rejected event. No-op when the caller
+    /// did not supply an accumulator.
+    pub fn record_workflow_guard_detail(&mut self, detail: WorkflowGuardRejectionDetail) {
+        if let Some(vec) = self.workflow_guard_details.as_deref_mut() {
+            vec.push(detail);
         }
     }
 

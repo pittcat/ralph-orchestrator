@@ -412,9 +412,8 @@ pub struct EventLoop {
 /// deterministic-correction flag is on, route a rejection
 /// through [`crate::correction::emit_correction_context`]
 /// instead of publishing a `task.resume` event. The helper
-/// takes a `&mut EventBus` (matching the legacy
-/// `publish_policy_rejection_resume` signature) so the existing
-/// 8 call sites do not need a signature change.
+/// takes a `&mut EventBus` so the existing call sites do
+/// not need a signature change.
 ///
 /// **Hook caveat (see the inner call site)**: the live
 /// `LoopState::prompt_context` cannot be reached from here
@@ -543,60 +542,13 @@ fn publish_correction_via_context(
     }
 }
 
-fn publish_policy_rejection_resume(
-    bus: &mut EventBus,
-    state: &mut crate::event_loop::LoopState,
-    mut ledger: Option<&mut crate::state::StateLedger>,
-    event: &JsonlEvent,
-    payload: String,
-    tracker: Option<&crate::event_loop::review_step_state::ReviewStepTracker>,
-    ttl_seconds: u64,
-) {
-    // A3 (002-adversarial-review / 003-adversarial-review
-    // P0-3): when the unified-deterministic-correction flag is
-    // on, the rejection must be routed through
-    // [`crate::correction::emit_correction_context`] so the
-    // correction block lands in `state.prompt_context` and the
-    // next prompt prepends it. The legacy `task.resume` event
-    // must NOT also be published — otherwise the same
-    // rejection would drive two correction mechanisms in
-    // parallel (silent double-fire) and the agent would see
-    // both `## ORCHESTRATOR CORRECTION` and a `task.resume`
-    // event on the bus.
-    //
-    // The `LoopState` is threaded through the bus via a
-    // `RejectionRecord` field on the `Event` envelope; the
-    // dispatcher's bus implementation stores the prompt
-    // context queue there. We cannot reach the live
-    // `StateLedger` from this free function — the function is
-    // called from many sites inside the event loop without a
-    // `&mut StateLedger` in scope. The `emit_correction_context`
-    // signature accepts `Option<&mut StateLedger>`; we pass
-    // `None` here and rely on the dispatcher's post-publish
-    // path to commit a `CommitDelta::RejectionRecorded` to
-    // the ledger (the dispatcher's `policy_rejection_to_ledger`
-    // hook owns that responsibility).
-    if crate::correction::is_correction_enabled() {
-        // A3 (002-adversarial-review / 003-adversarial-review
-        // P0-3): when the unified-deterministic-correction
-        // flag is on, route the rejection through
-        // `emit_correction_context` so the correction block
-        // lands in the loop's prompt queue.
-        //
-        // **Hook caveat**: the legacy helper takes only
-        // `&mut EventBus` (no `&mut StateLedger` or
-        // `&mut PromptContext` in scope). We therefore build a
-        // *throwaway* `PromptContext` here and let the caller's
-        // dispatcher merge it into the live `LoopState`'s
-        // `state.prompt_context` queue. The throwaway carries
-        // the freshly-built `CorrectionContext` so the
-        // `emit_correction_context` side effects (ledger
-        // commit, retry-count tracking, escalation threshold)
-        // all run; the merge step is a TODO that the
-        // `process_parse_result` integration owns.
-        return publish_correction_via_context(bus, state, ledger.as_deref_mut(), event, &payload);
-    }
-}
+// `publish_policy_rejection_resume` was the legacy bridge that
+// routed workflow-guard / step-handoff rejections through
+// `publish_correction_via_context`. It is no longer called by any
+// runtime code path: workflow-guard rejections now flow through
+// the unified post-commit loop (U11-T4) and use
+// `publish_correction_via_context` directly. The function was
+// deleted in U11-T4.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoverableExhaustion {
     /// Hat that emitted the (hat, topic) pair whose budget just
@@ -646,276 +598,15 @@ fn filter_human_guidance_blocks(content: &str) -> String {
     out
 }
 
-/// Result of extracting a correlation key from an event payload.
-enum CorrelationKeyResult {
-    /// Chain has no correlation config — use global instance tracking.
-    Global,
-    /// Successfully extracted instance key from payload.
-    Instance(String),
-    /// Correlation config exists but extraction failed (missing payload, invalid JSON,
-    /// path not found, or value is not a string). Event should be rejected.
-    ExtractFailed,
-}
-
-/// Extracts the correlation key from an event's payload based on chain config.
-///
-/// Returns [`CorrelationKeyResult::Global`] for chains without correlation config,
-/// [`CorrelationKeyResult::Instance`] when extraction succeeds, and
-/// [`CorrelationKeyResult::ExtractFailed`] when the chain has correlation config
-/// but the payload is missing, malformed, or does not contain the configured path.
-fn extract_correlation_key(
-    event: &JsonlEvent,
-    chain: &crate::config::WorkflowChain,
-) -> CorrelationKeyResult {
-    let Some(correlation) = chain.correlation.as_ref() else {
-        return CorrelationKeyResult::Global;
-    };
-    let Some(payload) = event.payload.as_ref() else {
-        return CorrelationKeyResult::ExtractFailed;
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
-        return CorrelationKeyResult::ExtractFailed;
-    };
-
-    // Navigate the JSON path (dot notation)
-    let parts: Vec<&str> = correlation.from_payload.split('.').collect();
-    let mut current = &value;
-    for part in parts {
-        let Some(next) = current.get(part) else {
-            return CorrelationKeyResult::ExtractFailed;
-        };
-        current = next;
-    }
-
-    match current.as_str() {
-        Some(s) => CorrelationKeyResult::Instance(s.to_string()),
-        None => CorrelationKeyResult::ExtractFailed,
-    }
-}
-
-/// Validates events against configured workflow guards.
-///
-/// Events that are out-of-order relative to a configured chain are rejected
-/// and replaced with a recovery signal (task.resume). The event is NOT recorded
-/// as seen and is NOT published to the bus.
-///
-/// Side-channel events (e.g., `periodic.review`) that are not part of any chain
-/// are accepted but do not advance the workflow progress.
-/// One rejected workflow-guard event. Returned from
-/// [`apply_workflow_guard_validation`] so the caller (in
-/// `process_events_from_jsonl`) can record a U4 recovery envelope
-/// without re-running the validation logic.
-///
-/// The function itself is still pure with respect to the diagnostics
-/// collector; it does not call `log_recovery`. The caller maps each
-/// rejection to a `RecoveryDiagnosisEnvelope` and writes it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkflowGuardRejectionDetail {
-    /// The chain that rejected the event (e.g. `experiment`).
-    pub chain_name: String,
-    /// The instance key (e.g. `exp-1`) when the chain is correlation-scoped.
-    pub instance_key: Option<String>,
-    /// The topic that was rejected.
-    pub rejected_topic: String,
-    /// The current phase the chain is at (0-based). `None` when the
-    /// chain is at the start or correlation extraction failed.
-    pub current_phase: Option<usize>,
-    /// Human-readable summary of the current phase topic.
-    pub current_topic: String,
-    /// The next expected topic, or `terminal` when the chain is
-    /// already at the end.
-    pub next_expected: String,
-    /// Source hat the event was attributed to (via `event.hat`).
-    pub source_hat: Option<String>,
-    /// The full rejection reason (concatenation across chains).
-    pub reason: String,
-}
-
-/// Output of [`apply_workflow_guard_validation`]. The accepted events
-/// keep flowing downstream exactly as before; the rejections list
-/// carries the metadata the caller needs to emit a U4 recovery
-/// envelope per rejection. U4 plan: "要么返回 rejection diagnostics，
-/// 要么注入一个轻量 sink/callback，由调用方统一写 log_recovery()".
-/// The lighter-touch approach is a return value; that is what this
-/// struct implements.
-#[derive(Debug, Default)]
-pub struct WorkflowGuardOutcome {
-    /// Events that passed workflow-guard validation.
-    pub accepted_events: Vec<JsonlEvent>,
-    /// Events that were rejected, in the order they were seen.
-    pub rejections: Vec<WorkflowGuardRejectionDetail>,
-}
-
-fn apply_workflow_guard_validation(
-    events: Vec<JsonlEvent>,
-    guards: &crate::config::WorkflowGuardsConfig,
-    workflow_progress: &mut WorkflowProgress,
-    bus: &mut EventBus,
-    state: &mut crate::event_loop::LoopState,
-    mut ledger: Option<&mut crate::state::StateLedger>,
-    review_step_tracker: &review_step_state::ReviewStepTracker,
-    ttl_seconds: u64,
-) -> WorkflowGuardOutcome {
-    let mut outcome = WorkflowGuardOutcome {
-        accepted_events: Vec::with_capacity(events.len()),
-        rejections: Vec::new(),
-    };
-
-    for event in events {
-        // Find which chain(s) this topic belongs to
-        let matching_chains: Vec<&crate::config::WorkflowChain> = guards
-            .chains
-            .iter()
-            .filter(|chain| chain.topics.contains(&event.topic))
-            .collect();
-
-        if matching_chains.is_empty() {
-            // Topic not in any chain — accept as side-channel (no progress tracking)
-            outcome.accepted_events.push(event);
-            continue;
-        }
-
-        // Extract instance keys and phases once per chain, then validate and advance
-        let mut rejections: Vec<(String, Option<String>, Option<usize>, String, String)> =
-            Vec::new();
-        let mut chain_extractions: Vec<(&crate::config::WorkflowChain, Option<String>, usize)> =
-            Vec::new();
-
-        for chain in &matching_chains {
-            let instance_key = match extract_correlation_key(&event, chain) {
-                CorrelationKeyResult::Global => None,
-                CorrelationKeyResult::Instance(key) => Some(key),
-                CorrelationKeyResult::ExtractFailed => {
-                    rejections.push((
-                        chain.name.clone(),
-                        None,
-                        None,
-                        "none".to_string(),
-                        "unknown (correlation extraction failed)".to_string(),
-                    ));
-                    continue;
-                }
-            };
-
-            // Find the phase index of this topic in the chain
-            let phase = chain.topics.iter().position(|t| *t == event.topic).unwrap();
-
-            // Strict mode rejects out-of-order events; Advisory mode accepts all
-            if matches!(chain.mode, crate::config::WorkflowChainMode::Strict) {
-                let is_valid =
-                    workflow_progress.is_phase_valid(&chain.name, instance_key.as_deref(), phase);
-
-                if !is_valid {
-                    let current_phase =
-                        workflow_progress.get_phase(&chain.name, instance_key.as_deref());
-                    let current_topic = current_phase
-                        .and_then(|p| chain.topics.get(p).cloned())
-                        .unwrap_or_else(|| "none".to_string());
-                    let next_expected = current_phase
-                        .and_then(|p| chain.topics.get(p + 1).cloned())
-                        .unwrap_or_else(|| "terminal".to_string());
-                    rejections.push((
-                        chain.name.clone(),
-                        instance_key.clone(),
-                        current_phase,
-                        current_topic,
-                        next_expected,
-                    ));
-                }
-            }
-
-            chain_extractions.push((chain, instance_key, phase));
-        }
-
-        if !rejections.is_empty() {
-            let rejection_details: Vec<String> = rejections
-                .iter()
-                .map(|(chain_name, instance_key, current_phase, current_topic, next_expected)| {
-                    format!(
-                        "chain '{}' (instance '{}'): current='{}' (phase {}), next expected='{}'",
-                        chain_name,
-                        instance_key.as_deref().unwrap_or("global"),
-                        current_topic,
-                        current_phase.map(|p| p.to_string()).unwrap_or_else(|| "none".to_string()),
-                        next_expected
-                    )
-                })
-                .collect();
-
-            let rejection_reason = format!(
-                "Workflow guard rejected '{}': {}.",
-                event.topic,
-                rejection_details.join("; ")
-            );
-
-            warn!(
-                reason = %rejection_reason,
-                topic = %event.topic,
-                "Out-of-order workflow event rejected by guard"
-            );
-
-            // Publish recovery signal with actionable context
-            let recovery_payload = format!(
-                "WORKFLOW_GUARD_REJECTED: out-of-order event '{}'.\n{}\n\n\
-                 Wait for the correct phase before emitting this event. \
-                 The loop will continue to allow recovery.",
-                event.topic,
-                rejection_details.join("\n")
-            );
-            publish_policy_rejection_resume(
-                bus,
-                state,
-                ledger.as_deref_mut(),
-                &event,
-                recovery_payload,
-                Some(review_step_tracker),
-                ttl_seconds,
-            );
-
-            // U4: surface the rejection metadata to the caller. The
-            // helper itself stays free of diagnostics dependencies;
-            // the caller writes the recovery journal + audit event.
-            // (One rejection entry per rejected event, regardless of
-            // how many chains rejected it — the loop summary in
-            // `reason` already concatenates chain details.)
-            let source_hat = event.hat.clone();
-            let mut envelope_rejection = None;
-            for (chain_name, instance_key, current_phase, current_topic, next_expected) in
-                rejections.into_iter()
-            {
-                if envelope_rejection.is_none() {
-                    envelope_rejection = Some(WorkflowGuardRejectionDetail {
-                        chain_name,
-                        instance_key,
-                        rejected_topic: event.topic.clone(),
-                        current_phase,
-                        current_topic,
-                        next_expected,
-                        source_hat: source_hat.clone(),
-                        reason: rejection_reason.clone(),
-                    });
-                }
-            }
-            if let Some(rejection) = envelope_rejection {
-                outcome.rejections.push(rejection);
-            }
-
-            // Do NOT record the rejected event or advance progress
-            continue;
-        }
-
-        // Event is valid — accept it
-        outcome.accepted_events.push(event);
-
-        // Advance workflow progress for all matching chains (both strict and advisory).
-        // Advisory chains track progress for in-order events but never reject.
-        for (chain, instance_key, phase) in chain_extractions {
-            workflow_progress.advance(&chain.name, instance_key.as_deref(), phase);
-        }
-    }
-
-    outcome
-}
+/// Validates events against configured workflow guards is implemented by
+/// [`crate::validation::rules_workflow_guard::WorkflowGuardRule`], invoked
+/// from the unified pre-commit / post-commit loop in
+/// `process_parse_result`. The legacy free function
+/// `apply_workflow_guard_validation` and its sibling
+/// `WorkflowGuardOutcome` / `WorkflowGuardRejectionDetail` structs were
+/// removed in U11-T4 (post-commit wiring); the recovery-envelope writer
+/// `Self::log_workflow_guard_rejection` survives because it is
+/// implementation-agnostic and is reused by the unified handler.
 
 impl EventLoop {
     /// 2026-06-09: returns the union of `verdict_gate.topic` and
@@ -3089,7 +2780,7 @@ impl EventLoop {
     /// (the agent has to fix the phase order, not a specific hat).
     fn log_workflow_guard_rejection(
         event_loop: &mut EventLoop,
-        rejection: &WorkflowGuardRejectionDetail,
+        rejection: &crate::validation::WorkflowGuardRejectionDetail,
     ) {
         let reason_code = if rejection.current_phase.is_none() {
             "workflow_correlation_extraction_failed"
@@ -8003,10 +7694,21 @@ impl EventLoop {
             // canonical instances directly.
             let mut policy_state = self.state.policy_runtime_state.take().unwrap_or_default();
             let mut review_step_tracker = std::mem::take(&mut self.state.review_step_tracker);
+            // U11-T4 (post-commit wiring): hand the live
+            // `WorkflowProgress` to the validation context so the
+            // unified `WorkflowGuardRule` reads & advances the same
+            // instance the legacy gate stack used to. The pre-commit
+            // rules do not touch this field; the post-commit pass
+            // calls it after every pre-commit accept.
+            let mut workflow_progress = std::mem::take(&mut self.state.workflow_progress);
             let mut event_policy_violation: Option<
                 crate::payload_contract::PayloadContractViolation,
             > = None;
             let mut policy_rejections: Vec<crate::event_policy::PolicyRejection> = Vec::new();
+            // `WorkflowGuardRule` rejection details collected per
+            // event; drained after the per-event loop to write
+            // recovery envelopes (one per rejected event).
+            let mut wg_details: Vec<crate::validation::WorkflowGuardRejectionDetail> = Vec::new();
 
             // Source/target hat attribution for payload-contract violations.
             let (source_hats_by_topic, target_hats_by_topic) = if policy_enabled {
@@ -8041,10 +7743,30 @@ impl EventLoop {
                 std::collections::HashSet::new();
             let mut hold_reason: Option<String> = None;
 
+            // U11-T4: post-commit workflow-guard wiring only
+            // engages when the state machine is disabled (mirrors
+            // the legacy bypass at line 8373). The state machine
+            // owns the lifecycle when it is on, so the linear
+            // guard would double-reject.
+            let post_commit_enabled = self
+                .config
+                .event_loop
+                .state_machine
+                .as_ref()
+                .is_none_or(|sm| !sm.enabled)
+                && self
+                    .config
+                    .event_loop
+                    .workflow_guards
+                    .as_ref()
+                    .is_some_and(|g| !g.chains.is_empty());
+
             for evt in &events {
                 let mut ctx = crate::validation::ValidationContext::new(&mut snapshot)
                     .with_policy_runtime_state(&mut policy_state)
                     .with_review_step_tracker(&mut review_step_tracker)
+                    .with_workflow_progress(&mut workflow_progress)
+                    .with_workflow_guard_details(&mut wg_details)
                     .with_payload_contract_violation(&mut event_policy_violation)
                     .with_policy_rejections(&mut policy_rejections)
                     .with_source_hats_by_topic(&source_hats_by_topic)
@@ -8178,6 +7900,65 @@ impl EventLoop {
                     );
                     self.bus.publish(Event::new("event.policy_warning", msg));
                 }
+                // U11-T4: post-commit pass — only `WorkflowGuardRule`
+                // is wired this round. `ExecutionContractRule` is
+                // still a partial proxy and would double-reject with
+                // the legacy `validate_execution_contract` path.
+                // When the post-commit rule rejects, drain the
+                // matching `WorkflowGuardRejectionDetail` (the rule
+                // pushed it before returning) and write the
+                // recovery envelope. Multiple chain rejections on
+                // one event share a single recovery envelope (the
+                // detail's `reason` concatenates chain details, the
+                // legacy helper does the same).
+                if event_accepted && post_commit_enabled {
+                    let post_results = pipeline.validate_post_commit(&view, &mut ctx, evt);
+                    for r in &post_results {
+                        if r.accepted {
+                            continue;
+                        }
+                        if r.stage != crate::validation::ValidationStage::WorkflowGuard {
+                            // Future post-commit rules (e.g. the
+                            // full `ExecutionContractRule` once U6
+                            // wires the workspace path) plug in
+                            // here. Today only the workflow guard
+                            // is engaged, so any other stage is a
+                            // misconfiguration — log and drop the
+                            // event to be safe.
+                            tracing::warn!(
+                                stage = %r.stage,
+                                topic = %evt.topic,
+                                "U11-T4: unexpected post-commit rejection; dropping event"
+                            );
+                            event_accepted = false;
+                            break;
+                        }
+                        // Drain the matching detail recorded by
+                        // the rule. Today `WorkflowGuardRule` is
+                        // the only post-commit rule, so at most
+                        // one detail was pushed; we pop it back
+                        // here so the next iteration's pre-commit
+                        // sees a clean accumulator.
+                        if let Some(detail) = wg_details.pop() {
+                            Self::log_workflow_guard_rejection(self, &detail);
+                        }
+                        let reason = format!(
+                            "{}:{}",
+                            r.stage.as_str(),
+                            r.reason_code.as_deref().unwrap_or("rejected"),
+                        );
+                        publish_correction_via_context(
+                            &mut self.bus,
+                            &mut self.state,
+                            state_ledger.as_mut(),
+                            evt,
+                            &reason,
+                        );
+                        had_policy_rejections = true;
+                        event_accepted = false;
+                        break;
+                    }
+                }
                 if event_accepted {
                     accepted_events.push(evt.clone());
                 }
@@ -8189,6 +7970,7 @@ impl EventLoop {
             self.state.state_ledger = state_ledger;
             self.state.review_step_tracker = review_step_tracker;
             self.state.policy_runtime_state = Some(policy_state);
+            self.state.workflow_progress = workflow_progress;
 
             if policy_enabled {
                 // Process recoverable rejection budget.
@@ -8355,49 +8137,15 @@ impl EventLoop {
         // is removed; tests `p1_3_unified_*` document the
         // layered contract.)
 
-        // --- Workflow guard validation: reject out-of-order events ---
-        // Legacy linear guards run after the state machine. When the state machine
-        // is enabled, branch-close topics that it accepts are lifecycle-complete
-        // even if they are not part of a linear guard chain.
-        let workflow_guards = self.config.event_loop.workflow_guards.as_ref();
-        let state_machine_enabled = self
-            .config
-            .event_loop
-            .state_machine
-            .as_ref()
-            .is_some_and(|sm| sm.enabled);
-        // U4: workflow guard now returns `WorkflowGuardOutcome` so we
-        // can write a recovery envelope per rejection. The accepted
-        // events keep flowing exactly as before.
-        let events: Vec<JsonlEvent> = match (workflow_guards, state_machine_enabled) {
-            (Some(guards), false) if !guards.chains.is_empty() => {
-                let mut review_step_tracker = std::mem::take(&mut self.state.review_step_tracker);
-                let mut state_ledger = std::mem::take(&mut self.state.state_ledger);
-                let mut workflow_progress = std::mem::take(&mut self.state.workflow_progress);
-                let outcome = apply_workflow_guard_validation(
-                    events,
-                    guards,
-                    &mut workflow_progress,
-                    &mut self.bus,
-                    &mut self.state,
-                    state_ledger.as_mut(),
-                    &review_step_tracker,
-                    self.config
-                        .event_loop
-                        .task_resume_ttl_seconds
-                        .unwrap_or(300),
-                );
-                self.state.workflow_progress = workflow_progress;
-                self.state.state_ledger = state_ledger;
-                self.state.review_step_tracker = review_step_tracker;
-                for rejection in &outcome.rejections {
-                    Self::log_workflow_guard_rejection(&mut *self, rejection);
-                }
-                outcome.accepted_events
-            }
-            _ => events,
-        };
-        // --- End workflow guard validation ---
+        // --- Workflow guard validation is now unified into the
+        // pre-commit / post-commit loop above (U11-T4). The legacy
+        // `apply_workflow_guard_validation` call site, the legacy
+        // `WorkflowGuardOutcome` / `WorkflowGuardRejectionDetail`
+        // types, and the `publish_policy_rejection_resume` helper
+        // have all been deleted; the `WorkflowGuardRule` in
+        // `validation::rules_workflow_guard` is the single source
+        // of truth for out-of-order / correlation-extraction
+        // rejections. ---
 
         // Update policy runtime state for events that survived all validation layers
         if let Some(ref policy_config) = self.config.event_loop.event_policy

@@ -239,6 +239,7 @@ mod tests {
             effective_required_fields: HashMap::new(),
             verdict_gate: None,
             workflow_contract: None,
+            workflow_guards: None,
             state_projection: None,
             execution_contracts: Some(ExecutionContractsConfig::default()),
             event_policy: None,

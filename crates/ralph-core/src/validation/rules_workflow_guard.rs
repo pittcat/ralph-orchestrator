@@ -1,22 +1,21 @@
 //! U4b: `WorkflowGuardRule` — wraps the workflow-guard stage.
 //!
-//! Post-commit phase. The legacy implementation still lives in
-//! `event_loop::apply_workflow_guard_validation` (a free function
-//! that mutates `WorkflowProgress`, the `EventBus`, and a
-//! `ReviewStepTracker`) because the event loop does not yet run
-//! post-commit rules. U4b exposes the **decision** surface behind a
-//! pure `ValidationRule` so the unified pipeline can compose it once
-//! post-commit execution is wired.
+//! Post-commit phase. The unified event loop calls
+//! [`ValidationPipeline::validate_post_commit`] after every pre-commit
+//! accept; this rule is the single source of truth for
+//! out-of-order / correlation-extraction rejections. Side effects
+//! (recovery-envelope writing, escalation) are owned by the
+//! orchestrator layer; the rule only (a) checks validity against
+//! the current progress and (b) advances progress on accept.
 //!
-//! The rule mirrors the strict-chain check: an event topic must
-//! appear in a configured chain's topic list and the chain's progress
-//! (read from the snapshot's `workflow_phases` map) must mark the
-//! event's phase as valid. The rule does **not** mutate the
-//! `EventBus`, call `RecoveryResponder`, or advance workflow progress
-//! — those side effects belong to the orchestrator layer (U6 will
-//! wire them). The rule produces the
-//! `ReasonCode::WORKFLOW_GUARD_OUT_OF_ORDER` reason code on
-//! rejection, matching the legacy diagnostic.
+//! The rule produces the `ReasonCode::WORKFLOW_GUARD_OUT_OF_ORDER`
+//! reason code on rejection, matching the legacy diagnostic.
+//!
+//! The rule reads & writes the loop's `WorkflowProgress` through
+//! the [`ValidationContext`] override. Side effects (recovery
+//! envelope writing, escalation) are owned by the orchestrator
+//! layer; the rule only (a) checks validity against the current
+//! progress and (b) advances progress on accept.
 
 use crate::config::WorkflowChain;
 use crate::config::workflow_guards::{CorrelationConfig, WorkflowChainMode};
@@ -63,7 +62,17 @@ impl ValidationRule for WorkflowGuardRule {
             _ => return ValidationResult::accept_with(ValidationStage::WorkflowGuard),
         };
 
-        let snapshot = ctx.snapshot();
+        // `WorkflowGuardRule` requires mutable access to a
+        // `WorkflowProgress`. The event loop supplies the live
+        // `LoopState::workflow_progress` via
+        // [`ValidationContext::with_workflow_progress`]; in
+        // tests the override is wired manually. When the
+        // override is missing we cannot make a decision, so
+        // we accept (matches the legacy pre-override default
+        // of "no guard installed").
+        let Some(progress) = ctx.workflow_progress_mut() else {
+            return ValidationResult::accept_with(ValidationStage::WorkflowGuard);
+        };
 
         // Collect every chain whose topic list contains this event.
         let matching_chains: Vec<&WorkflowChain> = guards
@@ -78,8 +87,9 @@ impl ValidationRule for WorkflowGuardRule {
         }
 
         let mut rejections: Vec<WorkflowGuardRejectionDetail> = Vec::new();
+        let mut advances: Vec<(String, Option<String>, usize)> = Vec::new();
 
-        for chain in matching_chains {
+        for chain in &matching_chains {
             let instance_key = match extract_correlation_key(event, chain) {
                 CorrelationKeyResult::Global => None,
                 CorrelationKeyResult::Instance(key) => Some(key),
@@ -87,9 +97,12 @@ impl ValidationRule for WorkflowGuardRule {
                     rejections.push(WorkflowGuardRejectionDetail {
                         chain_name: chain.name.clone(),
                         instance_key: None,
+                        rejected_topic: event.topic.clone(),
                         current_phase: None,
                         current_topic: "none".to_string(),
                         next_expected: "unknown (correlation extraction failed)".to_string(),
+                        source_hat: event.hat.clone(),
+                        reason: "unknown (correlation extraction failed)".to_string(),
                     });
                     continue;
                 }
@@ -101,24 +114,12 @@ impl ValidationRule for WorkflowGuardRule {
                 .position(|t| *t == event.topic)
                 .expect("topic is in chain.topics by filter above");
 
-            // Advisory chains never reject; they only track progress in
-            // the orchestrator layer.
-            if !matches!(chain.mode, WorkflowChainMode::Strict) {
-                continue;
-            }
-
-            let key = workflow_phase_key(&chain.name, instance_key.as_deref());
-            let current_phase = snapshot
-                .workflow_phases
-                .get(&key)
-                .map(|p| *p as usize);
-
-            let valid = match current_phase {
-                None => phase == 0,
-                Some(highest) => phase == highest || phase == highest + 1,
-            };
-
-            if !valid {
+            // Strict mode rejects out-of-order; advisory mode
+            // tracks progress only.
+            if matches!(chain.mode, WorkflowChainMode::Strict)
+                && !progress.is_phase_valid(&chain.name, instance_key.as_deref(), phase)
+            {
+                let current_phase = progress.get_phase(&chain.name, instance_key.as_deref());
                 let current_topic = current_phase
                     .and_then(|p| chain.topics.get(p).cloned())
                     .unwrap_or_else(|| "none".to_string());
@@ -129,35 +130,78 @@ impl ValidationRule for WorkflowGuardRule {
                 rejections.push(WorkflowGuardRejectionDetail {
                     chain_name: chain.name.clone(),
                     instance_key: instance_key.clone(),
+                    rejected_topic: event.topic.clone(),
                     current_phase,
                     current_topic,
                     next_expected,
+                    source_hat: event.hat.clone(),
+                    reason: String::new(),
                 });
+                continue;
             }
+
+            // Both strict and advisory chains advance progress for
+            // in-order events (advisory never rejects; strict
+            // accepts in-order).
+            advances.push((chain.name.clone(), instance_key, phase));
         }
 
-        if rejections.is_empty() {
-            return ValidationResult::accept_with(ValidationStage::WorkflowGuard);
+        if !rejections.is_empty() {
+            // Build the consolidated reason string and let the
+            // first rejection carry the structured detail. The
+            // event loop's recovery-envelope writer reads the
+            // detail; later rejections on the same event are
+            // surfaced through the validation `correction_hint`.
+            let reason = format!(
+                "Workflow guard rejected '{}': {}",
+                event.topic,
+                rejections
+                    .iter()
+                    .map(|d| {
+                        format!(
+                            "chain '{}' (instance '{}'): current='{}' (phase {}), next expected='{}'",
+                            d.chain_name,
+                            d.instance_key.as_deref().unwrap_or("global"),
+                            d.current_topic,
+                            d.current_phase
+                                .map(|p| p.to_string())
+                                .unwrap_or_else(|| "none".to_string()),
+                            d.next_expected
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
+            for d in rejections.iter_mut() {
+                if d.reason.is_empty() {
+                    d.reason = reason.clone();
+                }
+            }
+            // Record the first rejection structurally so the
+            // orchestrator can write a recovery envelope; later
+            // rejections are summarised in the `correction_hint`
+            // (the rule returns a single ValidationResult).
+            let first = rejections.into_iter().next().expect("non-empty");
+            ctx.record_workflow_guard_detail(first.clone());
+            return ValidationResult::reject(
+                ValidationStage::WorkflowGuard,
+                ReasonCode::WORKFLOW_GUARD_OUT_OF_ORDER,
+                Some(RejectionHint::workflow_guard_out_of_order(
+                    &event.topic,
+                    std::slice::from_ref(&first),
+                )),
+                true,
+            );
         }
 
-        let first = &rejections[0];
-        ValidationResult::reject(
-            ValidationStage::WorkflowGuard,
-            ReasonCode::WORKFLOW_GUARD_OUT_OF_ORDER,
-            Some(RejectionHint::workflow_guard_out_of_order(
-                &event.topic,
-                &rejections,
-            )),
-            true,
-        )
-    }
-}
+        // All chains accepted — advance progress for every
+        // matched chain. The advance is idempotent: re-emitting
+        // the same phase does not change the recorded highest.
+        for (chain_name, instance_key, phase) in advances {
+            progress.advance(&chain_name, instance_key.as_deref(), phase);
+        }
 
-/// Build the `workflow_phases` map key used by [`LedgerSnapshot`].
-fn workflow_phase_key(chain_name: &str, instance_key: Option<&str>) -> String {
-    match instance_key {
-        Some(k) => format!("{chain_name}::{k}"),
-        None => format!("{chain_name}::"),
+        ValidationResult::accept_with(ValidationStage::WorkflowGuard)
     }
 }
 
@@ -193,7 +237,9 @@ fn extract_correlation_key(event: &Event, chain: &WorkflowChain) -> CorrelationK
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{CorrelationConfig, WorkflowChain, WorkflowChainMode, WorkflowGuardsConfig};
+    use crate::config::workflow_guards::CorrelationConfig;
+    use crate::config::{WorkflowChain, WorkflowChainMode, WorkflowGuardsConfig};
+    use crate::event_loop::WorkflowProgress;
     use crate::event_reader::Event;
     use crate::state::LedgerSnapshot;
     use crate::validation::context::ValidationContext;
@@ -229,10 +275,7 @@ mod tests {
     fn advisory_chain() -> WorkflowChain {
         WorkflowChain {
             name: "build".to_string(),
-            topics: vec![
-                "build.started".to_string(),
-                "build.finished".to_string(),
-            ],
+            topics: vec!["build.started".to_string(), "build.finished".to_string()],
             mode: WorkflowChainMode::Advisory,
             correlation: None,
         }
@@ -244,11 +287,19 @@ mod tests {
         ProtocolView::from_event_loop(&config)
     }
 
+    fn ctx_with_progress<'a>(
+        snap: &'a mut LedgerSnapshot,
+        progress: &'a mut WorkflowProgress,
+    ) -> ValidationContext<'a> {
+        ValidationContext::new(snap).with_workflow_progress(progress)
+    }
+
     #[test]
     fn accepts_side_channel_event() {
         let view = view_with_chains(vec![strict_chain()]);
         let mut snap = LedgerSnapshot::cold_start();
-        let mut ctx = ValidationContext::new(&mut snap);
+        let mut progress = WorkflowProgress::new();
+        let mut ctx = ctx_with_progress(&mut snap, &mut progress);
         let result = WorkflowGuardRule.validate(&view, &mut ctx, &event("periodic.review", None));
         assert!(result.accepted);
         assert_eq!(result.stage, ValidationStage::WorkflowGuard);
@@ -258,19 +309,23 @@ mod tests {
     fn accepts_chain_start() {
         let view = view_with_chains(vec![strict_chain()]);
         let mut snap = LedgerSnapshot::cold_start();
-        let mut ctx = ValidationContext::new(&mut snap);
+        let mut progress = WorkflowProgress::new();
+        let mut ctx = ctx_with_progress(&mut snap, &mut progress);
         let result =
             WorkflowGuardRule.validate(&view, &mut ctx, &event("experiment.planned", None));
         assert!(result.accepted);
+        assert_eq!(progress.get_phase("experiment", None), Some(0));
     }
 
     #[test]
     fn rejects_out_of_order_strict_chain() {
         let view = view_with_chains(vec![strict_chain()]);
         let mut snap = LedgerSnapshot::cold_start();
-        snap.workflow_phases
-            .insert("experiment::".to_string(), 0);
-        let mut ctx = ValidationContext::new(&mut snap);
+        let mut progress = WorkflowProgress::new();
+        progress.advance("experiment", None, 0);
+        let mut details: Vec<WorkflowGuardRejectionDetail> = Vec::new();
+        let mut ctx =
+            ctx_with_progress(&mut snap, &mut progress).with_workflow_guard_details(&mut details);
         let result =
             WorkflowGuardRule.validate(&view, &mut ctx, &event("experiment.evaluated", None));
         assert!(!result.accepted);
@@ -279,30 +334,42 @@ mod tests {
             Some(ReasonCode::WORKFLOW_GUARD_OUT_OF_ORDER)
         );
         assert!(result.retry_eligible);
-        assert!(result
-            .correction_hint
-            .as_deref()
-            .unwrap_or("")
-            .contains("experiment.run"));
+        assert!(
+            result
+                .correction_hint
+                .as_deref()
+                .unwrap_or("")
+                .contains("experiment.run")
+        );
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0].current_phase, Some(0));
+        assert_eq!(details[0].next_expected, "experiment.run");
     }
 
     #[test]
     fn accepts_advisory_out_of_order() {
         let view = view_with_chains(vec![advisory_chain()]);
         let mut snap = LedgerSnapshot::cold_start();
-        let mut ctx = ValidationContext::new(&mut snap);
-        let result =
-            WorkflowGuardRule.validate(&view, &mut ctx, &event("build.finished", None));
+        let mut progress = WorkflowProgress::new();
+        let mut ctx = ctx_with_progress(&mut snap, &mut progress);
+        let result = WorkflowGuardRule.validate(&view, &mut ctx, &event("build.finished", None));
         assert!(result.accepted);
+        // Advisory chains do not reject out-of-order events. The
+        // `WorkflowProgress::advance` helper short-circuits when
+        // the phase is not sequentially valid, so the first
+        // emission of a higher phase does not record progress
+        // (this matches the legacy behaviour).
+        assert_eq!(progress.get_phase("build", None), None);
     }
 
     #[test]
     fn accepts_idempotent_re_emission() {
         let view = view_with_chains(vec![strict_chain()]);
         let mut snap = LedgerSnapshot::cold_start();
-        snap.workflow_phases
-            .insert("experiment::".to_string(), 1);
-        let mut ctx = ValidationContext::new(&mut snap);
+        let mut progress = WorkflowProgress::new();
+        progress.advance("experiment", None, 0);
+        progress.advance("experiment", None, 1);
+        let mut ctx = ctx_with_progress(&mut snap, &mut progress);
         let result = WorkflowGuardRule.validate(&view, &mut ctx, &event("experiment.run", None));
         assert!(result.accepted);
     }
@@ -311,12 +378,14 @@ mod tests {
     fn accepts_in_order_advance() {
         let view = view_with_chains(vec![strict_chain()]);
         let mut snap = LedgerSnapshot::cold_start();
-        snap.workflow_phases
-            .insert("experiment::".to_string(), 1);
-        let mut ctx = ValidationContext::new(&mut snap);
+        let mut progress = WorkflowProgress::new();
+        progress.advance("experiment", None, 0);
+        progress.advance("experiment", None, 1);
+        let mut ctx = ctx_with_progress(&mut snap, &mut progress);
         let result =
             WorkflowGuardRule.validate(&view, &mut ctx, &event("experiment.evaluated", None));
         assert!(result.accepted);
+        assert_eq!(progress.get_phase("experiment", None), Some(2));
     }
 
     #[test]
@@ -328,7 +397,10 @@ mod tests {
         });
         let view = view_with_chains(vec![chain]);
         let mut snap = LedgerSnapshot::cold_start();
-        let mut ctx = ValidationContext::new(&mut snap);
+        let mut progress = WorkflowProgress::new();
+        let mut details: Vec<WorkflowGuardRejectionDetail> = Vec::new();
+        let mut ctx =
+            ctx_with_progress(&mut snap, &mut progress).with_workflow_guard_details(&mut details);
         let result = WorkflowGuardRule.validate(
             &view,
             &mut ctx,
@@ -338,6 +410,11 @@ mod tests {
         assert_eq!(
             result.reason_code.as_deref(),
             Some(ReasonCode::WORKFLOW_GUARD_OUT_OF_ORDER)
+        );
+        assert_eq!(details.len(), 1);
+        assert_eq!(
+            details[0].next_expected,
+            "unknown (correlation extraction failed)"
         );
     }
 
@@ -350,17 +427,16 @@ mod tests {
         });
         let view = view_with_chains(vec![chain]);
         let mut snap = LedgerSnapshot::cold_start();
+        let mut progress = WorkflowProgress::new();
         // Another instance is further ahead; this must not affect the new instance.
-        snap.workflow_phases
-            .insert("experiment::other".to_string(), 2);
-        let mut ctx = ValidationContext::new(&mut snap);
+        progress.advance("experiment", Some("other"), 0);
+        progress.advance("experiment", Some("other"), 1);
+        progress.advance("experiment", Some("other"), 2);
+        let mut ctx = ctx_with_progress(&mut snap, &mut progress);
         let result = WorkflowGuardRule.validate(
             &view,
             &mut ctx,
-            &event(
-                "experiment.planned",
-                Some(r#"{"experiment_id":"exp-1"}"#),
-            ),
+            &event("experiment.planned", Some(r#"{"experiment_id":"exp-1"}"#)),
         );
         assert!(result.accepted);
     }

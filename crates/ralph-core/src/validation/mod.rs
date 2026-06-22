@@ -50,5 +50,7 @@ mod tests;
 
 pub use context::ValidationContext;
 pub use pipeline::{RulePhase, ValidationPipeline, ValidationReport, ValidationRule};
-pub use result::{ReasonCode, RejectionHint, ValidationResult, ValidationStage};
+pub use result::{
+    ReasonCode, RejectionHint, ValidationResult, ValidationStage, WorkflowGuardRejectionDetail,
+};
 pub use rules_event_policy::EventPolicyRule;

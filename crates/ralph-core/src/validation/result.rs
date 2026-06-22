@@ -249,7 +249,10 @@ impl RejectionHint {
     }
 
     /// Hint for workflow-guard out-of-order rejections.
-    pub fn workflow_guard_out_of_order(topic: &str, details: &[WorkflowGuardRejectionDetail]) -> String {
+    pub fn workflow_guard_out_of_order(
+        topic: &str,
+        details: &[WorkflowGuardRejectionDetail],
+    ) -> String {
         let detail_strings: Vec<String> = details
             .iter()
             .map(|d| {
@@ -280,12 +283,24 @@ pub struct WorkflowGuardRejectionDetail {
     pub chain_name: String,
     /// The instance key when the chain is correlation-scoped.
     pub instance_key: Option<String>,
+    /// The topic that was rejected.
+    pub rejected_topic: String,
     /// The current phase the chain is at (0-based).
     pub current_phase: Option<usize>,
     /// Human-readable summary of the current phase topic.
     pub current_topic: String,
     /// The next expected topic, or `terminal` when at the end.
     pub next_expected: String,
+    /// Source hat the event was attributed to (via `event.hat`).
+    /// Populated by the rule from the inbound event envelope so the
+    /// recovery-envelope writer can route the diagnosis correctly.
+    pub source_hat: Option<String>,
+    /// Full rejection reason assembled by the rule. Empty when
+    /// constructed by the rule with multiple chains (the rule
+    /// fills in a single reason string after collection). Callers
+    /// downstream may overwrite it (e.g. the event loop may add
+    /// iteration / session metadata).
+    pub reason: String,
 }
 
 #[cfg(test)]
