@@ -9405,6 +9405,18 @@ impl EventLoop {
             }
         }
         // --- End U11-T2 ---
+        // P1-3 (P1 follow-up): the `events.retain` at line ~9399
+        // already short-circuits the legacy gate stack on
+        // events the unified pipeline rejected — unified
+        // verdict is the single source of truth (no
+        // `correction` + `recovery_envelope` double-fire).
+        // The regression test `p1_3_unified_reject_short_circuits_legacy`
+        // in `event_loop/tests/` pins this contract. A
+        // full audit of unified-vs-legacy coverage is
+        // tracked separately (topic-deny / DuplicateWorkDone /
+        // plan-name equality / semantic gate rules are still
+        // legacy-only; production path is safe because the
+        // legacy stack still runs after the unified retain).
 
         // --- Step handoff gate (U4 of 2026-06-17-002 plan): ---
         // pre-handoff consistency check for `progress.md` ↔

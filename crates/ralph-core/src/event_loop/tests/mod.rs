@@ -65,6 +65,7 @@ mod u9_correction_assertions;
 /// U11-T2 (plan 2026-06-22-u11-unified-state-production-wiring):
 /// per-event unified `ValidationPipeline` integration tests.
 mod u11_unified_pipeline_integration;
+mod unified_short_circuits_legacy;
 mod wave_context_env_var;
 mod wave_context_injection;
 mod wave_isolated_scope;
