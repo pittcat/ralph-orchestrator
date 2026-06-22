@@ -2992,8 +2992,63 @@ impl EventLoop {
             debug!("Completion already handled, ignoring text fallback request");
             return;
         }
+        // P1-2: per-event commit so a mid-flight crash preserves
+        // the completion signal for replay. The A1 end-of-batch
+        // hook used to commit this; moving to the decision point
+        // shrinks the window where a crash loses the signal.
+        if !self.state.completion_requested {
+            Self::commit_terminal_delta(
+                &mut self.state.state_ledger,
+                crate::state::CommitDelta::CompletionRequested,
+            );
+        }
         self.state.completion_requested = true;
         info!("Completion requested via text fallback (output contained completion promise)");
+    }
+
+    /// Per-event commit helper for terminal markers
+    /// (`CompletionRequested`, `CompletionHonored`,
+    /// `CancellationRequested`).
+    ///
+    /// P1-2 (P1 follow-up): the A1 end-of-batch hook used to
+    /// commit these. Moving to the decision point shrinks the
+    /// window where a mid-flight crash loses the termination
+    /// signal — `replay_from_disk` will see the flag set on
+    /// cold start and honor the termination instead of
+    /// re-running the batch.
+    ///
+    /// No-op when the ledger is not enabled (legacy mode) or
+    /// the commit itself fails (the loop is still in
+    /// termination mode; ledger error is logged and the batch
+    /// continues). Per-event scalar `CounterChanged { Iteration }`
+    /// stays end-of-batch — that signal is per-iteration, not
+    /// per-decision.
+    ///
+    /// Takes `&mut Option<StateLedger>` (not `&mut self`) so
+    /// the caller can keep an immutable borrow of
+    /// `self.config.event_loop.event_policy` (or any other
+    /// immutable field) alive in the same scope. The helper
+    /// only touches the ledger slot; nothing else on `self`.
+    fn commit_terminal_delta(
+        ledger_slot: &mut Option<crate::state::StateLedger>,
+        delta: crate::state::CommitDelta,
+    ) {
+        let Some(ledger) = ledger_slot else {
+            return;
+        };
+        let topic = match &delta {
+            crate::state::CommitDelta::CompletionRequested => "loop.completion_requested",
+            crate::state::CommitDelta::CompletionHonored => "loop.completion_honored",
+            crate::state::CommitDelta::CancellationRequested => "loop.cancellation_requested",
+            _ => "loop.terminal",
+        };
+        if let Err(e) = ledger.commit(delta, Some(topic.to_string())) {
+            tracing::warn!(
+                error = %e,
+                topic,
+                "P1-2: per-event terminal commit failed; loop continues"
+            );
+        }
     }
 
     /// Checks if a completion event was received and returns termination reason.
@@ -3234,6 +3289,13 @@ impl EventLoop {
             },
         );
 
+        // P1-2: per-event commit (see `commit_terminal_delta`).
+        if !self.state.completion_honored {
+            Self::commit_terminal_delta(
+                &mut self.state.state_ledger,
+                crate::state::CommitDelta::CompletionHonored,
+            );
+        }
         self.state.completion_honored = true;
 
         if state_machine_enabled
@@ -6885,6 +6947,13 @@ impl EventLoop {
                 topic = %default_topic_str,
                 "default_publishes matches completion_promise — requesting termination"
             );
+            // P1-2: per-event commit (see `commit_terminal_delta`).
+            if !self.state.completion_requested {
+                Self::commit_terminal_delta(
+                &mut self.state.state_ledger,
+                crate::state::CommitDelta::CompletionRequested,
+            );
+            }
             self.state.completion_requested = true;
         }
 
@@ -9655,7 +9724,11 @@ impl EventLoop {
 
         // Validate and transform events (apply backpressure for build.done)
         let mut validated_events = Vec::new();
-        let completion_topic = self.config.event_loop.completion_promise.as_str();
+        // P1-2: own the topic strings so per-event commits
+        // (`commit_terminal_delta` borrows `&mut self`) can run
+        // inside the same loop without aliasing the `&str`
+        // borrow from `completion_promise.as_str()`.
+        let completion_topic = self.config.event_loop.completion_promise.clone();
         let cancellation_topic = self.config.event_loop.cancellation_promise.clone();
         let total_events = events.len();
         let mut completion_seen_in_batch = false;
@@ -9681,19 +9754,33 @@ impl EventLoop {
                     payload = %payload,
                     "loop.cancel event detected — scheduling graceful termination"
                 );
+                // P1-2: per-event commit (see `commit_terminal_delta`).
+                if !self.state.cancellation_requested {
+                    Self::commit_terminal_delta(
+                        &mut self.state.state_ledger,
+                        crate::state::CommitDelta::CancellationRequested,
+                    );
+                }
                 self.state.cancellation_requested = true;
                 accepted_log_events.push(Event::new(event.topic.as_str(), &payload));
                 // Continue processing remaining events (they may contain cleanup info)
                 continue;
             }
 
-            if event.topic == completion_topic {
+            if event.topic == completion_topic.as_str() {
                 if self.state.completion_honored {
                     debug!("Completion event already handled, ignoring duplicate");
                     continue;
                 }
                 // Completion event is accepted regardless of position in batch.
                 // Events AFTER it in the same batch are protected by the completion guard.
+                // P1-2: per-event commit (see `commit_terminal_delta`).
+                if !self.state.completion_requested {
+                    Self::commit_terminal_delta(
+                &mut self.state.state_ledger,
+                crate::state::CommitDelta::CompletionRequested,
+            );
+                }
                 self.state.completion_requested = true;
                 completion_seen_in_batch = true;
                 accepted_log_events.push(Event::new(event.topic.as_str(), &payload));
@@ -10523,17 +10610,14 @@ impl EventLoop {
         // P0-1): when the unified ledger is wired in, mirror
         // the per-batch counters into the commit log so the
         // `StateLedger` actually participates in the production
-        // event loop. The hook is intentionally conservative
-        // — we only commit scalars (iteration + completion /
-        // cancellation flags) at the end of the batch, not
-        // per-event. Wiring per-event commits here would
-        // require reworking the per-event gate stack
-        // (origin / publisher / contract / hat-handoff) so
-        // each gate can choose to abort the batch; that is a
-        // larger refactor tracked separately. The end-of-batch
-        // hook still satisfies the BLOCKED-1 review gate
-        // (ledger is *wired*, not *fully migrated*) and keeps
-        // the hot path O(1) per batch.
+        // event loop. P1-2 (P1 follow-up): terminal markers
+        // (`CompletionRequested` / `CompletionHonored` /
+        // `CancellationRequested`) are committed per-event at
+        // the decision point (see `commit_terminal_delta`) so
+        // a mid-flight crash preserves the termination signal.
+        // This hook keeps the per-iteration `CounterChanged`
+        // and the loop-`StewardWoken` scalars that don't need
+        // per-event latency.
         if let Some(ref mut ledger) = self.state.state_ledger {
             use crate::state::{CommitDelta, CounterKind};
             let iter_counter = CommitDelta::CounterChanged {
@@ -10547,18 +10631,8 @@ impl EventLoop {
                     "A1: end-of-batch ledger commit failed; loop continues"
                 );
             }
-            if self.state.completion_requested {
-                let _ = ledger.commit(
-                    CommitDelta::CompletionRequested,
-                    Some("loop.batch_sync".to_string()),
-                );
-            }
-            if self.state.cancellation_requested {
-                let _ = ledger.commit(
-                    CommitDelta::CancellationRequested,
-                    Some("loop.batch_sync".to_string()),
-                );
-            }
+            // Terminal marker commits moved to per-event
+            // decision points (see `commit_terminal_delta`).
         }
 
         Ok(ProcessedEvents {

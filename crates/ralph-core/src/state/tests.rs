@@ -1227,3 +1227,99 @@ fn new_replay_failure_falls_back_to_cold_start() {
     // Corruption should NOT panic; fallback to cold_start
     assert_eq!(ledger.snapshot().iteration, 0);
 }
+
+// ---------------------------------------------------------------------------
+// P1-2 (P1 follow-up): per-event terminal commit scope.
+//
+// Pins the contract that `CompletionRequested` /
+// `CompletionHonored` / `CancellationRequested` survive a
+// process restart when committed at the decision point (the
+// loop calls `commit_terminal_delta` BEFORE flipping the
+// boolean; a crash between commit and flip loses the commit
+// but the flip can only be reached after the commit returns).
+//
+// Without P1-2, these deltas were committed at the A1
+// end-of-batch hook and a mid-flight crash lost the
+// termination signal — `replay_from_disk` would resurrect an
+// empty snapshot and the loop would re-run the batch instead
+// of honoring the cancellation.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn p1_2_terminal_completion_requested_survives_process_restart() {
+    let dir = workspace();
+    let workspace = dir.path();
+
+    // First "process": commit a per-event terminal delta. The
+    // production caller (event_loop::commit_terminal_delta) uses
+    // these exact topic strings; we mirror them so the test
+    // exercises the same on-disk shape.
+    let mut first = StateLedger::new(workspace, true);
+    first
+        .commit(
+            CommitDelta::CounterChanged {
+                counter: CounterKind::Iteration,
+                new_value: 4,
+            },
+            Some("loop.batch_sync".to_string()),
+        )
+        .unwrap();
+    first
+        .commit(
+            CommitDelta::CompletionRequested,
+            Some("loop.completion_requested".to_string()),
+        )
+        .unwrap();
+    drop(first);
+
+    // Second "process": cold start must see CompletionRequested.
+    let mut second = StateLedger::new(workspace, true);
+    let replayed = StateLedger::replay_from_disk(workspace).expect("replay");
+    *second.snapshot_mut() = replayed;
+    let snap = second.snapshot();
+    assert_eq!(snap.iteration, 4);
+    assert!(
+        snap.completion_requested,
+        "P1-2: CompletionRequested must survive process restart (was end-of-batch in A1, now per-event)"
+    );
+}
+
+#[test]
+fn p1_2_terminal_cancellation_requested_survives_process_restart() {
+    let dir = workspace();
+    let workspace = dir.path();
+
+    let mut first = StateLedger::new(workspace, true);
+    first
+        .commit(CommitDelta::CancellationRequested, Some("loop.cancellation_requested".to_string()))
+        .unwrap();
+    drop(first);
+
+    let mut second = StateLedger::new(workspace, true);
+    let replayed = StateLedger::replay_from_disk(workspace).expect("replay");
+    *second.snapshot_mut() = replayed;
+    assert!(
+        second.snapshot().cancellation_requested,
+        "P1-2: CancellationRequested must survive process restart"
+    );
+}
+
+#[test]
+fn p1_2_terminal_completion_honored_survives_process_restart() {
+    let dir = workspace();
+    let workspace = dir.path();
+
+    let mut first = StateLedger::new(workspace, true);
+    first
+        .commit(CommitDelta::CompletionHonored, Some("loop.completion_honored".to_string()))
+        .unwrap();
+    drop(first);
+
+    let mut second = StateLedger::new(workspace, true);
+    let replayed = StateLedger::replay_from_disk(workspace).expect("replay");
+    *second.snapshot_mut() = replayed;
+    assert!(
+        second.snapshot().completion_honored,
+        "P1-2: CompletionHonored must survive process restart"
+    );
+}

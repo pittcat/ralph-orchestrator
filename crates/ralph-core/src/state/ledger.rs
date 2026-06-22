@@ -24,6 +24,43 @@
 //! env var itself — the caller passes the resolved boolean in
 //! via [`StateLedger::new`].
 //!
+//! ## Commit scope (P1-2 decision)
+//!
+//! Not every `CommitDelta` variant is persisted per-event. The
+//! ledger's role is **replay durability for crash recovery and
+//! cross-process resume**, and only the deltas that affect what
+//! `replay_from_disk` rebuilds on cold start need per-event
+//! latency. The scope decision is:
+//!
+//! **Per-event commit** (decision-point commits; see
+//! `EventLoop::commit_terminal_delta`):
+//! - `RejectionRecorded` (FIX-9, `correction/mod.rs:346`) —
+//!   consumed by the retry budget on resume.
+//! - `HandoffAccepted` (A4, `event_loop/mod.rs:8701, 9025`).
+//! - `CompletionRequested` / `CompletionHonored` /
+//!   `CancellationRequested` (P1-2) — terminal markers; without
+//!   per-event commit, a mid-flight crash loses the
+//!   termination signal and `replay_from_disk` re-runs the
+//!   batch instead of honoring it.
+//!
+//! **End-of-batch commit** (A1 hook, `event_loop/mod.rs:10522+`):
+//! - `CounterChanged { Iteration }` — per-iteration scalar.
+//! - `StewardWoken` — engine-internal.
+//!
+//! **NOT committed at all** (source of truth is the projector's
+//! disk-side writes, the ledger is redundant for these):
+//! - `TaskLifecycle`, `TaskInserted` — see
+//!   `.ralph/agent/tasks.jsonl` (projector writes).
+//! - `ProgressUpdate` — see `.ralph/agent/progress.md` (projector
+//!   writes).
+//! - `PlanComplete` — derived from `LOOP_COMPLETE` events in
+//!   `events.jsonl` on replay.
+//!
+//! Adding new per-event commits is fine as long as they pass
+//! the "would replay miss this without it" test. Anything that
+//! the projector's disk-side writes or the events.jsonl tail
+//! already preserves is redundant.
+//!
 //! ## U5: `commit_handoff_artifact` (macro-edge auto-generate)
 //!
 //! macro-edge `*.handoff.accepted` 事件被 engine gate accept 后,
