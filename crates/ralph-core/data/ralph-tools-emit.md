@@ -124,3 +124,31 @@ tail -n 1 "$events_file" | jq -e '.payload | type == "object"'
 > **wave worker 注意**：在 `RALPH_WAVE_WORKER=1` 的子进程中通过 `ralph emit` 返回结果时，事件会写入 **candidate-events**（不是 current-events），与 wave 调度器一致。不要强行设置 `RALPH_EVENTS_FILE` 指向其他文件——会被 allowlist 拒绝。
 
 > **诊断**：emit 拒收后无法在 CLI 层修复时，启 `RALPH_DIAGNOSTICS=1` 重新 loop；envelope 写到 `recovery.jsonl`，`ralph diagnose --session latest` 出报告。详见 `docs/guide/runtime-diagnosis.md` §10 / §12.1。
+
+---
+
+## Feature Flag 与 Unified Pipeline(U11)
+
+`ralph emit --policy-check` 在 U11(commit `e5baa07d`)后默认走 **unified validation pipeline**,与 loop 的 `process_parse_result` 使用同一 `ValidationPipeline::validate_pre_commit_with_view`。
+
+### 相关 env var(全部默认 on,U11-T7 后)
+
+| env var | 作用 | 显式关闭方式 |
+|---|---|---|
+| `UNIFIED_POLICY_CHECK` | CLI `--policy-check` 走 unified pipeline | `=0` 回到 legacy compat path |
+| `UNIFIED_STATE_LEDGER` | loop 启动时构造 `StateLedger`(自动 replay `.ralph/ledger.jsonl`) | `=0` 走 legacy `StateProjector` |
+| `UNIFIED_VALIDATION` | loop 接入 `ValidationPipeline` per-event | `=0` 走 legacy gate stack |
+| `UNIFIED_DETERMINISTIC_CORRECTION` | policy rejection 走 deterministic correction(`state.prompt_context`)而非 `task.resume` | **目前仍为 off**(T7.1 follow-up,需先迁移旧 wire-format 测试) |
+| `UNIFIED_PROTOCOL_VIEW` | 构造 `ProtocolView` 时启用扩展字段 | `=0` 走 legacy default |
+
+### Ledger 状态查询(U11-T1)
+
+进程崩溃后,`StateLedger::new(workspace)` 自动调用 `replay_from_disk` 重建 `LedgerSnapshot`,恢复:
+- `iteration` 计数
+- `rejection_digest`(R11 retry counts)
+- `handoff_accepted_log` / `handoff_tracker_log` / `flow_lifecycle_log`(U5 audit trail)
+- `workflow_phases`
+- counter 集合
+
+若 ledger 损坏,降级到 `LedgerSnapshot::cold_start()` 并 `warn!` 日志。修复方式:`ralph loops clean --ledger` 截断损坏文件。
+

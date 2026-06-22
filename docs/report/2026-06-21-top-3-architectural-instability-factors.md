@@ -179,3 +179,21 @@ Ralph 协调、task 关闭、handoff 文件生成、progress.md 更新等核心�
 - **因素 3** 的多状态源：每个 gate 维护自己的状态，缺乏单一提交点。
 
 只要这个循环还在，换个错误名字、换个 stage、换个 violation class，就会再次出现。
+
+---
+
+## 修复状态(2026-06-22,U11 commit 链)
+
+| 不稳定因素 | 修复单元 | 状态(2026-06-22) |
+|---|---|---|
+| **因素 1** `task.resume` 自指循环 | U7a deterministic correction + U7b `loop.resume` | ✅ 代码完成:`publish_correction_via_context` 接入真实 `LoopState::prompt_context` + `StateLedger::commit`(U11-T3, commit `d568437e`)。1 条 BDD `correction_deterministic_scenario` 已 un-ignore 并通过。`correction_three_escalation_scenario` 因 `LINT_CIRCUIT_BREAKER_LIMIT=2` 限制保留 `#[ignore]`(已知 follow-up)。⚠️ `UNIFIED_DETERMINISTIC_CORRECTION` 默认值尚未反转(T7.1 sub-task),需先迁移 10+ 旧 `task.resume` wire-format 测试。 |
+| **因素 2** 状态源分散 + agent 跳过副作用 | U1 StateLedger + U2 StateProjector migrate | ✅ 代码完成:`StateLedger::new` 接入 `replay_from_disk` 自动 cold-start 恢复(U11-T1, commit `df7dcae3`);`process_parse_result` 末尾 commit scalars(A1 hook);macro-edge auto-gen artifact(U11-T4, commit `63af596c`)。⚠️ `UNIFIED_STATE_LEDGER` 已默认 ON(T7);full per-event delta commit 仍待 P2 follow-up(原 plan §阶段二)。 |
+| **因素 3** 协议视图分裂(CLI / engine / runtime 三层不一致) | U3 ProtocolView + U4 ValidationPipeline + U6 CLI 迁移 | ✅ 代码完成:per-event `ValidationPipeline::validate_pre_commit_with_view` 接入 `process_parse_result` step handoff gate 之前(U11-T2, commit `76e409db`);`run_policy_check_unified` 加载 events.jsonl 重建 LedgerSnapshot(U11-T7)。⚠️ 3 个 event_loop 测试 + 16 个 ralph-cli policy_check 测试因 wire-format 差异需迁移(T7 follow-up);`review_step_gate::legal_synth_passed_then_plan_complete_accepted` 揭示 unified rule 集合与 legacy 不完全对齐,需规则审计。 |
+
+### 未完成项
+
+1. **`UNIFIED_DETERMINISTIC_CORRECTION` 默认反转**:T7 因 10+ 旧 `task.resume` wire-format 测试 pin 旧路径,保留 off。需把这些测试迁移到新 surface(correction blocks in prompt)后才能翻转默认。
+2. **Per-event delta commit**:当前 A1 hook 只 commit scalars(iteration + completion/cancellation flags)。每个 task/progress/handoff event 仍走 legacy StateProjector 写盘路径。
+3. **Unified rule 集合与 legacy 对齐**:U11-T2 接入 unified pipeline 后,3 个 event_loop 测试失败,说明 RequiredFieldsRule / StepHandoffRule 等规则与 legacy 不完全等价,需审计具体行为差异。
+4. **CLI policy_check wire-format 迁移**:16 个 ralph-cli 测试 pin 旧 compat path 错误消息文本,unified pipeline 输出不同格式。
+5. **`correction_three_escalation_scenario` BDD**:fixture 假设 3 次连续 rejection,但 `LINT_CIRCUIT_BREAKER_LIMIT=2` 在第 2 次就 trip。需要 fixture 调整或 breaker limit 提高。

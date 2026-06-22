@@ -725,3 +725,40 @@ emit 失败 / 拒收
 3. `Top findings` 不应出现 `critical` / `error` 级 finding；如果出现，按 `Suggested next actions` 修复后再合并。
 4. `## Runtime Diagnosis Alert` 块不应反复出现同一个 `retry_key`（>3 次）—— 出现说明 hat 真的没在执行 `expected_action`。
 5. `summary.md` 末尾的 `## Diagnostics` 段应包含至少一条 `recovery_journal_path` / `drift_journal_path`。
+
+---
+
+## 10. `--from-ledger` 选项(U8 + U11-T3)
+
+`ralph diagnose --from-ledger` 优先读取 `.ralph/recovery.jsonl` 和 `.ralph/ledger.jsonl`,
+输出由 `correction::emit_correction_context` 写入的结构化 `RejectionRecord` 列表,
+按 `retry_key`(hat + topic + reason_code)聚合。适用于冷启动后诊断历史 rejection
+(U7a production wire-up,U11-T3 commit `d568437e`)。
+
+**fallback 路径**:若 ledger 不存在(冷工作空间),降级读取 legacy `.ralph/recovery.jsonl`,
+输出历史 recovery envelope(无 ledger-side 审计轨迹)。
+
+**与 `--session` 的区别**:
+- `--session <id>`:读取 `.ralph/diagnostics/<id>/` 下的 session-scoped 诊断(snapshot + recovery envelope + diagnose report)
+- `--from-ledger`:读取 ledger 全局持久化 rejection log(跨 session 聚合)
+
+**用法**:
+
+```bash
+# 查看整个工作空间的历史 rejection 聚合
+ralph diagnose --from-ledger
+
+# 与 session 模式合并(读取 session + ledger)
+ralph diagnose --session latest --from-ledger
+```
+
+**输出示例**:
+
+```text
+## Ledger Rejection Summary
+
+| retry_key | count | last_seen | last_message |
+|---|---|---|---|
+| executor:queue.advance:required_fields:missing | 3 | 2026-06-22T14:30:00Z | payload must contain `task_id` |
+| reviewer:review.passed:semantic_gate:wave_open | 1 | 2026-06-22T14:25:00Z | wave is open; cannot pass empty diff |
+```
