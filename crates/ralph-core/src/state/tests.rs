@@ -1107,3 +1107,49 @@ fn u5_commit_handoff_artifact_validator_integration() {
     );
     result.unwrap_or_else(|e| panic!("validator must accept generated artifact: {e}"));
 }
+
+// ---------------------------------------------------------------------------
+// U11-T1: StateLedger::new() must replay ledger.jsonl on cold start
+// ---------------------------------------------------------------------------
+
+#[test]
+fn new_replays_from_disk_when_ledger_exists() {
+    let dir = workspace();
+    let workspace = dir.path();
+
+    // Write a commit to ledger.jsonl via first ledger
+    let mut ledger = StateLedger::new(workspace, true);
+    let delta = CommitDelta::CounterChanged {
+        counter: CounterKind::Iteration,
+        new_value: 42,
+    };
+    ledger.commit(delta, Some("setup".to_string())).unwrap();
+
+    // Re-construct: new() must replay
+    let ledger2 = StateLedger::new(workspace, true);
+    assert_eq!(
+        ledger2.snapshot().iteration,
+        42,
+        "snapshot.iteration should be restored from ledger.jsonl"
+    );
+}
+
+#[test]
+fn new_falls_back_to_cold_start_when_ledger_missing() {
+    let dir = workspace();
+    let ledger = StateLedger::new(dir.path(), true);
+    assert_eq!(ledger.snapshot().iteration, 0);
+    assert!(ledger.commit_log().is_empty());
+}
+
+#[test]
+fn new_replay_failure_falls_back_to_cold_start() {
+    let dir = workspace();
+    let workspace = dir.path();
+    // Create a corrupt ledger.jsonl
+    std::fs::create_dir_all(workspace.join(".ralph")).unwrap();
+    std::fs::write(workspace.join(".ralph/ledger.jsonl"), "garbage not json\n").unwrap();
+    let ledger = StateLedger::new(workspace, true);
+    // Corruption should NOT panic; fallback to cold_start
+    assert_eq!(ledger.snapshot().iteration, 0);
+}

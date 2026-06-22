@@ -51,7 +51,7 @@ use std::cell::Cell;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::commit::{Commit, CommitDelta};
 use super::snapshot::LedgerSnapshot;
@@ -164,9 +164,38 @@ impl StateLedger {
     /// on the first successful `commit()`. When
     /// `feature_enabled` is `false`, every subsequent `commit()` is
     /// a no-op (and the file is never created).
+    ///
+    /// **U11-T1 (P1-1 fix)**: when `feature_enabled` is `true`,
+    /// `new()` now calls [`Self::replay_from_disk`] first. This
+    /// restores the snapshot from `.ralph/ledger.jsonl` on cold
+    /// start so committed state survives process restarts. On
+    /// any I/O or parse error, we log a `warn!` and fall back to
+    /// [`LedgerSnapshot::cold_start`] — the loop should not refuse
+    /// to start just because the ledger is missing or corrupt;
+    /// the recovery path is the CLI's `ralph loops clean --ledger`
+    /// entry point.
     pub fn new(workspace: &Path, feature_enabled: bool) -> Self {
+        let snapshot = if feature_enabled {
+            match Self::replay_from_disk(workspace) {
+                Ok(snap) => {
+                    debug!(workspace = %workspace.display(), "replayed ledger.jsonl on cold start");
+                    snap
+                }
+                Err(e) => {
+                    warn!(
+                        workspace = %workspace.display(),
+                        error = %e,
+                        "replay_from_disk failed; falling back to cold_start snapshot"
+                    );
+                    LedgerSnapshot::cold_start()
+                }
+            }
+        } else {
+            LedgerSnapshot::cold_start()
+        };
+
         Self {
-            snapshot: LedgerSnapshot::cold_start(),
+            snapshot,
             commit_log: Vec::new(),
             commit_seq: 0,
             workspace: workspace.to_path_buf(),
