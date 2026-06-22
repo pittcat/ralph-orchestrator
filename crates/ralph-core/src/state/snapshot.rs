@@ -581,8 +581,15 @@ impl LedgerSnapshot {
     /// `ledger.jsonl` is not). U3 will wire this into the
     /// bootstrap path; U1 just exposes the helper.
     pub fn seed_from_projection_context(&mut self, ctx: &ProjectionContext) {
-        self.tasks = ctx.tasks_cache.clone();
-        self.progress = ctx.progress_cache.clone();
+        // Read via the dual-source accessors. The U2 path
+        // returns the wired `LedgerSnapshot` (preferred); the
+        // legacy path returns the `tasks_cache` /
+        // `progress_cache` mirrors. Both views are kept in
+        // sync by every projector write.
+        let (tasks, _from_ledger) = ctx.task_snapshot();
+        let (progress, _from_ledger) = ctx.progress_snapshot();
+        self.tasks = tasks.to_vec();
+        self.progress = progress.clone();
     }
 
     /// Borrow the embedded `ReviewStepTracker`. Provided so

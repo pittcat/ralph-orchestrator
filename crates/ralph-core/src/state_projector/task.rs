@@ -12,6 +12,16 @@
 //! into a [`super::Rejection`] and the bus emits
 //! `event.state_projection.rejected`.
 
+// This module **owns** the deprecated `tasks_cache` mirror:
+// `persist` updates it as a write-through of the on-disk ledger.
+// The mirror is kept in sync with the canonical
+// `LedgerSnapshot` (via `sync_to_ledger_snapshot` and
+// `project_ledger_snapshot`) so legacy callers continue to
+// observe the same view, while the U2 path reads from the
+// snapshot directly. Touching the field here is therefore
+// intentional and unavoidable.
+#![allow(deprecated)]
+
 use std::path::Path;
 
 use serde_json::Value;

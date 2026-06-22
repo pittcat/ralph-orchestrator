@@ -21,7 +21,6 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::state_projector::StateProjector;
-use crate::step_handoff::progress_task_gate::ProgressSnapshot;
 use crate::task::Task;
 
 /// Heading the loop prepends. Logged in the prompt verbatim so
@@ -88,19 +87,28 @@ impl RuntimeStateSnapshot {
         hat_handoff_state: Option<HandoffSnapshotState>,
     ) -> Self {
         let ctx = projector.context();
-        let (tasks, _) = if ctx.tasks_cache.is_empty() {
+        // Read through the dual-source accessors: the U2 path
+        // returns the wired `LedgerSnapshot` when present; the
+        // legacy path returns the `tasks_cache` / `progress_cache`
+        // mirrors. Both are kept in sync by every `apply` /
+        // `apply_from_ledger` call.
+        let (tasks_ref, _from_ledger) = ctx.task_snapshot();
+        let (progress_ref, _from_ledger) = ctx.progress_snapshot();
+        let (tasks, progress) = if tasks_ref.is_empty() && progress_ref.current_step.is_none()
+            && progress_ref.completed_steps.is_empty()
+        {
             // Cold cache; try disk before giving up. The progress
             // path is already cached (or empty), so the disk read
             // for tasks is the only fall-through.
             crate::state_projector::read_state_from_disk(&ctx.workspace_root)
         } else {
-            (ctx.tasks_cache.clone(), ProgressSnapshot::default())
+            (tasks_ref.to_vec(), progress_ref.clone())
         };
         let handoff = hat_handoff_state.and_then(|h| h.into_fields());
         Self {
             plan_name: derive_plan_name(&tasks),
-            current_step: ctx.progress_cache.current_step.clone(),
-            completed_steps: ctx.progress_cache.completed_steps.clone(),
+            current_step: progress.current_step,
+            completed_steps: progress.completed_steps,
             open_tasks: open_task_summaries(&tasks),
             wave: None, // U4 spike deferred: wave sub-section is
             //            duplicated with `## WAVE

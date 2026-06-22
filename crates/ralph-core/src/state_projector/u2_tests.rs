@@ -14,6 +14,14 @@
 //!    [`LedgerSnapshot`] matches the legacy
 //!    [`RuntimeStateSnapshot::to_prompt_block`] shape.
 
+// The `tasks_cache` / `progress_cache` legacy mirrors are kept
+// populated as write-throughs of the unified `LedgerSnapshot`.
+// U2 tests verify both paths: the cache mirror must agree with
+// the snapshot so pre-U2 callers continue to observe the same
+// view. Direct access to the deprecated fields is therefore an
+// intentional part of the test contract.
+#![allow(deprecated)]
+
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -497,22 +505,21 @@ fn commit_delta_task_inserted_appends_to_snapshot() {
 }
 
 // ---------------------------------------------------------------------------
-// 8. RuntimeStateSnapshot::build reads from the ledger snapshot
-//    when wired (the projection context's ledger_snapshot is
-//    ignored here; the test pins the legacy behaviour so
-//    runtime_state_injection.rs continues to pass).
+// 8. RuntimeStateSnapshot::build reads from the dual-source
+//    accessor (P1-3 migration): the wired `LedgerSnapshot` is
+//    preferred when the U2 path is enabled, otherwise the legacy
+//    `tasks_cache` mirror is used.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn runtime_state_snapshot_legacy_path_still_works_with_ledger_snapshot_wired() {
+fn runtime_state_snapshot_uses_ledger_snapshot_when_wired() {
     let tmp = workspace();
     let mut ctx = ProjectionContext::new_legacy(tmp.path(), make_config());
     // Wire a ledger snapshot so the U2 path is enabled. The
-    // legacy `RuntimeStateSnapshot::build` reads from the
-    // projector cache (which is empty), not the ledger
-    // snapshot — this test pins that contract so a future
-    // refactor cannot accidentally start reading the ledger
-    // snapshot from the legacy path.
+    // dual-source `task_snapshot()` accessor prefers the
+    // snapshot over the (empty) cache mirror, so the legacy
+    // `RuntimeStateSnapshot::build` now sees the snapshot's
+    // task list. This pins the P1-3 contract.
     let mut snap = LedgerSnapshot::cold_start();
     let mut t = Task::new("step-01".to_string(), 1);
     t.id = "task-X".to_string();
@@ -521,17 +528,21 @@ fn runtime_state_snapshot_legacy_path_still_works_with_ledger_snapshot_wired() {
     ctx.set_ledger_snapshot(snap);
 
     let proj = StateProjector::new(ctx);
-    let legacy_snap = RuntimeStateSnapshot::build(
+    let snap = RuntimeStateSnapshot::build(
         &proj,
         Some(HandoffSnapshotState {
             enabled: false,
             current_seq: 0,
         }),
     );
-    // Legacy path ignores the ledger snapshot; open_tasks
-    // remains empty because the cache is empty. This pins the
-    // back-compat contract.
-    assert!(legacy_snap.open_tasks.is_empty());
+    // P1-3: the dual-source accessor now reads the wired
+    // `LedgerSnapshot` (preferred over the empty cache
+    // mirror), so the legacy `RuntimeStateSnapshot::build`
+    // reflects the snapshot's task list rather than treating
+    // it as cold-cache and falling through to disk.
+    assert_eq!(snap.open_tasks.len(), 1, "snapshot task-X should surface");
+    assert_eq!(snap.open_tasks[0].id, "task-X");
+    assert_eq!(snap.plan_name.as_deref(), Some("demo"));
 }
 
 // ---------------------------------------------------------------------------

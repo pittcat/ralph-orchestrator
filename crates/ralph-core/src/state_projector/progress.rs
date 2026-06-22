@@ -8,6 +8,16 @@
 //! the source of truth for the dialect — we round-trip it instead
 //! of inventing a new one).
 
+// This module **owns** the deprecated `progress_cache` mirror:
+// `push_completed` and `write_progress` mutate it as a
+// write-through of the on-disk ledger. The mirror is kept in
+// sync with the canonical `LedgerSnapshot` (via
+// `sync_to_ledger_snapshot` and `project_ledger_snapshot`) so
+// legacy callers continue to observe the same view, while the
+// U2 path reads from the snapshot directly. Touching the
+// field here is therefore intentional and unavoidable.
+#![allow(deprecated)]
+
 use std::path::Path;
 
 use serde_json::Value;

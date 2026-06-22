@@ -67,6 +67,15 @@
 //! ledger path closes this gap entirely: the snapshot is the
 //! authoritative state, the caches are write-through mirrors.
 
+// This module **owns** the deprecated `tasks_cache` /
+// `progress_cache` mirrors and is responsible for keeping them
+// in sync with the canonical `LedgerSnapshot`. Touching the
+// deprecated fields is therefore intentional and unavoidable
+// here; the suppression is module-local so external callers
+// (production code in `event_loop`, `runtime_state`, and tests)
+// are not silenced.
+#![allow(deprecated)]
+
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -151,22 +160,36 @@ pub struct ProjectionContext {
     /// on every write so legacy callers and the ~150 pre-U2 tests
     /// continue to observe the same in-memory view. New reads
     /// must go through [`Self::task_snapshot`].
+    ///
+    /// P1-3 (plan 2026-06-23-003): visibility demoted from `pub`
+    /// to `pub(crate)` so external crates (event_loop, runtime_state,
+    /// etc.) cannot accidentally read the deprecated mirror. The
+    /// legacy mirror contract is still tested by
+    /// `state_projector/tests.rs` and `state_projector/u2_tests.rs`,
+    /// both of which live in this crate and have module-level
+    /// `#[allow(deprecated)]`. New code must use
+    /// [`Self::task_snapshot`] / [`Self::progress_snapshot`]
+    /// (or [`crate::state::LedgerSnapshot::tasks`] /
+    /// [`crate::state::LedgerSnapshot::progress`]).
     #[deprecated(
         since = "0.2.0",
         note = "U2: read from ProjectionContext::task_snapshot (LedgerSnapshot) instead"
     )]
-    pub tasks_cache: Vec<crate::task::Task>,
+    pub(crate) tasks_cache: Vec<crate::task::Task>,
     /// In-memory cache of the progress ledger. Same lifecycle as
     /// `tasks_cache`.
     ///
     /// U2 (plan 2026-06-21-002): deprecated as the read-side
     /// source of truth. See [`Self::tasks_cache`] for the
     /// rationale.
+    ///
+    /// P1-3 (plan 2026-06-23-003): visibility demoted from `pub`
+    /// to `pub(crate)` — see [`Self::tasks_cache`].
     #[deprecated(
         since = "0.2.0",
         note = "U2: read from ProjectionContext::progress_snapshot (LedgerSnapshot) instead"
     )]
-    pub progress_cache: ProgressSnapshot,
+    pub(crate) progress_cache: ProgressSnapshot,
     /// Optional reference to the unified [`LedgerSnapshot`] that
     /// the U2 path reads from. `None` keeps the legacy path fully
     /// working. The projector never mutates this field — the

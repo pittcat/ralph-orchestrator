@@ -3,6 +3,14 @@
 //! Plan ref: U1 of
 //! `docs/plans/2026-06-17-003-feat-hat-orchestrator-state-projection-phase1-plan.md`.
 
+// Allow direct `tasks_cache` / `progress_cache` access in this
+// module: the legacy mirror is the unit under test (every legacy
+// caller and ~150 pre-U2 tests still read from these fields). The
+// new `LedgerSnapshot` path is covered by `u2_tests.rs`. The
+// deprecation is intentional — it tracks the migration without
+// forcing a refactor of every test in this module.
+#![allow(deprecated)]
+
 use std::path::Path;
 
 use serde_json::json;
