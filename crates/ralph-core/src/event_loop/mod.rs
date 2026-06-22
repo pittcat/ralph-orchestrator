@@ -6419,13 +6419,32 @@ impl EventLoop {
                 .state
                 .consecutive_engine_gate_rejections
                 .saturating_add(1);
-            if self.state.consecutive_engine_gate_rejections >= LINT_CIRCUIT_BREAKER_LIMIT
+            // P1-1 (P1 follow-up): resolve the trip threshold
+            // with a 3-tier fallback so tests can relax the
+            // limit without `std::env::set_var` (unsafe under
+            // Rust 1.81+ / workspace's `forbid(unsafe_code)`):
+            //   1. test override (set via
+            //      `set_lint_circuit_breaker_limit_for_test`) —
+            //      wins so the 3-stage R11 escalation scenario
+            //      can run independently of the env var.
+            //   2. `RALPH_LINT_CIRCUIT_BREAKER_LIMIT` env var —
+            //      production operator override.
+            //   3. `LINT_CIRCUIT_BREAKER_LIMIT` constant (RISK-6:
+            //      1-iter early warning).
+            let limit = crate::event_loop::loop_state::lint_circuit_breaker_limit_for_test()
+                .or_else(|| {
+                    std::env::var("RALPH_LINT_CIRCUIT_BREAKER_LIMIT")
+                        .ok()
+                        .and_then(|v| v.parse::<u32>().ok())
+                })
+                .unwrap_or(LINT_CIRCUIT_BREAKER_LIMIT);
+            if self.state.consecutive_engine_gate_rejections >= limit
                 && !self.state.lint_circuit_breaker_tripped
             {
                 self.state.lint_circuit_breaker_tripped = true;
                 tracing::warn!(
                     consecutive = self.state.consecutive_engine_gate_rejections,
-                    limit = LINT_CIRCUIT_BREAKER_LIMIT,
+                    limit,
                     "lint circuit breaker tripped: engine gate disabled for remainder of run \
                      (d623c09 runtime gates remain active; RALPH_SERIAL_LINT_MODE=off \
                      is the operator override)"

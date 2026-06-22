@@ -1705,15 +1705,19 @@ fn test_u9_correction_deterministic_scenario() {
 /// `needs_escalation` flag and render the `ESCALATION`
 /// annotation line in the next prompt.
 ///
-/// `#[ignore]`-ed for the same reason as #1: the production
-/// `emit_correction_context` call site is missing, so the
-/// correction queue stays empty and the R11 tripwire never
-/// fires through the runtime path. The `correction::tests`
-/// unit suite covers the data-structure side; the BDD will
-/// pass once the production wire-up lands.
+/// P1-1 (P1 follow-up): production `LINT_CIRCUIT_BREAKER_LIMIT=2`
+/// trips the breaker on the 2nd rejection (RISK-6: 1-iter
+/// early warning), which would prevent the 3rd rejection from
+/// reaching `apply_engine_required_field_gate`. The BDD
+/// temporarily relaxes the limit to 3 via the
+/// `set_lint_circuit_breaker_limit_for_test` helper
+/// (mirrors `set_correction_enabled_for_test` — works
+/// under `forbid(unsafe_code)` without `std::env::set_var`).
+/// Production default is unchanged; nextest's process-per-test
+/// model keeps the override from leaking.
 #[test]
-#[ignore = "R11 escalation scenario requires the engine gate circuit breaker (LINT_CIRCUIT_BREAKER_LIMIT=2) to be relaxed — the test fires 3 consecutive rejections but the breaker trips after 2, so the 3rd rejection never reaches `apply_engine_required_field_gate`. Fixture mismatch (test was speculatively written before the breaker limit was lowered to 2 in 2026-06-20-001 KTD-7); T3 production wiring itself is verified by `test_u9_correction_deterministic_scenario`."]
 fn test_u9_correction_three_escalation_scenario() {
+    ralph_core::event_loop::loop_state::set_lint_circuit_breaker_limit_for_test(3);
     enable_deterministic_correction_for_test();
     let yaml = load_scenario("tests/scenarios/correction_three_escalation.yml");
     run_workflow_guard_scenario(yaml);

@@ -33,9 +33,57 @@ pub const U2_REJECTION_RETRY_LIMIT: u32 = 3;
 ///
 /// We use a *separate* counter (`consecutive_engine_gate_rejections`)
 /// rather than `consecutive_malformed_events` because the
-/// termination check already owns that field and conflating
-/// the two would couple lint backoff to loop death.
+/// Production default for the lint circuit breaker. The breaker
+/// trips after this many consecutive engine-gate rejections and
+/// disables the gate for the remainder of the run (the d623c09
+/// runtime gates stay active).
+///
+/// Override per-process with the `RALPH_LINT_CIRCUIT_BREAKER_LIMIT`
+/// env var. The override exists so the U9 3-stage R11 escalation
+/// scenario (`correction_three_escalation_scenario`) can verify
+/// the full retry→escalate flow without relaxing the production
+/// default. RISK-6 (2026-06-20-001 KTD-7) keeps the production
+/// limit at 2: trip on threshold 2 so the breaker fires *before*
+/// the termination check at 3, giving the runtime gates one
+/// iteration to record the rejection before the loop dies.
 pub const LINT_CIRCUIT_BREAKER_LIMIT: u32 = 2;
+
+/// Test-only override for the lint circuit breaker limit. Mirrors
+/// `correction::set_correction_enabled_for_test`: a `OnceLock` so
+/// tests can opt into a relaxed limit without calling
+/// `std::env::set_var` (which is `unsafe` under Rust 1.81+ and
+/// would conflict with the workspace's `forbid(unsafe_code)`).
+/// Production code paths never call this — the override is read
+/// at trip time in `apply_engine_required_field_gate`.
+///
+/// Returns `None` when the override was never set; the caller
+/// falls back to [`LINT_CIRCUIT_BREAKER_LIMIT`] or the
+/// `RALPH_LINT_CIRCUIT_BREAKER_LIMIT` env var.
+pub fn lint_circuit_breaker_limit_for_test() -> Option<u32> {
+    TEST_LINT_BREAKER_LIMIT.get().map(|cell| cell.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Install a test override for the circuit breaker limit.
+/// No-op when the override was already set; tests that need to
+/// change the value across calls should pair this with
+/// [`reset_lint_circuit_breaker_limit_for_test`].
+pub fn set_lint_circuit_breaker_limit_for_test(limit: u32) {
+    let cell = TEST_LINT_BREAKER_LIMIT.get_or_init(|| {
+        std::sync::atomic::AtomicU32::new(LINT_CIRCUIT_BREAKER_LIMIT)
+    });
+    cell.store(limit, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Reset the test override. After this call the production
+/// default + env-var path takes over again.
+pub fn reset_lint_circuit_breaker_limit_for_test() {
+    if let Some(cell) = TEST_LINT_BREAKER_LIMIT.get() {
+        cell.store(LINT_CIRCUIT_BREAKER_LIMIT, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+static TEST_LINT_BREAKER_LIMIT: std::sync::OnceLock<std::sync::atomic::AtomicU32> =
+    std::sync::OnceLock::new();
 
 /// Fingerprint of the last emitted event for stale loop detection.
 #[derive(Debug, Clone, PartialEq, Eq)]

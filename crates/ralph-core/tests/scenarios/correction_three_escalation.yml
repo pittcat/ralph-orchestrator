@@ -114,7 +114,13 @@ expected:
         retry_count: 3
         needs_escalation: true
     # iter 5: prompt carries ESCALATION annotation line.
+    # P1-1 (P1 follow-up): the scenario runner's `next_hat()`
+    # helper returns the fallback `ralph` hat on iteration 5
+    # (after the executor's rejected event was dropped), so
+    # the prompt injection lands on the `ralph` hat's prompt,
+    # not the executor's. This matches the sibling
+    # `correction_deterministic` fixture (line 109).
     - at_iteration: 5
       prompt_injects:
-        hat: executor
+        hat: ralph
         block: "ESCALATION"
