@@ -38,6 +38,9 @@ nix = { workspace = true }
 
 [dev-dependencies]
 jsonschema = { version = "0.18", features = ["draft202012"] }
+# U11-T7: env-isolation tests (`UNIFIED_PROTOCOL_VIEW`) flip the
+# global env var, so they must run serially relative to one another.
+serial_test = "3"
 
 [[bench]]
 name = "performance"

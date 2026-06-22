@@ -443,8 +443,9 @@ fn extract_handoff_path_from_payload(payload: Option<&str>) -> Option<String> {
 
 /// A2 (002-adversarial-review): build the unified
 /// `ValidationPipeline` once per batch when the
-/// `UNIFIED_VALIDATION=1` env var is on. Returns `None` when
-/// the flag is off so the legacy gate stack is unchanged.
+/// `UNIFIED_VALIDATION` env var is on. Returns `None` when
+/// the flag is explicitly disabled (`UNIFIED_VALIDATION=0`);
+/// the default is ON (U11-T7).
 ///
 /// **Hook caveat (see the inner call site)**: the pipeline
 /// is built so the per-batch wiring is exercised; the actual
@@ -455,10 +456,11 @@ fn extract_handoff_path_from_payload(payload: Option<&str>) -> Option<String> {
 fn build_unified_validation_pipeline(
     config: &crate::config::EventLoopConfig,
 ) -> Option<crate::validation::ValidationPipeline> {
-    let enabled = std::env::var("UNIFIED_VALIDATION")
-        .ok()
-        .map(|v| v.trim() == "1")
-        .unwrap_or(false);
+    // U11-T7: default-on; explicit "0" disables the unified pipeline.
+    let enabled = match std::env::var("UNIFIED_VALIDATION").ok() {
+        Some(v) if v.trim() == "0" => false,
+        _ => true,
+    };
     if !enabled {
         return None;
     }
@@ -11183,32 +11185,35 @@ fn is_rejection_stale(
 }
 
 /// U2 (plan 2026-06-21-002): construct a `StateLedger` from the
-/// `UNIFIED_STATE_LEDGER` env var, returning `None` when the flag
-/// is unset (legacy path) or invalid. This is the single env-var
-/// read site for the loop constructor; `with_context_and_diagnostics`
-/// is the only caller.
+/// `UNIFIED_STATE_LEDGER` env var. U11-T7: default is now ON;
+/// explicit `0` (or invalid values) keeps the legacy path.
 ///
-/// Flag rules:
-/// - unset, empty, or `0` → `None` (legacy).
-/// - `1` → feature on, fresh ledger rooted at `workspace`.
+/// Flag rules (U11-T7):
+/// - unset, empty, or `1` → feature on, fresh ledger rooted at `workspace`.
+/// - `0` → `None` (legacy).
 /// - any other value → warn and treat as off (`None`).
 fn build_state_ledger_from_env(workspace: &std::path::Path) -> Option<crate::state::StateLedger> {
-    let raw = std::env::var("UNIFIED_STATE_LEDGER").ok()?;
-    let trimmed = raw.trim();
-    if trimmed == "1" {
-        debug!(
-            workspace = %workspace.display(),
-            "UNIFIED_STATE_LEDGER=1 — wiring fresh StateLedger into LoopState"
-        );
-        Some(crate::state::StateLedger::new(workspace, true))
-    } else if trimmed.is_empty() || trimmed == "0" {
-        None
-    } else {
-        warn!(
-            value = %raw,
-            "UNIFIED_STATE_LEDGER must be '1' (on) or '0'/unset (off); \
-             treating as off"
-        );
-        None
+    match std::env::var("UNIFIED_STATE_LEDGER").ok().as_deref() {
+        Some("0") => {
+            debug!(
+                workspace = %workspace.display(),
+                "UNIFIED_STATE_LEDGER=0 — using legacy (ledger disabled)"
+            );
+            None
+        }
+        Some(other) if !other.trim().is_empty() && other.trim() != "1" => {
+            warn!(
+                value = %other,
+                "UNIFIED_STATE_LEDGER must be '1' (on) or '0' (off); treating as off"
+            );
+            None
+        }
+        _ => {
+            debug!(
+                workspace = %workspace.display(),
+                "UNIFIED_STATE_LEDGER default-on; wiring fresh StateLedger into LoopState"
+            );
+            Some(crate::state::StateLedger::new(workspace, true))
+        }
     }
 }

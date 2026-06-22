@@ -593,10 +593,15 @@ impl RetryCounter {
 /// Whether the unified deterministic-correction path is
 /// enabled.  Single source of truth for the env var read.
 ///
+/// U11-T7: default stays OFF. The default-on flip was attempted
+/// but reverted because 10+ legacy `task.resume` tests in
+/// `event_loop/tests/` pin the legacy
+/// `publish_policy_rejection_resume` wire format. Tracking
+/// issue: T7.1 sub-task — migrate the affected tests to assert
+/// the unified correction surface (`state.prompt_context`)
+/// instead of the bus, then re-flip the default. For now:
 /// - `unset` / `0` → feature off (legacy `task.resume` path).
 /// - `1` → feature on (correction injected via `PromptContext`).
-/// - any other value → feature off (with a `warn!` at the
-///   caller's discretion).
 pub fn is_correction_enabled() -> bool {
     // Test override (set via `set_correction_enabled_for_test`) wins
     // over the env var so unit / BDD suites can opt into the new

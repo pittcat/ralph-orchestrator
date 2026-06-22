@@ -751,7 +751,7 @@ pub fn run_policy_check_unified(
 ) -> Result<PolicyCheckReport> {
     use ralph_core::Event;
     use ralph_core::preset::engine::protocol::ProtocolView;
-    use ralph_core::state::LedgerSnapshot;
+    use ralph_core::state::{LedgerSnapshot, StateLedger};
     use ralph_core::validation::ValidationPipeline;
 
     // Load the config to build the protocol view. Reuse the
@@ -773,7 +773,26 @@ pub fn run_policy_check_unified(
     let view = ProtocolView::from_event_loop_with_index_for_env(&event_loop_config, None);
     let pipeline = ValidationPipeline::from_config(&view, &event_loop_config);
 
-    let snapshot = LedgerSnapshot::cold_start();
+    // R12 (U11-T7): load .ralph/events.jsonl into LedgerSnapshot so
+    // the unified pipeline sees terminal/business state. The legacy
+    // `LedgerSnapshot::cold_start()` produced an empty snapshot, which
+    // made the post-commit rules in `validate_with_preview` reject
+    // legitimate terminal events (e.g. `work.done` with `task_id`
+    // pointing at a queue that does not exist in the snapshot).
+    let events_path = workspace_root.join(".ralph/events.jsonl");
+    let snapshot = if events_path.exists() {
+        match StateLedger::replay_from_disk(&workspace_root) {
+            Ok(snap) => snap,
+            Err(e) => {
+                eprintln!(
+                    "Warning: ledger replay failed for policy check: {e}. Using cold start."
+                );
+                LedgerSnapshot::cold_start()
+            }
+        }
+    } else {
+        LedgerSnapshot::cold_start()
+    };
     let projected = snapshot.clone();
 
     let event = Event {
@@ -831,12 +850,13 @@ pub fn resolve_policy_check_path(flags: &UnifiedPolicyCheckFlags) -> PolicyCheck
     // KTD-8 env-var opt-in. Treated as a hint; an explicit
     // `--policy-check-compat` flag wins because the env var is
     // a global default that a CLI user can override.
-    if std::env::var("UNIFIED_POLICY_CHECK")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-    {
+    // U11-T7: default is now ON; explicit `UNIFIED_POLICY_CHECK=0`
+    // opts out and routes to the legacy compat path.
+    let unified = !matches!(
+        std::env::var("UNIFIED_POLICY_CHECK").ok().as_deref(),
+        Some("0")
+    );
+    if unified {
         return PolicyCheckPath::Unified;
     }
     PolicyCheckPath::Compat

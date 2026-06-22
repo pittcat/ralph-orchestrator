@@ -397,17 +397,51 @@ fn pipeline_short_circuit_returns_first_rejection() {
 // ============================================================
 
 #[test]
+#[serial_test::serial]
 fn pipeline_records_protocol_view_feature_flag() {
-    let config = minimal_config();
-    // Default: feature_enabled = false
-    let view_off = ProtocolView::from_event_loop(&config);
-    let pipeline_off = ValidationPipeline::from_config(&view_off, &config);
-    assert!(!pipeline_off.feature_enabled);
+    use crate::preset::engine::protocol::{
+        reset_protocol_view_enabled_for_test, set_protocol_view_enabled_for_test,
+    };
 
-    // Explicit on
+    let config = minimal_config();
+    // U11-T7: default is now ON; explicit `UNIFIED_PROTOCOL_VIEW=0`
+    // opts out. This test uses the test-override atomic on
+    // `protocol::set_protocol_view_enabled_for_test` so it stays
+    // safe under the workspace `forbid(unsafe_code)` lint
+    // (the env-var read in `from_event_loop_with_index_for_env`
+    // is short-circuited when the override is set).
+
+    // Default-on: override is `true` (test override defaults to
+    // the new U11-T7 default-on semantics) or unset, both yield
+    // the unified view.
+    reset_protocol_view_enabled_for_test();
+    let view_default = ProtocolView::from_event_loop_with_index_for_env(&config, None);
+    let pipeline_default = ValidationPipeline::from_config(&view_default, &config);
+    assert!(
+        pipeline_default.feature_enabled,
+        "default (override unset) must be feature_enabled = true (U11-T7 default-on)"
+    );
+
+    // Explicit off via the test override.
+    set_protocol_view_enabled_for_test(false);
+    let view_off = ProtocolView::from_event_loop_with_index_for_env(&config, None);
+    let pipeline_off = ValidationPipeline::from_config(&view_off, &config);
+    assert!(
+        !pipeline_off.feature_enabled,
+        "override = false must yield feature_enabled = false (U11-T7 opt-out)"
+    );
+
+    // Reset so subsequent tests see the real env var.
+    reset_protocol_view_enabled_for_test();
+
+    // Explicit on via `_and_feature(_, _, true)` still wins
+    // (this is the env-agnostic path, no override needed).
     let view_on = ProtocolView::from_event_loop_with_index_and_feature(&config, None, true);
     let pipeline_on = ValidationPipeline::from_config(&view_on, &config);
-    assert!(pipeline_on.feature_enabled);
+    assert!(
+        pipeline_on.feature_enabled,
+        "explicit feature_enabled = true must be respected"
+    );
 }
 
 // ============================================================
