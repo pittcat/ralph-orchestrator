@@ -1,6 +1,6 @@
 //! 2026-06-13-004 U6: incident fixture regression test.
 //!
-//! Reproduces the 2026-06-13 ce-executor-isolated incident end-to-end
+//! Reproduces the 2026-06-13 ce-executor-serial incident end-to-end
 //! from the anonymized JSONL fixture in
 //! `tests/fixtures/wave-isolated-dimension-done/`. The 8 events all
 //! carry `hat=dimension-reviewer` (correct worker provenance) and

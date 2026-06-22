@@ -372,10 +372,11 @@ pub fn run_preset_lint(
     //
     // Note: `check_schema_reference_parity` is intentionally NOT wired
     // here. It requires a sibling `presets/schemas/<name>.yml` reference
-    // file whose path is only known at compile time (see
-    // `crates/ralph-cli/src/presets.rs::test_ce_executor_isolated_reference_schema_matches_inline_schema`).
-    // That byte-equality test is the authoritative CI gate; `ralph preset check`
-    // relies on `check_publishes_have_schema` for runtime surfacing.
+    // file whose path is only known at compile time. The byte-equality
+    // tests inside `crates/ralph-cli/src/presets.rs` (the
+    // `test_ce_executor_serial_*` family that calls `merge_root_with_ssot`)
+    // are the authoritative CI gate; `ralph preset check` relies on
+    // `check_publishes_have_schema` for runtime surfacing.
     let schema_parity_findings = schema_parity::check_publishes_have_schema(config, strictness);
     findings.extend(lint_findings_to_contract_findings(&schema_parity_findings));
 

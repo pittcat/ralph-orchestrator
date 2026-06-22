@@ -30,7 +30,7 @@ pub struct TaskStore {
     /// `uN-` / `uNa-` shape must not collide with an open task for
     /// a different `uN` within the same `(loop_id, plan_name, step)`.
     /// Defaults to `false` for backward compatibility; the
-    /// `ce-executor-isolated` preset opts in via
+    /// `ce-executor-serial` preset opts in via
     /// `EventLoopConfig.enforce_current_unit`.
     enforce_current_unit: bool,
 }

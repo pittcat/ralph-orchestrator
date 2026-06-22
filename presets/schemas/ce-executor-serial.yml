@@ -34,7 +34,7 @@
 #   shipper             -> REVIEW_COMPLETE
 #   reporter            -> report.done
 #
-# Serial-review deviation from ce-executor-isolated:
+# Serial-review deviation from ce-executor-serial:
 #   * Removed: review.wave.ready (no wave dispatcher in serial path).
 #   * Added  : review.dimension.ready  — emitted by review-coordinator to
 #             kick off a single dimension's review (replaces wave).
@@ -299,7 +299,7 @@ report.done:
 # cannot reconstruct a task id from a Rejection (the task
 # id lives in `tasks.jsonl`, not the rejection). See the
 # matching SSOT entry in
-# `presets/schemas/ce-executor-isolated.yml` for the
+# `presets/schemas/ce-executor-serial.yml` for the
 # rationale.
 task.resume:
   required_fields:
@@ -381,7 +381,7 @@ execution_contracts:
         allow_empty_for_steps: ["trivial"]
 
 # R2: Verdict gate configuration (REVIEW_COMPLETE fails the loop if
-# pass_or_fail == "fail"). Mirrors what ce-executor-isolated declares
+# pass_or_fail == "fail"). Mirrors what ce-executor-serial declares
 # inline; bringing it into SSOT removes a hand-maintained inline copy.
 verdict_gate:
   topic: "REVIEW_COMPLETE"

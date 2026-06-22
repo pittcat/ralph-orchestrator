@@ -2,7 +2,7 @@
 # reaches the executor in a later turn (e2e <30s target).
 #
 # 2026-06-17-002 feat-ce-executor-step-handoff U8 (multi-step E2E):
-# The full ce-executor-isolated topology must carry plan-gate's
+# The full ce-executor-serial topology must carry plan-gate's
 # dual-publish `(queue.advance, work.ready)` through to executor
 # activation. WAC-U4 (2026-06-12-002) added the dual-publish
 # carve-out so executor is woken by `work.ready` priority dispatch
@@ -15,7 +15,7 @@
 # dual-publish on the same iteration that an actual U1→U2 step advance
 # would emit.
 #
-# Topology (mirroring ce-executor-isolated core handoff):
+# Topology (mirroring ce-executor-serial core handoff):
 #   plan-gate --(queue.advance + work.ready)--> executor --(work.done)--> plan-gate
 #
 # Reference:
@@ -59,7 +59,7 @@ config:
 # Iter 2: executor wakes on `work.ready` (priority dispatch) and emits
 #         `work.done` to close U2.
 # Iter 3: plan-gate wakes on `work.done` and emits LOOP_COMPLETE to
-#         terminate the loop. (Real ce-executor-isolated routes through
+#         terminate the loop. (Real ce-executor-serial routes through
 #         review/synth gates; the minimal scenario collapses that onto
 #         plan-gate to keep the wire flow deterministic.)
 mock_responses:

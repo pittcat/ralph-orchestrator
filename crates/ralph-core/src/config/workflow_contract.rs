@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// The block is optional; when absent the defaults
 /// (`progress_task_gate = false`) apply so non-tier-0 presets are
-/// unaffected. Tier-0 presets (`ce-executor-isolated` and its
+/// unaffected. Tier-0 presets (`ce-executor-serial` and its
 /// Chinese mirror) opt in.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StepHandoffConfig {
@@ -29,7 +29,7 @@ pub struct StepHandoffConfig {
     /// `queue.advance` / `plan.complete` is admitted.
     ///
     /// Defaults to `false` so non-tier-0 presets do not regress.
-    /// `ce-executor-isolated` and its Chinese mirror opt in.
+    /// `ce-executor-serial` and its Chinese mirror opt in.
     #[serde(default)]
     pub progress_task_gate: bool,
 }
@@ -119,7 +119,7 @@ pub struct WorkflowContractConfig {
     /// `plan.blocked` for review waves that stall past
     /// `0.8 * aggregate_timeout_secs` without further
     /// `dimension.done` progress. Default: `enabled = false`.
-    /// The `ce-executor-isolated` preset sets this to
+    /// The `ce-executor-serial` preset sets this to
     /// `enabled = true` via the `preset_enforce` path.
     #[serde(default = "default_incomplete_wave_gate")]
     pub incomplete_wave_gate: IncompleteWaveGateConfig,

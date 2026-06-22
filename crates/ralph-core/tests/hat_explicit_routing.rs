@@ -14,14 +14,14 @@ use ralph_core::{HatRegistry, RalphConfig};
 /// Load the ce-executor builtin preset YAML and build the runtime registry.
 ///
 /// U7 (2026-06-11-003): the legacy `ce-executor.yml` was removed (R13–R15).
-/// This routing contract now reads `ce-executor-isolated.yml` — the only
-/// complete CE executor entry point after U7 (R12). The hat topology under
+/// This routing contract now reads `ce-executor-serial.yml` — the canonical
+/// CE executor entry point. The hat topology under
 /// test is unchanged (10 hats with the same routing rules); only the
 /// canonical filename moved.
 fn load_ce_executor_registry() -> HatRegistry {
-    let yaml = include_str!("../../../presets/en/ce-executor-isolated.yml");
+    let yaml = include_str!("../../../presets/en/ce-executor-serial.yml");
     let config: RalphConfig =
-        serde_yaml::from_str(yaml).expect("ce-executor-isolated.yml must parse as RalphConfig");
+        serde_yaml::from_str(yaml).expect("ce-executor-serial.yml must parse as RalphConfig");
     HatRegistry::from_runtime_config(&config)
 }
 
@@ -58,8 +58,8 @@ fn ce_executor_full_chain_routes_to_explicit_hats() {
         ("work.start", "coordinator"),
         ("work.ready", "executor"),
         ("work.done", "review-coordinator"),
-        ("review.wave.ready", "dimension-reviewer"),
-        ("review.dimension.done", "review-synthesizer"),
+        ("review.dimension.ready", "dimension-reviewer"),
+        ("review.dimensions.complete", "review-synthesizer"),
         ("review.failed", "fixer"),
         ("review.passed", "plan-gate"),
         ("review.complete", "plan-gate"),

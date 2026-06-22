@@ -5,21 +5,10 @@
     "category": "optimization"
   },
   {
-    "name": "ce-executor-isolated",
-    "description": "Isolated-mode plan-driven work execution with adversarial wave code review, auto-fix, shipping, and manager report",
-    "category": "development"
-  },
-  {
     "name": "ce-executor-serial",
     "description": "Isolated-mode plan-driven work execution with serial code review (no wave), auto-fix, shipping, and manager report",
     "category": "development"
   },
-  {
-    "name": "ce-executor-wave",
-    "description": "Wave-based parallel plan-driven execution with adversarial review, auto-fix, and shipping",
-    "category": "development"
-  },
-  {
     "name": "debug",
     "description": "Bug investigation, root-cause analysis, and adversarial fix verification",
     "category": "workflow"

@@ -128,7 +128,7 @@ else
     info "Checking public preset names in index.json..."
     # Check that all public presets are in index.json
     # Public presets are those in manifest.yml that are not commented out
-    for preset in autoresearch ce-executor-isolated ce-executor-wave debug; do
+    for preset in autoresearch debug; do
         if grep -q "\"name\": \"$preset\"" "$INDEX_JSON"; then
             pass "Public preset '$preset' found in index.json"
         else
@@ -155,7 +155,7 @@ if [[ ! -f "$ZSH_PLUGIN" ]]; then
     fail "scripts/ralph-zsh-plugin.zsh not found"
 else
     info "Checking zsh completion values..."
-    for preset in autoresearch ce-executor-isolated ce-executor-wave debug; do
+    for preset in autoresearch debug; do
         if grep -q "builtin:$preset" "$ZSH_PLUGIN"; then
             pass "Preset '$preset' found in zsh completion"
         else

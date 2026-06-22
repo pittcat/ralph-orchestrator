@@ -1011,15 +1011,13 @@ still works, but the inline form is preferred for consistency.
 
 | Schema file | Referenced by | Status |
 |---|---|---|
-| `schemas/ce-executor-isolated.yml` | `ce-executor-isolated` | Deprecated reference copy (schemas inlined into `presets/en/ce-executor-isolated.yml`) |
-| `schemas/ce-executor-serial.yml`   | `ce-executor-serial`   | Deprecated reference copy (schemas inlined into `presets/en/ce-executor-serial.yml`) |
-| `schemas/ce-executor-wave.yml`   | `ce-executor-wave`    | Deprecated reference copy (schemas inlined into `presets/en/ce-executor-wave.yml`) |
+| `schemas/ce-executor-serial.yml` | `ce-executor-serial` | SSOT for `event_policy.schemas` block (deep-merged into `presets/en/ce-executor-serial.yml` at build time by `build.rs`) |
 
-### Task Split Heuristics (ce-executor-isolated)
+### Task Split Heuristics (ce-executor-serial)
 
-**Task Split Heuristics**: `ce-executor-isolated` coordinator 默认每 U 拆 1 张 task；
-只有在 plan 显式列子单元、需要 wave 并行、或跨 worktree 时才拆多张。
-详见 `presets/en/ce-executor-isolated.yml` 的 coordinator "Task Split Heuristics" 段。
+**Task Split Heuristics**: `ce-executor-serial` coordinator 默认每 U 拆 1 张 task；
+只有在 plan 显式列子单元、需要 worktree 隔离时才拆多张。
+详见 `presets/en/ce-executor-serial.yml` 的 coordinator "Task Split Heuristics" 段。
 
 ### Checklist for Preset Authors (Payload Contracts)
 
@@ -1059,4 +1057,4 @@ regression matrix source.
 - [ ] Does `./scripts/validate-builtin-presets.sh --strict` pass after the change?
 - [ ] If a new finding id appears, is it documented in `docs/guide/runtime-contracts.md`?
 - [ ] For new public builtin presets, is the name added to `presets/index.json`?
-- [ ] For development presets (`ce-executor-isolated`, `ce-executor-serial`, `ce-executor-wave`), does `ralph preset check --strict --format json` show zero findings?
+- [ ] For development presets (`ce-executor-serial`), does `ralph preset check --strict --format json` show zero findings?

@@ -38,7 +38,7 @@ RESULTS_DIR=".eval/results/${SUITE_ID}"
 mkdir -p "$RESULTS_DIR"
 
 # Core presets to evaluate (hatless-baseline runs first as control)
-PRESETS="hatless-baseline autoresearch ce-executor-isolated ce-executor-wave debug"
+PRESETS="hatless-baseline autoresearch debug"
 
 TOTAL=5
 PASSED=0

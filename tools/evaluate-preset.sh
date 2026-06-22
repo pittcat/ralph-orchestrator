@@ -8,7 +8,7 @@
 #   ./tools/evaluate-preset.sh spec-driven kiro
 #
 # Optional:
-#   RALPH_EVAL_BINARY=/abs/path/to/ralph ./tools/evaluate-preset.sh ce-executor-isolated claude smoke
+#   RALPH_EVAL_BINARY=/abs/path/to/ralph ./tools/evaluate-preset.sh ce-executor-serial claude smoke
 
 set -euo pipefail
 

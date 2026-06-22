@@ -2409,12 +2409,12 @@ hats:
         let config = crate::config::RalphConfig::default();
         let registry = HatRegistry::from_runtime_config(&config);
         let report = RuntimeContractAggregator::aggregate(
-            "builtin:ce-executor-isolated",
+            "builtin:ce-executor-serial",
             &config,
             &registry,
             RuntimeContractStrictness::default(),
         );
-        assert_eq!(report.source_label, "builtin:ce-executor-isolated");
+        assert_eq!(report.source_label, "builtin:ce-executor-serial");
     }
 
     #[test]

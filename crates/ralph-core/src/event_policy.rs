@@ -3873,7 +3873,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     fn review_passed_full_schema_config() -> EventPolicyConfig {
-        // Mirrors the ce-executor-isolated.yml `review.passed` schema:
+        // Mirrors the ce-executor-serial.yml `review.passed` schema:
         // required fields + skip_reason allowlist.
         let mut config = test_config();
         let mut schema = EventSchema {

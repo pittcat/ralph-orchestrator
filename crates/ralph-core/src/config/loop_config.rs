@@ -232,7 +232,7 @@ pub struct EventLoopConfig {
     /// (`crates/`, `src/`, `backend/`, etc.) and relocates them to
     /// `.ralph/agent/scratchpad-{loop_id}.md`.  Defaults to `false`
     /// so non-isolated presets are unaffected; the
-    /// `ce-executor-isolated` preset opts in.
+    /// `ce-executor-serial` preset opts in.
     #[serde(default)]
     pub ephemeral_isolation: bool,
 
@@ -243,7 +243,7 @@ pub struct EventLoopConfig {
     /// step)`.  The contract is enforced only for keys whose last
     /// slug matches the `uN-` / `uNa-` shape; legacy or
     /// non-conforming keys fall through to the legacy behaviour.
-    /// Defaults to `false`; `ce-executor-isolated` opts in.
+    /// Defaults to `false`; `ce-executor-serial` opts in.
     #[serde(default)]
     pub enforce_current_unit: bool,
 
@@ -279,7 +279,7 @@ pub struct EventLoopConfig {
     /// `.ralph/agent/tasks.jsonl` and `.ralph/agent/progress.md`
     /// ledgers from the inbound event batch **before** the
     /// `progress_task_gate` runs (SP-R8). Defaults to `disabled` so
-    /// legacy presets are unaffected; `ce-executor-isolated` and
+    /// legacy presets are unaffected; `ce-executor-serial` and
     /// `ce-executor-serial` opt in via
     /// `event_loop.state_projection.enabled: true` (SP-R18).
     #[serde(default)]

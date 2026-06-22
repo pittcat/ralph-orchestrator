@@ -1,7 +1,7 @@
 # ce-executor-serial: Isolated Mode Plan-Driven Work Execution with Serial Code Review, Auto-Fix, Debug Resolver, and Manager Report
 # Pattern: Plan → Execute → Serial Review → Auto-Fix → Debug Resolver → Fix Plan → Review → Ship → Report
 #
-# Same 10-hat topology as ce-executor-isolated, but the review stage is
+# Same 10-hat topology as ce-executor-serial, but the review stage is
 # STRICTLY SERIAL: review-coordinator walks a fixed 4-dimension sequence
 # (correctness → testing → maintainability → requirements) one dimension
 # at a time, so dimension-reviewer runs as a single instance per
@@ -36,7 +36,7 @@
 #   debug-resolver → debug.exhausted → Shipper → REVIEW_COMPLETE → Reporter → LOOP_COMPLETE
 #   plan-gate → plan.complete / plan.blocked → Shipper → REVIEW_COMPLETE → Reporter → LOOP_COMPLETE
 #
-# Why serial (deviation from ce-executor-isolated):
+# Why serial (deviation from ce-executor-serial):
 #   The parallel wave variant mis-routes dimensions, drops workers, and
 #   hits `plan.blocked(reason=dimension_reviewers_failed_to_converge)`
 #   frequently enough that wall-clock and correctness both regress.
@@ -80,12 +80,12 @@ event_loop:
   max_iterations: 50
   max_runtime_seconds: 28800  # 8 hours
   enforce_hat_scope: true
-  # Ephemeral file isolation is identical to ce-executor-isolated — the
+  # Ephemeral file isolation is identical to ce-executor-serial — the
   # serial path inherits the same per-loop scratchpad-{loop_id}.md
   # relocation, since the offending agent behaviour (writing scratchpad.md
   # into the source tree) is hat-collection-agnostic.
   ephemeral_isolation: true
-  # Same single-U contract as ce-executor-isolated. Coordinator must
+  # Same single-U contract as ce-executor-serial. Coordinator must
   # only create the current U's task.
   enforce_current_unit: true
   # 2026-06-18-002 plan U11: hat_handoff is enabled in the SSOT
@@ -124,7 +124,7 @@ event_loop:
   # is intentionally removed; edit
   # `presets/schemas/ce-executor-serial.yml` to change it.
   # 2026-06-17-003 U5: cross-hat HARD RULE (mirrors
-  # ce-executor-isolated). Per-hat instructions below may still
+  # ce-executor-serial). Per-hat instructions below may still
   # mention hand-writing the ledgers (legacy phrasing); treat
   # those as stale and read the live values from the
   # `## ORCHESTRATOR CONTEXT` block. Forbidden: agent-side
@@ -220,7 +220,7 @@ event_loop:
     # its owning hat and locked for the runtime pseudo-hat `ralph`.
     # The `debug.*` glob uses Topic::matches_str for segment wildcard
     # matching. Locked-out workflow topics follow the same convention
-    # as ce-executor-isolated.
+    # as ce-executor-serial.
     topic_deny_rules:
       - {hat_id: executor, topic: build.done}
       - {hat_id: coordinator, topic: build.done}

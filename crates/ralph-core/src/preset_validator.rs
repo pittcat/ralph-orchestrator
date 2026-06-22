@@ -780,10 +780,10 @@ event_loop:
         );
     }
 
-    // -- ce-executor-isolated topology tests ----------------------------------------
+    // -- ce-executor-serial topology tests ----------------------------------------
 
     #[test]
-    fn ce_executor_topology_is_valid() {
+    fn serial_executor_topology_is_valid() {
         let yaml = r#"
 hats:
   coordinator:
@@ -843,13 +843,13 @@ event_loop:
         let result = validate_preset_topology(&config, &registry);
         assert!(
             result.is_valid(),
-            "ce-executor topology should be valid: {:?}",
+            "ce-executor-serial topology should be valid: {:?}",
             result.errors
         );
     }
 
     #[test]
-    fn ce_executor_verdict_gate_rejects_fail_review_complete() {
+    fn serial_executor_verdict_gate_rejects_fail_review_complete() {
         // R10: The verdict gate must reject LOOP_COMPLETE when REVIEW_COMPLETE
         // carries pass_or_fail == "fail". This is a backstop for plan.blocked
         // and fix.exhausted paths that still emit REVIEW_COMPLETE.
@@ -884,7 +884,7 @@ event_loop:
     }
 
     #[test]
-    fn ce_executor_report_done_is_on_all_paths() {
+    fn serial_executor_report_done_is_on_all_paths() {
         let yaml = r#"
 hats:
   reporter:
@@ -1189,10 +1189,10 @@ event_loop:
         );
     }
 
-    // -- ce-executor-isolated multi-step advancement regression tests ---------------
+    // -- ce-executor-serial multi-step advancement regression tests ---------------
 
     #[test]
-    fn ce_executor_queue_advance_is_reachable_from_start() {
+    fn serial_executor_queue_advance_is_reachable_from_start() {
         // R11: After a step passes review, plan-gate must be able to emit
         // queue.advance so the executor can run the next step.
         let yaml = r#"

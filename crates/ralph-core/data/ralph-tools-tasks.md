@@ -69,9 +69,9 @@ points to a real loop), the following rules apply:
   for diagnostics; a warning is printed when the target task's
   `loop_id` differs from the current marker.
 
-### Single-U Contract（2026-06-14 计划 003 R4 — `ce-executor-isolated` only）
+### Single-U Contract（2026-06-14 计划 003 R4 — `ce-executor-serial` only）
 
-**默认关闭**。当 `ce-executor-isolated` preset 启动后，`ralph run` 写 `.ralph/agent/.ralph-enforce-current-unit` marker，子进程 `ralph tools task ensure` 检测后激活契约。standalone CLI 用户可设 `RALPH_ENFORCE_CURRENT_UNIT=1` 强制开启。
+**默认关闭**。当 `ce-executor-serial` preset 启动后，`ralph run` 写 `.ralph/agent/.ralph-enforce-current-unit` marker，子进程 `ralph tools task ensure` 检测后激活契约。standalone CLI 用户可设 `RALPH_ENFORCE_CURRENT_UNIT=1` 强制开启。
 
 **契约规则**：
 

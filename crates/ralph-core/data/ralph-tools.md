@@ -30,7 +30,7 @@ metadata:
    - `allowed_topics`：当前 hat 可发布的所有 topic（**只在这列里挑**）
 2. **对照 `required_fields` 补齐 payload**；用 `ralph emit <topic> --policy-check -j '...'` 在写盘前预检（U4，CLI 100% 与 loop gate 同源 schema）。
 3. **确认 hat 作用域**：isolated 模式下未在 `allowed_topics`（与 hat `publishes` 交集）的 topic 越权 — 改用 hat 实际可发的 topic，不要靠 `--unsafe-no-policy-check` 绕过。
-4. **不要**用 `--unsafe-no-policy-check` 绕 policy；`ce-executor-isolated` preset 默认 `allow_unsafe_cli_emit: false`，该参数直接被拒。**不要**直写 `events.jsonl` — 写完仍会被 `payload_contract` 拒。
+4. **不要**用 `--unsafe-no-policy-check` 绕 policy；`ce-executor-serial` preset 默认 `allow_unsafe_cli_emit: false`，该参数直接被拒。**不要**直写 `events.jsonl` — 写完仍会被 `payload_contract` 拒。
 5. **复杂 violation**（`progress_task_mismatch` / `handoff_dispatch_timeout` / `plan.blocked` / `review_passed_while_wave_open` 等）一行摘要见 `ralph-tools-handoff`；按需 `ralph tools skill load ralph-tools-handoff` 加载深参考。
 6. **仍不明**：`RALPH_DIAGNOSTICS=1` 启的 loop 把 envelope 写到 `recovery.jsonl`；`ralph diagnose --session latest` 出报告（`docs/guide/runtime-diagnosis.md` §10）。
 
@@ -103,7 +103,7 @@ metadata:
 |----------|---------|---------|
 | `events file not in allowlist` | `RALPH_EVENTS_FILE`/`--file` 指向了非 allowlist 路径 | 查看错误信息中列出的 allowlist 条目；如需新路径，先 `touch` 一个 marker 或去掉显式参数 |
 | `topic is required` | 缺少必需的位置参数 | 补上 topic 参数 |
-| `policy check failed` | 事件不符合策略 | 读 stderr 列出违规字段（`validation_errors[].field`）；修正后用 `ralph emit <topic> --policy-check -j '...'` 预检通过再正式发出。**不要**首选 `--unsafe-no-policy-check`（`ce-executor-isolated` preset 默认 `allow_unsafe_cli_emit: false` 时该参数不生效） |
+| `policy check failed` | 事件不符合策略 | 读 stderr 列出违规字段（`validation_errors[].field`）；修正后用 `ralph emit <topic> --policy-check -j '...'` 预检通过再正式发出。**不要**首选 `--unsafe-no-policy-check`（`ce-executor-serial` preset 默认 `allow_unsafe_cli_emit: false` 时该参数不生效） |
 | `task not found` | task ID 不存在或属于其他 loop | `ralph tools task list` 确认当前可用任务 |
 | `memory not found` | memory ID 不存在或无权访问 | `ralph tools memory list` 确认可用记忆 |
 | `skill not found` | skill 名称错误或对当前 hat 不可见 | `ralph tools skill list` 确认可用 skill；检查 `RALPH_CURRENT_HAT` |
@@ -112,9 +112,9 @@ metadata:
 | `policy validation failed` (`ralph wave emit`) | 任一 payload 违反 `event_policy.schemas.<topic>.required_fields`，整批拒绝 | 用 `--output json` 读 `validation_errors[].field` 一次性拿到全部缺失字段，修正后重发 |
 | 任何命令失败 | 通用恢复 | 1. `ralph <cmd> --help` 确认语法 2. 检查退出码 3. 查看错误信息 4. 重试 |
 
-## Agent Output Governance（2026-06-14 计划 003 — `ce-executor-isolated` only）
+## Agent Output Governance（2026-06-14 计划 003 — `ce-executor-serial` only）
 
-`ce-executor-isolated` preset 在四个卡点上加硬规则。agent 可能遇到如下机制 — 当以下块 / 变量 / 行为出现时，按对应说明处理。
+`ce-executor-serial` preset 在四个卡点上加硬规则。agent 可能遇到如下机制 — 当以下块 / 变量 / 行为出现时，按对应说明处理。
 
 ### `## WAVE CONTEXT` Block（R1 — review-synthesizer only）
 
@@ -172,7 +172,7 @@ The following runtime artefacts were moved out of the source tree by the runner.
 
 ### `ralph tools task ensure` 与 R4 Single-U 契约
 
-**默认关闭**。当 `ce-executor-isolated` preset 启动后，`ralph run` 写 `.ralph/agent/.ralph-enforce-current-unit` marker，子进程 `ralph tools task ensure` 检测后激活契约。standalone CLI 用户可设环境变量 `RALPH_ENFORCE_CURRENT_UNIT=1`。
+**默认关闭**。当 `ce-executor-serial` preset 启动后，`ralph run` 写 `.ralph/agent/.ralph-enforce-current-unit` marker，子进程 `ralph tools task ensure` 检测后激活契约。standalone CLI 用户可设环境变量 `RALPH_ENFORCE_CURRENT_UNIT=1`。
 
 **契约**：
 

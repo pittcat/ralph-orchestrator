@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 pub struct StateProjectionConfig {
     /// Master switch. When `false` (the default) the projector is
     /// not invoked and existing behaviour is preserved. The
-    /// `ce-executor-isolated` and `ce-executor-serial` presets opt
+    /// `ce-executor-serial` and `ce-executor-serial` presets opt
     /// in via `event_loop.state_projection.enabled: true`.
     #[serde(default)]
     pub enabled: bool,

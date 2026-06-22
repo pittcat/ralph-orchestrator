@@ -1147,7 +1147,7 @@ pub mod incomplete_wave_gate {
     /// Configuration knobs for the U2 incomplete-wave gate.
     ///
     /// `enabled` defaults to `false` globally and `true` for
-    /// `ce-executor-isolated` (per plan §U2). The caller
+    /// `ce-executor-serial` (per plan §U2). The caller
     /// (`EventLoop::maybe_emit_incomplete_wave_blocked`) reads
     /// `workflow_contract.incomplete_wave_gate.enabled` from
     /// `RalphConfig` and falls back to the global default.

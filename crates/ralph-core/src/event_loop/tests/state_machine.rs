@@ -291,7 +291,7 @@ fn test_no_verdict_gate_config_preserves_completion_behavior() {
     );
 }
 
-/// Verifies the ce-executor-isolated gate: REVIEW_COMPLETE + additional_topics: ["report.done"].
+/// Verifies the ce-executor-serial gate: REVIEW_COMPLETE + additional_topics: ["report.done"].
 /// When `report.done` carries pass_or_fail="fail", the verdict gate must block LOOP_COMPLETE
 /// even if the upstream REVIEW_COMPLETE topic itself would match.
 #[test]
@@ -301,7 +301,7 @@ fn test_verdict_gate_additional_topic_blocks_loop_complete_on_fail() {
 
     let temp_dir = TempDir::new().unwrap();
     let mut config = RalphConfig::default();
-    // Mirror ce-executor-isolated preset: REVIEW_COMPLETE is upstream,
+    // Mirror ce-executor-serial preset: REVIEW_COMPLETE is upstream,
     // report.done is the final downstream mirror.
     config.event_loop.verdict_gate = Some(VerdictGateConfig {
         topic: "REVIEW_COMPLETE".to_string(),

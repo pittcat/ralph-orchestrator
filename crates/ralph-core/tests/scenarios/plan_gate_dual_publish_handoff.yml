@@ -42,7 +42,7 @@ config:
 # single turn. Both must be accepted (pre-fix: work.ready was dropped).
 # Run 2: executor wakes on work.ready and emits work.done.
 # Run 3: plan-gate wakes on work.done and emits LOOP_COMPLETE to terminate
-# the loop. (In a real ce-executor-isolated run, a separate `ralph` hat
+# the loop. (In a real ce-executor-serial run, a separate `ralph` hat
 # would own LOOP_COMPLETE; here we collapse it onto plan-gate to keep the
 # scenario minimal.)
 mock_responses:

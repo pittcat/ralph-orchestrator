@@ -1,7 +1,7 @@
 # 2026-06-13-004 U6: incident fixture regression test
 #
 # Anonymized 8 `review.dimension.done` JSONL events extracted from the
-# 2026-06-13 ce-executor-isolated incident (worktree
+# 2026-06-13 ce-executor-serial incident (worktree
 # `.ralph/events-20260613-012231.jsonl`). The 8 rows are the ones
 # that were dropped by the isolated scope check before U1+U2 fixed
 # it: each carries `hat=dimension-reviewer` (correct worker

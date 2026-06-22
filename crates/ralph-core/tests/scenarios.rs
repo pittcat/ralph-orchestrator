@@ -1068,7 +1068,7 @@ fn test_state_projection_work_done_updates_progress() {
 // ──────────────────────────────────────────────────────────────────────
 // 2026-06-17-002 plan U8: Multi-step E2E / BDD handoff coverage
 //
-// These scenarios exercise the full ce-executor-isolated handoff
+// These scenarios exercise the full ce-executor-serial handoff
 // topology end-to-end through the real EventLoop. They complement
 // the per-unit Rust tests by pinning the wire flow that the runtime
 // contract aggregator and isolated mode dispatch guarantee:

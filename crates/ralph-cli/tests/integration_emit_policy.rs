@@ -22,7 +22,7 @@ fn ralph_emit(temp_path: &std::path::Path, args: &[&str]) -> std::process::Outpu
 /// skeleton under `temp_path`, then rewrite its `## next` action line to a
 /// topic-free placeholder so the U4 publishes_check accepts it.
 ///
-/// 2026-06-20: `ce-executor-serial` / `ce-executor-isolated` enable
+/// 2026-06-20: `ce-executor-serial` enables
 /// `hat_handoff`, so macro-edge emits (e.g. `work.done` from `executor`)
 /// require a `handoff_path` referring to a prepared handoff file. The
 /// default skeleton writes `**动作**: 待填写 (e.g. emit \`{topic}\` after
@@ -95,7 +95,7 @@ fn ralph_handoff_prepare(
 
 /// Happy path: a conforming `work.done` payload is accepted and written.
 ///
-/// 2026-06-20: `ce-executor-isolated` enables `hat_handoff`, so
+/// 2026-06-20: `ce-executor-serial` enables `hat_handoff`, so
 /// `work.done` from `executor` is a macro-edge that requires a
 /// `handoff_path` referring to a file previously prepared via
 /// `ralph tools handoff prepare`.
@@ -107,7 +107,7 @@ fn test_emit_with_builtin_preset_accepts_valid_work_done() {
 
     let handoff_path = ralph_handoff_prepare(
         temp_path,
-        "builtin:ce-executor-isolated",
+        "builtin:ce-executor-serial",
         "executor",
         "review-coordinator",
         "work.done",
@@ -121,7 +121,7 @@ fn test_emit_with_builtin_preset_accepts_valid_work_done() {
         temp_path,
         &[
             "-H",
-            "builtin:ce-executor-isolated",
+            "builtin:ce-executor-serial",
             "emit",
             "work.done",
             "--json",
@@ -164,7 +164,7 @@ fn test_emit_with_builtin_preset_rejects_missing_required_fields() {
         temp_path,
         &[
             "-H",
-            "builtin:ce-executor-isolated",
+            "builtin:ce-executor-serial",
             "emit",
             "work.done",
             "--json",
@@ -222,7 +222,7 @@ fn test_emit_with_builtin_preset_rejects_string_payload() {
         temp_path,
         &[
             "-H",
-            "builtin:ce-executor-isolated",
+            "builtin:ce-executor-serial",
             "emit",
             "work.done",
             "free text",
@@ -348,7 +348,7 @@ fn test_emit_isolated_mode_rejects_conflicting_hat_override() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ralph"))
         .args([
             "-H",
-            "builtin:ce-executor-isolated",
+            "builtin:ce-executor-serial",
             "emit",
             "debug.step",
             "task_id=demo",
@@ -395,7 +395,7 @@ fn test_emit_isolated_mode_rejects_coordinator_aggregate_timeout() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ralph"))
         .args([
             "-H",
-            "builtin:ce-executor-isolated",
+            "builtin:ce-executor-serial",
             "emit",
             "review.passed",
             "--json",
@@ -460,14 +460,14 @@ fn test_emit_isolated_mode_allows_matching_hat() {
     let temp_path = temp_dir.path();
     std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
 
-    // 2026-06-20: `ce-executor-isolated` enables `hat_handoff`, so
-    // `review.passed` from `review-synthesizer` is a macro-edge and
-    // requires a `handoff_path`. The downstream consumer is
-    // `plan-gate` (which reacts to `review.passed` and emits
-    // `queue.advance` / `plan.complete`).
+/// 2026-06-20: `ce-executor-serial` enables `hat_handoff`, so
+    /// `review.passed` from `review-synthesizer` is a macro-edge and
+    /// requires a `handoff_path`. The downstream consumer is
+    /// `plan-gate` (which reacts to `review.passed` and emits
+    /// `queue.advance` / `plan.complete`).
     let handoff_path = ralph_handoff_prepare(
         temp_path,
-        "builtin:ce-executor-isolated",
+        "builtin:ce-executor-serial",
         "review-synthesizer",
         "plan-gate",
         "review.passed",
@@ -480,7 +480,7 @@ fn test_emit_isolated_mode_allows_matching_hat() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ralph"))
         .args([
             "-H",
-            "builtin:ce-executor-isolated",
+            "builtin:ce-executor-serial",
             "emit",
             "review.passed",
             &payload,
@@ -512,7 +512,7 @@ fn test_emit_isolated_mode_allows_matching_hat() {
 // 8 times, each landing in events.jsonl before being dropped at loop runtime.
 // U1 closes this precheck gap. These two tests pin the fix to the actual
 // preset that triggered the bug — `ce-executor-serial` — not the
-// `ce-executor-isolated` preset covered by `test_emit_isolated_mode_allows_matching_hat`.
+// `ce-executor-serial` preset covered by `test_emit_isolated_mode_allows_matching_hat`.
 // -------------------------------------------------------------------------
 
 /// P0 (testing reviewer): `ce-executor-serial` executor emits `work.done` →
@@ -651,7 +651,7 @@ fn test_emit_ralph_pseudo_hat_cannot_emit_review_passed() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ralph"))
         .args([
             "-H",
-            "builtin:ce-executor-isolated",
+            "builtin:ce-executor-serial",
             "emit",
             "review.passed",
             "--json",
@@ -697,7 +697,7 @@ fn test_emit_ralph_pseudo_hat_can_emit_loop_cancel() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ralph"))
         .args([
             "-H",
-            "builtin:ce-executor-isolated",
+            "builtin:ce-executor-serial",
             "emit",
             "loop.cancel",
             "--json",
@@ -747,7 +747,7 @@ fn test_emit_with_env_hats_source_rejects_string_payload_for_work_ready() {
             "coordinator",
         ])
         .current_dir(temp_path)
-        .env("RALPH_HATS_SOURCE", "builtin:ce-executor-isolated")
+        .env("RALPH_HATS_SOURCE", "builtin:ce-executor-serial")
         .env("RALPH_CURRENT_HAT", "coordinator")
         .env("RALPH_EVENTS_FILE", temp_path.join(".ralph/events.jsonl"))
         .output()
@@ -812,7 +812,7 @@ fn test_emit_with_env_hats_source_accepts_valid_json_payload() {
 
     let handoff_path = ralph_handoff_prepare(
         temp_path,
-        "builtin:ce-executor-isolated",
+        "builtin:ce-executor-serial",
         "coordinator",
         "executor",
         "work.ready",
@@ -832,7 +832,7 @@ fn test_emit_with_env_hats_source_accepts_valid_json_payload() {
             "coordinator",
         ])
         .current_dir(temp_path)
-        .env("RALPH_HATS_SOURCE", "builtin:ce-executor-isolated")
+        .env("RALPH_HATS_SOURCE", "builtin:ce-executor-serial")
         .env("RALPH_CURRENT_HAT", "coordinator")
         .env("RALPH_EVENTS_FILE", temp_path.join(".ralph/events.jsonl"))
         .output()
@@ -880,52 +880,6 @@ fn test_emit_with_malformed_hats_source_fails_closed() {
     );
 }
 
-/// AC-7: `ralph wave emit` honours RALPH_HATS_SOURCE — a batch with a
-/// missing required field is rejected and no candidate events are
-/// written.
-#[test]
-fn test_wave_emit_with_env_hats_source_rejects_missing_required_field() {
-    let temp_dir = TempDir::new().expect("temp dir");
-    let temp_path = temp_dir.path();
-    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
-
-    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
-        .args([
-            "wave",
-            "emit",
-            "review.wave.ready",
-            "--payloads",
-            r#"{"dim":"d1"}"#,
-            r#"{"dim":"d2"}"#,
-        ])
-        .current_dir(temp_path)
-        .env("RALPH_HATS_SOURCE", "builtin:ce-executor-wave")
-        .env("RALPH_CURRENT_HAT", "dimension-reviewer")
-        .env("RALPH_WAVE_WORKER", "1")
-        .env("RALPH_EVENTS_FILE", temp_path.join(".ralph/events.jsonl"))
-        .output()
-        .expect("failed to execute ralph wave emit");
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        !output.status.success(),
-        "missing required field in batch must reject: stderr={} stdout={}",
-        stderr,
-        stdout
-    );
-
-    let candidate = temp_path.join(".ralph/candidate-events.jsonl");
-    if candidate.exists() {
-        let contents = std::fs::read_to_string(&candidate).unwrap_or_default();
-        assert!(
-            contents.trim().is_empty(),
-            "rejected batch must NOT write candidate-events: {}",
-            contents
-        );
-    }
-}
-
 /// AC-4: when an executor-hat child process tries to emit a topic it has
 /// no authority for (e.g. `work.ready`, which only `coordinator`/`plan-gate`
 /// may publish), the rejection hint must NOT leak the unauthorised
@@ -946,7 +900,7 @@ fn test_emit_rejection_hint_excludes_unauthorised_topics() {
             "executor",
         ])
         .current_dir(temp_path)
-        .env("RALPH_HATS_SOURCE", "builtin:ce-executor-isolated")
+        .env("RALPH_HATS_SOURCE", "builtin:ce-executor-serial")
         .env("RALPH_CURRENT_HAT", "executor")
         .env("RALPH_EVENTS_FILE", temp_path.join(".ralph/events.jsonl"))
         .output()

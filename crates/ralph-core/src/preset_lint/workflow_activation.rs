@@ -351,7 +351,7 @@ pub fn check_re_emit_trap(
 ///
 /// The 4-hop bound (raised from the 002 plan's 2-hop default by
 /// WRC-U3 / 2026-06-12-003) accommodates the canonical
-/// `ce-executor-isolated` workflow: `work.done → review-coordinator
+/// `ce-executor-serial` workflow: `work.done → review-coordinator
 /// → plan-gate → shipper → reporter → LOOP_COMPLETE` is a
 /// 5-node path. A 2-hop BFS would not see past the first two
 /// transitions and would falsely flag every hat in the chain as
@@ -568,7 +568,7 @@ pub fn check_trigger_publish_asymmetry(
     // reason as starting_event: the loop runner injects the
     // publish when cancellation is requested. Without this
     // exemption, every preset that wires a `loop.cancel` trigger
-    // (e.g. ce-executor-isolated's `plan-gate`) would receive a
+    // (e.g. ce-executor-serial's `plan-gate`) would receive a
     // spurious R5 finding, blocking Tier-0.
     let cancellation_promise = if config.event_loop.cancellation_promise.is_empty() {
         None
@@ -1127,7 +1127,7 @@ hats:
     // coordinator → executor → reviewer chain that closes on the
     // completion promise. This is the standalone unit-level
     // counterpart to the Tier-0 CI gate (`ralph preset check -H
-    // builtin:ce-executor-isolated --strict`) and pins the KTD-7
+    // builtin:ce-executor-serial --strict`) and pins the KTD-7
     // contract: builtin sources with a clean WAC graph pass
     // strict mode with no findings.
     #[test]
@@ -1169,7 +1169,7 @@ hats:
     #[test]
     fn source_label_builtin_embedded_helper() {
         assert!(source_label_is_builtin_embedded(
-            "builtin:ce-executor-isolated"
+            "builtin:ce-executor-serial"
         ));
         assert!(source_label_is_builtin_embedded("builtin:foo"));
         assert!(!source_label_is_builtin_embedded(""));

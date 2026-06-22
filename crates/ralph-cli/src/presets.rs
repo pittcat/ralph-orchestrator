@@ -30,24 +30,9 @@ const PRESETS: &[EmbeddedPreset] = &[
         public: true,
     },
     EmbeddedPreset {
-        name: "ce-executor-isolated",
-        description: "Isolated-mode plan-driven work execution with wave code review, auto-fix, shipping, and manager report",
-        content: include_str!(concat!(
-            env!("OUT_DIR"),
-            "/presets/ce-executor-isolated.yml"
-        )),
-        public: true,
-    },
-    EmbeddedPreset {
         name: "ce-executor-serial",
         description: "Isolated-mode plan-driven work execution with serial code review (no wave), auto-fix, shipping, and manager report",
         content: include_str!(concat!(env!("OUT_DIR"), "/presets/ce-executor-serial.yml")),
-        public: true,
-    },
-    EmbeddedPreset {
-        name: "ce-executor-wave",
-        description: "Wave-based parallel plan-driven execution with adversarial review, auto-fix, and shipping",
-        content: include_str!(concat!(env!("OUT_DIR"), "/presets/ce-executor-wave.yml")),
         public: true,
     },
     EmbeddedPreset {
@@ -73,19 +58,8 @@ const PRESETS: &[EmbeddedPreset] = &[
 /// and can be promoted to Tier-0 in a follow-up PR.
 ///
 /// Tier-0 design rationale (KTD-WRC-5): making every builtin
-/// preset WAC-strict at once would block CI on long-known WAC
-/// issues in `ce-executor-wave` (dispatcher events outside the
-/// static graph) and `autoresearch` (multi-branch completion
-/// paths). Tier-0 keeps the gate useful without forcing a
-/// "fix-everything" commit. Promotion is incremental: each preset
-/// reaches Tier-0 once the WAC findings are zero.
-///
-/// As of the 2026-06-12-003 plan landing, only `ce-executor-isolated`
-/// is Tier-0 — the canonical plan-driven workflow that 002 and 003
-/// were authored against. `ce-executor-wave` is the planned
-/// Tier-0 follow-up.
 #[allow(dead_code)] // 003 plan tiered-gates 预留：见 docs/solutions/developer-experience/wac-rollout-tiered-gates-2026-06-12.md
-pub const TIER_0_WAC_PRESETS: &[&str] = &["ce-executor-isolated"];
+pub const TIER_0_WAC_PRESETS: &[&str] = &["ce-executor-serial"];
 
 /// `true` if `preset_name` is in the Tier-0 list. Used by the CI
 /// gate and by the test suite that asserts the Tier-0 preset
@@ -206,7 +180,7 @@ mod tests {
     /// removal of the actual YAML, manifest entry, public index, registry entry,
     /// and shell completion — without an alias. `get_preset("ce-executor")` must
     /// return `None` and the user-facing `preset_names()` must not list it.
-    /// The replacement is `ce-executor-isolated` (R12, the only complete CE
+    /// The replacement is `ce-executor-serial` (R12, the only complete CE
     /// executor entry point).
     #[test]
     fn test_ce_executor_returns_unknown_after_u7_removal() {
@@ -216,16 +190,16 @@ mod tests {
             "U7: legacy 'ce-executor' must NOT be resolvable. \
              R13–R15 require removal of YAML, manifest, public index, \
              registry entry, and shell completion without aliasing to \
-             'ce-executor-isolated'."
+             'ce-executor-serial'."
         );
 
         // The replacement entry point must remain resolvable.
-        let replacement = get_preset("ce-executor-isolated")
-            .expect("ce-executor-isolated must remain the only complete CE executor entry point");
-        assert_eq!(replacement.name, "ce-executor-isolated");
+        let replacement = get_preset("ce-executor-serial")
+            .expect("ce-executor-serial must remain the only complete CE executor entry point");
+        assert_eq!(replacement.name, "ce-executor-serial");
         assert!(
             !replacement.content.is_empty(),
-            "ce-executor-isolated must still be embedded with non-empty content"
+            "ce-executor-serial must still be embedded with non-empty content"
         );
 
         // Public listing must drop the legacy name.
@@ -235,8 +209,8 @@ mod tests {
             "U7: 'ce-executor' must NOT appear in public preset_names()"
         );
         assert!(
-            public_names.contains(&"ce-executor-isolated"),
-            "U7: 'ce-executor-isolated' must remain in public preset_names()"
+            public_names.contains(&"ce-executor-serial"),
+            "U7: 'ce-executor-serial' must remain in public preset_names()"
         );
 
         // Sibling templates (lite / wave) must be unaffected.
@@ -244,12 +218,8 @@ mod tests {
             !public_names.contains(&"ce-executor-lite"),
             "ce-executor-lite is a template, not a builtin — it must NOT be in public_names()"
         );
-        assert!(
-            public_names.contains(&"ce-executor-wave"),
-            "ce-executor-wave must remain a public builtin"
-        );
         // 2026-06-17-002 U3: ce-executor-serial (serial-review variant) is a
-        // sibling public builtin alongside -isolated and -wave.
+        // sibling public builtin alongside -isolated.
         assert!(
             public_names.contains(&"ce-executor-serial"),
             "ce-executor-serial must be a public builtin (2026-06-17-002 U3)"
@@ -294,11 +264,10 @@ mod tests {
     #[test]
     fn test_preset_names_returns_all_names() {
         let names = preset_names();
-        assert_eq!(names.len(), 5);
+        assert_eq!(names.len(), 4);
         assert!(names.contains(&"autoresearch"));
-        assert!(names.contains(&"ce-executor-isolated"));
         assert!(names.contains(&"ce-executor-serial"));
-        assert!(names.contains(&"ce-executor-wave"));
+        assert!(names.contains(&"ce-executor-serial"));
         assert!(names.contains(&"debug"));
     }
 
@@ -541,7 +510,7 @@ mod tests {
     fn test_ce_executor_required_events_is_report_done() {
         // Verify ce-executor uses report.done as completion gate (not mutually exclusive
         // branch events review.passed + review.complete which caused infinite loops)
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         assert_eq!(
@@ -556,14 +525,14 @@ mod tests {
     #[test]
     fn test_ce_executor_required_events_is_report_done_for_root_preset() {
         // Mirror-drift guard: the embedded preset is loaded via `include_str!`
-        // from `$OUT_DIR/presets/ce-executor-isolated.yml` (a copy made by build.rs from
-        // `presets/en/ce-executor-isolated.yml`). If a future change edits the canonical
+        // from `$OUT_DIR/presets/ce-executor-serial.yml` (a copy made by build.rs from
+        // `presets/en/ce-executor-serial.yml`). If a future change edits the canonical
         // file but leaves a stale `$OUT_DIR` copy lying around, the `get_preset`
         // test above would still pass and the original infinite-loop bug would
         // silently return. Read the canonical file at test runtime so cargo test
         // fails whenever the two diverge on the completion gate.
         // U7 (2026-06-11-003): the legacy `ce-executor.yml` was removed; this
-        // mirror-drift guard now reads the canonical `ce-executor-isolated.yml`
+        // mirror-drift guard now reads the canonical `ce-executor-serial.yml`
         // (the only complete CE executor entry point, R12–R15).
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let root_preset_path = std::path::Path::new(manifest_dir)
@@ -571,10 +540,10 @@ mod tests {
             .join("..")
             .join("presets")
             .join("en")
-            .join("ce-executor-isolated.yml");
+            .join("ce-executor-serial.yml");
         let root_content = std::fs::read_to_string(&root_preset_path).unwrap_or_else(|e| {
             panic!(
-                "failed to read root ce-executor-isolated preset at {}: {}",
+                "failed to read root ce-executor-serial preset at {}: {}",
                 root_preset_path.display(),
                 e
             )
@@ -594,7 +563,7 @@ mod tests {
     fn test_ce_executor_executor_has_no_default_publishes() {
         // U2: executor must NOT have default_publishes — it must explicitly emit.
         // The no-event gate (U1) handles the "forgot to emit" case instead.
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         let executor = config
@@ -611,7 +580,7 @@ mod tests {
     #[test]
     fn test_ce_executor_executor_has_no_default_publishes_for_root_preset() {
         // U2: root preset must match embedded preset
-        let root_content = read_root_preset("ce-executor-isolated.yml");
+        let root_content = read_root_preset("ce-executor-serial.yml");
         let config =
             RalphConfig::parse_yaml(&root_content).expect("root ce-executor YAML should parse");
         let executor = config
@@ -628,7 +597,7 @@ mod tests {
     #[test]
     fn test_ce_executor_publish_chain_origin_compatible() {
         // Verify ce-executor's normal publish chain survives origin guard
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         let registry = HatRegistry::from_config(&config);
@@ -871,71 +840,6 @@ mod tests {
     }
 
     #[test]
-    fn test_ce_executor_zh_required_events_is_report_done() {
-        // Happy-path: the Chinese ce-executor-zh preset must use "report.done"
-        // as its sole completion gate, matching the English root preset.
-        let content = read_root_preset("ce-executor-isolated-zh.yml");
-        let config = RalphConfig::parse_yaml(&content).expect("ce-executor-zh YAML should parse");
-        assert_eq!(
-            config.event_loop.required_events,
-            &["report.done"],
-            "ce-executor-zh should require 'report.done' as its only completion gate"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_zh_reporter_publishes_report_done_and_loop_complete() {
-        // Regression: the Chinese preset's reporter hat must declare both
-        // "report.done" (completion gate) and "LOOP_COMPLETE" (terminal promise).
-        let content = read_root_preset("ce-executor-isolated-zh.yml");
-        let config = RalphConfig::parse_yaml(&content).expect("ce-executor-zh YAML should parse");
-        let reporter = config
-            .hats
-            .get("reporter")
-            .expect("ce-executor-zh must define a 'reporter' hat");
-        assert!(
-            reporter.publishes.iter().any(|p| p == "report.done"),
-            "ce-executor-zh 'reporter' hat must declare 'report.done' in publishes. \
-             current publishes: {:?}",
-            reporter.publishes
-        );
-        assert!(
-            reporter.publishes.iter().any(|p| p == "LOOP_COMPLETE"),
-            "ce-executor-zh 'reporter' hat must declare 'LOOP_COMPLETE' in publishes. \
-             current publishes: {:?}",
-            reporter.publishes
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_en_and_zh_completion_gate_consistent() {
-        // Regression: English root preset, embedded mirror, and Chinese root preset
-        // must all agree on the completion gate. If any diverges, the test fails.
-        let en_root = read_root_preset("ce-executor-isolated.yml");
-        let zh_root = read_root_preset("ce-executor-isolated-zh.yml");
-
-        let en_config =
-            RalphConfig::parse_yaml(&en_root).expect("English ce-executor YAML should parse");
-        let zh_config =
-            RalphConfig::parse_yaml(&zh_root).expect("Chinese ce-executor-zh YAML should parse");
-
-        // Embedded mirror must match English root (sync-embedded-files.sh contract)
-        let embedded_preset =
-            get_preset("ce-executor-isolated").expect("ce-executor embedded preset should exist");
-        let embedded_config = RalphConfig::parse_yaml(embedded_preset.content)
-            .expect("embedded ce-executor YAML should parse");
-
-        assert_eq!(
-            embedded_config.event_loop.required_events, en_config.event_loop.required_events,
-            "Embedded mirror must match English root preset required_events"
-        );
-        assert_eq!(
-            zh_config.event_loop.required_events, en_config.event_loop.required_events,
-            "Chinese ce-executor-zh must match English ce-executor required_events"
-        );
-    }
-
-    #[test]
     fn test_ce_executor_reporter_publishes_report_done() {
         // Static-config guard for the completion-gate event. The chain test above
         // proves the event is origin-compatible at runtime, but `required_events`
@@ -944,7 +848,7 @@ mod tests {
         // that drops `report.done`), the gate event would never fire and the
         // infinite-loop bug would return even with `required_events: ["report.done"]`.
         // Reading the static config catches that case at unit-test time.
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         let reporter = config
@@ -967,7 +871,7 @@ mod tests {
         // before the agent activates. The agent improvising a "git checkout -b
         // feat/plan-name" or "git worktree add ..." was the original bug — see
         // git history for "fix: ce-executor 禁建分支".
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let content = preset.content;
 
         // Top-level guardrail must carry the prohibition
@@ -1075,7 +979,7 @@ mod tests {
     #[test]
     fn test_ce_executor_dimension_reviewer_timeout_is_900() {
         // R1: dimension-reviewer must have explicit timeout to avoid default 300s.
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         let reviewer = config
@@ -1098,13 +1002,13 @@ mod tests {
         // want to lock down is: the embedded copy is the merge of
         // (canonical preset, schema SSOT) — i.e. the build pipeline
         // produced what the SSOT prescribes.
-        let merged = merge_root_with_ssot("ce-executor-isolated");
+        let merged = merge_root_with_ssot("ce-executor-serial");
         let preset =
-            get_preset("ce-executor-isolated").expect("ce-executor-isolated preset should exist");
+            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
         assert_eq!(
             merged, preset.content,
-            "Embedded ce-executor-isolated must equal merge(canonical preset, schema SSOT). \
-             Re-run `cargo build` so build.rs regenerates $OUT_DIR/presets/ce-executor-isolated.yml."
+            "Embedded ce-executor-serial must equal merge(canonical preset, schema SSOT). \
+             Re-run `cargo build` so build.rs regenerates $OUT_DIR/presets/ce-executor-serial.yml."
         );
     }
 
@@ -1113,7 +1017,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     /// U4: ce-executor-serial must use `report.done` as its sole completion
-    /// gate, mirroring ce-executor-isolated. Without this, the loop would
+    /// gate, mirroring ce-executor-serial. Without this, the loop would
     /// never reach `LOOP_COMPLETE` and stall at the missing-event gate.
     #[test]
     fn test_ce_executor_serial_has_report_done_completion_gate() {
@@ -1424,9 +1328,8 @@ mod tests {
     }
 
     /// U4: ce-executor-serial must validate end-to-end (ambiguous routing
-    /// whitelist, terminal event authority, etc.). Mirrors
-    /// test_ce_executor_isolated_preset_validates_ambiguous_routing for the
-    /// new preset.
+    /// whitelist, terminal event authority, etc.). Companion of
+    /// test_ce_executor_serial_preset_validates_ambiguous_routing.
     #[test]
     fn test_ce_executor_serial_preset_validates() {
         let preset = get_preset("ce-executor-serial")
@@ -1493,24 +1396,9 @@ mod tests {
     }
 
     #[test]
-    fn test_ce_executor_zh_dimension_reviewer_timeout_is_900() {
-        let content = read_root_preset("ce-executor-isolated-zh.yml");
-        let config = RalphConfig::parse_yaml(&content).expect("ce-executor-zh YAML should parse");
-        let reviewer = config
-            .hats
-            .get("dimension-reviewer")
-            .expect("ce-executor-zh must define a 'dimension-reviewer' hat");
-        assert_eq!(
-            reviewer.timeout,
-            Some(1800),
-            "ce-executor-zh dimension-reviewer timeout must be explicitly set to 1800 seconds"
-        );
-    }
-
-    #[test]
     fn test_ce_executor_has_hard_commit_cadence() {
         // R3: executor must have hard commit cadence rule.
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let content = preset.content;
         assert!(
             content.contains("Commit Cadence (HARD RULE)"),
@@ -1525,7 +1413,7 @@ mod tests {
     #[test]
     fn test_ce_executor_has_preflight_contract() {
         // R4: executor must validate hard prerequisites before implementation.
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let content = preset.content;
         assert!(
             content.contains("Preflight Contract (HARD RULE)"),
@@ -1563,7 +1451,7 @@ mod tests {
         // `ralph wave emit` call, not once per dimension. The "for each
         // dimension" anti-pattern produces N single-worker waves that
         // serialize at the dispatcher.
-        let content = read_root_preset("ce-executor-isolated.yml");
+        let content = read_root_preset("ce-executor-serial.yml");
         let instructions = review_coordinator_instructions_from(&content);
 
         assert!(
@@ -1590,167 +1478,6 @@ mod tests {
     }
 
     #[test]
-    fn test_ce_executor_zh_review_coordinator_must_batch_wave_emission() {
-        // Mirror of the English contract test, for the Chinese variant.
-        let content = read_root_preset("ce-executor-isolated-zh.yml");
-        let instructions = review_coordinator_instructions_from(&content);
-
-        assert!(
-            !instructions.contains("对每个选中的 dimension 发射")
-                && !instructions.contains("对每个选中的dimension发射"),
-            "ce-executor-zh review-coordinator still uses the 'for each dimension' \
-             anti-pattern. Replace with a single-batch emit instruction. \n\
-             Offending instructions excerpt:\n{instructions}"
-        );
-
-        let lower = instructions.to_ascii_lowercase();
-        // Tightened: require the literal "一次性 emit" marker (the HARD RULE
-        // lead-in for the Chinese variant) AND the "--payloads" flag name,
-        // instead of bare "一次" / "单个" which match many unrelated lines.
-        assert!(
-            lower.contains("一次性 emit") && lower.contains("--payloads"),
-            "ce-executor-zh review-coordinator must include the HARD RULE batched-emit \
-             guidance: literal '一次性 emit' marker AND '--payloads' flag. \n\
-             Offending instructions excerpt:\n{instructions}"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_wave_review_coordinator_must_batch_wave_emission() {
-        // Mirror of test_ce_executor_review_coordinator_must_batch_wave_emission,
-        // for the wave-variant preset. The "for each dimension" anti-pattern
-        // would defeat dimension-reviewer's concurrency: 9 in the wave path too.
-        let content = read_root_preset("ce-executor-wave.yml");
-        let instructions = review_coordinator_instructions_from(&content);
-
-        assert!(
-            !instructions.contains("for each selected dimension"),
-            "ce-executor-wave review-coordinator still instructs 'ralph wave emit for each \
-             selected dimension'. Replace with the HARD RULE batched-emit version. \n\
-             Offending instructions excerpt:\n{instructions}"
-        );
-
-        // Tightened positive marker: require the literal "ONE wave call" phrase
-        // (the actual HARD RULE lead-in) AND the "--payloads" flag name.
-        let lower = instructions.to_ascii_lowercase();
-        assert!(
-            lower.contains("one wave call") && lower.contains("--payloads"),
-            "ce-executor-wave review-coordinator must include the HARD RULE batched-emit \
-             guidance: literal 'ONE wave call' marker AND '--payloads' flag. \n\
-             Offending instructions excerpt:\n{instructions}"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_zh_has_hard_commit_cadence() {
-        let content = read_root_preset("ce-executor-isolated-zh.yml");
-        assert!(
-            content.contains("提交节奏（硬性规则）"),
-            "ce-executor-zh must contain hard commit cadence rule"
-        );
-        assert!(
-            content.contains("禁止将多个 U-ID 合并为一个 commit"),
-            "ce-executor-zh must forbid batching multiple U-IDs"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_zh_has_preflight_contract() {
-        let content = read_root_preset("ce-executor-isolated-zh.yml");
-        assert!(
-            content.contains("前置检查契约（硬性规则）"),
-            "ce-executor-zh must contain preflight contract"
-        );
-        assert!(
-            content.contains("preflight check failed"),
-            "ce-executor-zh must reference preflight check failure"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_zh_review_coordinator_obligation_parity() {
-        // 2026-06-08 fix parity: ZH preset must mirror the EN preset's
-        // `obligations:` block with `conditional_must_emit` on
-        // review-coordinator. Without this the ZH preset cannot
-        // catch the U3/U4 failure mode (review-coordinator emits
-        // review.passed for a 400-line diff, skipping the wave).
-        let en = read_root_preset("ce-executor-isolated.yml");
-        let zh = read_root_preset("ce-executor-isolated-zh.yml");
-        let en_config = RalphConfig::parse_yaml(&en).expect("EN preset should parse");
-        let zh_config = RalphConfig::parse_yaml(&zh).expect("ZH preset should parse");
-
-        let en_rc = en_config
-            .hats
-            .get("review-coordinator")
-            .expect("EN must define review-coordinator");
-        let zh_rc = zh_config
-            .hats
-            .get("review-coordinator")
-            .expect("ZH must define review-coordinator");
-
-        // The structural fix requires `obligations:` on review-coordinator.
-        assert!(
-            !zh_rc.obligations.is_empty(),
-            "ZH review-coordinator must declare at least one obligation (U3/U4 bug fix)"
-        );
-
-        // Each EN obligation on work.done / fix.applied must have a
-        // matching ZH obligation on the same trigger topic.
-        for en_obligation in &en_rc.obligations {
-            let zh_obligation = zh_rc
-                .obligations
-                .iter()
-                .find(|o| o.on_trigger == en_obligation.on_trigger)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "ZH review-coordinator must have an obligation for on_trigger={}",
-                        en_obligation.on_trigger
-                    )
-                });
-            // Each EN conditional on a given trigger must have a
-            // matching ZH conditional (same predicate intent).
-            assert_eq!(
-                en_obligation.conditional_must_emit.len(),
-                zh_obligation.conditional_must_emit.len(),
-                "ZH obligation on '{}' must have the same number of conditional_must_emit entries as EN ({})",
-                en_obligation.on_trigger,
-                en_obligation.conditional_must_emit.len()
-            );
-            // The strict set for each EN conditional must be review.wave.ready
-            // (the same set ZH emits when an EN-style tightening applies).
-            for (en_cond, zh_cond) in en_obligation
-                .conditional_must_emit
-                .iter()
-                .zip(zh_obligation.conditional_must_emit.iter())
-            {
-                assert_eq!(
-                    en_cond.must_emit_any_of, zh_cond.must_emit_any_of,
-                    "ZH obligation on '{}' conditional must_emit_any_of must match EN",
-                    en_obligation.on_trigger
-                );
-            }
-        }
-
-        // ZH instructions must contain the HARD RULE段 and skip_reason audit mention.
-        let zh_instructions = zh_rc.instructions.as_str();
-        assert!(
-            zh_instructions.contains("HARD RULE"),
-            "ZH review-coordinator instructions must include HARD RULE段"
-        );
-        assert!(
-            zh_instructions.contains("skip_reason"),
-            "ZH review-coordinator instructions must mention skip_reason audit field"
-        );
-        // ZH should NOT have a soft default_publishes兜底 (the strict
-        // obligation path is in charge; keeping both would be confusing
-        // and could mask enforcement).
-        assert!(
-            zh_rc.default_publishes.is_none(),
-            "ZH review-coordinator must NOT have default_publishes — the strict obligation path replaces it"
-        );
-    }
-
-    #[test]
     fn test_ce_executor_plan_gate_exists_and_routes_correctly() {
         // R1-R4: plan-gate must exist, must subscribe to review.passed + review.complete,
         // must publish queue.advance / plan.complete / plan.blocked, and must NOT
@@ -1758,7 +1485,7 @@ mod tests {
         // 2026-06-04 plan U5: plan-gate must ALSO trigger on work.failed so
         // failure events from coordinator/executor route to plan.blocked
         // instead of falling back to Ralph.
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
 
@@ -1831,7 +1558,7 @@ mod tests {
     #[test]
     fn test_ce_executor_shipper_triggers_finalization_only() {
         // R6: Shipper must only trigger on finalization inputs, not directly on review.
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
 
@@ -1868,7 +1595,7 @@ mod tests {
     #[test]
     fn test_ce_executor_executor_publishes_excludes_queue_advance() {
         // KTD4: executor no longer publishes queue.advance; plan-gate owns advancement.
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
 
@@ -1882,7 +1609,7 @@ mod tests {
         );
     }
 
-    /// U1 (2026-06-17-002): the full `ce-executor-isolated` preset must
+    /// U1 (2026-06-17-002): the full `ce-executor-serial` preset must
     /// pass `RalphConfig::validate` end-to-end, including the new
     /// `trigger_multi_consumer_topics` whitelist for `fix.exhausted`
     /// and `debug.exhausted`. This is the KTD regression: if any
@@ -1890,14 +1617,14 @@ mod tests {
     /// `validate_ambiguous_routing` rejects it on first run, not just
     /// in unit tests.
     #[test]
-    fn test_ce_executor_isolated_preset_validates_ambiguous_routing() {
-        let en = get_preset("ce-executor-isolated")
-            .expect("ce-executor-isolated must be embedded with non-empty content");
-        let zh = read_root_preset("ce-executor-isolated-zh.yml");
+    fn test_ce_executor_serial_preset_validates_ambiguous_routing() {
+        let en = get_preset("ce-executor-serial")
+            .expect("ce-executor-serial must be embedded with non-empty content");
+        let zh = read_root_preset("ce-executor-serial.yml");
         let en_yaml: &str = en.content.as_ref();
         let cases: &[(&str, &str)] = &[
-            ("ce-executor-isolated", en_yaml),
-            ("ce-executor-isolated-zh", zh.as_str()),
+            ("ce-executor-serial", en_yaml),
+            ("ce-executor-serial", zh.as_str()),
         ];
         for (name, yaml) in cases {
             let config =
@@ -1915,7 +1642,7 @@ mod tests {
         // between these layers lets an agent emit a payload that passes one
         // gate and fails the other, which is exactly the false-positive
         // trap the contract is supposed to prevent.
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
 
@@ -2024,80 +1751,12 @@ mod tests {
     }
 
     #[test]
-    fn test_ce_executor_zh_work_done_field_consistency() {
-        // R6/R7/R13 ZH parity: the Chinese preset must keep the same work.done
-        // field set as the English preset.
-        let en = read_root_preset("ce-executor-isolated.yml");
-        let zh = read_root_preset("ce-executor-isolated-zh.yml");
-        let en_config = RalphConfig::parse_yaml(&en).expect("English preset should parse");
-        let zh_config = RalphConfig::parse_yaml(&zh).expect("Chinese preset should parse");
-
-        let en_contracts = en_config
-            .event_loop
-            .execution_contracts
-            .as_ref()
-            .expect("EN ce-executor should have execution_contracts");
-        let en_rule = en_contracts
-            .rules
-            .get("work.done")
-            .expect("EN work.done contract should exist");
-        let en_required: std::collections::BTreeSet<&str> = en_rule
-            .require_payload_fields
-            .iter()
-            .map(String::as_str)
-            .collect();
-
-        let zh_contracts = zh_config
-            .event_loop
-            .execution_contracts
-            .as_ref()
-            .expect("ZH ce-executor should have execution_contracts");
-        let zh_rule = zh_contracts
-            .rules
-            .get("work.done")
-            .expect("ZH work.done contract should exist");
-        let zh_required: std::collections::BTreeSet<&str> = zh_rule
-            .require_payload_fields
-            .iter()
-            .map(String::as_str)
-            .collect();
-
-        assert_eq!(
-            en_required, zh_required,
-            "ZH ce-executor work.done contract must require the same field set as EN"
-        );
-
-        let zh_policy = zh_config
-            .event_loop
-            .event_policy
-            .as_ref()
-            .expect("ZH ce-executor should have event_policy");
-        let zh_schema = zh_policy
-            .schemas
-            .get("work.done")
-            .expect("ZH work.done schema should exist");
-        let zh_schema_fields: std::collections::BTreeSet<&str> = zh_schema
-            .required_fields
-            .iter()
-            .map(String::as_str)
-            .collect();
-
-        for field in &en_required {
-            assert!(
-                zh_schema_fields.contains(field),
-                "ZH ce-executor work.done event_policy schema must require '{}' (EN contract does)",
-                field
-            );
-        }
-    }
-
-    #[test]
     fn test_ce_executor_failure_topics_accept_reason_only_payloads() {
         // Early failure paths can happen before a plan is parsed or a task is
         // selected, so they may not have plan_name/task_id/task_key/step yet.
         // The schema must allow those failures to reach plan-gate instead of
         // rejecting them at the event policy layer.
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         let policy = config
@@ -2130,85 +1789,9 @@ mod tests {
     }
 
     #[test]
-    fn test_ce_executor_zh_failure_topics_match_en_reason_only_schema() {
-        let en = read_root_preset("ce-executor-isolated.yml");
-        let zh = read_root_preset("ce-executor-isolated-zh.yml");
-        let en_config = RalphConfig::parse_yaml(&en).expect("English preset should parse");
-        let zh_config = RalphConfig::parse_yaml(&zh).expect("Chinese preset should parse");
-
-        let en_policy = en_config
-            .event_loop
-            .event_policy
-            .as_ref()
-            .expect("EN ce-executor should have event_policy");
-        let zh_policy = zh_config
-            .event_loop
-            .event_policy
-            .as_ref()
-            .expect("ZH ce-executor should have event_policy");
-
-        for topic in ["work.failed", "plan.blocked"] {
-            let en_schema = en_policy
-                .schemas
-                .get(topic)
-                .unwrap_or_else(|| panic!("EN ce-executor should define {} schema", topic));
-            let zh_schema = zh_policy
-                .schemas
-                .get(topic)
-                .unwrap_or_else(|| panic!("ZH ce-executor should define {} schema", topic));
-            assert_eq!(
-                zh_schema.required_fields, en_schema.required_fields,
-                "ZH {} schema must match EN",
-                topic
-            );
-            assert_eq!(
-                zh_schema.required_fields,
-                vec!["reason".to_string()],
-                "ZH {} schema must allow reason-only early failures",
-                topic
-            );
-        }
-    }
-
-    #[test]
-    fn test_ce_executor_zh_plan_gate_matches_en() {
-        let en = read_root_preset("ce-executor-isolated.yml");
-        let zh = read_root_preset("ce-executor-isolated-zh.yml");
-
-        let en_config = RalphConfig::parse_yaml(&en).expect("English preset should parse");
-        let zh_config = RalphConfig::parse_yaml(&zh).expect("Chinese preset should parse");
-
-        let en_gate = en_config
-            .hats
-            .get("plan-gate")
-            .expect("English preset must have plan-gate");
-        let zh_gate = zh_config
-            .hats
-            .get("plan-gate")
-            .expect("Chinese preset must have plan-gate");
-
-        assert_eq!(
-            en_gate.triggers, zh_gate.triggers,
-            "plan-gate triggers must match between EN and ZH"
-        );
-        assert_eq!(
-            en_gate.publishes, zh_gate.publishes,
-            "plan-gate publishes must match between EN and ZH"
-        );
-        assert_eq!(
-            en_gate.default_publishes, zh_gate.default_publishes,
-            "plan-gate default_publishes must match between EN and ZH"
-        );
-        assert_eq!(
-            en_gate.trigger_multi_consumer_topics, zh_gate.trigger_multi_consumer_topics,
-            "plan-gate trigger_multi_consumer_topics must match between EN and ZH (U1)"
-        );
-    }
-
-    #[test]
     fn test_ce_executor_reporter_defensive_plan_check() {
         // R8: Reporter instructions must contain a defensive plan completion check.
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let content = preset.content;
         assert!(
             content.contains("Defensive plan completion check")
@@ -2225,7 +1808,7 @@ mod tests {
     fn test_ce_executor_verdict_gate_targets_review_complete() {
         // R10: verdict_gate must check REVIEW_COMPLETE (not review.complete) because
         // REVIEW_COMPLETE carries pass_or_fail; review.complete carries verdict.
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         let gate = config
@@ -2251,7 +1834,7 @@ mod tests {
     fn test_ce_executor_dimension_reviewer_passes_through_task_correlation() {
         // R13: dimension-reviewer must read and publish task_id/task_key/step so
         // plan-gate can correlate wave results with the original task.
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let content = preset.content;
         let dim_section = content
             .split("dimension-reviewer:")
@@ -2268,7 +1851,7 @@ mod tests {
     #[test]
     fn test_ce_executor_shipper_commit_only_on_plan_complete() {
         // R14: shipper must NOT commit or mark plan completed on plan.blocked/debug.exhausted.
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let content = preset.content;
         let shipper_section = content
             .split("shipper:")
@@ -2291,7 +1874,7 @@ mod tests {
         // R15: executor must read reviewed_task_id/reviewed_task_key on queue.advance,
         // NOT task_id/task_key, to avoid confusing the reviewed step's tasks with the
         // next step's tasks.
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let content = preset.content;
         let exec_section = content
             .split("  executor:\n")
@@ -2327,16 +1910,16 @@ mod tests {
     // docs/plans/2026-06-17-005-fix-state-projection-phase1-review-findings-plan.md.
     // ------------------------------------------------------------------
 
-    /// R4 (2026-06-17-005): `ce-executor-isolated` must opt in to
+    /// R4 (2026-06-17-005): `ce-executor-serial` must opt in to
     /// state projection and pin the four canonical actions.
     #[test]
     fn test_ce_executor_state_projection_enabled_isolated_en() {
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor-isolated preset");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor-serial preset");
         let config =
-            RalphConfig::parse_yaml(&preset.content).expect("ce-executor-isolated must parse");
+            RalphConfig::parse_yaml(&preset.content).expect("ce-executor-serial must parse");
         assert!(
             config.event_loop.state_projection.enabled,
-            "ce-executor-isolated must enable state projection (R1/R4 in 2026-06-17-005); \
+            "ce-executor-serial must enable state projection (R1/R4 in 2026-06-17-005); \
              set event_loop.state_projection.enabled: true"
         );
         for topic in ["work.ready", "work.done", "queue.advance", "plan.complete"] {
@@ -2346,7 +1929,7 @@ mod tests {
                     .state_projection
                     .actions
                     .contains_key(topic),
-                "ce-executor-isolated must define a projection action for `{topic}`"
+                "ce-executor-serial must define a projection action for `{topic}`"
             );
         }
     }
@@ -2397,11 +1980,11 @@ mod tests {
     /// agent to prefer `work.ready` over `ralph tools task`.
     #[test]
     fn test_ce_executor_orchestrator_context_is_canonical_read_source_en() {
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor-isolated preset");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor-serial preset");
         let content = &preset.content;
         assert!(
             content.contains("## ORCHESTRATOR CONTEXT"),
-            "ce-executor-isolated must reference `## ORCHESTRATOR CONTEXT` as the read source"
+            "ce-executor-serial must reference `## ORCHESTRATOR CONTEXT` as the read source"
         );
         // The HARD RULE says the agent must prefer `work.ready`
         // and only fall back to `ralph tools task` when the
@@ -2410,14 +1993,14 @@ mod tests {
         // mention `work.ready` together with `ORCHESTRATOR CONTEXT`).
         assert!(
             content.contains("work.ready") && content.contains("ORCHESTRATOR CONTEXT"),
-            "ce-executor-isolated instructions must couple `work.ready` to `ORCHESTRATOR CONTEXT`"
+            "ce-executor-serial instructions must couple `work.ready` to `ORCHESTRATOR CONTEXT`"
         );
         // The Chinese preset mirrors the same cross-hat block
         // (R3 of 2026-06-17-005 — see U3).
-        let zh = read_root_preset("ce-executor-isolated-zh.yml");
+        let zh = read_root_preset("ce-executor-serial.yml");
         assert!(
             zh.contains("## ORCHESTRATOR CONTEXT"),
-            "ce-executor-isolated-zh must reference `## ORCHESTRATOR CONTEXT` (R3 of 2026-06-17-005)"
+            "ce-executor-serial must reference `## ORCHESTRATOR CONTEXT` (R3 of 2026-06-17-005)"
         );
         // And the zh HARD RULE mirrors the en "ralph tools task"
         // prohibition (added in U3 of 2026-06-17-005). The
@@ -2430,7 +2013,7 @@ mod tests {
         for token in ["ensure", "start", "close", "fail", "reopen"] {
             assert!(
                 zh_collapsed.contains(token),
-                "ce-executor-isolated-zh HARD RULE must mention `{token}` \
+                "ce-executor-serial HARD RULE must mention `{token}` \
                  (R3 / U3 of 2026-06-17-005); multi-line comment is collapsed before search"
             );
         }
@@ -2484,11 +2067,11 @@ mod tests {
         // anyone reading the legacy contract test can see the
         // successor contract. It must stay green; if it fails
         // the projector was disabled.
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor-isolated preset");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor-serial preset");
         let config = RalphConfig::parse_yaml(&preset.content).expect("parse");
         assert!(
             config.event_loop.state_projection.enabled,
-            "R4 contract is broken: state projection must stay enabled in ce-executor-isolated"
+            "R4 contract is broken: state projection must stay enabled in ce-executor-serial"
         );
     }
 
@@ -2496,7 +2079,7 @@ mod tests {
     fn test_ce_executor_u2_review_coordinator_idempotency_key_en() {
         // U2 (2026-06-11-002): review-coordinator must emit waves with an
         // explicit idempotency key so retries cannot double-write events.
-        let content = read_root_preset("ce-executor-isolated.yml");
+        let content = read_root_preset("ce-executor-serial.yml");
         let instructions = review_coordinator_instructions_from(&content);
         let wave_section = instructions
             .split("### Wave Emission")
@@ -2519,7 +2102,7 @@ mod tests {
 
     #[test]
     fn test_ce_executor_u2_review_coordinator_idempotency_key_zh() {
-        let content = read_root_preset("ce-executor-isolated-zh.yml");
+        let content = read_root_preset("ce-executor-serial.yml");
         let instructions = review_coordinator_instructions_from(&content);
         let wave_section = instructions
             .split("### Wave 发射")
@@ -2543,7 +2126,7 @@ mod tests {
     fn test_ce_executor_shipper_simplify_check_gated_to_plan_complete() {
         // R16: shipper's simplify check must be gated to plan.complete only.
         // On plan.blocked or debug.exhausted, the state is not shippable — simplify is inappropriate.
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let content = preset.content;
         let shipper_section = content
             .split("shipper:")
@@ -2557,54 +2140,10 @@ mod tests {
     }
 
     #[test]
-    fn test_ce_executor_zh_verdict_gate_targets_review_complete() {
-        let content = read_root_preset("ce-executor-isolated-zh.yml");
-        let config = RalphConfig::parse_yaml(&content).expect("ce-executor-zh YAML should parse");
-        let gate = config
-            .event_loop
-            .verdict_gate
-            .as_ref()
-            .expect("ce-executor-zh must have a verdict_gate");
-        assert_eq!(
-            gate.topic, "REVIEW_COMPLETE",
-            "ce-executor-zh verdict_gate topic must be REVIEW_COMPLETE"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_zh_dimension_reviewer_passes_through_task_correlation() {
-        let content = read_root_preset("ce-executor-isolated-zh.yml");
-        let dim_section = content
-            .split("dimension-reviewer:")
-            .nth(1)
-            .expect("ce-executor-zh must have dimension-reviewer section");
-        assert!(
-            dim_section.contains("task_id")
-                && dim_section.contains("task_key")
-                && dim_section.contains("step"),
-            "ce-executor-zh dimension-reviewer must reference task_id, task_key, step"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_zh_shipper_commit_only_on_plan_complete() {
-        let content = read_root_preset("ce-executor-isolated-zh.yml");
-        let shipper_section = content
-            .split("shipper:")
-            .nth(1)
-            .expect("ce-executor-zh must have shipper section");
-        assert!(
-            shipper_section.contains("仅限 plan.complete")
-                || shipper_section.contains("plan.complete 时"),
-            "ce-executor-zh shipper must gate commit to plan.complete only"
-        );
-    }
-
-    #[test]
     fn test_ce_executor_fixer_reads_task_correlation_fields() {
         // R17: fixer must read task_id/task_key/step from review.failed payload
         // so that fix.applied / fix.exhausted can carry them downstream.
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         let fixer = config
@@ -2637,7 +2176,7 @@ mod tests {
     fn test_ce_executor_coordinator_work_ready_includes_task_correlation() {
         // R18: coordinator must publish task_id/task_key/step in work.ready payload
         // so that executor (including trivial path) can forward them to work.done.
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let content = preset.content;
         let coord_section = content
             .split("\n  coordinator:\n")
@@ -2655,7 +2194,7 @@ mod tests {
     fn test_ce_executor_trivial_path_includes_task_correlation() {
         // R19: executor trivial path must publish task_id/task_key/step in work.done
         // so review-coordinator can correlate the review with the right task.
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let content = preset.content;
         let exec_section = content
             .split("  executor:\n")
@@ -2674,66 +2213,8 @@ mod tests {
     }
 
     #[test]
-    fn test_ce_executor_zh_fixer_reads_task_correlation_fields() {
-        let content = read_root_preset("ce-executor-isolated-zh.yml");
-        let config = RalphConfig::parse_yaml(&content).expect("ce-executor-zh YAML should parse");
-        let fixer = config
-            .hats
-            .get("fixer")
-            .expect("ce-executor-zh must define fixer");
-        assert!(
-            fixer.default_publishes.is_none(),
-            "ce-executor-zh fixer must NOT use default_publishes"
-        );
-        let fixer_section = content
-            .split("fixer:")
-            .nth(1)
-            .expect("ce-executor-zh must have fixer section");
-        assert!(
-            fixer_section.contains("task_id")
-                && fixer_section.contains("task_key")
-                && fixer_section.contains("step"),
-            "ce-executor-zh fixer Read State must reference task_id, task_key, step from review.failed payload"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_zh_coordinator_work_ready_includes_task_correlation() {
-        let content = read_root_preset("ce-executor-isolated-zh.yml");
-        let coord_section = content
-            .split("\n  coordinator:\n")
-            .nth(1)
-            .expect("ce-executor-zh must have coordinator section");
-        assert!(
-            coord_section.contains("task_id")
-                && coord_section.contains("task_key")
-                && coord_section.contains("step"),
-            "ce-executor-zh coordinator Event Publishing must include task_id, task_key, step in work.ready payload"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_zh_trivial_path_includes_task_correlation() {
-        let content = read_root_preset("ce-executor-isolated-zh.yml");
-        let exec_section = content
-            .split("\n  executor:\n")
-            .nth(1)
-            .expect("ce-executor-zh must have executor section");
-        let trivial_start = exec_section
-            .find("Trivial")
-            .expect("ce-executor-zh executor must have Trivial section");
-        let trivial_section = &exec_section[trivial_start..];
-        assert!(
-            trivial_section.contains("task_id")
-                && trivial_section.contains("task_key")
-                && trivial_section.contains("step"),
-            "ce-executor-zh executor trivial path must include task_id, task_key, step in work.done payload"
-        );
-    }
-
-    #[test]
     fn test_ce_executor_fixer_exhausted_early_exit_keeps_task_correlation() {
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let content = preset.content;
         let fixer_section = content
             .split("fixer:")
@@ -2748,25 +2229,6 @@ mod tests {
                 && exhausted_section.contains("task_key")
                 && exhausted_section.contains("step"),
             "fixer early fix.exhausted path must carry task_id, task_key, step"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_zh_fixer_exhausted_early_exit_keeps_task_correlation() {
-        let content = read_root_preset("ce-executor-isolated-zh.yml");
-        let fixer_section = content
-            .split("fixer:")
-            .nth(1)
-            .expect("ce-executor-zh must have fixer section");
-        let exhausted_start = fixer_section
-            .find("fix_round + 1 > 3")
-            .expect("ce-executor-zh fixer must describe exhausted early exit");
-        let exhausted_section = &fixer_section[exhausted_start..];
-        assert!(
-            exhausted_section.contains("task_id")
-                && exhausted_section.contains("task_key")
-                && exhausted_section.contains("step"),
-            "ce-executor-zh fixer early fix.exhausted path must carry task_id, task_key, step"
         );
     }
 
@@ -2923,9 +2385,8 @@ mod tests {
         // Zsh completion values for builtin presets (from zsh plugin)
         // This must stay in sync with scripts/ralph-zsh-plugin.zsh
         let zsh_values: std::collections::BTreeSet<String> = [
-            "builtin:ce-executor-isolated",
             "builtin:ce-executor-serial",
-            "builtin:ce-executor-wave",
+            "builtin:ce-executor-serial",
             "builtin:debug",
             "builtin:autoresearch",
         ]
@@ -3161,7 +2622,7 @@ mod tests {
     fn test_ce_executor_findings_include_task_id_isolation() {
         // Bug #2 regression: dimension-reviewer must write findings files that
         // include task_id so stale files from prior steps/presets do not串扰.
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let content = preset.content;
 
         // dimension-reviewer instructions must reference task-id-scoped paths
@@ -3189,7 +2650,7 @@ mod tests {
     fn test_ce_executor_debug_resolver_exists_and_routes_correctly() {
         // U6: debug-resolver must exist, subscribe to fix.exhausted, and publish
         // fix.plan.ready / debug.exhausted / plan.blocked explicitly.
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
 
@@ -3260,7 +2721,7 @@ mod tests {
     #[test]
     fn test_ce_executor_debug_resolver_forbids_branch_creation() {
         // U6: debug-resolver must not create branches, push, or create PRs.
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         let resolver = config
@@ -3293,7 +2754,7 @@ mod tests {
     #[test]
     fn test_ce_executor_executor_accepts_fix_plan_ready() {
         // U6: executor must accept fix.plan.ready and enter fix-plan execution mode.
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
 
@@ -3330,7 +2791,7 @@ mod tests {
     #[test]
     fn test_ce_executor_shipper_handles_debug_exhausted_not_fix_exhausted() {
         // U6: shipper must trigger on debug.exhausted, not on fix.exhausted in normal topology.
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
 
@@ -3358,7 +2819,7 @@ mod tests {
     fn test_ce_executor_debug_topics_have_schemas() {
         // U6: fix.plan.ready and debug.exhausted must have event_policy schemas with the
         // documented required fields (task correlation + debug plan fields).
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         let policy = config
@@ -3409,107 +2870,11 @@ mod tests {
     }
 
     #[test]
-    fn test_ce_executor_zh_debug_topology_matches_en() {
-        // U6: Chinese preset must stay isomorphic to English for the new debug topology.
-        let en = read_root_preset("ce-executor-isolated.yml");
-        let zh = read_root_preset("ce-executor-isolated-zh.yml");
-        let en_config = RalphConfig::parse_yaml(&en).expect("English preset should parse");
-        let zh_config = RalphConfig::parse_yaml(&zh).expect("Chinese preset should parse");
-
-        let en_resolver = en_config
-            .hats
-            .get("debug-resolver")
-            .expect("EN preset must have debug-resolver");
-        let zh_resolver = zh_config
-            .hats
-            .get("debug-resolver")
-            .expect("ZH preset must have debug-resolver");
-
-        assert_eq!(
-            zh_resolver.triggers, en_resolver.triggers,
-            "ZH debug-resolver triggers must match EN"
-        );
-        assert_eq!(
-            zh_resolver.publishes, en_resolver.publishes,
-            "ZH debug-resolver publishes must match EN"
-        );
-        assert_eq!(
-            zh_resolver.default_publishes, en_resolver.default_publishes,
-            "ZH debug-resolver default_publishes must match EN"
-        );
-        assert!(
-            en_resolver.default_publishes.is_none(),
-            "EN debug-resolver must not configure default_publishes"
-        );
-
-        let en_policy = en_config
-            .event_loop
-            .event_policy
-            .as_ref()
-            .expect("EN ce-executor should have event_policy");
-        let zh_policy = zh_config
-            .event_loop
-            .event_policy
-            .as_ref()
-            .expect("ZH ce-executor should have event_policy");
-
-        for topic in ["fix.plan.ready", "debug.exhausted"] {
-            let en_schema = en_policy
-                .schemas
-                .get(topic)
-                .unwrap_or_else(|| panic!("EN ce-executor should define {} schema", topic));
-            let zh_schema = zh_policy
-                .schemas
-                .get(topic)
-                .unwrap_or_else(|| panic!("ZH ce-executor should define {} schema", topic));
-            assert_eq!(
-                zh_schema.required_fields, en_schema.required_fields,
-                "ZH {} schema required_fields must match EN",
-                topic
-            );
-        }
-
-        let en_executor = en_config
-            .hats
-            .get("executor")
-            .expect("EN preset must have executor");
-        let zh_executor = zh_config
-            .hats
-            .get("executor")
-            .expect("ZH preset must have executor");
-        assert!(
-            zh_executor.triggers.contains(&"fix.plan.ready".to_string()),
-            "ZH executor must trigger on fix.plan.ready"
-        );
-        assert_eq!(
-            zh_executor.triggers, en_executor.triggers,
-            "ZH executor triggers must match EN"
-        );
-
-        let en_shipper = en_config
-            .hats
-            .get("shipper")
-            .expect("EN preset must have shipper");
-        let zh_shipper = zh_config
-            .hats
-            .get("shipper")
-            .expect("ZH preset must have shipper");
-        assert!(
-            zh_shipper.triggers.contains(&"debug.exhausted".to_string()),
-            "ZH shipper must trigger on debug.exhausted"
-        );
-        assert_eq!(
-            zh_shipper.triggers, en_shipper.triggers,
-            "ZH shipper triggers must match EN"
-        );
-    }
-
-    #[test]
     fn test_ce_executor_strict_payload_contract_is_valid() {
         // Strict mode: every trigger topic with payload field references in
         // instructions must have a schema, and all referenced fields must be
         // declared in the schema's required_fields.
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         let registry = HatRegistry::from_config(&config);
@@ -3523,7 +2888,7 @@ mod tests {
 
     #[test]
     fn test_ce_executor_strict_payload_contract_is_valid_for_root_preset() {
-        let content = read_root_preset("ce-executor-isolated.yml");
+        let content = read_root_preset("ce-executor-serial.yml");
         let config = RalphConfig::parse_yaml(&content).expect("root ce-executor YAML should parse");
         let registry = HatRegistry::from_config(&config);
         let result = validate_payload_contract(&config, &registry, true);
@@ -3532,1141 +2897,6 @@ mod tests {
             "root ce-executor strict payload contract validation failed: {:?}",
             result.errors
         );
-    }
-
-    #[test]
-    fn test_ce_executor_zh_strict_payload_contract_is_valid() {
-        let content = read_root_preset("ce-executor-isolated-zh.yml");
-        let config = RalphConfig::parse_yaml(&content).expect("ce-executor-zh YAML should parse");
-        let registry = HatRegistry::from_config(&config);
-        let result = validate_payload_contract(&config, &registry, true);
-        assert!(
-            result.is_valid(),
-            "ce-executor-zh strict payload contract validation failed: {:?}",
-            result.errors
-        );
-    }
-
-    // ------------------------------------------------------------------
-    // ce-executor-wave preset tests
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn test_ce_executor_wave_required_events_is_report_done() {
-        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
-        assert_eq!(
-            config.event_loop.required_events,
-            &["report.done"],
-            "ce-executor-wave should require 'report.done' as its only completion gate event"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_wave_executor_has_no_default_publishes() {
-        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
-        let executor = config
-            .hats
-            .get("parallel-executor")
-            .expect("ce-executor-wave should define parallel-executor hat");
-        assert!(
-            executor.default_publishes.is_none(),
-            "parallel-executor must NOT have default_publishes; explicit emit is required"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_wave_publish_chain_origin_compatible() {
-        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
-        let registry = HatRegistry::from_config(&config);
-        let cancellation = &config.event_loop.cancellation_promise;
-        let completion = &config.event_loop.completion_promise;
-
-        let chain_publishes: Vec<(&str, &str)> = vec![
-            ("coordinator", "work.batch.ready"),
-            ("execution-dispatcher", "work.unit.ready"),
-            ("execution-dispatcher", "work.serial.ready"),
-            ("parallel-executor", "work.unit.done"),
-            ("parallel-executor", "work.unit.failed"),
-            ("execution-synthesizer", "work.done"),
-            ("execution-synthesizer", "work.failed"),
-            ("serial-executor", "work.done"),
-            ("serial-executor", "work.failed"),
-            ("review-coordinator", "review.wave.ready"),
-            ("review-coordinator", "review.passed"),
-            ("dimension-reviewer", "review.dimension.done"),
-            ("review-synthesizer", "review.passed"),
-            ("review-synthesizer", "review.failed"),
-            ("review-synthesizer", "review.complete"),
-            ("plan-gate", "queue.advance"),
-            ("plan-gate", "plan.complete"),
-            ("plan-gate", "plan.blocked"),
-            ("fixer", "fix.exhausted"),
-            ("debug-resolver", "fix.plan.ready"),
-            ("debug-resolver", "debug.exhausted"),
-            ("debug-resolver", "plan.blocked"),
-            ("shipper", "REVIEW_COMPLETE"),
-            ("reporter", "report.done"),
-            ("reporter", "LOOP_COMPLETE"),
-        ];
-
-        for (hat_name, expected_topic) in &chain_publishes {
-            let event = ralph_core::Event {
-                topic: expected_topic.to_string(),
-                payload: None,
-                ts: "2025-01-01T00:00:00Z".to_string(),
-                hat: Some(hat_name.to_string()),
-                triggered: None,
-                source: None,
-                wave_id: None,
-                wave_index: None,
-                wave_total: None,
-                system_injected: None,
-            };
-
-            let result = validate_event_origin(&event, &registry, cancellation, completion);
-            assert_eq!(
-                result,
-                OriginCheck::Accepted,
-                "ce-executor-wave: hat '{}' should be able to publish '{}', got: {:?}",
-                hat_name,
-                expected_topic,
-                result
-            );
-        }
-    }
-
-    #[test]
-    fn test_ce_executor_wave_root_preset_matches_embedded() {
-        // Plan 2026-06-16-002 Unit 1: see the ce-executor-isolated
-        // counterpart for the rationale. The embedded copy must
-        // equal merge(canonical preset, schema SSOT).
-        let merged = merge_root_with_ssot("ce-executor-wave");
-        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
-        assert_eq!(
-            merged, preset.content,
-            "Embedded ce-executor-wave must equal merge(canonical preset, schema SSOT). \
-             Re-run `cargo build` so build.rs regenerates $OUT_DIR/presets/ce-executor-wave.yml."
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_wave_parallel_executor_has_concurrency_3_no_aggregate() {
-        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
-        let executor = config
-            .hats
-            .get("parallel-executor")
-            .expect("ce-executor-wave should define parallel-executor hat");
-        assert_eq!(
-            executor.concurrency, 3,
-            "parallel-executor must have concurrency = 3"
-        );
-        assert!(
-            executor.aggregate.is_none(),
-            "parallel-executor must NOT have aggregate"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_wave_synthesizer_has_aggregate_no_concurrency() {
-        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
-        let synthesizer = config
-            .hats
-            .get("execution-synthesizer")
-            .expect("ce-executor-wave should define execution-synthesizer hat");
-        assert!(
-            matches!(
-                synthesizer.aggregate.as_ref().map(|a| a.mode.clone()),
-                Some(ralph_core::AggregateMode::WaitForAll)
-            ),
-            "execution-synthesizer aggregate.mode must be wait_for_all"
-        );
-        assert_eq!(
-            synthesizer.concurrency, 1,
-            "execution-synthesizer must use default concurrency (1), not an explicit override"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_wave_work_done_field_consistency() {
-        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
-
-        let contracts = config
-            .event_loop
-            .execution_contracts
-            .as_ref()
-            .expect("ce-executor-wave should have execution_contracts");
-        let policy = config
-            .event_loop
-            .event_policy
-            .as_ref()
-            .expect("ce-executor-wave should have event_policy");
-
-        let contract_rule = contracts
-            .rules
-            .get("work.done")
-            .expect("ce-executor-wave execution contract should define work.done rule");
-        let contract_fields: std::collections::BTreeSet<&str> = contract_rule
-            .require_payload_fields
-            .iter()
-            .map(String::as_str)
-            .collect();
-
-        let schema = policy
-            .schemas
-            .get("work.done")
-            .expect("ce-executor-wave event_policy should define work.done schema");
-        let schema_fields: std::collections::BTreeSet<&str> =
-            schema.required_fields.iter().map(String::as_str).collect();
-
-        let required_minimum: std::collections::BTreeSet<&str> = [
-            "plan_name",
-            "plan_path",
-            "task_id",
-            "task_key",
-            "step",
-            "commit_count",
-            "changed_lines",
-        ]
-        .iter()
-        .copied()
-        .collect();
-        assert_eq!(
-            contract_fields, required_minimum,
-            "ce-executor-wave work.done contract must require exactly \
-             {{plan_name, plan_path, task_id, task_key, step, commit_count, changed_lines}}"
-        );
-        assert_eq!(
-            schema_fields, required_minimum,
-            "ce-executor-wave work.done event_policy schema must require exactly \
-             {{plan_name, plan_path, task_id, task_key, step, commit_count, changed_lines}}"
-        );
-
-        // parallel-executor and serial-executor instructions must mention every required field
-        for hat_name in ["parallel-executor", "serial-executor"] {
-            let hat = config
-                .hats
-                .get(hat_name)
-                .unwrap_or_else(|| panic!("ce-executor-wave should have {} hat", hat_name));
-            let instructions = hat.instructions.as_str();
-            for field in &required_minimum {
-                assert!(
-                    instructions.contains(field),
-                    "{} instructions must mention required work.done field '{}'",
-                    hat_name,
-                    field
-                );
-            }
-        }
-
-        let reviewer = config
-            .hats
-            .get("review-coordinator")
-            .expect("ce-executor-wave should have review-coordinator hat");
-        let reviewer_instructions = reviewer.instructions.as_str();
-        for field in &required_minimum {
-            assert!(
-                reviewer_instructions.contains(field),
-                "review-coordinator instructions must mention required work.done field '{}'",
-                field
-            );
-        }
-    }
-
-    #[test]
-    fn test_ce_executor_wave_plan_gate_exists_and_routes_correctly() {
-        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
-
-        let plan_gate = config
-            .hats
-            .get("plan-gate")
-            .expect("ce-executor-wave must define a 'plan-gate' hat");
-        assert!(
-            plan_gate.triggers.contains(&"review.passed".to_string()),
-            "plan-gate must trigger on review.passed"
-        );
-        assert!(
-            plan_gate.triggers.contains(&"review.complete".to_string()),
-            "plan-gate must trigger on review.complete"
-        );
-        assert!(
-            plan_gate.triggers.contains(&"work.failed".to_string()),
-            "plan-gate must trigger on work.failed"
-        );
-        assert!(
-            plan_gate.publishes.contains(&"queue.advance".to_string()),
-            "plan-gate must publish queue.advance"
-        );
-        assert!(
-            plan_gate.publishes.contains(&"plan.complete".to_string()),
-            "plan-gate must publish plan.complete"
-        );
-        assert!(
-            plan_gate.publishes.contains(&"plan.blocked".to_string()),
-            "plan-gate must publish plan.blocked"
-        );
-        assert_eq!(
-            plan_gate.default_publishes.as_deref(),
-            Some("plan.blocked"),
-            "plan-gate default_publishes should be plan.blocked"
-        );
-        assert!(
-            !plan_gate.triggers.contains(&"fix.applied".to_string()),
-            "plan-gate must NOT listen to fix.applied"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_wave_shipper_triggers_finalization_only() {
-        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
-
-        let shipper = config
-            .hats
-            .get("shipper")
-            .expect("ce-executor-wave must define a 'shipper' hat");
-        assert!(
-            shipper.triggers.contains(&"plan.complete".to_string()),
-            "shipper must trigger on plan.complete"
-        );
-        assert!(
-            shipper.triggers.contains(&"plan.blocked".to_string()),
-            "shipper must trigger on plan.blocked"
-        );
-        assert!(
-            shipper.triggers.contains(&"debug.exhausted".to_string()),
-            "shipper must trigger on debug.exhausted"
-        );
-        assert!(
-            !shipper.triggers.contains(&"review.passed".to_string()),
-            "shipper must NOT trigger on review.passed"
-        );
-        assert!(
-            !shipper.triggers.contains(&"review.complete".to_string()),
-            "shipper must NOT trigger on review.complete"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_wave_work_failed_requires_plan_context() {
-        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
-        let policy = config
-            .event_loop
-            .event_policy
-            .as_ref()
-            .expect("ce-executor-wave should have event_policy");
-
-        let schema = policy
-            .schemas
-            .get("work.failed")
-            .expect("ce-executor-wave should define work.failed schema");
-        let expected_fields = [
-            "plan_name",
-            "plan_path",
-            "step",
-            "task_id",
-            "task_key",
-            "reason",
-        ];
-        assert_eq!(
-            schema.required_fields.len(),
-            expected_fields.len(),
-            "work.failed schema field count mismatch"
-        );
-        for field in &expected_fields {
-            assert!(
-                schema.required_fields.contains(&field.to_string()),
-                "work.failed schema must require field '{}'",
-                field
-            );
-        }
-
-        let plan_blocked = policy
-            .schemas
-            .get("plan.blocked")
-            .expect("ce-executor-wave should define plan.blocked schema");
-        assert_eq!(
-            plan_blocked.required_fields,
-            vec!["reason".to_string()],
-            "plan.blocked may remain reason-only because it is the final manager-facing blocked topic"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_wave_forbids_agent_branch_creation() {
-        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
-        let content = preset.content;
-
-        assert!(
-            content.contains("NEVER create, switch, or rename branches")
-                && content.contains("`git checkout -b`")
-                && content.contains("`git worktree add`"),
-            "ce-executor-wave guardrails must explicitly forbid branch creation by the agent"
-        );
-
-        assert!(
-            !content.contains("create one (e.g., `feat/plan-name`)"),
-            "ce-executor-wave must NOT instruct the agent to auto-create a feature branch"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_wave_new_topics_have_schema_publisher_consumer() {
-        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
-        let policy = config
-            .event_loop
-            .event_policy
-            .as_ref()
-            .expect("ce-executor-wave should have event_policy");
-
-        let new_topics = [
-            "work.batch.ready",
-            "work.unit.ready",
-            "work.unit.done",
-            "work.unit.failed",
-            "work.serial.ready",
-        ];
-
-        for topic in &new_topics {
-            // Some hat must publish this topic
-            let has_publisher = config.hats.values().any(|hat| {
-                hat.publishes.contains(&topic.to_string())
-                    || hat.default_publishes.as_deref() == Some(topic)
-            });
-            assert!(
-                has_publisher,
-                "ce-executor-wave: topic '{}' must have at least one publisher hat",
-                topic
-            );
-
-            // Some hat must trigger on this topic
-            let has_consumer = config
-                .hats
-                .values()
-                .any(|hat| hat.triggers.contains(&topic.to_string()));
-            assert!(
-                has_consumer,
-                "ce-executor-wave: topic '{}' must have at least one consumer (trigger) hat",
-                topic
-            );
-
-            // Schema must be defined
-            assert!(
-                policy.schemas.contains_key(*topic),
-                "ce-executor-wave: topic '{}' must have a schema defined in event_policy.schemas",
-                topic
-            );
-        }
-
-        // P2-14: Precise publisher/consumer assertions for each topic
-        let coordinator = config
-            .hats
-            .get("coordinator")
-            .expect("coordinator must exist");
-        assert!(
-            coordinator
-                .publishes
-                .contains(&"work.batch.ready".to_string()),
-            "coordinator must publish work.batch.ready"
-        );
-
-        let dispatcher = config
-            .hats
-            .get("execution-dispatcher")
-            .expect("execution-dispatcher must exist");
-        assert!(
-            dispatcher
-                .publishes
-                .contains(&"work.unit.ready".to_string()),
-            "execution-dispatcher must publish work.unit.ready"
-        );
-        assert!(
-            dispatcher
-                .publishes
-                .contains(&"work.serial.ready".to_string()),
-            "execution-dispatcher must publish work.serial.ready"
-        );
-        assert!(
-            dispatcher
-                .triggers
-                .contains(&"work.batch.ready".to_string()),
-            "execution-dispatcher must trigger on work.batch.ready"
-        );
-
-        let parallel_executor = config
-            .hats
-            .get("parallel-executor")
-            .expect("parallel-executor must exist");
-        assert!(
-            parallel_executor
-                .publishes
-                .contains(&"work.unit.done".to_string()),
-            "parallel-executor must publish work.unit.done"
-        );
-        assert!(
-            parallel_executor
-                .publishes
-                .contains(&"work.unit.failed".to_string()),
-            "parallel-executor must publish work.unit.failed"
-        );
-        assert!(
-            parallel_executor
-                .triggers
-                .contains(&"work.unit.ready".to_string()),
-            "parallel-executor must trigger on work.unit.ready"
-        );
-
-        let synthesizer = config
-            .hats
-            .get("execution-synthesizer")
-            .expect("execution-synthesizer must exist");
-        assert!(
-            synthesizer.triggers.contains(&"work.unit.done".to_string()),
-            "execution-synthesizer must trigger on work.unit.done"
-        );
-        assert!(
-            synthesizer
-                .triggers
-                .contains(&"work.unit.failed".to_string()),
-            "execution-synthesizer must trigger on work.unit.failed"
-        );
-
-        let serial_executor = config
-            .hats
-            .get("serial-executor")
-            .expect("serial-executor must exist");
-        assert!(
-            serial_executor
-                .triggers
-                .contains(&"work.serial.ready".to_string()),
-            "serial-executor must trigger on work.serial.ready"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_wave_parallel_executor_forbids_git_and_nested_waves() {
-        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
-        let content = preset.content;
-        let parallel_section = content
-            .split("parallel-executor:")
-            .nth(1)
-            .expect("parallel-executor section must exist");
-        let next_hat = parallel_section
-            .find("execution-synthesizer:")
-            .expect("execution-synthesizer must follow parallel-executor");
-        let parallel_instr = &parallel_section[..next_hat];
-
-        // Git operations prohibited
-        assert!(
-            parallel_instr.contains("MUST NOT run `git add` or `git commit`"),
-            "parallel-executor must prohibit git add/commit"
-        );
-        // Branch creation prohibited
-        assert!(
-            parallel_instr.contains("MUST NOT create, switch, or rename branches or worktrees"),
-            "parallel-executor must prohibit branch/worktree creation"
-        );
-        // Task lifecycle prohibited
-        assert!(
-            parallel_instr.contains("MUST NOT run `ralph tools task start/close/fail/reopen`"),
-            "parallel-executor must prohibit task lifecycle operations"
-        );
-        // Nested waves prohibited
-        assert!(
-            parallel_instr.contains("MUST NOT run `ralph wave emit`"),
-            "parallel-executor must prohibit nested wave emission"
-        );
-        // owned_files boundary
-        assert!(
-            parallel_instr.contains("owned_files"),
-            "parallel-executor must reference owned_files boundary"
-        );
-        assert!(
-            parallel_instr.contains("outside owned_files"),
-            "parallel-executor must explicitly guard against modifying files outside owned_files"
-        );
-
-        // Timeout must be 1800 (not default 300)
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
-        let executor = config
-            .hats
-            .get("parallel-executor")
-            .expect("parallel-executor must exist");
-        assert_eq!(
-            executor.timeout,
-            Some(1800),
-            "parallel-executor timeout must be 1800s (30 min), not default 300s"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_wave_dispatcher_safety_rules() {
-        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
-        let content = preset.content;
-        let dispatcher_section = content
-            .split("execution-dispatcher:")
-            .nth(1)
-            .expect("execution-dispatcher section must exist");
-        let next_hat = dispatcher_section
-            .find("parallel-executor:")
-            .expect("parallel-executor must follow execution-dispatcher");
-        let dispatcher_instr = &dispatcher_section[..next_hat];
-
-        // Current-step-only analysis
-        assert!(
-            dispatcher_instr.contains("current step"),
-            "dispatcher must scope analysis to current step only"
-        );
-        // Disjoint owned_files
-        assert!(
-            dispatcher_instr.contains("No two tasks share any file path"),
-            "dispatcher must require disjoint file ownership"
-        );
-        // Conservative fallback principle
-        assert!(
-            dispatcher_instr.contains("When in doubt, go serial"),
-            "dispatcher must encode conservative fallback principle"
-        );
-        assert!(
-            dispatcher_instr.contains("Safety over throughput"),
-            "dispatcher must prioritize safety over throughput"
-        );
-        // MUST NOT implement / modify tasks
-        assert!(
-            dispatcher_instr.contains("MUST NOT implement code"),
-            "dispatcher must be forbidden from implementing code"
-        );
-        assert!(
-            dispatcher_instr.contains("MUST NOT modify runtime tasks"),
-            "dispatcher must be forbidden from modifying runtime tasks"
-        );
-        // Payloads-stdin required
-        assert!(
-            dispatcher_instr.contains("--payloads-stdin"),
-            "dispatcher must use --payloads-stdin for wave dispatch"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_wave_work_unit_done_schema_consistency() {
-        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
-        let policy = config
-            .event_loop
-            .event_policy
-            .as_ref()
-            .expect("ce-executor-wave should have event_policy");
-        let schema = policy
-            .schemas
-            .get("work.unit.done")
-            .expect("work.unit.done schema must exist");
-
-        let expected_fields = [
-            "plan_name",
-            "plan_path",
-            "step",
-            "task_id",
-            "task_key",
-            "owned_files",
-            "changed_files",
-            "tests",
-        ];
-        assert_eq!(
-            schema.required_fields.len(),
-            expected_fields.len(),
-            "work.unit.done schema field count mismatch"
-        );
-        for field in &expected_fields {
-            assert!(
-                schema.required_fields.contains(&field.to_string()),
-                "work.unit.done schema must require field '{}'",
-                field
-            );
-        }
-
-        // Instructions must mention all required payload fields
-        let content = preset.content;
-        let parallel_section = content
-            .split("parallel-executor:")
-            .nth(1)
-            .expect("parallel-executor section must exist");
-        let next_hat = parallel_section
-            .find("execution-synthesizer:")
-            .expect("execution-synthesizer must follow parallel-executor");
-        let parallel_instr = &parallel_section[..next_hat];
-        assert!(
-            parallel_instr.contains("changed_files"),
-            "parallel-executor instructions must reference changed_files"
-        );
-        assert!(
-            parallel_instr.contains("tests"),
-            "parallel-executor instructions must reference tests"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_wave_work_unit_failed_schema_consistency() {
-        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
-        let policy = config
-            .event_loop
-            .event_policy
-            .as_ref()
-            .expect("ce-executor-wave should have event_policy");
-        let schema = policy
-            .schemas
-            .get("work.unit.failed")
-            .expect("work.unit.failed schema must exist");
-
-        let expected_fields = [
-            "plan_name",
-            "plan_path",
-            "step",
-            "task_id",
-            "task_key",
-            "reason",
-        ];
-        assert_eq!(
-            schema.required_fields.len(),
-            expected_fields.len(),
-            "work.unit.failed schema field count mismatch"
-        );
-        for field in &expected_fields {
-            assert!(
-                schema.required_fields.contains(&field.to_string()),
-                "work.unit.failed schema must require field '{}'",
-                field
-            );
-        }
-
-        // Instructions must reference the failure reason
-        let content = preset.content;
-        let parallel_section = content
-            .split("parallel-executor:")
-            .nth(1)
-            .expect("parallel-executor section must exist");
-        let next_hat = parallel_section
-            .find("execution-synthesizer:")
-            .expect("execution-synthesizer must follow parallel-executor");
-        let parallel_instr = &parallel_section[..next_hat];
-        assert!(
-            parallel_instr.contains("reason"),
-            "parallel-executor instructions must reference reason in failure payload"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_wave_synthesizer_fail_closed() {
-        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
-        let content = preset.content;
-        let synth_section = content
-            .split("execution-synthesizer:")
-            .nth(1)
-            .expect("execution-synthesizer section must exist");
-        let next_hat = synth_section
-            .find("serial-executor:")
-            .expect("serial-executor must follow execution-synthesizer");
-        let synth_instr = &synth_section[..next_hat];
-
-        // Partial failure handling
-        assert!(
-            synth_instr.contains("Any `work.unit.failed`"),
-            "synthesizer must treat any worker failure as batch failure"
-        );
-        assert!(
-            synth_instr.contains("batch failed"),
-            "synthesizer must reference batch failed state"
-        );
-        // Boundary violation handling
-        assert!(
-            synth_instr.contains("outside the worker's `owned_files`"),
-            "synthesizer must check owned_files boundary violations"
-        );
-        // Timeout / missing worker
-        assert!(
-            synth_instr.contains("missing worker result within timeout"),
-            "synthesizer must handle missing worker results (timeout)"
-        );
-        // Re-validation requirement
-        assert!(
-            synth_instr.contains("re-validation"),
-            "synthesizer must require re-validation"
-        );
-        assert!(
-            synth_instr.contains("Do NOT trust worker self-reported success alone"),
-            "synthesizer must distrust worker self-reported success"
-        );
-        // Failure cleanup must not destroy unrelated user changes.
-        assert!(
-            synth_instr.contains("Do not run global rollback commands"),
-            "synthesizer must forbid global rollback commands on batch failure"
-        );
-        assert!(
-            synth_instr.contains("Never use `git checkout -- .`")
-                && synth_instr.contains("`git restore .`")
-                && synth_instr.contains("whole workspace"),
-            "synthesizer must explicitly forbid whole-workspace checkout/restore rollback"
-        );
-        assert!(
-            synth_instr.contains("changed_files") && synth_instr.contains("owned_files"),
-            "synthesizer must scope failure cleanup to changed_files and owned_files"
-        );
-        assert!(
-            synth_instr.contains("execution-batch.md"),
-            "synthesizer must record dirty state in execution-batch.md"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_wave_reference_schema_matches_inline_schema() {
-        // Plan 2026-06-16-002 Unit 1: with the SSOT build-merge, the
-        // embedded `event_policy.schemas` block is the merge of
-        // (SSOT base, inline override). The parity invariant is now:
-        //   * the canonical `presets/en/ce-executor-wave.yml` parses
-        //     cleanly and exposes an inline `schemas` block, AND
-        //   * the embedded (merged) schemas block equals what the
-        //     merge would produce from (canonical, SSOT) — verified
-        //     by `test_ce_executor_wave_root_preset_matches_embedded`,
-        //     which compares the merged YAML text against the
-        //     embedded content. This test focuses on the *semantic*
-        //     coverage check: every SSOT topic must reach the embedded
-        //     preset, and the inline block must not silently drop any
-        //     SSOT field.
-        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
-        let inline_yaml: serde_yaml::Value =
-            serde_yaml::from_str(preset.content).expect("ce-executor-wave YAML should parse");
-        let merged_schemas = inline_yaml
-            .get("event_loop")
-            .and_then(|value| value.get("event_policy"))
-            .and_then(|value| value.get("schemas"))
-            .expect("ce-executor-wave embedded schemas should exist after build.rs merge");
-
-        let reference_content = read_root_schema("ce-executor-wave.yml");
-        let reference_schemas_yaml: serde_yaml::Value =
-            serde_yaml::from_str(&reference_content).expect("reference schema YAML should parse");
-
-        // The merge should preserve every SSOT topic. We compare
-        // canonical forms (round-trip through serde_yaml) so block
-        // vs. flow style does not produce a false positive.
-        let canonical_merged = canonicalize_schemas(merged_schemas);
-        let canonical_reference = canonicalize_schemas(&reference_schemas_yaml);
-
-        assert_eq!(
-            canonical_merged, canonical_reference,
-            "After build.rs SSOT merge, the embedded event_policy.schemas must equal \
-             presets/schemas/ce-executor-wave.yml (since the inline override layer currently \
-             matches the SSOT). If this fails, the inline override has drifted from the SSOT \
-             and either needs to be deleted or updated in lockstep."
-        );
-    }
-
-    /// Plan 2026-06-16-002 Unit 1: see the wave counterpart above
-    /// for the full rationale. The pre-merge invariant was
-    /// "byte-locked with the inline block"; the post-merge invariant
-    /// is "embedded = merge(SSOT, inline)", which we assert via the
-    /// _root_preset_matches_embedded test. This test focuses on the
-    /// semantic coverage check: every SSOT topic must reach the
-    /// embedded preset.
-    #[test]
-    fn test_ce_executor_isolated_reference_schema_matches_inline_schema() {
-        let preset =
-            get_preset("ce-executor-isolated").expect("ce-executor-isolated preset should exist");
-        let inline_yaml: serde_yaml::Value =
-            serde_yaml::from_str(preset.content).expect("ce-executor-isolated YAML should parse");
-        let merged_schemas = inline_yaml
-            .get("event_loop")
-            .and_then(|value| value.get("event_policy"))
-            .and_then(|value| value.get("schemas"))
-            .expect("ce-executor-isolated embedded schemas should exist after build.rs merge");
-
-        let reference_content = read_root_schema("ce-executor-isolated.yml");
-        let reference_schemas: serde_yaml::Value =
-            serde_yaml::from_str(&reference_content).expect("reference schema YAML should parse");
-
-        let canonical_merged = canonicalize_schemas(merged_schemas);
-        let canonical_reference = canonicalize_schemas(&reference_schemas);
-
-        assert_eq!(
-            canonical_merged, canonical_reference,
-            "After build.rs SSOT merge, the embedded event_policy.schemas must equal \
-             presets/schemas/ce-executor-isolated.yml (since the inline override layer currently \
-             matches the SSOT). If this fails, the inline override has drifted from the SSOT \
-             and either needs to be deleted or updated in lockstep."
-        );
-    }
-
-    fn canonicalize_schemas(value: &serde_yaml::Value) -> String {
-        serde_yaml::to_string(value).expect("schemas should re-serialise")
-    }
-
-    #[test]
-    fn test_ce_executor_wave_synthesizer_aggregate_timeout() {
-        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
-        let synthesizer = config
-            .hats
-            .get("execution-synthesizer")
-            .expect("execution-synthesizer must exist");
-        let aggregate = synthesizer
-            .aggregate
-            .as_ref()
-            .expect("execution-synthesizer must have aggregate");
-        assert_eq!(
-            aggregate.timeout, 300,
-            "execution-synthesizer aggregate timeout must be 300s"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_wave_dimension_reviewer_timeout() {
-        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
-        let reviewer = config
-            .hats
-            .get("dimension-reviewer")
-            .expect("dimension-reviewer must exist");
-        assert_eq!(
-            reviewer.timeout,
-            Some(1800),
-            "dimension-reviewer timeout must be 1800s"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_wave_review_synthesizer_default_publishes() {
-        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
-        let reviewer = config
-            .hats
-            .get("review-synthesizer")
-            .expect("review-synthesizer must exist");
-        assert_eq!(
-            reviewer.default_publishes,
-            Some("review.complete".to_string()),
-            "review-synthesizer default_publishes must be review.complete"
-        );
-        assert!(
-            reviewer.publishes.contains(&"review.passed".to_string()),
-            "review-synthesizer must publish review.passed"
-        );
-        assert!(
-            reviewer.publishes.contains(&"review.failed".to_string()),
-            "review-synthesizer must publish review.failed"
-        );
-        assert!(
-            reviewer.publishes.contains(&"review.complete".to_string()),
-            "review-synthesizer must publish review.complete"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_wave_serial_executor_triggers() {
-        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
-        let serial = config
-            .hats
-            .get("serial-executor")
-            .expect("serial-executor must exist");
-        assert!(
-            serial.triggers.contains(&"work.serial.ready".to_string()),
-            "serial-executor must trigger on work.serial.ready"
-        );
-        assert!(
-            serial.triggers.contains(&"fix.plan.ready".to_string()),
-            "serial-executor must trigger on fix.plan.ready"
-        );
-        assert!(
-            serial.publishes.contains(&"work.done".to_string()),
-            "serial-executor must publish work.done"
-        );
-        assert!(
-            serial.publishes.contains(&"work.failed".to_string()),
-            "serial-executor must publish work.failed"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_wave_dispatcher_hat_config() {
-        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
-        let dispatcher = config
-            .hats
-            .get("execution-dispatcher")
-            .expect("execution-dispatcher must exist");
-        assert_eq!(
-            dispatcher.triggers,
-            vec!["work.batch.ready".to_string()],
-            "execution-dispatcher must trigger only on work.batch.ready"
-        );
-        assert!(
-            dispatcher
-                .publishes
-                .contains(&"work.unit.ready".to_string()),
-            "execution-dispatcher must publish work.unit.ready"
-        );
-        assert!(
-            dispatcher
-                .publishes
-                .contains(&"work.serial.ready".to_string()),
-            "execution-dispatcher must publish work.serial.ready"
-        );
-        assert!(
-            dispatcher.publishes.contains(&"work.failed".to_string()),
-            "execution-dispatcher must publish work.failed"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_wave_verdict_gate() {
-        let preset = get_preset("ce-executor-wave").expect("ce-executor-wave preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor-wave YAML should parse");
-        let gate = config
-            .event_loop
-            .verdict_gate
-            .as_ref()
-            .expect("ce-executor-wave must have verdict_gate");
-        assert_eq!(
-            gate.topic, "REVIEW_COMPLETE",
-            "verdict_gate topic must be REVIEW_COMPLETE"
-        );
-        assert_eq!(
-            gate.fail_field, "pass_or_fail",
-            "verdict_gate fail_field must be pass_or_fail"
-        );
-        assert_eq!(
-            gate.fail_value, "fail",
-            "verdict_gate fail_value must be 'fail'"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_wave_shared_tail_matches_ce_executor() {
-        // P1-3: The back-half pipeline (fixer → debug-resolver → shipper → reporter)
-        // is intentionally shared between ce-executor and ce-executor-wave. This test
-        // gates against accidental drift in triggers/publishes/default_publishes for
-        // those hats.
-        //
-        // WAC-U4 (2026-06-12-002) divergence: `ce-executor-isolated`
-        // plan-gate dual-publishes `work.ready` (the executor handoff)
-        // while `ce-executor-wave` does not (its front-half uses a
-        // coordinator + parallel/serial-executor topology, where
-        // queue.advance is the dispatcher signal to the coordinator
-        // and `work.batch.ready` is the executor handoff). The
-        // plan-gate hat is therefore no longer in the shared-tail
-        // set; it is asserted separately for each preset.
-        let wave_preset = get_preset("ce-executor-wave").expect("ce-executor-wave should exist");
-        let wave_config = RalphConfig::parse_yaml(wave_preset.content)
-            .expect("ce-executor-wave YAML should parse");
-
-        let base_preset = get_preset("ce-executor-isolated").expect("ce-executor should exist");
-        let base_config =
-            RalphConfig::parse_yaml(base_preset.content).expect("ce-executor YAML should parse");
-
-        let shared_hats = ["fixer", "debug-resolver", "shipper", "reporter"];
-
-        for hat_name in &shared_hats {
-            let wave_hat = wave_config
-                .hats
-                .get(*hat_name)
-                .unwrap_or_else(|| panic!("ce-executor-wave must have {} hat", hat_name));
-            let base_hat = base_config
-                .hats
-                .get(*hat_name)
-                .unwrap_or_else(|| panic!("ce-executor must have {} hat", hat_name));
-
-            assert_eq!(
-                wave_hat.triggers, base_hat.triggers,
-                "{}: triggers must match between ce-executor-wave and ce-executor",
-                hat_name
-            );
-            assert_eq!(
-                wave_hat.publishes, base_hat.publishes,
-                "{}: publishes must match between ce-executor-wave and ce-executor",
-                hat_name
-            );
-            assert_eq!(
-                wave_hat.default_publishes, base_hat.default_publishes,
-                "{}: default_publishes must match between ce-executor-wave and ce-executor",
-                hat_name
-            );
-        }
-
-        // WAC-U4: plan-gate assertions are preset-specific.
-        // `ce-executor-isolated` plan-gate must dual-publish
-        // `work.ready` (executor handoff); `ce-executor-wave`
-        // plan-gate must keep `queue.advance` as the coordinator
-        // dispatch signal (no self-loop, no `work.ready`).
-        let iso_plan_gate = base_config
-            .hats
-            .get("plan-gate")
-            .expect("ce-executor-isolated must have plan-gate");
-        assert!(
-            iso_plan_gate.publishes.iter().any(|p| p == "work.ready"),
-            "WAC-U4: ce-executor-isolated plan-gate must publish `work.ready` (executor handoff)"
-        );
-        assert!(
-            iso_plan_gate.triggers.iter().any(|p| p == "queue.advance"),
-            "WAC-U4: ce-executor-isolated plan-gate must self-trigger `queue.advance` (audit signal)"
-        );
-        let wave_plan_gate = wave_config
-            .hats
-            .get("plan-gate")
-            .expect("ce-executor-wave must have plan-gate");
-        assert!(
-            !wave_plan_gate.publishes.iter().any(|p| p == "work.ready"),
-            "WAC-U4: ce-executor-wave plan-gate must NOT publish `work.ready` (wave mode uses work.batch.ready)"
-        );
-        assert!(
-            !wave_plan_gate.triggers.iter().any(|p| p == "queue.advance"),
-            "WAC-U4: ce-executor-wave plan-gate must NOT self-trigger `queue.advance` (coordinator owns it)"
-        );
-
-        // Verify both presets share the same core safety constraints in instructions
-        let wave_content = wave_preset.content;
-        let base_content = base_preset.content;
-        for phrase in [
-            "NEVER create, switch, or rename branches",
-            "NEVER push to origin",
-            "MUST NOT modify code",
-        ] {
-            assert!(
-                wave_content.contains(phrase),
-                "ce-executor-wave must contain safety phrase: '{}'",
-                phrase
-            );
-            assert!(
-                base_content.contains(phrase),
-                "ce-executor must contain safety phrase: '{}'",
-                phrase
-            );
-        }
     }
 
     // ──────────────────────────────────────────────────────────────────────
@@ -4754,7 +2984,7 @@ mod tests {
     /// fully declared schemas.
     #[test]
     fn test_development_presets_pass_strict_contract() {
-        let strict_presets = &["ce-executor-isolated", "ce-executor-wave"];
+        let strict_presets = &["ce-executor-serial"];
         for preset_name in strict_presets {
             let preset = PRESETS
                 .iter()
@@ -4948,7 +3178,6 @@ mod tests {
             );
         }
         assert!(!is_tier_0_wac_preset("not-a-real-preset"));
-        assert!(!is_tier_0_wac_preset("ce-executor-wave")); // Tier-1
         assert!(!is_tier_0_wac_preset("autoresearch")); // Tier-2
     }
 
@@ -4956,11 +3185,11 @@ mod tests {
     // 2026-06-17-002 plan U8: end-to-end step-handoff topology coverage
     //
     // Pins the multi-consumer handoff invariants from U1/U4/U5/U7 in
-    // one place so future edits to ce-executor-isolated's hat
+    // one place so future edits to ce-executor-serial's hat
     // triggers / trigger_multi_consumer_topics / publishes can't
     // silently break the manager-report chain.
     //
-    // Topology (10-hat ce-executor-isolated):
+    // Topology (10-hat ce-executor-serial):
     //   plan-gate       --(queue.advance, work.ready)-->  executor
     //   plan-gate       --(plan.complete, plan.blocked)--> shipper
     //   executor        --(work.done, work.failed)-------> plan-gate / review-coord
@@ -4979,7 +3208,7 @@ mod tests {
     fn test_e2e_step_handoff_topology_complete() {
         use std::collections::HashMap;
 
-        let preset = get_preset("ce-executor-isolated").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
 
@@ -4997,7 +3226,7 @@ mod tests {
             let hat = config
                 .hats
                 .get(hat_id)
-                .unwrap_or_else(|| panic!("ce-executor-isolated must define '{hat_id}' hat"));
+                .unwrap_or_else(|| panic!("ce-executor-serial must define '{hat_id}' hat"));
             assert!(
                 !hat.triggers.is_empty(),
                 "'{hat_id}' must subscribe to at least one trigger"
@@ -5199,46 +3428,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ce_executor_isolated_dimension_reviewer_mentions_assigned_dimension() {
-        // U6 (2026-06-17-002): The dimension-reviewer hat's instructions
-        // MUST explain that the assigned dimension comes from TWO sources
-        // (`## ASSIGNED DIMENSION` block + `RALPH_WAVE_DIMENSION` env var)
-        // and that mismatch with the emitted `dimension` field is hard-rejected
-        // by the CLI precheck and the merge layer. This test guards against
-        // silent drift in the instructions text.
-        //
-        // The block extraction below is intentionally tolerant of additional
-        // sibling hats that may be appended below dimension-reviewer — it
-        // walks forward looking for the next top-level sibling hat key
-        // (newline + 2-space indent + `name:`). If no sibling is found,
-        // it falls back to the rest of the document.
-        use regex::Regex;
-        let yaml = include_str!("../../../presets/en/ce-executor-isolated.yml");
-        let after_start = yaml
-            .find("dimension-reviewer:")
-            .expect("dimension-reviewer hat defined in ce-executor-isolated.yml");
-        let after = &yaml[after_start..];
-        // Find the next sibling hat key: `\n  <hat-name>:`. We offset by 1
-        // to skip past the dimension-reviewer header itself when searching.
-        let sibling_re = Regex::new(r"\n  [a-z][a-z0-9_-]*:").unwrap();
-        let end = sibling_re
-            .find(&after[1..])
-            .map(|m| m.start() + 1)
-            .unwrap_or(after.len());
-        let block = &after[..end];
-
-        assert!(
-            block.contains("## ASSIGNED DIMENSION"),
-            "dimension-reviewer instructions must reference `## ASSIGNED DIMENSION` block"
-        );
-        assert!(
-            block.contains("RALPH_WAVE_DIMENSION"),
-            "dimension-reviewer instructions must reference `RALPH_WAVE_DIMENSION` env var"
-        );
-        assert!(
-            block.contains("HARD RULE") && block.contains("dimension"),
-            "dimension-reviewer instructions must contain a HARD RULE about dimension match"
-        );
     }
-}

@@ -34,7 +34,7 @@ const TUTORIAL_STEPS: &[TutorialStep] = &[
             "Core config and hat collections are split.",
             "List built-in hat collections: ralph init --list-presets",
             "Create core config: ralph init --backend <name>",
-            "Run with hats: ralph run -c ralph.yml -H builtin:ce-executor-isolated",
+            "Run with hats: ralph run -c ralph.yml -H builtin:ce-executor-serial",
         ],
     },
     TutorialStep {
@@ -138,13 +138,13 @@ pub fn prompt_to_continue(use_colors: bool) -> Result<()> {
 pub fn print_tutorial_outro(use_colors: bool) {
     if use_colors {
         println!(
-            "{}Tutorial complete. Next: ralph init --backend <name>, then ralph run -c ralph.yml -H builtin:ce-executor-isolated.{}",
+            "{}Tutorial complete. Next: ralph init --backend <name>, then ralph run -c ralph.yml -H builtin:ce-executor-serial.{}",
             colors::GREEN,
             colors::RESET
         );
     } else {
         println!(
-            "Tutorial complete. Next: ralph init --backend <name>, then ralph run -c ralph.yml -H builtin:ce-executor-isolated."
+            "Tutorial complete. Next: ralph init --backend <name>, then ralph run -c ralph.yml -H builtin:ce-executor-serial."
         );
     }
 }

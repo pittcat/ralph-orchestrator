@@ -11,7 +11,7 @@ metadata:
 >
 > **不注入**：本 skill 不在 auto-inject 白名单中（plan 004 KTD3）；按需 load 节省 token。
 
-## 1. Step handoff topic 归属（`ce-executor-isolated` preset）
+## 1. Step handoff topic 归属（`ce-executor-serial` preset）
 
 | Topic | 发布 hat | 消费者 hat | 拒收 reason_code 常见值 |
 |-------|---------|----------|------------------------|
@@ -71,7 +71,7 @@ CLI 入口预检（`--policy-check` 接 `progress_task_gate`）见计划 `docs/p
 review wave `received_count < expected_dimensions` 时的两条路径：
 
 - **等待中**（`now - last_dimension_at < 0.8 * aggregate_timeout_secs`）：继续等 worker 收尾，**不要**自补 `review.dimension.done`。
-- **超时**（`now - last_dimension_at >= 0.8 * aggregate_timeout_secs`）：**机制层**自动 emit `plan.blocked(reason=dimension_reviewers_failed_to_converge)`，路由 `review-synthesizer` → `shipper`（不要等 plan-gate 自消费）；详见 `docs/plans/2026-06-17-003-fix-ce-executor-wave-stall-bypass-plan.md` U1+U2 与 `crates/ralph-core/src/flow_lifecycle/incomplete_wave_gate.rs`。
+- **超时**（`now - last_dimension_at >= 0.8 * aggregate_timeout_secs`）：**机制层**自动 emit `plan.blocked(reason=dimension_reviewers_failed_to_converge)`，路由 `review-synthesizer` → `shipper`（不要等 plan-gate 自消费）；详见 `docs/plans/2026-06-17-003-fix-ce-executor-serial-stall-bypass-plan.md` U1+U2 与 `crates/ralph-core/src/flow_lifecycle/incomplete_wave_gate.rs`。
 
 `review_passed_while_wave_open`（U1）改为 `ViolationType::SemanticGateViolation`，独立 recoverable bucket，**不**计入 `U2_REJECTION_RETRY_LIMIT`，不发 fatal `PayloadContractViolation`；`task.resume` hint 显式禁止 empty_diff，要求等待 `plan.blocked` 或补全维度。
 
@@ -87,7 +87,7 @@ review wave `received_count < expected_dimensions` 时的两条路径：
 
 ### 5.5.1 概念
 
-**宏观边** = 唯一消费者 topic ∧ 非自环 ∧ 非豁免。`ce-executor-isolated` 下的典型宏观边：
+**宏观边** = 唯一消费者 topic ∧ 非自环 ∧ 非豁免。`ce-executor-serial` 下的典型宏观边：
 
 | 起点 hat | topic | 终点 hat |
 |---|---|---|
@@ -231,7 +231,7 @@ jq 'select(.topic == "diagnostic.hat_handoff.rejected")' \
 ### 5.5.9 U11 开启步骤（follow-up）
 
 ```yaml
-# presets/en/ce-executor-isolated.yml
+# presets/en/ce-executor-serial.yml
 event_loop:
   hat_handoff:
     enabled: true
@@ -302,7 +302,7 @@ CI 接入:在 `scripts/ci-rust-gate.sh` 加 `RUN_AUDIT=1` 开关。
 ## 7. 相关文档
 
 - `docs/plans/2026-06-17-002-feat-ce-executor-step-handoff-plan.md` — step handoff 机制完整设计
-- `docs/plans/2026-06-17-003-fix-ce-executor-wave-stall-bypass-plan.md` — wave 收摊 / R6 机制
+- `docs/plans/2026-06-17-003-fix-ce-executor-serial-stall-bypass-plan.md` — wave 收摊 / R6 机制
 - `docs/plans/2026-06-17-005-fix-agent-recovery-mechanism-gaps-plan.md` — CLI 预检对齐（姊妹 PR）
 - `docs/guide/runtime-diagnosis.md` §10 / §12.1 — 诊断决策树
 - `crates/ralph-core/data/ralph-tools.md` — 每轮自动注入的修复段（速查）

@@ -10,7 +10,7 @@
 //! 4. **Drift** — `DriftDetector::check_field_completeness` (U5 layer)
 //!
 //! The four chains must all derive from the same SSOT
-//! (`presets/schemas/ce-executor-isolated.yml`, embedded at build time).
+//! (`presets/schemas/ce-executor-serial.yml`, embedded at build time).
 //! Modifying the SSOT must produce matching changes in all four chains
 //! (covered by 002 plan, U7 only validates the baseline).
 
@@ -37,7 +37,7 @@ use tempfile::TempDir;
 const HANDOFF_TOPICS: &[&str] = &["work.ready", "queue.advance", "work.done", "review.passed"];
 
 /// Map a handoff topic to the hat that publishes it in
-/// `ce-executor-isolated`. Used by chain 1 (prompt) and chain 2
+/// `ce-executor-serial`. Used by chain 1 (prompt) and chain 2
 /// (precheck) to confirm the hat is allowed to publish the topic.
 fn author_hat_for(topic: &str) -> &'static str {
     match topic {
@@ -163,7 +163,7 @@ fn run_ralph_emit_precheck(
     Command::new(env!("CARGO_BIN_EXE_ralph"))
         .args([
             "-H",
-            "builtin:ce-executor-isolated",
+            "builtin:ce-executor-serial",
             "emit",
             topic,
             "--json",
@@ -171,7 +171,7 @@ fn run_ralph_emit_precheck(
             "--hat",
             hat,
         ])
-        .env("RALPH_HATS_SOURCE", "builtin:ce-executor-isolated")
+        .env("RALPH_HATS_SOURCE", "builtin:ce-executor-serial")
         .env("RALPH_CURRENT_HAT", hat)
         .env("RALPH_EVENTS_FILE", temp_path.join(".ralph/events.jsonl"))
         .current_dir(temp_path)

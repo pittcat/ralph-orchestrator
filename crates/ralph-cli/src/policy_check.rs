@@ -150,7 +150,7 @@ pub fn load_workspace_config(
 /// the environment, merge the matching preset's `event_policy` on top
 /// of the workspace config. This is the C1 path that closes the
 /// loop-subprocess precheck hole described in plan 001 §4.3: an agent
-/// running inside `ralph run -H builtin:ce-executor-isolated` can call
+/// running inside `ralph run -H builtin:ce-executor-serial` can call
 /// `ralph emit` / `ralph wave emit` without re-passing `-H`, and the
 /// CLI still gets the same `event_policy.schemas` the loop sees.
 ///

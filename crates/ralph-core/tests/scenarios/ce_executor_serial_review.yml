@@ -4,7 +4,7 @@
 #
 # This BDD scenario exercises the **serial review chain** that
 # `ce-executor-serial` introduces (replacing the parallel wave chain
-# in `ce-executor-isolated`). The chain walks 4 dimensions one at a
+# in `ce-executor-serial`). The chain walks 4 dimensions one at a
 # time:
 #
 #   work.done → review-coordinator → review.dimension.ready (correctness)

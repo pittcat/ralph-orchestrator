@@ -251,7 +251,7 @@ Failed → Degraded
 
 **触发条件（所有 4 条同时满足）：**
 
-1. `workflow_contract.incomplete_wave_gate.enabled = true`（仅 `ce-executor-isolated` preset 显式开启）
+1. `workflow_contract.incomplete_wave_gate.enabled = true`（仅 `ce-executor-serial` preset 显式开启）
 2. `ReviewStepTracker.open_wave_id` 非空 + `received < expected`
 3. `last_dimension_at` 已设置（至少 1 个 dimension.done 到过）
 4. `now - last_dimension_at > 0.8 * aggregate_timeout_secs`（**仅 staleness**，不含 handoff timeout；handoff 归 U3 ladder）
@@ -638,7 +638,7 @@ grep -c '"topic":"work.start"' "$CURRENT"
 
 ## 13. Step Handoff 诊断（2026-06-17-002）
 
-`ce-executor-isolated` preset 在 2026-06-17-002 中新增了两类 Step Handoff 诊断事件，均写入 `recovery.jsonl`：
+`ce-executor-serial` preset 在 2026-06-17-002 中新增了两类 Step Handoff 诊断事件，均写入 `recovery.jsonl`：
 
 | 信号 | `source` | `reason_code` | 含义 / 排查 |
 |---|---|---|---|
@@ -689,7 +689,7 @@ emit 失败 / 拒收
 
 1. 读 PENDING EVENTS 里 `task.resume` payload（`stage` / `topic` / `violation` / `required_fields` / `allowed_topics`）。
 2. 按决策树第一分支定位层。
-3. 不要用 `--unsafe-no-policy-check`（`ce-executor-isolated` preset 默认 `allow_unsafe_cli_emit: false` 时该参数被拒）；不要直写 `events.jsonl`。
+3. 不要用 `--unsafe-no-policy-check`（`ce-executor-serial` preset 默认 `allow_unsafe_cli_emit: false` 时该参数被拒）；不要直写 `events.jsonl`。
 4. 修复后用 `ralph emit --policy-check` 预检；同源通过再正式发。
 5. 仍不明：`ralph diagnose --session latest` 出报告；本 guide §10 解释 schema；本节决策树与 §13 互补。
 

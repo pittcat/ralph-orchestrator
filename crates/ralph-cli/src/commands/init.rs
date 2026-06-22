@@ -56,14 +56,14 @@ pub fn init_command(color_mode: ColorMode, args: InitArgs) -> Result<()> {
                         backend
                     );
                     println!(
-                        "\n{}Next steps:{}\n  1. Create PROMPT.md with your task\n  2. Run core-only: ralph run -c ralph.yml\n  3. Or with hats:  ralph run -c ralph.yml -H builtin:ce-executor-isolated",
+                        "\n{}Next steps:{}\n  1. Create PROMPT.md with your task\n  2. Run core-only: ralph run -c ralph.yml\n  3. Or with hats:  ralph run -c ralph.yml -H builtin:ce-executor-serial",
                         colors::DIM,
                         colors::RESET
                     );
                 } else {
                     println!("Created ralph.yml with {} backend", backend);
                     println!(
-                        "\nNext steps:\n  1. Create PROMPT.md with your task\n  2. Run core-only: ralph run -c ralph.yml\n  3. Or with hats:  ralph run -c ralph.yml -H builtin:ce-executor-isolated"
+                        "\nNext steps:\n  1. Create PROMPT.md with your task\n  2. Run core-only: ralph run -c ralph.yml\n  3. Or with hats:  ralph run -c ralph.yml -H builtin:ce-executor-serial"
                     );
                 }
                 return Ok(());
@@ -80,7 +80,7 @@ pub fn init_command(color_mode: ColorMode, args: InitArgs) -> Result<()> {
     println!("  ralph init --backend <backend>   Generate core config (ralph.yml)");
     println!("  ralph init --list-presets        Show builtin hat collections\n");
     println!("Backends: {}", crate::backend_support::VALID_BACKENDS_LABEL);
-    println!("\nThen run with hats, e.g.: ralph run -c ralph.yml -H builtin:ce-executor-isolated");
+    println!("\nThen run with hats, e.g.: ralph run -c ralph.yml -H builtin:ce-executor-serial");
 
     Ok(())
 }

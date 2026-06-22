@@ -21,7 +21,7 @@ ralph run -c ralph.yml -P PROMPT.md
 如果要使用内置工作流，而不是当前项目的 `hats`，可以用 `-H` 指定 preset：
 
 ```bash
-ralph run -c ralph.yml -H builtin:ce-executor-isolated -p "实现登录限流"
+ralph run -c ralph.yml -H builtin:ce-executor-serial -p "实现登录限流"
 ralph run -c ralph.yml -H builtin:debug -p "排查 CI 偶发超时"
 ```
 
@@ -349,7 +349,7 @@ ralph run -c ralph.qa.yml -p "验证事件循环改动"
 ralph run -c ralph.yml -P PROMPT.md
 
 # 使用基础配置 + 内置 hats
-ralph run -c ralph.yml -H builtin:ce-executor-isolated -p "实现一个功能"
+ralph run -c ralph.yml -H builtin:ce-executor-serial -p "实现一个功能"
 
 # 临时覆盖 specs 目录
 ralph run -c ralph.yml -c core.specs_dir=.ralph/specs -p "按 spec 实现"
@@ -594,7 +594,7 @@ Rules of engagement:
 
 ```bash
 # 使用内置名称
-ralph run -c ralph.yml -H builtin:ce-executor-isolated -p "实现 OAuth 登录"
+ralph run -c ralph.yml -H builtin:ce-executor-serial -p "实现 OAuth 登录"
 
 # 直接使用本地 preset 文件
 ralph run -c ralph.yml -H presets/wave-review.yml -p "审查认证模块"
@@ -617,8 +617,8 @@ ralph run -c ralph.yml -H builtin:debug -p "排查某个问题"
 
 | preset | 适合场景 | 特点 |
 |---|---|---|
-| `ce-executor-isolated` | 默认实现任务 | Plan-driven 执行、wave review、auto-fix、manager report |
-| `ce-executor-wave` | 并行计划执行 | 多维并行 review + aggregate，适合大 plan step |
+| `ce-executor-serial` | 默认实现任务 | Plan-driven 执行、wave review、auto-fix、manager report |
+| `ce-executor-serial` | 并行计划执行 | 多维并行 review + aggregate，适合大 plan step |
 | `debug` | bug 排查 | 先复现和假设，再修复和验证 |
 | `autoresearch` | 指标驱动实验 | 尝试想法、测量、保留有效改动、丢弃无效改动 |
 
@@ -859,7 +859,7 @@ ralph run -c ralph.yml -P PROMPT.md
 ### 想用通用实现工作流
 
 ```bash
-ralph run -c ralph.yml -H builtin:ce-executor-isolated -p "实现配置校验错误信息优化"
+ralph run -c ralph.yml -H builtin:ce-executor-serial -p "实现配置校验错误信息优化"
 ```
 
 ### 排查 bug
@@ -871,7 +871,7 @@ ralph run -c ralph.yml -H builtin:debug -p "排查 ralph run --continue 重复�
 ### Plan-driven 执行
 
 ```bash
-ralph run -c ralph.yml -H builtin:ce-executor-isolated -p "docs/plans/my-plan.md"
+ralph run -c ralph.yml -H builtin:ce-executor-serial -p "docs/plans/my-plan.md"
 ```
 
 ### 并行审查

@@ -8,7 +8,7 @@ Built-in hat collections are now intentionally small. Ralph ships a core working
 ralph init --backend claude
 ralph init --list-presets
 
-ralph run -c ralph.yml -H builtin:ce-executor-isolated -p "docs/plans/my-plan.md"
+ralph run -c ralph.yml -H builtin:ce-executor-serial -p "docs/plans/my-plan.md"
 ```
 
 ## Supported Builtins
@@ -16,8 +16,7 @@ ralph run -c ralph.yml -H builtin:ce-executor-isolated -p "docs/plans/my-plan.md
 | Collection | Hats | Best for | Notes |
 |---|---|---|---|
 | `autoresearch` | autonomous experiment loop | Try ideas, measure, keep what works | Optimization loop with self-scoring |
-| `ce-executor-isolated` | plan-driven work exec with wave review, auto-fix, shipping, manager report | Plan-driven implementation | Recommended default; isolated multi-hat |
-| `ce-executor-wave` | wave-parallel plan-driven exec with adversarial review, auto-fix, shipping | Plan-driven with disjoint step units | Wave-parallel variant |
+| `ce-executor-serial` | plan-driven work exec with serial code review, auto-fix, shipping, manager report | Plan-driven implementation | Recommended default; isolated multi-hat |
 | `debug` | `investigator`, `tester`, `fixer`, `verifier` | Root-cause debugging | Strong on repro and fix verification |
 
 ## Internal Presets
@@ -56,7 +55,7 @@ ralph run -c ralph.yml -H .ralph/hats/my-flow.yml -p "..."
 
 ## Recommended Workflow
 
-- Use `ce-executor-isolated` for plan-driven implementation tasks.
+- Use `ce-executor-serial` for plan-driven implementation tasks.
 - Use `debug` for bug investigation and root-cause analysis.
 
 | Collection | Canonical source | Hats | Start event | Completion | Best for |
@@ -74,8 +73,7 @@ ralph run -c ralph.yml -H .ralph/hats/my-flow.yml -p "..."
 | `refactor` | `presets/refactor.yml` | `refactorer`, `verifier` | `task.start` (default) | `REFACTOR_COMPLETE` | Incremental, verified refactoring |
 | `spec-driven` | `presets/spec-driven.yml` | `spec_writer`, `spec_reviewer`, `implementer`, `verifier` | `spec.start` | `LOOP_COMPLETE` (default) | Specification-driven implementation |
 | `wave-review` | `presets/zh/wave-review-zh.yml` (zh-only reference) | `coordinator`, `reviewer` (x3), `synthesizer` | `review.start` | `LOOP_COMPLETE` | Specialized parallel code review (wave-enabled) |
-| `ce-executor-isolated` | `presets/en/ce-executor-isolated.yml` | `coordinator`, `executor`, `review-coordinator`, `dimension-reviewer` (wave), `review-synthesizer` (aggregate), `fixer`, `plan-gate`, `shipper`, `reporter` | `work.start` | `LOOP_COMPLETE` | Plan-driven execution with wave review, auto-fix, and manager report (isolated mode) |
-| `ce-executor-wave` | `presets/en/ce-executor-wave.yml` | `coordinator`, `execution-dispatcher`, `parallel-executor` (wave), `execution-synthesizer` (aggregate), `serial-executor`, `review-coordinator`, `dimension-reviewer` (wave), `review-synthesizer` (aggregate), `fixer`, `debug-resolver`, `plan-gate`, `shipper`, `reporter` | `work.start` | `LOOP_COMPLETE` | Wave-parallel variant of `ce-executor-isolated`; executes disjoint implementation units within a step concurrently, then aggregates and reviews |
+| `ce-executor-serial` | `presets/en/ce-executor-serial.yml` | `coordinator`, `executor`, `review-coordinator`, `dimension-reviewer` (serial), `review-synthesizer` (aggregate), `fixer`, `plan-gate`, `shipper`, `reporter` | `work.start` | `LOOP_COMPLETE` | Plan-driven execution with serial 4-dimension review (correctness → testing → maintainability → requirements), auto-fix, and manager report (isolated mode) |
 
 ## Why The Builtin Set Is Small
 
@@ -99,7 +97,7 @@ Historical workflow ideas such as spec-driven development, red-team review, mob 
 
 ```bash
 # Plan-driven implementation workflow
-ralph run -c ralph.yml -H builtin:ce-executor-isolated -p "docs/plans/my-plan.md"
+ralph run -c ralph.yml -H builtin:ce-executor-serial -p "docs/plans/my-plan.md"
 
 # Debugging
 ralph run -c ralph.yml -H builtin:debug -p "Investigate why login fails on mobile"
@@ -107,21 +105,17 @@ ralph run -c ralph.yml -H builtin:debug -p "Investigate why login fails on mobil
 
 ### ce-executor Workflow
 
-`ce-executor` is a plan-driven execution preset with wave-based code review, auto-fix, and manager reporting.
+`ce-executor-serial` is the only plan-driven execution builtin. It uses serial 4-dimension code review, auto-fix, and manager reporting.
 
 **Key characteristics:**
 - Does not auto-create feature branches (runs on current checkout)
 - Records `start_sha` at startup to anchor review scope
-- Uses wave parallelism for multi-dimensional code review
+- Review stage walks 4 dimensions strictly serially (correctness → testing → maintainability → requirements)
 - Blocks all push operations (local commit only)
 - Includes a `plan-gate` hat that reconciles review verdict against `plan.md` / `progress.md` and decides whether to advance to the next step or complete the plan
 
-**When to use `ce-executor-wave` vs `ce-executor`:**
-- Use `ce-executor-wave` when a plan step contains multiple implementation units with **disjoint file ownership** (no overlapping files between units). The dispatcher will safely run them in parallel via wave workers.
-- Use `ce-executor` when file boundaries are unclear, units overlap, or you prefer deterministic serial execution.
-
 **When to use `--worktree`:**
-- Multiple parallel ce-executor runs
+- Multiple parallel ce-executor-serial runs
 - When you want isolation from main workspace changes
 - When the plan might involve significant refactoring
 
@@ -132,17 +126,10 @@ ralph run -c ralph.yml -H builtin:debug -p "Investigate why login fails on mobil
 
 ```bash
 # Single run (in-place execution)
-ralph run -H builtin:ce-executor -p "docs/plans/my-plan.md"
+ralph run -H builtin:ce-executor-serial -p "docs/plans/my-plan.md"
 
 # Isolated run (worktree, no branch creation)
-ralph run -H builtin:ce-executor --worktree -p "docs/plans/my-plan.md"
-
-# Isolated run with higher concurrency for review
-ralph run -H builtin:ce-executor --worktree -c ralph.yml -p "docs/plans/my-plan.md"
-
-# Wave-parallel execution (concurrent step units when safe)
-ralph run -H builtin:ce-executor-wave -p "docs/plans/my-plan.md"
-ralph run -H builtin:ce-executor-wave --worktree -p "docs/plans/my-plan.md"
+ralph run -H builtin:ce-executor-serial --worktree -p "docs/plans/my-plan.md"
 ```
 
 ## Common Workflow Patterns
@@ -174,7 +161,7 @@ See [Agent Waves](../advanced/agent-waves.md) for details.
 ### 5) Extended End-to-End Orchestration
 Large multi-stage pipelines from idea through implementation.
 
-Example: `ce-executor-isolated`
+Example: `ce-executor-serial`
 
 ### 6) Guarded Sequential Workflows
 Workflows with mandatory phase ordering where out-of-order events could corrupt state.

@@ -104,7 +104,7 @@ jq -e --arg id "$wave_id" --argjson expected "$expected_count" '
 - 默认行为：当 `ralph.yml`（或合并后的 preset）开启 `event_policy.enabled: true` 时强制启用预检。`require_policy_check_for_cli_emit: true` 不改变 wave 行为——wave 始终预检。
 - 任一 payload 缺必需字段（如 `review.wave.ready` 的 `depth`）→ 整批**原子拒绝**，**不写盘**任何 line。
 - `--policy-check`：显式强制预检（即便 config 未开启 `event_policy`）。
-- `--unsafe-no-policy-check`：尝试绕过预检；当 config `event_policy.allow_unsafe_cli_emit: false` 时**不生效**。`ce-executor-isolated` 预设的 `allow_unsafe_cli_emit: false` 强制 agent 看到 schema 错误而非写入后被静默清空。
+- `--unsafe-no-policy-check`：尝试绕过预检；当 config `event_policy.allow_unsafe_cli_emit: false` 时**不生效**。`ce-executor-serial` 预设的 `allow_unsafe_cli_emit: false` 强制 agent 看到 schema 错误而非写入后被静默清空。
 
 **JSON 失败响应**（`--output json`，stdout，exit ≠ 0）：
 

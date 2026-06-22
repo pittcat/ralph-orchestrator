@@ -2458,7 +2458,7 @@ impl EventLoop {
             IncompleteWaveGate, IncompleteWaveGateConfig,
         };
 
-        // Plan §U2: global default off, `ce-executor-isolated`
+        // Plan §U2: global default off, `ce-executor-serial`
         // default on. The config key is
         // `workflow_contract.incomplete_wave_gate.enabled`. We
         // read it defensively — when the preset does not set it,

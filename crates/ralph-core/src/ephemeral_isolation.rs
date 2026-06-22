@@ -1,6 +1,6 @@
 //! Ephemeral file isolation (R3 — 2026-06-14-003 plan).
 //!
-//! The `ce-executor-isolated` preset has been observed to be polluted by
+//! The `ce-executor-serial` preset has been observed to be polluted by
 //! agent-written runtime artefacts (`scratchpad.md`, `notes.md`, `tmp*.md`,
 //! etc.) that the agent drops into source directories such as
 //! `crates/ralph-core/`.  These files show up as untracked changes and

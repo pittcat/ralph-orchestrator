@@ -683,7 +683,7 @@ const ALLOWED_HATS_TOP_LEVEL: &[&str] = &[
 // `verdict_gate`, `execution_contracts`) are hat-driven by design: a hat
 // collection declares the topology and contracts required for its safety
 // properties, so they must survive overlay merge for builtin presets like
-// `ce-executor-isolated` to work end-to-end.
+// `ce-executor-serial` to work end-to-end.
 //
 // Note: resource budgets (`max_iterations`, `max_runtime_seconds`,
 // `checkpoint_interval`) and `enforce_hat_scope` are intentionally
@@ -1438,7 +1438,7 @@ event_loop:
     // to the merged config when the operator's ralph.yml has NOT
     // declared `hat_handoff` (mirrors the `state_projection` opt-in
     // pattern at lines ~895-920). Without this, every preset that opts
-    // into the hat→hat roadmap handoff (ce-executor-isolated / serial /
+    // into the hat→hat roadmap handoff (ce-executor-serial / serial /
     // wave) is silently downgraded to `HatHandoffConfig::default()`
     // (`enabled: false`) because `hat_handoff` is not in
     // `ALLOWED_HATS_EVENT_LOOP_OVERLAY_KEYS`. Symptom:
