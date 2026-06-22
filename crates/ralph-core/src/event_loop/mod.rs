@@ -9029,6 +9029,61 @@ impl EventLoop {
         }
         // --- End state projection ---
 
+        // --- U11-T2: per-event unified ValidationPipeline ---
+        // When `UNIFIED_VALIDATION=1` is on (pipeline was
+        // built at the top of this function), run the
+        // pre-commit rules against every accepted event
+        // BEFORE the legacy gate stack (`apply_step_handoff_gate`,
+        // `apply_workflow_guard_validation`,
+        // `validate_execution_contract`). Rejections route
+        // through `publish_correction_via_context` (the A3
+        // hook; T3 will replace its throwaway `PromptContext`
+        // with the real `state.prompt_context`). Accepted
+        // events continue through the legacy gate stack
+        // unchanged — backward compatibility per the A2
+        // opt-in design.
+        if let Some(ref pipeline) = unified_pipeline {
+            let snapshot = self
+                .state
+                .state_ledger
+                .as_ref()
+                .map(|l| l.snapshot().clone())
+                .unwrap_or_else(crate::state::LedgerSnapshot::cold_start);
+            let view = crate::preset::engine::protocol::ProtocolView::from_event_loop_with_index_and_feature(
+                &self.config.event_loop,
+                None,
+                true,
+            );
+            let mut rejected_topics: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            for evt in &events {
+                let results =
+                    pipeline.validate_pre_commit_with_view(&view, &snapshot, evt);
+                for r in &results {
+                    if !r.accepted {
+                        let reason = format!(
+                            "{}:{}",
+                            r.stage.as_str(),
+                            r.reason_code.as_deref().unwrap_or("rejected"),
+                        );
+                        publish_correction_via_context(&mut self.bus, evt, &reason);
+                        rejected_topics.insert(evt.topic.clone());
+                        break;
+                    }
+                }
+            }
+            if !rejected_topics.is_empty() {
+                let before = events.len();
+                events.retain(|e| !rejected_topics.contains(&e.topic));
+                tracing::debug!(
+                    rejected = before - events.len(),
+                    remaining = events.len(),
+                    "U11-T2: unified pipeline rejected events; remaining continue through legacy gates"
+                );
+            }
+        }
+        // --- End U11-T2 ---
+
         // --- Step handoff gate (U4 of 2026-06-17-002 plan): ---
         // pre-handoff consistency check for `progress.md` ↔
         // `tasks.jsonl`. Rejects `queue.advance` / `plan.complete`

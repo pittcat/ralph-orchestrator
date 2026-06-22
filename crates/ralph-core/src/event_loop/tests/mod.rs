@@ -62,6 +62,9 @@ mod u7_correction;
 /// the *new* deterministic-correction path on top of the
 /// legacy task.resume injection.
 mod u9_correction_assertions;
+/// U11-T2 (plan 2026-06-22-u11-unified-state-production-wiring):
+/// per-event unified `ValidationPipeline` integration tests.
+mod u11_unified_pipeline_integration;
 mod wave_context_env_var;
 mod wave_context_injection;
 mod wave_isolated_scope;
