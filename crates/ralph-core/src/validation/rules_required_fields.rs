@@ -17,9 +17,9 @@ use std::collections::HashSet;
 
 use crate::event_reader::Event;
 use crate::preset::engine::protocol::ProtocolView;
-use crate::state::LedgerSnapshot;
 use serde_json::Value;
 
+use super::context::ValidationContext;
 use super::pipeline::{RulePhase, ValidationRule};
 use super::result::{ReasonCode, ValidationResult, ValidationStage};
 
@@ -38,7 +38,7 @@ impl ValidationRule for RequiredFieldsRule {
     fn validate(
         &self,
         protocol_view: &ProtocolView,
-        _ledger_snapshot: &LedgerSnapshot,
+        _ctx: &mut ValidationContext<'_>,
         event: &Event,
     ) -> ValidationResult {
         let required: HashSet<String> = protocol_view

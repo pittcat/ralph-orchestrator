@@ -241,6 +241,7 @@ mod tests {
             workflow_contract: None,
             state_projection: None,
             execution_contracts: Some(ExecutionContractsConfig::default()),
+            event_policy: None,
             hat_handoff: HatHandoffConfig::default(),
             macro_edges_resolved: HashSet::new(),
             macro_edge_consumers: HashMap::new(),

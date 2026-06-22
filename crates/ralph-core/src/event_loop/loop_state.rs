@@ -60,7 +60,9 @@ pub const LINT_CIRCUIT_BREAKER_LIMIT: u32 = 2;
 /// falls back to [`LINT_CIRCUIT_BREAKER_LIMIT`] or the
 /// `RALPH_LINT_CIRCUIT_BREAKER_LIMIT` env var.
 pub fn lint_circuit_breaker_limit_for_test() -> Option<u32> {
-    TEST_LINT_BREAKER_LIMIT.get().map(|cell| cell.load(std::sync::atomic::Ordering::Relaxed))
+    TEST_LINT_BREAKER_LIMIT
+        .get()
+        .map(|cell| cell.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 /// Install a test override for the circuit breaker limit.
@@ -68,9 +70,8 @@ pub fn lint_circuit_breaker_limit_for_test() -> Option<u32> {
 /// change the value across calls should pair this with
 /// [`reset_lint_circuit_breaker_limit_for_test`].
 pub fn set_lint_circuit_breaker_limit_for_test(limit: u32) {
-    let cell = TEST_LINT_BREAKER_LIMIT.get_or_init(|| {
-        std::sync::atomic::AtomicU32::new(LINT_CIRCUIT_BREAKER_LIMIT)
-    });
+    let cell = TEST_LINT_BREAKER_LIMIT
+        .get_or_init(|| std::sync::atomic::AtomicU32::new(LINT_CIRCUIT_BREAKER_LIMIT));
     cell.store(limit, std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -78,7 +79,10 @@ pub fn set_lint_circuit_breaker_limit_for_test(limit: u32) {
 /// default + env-var path takes over again.
 pub fn reset_lint_circuit_breaker_limit_for_test() {
     if let Some(cell) = TEST_LINT_BREAKER_LIMIT.get() {
-        cell.store(LINT_CIRCUIT_BREAKER_LIMIT, std::sync::atomic::Ordering::Relaxed);
+        cell.store(
+            LINT_CIRCUIT_BREAKER_LIMIT,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 }
 

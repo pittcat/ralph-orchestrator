@@ -85,7 +85,7 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 
 JSON 写法：`ralph emit work.done --policy-check -j '{"plan_path": "...", "task_id": "..."}'`（事件文件已存在 + allowlist 命中）。
 
-**`--policy-check` 边界**：CLI `--policy-check` 与 `ralph run` 循环内 `apply_event_policy_validation` 行为**同源**（都走 `event_policy.schemas.<topic>.required_fields`），但**不覆盖** step handoff 的 `progress_task_gate`（`progress.md` ↔ `tasks.jsonl` 一致性）。完整预检（含 `progress_task_gate` 在 CLI 入口预检）见计划 `docs/plans/2026-06-17-005-fix-agent-recovery-mechanism-gaps-plan.md`。
+**`--policy-check` 边界**：CLI `--policy-check` 与 `ralph run` 循环内统一校验管线 `validation::rules_event_policy::EventPolicyRule` 行为**同源**（都走 `event_policy.schemas.<topic>.required_fields`），但**不覆盖** step handoff 的 `progress_task_gate`（`progress.md` ↔ `tasks.jsonl` 一致性）。完整预检（含 `progress_task_gate` 在 CLI 入口预检）见计划 `docs/plans/2026-06-17-005-fix-agent-recovery-mechanism-gaps-plan.md`。
 
 **校验：**
 ```bash
@@ -127,19 +127,11 @@ tail -n 1 "$events_file" | jq -e '.payload | type == "object"'
 
 ---
 
-## Feature Flag 与 Unified Pipeline(U11)
+## Unified Pipeline(U11)
 
-`ralph emit --policy-check` 在 U11(commit `e5baa07d`)后默认走 **unified validation pipeline**,与 loop 的 `process_parse_result` 使用同一 `ValidationPipeline::validate_pre_commit_with_view`。
+`ralph emit --policy-check` 走 **unified validation pipeline**,与 loop 的 `process_parse_result` 使用同一 `ValidationPipeline::validate_pre_commit_with_view`。
 
-### 相关 env var(全部默认 on,U11-T7 后)
-
-| env var | 作用 | 显式关闭方式 |
-|---|---|---|
-| `UNIFIED_POLICY_CHECK` | CLI `--policy-check` 走 unified pipeline | `=0` 回到 legacy compat path |
-| `UNIFIED_STATE_LEDGER` | loop 启动时构造 `StateLedger`(自动 replay `.ralph/ledger.jsonl`) | `=0` 走 legacy `StateProjector` |
-| `UNIFIED_VALIDATION` | loop 接入 `ValidationPipeline` per-event | `=0` 走 legacy gate stack |
-| `UNIFIED_DETERMINISTIC_CORRECTION` | policy rejection 走 deterministic correction(`state.prompt_context`)而非 `task.resume` | **目前仍为 off**(T7.1 follow-up,需先迁移旧 wire-format 测试) |
-| `UNIFIED_PROTOCOL_VIEW` | 构造 `ProtocolView` 时启用扩展字段 | `=0` 走 legacy default |
+> 之前的 `UNIFIED_*` env var 开关已全部移除;unified path 现在为唯一路径,不再提供 legacy compat path。
 
 ### Ledger 状态查询(U11-T1)
 

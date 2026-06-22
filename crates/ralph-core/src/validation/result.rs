@@ -100,6 +100,8 @@ pub enum ValidationStage {
     Publisher,
     /// Required fields check — `ProtocolView::required_fields_for`.
     RequiredFields,
+    /// Event policy — `validation::rules_event_policy::EventPolicyRule`.
+    EventPolicy,
     /// Execution contract — `execution_contract::validate_execution_contract`.
     /// PostCommit phase.
     ExecutionContract,
@@ -107,7 +109,7 @@ pub enum ValidationStage {
     StepHandoff,
     /// Hat-handoff gate — `hat_handoff::gate::evaluate_event`.
     HatHandoff,
-    /// Workflow guard — `event_loop::apply_workflow_guard_validation`.
+    /// Workflow guard — `validation::rules_workflow_guard::WorkflowGuardRule`.
     /// PostCommit phase.
     WorkflowGuard,
 }
@@ -121,6 +123,7 @@ impl ValidationStage {
             Self::Origin => "origin",
             Self::Publisher => "publisher",
             Self::RequiredFields => "required_fields",
+            Self::EventPolicy => "event_policy",
             Self::ExecutionContract => "execution_contract",
             Self::StepHandoff => "step_handoff",
             Self::HatHandoff => "hat_handoff",
@@ -157,6 +160,45 @@ impl ReasonCode {
 
     /// Engine-required field missing from payload.
     pub const REQUIRED_FIELD_MISSING: &'static str = "engine_rejected:required_field";
+
+    /// Event policy: topic matched a deny rule for this hat.
+    pub const EVENT_POLICY_TOPIC_DENIED: &'static str = "event_policy:topic_denied";
+    /// Event policy: terminal event after another terminal event.
+    pub const EVENT_POLICY_TERMINAL_MONOTONICITY: &'static str =
+        "event_policy:terminal_monotonicity_violation";
+    /// Event policy: duplicate terminal event after completion.
+    pub const EVENT_POLICY_DUPLICATE_TERMINAL: &'static str =
+        "event_policy:duplicate_terminal_event";
+    /// Event policy: business event after completion was honored.
+    pub const EVENT_POLICY_BUSINESS_AFTER_COMPLETION: &'static str =
+        "event_policy:business_event_after_completion";
+    /// Event policy: topic not in the whitelist of known topics.
+    pub const EVENT_POLICY_TOPIC_FORMAT: &'static str = "event_policy:invalid_topic_format";
+    /// Event policy: required field missing from payload.
+    pub const EVENT_POLICY_MISSING_REQUIRED_FIELD: &'static str =
+        "event_policy:missing_required_field";
+    /// Event policy: field value violates allowed-value/type constraints.
+    pub const EVENT_POLICY_INVALID_FIELD_VALUE: &'static str = "event_policy:invalid_field_value";
+    /// Event policy: payload type does not match schema.
+    pub const EVENT_POLICY_PAYLOAD_TYPE_MISMATCH: &'static str =
+        "event_policy:payload_type_mismatch";
+    /// Event policy: semantic gate violation (e.g. review step timing).
+    pub const EVENT_POLICY_SEMANTIC_GATE: &'static str = "event_policy:semantic_gate_violation";
+    /// Event policy: duplicate work.done / review dimension ready.
+    pub const EVENT_POLICY_DUPLICATE_WORK_DONE: &'static str = "event_policy:duplicate_work_done";
+    /// Event policy: hold action triggered.
+    pub const EVENT_POLICY_HOLD: &'static str = "event_policy:hold";
+    /// Event policy: completion-guard `Block` action.
+    pub const EVENT_POLICY_COMPLETION_BLOCKED: &'static str = "event_policy:completion_blocked";
+    /// Event policy: completion-guard `Ignore` action.
+    pub const EVENT_POLICY_COMPLETION_IGNORED: &'static str = "event_policy:completion_ignored";
+    /// Event policy: generic `Block` action (e.g. topic-deny Block).
+    pub const EVENT_POLICY_BLOCKED: &'static str = "event_policy:blocked";
+    /// Event policy: generic `Ignore` action.
+    pub const EVENT_POLICY_IGNORED: &'static str = "event_policy:ignored";
+    /// Event policy: warning-only decision; the caller publishes a
+    /// diagnostic and keeps the event.
+    pub const EVENT_POLICY_WARNING: &'static str = "event_policy:warning";
 
     /// Execution contract: payload missing `task_id` field.
     pub const CONTRACT_MISSING_TASK_ID: &'static str = "contract:missing_task_id";
@@ -205,6 +247,45 @@ impl RejectionHint {
             "Run `ralph tools task close {task_id}` first, then re-emit work.done with task_id={task_id}."
         )
     }
+
+    /// Hint for workflow-guard out-of-order rejections.
+    pub fn workflow_guard_out_of_order(topic: &str, details: &[WorkflowGuardRejectionDetail]) -> String {
+        let detail_strings: Vec<String> = details
+            .iter()
+            .map(|d| {
+                format!(
+                    "chain '{}' (instance '{}'): current='{}' (phase {}), next expected='{}'",
+                    d.chain_name,
+                    d.instance_key.as_deref().unwrap_or("global"),
+                    d.current_topic,
+                    d.current_phase
+                        .map(|p| p.to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                    d.next_expected
+                )
+            })
+            .collect();
+        format!(
+            "Workflow guard rejected '{}': {}. Wait for the correct phase before emitting this event.",
+            topic,
+            detail_strings.join("; ")
+        )
+    }
+}
+
+/// Lightweight detail used by [`RejectionHint::workflow_guard_out_of_order`].
+#[derive(Debug, Clone)]
+pub struct WorkflowGuardRejectionDetail {
+    /// The chain that rejected the event.
+    pub chain_name: String,
+    /// The instance key when the chain is correlation-scoped.
+    pub instance_key: Option<String>,
+    /// The current phase the chain is at (0-based).
+    pub current_phase: Option<usize>,
+    /// Human-readable summary of the current phase topic.
+    pub current_topic: String,
+    /// The next expected topic, or `terminal` when at the end.
+    pub next_expected: String,
 }
 
 #[cfg(test)]
@@ -219,6 +300,7 @@ mod tests {
         assert_eq!(ValidationStage::Origin.as_str(), "origin");
         assert_eq!(ValidationStage::Publisher.as_str(), "publisher");
         assert_eq!(ValidationStage::RequiredFields.as_str(), "required_fields");
+        assert_eq!(ValidationStage::EventPolicy.as_str(), "event_policy");
         assert_eq!(
             ValidationStage::ExecutionContract.as_str(),
             "execution_contract"

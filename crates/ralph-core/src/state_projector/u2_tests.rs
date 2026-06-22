@@ -761,7 +761,7 @@ fn progress_md_written_from_ledger_round_trips() {
 // ────────────────────────────────────────────────────────────────────
 // U11-T9 (P0-3 follow-up): projector → ledger sync so the unified
 // pre-commit `StepHandoffRule` sees the same `progress` / `tasks`
-// view as the legacy disk-side `apply_step_handoff_gate`.
+// view that the legacy disk-side gate used to read.
 //
 // Without `sync_to_ledger_snapshot`, the unified path runs against
 // a cold-start `LedgerSnapshot` even when the projector's in-memory
@@ -845,7 +845,11 @@ fn u11_t9_sync_to_ledger_snapshot_picks_up_projector_progress_cache() {
     // Sanity: the projector's cache was actually updated.
     assert_eq!(proj.ctx.tasks_cache.len(), 1, "task not in cache");
     assert!(
-        proj.ctx.progress_cache.completed_steps.iter().any(|s| s == "step-01"),
+        proj.ctx
+            .progress_cache
+            .completed_steps
+            .iter()
+            .any(|s| s == "step-01"),
         "step-01 not in progress_cache.completed_steps: {:?}",
         proj.ctx.progress_cache.completed_steps
     );
@@ -865,10 +869,7 @@ fn u11_t9_sync_to_ledger_snapshot_picks_up_projector_progress_cache() {
     assert_eq!(snap.tasks.len(), 1, "ledger snapshot missing tasks");
     assert_eq!(snap.tasks[0].id, "task-step-01");
     assert!(
-        snap.progress
-            .completed_steps
-            .iter()
-            .any(|s| s == "step-01"),
+        snap.progress.completed_steps.iter().any(|s| s == "step-01"),
         "ledger snapshot missing progress.completed_steps"
     );
 
@@ -878,13 +879,13 @@ fn u11_t9_sync_to_ledger_snapshot_picks_up_projector_progress_cache() {
     // is in `completed_steps`).
     use crate::config::EventLoopConfig;
     use crate::preset::engine::protocol::ProtocolView;
-    use crate::validation::{ValidationPipeline, ValidationStage};
+    use crate::validation::{ValidationContext, ValidationPipeline, ValidationStage};
 
     let pipeline = ValidationPipeline::from_config(
         &ProtocolView::from_event_loop(&EventLoopConfig::default()),
         &EventLoopConfig::default(),
     );
-    assert_eq!(pipeline.pre_commit_rules.len(), 5);
+    assert_eq!(pipeline.pre_commit_rules.len(), 6);
     let queue_advance = Event {
         topic: "queue.advance".to_string(),
         payload: Some(
@@ -901,7 +902,8 @@ fn u11_t9_sync_to_ledger_snapshot_picks_up_projector_progress_cache() {
         system_injected: None,
     };
     let view = ProtocolView::from_event_loop(&EventLoopConfig::default());
-    let results = pipeline.validate_pre_commit_with_view(&view, &snap, &queue_advance);
+    let mut ctx = ValidationContext::new(&mut snap);
+    let results = pipeline.validate_pre_commit_with_view(&view, &mut ctx, &queue_advance);
     let step_handoff = results
         .iter()
         .find(|r| r.stage == ValidationStage::StepHandoff)
@@ -947,7 +949,7 @@ fn u11_t9_sync_to_ledger_snapshot_step_mismatch_rejected() {
 
     use crate::config::EventLoopConfig;
     use crate::preset::engine::protocol::ProtocolView;
-    use crate::validation::{ValidationPipeline, ValidationStage};
+    use crate::validation::{ValidationContext, ValidationPipeline, ValidationStage};
 
     let pipeline = ValidationPipeline::from_config(
         &ProtocolView::from_event_loop(&EventLoopConfig::default()),
@@ -969,7 +971,8 @@ fn u11_t9_sync_to_ledger_snapshot_step_mismatch_rejected() {
         system_injected: None,
     };
     let view = ProtocolView::from_event_loop(&EventLoopConfig::default());
-    let results = pipeline.validate_pre_commit_with_view(&view, &snap, &bad_advance);
+    let mut ctx = ValidationContext::new(&mut snap);
+    let results = pipeline.validate_pre_commit_with_view(&view, &mut ctx, &bad_advance);
     let step_handoff = results
         .iter()
         .find(|r| r.stage == ValidationStage::StepHandoff)

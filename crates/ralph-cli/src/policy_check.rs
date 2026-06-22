@@ -752,7 +752,7 @@ pub fn run_policy_check_unified(
     use ralph_core::Event;
     use ralph_core::preset::engine::protocol::ProtocolView;
     use ralph_core::state::{LedgerSnapshot, StateLedger};
-    use ralph_core::validation::ValidationPipeline;
+    use ralph_core::validation::{ValidationContext, ValidationPipeline};
 
     // Load the config to build the protocol view. Reuse the
     // existing preflight loader so RALPH_HATS_SOURCE, schema
@@ -780,20 +780,18 @@ pub fn run_policy_check_unified(
     // legitimate terminal events (e.g. `work.done` with `task_id`
     // pointing at a queue that does not exist in the snapshot).
     let events_path = workspace_root.join(".ralph/events.jsonl");
-    let snapshot = if events_path.exists() {
+    let mut snapshot = if events_path.exists() {
         match StateLedger::replay_from_disk(&workspace_root) {
             Ok(snap) => snap,
             Err(e) => {
-                eprintln!(
-                    "Warning: ledger replay failed for policy check: {e}. Using cold start."
-                );
+                eprintln!("Warning: ledger replay failed for policy check: {e}. Using cold start.");
                 LedgerSnapshot::cold_start()
             }
         }
     } else {
         LedgerSnapshot::cold_start()
     };
-    let projected = snapshot.clone();
+    let mut projected = snapshot.clone();
 
     // U11-T7-R12b: legacy `validate_topic_payload_against_config` is
     // the canonical path for **terminal-monotonicity** and
@@ -829,10 +827,8 @@ pub fn run_policy_check_unified(
                 // public CLI surface and tests pin them.
                 use ralph_core::validation::ValidationReport;
                 use ralph_core::validation::{ValidationResult, ValidationStage};
-                let wrapped_reason = format!(
-                    "engine_rejected:legacy_policy:{}",
-                    legacy_error.reason_code
-                );
+                let wrapped_reason =
+                    format!("engine_rejected:legacy_policy:{}", legacy_error.reason_code);
                 let reject = ValidationResult::reject(
                     ValidationStage::ExecutionContract,
                     wrapped_reason,
@@ -845,12 +841,7 @@ pub fn run_policy_check_unified(
                     accepted: false,
                     post_commit_rejected: false,
                 };
-                return Ok(report_from_validation(
-                    &report,
-                    topic,
-                    hat,
-                    &workspace_root,
-                ));
+                return Ok(report_from_validation(&report, topic, hat, &workspace_root));
             }
             Ok(None) => {
                 // Legacy gate accepted; fall through to the unified
@@ -877,58 +868,32 @@ pub fn run_policy_check_unified(
         system_injected: None,
     };
 
-    let report = pipeline.validate_with_preview(&view, &snapshot, &projected, &event);
+    let mut ctx = ValidationContext::new(&mut snapshot);
+    let mut projected_ctx = ValidationContext::new(&mut projected);
+    let report = pipeline.validate_with_preview(&view, &mut ctx, &mut projected_ctx, &event);
     Ok(report_from_validation(&report, topic, hat, &workspace_root))
 }
 
-/// Resolve the U6 policy-check mode from CLI flags + env var.
-///
-/// - `--policy-check-unified` → `Unified`
-/// - `--policy-check-compat` → `Compat` (legacy path, default)
-/// - `UNIFIED_POLICY_CHECK=1` env var → `Unified` (when no explicit
-///   compat flag was passed; the env var is the KTD-8 opt-in switch
-///   for staged rollout)
-/// - else → `Compat`
-///
-/// The legacy `resolve_policy_check_mode` continues to decide whether
-/// the *policy enforcement level* is `Skip` / `ExplicitCheck` /
-/// `Enforce`; this new function is the orthogonal "which validator
-/// do we use" switch.
+/// U6 policy-check path resolver. The unified `ValidationPipeline`
+/// is now the only validator; the legacy `validate_event_with_hat`
+/// path and its env/CLI escape hatches have been removed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolicyCheckPath {
     /// Use the U6 unified `ValidationPipeline` path.
     Unified,
-    /// Use the legacy `validate_event_with_hat` path.
-    Compat,
 }
 
+/// Kept for source compatibility at call sites. Both fields are
+/// ignored; the unified path is always used.
 pub struct UnifiedPolicyCheckFlags {
-    /// `--policy-check-unified` flag.
+    /// Deprecated `--policy-check-unified` flag.
     pub policy_check_unified: bool,
-    /// `--policy-check-compat` flag.
+    /// Deprecated `--policy-check-compat` flag.
     pub policy_check_compat: bool,
 }
 
-pub fn resolve_policy_check_path(flags: &UnifiedPolicyCheckFlags) -> PolicyCheckPath {
-    if flags.policy_check_compat {
-        return PolicyCheckPath::Compat;
-    }
-    if flags.policy_check_unified {
-        return PolicyCheckPath::Unified;
-    }
-    // KTD-8 env-var opt-in. Treated as a hint; an explicit
-    // `--policy-check-compat` flag wins because the env var is
-    // a global default that a CLI user can override.
-    // U11-T7: default is now ON; explicit `UNIFIED_POLICY_CHECK=0`
-    // opts out and routes to the legacy compat path.
-    let unified = !matches!(
-        std::env::var("UNIFIED_POLICY_CHECK").ok().as_deref(),
-        Some("0")
-    );
-    if unified {
-        return PolicyCheckPath::Unified;
-    }
-    PolicyCheckPath::Compat
+pub fn resolve_policy_check_path(_flags: &UnifiedPolicyCheckFlags) -> PolicyCheckPath {
+    PolicyCheckPath::Unified
 }
 
 #[cfg(test)]
@@ -1049,41 +1014,21 @@ mod u6_unified_path_tests {
     }
 
     #[test]
-    fn resolve_policy_check_path_default_is_unified() {
+    fn resolve_policy_check_path_is_always_unified() {
         let flags = UnifiedPolicyCheckFlags {
             policy_check_unified: false,
-            policy_check_compat: false,
-        };
-        // U11-T7: default flipped from Compat to Unified. The
-        // test workspace's `forbid(unsafe_code)` blocks
-        // `set_var`, so on a clean process the env var is unset →
-        // default Unified. Callers that need the legacy path
-        // must opt in explicitly via `--policy-check-compat` or
-        // `UNIFIED_POLICY_CHECK=0`.
-        let prev = std::env::var("UNIFIED_POLICY_CHECK").ok();
-        if prev.is_none() {
-            assert_eq!(resolve_policy_check_path(&flags), PolicyCheckPath::Unified);
-        }
-    }
-
-    #[test]
-    fn resolve_policy_check_path_explicit_unified_wins() {
-        let flags = UnifiedPolicyCheckFlags {
-            policy_check_unified: true,
             policy_check_compat: false,
         };
         assert_eq!(resolve_policy_check_path(&flags), PolicyCheckPath::Unified);
     }
 
     #[test]
-    fn resolve_policy_check_path_explicit_compat_wins_over_env() {
-        // Even with the env var "set" (we cannot actually set it
-        // here, but we test the explicit flag branch).
+    fn resolve_policy_check_path_ignores_legacy_compat_flag() {
         let flags = UnifiedPolicyCheckFlags {
             policy_check_unified: false,
             policy_check_compat: true,
         };
-        assert_eq!(resolve_policy_check_path(&flags), PolicyCheckPath::Compat);
+        assert_eq!(resolve_policy_check_path(&flags), PolicyCheckPath::Unified);
     }
 
     #[test]

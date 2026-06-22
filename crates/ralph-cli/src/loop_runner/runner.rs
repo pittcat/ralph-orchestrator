@@ -3724,7 +3724,7 @@ async fn run_loop_impl_inner(
         // `MissingRequiredField` / `TopicDenied`) is allowed to
         // retry for `U2_REJECTION_RETRY_LIMIT` attempts.  When
         // the (hat, topic, reason_class) bucket crosses the
-        // limit, `apply_event_policy_validation` pushes a
+        // limit, the unified `EventPolicyRule` pushes a
         // `RecoverableExhaustion` into
         // `event_loop.state.recoverable_exhaustion_buffer`.  The
         // runner promotes the **first** entry into a

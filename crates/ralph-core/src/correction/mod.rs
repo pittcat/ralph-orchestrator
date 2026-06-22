@@ -24,13 +24,11 @@
 //!   for `## ORCHESTRATOR CORRECTION` / `## LOOP RESUME
 //!   CONTEXT` blocks.
 //!
-//! ## Feature flag
+//! ## Feature status
 //!
-//! The `UNIFIED_DETERMINISTIC_CORRECTION=1` env var opts into
-//! the deterministic-correction path.  When the flag is off
-//! the legacy `task.resume` event injection continues to work
-//! unchanged — every test under `event_loop/tests/` and
-//! `loop_runner/tests.rs` must keep passing without the flag.
+//! The deterministic-correction path is always on.  The legacy
+//! `task.resume` event injection has been removed; recoverable
+//! rejections are now injected into `PromptContext` directly.
 //!
 //! U7a only writes the new structures; U7b switches the loop to
 //! read from `PromptContext` instead of the bus.
@@ -597,24 +595,15 @@ impl RetryCounter {
 /// but reverted because 10+ legacy `task.resume` tests in
 /// `event_loop/tests/` pin the legacy
 /// `publish_policy_rejection_resume` wire format. Tracking
-/// issue: T7.1 sub-task — migrate the affected tests to assert
-/// the unified correction surface (`state.prompt_context`)
-/// instead of the bus, then re-flip the default. For now:
-/// - `unset` / `0` → feature off (legacy `task.resume` path).
-/// - `1` → feature on (correction injected via `PromptContext`).
+/// The deterministic-correction path is always on.  The test
+/// override (set via `set_correction_enabled_for_test`) is kept
+/// so unit / BDD suites can still exercise the legacy path when
+/// needed, but production code no longer reads an env var.
 pub fn is_correction_enabled() -> bool {
-    // Test override (set via `set_correction_enabled_for_test`) wins
-    // over the env var so unit / BDD suites can opt into the new
-    // path without relying on `std::env::set_var` (which is `unsafe`
-    // under Rust 1.81+ and would conflict with the workspace's
-    // `forbid(unsafe_code)`).
     if let Some(cell) = TEST_CORRECTION_ENABLED.get() {
         return cell.load(std::sync::atomic::Ordering::Relaxed);
     }
-    std::env::var("UNIFIED_DETERMINISTIC_CORRECTION")
-        .ok()
-        .map(|v| v.trim() == "1")
-        .unwrap_or(false)
+    true
 }
 
 /// Test-only override for [`is_correction_enabled`]. The function
@@ -630,9 +619,7 @@ pub fn is_correction_enabled() -> bool {
 /// `tests/scenarios.rs`) to opt into the deterministic correction
 /// path without flipping the env var.
 pub fn set_correction_enabled_for_test(enabled: bool) {
-    let cell = TEST_CORRECTION_ENABLED.get_or_init(|| {
-        std::sync::atomic::AtomicBool::new(false)
-    });
+    let cell = TEST_CORRECTION_ENABLED.get_or_init(|| std::sync::atomic::AtomicBool::new(false));
     cell.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 

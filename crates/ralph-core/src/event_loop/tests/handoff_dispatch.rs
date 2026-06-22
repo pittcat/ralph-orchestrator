@@ -35,7 +35,7 @@ fn handoff_tracker_field_in_loop_state_starts_empty() {
 /// T-WRC-U4-01: when a handoff topic is accepted via the policy
 /// hook, the tracker records the entry with the configured
 /// deadline. We exercise the tracker directly here because the
-/// full `apply_event_policy_validation` → tracker path requires a
+/// full `validation::rules_event_policy::EventPolicyRule` → tracker path requires a
 /// `RalphConfig` + `HatRegistry` setup; the wire-up is exercised by
 /// the `isolated_complex_regression` suite which already covers
 /// isolated-mode hat selection. The dedicated integration test

@@ -12,12 +12,12 @@
 
 use crate::event_reader::Event;
 use crate::preset::engine::protocol::ProtocolView;
-use crate::state::LedgerSnapshot;
 use crate::step_handoff::progress_task_gate::{
     GATED_TOPICS, GateDecision, check_alignment_with_snapshot,
 };
 use ralph_proto::HatId;
 
+use super::context::ValidationContext;
 use super::pipeline::{RulePhase, ValidationRule};
 use super::result::{ReasonCode, ValidationResult, ValidationStage};
 
@@ -36,7 +36,7 @@ impl ValidationRule for StepHandoffRule {
     fn validate(
         &self,
         _protocol_view: &ProtocolView,
-        ledger_snapshot: &LedgerSnapshot,
+        ctx: &mut ValidationContext<'_>,
         event: &Event,
     ) -> ValidationResult {
         if !GATED_TOPICS.contains(&event.topic.as_str()) {
@@ -50,9 +50,10 @@ impl ValidationRule for StepHandoffRule {
         // the legacy clone was pure waste. The borrow checker
         // is happy because `extract_step_task` consumes only
         // `&Event` (no overlap with the snapshot accessors).
+        let snapshot = ctx.snapshot();
         let decision = check_alignment_with_snapshot(
-            &ledger_snapshot.progress,
-            &ledger_snapshot.tasks,
+            &snapshot.progress,
+            &snapshot.tasks,
             event.topic.as_str(),
             step.as_deref(),
             task_id.as_deref(),

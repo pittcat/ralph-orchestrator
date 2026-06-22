@@ -35,9 +35,7 @@ use crate::event_parser::{
     parse_backpressure_json, parse_review_json,
 };
 use crate::event_policy::{
-    DuplicateWorkDoneHint, PolicyDecision, PolicyFinding, PolicyRuntimeState, ReasonClass,
-    ViolationType, check_completion_guard, check_completion_honored, check_topic_deny_rules,
-    is_recoverable_policy_finding, validate_event,
+    PolicyDecision, PolicyFinding, PolicyRuntimeState, ReasonClass, check_completion_guard,
 };
 use crate::event_reader::{Event as JsonlEvent, EventReader};
 use crate::execution_contract::{
@@ -55,7 +53,7 @@ use crate::preset::engine::{
 };
 use crate::skill_registry::SkillRegistry;
 use crate::state_machine::{StateMachineDecision, StateMachineRuntimeState};
-use crate::step_handoff::progress_task_gate::{GateDecision, check_progress_task_alignment};
+
 use crate::text::floor_char_boundary;
 use ralph_proto::{CheckinContext, Event, EventBus, Hat, HatId, RobotService};
 use serde::{Deserialize, Serialize};
@@ -442,34 +440,15 @@ fn extract_handoff_path_from_payload(payload: Option<&str>) -> Option<String> {
 }
 
 /// A2 (002-adversarial-review): build the unified
-/// `ValidationPipeline` once per batch when the
-/// `UNIFIED_VALIDATION` env var is on. Returns `None` when
-/// the flag is explicitly disabled (`UNIFIED_VALIDATION=0`);
-/// the default is ON (U11-T7).
-///
-/// **Hook caveat (see the inner call site)**: the pipeline
-/// is built so the per-batch wiring is exercised; the actual
-/// gate calls inside the per-event loop are migrated in
-/// follow-up commits. Returning `Some(pipeline)` here makes
-/// the wiring visible to operators and to future wiring
-/// work without forcing the larger signature change today.
+/// `ValidationPipeline` once per batch. The pipeline is always
+/// constructed; the legacy per-rule gate stack has been removed.
 fn build_unified_validation_pipeline(
     config: &crate::config::EventLoopConfig,
-) -> Option<crate::validation::ValidationPipeline> {
-    // U11-T7: default-on; explicit "0" disables the unified pipeline.
-    let enabled = match std::env::var("UNIFIED_VALIDATION").ok() {
-        Some(v) if v.trim() == "0" => false,
-        _ => true,
-    };
-    if !enabled {
-        return None;
-    }
+) -> crate::validation::ValidationPipeline {
     let view = crate::preset::engine::protocol::ProtocolView::from_event_loop_with_index_for_env(
         config, None,
     );
-    Some(crate::validation::ValidationPipeline::from_config(
-        &view, config,
-    ))
+    crate::validation::ValidationPipeline::from_config(&view, config)
 }
 
 fn publish_correction_via_context(
@@ -617,157 +596,54 @@ fn publish_policy_rejection_resume(
         // `process_parse_result` integration owns.
         return publish_correction_via_context(bus, state, ledger.as_deref_mut(), event, &payload);
     }
-
-    // 2026-06-17-001 U2: TTL freshness filter — mirror the origin-guard
-    // stale-rejection path.  Construct a minimal Rejection so we can
-    // reuse `is_rejection_stale()`.  Missing/unparseable ts is treated
-    // as fresh (same fallback semantics as U3).
-    let rejection = crate::event_loop::rejection::Rejection {
-        stage: crate::event_loop::rejection::RejectionStage::Policy,
-        source_hat: event.hat.clone(),
-        business_hat: event.hat.clone(),
-        topic: event.topic.to_string(),
-        violation: payload.clone(),
-        retry_key: String::new(),
-        retry_eligible: true,
-        non_retryable_reason: None,
-        target_hat: event.hat.clone(),
-        original_event_id: None,
-        original_ts: Some(event.ts.clone()),
-    };
-    if is_rejection_stale(&rejection, ttl_seconds) {
-        warn!(
-            source_event_ts = ?rejection.original_ts,
-            ttl_seconds,
-            hat = ?event.hat.as_deref(),
-            topic = %event.topic,
-            "policy rejection: stale (TTL exceeded) — dropping task.resume"
-        );
-        bus.publish(Event::new(
-            "event.isolation.boundary_violation",
-            format!(
-                "{{\"hat\":\"{}\",\"topic\":\"{}\",\"violation\":\"Policy rejection: stale (TTL={}s)\",\"stage\":\"policy\"}}",
-                event.hat.as_deref().unwrap_or("unknown"),
-                event.topic,
-                ttl_seconds
-            ),
-        ));
-        return;
-    }
-
-    let payload = enrich_payload_with_wave(&payload, event);
-    let payload = enrich_payload_with_wave_open_hint(&payload, event, tracker);
-
-    // U2 (2026-06-17-003 plan): wrap the free-form payload text in a
-    // JSON object that carries the schema-required `reason` (derived
-    // from the rejected topic via `extract_reason_code`) and
-    // `target_hat` (the source hat).  Without this wrap the
-    // injected `task.resume` would carry only the free-form text
-    // and the drift detector would flag it as `field_completeness=0%`.
-    let reason_code = extract_reason_code(&format!("{}: {}", event.topic, payload));
-    let target_hat_value = event
-        .hat
-        .clone()
-        .filter(|h| !h.is_empty())
-        .unwrap_or_else(|| "ralph".to_string());
-    let structured_payload = serde_json::json!({
-        "reason": reason_code,
-        "target_hat": target_hat_value,
-        "rejected_topic": event.topic.as_str(),
-        "source_hat": event.hat.as_deref(),
-        "message": payload,
-    });
-    let structured_payload_str = structured_payload.to_string();
-
-    // U2 gate: fail-closed when the schema-required fields are
-    // missing.  The check is cheap (single JSON parse) and
-    // mirrors the `is_rejection_stale` pattern above.  When the
-    // gate fires, we emit an orchestrator diagnostic
-    // (`event.isolation.boundary_violation`) so operators see
-    // the gate trip in `orchestration.jsonl`.
-    if !task_resume_payload_has_required_fields(&structured_payload_str) {
-        warn!(
-            hat = ?event.hat.as_deref(),
-            topic = %event.topic,
-            "policy rejection: structured task.resume payload missing required fields — dropping"
-        );
-        bus.publish(Event::new(
-            "event.isolation.boundary_violation",
-            format!(
-                "{{\"hat\":\"{}\",\"topic\":\"{}\",\"violation\":\"Policy rejection: task.resume payload missing required fields (reason/target_hat)\",\"stage\":\"policy\"}}",
-                event.hat.as_deref().unwrap_or("unknown"),
-                event.topic
-            ),
-        ));
-        return;
-    }
-
-    let mut resume = Event::new("task.resume", structured_payload_str);
-    if let Some(hat) = event.hat.as_deref() {
-        if !hat.is_empty() {
-            resume = resume.with_target(HatId::new(hat.to_string()));
-        }
-    }
-    bus.publish(resume);
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoverableExhaustion {
+    /// Hat that emitted the (hat, topic) pair whose budget just
+    /// crossed the limit.
+    pub hat: String,
+    /// Topic the hat kept emitting despite the `task.resume` guidance.
+    pub topic: String,
+    /// Reason class the budget was burned on.
+    pub reason_class: crate::event_policy::ReasonClass,
+    /// Post-increment count (always `> U2_REJECTION_RETRY_LIMIT`).
+    pub count: u32,
 }
 
-/// U3 (2026-06-17-003 plan) — when the source event is `work.done`
-/// and the tracker reports any open wave, append a structured
-/// `## WAVE_OPEN HINT` block to the resume payload. The block
-/// tells the agent:
-///   - a wave is currently open (`open_wave_id=<id>`,
-///     `received=<n>/<total>`),
-///   - do NOT emit `review.passed(empty_diff)` while the wave
-///     is open (semantic gate `review_passed_while_wave_open`
-///     will reject and recover — see U1),
-///   - do NOT re-emit `work.done` (duplicate dedup is U4).
-///   - the mechanism will emit `plan.blocked` via U2 staleness
-///     if the wave does not close; agents should let it close
-///     instead of attempting empty_diff fast-path.
-fn enrich_payload_with_wave_open_hint(
-    payload: &str,
-    event: &JsonlEvent,
-    tracker: Option<&crate::event_loop::review_step_state::ReviewStepTracker>,
-) -> String {
-    if event.topic != "work.done" {
-        return payload.to_string();
-    }
-    let Some(tracker) = tracker else {
-        return payload.to_string();
-    };
-    let Some(snapshot) = tracker.first_open_wave_snapshot() else {
-        return payload.to_string();
-    };
-    format!(
-        "{payload}\n\n\
-         ## WAVE_OPEN HINT (U3)\n\
-         - reason: work.done rejected while a review wave is open; do not bypass with empty_diff\n\
-         - open_wave_id: {wave_id}\n\
-         - received: {received}/{expected}\n\
-         - prohibition: do NOT emit `review.passed(empty_diff)` while a wave is open — semantic gate rejects with `review_passed_while_wave_open` (recoverable, not fatal); do NOT re-emit `work.done` either (U4 dedup blocks it).\n\
-         - fallback: let the wave close naturally, or wait for mechanism `plan.blocked` via U2 staleness if the wave stalls past the aggregate window.\n",
-        wave_id = snapshot.wave_id,
-        received = snapshot.received,
-        expected = snapshot.expected,
-    )
-}
+/// Unit 2 (2026-06-16-002 plan) take-3: a single recoverable
+/// rejection surfaced from the policy validator.  The validator
+/// does **not** call `state.record_recoverable_rejection_key`
+/// itself (it does not own `&mut LoopState`); it just records
+/// the candidate `(hat, topic, reason_class)` triple.  The
+/// caller is responsible for the counter bookkeeping and the
+/// promotion into a `RecoverableExhaustion` if the budget
+/// crosses the limit.  This split keeps the validator
+/// borrow-checkable under NLL.
 
-/// Append a `<!-- wave_id=... wave_index=... wave_total=... -->`
-/// HTML-comment block to the payload when the source event carries
-/// wave metadata.  The block is intentionally machine-greppable
-/// (so downstream tooling can recover the wave without parsing
-/// the entire payload) and harmless to human readers.
-fn enrich_payload_with_wave(payload: &str, event: &JsonlEvent) -> String {
-    let Some(wave_id) = event.wave_id.as_deref() else {
-        return payload.to_string();
-    };
-    let block = match (event.wave_index, event.wave_total) {
-        (Some(i), Some(t)) => {
-            format!("\n\n<!-- wave_id={wave_id} wave_index={i} wave_total={t} -->")
+fn filter_human_guidance_blocks(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut in_guidance = false;
+    for line in content.lines() {
+        if line.starts_with("### HUMAN GUIDANCE") {
+            // Drop the entire guidance block (header + body).
+            // Replace with a single blank line so subsequent
+            // sections keep their line numbering stable.
+            in_guidance = true;
+            out.push('\n');
+            continue;
         }
-        _ => format!("\n\n<!-- wave_id={wave_id} -->"),
-    };
-    format!("{payload}{block}")
+        if in_guidance && (line.starts_with("### ") || line.starts_with("## ")) {
+            // New section starts after a guidance block — exit
+            // the guidance state and emit the new section header
+            // normally.
+            in_guidance = false;
+        }
+        if !in_guidance {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 /// Result of extracting a correlation key from an event payload.
@@ -1041,973 +917,6 @@ fn apply_workflow_guard_validation(
     outcome
 }
 
-/// Validates events against configured event policy.
-///
-/// Events that violate the policy are handled according to the configured
-/// `on_violation` action. In `observe` mode, violations are logged as diagnostics
-/// but events still pass through. In `enforce` mode, violations may reject or
-/// hold events.
-/// Result of event policy validation including events and hold status.
-#[derive(Debug)]
-struct PolicyValidationResult {
-    events: Vec<JsonlEvent>,
-    hold_triggered: bool,
-    hold_reason: Option<String>,
-    /// U6: payload contract violation captured during policy validation
-    /// (if any). When set, the loop should pause and emit a diagnostic.
-    /// Unit 2 (2026-06-16-002 plan) R-B1/R-B2: this field is ONLY
-    /// populated for **non-recoverable** violations so the U6
-    /// `NotRetriable` fast-fail does not trigger on the recoverable
-    /// set.
-    payload_contract_violation: Option<crate::payload_contract::PayloadContractViolation>,
-    /// Origin/policy/payload rejections collected during validation.
-    /// Used by the CLI runner to produce unified recovery diagnostics.
-    /// Each entry carries an optional `reason_class` — when `Some`,
-    /// the rejection is in the recoverable bucket.
-    policy_rejections: Vec<crate::event_policy::PolicyRejection>,
-    /// Unit 2 (2026-06-16-002 plan) recoverable-bucket budget
-    /// exhaustions. Each entry represents a (hat, topic,
-    /// DEPRECATED by `recoverable_candidates` (Unit 2 take-3):
-    /// the function no longer takes `&mut LoopState`, so the
-    /// actual counter bookkeeping happens in the caller.  The
-    /// field is kept for back-compat with diagnostic snapshots
-    /// but is no longer populated — the caller merges candidates
-    /// into `state.recoverable_exhaustion_buffer` instead.
-    /// The `#[allow(dead_code)]` is required because the field
-    /// is now always written as `Vec::new()` from the validator
-    /// and never read; the validator still constructs it for
-    /// shape compatibility.
-    #[allow(dead_code)]
-    recoverable_exhausted: Vec<RecoverableExhaustion>,
-    /// Unit 2 (2026-06-16-002 plan) take-3: candidates the
-    /// caller still needs to record against the recoverable
-    /// budget.  Each entry is a `(hat, topic, reason_class)`
-    /// triple produced by a recoverable rejection in this
-    /// pass.  The caller is responsible for calling
-    /// `state.record_recoverable_rejection_key(...)` for each
-    /// entry and pushing the exhausted ones into
-    /// `state.recoverable_exhaustion_buffer`.
-    recoverable_candidates: Vec<RecoverableExhaustionCandidate>,
-}
-
-/// Unit 2 (2026-06-16-002 plan) recoverable-bucket budget exhaustion.
-/// The runner turns each of these into a
-/// `RecoverablePayloadExhausted` termination reason (or, when the
-/// iteration can still proceed, a `DiagnosisOutcome::Failed`
-/// recovery envelope).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecoverableExhaustion {
-    /// Hat that emitted the (hat, topic) pair whose budget just
-    /// crossed the limit.
-    pub hat: String,
-    /// Topic the hat kept emitting despite the `task.resume` guidance.
-    pub topic: String,
-    /// Reason class the budget was burned on.
-    pub reason_class: crate::event_policy::ReasonClass,
-    /// Post-increment count (always `> U2_REJECTION_RETRY_LIMIT`).
-    pub count: u32,
-}
-
-/// Unit 2 (2026-06-16-002 plan) take-3: a single recoverable
-/// rejection surfaced from the policy validator.  The validator
-/// does **not** call `state.record_recoverable_rejection_key`
-/// itself (it does not own `&mut LoopState`); it just records
-/// the candidate `(hat, topic, reason_class)` triple.  The
-/// caller is responsible for the counter bookkeeping and the
-/// promotion into a `RecoverableExhaustion` if the budget
-/// crosses the limit.  This split keeps the validator
-/// borrow-checkable under NLL.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecoverableExhaustionCandidate {
-    /// Hat that emitted the rejection.
-    pub hat: String,
-    /// Topic the hat was emitting.
-    pub topic: String,
-    /// Reason class the rejection belongs to.
-    pub reason_class: crate::event_policy::ReasonClass,
-}
-
-/// Unit 3 (2026-06-16-002 plan): strip `### HUMAN GUIDANCE` blocks
-/// from a scratchpad snapshot.  Mirrors the state machine used by
-/// `persist_guidance_to_scratchpad` to detect guidance blocks
-/// (a `### HUMAN GUIDANCE` header followed by body lines, ending
-/// at the next `### ` / `## ` section header or EOF) so a line in
-/// `## NOTES` that happens to mention guidance is NOT stripped.
-///
-/// The filtered output preserves the surrounding section structure
-/// — a guidance block is replaced with a single blank line so the
-/// surrounding content keeps its line numbers in tools that index
-/// by line.
-fn filter_human_guidance_blocks(content: &str) -> String {
-    let mut out = String::with_capacity(content.len());
-    let mut in_guidance = false;
-    for line in content.lines() {
-        if line.starts_with("### HUMAN GUIDANCE") {
-            // Drop the entire guidance block (header + body).
-            // Replace with a single blank line so subsequent
-            // sections keep their line numbering stable.
-            in_guidance = true;
-            out.push('\n');
-            continue;
-        }
-        if in_guidance && (line.starts_with("### ") || line.starts_with("## ")) {
-            // New section starts after a guidance block — exit
-            // the guidance state and emit the new section header
-            // normally.
-            in_guidance = false;
-        }
-        if !in_guidance {
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
-    out
-}
-
-/// Unit 2 (2026-06-16-002 plan R-B3): append a schema-aware fix hint to a
-/// recoverable policy rejection payload when the source hat is authorised
-/// to publish the topic and a schema is configured. Returns `payload`
-/// unchanged if no hint can be generated.
-fn append_fix_hint_if_recoverable(
-    payload: &str,
-    hat_id: Option<&str>,
-    topic: &str,
-    policy_config: &crate::config::EventPolicyConfig,
-    registry: &crate::hat_registry::HatRegistry,
-) -> String {
-    let Some(hat_id) = hat_id else {
-        return payload.to_string();
-    };
-    let Some(schema) = policy_config.schemas.get(topic) else {
-        return payload.to_string();
-    };
-    let hat = match registry.get(&ralph_proto::HatId::new(hat_id)) {
-        Some(h) => h,
-        None => return payload.to_string(),
-    };
-    match crate::emit_schema_hint::fix_hint_for_hat_topic(hat, topic, schema) {
-        Some(hint) => format!("{}\n\n{}", payload, hint),
-        None => payload.to_string(),
-    }
-}
-
-/// When a hat hits a topic-deny rule, list its declared `publishes`
-/// topics so the agent can recover without guessing.
-fn append_hat_publishes_hint(
-    payload: &str,
-    hat_id: Option<&str>,
-    registry: &crate::hat_registry::HatRegistry,
-) -> String {
-    let Some(hat_id) = hat_id else {
-        return payload.to_string();
-    };
-    let Some(hat) = registry.get(&ralph_proto::HatId::new(hat_id)) else {
-        return payload.to_string();
-    };
-    if hat.publishes.is_empty() {
-        return payload.to_string();
-    }
-    let topics: Vec<&str> = hat.publishes.iter().map(|t| t.as_str()).collect();
-    format!(
-        "{payload}\n\nAllowed publish topics for hat '{hat_id}': {}",
-        topics.join(", ")
-    )
-}
-
-/// U4 (2026-06-17-002 plan): Step Handoff pre-handoff hard gate.
-///
-/// For each event with topic in `progress_task_gate::GATED_TOPICS`,
-/// check that `.ralph/agent/progress.md` is consistent with
-/// `.ralph/agent/tasks.jsonl`. Mismatched events are rejected (not
-/// appended to the return vector) and a `plan.blocked` event is
-/// published to the bus with the mismatch reason as its payload —
-/// so `plan-gate` can read it on the next iteration and remediate.
-///
-/// Topics not in `GATED_TOPICS` are passed through untouched. This
-/// keeps the gate narrow: the hard fail is reserved for the two
-/// topics that mutate the step counter / finalize the plan.
-///
-/// Review fix #4 (code-review-2026-06-17-002): the second return
-/// value carries a `RecoveryDiagnosisEnvelope` per rejection so the
-/// caller can persist it via `EventLoop::record_recovery_envelope`
-/// (writes `recovery.jsonl` for `ralph diagnose`). The gate itself
-/// cannot call `record_recovery_envelope` because that requires
-/// `&mut EventLoop`, not the `&mut EventBus` signature below.
-fn apply_step_handoff_gate(
-    events: Vec<JsonlEvent>,
-    workspace: &std::path::Path,
-    bus: &mut EventBus,
-    iteration: u32,
-) -> (
-    Vec<JsonlEvent>,
-    Vec<crate::diagnosis::RecoveryDiagnosisEnvelope>,
-) {
-    use crate::step_handoff::progress_task_gate;
-    let mut accepted: Vec<JsonlEvent> = Vec::with_capacity(events.len());
-    let mut envelopes: Vec<crate::diagnosis::RecoveryDiagnosisEnvelope> = Vec::new();
-
-    for event in events {
-        if !progress_task_gate::is_gated_topic(event.topic.as_str()) {
-            accepted.push(event);
-            continue;
-        }
-
-        let (step, task_id) = extract_step_and_task_id(&event);
-        let decision = check_progress_task_alignment(
-            event.topic.as_str(),
-            step.as_deref(),
-            task_id.as_deref(),
-            workspace,
-        );
-
-        match decision {
-            GateDecision::Inert | GateDecision::Aligned => {
-                accepted.push(event);
-            }
-            GateDecision::Mismatch(mismatch) => {
-                // Reject the gated event and publish `plan.blocked`
-                // with the mismatch reason. The plan-gate hat is the
-                // canonical consumer (it owns `plan.blocked` in
-                // ce-executor-isolated).
-                //
-                // Review fix #1 (code-review-2026-06-17-002): hardcode
-                // the source hat to `plan-gate` rather than copying
-                // `event.hat`. Rationale: any non-plan-gate hat that
-                // emits a gated topic will fail the EventOriginGuard's
-                // publish-scope check when its source claims authorship
-                // of `plan.blocked`. The orchestrator synthesizes
-                // `plan.blocked` and must own the source.
-                let blocked_payload = serde_json::json!({
-                    "reason": "progress_task_mismatch",
-                    "topic": event.topic,
-                    "step": mismatch.step,
-                    "task_id": mismatch.task_id,
-                    "detail": mismatch.detail,
-                });
-                let source_hat = HatId::from("plan-gate");
-                let blocked =
-                    Event::new("plan.blocked", blocked_payload.to_string()).with_source(source_hat);
-                bus.publish(blocked);
-                // Diagnostic on the bus for operators reading
-                // orchestration logs. The main signal is the
-                // `plan.blocked` event above.
-                let diagnostic = Event::new(
-                    "event.step_handoff.gate_rejected",
-                    format!(
-                        "step_handoff gate rejected topic='{}' reason={}",
-                        event.topic, mismatch.reason
-                    ),
-                );
-                bus.publish(diagnostic);
-                // Review fix #4 (code-review-2026-06-17-002):
-                // accumulate a recovery envelope so the caller can
-                // persist via `record_recovery_envelope`. This makes
-                // the rejection visible to `ralph diagnose --session
-                // latest` and to the responder ladder. The envelope is
-                // a builder-stamped payload; `iteration` and
-                // `retry_attempt` are patched in by the caller from
-                // the live EventLoop state.
-                let envelope = crate::diagnosis::RecoveryDiagnosisEnvelope::builder()
-                    .source(crate::diagnosis::DiagnosisSource::PayloadContract)
-                    .severity(crate::diagnosis::DiagnosisSeverity::Warning)
-                    .iteration(iteration)
-                    .source_hat("plan-gate")
-                    .target_hat("plan-gate")
-                    .topic(event.topic.clone())
-                    .reason_code("progress_task_mismatch")
-                    .message(format!(
-                        "step_handoff gate rejected topic='{}' reason={} detail={}",
-                        event.topic, mismatch.reason, mismatch.detail
-                    ))
-                    .safe_target(true)
-                    .build();
-                envelopes.push(envelope);
-                // Reject the original event: do NOT push it to
-                // `accepted`. The next iteration's `plan-gate`
-                // activation will see `plan.blocked` and emit a
-                // corrected `queue.advance` / `plan.complete`.
-            }
-        }
-    }
-
-    (accepted, envelopes)
-}
-
-/// Extract `step` and `task_id` fields from an event payload.
-///
-/// Both fields are best-effort: a missing field is fine and means
-/// the gate will skip the corresponding check. This mirrors how
-/// plan-gate / executor emit payloads today — fields are optional
-/// and the schema is enforced by the policy layer (not by the gate).
-///
-/// The primary source is a JSON object. If the payload is not valid
-/// JSON, we fall back to scanning for XML-style attributes
-/// (`step="..."`, `task_id='...'`) so that mock/scenario fixtures
-/// and agents emitting XML attributes are still gated.
-fn extract_step_and_task_id(event: &JsonlEvent) -> (Option<String>, Option<String>) {
-    let payload = match event.payload.as_deref() {
-        Some(p) if !p.is_empty() => p,
-        _ => return (None, None),
-    };
-    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(payload) {
-        let step = parsed
-            .get("step")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let task_id = parsed
-            .get("task_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        return (step, task_id);
-    }
-    // Fallback: scan for XML-style attributes in a non-JSON payload.
-    let step = extract_xml_attr(payload, "step");
-    let task_id = extract_xml_attr(payload, "task_id");
-    (step, task_id)
-}
-
-/// Best-effort extraction of an XML-style attribute value from a
-/// free-text payload. Supports double-quoted and single-quoted
-/// values. Returns `None` when the attribute is missing or malformed.
-fn extract_xml_attr(text: &str, attr: &str) -> Option<String> {
-    for quote in ['"', '\''] {
-        let pattern = format!("{attr}={quote}");
-        if let Some(start) = text.find(&pattern) {
-            let value_start = start + pattern.len();
-            let rest = &text[value_start..];
-            if let Some(end) = rest.find(quote) {
-                let value = &rest[..end];
-                if !value.is_empty() {
-                    return Some(value.to_string());
-                }
-            }
-        }
-    }
-    None
-}
-
-fn apply_event_policy_validation(
-    events: Vec<JsonlEvent>,
-    policy_config: &crate::config::EventPolicyConfig,
-    policy_state: &mut PolicyRuntimeState,
-    review_step_tracker: &mut review_step_state::ReviewStepTracker,
-    bus: &mut EventBus,
-    state: &mut crate::event_loop::LoopState,
-    mut ledger: Option<&mut crate::state::StateLedger>,
-    write_diagnostic: bool,
-    // U6 (2026-06-17-004 plan, R6): use `BTreeMap` so the topic keys iterate
-    // in sorted order, and each per-topic hat list is pre-sorted by the
-    // caller.  Without this, the `source_hat` / `target_hat` vectors that
-    // get serialized into a `PayloadContractViolation` would inherit the
-    // `config.hats` (HashMap) iteration order, which is undefined across
-    // runs and breaks diagnostic snapshot stability.
-    source_hats_by_topic: &std::collections::BTreeMap<String, Vec<String>>,
-    target_hats_by_topic: &std::collections::BTreeMap<String, Vec<String>>,
-    registry: &crate::hat_registry::HatRegistry,
-    ttl_seconds: u64,
-) -> PolicyValidationResult {
-    // Unit 2 (2026-06-16-002 plan) take-3: the validator does NOT
-    // take `&mut LoopState` directly.  It returns a list of
-    // `RecoverableExhaustionCandidate` and the **caller** is
-    // responsible for calling `state.record_recoverable_rejection_key`
-    // for each entry.  This split avoids the borrow-checker conflict
-    // between `&mut LoopState` and `&mut ReviewStepTracker` (the
-    // latter is a field of the former) at the call site.
-    let mut payload_contract_violation: Option<crate::payload_contract::PayloadContractViolation> =
-        None;
-    // Unit 2 (2026-06-16-002 plan): `capture_violation` now ONLY fires
-    // for **non-recoverable** findings.  The recoverable set
-    // (`PayloadTypeMismatch`, `MissingRequiredField`, `TopicDenied`)
-    // bypasses this closure entirely so the U6 fast-fail is not
-    // triggered on a recoverable first attempt.
-    //
-    // U1 (2026-06-17-003 plan): `SemanticGateViolation` (e.g.
-    // `review_passed_while_wave_open`) is in the same recoverable
-    // set via `is_recoverable_policy_finding` returning
-    // `Some(ReasonClass::SemanticGateViolation)`.  The bucket is
-    // **independent** — semantic-gate rejections never compete
-    // with `PayloadTypeMismatch` / `MissingRequiredField` /
-    // `TopicDenied` for the same `(hat, topic)` retry budget.  The
-    // dedicated `task.resume` payload (see the call sites below)
-    // tells the source hat to wait for the mechanism-emitted
-    // `plan.blocked` or to actually complete the missing dimensions
-    // before retrying `review.passed`.
-    let mut capture_violation = |finding: &PolicyFinding, payload: Option<&str>| {
-        if payload_contract_violation.is_some() {
-            return; // capture only the first
-        }
-        if is_recoverable_policy_finding(finding).is_some() {
-            return; // recoverable: never feed into U6 fast-fail
-        }
-        let source_hats = source_hats_by_topic
-            .get(&finding.topic)
-            .cloned()
-            .unwrap_or_default();
-        let target_hats = target_hats_by_topic
-            .get(&finding.topic)
-            .cloned()
-            .unwrap_or_default();
-        let schema_defined_in = match policy_config.schemas.get(&finding.topic) {
-            Some(_) => match &policy_config.schema_file {
-                Some(f) => format!("inline + file:{}", f),
-                None => "inline".to_string(),
-            },
-            None => "(none)".to_string(),
-        };
-        payload_contract_violation = finding_to_payload_contract_violation(
-            finding,
-            payload,
-            &source_hats,
-            &target_hats,
-            &schema_defined_in,
-        );
-    };
-
-    let mut validated_events = Vec::with_capacity(events.len());
-    let mut hold_triggered = false;
-    let mut hold_reason = None;
-    let mut policy_rejections: Vec<crate::event_policy::PolicyRejection> = Vec::new();
-    // Unit 2 (2026-06-16-002 plan): this function no longer takes
-    // `&mut LoopState`.  It only collects **candidates** for
-    // recoverable budget exhaustion.  The caller is responsible
-    // for calling `state.record_recoverable_rejection_key(...)`
-    // for each candidate and pushing the exhausted entries into
-    // `state.recoverable_exhaustion_buffer`.  We emit the
-    // `(hat, topic, reason_class)` triple plus a
-    // `payload_excerpt` (for diagnostics) for the caller to
-    // consume.
-    let mut recoverable_candidates: Vec<RecoverableExhaustionCandidate> = Vec::new();
-
-    for event in events {
-        // Completion-honored guard takes precedence: after a completion promise
-        // has been accepted, subsequent terminal/business events are filtered
-        // according to completion_after_terminal config.
-        if let Some(decision) = check_completion_honored(&event.topic, policy_config, policy_state)
-        {
-            match decision {
-                PolicyDecision::Accept => {
-                    validated_events.push(event);
-                }
-                PolicyDecision::Warn(findings) => {
-                    for finding in findings {
-                        let diagnostic = Event::new(
-                            "event.policy_warning",
-                            format!(
-                                "Completion-guard warning for '{}': {}",
-                                event.topic, finding.message
-                            ),
-                        );
-                        bus.publish(diagnostic);
-                    }
-                    validated_events.push(event);
-                }
-                PolicyDecision::RejectWithResume(finding) => {
-                    // Collect for unified rejection handler (Task #21)
-                    policy_rejections.push(crate::event_policy::PolicyRejection {
-                        topic: event.topic.clone(),
-                        source_hat: event.hat.clone(),
-                        finding: finding.clone(),
-                        reason_class: None,
-                    });
-                    let recovery_payload = format!(
-                        "EVENT_POLICY_REJECTED: event '{}' violates completion guard.\n{}\n\n\
-                         Wait for the correct event schema before emitting this event. \
-                         The loop will continue to allow recovery.",
-                        event.topic, finding.message
-                    );
-                    publish_policy_rejection_resume(
-                        bus,
-                        state,
-                        ledger.as_deref_mut(),
-                        &event,
-                        recovery_payload,
-                        Some(review_step_tracker),
-                        ttl_seconds,
-                    );
-                }
-                PolicyDecision::Hold(finding) => {
-                    hold_triggered = true;
-                    hold_reason = Some(finding.message.clone());
-                    // Collect for unified rejection handler (Task #21)
-                    policy_rejections.push(crate::event_policy::PolicyRejection {
-                        topic: event.topic.clone(),
-                        source_hat: event.hat.clone(),
-                        finding: finding.clone(),
-                        reason_class: None,
-                    });
-                    let recovery_payload = format!(
-                        "EVENT_POLICY_HOLD: event '{}' violates completion guard.\n{}\n\n\
-                         Loop held due to completion guard violation. Use resume to continue.",
-                        event.topic, finding.message
-                    );
-                    publish_policy_rejection_resume(
-                        bus,
-                        state,
-                        ledger.as_deref_mut(),
-                        &event,
-                        recovery_payload,
-                        Some(review_step_tracker),
-                        ttl_seconds,
-                    );
-                }
-                PolicyDecision::Block(finding) => {
-                    if write_diagnostic {
-                        let diagnostic = Event::new(
-                            "event.completion.blocked",
-                            format!(
-                                "Completion guard blocked '{}': {}",
-                                event.topic, finding.message
-                            ),
-                        );
-                        bus.publish(diagnostic);
-                    }
-                }
-                PolicyDecision::Ignore(finding) => {
-                    if write_diagnostic {
-                        let diagnostic = Event::new(
-                            "event.completion.ignored",
-                            format!(
-                                "Completion guard ignored '{}': {}",
-                                event.topic, finding.message
-                            ),
-                        );
-                        bus.publish(diagnostic);
-                    }
-                }
-            }
-            continue;
-        }
-
-        // U3: Topic-deny rules — check BEFORE payload schema validation.
-        // When a (hat_id, topic) pair matches a deny rule, the event is
-        // rejected according to the policy mode (Block, Warn, etc.).
-        if let Some(decision) =
-            check_topic_deny_rules(event.hat.as_deref(), &event.topic, policy_config)
-        {
-            match decision {
-                PolicyDecision::Accept => {
-                    validated_events.push(event);
-                }
-                PolicyDecision::Warn(findings) => {
-                    for finding in findings {
-                        let diagnostic = Event::new(
-                            "event.policy_warning",
-                            format!(
-                                "Topic-deny warning for '{}': {}",
-                                event.topic, finding.message
-                            ),
-                        );
-                        bus.publish(diagnostic);
-                    }
-                    validated_events.push(event);
-                }
-                PolicyDecision::RejectWithResume(finding) => {
-                    let reason_class = is_recoverable_policy_finding(&finding);
-                    policy_rejections.push(crate::event_policy::PolicyRejection {
-                        topic: event.topic.clone(),
-                        source_hat: event.hat.clone(),
-                        finding: finding.clone(),
-                        reason_class,
-                    });
-                    if let Some(rc) = reason_class {
-                        let hat_for_counter = event.hat.as_deref().unwrap_or("unknown");
-                        recoverable_candidates.push(RecoverableExhaustionCandidate {
-                            hat: hat_for_counter.to_string(),
-                            topic: event.topic.clone(),
-                            reason_class: rc,
-                        });
-                    }
-                    let recovery_payload = format!(
-                        "EVENT_POLICY_REJECTED: event '{}' matches topic-deny rule.\n{}\n\n\
-                         This hat is not allowed to publish this topic. \
-                         Emit one of the hat's declared `publishes` topics instead.",
-                        event.topic, finding.message
-                    );
-                    let recovery_payload = append_hat_publishes_hint(
-                        &recovery_payload,
-                        event.hat.as_deref(),
-                        registry,
-                    );
-                    publish_policy_rejection_resume(
-                        bus,
-                        state,
-                        ledger.as_deref_mut(),
-                        &event,
-                        recovery_payload,
-                        Some(review_step_tracker),
-                        ttl_seconds,
-                    );
-                }
-                PolicyDecision::Hold(finding) => {
-                    hold_triggered = true;
-                    hold_reason = Some(finding.message.clone());
-                    policy_rejections.push(crate::event_policy::PolicyRejection {
-                        topic: event.topic.clone(),
-                        source_hat: event.hat.clone(),
-                        finding: finding.clone(),
-                        reason_class: None,
-                    });
-                    let recovery_payload = format!(
-                        "EVENT_POLICY_HOLD: event '{}' matches topic-deny rule.\n{}\n\n\
-                         Loop held due to topic-deny rule. Use resume to continue.",
-                        event.topic, finding.message
-                    );
-                    publish_policy_rejection_resume(
-                        bus,
-                        state,
-                        ledger.as_deref_mut(),
-                        &event,
-                        recovery_payload,
-                        Some(review_step_tracker),
-                        ttl_seconds,
-                    );
-                }
-                PolicyDecision::Block(_finding) => {
-                    // Silently drop the event
-                }
-                PolicyDecision::Ignore(_finding) => {
-                    // Silently ignore the event
-                }
-            }
-            continue;
-        }
-
-        let decision = validate_event(
-            &event.topic,
-            event.payload.as_deref(),
-            policy_config,
-            policy_state,
-        );
-
-        match decision {
-            PolicyDecision::Accept => {
-                if let Some(finding) = review_step_tracker.check_semantic_gates(&event) {
-                    // U1 (2026-06-17-003 plan): `capture_violation`
-                    // no-ops for `SemanticGateViolation` because the
-                    // variant is in the recoverable set. We still
-                    // emit a `task.resume` so the source hat sees
-                    // the failure reason; the hint explicitly tells
-                    // review-coordinator NOT to retry with
-                    // `skip_reason=empty_diff` and to either
-                    // complete the missing dimensions or wait for
-                    // the mechanism to emit `plan.blocked` (U2).
-                    capture_violation(&finding, event.payload.as_deref());
-                    policy_rejections.push(crate::event_policy::PolicyRejection {
-                        topic: event.topic.clone(),
-                        source_hat: event.hat.clone(),
-                        finding: finding.clone(),
-                        reason_class: is_recoverable_policy_finding(&finding),
-                    });
-                    let recovery_payload = format!(
-                        "EVENT_POLICY_REJECTED: event '{}' violates semantic gate (review step gate).\n{}\n\n\
-                         Wave 未闭合，禁止 empty_diff；等待机制 plan.blocked 或补全维度后重发 review.passed。\
-                         Wait for review-synthesizer terminal before plan-gate events.",
-                        event.topic, finding.message
-                    );
-                    publish_policy_rejection_resume(
-                        bus,
-                        state,
-                        ledger.as_deref_mut(),
-                        &event,
-                        recovery_payload,
-                        Some(review_step_tracker),
-                        ttl_seconds,
-                    );
-                } else {
-                    review_step_tracker.observe_accepted(&event);
-                    validated_events.push(event);
-                }
-            }
-            PolicyDecision::Warn(findings) => {
-                // In observe mode: log diagnostics but still pass the event through
-                for finding in findings {
-                    let diagnostic = Event::new(
-                        "event.policy_warning",
-                        format!("Policy warning for '{}': {}", event.topic, finding.message),
-                    );
-                    bus.publish(diagnostic);
-                }
-                if let Some(finding) = review_step_tracker.check_semantic_gates(&event) {
-                    // U1 (2026-06-17-003 plan): same handling as
-                    // the `Accept` arm — `SemanticGateViolation` is
-                    // recoverable and the loop continues.
-                    capture_violation(&finding, event.payload.as_deref());
-                    policy_rejections.push(crate::event_policy::PolicyRejection {
-                        topic: event.topic.clone(),
-                        source_hat: event.hat.clone(),
-                        finding: finding.clone(),
-                        reason_class: is_recoverable_policy_finding(&finding),
-                    });
-                    let recovery_payload = format!(
-                        "EVENT_POLICY_REJECTED: event '{}' violates semantic gate (review step gate).\n{}\n\n\
-                         Wave 未闭合，禁止 empty_diff；等待机制 plan.blocked 或补全维度后重发 review.passed。\
-                         Wait for review-synthesizer terminal before plan-gate events.",
-                        event.topic, finding.message
-                    );
-                    publish_policy_rejection_resume(
-                        bus,
-                        state,
-                        ledger.as_deref_mut(),
-                        &event,
-                        recovery_payload,
-                        Some(review_step_tracker),
-                        ttl_seconds,
-                    );
-                } else {
-                    review_step_tracker.observe_accepted(&event);
-                    validated_events.push(event);
-                }
-            }
-            PolicyDecision::RejectWithResume(finding) => {
-                let mut finding = finding;
-                let reason_class = is_recoverable_policy_finding(&finding);
-                // U4 (2026-06-17-003 plan): when the rejection is a
-                // `DuplicateWorkDone` and the event carries a
-                // `wave_id` (wave is still open), upgrade the hint
-                // from `DuplicateSameStep` to `DuplicateStallBypass`
-                // so the recovery message warns the agent against
-                // bypassing a stalled review cycle. Also include
-                // the wave_id in the message for diagnostics.
-                if let ViolationType::DuplicateWorkDone {
-                    ref mut hint,
-                    ref key,
-                } = finding.violation_type
-                {
-                    if event.wave_id.is_some() {
-                        *hint = DuplicateWorkDoneHint::DuplicateStallBypass;
-                        finding.message = format!(
-                            "duplicate_stall_bypass: work.done for key '{key}' was already accepted \
-                             but wave_id={:?} is still open. The agent is attempting to re-emit \
-                             work.done to bypass the stalled review cycle. Wait for review-synthesizer \
-                             terminal (review.passed or review.complete) or plan.blocked before \
-                             re-sending work.done.",
-                            event.wave_id
-                        );
-                    }
-                }
-                if reason_class.is_none() {
-                    // Non-recoverable: capture the violation
-                    // for the U6 fast-fail path.  We still
-                    // publish a `task.resume` so the U1 R5
-                    // routing (semantic-gate and
-                    // review-step-gate violations targeted at
-                    // the source hat) keeps working — the
-                    // runner's "fast-fail" happens at the U6
-                    // `PayloadContractViolation` branch, not
-                    // here.  The U2 plan §3 "R-B2" semantic
-                    // (non-recoverable → no resume) is reserved
-                    // for the future `plan_name`/task-key
-                    // mismatch path (U3), not the existing U1
-                    // semantic-gate `InvalidFieldValue` path.
-                    capture_violation(&finding, event.payload.as_deref());
-                }
-                policy_rejections.push(crate::event_policy::PolicyRejection {
-                    topic: event.topic.clone(),
-                    source_hat: event.hat.clone(),
-                    finding: finding.clone(),
-                    reason_class,
-                });
-                if let Some(rc) = reason_class {
-                    let hat_for_counter = event.hat.as_deref().unwrap_or("unknown");
-                    // U1 (2026-06-17-003 plan): `SemanticGateViolation`
-                    // is in the recoverable set so the event is not
-                    // fatal, but it is intentionally **not** pushed
-                    // into `recoverable_candidates` — semantic-gate
-                    // rejections (e.g. `review_passed_while_wave_open`)
-                    // never count toward `U2_REJECTION_RETRY_LIMIT`.
-                    // Otherwise a misbehaving review-coordinator
-                    // would exhaust the budget on empty-diff retries
-                    // and the loop would still terminate via
-                    // `RecoverablePayloadExhausted`.  The mechanism
-                    // emits `plan.blocked` (U2) before the budget
-                    // can run out for any meaningful case.
-                    if !matches!(rc, ReasonClass::SemanticGateViolation) {
-                        recoverable_candidates.push(RecoverableExhaustionCandidate {
-                            hat: hat_for_counter.to_string(),
-                            topic: event.topic.clone(),
-                            reason_class: rc,
-                        });
-                    }
-                    // NOTE: do not `continue` here — we still
-                    // want to publish a `task.resume` (the
-                    // recoverable path's contract).  The caller
-                    // will check the post-call counter and, if
-                    // exhausted, the runner will terminate the
-                    // loop on the next iteration pass.
-                }
-                let recovery_payload = format!(
-                    "EVENT_POLICY_REJECTED: event '{}' violates policy.\n{}\n\n\
-                     Wait for the correct event schema before emitting this event. \
-                     The loop will continue to allow recovery.",
-                    event.topic, finding.message
-                );
-                let recovery_payload = append_fix_hint_if_recoverable(
-                    &recovery_payload,
-                    event.hat.as_deref(),
-                    &event.topic,
-                    policy_config,
-                    registry,
-                );
-                publish_policy_rejection_resume(
-                    bus,
-                    state,
-                    ledger.as_deref_mut(),
-                    &event,
-                    recovery_payload,
-                    Some(review_step_tracker),
-                    ttl_seconds,
-                );
-                // Do NOT record the rejected event
-            }
-            PolicyDecision::Hold(finding) => {
-                let reason_class = is_recoverable_policy_finding(&finding);
-                if reason_class.is_none() {
-                    capture_violation(&finding, event.payload.as_deref());
-                }
-                hold_triggered = true;
-                hold_reason = Some(finding.message.clone());
-                policy_rejections.push(crate::event_policy::PolicyRejection {
-                    topic: event.topic.clone(),
-                    source_hat: event.hat.clone(),
-                    finding: finding.clone(),
-                    reason_class,
-                });
-                let recovery_payload = format!(
-                    "EVENT_POLICY_HOLD: event '{}' violates policy.\n{}\n\n\
-                     Loop held due to policy violation. Use resume to continue.",
-                    event.topic, finding.message
-                );
-                let recovery_payload = append_fix_hint_if_recoverable(
-                    &recovery_payload,
-                    event.hat.as_deref(),
-                    &event.topic,
-                    policy_config,
-                    registry,
-                );
-                publish_policy_rejection_resume(
-                    bus,
-                    state,
-                    ledger.as_deref_mut(),
-                    &event,
-                    recovery_payload,
-                    Some(review_step_tracker),
-                    ttl_seconds,
-                );
-            }
-            PolicyDecision::Block(_finding) => {
-                // Silently drop the event without publishing recovery or hold artifacts
-            }
-            PolicyDecision::Ignore(_finding) => {
-                // Silently ignore the event without publishing recovery or hold artifacts
-            }
-        }
-    }
-
-    PolicyValidationResult {
-        events: validated_events,
-        hold_triggered,
-        hold_reason,
-        payload_contract_violation,
-        policy_rejections,
-        // Unit 2 (2026-06-16-002 plan) take-3: the validator no
-        // longer calls `record_recoverable_rejection_key` itself.
-        // The `recoverable_exhausted` field is left empty; the
-        // caller consumes `recoverable_candidates` and
-        // post-increments the counter itself.  We keep the
-        // field for back-compat with the
-        // `PolicyValidationResult` shape (existing call sites
-        // destructure it).
-        recoverable_exhausted: Vec::new(),
-        recoverable_candidates,
-    }
-}
-
-/// U6: convert a `PolicyFinding` into a `PayloadContractViolation` if and only
-/// if the finding is schema-derived (MissingRequiredField, PayloadTypeMismatch,
-/// InvalidFieldValue). Terminal-monotonicity and completion-guard violations
-/// are NOT payload contract violations and are passed through unchanged.
-///
-/// U1 (2026-06-17-003 plan): `SemanticGateViolation` is also passed
-/// through unchanged — semantic-gate rejections are recoverable
-/// (`task.resume` → review-coordinator) and **not** a payload contract
-/// violation. Treating them as one would re-introduce the
-/// `PayloadContractViolation` fatal termination that this unit removes.
-fn finding_to_payload_contract_violation(
-    finding: &PolicyFinding,
-    payload: Option<&str>,
-    source_hats: &[String],
-    target_hats: &[String],
-    schema_defined_in: &str,
-) -> Option<crate::payload_contract::PayloadContractViolation> {
-    use crate::event_policy::ViolationType;
-    use crate::payload_contract::{PayloadContractViolation, PayloadContractViolationKind};
-    let (kind, field) = match &finding.violation_type {
-        ViolationType::MissingRequiredField { field } => (
-            PayloadContractViolationKind::MissingRequiredField,
-            Some(field.clone()),
-        ),
-        ViolationType::PayloadTypeMismatch { .. } => {
-            (PayloadContractViolationKind::PayloadTypeMismatch, None)
-        }
-        ViolationType::InvalidFieldValue { field, .. } => (
-            PayloadContractViolationKind::AllowedValueMismatch,
-            Some(field.clone()),
-        ),
-        // Terminal / completion-guard / topic-format / topic-deny /
-        // semantic-gate violations are NOT payload contract violations
-        // and must not be reported as such. Semantic-gate violations
-        // still write a diagnostic envelope via the unified recovery
-        // pipeline (see runner.rs `record_recovery_envelope`), but
-        // they do NOT trigger the U6 `PayloadContractViolation`
-        // fatal termination — see the runner's branch below.
-        ViolationType::TerminalMonotonicityViolation { .. }
-        | ViolationType::DuplicateTerminalEvent { .. }
-        | ViolationType::BusinessEventAfterCompletion { .. }
-        | ViolationType::InvalidTopicFormat { .. }
-        | ViolationType::TopicDenied { .. }
-        | ViolationType::SemanticGateViolation { .. }
-        | ViolationType::DuplicateWorkDone { .. } => return None,
-    };
-    let fix_hint = match kind {
-        PayloadContractViolationKind::MissingRequiredField => format!(
-            "Add the missing field to the payload of the '{}' event. \
-             If the field is optional, remove it from the schema's required_fields.",
-            finding.topic
-        ),
-        PayloadContractViolationKind::PayloadTypeMismatch => format!(
-            "Ensure the payload of '{}' matches the schema's declared payload type.",
-            finding.topic
-        ),
-        PayloadContractViolationKind::AllowedValueMismatch => format!(
-            "Update the payload of '{}' to a value allowed by the schema.",
-            finding.topic
-        ),
-        PayloadContractViolationKind::SchemaMissingForRequiredTopic => {
-            "Add a schema for this topic.".to_string()
-        }
-    };
-    Some(PayloadContractViolation {
-        error_type: kind,
-        timestamp: chrono::Utc::now().to_rfc3339(),
-        topic: finding.topic.clone(),
-        field,
-        source_hat: source_hats.to_vec(),
-        target_hat: target_hats.to_vec(),
-        schema_defined_in: schema_defined_in.to_string(),
-        downstream_reference: None,
-        upstream_reference: None,
-        fix_hint,
-        payload_excerpt: payload.map(|p| {
-            const MAX: usize = 240;
-            if p.len() > MAX {
-                format!("{}…", &p[..MAX])
-            } else {
-                p.to_string()
-            }
-        }),
-    })
-}
-
 impl EventLoop {
     /// 2026-06-09: returns the union of `verdict_gate.topic` and
     /// its `additional_topics`, or `None` when no gate is
@@ -2191,14 +1100,8 @@ impl EventLoop {
             .with_default_timeout(std::time::Duration::from_secs(handoff_timeout));
 
         // U2 (plan 2026-06-21-002): unified state ledger opt-in.
-        // `UNIFIED_STATE_LEDGER=1` enables the new code path; the
-        // default leaves `state.state_ledger = None` so the
-        // legacy `StateProjector::ProjectionContext` continues to
-        // own the in-memory caches. U9 will flip the default; for
-        // now the env var is the only switch.
-        if let Some(ledger) = build_state_ledger_from_env(context.workspace()) {
-            state.state_ledger = Some(ledger);
-        }
+        // U2: the state ledger is always enabled.
+        state.state_ledger = Some(build_state_ledger_from_env(context.workspace()));
 
         Self {
             config: config.clone(),
@@ -5560,6 +4463,81 @@ impl EventLoop {
             .record_finding(envelope, current_iteration)
     }
 
+    /// U11-T2 step-handoff side effects: when the unified pipeline
+    /// rejects a `queue.advance` / `plan.complete` event, publish the
+    /// same `plan.blocked` + diagnostic + recovery envelope that the
+    /// legacy `apply_step_handoff_gate` used to emit. This keeps the
+    /// operator-facing signal (`ralph diagnose`, responder ladder)
+    /// intact while the gate decision itself lives in the pure
+    /// `StepHandoffRule`.
+    fn emit_step_handoff_rejection_side_effects(
+        &mut self,
+        event: &JsonlEvent,
+        result: &crate::validation::ValidationResult,
+    ) {
+        let (step, task_id) = {
+            let payload = event.payload.as_deref().unwrap_or("");
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(payload) {
+                let step = parsed
+                    .get("step")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let task_id = parsed
+                    .get("task_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                (step, task_id)
+            } else {
+                (None, None)
+            }
+        };
+        let reason = result
+            .reason_code
+            .as_deref()
+            .and_then(|code| {
+                code.strip_prefix(crate::validation::ReasonCode::STEP_HANDOFF_MISMATCH_PREFIX)
+            })
+            .unwrap_or("progress_task_mismatch");
+        let detail = result.correction_hint.as_deref().unwrap_or("");
+
+        let blocked_payload = serde_json::json!({
+            "reason": reason,
+            "topic": event.topic,
+            "step": step,
+            "task_id": task_id,
+            "detail": detail,
+        });
+        let source_hat = HatId::from("plan-gate");
+        let blocked =
+            Event::new("plan.blocked", blocked_payload.to_string()).with_source(source_hat);
+        self.bus.publish(blocked);
+
+        let diagnostic = Event::new(
+            "event.step_handoff.gate_rejected",
+            format!(
+                "step_handoff gate rejected topic='{}' reason={}",
+                event.topic, reason
+            ),
+        );
+        self.bus.publish(diagnostic);
+
+        let envelope = crate::diagnosis::RecoveryDiagnosisEnvelope::builder()
+            .source(crate::diagnosis::DiagnosisSource::PayloadContract)
+            .severity(crate::diagnosis::DiagnosisSeverity::Warning)
+            .iteration(self.state.iteration)
+            .source_hat("plan-gate")
+            .target_hat("plan-gate")
+            .topic(event.topic.clone())
+            .reason_code(reason)
+            .message(format!(
+                "step_handoff gate rejected topic='{}' reason={} detail={}",
+                event.topic, reason, detail
+            ))
+            .safe_target(true)
+            .build();
+        self.record_recovery_envelope(&envelope, Vec::new());
+    }
+
     /// U6: Mark the next iteration as fresh. Clears the responder's
     /// per-iteration caches (`pending_findings`, hard-escalation
     /// queue, termination hint) so the prompt builder does not
@@ -6547,8 +5525,10 @@ impl EventLoop {
                 // incremented count. When the ledger IS
                 // configured, the helper also commits a
                 // `CommitDelta::RejectionRecorded` there.
-                let reason_code =
-                    format!("lint:{}", crate::event_loop::rejection::extract_reason_code(&message));
+                let reason_code = format!(
+                    "lint:{}",
+                    crate::event_loop::rejection::extract_reason_code(&message)
+                );
                 self.state.record_rejection_digest(
                     &reason_code,
                     &message,
@@ -6950,9 +5930,9 @@ impl EventLoop {
             // P1-2: per-event commit (see `commit_terminal_delta`).
             if !self.state.completion_requested {
                 Self::commit_terminal_delta(
-                &mut self.state.state_ledger,
-                crate::state::CommitDelta::CompletionRequested,
-            );
+                    &mut self.state.state_ledger,
+                    crate::state::CommitDelta::CompletionRequested,
+                );
             }
             self.state.completion_requested = true;
         }
@@ -7721,13 +6701,11 @@ impl EventLoop {
         // workspace path and HatRegistry into the pipeline,
         // which is a non-trivial signature change).
         let unified_pipeline = build_unified_validation_pipeline(&self.config.event_loop);
-        if let Some(ref p) = unified_pipeline {
-            tracing::debug!(
-                pre_commit_rules = p.pre_commit_rules.len(),
-                post_commit_rules = p.post_commit_rules.len(),
-                "A2: unified validation pipeline built for this batch"
-            );
-        }
+        tracing::debug!(
+            pre_commit_rules = unified_pipeline.pre_commit_rules.len(),
+            post_commit_rules = unified_pipeline.post_commit_rules.len(),
+            "A2: unified validation pipeline built for this batch"
+        );
 
         // U6: capture payload contract violation produced by event policy
         // validation. The loop runner will read this and pause with a
@@ -7735,6 +6713,7 @@ impl EventLoop {
         let mut payload_contract_violation: Option<
             crate::payload_contract::PayloadContractViolation,
         > = None;
+        let mut had_policy_rejections = false;
 
         // U2 (plan 2026-06-20-001, R15 / KTD-10): engine-backed
         // fail-fast gate. Runs *before* d623c09's policy / scope
@@ -7774,11 +6753,11 @@ impl EventLoop {
         // engine gate does NOT disable the d623c09 gates — the
         // engine is a fail-fast addition, not a replacement.
         //
-        // Phase 2 (separate commit) replaces the d623c09
-        // required-fields path with the engine entirely. That
-        // commit will delete `validate_event_with_hat` for
-        // required-fields handling and have `apply_event_policy_validation`
-        // use the engine's `GateContext::pre_check`.
+        // Phase 2 (U11-T2) moved event-policy validation into the
+        // unified `ValidationPipeline` (`rules_event_policy::EventPolicyRule`).
+        // The per-event loop below runs that pipeline and applies the same
+        // d623c09 semantics (terminal monotonicity, semantic gate, recovery)
+        // through the pipeline's `ValidationResult`s.
         let result = if self.should_run_engine_gate() {
             self.apply_engine_required_field_gate(result)
         } else {
@@ -8607,326 +7586,10 @@ impl EventLoop {
         }
         // --- End topic format check ---
 
-        // --- Event policy validation: check typed payload schema ---
-        // Inserted after scope enforcement, before workflow guard validation
-        let mut had_policy_rejections = false;
-        if let Some(ref policy_config) = self.config.event_loop.event_policy
-            && policy_config.enabled
-        {
-            // Unit 2 (2026-06-16-002 plan): `apply_event_policy_validation`
-            // now requires `&mut LoopState` (to drive the recoverable
-            // budget counters and to surface exhaustions to the
-            // runner).  To avoid a double `&mut self.state` borrow
-            // (the `policy_runtime_state` slot is **inside**
-            // `self.state`), we **take** the `Option<PolicyRuntimeState>`
-            // out of `self.state` for the duration of the call, then
-            // put it back.  This keeps the borrow checker happy and
-            // also matches the original (pre-Unit-2) call site's
-            // borrow pattern.
-            let mut policy_state: PolicyRuntimeState =
-                self.state.policy_runtime_state.take().unwrap_or_default();
-            // U6: build source/target hat indexes for payload contract
-            // violation attribution.
-            //
-            // R6 (2026-06-17-004 plan): use `BTreeMap` so the per-topic
-            // hat lists are built in a deterministic order.  `config.hats`
-            // is a `HashMap`, so iterating it produces a non-deterministic
-            // push order into the per-topic Vec; without the sort the
-            // resulting `source_hat` / `target_hat` vectors that get
-            // serialized into a `PayloadContractViolation` would inherit
-            // that order and break diagnostic / regression snapshot
-            // stability.  Sorting each Vec once after construction is
-            // O(N log N) on the total hat count and only runs when the
-            // event policy is enabled.
-            let mut source_hats_by_topic: std::collections::BTreeMap<String, Vec<String>> =
-                std::collections::BTreeMap::new();
-            let mut target_hats_by_topic: std::collections::BTreeMap<String, Vec<String>> =
-                std::collections::BTreeMap::new();
-            for (hat_id, hat_config) in &self.config.hats {
-                for t in &hat_config.publishes {
-                    source_hats_by_topic
-                        .entry(t.clone())
-                        .or_default()
-                        .push(hat_id.clone());
-                }
-                for t in &hat_config.triggers {
-                    target_hats_by_topic
-                        .entry(t.clone())
-                        .or_default()
-                        .push(hat_id.clone());
-                }
-            }
-            // Stable, sorted hat lists per topic.
-            for hats in source_hats_by_topic.values_mut() {
-                hats.sort();
-            }
-            for hats in target_hats_by_topic.values_mut() {
-                hats.sort();
-            }
-            // Unit 2 (2026-06-16-002 plan) take-3: the policy
-            // validator no longer takes `&mut LoopState`; it
-            // borrows `review_step_tracker` from `self.state` via
-            // a `&mut self.state.review_step_tracker` field
-            // reborrow that lives only for the call.  NLL
-            // recognizes the disjoint field as borrowable because
-            // the `&mut LoopState` parameter was removed (the
-            // counter bookkeeping moved to the caller).
-            let mut review_step_tracker = std::mem::take(&mut self.state.review_step_tracker);
-            let mut state_ledger = std::mem::take(&mut self.state.state_ledger);
-            let mut policy_result = apply_event_policy_validation(
-                events,
-                policy_config,
-                &mut policy_state,
-                &mut review_step_tracker,
-                &mut self.bus,
-                &mut self.state,
-                state_ledger.as_mut(),
-                policy_config
-                    .completion_after_terminal
-                    .write_diagnostic_event,
-                &source_hats_by_topic,
-                &target_hats_by_topic,
-                &self.registry,
-                self.config
-                    .event_loop
-                    .task_resume_ttl_seconds
-                    .unwrap_or(300),
-            );
-            // Restore the `ReviewStepTracker`, `StateLedger`, and put the
-            // `PolicyRuntimeState` back so the next call sees the
-            // same counters.
-            self.state.state_ledger = state_ledger;
-            self.state.review_step_tracker = review_step_tracker;
-            self.state.policy_runtime_state = Some(policy_state);
-            had_policy_rejections = !policy_result.policy_rejections.is_empty();
-            // Unit 2 (2026-06-16-002 plan) take-3: process the
-            // recoverable candidates ourselves.  The validator
-            // did not call `record_recoverable_rejection_key`
-            // because it does not own `&mut LoopState`.  For
-            // each candidate we (a) bump the counter and (b)
-            // push a `RecoverableExhaustion` into the buffer
-            // when the post-increment count crosses the budget.
-            for candidate in policy_result.recoverable_candidates.drain(..) {
-                let (count, exhausted) = self.state.record_recoverable_rejection_key(
-                    &candidate.hat,
-                    &candidate.topic,
-                    candidate.reason_class.as_str(),
-                );
-                if exhausted {
-                    self.state
-                        .recoverable_exhaustion_buffer
-                        .push(RecoverableExhaustion {
-                            hat: candidate.hat,
-                            topic: candidate.topic,
-                            reason_class: candidate.reason_class,
-                            count,
-                        });
-                }
-            }
-
-            // WRC-U4 (2026-06-12-003 / KTD-13 / F2): for every
-            // accepted event whose topic has a unique consumer in
-            // the HandoffIndex, record the handoff with the
-            // configured dispatch deadline. The tracker is a no-op
-            // in coordinator mode (`HandoffIndex::consumer_of`
-            // returns None there) and for non-handoff topics. The
-            // `Instant::now()` is captured at policy-accept time,
-            // not at bus.publish time, so a slow downstream
-            // validation step does not skew the deadline. Policy
-            // rejections (anything that did not land in
-            // `policy_result.events`) are intentionally NOT
-            // recorded — those events are dropped or held, and
-            // tracking them would create a phantom escalation.
-            //
-            // This loop runs **before** `events = policy_result.events`
-            // because that line moves the field out of the
-            // result; we still need to borrow the events vector
-            // here. The cost is one extra field access (the
-            // borrow ends at the end of this block).
-            for accepted in &policy_result.events {
-                if let Some(consumer) = self.handoff_index.consumer_of(&accepted.topic) {
-                    // JsonlEvent has no stable `id` field; use
-                    // `ts + topic` as the unique key for the
-                    // tracker's pending map. Two events on the
-                    // same topic with the same `ts` would
-                    // collide, but the JSONL reader increments
-                    // `ts` per line so the practical collision
-                    // rate is zero in normal use.
-                    let event_id = format!("{}:{}", accepted.ts, accepted.topic);
-                    self.state.handoff_tracker.on_handoff_accepted(
-                        accepted.topic.clone(),
-                        consumer.to_string(),
-                        event_id.clone(),
-                        std::time::Instant::now(),
-                    );
-
-                    // A4 (002-adversarial-review / 003-adversarial-review
-                    // P0-4): when the unified ledger is wired in,
-                    // mirror the accepted handoff into the commit
-                    // log. The ledger's
-                    // `commit_handoff_artifact` helper
-                    // auto-generates the artifact file when the
-                    // agent-provided `handoff_path` is missing or
-                    // fails validation (U5 regenerate policy), so
-                    // the loop is no longer dependent on the
-                    // agent to write a valid handoff file before
-                    // emitting `*.handoff.accepted`.
-                    if let Some(ref mut ledger) = self.state.state_ledger {
-                        let inputs = crate::state::HandoffAcceptedInputs {
-                            from: consumer.clone().into(),
-                            to: accepted
-                                .hat
-                                .clone()
-                                .unwrap_or_else(|| "unknown".into())
-                                .into(),
-                            iteration: self.state.iteration,
-                            current_seq: self.state.hat_handoff_seq,
-                            topic: accepted.topic.clone(),
-                            provided_handoff_path: extract_handoff_path_from_payload(
-                                accepted.payload.as_deref(),
-                            ),
-                        };
-                        match ledger.commit_handoff_artifact(&inputs) {
-                            Ok(outcome) => {
-                                if let Some(path) = outcome.handoff_path {
-                                    tracing::debug!(
-                                        event_id = %event_id,
-                                        handoff_path = %path,
-                                        "A4: ledger committed HandoffAccepted and (when needed) auto-generated artifact"
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    error = %e,
-                                    event_id = %event_id,
-                                    "A4: ledger.commit_handoff_artifact failed; loop continues with the live HandoffTracker record only"
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Unit 3 (2026-06-16-002 plan): flip the bootstrap
-            // gate when the coordinator hands off a terminal
-            // bootstrap event.  `policy_result.events` carries
-            // every policy-accepted event, including those
-            // routed through topic-deny and review-step gates
-            // (the `Accept` arm of `PolicyDecision`).  Plan-gate
-            // `work.ready` (with `reviewed_task_id`) is filtered
-            // out by the helper, matching the
-            // `ReviewStepTracker::check_semantic_gates` rule at
-            // `review_step_state.rs:174-191`.
-            self.update_bootstrap_flags_from_accepted(&policy_result.events);
-
-            // U4 (2026-06-17-003 plan): maintain the per-loop
-            // `work.done` dedup set. For each policy-accepted
-            // event, either (a) record the dedup key (for
-            // `work.done`) or (b) prune the step bucket (for
-            // step-boundary events `queue.advance`, `review.failed`,
-            // `fix.applied`). The set lives in
-            // `LoopState::work_done_seen_tasks`; the in-batch
-            // mirror lives in `PolicyRuntimeState::work_done_seen_keys`
-            // and is consulted by `validate_event_with_hat` for
-            // per-batch dedup.
-            for accepted in &policy_result.events {
-                match accepted.topic.as_str() {
-                    "work.done" => {
-                        if let Some(p) = accepted.payload.as_deref()
-                            && let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p)
-                            && let (Some(pn), Some(st), Some(ti)) = (
-                                obj.get("plan_name").and_then(|v| v.as_str()),
-                                obj.get("step").and_then(|v| v.as_str()),
-                                obj.get("task_id").and_then(|v| v.as_str()),
-                            )
-                        {
-                            let key = LoopState::work_done_dedup_key(pn, st, ti);
-                            self.state.work_done_seen_tasks.insert(key);
-                        }
-                    }
-                    "queue.advance" | "review.failed" | "fix.applied" => {
-                        if let Some(p) = accepted.payload.as_deref()
-                            && let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p)
-                        {
-                            let plan_name = obj
-                                .get("plan_name")
-                                .and_then(|v| v.as_str())
-                                .map(String::from);
-                            let step = obj
-                                .get("completed_step")
-                                .or_else(|| obj.get("step"))
-                                .and_then(|v| v.as_str())
-                                .map(String::from);
-                            if let (Some(pn), Some(st)) = (&plan_name, &step) {
-                                self.state.prune_work_done_bucket(pn, st);
-                                // U1 (2026-06-18-004 plan, KTD1):
-                                // `fix.applied` opens the re-review
-                                // window — prune the in-batch
-                                // `review.dimension.ready` mirror so
-                                // `review-coordinator` can legally
-                                // emit `review.dimension.ready` for
-                                // the same `(plan, step, task)` in a
-                                // new fix round. The original dedup
-                                // key lacks `fix_round`; without this
-                                // prune a fix → re-review attempt
-                                // always gets `DuplicateWorkDone`.
-                                if accepted.topic == "fix.applied" {
-                                    let task_id = obj
-                                        .get("task_id")
-                                        .and_then(|v| v.as_str())
-                                        .map(String::from);
-                                    if let Some(ti) = task_id.as_deref() {
-                                        if let Some(ref mut policy_state) =
-                                            self.state.policy_runtime_state
-                                        {
-                                            policy_state
-                                                .prune_review_dimension_ready_bucket(pn, st, ti);
-                                            // U5 (2026-06-18-004 plan, R4):
-                                            // also prune the
-                                            // `review.dimensions.complete`
-                                            // mirror so the
-                                            // next-round complete
-                                            // (with fix_round=N+1)
-                                            // lands cleanly.
-                                            policy_state.prune_review_dimensions_complete_bucket(
-                                                pn, st, ti,
-                                            );
-                                            // Symmetry fix: also prune
-                                            // the `PolicyRuntimeState`
-                                            // `work_done_seen_keys`
-                                            // mirror so the next
-                                            // process_output batch can
-                                            // accept a fresh
-                                            // `work.done` (the loop
-                                            // boundary alone is not
-                                            // enough).
-                                            policy_state.prune_work_done_bucket(pn, st);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-
-            events = policy_result.events;
-
-            // Write hold artifact if policy hold was triggered
-            if policy_result.hold_triggered
-                && let Err(e) = self.write_hold_artifact(policy_result.hold_reason.as_deref())
-            {
-                warn!(error = %e, "Failed to write hold artifact");
-            }
-            // U6: capture the first payload contract violation for the
-            // loop runner to surface.
-            if payload_contract_violation.is_none() {
-                payload_contract_violation = policy_result.payload_contract_violation;
-            }
-        }
-        // --- End event policy validation ---
+        // --- Event policy validation now runs inside the U11-T2 unified pipeline ---
+        // The legacy `apply_event_policy_validation` block was removed; see the
+        // per-event unified pipeline loop below for completion guard, topic-deny,
+        // payload policy, review-step gates, and side-effect handling.
 
         // --- State machine validation: enforce instance lifecycle rules ---
         // Inserted after policy validation, before workflow guards and record_event() + bus.publish()
@@ -9299,39 +7962,33 @@ impl EventLoop {
         // --- End state projection ---
 
         // --- U11-T2: per-event unified ValidationPipeline ---
-        // When `UNIFIED_VALIDATION=1` is on (pipeline was
-        // built at the top of this function), run the
-        // pre-commit rules against every accepted event
-        // BEFORE the legacy gate stack (`apply_step_handoff_gate`,
-        // `apply_workflow_guard_validation`,
-        // `validate_execution_contract`). Rejections route
-        // through `publish_correction_via_context` (the A3
-        // hook; T3 will replace its throwaway `PromptContext`
-        // with the real `state.prompt_context`). Accepted
-        // events continue through the legacy gate stack
-        // unchanged — backward compatibility per the A2
-        // opt-in design.
-        if let Some(ref pipeline) = unified_pipeline {
-            // U11-T9 (P0-3 follow-up): mirror the state
-            // projector's in-memory `tasks_cache` /
-            // `progress_cache` into the `LedgerSnapshot` so the
-            // unified pre-commit `StepHandoffRule` sees the
-            // same view as the legacy disk-side
-            // `apply_step_handoff_gate` (which reads the
-            // `progress.md` / `tasks.jsonl` that the projector
-            // just wrote). Without this sync, the rule would
-            // see a cold-start empty snapshot and silently
-            // miss the projected work-done, leading to either
-            // a missed accept or, before the temporary skip in
-            // `36a68306`, a spurious reject.
+        //
+        // Runs the unified pre-commit rules against every event that
+        // reached this point. Event-policy decisions are handled here
+        // (drop, warn, or publish correction); non-event-policy rejections
+        // emit a correction but keep the event so the legacy gate stack
+        // can produce its own verdict.
+        {
+            let policy_enabled = self
+                .config
+                .event_loop
+                .event_policy
+                .as_ref()
+                .is_some_and(|p| p.enabled);
+            let pipeline = &unified_pipeline;
+
+            // U11-T9 (P0-3 follow-up): mirror the state projector's cache
+            // into the `LedgerSnapshot` so `StepHandoffRule` sees the same
+            // view as the legacy disk-side gate.
             if let Some(ref mut projector) = self.state.state_projection {
                 if let Some(ref mut ledger) = self.state.state_ledger {
                     let mut guard = ledger.snapshot_mut();
                     projector.sync_to_ledger_snapshot(&mut guard);
                 }
             }
+
             let mut state_ledger = std::mem::take(&mut self.state.state_ledger);
-            let snapshot = state_ledger
+            let mut snapshot = state_ledger
                 .as_ref()
                 .map(|l| l.snapshot().clone())
                 .unwrap_or_else(crate::state::LedgerSnapshot::cold_start);
@@ -9340,42 +7997,164 @@ impl EventLoop {
                 None,
                 true,
             );
+
+            // Pass LoopState's policy runtime state / review-step tracker into
+            // the context as overrides so the event-policy rule mutates the
+            // canonical instances directly.
+            let mut policy_state = self.state.policy_runtime_state.take().unwrap_or_default();
+            let mut review_step_tracker = std::mem::take(&mut self.state.review_step_tracker);
+            let mut event_policy_violation: Option<
+                crate::payload_contract::PayloadContractViolation,
+            > = None;
+            let mut policy_rejections: Vec<crate::event_policy::PolicyRejection> = Vec::new();
+
+            // Source/target hat attribution for payload-contract violations.
+            let (source_hats_by_topic, target_hats_by_topic) = if policy_enabled {
+                let mut source: std::collections::BTreeMap<String, Vec<String>> =
+                    std::collections::BTreeMap::new();
+                let mut target: std::collections::BTreeMap<String, Vec<String>> =
+                    std::collections::BTreeMap::new();
+                for (hat_id, hat_config) in &self.config.hats {
+                    for t in &hat_config.publishes {
+                        source.entry(t.clone()).or_default().push(hat_id.clone());
+                    }
+                    for t in &hat_config.triggers {
+                        target.entry(t.clone()).or_default().push(hat_id.clone());
+                    }
+                }
+                for hats in source.values_mut() {
+                    hats.sort();
+                }
+                for hats in target.values_mut() {
+                    hats.sort();
+                }
+                (source, target)
+            } else {
+                (
+                    std::collections::BTreeMap::new(),
+                    std::collections::BTreeMap::new(),
+                )
+            };
+
+            let mut accepted_events: Vec<JsonlEvent> = Vec::with_capacity(events.len());
             let mut rejected_topics: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
+            let mut hold_reason: Option<String> = None;
+
             for evt in &events {
-                let results =
-                    pipeline.validate_pre_commit_with_view(&view, &snapshot, evt);
+                let mut ctx = crate::validation::ValidationContext::new(&mut snapshot)
+                    .with_policy_runtime_state(&mut policy_state)
+                    .with_review_step_tracker(&mut review_step_tracker)
+                    .with_payload_contract_violation(&mut event_policy_violation)
+                    .with_policy_rejections(&mut policy_rejections)
+                    .with_source_hats_by_topic(&source_hats_by_topic)
+                    .with_target_hats_by_topic(&target_hats_by_topic);
+                let results = pipeline.validate_pre_commit_with_view(&view, &mut ctx, evt);
+                let mut event_accepted = true;
+                let mut event_warnings: Vec<String> = Vec::new();
                 for r in &results {
-                    if !r.accepted {
-                        // U11-T9 (P0-3 follow-up): the previous
-                        // `if r.stage == ValidationStage::StepHandoff { continue; }`
-                        // skip was a temporary workaround (commit
-                        // `36a68306`) for the cold-start
-                        // `LedgerSnapshot` desync. The projector's
-                        // cache is now mirrored into the snapshot
-                        // before this filter runs, so
-                        // `StepHandoffRule` produces the same
-                        // verdict here as the legacy disk-side
-                        // `apply_step_handoff_gate` (line ~9301)
-                        // — but only when the state projector is
-                        // actually wiring those ledgers. When
-                        // `state_projection.enabled` is false, the
-                        // unified `StepHandoffRule` runs against a
-                        // cold-start snapshot with no task ledger
-                        // and would spuriously reject
-                        // `plan.complete` / `queue.advance` for
-                        // `task_not_found` even though the legacy
-                        // `apply_step_handoff_gate` is opt-in and
-                        // would not run. Mirror the legacy gate's
-                        // opt-in semantics: skip the unified
-                        // `StepHandoffRule` verdict when no
-                        // projector is active.
-                        if r.stage
-                            == crate::validation::ValidationStage::StepHandoff
-                            && !self.config.event_loop.state_projection.enabled
+                    if r.accepted {
+                        if r.stage == crate::validation::ValidationStage::EventPolicy
+                            && r.reason_code.as_deref()
+                                == Some(crate::validation::ReasonCode::EVENT_POLICY_WARNING)
                         {
-                            continue;
+                            if let Some(hint) = &r.correction_hint {
+                                event_warnings.push(hint.clone());
+                            }
                         }
+                        continue;
+                    }
+                    // Preserve the legacy opt-out for step-handoff when state
+                    // projection is disabled.
+                    if r.stage == crate::validation::ValidationStage::StepHandoff
+                        && !self.config.event_loop.state_projection.enabled
+                    {
+                        continue;
+                    }
+                    // U11-T2: step-handoff rejections now emit their operator-facing
+                    // side effects (`plan.blocked` + diagnostic + recovery envelope)
+                    // directly from the unified rejection handler. The legacy batch
+                    // gate is removed; this is the single source of truth for the
+                    // progress-task-mismatch recovery path.
+                    if r.stage == crate::validation::ValidationStage::StepHandoff {
+                        self.emit_step_handoff_rejection_side_effects(evt, r);
+                        event_accepted = false;
+                        break;
+                    }
+                    if r.stage == crate::validation::ValidationStage::EventPolicy {
+                        match r.reason_code.as_deref() {
+                            Some(
+                                crate::validation::ReasonCode::EVENT_POLICY_COMPLETION_BLOCKED,
+                            ) => {
+                                let msg = r.correction_hint.clone().unwrap_or_else(|| {
+                                    format!("Completion guard blocked '{}'", evt.topic)
+                                });
+                                self.bus
+                                    .publish(Event::new("event.completion.blocked", msg));
+                                event_accepted = false;
+                                break;
+                            }
+                            Some(
+                                crate::validation::ReasonCode::EVENT_POLICY_COMPLETION_IGNORED,
+                            ) => {
+                                let msg = r.correction_hint.clone().unwrap_or_else(|| {
+                                    format!("Completion guard ignored '{}'", evt.topic)
+                                });
+                                self.bus
+                                    .publish(Event::new("event.completion.ignored", msg));
+                                event_accepted = false;
+                                break;
+                            }
+                            Some(crate::validation::ReasonCode::EVENT_POLICY_BLOCKED)
+                            | Some(crate::validation::ReasonCode::EVENT_POLICY_IGNORED) => {
+                                event_accepted = false;
+                                break;
+                            }
+                            Some(crate::validation::ReasonCode::EVENT_POLICY_WARNING) => {
+                                if let Some(hint) = &r.correction_hint {
+                                    event_warnings.push(hint.clone());
+                                }
+                                continue;
+                            }
+                            Some(crate::validation::ReasonCode::EVENT_POLICY_HOLD) => {
+                                hold_reason = r.correction_hint.clone().or_else(|| {
+                                    Some(format!("Event '{}' violates policy", evt.topic))
+                                });
+                                let reason = format!(
+                                    "{}:{}",
+                                    r.stage.as_str(),
+                                    r.reason_code.as_deref().unwrap_or("rejected"),
+                                );
+                                publish_correction_via_context(
+                                    &mut self.bus,
+                                    &mut self.state,
+                                    state_ledger.as_mut(),
+                                    evt,
+                                    &reason,
+                                );
+                                had_policy_rejections = true;
+                                event_accepted = false;
+                                break;
+                            }
+                            _ => {
+                                let reason = format!(
+                                    "{}:{}",
+                                    r.stage.as_str(),
+                                    r.reason_code.as_deref().unwrap_or("rejected"),
+                                );
+                                publish_correction_via_context(
+                                    &mut self.bus,
+                                    &mut self.state,
+                                    state_ledger.as_mut(),
+                                    evt,
+                                    &reason,
+                                );
+                                had_policy_rejections = true;
+                                event_accepted = false;
+                                break;
+                            }
+                        }
+                    } else {
                         let reason = format!(
                             "{}:{}",
                             r.stage.as_str(),
@@ -9389,39 +8168,172 @@ impl EventLoop {
                             &reason,
                         );
                         rejected_topics.insert(evt.topic.clone());
-                        break;
                     }
                 }
+                if !event_warnings.is_empty() {
+                    let msg = format!(
+                        "Policy warning for '{}': {}",
+                        evt.topic,
+                        event_warnings.join("; ")
+                    );
+                    self.bus.publish(Event::new("event.policy_warning", msg));
+                }
+                if event_accepted {
+                    accepted_events.push(evt.clone());
+                }
             }
+
+            events = accepted_events;
+
+            // Restore LoopState fields mutated through context overrides.
             self.state.state_ledger = state_ledger;
-            // U11-T2 bugfix: do NOT `events.retain` on rejected
-            // topics. The original T2 retain short-circuited the
-            // legacy gate stack — unified verdict became the
-            // single source of truth, but the legacy contract
-            // layer lost the ability to produce its own
-            // `contract_rejections` (the
-            // `replay_light_integration::test_rejected_work_done_retry_payload_reaches_executor_prompt`
-            // and `test_rejected_missing_plan_path_*` tests pin
-            // the contract that legacy execution-contract
-            // validation *does* surface missing-field findings,
-            // even when unified already emitted a correction).
-            //
-            // The unified verdict now only emits
-            // `publish_correction_via_context` (the
-            // agent-facing signal). The legacy gate stack keeps
-            // its independent verdict (the operator-facing
-            // `recovery_envelope` + `contract_rejections`). The
-            // two signals are orthogonal by design — see
-            // A2 opt-in in the U11-T2 doc.
-            //
-            // `rejected_topics` is retained as a per-iteration
-            // diagnostic (logged below) but does not mutate
-            // `events`.
+            self.state.review_step_tracker = review_step_tracker;
+            self.state.policy_runtime_state = Some(policy_state);
+
+            if policy_enabled {
+                // Process recoverable rejection budget.
+                use crate::event_policy::ReasonClass;
+                for rejection in &policy_rejections {
+                    if let Some(ref class) = rejection.reason_class {
+                        // Semantic-gate violations are recoverable but bypass the
+                        // retry budget so a misbehaving coordinator cannot exhaust
+                        // the schema budget on empty-diff retries.
+                        if matches!(class, ReasonClass::SemanticGateViolation) {
+                            continue;
+                        }
+                        let hat = rejection.source_hat.as_deref().unwrap_or("unknown");
+                        let (count, exhausted) = self.state.record_recoverable_rejection_key(
+                            hat,
+                            &rejection.topic,
+                            class.as_str(),
+                        );
+                        if exhausted {
+                            self.state
+                                .recoverable_exhaustion_buffer
+                                .push(RecoverableExhaustion {
+                                    hat: hat.to_string(),
+                                    topic: rejection.topic.clone(),
+                                    reason_class: *class,
+                                    count,
+                                });
+                        }
+                    }
+                }
+
+                // WRC-U4: handoff tracking for accepted events whose topic has a
+                // unique consumer in the HandoffIndex.
+                self.update_bootstrap_flags_from_accepted(&events);
+                for accepted in &events {
+                    if let Some(consumer) = self.handoff_index.consumer_of(&accepted.topic) {
+                        let event_id = format!("{}:{}", accepted.ts, accepted.topic);
+                        self.state.handoff_tracker.on_handoff_accepted(
+                            accepted.topic.clone(),
+                            consumer.to_string(),
+                            event_id.clone(),
+                            std::time::Instant::now(),
+                        );
+                        if let Some(ref mut ledger) = self.state.state_ledger {
+                            let inputs = crate::state::HandoffAcceptedInputs {
+                                from: consumer.clone().into(),
+                                to: accepted
+                                    .hat
+                                    .clone()
+                                    .unwrap_or_else(|| "unknown".into())
+                                    .into(),
+                                iteration: self.state.iteration,
+                                current_seq: self.state.hat_handoff_seq,
+                                topic: accepted.topic.clone(),
+                                provided_handoff_path: extract_handoff_path_from_payload(
+                                    accepted.payload.as_deref(),
+                                ),
+                            };
+                            if let Err(e) = ledger.commit_handoff_artifact(&inputs) {
+                                tracing::warn!(
+                                    error = %e,
+                                    event_id = %event_id,
+                                    "A4: ledger.commit_handoff_artifact failed; loop continues"
+                                );
+                            }
+                        }
+                    }
+
+                    match accepted.topic.as_str() {
+                        "work.done" => {
+                            if let Some(p) = accepted.payload.as_deref()
+                                && let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p)
+                                && let (Some(pn), Some(st), Some(ti)) = (
+                                    obj.get("plan_name").and_then(|v| v.as_str()),
+                                    obj.get("step").and_then(|v| v.as_str()),
+                                    obj.get("task_id").and_then(|v| v.as_str()),
+                                )
+                            {
+                                let key = LoopState::work_done_dedup_key(pn, st, ti);
+                                self.state.work_done_seen_tasks.insert(key);
+                            }
+                        }
+                        "queue.advance" | "review.failed" | "fix.applied" => {
+                            if let Some(p) = accepted.payload.as_deref()
+                                && let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p)
+                            {
+                                let plan_name = obj
+                                    .get("plan_name")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from);
+                                let step = obj
+                                    .get("completed_step")
+                                    .or_else(|| obj.get("step"))
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from);
+                                if let (Some(pn), Some(st)) = (&plan_name, &step) {
+                                    self.state.prune_work_done_bucket(pn, st);
+                                    if accepted.topic == "fix.applied" {
+                                        let task_id = obj
+                                            .get("task_id")
+                                            .and_then(|v| v.as_str())
+                                            .map(String::from);
+                                        if let Some(ti) = task_id.as_deref() {
+                                            if let Some(ref mut policy_state) =
+                                                self.state.policy_runtime_state
+                                            {
+                                                policy_state.prune_review_dimension_ready_bucket(
+                                                    pn, st, ti,
+                                                );
+                                                policy_state
+                                                    .prune_review_dimensions_complete_bucket(
+                                                        pn, st, ti,
+                                                    );
+                                                policy_state.prune_work_done_bucket(pn, st);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Write hold artifact if policy hold was triggered.
+                if let Some(ref reason) = hold_reason {
+                    if let Err(e) = self.write_hold_artifact(Some(reason)) {
+                        warn!(error = %e, "Failed to write hold artifact");
+                    }
+                }
+
+                // U6: capture the first payload contract violation for the runner.
+                if payload_contract_violation.is_none() {
+                    payload_contract_violation = event_policy_violation;
+                }
+                if !policy_rejections.is_empty() {
+                    had_policy_rejections = true;
+                }
+            }
+
             if !rejected_topics.is_empty() {
                 tracing::debug!(
                     rejected = rejected_topics.len(),
                     remaining = events.len(),
-                    "U11-T2: unified pipeline rejected topics; events continue through legacy gates"
+                    "U11-T2: unified pipeline rejected topics; non-event-policy events continue through legacy gates"
                 );
             }
         }
@@ -9443,37 +8355,6 @@ impl EventLoop {
         // is removed; tests `p1_3_unified_*` document the
         // layered contract.)
 
-        // --- Step handoff gate (U4 of 2026-06-17-002 plan): ---
-        // pre-handoff consistency check for `progress.md` ↔
-        // `tasks.jsonl`. Rejects `queue.advance` / `plan.complete`
-        // when the two ledgers disagree, and injects `plan.blocked`
-        // so `plan-gate` can recover on the next iteration. Gate
-        // is opt-in via `workflow_contract.step_handoff.progress_task_gate`
-        // (default `false`); non-tier-0 presets are unaffected.
-        if self
-            .config
-            .event_loop
-            .workflow_contract
-            .as_ref()
-            .is_some_and(|wc| wc.step_handoff.progress_task_gate)
-        {
-            let (accepted_events, gate_envelopes) = apply_step_handoff_gate(
-                events,
-                self.config.core.workspace_root.as_path(),
-                &mut self.bus,
-                self.state.iteration,
-            );
-            events = accepted_events;
-            // Review fix #4 (code-review-2026-06-17-002): persist
-            // each gate rejection as a recovery envelope so
-            // `ralph diagnose --session latest` and the responder
-            // ladder see the gate failure.
-            for envelope in gate_envelopes {
-                self.record_recovery_envelope(&envelope, Vec::new());
-            }
-        }
-        // --- End step handoff gate ---
-
         // --- Workflow guard validation: reject out-of-order events ---
         // Legacy linear guards run after the state machine. When the state machine
         // is enabled, branch-close topics that it accepts are lifecycle-complete
@@ -9490,11 +8371,9 @@ impl EventLoop {
         // events keep flowing exactly as before.
         let events: Vec<JsonlEvent> = match (workflow_guards, state_machine_enabled) {
             (Some(guards), false) if !guards.chains.is_empty() => {
-                let mut review_step_tracker =
-                    std::mem::take(&mut self.state.review_step_tracker);
+                let mut review_step_tracker = std::mem::take(&mut self.state.review_step_tracker);
                 let mut state_ledger = std::mem::take(&mut self.state.state_ledger);
-                let mut workflow_progress =
-                    std::mem::take(&mut self.state.workflow_progress);
+                let mut workflow_progress = std::mem::take(&mut self.state.workflow_progress);
                 let outcome = apply_workflow_guard_validation(
                     events,
                     guards,
@@ -9814,9 +8693,9 @@ impl EventLoop {
                 // P1-2: per-event commit (see `commit_terminal_delta`).
                 if !self.state.completion_requested {
                     Self::commit_terminal_delta(
-                &mut self.state.state_ledger,
-                crate::state::CommitDelta::CompletionRequested,
-            );
+                        &mut self.state.state_ledger,
+                        crate::state::CommitDelta::CompletionRequested,
+                    );
                 }
                 self.state.completion_requested = true;
                 completion_seen_in_batch = true;
@@ -10800,93 +9679,140 @@ impl EventLoop {
             && policy_config.enabled
         {
             wave_raw_count = wave_events.len();
-            // Unit 2 (2026-06-16-002 plan): same `take()`/put-back
-            // pattern as the regular partition — see the long
-            // comment block above for the borrow-checker rationale.
-            // The function now takes `&mut LoopState` and reborrows
-            // `review_step_tracker` internally, so we only need to
-            // move `policy_runtime_state` out of `self.state` for
-            // the call.
             let mut policy_state: PolicyRuntimeState =
                 self.state.policy_runtime_state.take().unwrap_or_default();
-            // Unit 2 (2026-06-16-002 plan) take-3: same pattern
-            // as the regular partition.  Move the
-            // `review_step_tracker` and `policy_runtime_state`
-            // out of `self.state` for the call (the validator
-            // does **not** take `&mut LoopState` anymore), then
-            // restore them and post-process the recoverable
-            // candidates.
             let mut review_step_tracker = std::mem::take(&mut self.state.review_step_tracker);
             let mut state_ledger = std::mem::take(&mut self.state.state_ledger);
-            // U6 (2026-06-17-004 plan, R6): wave partition passes empty
-            // BTreeMaps because wave events don't produce payload-contract
-            // attributions (they fan out before any schema violation can
-            // resolve to a single (hat, topic) attribution).  The type
-            // stays `BTreeMap` to match the regular partition.
-            let policy_result = apply_event_policy_validation(
-                wave_events,
-                policy_config,
-                &mut policy_state,
-                &mut review_step_tracker,
-                &mut self.bus,
-                &mut self.state,
-                state_ledger.as_mut(),
-                policy_config
-                    .completion_after_terminal
-                    .write_diagnostic_event,
-                &std::collections::BTreeMap::new(),
-                &std::collections::BTreeMap::new(),
-                &self.registry,
-                self.config
-                    .event_loop
-                    .task_resume_ttl_seconds
-                    .unwrap_or(300),
+            let mut wave_violation: Option<crate::payload_contract::PayloadContractViolation> =
+                None;
+            let mut wave_rejections: Vec<crate::event_policy::PolicyRejection> = Vec::new();
+            let mut hold_reason: Option<String> = None;
+
+            let view = crate::preset::engine::protocol::ProtocolView::from_event_loop(
+                &self.config.event_loop,
             );
+            use crate::validation::{EventPolicyRule, ValidationContext, ValidationRule};
+            let rule = EventPolicyRule;
+
+            let mut accepted_wave_events: Vec<JsonlEvent> = Vec::with_capacity(wave_events.len());
+            for evt in &wave_events {
+                let mut snapshot = crate::state::LedgerSnapshot::cold_start();
+                let mut ctx = ValidationContext::new(&mut snapshot)
+                    .with_policy_runtime_state(&mut policy_state)
+                    .with_review_step_tracker(&mut review_step_tracker)
+                    .with_payload_contract_violation(&mut wave_violation)
+                    .with_policy_rejections(&mut wave_rejections);
+                let r = rule.validate(&view, &mut ctx, evt);
+                if r.accepted {
+                    if r.stage == crate::validation::ValidationStage::EventPolicy
+                        && r.reason_code.as_deref()
+                            == Some(crate::validation::ReasonCode::EVENT_POLICY_WARNING)
+                    {
+                        let msg = format!(
+                            "Policy warning for '{}': {}",
+                            evt.topic,
+                            r.correction_hint.as_deref().unwrap_or("")
+                        );
+                        self.bus.publish(Event::new("event.policy_warning", msg));
+                    }
+                    accepted_wave_events.push(evt.clone());
+                    continue;
+                }
+                match r.reason_code.as_deref() {
+                    Some(crate::validation::ReasonCode::EVENT_POLICY_COMPLETION_BLOCKED) => {
+                        let msg = r
+                            .correction_hint
+                            .clone()
+                            .unwrap_or_else(|| format!("Completion guard blocked '{}'", evt.topic));
+                        self.bus
+                            .publish(Event::new("event.completion.blocked", msg));
+                    }
+                    Some(crate::validation::ReasonCode::EVENT_POLICY_COMPLETION_IGNORED) => {
+                        let msg = r
+                            .correction_hint
+                            .clone()
+                            .unwrap_or_else(|| format!("Completion guard ignored '{}'", evt.topic));
+                        self.bus
+                            .publish(Event::new("event.completion.ignored", msg));
+                    }
+                    Some(crate::validation::ReasonCode::EVENT_POLICY_BLOCKED)
+                    | Some(crate::validation::ReasonCode::EVENT_POLICY_IGNORED) => {}
+                    Some(crate::validation::ReasonCode::EVENT_POLICY_HOLD) => {
+                        hold_reason = r
+                            .correction_hint
+                            .clone()
+                            .or_else(|| Some(format!("Event '{}' violates policy", evt.topic)));
+                        let reason = format!(
+                            "{}:{}",
+                            r.stage.as_str(),
+                            r.reason_code.as_deref().unwrap_or("rejected"),
+                        );
+                        publish_correction_via_context(
+                            &mut self.bus,
+                            &mut self.state,
+                            state_ledger.as_mut(),
+                            evt,
+                            &reason,
+                        );
+                    }
+                    _ => {
+                        let reason = format!(
+                            "{}:{}",
+                            r.stage.as_str(),
+                            r.reason_code.as_deref().unwrap_or("rejected"),
+                        );
+                        publish_correction_via_context(
+                            &mut self.bus,
+                            &mut self.state,
+                            state_ledger.as_mut(),
+                            evt,
+                            &reason,
+                        );
+                    }
+                }
+            }
+
             self.state.state_ledger = state_ledger;
             self.state.review_step_tracker = review_step_tracker;
             self.state.policy_runtime_state = Some(policy_state);
 
-            // Write hold artifact if policy hold was triggered
-            if policy_result.hold_triggered
-                && let Err(e) = self.write_hold_artifact(policy_result.hold_reason.as_deref())
-            {
-                warn!(error = %e, "Failed to write hold artifact");
-            }
+            wave_policy_rejections = wave_rejections;
 
-            wave_policy_rejections = policy_result.policy_rejections;
-            // Unit 2 (2026-06-16-002 plan) take-3: post-process
-            // the recoverable candidates — same loop as the
-            // regular partition, just extending the same buffer.
-            for candidate in policy_result.recoverable_candidates.into_iter() {
-                let (count, exhausted) = self.state.record_recoverable_rejection_key(
-                    &candidate.hat,
-                    &candidate.topic,
-                    candidate.reason_class.as_str(),
-                );
-                if exhausted {
-                    self.state
-                        .recoverable_exhaustion_buffer
-                        .push(RecoverableExhaustion {
-                            hat: candidate.hat,
-                            topic: candidate.topic,
-                            reason_class: candidate.reason_class,
-                            count,
-                        });
+            // Write hold artifact if policy hold was triggered.
+            if let Some(ref reason) = hold_reason {
+                if let Err(e) = self.write_hold_artifact(Some(reason)) {
+                    warn!(error = %e, "Failed to write hold artifact");
                 }
             }
 
-            // U1: when policy rejected every wave event, write a recovery
-            // envelope with `source = payload_contract` and
-            // `reason_code = wave_dispatch_blocked` (or `missing_required_field`
-            // if the first rejection's violation type is `MissingRequiredField`).
-            // The envelope is what `ralph diagnose` and the runner's gate
-            // logic use to distinguish "agent forgot to emit" from "agent
-            // emitted a wave that policy blocked". Fired on any batch
-            // where wave events entered the policy validator but none
-            // survived — covers both Reject-with-Resume and Hold (which
-            // does not produce PolicyRejection rows but still drops the
-            // event from the dispatch set).
-            if wave_raw_count > 0 && policy_result.events.is_empty() {
+            // Post-process recoverable rejection budget.
+            use crate::event_policy::ReasonClass;
+            for rejection in &wave_policy_rejections {
+                if let Some(ref class) = rejection.reason_class {
+                    if matches!(class, ReasonClass::SemanticGateViolation) {
+                        continue;
+                    }
+                    let hat = rejection.source_hat.as_deref().unwrap_or("unknown");
+                    let (count, exhausted) = self.state.record_recoverable_rejection_key(
+                        hat,
+                        &rejection.topic,
+                        class.as_str(),
+                    );
+                    if exhausted {
+                        self.state
+                            .recoverable_exhaustion_buffer
+                            .push(RecoverableExhaustion {
+                                hat: hat.to_string(),
+                                topic: rejection.topic.clone(),
+                                reason_class: *class,
+                                count,
+                            });
+                    }
+                }
+            }
+
+            // U1: when every wave event was rejected, write a recovery envelope.
+            if wave_raw_count > 0 && accepted_wave_events.is_empty() {
                 Self::log_wave_policy_blocked_envelope(
                     self,
                     &wave_policy_rejections,
@@ -10894,7 +9820,7 @@ impl EventLoop {
                 );
             }
 
-            policy_result.events
+            accepted_wave_events
         } else {
             wave_events
         };
@@ -11361,36 +10287,13 @@ fn is_rejection_stale(
     age > ttl_seconds as i64
 }
 
-/// U2 (plan 2026-06-21-002): construct a `StateLedger` from the
-/// `UNIFIED_STATE_LEDGER` env var. U11-T7: default is now ON;
-/// explicit `0` (or invalid values) keeps the legacy path.
-///
-/// Flag rules (U11-T7):
-/// - unset, empty, or `1` → feature on, fresh ledger rooted at `workspace`.
-/// - `0` → `None` (legacy).
-/// - any other value → warn and treat as off (`None`).
-fn build_state_ledger_from_env(workspace: &std::path::Path) -> Option<crate::state::StateLedger> {
-    match std::env::var("UNIFIED_STATE_LEDGER").ok().as_deref() {
-        Some("0") => {
-            debug!(
-                workspace = %workspace.display(),
-                "UNIFIED_STATE_LEDGER=0 — using legacy (ledger disabled)"
-            );
-            None
-        }
-        Some(other) if !other.trim().is_empty() && other.trim() != "1" => {
-            warn!(
-                value = %other,
-                "UNIFIED_STATE_LEDGER must be '1' (on) or '0' (off); treating as off"
-            );
-            None
-        }
-        _ => {
-            debug!(
-                workspace = %workspace.display(),
-                "UNIFIED_STATE_LEDGER default-on; wiring fresh StateLedger into LoopState"
-            );
-            Some(crate::state::StateLedger::new(workspace, true))
-        }
-    }
+/// U2 (plan 2026-06-21-002): construct a `StateLedger` rooted at
+/// `workspace`. The ledger is always enabled; the legacy in-memory
+/// projection caches have been removed.
+fn build_state_ledger_from_env(workspace: &std::path::Path) -> crate::state::StateLedger {
+    debug!(
+        workspace = %workspace.display(),
+        "wiring fresh StateLedger into LoopState"
+    );
+    crate::state::StateLedger::new(workspace, true)
 }

@@ -21,8 +21,8 @@ use ralph_proto::HatId;
 use crate::config::EventLoopConfig;
 use crate::event_reader::Event;
 use crate::preset::engine::protocol::ProtocolView;
-use crate::state::LedgerSnapshot;
 
+use super::context::ValidationContext;
 use super::result::{ValidationResult, ValidationStage};
 
 /// Which phase a [`ValidationRule`] runs in.
@@ -43,7 +43,7 @@ pub enum RulePhase {
 /// `required_fields` check, `execution_contract`,
 /// `hat_handoff::gate::evaluate_event`,
 /// `step_handoff::progress_task_gate`,
-/// `apply_workflow_guard_validation`) is wrapped as a `ValidationRule`
+/// `workflow guard`) is wrapped as a `ValidationRule`
 /// in [`super::rules_*`]. The trait stays intentionally narrow
 /// (no clock, no IO, no mutable state) so rules are pure functions
 /// of `(ProtocolView, LedgerSnapshot, Event)`.
@@ -58,11 +58,13 @@ pub trait ValidationRule: Send + Sync {
     /// Which phase the rule runs in.
     fn applies_to(&self) -> RulePhase;
 
-    /// Run the rule. Must not mutate any shared state.
+    /// Run the rule. Rules may mutate the snapshot through
+    /// [`ValidationContext::snapshot_mut`] when they need to update
+    /// per-event runtime state (e.g. event-policy dedup keys).
     fn validate(
         &self,
         protocol_view: &ProtocolView,
-        ledger_snapshot: &LedgerSnapshot,
+        ctx: &mut ValidationContext<'_>,
         event: &Event,
     ) -> ValidationResult;
 
@@ -165,6 +167,7 @@ impl ValidationPipeline {
         protocol_view: &ProtocolView,
         registry: Option<std::sync::Arc<crate::hat_registry::HatRegistry>>,
     ) -> Self {
+        use super::rules_event_policy::EventPolicyRule;
         use super::rules_execution_contract::ExecutionContractRule;
         use super::rules_hat_handoff::HatHandoffRule;
         use super::rules_origin::OriginRule;
@@ -182,6 +185,7 @@ impl ValidationPipeline {
             origin_rule,
             Arc::new(PublisherRule),
             Arc::new(RequiredFieldsRule),
+            Arc::new(EventPolicyRule),
             Arc::new(StepHandoffRule),
             Arc::new(HatHandoffRule),
         ];
@@ -223,12 +227,12 @@ impl ValidationPipeline {
     pub fn validate_pre_commit_with_view(
         &self,
         view: &ProtocolView,
-        snapshot: &LedgerSnapshot,
+        ctx: &mut ValidationContext<'_>,
         event: &Event,
     ) -> Vec<ValidationResult> {
         self.pre_commit_rules
             .iter()
-            .map(|rule| rule.validate(view, snapshot, event))
+            .map(|rule| rule.validate(view, ctx, event))
             .collect()
     }
 
@@ -239,12 +243,12 @@ impl ValidationPipeline {
     pub fn validate_post_commit(
         &self,
         view: &ProtocolView,
-        projected_snapshot: &LedgerSnapshot,
+        ctx: &mut ValidationContext<'_>,
         event: &Event,
     ) -> Vec<ValidationResult> {
         self.post_commit_rules
             .iter()
-            .map(|rule| rule.validate(view, projected_snapshot, event))
+            .map(|rule| rule.validate(view, ctx, event))
             .collect()
     }
 
@@ -261,12 +265,12 @@ impl ValidationPipeline {
     pub fn validate_with_preview(
         &self,
         view: &ProtocolView,
-        snapshot: &LedgerSnapshot,
-        projected_snapshot: &LedgerSnapshot,
+        ctx: &mut ValidationContext<'_>,
+        projected_ctx: &mut ValidationContext<'_>,
         event: &Event,
     ) -> ValidationReport {
-        let pre_commit = self.validate_pre_commit_with_view(view, snapshot, event);
-        let post_commit = self.validate_post_commit(view, projected_snapshot, event);
+        let pre_commit = self.validate_pre_commit_with_view(view, ctx, event);
+        let post_commit = self.validate_post_commit(view, projected_ctx, event);
         let post_commit_rejected = post_commit.iter().any(|r| !r.accepted);
         let accepted =
             pre_commit.iter().all(|r| r.accepted) && post_commit.iter().all(|r| r.accepted);

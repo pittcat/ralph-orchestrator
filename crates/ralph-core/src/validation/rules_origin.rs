@@ -31,8 +31,8 @@ use crate::event_origin::{self, OriginCheck};
 use crate::event_reader::Event;
 use crate::hat_registry::HatRegistry;
 use crate::preset::engine::protocol::ProtocolView;
-use crate::state::LedgerSnapshot;
 
+use super::context::ValidationContext;
 use super::pipeline::{RulePhase, ValidationRule};
 use super::result::{ReasonCode, ValidationResult, ValidationStage};
 
@@ -76,7 +76,7 @@ impl ValidationRule for OriginRule {
     fn validate(
         &self,
         _protocol_view: &ProtocolView,
-        _ledger_snapshot: &LedgerSnapshot,
+        _ctx: &mut ValidationContext<'_>,
         event: &Event,
     ) -> ValidationResult {
         let cancellation_topic = ""; // resolved via `LoopState` in legacy path

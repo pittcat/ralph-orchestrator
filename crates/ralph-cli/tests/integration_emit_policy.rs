@@ -303,9 +303,7 @@ fn test_emit_with_builtin_preset_rejects_string_payload() {
     // `not_retriable`); payload-type gate uses `not_retriable`.
     // Accept either since the assertion is that the emit was
     // rejected, not which gate fired.
-    let outcome = entry["envelope"]["outcome"]
-        .as_str()
-        .unwrap_or_default();
+    let outcome = entry["envelope"]["outcome"].as_str().unwrap_or_default();
     assert!(
         outcome == "not_retriable" || outcome == "failed",
         "expected a non-retriable outcome, got: {}",
@@ -427,8 +425,8 @@ fn test_emit_isolated_mode_rejects_coordinator_aggregate_timeout() {
     // - `aggregate_timeout` only present when the gate that
     //   tripped actually consulted `skip_reason`; not all
     //   guards do, so this is not a required match.
-    let has_hat_aware_rejection = stderr.contains("Event rejected by")
-        && stderr.contains("review-coordinator");
+    let has_hat_aware_rejection =
+        stderr.contains("Event rejected by") && stderr.contains("review-coordinator");
     assert!(
         has_hat_aware_rejection,
         "expected hat-aware rejection mentioning review-coordinator, got: {}",
@@ -783,7 +781,8 @@ fn test_emit_with_env_hats_source_rejects_string_payload_for_work_ready() {
             && (stderr.contains("ralph emit work.ready --json")
                 || stderr.contains("ralph tools handoff prepare")
                 || stderr.contains("requires payload")
-                || stderr.contains("hat_handoff_missing_path")),
+                || stderr.contains("hat_handoff_missing_path")
+                || stderr.contains("event_policy:payload_type_mismatch")),
         "stderr should expose a hat-aware or schema-aware rejection: {}",
         stderr
     );

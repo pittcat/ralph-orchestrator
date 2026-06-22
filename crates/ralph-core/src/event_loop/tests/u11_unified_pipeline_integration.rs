@@ -9,7 +9,7 @@ use crate::config::EventLoopConfig;
 use crate::event_reader::Event as JsonlEvent;
 use crate::preset::engine::protocol::ProtocolView;
 use crate::state::LedgerSnapshot;
-use crate::validation::ValidationPipeline;
+use crate::validation::{ValidationContext, ValidationPipeline};
 
 #[test]
 fn pre_commit_pipeline_accepts_legal_event() {
@@ -18,7 +18,7 @@ fn pre_commit_pipeline_accepts_legal_event() {
         None,
         true,
     );
-    let snapshot = LedgerSnapshot::cold_start();
+    let mut snapshot = LedgerSnapshot::cold_start();
     let pipeline = ValidationPipeline::from_config(&view, &EventLoopConfig::default());
 
     let event = JsonlEvent {
@@ -33,7 +33,8 @@ fn pre_commit_pipeline_accepts_legal_event() {
         wave_total: None,
         system_injected: None,
     };
-    let results = pipeline.validate_pre_commit_with_view(&view, &snapshot, &event);
+    let mut ctx = ValidationContext::new(&mut snapshot);
+    let results = pipeline.validate_pre_commit_with_view(&view, &mut ctx, &event);
     assert!(
         results.iter().all(|r| r.accepted),
         "well-formed debug.step event should pass pre-commit; got rejections: {:?}",
@@ -52,7 +53,7 @@ fn pre_commit_pipeline_returns_one_result_per_rule() {
         None,
         true,
     );
-    let snapshot = LedgerSnapshot::cold_start();
+    let mut snapshot = LedgerSnapshot::cold_start();
     let pipeline = ValidationPipeline::from_config(&view, &EventLoopConfig::default());
 
     let event = JsonlEvent {
@@ -67,7 +68,8 @@ fn pre_commit_pipeline_returns_one_result_per_rule() {
         wave_total: None,
         system_injected: None,
     };
-    let results = pipeline.validate_pre_commit_with_view(&view, &snapshot, &event);
+    let mut ctx = ValidationContext::new(&mut snapshot);
+    let results = pipeline.validate_pre_commit_with_view(&view, &mut ctx, &event);
     // One ValidationResult per pre-commit rule, regardless of accepted/rejected.
     assert_eq!(
         results.len(),

@@ -15,6 +15,7 @@ use crate::execution_contract::{self, ExecutionContractDecision, ExecutionContra
 use crate::preset::engine::protocol::ProtocolView;
 use crate::state::LedgerSnapshot;
 
+use super::context::ValidationContext;
 use super::pipeline::{RulePhase, ValidationRule};
 use super::result::{ReasonCode, RejectionHint, ValidationResult, ValidationStage};
 
@@ -33,7 +34,7 @@ impl ValidationRule for ExecutionContractRule {
     fn validate(
         &self,
         protocol_view: &ProtocolView,
-        ledger_snapshot: &LedgerSnapshot,
+        ctx: &mut ValidationContext<'_>,
         event: &Event,
     ) -> ValidationResult {
         // The rule only fires when the runtime has a contract
@@ -61,7 +62,7 @@ impl ValidationRule for ExecutionContractRule {
         // roundtrip, git evidence) remain in the legacy
         // execution-contract path until U6 wires the workspace
         // path through the pipeline.
-        let decision = execution_contract_check(rule, event, ledger_snapshot);
+        let decision = execution_contract_check(rule, event, ctx.snapshot());
         match decision {
             ExecutionContractDecision::Accept => {
                 ValidationResult::accept_with(ValidationStage::ExecutionContract)

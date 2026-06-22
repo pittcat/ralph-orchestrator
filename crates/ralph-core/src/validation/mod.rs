@@ -1,23 +1,19 @@
-//! Unified validation pipeline (U4).
+//! Unified validation pipeline (U4 / U11).
 //!
 //! Plan ref: U4 of
 //! `docs/plans/2026-06-21-002-refactor-unified-orchestrator-state-plan.md`.
 //!
-//! This module is the single home for the *stateless* validation rules
-//! that gate agent-emitted events before they touch
-//! [`crate::state::StateLedger`]. The rules are pure functions:
-//!
-//! ```text
-//! (ProtocolView, LedgerSnapshot, Event) -> ValidationResult
-//! ```
-//!
-//! They share no mutable state — every field they need comes from
-//! `ProtocolView` (config SSOT) and `LedgerSnapshot` (state SSOT).
+//! This module is the single home for validation rules that gate
+//! agent-emitted events before they touch [`crate::state::StateLedger`].
+//! Rules receive a mutable [`ValidationContext`] so stateful rules
+//! (e.g. event-policy dedup) can update runtime state while remaining
+//! composable.  Read-only rules use [`ValidationContext::snapshot`].
 //! Stage names (`origin`, `publisher`, `required_fields`,
 //! `execution_contract`, `step_handoff`, `hat_handoff`,
-//! `workflow_guard`) are preserved as `ValidationRule::name()`
-//! values so `reason_code` strings remain stable for downstream
-//! tooling (`ralph diagnose`, recovery envelopes, JSONL audits).
+//! `workflow_guard`, `event_policy`) are preserved as
+//! `ValidationRule::name()` values so `reason_code` strings remain
+//! stable for downstream tooling (`ralph diagnose`, recovery envelopes,
+//! JSONL audits).
 //!
 //! ## Phase split (KTD-3)
 //!
@@ -27,7 +23,7 @@
 //! - **PreCommit** rules run with the **current** snapshot. They
 //!   answer questions that only depend on configuration + the
 //!   event itself (origin guard, publisher, required fields,
-//!   hat-handoff, step-handoff).
+//!   hat-handoff, step-handoff, event-policy).
 //! - **PostCommit** rules run with the **projected** snapshot. They
 //!   answer questions that need the post-state (execution
 //!   contract, workflow guard).
@@ -36,16 +32,11 @@
 //! in the right order without committing the post-commit delta;
 //! the caller decides whether to finalize based on the returned
 //! [`ValidationReport`].
-//!
-//! ## Feature flag (KTD-8)
-//!
-//! The pipeline is **opt-in**. The runtime checks the
-//! `UNIFIED_VALIDATION` env var at construction time and falls
-//! back to the legacy gate stack when the flag is off. See
-//! [`ValidationPipeline::from_config`] for the resolution rule.
 
+mod context;
 mod pipeline;
 mod result;
+mod rules_event_policy;
 mod rules_execution_contract;
 mod rules_hat_handoff;
 mod rules_origin;
@@ -57,5 +48,7 @@ mod rules_workflow_guard;
 #[cfg(test)]
 mod tests;
 
+pub use context::ValidationContext;
 pub use pipeline::{RulePhase, ValidationPipeline, ValidationReport, ValidationRule};
 pub use result::{ReasonCode, RejectionHint, ValidationResult, ValidationStage};
+pub use rules_event_policy::EventPolicyRule;

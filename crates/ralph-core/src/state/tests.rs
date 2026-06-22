@@ -1131,7 +1131,10 @@ fn apply_delta_records_review_step_update() {
         let _ = steps_lock; // suppress unused
         dbg.contains("test-plan") && dbg.contains("task-1") && dbg.contains("step-1")
     };
-    assert!(found, "ReviewStepTracker Debug should contain applied delta keys");
+    assert!(
+        found,
+        "ReviewStepTracker Debug should contain applied delta keys"
+    );
 }
 
 #[test]
@@ -1291,7 +1294,10 @@ fn p1_2_terminal_cancellation_requested_survives_process_restart() {
 
     let mut first = StateLedger::new(workspace, true);
     first
-        .commit(CommitDelta::CancellationRequested, Some("loop.cancellation_requested".to_string()))
+        .commit(
+            CommitDelta::CancellationRequested,
+            Some("loop.cancellation_requested".to_string()),
+        )
         .unwrap();
     drop(first);
 
@@ -1311,7 +1317,10 @@ fn p1_2_terminal_completion_honored_survives_process_restart() {
 
     let mut first = StateLedger::new(workspace, true);
     first
-        .commit(CommitDelta::CompletionHonored, Some("loop.completion_honored".to_string()))
+        .commit(
+            CommitDelta::CompletionHonored,
+            Some("loop.completion_honored".to_string()),
+        )
         .unwrap();
     drop(first);
 

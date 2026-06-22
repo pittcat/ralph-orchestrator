@@ -10,8 +10,8 @@ use crate::event_reader::Event;
 use crate::preset::engine::protocol::ProtocolView;
 use crate::state::LedgerSnapshot;
 use crate::validation::{
-    ReasonCode, RulePhase, ValidationPipeline, ValidationReport, ValidationResult, ValidationRule,
-    ValidationStage,
+    ReasonCode, RulePhase, ValidationContext, ValidationPipeline, ValidationReport,
+    ValidationResult, ValidationRule, ValidationStage,
 };
 
 /// Helper: build a minimal `EventLoopConfig` whose schema set
@@ -66,6 +66,7 @@ fn make_event(topic: &str, payload: &str, hat: Option<&str>) -> Event {
 
 #[test]
 fn rule_phase_classification_matches_pipeline() {
+    use crate::validation::rules_event_policy::EventPolicyRule;
     use crate::validation::rules_execution_contract::ExecutionContractRule;
     use crate::validation::rules_hat_handoff::HatHandoffRule;
     use crate::validation::rules_origin::OriginRule;
@@ -79,6 +80,7 @@ fn rule_phase_classification_matches_pipeline() {
         &origin,
         &PublisherRule,
         &RequiredFieldsRule,
+        &EventPolicyRule,
         &StepHandoffRule,
         &HatHandoffRule,
     ];
@@ -94,6 +96,7 @@ fn rule_phase_classification_matches_pipeline() {
 
 #[test]
 fn rule_names_match_stage_constants() {
+    use crate::validation::rules_event_policy::EventPolicyRule;
     use crate::validation::rules_execution_contract::ExecutionContractRule;
     use crate::validation::rules_hat_handoff::HatHandoffRule;
     use crate::validation::rules_origin::OriginRule;
@@ -107,6 +110,7 @@ fn rule_names_match_stage_constants() {
         (&origin, ValidationStage::Origin),
         (&PublisherRule, ValidationStage::Publisher),
         (&RequiredFieldsRule, ValidationStage::RequiredFields),
+        (&EventPolicyRule, ValidationStage::EventPolicy),
         (&ExecutionContractRule, ValidationStage::ExecutionContract),
         (&StepHandoffRule, ValidationStage::StepHandoff),
         (&HatHandoffRule, ValidationStage::HatHandoff),
@@ -122,12 +126,12 @@ fn rule_names_match_stage_constants() {
 // ============================================================
 
 #[test]
-fn pipeline_from_config_contains_seven_rules() {
+fn pipeline_from_config_contains_eight_rules() {
     let config = minimal_config();
     let view = ProtocolView::from_event_loop(&config);
     let pipeline = ValidationPipeline::from_config(&view, &config);
-    // 5 pre + 2 post = 7 rules total.
-    assert_eq!(pipeline.pre_commit_rules.len(), 5);
+    // 6 pre + 2 post = 8 rules total.
+    assert_eq!(pipeline.pre_commit_rules.len(), 6);
     assert_eq!(pipeline.post_commit_rules.len(), 2);
 }
 
@@ -139,9 +143,10 @@ fn pipeline_from_config_contains_seven_rules() {
 fn origin_rule_accepts_solo_mode_event() {
     use crate::validation::rules_origin::OriginRule;
     let view = ProtocolView::from_event_loop(&minimal_config());
-    let snap = minimal_snapshot();
+    let mut snap = minimal_snapshot();
+    let mut ctx = ValidationContext::new(&mut snap);
     let event = make_event("any.topic", "{}", Some("any-hat"));
-    let result = OriginRule::default().validate(&view, &snap, &event);
+    let result = OriginRule::default().validate(&view, &mut ctx, &event);
     assert!(
         result.accepted,
         "solo-mode origin rule should accept: {result:?}"
@@ -152,13 +157,14 @@ fn origin_rule_accepts_solo_mode_event() {
 fn origin_rule_handles_ralph_pseudo_hat_event() {
     use crate::validation::rules_origin::OriginRule;
     let view = ProtocolView::from_event_loop(&minimal_config());
-    let snap = minimal_snapshot();
+    let mut snap = minimal_snapshot();
+    let mut ctx = ValidationContext::new(&mut snap);
     let event = make_event("work.start", "{}", Some("ralph"));
     // The default empty registry accepts everything; the
     // rule's reason_code surface is exercised by the legacy
     // `event_origin` tests. This test pins that the rule
     // *runs* without panicking on the ralph-pseudo-hat path.
-    let _ = OriginRule::default().validate(&view, &snap, &event);
+    let _ = OriginRule::default().validate(&view, &mut ctx, &event);
 }
 
 // ============================================================
@@ -169,9 +175,10 @@ fn origin_rule_handles_ralph_pseudo_hat_event() {
 fn publisher_rule_accepts_default_permissive_view() {
     use crate::validation::rules_publisher::PublisherRule;
     let view = ProtocolView::from_event_loop(&minimal_config());
-    let snap = minimal_snapshot();
+    let mut snap = minimal_snapshot();
+    let mut ctx = ValidationContext::new(&mut snap);
     let event = make_event("work.done", r#"{"task_id":"t","step":"s"}"#, None);
-    let result = PublisherRule.validate(&view, &snap, &event);
+    let result = PublisherRule.validate(&view, &mut ctx, &event);
     assert!(result.accepted, "default view is permissive: {result:?}");
 }
 
@@ -183,9 +190,10 @@ fn publisher_rule_accepts_default_permissive_view() {
 fn required_fields_rule_accepts_complete_payload() {
     use crate::validation::rules_required_fields::RequiredFieldsRule;
     let view = ProtocolView::from_event_loop(&minimal_config());
-    let snap = minimal_snapshot();
+    let mut snap = minimal_snapshot();
+    let mut ctx = ValidationContext::new(&mut snap);
     let event = make_event("work.done", r#"{"task_id":"t1","step":"s1"}"#, None);
-    let result = RequiredFieldsRule.validate(&view, &snap, &event);
+    let result = RequiredFieldsRule.validate(&view, &mut ctx, &event);
     assert!(result.accepted, "{result:?}");
 }
 
@@ -193,9 +201,10 @@ fn required_fields_rule_accepts_complete_payload() {
 fn required_fields_rule_rejects_missing_field_with_engine_prefix() {
     use crate::validation::rules_required_fields::RequiredFieldsRule;
     let view = ProtocolView::from_event_loop(&minimal_config());
-    let snap = minimal_snapshot();
+    let mut snap = minimal_snapshot();
+    let mut ctx = ValidationContext::new(&mut snap);
     let event = make_event("work.done", r#"{"step":"s1"}"#, None);
-    let result = RequiredFieldsRule.validate(&view, &snap, &event);
+    let result = RequiredFieldsRule.validate(&view, &mut ctx, &event);
     assert!(!result.accepted);
     let code = result
         .reason_code
@@ -211,9 +220,10 @@ fn required_fields_rule_rejects_missing_field_with_engine_prefix() {
 fn required_fields_rule_rejects_empty_payload() {
     use crate::validation::rules_required_fields::RequiredFieldsRule;
     let view = ProtocolView::from_event_loop(&minimal_config());
-    let snap = minimal_snapshot();
+    let mut snap = minimal_snapshot();
+    let mut ctx = ValidationContext::new(&mut snap);
     let event = make_event("work.done", "", None);
-    let result = RequiredFieldsRule.validate(&view, &snap, &event);
+    let result = RequiredFieldsRule.validate(&view, &mut ctx, &event);
     assert!(!result.accepted, "empty payload should be rejected");
     assert!(
         result
@@ -228,9 +238,10 @@ fn required_fields_rule_rejects_empty_payload() {
 fn required_fields_rule_accepts_malformed_json_to_defer_to_execution_contract() {
     use crate::validation::rules_required_fields::RequiredFieldsRule;
     let view = ProtocolView::from_event_loop(&minimal_config());
-    let snap = minimal_snapshot();
+    let mut snap = minimal_snapshot();
+    let mut ctx = ValidationContext::new(&mut snap);
     let event = make_event("work.done", "not valid json", None);
-    let result = RequiredFieldsRule.validate(&view, &snap, &event);
+    let result = RequiredFieldsRule.validate(&view, &mut ctx, &event);
     // The rule is intentionally lenient on parse failures;
     // execution_contract / payload_contract own that domain.
     assert!(result.accepted, "{result:?}");
@@ -244,9 +255,10 @@ fn required_fields_rule_accepts_malformed_json_to_defer_to_execution_contract() 
 fn step_handoff_rule_accepts_non_gated_topic() {
     use crate::validation::rules_step_handoff::StepHandoffRule;
     let view = ProtocolView::from_event_loop(&minimal_config());
-    let snap = minimal_snapshot();
+    let mut snap = minimal_snapshot();
+    let mut ctx = ValidationContext::new(&mut snap);
     let event = make_event("review.dimension.done", r#"{"step":"s1"}"#, None);
-    let result = StepHandoffRule.validate(&view, &snap, &event);
+    let result = StepHandoffRule.validate(&view, &mut ctx, &event);
     assert!(result.accepted, "{result:?}");
 }
 
@@ -260,8 +272,9 @@ fn step_handoff_rule_rejects_mismatched_step() {
     progress.current_step = Some("step-05".to_string());
     progress.completed_steps = vec!["step-01".to_string(), "step-02".to_string()];
     snap.progress = progress;
+    let mut ctx = ValidationContext::new(&mut snap);
     let event = make_event("queue.advance", r#"{"step":"step-09"}"#, None);
-    let result = StepHandoffRule.validate(&view, &snap, &event);
+    let result = StepHandoffRule.validate(&view, &mut ctx, &event);
     assert!(!result.accepted);
     let code = result.reason_code.unwrap();
     assert!(
@@ -288,12 +301,13 @@ fn step_handoff_rule_accepts_aligned_state() {
         t
     };
     snap.tasks = vec![task];
+    let mut ctx = ValidationContext::new(&mut snap);
     let event = make_event(
         "queue.advance",
         r#"{"step":"step-02","task_id":"task-1"}"#,
         None,
     );
-    let result = StepHandoffRule.validate(&view, &snap, &event);
+    let result = StepHandoffRule.validate(&view, &mut ctx, &event);
     assert!(result.accepted, "{result:?}");
 }
 
@@ -305,9 +319,10 @@ fn step_handoff_rule_accepts_aligned_state() {
 fn hat_handoff_rule_accepts_non_macro_topic() {
     use crate::validation::rules_hat_handoff::HatHandoffRule;
     let view = ProtocolView::from_event_loop(&minimal_config());
-    let snap = minimal_snapshot();
+    let mut snap = minimal_snapshot();
+    let mut ctx = ValidationContext::new(&mut snap);
     let event = make_event("some.topic", r#"{}"#, None);
-    let result = HatHandoffRule.validate(&view, &snap, &event);
+    let result = HatHandoffRule.validate(&view, &mut ctx, &event);
     assert!(result.accepted, "{result:?}");
 }
 
@@ -319,9 +334,10 @@ fn hat_handoff_rule_accepts_non_macro_topic() {
 fn execution_contract_rule_accepts_when_contracts_disabled() {
     use crate::validation::rules_execution_contract::ExecutionContractRule;
     let view = ProtocolView::from_event_loop(&minimal_config());
-    let snap = minimal_snapshot();
+    let mut snap = minimal_snapshot();
+    let mut ctx = ValidationContext::new(&mut snap);
     let event = make_event("work.done", r#"{"task_id":"t1"}"#, None);
-    let result = ExecutionContractRule.validate(&view, &snap, &event);
+    let result = ExecutionContractRule.validate(&view, &mut ctx, &event);
     assert!(result.accepted, "{result:?}");
 }
 
@@ -340,9 +356,10 @@ fn execution_contract_rule_rejects_invalid_payload() {
     contracts.rules.insert("work.done".to_string(), ecr);
     config.execution_contracts = Some(contracts);
     let view = ProtocolView::from_event_loop(&config);
-    let snap = minimal_snapshot();
+    let mut snap = minimal_snapshot();
+    let mut ctx = ValidationContext::new(&mut snap);
     let event = make_event("work.done", "not json", None);
-    let result = ExecutionContractRule.validate(&view, &snap, &event);
+    let result = ExecutionContractRule.validate(&view, &mut ctx, &event);
     assert!(!result.accepted);
     let code = result.reason_code.unwrap();
     assert!(
@@ -361,9 +378,10 @@ fn execution_contract_rule_rejects_invalid_payload() {
 fn workflow_guard_rule_accepts_with_no_chain_configured() {
     use crate::validation::rules_workflow_guard::WorkflowGuardRule;
     let view = ProtocolView::from_event_loop(&minimal_config());
-    let snap = minimal_snapshot();
+    let mut snap = minimal_snapshot();
+    let mut ctx = ValidationContext::new(&mut snap);
     let event = make_event("experiment.planned", r#"{}"#, None);
-    let result = WorkflowGuardRule.validate(&view, &snap, &event);
+    let result = WorkflowGuardRule.validate(&view, &mut ctx, &event);
     assert!(result.accepted, "{result:?}");
 }
 
@@ -460,6 +478,7 @@ fn reason_code_prefixes_match_stages() {
         ("origin", &["origin:"]),
         ("publisher", &["publisher:"]),
         ("required_fields", &["required_fields:", "engine_rejected:"]),
+        ("event_policy", &["event_policy:"]),
         ("execution_contract", &["execution_contract:", "contract:"]),
         ("step_handoff", &["step_handoff:"]),
         ("hat_handoff", &["hat_handoff:"]),
@@ -475,6 +494,10 @@ fn reason_code_prefixes_match_stages() {
         (
             ReasonCode::REQUIRED_FIELD_MISSING,
             ValidationStage::RequiredFields,
+        ),
+        (
+            ReasonCode::EVENT_POLICY_TOPIC_DENIED,
+            ValidationStage::EventPolicy,
         ),
         (
             ReasonCode::CONTRACT_MISSING_TASK_ID,
@@ -514,10 +537,13 @@ fn validate_with_preview_accepts_well_formed_work_done() {
     let config = minimal_config();
     let view = ProtocolView::from_event_loop(&config);
     let pipeline = ValidationPipeline::from_config(&view, &config);
-    let snap = minimal_snapshot();
+    let mut snap = minimal_snapshot();
+    let mut projected = snap.clone();
+    let mut ctx = ValidationContext::new(&mut snap);
+    let mut projected_ctx = ValidationContext::new(&mut projected);
     let event = make_event("work.done", r#"{"task_id":"t1","step":"s1"}"#, None);
     // Empty projection equals current snapshot in this test.
-    let report = pipeline.validate_with_preview(&view, &snap, &snap, &event);
+    let report = pipeline.validate_with_preview(&view, &mut ctx, &mut projected_ctx, &event);
     // Origin rule (default empty registry) accepts; publisher
     // rule accepts (default permissive); required-fields rule
     // accepts; execution-contract rule accepts (no contracts
@@ -533,9 +559,12 @@ fn validate_with_preview_rejects_missing_required_field() {
     let config = minimal_config();
     let view = ProtocolView::from_event_loop(&config);
     let pipeline = ValidationPipeline::from_config(&view, &config);
-    let snap = minimal_snapshot();
+    let mut snap = minimal_snapshot();
+    let mut projected = snap.clone();
+    let mut ctx = ValidationContext::new(&mut snap);
+    let mut projected_ctx = ValidationContext::new(&mut projected);
     let event = make_event("work.done", r#"{"step":"s1"}"#, None);
-    let report = pipeline.validate_with_preview(&view, &snap, &snap, &event);
+    let report = pipeline.validate_with_preview(&view, &mut ctx, &mut projected_ctx, &event);
     assert!(!report.accepted);
     let first = report.first_rejection().expect("rejection present");
     assert!(

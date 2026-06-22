@@ -73,7 +73,7 @@ metadata:
 
 ### `ralph wave emit` Schema 预检（U4）
 
-`ralph wave emit` 在 shape 校验之后、写盘之前会先对**整批** payload 做 event policy schema 预检（`crates/ralph-cli/src/policy_check.rs`），与 `ralph run` 循环内 `apply_event_policy_validation` 行为一致：
+`ralph wave emit` 在 shape 校验之后、写盘之前会先对**整批** payload 做 event policy schema 预检（`crates/ralph-cli/src/policy_check.rs`），与 `ralph run` 循环内统一校验管线 `validation::rules_event_policy::EventPolicyRule` 行为一致：
 
 - 默认行为：当 `ralph.yml`（或合并后的 preset）开启了 `event_policy.enabled: true` 时，强制启用预检。
 - 任一 payload 缺必需字段（如 `review.wave.ready` 的 `depth`）→ 整批**原子拒绝**，**不写盘**任何 line。

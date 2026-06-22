@@ -29,8 +29,8 @@
 
 use crate::event_reader::Event;
 use crate::preset::engine::protocol::ProtocolView;
-use crate::state::LedgerSnapshot;
 
+use super::context::ValidationContext;
 use super::pipeline::{RulePhase, ValidationRule};
 use super::result::{ReasonCode, ValidationResult, ValidationStage};
 
@@ -49,7 +49,7 @@ impl ValidationRule for HatHandoffRule {
     fn validate(
         &self,
         protocol_view: &ProtocolView,
-        _ledger_snapshot: &LedgerSnapshot,
+        _ctx: &mut ValidationContext<'_>,
         event: &Event,
     ) -> ValidationResult {
         // The rule's macro-edge check is `ProtocolView::is_macro_edge(topic)`.

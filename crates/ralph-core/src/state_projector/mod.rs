@@ -6,7 +6,8 @@
 //! The module has four public entry points:
 //! - [`StateProjector::apply`] — main hook. Called from
 //!   `process_parse_result` **after** the state machine validates
-//!   the batch and **before** `apply_step_handoff_gate` (SP-R8).
+//!   the batch and **before** the unified `StepHandoffRule` runs
+//!   (SP-R8).
 //!   Returns an [`ApplyReport`] so the caller can fail-closed on
 //!   individual events.
 //! - [`StateProjector::bootstrap_from_disk`] — Unit 6 entry point

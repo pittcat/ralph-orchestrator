@@ -47,8 +47,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::config::execution_contracts::{ExecutionContractRule, ExecutionContractsConfig};
 use crate::config::{
-    EventLoopConfig, EventSchema, HatExecutionMode, StateProjectionConfig, VerdictGateConfig,
-    WorkflowContractConfig,
+    EventLoopConfig, EventPolicyConfig, EventSchema, HatExecutionMode, StateProjectionConfig,
+    VerdictGateConfig, WorkflowChain, WorkflowContractConfig, WorkflowGuardsConfig,
 };
 use crate::hat_handoff::HatHandoffConfig;
 use crate::workflow_contract::handoff_index::HandoffIndex;
@@ -75,12 +75,20 @@ pub struct ProtocolView {
     /// Workflow contract (handoff seeds + step handoff flags).
     pub workflow_contract: Option<WorkflowContractConfig>,
 
+    /// Workflow guards (ordered event chains).
+    pub workflow_guards: Option<WorkflowGuardsConfig>,
+
     /// State projection chain.
     pub state_projection: Option<StateProjectionConfig>,
 
     /// Execution contracts (require_git_change / require_task /
     /// dedup_key / etc). Empty when `enabled = false`.
     pub execution_contracts: Option<ExecutionContractsConfig>,
+
+    /// Event policy config (schemas, topic deny rules, terminal /
+    /// business topics, completion-after-terminal actions). `None`
+    /// when the preset does not declare an `event_policy` block.
+    pub event_policy: Option<EventPolicyConfig>,
 
     /// Hat handoff config (artifact rules, linter settings,
     /// macro/exempt topics, max bytes).
@@ -171,32 +179,17 @@ impl ProtocolView {
         Self::from_event_loop_with_index_and_feature(config, index, false)
     }
 
-    /// Build a view with the `UNIFIED_PROTOCOL_VIEW` env var
-    /// read at the call site. Production-only — tests must not
-    /// use this helper because the env is process-global and
-    /// cannot be reset safely across `cargo nextest` workers.
-    /// The CLI / runtime invoke this *once* at startup so the
-    /// rest of the pipeline can stay env-free.
+    /// Build a view with the unified protocol view always enabled.
+    /// The env var read has been removed; the test override remains
+    /// so suites can still exercise the legacy path when needed.
     pub fn from_event_loop_with_index_for_env(
         config: &EventLoopConfig,
         index: Option<&HandoffIndex>,
     ) -> Self {
-        // KTD-8: feature flag is captured at construction so the
-        // runtime can consult `feature_enabled()` later without
-        // re-reading the env.
-        // U11-T7: default is now ON; explicit `UNIFIED_PROTOCOL_VIEW=0`
-        // opts out and preserves the legacy resolution path.
-        let feature_flag_enabled = if let Some(cell) = TEST_PROTOCOL_VIEW_ENABLED.get() {
-            // Test override wins so the workspace's
-            // `forbid(unsafe_code)` lint does not require
-            // tests to flip the process-global env var.
-            cell.load(std::sync::atomic::Ordering::Relaxed)
-        } else {
-            !matches!(
-                std::env::var("UNIFIED_PROTOCOL_VIEW").ok().as_deref(),
-                Some("0")
-            )
-        };
+        let feature_flag_enabled = TEST_PROTOCOL_VIEW_ENABLED
+            .get()
+            .map(|cell| cell.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(true);
         Self::from_event_loop_with_index_and_feature(config, index, feature_flag_enabled)
     }
 
@@ -226,6 +219,7 @@ impl ProtocolView {
         );
 
         let verdict_gate = config.verdict_gate.clone();
+        let workflow_guards = config.workflow_guards.clone();
         let state_projection = Some(config.state_projection.clone());
         let execution_contracts = config.execution_contracts.clone();
         let hat_handoff = config.hat_handoff.clone();
@@ -240,14 +234,17 @@ impl ProtocolView {
             &effective_required_fields,
             &hat_handoff,
             &macro_edges_resolved,
+            workflow_guards.as_ref(),
         );
 
         Self {
             effective_required_fields,
             verdict_gate,
             workflow_contract,
+            workflow_guards,
             state_projection,
             execution_contracts,
+            event_policy: config.event_policy.clone(),
             hat_handoff,
             macro_edges_resolved,
             macro_edge_consumers,
@@ -457,9 +454,7 @@ impl ProtocolView {
 /// Production code never touches this static; it stays `None`
 /// in release binaries.
 pub fn set_protocol_view_enabled_for_test(enabled: bool) {
-    let cell = TEST_PROTOCOL_VIEW_ENABLED.get_or_init(|| {
-        std::sync::atomic::AtomicBool::new(true)
-    });
+    let cell = TEST_PROTOCOL_VIEW_ENABLED.get_or_init(|| std::sync::atomic::AtomicBool::new(true));
     cell.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -568,6 +563,7 @@ fn compute_protocol_hash(
     fields: &HashMap<String, HashSet<String>>,
     hat_handoff: &HatHandoffConfig,
     macro_edges: &HashSet<String>,
+    workflow_guards: Option<&WorkflowGuardsConfig>,
 ) -> String {
     let mut hasher = Sha256::new();
     // BTreeMap shadow gives a stable iteration order without
@@ -607,6 +603,20 @@ fn compute_protocol_hash(
     for t in sorted_macro {
         hasher.update(t.as_bytes());
         hasher.update([0u8]);
+    }
+    hasher.update(b"|workflow_guards|");
+    if let Some(guards) = workflow_guards {
+        let mut chains: Vec<&WorkflowChain> = guards.chains.iter().collect();
+        chains.sort_by(|a, b| a.name.cmp(&b.name));
+        for chain in chains {
+            hasher.update(chain.name.as_bytes());
+            hasher.update([0u8]);
+            for topic in &chain.topics {
+                hasher.update(topic.as_bytes());
+                hasher.update([0u8]);
+            }
+            hasher.update([1u8]); // chain separator
+        }
     }
     let digest = hasher.finalize();
     // 16 hex chars = 64 bits; same width as the previous
@@ -975,16 +985,14 @@ hats:
         // returns `feature_enabled` equal to the override value
         // (the env-var read is short-circuited by the override).
         super::set_protocol_view_enabled_for_test(false);
-        let view_env_off =
-            ProtocolView::from_event_loop_with_index_for_env(&cfg.event_loop, None);
+        let view_env_off = ProtocolView::from_event_loop_with_index_for_env(&cfg.event_loop, None);
         assert!(
             !view_env_off.feature_enabled(),
             "env-var wrapper with override = false must yield feature_enabled = false (opt-out via test override)"
         );
 
         super::set_protocol_view_enabled_for_test(true);
-        let view_env_on =
-            ProtocolView::from_event_loop_with_index_for_env(&cfg.event_loop, None);
+        let view_env_on = ProtocolView::from_event_loop_with_index_for_env(&cfg.event_loop, None);
         assert!(
             view_env_on.feature_enabled(),
             "env-var wrapper with override = true must yield feature_enabled = true (default-on path)"
