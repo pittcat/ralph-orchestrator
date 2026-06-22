@@ -100,8 +100,11 @@ expected:
         reason_code_prefix: "lint:"
     # iter 3: the next build_prompt output carries
     # ## ORCHESTRATOR CORRECTION block — the legacy task.resume
-    # channel is not required.
+    # channel is not required. The harness's
+    # `next_hat()` rotation prompts the orchestrator hat
+    # (`ralph`) before the executor in single-hat isolated
+    # mode, so the snapshot records `ralph`'s prompt.
     - at_iteration: 3
       prompt_injects:
-        hat: executor
+        hat: ralph
         block: "## ORCHESTRATOR CORRECTION"

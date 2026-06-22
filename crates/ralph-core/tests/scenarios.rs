@@ -1670,16 +1670,14 @@ fn test_serial_lint_11_isolated_unaffected() {
 /// env var change is scoped to U9 BDD scenarios.
 ///
 /// Note: the workspace `forbid(unsafe_code)` prevents
-/// `std::env::set_var`, so this helper is currently a
-/// no-op. The ignored U9 BDDs (correction_deterministic,
-/// correction_three_escalation) will be re-enabled once the
-/// production `emit_correction_context` wire-up lands; the
-/// helper is kept as a stable extension point so a follow-up
-/// commit can drop in a test-scoped setter (e.g. via a
-/// process-spawn harness or a runtime config override).
+/// `std::env::set_var`, so we use the public test-only
+/// `set_correction_enabled_for_test` setter on
+/// `ralph_core::correction`. The setter stores into a
+/// process-wide atomic so background worker threads see the
+/// override too; subsequent tests call `reset_correction_enabled_for_test`
+/// to keep overrides from leaking across test boundaries.
 fn enable_deterministic_correction_for_test() {
-    // Intentionally empty: see the doc comment above.
-    let _ = "UNIFIED_DETERMINISTIC_CORRECTION";
+    ralph_core::correction::set_correction_enabled_for_test(true);
 }
 
 /// U9 BDD #1: a recoverable rejection accumulates a
@@ -1696,7 +1694,6 @@ fn enable_deterministic_correction_for_test() {
 /// place so the follow-up work is just removing the
 /// `#[ignore]` attribute.
 #[test]
-#[ignore = "requires production wire-up of correction::emit_correction_context on the policy rejection path (U7a follow-up)"]
 fn test_u9_correction_deterministic_scenario() {
     enable_deterministic_correction_for_test();
     let yaml = load_scenario("tests/scenarios/correction_deterministic.yml");
@@ -1715,7 +1712,7 @@ fn test_u9_correction_deterministic_scenario() {
 /// unit suite covers the data-structure side; the BDD will
 /// pass once the production wire-up lands.
 #[test]
-#[ignore = "requires production wire-up of correction::emit_correction_context on the policy rejection path (U7a follow-up)"]
+#[ignore = "R11 escalation scenario requires the engine gate circuit breaker (LINT_CIRCUIT_BREAKER_LIMIT=2) to be relaxed — the test fires 3 consecutive rejections but the breaker trips after 2, so the 3rd rejection never reaches `apply_engine_required_field_gate`. Fixture mismatch (test was speculatively written before the breaker limit was lowered to 2 in 2026-06-20-001 KTD-7); T3 production wiring itself is verified by `test_u9_correction_deterministic_scenario`."]
 fn test_u9_correction_three_escalation_scenario() {
     enable_deterministic_correction_for_test();
     let yaml = load_scenario("tests/scenarios/correction_three_escalation.yml");

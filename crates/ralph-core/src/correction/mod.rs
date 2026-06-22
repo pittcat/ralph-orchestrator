@@ -598,11 +598,50 @@ impl RetryCounter {
 /// - any other value → feature off (with a `warn!` at the
 ///   caller's discretion).
 pub fn is_correction_enabled() -> bool {
+    // Test override (set via `set_correction_enabled_for_test`) wins
+    // over the env var so unit / BDD suites can opt into the new
+    // path without relying on `std::env::set_var` (which is `unsafe`
+    // under Rust 1.81+ and would conflict with the workspace's
+    // `forbid(unsafe_code)`).
+    if let Some(cell) = TEST_CORRECTION_ENABLED.get() {
+        return cell.load(std::sync::atomic::Ordering::Relaxed);
+    }
     std::env::var("UNIFIED_DETERMINISTIC_CORRECTION")
         .ok()
         .map(|v| v.trim() == "1")
         .unwrap_or(false)
 }
+
+/// Test-only override for [`is_correction_enabled`]. The function
+/// is public so integration tests in `tests/` can call it; production
+/// code paths never call it (the binary crate's "test override" is
+/// always `None` in release builds). Uses a `OnceLock<AtomicBool>`
+/// so the override is process-wide and survives the legacy
+/// "thread-local would only affect the calling thread" gotcha —
+/// callers from background worker threads see the override too.
+///
+/// Tests call it from a setup hook (e.g.
+/// `enable_deterministic_correction_for_test` in
+/// `tests/scenarios.rs`) to opt into the deterministic correction
+/// path without flipping the env var.
+pub fn set_correction_enabled_for_test(enabled: bool) {
+    let cell = TEST_CORRECTION_ENABLED.get_or_init(|| {
+        std::sync::atomic::AtomicBool::new(false)
+    });
+    cell.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Reset the test override (used by `tests/scenarios.rs` to keep
+/// tests isolated from each other when nextest shares a process).
+/// No-op when the override was never set.
+pub fn reset_correction_enabled_for_test() {
+    if let Some(cell) = TEST_CORRECTION_ENABLED.get() {
+        cell.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+static TEST_CORRECTION_ENABLED: std::sync::OnceLock<std::sync::atomic::AtomicBool> =
+    std::sync::OnceLock::new();
 
 /// R11 (plan 2026-06-21-002): when the same `retry_key` has
 /// been rejected 3 or more times in a short window, escalate

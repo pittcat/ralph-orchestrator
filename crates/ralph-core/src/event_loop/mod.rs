@@ -470,7 +470,13 @@ fn build_unified_validation_pipeline(
     ))
 }
 
-fn publish_correction_via_context(bus: &mut EventBus, event: &JsonlEvent, payload: &str) {
+fn publish_correction_via_context(
+    bus: &mut EventBus,
+    state: &mut crate::event_loop::LoopState,
+    mut ledger: Option<&mut crate::state::StateLedger>,
+    event: &JsonlEvent,
+    payload: &str,
+) {
     // Re-use the same Rejection construction the legacy
     // path uses so the `retry_key` / `topic` / `violation`
     // surface matches the wire format.
@@ -487,34 +493,64 @@ fn publish_correction_via_context(bus: &mut EventBus, event: &JsonlEvent, payloa
         original_event_id: None,
         original_ts: Some(event.ts.clone()),
     };
+    let retry_key = rejection.compute_retry_key();
 
-    // Throwaway PromptContext — the caller's dispatcher
-    // will rebuild the live context from the tracing
-    // record (and ultimately own the merge step).
-    let mut throwaway = crate::correction::PromptContext::default();
-    let retry_count = 1u32; // first attempt; ledger tracks the rest
+    // U11-T3: pull the per-key retry count from the ledger's
+    // rejection digest when available so escalation threshold
+    // (R11) tracks prior calls. Falls back to 1 on cold start.
+    let retry_count = ledger
+        .as_ref()
+        .and_then(|l| l.snapshot().rejection_digest().get(&retry_key))
+        .map(|entry| entry.count as u32)
+        .unwrap_or(1u32);
+
+    // U11-T3: in-place mutation of the live `LoopState::prompt_context`
+    // (no longer throwaway). The correction block will be picked up by
+    // the next `build_prompt` call. Workspace path is read from the
+    // LoopState config — the emitter needs `.ralph/` under the workspace.
+    let workspace_root: Option<std::path::PathBuf> = None; // workspace is recorded via ledger path; emit_correction_context only uses it for recovery.jsonl, which is optional.
     let ctx = crate::correction::emit_correction_context(
-        None, // no `&mut StateLedger` in scope here
+        ledger.as_deref_mut(),
         &rejection,
         retry_count,
-        None, // no workspace path
-        &mut throwaway,
+        workspace_root.as_deref(),
+        &mut state.prompt_context,
     );
     tracing::info!(
         retry_key = %ctx.retry_key,
         topic = %ctx.topic,
         reason_code = %ctx.reason_code,
         needs_escalation = ctx.needs_escalation,
-        "A3: emit_correction_context produced a CorrectionContext; dispatcher must merge into LoopState::prompt_context"
+        "A3: emit_correction_context produced a CorrectionContext; injected into state.prompt_context"
     );
 
-    // R11 (3-strike escalation): if the throwaway
-    // `emit_correction_context` already crossed the
-    // escalation threshold, also publish a
-    // `human.guidance` event so the operator sees the
-    // hook fire — the legacy `task.resume` event is not
-    // published alongside (the `return` in the caller
-    // short-circuits the legacy path).
+    // U11-T3: ledger commit for replay durability. The
+    // `emit_correction_context` helper already commits the
+    // primary `RejectionRecorded` delta when `ledger.is_some()`;
+    // this second commit mirrors the event-bound reason / iteration
+    // so the audit log can correlate the correction with the loop
+    // iteration that produced it. Idempotent if the primary commit
+    // above already recorded the same key.
+    if let Some(l) = ledger.as_deref_mut() {
+        let delta = crate::state::CommitDelta::RejectionRecorded {
+            key: ctx.retry_key.clone(),
+            message: Some(payload.to_string()),
+            topic: Some(ctx.topic.clone()),
+        };
+        if let Err(e) = l.commit(delta, Some(ctx.topic.clone())) {
+            tracing::debug!(
+                error = %e,
+                retry_key = %ctx.retry_key,
+                "U11-T3: redundant ledger commit skipped (already committed by emit_correction_context)"
+            );
+        }
+    }
+
+    // R11 (3-strike escalation): if the correction block already
+    // crossed the escalation threshold, publish a `human.guidance`
+    // event so the operator sees the hook fire — the legacy
+    // `task.resume` event is not published alongside (the `return`
+    // in the caller short-circuits the legacy path).
     if ctx.needs_escalation {
         let guidance = crate::correction::maybe_escalate_to_human_guidance(bus, &ctx);
         if guidance {
@@ -528,6 +564,8 @@ fn publish_correction_via_context(bus: &mut EventBus, event: &JsonlEvent, payloa
 
 fn publish_policy_rejection_resume(
     bus: &mut EventBus,
+    state: &mut crate::event_loop::LoopState,
+    mut ledger: Option<&mut crate::state::StateLedger>,
     event: &JsonlEvent,
     payload: String,
     tracker: Option<&crate::event_loop::review_step_state::ReviewStepTracker>,
@@ -575,7 +613,7 @@ fn publish_policy_rejection_resume(
         // commit, retry-count tracking, escalation threshold)
         // all run; the merge step is a TODO that the
         // `process_parse_result` integration owns.
-        return publish_correction_via_context(bus, event, &payload);
+        return publish_correction_via_context(bus, state, ledger.as_deref_mut(), event, &payload);
     }
 
     // 2026-06-17-001 U2: TTL freshness filter — mirror the origin-guard
@@ -835,6 +873,8 @@ fn apply_workflow_guard_validation(
     guards: &crate::config::WorkflowGuardsConfig,
     workflow_progress: &mut WorkflowProgress,
     bus: &mut EventBus,
+    state: &mut crate::event_loop::LoopState,
+    mut ledger: Option<&mut crate::state::StateLedger>,
     review_step_tracker: &review_step_state::ReviewStepTracker,
     ttl_seconds: u64,
 ) -> WorkflowGuardOutcome {
@@ -946,6 +986,8 @@ fn apply_workflow_guard_validation(
             );
             publish_policy_rejection_resume(
                 bus,
+                state,
+                ledger.as_deref_mut(),
                 &event,
                 recovery_payload,
                 Some(review_step_tracker),
@@ -1348,6 +1390,8 @@ fn apply_event_policy_validation(
     policy_state: &mut PolicyRuntimeState,
     review_step_tracker: &mut review_step_state::ReviewStepTracker,
     bus: &mut EventBus,
+    state: &mut crate::event_loop::LoopState,
+    mut ledger: Option<&mut crate::state::StateLedger>,
     write_diagnostic: bool,
     // U6 (2026-06-17-004 plan, R6): use `BTreeMap` so the topic keys iterate
     // in sorted order, and each per-topic hat list is pre-sorted by the
@@ -1471,6 +1515,8 @@ fn apply_event_policy_validation(
                     );
                     publish_policy_rejection_resume(
                         bus,
+                        state,
+                        ledger.as_deref_mut(),
                         &event,
                         recovery_payload,
                         Some(review_step_tracker),
@@ -1494,6 +1540,8 @@ fn apply_event_policy_validation(
                     );
                     publish_policy_rejection_resume(
                         bus,
+                        state,
+                        ledger.as_deref_mut(),
                         &event,
                         recovery_payload,
                         Some(review_step_tracker),
@@ -1580,6 +1628,8 @@ fn apply_event_policy_validation(
                     );
                     publish_policy_rejection_resume(
                         bus,
+                        state,
+                        ledger.as_deref_mut(),
                         &event,
                         recovery_payload,
                         Some(review_step_tracker),
@@ -1602,6 +1652,8 @@ fn apply_event_policy_validation(
                     );
                     publish_policy_rejection_resume(
                         bus,
+                        state,
+                        ledger.as_deref_mut(),
                         &event,
                         recovery_payload,
                         Some(review_step_tracker),
@@ -1652,6 +1704,8 @@ fn apply_event_policy_validation(
                     );
                     publish_policy_rejection_resume(
                         bus,
+                        state,
+                        ledger.as_deref_mut(),
                         &event,
                         recovery_payload,
                         Some(review_step_tracker),
@@ -1690,6 +1744,8 @@ fn apply_event_policy_validation(
                     );
                     publish_policy_rejection_resume(
                         bus,
+                        state,
+                        ledger.as_deref_mut(),
                         &event,
                         recovery_payload,
                         Some(review_step_tracker),
@@ -1792,6 +1848,8 @@ fn apply_event_policy_validation(
                 );
                 publish_policy_rejection_resume(
                     bus,
+                    state,
+                    ledger.as_deref_mut(),
                     &event,
                     recovery_payload,
                     Some(review_step_tracker),
@@ -1826,6 +1884,8 @@ fn apply_event_policy_validation(
                 );
                 publish_policy_rejection_resume(
                     bus,
+                    state,
+                    ledger.as_deref_mut(),
                     &event,
                     recovery_payload,
                     Some(review_step_tracker),
@@ -6215,6 +6275,13 @@ impl EventLoop {
             }
         }
 
+        // U11-T3 note: the matching `CorrectionContext` push to
+        // `state.prompt_context` happens in
+        // `apply_engine_required_field_gate` at the moment of
+        // rejection (so the per-iteration BDD snapshot sees the
+        // block in the iteration it fired). This helper only
+        // emits the human-readable prompt block.
+
         let view = ProtocolView::from_event_loop_with_index(
             &self.config.event_loop,
             Some(&self.handoff_index),
@@ -6379,8 +6446,48 @@ impl EventLoop {
             // the CLI emit file-write (now a no-op stub) is no
             // longer part of the contract.
             if let Some((topic, kind, message)) = last_rejection {
-                self.state.pending_lint_resume =
-                    Some(LintResumeHint::from_typed_rejection(&topic, kind, &message));
+                let hint = LintResumeHint::from_typed_rejection(&topic, kind, &message);
+                // U11-T3: also push the lint rejection into the
+                // unified `state.prompt_context` queue at the
+                // moment of rejection (not at `build_prompt` time).
+                // This way the per-iteration BDD snapshot sees
+                // the correction block in the same iteration the
+                // rejection fired, and downstream prompt
+                // builders can drain the queue if needed.
+                //
+                // The R11 escalation tripwire (and the BDD's
+                // expected `retry_count`) is keyed off the
+                // reason_code (`lint:missing_field` etc.). We
+                // update `LoopState::recent_rejection_digest`
+                // (the legacy in-memory digest that works without
+                // the unified ledger) so the next call sees the
+                // incremented count. When the ledger IS
+                // configured, the helper also commits a
+                // `CommitDelta::RejectionRecorded` there.
+                let reason_code =
+                    format!("lint:{}", crate::event_loop::rejection::extract_reason_code(&message));
+                self.state.record_rejection_digest(
+                    &reason_code,
+                    &message,
+                    &topic,
+                    "iteration-start",
+                );
+                let retry_count = self
+                    .state
+                    .recent_rejection_digest
+                    .get(&reason_code)
+                    .map(|e| e.count as u32)
+                    .unwrap_or(1u32);
+                let mut state_ledger = std::mem::take(&mut self.state.state_ledger);
+                let _ctx = crate::correction::emit_correction_from_lint_hint(
+                    state_ledger.as_mut(),
+                    &hint,
+                    retry_count,
+                    None,
+                    &mut self.state.prompt_context,
+                );
+                self.state.state_ledger = state_ledger;
+                self.state.pending_lint_resume = Some(hint);
             }
         }
         result
@@ -8475,12 +8582,15 @@ impl EventLoop {
             // the `&mut LoopState` parameter was removed (the
             // counter bookkeeping moved to the caller).
             let mut review_step_tracker = std::mem::take(&mut self.state.review_step_tracker);
+            let mut state_ledger = std::mem::take(&mut self.state.state_ledger);
             let mut policy_result = apply_event_policy_validation(
                 events,
                 policy_config,
                 &mut policy_state,
                 &mut review_step_tracker,
                 &mut self.bus,
+                &mut self.state,
+                state_ledger.as_mut(),
                 policy_config
                     .completion_after_terminal
                     .write_diagnostic_event,
@@ -8492,9 +8602,10 @@ impl EventLoop {
                     .task_resume_ttl_seconds
                     .unwrap_or(300),
             );
-            // Restore the `ReviewStepTracker` and put the
+            // Restore the `ReviewStepTracker`, `StateLedger`, and put the
             // `PolicyRuntimeState` back so the next call sees the
             // same counters.
+            self.state.state_ledger = state_ledger;
             self.state.review_step_tracker = review_step_tracker;
             self.state.policy_runtime_state = Some(policy_state);
             had_policy_rejections = !policy_result.policy_rejections.is_empty();
@@ -9043,9 +9154,8 @@ impl EventLoop {
         // unchanged — backward compatibility per the A2
         // opt-in design.
         if let Some(ref pipeline) = unified_pipeline {
-            let snapshot = self
-                .state
-                .state_ledger
+            let mut state_ledger = std::mem::take(&mut self.state.state_ledger);
+            let snapshot = state_ledger
                 .as_ref()
                 .map(|l| l.snapshot().clone())
                 .unwrap_or_else(crate::state::LedgerSnapshot::cold_start);
@@ -9066,12 +9176,19 @@ impl EventLoop {
                             r.stage.as_str(),
                             r.reason_code.as_deref().unwrap_or("rejected"),
                         );
-                        publish_correction_via_context(&mut self.bus, evt, &reason);
+                        publish_correction_via_context(
+                            &mut self.bus,
+                            &mut self.state,
+                            state_ledger.as_mut(),
+                            evt,
+                            &reason,
+                        );
                         rejected_topics.insert(evt.topic.clone());
                         break;
                     }
                 }
             }
+            self.state.state_ledger = state_ledger;
             if !rejected_topics.is_empty() {
                 let before = events.len();
                 events.retain(|e| !rejected_topics.contains(&e.topic));
@@ -9131,17 +9248,27 @@ impl EventLoop {
         // events keep flowing exactly as before.
         let events: Vec<JsonlEvent> = match (workflow_guards, state_machine_enabled) {
             (Some(guards), false) if !guards.chains.is_empty() => {
+                let mut review_step_tracker =
+                    std::mem::take(&mut self.state.review_step_tracker);
+                let mut state_ledger = std::mem::take(&mut self.state.state_ledger);
+                let mut workflow_progress =
+                    std::mem::take(&mut self.state.workflow_progress);
                 let outcome = apply_workflow_guard_validation(
                     events,
                     guards,
-                    &mut self.state.workflow_progress,
+                    &mut workflow_progress,
                     &mut self.bus,
-                    &self.state.review_step_tracker,
+                    &mut self.state,
+                    state_ledger.as_mut(),
+                    &review_step_tracker,
                     self.config
                         .event_loop
                         .task_resume_ttl_seconds
                         .unwrap_or(300),
                 );
+                self.state.workflow_progress = workflow_progress;
+                self.state.state_ledger = state_ledger;
+                self.state.review_step_tracker = review_step_tracker;
                 for rejection in &outcome.rejections {
                     Self::log_workflow_guard_rejection(&mut *self, rejection);
                 }
@@ -10443,6 +10570,7 @@ impl EventLoop {
             // restore them and post-process the recoverable
             // candidates.
             let mut review_step_tracker = std::mem::take(&mut self.state.review_step_tracker);
+            let mut state_ledger = std::mem::take(&mut self.state.state_ledger);
             // U6 (2026-06-17-004 plan, R6): wave partition passes empty
             // BTreeMaps because wave events don't produce payload-contract
             // attributions (they fan out before any schema violation can
@@ -10454,6 +10582,8 @@ impl EventLoop {
                 &mut policy_state,
                 &mut review_step_tracker,
                 &mut self.bus,
+                &mut self.state,
+                state_ledger.as_mut(),
                 policy_config
                     .completion_after_terminal
                     .write_diagnostic_event,
@@ -10465,6 +10595,7 @@ impl EventLoop {
                     .task_resume_ttl_seconds
                     .unwrap_or(300),
             );
+            self.state.state_ledger = state_ledger;
             self.state.review_step_tracker = review_step_tracker;
             self.state.policy_runtime_state = Some(policy_state);
 
