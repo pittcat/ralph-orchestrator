@@ -74,7 +74,7 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 - 🔴 `ralph emit` **没有** `format` 选项。
 - 🔴 试图通过 `RALPH_EVENTS_FILE` 或 `--file` 写入其他 worktree 的 events 文件会被 `ralph emit` 拒绝；错误信息会列出当前 allowlist。
 
-**NULL payload 拒收白名单**（`crates/ralph-core/src/event_policy.rs:502-512` `NULL_PAYLOAD_REJECT_TOPICS`）：以下 9 个 topic 不接受空 payload（`[PAYLOAD]` 省略 + 无 `-j`）— 必须传 JSON object：
+**NULL payload 拒收白名单**（`crates/ralph-core/src/event_policy.rs:724-734` `NULL_PAYLOAD_REJECT_TOPICS`）：以下 9 个 topic 不接受空 payload（`[PAYLOAD]` 省略 + 无 `-j`）— 必须传 JSON object：
 
 | Topic | 出现位置 |
 |-------|---------|

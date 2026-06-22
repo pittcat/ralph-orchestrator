@@ -259,6 +259,7 @@ pub fn build_policy_state(
 /// gated topics are surfaced as a parse-style mismatch so the agent
 /// gets structured backpressure instead of a silent fall-through
 /// (review finding #6 / U3 fail-closed alignment).
+#[allow(deprecated)]
 pub fn check_step_handoff_gate(
     topic: &str,
     payload_str: &str,
@@ -1047,6 +1048,7 @@ event_loop:
     }
 
     #[test]
+    #[allow(deprecated)]
     fn run_policy_check_unified_misaligned_queue_advance_rejected() {
         // Step-handoff gate (U1 2026-06-17-005 plan): when
         // progress.md and tasks.jsonl disagree, the loop rejects
@@ -1813,6 +1815,7 @@ pub fn emit_policy_validation_failure(
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use ralph_core::PolicyRuntimeState;
@@ -2349,6 +2352,7 @@ event_loop:
     /// `Mismatch.reason` for the same fixture. Drift between the two
     /// would re-introduce finding #21 (CLI passes / loop rejects).
     #[test]
+    #[allow(deprecated)]
     fn u1_step_handoff_gate_matches_loop_gate_reason() {
         let tmp = workspace();
         write_closed_task(&tmp, "task-1", "step-01");

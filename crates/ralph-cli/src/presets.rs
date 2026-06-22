@@ -100,6 +100,7 @@ pub fn preset_names() -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::preset_merge_table::SSOT_SECTION_TARGETS;
     use ralph_core::event_origin::{OriginCheck, validate_event_origin};
     use ralph_core::payload_contract::validate_payload_contract;
     use ralph_core::{HatRegistry, RalphConfig};
@@ -749,11 +750,12 @@ mod tests {
         //    U1 / KTD-1). Mirrors `build.rs` exactly so the
         //    embedded copy produced by `cargo build` matches
         //    what this test computes. The mapping table lives
-        //    in `super::SSOT_SECTION_TARGETS` (P2-6) so the
-        //    build script and the test can share one source
-        //    of truth. Each SSOT top-level key (other than
-        //    `schemas`) is deep-merged into `event_loop.<section>`.
-        let section_targets = super::SSOT_SECTION_TARGETS;
+        //    in `crate::preset_merge_table::SSOT_SECTION_TARGETS`
+        //    (P2-6) so the build script and the test can share
+        //    one source of truth. Each SSOT top-level key (other
+        //    than `schemas`) is deep-merged into
+        //    `event_loop.<section>`.
+        let section_targets = SSOT_SECTION_TARGETS;
         for (ssot_key, target_path) in section_targets {
             let Some(ssot_value) = ssot.get(*ssot_key) else {
                 continue;

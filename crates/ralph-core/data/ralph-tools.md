@@ -7,7 +7,7 @@ metadata:
 
 # Ralph CLI 核心参考
 
-> **前提**：本 skill 仅在 `memories.enabled` 或 `tasks.enabled` 至少一个启用时被注入（`crates/ralph-core/src/event_loop/mod.rs:4862-4873`）。速查表中的"已注入"列均受此条件约束。
+> **前提**：本 skill 仅在 `memories.enabled` 或 `tasks.enabled` 至少一个启用时被注入（`crates/ralph-core/src/event_loop/mod.rs:4365-4380`）。速查表中的"已注入"列均受此条件约束。
 
 > **遇到不确定的命令语法时，先 `ralph <cmd> --help` 再执行。**
 
@@ -20,7 +20,7 @@ metadata:
 
 ## 收到 `task.resume` 时（policy / origin / contract 拒收后自动注入）
 
-编排器拒收后会在 PENDING EVENTS 注入 `task.resume`（payload 形状：`crates/ralph-core/src/event_loop/rejection.rs:324-398` `build_task_resume_payload`）。**不要重发同样 payload**，按以下顺序修复：
+编排器拒收后会在 PENDING EVENTS 注入 `task.resume`（payload 形状：`crates/ralph-core/src/event_loop/rejection.rs:386-460` `build_task_resume_payload`）。**不要重发同样 payload**，按以下顺序修复：
 
 1. **读 PENDING EVENTS 里 `task.resume` 的 JSON payload**，关键字段：
    - `stage`：`origin` / `policy` / `execution_contract` / `payload_contract`
@@ -60,7 +60,7 @@ metadata:
 
 ## 事件文件解析优先级（`ralph emit` 完整规则）
 
-`ralph emit` 写入路径解析为 3 级回退 + allowlist 校验（`crates/ralph-cli/src/cli/emit_path.rs:32-120`）：
+`ralph emit` 写入路径解析为 3 级回退 + allowlist 校验（`crates/ralph-cli/src/cli/emit_path.rs:32-145`）：
 
 1. 显式 `RALPH_EVENTS_FILE` 环境变量或非默认 `--file`（**必须命中 events allowlist**——来源是 `.ralph/current-candidate-events` 或 `.ralph/current-events` marker——否则 `ralph emit` 拒绝写入并打印 allowlist 内容）
 2. `.ralph/current-candidate-events` marker 目标（仅当未提供显式路径时）
@@ -69,7 +69,7 @@ metadata:
 
 🔴 **绝不静默回退**：如果设置了 `RALPH_EVENTS_FILE=foo.jsonl` 但 `foo.jsonl` 不在 allowlist 中，命令会**失败**（不会改写到 marker），错误信息会列出当前 allowlist 的所有合法目标。
 
-> `ralph wave emit` 的事件文件解析走 3 级：`RALPH_EVENTS_FILE` → `.ralph/current-events` → `.ralph/events.jsonl`（`crates/ralph-cli/src/wave.rs:551-560`），与 ralph emit 不同。**wave worker 通过 `ralph emit` 返回结果时，事件会写入 candidate-events（与 wave 调度相关），不要改写 `RALPH_EVENTS_FILE` 指向其他文件。**
+> `ralph wave emit` 的事件文件解析走 3 级：`RALPH_EVENTS_FILE` → `.ralph/current-events` → `.ralph/events.jsonl`（`crates/ralph-cli/src/wave.rs:580-590` `resolve_events_file`），与 ralph emit 不同。**wave worker 通过 `ralph emit` 返回结果时，事件会写入 candidate-events（与 wave 调度相关），不要改写 `RALPH_EVENTS_FILE` 指向其他文件。**
 
 ### `ralph wave emit` Schema 预检（U4）
 

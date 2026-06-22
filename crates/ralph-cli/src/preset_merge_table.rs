@@ -18,6 +18,11 @@
 // and a later entry overwrites an earlier one. Today the keys
 // are disjoint under `event_loop.*`, so order is irrelevant;
 // preserve the alphabetical-ish layout for readability.
+// `#[allow(dead_code)]`: only consumed by `presets::tests` and
+// `build.rs` (via `include!`). Neither `cargo build --workspace`
+// nor the bin sees those consumers, so without the allow the
+// compiler flags it as unused. Behaviour is unchanged.
+#[allow(dead_code)]
 pub const SSOT_SECTION_TARGETS: &[(&str, &[&str])] = &[
     (
         "execution_contracts",
