@@ -1090,6 +1090,80 @@ fn u5_commit_handoff_artifact_feature_disabled_noop() {
 }
 
 #[test]
+fn apply_delta_records_handoff_accepted_audit_entry() {
+    let mut snap = LedgerSnapshot::cold_start();
+    let delta = CommitDelta::HandoffAccepted {
+        from: HatId::new("executor".to_string()),
+        to: HatId::new("reviewer".to_string()),
+        handoff_path: Some(".ralph/agent/hat-handoff/test.md".to_string()),
+    };
+    snap.apply_delta(&delta);
+
+    assert_eq!(snap.handoff_accepted_log.len(), 1);
+    assert_eq!(snap.handoff_accepted_log[0].from.as_str(), "executor");
+    assert_eq!(snap.handoff_accepted_log[0].to.as_str(), "reviewer");
+}
+
+#[test]
+fn apply_delta_records_review_step_update() {
+    let mut snap = LedgerSnapshot::cold_start();
+    let delta = CommitDelta::ReviewStepUpdated {
+        plan_name: "test-plan".to_string(),
+        task_id: "task-1".to_string(),
+        step: "step-1".to_string(),
+        synth_pass: true,
+        synth_terminal: None,
+    };
+    snap.apply_delta(&delta);
+
+    // ReviewStepTracker records the (plan, task, step) triple.
+    // Field is private, so we use the public accessor:
+    // has_open_review_wave reflects any active wave state.
+    let _tracker = snap.review_step_tracker();
+    // The delta was applied; replay would now find the entry.
+    // (We can't inspect `steps` directly since it's private;
+    //  the public API returns the tracker for downstream read.)
+    let found: bool = {
+        let mut found = false;
+        let steps_lock = std::sync::Mutex::new(&mut found);
+        // Iterate via Debug — confirms the entry was recorded
+        let dbg = format!("{:?}", snap.review_step_tracker());
+        let _ = steps_lock; // suppress unused
+        dbg.contains("test-plan") && dbg.contains("task-1") && dbg.contains("step-1")
+    };
+    assert!(found, "ReviewStepTracker Debug should contain applied delta keys");
+}
+
+#[test]
+fn apply_delta_records_handoff_tracker_update() {
+    let mut snap = LedgerSnapshot::cold_start();
+    let delta = CommitDelta::HandoffTrackerUpdated {
+        event_id: "evt-001".to_string(),
+        accepted: true,
+        escalation_reason: None,
+    };
+    snap.apply_delta(&delta);
+
+    assert_eq!(snap.handoff_tracker_log.len(), 1);
+    assert_eq!(snap.handoff_tracker_log[0].event_id, "evt-001");
+    assert!(snap.handoff_tracker_log[0].accepted);
+}
+
+#[test]
+fn apply_delta_records_flow_lifecycle_update() {
+    let mut snap = LedgerSnapshot::cold_start();
+    let delta = CommitDelta::FlowLifecycleUpdated {
+        flow_unit_id: "flow-1".to_string(),
+        phase: "active".to_string(),
+    };
+    snap.apply_delta(&delta);
+
+    assert_eq!(snap.flow_lifecycle_log.len(), 1);
+    assert_eq!(snap.flow_lifecycle_log[0].flow_unit_id, "flow-1");
+    assert_eq!(snap.flow_lifecycle_log[0].phase, "active");
+}
+
+#[test]
 fn u5_commit_handoff_artifact_validator_integration() {
     let dir = workspace();
     let mut ledger = StateLedger::new(dir.path(), true);
