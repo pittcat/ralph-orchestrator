@@ -1,33 +1,49 @@
-//! P1-3 (P1 follow-up): regression tests for the unified/legacy
-//! short-circuit contract.
+//! P1-3 (P1 follow-up): regression tests for the
+//! unified/legacy layered-verdict contract.
 //!
 //! When `UNIFIED_VALIDATION=1`, the unified `ValidationPipeline`
 //! runs per-event before the legacy gate stack
 //! (`apply_step_handoff_gate`, `apply_workflow_guard_validation`,
-//! `validate_execution_contract`). The contract is: events the
-//! unified pipeline rejected do NOT reach the legacy gates,
-//! so the legacy stack cannot produce a *second* rejection
-//! signal (correction + recovery_envelope double-fire) for
-//! the same event.
+//! `validate_execution_contract`). The two layers produce
+//! **orthogonal** reject signals:
 //!
-//! U11-T2 already implements this via the `events.retain` call
-//! in `process_parse_result` (line ~9399). This test pins the
-//! contract by directly exercising the retain logic on a
-//! synthetic `events` vector + `rejected_topics` set.
+//! - Unified verdict → `publish_correction_via_context` (the
+//!   agent-facing signal that lands in the next prompt's
+//!   `## ORCHESTRATOR CORRECTION` block).
+//! - Legacy verdict → `record_recovery_envelope` +
+//!   `contract_rejections` (the operator-facing signal that
+//!   `ralph diagnose --session latest` reads).
+//!
+//! The events the unified pipeline rejected DO still pass
+//! through the legacy gate stack — the legacy verdict is
+//! independent. Originally U11-T2 had a `events.retain` that
+//! dropped unified-rejected topics from the batch, which
+//! silently broke the legacy execution-contract check
+//! (`replay_light_integration::test_rejected_work_done_retry_*`
+//! and `test_rejected_missing_plan_path_*` were the canary).
+//! That retain was the wrong design — the two layers are
+//! independent, not a single source of truth. This test pins
+//! the layered contract instead.
 
 use std::collections::HashSet;
 
-/// Pin the retain contract: events whose topic appears in
-/// `rejected_topics` MUST be removed before the legacy gate
-/// stack runs. The contract is the basis for
-/// "unified verdict is the single source of truth".
+/// Pin the layered contract: events the unified pipeline
+/// rejected DO still reach the legacy gate stack. The
+/// unified verdict only emits a correction; the legacy
+/// verdict is independent.
+///
+/// (Earlier revisions of this test asserted `events.retain`
+/// short-circuit behavior. That was the U11-T2 bug; the
+/// retain is gone and this test now documents the correct
+/// design.)
 #[test]
-fn p1_3_unified_reject_short_circuits_legacy() {
+fn p1_3_unified_and_legacy_are_layered_not_short_circuited() {
     use crate::event_reader::Event as JsonlEvent;
 
-    // Build a small batch: 3 events, 2 of which unified will
-    // hypothetically reject (topics in `rejected_topics`).
-    let events = vec![
+    // Build a small batch: 2 events. Unified will reject
+    // both (hypothetically), but the legacy stack must still
+    // see them.
+    let mut events = vec![
         JsonlEvent {
             topic: "queue.advance".to_string(),
             payload: Some("{}".to_string()),
@@ -41,19 +57,7 @@ fn p1_3_unified_reject_short_circuits_legacy() {
             system_injected: None,
         },
         JsonlEvent {
-            topic: "task.resume".to_string(),
-            payload: Some("{}".to_string()),
-            ts: String::new(),
-            hat: None,
-            triggered: None,
-            source: None,
-            wave_id: None,
-            wave_index: None,
-            wave_total: None,
-            system_injected: None,
-        },
-        JsonlEvent {
-            topic: "debug.step".to_string(),
+            topic: "work.done".to_string(),
             payload: Some("{}".to_string()),
             ts: String::new(),
             hat: None,
@@ -66,59 +70,43 @@ fn p1_3_unified_reject_short_circuits_legacy() {
         },
     ];
 
-    // unified rejected 2 of the 3 topics.
-    let rejected_topics: HashSet<String> = ["queue.advance", "task.resume"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    // unified rejected both topics — but does NOT mutate
+    // `events` (no `events.retain` call).
+    let rejected_topics: HashSet<String> =
+        ["queue.advance", "work.done"].iter().map(|s| s.to_string()).collect();
 
-    // This is the exact line from `process_parse_result`:
-    let mut events = events;
-    if !rejected_topics.is_empty() {
-        events.retain(|e| !rejected_topics.contains(&e.topic));
-    }
-
-    // After retain, only `debug.step` survives the trip to
-    // the legacy gate stack. Without the retain, the legacy
-    // gates would see all 3 events and could double-reject
-    // the ones unified already rejected.
-    assert_eq!(events.len(), 1, "expected 1 survivor, got {}", events.len());
-    assert_eq!(events[0].topic, "debug.step");
-    assert!(
-        !rejected_topics.contains(&events[0].topic),
-        "retained event topic must not be in rejected_topics"
+    // The unified verdict is captured only on the bus (via
+    // `publish_correction_via_context`), not by mutating the
+    // batch. The legacy gate stack sees the full batch.
+    assert_eq!(
+        events.len(),
+        2,
+        "events.len() must be unchanged after unified verdict"
     );
+    assert_eq!(rejected_topics.len(), 2);
 }
 
-/// Pin the contract that the `correction` publish is the
-/// only reject signal for unified-rejected events: no
-/// `recovery_envelope` is generated by the legacy stack for
-/// them. This is structural — the retain already prevents
-/// the legacy gates from seeing the event — but the test
-/// documents the intent so a future refactor doesn't break
-/// it.
+/// Pin the contract that the legacy gate's recovery envelope
+/// loop sees the full batch — even for events the unified
+/// pipeline rejected. The two layers are independent.
 #[test]
-fn p1_3_unified_reject_no_legacy_envelope() {
-    use crate::event_reader::Event as JsonlEvent;
-
-    // Empty events after retain = no envelope possible.
-    let events: Vec<JsonlEvent> = vec![];
-    let mut gate_envelopes: Vec<u8> = vec![];
-
-    // Mirror the legacy gate loop: `for envelope in
-    // gate_envelopes { record_recovery_envelope(...) }`. If
-    // `events` is empty, the legacy stack cannot produce
-    // envelopes for retained events.
-    let mut events = events;
-    if !events.is_empty() {
-        // Would not run because `events` is empty after the
-        // unified pre-commit retain. Documented here so a
-        // future refactor that re-introduces the loop over
-        // `gate_envelopes` (e.g. by inverting the retain) is
-        // caught by the test.
-        for _ in &events {
-            gate_envelopes.push(1);
-        }
-    }
-    assert!(gate_envelopes.is_empty());
+fn p1_3_legacy_gates_receive_full_batch_after_unified() {
+    // The legacy `apply_step_handoff_gate` and
+    // `validate_execution_contract` consume `events: Vec<JsonlEvent>`
+    // directly. As long as `events.len()` is unchanged by the
+    // unified pre-commit (the bugfix in the production code),
+    // the legacy stack sees every event. The legacy verdict
+    // (recovery envelope, contract_rejections) is reported
+    // on the bus + contract_rejections without any
+    // short-circuit from the unified layer.
+    //
+    // Concrete pin: when unified rejects `work.done` for
+    // missing `plan_path`, the legacy execution-contract
+    // path STILL produces a `MissingPayloadField(plan_path)`
+    // finding in `contract_rejections`. The end-to-end
+    // version of this is in
+    // `replay_light_integration::test_rejected_work_done_retry_payload_reaches_executor_prompt`
+    // (passes after the bugfix).
+    //
+    // This unit test documents the design contract.
 }

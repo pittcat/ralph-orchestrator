@@ -9394,29 +9394,54 @@ impl EventLoop {
                 }
             }
             self.state.state_ledger = state_ledger;
+            // U11-T2 bugfix: do NOT `events.retain` on rejected
+            // topics. The original T2 retain short-circuited the
+            // legacy gate stack — unified verdict became the
+            // single source of truth, but the legacy contract
+            // layer lost the ability to produce its own
+            // `contract_rejections` (the
+            // `replay_light_integration::test_rejected_work_done_retry_payload_reaches_executor_prompt`
+            // and `test_rejected_missing_plan_path_*` tests pin
+            // the contract that legacy execution-contract
+            // validation *does* surface missing-field findings,
+            // even when unified already emitted a correction).
+            //
+            // The unified verdict now only emits
+            // `publish_correction_via_context` (the
+            // agent-facing signal). The legacy gate stack keeps
+            // its independent verdict (the operator-facing
+            // `recovery_envelope` + `contract_rejections`). The
+            // two signals are orthogonal by design — see
+            // A2 opt-in in the U11-T2 doc.
+            //
+            // `rejected_topics` is retained as a per-iteration
+            // diagnostic (logged below) but does not mutate
+            // `events`.
             if !rejected_topics.is_empty() {
-                let before = events.len();
-                events.retain(|e| !rejected_topics.contains(&e.topic));
                 tracing::debug!(
-                    rejected = before - events.len(),
+                    rejected = rejected_topics.len(),
                     remaining = events.len(),
-                    "U11-T2: unified pipeline rejected events; remaining continue through legacy gates"
+                    "U11-T2: unified pipeline rejected topics; events continue through legacy gates"
                 );
             }
         }
         // --- End U11-T2 ---
-        // P1-3 (P1 follow-up): the `events.retain` at line ~9399
-        // already short-circuits the legacy gate stack on
-        // events the unified pipeline rejected — unified
-        // verdict is the single source of truth (no
-        // `correction` + `recovery_envelope` double-fire).
-        // The regression test `p1_3_unified_reject_short_circuits_legacy`
-        // in `event_loop/tests/` pins this contract. A
-        // full audit of unified-vs-legacy coverage is
-        // tracked separately (topic-deny / DuplicateWorkDone /
-        // plan-name equality / semantic gate rules are still
-        // legacy-only; production path is safe because the
-        // legacy stack still runs after the unified retain).
+        // P1-3 (P1 follow-up): the unified pipeline verdict
+        // is independent of the legacy gate stack — the two
+        // layers produce orthogonal reject signals (the
+        // agent-facing `publish_correction_via_context` from
+        // unified, the operator-facing `recovery_envelope` +
+        // `contract_rejections` from legacy). The batch is
+        // NOT short-circuited: events the unified pipeline
+        // rejected DO still reach the legacy gates so the
+        // legacy execution-contract check can produce its
+        // own `MissingPayloadField` finding. (Originally U11-T2
+        // had an `events.retain` that dropped unified-rejected
+        // topics; that was the wrong design and broke
+        // `replay_light_integration::test_rejected_work_done_retry_*`
+        // and `test_rejected_missing_plan_path_*`. The retain
+        // is removed; tests `p1_3_unified_*` document the
+        // layered contract.)
 
         // --- Step handoff gate (U4 of 2026-06-17-002 plan): ---
         // pre-handoff consistency check for `progress.md` ↔
