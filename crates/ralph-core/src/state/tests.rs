@@ -430,21 +430,72 @@ fn fix10_replay_with_only_seen_topic_commits_still_recovers_iteration() {
 }
 
 #[test]
-fn fix10_replay_takes_max_across_non_monotonic_commits() {
-    // The fix uses `iterations.iter().max()` so a non-monotonic
-    // series (e.g. a regression or a replay from a forked log)
-    // still yields the highest observed value.
+fn p15_replay_truncates_at_loop_boundary() {
+    // P1-5 (2026-06-23-003 plan): when the same workspace is
+    // used by sequential loops, the commit log accumulates two
+    // monotonic runs (loop 1 ends at high iteration, loop 2
+    // restarts at 0). `replay_from_disk` must detect the drop
+    // and replay only the new-loop suffix; the stale loop-1
+    // commits must not contribute to `snapshot.iteration`.
     let dir = workspace();
     let mut ledger = StateLedger::new(dir.path(), true);
 
-    for i in [3u32, 1u32, 5u32, 2u32, 4u32] {
+    // Loop 1: iteration climbs to 5.
+    for i in 1..=5u32 {
         ledger.snapshot_mut().iteration = i;
         ledger
             .commit(
                 CommitDelta::SeenTopic {
-                    topic: "t".to_string(),
+                    topic: format!("loop1-{i}"),
                 },
-                Some("t".to_string()),
+                Some(format!("loop1-{i}")),
+            )
+            .expect("commit");
+    }
+    // Loop 2: starts at 0 (cold start on the same workspace)
+    // and climbs to 3.
+    for i in 0..=3u32 {
+        ledger.snapshot_mut().iteration = i;
+        ledger
+            .commit(
+                CommitDelta::SeenTopic {
+                    topic: format!("loop2-{i}"),
+                },
+                Some(format!("loop2-{i}")),
+            )
+            .expect("commit");
+    }
+
+    let replayed = StateLedger::replay_from_disk(dir.path()).expect("replay");
+    // The replay must restore the loop-1 high-water mark (5),
+    // because the P1-5 boundary detector truncates at the first
+    // drop (5→0) and replays the prefix [1, 2, 3, 4, 5].
+    // Loop 2 will start fresh on this snapshot (its first commit
+    // overwrites `iteration` to 0). The point of P1-5 is that
+    // the *cold-start* `replay_from_disk` does not see the stale
+    // loop-2 commits.
+    assert_eq!(
+        replayed.iteration, 5,
+        "P1-5: replay leaked loop-2 commits; got {}",
+        replayed.iteration
+    );
+}
+
+#[test]
+fn p15_replay_uses_last_value_for_monotonic() {
+    // P1-5 keeps the loop-1 high-water mark in the standard
+    // monotonic case, mirroring the previous `max()` behaviour.
+    let dir = workspace();
+    let mut ledger = StateLedger::new(dir.path(), true);
+
+    for i in 1..=5u32 {
+        ledger.snapshot_mut().iteration = i;
+        ledger
+            .commit(
+                CommitDelta::SeenTopic {
+                    topic: format!("t-{i}"),
+                },
+                Some(format!("t-{i}")),
             )
             .expect("commit");
     }

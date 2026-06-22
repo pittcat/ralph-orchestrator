@@ -440,6 +440,11 @@ impl StateLedger {
     /// `iteration` the loop ended on.
     pub fn replay_from_disk(workspace: &Path) -> Result<LedgerSnapshot, LedgerError> {
         let ledger_path = workspace.join(LEDGER_RELATIVE_PATH);
+        // P1-5 (2026-06-23-003 plan): replay against a cold
+        // start. The boundary-detection step below may discard
+        // trailing stale commits, so we cannot accumulate into a
+        // single `snapshot` and then throw it away — re-derive on
+        // a fresh base once we know where the new loop starts.
         let mut snapshot = LedgerSnapshot::cold_start();
         // FIX-10: collect all per-commit iteration values so we
         // can restore `snapshot.iteration` even when the only
@@ -447,6 +452,12 @@ impl StateLedger {
         // emitted rarely or in bursts. The `commit.iteration`
         // field is authoritative for the in-memory loop's view.
         let mut iterations: Vec<u32> = Vec::new();
+        // P1-5: keep the parsed commits so we can truncate the
+        // log at the first iteration drop (the loop boundary).
+        // The previous `iterations.iter().max()` would pick up
+        // stale loop-1 iteration values when the same workspace
+        // was used by sequential loops.
+        let mut commits: Vec<Commit> = Vec::new();
 
         let body = match std::fs::read_to_string(&ledger_path) {
             Ok(s) => s,
@@ -478,7 +489,7 @@ impl StateLedger {
                 }
             };
             iterations.push(commit.iteration);
-            snapshot.apply_delta(&commit.delta);
+            commits.push(commit);
             last_good_line = line_no;
         }
 
@@ -492,11 +503,42 @@ impl StateLedger {
             });
         }
 
-        // FIX-10: restore `iteration` from the commit log. The
-        // loop records `commit.iteration = self.snapshot.iteration`
-        // at every write; the max across the log equals the
-        // final loop iteration.
-        snapshot.iteration = iterations.iter().copied().max().unwrap_or(0);
+        // P1-5: detect a multi-loop boundary. A drop in
+        // `commit.iteration` (any commit i+1 with iteration
+        // strictly less than commit i) means the new loop
+        // started on the same workspace. Discard the drop and
+        // everything after it; the surviving prefix is the
+        // completed previous loop, and the new loop will start
+        // fresh on a cold snapshot.
+        //
+        // We rebuild the snapshot from the active prefix
+        // instead of relying on the `snapshot` accumulated
+        // above. The first loop's commit log may be discarded
+        // (when the first drop is at index 0, e.g. iteration
+        // went 5→0 in commits 0–1), in which case the snapshot
+        // is replaced by a cold start — matching what a clean
+        // ledger rotation would yield.
+        let drop_idx = iterations.windows(2).position(|w| w[1] < w[0]);
+        let active_commits: &[Commit] = match drop_idx {
+            Some(p) => &commits[..p],
+            None => &commits[..],
+        };
+
+        let mut snapshot = LedgerSnapshot::cold_start();
+        let mut active_iterations: Vec<u32> = Vec::with_capacity(active_commits.len());
+        for commit in active_commits {
+            snapshot.apply_delta(&commit.delta);
+            active_iterations.push(commit.iteration);
+        }
+
+        // FIX-10: restore `iteration` from the commit log. After
+        // the P1-5 truncation, `active_iterations` is monotonically
+        // non-decreasing so `max()` and `last()` agree. We keep
+        // `max()` for parity with the previous semantics and to
+        // stay robust against future loop patterns that emit
+        // non-monotonic commits inside a single loop (e.g. a
+        // temporary regression recovery).
+        snapshot.iteration = active_iterations.iter().copied().max().unwrap_or(0);
 
         // `last_good_line` is set if any commit was applied;
         // corruption would have already returned an error.
