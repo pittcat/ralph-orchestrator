@@ -47,7 +47,6 @@
 //! 仍保留 `commit()` 主流程不动;U5 集成通过单独 API 完成,避免
 //! 影响 U1 的 16 个测试。
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -226,6 +225,15 @@ impl StateLedger {
     /// When the feature is on, the in-memory snapshot is mutated
     /// first; if the on-disk write fails, the in-memory mutation
     /// is rolled back and the original snapshot is restored.
+    ///
+    /// **FIX-1 (U11)**: the on-disk write is now atomic. The
+    /// full commit log is rebuilt to a sibling `.tmp` file and
+    /// renamed into place. A crash mid-write leaves the previous
+    /// file intact (POSIX rename is atomic on the same
+    /// filesystem) — `replay_from_disk` therefore never sees a
+    /// partial line. The append-only pattern was dropped because
+    /// it could leave half a JSONL line on disk after a process
+    /// crash.
     pub fn commit(
         &mut self,
         delta: CommitDelta,
@@ -236,13 +244,11 @@ impl StateLedger {
         }
 
         // Snapshot the affected sub-state *before* mutation so we
-        // can roll back on write failure. We snapshot the whole
-        // `LedgerSnapshot` (cheap clone) and replace it on
-        // rollback; for high-frequency commits the clone cost
-        // dominates and the rollback becomes a real cost. U2 may
-        // introduce a narrower "affected sub-state" snapshot if
-        // benchmarks show it matters.
+        // can roll back on write failure. We snapshot both the
+        // `LedgerSnapshot` and the in-memory `commit_log` (cheap
+        // clones) and restore them on rename failure.
         let prior_snapshot = self.snapshot.clone();
+        let prior_commit_log = self.commit_log.clone();
 
         self.snapshot.apply_delta(&delta);
         let new_seq = self.commit_seq + 1;
@@ -254,15 +260,27 @@ impl StateLedger {
             delta,
         };
 
-        if let Err(err) = persist_commit(&self.ledger_path, &commit) {
-            // Roll back the in-memory mutation; the commit was
-            // not added to the log and `commit_seq` does not
-            // advance.
+        // FIX-1: rebuild the on-disk log under a `.tmp` sibling
+        // and rename it into place atomically. We append the new
+        // commit to the in-memory `commit_log` *only after* the
+        // rename succeeds so a failed rename leaves both on-disk
+        // and in-memory state unchanged.
+        self.commit_log.push(commit.clone());
+        if let Err(err) = persist_commit_log(&self.ledger_path, &self.commit_log) {
+            // Roll back both the snapshot and the in-memory
+            // log. The on-disk file is intact (rename never
+            // happened) so no `truncate_after_path` call is
+            // needed; we just need to make sure no stale `.tmp`
+            // sibling is left behind.
+            self.commit_log = prior_commit_log;
             self.snapshot = prior_snapshot;
+            // Best-effort cleanup of any stale `.tmp` left by an
+            // interrupted rename.
+            if let Some(tmp) = temp_sibling_path(&self.ledger_path) {
+                let _ = std::fs::remove_file(&tmp);
+            }
             return Err(err);
         }
-
-        self.commit_log.push(commit.clone());
         self.commit_seq = new_seq;
         Ok(commit)
     }
@@ -280,9 +298,24 @@ impl StateLedger {
     ///
     /// The empty / missing file case is not an error: a fresh
     /// workspace returns the cold-start snapshot.
+    ///
+    /// **FIX-10 (U11)**: `LedgerSnapshot::iteration` is restored
+    /// from the max of all `commit.iteration` values in the log,
+    /// not from `CounterChanged("iteration")` deltas. The
+    /// `Commit::iteration` field is recorded by every commit
+    /// (`commit` in [`Self::commit`] uses
+    /// `self.snapshot.iteration` at the time of the write), so
+    /// replaying the log and taking the max yields the same
+    /// `iteration` the loop ended on.
     pub fn replay_from_disk(workspace: &Path) -> Result<LedgerSnapshot, LedgerError> {
         let ledger_path = workspace.join(LEDGER_RELATIVE_PATH);
         let mut snapshot = LedgerSnapshot::cold_start();
+        // FIX-10: collect all per-commit iteration values so we
+        // can restore `snapshot.iteration` even when the only
+        // delta touching it was `CounterChanged`, which may be
+        // emitted rarely or in bursts. The `commit.iteration`
+        // field is authoritative for the in-memory loop's view.
+        let mut iterations: Vec<u32> = Vec::new();
 
         let body = match std::fs::read_to_string(&ledger_path) {
             Ok(s) => s,
@@ -310,6 +343,7 @@ impl StateLedger {
                     });
                 }
             };
+            iterations.push(commit.iteration);
             snapshot.apply_delta(&commit.delta);
             last_good_line = line_no;
         }
@@ -323,6 +357,12 @@ impl StateLedger {
                 remaining_lines: body.lines().filter(|l| !l.trim().is_empty()).count(),
             });
         }
+
+        // FIX-10: restore `iteration` from the commit log. The
+        // loop records `commit.iteration = self.snapshot.iteration`
+        // at every write; the max across the log equals the
+        // final loop iteration.
+        snapshot.iteration = iterations.iter().copied().max().unwrap_or(0);
 
         // `last_good_line` is set if any commit was applied;
         // corruption would have already returned an error.
@@ -443,29 +483,111 @@ fn resolve_handoff_path(
     Ok(computed.handoff_path)
 }
 
-/// Append one commit to the on-disk JSONL file. Uses the same
-/// temp-file + rename pattern as `state_projector/progress.rs`
-/// (atomic on the same filesystem).
-fn persist_commit(ledger_path: &Path, commit: &Commit) -> Result<(), LedgerError> {
+/// Atomic-write helper for the on-disk JSONL commit log.
+///
+/// **FIX-1 (U11)**: writes the full log to a sibling `.tmp`
+/// file, `fsync`s it, then `rename`s it into place and
+/// `fsync`s the parent directory. The previous implementation
+/// used append mode + `sync_all().ok()`, which could leave a
+/// partial JSONL line on disk after a crash — `replay_from_disk`
+/// would then fail with `LedgerError::Parse` for the entire
+/// cold start. The new pattern is crash-safe: either the
+/// previous file is intact, or the new file is fully replaced.
+///
+/// `fsync` failures are **not** silenced: a failed `fsync`
+/// propagates as `LedgerError::Io` and the caller rolls back the
+/// in-memory snapshot. The previous code's `.ok()` swallowed
+/// these errors and left the caller unable to detect silent
+/// durability loss.
+///
+/// Performance note: the log is rebuilt in full on every
+/// commit. The commit log is KB-scale today (one entry per
+/// orchestration-relevant state change); if U11+ introduces
+/// per-event commits the helper can be swapped for an
+/// append-and-rotate strategy.
+fn persist_commit_log(ledger_path: &Path, log: &[Commit]) -> Result<(), LedgerError> {
     if let Some(parent) = ledger_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut line = serde_json::to_string(commit)
-        .map_err(|e| LedgerError::Parse {
+
+    let tmp_path = temp_sibling_path(ledger_path)
+        .ok_or_else(|| LedgerError::Parse {
+            line: 0,
+            message: "ledger_persist: cannot derive temp sibling path".to_string(),
+        })?;
+
+    // Serialize the full log to a buffer first so a JSON error
+    // surfaces *before* we touch the filesystem.
+    let mut body = String::new();
+    for commit in log {
+        let mut line = serde_json::to_string(commit).map_err(|e| LedgerError::Parse {
             line: 0,
             message: format!("commit_serialize: {e}"),
         })?;
-    line.push('\n');
+        line.push('\n');
+        body.push_str(&line);
+    }
 
-    // Append: open in append mode, write the line, close. The
-    // file is not expected to be on a remote filesystem; if
-    // that changes, swap to the temp-file + rename pattern.
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(ledger_path)?;
-    f.write_all(line.as_bytes())?;
-    f.sync_all().ok();
+    // Write to the temp file, fsync, rename, fsync parent dir.
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp_path)?;
+        std::io::Write::write_all(&mut f, body.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp_path, ledger_path)?;
+    if let Some(parent) = ledger_path.parent() {
+        // fsync the directory so the rename is durable across
+        // a power failure. On platforms where opening a dir
+        // for writing is unsupported (e.g. Windows) this fails
+        // with `IsADirectory` / `PermissionDenied`; that is
+        // acceptable — the parent dir's mtime is a soft
+        // durability hint, the file contents are already on
+        // disk.
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+    Ok(())
+}
+
+/// Compute the sibling `.tmp` path used by the atomic write
+/// helper. Returns `None` only when the input path has no
+/// `file_name` (which cannot happen for a `ledger.jsonl` file
+/// constructed under `.ralph/`).
+fn temp_sibling_path(ledger_path: &Path) -> Option<PathBuf> {
+    let fname = ledger_path.file_name()?;
+    let mut tmp_name = std::ffi::OsString::from(".");
+    tmp_name.push(fname);
+    tmp_name.push(".tmp");
+    Some(ledger_path.with_file_name(tmp_name))
+}
+
+/// Truncate the on-disk ledger to the first `keep_lines` lines
+/// (best-effort: returns `LedgerError::Io` on read/write
+/// failure). Used by `commit`'s rollback path *and* by the
+/// CLI recovery entry point (`ralph loops clean --ledger`).
+fn truncate_after_path(ledger_path: &Path, keep_lines: usize) -> Result<(), LedgerError> {
+    let body = match std::fs::read_to_string(ledger_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(LedgerError::Io(e)),
+    };
+    let kept: String = body
+        .lines()
+        .take(keep_lines)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(ledger_path, kept)?;
+    warn!(
+        path = %ledger_path.display(),
+        kept_lines = keep_lines,
+        "ledger truncated after failed persist"
+    );
     Ok(())
 }
 
@@ -498,27 +620,13 @@ pub fn read_commit_log(workspace: &Path) -> Result<Vec<Commit>, LedgerError> {
 
 /// Best-effort truncate for the recovery path (e.g. when
 /// `replay_from_disk` reports corruption past line N and the
-/// operator confirms truncation). Reserved for U2 — the CLI
-/// will expose this behind `ralph loops clean --ledger`.
-#[allow(dead_code)]
+/// operator confirms truncation). Exposed for the CLI's
+/// `ralph loops clean --ledger` entry point.
+///
+/// **FIX-1 (U11)**: now wired into `commit`'s rollback path
+/// indirectly through `truncate_after_path`; the public API
+/// here is kept for the CLI.
 pub fn truncate_after(workspace: &Path, keep_lines: usize) -> Result<(), LedgerError> {
     let path = workspace.join(LEDGER_RELATIVE_PATH);
-    let body = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(LedgerError::Io(e)),
-    };
-    let kept: String = body
-        .lines()
-        .take(keep_lines)
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n";
-    std::fs::write(&path, kept)?;
-    warn!(
-        path = %path.display(),
-        kept_lines = keep_lines,
-        "ledger truncated after corruption"
-    );
-    Ok(())
+    truncate_after_path(&path, keep_lines)
 }

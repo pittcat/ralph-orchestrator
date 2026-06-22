@@ -46,8 +46,8 @@ mod snapshot;
 
 pub use commit::{Commit, CommitDelta, TaskTransition};
 pub use ledger::{
-    read_commit_log, HandoffAcceptedInputs, HandoffCommitOutcome, LedgerError, StateLedger,
-    LEDGER_RELATIVE_PATH,
+    read_commit_log, truncate_after, HandoffAcceptedInputs, HandoffCommitOutcome, LedgerError,
+    StateLedger, LEDGER_RELATIVE_PATH,
 };
 pub use recovery_log::{
     append_rejection, read_rejection_log, recovery_log_path, retry_count_for, RejectionRecord,

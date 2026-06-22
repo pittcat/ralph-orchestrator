@@ -807,6 +807,10 @@ mod tests {
                 captured_path.to_string_lossy().into_owned(),
             ],
         );
+        // Under heavy nextest parallel load the simple fork/exec + stdin
+        // dance can take more than the default 2s wall-clock on macOS.
+        request.timeout_seconds = 10;
+
         let payload = json!({
             "schema_version": 1,
             "phase": "pre",

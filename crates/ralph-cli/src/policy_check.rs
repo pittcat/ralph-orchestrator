@@ -624,6 +624,15 @@ pub struct PolicyCheckReport {
     /// Hat that emitted the event (None when unknown).
     pub hat: Option<String>,
     /// Workspace root the validation was performed against.
+    ///
+    /// **FIX-5 (U11)**: marked `#[serde(skip)]` so the absolute
+    /// path never leaks through any automatic `Serialize` path.
+    /// The canonical JSON shape (built by [`Self::to_json_value`])
+    /// exposes a basename-only `workspace_redacted` field instead.
+    /// The struct still keeps the absolute path so in-process
+    /// callers (e.g. log enrichment, file-system operations)
+    /// can continue to use it.
+    #[serde(skip)]
     pub workspace: PathBuf,
     /// `true` iff every U4 rule accepted the event.
     pub accepted: bool,
@@ -647,12 +656,33 @@ pub struct PolicyCheckReport {
 impl PolicyCheckReport {
     /// Convert the report into a JSON `Value` so callers can layer
     /// their own envelope (e.g. the legacy `ValidationFailure`
-    /// shape). `serde_json::to_value` is used so the report's
-    /// `Serialize` impl stays the single source of truth for the
-    /// agent-facing contract.
+    /// shape).
+    ///
+    /// **FIX-5 (U11)**: the on-disk report shape MUST NOT include
+    /// the absolute `workspace` path.  Policy check reports are
+    /// written into `.ralph/events.jsonl` / JSON envelopes that
+    /// may be shipped to operator dashboards, telemetry, or
+    /// shared with downstream services; leaking the workspace
+    /// path leaks the operator's directory layout.  The
+    /// `workspace` field is kept on the struct (so downstream
+    /// code can still inspect it in-process) but the JSON
+    /// representation only carries a basename-style redacted
+    /// `workspace_redacted` string.
     #[allow(dead_code)] // public API, exposed for downstream tooling
     pub fn to_json_value(&self) -> serde_json::Result<serde_json::Value> {
-        serde_json::to_value(self)
+        Ok(serde_json::json!({
+            "topic": self.topic,
+            "hat": self.hat,
+            "workspace_redacted": self
+                .workspace
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("<redacted>"),
+            "accepted": self.accepted,
+            "reason_codes": self.reason_codes,
+            "suggestions": self.suggestions,
+            "post_commit_rejected": self.post_commit_rejected,
+        }))
     }
 }
 

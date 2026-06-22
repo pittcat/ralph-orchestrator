@@ -380,6 +380,213 @@ fn replay_from_disk_reports_empty_ledger_as_corruption() {
 }
 
 // ---------------------------------------------------------------------------
+// FIX-10 (U11): `replay_from_disk` restores `iteration` from the
+// commit log. The `commit.iteration` field is the authoritative
+// source; the previous replay path only restored the value when
+// the loop emitted a `CounterChanged("iteration")` delta, which
+// happens at variable cadence.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fix10_replay_restores_iteration_from_commit_log() {
+    let dir = workspace();
+    let mut ledger = StateLedger::new(dir.path(), true);
+
+    // Simulate 5 iterations: bump `iteration` then commit a
+    // non-counter delta so the only signal the replay path sees
+    // is `commit.iteration`.
+    for i in 1..=5u32 {
+        ledger
+            .snapshot_mut()
+            .iteration = i;
+        ledger
+            .commit(
+                CommitDelta::SeenTopic {
+                    topic: format!("topic-{i}"),
+                },
+                Some(format!("topic-{i}")),
+            )
+            .expect("commit");
+    }
+
+    // Drop the ledger; replay from disk into a fresh snapshot.
+    let replayed = StateLedger::replay_from_disk(dir.path()).expect("replay");
+    assert_eq!(
+        replayed.iteration, 5,
+        "replay must restore iteration from the commit log"
+    );
+}
+
+#[test]
+fn fix10_replay_with_only_seen_topic_commits_still_recovers_iteration() {
+    // The replay path must recover `iteration` even when the
+    // log contains *no* `CounterChanged("iteration")` deltas —
+    // which is the common case in real loops where iteration
+    // bumps happen on hat selection, not on every commit.
+    let dir = workspace();
+    let mut ledger = StateLedger::new(dir.path(), true);
+
+    ledger.snapshot_mut().iteration = 12;
+    for _ in 0..3 {
+        ledger
+            .commit(
+                CommitDelta::SeenTopic {
+                    topic: "work.ready".to_string(),
+                },
+                Some("work.ready".to_string()),
+            )
+            .expect("commit");
+    }
+
+    let replayed = StateLedger::replay_from_disk(dir.path()).expect("replay");
+    assert_eq!(replayed.iteration, 12);
+}
+
+#[test]
+fn fix10_replay_takes_max_across_non_monotonic_commits() {
+    // The fix uses `iterations.iter().max()` so a non-monotonic
+    // series (e.g. a regression or a replay from a forked log)
+    // still yields the highest observed value.
+    let dir = workspace();
+    let mut ledger = StateLedger::new(dir.path(), true);
+
+    for i in [3u32, 1u32, 5u32, 2u32, 4u32] {
+        ledger.snapshot_mut().iteration = i;
+        ledger
+            .commit(
+                CommitDelta::SeenTopic {
+                    topic: "t".to_string(),
+                },
+                Some("t".to_string()),
+            )
+            .expect("commit");
+    }
+
+    let replayed = StateLedger::replay_from_disk(dir.path()).expect("replay");
+    assert_eq!(replayed.iteration, 5);
+}
+
+// ---------------------------------------------------------------------------
+// FIX-1 (U11): `persist_commit` is now atomic (temp-file + rename).
+// 1) Happy path: many commits leave a valid JSONL log on disk.
+// 2) Crash simulation: a fake partial line at the tail surfaces as
+//    `LedgerError::Parse` on replay; the in-memory state is not affected.
+// 3) `truncate_after`: corrupt file is reduced to the first N valid lines.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fix1_persist_is_atomic_after_many_commits() {
+    // 1000 commits — at this scale the original append-mode
+    // implementation would have left an arbitrarily-deep `.tmp`
+    // on a crash. The atomic-rename path rebuilds the file
+    // every commit; this test pins the on-disk shape (one
+    // JSONL line per commit) and the round-trip read.
+    let dir = workspace();
+    let mut ledger = StateLedger::new(dir.path(), true);
+    for i in 1..=1000u32 {
+        ledger
+            .commit(
+                CommitDelta::CounterChanged {
+                    counter: "consecutive_failures".to_string(),
+                    new_value: i as i64,
+                },
+                None,
+            )
+            .expect("commit");
+    }
+    // No leftover `.tmp` sibling.
+    let tmp = ledger.ledger_path().with_file_name(".ledger.jsonl.tmp");
+    assert!(!tmp.exists(), ".tmp sibling must be removed after rename");
+    // Round-trip: read the log back.
+    let log = read_commit_log(dir.path()).expect("read log");
+    assert_eq!(log.len(), 1000);
+    // Every line is parseable JSONL.
+    for (idx, commit) in log.iter().enumerate() {
+        assert_eq!(commit.sequence as usize, idx + 1);
+    }
+    // consecutive_failures advanced to the final value.
+    let replayed = StateLedger::replay_from_disk(dir.path()).expect("replay");
+    assert_eq!(replayed.consecutive_failures, 1000);
+}
+
+#[test]
+fn fix1_replay_reports_partial_line_as_parse_error_not_panic() {
+    // Simulate a crash that left a half-line at the tail of
+    // the log. The atomic-rename path is supposed to make this
+    // *impossible*, but a pre-FIX-1 ledger (or a third-party
+    // corruption) can still produce a partial line. The replay
+    // path must surface a `LedgerError::Parse` (not panic).
+    let dir = workspace();
+    let mut ledger = StateLedger::new(dir.path(), true);
+    ledger
+        .commit(
+            CommitDelta::CounterChanged {
+                counter: "consecutive_failures".to_string(),
+                new_value: 1,
+            },
+            None,
+        )
+        .unwrap();
+
+    // Append a half-line that mimics what an interrupted
+    // append-mode write would have left behind.
+    use std::io::Write as _;
+    let path = ledger.ledger_path();
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .expect("open");
+    f.write_all(b"{\"sequence\":2,\"delta\":{\"kind\":\"Co")
+        .expect("write partial");
+    drop(f);
+
+    let result = StateLedger::replay_from_disk(dir.path());
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    let s = format!("{err}");
+    assert!(
+        s.contains("parse error at line"),
+        "expected parse error, got: {s}"
+    );
+}
+
+#[test]
+fn fix1_truncate_after_keeps_first_n_lines() {
+    // Set up a corrupted ledger (valid first line, garbage
+    // second line). `truncate_after(1)` must keep only the
+    // first line, and a subsequent replay must succeed.
+    let dir = workspace();
+    let mut ledger = StateLedger::new(dir.path(), true);
+    ledger
+        .commit(
+            CommitDelta::CounterChanged {
+                counter: "consecutive_failures".to_string(),
+                new_value: 1,
+            },
+            None,
+        )
+        .unwrap();
+
+    use std::io::Write as _;
+    let path = ledger.ledger_path();
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .expect("open");
+    f.write_all(b"this is not valid json\n").expect("write junk");
+    drop(f);
+
+    // Truncate to 1 line.
+    read_commit_log(dir.path()).expect_err("replay must fail on corruption");
+    read_commit_log(dir.path()).ok(); // smoke
+    crate::state::truncate_after(dir.path(), 1).expect("truncate");
+    let log = read_commit_log(dir.path()).expect("read after truncate");
+    assert_eq!(log.len(), 1);
+    let replayed = StateLedger::replay_from_disk(dir.path()).expect("replay");
+    assert_eq!(replayed.consecutive_failures, 1);
+}
+
+// ---------------------------------------------------------------------------
 // 7. Feature flag: feature_enabled=false is a no-op
 // ---------------------------------------------------------------------------
 

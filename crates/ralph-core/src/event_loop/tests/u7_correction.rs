@@ -53,8 +53,13 @@ fn u7a_recoverable_rejection_writes_correction_and_log() {
     let temp = tempfile::tempdir().unwrap();
     let rejection = rejection_with_origin("executor", "work.done", "missing field plan_path");
     let mut pc = PromptContext::default();
-    let ctx =
-        correction::emit_correction_context(&rejection, 1, Some(temp.path()), &mut pc);
+    let ctx = correction::emit_correction_context(
+        None,
+        &rejection,
+        1,
+        Some(temp.path()),
+        &mut pc,
+    );
     assert_eq!(pc.correction_blocks.len(), 1);
     assert_eq!(pc.correction_blocks[0].reason_code, ctx.reason_code);
     assert!(!ctx.needs_escalation);
@@ -73,9 +78,9 @@ fn u7a_three_rejections_escalate_to_human_guidance() {
     let mut bus = ralph_proto::EventBus::new();
     let rejection = rejection_with_origin("executor", "work.done", "missing field");
     let mut pc = PromptContext::default();
-    let ctx1 = correction::emit_correction_context(&rejection, 1, None, &mut pc);
-    let ctx2 = correction::emit_correction_context(&rejection, 2, None, &mut pc);
-    let ctx3 = correction::emit_correction_context(&rejection, 3, None, &mut pc);
+    let ctx1 = correction::emit_correction_context(None, &rejection, 1, None, &mut pc);
+    let ctx2 = correction::emit_correction_context(None, &rejection, 2, None, &mut pc);
+    let ctx3 = correction::emit_correction_context(None, &rejection, 3, None, &mut pc);
     assert!(!ctx1.needs_escalation);
     assert!(!ctx2.needs_escalation);
     assert!(ctx3.needs_escalation);

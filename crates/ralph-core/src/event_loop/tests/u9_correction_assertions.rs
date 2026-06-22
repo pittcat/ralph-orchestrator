@@ -206,7 +206,7 @@ fn u9_emit_correction_writes_recovery_jsonl_with_unified_schema() {
     let temp = TempDir::new().unwrap();
     let r = rejection_with_origin("executor", "work.done", "missing plan_path");
     let mut pc = PromptContext::default();
-    let ctx = correction::emit_correction_context(&r, 1, Some(temp.path()), &mut pc);
+    let ctx = correction::emit_correction_context(None, &r, 1, Some(temp.path()), &mut pc);
 
     let path = crate::state::recovery_log_path(temp.path());
     assert!(path.exists(), "recovery.jsonl must be created");
