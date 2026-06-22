@@ -586,9 +586,18 @@ fn u6_verdict_gate_rejects_loop_complete_on_upstream_fail() {
         reason, None,
         "verdict gate must reject LOOP_COMPLETE on upstream fail"
     );
+    // P0-2 (2026-06-23-003 plan): completion rejection now routes
+    // through the deterministic-correction path. The rejection
+    // signal lives in `state.prompt_context.correction_blocks`
+    // (rendered into the next prompt as `## ORCHESTRATOR CORRECTION`)
+    // instead of being published on the EventBus as `task.resume`.
     assert!(
-        event_loop.has_pending_events(),
-        "Rejection must inject task.resume so the loop continues"
+        !event_loop
+            .state()
+            .prompt_context
+            .correction_blocks
+            .is_empty(),
+        "completion rejection must inject a CorrectionContext into state.prompt_context (P0-2)"
     );
 }
 
@@ -631,9 +640,18 @@ fn u6_verdict_gate_rejects_loop_complete_on_report_done_fail() {
         reason, None,
         "verdict gate must reject LOOP_COMPLETE when report.done carries fail"
     );
+    // P0-2 (2026-06-23-003 plan): completion rejection now routes
+    // through the deterministic-correction path. The rejection
+    // signal lives in `state.prompt_context.correction_blocks`
+    // (rendered into the next prompt as `## ORCHESTRATOR CORRECTION`)
+    // instead of being published on the EventBus as `task.resume`.
     assert!(
-        event_loop.has_pending_events(),
-        "Rejection must inject task.resume so the loop continues"
+        !event_loop
+            .state()
+            .prompt_context
+            .correction_blocks
+            .is_empty(),
+        "completion rejection must inject a CorrectionContext into state.prompt_context (P0-2)"
     );
 }
 
@@ -701,9 +719,18 @@ fn u6_verdict_gate_fake_pass_on_report_done_after_upstream_fail() {
         reason.is_none(),
         "verdict gate must reject LOOP_COMPLETE when upstream verdict was fail, got {reason:?}"
     );
+    // P0-2 (2026-06-23-003 plan): completion rejection now routes
+    // through the deterministic-correction path. The rejection
+    // signal lives in `state.prompt_context.correction_blocks`
+    // (rendered into the next prompt as `## ORCHESTRATOR CORRECTION`)
+    // instead of being published on the EventBus as `task.resume`.
     assert!(
-        event_loop.has_pending_events(),
-        "Rejection must inject task.resume so the loop continues"
+        !event_loop
+            .state()
+            .prompt_context
+            .correction_blocks
+            .is_empty(),
+        "completion rejection must inject a CorrectionContext into state.prompt_context (P0-2)"
     );
 }
 

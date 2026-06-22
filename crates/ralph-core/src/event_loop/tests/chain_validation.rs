@@ -141,10 +141,18 @@ fn test_chain_validation_injects_task_resume_on_rejection() {
     let reason = event_loop.check_completion_event();
     assert_eq!(reason, None, "Should reject completion");
 
-    // A task.resume event should have been published to the bus
+    // P0-2 (2026-06-23-003 plan): completion rejection now routes
+    // through the deterministic-correction path. The rejection
+    // signal lives in `state.prompt_context.correction_blocks`
+    // (rendered into the next prompt as `## ORCHESTRATOR CORRECTION`)
+    // instead of being published on the EventBus as `task.resume`.
     assert!(
-        event_loop.has_pending_events(),
-        "task.resume should be published on rejection"
+        !event_loop
+            .state()
+            .prompt_context
+            .correction_blocks
+            .is_empty(),
+        "completion rejection must inject a CorrectionContext into state.prompt_context (P0-2)"
     );
 }
 

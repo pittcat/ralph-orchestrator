@@ -209,9 +209,18 @@ fn test_verdict_gate_rejects_loop_complete_when_payload_is_fail() {
         reason, None,
         "verdict gate should reject LOOP_COMPLETE when review.complete carries pass_or_fail=fail"
     );
+    // P0-2 (2026-06-23-003 plan): completion rejection now routes
+    // through the deterministic-correction path. The rejection
+    // signal lives in `state.prompt_context.correction_blocks`
+    // (rendered into the next prompt as `## ORCHESTRATOR CORRECTION`)
+    // instead of being published on the EventBus as `task.resume`.
     assert!(
-        event_loop.has_pending_events(),
-        "Rejecting completion should inject task.resume so the loop continues"
+        !event_loop
+            .state()
+            .prompt_context
+            .correction_blocks
+            .is_empty(),
+        "completion rejection must inject a CorrectionContext into state.prompt_context (P0-2)"
     );
 }
 
@@ -326,8 +335,17 @@ fn test_verdict_gate_additional_topic_blocks_loop_complete_on_fail() {
         reason, None,
         "verdict gate should reject LOOP_COMPLETE when report.done carries pass_or_fail=fail"
     );
+    // P0-2 (2026-06-23-003 plan): completion rejection now routes
+    // through the deterministic-correction path. The rejection
+    // signal lives in `state.prompt_context.correction_blocks`
+    // (rendered into the next prompt as `## ORCHESTRATOR CORRECTION`)
+    // instead of being published on the EventBus as `task.resume`.
     assert!(
-        event_loop.has_pending_events(),
-        "Rejecting completion should inject task.resume so the loop continues"
+        !event_loop
+            .state()
+            .prompt_context
+            .correction_blocks
+            .is_empty(),
+        "completion rejection must inject a CorrectionContext into state.prompt_context (P0-2)"
     );
 }

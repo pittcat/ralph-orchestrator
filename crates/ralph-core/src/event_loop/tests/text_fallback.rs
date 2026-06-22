@@ -91,9 +91,18 @@ fn test_text_fallback_completions_with_missing_required_events() {
         !event_loop.state().completion_requested,
         "completion_requested should be reset after required-events rejection"
     );
+    // P0-2 (2026-06-23-003 plan): completion rejection now routes
+    // through the deterministic-correction path. The rejection
+    // signal lives in `state.prompt_context.correction_blocks`
+    // (rendered into the next prompt as `## ORCHESTRATOR CORRECTION`)
+    // instead of being published on the EventBus as `task.resume`.
     assert!(
-        event_loop.has_pending_events(),
-        "Rejecting completion should inject task.resume so the loop continues"
+        !event_loop
+            .state()
+            .prompt_context
+            .correction_blocks
+            .is_empty(),
+        "completion rejection must inject a CorrectionContext into state.prompt_context (P0-2)"
     );
 }
 

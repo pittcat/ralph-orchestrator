@@ -1681,21 +1681,22 @@ impl EventLoop {
                 }
                 self.state.completion_requested = false;
 
-                // Inject task.resume so the loop continues
+                // U11-T8 / P0-2 (2026-06-23-003 plan): deterministic
+                // correction.  Replaces the legacy `task.resume`
+                // injection so the rejection signal flows through
+                // `PromptContext` (single source for the next prompt)
+                // instead of the EventBus back-channel.
                 let free_form = format!(
                     "LOOP_COMPLETE rejected: missing required events: {:?}. \
                      The agent must complete all workflow phases before emitting LOOP_COMPLETE. \
                      Use loop.cancel to abort the workflow instead.",
                     missing
                 );
-                // U2 (2026-06-17-003 plan): wrap the free-form message in
-                // a JSON object carrying the schema-required
-                // `reason` and `target_hat` fields so the drift
-                // detector counts the injected `task.resume` as
-                // schema-compliant.
-                let resume_payload =
-                    enrich_task_resume_payload(&free_form, "missing required events", None);
-                self.bus.publish(Event::new("task.resume", resume_payload));
+                Self::inject_completion_correction(
+                    &mut self.state,
+                    "missing_required_events",
+                    &free_form,
+                );
                 return None;
             }
         }
@@ -1741,16 +1742,19 @@ impl EventLoop {
                 }
                 self.state.completion_requested = false;
 
+                // U11-T8 / P0-2 (2026-06-23-003 plan): deterministic
+                // correction.  Replaces the legacy `task.resume`
+                // injection.
                 let free_form = format!(
                     "LOOP_COMPLETE rejected: most recent {} event has {}={}. \
                      The workflow has not passed final review. Use loop.cancel to abort instead.",
                     gate.topic, gate.fail_field, gate.fail_value
                 );
-                // U2 (2026-06-17-003 plan): wrap the free-form
-                // message in a JSON object carrying the
-                // schema-required `reason` and `target_hat` fields.
-                let resume_payload = enrich_task_resume_payload(&free_form, "verdict_fail", None);
-                self.bus.publish(Event::new("task.resume", resume_payload));
+                Self::inject_completion_correction(
+                    &mut self.state,
+                    "verdict_fail",
+                    &free_form,
+                );
                 return None;
             }
         }
@@ -1779,12 +1783,14 @@ impl EventLoop {
                  Use loop.cancel to abort the workflow instead.",
                 rejection.message
             );
-            // U2 (2026-06-17-003 plan): wrap the free-form message
-            // in a JSON object carrying the schema-required
-            // `reason` and `target_hat` fields.
-            let resume_payload =
-                enrich_task_resume_payload(&free_form, "workflow_guard incomplete", None);
-            self.bus.publish(Event::new("task.resume", resume_payload));
+            // U11-T8 / P0-2 (2026-06-23-003 plan): deterministic
+            // correction.  Replaces the legacy `task.resume`
+            // injection.
+            Self::inject_completion_correction(
+                &mut self.state,
+                "workflow_guard_incomplete",
+                &free_form,
+            );
             return None;
         }
 
@@ -1954,6 +1960,79 @@ impl EventLoop {
         self.state.completion_rejection_signature = Some(signature);
         self.state.last_rejection_fingerprint = current_fp;
         None
+    }
+
+    /// P0-2 (2026-06-23-003 plan): completion rejection no longer
+    /// publishes a `task.resume` event.  Instead, we route the
+    /// rejection through the deterministic-correction path so the
+    /// next prompt builder renders a `## ORCHESTRATOR CORRECTION`
+    /// block sourced from `state.prompt_context` (the U7a single
+    /// source of truth for prompt-side rejection signals).
+    ///
+    /// The synthesised `Rejection` uses the `Policy` stage as the
+    /// closest existing bucket.  The `reason_hint` is fed into the
+    /// correction block verbatim so the next prompt keeps the same
+    /// free-form text the legacy `task.resume` payload used to
+    /// carry.  The per-key retry counter is read from the unified
+    /// ledger so escalation (R11) tracks the same number the
+    /// legacy wire-format path used.
+    fn inject_completion_correction(
+        state: &mut LoopState,
+        reason_hint: &str,
+        free_form: &str,
+    ) {
+        let topic = ralph_proto::LOOP_COMPLETE.to_string();
+        let mut rejection = crate::event_loop::rejection::Rejection {
+            stage: crate::event_loop::rejection::RejectionStage::Policy,
+            source_hat: None,
+            business_hat: None,
+            topic: topic.clone(),
+            violation: free_form.to_string(),
+            retry_key: String::new(),
+            retry_eligible: true,
+            non_retryable_reason: None,
+            target_hat: None,
+            original_event_id: None,
+            original_ts: None,
+        };
+        let retry_key = rejection.compute_retry_key();
+        rejection.retry_key = retry_key.clone();
+
+        // Read the per-key retry count from the unified ledger so
+        // R11 escalation tracks the same number the legacy
+        // `task.resume` payload used to ship on the wire.  Fall
+        // back to 1 on cold start (no prior rejection recorded).
+        let retry_count = state
+            .state_ledger
+            .as_ref()
+            .and_then(|l| l.snapshot().rejection_digest().get(&retry_key))
+            .map(|entry| entry.count as u32)
+            .unwrap_or(1u32);
+
+        // `emit_correction_context` is the U7a entry point: it
+        // commits a `RejectionRecorded` delta to the unified ledger
+        // (when wired up) and pushes the `CorrectionContext` into
+        // `state.prompt_context` so the next `build_prompt` call
+        // prepends the `## ORCHESTRATOR CORRECTION` block.  No
+        // event is published on the bus — the prompt builder is
+        // the single source of truth.
+        let _ctx = crate::correction::emit_correction_context(
+            state.state_ledger.as_mut(),
+            &rejection,
+            retry_count,
+            None,
+            &mut state.prompt_context,
+        );
+
+        // Surface the reason hint in tracing so operators can
+        // correlate a `LOOP_COMPLETE` rejection with the
+        // correction block queued in the next prompt.
+        tracing::info!(
+            retry_key = %retry_key,
+            reason_hint = %reason_hint,
+            topic = %topic,
+            "P0-2: injected completion rejection into state.prompt_context (replaces task.resume)"
+        );
     }
 
     /// Returns true if the verdict event payload contains `gate.fail_field == gate.fail_value`.
