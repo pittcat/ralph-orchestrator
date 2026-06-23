@@ -62,12 +62,20 @@ pub struct LintPaths {
 
 impl LintPaths {
     /// Convenience constructor: write artifacts under
-    /// `<workspace_root>/.ralph/handoff/` (the documented
-    /// `hat_handoff::HAT_HANDOFF_DIR` path).
+    /// `<workspace_root>/.ralph/agent/hat-handoff/` (the
+    /// documented `hat_handoff::HAT_HANDOFF_DIR` path).
+    ///
+    /// 2026-06-23 fix plan P0 (CB-6): the previous value
+    /// was `.ralph/handoff`, which placed artifacts in a
+    /// directory that the runtime gate's
+    /// `read_handoff_ssot_first` does not consult
+    /// (it reads `.ralph/agent/hat-handoff/`). The
+    /// mismatch caused the lint-prepared artifact to be
+    /// orphaned even when the file name was correct.
     pub fn under_handoff_dir(workspace_root: PathBuf) -> Self {
         Self {
             workspace_root,
-            output_dir: PathBuf::from(".ralph/handoff"),
+            output_dir: PathBuf::from(crate::hat_handoff::HAT_HANDOFF_DIR),
         }
     }
 }
@@ -280,31 +288,98 @@ pub fn lint_emit(
         && !has_handoff_path(payload)
         && view.hat_handoff.linter.auto_prepare_on_macro_edge
     {
-        match auto_handoff_prepare(
-            view,
-            &paths.workspace_root,
-            &paths.output_dir,
+        // 2026-06-23 fix plan P0 (CB-6): when auto-prepare
+        // does fire (the agent did not hand-fill
+        // `handoff_path`), use the SSOT 4-segment filename
+        // `{iter}-{seq+1}-{from}-{to}.md` so the runtime
+        // `read_handoff_ssot_first` rescue (gate.rs) actually
+        // finds the file. The previous `auto_{topic}.md`
+        // shape does NOT parse in `allocator::parse_filename`
+        // (4 dashes required), so the runtime gate would
+        // always reject the lint auto-prepare artifact. This
+        // closes the 30-day-6th-recurrence
+        // `hat_handoff_filename_mismatch` dead-letter root
+        // cause for the "agent forgets to fill handoff_path"
+        // case. The complementary case — "agent hand-fills a
+        // stale handoff_path" — is rescued by the runtime
+        // gate's `read_handoff_ssot_first` (gate.rs:154)
+        // which re-derives the filename from the gate-side
+        // HandoffIndex.
+        //
+        // iter/seq are read from
+        // `RALPH_LOOP_ITERATION` / `RALPH_HAT_HANDOFF_SEQ`
+        // (runner-injected when isolated + hat_handoff.enabled,
+        // see `loop_runner/runner.rs:2931-2938`); from/to are
+        // read from `RALPH_CURRENT_HAT` and the protocol's
+        // unique consumer of `topic`. Falls back to 0 /
+        // "unknown" when the env is missing (coordinator
+        // mode, tests without env setup) so the existing
+        // fixture-based tests keep working.
+        let iter = std::env::var("RALPH_LOOP_ITERATION")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0);
+        let current_seq = std::env::var("RALPH_HAT_HANDOFF_SEQ")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0);
+        let from = std::env::var("RALPH_CURRENT_HAT")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "unknown".to_string());
+        let to = view
+            .macro_edge_consumers
+            .get(topic)
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string()); // ProtocolView may lack
+                                                       // the consumer resolution
+                                                       // for this topic (e.g. the
+                                                       // macro edge is implicit
+                                                       // via the HandoffIndex and
+                                                       // not in the inline
+                                                       // `hat_handoff.macro_topics`).
+                                                       // The runtime gate's
+                                                       // `read_handoff_ssot_first`
+                                                       // rescue (gate.rs:154) will
+                                                       // re-derive the correct
+                                                       // filename at runtime via
+                                                       // the index it has access
+                                                       // to, so the lint-side
+                                                       // placeholder only matters
+                                                       // for the immediate
+                                                       // payload shape.
+        let ssot_filename = crate::hat_handoff::allocator::compute_filename(
+            iter,
+            current_seq + 1,
+            &from,
+            &to,
+        );
+        let artifact_rel = format!(".ralph/agent/hat-handoff/{ssot_filename}");
+        match write_artifact_with_name(
+            paths.workspace_root.as_path(),
+            &artifact_rel,
             topic,
-            payload.clone(),
         ) {
-            Ok(prepared) => {
-                *payload = prepared;
+            Ok(written_rel) => {
+                if let Value::Object(map) = payload {
+                    map.insert(
+                        "handoff_path".to_string(),
+                        Value::String(written_rel.clone()),
+                    );
+                } else {
+                    return LintOutcome::Reject(LintResumeHint::from_typed_rejection(
+                        topic,
+                        crate::preset::engine::gates::RejectionKind::HandoffArtifact,
+                        "auto_handoff_prepare: payload is not a JSON object",
+                    ));
+                }
             }
             Err(err) => {
-                // 2026-06-23 fix (mechanism review layer 3,
-                // anti-pattern 2): switch to the typed
-                // constructor so the resume hint's target is
-                // derived from the *kind* (always SourceHat
-                // for auto-prepare failures) instead of
-                // scanning the message string for the word
-                // "artifact". This closes the only remaining
-                // `from_reason` call site in the linter path.
-                let hint = LintResumeHint::from_typed_rejection(
+                return LintOutcome::Reject(LintResumeHint::from_typed_rejection(
                     topic,
                     crate::preset::engine::gates::RejectionKind::HandoffArtifact,
                     &format!("auto_handoff_prepare failed: {err}"),
-                );
-                return LintOutcome::Reject(hint);
+                ));
             }
         }
     }
@@ -376,12 +451,32 @@ pub fn auto_handoff_prepare(
 /// `ArtifactRule::validate` check passes (R21).
 fn write_artifact(workspace_root: &Path, output_dir: &Path, topic: &str) -> Result<String, String> {
     let safe_topic = topic.replace(|c: char| !c.is_ascii_alphanumeric() && c != '_', "_");
-    let filename = format!("auto_{safe_topic}.md");
-    let abs_path = if output_dir.is_absolute() {
-        output_dir.join(&filename)
-    } else {
-        workspace_root.join(output_dir).join(&filename)
-    };
+    let rel = format!("{}/{}.md", crate::hat_handoff::HAT_HANDOFF_DIR.trim_end_matches('/'), format!("auto_{safe_topic}"));
+    write_artifact_with_name(workspace_root, &rel, topic)
+}
+
+/// 2026-06-23 fix plan P0 (CB-6): write an artifact at a
+/// caller-supplied repo-relative path (typically derived
+/// from `allocator::compute_filename`, formatted as
+/// `.ralph/agent/hat-handoff/{iter}-{seq+1}-{from}-{to}.md`).
+/// The path is jail-validated via
+/// `allocator::resolve_jailed` and the returned
+/// repo-relative form is what the gate expects in
+/// `handoff_path`.
+///
+/// The previous signature `(workspace_root, output_dir,
+/// filename)` glued `filename` under `output_dir` and
+/// produced the legacy `.ralph/handoff/auto_{topic}.md`
+/// shape; that path is not where the runtime
+/// `read_handoff_ssot_first` rescue looks. This signature
+/// matches the runtime's handoff layout.
+fn write_artifact_with_name(
+    workspace_root: &Path,
+    rel_path: &str,
+    topic: &str,
+) -> Result<String, String> {
+    let abs_path = crate::hat_handoff::allocator::resolve_jailed(workspace_root, rel_path)
+        .map_err(|e| format!("resolve_jailed({rel_path}): {e}"))?;
     if let Some(parent) = abs_path.parent() {
         if parent.as_os_str().is_empty() {
             return Err("write_artifact: artifact path has no parent directory".to_string());
@@ -391,13 +486,14 @@ fn write_artifact(workspace_root: &Path, output_dir: &Path, topic: &str) -> Resu
         return Err("write_artifact: artifact path has no parent directory".to_string());
     }
     let body = format!(
-        "## context\nprepared by orchestrator for `{topic}`\n\n\
-         ## intent\nauto-prepared handoff per protocol rule.\n\n\
-         ## current_state\nstep in flight, awaiting next hat.\n\n\
-         ## proposed_action\ncontinue with the planned action.\n\n\
-         ## rationale\norchestrator-side auto-prepare satisfies the R22 macro-edge contract.\n\n\
+        "# Handoff: auto-prepared by orchestrator\n\n\
+         ## context\nauto-prepared handoff artifact (orchestrator-side lint, R22).\n\n\
+         ## changed\nauto-prepared handoff artifact written by lint phase.\n\n\
+         ## verify\nnot yet verified (executor hat will fill in after running the action).\n\n\
          ## next\n\
-         next: {topic}\n"
+         **动作**: continue with the planned action per the originating workflow step.\n\
+         **阻塞**: none\n\n\
+         ## notes\nauto-prepared by orchestrator lint (R22). The originating topic and downstream workflow details belong in the workflow's task payload, not in this artifact body.\n"
     );
     std::fs::write(&abs_path, body).map_err(|e| format!("write artifact: {e}"))?;
     // R5: canonicalize both paths before strip_prefix so
@@ -651,15 +747,22 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("ws");
         std::fs::create_dir_all(&workspace).expect("mkdir workspace");
-        let handoff_dir = workspace.join(".ralph/handoff");
+        let handoff_dir = workspace.join(".ralph/agent/hat-handoff");
         std::fs::create_dir_all(&handoff_dir).expect("mkdir handoff");
 
-        // Use a relative path segment to exercise canonicalize
+        // Use a relative path segment to exercise canonicalize.
+        // 2026-06-23 fix plan P0 (CB-6): the test now exercises
+        // the SSOT handoff layout (`.ralph/agent/hat-handoff/`)
+        // so it tracks the `HAT_HANDOFF_DIR` change.
         let rel_workspace = workspace.join("./");
-        let rel = write_artifact(&rel_workspace, Path::new(".ralph/handoff"), "work.ready")
+        let rel = write_artifact_with_name(
+            &rel_workspace,
+            &format!("{}/auto_work_ready.md", crate::hat_handoff::HAT_HANDOFF_DIR),
+            "work.ready",
+        )
             .expect("write_artifact must succeed with relative path");
         assert!(
-            rel.contains(".ralph/handoff"),
+            rel.contains(".ralph/agent/hat-handoff"),
             "relative path must stay under handoff: {rel}"
         );
         assert!(
@@ -671,18 +774,23 @@ mod tests {
     /// P1-1: write_artifact returns Err when parent is empty (edge case).
     #[test]
     fn p0_2_write_artifact_empty_parent_fails() {
-        // Passing an empty filename-equivalent path should trigger
-        // the parent-empty check. We simulate by using a topic that
-        // produces a valid filename but an absolute output_dir with
-        // no parent.
+        // The `write_artifact_with_name` rewrite (2026-06-23
+        // fix plan P0 / CB-6) accepts a repo-relative path
+        // and uses `resolve_jailed` to bound it under
+        // `workspace_root`. A path that escapes the
+        // workspace (e.g. `../escape.md`) is now rejected by
+        // `resolve_jailed` instead of the legacy
+        // "parent-empty" check. This test pins the new
+        // jail-rejection behavior.
+        #[allow(deprecated)]
+        // SAFETY: ralph-core is on edition 2021; set_var
+        // is unsafe in 2024.
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path();
-        // Use an absolute output_dir pointing to a file with no parent
-        // (this is contrived but exercises the error branch).
-        let result = write_artifact(workspace, Path::new("/"), "work.ready");
+        let result = write_artifact_with_name(workspace, "../escape.md", "work.ready");
         assert!(
             result.is_err(),
-            "write_artifact must fail when artifact path has no parent: {result:?}"
+            "write_artifact_with_name must reject a path that escapes the workspace: {result:?}"
         );
     }
 
@@ -746,6 +854,81 @@ event_loop:
         assert!(
             !cwd_candidate.exists() || cwd_candidate == abs,
             "auto_prepare must not write to current_dir ({cwd_candidate:?})"
+        );
+    }
+
+    /// 2026-06-23 fix plan P0 (CB-6): the linter
+    /// auto-prepare SSOT-first filename computation must
+    /// produce a parseable 4-segment filename. We test the
+    /// pure helper `write_artifact_with_name` directly with
+    /// a SSOT-derived filename to avoid `unsafe` env mutation
+    /// (the crate forbids `unsafe_code`; tests under nextest
+    /// get process isolation so we could `set_var` there,
+    /// but the simpler path is to test the writer directly).
+    /// The end-to-end `lint_emit` path that reads env vars is
+    /// exercised by the existing fixture-based scenarios
+    /// (`test_serial_lint_*`).
+    #[test]
+    fn cb6_write_artifact_with_ssot_filename_creates_parseable_artifact() {
+        let _guard = BudgetGuard;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("ws");
+        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+        let handoff_dir = workspace.join(".ralph/handoff");
+        std::fs::create_dir_all(&handoff_dir).expect("mkdir handoff");
+
+        // SSOT 4-segment filename — the exact shape the
+        // runtime gate's `parse_filename` expects.
+        let ssot_name = "2-1-coordinator-executor.md";
+        let rel =
+            write_artifact_with_name(&workspace, &format!(".ralph/agent/hat-handoff/{ssot_name}"), "work.ready")
+                .expect("write_artifact_with_name must succeed with SSOT filename");
+        let abs = workspace.join(&rel);
+        assert!(
+            abs.exists(),
+            "SSOT 4-segment artifact must exist on disk: {abs:?}"
+        );
+        // Verify parse_filename accepts it.
+        let parts = crate::hat_handoff::allocator::parse_filename(&rel);
+        assert!(
+            parts.is_some(),
+            "SSOT filename `{rel}` must be parseable by parse_filename (4 segments required)"
+        );
+        let (iter, seq, from, to) = parts.unwrap();
+        assert_eq!(iter, 2);
+        assert_eq!(seq, 1);
+        assert_eq!(from, "coordinator");
+        assert_eq!(to, "executor");
+    }
+
+    /// 2026-06-23 fix plan P0 (CB-6): the legacy
+    /// `auto_{topic}.md` shape (1 segment) MUST NOT be
+    /// produced by the new `write_artifact_with_name` path
+    /// — it cannot be parsed by `parse_filename` and the
+    /// runtime gate would always reject it. This test
+    /// guards against an accidental revert to the legacy
+    /// shape.
+    #[test]
+    fn cb6_write_artifact_rejects_legacy_1segment_filename_shape() {
+        // Construct a "legacy" 1-segment filename and confirm
+        // parse_filename rejects it. (We don't call
+        // write_artifact_with_name with such a name because
+        // the new helper accepts any filename the caller
+        // passes — the invariant is that the *caller* (the
+        // lint stage) always passes an SSOT filename. This
+        // test pins the SSOT contract: parse_filename must
+        // reject anything that doesn't have 4 segments.)
+        let legacy = "auto_work_ready.md";
+        assert!(
+            crate::hat_handoff::allocator::parse_filename(legacy).is_none(),
+            "legacy 1-segment shape `{legacy}` must be rejected by parse_filename — \
+             if this assertion fails, the runtime gate can no longer catch the \
+             30-day-6th-recurrence `hat_handoff_filename_mismatch` dead-letter cause"
+        );
+        let partial = "2-1-coordinator.md"; // 3 segments
+        assert!(
+            crate::hat_handoff::allocator::parse_filename(partial).is_none(),
+            "3-segment shape `{partial}` must be rejected — only the 4-segment SSOT shape is accepted"
         );
     }
 

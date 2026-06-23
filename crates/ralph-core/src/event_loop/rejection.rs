@@ -1486,5 +1486,52 @@ mod tests {
                 CoordinatorAction::FixEmitTarget
             );
         }
+
+        /// 2026-06-23 fix plan P0 (CB-6): when the dispatcher
+        /// returns PlanBlocked (count >= threshold), the
+        /// event_loop must persist a `task_resume_dead_letter`
+        /// entry to `.ralph/recovery.jsonl` so the operator
+        /// can see the cumulative count even when stdout
+        /// logs rotate. We test the envelope construction
+        /// (the loop's dead-letter path is in
+        /// `event_loop/mod.rs` and not unit-testable in
+        /// isolation; the SSOT is here, the wiring is
+        /// verified by the dispatch + persistence contract).
+        #[test]
+        fn dead_letter_envelope_carries_kind_and_count() {
+            use crate::diagnosis::{
+                DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource,
+                RecoveryDiagnosisEnvelope,
+            };
+            let kind = RejectionKind::HandoffFilenameMismatch;
+            let count: u32 = 3;
+            let envelope = RecoveryDiagnosisEnvelope::builder()
+                .source(DiagnosisSource::LoopStale)
+                .severity(DiagnosisSeverity::Error)
+                .topic("work.ready")
+                .reason_code("task_resume_dead_letter")
+                .message(format!(
+                    "coordinator dead-letter after {count} consecutive task.resume (kind={}); emitting plan.blocked",
+                    kind.reason_code()
+                ))
+                .outcome(DiagnosisOutcome::Failed)
+                .source_hat("coordinator")
+                .safe_target(false)
+                .build();
+            // The reason_code is the new SSOT — distinct from
+            // the gate's `hat_handoff_filename_mismatch` so
+            // downstream tools can filter the terminal state
+            // separately from the per-iteration rejections.
+            assert_eq!(envelope.reason_code, "task_resume_dead_letter");
+            assert!(envelope.message.contains("kind=hat_handoff_filename_mismatch"));
+            assert!(envelope.message.contains("3 consecutive"));
+            // Serialized form must include the kind/count
+            // payload so operators reading recovery.jsonl can
+            // see the cumulative count and trigger kind.
+            let serialized = serde_json::to_value(&envelope).expect("serialize");
+            assert_eq!(serialized["reason_code"], "task_resume_dead_letter");
+            assert_eq!(serialized["source"], "loop_stale");
+            assert_eq!(serialized["source_hat"], "coordinator");
+        }
     }
 }

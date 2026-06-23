@@ -245,13 +245,26 @@ fn test_emit_with_builtin_preset_rejects_string_payload() {
     // - `Event rejected by` + any of the CLI emit gates.
     // - The original payload-rejection strings when no
     //   earlier gate tripped.
+    // 2026-06-23 fix plan P0 (CB-6): the lint phase now
+    // runs *before* the hat-handoff gate so it can auto-fill
+    // `handoff_path` for macro edges. A string payload
+    // therefore trips the lint phase first with
+    // `auto_handoff_prepare: payload is not a JSON object`.
+    // We accept the lint rejection or the legacy
+    // gate-level signals (any of which indicates the
+    // payload was rejected for the right reason).
     let has_any_rejection = stderr.contains("Event rejected by")
-        && (stderr.contains("Payload is not valid JSON")
-            || stderr.contains("payload type mismatch")
-            || stderr.contains("missing_path")
-            || stderr.contains("requires payload"));
+        || stderr.contains("LINT FAILED");
     assert!(
         has_any_rejection,
+        "stderr should explain a payload-style rejection"
+    );
+    assert!(
+        stderr.contains("payload is not a JSON object")
+            || stderr.contains("Payload is not valid JSON")
+            || stderr.contains("payload type mismatch")
+            || stderr.contains("missing_path")
+            || stderr.contains("requires payload"),
         "stderr should explain a payload-style rejection: {}",
         stderr
     );

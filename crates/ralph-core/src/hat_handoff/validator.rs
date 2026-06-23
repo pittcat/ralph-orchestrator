@@ -169,7 +169,16 @@ pub fn validate(content: &str) -> Result<(), HatHandoffViolation> {
     if let Some((_, body)) = sections.iter().find(|(h, _)| h == "notes") {
         let joined = body.join(" ");
         let words = joined.split_whitespace().count();
-        if words > 15 {
+        // 2026-06-23 fix plan P0 (CB-6): raised from 15
+        // to 50. The 15-word limit was a reasonable cap when
+        // agents wrote these by hand, but the orchestrator's
+        // auto-prepared handoff (R22) needs a small
+        // explanatory note that fits within 50 words
+        // without being artificially compressed. Production
+        // handoffs written by humans can still be much
+        // shorter — the higher cap is a backstop, not a
+        // target.
+        if words > 50 {
             return Err(HatHandoffViolation::NotesTooLong { words });
         }
     }
@@ -384,9 +393,13 @@ mod tests {
     #[test]
     fn notes_too_long_rejected() {
         let mut s = String::from(good_template());
+        // 2026-06-23 fix plan P0 (CB-6): the `## notes`
+        // word cap was raised from 15 to 50 (see line ~172).
+        // 60+ words here triggers the new NotesTooLong
+        // rejection path.
         s = s.replace(
             "## notes\n无\n",
-            "## notes\nthis is a very long notes section that exceeds the fifteen word limit and should be rejected by the validator\n",
+            "## notes\nthis is a very long notes section that has well over fifty words now because the cap was raised from fifteen to fifty in the same plan, so we need at least sixty words here to trigger the new NotesTooLong rejection path and keep the test exercising the same code branch it did before the cap change.\n",
         );
         let err = validate(&s).unwrap_err();
         assert!(matches!(err, HatHandoffViolation::NotesTooLong { .. }));

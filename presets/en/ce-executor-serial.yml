@@ -416,9 +416,14 @@ hats:
       `[hat_handoff_filename_mismatch, hat_handoff_structure_invalid, hat_handoff_illegal_emit_topic]`,
       the previous handoff was rejected by the gate. Recover the run by:
       1. Reading `.ralph/agent/scratchpad.md` to recover current iteration state.
-      2. Re-preparing the handoff artifact via
-         `ralph tools handoff prepare --from coordinator --to <next> --topic <topic> --iteration <current_iter> --current-seq 0 --force`.
-      3. Re-emitting `work.ready` with the new SSOT-derived filename.
+      2. Re-emitting `work.ready` with business fields only (task_id, plan_path,
+         step, complexity). Do NOT include `handoff_path` in the payload —
+         `ralph emit` derives it from the loop's iter/seq (SSOT via
+         `allocator::compute_filename`) and writes the artifact itself
+         during the lint phase. Hand-filling `handoff_path` from a stale
+         `ralph tools handoff prepare` (defaults to iter=0) is the
+         30-day-6th-recurrence `hat_handoff_filename_mismatch` dead-letter
+         root cause and the runtime will reject it.
       `plan.blocked` is emitted automatically by `CoordinatorDispatcher`
       after 3 consecutive same-kind `task.resume` (typed dispatch via
       `typed_lint_rejection_count(kind) >= COORDINATOR_DEAD_LETTER_THRESHOLD`)

@@ -250,6 +250,7 @@ fn handle_lint_outcome(
     workspace_root: &Path,
     view: &ProtocolView,
     topic: &str,
+    hat: Option<&str>,
     payload: serde_json::Value,
 ) -> Result<serde_json::Value> {
     match outcome {
@@ -271,19 +272,35 @@ fn handle_lint_outcome(
             Ok(payload)
         }
         LintOutcome::Reject(hint) => {
-            // R9: lint failures do NOT write recovery.jsonl.
-            // Plan 2026-06-20-001 review P0 #2: the cross-process
-            // `pending_lint_resume.json` hand-off was broken
-            // (write-only, no reader). The function is now a
-            // no-op stub (see `write_pending_lint_resume`). The
-            // in-loop feedback path lives in
-            // `engine_required_field_filter` which DOES populate
-            // `state.pending_lint_resume` so the agent's next
-            // `build_prompt` sees `## LINT RESUME REQUIRED`. The
-            // CLI emit failure is a fast-feedback channel: print
-            // the blocks, exit non-zero, the agent retries
-            // through the same in-loop path.
+            // 2026-06-23 fix plan P0 (CB-6): also write
+            // recovery.jsonl (in addition to the in-loop
+            // `pending_lint_resume` path that R9 preserved) so
+            // the operator can correlate the lint rejection
+            // with the gate rejection via the unified audit
+            // log. Pre-CB-6, gate ran before lint and wrote
+            // recovery.jsonl on missing-required-field
+            // rejections; with the reordered pipeline (lint
+            // first to let auto-prepare fill `handoff_path`),
+            // lint is the one that catches the missing-fields
+            // case, so the audit write has to follow.
             let _ = write_pending_lint_resume(workspace_root, topic, &hint);
+            // Mirror the gate-rejection recovery envelope
+            // shape so the audit log uses the same SSOT
+            // vocabulary (reason_code, source, source_hat,
+            // topic) for both gate and lint rejections.
+            {
+                use ralph_core::{PolicyFinding, ViolationType};
+                let kind_label = format!("{:?}", hint.class);
+                let finding = PolicyFinding {
+                    violation_type: ViolationType::SemanticGateViolation {
+                        gate: "lint".to_string(),
+                        context: kind_label,
+                    },
+                    topic: topic.to_string(),
+                    message: format!("{} (reason_code: lint_reject)", hint.reason),
+                };
+                record_cli_emit_rejection(workspace_root, topic, hat.as_deref(), &finding);
+            }
             print_lint_failure_blocks(view, &hint);
             Err(lint_failure_exit_code(&hint))
         }
@@ -297,6 +314,20 @@ fn handle_lint_outcome(
             // `reason` string.
             let hint = LintResumeHint::from_reason(topic, &reason);
             let _ = write_pending_lint_resume(workspace_root, topic, &hint);
+            // Mirror the lint-reject audit write (see Reject
+            // branch above for rationale).
+            {
+                use ralph_core::{PolicyFinding, ViolationType};
+                let finding = PolicyFinding {
+                    violation_type: ViolationType::SemanticGateViolation {
+                        gate: "lint".to_string(),
+                        context: "timeout".to_string(),
+                    },
+                    topic: topic.to_string(),
+                    message: format!("{} (reason_code: lint_timeout)", reason),
+                };
+                record_cli_emit_rejection(workspace_root, topic, hat.as_deref(), &finding);
+            }
             eprintln!(
                 "## LINT TIMEOUT\n\
                  topic: `{topic}`\n\
@@ -1017,31 +1048,64 @@ fn emit_command_with_root_and_hats(
         args.payload
     };
 
+    // 2026-06-23 fix plan P0 (CB-6) was originally a hard
+    // reject for hand-filled `handoff_path`, but the
+    // "agent used `ralph tools handoff prepare` then
+    // emitted" path is a legitimate re-emit flow exercised
+    // by `tests/integration_emit_policy.rs`. The actual
+    // root cause was a different bug — `auto_handoff_prepare`
+    // wrote a non-SSOT 1-segment filename
+    // (`auto_{topic}.md`) that the runtime gate's
+    // `parse_filename` could not accept. That is fixed
+    // in `linter.rs` (always use
+    // `allocator::compute_filename` SSOT). The fail-closed
+    // backstop for stale hand-filled paths is the runtime
+    // gate's `read_handoff_ssot_first` (gate.rs:154), which
+    // re-derives the filename from the gate-side
+    // HandoffIndex when the agent path is stale. No CLI
+    // guard is needed.
+
     // 2026-06-18-002 plan U7: CLI mirror of the runtime
-    // hat-handoff gate. Runs after payload normalization so we
-    // can read `handoff_path` from the same string the runner
-    // will eventually consume. Same reason_code SSOT, same
-    // decision shape. Disabled by default; opt-in via
+    // hat-handoff gate. Disabled by default; opt-in via
     // `event_loop.hat_handoff.enabled`.
-    if let Some(cfg) = config.as_ref() {
-        if let Err(err) =
-            crate::policy_check::check_hat_handoff_gate(hat.as_deref(), &topic, Some(&payload), cfg)
-        {
-            use ralph_core::{PolicyFinding, ViolationType};
-            let finding = PolicyFinding {
-                violation_type: ViolationType::SemanticGateViolation {
-                    gate: "hat_handoff".to_string(),
-                    context: err.message.clone(),
-                },
-                topic: topic.to_string(),
-                message: format!("{} (reason_code: {})", err.message, err.reason_code),
-            };
-            record_cli_emit_rejection(&workspace_root, &topic, hat.as_deref(), &finding);
-            anyhow::bail!(
-                "Event rejected by hat-handoff gate ({}): {}",
-                err.reason_code,
-                err.message
-            );
+    //
+    // 2026-06-23 fix plan P0 (CB-6): when the lint phase
+    // will run, defer the gate check until *after* lint so
+    // the lint auto-prepare (R22) can fill a missing
+    // `handoff_path` before the gate sees it. The previous
+    // order (gate before lint) caused the gate to reject
+    // agents that hand-omitted `handoff_path` even though
+    // the lint phase would have computed the SSOT 4-segment
+    // filename. With this reordering, the missing-path case
+    // is recovered by the lint phase, and the hand-filled
+    // stale case is recovered by the runtime gate's
+    // `read_handoff_ssot_first` rescue.
+    //
+    // When lint is off, the gate runs first (preserves the
+    // pre-CB-6 behavior for `RALPH_SERIAL_LINT_MODE=off`
+    // callers, e.g. integration tests of the policy
+    // surface itself).
+    if !should_run_lint(config.as_ref()) {
+        if let Some(cfg) = config.as_ref() {
+            if let Err(err) =
+                crate::policy_check::check_hat_handoff_gate(hat.as_deref(), &topic, Some(&payload), cfg)
+            {
+                use ralph_core::{PolicyFinding, ViolationType};
+                let finding = PolicyFinding {
+                    violation_type: ViolationType::SemanticGateViolation {
+                        gate: "hat_handoff".to_string(),
+                        context: err.message.clone(),
+                    },
+                    topic: topic.to_string(),
+                    message: format!("{} (reason_code: {})", err.message, err.reason_code),
+                };
+                record_cli_emit_rejection(&workspace_root, &topic, hat.as_deref(), &finding);
+                anyhow::bail!(
+                    "Event rejected by hat-handoff gate ({}): {}",
+                    err.reason_code,
+                    err.message
+                );
+            }
         }
     }
 
@@ -1105,13 +1169,59 @@ fn emit_command_with_root_and_hats(
         // for macro edges lacking one.
         let mut payload_mut = payload_value;
         let outcome = lint_emit_with_timeout(&view, &paths, &topic, &mut payload_mut);
-        match handle_lint_outcome(outcome, &workspace_root, &view, &topic, payload_mut) {
+        match handle_lint_outcome(outcome, &workspace_root, &view, &topic, hat.as_deref(), payload_mut) {
             Ok(v) => v,
             Err(e) => return Err(e),
         }
     } else {
         payload_value
     };
+
+    // Post-lint gate check: rerun the CLI mirror of the
+    // runtime hat-handoff gate on the lint-mutated payload.
+    // The lint phase may have injected `handoff_path`
+    // (auto-prepare R22) or kept the agent's hand-filled
+    // path; in both cases the gate should now find a valid
+    // path. Recovery.jsonl is still written via
+    // `record_cli_emit_rejection` for any remaining
+    // rejection (e.g. path-jail violation, parse_filename
+    // mismatch on a hand-filled stale path that the agent
+    // is responsible for — the runtime gate's
+    // `read_handoff_ssot_first` rescue handles this at
+    // runtime, so this CLI mirror is just a fast-feedback
+    // channel).
+    if let Some(cfg) = config.as_ref() {
+        // Serialize the (lint-mutated) payload back to a
+        // string for the gate. The lint may have injected
+        // `handoff_path` (auto-prepare) or kept the
+        // hand-filled one. We use the canonical JSON
+        // serialization (not `payload.clone()` which is
+        // already moved into `payload_value` at this point).
+        let post_lint_payload_str = serde_json::to_string(&payload_value)
+            .unwrap_or_default();
+        if let Err(err) = crate::policy_check::check_hat_handoff_gate(
+            hat.as_deref(),
+            &topic,
+            Some(&post_lint_payload_str),
+            cfg,
+        ) {
+            use ralph_core::{PolicyFinding, ViolationType};
+            let finding = PolicyFinding {
+                violation_type: ViolationType::SemanticGateViolation {
+                    gate: "hat_handoff".to_string(),
+                    context: err.message.clone(),
+                },
+                topic: topic.to_string(),
+                message: format!("{} (reason_code: {})", err.message, err.reason_code),
+            };
+            record_cli_emit_rejection(&workspace_root, &topic, hat.as_deref(), &finding);
+            anyhow::bail!(
+                "Event rejected by hat-handoff gate ({}): {}",
+                err.reason_code,
+                err.message
+            );
+        }
+    }
 
     let mut record = serde_json::json!({
         "topic": args.topic,

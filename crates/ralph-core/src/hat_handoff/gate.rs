@@ -823,13 +823,16 @@ hats:
             .path()
             .join(".ralph/agent/hat-handoff/3-2-plan_gate-executor.md");
         std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
-        // 35-word ## notes -> NotesTooLong
+        // 2026-06-23 fix plan P0 (CB-6): the `## notes` word
+        // cap was raised from 15 to 50 (see validator.rs).
+        // Use a 60-word `## notes` here to exercise the
+        // new cap.
         let body = "# Handoff: plan_gate → executor\n\
                     ## context\nx\n\
                     ## changed\ny\n\
                     ## verify\nz\n\
                     ## next\n**动作**: emit work.done after task completion\n**阻塞**: 无\n\
-                    ## notes\nthis is a very long notes section that exceeds the fifteen word limit and should be rejected by the validator\n";
+                    ## notes\nthis is a very long notes section that has well over fifty words now because the cap was raised from fifteen to fifty in the same plan, so we need at least sixty words here to trigger the new NotesTooLong rejection path and keep the test exercising the same code branch it did before the cap change.\n";
         std::fs::write(&abs, body).unwrap();
         let inputs = make_inputs(
             repo.path(),

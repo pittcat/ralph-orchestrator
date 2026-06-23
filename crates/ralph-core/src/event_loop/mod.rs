@@ -7709,6 +7709,88 @@ impl EventLoop {
                                     "coordinator dead-letter: {} consecutive task.resume — emitting plan.blocked (skipping task.resume, CB-7 P1-4 mutex)",
                                     count,
                                 );
+                                // 2026-06-23 fix plan U4 (CB-7 obs):
+                                // persist the dead-letter to
+                                // `.ralph/recovery.jsonl` so the
+                                // operator / `ralph doctor` can see
+                                // the cumulative count even when
+                                // stdout logs rotate. Reason code
+                                // `task_resume_dead_letter` is
+                                // distinct from the gate's
+                                // `hat_handoff_filename_mismatch` so
+                                // downstream tools can filter the
+                                // terminal state separately from the
+                                // per-iteration rejections.
+                                let dead_letter_envelope =
+                                    crate::diagnosis::RecoveryDiagnosisEnvelope::builder()
+                                        .source(crate::diagnosis::DiagnosisSource::LoopStale)
+                                        .severity(crate::diagnosis::DiagnosisSeverity::Error)
+                                        .topic(&ev.topic)
+                                        .reason_code("task_resume_dead_letter")
+                                        .message(format!(
+                                            "coordinator dead-letter after {count} consecutive task.resume (kind={}); emitting plan.blocked",
+                                            blocked_kind.reason_code()
+                                        ))
+                                        .outcome(crate::diagnosis::DiagnosisOutcome::Failed)
+                                        .source_hat(from_hat)
+                                        .safe_target(false)
+                                        .build();
+                                let dead_letter_entry = crate::diagnosis::RecoveryJournalEntry::from_envelope(
+                                    dead_letter_envelope,
+                                    Vec::new(),
+                                );
+                                if let Ok(line) = serde_json::to_string(&dead_letter_entry) {
+                                    let recovery_path = self
+                                        .config
+                                        .core
+                                        .workspace_root
+                                        .join(".ralph/recovery.jsonl");
+                                    if let Some(parent) = recovery_path.parent() {
+                                        // Surface directory-creation failures via
+                                        // tracing (not `let _ =`) so the
+                                        // operator can see why the dead-letter
+                                        // audit is missing. A missing parent
+                                        // is usually a disk-permission issue.
+                                        if let Err(e) = std::fs::create_dir_all(parent) {
+                                            warn!(
+                                                target: "ralph::event_loop::dead_letter",
+                                                recovery_path = %recovery_path.display(),
+                                                error = %e,
+                                                "failed to create .ralph/ directory for dead-letter recovery.jsonl; \
+                                                 the dead-letter audit will be missing from this run — \
+                                                 fix disk permissions and replay the run to recover audit"
+                                            );
+                                        }
+                                    }
+                                    match std::fs::OpenOptions::new()
+                                        .create(true)
+                                        .append(true)
+                                        .open(&recovery_path)
+                                    {
+                                        Ok(mut f) => {
+                                            use std::io::Write as _;
+                                            if let Err(e) = writeln!(f, "{}", line) {
+                                                warn!(
+                                                    target: "ralph::event_loop::dead_letter",
+                                                    recovery_path = %recovery_path.display(),
+                                                    error = %e,
+                                                    "failed to write dead-letter entry to recovery.jsonl; \
+                                                     the dead-letter audit is incomplete for this run"
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                target: "ralph::event_loop::dead_letter",
+                                                recovery_path = %recovery_path.display(),
+                                                error = %e,
+                                                "failed to open recovery.jsonl for dead-letter write; \
+                                                 the dead-letter audit is missing from this run — \
+                                                 fix disk permissions and replay"
+                                            );
+                                        }
+                                    }
+                                }
                                 let blocked_event = ralph_proto::Event::new(
                                     "plan.blocked",
                                     format!(
