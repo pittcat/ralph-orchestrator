@@ -453,24 +453,16 @@ state_projection:
       - kind: plan_complete
         final_step: "step"
 
-# R20 / R21 / R22: Hat handoff configuration. `artifact` is enforced
-# by the engine's hard validation (U7); `linter.auto_prepare_on_macro_edge`
-# enables the orchestrator-side handoff preparation at lint time (B4).
+# 2026-06-23 user decision: 关闭 hat handoff 机制
+# (30 天第 6 次复发根因 — 业务传递通过 task ownership 即可,
+# 不需要 SSOT 文件名五段式结构;revert 上一轮 fix 不再触发)。
 hat_handoff:
-  enabled: true
+  enabled: false
   artifact:
     required_sections: 5
     require_next_marker: true
   linter:
-    auto_prepare_on_macro_edge: true
-  # 2026-06-20: control topics (loop lifecycle + operator injection) are
-  # not hat→hat business handoffs — they bypass the loop self-emit and
-  # the human operator paths. The runtime does not need a five-section
-  # handoff file for them; forcing the gate to require one would block
-  # `ralph emit loop.cancel --hat ralph` even when the loop runner itself
-  # is the source. Same applies to `task.resume` (loop → current hat
-  # diagnostic) and `human.guidance` (operator manual inject). Business
-  # edges (work.ready/work.done/review.passed/etc.) keep the gate.
+    auto_prepare_on_macro_edge: false
   exempt_topics:
     - loop.cancel
     - task.resume

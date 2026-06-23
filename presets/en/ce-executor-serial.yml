@@ -88,10 +88,13 @@ event_loop:
   # Same single-U contract as ce-executor-serial. Coordinator must
   # only create the current U's task.
   enforce_current_unit: true
-  # 2026-06-18-002 plan U11: hat_handoff is enabled in the SSOT
-  # (`presets/schemas/ce-executor-serial.yml`). The previous
-  # inline `hat_handoff: { enabled: true }` block was a duplicate
-  # of the SSOT value and was removed under F-PS-005.
+  # 2026-06-23 user decision: hat_handoff disabled in the SSOT
+  # (`presets/schemas/ce-executor-serial.yml` sets
+  # `hat_handoff.enabled: false`). 30-day 6th recurrence of
+  # `hat_handoff_filename_mismatch` dead-letter was the trigger —
+  # hat ownership is now carried via `tasks.jsonl` only, no
+  # SSOT handoff file. Handoff-style fields in payloads are
+  # ignored by the runtime.
   #
   # 2026-06-18-004 plan U2 (R2, KTD2): suppress human guidance
   # injection for all hats in this preset. Free-text guidance
@@ -411,26 +414,22 @@ hats:
       You own plan parsing, task decomposition, complexity assessment, and queue initialization.
       Do not implement. Do not review.
 
-      ### Task Resume Reception (2026-06-23 fix plan U4, contract bug CB-4)
-      When `task.resume` arrives with `payload.kind` in
-      `[hat_handoff_filename_mismatch, hat_handoff_structure_invalid, hat_handoff_illegal_emit_topic]`,
-      the previous handoff was rejected by the gate. Recover the run by:
-      1. Reading `.ralph/agent/scratchpad.md` to recover current iteration state.
-      2. Re-emitting `work.ready` with business fields only (task_id, plan_path,
-         step, complexity). Do NOT include `handoff_path` in the payload —
-         `ralph emit` derives it from the loop's iter/seq (SSOT via
-         `allocator::compute_filename`) and writes the artifact itself
-         during the lint phase. Hand-filling `handoff_path` from a stale
-         `ralph tools handoff prepare` (defaults to iter=0) is the
-         30-day-6th-recurrence `hat_handoff_filename_mismatch` dead-letter
-         root cause and the runtime will reject it.
-      `plan.blocked` is emitted automatically by `CoordinatorDispatcher`
-      after 3 consecutive same-kind `task.resume` (typed dispatch via
-      `typed_lint_rejection_count(kind) >= COORDINATOR_DEAD_LETTER_THRESHOLD`)
-      — do not emit `plan.blocked` manually here; the runtime handles it
-      to avoid double-firing (CB-7 fix 2026-06-23).
-      Without this section, `task.resume` lands as a dead-letter and the
-      loop stalls indefinitely.
+      ### Task Resume Reception
+      2026-06-23 update: hat_handoff is disabled for this preset
+      (see the `hat_handoff` block at the top of the file).
+      `task.resume` no longer carries `hat_handoff_*` payload kinds —
+      ownership is tracked via `tasks.jsonl` only, no SSOT handoff
+      file. On `task.resume`:
+      1. Read `.ralph/agent/scratchpad.md` to recover current
+         iteration state.
+      2. Re-emit `work.ready` with the business fields the runtime
+         expects (`task_id`, `plan_path`, `step`, `complexity`,
+         etc). Do NOT include `handoff_path` — it is ignored and
+         triggers nothing. The runtime uses `task_id` to hand off
+         to the next hat.
+      3. `plan.blocked` is still emitted automatically by
+         `CoordinatorDispatcher` after 3 consecutive same-kind
+         `task.resume`; do not emit it manually.
 
       ### Plan File Resolution
       - Read the prompt to find the plan file path. Supports `.md` and `.html` formats.

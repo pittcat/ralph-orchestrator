@@ -152,177 +152,20 @@ fn test_emit_with_builtin_preset_accepts_valid_work_done() {
     );
 }
 
-/// Error path: a JSON object missing required fields for `work.done` is
-/// rejected and leaves a recovery envelope.
-#[test]
-fn test_emit_with_builtin_preset_rejects_missing_required_fields() {
-    let temp_dir = TempDir::new().expect("temp dir");
-    let temp_path = temp_dir.path();
-    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+// 2026-06-23 user decision: hat_handoff disabled in ce-executor-serial.
+// The previous `test_emit_with_builtin_preset_rejects_missing_required_fields`
+// covered the lint+gate reject path for missing required fields, which is
+// part of the handoff pipeline. With handoff disabled, the missing-fields
+// reject no longer fires; this test was removed. If a future feature
+// reintroduces required-field rejection outside the handoff pipeline,
+// re-add the test under a different test name pointing at that feature.
 
-    let output = ralph_emit(
-        temp_path,
-        &[
-            "-H",
-            "builtin:ce-executor-serial",
-            "emit",
-            "work.done",
-            "--json",
-            r#"{"ok":true}"#,
-            "--hat",
-            "executor",
-        ],
-    );
-
-    assert!(
-        !output.status.success(),
-        "emit should fail for work.done payload missing required fields"
-    );
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("missing") || stderr.contains("required"),
-        "stderr should explain missing required fields: {}",
-        stderr
-    );
-
-    let events_file = temp_path.join(".ralph/events.jsonl");
-    assert!(
-        !events_file.exists()
-            || std::fs::read_to_string(&events_file)
-                .unwrap()
-                .trim()
-                .is_empty(),
-        "rejected event must not be written to events file"
-    );
-
-    let recovery_file = temp_path.join(".ralph/recovery.jsonl");
-    assert!(recovery_file.exists(), "recovery.jsonl should be written");
-    let recovery = std::fs::read_to_string(&recovery_file).unwrap();
-    let entry: serde_json::Value = recovery
-        .lines()
-        .next()
-        .expect("recovery.jsonl should have at least one line")
-        .parse()
-        .expect("recovery line should be valid JSON");
-    assert_eq!(entry["envelope"]["source"], "cli_emit");
-    assert_eq!(entry["envelope"]["topic"], "work.done");
-    assert_eq!(entry["envelope"]["source_hat"], "executor");
-}
-
-/// Error path: a string payload for `work.done` is rejected and leaves a
-/// recovery envelope.
-#[test]
-fn test_emit_with_builtin_preset_rejects_string_payload() {
-    let temp_dir = TempDir::new().expect("temp dir");
-    let temp_path = temp_dir.path();
-    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
-
-    let output = ralph_emit(
-        temp_path,
-        &[
-            "-H",
-            "builtin:ce-executor-serial",
-            "emit",
-            "work.done",
-            "free text",
-            "--hat",
-            "executor",
-        ],
-    );
-
-    assert!(
-        !output.status.success(),
-        "emit should fail for string work.done payload"
-    );
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    // The hat-handoff gate trips first (macro-edge `work.done`
-    // requires `handoff_path` payload; this test doesn't
-    // supply one) and bails before the payload type-mismatch
-    // check can see the string payload. The acceptable
-    // signals:
-    // - `Event rejected by` + any of the CLI emit gates.
-    // - The original payload-rejection strings when no
-    //   earlier gate tripped.
-    // 2026-06-23 fix plan P0 (CB-6): the lint phase now
-    // runs *before* the hat-handoff gate so it can auto-fill
-    // `handoff_path` for macro edges. A string payload
-    // therefore trips the lint phase first with
-    // `auto_handoff_prepare: payload is not a JSON object`.
-    // We accept the lint rejection or the legacy
-    // gate-level signals (any of which indicates the
-    // payload was rejected for the right reason).
-    let has_any_rejection = stderr.contains("Event rejected by")
-        || stderr.contains("LINT FAILED");
-    assert!(
-        has_any_rejection,
-        "stderr should explain a payload-style rejection"
-    );
-    assert!(
-        stderr.contains("payload is not a JSON object")
-            || stderr.contains("Payload is not valid JSON")
-            || stderr.contains("payload type mismatch")
-            || stderr.contains("missing_path")
-            || stderr.contains("requires payload"),
-        "stderr should explain a payload-style rejection: {}",
-        stderr
-    );
-
-    let events_file = temp_path.join(".ralph/events.jsonl");
-    assert!(
-        !events_file.exists()
-            || std::fs::read_to_string(&events_file)
-                .unwrap()
-                .trim()
-                .is_empty(),
-        "rejected event must not be written to events file"
-    );
-
-    let recovery_file = temp_path.join(".ralph/recovery.jsonl");
-    assert!(recovery_file.exists(), "recovery.jsonl should be written");
-    let recovery = std::fs::read_to_string(&recovery_file).unwrap();
-    let entry: serde_json::Value = recovery
-        .lines()
-        .next()
-        .expect("recovery.jsonl should have at least one line")
-        .parse()
-        .expect("recovery line should be valid JSON");
-    assert_eq!(entry["envelope"]["source"], "cli_emit");
-    // The CLI emit gate stack rejects in a deterministic
-    // order: isolated scope → hat-handoff → payload
-    // type-mismatch → ... When the test sends a macro-edge
-    // topic (`work.done`) without `handoff_path`, the
-    // hat-handoff gate trips first and emits a
-    // `semantic_gate_violation` / `hat_handoff_missing_path`
-    // reason code. The legacy test name says "rejects string
-    // payload" but the assertion is really about the
-    // *string payload is rejected* gate, which never
-    // reached because the macro-edge gate runs first. Accept
-    // any of: payload type mismatch, hat-handoff missing
-    // path, or generic `not_retriable` outcome.
-    let reason_code = entry["envelope"]["reason_code"]
-        .as_str()
-        .unwrap_or_default();
-    assert!(
-        reason_code == "payload_contract_violation"
-            || reason_code == "semantic_gate_violation"
-            || reason_code == "hat_handoff_missing_path",
-        "expected a payload-style or hat-handoff reason_code, got: {}",
-        reason_code
-    );
-    assert_eq!(entry["envelope"]["topic"], "work.done");
-    // outcome: hat-handoff gate uses `failed` (not
-    // `not_retriable`); payload-type gate uses `not_retriable`.
-    // Accept either since the assertion is that the emit was
-    // rejected, not which gate fired.
-    let outcome = entry["envelope"]["outcome"].as_str().unwrap_or_default();
-    assert!(
-        outcome == "not_retriable" || outcome == "failed",
-        "expected a non-retriable outcome, got: {}",
-        outcome
-    );
-}
+// 2026-06-23 user decision: hat_handoff disabled in ce-executor-serial.
+// The previous `test_emit_with_builtin_preset_rejects_string_payload` tested
+// the hat-handoff gate's "string payload → reject" branch. With handoff
+// disabled the gate no longer fires and the test no longer applies.
+// Removed; re-add under a different name if a future feature reintroduces
+// string-payload rejection outside the handoff pipeline.
 
 /// Edge path: no preset and no event_policy logs that the policy check is skipped.
 #[test]
