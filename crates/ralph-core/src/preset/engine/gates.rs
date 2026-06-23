@@ -20,6 +20,7 @@
 
 use std::collections::HashSet;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::protocol::ProtocolView;
@@ -50,7 +51,8 @@ pub enum GateDecision {
 /// Adding a new variant is the supported way to add a new
 /// rejection class. String-substring matching on `message` is
 /// **not** supported; do not reintroduce it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum RejectionKind {
     /// Required payload field is missing. Routes to the
@@ -135,6 +137,27 @@ impl RejectionKind {
             RejectionKind::HandoffFilenameMismatch => "hat_handoff_filename_mismatch",
             RejectionKind::HandoffStructureInvalid => "hat_handoff_structure_invalid",
             RejectionKind::HandoffIllegalEmitTopic => "hat_handoff_illegal_emit_topic",
+        }
+    }
+
+    /// 2026-06-23 fix plan U6 (CB-3): reverse-lookup helper for
+    /// callers that already have a reason_code string but no
+    /// typed kind (e.g. legacy correction paths that build the
+    /// `RejectionRecord` from a free-form reason). Returns the
+    /// matching kind when the reason_code is a known kind
+    /// `reason_code()`; otherwise `None` (caller falls back to
+    /// `RejectionRecord::new` with `kind=None`).
+    pub fn from_reason_code(reason_code: &str) -> Option<Self> {
+        match reason_code {
+            "missing_field" => Some(Self::MissingField),
+            "topic_ownership" => Some(Self::TopicOwnership),
+            "upstream_state" => Some(Self::UpstreamState),
+            "handoff_artifact" => Some(Self::HandoffArtifact),
+            "pre_check" => Some(Self::PreCheck),
+            "hat_handoff_filename_mismatch" => Some(Self::HandoffFilenameMismatch),
+            "hat_handoff_structure_invalid" => Some(Self::HandoffStructureInvalid),
+            "hat_handoff_illegal_emit_topic" => Some(Self::HandoffIllegalEmitTopic),
+            _ => None,
         }
     }
 }

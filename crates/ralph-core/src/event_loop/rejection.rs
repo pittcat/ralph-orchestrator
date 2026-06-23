@@ -161,6 +161,22 @@ pub struct Rejection {
     /// back to the rejection creation time when the source event
     /// had no `ts` field (legacy JSONL or synthesised records).
     pub original_ts: Option<String>,
+    /// 2026-06-23 fix plan U5 (CB-2): typed `RejectionKind` so the
+    /// `task.resume` consumer can dispatch on kind rather than
+    /// substring-matching the free-form `violation` string. None
+    /// when the source layer predates the typed-kinds plumbing
+    /// (e.g. topic-format / payload-contract rejections) — callers
+    /// that need a string fallback MUST serialise `violation`.
+    /// Marked `#[non_exhaustive]` is NOT applied (struct is public
+    /// and consumers read `violation` directly); instead we use
+    /// `Option<RejectionKind>` so legacy builders stay
+    /// source-compatible (CLAUDE.md "backwards compatibility doesn't
+    /// matter" but cargo's `pub` field addition would force every
+    /// test struct-literal to update — Option<> keeps literals valid).
+    /// `#[serde(default)]` so JSONL written before this field
+    /// existed deserialises without error (deserialise-as-None).
+    #[serde(default)]
+    pub kind: Option<crate::preset::engine::gates::RejectionKind>,
 }
 
 impl Rejection {
@@ -188,6 +204,9 @@ impl Rejection {
             // by definition, so freshness metadata is informational only.
             original_event_id: None,
             original_ts: None,
+            // 2026-06-23 fix plan U5 (CB-2): topic-format predates
+            // typed-kind plumbing — keep None.
+            kind: None,
         };
         s.retry_key = s.compute_retry_key();
         s
@@ -215,6 +234,9 @@ impl Rejection {
             // back to the rejection creation time.
             original_event_id: None,
             original_ts: None,
+            // 2026-06-23 fix plan U5 (CB-2): origin-guard predates
+            // typed-kind plumbing — keep None.
+            kind: None,
         };
         s.retry_key = s.compute_retry_key();
         s
@@ -260,6 +282,9 @@ impl Rejection {
             // is updated in a follow-up.
             original_event_id: None,
             original_ts: None,
+            // 2026-06-23 fix plan U5 (CB-2): execution-contract
+            // predates typed-kind plumbing — keep None.
+            kind: None,
         };
         s.retry_key = s.compute_retry_key();
         s
@@ -380,6 +405,10 @@ pub fn rejection_with_key(
         // is safe for backwards compatibility.
         original_event_id: None,
         original_ts: None,
+        // 2026-06-23 fix plan U5 (CB-2): legacy helper predates
+        // typed-kind plumbing — keep None so payload falls back
+        // to violation-derived reason.
+        kind: None,
     }
 }
 
@@ -470,6 +499,23 @@ pub fn build_task_resume_payload(
     payload.insert(
         "reason".into(),
         serde_json::Value::String(extract_reason_code(&rejection.violation).to_string()),
+    );
+    // 2026-06-23 fix plan U5 (CB-2): typed `kind` field for the
+    // `task.resume` consumer dispatch (plan 2026-06-23-004 U4).
+    // When `rejection.kind` is Some, surface the kind's
+    // `reason_code()` string as the typed SSOT; when None (legacy
+    // paths: topic-format, payload-contract), fall back to the
+    // `reason` string (which mirrors `violation` substring). This
+    // mirrors `gate::reject_to_task_resume` behaviour so all
+    // `task.resume` payloads in the system carry the typed kind.
+    payload.insert(
+        "kind".into(),
+        serde_json::Value::String(
+            rejection
+                .kind
+                .map(|k| k.reason_code().to_string())
+                .unwrap_or_else(|| extract_reason_code(&rejection.violation).to_string()),
+        ),
     );
     // `target_hat` resolution: explicit `target_hat` first, then
     // `source_hat` (which is what `resolve_target_hat` falls back
@@ -1014,6 +1060,47 @@ mod tests {
         // U2 (2026-06-17-003 plan): schema-required fields.
         assert_eq!(v["reason"], "missing_field");
         assert_eq!(v["target_hat"], "executor");
+        // 2026-06-23 fix plan U5 (CB-2): payload MUST carry typed
+        // `kind` field (falls back to `reason` when rejection.kind
+        // is None — this path predates typed plumbing).
+        assert!(
+            v["kind"].as_str().is_some(),
+            "task.resume payload MUST carry `kind` field; got {v:?}"
+        );
+        // Legacy paths (None) → kind == reason.
+        assert_eq!(v["kind"], "missing_field");
+    }
+
+    /// 2026-06-23 fix plan U5 (CB-2): when the rejection carries
+    /// a typed `RejectionKind`, the payload's `kind` field MUST
+    /// surface the kind's `reason_code()` (typed SSOT). This is
+    /// the consumer-dispatchable path (plan 2026-06-23-004 U4).
+    #[test]
+    fn build_task_resume_payload_surfaces_typed_kind() {
+        let mut r = Rejection::from_execution_contract(
+            &ExecutionContractFinding {
+                topic: "work.ready".into(),
+                kind: ExecutionContractViolationKind::MissingPayloadField {
+                    field: "handoff_path".into(),
+                },
+                message: "missing handoff_path".into(),
+                source_hat: Some("coordinator".into()),
+            },
+            Some("coordinator".into()),
+            Some("coordinator".into()),
+        );
+        // Inject typed kind (in real code the gate Reject arm in
+        // event_loop passes the typed kind here, CB-2 wires it).
+        r.kind = Some(crate::preset::engine::gates::RejectionKind::HandoffFilenameMismatch);
+        let payload_str = build_task_resume_payload(&r, &[], &[], None, None, None);
+        let v: serde_json::Value = serde_json::from_str(&payload_str).unwrap();
+        assert_eq!(
+            v["kind"], "hat_handoff_filename_mismatch",
+            "typed kind's reason_code() MUST surface as payload `kind` field"
+        );
+        // And the legacy `reason` field stays the same so existing
+        // drift-detector greps continue to match.
+        assert_eq!(v["reason"], "missing_field");
     }
 
     #[test]
@@ -1076,6 +1163,7 @@ mod tests {
             target_hat: Some("explicit-target".into()),
             original_event_id: None,
             original_ts: None,
+            kind: None,
         };
         let payload1 = build_task_resume_payload(&r1, &[], &[], None, None, None);
         let v1: serde_json::Value = serde_json::from_str(&payload1).unwrap();

@@ -118,6 +118,55 @@ impl RejectionRecord {
         }
     }
 
+    /// 2026-06-23 fix plan U6 (CB-3): legacy-tolerant factory
+    /// used by correction paths that already have a
+    /// `reason_code` string (the legacy string from
+    /// `extract_reason_code(&violation)`) but no typed
+    /// `RejectionKind` available. Calls
+    /// [`RejectionKind::from_reason_code`] — when the string
+    /// matches a known kind, builds via `from_typed_rejection`
+    /// (typed kind field set); when no match, falls back to
+    /// `new()` (kind=None, legacy shape).
+    ///
+    /// **P1-3 (CB-3 legacy envelope compat)**: callers SHOULD pass
+    /// `kind` via `from_typed_rejection` directly. This factory is
+    /// a soft fallback and silently swallows unknown reason_codes
+    /// into `kind=None`. Use [`LegacyKindStatus`] (read path) or
+    /// log warnings at the call site if caller intent is unknown.
+    pub fn from_reason_code_or_legacy(
+        hat: impl Into<String>,
+        topic: impl Into<String>,
+        reason_code: impl Into<String>,
+        retry_count: u32,
+    ) -> Self {
+        let code: String = reason_code.into();
+        match crate::preset::engine::gates::RejectionKind::from_reason_code(&code) {
+            Some(kind) => Self::from_typed_rejection(hat, topic, kind, retry_count),
+            None => Self::new(hat, topic, code, retry_count),
+        }
+    }
+
+    /// 2026-06-23 fix plan P1-3 (CB-3 legacy envelope compat):
+    /// round-trip helper that does NOT silently swallow unknown
+    /// reason_codes. Returns a [`LegacyKindStatus`] the caller
+    /// can match on for diagnostics. Pre-existing
+    /// [`read_rejection_log`] is kept for backwards compatibility
+    /// — this variant is the **explicit** path.
+    ///
+    /// `workspace` is the repo root (where `.ralph/recovery.jsonl`
+    /// lives). `line_index` selects which record in the log to
+    /// inspect; passes through `read_rejection_log` ordering.
+    pub fn classify_legacy_envelope(
+        workspace: &Path,
+        line_index: usize,
+    ) -> std::io::Result<Option<LegacyKindStatus>> {
+        let records = read_rejection_log(workspace)?;
+        let Some(record) = records.get(line_index) else {
+            return Ok(None);
+        };
+        Ok(classify_record(&record))
+    }
+
     /// Mark the record as terminal (R11 escalation).  Returns
     /// the mutated value.
     pub fn with_terminal_reason(mut self, reason: impl Into<String>) -> Self {
@@ -132,6 +181,60 @@ impl RejectionRecord {
     pub fn retry_key(&self) -> String {
         format!("{}:{}:{}", self.hat, self.topic, self.reason_code)
     }
+}
+
+/// 2026-06-23 fix plan P1-3 (CB-3 legacy envelope compat):
+/// explicit status for legacy envelope round-trip — distinguishes
+/// "typed kind present and matches" vs "reason_code parsed to known
+/// kind" vs "reason_code unknown, kind=None is a SILENT LOSS".
+/// Callers that need to surface unknown reason_codes (ops alerting)
+/// should use this instead of the implicit `kind: Option<String>`
+/// field, which hides the same info inside the deserialised struct.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LegacyKindStatus {
+    /// Typed `kind` field was present and matched the
+    /// reason_code (the strict SSOT path — both fields set).
+    Typed(crate::preset::engine::gates::RejectionKind),
+    /// `kind` field was absent in the envelope but the
+    /// reason_code mapped to a known `RejectionKind` via
+    /// [`RejectionKind::from_reason_code`]. Round-trip via
+    /// `from_reason_code_or_legacy` succeeds.
+    LegacyFromReasonCode(crate::preset::engine::gates::RejectionKind),
+    /// reason_code did NOT match any known `RejectionKind`.
+    /// Caller that uses `from_reason_code_or_legacy` will
+    /// silently produce `kind=None`; this status signals to
+    /// the caller that they should warn / escalate.
+    UnknownReasonCode(String),
+}
+
+/// 2026-06-23 fix plan P1-3 (CB-3 legacy envelope compat):
+/// classify a single record into a [`LegacyKindStatus`]. The
+/// classifier is a free function so it can also be called from
+/// `RejectionRecord::classify_legacy_envelope` and from tests.
+fn classify_record(record: &RejectionRecord) -> Option<LegacyKindStatus> {
+    // Strict path: typed kind field present.
+    if let Some(kind_str) = record.kind.as_deref() {
+        if let Some(kind) =
+            crate::preset::engine::gates::RejectionKind::from_reason_code(kind_str)
+        {
+            return Some(LegacyKindStatus::Typed(kind));
+        }
+        // Typed kind present but unrecognised — treat as
+        // UnknownReasonCode for safety (callers should be
+        // alerted about a kind drift).
+        return Some(LegacyKindStatus::UnknownReasonCode(
+            record.reason_code.clone(),
+        ));
+    }
+    // Legacy path: reason_code string.
+    if let Some(kind) =
+        crate::preset::engine::gates::RejectionKind::from_reason_code(&record.reason_code)
+    {
+        return Some(LegacyKindStatus::LegacyFromReasonCode(kind));
+    }
+    // Unknown reason_code — this is the silent-loss path the
+    // CB-3 fix is designed to surface.
+    Some(LegacyKindStatus::UnknownReasonCode(record.reason_code.clone()))
 }
 
 /// Resolve the workspace-rooted path of the rejection log.
@@ -387,6 +490,156 @@ mod tests {
                 records[0].kind.as_deref(),
                 Some("hat_handoff_structure_invalid")
             );
+        }
+
+        /// 2026-06-23 fix plan U6 (CB-3): legacy reason_code strings
+        /// (from `extract_reason_code(&violation)` in
+        /// `correction/mod.rs`) MUST round-trip through
+        /// `from_reason_code_or_legacy` and surface the typed
+        /// kind. Known kinds set `kind=Some(_)`; unknown strings
+        /// fall back to `kind=None`.
+        #[test]
+        fn from_reason_code_or_legacy_typed_kind_for_known_reason_codes() {
+            for reason in [
+                "missing_field",
+                "topic_ownership",
+                "upstream_state",
+                "handoff_artifact",
+                "pre_check",
+                "hat_handoff_filename_mismatch",
+                "hat_handoff_structure_invalid",
+                "hat_handoff_illegal_emit_topic",
+            ] {
+                let r = RejectionRecord::from_reason_code_or_legacy(
+                    "executor",
+                    "work.ready",
+                    reason,
+                    1,
+                );
+                assert_eq!(
+                    r.kind.as_deref(),
+                    Some(reason),
+                    "known reason `{reason}` MUST surface as typed kind"
+                );
+                assert_eq!(r.reason_code, reason);
+            }
+        }
+
+        #[test]
+        fn from_reason_code_or_legacy_falls_back_for_unknown_reason() {
+            // Unknown reason (legacy free-form) keeps kind=None.
+            let r = RejectionRecord::from_reason_code_or_legacy(
+                "executor",
+                "work.ready",
+                "totally_unknown_legacy_reason",
+                1,
+            );
+            assert!(
+                r.kind.is_none(),
+                "unknown reason code MUST fall back to kind=None"
+            );
+            assert_eq!(r.reason_code, "totally_unknown_legacy_reason");
+        }
+
+        /// 2026-06-23 fix plan P1-3 (CB-3 legacy envelope compat):
+        /// the `classify_legacy_envelope` helper MUST surface an
+        /// `UnknownReasonCode` status for old envelopes whose
+        /// reason_code is not in the known kind vocabulary —
+        /// callers that previously silently produced
+        /// `kind=None` can now match on the status and emit a
+        /// `tracing::warn!` for ops visibility.
+        #[test]
+        fn legacy_envelope_round_trip_warns_on_unknown_reason_code() {
+            use std::fs;
+            let dir = TempDir::new().unwrap();
+            let path = recovery_log_path(dir.path());
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            // Old envelope: NO `kind` field, reason_code is unknown.
+            let legacy = b"{\"ts\":\"2026-06-23T00:00:00Z\",\"hat\":\"a\",\"topic\":\"x\",\"reason_code\":\"unknown_reason_xxx\",\"retry_count\":1,\"terminal_reason\":null}\n";
+            fs::write(&path, legacy).unwrap();
+
+            // The legacy tolerant path produces kind=None (existing
+            // behaviour preserved for backwards compatibility).
+            let records = read_rejection_log(dir.path()).unwrap();
+            assert_eq!(records.len(), 1);
+            assert!(
+                records[0].kind.is_none(),
+                "legacy envelope without kind field MUST keep kind=None on read"
+            );
+
+            // The explicit P1-3 path surfaces UnknownReasonCode so
+            // callers can warn / escalate.
+            let status = RejectionRecord::classify_legacy_envelope(dir.path(), 0).unwrap();
+            match status {
+                Some(LegacyKindStatus::UnknownReasonCode(reason)) => {
+                    assert_eq!(
+                        reason, "unknown_reason_xxx",
+                        "UnknownReasonCode MUST carry the original reason_code for ops diagnostics"
+                    );
+                }
+                other => panic!(
+                    "P1-3: legacy envelope with unknown reason_code MUST surface UnknownReasonCode, got {other:?}"
+                ),
+            }
+        }
+
+        /// 2026-06-23 fix plan P1-3 (CB-3 legacy envelope compat):
+        /// when the `kind` field IS present (typed path), the
+        /// helper classifies as `Typed(_)` and the round-trip
+        /// is lossless.
+        #[test]
+        fn legacy_envelope_with_typed_kind_classifies_as_typed() {
+            use std::fs;
+            let dir = TempDir::new().unwrap();
+            let path = recovery_log_path(dir.path());
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            let typed = b"{\"ts\":\"2026-06-23T00:00:00Z\",\"hat\":\"a\",\"topic\":\"x\",\"reason_code\":\"hat_handoff_filename_mismatch\",\"kind\":\"hat_handoff_filename_mismatch\",\"retry_count\":1,\"terminal_reason\":null}\n";
+            fs::write(&path, typed).unwrap();
+            let status = RejectionRecord::classify_legacy_envelope(dir.path(), 0).unwrap();
+            match status {
+                Some(LegacyKindStatus::Typed(kind)) => {
+                    assert_eq!(
+                        kind,
+                        crate::preset::engine::gates::RejectionKind::HandoffFilenameMismatch
+                    );
+                }
+                other => panic!(
+                    "P1-3: typed envelope MUST classify as Typed(_), got {other:?}"
+                ),
+            }
+        }
+
+        /// 2026-06-23 fix plan P1-3 (CB-3 legacy envelope compat):
+        /// legacy envelope without `kind` field but with a known
+        /// reason_code (e.g. `hat_handoff_structure_invalid`)
+        /// MUST classify as `LegacyFromReasonCode` — caller can
+        /// either rebuild the typed record or pass it through.
+        #[test]
+        fn legacy_envelope_without_kind_but_known_reason_classifies_legacy() {
+            use std::fs;
+            let dir = TempDir::new().unwrap();
+            let path = recovery_log_path(dir.path());
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            let legacy_known = b"{\"ts\":\"2026-06-23T00:00:00Z\",\"hat\":\"a\",\"topic\":\"x\",\"reason_code\":\"hat_handoff_structure_invalid\",\"retry_count\":1,\"terminal_reason\":null}\n";
+            fs::write(&path, legacy_known).unwrap();
+            let status = RejectionRecord::classify_legacy_envelope(dir.path(), 0).unwrap();
+            match status {
+                Some(LegacyKindStatus::LegacyFromReasonCode(kind)) => {
+                    assert_eq!(
+                        kind,
+                        crate::preset::engine::gates::RejectionKind::HandoffStructureInvalid
+                    );
+                }
+                other => panic!(
+                    "P1-3: legacy envelope with known reason_code MUST classify as LegacyFromReasonCode, got {other:?}"
+                ),
+            }
         }
     }
 }

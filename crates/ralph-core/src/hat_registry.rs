@@ -418,6 +418,54 @@ hats:
         assert!(!registry.has_subscriber("build.task"));
     }
 
+    /// 2026-06-23 fix plan U4 (CB-8): a preset that forgets to
+    /// register `task.resume` as a coordinator trigger (or any
+    /// other consumer) MUST be detectable via
+    /// `has_subscriber`. The runtime emits
+    /// `loop.diagnostic.task_resume_dead_letter` when this
+    /// returns `false`. The test below pins the
+    /// detector-facing API contract.
+    #[test]
+    fn task_resume_with_no_consumer_emits_diagnostic_predicate() {
+        // Empty config: no hat subscribes to anything, including
+        // `task.resume` → dead-letter path will fire.
+        let empty = HatRegistry::from_config(&RalphConfig::default());
+        assert!(
+            !empty.has_subscriber("task.resume"),
+            "empty registry MUST report no subscriber for task.resume"
+        );
+
+        // A preset that ONLY registers executor (no coordinator)
+        // → still no `task.resume` consumer.
+        let executor_only = r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.ready"]
+"#;
+        let cfg: RalphConfig = serde_yaml::from_str(executor_only).unwrap();
+        let registry = HatRegistry::from_config(&cfg);
+        assert!(
+            !registry.has_subscriber("task.resume"),
+            "executor-only preset MUST report no subscriber for task.resume"
+        );
+
+        // Preset WITH coordinator subscribing to `task.resume`
+        // (CB-4 fix) → dead-letter path stays silent.
+        let with_coordinator = r#"
+hats:
+  coordinator:
+    name: "Coordinator"
+    triggers: ["work.start", "task.resume"]
+"#;
+        let cfg: RalphConfig = serde_yaml::from_str(with_coordinator).unwrap();
+        let registry = HatRegistry::from_config(&cfg);
+        assert!(
+            registry.has_subscriber("task.resume"),
+            "coordinator-subscribed preset MUST report a subscriber for task.resume"
+        );
+    }
+
     #[test]
     fn test_get_for_topic() {
         let yaml = r#"

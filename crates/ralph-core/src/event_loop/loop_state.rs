@@ -1368,6 +1368,101 @@ pub fn detect_rejection_stall(state: &LoopState) -> bool {
     sum_rej >= REJECTION_WINDOW_THRESHOLD && sum_emit == 0
 }
 
+/// 2026-06-23 fix plan U3 (CB-6): typed rejection-stall
+/// detector. Walks the per-kind counter map and returns the
+/// first kind whose count meets or exceeds
+/// `REJECTION_WINDOW_THRESHOLD`. Used by the loop to emit
+/// `stall.handoff_unconsumed` with the specific kind
+/// (the bool-only `detect_rejection_stall` cannot tell which
+/// kind tripped). Order: Handoff* kinds first
+/// (the ones with no remediation in the executor) then the
+/// others, so the diagnostic carries the most actionable
+/// kind.
+pub fn detect_rejection_stall_kind(
+    state: &LoopState,
+) -> Option<crate::preset::engine::gates::RejectionKind> {
+    use crate::preset::engine::gates::RejectionKind;
+    let order = [
+        RejectionKind::HandoffFilenameMismatch,
+        RejectionKind::HandoffStructureInvalid,
+        RejectionKind::HandoffIllegalEmitTopic,
+        RejectionKind::HandoffArtifact,
+        RejectionKind::MissingField,
+        RejectionKind::TopicOwnership,
+        RejectionKind::UpstreamState,
+        RejectionKind::PreCheck,
+    ];
+    for kind in order {
+        if state.typed_lint_rejection_count(kind) >= REJECTION_WINDOW_THRESHOLD {
+            return Some(kind);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod detect_rejection_stall_kind_tests {
+    //! 2026-06-23 fix plan U3 (CB-6): the typed `detect_rejection_stall_kind`
+    //! helper MUST surface the first kind whose count meets the
+    //! typed threshold so the runtime can emit
+    //! `stall.handoff_unconsumed` with the actionable kind.
+
+    use super::*;
+    use crate::preset::engine::gates::RejectionKind;
+
+    #[test]
+    fn no_rejections_returns_none() {
+        let state = LoopState::new();
+        assert!(detect_rejection_stall_kind(&state).is_none());
+    }
+
+    #[test]
+    fn below_threshold_returns_none() {
+        let mut state = LoopState::new();
+        for _ in 0..(REJECTION_WINDOW_THRESHOLD - 1) {
+            state.record_typed_lint_rejection(RejectionKind::HandoffFilenameMismatch);
+        }
+        assert_eq!(state.typed_lint_rejection_count(RejectionKind::HandoffFilenameMismatch), REJECTION_WINDOW_THRESHOLD - 1);
+        assert!(detect_rejection_stall_kind(&state).is_none());
+    }
+
+    #[test]
+    fn at_threshold_returns_first_handoff_kind() {
+        let mut state = LoopState::new();
+        for _ in 0..REJECTION_WINDOW_THRESHOLD {
+            state.record_typed_lint_rejection(RejectionKind::HandoffFilenameMismatch);
+        }
+        assert_eq!(
+            detect_rejection_stall_kind(&state),
+            Some(RejectionKind::HandoffFilenameMismatch)
+        );
+    }
+
+    /// 2026-06-23 fix plan U3 (CB-6): the helper must trip on the
+    /// exact threshold (3 in `REJECTION_WINDOW_THRESHOLD`), not on
+    /// a count strictly greater — used by
+    /// `run_stall_detector_on_state` to emit
+    /// `stall.handoff_unconsumed`.
+    #[test]
+    fn stall_at_5_reject_rounds_triggers_stall() {
+        let mut state = LoopState::new();
+        // 5 rounds (well past the threshold) — the primary-20260622-182705
+        // case was filename_mismatch × 6.
+        for _ in 0..5 {
+            state.record_typed_lint_rejection(RejectionKind::HandoffFilenameMismatch);
+        }
+        assert_eq!(
+            state.typed_lint_rejection_count(RejectionKind::HandoffFilenameMismatch),
+            5
+        );
+        assert_eq!(
+            detect_rejection_stall_kind(&state),
+            Some(RejectionKind::HandoffFilenameMismatch),
+            "kind helper surfaces the actionable Handoff* kind"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{LoopState, U2_REJECTION_RETRY_LIMIT, WorkflowProgress};

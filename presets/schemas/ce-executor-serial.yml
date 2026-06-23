@@ -301,10 +301,20 @@ report.done:
 # matching SSOT entry in
 # `presets/schemas/ce-executor-serial.yml` for the
 # rationale.
+#
+# 2026-06-23 fix plan U5 (CB-2): `kind` is the typed-dispatch SSOT
+# surfaced by `build_task_resume_payload` (rejection.rs:503-519).
+# It carries the gate's `RejectionKind::reason_code()` so the
+# coordinator's typed dispatch can route on kind rather than
+# substring-matching `reason`. The U4 typed dispatch (plan
+# 2026-06-23-004) uses `CoordinatorDispatcher::dispatch(kind, count)`
+# driven by this field; without it declared here, the drift
+# detector never reports producer-side omission as a finding.
 task.resume:
   required_fields:
     - reason
     - target_hat
+    - kind
   payload: json_object
 
 # 2026-06-16-001 U5: diagnostic topic emitted when the loop

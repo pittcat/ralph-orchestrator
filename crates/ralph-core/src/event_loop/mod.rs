@@ -415,6 +415,9 @@ fn publish_correction_via_context(
         target_hat: event.hat.clone(),
         original_event_id: None,
         original_ts: Some(event.ts.clone()),
+        // 2026-06-23 fix plan U5 (CB-2): policy-level rejection
+        // predates typed-kind plumbing — keep None.
+        kind: None,
     };
     let retry_key = rejection.compute_retry_key();
 
@@ -1922,6 +1925,9 @@ impl EventLoop {
             target_hat: None,
             original_event_id: None,
             original_ts: None,
+            // 2026-06-23 fix plan U5 (CB-2): completion-correction
+            // path predates typed-kind plumbing — keep None.
+            kind: None,
         };
         let retry_key = rejection.compute_retry_key();
         rejection.retry_key = retry_key.clone();
@@ -6955,6 +6961,11 @@ impl EventLoop {
                             // timestamp.
                             original_event_id: None,
                             original_ts: Some(event.ts.clone()),
+                            // 2026-06-23 fix plan U5 (CB-2): isolated_scope
+                            // path predates the typed-kind plumbing;
+                            // pass None so the resume payload falls
+                            // back to `violation`-derived reason.
+                            kind: None,
                         };
                         // 2026-06-16-001 U3: freshness filter — drop
                         // the rejection (and the synthetic
@@ -7402,21 +7413,38 @@ impl EventLoop {
                 };
                 // 2026-06-18-005 U6: tri-state read result so
                 // gate can distinguish not_found vs read_fail.
-                let file_content = if let Some(path) = handoff_path.as_deref() {
-                    use crate::hat_handoff::allocator;
-                    match allocator::resolve_jailed(
+                //
+                // 2026-06-23 fix plan U2 (CB-1): SSOT-first read
+                // via gate::read_handoff_ssot_first. If the SSOT-
+                // derived handoff file exists and is readable,
+                // the gate's `Accept` will already emit the SSOT
+                // basename — so we MUST feed it the SSOT path's
+                // content, not the agent-submitted path. Otherwise
+                // an agent that misnames the file (seq=3 when
+                // seq=2 is expected) hits `HandoffFilenameMismatch`
+                // Reject instead of being recovered. Pre-empts the
+                // 30-day 6-recurrence bug.
+                let consumer_hat_for_ssot = self
+                    .handoff_index
+                    .consumer_of(&ev.topic)
+                    .unwrap_or(from_hat);
+                let (effective_handoff_path, file_content) =
+                    gate::read_handoff_ssot_first(
                         self.config.core.workspace_root.as_path(),
-                        path,
-                    ) {
-                        Ok(abs) => {
-                            crate::hat_handoff::gate::FileContent::from_read_result(
-                                std::fs::read_to_string(&abs),
-                            )
-                        }
-                        Err(_) => crate::hat_handoff::gate::FileContent::Missing,
-                    }
+                        &inputs,
+                        handoff_path.as_deref(),
+                        consumer_hat_for_ssot,
+                    );
+                // If we overrode the handoff_path, rebuild inputs
+                // so the gate sees the SSOT path (otherwise the
+                // seq/iter check inside the gate would still
+                // mismatch against the SSOT path's basename).
+                let inputs = if effective_handoff_path.as_deref() != handoff_path.as_deref() {
+                    let mut inputs_override = inputs.clone();
+                    inputs_override.handoff_path = effective_handoff_path.as_deref();
+                    inputs_override
                 } else {
-                    crate::hat_handoff::gate::FileContent::Missing
+                    inputs
                 };
                 match gate::evaluate_event(&inputs, &file_content) {
                     GateDecision::NotRequired => true,
@@ -7592,6 +7620,11 @@ impl EventLoop {
                             target_hat: Some(from_hat.to_string()),
                             original_event_id: Some(event_id.clone()),
                             original_ts: Some(ev.ts.clone()),
+                            // 2026-06-23 fix plan U5 (CB-2): typed kind
+                            // from gate Reject so the resume payload
+                            // carries `kind` for the consumer's
+                            // typed dispatch (plan 2026-06-23-004 U4).
+                            kind: Some(kind),
                         };
                         let resume_payload =
                             crate::event_loop::rejection::build_task_resume_payload(
@@ -7607,9 +7640,102 @@ impl EventLoop {
                             resume_payload,
                         )
                         .with_target(ralph_proto::HatId::new(from_hat));
-                        self.state.record_event(&resume_evt);
-                        rejected_diagnostics.push(resume_evt);
-                        false
+                        // 2026-06-23 fix plan U4 (CB-8): dead-letter
+                        // diagnostic when no hat in the registry
+                        // subscribes to `task.resume`. Without this,
+                        // a misconfigured preset (forgetting the
+                        // CB-4 trigger registration) silently
+                        // consumes the resume event into a void —
+                        // operators see nothing. Emit
+                        // `loop.diagnostic.task_resume_dead_letter`
+                        // with the target hat so the stall
+                        // detector / `ralph doctor` can flag it.
+                        if !self.registry.has_subscriber("task.resume") {
+                            let dead_letter = ralph_proto::Event::new(
+                                "loop.diagnostic.task_resume_dead_letter",
+                                format!(
+                                    "{{\"reason\":\"no_consumer_for_target_hat\",\"target_hat\":\"{from_hat}\",\"topic\":\"{topic}\"}}",
+                                    topic = ev.topic,
+                                ),
+                            );
+                            warn!(
+                                target_hat = %from_hat,
+                                topic = %ev.topic,
+                                "task.resume has no consumer in registry — emitting dead-letter diagnostic"
+                            );
+                            self.state.record_event(&dead_letter);
+                            rejected_diagnostics.push(dead_letter);
+                        }
+                        // 2026-06-23 fix plan U4 (CB-7): typed
+                        // dispatch via `CoordinatorDispatcher`. The
+                        // consecutive counter uses
+                        // `typed_lint_rejection_count(kind)` —
+                        // the same counter that feeds
+                        // `EscalationAction::DriftFinding` etc.,
+                        // so escalation and dispatch stay in sync.
+                        // At threshold (3) → `PlanBlocked` → emit
+                        // `plan.blocked` so the operator is alerted
+                        // (instead of silently consuming the
+                        // dead-letter).
+                        //
+                        // 2026-06-23 fix plan P1-4 (CB-7 plan.blocked
+                        // 与 task.resume 双发互斥):when dispatch returns
+                        // `PlanBlocked`, we MUST NOT also emit
+                        // `task.resume` — the loop would land on a
+                        // dead-letter `task.resume` AND the
+                        // `plan.blocked` event in the same tick,
+                        // double-firing the same root cause and
+                        // contaminating the terminal state
+                        // projection. Use an explicit match on
+                        // `CoordinatorAction` to keep one
+                        // emit-side clean: PlanBlocked → only
+                        // `plan.blocked`; everything else → only
+                        // `task.resume` (+ dead-letter diagnostic).
+                        let consecutive = self
+                            .state
+                            .typed_lint_rejection_count(kind);
+                        let action = crate::event_loop::rejection::CoordinatorDispatcher::dispatch(
+                            kind,
+                            consecutive,
+                        );
+                        use crate::event_loop::rejection::CoordinatorAction as A;
+                        match action {
+                            A::PlanBlocked { kind: blocked_kind, count } => {
+                                warn!(
+                                    kind = %blocked_kind.reason_code(),
+                                    count,
+                                    from_hat = %from_hat,
+                                    topic = %ev.topic,
+                                    "coordinator dead-letter: {} consecutive task.resume — emitting plan.blocked (skipping task.resume, CB-7 P1-4 mutex)",
+                                    count,
+                                );
+                                let blocked_event = ralph_proto::Event::new(
+                                    "plan.blocked",
+                                    format!(
+                                        "{{\"reason\":\"hat_handoff_repeated_rejection\",\"kind\":\"{kind}\",\"count\":{count}}}",
+                                        kind = blocked_kind.reason_code(),
+                                    ),
+                                );
+                                self.state.record_event(&blocked_event);
+                                rejected_diagnostics.push(blocked_event);
+                                // CB-7 P1-4 mutex: do NOT emit
+                                // task.resume on PlanBlocked path —
+                                // return early to keep the resume
+                                // record_event below out of the
+                                // rejected_diagnostics list.
+                                return false;
+                            }
+                            A::ReEmitWorkReady
+                            | A::FixPayloadSchema
+                            | A::FixEmitTarget => {
+                                // Normal path: emit task.resume +
+                                // dead-letter diagnostic only (already
+                                // emitted above when no subscriber).
+                                self.state.record_event(&resume_evt);
+                                rejected_diagnostics.push(resume_evt);
+                                false
+                            }
+                        }
                     }
                 }
             });
@@ -9338,14 +9464,32 @@ impl EventLoop {
         // per-event latency.
         if let Some(ref mut ledger) = self.state.state_ledger {
             use crate::state::{CommitDelta, CounterKind};
+            // 2026-06-23 fix plan U7 (CB-5): only advance the
+            // iter counter when this iteration actually accepted
+            // at least one event. A no-progress turn (all
+            // rejected, e.g. `hat_handoff_*` rejection cascade)
+            // must NOT bump the iter counter — that would create
+            // a divergent ledger where iter N points at
+            // `events.jsonl` lines from a different iteration.
+            //
+            // The `loop.batch_sync` source tag distinguishes the
+            // happy path from the no-progress path so operators
+            // inspecting `ledger.jsonl` can see when the loop
+            // chose not to advance.
+            let batch_sync_source = if had_events || !accepted_log_events.is_empty() {
+                "loop.batch_sync"
+            } else {
+                "loop.batch_sync.no_progress"
+            };
             let iter_counter = CommitDelta::CounterChanged {
                 counter: CounterKind::Iteration,
                 new_value: self.state.iteration as i64,
             };
-            if let Err(e) = ledger.commit(iter_counter, Some("loop.batch_sync".to_string())) {
+            if let Err(e) = ledger.commit(iter_counter, Some(batch_sync_source.to_string())) {
                 tracing::warn!(
                     error = %e,
                     iteration = self.state.iteration,
+                    source = %batch_sync_source,
                     "A1: end-of-batch ledger commit failed; loop continues"
                 );
             }
@@ -10034,6 +10178,32 @@ fn run_stall_detector_on_state(
         // or operator restart) starts from a clean state.
         state.consecutive_no_progress_turns = 0;
         state.consecutive_steward_activations = 0;
+    }
+
+    // 2026-06-23 fix plan U3 (CB-6): typed rejection-stall
+    // detection. After all the no-progress / steward-wake
+    // escalation above, ALSO check the typed rejection window
+    // (via `LoopState::detect_rejection_stall_kind`) and emit a
+    // `stall.handoff_unconsumed` diagnostic if the rejection
+    // count exceeds the typed threshold (default 3 in
+    // `detect_rejection_stall`). This closes the 8h+ stall
+    // detector silence bug from `primary-20260622-182705`
+    // (filename_mismatch × 6 with no stall alert).
+    if let Some(stall_kind) = crate::event_loop::loop_state::detect_rejection_stall_kind(state) {
+        let window = state.typed_lint_rejection_count(stall_kind);
+        warn!(
+            kind = %stall_kind.reason_code(),
+            window = window,
+            "isolated loop: typed rejection stall detected — emitting stall.handoff_unconsumed"
+        );
+        let stall_event = ralph_proto::Event::new(
+            "stall.handoff_unconsumed",
+            format!(
+                "{{\"reason\":\"rejection_stall\",\"kind\":\"{kind}\",\"window\":{window}}}",
+                kind = stall_kind.reason_code(),
+            ),
+        );
+        bus.publish(stall_event);
     }
 }
 

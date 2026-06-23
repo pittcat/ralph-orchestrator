@@ -125,6 +125,87 @@ impl FileContent {
     }
 }
 
+/// 2026-06-23 fix plan U2 (CB-1) + adversarial review P0-1:
+/// SSOT-first handoff read with shape guard.
+///
+/// 消除 `hat_handoff_filename_mismatch` 30 天第 6 次复发:
+/// 不论 agent 提交什么 `handoff_path`,caller 在读盘前先尝试
+/// SSOT 派生路径(由 `compute_filename` 算出)。如果 SSOT
+/// 路径上的文件存在 + 可读,就**用 SSOT 路径**作为
+/// `effective_handoff_path`(连同 SSOT 文件内容)返回。
+/// Agent 提交错的文件名根本不会进入 gate 的 filename 比对,
+/// 直接走 Accept + `register_pending` + `hat_handoff_seq += 1`。
+///
+/// **P0-1 SSOT-first 安全绕过 guard**:SSOT-first 是**救援机制**
+/// (agent 写对了文件名形状但 seq 漂移),**不是绕过机制**(agent
+/// 写错文件名也能通过)。当 agent 提交的 `handoff_path` 不能通过
+/// `parse_filename` 解析(无 4 段式形状,或无法 parse 数字/owner)
+/// 时,SSOT-first **不会启动** —— 让后续 gate 走标准的
+/// `HandoffFilenameMismatch` Reject,避免恶意/无心 agent
+/// 在 SSOT 派生路径上预写一个伪 handoff 来绕过 gate 的文件名
+/// owner / shape 校验。
+///
+/// 返回 `(effective_handoff_path, file_content)` 元组:
+/// - 当 SSOT 文件存在:返回 `(Some(ssot_path), Read(content))`
+/// - 否则 fallback 到 agent 提交路径:返回
+///   `(agent_handoff_path, agent_file_content)`
+/// - 都不可用:返回 `(agent_handoff_path, Missing)`(让 gate 走
+///   标准 missing-file Reject)
+pub fn read_handoff_ssot_first(
+    repo_root: &Path,
+    inputs: &GateInputs<'_>,
+    agent_handoff_path: Option<&str>,
+    consumer_hat: &str,
+) -> (Option<String>, FileContent) {
+    use crate::hat_handoff::allocator;
+    // P0-1 guard: SSOT-first is only a rescue path for agents that
+    // wrote the correct filename shape. If the agent's handoff_path
+    // does NOT parse (bad shape, non-numeric iter/seq, etc.) we
+    // refuse to consult SSOT — gate will run the standard
+    // `HandoffFilenameMismatch` Reject, content validation is
+    // skipped entirely. This blocks the "pre-write SSOT file to
+    // bypass filename owner check" attack.
+    let agent_path_parses = agent_handoff_path
+        .and_then(|p| allocator::parse_filename(p))
+        .is_some();
+    if !agent_path_parses {
+        // Fall through to standard gate flow: parse_filename will
+        // return None → filename_mismatch Reject.
+        let path = agent_handoff_path.map(|s| s.to_string());
+        return (path, FileContent::Missing);
+    }
+    let expected_seq = inputs.current_seq + 1;
+    let ssot_basename = allocator::compute_filename(
+        inputs.iteration,
+        expected_seq,
+        inputs.from_hat,
+        consumer_hat,
+    );
+    let ssot_rel = format!(".ralph/agent/hat-handoff/{ssot_basename}");
+    // SSOT 路径必须在 jail 内(resolve_jailed 失败 → 跳过 SSOT)。
+    if let Ok(ssot_abs) = allocator::resolve_jailed(repo_root, &ssot_rel) {
+        if ssot_abs.is_file() {
+            let content = FileContent::from_read_result(std::fs::read_to_string(&ssot_abs));
+            // 读失败时也走 SSOT 路径覆盖(让 ReadError 触发
+            // `hat_handoff_file_read_fail` 给 agent 看到真问题),
+            // 不要静默 fallback 到 agent 路径。
+            if !matches!(content, FileContent::Missing) {
+                return (Some(ssot_rel), content);
+            }
+        }
+    }
+    // Fallback: agent 提交路径。
+    if let Some(path) = agent_handoff_path {
+        let file_content = match allocator::resolve_jailed(repo_root, path) {
+            Ok(abs) => FileContent::from_read_result(std::fs::read_to_string(&abs)),
+            Err(_) => FileContent::Missing,
+        };
+        (Some(path.to_string()), file_content)
+    } else {
+        (None, FileContent::Missing)
+    }
+}
+
 /// 输入参数(纯函数,便于 CLI 镜像)。
 #[derive(Debug, Clone)]
 pub struct GateInputs<'a> {
@@ -850,6 +931,95 @@ hats:
         }
     }
 
+    /// 2026-06-23 fix plan U2 (CB-1): agent 提交错误文件名(seq=3,
+    /// 但 current_seq=1 期望 seq=2)时,SSOT 派生路径(3-2-...)上
+    /// 的文件存在 + 可读,SSOT-first read 必须覆盖 agent 提交,
+    /// 返回 `(SSOT_path, SSOT_content)`。这是消除 30 天第 6 次
+    /// `hat_handoff_filename_mismatch` 复发的核心机制。
+    #[test]
+    fn ssot_overrides_mismatched_filename_on_accept() {
+        let repo = temp_repo();
+        let idx = two_hat_index();
+        let mut cfg = HatHandoffConfig::default();
+        cfg.enabled = true;
+        // 在 SSOT 派生路径(3-2-...)和 agent 错填路径(3-3-...)都写文件。
+        let ssot_rel = ".ralph/agent/hat-handoff/3-2-plan_gate-executor.md";
+        let wrong_rel = ".ralph/agent/hat-handoff/3-3-plan_gate-executor.md";
+        let ssot_abs = repo.path().join(ssot_rel);
+        let wrong_abs = repo.path().join(wrong_rel);
+        std::fs::create_dir_all(ssot_abs.parent().unwrap()).unwrap();
+        std::fs::write(&ssot_abs, valid_handoff()).unwrap();
+        std::fs::write(&wrong_abs, valid_handoff()).unwrap();
+        // 构造 inputs:agent 提交错误文件名(3-3 而非 3-2)。
+        let inputs = make_inputs(repo.path(), &idx, &cfg, Some(wrong_rel));
+        let (effective_path, content) = read_handoff_ssot_first(
+            repo.path(),
+            &inputs,
+            inputs.handoff_path,
+            // topic=work.ready 的 consumer 是 executor
+            "executor",
+        );
+        // 关键断言 1:SSOT 派生路径覆盖了 agent 提交路径。
+        assert_eq!(
+            effective_path.as_deref(),
+            Some(ssot_rel),
+            "SSOT-first read MUST override agent-submitted wrong filename"
+        );
+        assert_ne!(
+            effective_path.as_deref(),
+            Some(wrong_rel),
+            "effective path MUST NOT echo agent's wrong filename"
+        );
+        // 关键断言 2:读到的是 SSOT 文件内容(Missing 才表示 read 失败)。
+        let body = match &content {
+            FileContent::Read(c) => c.clone(),
+            FileContent::Missing => panic!("SSOT file exists, expected Read content"),
+            FileContent::ReadError(e) => panic!("SSOT file read failed: {e}"),
+        };
+        assert!(
+            body.contains("## context"),
+            "SSOT body should be valid_handoff"
+        );
+        // 关键断言 3:用 effective_path 重跑 gate,Accept 返回 SSOT basename。
+        let mut inputs_override = inputs.clone();
+        inputs_override.handoff_path = effective_path.as_deref();
+        let downstream = vec!["work.done".to_string()];
+        let mut inputs_override = inputs_override;
+        inputs_override.downstream_publishes = &downstream;
+        match evaluate_event(&inputs_override, &FileContent::Read(body)) {
+            GateDecision::Accept { handoff_path } => {
+                assert_eq!(
+                    handoff_path, ssot_rel,
+                    "Accept MUST echo SSOT basename (already verified at commit 91043081)"
+                );
+            }
+            other => panic!("expected Accept (SSOT override), got {other:?}"),
+        }
+    }
+
+    /// 2026-06-23 fix plan U2 (CB-1): SSOT 文件不存在时,fallback
+    /// 到 agent 提交路径(允许 caller 处理 file_not_found / 其他错误)。
+    #[test]
+    fn ssot_first_falls_back_to_agent_path_when_ssot_missing() {
+        let repo = temp_repo();
+        let idx = two_hat_index();
+        let mut cfg = HatHandoffConfig::default();
+        cfg.enabled = true;
+        let agent_rel = ".ralph/agent/hat-handoff/3-2-plan_gate-executor.md";
+        let agent_abs = repo.path().join(agent_rel);
+        std::fs::create_dir_all(agent_abs.parent().unwrap()).unwrap();
+        std::fs::write(&agent_abs, valid_handoff()).unwrap();
+        let inputs = make_inputs(repo.path(), &idx, &cfg, Some(agent_rel));
+        let (effective_path, content) =
+            read_handoff_ssot_first(repo.path(), &inputs, Some(agent_rel), "executor");
+        // 当 agent 路径 == SSOT 派生路径时,正常返回 agent 路径。
+        assert_eq!(effective_path.as_deref(), Some(agent_rel));
+        match content {
+            FileContent::Read(_) => {}
+            other => panic!("expected Read, got {other:?}"),
+        }
+    }
+
     #[test]
     fn happy_path_accept() {
         let repo = temp_repo();
@@ -1005,5 +1175,124 @@ hats:
         );
         assert_eq!(reason_code, "hat_handoff_illegal_emit_topic");
         assert_eq!(target_hat, "coordinator");
+    }
+
+    // 2026-06-23 fix plan adversarial review P0-1 (CB-1 SSOT-first
+    // 安全绕过):SSOT-first is a rescue path for agents that wrote
+    // the correct filename shape but had seq/iter drift. It is NOT
+    // a bypass path for agents that wrote a malformed filename.
+    // Without the shape guard, a malicious agent could pre-write
+    // an arbitrary SSOT file to slip past filename owner checks.
+    mod ssot_first_shape_guard {
+        use super::*;
+
+        /// P0-1 (CB-1 SSOT-first 安全绕过):agent 提交的文件名无
+        /// 4 段式形状(bad-name.md),即便 SSOT 路径上预写了一个
+        /// 看起来合法的 handoff,gate 也必须走标准
+        /// `HandoffFilenameMismatch` Reject。
+        #[test]
+        fn ssot_does_not_bypass_when_agent_path_malformed() {
+            let repo = temp_repo();
+            let idx = two_hat_index();
+            let mut cfg = HatHandoffConfig::default();
+            cfg.enabled = true;
+            // 攻击者预写 SSOT 路径文件,内容看起来合法
+            let ssot_basename = allocator::compute_filename(3, 2, "plan_gate", "executor");
+            let ssot_abs = repo
+                .path()
+                .join(".ralph/agent/hat-handoff")
+                .join(&ssot_basename);
+            std::fs::create_dir_all(ssot_abs.parent().unwrap()).unwrap();
+            std::fs::write(&ssot_abs, valid_handoff()).unwrap();
+            // 攻击者提交的 handoff_path 形状非法 (bad-name.md)
+            let inputs = make_inputs(repo.path(), &idx, &cfg, Some("bad-name.md"));
+            // gate 走标准 filename_mismatch Reject
+            match evaluate_event(&inputs, &FileContent::Missing) {
+                GateDecision::Reject {
+                    kind, reason_code, ..
+                } => {
+                    assert_eq!(reason_code, REASON_CODE_HAT_HANDOFF_FILENAME_MISMATCH);
+                    assert_eq!(
+                        kind,
+                        crate::preset::engine::gates::RejectionKind::HandoffFilenameMismatch,
+                        "malformed handoff_path MUST surface as HandoffFilenameMismatch Reject, NOT bypass via SSOT"
+                    );
+                }
+                GateDecision::Accept { .. } => panic!(
+                    "P0-1 SECURITY: malformed filename MUST NOT Accept via SSOT-first bypass"
+                ),
+                GateDecision::NotRequired => panic!(
+                    "P0-1 SECURITY: macro-edge emit MUST NOT skip filename validation"
+                ),
+            }
+        }
+
+        /// P0-1 (CB-1 SSOT-first 安全绕过):agent 提交合法形状
+        /// 文件名,但 SSOT 路径上预写的文件内容里 `## next` 引用
+        /// 非法 topic(不在 downstream publishes 中)。即便 SSOT
+        /// first 接管文件路径,content validation 仍要触发
+        /// `HandoffIllegalEmitTopic` Reject。
+        #[test]
+        fn ssot_does_not_skip_content_validation() {
+            let repo = temp_repo();
+            let idx = two_hat_index();
+            let mut cfg = HatHandoffConfig::default();
+            cfg.enabled = true;
+            // 攻击者预写 SSOT 路径,但 ## next 引用 work.deleted
+            // (不在 downstream publishes [work.done] 中)
+            let bad_body = "# Handoff: plan_gate → executor\n\
+                           ## context\n无\n\n\
+                           ## changed\n无\n\n\
+                           ## verify\n未验证\n\n\
+                           ## next\n\
+                           **动作**: emit work.deleted after task completion\n\
+                           **阻塞**: 无\n\n\
+                           ## notes\n无\n";
+            let ssot_basename = allocator::compute_filename(3, 2, "plan_gate", "executor");
+            let ssot_abs = repo
+                .path()
+                .join(".ralph/agent/hat-handoff")
+                .join(&ssot_basename);
+            std::fs::create_dir_all(ssot_abs.parent().unwrap()).unwrap();
+            std::fs::write(&ssot_abs, bad_body).unwrap();
+            // agent 提交合法形状文件名(但没文件 —— SSOT 接管)
+            let inputs_path = ".ralph/agent/hat-handoff/3-2-plan_gate-executor.md";
+            let mut inputs = make_inputs(repo.path(), &idx, &cfg, Some(inputs_path));
+            let downstream = vec!["work.done".to_string()];
+            inputs.downstream_publishes = &downstream;
+            // SSOT-first 接管,读 SSOT 内容
+            let (eff_path, content) = read_handoff_ssot_first(
+                repo.path(),
+                &inputs,
+                Some(inputs_path),
+                "executor",
+            );
+            // 验证 SSOT-first 确实接管了路径
+            assert!(eff_path.is_some());
+            let content_owned = match content {
+                FileContent::Read(s) => s,
+                other => panic!("expected Read content from SSOT, got {other:?}"),
+            };
+            // 即便路径被 SSOT 接管,content validation 仍要走
+            match evaluate_event(&inputs, &FileContent::Read(content_owned)) {
+                GateDecision::Reject {
+                    kind, reason_code, ..
+                } => {
+                    assert_eq!(
+                        reason_code,
+                        REASON_CODE_HAT_HANDOFF_ILLEGAL_EMIT_TOPIC
+                    );
+                    assert_eq!(
+                        kind,
+                        crate::preset::engine::gates::RejectionKind::HandoffIllegalEmitTopic,
+                        "P0-1 SECURITY: SSOT-first MUST NOT skip content validation; illegal topic Reject MUST fire"
+                    );
+                }
+                GateDecision::Accept { .. } => panic!(
+                    "P0-1 SECURITY: SSOT with illegal ## next topic MUST NOT Accept"
+                ),
+                other => panic!("expected Reject, got {other:?}"),
+            }
+        }
     }
 }

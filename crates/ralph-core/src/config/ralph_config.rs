@@ -254,11 +254,19 @@ impl RalphConfig {
         }
 
         // Check for reserved triggers: task.start and task.resume are reserved for Ralph
-        // Per design: Ralph coordinates first, then delegates to custom hats via events
+        // Per design: Ralph coordinates first, then delegates to custom hats via events.
+        // Exception: the `coordinator` hat is Ralph's built-in coordinator and
+        // legitimately subscribes to `task.resume` so the typed dispatch
+        // (plan 2026-06-23-004 U4, CB-4 contract bug fix) can route
+        // rejections back to the orchestrator's coordinator hat.
         const RESERVED_TRIGGERS: &[&str] = &["task.start", "task.resume"];
         for (hat_id, hat_config) in &self.hats {
+            // 2026-06-23 fix (CB-4): the `coordinator` hat is
+            // Ralph's own. It owns the `task.resume` /
+            // `task.start` subscription rights.
+            let is_coordinator = hat_id == "coordinator";
             for trigger in &hat_config.triggers {
-                if RESERVED_TRIGGERS.contains(&trigger.as_str()) {
+                if RESERVED_TRIGGERS.contains(&trigger.as_str()) && !is_coordinator {
                     return Err(ConfigError::ReservedTrigger {
                         trigger: trigger.clone(),
                         hat: hat_id.clone(),

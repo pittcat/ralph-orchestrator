@@ -355,12 +355,43 @@ pub fn emit_correction_context(
     prompt: &mut PromptContext,
 ) -> CorrectionContext {
     let ctx = CorrectionContext::from_rejection(rejection, retry_count);
-    let record = crate::state::RejectionRecord::new(
-        ctx.source_hat.clone().unwrap_or_else(|| "unknown".into()),
-        ctx.topic.clone(),
-        ctx.reason_code.clone(),
-        ctx.retry_count,
-    );
+    // 2026-06-23 fix plan U6 (CB-3): prefer typed kind from
+    // `Rejection::kind` (set by gate Reject path); fall back to
+    // reason_code string parsing (via
+    // `RejectionRecord::from_reason_code_or_legacy`) when the
+    // rejection predates the typed-kind plumbing.
+    //
+    // 2026-06-23 fix plan P1-3 (CB-3 legacy envelope compat):
+    // make the `kind` MISSING path explicit — emit a tracing::warn
+    // so ops can detect callers that build Rejection without the
+    // typed kind field (a backwards-compat window will close once
+    // all rejection sites populate `kind`).
+    let record = match rejection.kind {
+        Some(kind) => crate::state::RejectionRecord::from_typed_rejection(
+            ctx.source_hat.clone().unwrap_or_else(|| "unknown".into()),
+            ctx.topic.clone(),
+            kind,
+            ctx.retry_count,
+        ),
+        None => {
+            // 2026-06-23 fix plan P1-3 (CB-3): force callers to
+            // populate `kind`. If missing, log a warning so ops
+            // can grep for legacy rejection sites; fall back to
+            // reason_code string parsing as a soft compat path.
+            tracing::warn!(
+                retry_key = %ctx.retry_key,
+                hat = %ctx.source_hat.as_deref().unwrap_or("unknown"),
+                topic = %ctx.topic,
+                "correction: rejection missing typed kind — falling back to reason_code parsing (legacy site)"
+            );
+            crate::state::RejectionRecord::from_reason_code_or_legacy(
+                ctx.source_hat.clone().unwrap_or_else(|| "unknown".into()),
+                ctx.topic.clone(),
+                ctx.reason_code.clone(),
+                ctx.retry_count,
+            )
+        }
+    };
 
     // FIX-9: ledger-first, recovery-second.  When a unified ledger
     // is available, commit the rejection there *before* writing
@@ -421,7 +452,12 @@ pub fn emit_correction_from_lint_hint(
     prompt: &mut PromptContext,
 ) -> CorrectionContext {
     let ctx = CorrectionContext::from_lint_resume_hint(hint, retry_count);
-    let record = crate::state::RejectionRecord::new(
+    // 2026-06-23 fix plan U6 (CB-3): `LintResumeHint` predates
+    // typed-kind plumbing (no kind field on the struct); fall
+    // back to reason_code string parsing so legacy hints still
+    // surface typed kind in `recovery.jsonl` when the reason
+    // matches a known kind.
+    let record = crate::state::RejectionRecord::from_reason_code_or_legacy(
         ctx.source_hat.clone().unwrap_or_else(|| "unknown".into()),
         ctx.topic.clone(),
         ctx.reason_code.clone(),

@@ -368,7 +368,7 @@ event_loop:
         required_fields: [report_path, awaiting_decision]
         payload: json_object
       task.resume:
-        required_fields: [reason, target_hat]
+        required_fields: [reason, target_hat, kind]
         payload: json_object
       loop.stalled:
         required_fields: [reason]
@@ -401,7 +401,7 @@ hats:
   coordinator:
     name: "📋 Coordinator"
     description: "Parses plan files, assesses complexity, creates working directory and runtime tasks."
-    triggers: ["work.start"]
+    triggers: ["work.start", "task.resume"]
     publishes: ["work.ready", "work.failed"]
     default_publishes: "work.failed"
     terminal_events: ["work.ready", "work.failed"]
@@ -410,6 +410,22 @@ hats:
 
       You own plan parsing, task decomposition, complexity assessment, and queue initialization.
       Do not implement. Do not review.
+
+      ### Task Resume Reception (2026-06-23 fix plan U4, contract bug CB-4)
+      When `task.resume` arrives with `payload.kind` in
+      `[hat_handoff_filename_mismatch, hat_handoff_structure_invalid, hat_handoff_illegal_emit_topic]`,
+      the previous handoff was rejected by the gate. Recover the run by:
+      1. Reading `.ralph/agent/scratchpad.md` to recover current iteration state.
+      2. Re-preparing the handoff artifact via
+         `ralph tools handoff prepare --from coordinator --to <next> --topic <topic> --iteration <current_iter> --current-seq 0 --force`.
+      3. Re-emitting `work.ready` with the new SSOT-derived filename.
+      `plan.blocked` is emitted automatically by `CoordinatorDispatcher`
+      after 3 consecutive same-kind `task.resume` (typed dispatch via
+      `typed_lint_rejection_count(kind) >= COORDINATOR_DEAD_LETTER_THRESHOLD`)
+      — do not emit `plan.blocked` manually here; the runtime handles it
+      to avoid double-firing (CB-7 fix 2026-06-23).
+      Without this section, `task.resume` lands as a dead-letter and the
+      loop stalls indefinitely.
 
       ### Plan File Resolution
       - Read the prompt to find the plan file path. Supports `.md` and `.html` formats.
