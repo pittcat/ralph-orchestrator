@@ -330,8 +330,21 @@ pub fn evaluate_event(inputs: &GateInputs<'_>, file_content: &FileContent) -> Ga
         };
     }
 
+    let expected_seq = inputs.current_seq + 1;
+    // U2 (plan 2026-06-23-004): handoff 文件名 SSOT 派生。
+    // 不论 agent 提交什么 handoff_path,Accept 都用 allocator SSOT 重算
+    // 文件名 + 写盘 + register pending。agent 错填文件名根本不会进
+    // `HandoffFilenameMismatch` Reject,因为 SSOT 覆盖了它。
+    let consumer = inputs.index.consumer_of(inputs.topic);
+    let to_hat = consumer.as_deref().unwrap_or("unknown");
+    let ssot_basename = allocator::compute_filename(
+        inputs.iteration,
+        expected_seq,
+        inputs.from_hat,
+        to_hat,
+    );
     GateDecision::Accept {
-        handoff_path: handoff_path.to_string(),
+        handoff_path: format!(".ralph/agent/hat-handoff/{ssot_basename}"),
     }
 }
 
