@@ -261,6 +261,35 @@ fn missing_fields(required: &HashSet<String>, payload: &Value) -> HashSet<String
     required.difference(&present).cloned().collect()
 }
 
+/// U7 (plan 2026-06-23-004): downstream_publishes 派生 SSOT 化.
+///
+/// CLI precheck 与 runtime gate 必须从同一函数取下游 hat 的 publishes 列表,
+/// 否则会出现 precheck PASS 但 runtime Reject 的不一致场景。
+///
+/// 解析规则:
+/// 1. 通过 `consumer_of(topic)` 找到下游 hat 的 id(若 `topic` 没有注册消费者则返回空列表)
+/// 2. 查该 hat 的 `publishes` 配置
+/// 3. 没有匹配 → 返回默认 `["work.done", "work.failed"]`(与历史 runtime 行为一致)
+///
+/// 这是一个纯函数;lint / runtime 共享实现,杜绝两份代码各算一遍。
+pub fn resolve_downstream_publishes(
+    consumer_of: impl Fn(&str) -> Option<String>,
+    preset_hats: &std::collections::BTreeMap<String, crate::config::HatConfig>,
+    topic: &str,
+) -> Vec<String> {
+    let consumer = match consumer_of(topic) {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+    preset_hats
+        .get(&consumer)
+        .map(|h| h.publishes.clone())
+        .unwrap_or_else(|| {
+            // 与 `event_loop::preset_hats_publishes` 保持一致的默认。
+            vec!["work.done".to_string(), "work.failed".to_string()]
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -635,5 +664,43 @@ mod tests {
                 "reason_code drifted for {kind:?}"
             );
         }
+    }
+
+    /// U7 (plan 2026-06-23-004): `resolve_downstream_publishes` 是 SSOT,
+    /// 多次调用结果必须稳定一致,CLI precheck 与 runtime gate 不许漂移。
+    #[test]
+    fn resolve_does_not_diverge() {
+        use crate::config::HatConfig;
+        use std::collections::BTreeMap;
+        let mut hats = BTreeMap::new();
+        hats.insert(
+            "executor".to_string(),
+            HatConfig {
+                name: "executor".to_string(),
+                publishes: vec!["work.done".to_string(), "report.done".to_string()],
+                ..Default::default()
+            },
+        );
+        let consumer_of = |topic: &str| {
+            if topic == "work.ready" {
+                Some("executor".to_string())
+            } else {
+                None
+            }
+        };
+        let first = resolve_downstream_publishes(&consumer_of, &hats, "work.ready");
+        let second = resolve_downstream_publishes(&consumer_of, &hats, "work.ready");
+        assert_eq!(first, second);
+        assert_eq!(
+            first,
+            vec!["work.done".to_string(), "report.done".to_string()]
+        );
+        // 不在 consumer_of 中的 topic → 空列表
+        assert!(resolve_downstream_publishes(&consumer_of, &hats, "unknown.topic").is_empty());
+        // consumer_of 命中但 preset 无 hat 条目 → fallback 默认值
+        let empty = BTreeMap::new();
+        let fallback_consumer = |_: &str| Some("ghost".to_string());
+        let defaulted = resolve_downstream_publishes(&fallback_consumer, &empty, "any.topic");
+        assert_eq!(defaulted, vec!["work.done", "work.failed"]);
     }
 }
