@@ -74,6 +74,19 @@ event_loop:
   # cannot silently enable diagnostics, artifact writes, or prompt
   # injection. Operators must enable it in their project ralph.yml under
   # the top-level `telemetry:` key, or set RALPH_DIAGNOSTICS=1.
+  #
+  # 2026-06-23-004 plan U1 KTD-RTC exemption: `plan-gate` legitimately
+  # consumes BOTH `review.passed` and `review.complete` because it
+  # branches on the payload `verdict` field (`pass` / `pass_with_residuals`
+  # / `fail` may appear on either terminal). The KTD-RTC lint
+  # `preset.review_terminal_dual_subscribe` would otherwise block this
+  # preset from booting. The exemption is auditable here, and the
+  # comment at `crates/ralph-core/src/preset_lint/review_terminal_coherence.rs`
+  # explains why plan-gate is the one allowed exception in
+  # `ce-executor-serial`. If you add another dual-subscribe hat, copy
+  # this pattern with a brief justification.
+  review_terminal_coherence_exempt_consumers:
+    - plan-gate
   completion_promise: "LOOP_COMPLETE"
   required_events: ["report.done"]
   starting_event: "work.start"
