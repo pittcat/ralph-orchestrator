@@ -518,6 +518,29 @@ pub struct RecoverableExhaustion {
 /// crosses the limit.  This split keeps the validator
 /// borrow-checkable under NLL.
 
+/// 2026-06-23 T2: appends a `## RUNTIME CONFIG` block exposing the
+/// runtime-resolved `event_loop.*` values that the hat preset
+/// references as variables (e.g. `max_fix_rounds`) but cannot see
+/// through plain text. This keeps the YAML position of
+/// `max_fix_rounds` (in `event_loop:`) unchanged, lets the operator
+/// override it in `ralph.yml`, and lets the hat prompt read the
+/// actual value rather than the literal variable name.
+///
+/// Appended AFTER `### GUARDRAILS` so the hat's own instructions
+/// remain authoritative for workflow order. Block is always emitted
+/// (even with default 3) so the hat learns where to look.
+pub(crate) fn append_runtime_config_block(
+    base_prompt: String,
+    max_fix_rounds: u32,
+) -> String {
+    format!(
+        "{base_prompt}\n\n## RUNTIME CONFIG\n\
+         The following values are resolved at loop start and apply to this iteration:\n\
+         - max_fix_rounds: {n}\n",
+        n = max_fix_rounds,
+    )
+}
+
 fn filter_human_guidance_blocks(content: &str) -> String {
     let mut out = String::with_capacity(content.len());
     let mut in_guidance = false;
@@ -3551,6 +3574,15 @@ impl EventLoop {
             let base_prompt = self
                 .instruction_builder
                 .build_custom_hat(hat, &events_context);
+            // 2026-06-23 T2: append `## RUNTIME CONFIG` block so the hat
+            // can read the runtime-resolved `max_fix_rounds` (which lives
+            // under `event_loop:` in the YAML). The block is informational
+            // and lives at the END of the hat prompt so the hat's own
+            // workflow order (in `### GUARDRAILS`) stays authoritative.
+            let base_prompt = append_runtime_config_block(
+                base_prompt,
+                self.config.event_loop.max_fix_rounds,
+            );
 
             // Inject the cached `human.guidance` text as a `## ROBOT GUIDANCE`
             // block so isolated hats (whose `build_custom_hat` template does
@@ -3701,6 +3733,14 @@ impl EventLoop {
         let base = self
             .instruction_builder
             .build_custom_hat(hat, &events_context);
+        // 2026-06-23 T2: append `## RUNTIME CONFIG` block so the hat can
+        // read the runtime-resolved `max_fix_rounds`. Appended BEFORE
+        // `inject_phase_into_prompt` so the phase block (if any) sits
+        // just above RUNTIME CONFIG at the tail of the prompt.
+        let base = append_runtime_config_block(
+            base,
+            self.config.event_loop.max_fix_rounds,
+        );
         let with_phase = self.inject_phase_into_prompt(base);
         let with_diagnosis = self.apply_runtime_diagnosis_prompt(with_phase, hat_id);
         // R5 (2026-06-17-005 fix plan): the

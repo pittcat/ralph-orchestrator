@@ -51,6 +51,9 @@ mod recovery_envelope_u7_u8;
 mod replay_light_integration;
 mod review_step_gate;
 mod robot_skill;
+// 2026-06-23 T2: `## RUNTIME CONFIG` block injection for `max_fix_rounds`.
+// See `runtime_config_block.rs`.
+mod runtime_config_block;
 mod runtime_state_injection;
 mod scope_enforcement;
 mod scratchpad;
