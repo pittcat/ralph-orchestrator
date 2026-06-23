@@ -79,6 +79,10 @@ event_loop:
   starting_event: "work.start"
   max_iterations: 50
   max_fix_rounds: 1  # 2026-06-23: one auto-fix round; set to 3 for multi-round behavior
+    # 2026-06-23: this value is read by Rust (whitelisted in
+    # `PRESET_OPT_IN_WHEN_OPERATOR_OMITS`) and injected into every
+    # hat prompt via the `## RUNTIME CONFIG` block. Operators can
+    # override per-workspace in their `ralph.yml`.
   max_runtime_seconds: 28800  # 8 hours
   enforce_hat_scope: true
   # Ephemeral file isolation is identical to ce-executor-serial — the
@@ -1536,6 +1540,11 @@ hats:
         - Read `fix_round` from `fix-log.md` (or 0 if not exists)
         - Extract safe_auto findings and gated_manual findings separately (excluding pre_existing)
         - If safe_auto > 0 and fix_round < max_fix_rounds → publish `review.failed`, payload: `plan_name`, `fix_round`, `safe_auto_count`, `gated_manual_count`, `findings_summary`, `task_id`, `task_key`, `step`
+        # NOTE: the actual numeric value of `max_fix_rounds` is resolved at
+        # loop start and is exposed to this hat in the `## RUNTIME CONFIG`
+        # block at the very bottom of the prompt (it is also declared in
+        # `event_loop.max_fix_rounds` of this preset, currently `1`). Do
+        # NOT hard-code the round count in the hat prompt.
         - If safe_auto == 0 and gated_manual > 0 → publish `review.complete`, verdict: `pass_with_residuals`, payload: `plan_name`, `fix_round`, `residual_findings_count`, `findings_summary`, `task_id`, `task_key`, `step`, **`findings_count: <int>`** (gated_manual cannot be auto-fixed; escalate to manager)
         - If safe_auto == 0 and gated_manual == 0 → publish `review.passed`, payload: `plan_name`, `findings_count: 0`, `changed_lines`, `task_id`, `task_key`, `step`, **`skip_reason: "dimensions_complete"`**
       - `verdict`: `pass` (0 findings) | `pass_with_residuals` (gated_manual unresolved, non-blocking) | `fail` (P0 unresolved or fix exhausted)
@@ -1572,6 +1581,9 @@ hats:
       - Use max of (file_round, payload_round), increment to `fix_round + 1`
       - If `fix_round + 1 > max_fix_rounds`:
         - Publish `fix.exhausted`, payload: `plan_name`, `fix_round: max_fix_rounds`, `reason: "safe_auto rounds exhausted"`, `residual_findings: <all findings>`, `failed_attempt_summary: <brief recap of what was tried and why it did not hold>`, `task_id`, `task_key`, `step`
+        # NOTE: see the `## RUNTIME CONFIG` block at the end of the prompt
+        # for the actual numeric value of `max_fix_rounds` (declared in
+        # `event_loop.max_fix_rounds`, currently `1` for this preset).
         - This is an escalation to `debug-resolver`, not a final failure. Stop the Fixer.
 
       ### Read Findings
