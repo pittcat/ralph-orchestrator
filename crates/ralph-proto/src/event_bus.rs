@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 type Observer = Box<dyn Fn(&Event) + Send + 'static>;
 
 /// Central pub/sub hub for routing events between hats.
+#[derive(Default)]
 pub struct EventBus {
     /// Registered hats indexed by ID.
     hats: BTreeMap<HatId, Hat>,
@@ -28,18 +29,6 @@ pub struct EventBus {
     /// Round-robin cursor: tracks the last selected hat ID.
     /// Used by `select_next_hat_with_pending` to ensure fair scheduling.
     last_selected: Option<HatId>,
-}
-
-impl Default for EventBus {
-    fn default() -> Self {
-        Self {
-            hats: BTreeMap::new(),
-            pending: BTreeMap::new(),
-            human_pending: Vec::new(),
-            observers: Vec::new(),
-            last_selected: None,
-        }
-    }
 }
 
 impl EventBus {
@@ -96,13 +85,12 @@ impl EventBus {
         // If event.source is set, it must correspond to a registered hat.
         // Events with unknown sources are dropped before observers see them.
         // System-injected events bypass this guard (orchestrator bootstrap).
-        if event.system_injected != Some(true) {
-            if let Some(ref source) = event.source {
-                if !self.hats.contains_key(source) {
-                    // Unknown source — fail closed, return no recipients
-                    return Vec::new();
-                }
-            }
+        if event.system_injected != Some(true)
+            && let Some(ref source) = event.source
+            && !self.hats.contains_key(source)
+        {
+            // Unknown source — fail closed, return no recipients
+            return Vec::new();
         }
         // --- End EventBus source guard ---
 
@@ -587,7 +575,7 @@ mod tests {
 
         // Publish enough events so queues never empty.
         for i in 0..6 {
-            bus.publish(Event::new("work", &format!("event-{i}")));
+            bus.publish(Event::new("work", format!("event-{i}")));
         }
 
         let mut sequence = Vec::new();
@@ -714,7 +702,7 @@ mod tests {
             register_wildcard(&mut bus, "gamma");
 
             for i in 0..6 {
-                bus.publish(Event::new("work", &format!("event-{i}")));
+                bus.publish(Event::new("work", format!("event-{i}")));
             }
 
             let mut seq = Vec::new();
