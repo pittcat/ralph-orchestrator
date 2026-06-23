@@ -1240,7 +1240,7 @@ fn test_emit_t1_7_isolated_no_hat_task_resume_allowed() {
             "emit",
             "task.resume",
             "--json",
-            r#"{"target_hat":"executor","reason":"missing_event_gate","original_trigger_topic":"review.dimension.ready"}"#,
+            r#"{"target_hat":"executor","reason":"missing_event_gate","kind":"missing_field","original_trigger_topic":"review.dimension.ready"}"#,
         ])
         .current_dir(temp_path)
         .output()
