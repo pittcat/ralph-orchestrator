@@ -110,4 +110,3 @@ crates/ralph-core/tests/scenarios/ce_executor_serial_review.yml
 3. **所有证据必须标注具体文件路径和行号 / 事件 ID**，不允许模糊描述。
 4. **历史文档分析不可省略**，必须输出历史问题知识库，即使本次未发现直接关联。
 5. **主 Agent 只做汇总和格式整理**，不重新分析原始数据。
-

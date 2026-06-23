@@ -675,6 +675,19 @@ const ALLOWED_HATS_TOP_LEVEL: &[&str] = &[
     // it is safe to allow it through the operator/hat-collection
     // security boundary.
     "topic_format_whitelist",
+    // 2026-06-24 KTD-Drift: builtin presets (e.g. `ce-executor-serial`)
+    // declare `telemetry.runtime_diagnosis.drift.coord_join_mode: serial`
+    // for the 4-dim serial review chain (parallel default's 60% threshold
+    // would false-positive on the structurally-low 1/4 rate). The
+    // security boundary treats `telemetry.*` as operator-controlled at
+    // the top level, so the preset can ONLY opt in to specific leaf
+    // keys (currently just `coord_join_mode`); the operator's
+    // `telemetry:` block in `ralph.yml` still wins on per-key basis via
+    // the `deep_merge_yaml_values` step in `merge_hats_overlay`. The
+    // `default_core_value()` strip at `config_resolution.rs` is the
+    // matching counterweight (removes the `coord_join_mode: parallel`
+    // placeholder so the !contains_key guard fires correctly).
+    "telemetry",
 ];
 // Event-loop keys that a hat collection overlay is allowed to provide.
 //
@@ -735,6 +748,15 @@ const PRESET_OPT_IN_WHEN_OPERATOR_OMITS: &[&str] = &[
     // when the operator's ralph.yml omits the key. Operators
     // can raise it per-workspace.
     "max_fix_rounds",
+    // 2026-06-24: review_terminal_coherence_exempt_consumers is opt-in
+    // so the preset's `plan-gate` dual-subscribe exemption survives the
+    // operator-omits-this-key path. Without this entry, KTD-RTC
+    // (2026-06-23-004 plan U1) lint `check_reviewer_dual_subscribe`
+    // is silent-dropped by `merge_hats_overlay` and the runtime
+    // configuration has `exempt_consumers = None`, causing every
+    // ce-executor-serial boot to trip the lint gate. Operators can
+    // extend the list in their project's ralph.yml.
+    "review_terminal_coherence_exempt_consumers",
 ];
 
 fn hats_disallowed_keys(mapping: &Mapping) -> Vec<String> {
@@ -787,6 +809,14 @@ fn extract_hat_overlay_from_preset(preset_value: Value) -> Result<Value> {
         "hats",
         "tasks",
         "topic_format_whitelist",
+        // 2026-06-24 KTD-Drift: pass-through `telemetry.*` so the
+        // `coord_join_mode` opt-in from `ce-executor-serial` survives
+        // the `merge_hats_overlay` step (per the
+        // `merge_hats_overlay_preserves_coord_join_mode_via_default_core_value`
+        // e2e guard). The security boundary is enforced by the
+        // operator's `ralph.yml` overriding preset values per-key in
+        // the deep-merge step in `merge_hats_overlay`.
+        "telemetry",
     ] {
         if let Some(value) = mapping_get(mapping, key) {
             mapping_insert(&mut overlay, key, value.clone());
@@ -1004,6 +1034,49 @@ pub(crate) fn merge_hats_overlay(mut core: Value, hats: Value) -> Result<Value> 
             "topic_format_whitelist",
             Value::Sequence(merged.into_iter().map(Value::String).collect()),
         );
+    }
+
+    // 2026-06-24 KTD-Drift follow-up: union-merge the preset's
+    // `telemetry.*` block into the core config so the KTD-Drift opt-in
+    // `telemetry.runtime_diagnosis.drift.coord_join_mode: serial` (and
+    // any other hat-declared drift settings) survives when the
+    // operator ralph.yml omits the field.
+    //
+    // The `coord_join_mode` field is concrete-typed (default =
+    // `CoordJoinMode::Parallel`) — it is NOT `Option<CoordJoinMode>`, so
+    // `default_core_value()` serialises it to `{coord_join_mode:
+    // parallel}` (a real value, not `Value::Null`). Without the matching
+    // strip in `default_core_value()` (see `config_resolution.rs`
+    // line ~120) the `!contains_key` guard would always see the key as
+    // present and silently swallow the preset opt-in. We strip in
+    // `default_core_value()` AND union-merge here so the
+    // `default_core_value() → merge_hats_overlay` production path
+    // correctly preserves the preset's `coord_join_mode: serial` value.
+    //
+    // The semantics mirror `topic_format_whitelist`: the operator wins
+    // on a per-key basis (operator's `coord_join_mode` overrides
+    // preset's), but the preset's keys are inherited when the operator
+    // omits them. Deep-merge through `runtime_diagnosis` → `drift` so
+    // any future hat-driven drift tuning (e.g. preset-declared
+    // `window_size` overrides for a specific workflow shape) survives
+    // the same path without needing a new entry in this block.
+    //
+    // Note: this does NOT widen the `operator/hat-collection` security
+    // boundary in spirit — `telemetry.*` remains operator-controlled at
+    // the top level (see `ALLOWED_HATS_TOP_LEVEL`); we are simply
+    // allowing the KTD-Drift opt-in to ride through `merge_hats_overlay`
+    // for preset opt-in scenarios (e.g. `presets/en/ce-executor-serial.yml`
+    // shipping with `coord_join_mode: serial` for the 4-dim serial
+    // review chain). KTD-Drift e2e guard
+    // `merge_hats_overlay_preserves_coord_join_mode_via_default_core_value`
+    // pins this contract.
+    if let Some(preset_telemetry_value) = mapping_get(hats_mapping, "telemetry") {
+        let operator_telemetry = mapping_get(core_mapping, "telemetry")
+            .cloned()
+            .unwrap_or_else(|| Value::Mapping(Mapping::new()));
+        let merged_telemetry =
+            deep_merge_yaml_values(operator_telemetry, preset_telemetry_value.clone());
+        mapping_insert(core_mapping, "telemetry", merged_telemetry);
     }
 
     Ok(core)
@@ -1624,6 +1697,50 @@ event_loop:
     }
 
     #[test]
+    fn merge_hats_overlay_preserves_review_terminal_coherence_exempt_consumers() {
+        // 2026-06-24: KTD-RTC (2026-06-23-004 plan U1) added
+        // `review_terminal_coherence_exempt_consumers` to the preset's
+        // `event_loop` block. The lint `check_reviewer_dual_subscribe`
+        // (crates/ralph-core/src/preset_lint/review_terminal_coherence.rs)
+        // reads this field from the runtime `RalphConfig.event_loop` to
+        // exempt legitimate dual subscribers (e.g. `plan-gate` branches
+        // on the `verdict` payload field regardless of which terminal
+        // carries it). Without an entry in PRESET_OPT_IN_WHEN_OPERATOR_OMITS
+        // the field is silent-dropped at `merge_hats_overlay` time and
+        // the lint fails every boot of `ce-executor-serial`. This test
+        // pins the post-merge contract.
+        let core: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  completion_promise: LOOP_COMPLETE
+",
+        )
+        .unwrap();
+
+        let hats: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  review_terminal_coherence_exempt_consumers:
+    - plan-gate
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        assert_eq!(
+            config
+                .event_loop
+                .review_terminal_coherence_exempt_consumers,
+            Some(vec!["plan-gate".to_string()]),
+            "preset review_terminal_coherence_exempt_consumers must survive \
+             merge_hats_overlay when operator omits it (KTD-RTC exemption list \
+             is a preset-level policy, not operator policy)"
+        );
+    }
+
+    #[test]
     fn merge_hats_overlay_preserves_required_events_from_hats() {
         let core: Value = serde_yaml::from_str(
             r"
@@ -1972,6 +2089,163 @@ hats:
                 "preset action `{topic}` must survive the production-path merge"
             );
         }
+    }
+
+    /// 2026-06-24 KTD-RTC e2e guard: production-path regression test
+    /// for `event_loop.review_terminal_coherence_exempt_consumers`.
+    ///
+    /// The hand-written-core sibling test (line 1636) only exercises the
+    /// merge logic with a from-scratch `core:` Value, so it cannot catch
+    /// a regression in `default_core_value()` itself. This test mirrors
+    /// the production path (`default_core_value()` → `merge_hats_overlay`
+    /// → `RalphConfig`) so that any future change to the
+    /// `PRESET_OPT_IN_WHEN_OPERATOR_OMITS` strip list in
+    /// `default_core_value()` is immediately caught: a missing
+    /// `review_terminal_coherence_exempt_consumers` strip turns the
+    /// placeholder into a `Value::Null` that satisfies the
+    /// `!contains_key` guard, silently dropping the preset's opt-in and
+    /// causing the `check_reviewer_dual_subscribe` lint to fail every
+    /// `ce-executor-serial` boot for operators who do not redeclare the
+    /// field in `ralph.yml`.
+    #[test]
+    fn merge_hats_overlay_preserves_review_terminal_coherence_exempt_consumers_via_default_core_value() {
+        let core = crate::config_resolution::default_core_value()
+            .expect("default_core_value must succeed");
+        let hats: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  review_terminal_coherence_exempt_consumers:
+    - plan-gate
+hats:
+  coordinator: {name: Coordinator}
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        assert_eq!(
+            config.event_loop.review_terminal_coherence_exempt_consumers,
+            Some(vec!["plan-gate".to_string()]),
+            "production-path merge (default_core_value -> merge_hats_overlay -> RalphConfig) \
+             must keep the preset's `event_loop.review_terminal_coherence_exempt_consumers` \
+             alive (KTD-RTC e2e guard); without this assertion a regression in the \
+             PRESET_OPT_IN_WHEN_OPERATOR_OMITS strip list silently drops the opt-in for \
+             any operator who does not hand-declare the field in ralph.yml"
+        );
+    }
+
+    /// 2026-06-24 KTD-Drift e2e guard: production-path regression test
+    /// for `telemetry.runtime_diagnosis.drift.coord_join_mode`.
+    ///
+    /// The drift-detector's `CoordJoinMode` enum has no production-path
+    /// test today; the only coverage lives in the `telemetry` config
+    /// parser's own unit tests (which never touch `merge_hats_overlay`).
+    /// `ce-executor-serial` ships with
+    /// `telemetry.runtime_diagnosis.drift.coord_join_mode: serial` and
+    /// relies on the merge step keeping it alive when the operator's
+    /// `ralph.yml` omits the field. A regression that drops the preset
+    /// opt-in would silently revert serial-mode presets to the
+    /// parallel default (60% threshold), causing the drift detector to
+    /// raise `coord_join_rate 1/4 < 60%` false positives on the
+    /// structurally-low serial workflow. This test pins the
+    /// production-path contract.
+    ///
+    /// Fix chain (2026-06-24 KTD-Drift close-loop):
+    ///   1. `default_core_value()` strips the default `coord_join_mode`
+    ///      placeholder from `telemetry.runtime_diagnosis.drift` (the
+    ///      field is concrete-typed so the `!contains_key` guard in
+    ///      `merge_hats_overlay` would otherwise always see the key
+    ///      as present and silently swallow the preset opt-in; unlike
+    ///      Option-typed fields, this one cannot rely on
+    ///      `Value::Null` semantics).
+    ///   2. `merge_hats_overlay` recursively deep-merges the preset's
+    ///      `telemetry.*` block into the core config (mirrors
+    ///      `topic_format_whitelist` union-merge). Without this,
+    ///      `extract_hat_overlay_from_preset` would strip the preset's
+    ///      `telemetry` block at the hat boundary (it's not in
+    ///      `ALLOWED_HATS_TOP_LEVEL` by default) and the opt-in would
+    ///      never reach `merge_hats_overlay`.
+    ///   3. `ALLOWED_HATS_TOP_LEVEL` and `extract_hat_overlay_from_preset`
+    ///      carry `telemetry` so preset-declared telemetry leaf keys
+    ///      (currently just `coord_join_mode`) ride through the
+    ///      security boundary unchanged.
+    #[test]
+    fn merge_hats_overlay_preserves_coord_join_mode_via_default_core_value() {
+        let core = crate::config_resolution::default_core_value()
+            .expect("default_core_value must succeed");
+        let hats: Value = serde_yaml::from_str(
+            r"
+telemetry:
+  runtime_diagnosis:
+    drift:
+      coord_join_mode: serial
+hats:
+  coordinator: {name: Coordinator}
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        assert_eq!(
+            config.telemetry.runtime_diagnosis.drift.coord_join_mode,
+            ralph_core::config::CoordJoinMode::Serial,
+            "production-path merge (default_core_value -> merge_hats_overlay -> RalphConfig) \
+             must keep the preset's `telemetry.runtime_diagnosis.drift.coord_join_mode: serial` \
+             alive (KTD-Drift e2e guard). Strip in `default_core_value()` removes the default \
+             `coord_join_mode: parallel` placeholder, `merge_hats_overlay` recursively merges \
+             the preset's `telemetry.*` block, and `ALLOWED_HATS_TOP_LEVEL` lets the preset's \
+             `telemetry` block pass through the security boundary."
+        );
+    }
+
+    /// 2026-06-24 KTD-Drift follow-up guard: the operator's
+    /// `ralph.yml` MUST override the preset's `coord_join_mode` when
+    /// the operator explicitly redeclares the field. This is the
+    /// "operator wins on a per-key basis" half of the contract; the
+    /// opt-in half is the
+    /// `..._preserves_coord_join_mode_via_default_core_value` test
+    /// above. Without this test, a regression that always-uses the
+    /// preset value (e.g. blindly `insert` instead of
+    /// `deep_merge_yaml_values`) would silently override an operator
+    /// who explicitly opted back into `parallel` mode.
+    #[test]
+    fn merge_hats_overlay_lets_operator_override_coord_join_mode() {
+        let core: Value = serde_yaml::from_str(
+            r"
+telemetry:
+  runtime_diagnosis:
+    drift:
+      coord_join_mode: parallel
+hats:
+  coordinator: {name: Coordinator}
+",
+        )
+        .unwrap();
+
+        let hats: Value = serde_yaml::from_str(
+            r"
+telemetry:
+  runtime_diagnosis:
+    drift:
+      coord_join_mode: serial
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        assert_eq!(
+            config.telemetry.runtime_diagnosis.drift.coord_join_mode,
+            ralph_core::config::CoordJoinMode::Serial,
+            "operator's ralph.yml may override preset's `coord_join_mode` \
+             on a per-key basis; the security boundary must NOT clobber the \
+             operator's explicit value"
+        );
     }
 
     /// End-to-end regression guard for the U5 bug. The user's ralph.yml

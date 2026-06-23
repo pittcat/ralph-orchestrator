@@ -70,6 +70,25 @@ pub(crate) fn default_core_value() -> Result<Value> {
             "workflow_contract",
             "ephemeral_isolation",
             "enforce_current_unit",
+            // 2026-06-23: max_fix_rounds is Option<u32>-typed so the
+            // default serialises to Value::Null under
+            // `event_loop.max_fix_rounds`. Without this strip, the
+            // `!contains_key` guard in `merge_hats_overlay` always
+            // sees the key as present and silently drops the preset
+            // opt-in, leaving the loop with the framework default
+            // (3 rounds) instead of the preset value (1 for
+            // ce-executor-serial).
+            "max_fix_rounds",
+            // 2026-06-24: review_terminal_coherence_exempt_consumers
+            // is Option<Vec<String>>-typed so the default serialises
+            // to Value::Null under
+            // `event_loop.review_terminal_coherence_exempt_consumers`.
+            // Without this strip, the KTD-RTC
+            // (`plan-gate` dual-subscribe exemption) opt-in is
+            // silently dropped at `merge_hats_overlay` time and the
+            // lint `check_reviewer_dual_subscribe` fails every
+            // `ce-executor-serial` boot.
+            "review_terminal_coherence_exempt_consumers",
         ];
         if let Some(event_loop) = mapping
             .get_mut(&Value::String("event_loop".to_string()))
@@ -77,6 +96,34 @@ pub(crate) fn default_core_value() -> Result<Value> {
         {
             for key in PRESET_OPT_IN_KEYS {
                 event_loop.remove(&Value::String((*key).to_string()));
+            }
+        }
+
+        // 2026-06-24: also strip
+        // `telemetry.runtime_diagnosis.drift.coord_join_mode`. Unlike
+        // the event_loop-level keys above (which are Option-typed and
+        // serialise to Value::Null), `coord_join_mode` is concrete-typed
+        // (default = CoordJoinMode::Parallel) so it serialises to a
+        // real value, and the `!contains_key` guard in
+        // `merge_hats_overlay` always sees the key as present and
+        // silently swallows the preset's `coord_join_mode: serial`
+        // opt-in. KTD-Drift e2e guard
+        // `merge_hats_overlay_preserves_coord_join_mode_via_default_core_value`
+        // pins this contract.
+        if let Some(telemetry) = mapping
+            .get_mut(&Value::String("telemetry".to_string()))
+            .and_then(|v| v.as_mapping_mut())
+        {
+            if let Some(runtime_diagnosis) = telemetry
+                .get_mut(&Value::String("runtime_diagnosis".to_string()))
+                .and_then(|v| v.as_mapping_mut())
+            {
+                if let Some(drift) = runtime_diagnosis
+                    .get_mut(&Value::String("drift".to_string()))
+                    .and_then(|v| v.as_mapping_mut())
+                {
+                    drift.remove(&Value::String("coord_join_mode".to_string()));
+                }
             }
         }
     }
@@ -219,5 +266,77 @@ event_loop:
             "/home/test/.ralph/config.yml + repo/ralph.yml"
         );
         assert_eq!(compose_core_label(None, "ralph.yml", true), "ralph.yml");
+    }
+
+    /// 2026-06-24 fix: `default_core_value()` MUST strip all preset
+    /// opt-in keys from the `event_loop` mapping so that
+    /// `merge_hats_overlay`'s `!contains_key` guard correctly
+    /// detects "operator omitted the key". Without this strip,
+    /// `Option<...>`-typed fields default to `Value::Null` in the
+    /// serialised core value, the `contains_key` check is always
+    /// true, and the preset opt-in is silently dropped
+    /// (perky-maple + bold-heron pattern, plus the new
+    /// `max_fix_rounds` and `review_terminal_coherence_exempt_consumers`
+    /// regressions found in 2026-06-24). This test pins the
+    /// post-strip contract: the key is absent from the default
+    /// core value, and a preset overlay correctly inserts it.
+    ///
+    /// 2026-06-24 follow-up: also covers the nested
+    /// `telemetry.runtime_diagnosis.drift.coord_join_mode` opt-in.
+    /// Unlike the event_loop-level keys (which are Option-typed and
+    /// serialise to Value::Null), `coord_join_mode` is
+    /// concrete-typed (default = CoordJoinMode::Parallel) so it
+    /// serialises to a real value; the `!contains_key` guard sees
+    /// the key as present and silently swallows the preset's
+    /// `coord_join_mode: serial` opt-in. KTD-Drift e2e guard
+    /// `merge_hats_overlay_preserves_coord_join_mode_via_default_core_value`
+    /// in preflight.rs pins this contract.
+    #[test]
+    fn default_core_value_strips_preset_opt_in_keys_from_event_loop() {
+        let default_value = default_core_value().expect("default must build");
+
+        let event_loop = default_value
+            .get("event_loop")
+            .and_then(|v| v.as_mapping())
+            .expect("event_loop must be a mapping in default core value");
+
+        for key in [
+            "state_projection",
+            "hat_handoff",
+            "suppress_human_guidance",
+            "workflow_contract",
+            "ephemeral_isolation",
+            "enforce_current_unit",
+            "max_fix_rounds",
+            "review_terminal_coherence_exempt_consumers",
+        ] {
+            let key_value = Value::String(key.to_string());
+            assert!(
+                !event_loop.contains_key(&key_value),
+                "default core value must NOT contain event_loop.{} \
+                 (it would block preset opt-in via `contains_key` guard \
+                 in `merge_hats_overlay`)",
+                key
+            );
+        }
+
+        // The nested `coord_join_mode` opt-in must also be stripped
+        // from the default telemetry.runtime_diagnosis.drift mapping.
+        // Concrete-typed default values still need to be removed so
+        // the preset's serial opt-in can land.
+        let coord_join_mode = default_value
+            .get("telemetry")
+            .and_then(|v| v.get("runtime_diagnosis"))
+            .and_then(|v| v.get("drift"))
+            .and_then(|v| v.get("coord_join_mode"));
+        assert!(
+            coord_join_mode.is_none(),
+            "default core value must NOT contain \
+             telemetry.runtime_diagnosis.drift.coord_join_mode \
+             (concrete-typed default CoordJoinMode::Parallel would \
+             block preset opt-in via `contains_key` guard in \
+             `merge_hats_overlay`); got {:?}",
+            coord_join_mode
+        );
     }
 }

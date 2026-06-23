@@ -305,3 +305,64 @@ event_loop:
 - `docs/solutions/developer-experience/ce-executor-serial-30day-6th-recurrence-fix.md` — 30 天 6 次复发复盘
 - `.cursor/rules/multi-hat-isolation.mdc` — 多 hat 隔离 policy（已固化的 3-hat / 4+ hat 约束）
 - `.cursor/rules/architecture-modules.mdc` — event loop / hat gate 架构
+
+---
+
+## KTD-Drift 二次闭环：production-path strip + merge 修复（2026-06-24）
+
+**触发**: KTD-RTC 修复（增加 `review_terminal_coherence_exempt_consumers` 到 `PRESET_OPT_IN_WHEN_OPERATOR_OMITS`）落地后，drift detector 4 维串行 review 链仍然在 production 路径上报 `coord_join_rate 1/4 = 25% < 60% threshold` 假阳性。补测 subagent `24c5dd94` 发现：lint 已经认 `coord_join_mode = serial`，但**实际 drift detector 仍跑 parallel 模式**。
+
+### 根因
+
+`DriftConfig::coord_join_mode: CoordJoinMode` 是**必填 enum**（默认 `CoordJoinMode::Parallel`），不是 `Option<CoordJoinMode>`。两个独立的 silent-drop 通道：
+
+| 通道 | 位置 | 行为 |
+|---|---|---|
+| **A. default 占位符吞 preset** | `default_core_value()` (`crates/ralph-cli/src/config_resolution.rs`) | `coord_join_mode: parallel` 占位符跟 `Option<...>` 的 `Value::Null` 同样参与 `merge_hats_overlay` 的 `!contains_key` 守卫逻辑——`contains_key` 永远 true，守卫不生效，preset 的 `serial` 被静默吞掉 |
+| **B. merge 通道根本没处理 telemetry 顶层** | `merge_hats_overlay()` (`crates/ralph-cli/src/preflight.rs`) | 只手动 merge `event_loop.*` / `hats` / `events` / `tasks` / `topic_format_whitelist`，**`telemetry.*` 顶层 key 完全没有合并逻辑**；`extract_hat_overlay_from_preset` 的 allow-list 也没列 `telemetry`，所以 preset 的 `telemetry.runtime_diagnosis.drift.coord_join_mode: serial` 根本到不了 `merge_hats_overlay` |
+
+**单修 A 不够**：strip 移除了 default 占位符，但 preset 的 `serial` 因为通道 B 根本没被读取，结果反序列化为 `DriftConfig::default().coord_join_mode = Parallel`。
+**单修 B 不够**：让 `telemetry` 走 merge 通道，但 `default_core_value()` 里仍然有 `coord_join_mode: parallel` 占位符，`!contains_key` 守卫不触发，operator 显式声明的 `parallel` 会**反向吞掉** preset 的 `serial`。
+
+### 修复链（必须 3 处同改）
+
+1. **`default_core_value()` strip `coord_join_mode`**（`config_resolution.rs:113-128`）—— 移除 default 占位符，让 `!contains_key` 守卫正确识别"operator omitted"。
+2. **`ALLOWED_HATS_TOP_LEVEL` 加 `telemetry`**（`preflight.rs:660-691`）—— 允许 preset 把 `telemetry.*` 块传递过 `validate_hats_config_shape` 安全边界检查。
+3. **`extract_hat_overlay_from_preset` 加 `telemetry`**（`preflight.rs:797-810`）—— 真正把 preset 的 `telemetry.*` 块挑出到 overlay。
+4. **`merge_hats_overlay` 递归深合并 `telemetry.*`**（`preflight.rs:1018-1057`）—— 用 `deep_merge_yaml_values` 让 `runtime_diagnosis → drift` 嵌套路径支持 opt-in，跟 `topic_format_whitelist` 的 union-merge 语义对齐（operator wins per-key，preset 在 operator 缺省时补足）。
+
+### 关键设计权衡
+
+- **保留 operator-wins 语义**：`deep_merge_yaml_values` 让 operator 的 `ralph.yml` 仍然可以**反向覆盖** preset 的 `coord_join_mode`（已加 `merge_hats_overlay_lets_operator_override_coord_join_mode` 测试钉合约）。
+- **不动 `CoordJoinMode` 字段类型**：必填 enum 是默认值 `Parallel` 的语义来源，改成 `Option<CoordJoinMode>` 会破坏 47/47 `ce_executor` 测试和全 workspace drift 检测代码的 None-handling 路径。Strip + merge 是最小破坏面。
+- **不重命名 `coord_join_mode`**：保留 snake_case 命名（`Serial`/`Parallel`），跟 `merge_yaml_values`/`serde_yaml` 期望一致。
+
+### 验证
+
+```bash
+# 单元 + 集成
+cargo nextest run -p ralph-cli --bin ralph -- coord_join_mode
+  → 2 passed (含新增的 operator-override 测)
+
+cargo nextest run -p ralph-cli --bin ralph -- preflight
+  → 50 passed
+
+cargo nextest run -p ralph-cli --bin ralph -- ce_executor
+  → 47 passed（0 回归）
+
+# 全 workspace baseline
+./scripts/run-tests.sh
+  → 5137 tests run: 5137 passed (2 leaky), 13 skipped
+  → ✅ 测试通过（nextest + doctest）
+```
+
+### 机制洞见
+
+`PRESET_OPT_IN_WHEN_OPERATOR_OMITS` strip 列表只覆盖 `event_loop.*` 顶层 key，对**嵌套路径**（如 `telemetry.runtime_diagnosis.drift.*`）和**非 event_loop 顶层 key**（如 `telemetry`）都无能为力。修复模式需要 4 件套：
+
+1. `default_core_value()` strip 嵌套路径（占位符移除）
+2. `ALLOWED_HATS_TOP_LEVEL` 列出新顶层（安全边界放行）
+3. `extract_hat_overlay_from_preset` 同步加 key（overlay 提取）
+4. `merge_hats_overlay` 递归合并路径（数据落地）
+
+这 4 步缺一不可。后续如果 `runtime_diagnosis` 下的其他字段（如 `window_size` / `coord_join_rate_threshold`）也需要 preset opt-in，照搬本节模式即可——KTD-RTC + KTD-Drift 是首批案例，但不应该是最后一批。

@@ -103,11 +103,11 @@ pub mod worktree;
 pub use cli_capture::{CliCapture, CliCapturePair};
 pub use config::{
     ActivationObligation, AgentDocSyncConfig, AggregateConfig, AggregateMode, CliConfig,
-    ConditionalEmission, ConfigError, CoreConfig, DriftConfig, EventFilterConfig, EventFilterMode,
-    EventLoopConfig, EventMetadata, EventPolicyConfig, EventPolicyMode, EventProjectionConfig,
-    EventSchema, FeaturesConfig, HatBackend, HatConfig, HookStage, InjectMode,
-    MalformedJsonlPolicy, MemoriesConfig, MemoriesFilter, OnErrorPolicy, PayloadType, Phase,
-    PhaseConfig, PreflightExtensionsConfig, PreflightHook, ProjectionMode, ProjectionRule,
+    ConditionalEmission, ConfigError, CoordJoinMode, CoreConfig, DriftConfig, EventFilterConfig,
+    EventFilterMode, EventLoopConfig, EventMetadata, EventPolicyConfig, EventPolicyMode,
+    EventProjectionConfig, EventSchema, FeaturesConfig, HatBackend, HatConfig, HookStage,
+    InjectMode, MalformedJsonlPolicy, MemoriesConfig, MemoriesFilter, OnErrorPolicy, PayloadType,
+    Phase, PhaseConfig, PreflightExtensionsConfig, PreflightHook, ProjectionMode, ProjectionRule,
     RalphConfig, RuntimeDiagnosisConfig, ScratchpadConfig, SkillOverride, SkillsConfig,
     StateFileEntry, StateFileFormat, StateFilesConfig, StepHandoffConfig, TelemetryConfig,
     TriggerContext, TriggerPredicate, ViolationAction, WarmupConfig, obligation_satisfied,
