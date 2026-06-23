@@ -571,6 +571,13 @@ mod tests {
             // circuit-breaker trip in the test fixture.
             consecutive_engine_gate_rejections: 0,
             lint_circuit_breaker_tripped: false,
+            // 2026-06-23 fix: typed per-kind counters empty;
+            // first rejection seeds a new bucket.
+            consecutive_lint_rejections_by_kind: std::collections::HashMap::new(),
+            // 2026-06-23 fix (anti-pattern 3): no pending handoff
+            // artifacts in the test fixture; stall detector only
+            // arms for artifacts accepted after this field is wired.
+            pending_handoff_artifacts: std::collections::HashSet::new(),
             // U1 (plan 2026-06-21-002): the unified state ledger
             // is opt-in. The test fixture stays on the legacy
             // path by default.

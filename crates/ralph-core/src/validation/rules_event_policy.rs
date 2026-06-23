@@ -9,8 +9,8 @@
 
 use crate::event_policy::{
     DuplicateWorkDoneHint, EventPolicyConfig, PolicyDecision, PolicyFinding, PolicyRejection,
-    ViolationType, check_completion_honored, check_topic_deny_rules,
-    is_recoverable_policy_finding, validate_event_with_hat,
+    ViolationType, check_completion_honored, check_topic_deny_rules, is_recoverable_policy_finding,
+    validate_event_with_hat,
 };
 use crate::event_reader::Event;
 use crate::payload_contract::{PayloadContractViolation, PayloadContractViolationKind};

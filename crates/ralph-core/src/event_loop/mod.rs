@@ -1686,11 +1686,7 @@ impl EventLoop {
                      The workflow has not passed final review. Use loop.cancel to abort instead.",
                     gate.topic, gate.fail_field, gate.fail_value
                 );
-                Self::inject_completion_correction(
-                    &mut self.state,
-                    "verdict_fail",
-                    &free_form,
-                );
+                Self::inject_completion_correction(&mut self.state, "verdict_fail", &free_form);
                 return None;
             }
         }
@@ -1912,11 +1908,7 @@ impl EventLoop {
     /// carry.  The per-key retry counter is read from the unified
     /// ledger so escalation (R11) tracks the same number the
     /// legacy wire-format path used.
-    fn inject_completion_correction(
-        state: &mut LoopState,
-        reason_hint: &str,
-        free_form: &str,
-    ) {
+    fn inject_completion_correction(state: &mut LoopState, reason_hint: &str, free_form: &str) {
         let topic = ralph_proto::LOOP_COMPLETE.to_string();
         let mut rejection = crate::event_loop::rejection::Rejection {
             stage: crate::event_loop::rejection::RejectionStage::Policy,
@@ -7433,8 +7425,10 @@ impl EventLoop {
                         true
                     }
                     GateDecision::Reject {
+                        kind,
                         reason_code,
                         message,
+                        ..
                     } => {
                         // U11-T4: when the gate rejects because the
                         // handoff file is missing
@@ -7508,6 +7502,17 @@ impl EventLoop {
                         // policy-accept time so it doesn't escalate.
                         let event_id = format!("{}:{}", ev.ts, ev.topic);
                         self.state.handoff_tracker.cancel_pending(&event_id);
+                        // 2026-06-23 fix (mechanism review layer 2,
+                        // P0-B): typed per-kind counter. The `kind`
+                        // field is captured above so the runtime
+                        // gate can drive typed escalation (drift
+                        // finding, circuit breaker, plan.blocked)
+                        // without scanning the message string.
+                        // The follow-up plan 2026-06-21-001 U4 is
+                        // the consumer that decides what each
+                        // kind's escalation curve looks like; this
+                        // site is the typed record point.
+                        let _typed_count = self.state.record_typed_lint_rejection(kind);
                         // 2026-06-18-001 plan U6: 累加到 digest,
                         // 让 agent 在下一轮 prompt 中看到拒收摘要
                         self.state.record_rejection_digest(

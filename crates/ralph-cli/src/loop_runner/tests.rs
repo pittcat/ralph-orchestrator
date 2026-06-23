@@ -7232,8 +7232,11 @@ fn test_process_pending_merges_redirects_subprocess_output_to_log_file() {
 
     process_pending_merges_with_command(repo_root, ralph_path.as_os_str());
 
-    // Wait for subprocess to finish writing
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    // process_pending_merges_with_command now synchronously waits for the
+    // child to exit (see merge_queue.rs function-level doc), so by the time
+    // it returns the redirected stdio fds have been flushed and closed by
+    // the OS. No fixed `std::thread::sleep` needed — that was the
+    // CPU-preemption flake this test used to hit under load.
 
     // Verify a log file was created under .ralph/diagnostics/logs/
     let logs_dir = repo_root.join(".ralph/diagnostics/logs");

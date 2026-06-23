@@ -3,7 +3,23 @@ use super::*;
 /// Processes pending merges from the merge queue.
 ///
 /// Called when the primary loop completes successfully. Spawns merge-ralph
-/// processes for each queued loop in FIFO order.
+/// processes for each queued loop in FIFO order and **synchronously waits**
+/// for every spawned child to exit before returning.
+///
+/// Why synchronous (mechanism layer, not point-fix):
+/// - **Lifecycle binding**: child stdout/stderr are redirected to per-merge
+///   log files. The parent must wait for child exit so the OS flushes and
+///   closes the redirected file descriptors before the parent drops the
+///   `File` handles it cloned into `Stdio::from(...)`. Otherwise the log
+///   file can be observed empty (no flush yet) under load.
+/// - **No orphans**: under the previous fire-and-forget shape, if the
+///   caller returned early the spawned `ralph run` would be reparented to
+///   init and become an orphan, leaking its log fd. Synchronous wait
+///   bounds lifetime to the parent's stack frame.
+/// - **Test determinism**: the existing tests assert on the contents of the
+///   log file; they used a `std::thread::sleep(500ms)` which is a known
+///   CPU-preemption flake. Synchronous wait replaces the sleep with an
+///   event-driven signal (child exit).
 pub fn process_pending_merges_with_command(repo_root: &Path, ralph_cmd: &OsStr) {
     let queue = MergeQueue::new(repo_root);
 
@@ -74,6 +90,11 @@ pub fn process_pending_merges_with_command(repo_root: &Path, ralph_cmd: &OsStr) 
         return;
     }
 
+    // Collect spawned children so we can synchronously wait for them at the
+    // end of the function (see function-level doc for rationale). FIFO order
+    // matches the spawn order below.
+    let mut children: Vec<std::process::Child> = Vec::with_capacity(pending.len());
+
     // Process each pending merge
     for entry in pending {
         let loop_id = &entry.loop_id;
@@ -139,6 +160,7 @@ pub fn process_pending_merges_with_command(repo_root: &Path, ralph_cmd: &OsStr) 
                         "merge-ralph spawned successfully"
                     );
                 }
+                children.push(child);
             }
             Err(e) => {
                 warn!(
@@ -146,6 +168,34 @@ pub fn process_pending_merges_with_command(repo_root: &Path, ralph_cmd: &OsStr) 
                     error = %e,
                     "Failed to spawn merge-ralph, loop will remain queued for manual retry"
                 );
+            }
+        }
+    }
+
+    // Synchronously wait for every spawned merge-ralph to exit. This binds
+    // child lifetime to the parent's stack frame so the redirected stdout
+    // file descriptors are flushed and closed by the OS before we return,
+    // and so no orphans are leaked. Per-child wait is sequential in FIFO
+    // order so logs are rotated/picked up deterministically.
+    for mut child in children {
+        let pid = child.id();
+        match child.wait() {
+            Ok(status) => {
+                debug!(
+                    pid = pid,
+                    ?status,
+                    "merge-ralph exited"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    pid = pid,
+                    error = %e,
+                    "Failed to wait for merge-ralph; it may have been reaped elsewhere"
+                );
+                // Best-effort: try to reap to avoid zombie. If wait() failed
+                // it's likely already reaped, so try_wait is harmless.
+                let _ = child.try_wait();
             }
         }
     }

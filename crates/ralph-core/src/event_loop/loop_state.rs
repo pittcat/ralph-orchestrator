@@ -530,6 +530,38 @@ pub struct LoopState {
     /// restarting the loop.
     pub lint_circuit_breaker_tripped: bool,
 
+    /// 2026-06-23 fix plan (mechanism review layer 2,
+    /// P0-B): typed per-kind consecutive lint-rejection
+    /// counters. The key is `RejectionKind::reason_code()`
+    /// (stable string SSOT for `recovery.jsonl` greps), the
+    /// value is the consecutive count for that exact kind.
+    /// Distinct from
+    /// [`Self::consecutive_engine_gate_rejections`] (which
+    /// counts *iterations* with all-reject batches) and from
+    /// [`Self::rejection_retry_counts`] (which is keyed by
+    /// arbitrary caller strings). The typed map enables:
+    ///   1. circuit-breaker logic that picks a different
+    ///      escalation per kind (e.g. filename mismatch →
+    ///      drift_finding; structure invalid → plan.blocked).
+    ///   2. follow-up plans (2026-06-21-001 U4) to add
+    ///      `consecutive_lint_rejections:{kind}` counters
+    ///      without re-instrumenting the gate.
+    /// Seed: empty; populated by
+    /// [`Self::record_typed_lint_rejection`].
+    pub consecutive_lint_rejections_by_kind: HashMap<String, u32>,
+
+    /// 2026-06-23 fix (mechanism review layer 3, anti-pattern 3:
+    /// stall detector silent on rejection noise):
+    /// set of macro-edge handoff artifact paths the loop has
+    /// accepted (via `GateDecision::Accept`) but for which no
+    /// downstream hat has *consumed* (i.e. produced a matching
+    /// business event) within `pending_handoff_deadline`.
+    /// Used by [`crate::event_loop::stall_detector`] to
+    /// surface `stall.handoff_unconsumed` alerts when an
+    /// executor (or downstream reviewer) fails to pick up
+    /// a freshly-emitted handoff artifact.
+    pub pending_handoff_artifacts: HashSet<std::path::PathBuf>,
+
     /// U1 (plan 2026-06-21-002): unified state ledger.
     /// `None` until the loop constructor wires it in.
     pub state_ledger: Option<crate::state::StateLedger>,
@@ -641,6 +673,13 @@ impl Default for LoopState {
             // circuit breaker counter; no trip on iteration 1.
             consecutive_engine_gate_rejections: 0,
             lint_circuit_breaker_tripped: false,
+            // 2026-06-23 fix: typed per-kind counters start empty;
+            // the first rejection seeds a new bucket.
+            consecutive_lint_rejections_by_kind: HashMap::new(),
+            // 2026-06-23 fix (anti-pattern 3): no pending handoff
+            // artifacts on cold start; stall detector only fires
+            // for artifacts accepted AFTER this field is wired in.
+            pending_handoff_artifacts: HashSet::new(),
             // U1 (plan 2026-06-21-002): unified state ledger.
             // `None` until the loop constructor wires it in.
             state_ledger: None,
@@ -876,6 +915,64 @@ impl LoopState {
         *entry
     }
 
+    /// 2026-06-23 fix plan (mechanism review layer 2, P0-B):
+    /// typed variant of [`Self::record_rejection_key`]. The kind
+    /// is mapped to its stable `reason_code()` string so the
+    /// typed counters and the legacy string-keyed counters stay
+    /// aligned (no parallel SSOT). Returns the **post-increment**
+    /// count for that exact kind so callers can branch on
+    /// `count >= U2_REJECTION_RETRY_LIMIT` to trigger their own
+    /// per-kind escalation (drift_finding, circuit_breaker, etc.).
+    ///
+    /// The follow-up plan `2026-06-21-001 U4` consumes this
+    /// signal to:
+    ///   - kind `HandoffFilenameMismatch` × 2 → `drift_finding`
+    ///   - kind `*` × 3 → `loop.circuit_breaker_trip`
+    ///   - kind `*` × 4 → `plan.blocked(reason=...)`.
+    ///
+    /// Until that follow-up lands, the typed counter is recorded
+    /// but no caller consumes it; this is intentional so the
+    /// landing block is the typed call site, not a string match.
+    pub fn record_typed_lint_rejection(
+        &mut self,
+        kind: crate::preset::engine::gates::RejectionKind,
+    ) -> u32 {
+        let key = kind.reason_code();
+        let entry = self
+            .consecutive_lint_rejections_by_kind
+            .entry(key.to_string())
+            .or_insert(0);
+        *entry = entry.saturating_add(1);
+        *entry
+    }
+
+    /// 2026-06-23 fix (anti-pattern 3): current typed count for a
+    /// given `RejectionKind`. Returns 0 when no rejection of that
+    /// kind has been recorded.
+    pub fn typed_lint_rejection_count(
+        &self,
+        kind: crate::preset::engine::gates::RejectionKind,
+    ) -> u32 {
+        self.consecutive_lint_rejections_by_kind
+            .get(kind.reason_code())
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// 2026-06-23 fix (anti-pattern 3): clear the typed counter
+    /// for a single kind. Called when a downstream hat successfully
+    /// publishes a legal event so a stale count does not trigger
+    /// a premature fuse for an unrelated later violation. Mirrors
+    /// the legacy [`Self::clear_rejection_keys_for_hat`] but
+    /// operates on the typed per-kind map.
+    pub fn clear_typed_lint_rejection_count(
+        &mut self,
+        kind: crate::preset::engine::gates::RejectionKind,
+    ) {
+        self.consecutive_lint_rejections_by_kind
+            .remove(kind.reason_code());
+    }
+
     /// Unit 2 (2026-06-16-002 plan) recoverable-payload variant of
     /// [`Self::record_rejection_key`].  The key shape is fixed to
     /// `"policy:{hat}:{topic}:{reason_class}"` so the bucket is the
@@ -931,6 +1028,59 @@ impl LoopState {
     /// Used for `work.done` duplicate detection in event policy.
     pub fn work_done_dedup_key(plan_name: &str, step: &str, task_id: &str) -> String {
         format!("{plan_name}::{step}::{task_id}")
+    }
+
+    /// 2026-06-23 fix (mechanism review layer 3, anti-pattern 3):
+    /// register a freshly-accepted handoff artifact as pending
+    /// downstream consumption. Called from the runtime gate's
+    /// `GateDecision::Accept { handoff_path }` branch.
+    pub fn register_pending_handoff(&mut self, handoff_path: std::path::PathBuf) {
+        self.pending_handoff_artifacts.insert(handoff_path);
+    }
+
+    /// 2026-06-23 fix (mechanism review layer 3, anti-pattern 3):
+    /// mark a handoff artifact as consumed by a downstream hat.
+    /// Removes the path from the pending set so the stall
+    /// detector no longer counts it. Idempotent: removing a path
+    /// that was never registered is a no-op.
+    pub fn consume_pending_handoff(&mut self, handoff_path: &std::path::Path) -> bool {
+        self.pending_handoff_artifacts.remove(handoff_path)
+    }
+
+    /// 2026-06-23 fix (mechanism review layer 3, anti-pattern 3):
+    /// current count of pending handoff artifacts (i.e. the
+    /// number of accepted artifacts whose downstream hat has not
+    /// yet produced a matching business event). The stall
+    /// detector compares this count against
+    /// `pending_handoff_deadline` (driven by `last_progress_ts`)
+    /// and surfaces `stall.handoff_unconsumed` when an artifact
+    /// sits too long.
+    pub fn pending_handoff_count(&self) -> usize {
+        self.pending_handoff_artifacts.len()
+    }
+
+    /// 2026-06-23 fix (mechanism review layer 3, anti-pattern 3):
+    /// returns true when at least one handoff artifact has been
+    /// pending for longer than `max_age`. The stall detector uses
+    /// this signal to surface `stall.handoff_unconsumed` without
+    /// needing a clock-aware HashMap. Production wiring uses
+    /// `last_progress_ts` from the loop instead of `Instant::now()`
+    /// directly so the detector is testable.
+    pub fn has_pending_handoff_older_than(&self, now: Instant, max_age: Duration) -> bool {
+        // Track timestamp per path only when populated; for the
+        // initial wiring we conservatively assume "all pending
+        // artifacts are stale" when any are present and the loop
+        // hasn't seen a progress event in `max_age`. The full
+        // per-path timestamp map is left for the follow-up plan
+        // (2026-06-21-001 U1 extension). For now, the
+        // `pending_handoff_count` accessor is sufficient to
+        // unblock the alarm: any leftover pending artifact is a
+        // signal that the loop is stalled on dead-letter handoffs.
+        !self.pending_handoff_artifacts.is_empty()
+            && self
+                .stall_detector_had_events
+                .then(|| now.elapsed())
+                .map_or(true, |elapsed| elapsed >= max_age)
     }
 
     /// U4 (2026-06-17-003 plan): prune the dedup-set entries that
@@ -1543,6 +1693,141 @@ mod tests {
         assert!(
             state.recent_rejection_digest.is_empty(),
             "digest 应在第 6 个不同 code 时清空,避免无限增长"
+        );
+    }
+
+    // ── 2026-06-23 fix (mechanism review layer 2 P0-B): typed
+    // per-kind rejection counters. The 4 historical recovery.jsonl
+    // entries from primary-20260622-182705 were all `outcome=failed`
+    // because the same retry_key + same kind were never aggregated
+    // across iterations. The typed counter is the new SSOT. ──
+
+    use crate::preset::engine::gates::RejectionKind;
+
+    #[test]
+    fn typed_lint_rejection_count_buckets_per_kind() {
+        let mut state = LoopState::new();
+        // Same kind twice — counter accumulates in ONE bucket.
+        let n1 = state.record_typed_lint_rejection(RejectionKind::HandoffFilenameMismatch);
+        let n2 = state.record_typed_lint_rejection(RejectionKind::HandoffFilenameMismatch);
+        assert_eq!(n1, 1);
+        assert_eq!(n2, 2);
+        assert_eq!(
+            state.typed_lint_rejection_count(RejectionKind::HandoffFilenameMismatch),
+            2,
+            "second rejection of the same kind MUST land in the same bucket"
+        );
+        // Different kind — independent bucket.
+        state.record_typed_lint_rejection(RejectionKind::HandoffStructureInvalid);
+        assert_eq!(
+            state.typed_lint_rejection_count(RejectionKind::HandoffStructureInvalid),
+            1,
+            "different kind MUST land in its own bucket; do NOT collapse across kinds"
+        );
+        assert_eq!(
+            state.typed_lint_rejection_count(RejectionKind::HandoffFilenameMismatch),
+            2,
+            "first bucket MUST stay independent of the second"
+        );
+    }
+
+    #[test]
+    fn typed_lint_rejection_clear_isolated_per_kind() {
+        let mut state = LoopState::new();
+        state.record_typed_lint_rejection(RejectionKind::HandoffFilenameMismatch);
+        state.record_typed_lint_rejection(RejectionKind::HandoffStructureInvalid);
+        state.record_typed_lint_rejection(RejectionKind::HandoffIllegalEmitTopic);
+        assert_eq!(
+            state.typed_lint_rejection_count(RejectionKind::HandoffFilenameMismatch),
+            1
+        );
+        state.clear_typed_lint_rejection_count(RejectionKind::HandoffFilenameMismatch);
+        assert_eq!(
+            state.typed_lint_rejection_count(RejectionKind::HandoffFilenameMismatch),
+            0
+        );
+        assert_eq!(
+            state.typed_lint_rejection_count(RejectionKind::HandoffStructureInvalid),
+            1
+        );
+        assert_eq!(
+            state.typed_lint_rejection_count(RejectionKind::HandoffIllegalEmitTopic),
+            1,
+            "clearing one bucket MUST NOT clear the others"
+        );
+    }
+
+    #[test]
+    fn typed_lint_rejection_reason_code_keys_match_legacy_ssot() {
+        // The typed counter MUST bucket by `reason_code()` so
+        // operators grepping `.ralph/recovery.jsonl` see the same
+        // string. This guards against a future drift between the
+        // typed kind enum and the legacy reason_code strings.
+        let mut state = LoopState::new();
+        state.record_typed_lint_rejection(RejectionKind::HandoffFilenameMismatch);
+        state.record_typed_lint_rejection(RejectionKind::HandoffStructureInvalid);
+        state.record_typed_lint_rejection(RejectionKind::HandoffIllegalEmitTopic);
+        assert!(
+            state
+                .consecutive_lint_rejections_by_kind
+                .contains_key(RejectionKind::HandoffFilenameMismatch.reason_code()),
+            "typed counter MUST key on RejectionKind::reason_code() for legacy SSOT compatibility"
+        );
+    }
+
+    // ── 2026-06-23 fix (mechanism review layer 3, anti-pattern 3):
+    // pending handoff artifact dead-letter detector. The 8h+ 0
+    // stall alarm case in primary-20260622-182705 happened because
+    // no path tracked which handoff artifacts were accepted but
+    // never consumed by the downstream hat. ──
+
+    #[test]
+    fn pending_handoff_register_and_consume_round_trip() {
+        let mut state = LoopState::new();
+        let path = std::path::PathBuf::from(".ralph/agent/hat-handoff/0-1-coord-exec.md");
+        state.register_pending_handoff(path.clone());
+        assert_eq!(state.pending_handoff_count(), 1);
+        assert!(state.consume_pending_handoff(&path));
+        assert_eq!(state.pending_handoff_count(), 0);
+        // Idempotent: re-consuming returns false.
+        assert!(!state.consume_pending_handoff(&path));
+    }
+
+    #[test]
+    fn pending_handoff_dead_letter_detected_after_no_progress() {
+        use std::time::{Duration, Instant};
+        let mut state = LoopState::new();
+        let path = std::path::PathBuf::from(".ralph/agent/hat-handoff/0-1-coord-exec.md");
+        state.register_pending_handoff(path);
+        // `stall_detector_had_events = false` (no business event
+        // was admitted this turn) and a non-empty pending set:
+        // the detector SHOULD fire.
+        state.stall_detector_had_events = false;
+        let now = Instant::now();
+        let max_age = Duration::from_secs(300);
+        assert!(
+            state.has_pending_handoff_older_than(now, max_age),
+            "dead-letter handoff with no progress MUST trip the stall detector"
+        );
+    }
+
+    #[test]
+    fn pending_handoff_alarm_silent_when_progress_seen() {
+        use std::time::{Duration, Instant};
+        let mut state = LoopState::new();
+        state.register_pending_handoff(std::path::PathBuf::from("a.md"));
+        // `stall_detector_had_events = true` (a business event was
+        // admitted this turn) — the alarm should NOT fire just
+        // because a handoff is pending.
+        state.stall_detector_had_events = true;
+        let now = Instant::now() - Duration::from_secs(60);
+        let max_age = Duration::from_secs(120);
+        // `now.elapsed()` is small (~60s) and within max_age (120s),
+        // so even with progress the alarm stays silent until
+        // max_age is crossed.
+        assert!(
+            !state.has_pending_handoff_older_than(now, max_age),
+            "stall alarm MUST stay silent when recent progress is observed"
         );
     }
 }

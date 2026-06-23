@@ -11,6 +11,36 @@
 //! (递增 seq、cancel_pending、emit task.resume)在 `event_loop::mod.rs`
 //! 里基于本模块的判定结果执行。这样 CLI policy_check 与 runtime
 //! gate 走同一段逻辑(U7 落地基础)。
+//!
+//! ## 2026-06-23 fix plan P0-2: typed `RejectionKind`
+//!
+//! `GateDecision::Reject` carries a typed
+//! [`crate::preset::engine::gates::RejectionKind`] in addition
+//! to the legacy `reason_code: &'static str` (which mirrors the
+//! kind's `reason_code()`). The typed kind lets the runtime
+//! accumulate per-kind counters via
+//! [`crate::event_loop::LoopState::record_typed_lint_rejection`]
+//! (new in the 2026-06-23 fix) without string-substring
+//! matching — the previous 6-recurrence bug in
+//! `primary-20260622-182705` came from string matching on
+//! `recovery.jsonl:1-4` to derive `safe_target`. The kind is
+//! the new SSOT; the `reason_code` string is kept for
+//! backwards-compatible diagnostics and `recovery.jsonl` grep
+//! compatibility.
+//!
+//! ## Follow-up plan status (2026-06-23)
+//!
+//! This module's typed `Reject` and the typed counter on
+//! `LoopState` are the **typed routing infrastructure**. The
+//! follow-up plan `2026-06-21-001 U4` is the consumer that
+//! turns per-kind counts into:
+//!   - kind `HandoffFilenameMismatch` × 2 → drift_finding
+//!   - kind `*` × 3 → `loop.circuit_breaker_trip`
+//!   - kind `*` × 4 → `plan.blocked(reason=...)`.
+//! Until that follow-up lands, the typed counter records
+//! rejections but no caller escalates them; this is intentional
+//! so the landing block is the typed call site
+//! (`record_typed_lint_rejection`), not a string match.
 
 use crate::config::HatExecutionMode;
 use crate::hat_handoff::{
@@ -18,11 +48,18 @@ use crate::hat_handoff::{
     publishes_check::{self, TopicViolation},
     validator::{self, HatHandoffViolation},
 };
+use crate::preset::engine::gates::RejectionKind;
 use crate::workflow_contract::handoff_index::HandoffIndex;
 
 use std::path::Path;
 
 /// Reason code 常量,reason_code SSOT(供 CLI/runtime 共享,U7)。
+///
+/// 2026-06-23 fix plan P0-2: these strings remain the
+/// `reason_code()` of the typed `RejectionKind`. New code
+/// should pattern-match the kind directly; these constants are
+/// kept for the CLI precheck path and backwards-compatible
+/// diagnostics.
 pub const REASON_CODE_HAT_HANDOFF_MISSING_PATH: &str = "hat_handoff_missing_path";
 pub const REASON_CODE_HAT_HANDOFF_PATH_ESCAPE: &str = "hat_handoff_path_escape";
 pub const REASON_CODE_HAT_HANDOFF_FILENAME_MISMATCH: &str = "hat_handoff_filename_mismatch";
@@ -33,6 +70,13 @@ pub const REASON_CODE_HAT_HANDOFF_ILLEGAL_EMIT_TOPIC: &str = "hat_handoff_illega
 pub const REASON_CODE_HAT_HANDOFF_NOT_REQUIRED: &str = "hat_handoff_not_required";
 
 /// Gate 判定结果。
+///
+/// 2026-06-23 fix plan P0-2: `Reject` carries a typed
+/// `kind: RejectionKind` so the runtime can call
+/// [`crate::event_loop::LoopState::record_typed_lint_rejection`]
+/// without relying on string-substring matching on `reason_code`.
+/// The `reason_code` field is retained for backwards-compatible
+/// diagnostics (operators grep `recovery.jsonl`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateDecision {
     /// 不是宏观边,无需 handoff(passthrough)。
@@ -40,7 +84,13 @@ pub enum GateDecision {
     /// 校验通过:event 应被接受。
     Accept { handoff_path: String },
     /// 校验失败:event 应被拒收并向 emit hat 发 `task.resume`。
+    ///
+    /// `kind` is the typed classification; `reason_code` is
+    /// `kind.reason_code()` (kept for diagnostics and the
+    /// CLI precheck mirror). New code MUST pattern-match on
+    /// `kind` rather than `reason_code`.
     Reject {
+        kind: RejectionKind,
         reason_code: &'static str,
         message: String,
     },
@@ -136,6 +186,10 @@ pub fn evaluate_event(inputs: &GateInputs<'_>, file_content: &FileContent) -> Ga
         Some(p) if !p.is_empty() => p,
         _ => {
             return GateDecision::Reject {
+                // 2026-06-23 fix plan P0-2: typed classification.
+                // Pre-existing reason_code constant retained for
+                // backwards-compatible `recovery.jsonl` greps.
+                kind: RejectionKind::HandoffArtifact,
                 reason_code: REASON_CODE_HAT_HANDOFF_MISSING_PATH,
                 message: format!(
                     "macro-edge emit `{topic}` from `{from}` requires payload `handoff_path`; use `ralph tools handoff prepare`",
@@ -149,6 +203,7 @@ pub fn evaluate_event(inputs: &GateInputs<'_>, file_content: &FileContent) -> Ga
     // 3) path jail
     if let Err(err) = allocator::resolve_jailed(inputs.repo_root, handoff_path) {
         return GateDecision::Reject {
+            kind: RejectionKind::HandoffArtifact,
             reason_code: REASON_CODE_HAT_HANDOFF_PATH_ESCAPE,
             message: format!(
                 "handoff_path `{handoff_path}` is not a safe repo-relative path: {err}"
@@ -161,6 +216,12 @@ pub fn evaluate_event(inputs: &GateInputs<'_>, file_content: &FileContent) -> Ga
         Some(parts) => parts,
         None => {
             return GateDecision::Reject {
+                // 2026-06-23 fix plan P0-2 / P0-1: typed kind for the
+                // filename-shape rejection. Same reason_code as the
+                // existing iter/seq mismatch path because both are
+                // "the filename does not match the SSOT shape", but
+                // the kind is more specific for downstream counters.
+                kind: RejectionKind::HandoffFilenameMismatch,
                 reason_code: REASON_CODE_HAT_HANDOFF_FILENAME_MISMATCH,
                 message: format!(
                     "handoff_path `{handoff_path}` does not match `{{iter}}-{{seq+1}}-{{from}}-{{to}}.md` shape",
@@ -171,6 +232,7 @@ pub fn evaluate_event(inputs: &GateInputs<'_>, file_content: &FileContent) -> Ga
     let expected_seq = inputs.current_seq + 1;
     if !inputs.skip_seq_check && (file_iter != inputs.iteration || file_seq != expected_seq) {
         return GateDecision::Reject {
+            kind: RejectionKind::HandoffFilenameMismatch,
             reason_code: REASON_CODE_HAT_HANDOFF_FILENAME_MISMATCH,
             message: format!(
                 "handoff_path `{handoff_path}` expects iter={exp_iter}, seq={exp_seq}; got iter={got_iter}, seq={got_seq}",
@@ -191,6 +253,7 @@ pub fn evaluate_event(inputs: &GateInputs<'_>, file_content: &FileContent) -> Ga
             let to_ok = file_to == allocator::sanitize(consumer);
             if !from_ok || !to_ok {
                 return GateDecision::Reject {
+                    kind: RejectionKind::HandoffFilenameMismatch,
                     reason_code: REASON_CODE_HAT_HANDOFF_FILENAME_MISMATCH,
                     message: format!(
                         "handoff_path `{handoff_path}` from/to mismatch: expected `{exp_from}-{exp_to}`, got `{got_from}-{got_to}`",
@@ -208,6 +271,7 @@ pub fn evaluate_event(inputs: &GateInputs<'_>, file_content: &FileContent) -> Ga
     let content = match file_content {
         FileContent::Missing => {
             return GateDecision::Reject {
+                kind: RejectionKind::HandoffArtifact,
                 reason_code: REASON_CODE_HAT_HANDOFF_FILE_NOT_FOUND,
                 message: format!(
                     "handoff file `{handoff_path}` not found; run `ralph tools handoff prepare --from {from} --to <downstream> --topic {topic}` first",
@@ -222,6 +286,7 @@ pub fn evaluate_event(inputs: &GateInputs<'_>, file_content: &FileContent) -> Ga
             // caller 已经把 resolve_jailed 失败 (path 越界) 折叠成 Missing,
             // 所以这里 ReadError 只会是权限/IO 等"真读不到"。
             return GateDecision::Reject {
+                kind: RejectionKind::HandoffArtifact,
                 reason_code: REASON_CODE_HAT_HANDOFF_FILE_READ_FAIL,
                 message: format!(
                     "handoff file `{handoff_path}` exists but could not be read: {err}; check workspace permissions"
@@ -234,6 +299,11 @@ pub fn evaluate_event(inputs: &GateInputs<'_>, file_content: &FileContent) -> Ga
     // 6) 结构校验
     if let Err(err) = validator::validate(content) {
         return GateDecision::Reject {
+            // 2026-06-23 fix plan P0-2 / P2-1: typed kind for body
+            // structural failures (missing section, out-of-order,
+            // missing `## next` field, `## notes` > 15 words,
+            // antipattern action line).
+            kind: RejectionKind::HandoffStructureInvalid,
             reason_code: REASON_CODE_HAT_HANDOFF_STRUCTURE,
             message: format_violation(err),
         };
@@ -245,6 +315,13 @@ pub fn evaluate_event(inputs: &GateInputs<'_>, file_content: &FileContent) -> Ga
         publishes_check::validate(&action_line, inputs.downstream_publishes)
     {
         return GateDecision::Reject {
+            // 2026-06-23 fix plan P0-2 / P1-1: typed kind for the
+            // illegal-topic rejection. The agent's `## next` line
+            // referenced a topic that the downstream hat does not
+            // publish (P1-1 root cause: coordinator's `## next`
+            // template mentioned `work.ready`, but executor's
+            // publishes only contain `work.done` / `work.failed`).
+            kind: RejectionKind::HandoffIllegalEmitTopic,
             reason_code: REASON_CODE_HAT_HANDOFF_ILLEGAL_EMIT_TOPIC,
             message: format!(
                 "`## next` action line `{action_line}` references a topic not in downstream publishes {downstream:?}",
@@ -285,21 +362,60 @@ fn extract_action_line(content: &str) -> Option<String> {
 /// `target_hat` 通常是 emit hat(`inputs.from_hat`);若上游 hat
 /// 是 plan-gate 且 task.resume 自身不应回到 plan-gate,可由 caller
 /// 走 `resolve_target_hat` 决定。
+///
+/// 2026-06-23 fix plan P0-2: the returned `reason_code` is the
+/// typed `RejectionKind::reason_code()` (a stable
+/// `&'static str`), so callers that grep
+/// `recovery.jsonl:reason_code` see the same string as before.
+///
+/// 2026-06-23 fix (mechanism review layer 3, anti-pattern 4):
+/// the returned tuple now carries the typed `kind` so the
+/// `task.resume` consumer can dispatch on the kind instead of
+/// scanning the `reason_code` string. The payload JSON also
+/// includes an explicit `"kind"` field (`RejectionKind`
+/// serialised as its `reason_code()` string for backwards
+/// compatibility — the literal `kind` enum string is the new
+/// SSOT for typed routing, the `reason_code` field stays for
+/// operator grep compatibility).
 pub fn reject_to_task_resume(
     decision: &GateDecision,
     target_hat: &str,
-) -> Option<(String, &'static str)> {
-    let (reason_code, message) = match decision {
+) -> Option<RejectTaskResume> {
+    let (kind, reason_code, message) = match decision {
         GateDecision::Reject {
+            kind,
             reason_code,
             message,
-        } => (*reason_code, message.clone()),
+            ..
+        } => (*kind, *reason_code, message.clone()),
         _ => return None,
     };
     let payload = format!(
-        "{{\"reason_code\":\"{reason_code}\",\"message\":\"{message}\",\"target_hat\":\"{target_hat}\"}}"
+        "{{\"reason_code\":\"{reason_code}\",\"kind\":\"{kind_code}\",\"message\":\"{message}\",\"target_hat\":\"{target_hat}\"}}",
+        kind_code = kind.reason_code(),
     );
-    Some((payload, reason_code))
+    Some(RejectTaskResume {
+        payload,
+        reason_code,
+        kind,
+    })
+}
+
+/// Typed triple returned by [`reject_to_task_resume`]. The
+/// `payload` field is the JSON string the loop emits as
+/// `task.resume`; `reason_code` is the stable operator-facing
+/// string; `kind` is the new typed SSOT for routing decisions.
+///
+/// 2026-06-23 fix: this struct makes the typed kind part of
+/// the function's stable surface so downstream consumers
+/// (loop_runner, stall detector, task.resume consumer wiring)
+/// can read it directly instead of re-deriving the kind from
+/// `reason_code` strings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RejectTaskResume {
+    pub payload: String,
+    pub reason_code: &'static str,
+    pub kind: RejectionKind,
 }
 
 #[cfg(test)]
@@ -387,8 +503,17 @@ hats:
         cfg.enabled = true;
         let inputs = make_inputs(repo.path(), &idx, &cfg, None);
         match evaluate_event(&inputs, &FileContent::Missing) {
-            GateDecision::Reject { reason_code, .. } => {
+            GateDecision::Reject {
+                kind, reason_code, ..
+            } => {
                 assert_eq!(reason_code, REASON_CODE_HAT_HANDOFF_MISSING_PATH);
+                // 2026-06-23 fix (adversarial review P1-4):
+                // explicit kind assertion so a kind flip is caught.
+                assert_eq!(
+                    kind,
+                    crate::preset::engine::gates::RejectionKind::HandoffArtifact,
+                    "missing-path rejection MUST keep HandoffArtifact kind"
+                );
             }
             other => panic!("expected Reject, got {other:?}"),
         }
@@ -402,8 +527,15 @@ hats:
         cfg.enabled = true;
         let inputs = make_inputs(repo.path(), &idx, &cfg, Some("../escape.md"));
         match evaluate_event(&inputs, &FileContent::Missing) {
-            GateDecision::Reject { reason_code, .. } => {
+            GateDecision::Reject {
+                kind, reason_code, ..
+            } => {
                 assert_eq!(reason_code, REASON_CODE_HAT_HANDOFF_PATH_ESCAPE);
+                assert_eq!(
+                    kind,
+                    crate::preset::engine::gates::RejectionKind::HandoffArtifact,
+                    "path-escape rejection MUST keep HandoffArtifact kind"
+                );
             }
             other => panic!("expected Reject, got {other:?}"),
         }
@@ -423,7 +555,54 @@ hats:
             Some(".ralph/agent/hat-handoff/3-3-plan_gate-executor.md"),
         );
         match evaluate_event(&inputs, &FileContent::Missing) {
-            GateDecision::Reject { reason_code, .. } => {
+            GateDecision::Reject {
+                kind, reason_code, ..
+            } => {
+                assert_eq!(reason_code, REASON_CODE_HAT_HANDOFF_FILENAME_MISMATCH);
+                // 2026-06-23 fix (adversarial review P1-4):
+                // explicit kind assertion — without this, a kind
+                // flip to `HandoffArtifact` would silently break
+                // the typed escalation chain.
+                assert_eq!(
+                    kind,
+                    crate::preset::engine::gates::RejectionKind::HandoffFilenameMismatch,
+                    "filename mismatch MUST keep HandoffFilenameMismatch kind"
+                );
+            }
+            other => panic!("expected Reject, got {other:?}"),
+        }
+    }
+
+    /// 2026-06-23 fix plan P0-2: the filename iter/seq
+    /// mismatch MUST produce a typed `HandoffFilenameMismatch`
+    /// rejection, distinct from the older `HandoffArtifact`
+    /// (missing path / missing file) rejections. Without this
+    /// typing, the runtime cannot differentiate "agent wrote
+    /// the wrong filename" from "agent forgot handoff_path
+    /// entirely", and the typed escalation accumulator
+    /// (`LoopState::record_typed_lint_rejection`) cannot
+    /// promote only the filename-mismatch path to a drift
+    /// finding.
+    #[test]
+    fn filename_seq_mismatch_carries_typed_kind() {
+        let repo = temp_repo();
+        let idx = two_hat_index();
+        let mut cfg = HatHandoffConfig::default();
+        cfg.enabled = true;
+        let inputs = make_inputs(
+            repo.path(),
+            &idx,
+            &cfg,
+            Some(".ralph/agent/hat-handoff/3-3-plan_gate-executor.md"),
+        );
+        match evaluate_event(&inputs, &FileContent::Missing) {
+            GateDecision::Reject {
+                kind, reason_code, ..
+            } => {
+                assert_eq!(
+                    kind,
+                    crate::preset::engine::gates::RejectionKind::HandoffFilenameMismatch
+                );
                 assert_eq!(reason_code, REASON_CODE_HAT_HANDOFF_FILENAME_MISMATCH);
             }
             other => panic!("expected Reject, got {other:?}"),
@@ -443,8 +622,17 @@ hats:
             Some(".ralph/agent/hat-handoff/3-2-plan_gate-executor.md"),
         );
         match evaluate_event(&inputs, &FileContent::Missing) {
-            GateDecision::Reject { reason_code, .. } => {
+            GateDecision::Reject {
+                kind, reason_code, ..
+            } => {
                 assert_eq!(reason_code, REASON_CODE_HAT_HANDOFF_FILE_NOT_FOUND);
+                // 2026-06-23 fix (adversarial review P1-4):
+                // explicit kind assertion.
+                assert_eq!(
+                    kind,
+                    crate::preset::engine::gates::RejectionKind::HandoffArtifact,
+                    "file-not-found rejection MUST keep HandoffArtifact kind"
+                );
             }
             other => panic!("expected Reject, got {other:?}"),
         }
@@ -467,8 +655,15 @@ hats:
             &inputs,
             &FileContent::ReadError("permission denied".to_string()),
         ) {
-            GateDecision::Reject { reason_code, .. } => {
+            GateDecision::Reject {
+                kind, reason_code, ..
+            } => {
                 assert_eq!(reason_code, REASON_CODE_HAT_HANDOFF_FILE_READ_FAIL);
+                assert_eq!(
+                    kind,
+                    crate::preset::engine::gates::RejectionKind::HandoffArtifact,
+                    "file-read-error rejection MUST keep HandoffArtifact kind"
+                );
             }
             other => panic!("expected Reject, got {other:?}"),
         }
@@ -498,7 +693,68 @@ hats:
         );
         let content = std::fs::read_to_string(&abs).unwrap();
         match evaluate_event(&inputs, &FileContent::Read(content)) {
-            GateDecision::Reject { reason_code, .. } => {
+            GateDecision::Reject {
+                kind, reason_code, ..
+            } => {
+                assert_eq!(reason_code, REASON_CODE_HAT_HANDOFF_STRUCTURE);
+                // 2026-06-23 fix (adversarial review P1-4):
+                // explicit kind assertion.
+                assert_eq!(
+                    kind,
+                    crate::preset::engine::gates::RejectionKind::HandoffStructureInvalid,
+                    "structure-violation rejection MUST keep HandoffStructureInvalid kind"
+                );
+            }
+            other => panic!("expected Reject, got {other:?}"),
+        }
+    }
+
+    /// 2026-06-23 fix plan P0-2 / P2-1: a missing
+    /// `## verify` section produces a typed
+    /// `HandoffStructureInvalid` rejection so the runtime
+    /// can promote it through the escalation chain (drift
+    /// finding on the 2nd occurrence). The historical
+    /// `recovery.jsonl:3` (35-word `## notes` from
+    /// `primary-20260622-182705`) was correctly classified
+    /// as `hat_handoff_structure_invalid`, but the kind was
+    /// string-only — the typed kind makes the upgrade path
+    /// explicit.
+    #[test]
+    fn structure_violation_carries_typed_kind() {
+        let repo = temp_repo();
+        let idx = two_hat_index();
+        let mut cfg = HatHandoffConfig::default();
+        cfg.enabled = true;
+        let abs = repo
+            .path()
+            .join(".ralph/agent/hat-handoff/3-2-plan_gate-executor.md");
+        std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        // 35-word ## notes -> NotesTooLong
+        let body = "# Handoff: plan_gate → executor\n\
+                    ## context\nx\n\
+                    ## changed\ny\n\
+                    ## verify\nz\n\
+                    ## next\n**动作**: emit work.done after task completion\n**阻塞**: 无\n\
+                    ## notes\nthis is a very long notes section that exceeds the fifteen word limit and should be rejected by the validator\n";
+        std::fs::write(&abs, body).unwrap();
+        let inputs = make_inputs(
+            repo.path(),
+            &idx,
+            &cfg,
+            Some(".ralph/agent/hat-handoff/3-2-plan_gate-executor.md"),
+        );
+        let downstream = vec!["work.done".to_string()];
+        let content = std::fs::read_to_string(&abs).unwrap();
+        let mut inputs = inputs;
+        inputs.downstream_publishes = &downstream;
+        match evaluate_event(&inputs, &FileContent::Read(content)) {
+            GateDecision::Reject {
+                kind, reason_code, ..
+            } => {
+                assert_eq!(
+                    kind,
+                    crate::preset::engine::gates::RejectionKind::HandoffStructureInvalid
+                );
                 assert_eq!(reason_code, REASON_CODE_HAT_HANDOFF_STRUCTURE);
             }
             other => panic!("expected Reject, got {other:?}"),
@@ -526,7 +782,55 @@ hats:
         let mut inputs = make_inputs(repo.path(), &idx, &cfg, Some(path));
         inputs.downstream_publishes = &downstream;
         match evaluate_event(&inputs, &FileContent::Read(content)) {
-            GateDecision::Reject { reason_code, .. } => {
+            GateDecision::Reject {
+                kind, reason_code, ..
+            } => {
+                assert_eq!(reason_code, REASON_CODE_HAT_HANDOFF_ILLEGAL_EMIT_TOPIC);
+                // 2026-06-23 fix (adversarial review P1-4):
+                // explicit kind assertion so a kind flip is caught.
+                assert_eq!(
+                    kind,
+                    crate::preset::engine::gates::RejectionKind::HandoffIllegalEmitTopic,
+                    "illegal-emit-topic rejection MUST keep HandoffIllegalEmitTopic kind"
+                );
+            }
+            other => panic!("expected Reject, got {other:?}"),
+        }
+    }
+
+    /// 2026-06-23 fix plan P0-2 / P1-1: illegal `## next`
+    /// topic MUST carry typed `HandoffIllegalEmitTopic`,
+    /// matching the `recovery.jsonl:4` failure from
+    /// `primary-20260622-182705` (coordinator's `## next`
+    /// mentioned `work.ready`, not in executor publishes).
+    #[test]
+    fn illegal_emit_topic_carries_typed_kind() {
+        let repo = temp_repo();
+        let idx = two_hat_index();
+        let mut cfg = HatHandoffConfig::default();
+        cfg.enabled = true;
+        let path = ".ralph/agent/hat-handoff/3-2-plan_gate-executor.md";
+        let abs = repo.path().join(path);
+        std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        // body claims executor will emit work.ready (not in
+        // executor's publishes [work.done, work.failed]).
+        std::fs::write(
+            &abs,
+            "# Handoff: plan_gate → executor\n## context\nx\n## changed\ny\n## verify\nz\n## next\n**动作**: emit work.ready\n**阻塞**: 无\n## notes\n无\n",
+        )
+        .unwrap();
+        let downstream = vec!["work.done".to_string(), "work.failed".to_string()];
+        let content = std::fs::read_to_string(&abs).unwrap();
+        let mut inputs = make_inputs(repo.path(), &idx, &cfg, Some(path));
+        inputs.downstream_publishes = &downstream;
+        match evaluate_event(&inputs, &FileContent::Read(content)) {
+            GateDecision::Reject {
+                kind, reason_code, ..
+            } => {
+                assert_eq!(
+                    kind,
+                    crate::preset::engine::gates::RejectionKind::HandoffIllegalEmitTopic
+                );
                 assert_eq!(reason_code, REASON_CODE_HAT_HANDOFF_ILLEGAL_EMIT_TOPIC);
             }
             other => panic!("expected Reject, got {other:?}"),
@@ -603,12 +907,90 @@ hats:
     #[test]
     fn reject_to_task_resume_extracts_reason_code() {
         let decision = GateDecision::Reject {
+            kind: crate::preset::engine::gates::RejectionKind::HandoffArtifact,
             reason_code: REASON_CODE_HAT_HANDOFF_MISSING_PATH,
             message: "missing".into(),
         };
-        let (payload, code) = reject_to_task_resume(&decision, "plan-gate").unwrap();
-        assert_eq!(code, REASON_CODE_HAT_HANDOFF_MISSING_PATH);
-        assert!(payload.contains("reason_code"));
-        assert!(payload.contains("plan-gate"));
+        let rtr = reject_to_task_resume(&decision, "plan-gate").unwrap();
+        assert_eq!(rtr.reason_code, REASON_CODE_HAT_HANDOFF_MISSING_PATH);
+        assert!(rtr.payload.contains("reason_code"));
+        assert!(rtr.payload.contains("plan-gate"));
+    }
+
+    /// 2026-06-23 fix (mechanism review layer 3, anti-pattern 4):
+    /// `task.resume` payload MUST carry the typed kind so the
+    /// consumer (coordinator hat in primary-20260622-182705's case)
+    /// can dispatch on the kind instead of substring-matching the
+    /// reason_code. The payload JSON exposes `kind` as the same
+    /// string as `reason_code` so backwards-compatible `recovery.jsonl`
+    /// greps continue to work, but the typed field on the in-memory
+    /// return value is the new SSOT.
+    #[test]
+    fn reject_to_task_resume_carries_typed_kind() {
+        let decision = GateDecision::Reject {
+            kind: crate::preset::engine::gates::RejectionKind::HandoffFilenameMismatch,
+            reason_code: REASON_CODE_HAT_HANDOFF_FILENAME_MISMATCH,
+            message: "iter/seq drift".into(),
+        };
+        let rtr = reject_to_task_resume(&decision, "coordinator").unwrap();
+        assert_eq!(
+            rtr.kind,
+            crate::preset::engine::gates::RejectionKind::HandoffFilenameMismatch,
+            "typed kind must surface from the Reject decision"
+        );
+        assert_eq!(rtr.reason_code, REASON_CODE_HAT_HANDOFF_FILENAME_MISMATCH);
+        assert!(
+            rtr.payload
+                .contains("\"kind\":\"hat_handoff_filename_mismatch\""),
+            "payload must carry explicit `kind` field for the typed consumer; got: {}",
+            rtr.payload
+        );
+        assert!(
+            rtr.payload.contains("coordinator"),
+            "payload must carry target_hat for the consumer to route"
+        );
+    }
+
+    /// 2026-06-23 fix (mechanism review layer 3, anti-pattern 4):
+    /// the `task.resume` consumer (coordinator hat in
+    /// `primary-20260622-182705`) MUST be able to read the
+    /// typed kind from the payload JSON without scanning the
+    /// `reason_code` string. The payload carries `kind` as
+    /// `RejectionKind::reason_code()`, and a downstream
+    /// `coordinator` hat can dispatch on the kind directly.
+    ///
+    /// This test simulates the consumer side: parse the
+    /// payload and verify both `kind` and `reason_code` are
+    /// present and equal (typed SSOT + operator-grep SSOT in
+    /// the same field set).
+    #[test]
+    fn reject_to_task_resume_payload_is_consumer_dispatchable() {
+        use serde_json::Value;
+        let decision = GateDecision::Reject {
+            kind: crate::preset::engine::gates::RejectionKind::HandoffIllegalEmitTopic,
+            reason_code: REASON_CODE_HAT_HANDOFF_ILLEGAL_EMIT_TOPIC,
+            message: "## next action topic not in downstream publishes".into(),
+        };
+        let rtr = reject_to_task_resume(&decision, "coordinator").unwrap();
+        let parsed: Value =
+            serde_json::from_str(&rtr.payload).expect("task.resume payload must be valid JSON");
+        let kind = parsed
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .expect("payload MUST carry explicit `kind` field for typed consumer dispatch");
+        let reason_code = parsed
+            .get("reason_code")
+            .and_then(|v| v.as_str())
+            .expect("payload MUST carry `reason_code` for operator grep compatibility");
+        let target_hat = parsed
+            .get("target_hat")
+            .and_then(|v| v.as_str())
+            .expect("payload MUST carry `target_hat` for routing");
+        assert_eq!(
+            kind, "hat_handoff_illegal_emit_topic",
+            "kind field must equal RejectionKind::reason_code() so a consumer can match without parsing"
+        );
+        assert_eq!(reason_code, "hat_handoff_illegal_emit_topic");
+        assert_eq!(target_hat, "coordinator");
     }
 }

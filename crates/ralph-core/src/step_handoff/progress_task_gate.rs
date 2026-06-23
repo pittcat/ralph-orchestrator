@@ -255,8 +255,19 @@ fn parse_completed_entry(line: &str) -> Option<String> {
 }
 
 /// Effective gate result for a single event check.
+///
+/// 2026-06-23 fix: renamed from `GateDecision` to
+/// `TaskProgressDecision` to remove the name collision with
+/// `crate::preset::engine::gates::GateDecision` and
+/// `crate::hat_handoff::gate::GateDecision`. Both enums share
+/// the suffix `GateDecision` but model semantically different
+/// decisions; using the same name across crates made it easy
+/// to extend one enum's variant set and forget to update
+/// downstream match arms in the other module. Alias
+/// `GateDecision` is preserved as a deprecated re-export for
+/// one release to keep external crates compiling.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GateDecision {
+pub enum TaskProgressDecision {
     /// Gate is off; topic is not gated; pass through.
     Inert,
     /// Topic is gated and progress.md ↔ tasks.jsonl align; pass through.
@@ -264,6 +275,19 @@ pub enum GateDecision {
     /// Topic is gated but progress.md ↔ tasks.jsonl disagree; reject.
     Mismatch(ProgressTaskMismatch),
 }
+
+/// 2026-06-23 fix: deprecated alias kept for downstream
+/// crates that previously imported
+/// `crate::step_handoff::progress_task_gate::GateDecision`.
+/// New code MUST use `TaskProgressDecision` directly. This
+/// alias is intentionally a `pub use` of the new name so
+/// downstream `match GateDecision::Inert` arms keep working
+/// without a string-level rename.
+#[deprecated(
+    since = "0.1.0",
+    note = "renamed to TaskProgressDecision to remove name collision with crate::preset::engine::gates::GateDecision; the variant set is the same"
+)]
+pub use TaskProgressDecision as GateDecision;
 
 /// Pure-function check that takes the snapshot directly instead
 /// of reading from disk. The U4 validation pipeline

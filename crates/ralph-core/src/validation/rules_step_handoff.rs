@@ -13,7 +13,7 @@
 use crate::event_reader::Event;
 use crate::preset::engine::protocol::ProtocolView;
 use crate::step_handoff::progress_task_gate::{
-    GATED_TOPICS, GateDecision, check_alignment_with_snapshot,
+    GATED_TOPICS, TaskProgressDecision, check_alignment_with_snapshot,
 };
 use ralph_proto::HatId;
 
@@ -59,10 +59,10 @@ impl ValidationRule for StepHandoffRule {
             task_id.as_deref(),
         );
         match decision {
-            GateDecision::Inert | GateDecision::Aligned => {
+            TaskProgressDecision::Inert | TaskProgressDecision::Aligned => {
                 ValidationResult::accept_with(ValidationStage::StepHandoff)
             }
-            GateDecision::Mismatch(m) => {
+            TaskProgressDecision::Mismatch(m) => {
                 let code = format!("{}:{}", ReasonCode::STEP_HANDOFF_MISMATCH_PREFIX, m.reason);
                 let hint = m.detail.clone();
                 ValidationResult::reject(ValidationStage::StepHandoff, code, Some(hint), true)

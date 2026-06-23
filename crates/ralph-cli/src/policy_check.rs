@@ -582,6 +582,7 @@ pub fn check_hat_handoff_gate_with_env(
         GateDecision::Reject {
             reason_code,
             message,
+            ..
         } => Err(ValidationError {
             payload_index: 0,
             field: "handoff_path".to_string(),

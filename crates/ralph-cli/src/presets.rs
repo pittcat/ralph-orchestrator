@@ -3245,5 +3245,4 @@ mod tests {
              match the plan-gate emit shape. Got '{completed_step}'."
         );
     }
-
-    }
+}

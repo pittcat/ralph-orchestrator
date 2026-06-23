@@ -10,4 +10,4 @@
 
 pub mod progress_task_gate;
 
-pub use progress_task_gate::ProgressSnapshot;
+pub use progress_task_gate::{ProgressSnapshot, TaskProgressDecision};

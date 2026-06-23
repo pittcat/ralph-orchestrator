@@ -94,7 +94,8 @@ impl RuntimeStateSnapshot {
         // `apply_from_ledger` call.
         let (tasks_ref, _from_ledger) = ctx.task_snapshot();
         let (progress_ref, _from_ledger) = ctx.progress_snapshot();
-        let (tasks, progress) = if tasks_ref.is_empty() && progress_ref.current_step.is_none()
+        let (tasks, progress) = if tasks_ref.is_empty()
+            && progress_ref.current_step.is_none()
             && progress_ref.completed_steps.is_empty()
         {
             // Cold cache; try disk before giving up. The progress

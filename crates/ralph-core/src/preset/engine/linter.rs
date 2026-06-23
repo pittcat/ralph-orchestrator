@@ -291,8 +291,17 @@ pub fn lint_emit(
                 *payload = prepared;
             }
             Err(err) => {
-                let hint = LintResumeHint::from_reason(
+                // 2026-06-23 fix (mechanism review layer 3,
+                // anti-pattern 2): switch to the typed
+                // constructor so the resume hint's target is
+                // derived from the *kind* (always SourceHat
+                // for auto-prepare failures) instead of
+                // scanning the message string for the word
+                // "artifact". This closes the only remaining
+                // `from_reason` call site in the linter path.
+                let hint = LintResumeHint::from_typed_rejection(
                     topic,
+                    crate::preset::engine::gates::RejectionKind::HandoffArtifact,
                     &format!("auto_handoff_prepare failed: {err}"),
                 );
                 return LintOutcome::Reject(hint);
