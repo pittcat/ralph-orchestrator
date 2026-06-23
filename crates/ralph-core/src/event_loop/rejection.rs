@@ -703,6 +703,62 @@ impl RejectionEscalator {
     }
 }
 
+/// U4 (plan 2026-06-23-004, anti-pattern 4): coordinator 对 task.resume
+/// 的 typed kind dispatch。
+///
+/// 接收 `task.resume` 携带的 `RejectionKind`,按 kind 路由到对应修复策略:
+/// - `HandoffFilenameMismatch` → 重新 emit work.ready(用 allocator SSOT 派生)
+/// - `HandoffStructureInvalid` → 修复 payload schema 后重发
+/// - `HandoffIllegalEmitTopic` → 改 emit target 后重发
+///
+/// 死信兜底:连续 N=3 次同 kind task.resume 仍未消费 → emit `plan.blocked`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoordinatorAction {
+    /// 重新 emit work.ready(SSOT 文件名派生)
+    ReEmitWorkReady,
+    /// 修复 payload schema 后重发
+    FixPayloadSchema,
+    /// 改 emit target 后重发
+    FixEmitTarget,
+    /// 死信:连续 N 次同 kind 未消费,emit plan.blocked
+    PlanBlocked {
+        kind: crate::preset::engine::gates::RejectionKind,
+        count: u32,
+    },
+}
+
+/// U4 (plan 2026-06-23-004): 死信阈值——同一 kind 累计 N 次 task.resume
+/// 仍未消费 → emit plan.blocked。
+pub const COORDINATOR_DEAD_LETTER_THRESHOLD: u32 = 3;
+
+pub struct CoordinatorDispatcher;
+
+impl CoordinatorDispatcher {
+    /// 纯函数:输入 `(kind, consecutive_count)` 按 KTD-4 dispatch。
+    /// `consecutive_count` 由调用方统计(同一 kind 累计 task.resume 次数)。
+    pub fn dispatch(
+        kind: crate::preset::engine::gates::RejectionKind,
+        consecutive_count: u32,
+    ) -> CoordinatorAction {
+        use crate::preset::engine::gates::RejectionKind as K;
+        // 死信兜底先于具体 dispatch
+        if consecutive_count >= COORDINATOR_DEAD_LETTER_THRESHOLD {
+            return CoordinatorAction::PlanBlocked {
+                kind,
+                count: consecutive_count,
+            };
+        }
+        match kind {
+            K::HandoffFilenameMismatch => CoordinatorAction::ReEmitWorkReady,
+            K::HandoffStructureInvalid => CoordinatorAction::FixPayloadSchema,
+            K::HandoffIllegalEmitTopic => CoordinatorAction::FixEmitTarget,
+            // 其他 kind 不在 typed dispatch 范围,走 default 修复策略
+            // (重发原 task.resume,等待下一个信号)。
+            _ => CoordinatorAction::ReEmitWorkReady,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1242,5 +1298,105 @@ mod tests {
             r.retry_key
                 .contains("unknown:BAD_TOPIC:invalid_topic_format")
         );
+    }
+
+    // U4 (plan 2026-06-23-004, anti-pattern 4): coordinator dispatcher 测试。
+    mod task_resume_consumer {
+        use super::*;
+        use crate::preset::engine::gates::RejectionKind;
+
+        #[test]
+        fn dispatch_routes_by_kind() {
+            // AE4 (反模式 4): ralph emit task.resume(kind=HandoffFilenameMismatch)
+            // → coordinator dispatch 路由到 ReEmitWorkReady。
+            assert_eq!(
+                CoordinatorDispatcher::dispatch(
+                    RejectionKind::HandoffFilenameMismatch,
+                    1
+                ),
+                CoordinatorAction::ReEmitWorkReady
+            );
+            assert_eq!(
+                CoordinatorDispatcher::dispatch(
+                    RejectionKind::HandoffStructureInvalid,
+                    1
+                ),
+                CoordinatorAction::FixPayloadSchema
+            );
+            assert_eq!(
+                CoordinatorDispatcher::dispatch(
+                    RejectionKind::HandoffIllegalEmitTopic,
+                    1
+                ),
+                CoordinatorAction::FixEmitTarget
+            );
+        }
+
+        #[test]
+        fn dead_letter_kicks_in_at_3() {
+            // 死信兜底:连续 3 次同 kind → emit plan.blocked
+            let action = CoordinatorDispatcher::dispatch(
+                RejectionKind::HandoffFilenameMismatch,
+                COORDINATOR_DEAD_LETTER_THRESHOLD,
+            );
+            assert!(matches!(
+                action,
+                CoordinatorAction::PlanBlocked {
+                    kind: RejectionKind::HandoffFilenameMismatch,
+                    count: COORDINATOR_DEAD_LETTER_THRESHOLD,
+                }
+            ));
+            // 4 次同样进入死信
+            let action = CoordinatorDispatcher::dispatch(
+                RejectionKind::HandoffStructureInvalid,
+                4,
+            );
+            assert!(matches!(
+                action,
+                CoordinatorAction::PlanBlocked {
+                    kind: RejectionKind::HandoffStructureInvalid,
+                    count: 4,
+                }
+            ));
+        }
+
+        #[test]
+        fn dispatch_does_not_cross_pollute_kinds() {
+            // filename × 1 → ReEmitWorkReady,不影响 structure
+            assert_eq!(
+                CoordinatorDispatcher::dispatch(
+                    RejectionKind::HandoffFilenameMismatch,
+                    1
+                ),
+                CoordinatorAction::ReEmitWorkReady
+            );
+            // 结构错误与文件名错误用各自 dispatch path
+            assert_eq!(
+                CoordinatorDispatcher::dispatch(
+                    RejectionKind::HandoffStructureInvalid,
+                    1
+                ),
+                CoordinatorAction::FixPayloadSchema
+            );
+        }
+
+        #[test]
+        fn threshold_boundary_below_3_does_not_dead_letter() {
+            // 1 / 2 次都不应触发死信
+            assert_eq!(
+                CoordinatorDispatcher::dispatch(
+                    RejectionKind::HandoffIllegalEmitTopic,
+                    1
+                ),
+                CoordinatorAction::FixEmitTarget
+            );
+            assert_eq!(
+                CoordinatorDispatcher::dispatch(
+                    RejectionKind::HandoffIllegalEmitTopic,
+                    2
+                ),
+                CoordinatorAction::FixEmitTarget
+            );
+        }
     }
 }
