@@ -578,6 +578,9 @@ mod tests {
             // artifacts in the test fixture; stall detector only
             // arms for artifacts accepted after this field is wired.
             pending_handoff_artifacts: std::collections::HashSet::new(),
+            // U3 (plan 2026-06-23-004): rejection stall 检测窗口
+            // 在 test fixture 中保持空。
+            stall_detector_rejection_window: Vec::new(),
             // U1 (plan 2026-06-21-002): the unified state ledger
             // is opt-in. The test fixture stays on the legacy
             // path by default.

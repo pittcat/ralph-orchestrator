@@ -712,7 +712,6 @@ mod tests {
     // U1 (plan 2026-06-23-004): 12 个 typed rejection escalation case
     // (4 kind × 3 threshold band),SSOT 化阶梯触发链。
     mod rejection_escalation_unit {
-        use super::*;
         use crate::preset::engine::gates::RejectionKind;
 
         #[test]

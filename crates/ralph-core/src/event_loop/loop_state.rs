@@ -562,6 +562,15 @@ pub struct LoopState {
     /// a freshly-emitted handoff artifact.
     pub pending_handoff_artifacts: HashSet<std::path::PathBuf>,
 
+    /// U3 (plan 2026-06-23-004, anti-pattern 3): rejection stall 检测窗口。
+    ///
+    /// 最近 N 轮(`REJECTION_WINDOW_SIZE`)的 `(rejection_count, emit_count)` 计数。
+    /// 当 sum(rejection_count) ≥ 3 && sum(emit_count) == 0 → stall,
+    /// emit `stall.handoff_unconsumed` typed 事件。
+    ///
+    /// 复用现有 progressive_failures 窗口,避免新增独立 timer。
+    pub stall_detector_rejection_window: Vec<RejectionWindowEntry>,
+
     /// U1 (plan 2026-06-21-002): unified state ledger.
     /// `None` until the loop constructor wires it in.
     pub state_ledger: Option<crate::state::StateLedger>,
@@ -573,6 +582,21 @@ pub struct LoopState {
     /// block to the prompt.
     pub prompt_context: crate::correction::PromptContext,
 }
+
+/// U3 (plan 2026-06-23-004): 单轮 rejection stall 检测窗口的条目。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RejectionWindowEntry {
+    /// 本轮 typed rejection 累计计数(来自 typed_lint_rejection_count)。
+    pub rejection_count: u32,
+    /// 本轮 emit 的合法 business event 数(work.done / report.done 等)。
+    pub emit_count: u32,
+}
+
+/// U3 (plan 2026-06-23-004): rejection stall 检测窗口大小。N 轮全 reject 触发 stall。
+pub const REJECTION_WINDOW_SIZE: usize = 5;
+
+/// U3 (plan 2026-06-23-004): rejection stall 阈值——窗口内累计拒绝次数 ≥ 此值触发 stall。
+pub const REJECTION_WINDOW_THRESHOLD: u32 = 3;
 impl Default for LoopState {
     fn default() -> Self {
         Self {
@@ -680,6 +704,8 @@ impl Default for LoopState {
             // artifacts on cold start; stall detector only fires
             // for artifacts accepted AFTER this field is wired in.
             pending_handoff_artifacts: HashSet::new(),
+            // U3 (plan 2026-06-23-004): rejection stall 检测窗口。
+            stall_detector_rejection_window: Vec::new(),
             // U1 (plan 2026-06-21-002): unified state ledger.
             // `None` until the loop constructor wires it in.
             state_ledger: None,
@@ -1283,6 +1309,34 @@ impl LoopState {
         ) || topic.ends_with(".exhausted")
             || topic.ends_with(".scope_violation")
     }
+
+    /// U3 (plan 2026-06-23-004): 推入一轮窗口条目,保留最近 N=5 轮。
+    ///
+    /// `rejection_count` 通常是 `typed_lint_rejection_count` 累计值,
+    /// `emit_count` 是本轮通过 gate 的合法 business event 数。
+    pub fn push_rejection_window(&mut self, entry: RejectionWindowEntry) {
+        self.stall_detector_rejection_window.push(entry);
+        // 保留最近 N 轮,旧数据自动出队。
+        let len = self.stall_detector_rejection_window.len();
+        if len > REJECTION_WINDOW_SIZE {
+            let drop_n = len - REJECTION_WINDOW_SIZE;
+            self.stall_detector_rejection_window.drain(0..drop_n);
+        }
+    }
+
+    /// U3 (plan 2026-06-23-004): 当前窗口内 reject / emit 累计求和。
+    ///
+    /// 返回 `(sum_rejections, sum_emits)`。stall 触发条件:
+    /// `sum_rejections >= REJECTION_WINDOW_THRESHOLD && sum_emits == 0`。
+    pub fn rejection_window_sums(&self) -> (u32, u32) {
+        let mut rej = 0u32;
+        let mut emit = 0u32;
+        for entry in &self.stall_detector_rejection_window {
+            rej = rej.saturating_add(entry.rejection_count);
+            emit = emit.saturating_add(entry.emit_count);
+        }
+        (rej, emit)
+    }
 }
 
 impl EventSignature {
@@ -1299,6 +1353,19 @@ fn fingerprint_payload(payload: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     payload.hash(&mut hasher);
     hasher.finish()
+}
+
+/// U3 (plan 2026-06-23-004, anti-pattern 3): rejection stall 检查。
+///
+/// 纯函数:输入当前 `LoopState`,返回 `Some(())` 表示检测到 stall(应 emit
+/// `stall.handoff_unconsumed` 报警);`None` 表示正常。
+///
+/// 阈值复用 `REJECTION_WINDOW_SIZE` × `REJECTION_WINDOW_THRESHOLD`:
+/// - 窗口大小 = 5 轮(最近 N 轮)
+/// - 累计 rejection ≥ 3 && emit == 0
+pub fn detect_rejection_stall(state: &LoopState) -> bool {
+    let (sum_rej, sum_emit) = state.rejection_window_sums();
+    sum_rej >= REJECTION_WINDOW_THRESHOLD && sum_emit == 0
 }
 
 #[cfg(test)]
@@ -1829,5 +1896,92 @@ mod tests {
             !state.has_pending_handoff_older_than(now, max_age),
             "stall alarm MUST stay silent when recent progress is observed"
         );
+    }
+
+    // U3 (plan 2026-06-23-004): rejection stall 检测测试。
+    mod stall_rejection {
+        use super::*;
+        use crate::event_loop::loop_state::{
+            detect_rejection_stall, RejectionWindowEntry, REJECTION_WINDOW_SIZE,
+            REJECTION_WINDOW_THRESHOLD,
+        };
+
+        #[test]
+        fn happy_path_5_reject_rounds_triggers_stall() {
+            // AE3 (反模式 3): 5 轮全 reject → emit stall.handoff_unconsumed
+            let mut state = LoopState::default();
+            for _ in 0..REJECTION_WINDOW_SIZE {
+                state.push_rejection_window(RejectionWindowEntry {
+                    rejection_count: 1,
+                    emit_count: 0,
+                });
+            }
+            assert!(detect_rejection_stall(&state));
+        }
+
+        #[test]
+        fn negative_one_emit_breaks_stall() {
+            let mut state = LoopState::default();
+            // 4 轮 reject + 1 轮有 emit → stall 不触发
+            for _ in 0..4 {
+                state.push_rejection_window(RejectionWindowEntry {
+                    rejection_count: 1,
+                    emit_count: 0,
+                });
+            }
+            state.push_rejection_window(RejectionWindowEntry {
+                rejection_count: 0,
+                emit_count: 1,
+            });
+            assert!(!detect_rejection_stall(&state));
+        }
+
+        #[test]
+        fn threshold_boundary_3_rejects_below_window_still_triggers() {
+            // 累计 reject 3 次即触发 stall,不需要等到 5 轮窗口填满。
+            let mut state = LoopState::default();
+            state.push_rejection_window(RejectionWindowEntry {
+                rejection_count: 1,
+                emit_count: 0,
+            });
+            state.push_rejection_window(RejectionWindowEntry {
+                rejection_count: 1,
+                emit_count: 0,
+            });
+            state.push_rejection_window(RejectionWindowEntry {
+                rejection_count: 1,
+                emit_count: 0,
+            });
+            assert_eq!(REJECTION_WINDOW_THRESHOLD, 3);
+            assert!(detect_rejection_stall(&state));
+        }
+
+        #[test]
+        fn window_rolls_after_size_exceeded() {
+            // 旧 reject 出队后,新 emit 抵消 stall。
+            let mut state = LoopState::default();
+            // 填 5 轮全 reject
+            for _ in 0..REJECTION_WINDOW_SIZE {
+                state.push_rejection_window(RejectionWindowEntry {
+                    rejection_count: 1,
+                    emit_count: 0,
+                });
+            }
+            assert!(detect_rejection_stall(&state));
+            // 推入 5 轮全 emit,旧 reject 出队
+            for _ in 0..REJECTION_WINDOW_SIZE {
+                state.push_rejection_window(RejectionWindowEntry {
+                    rejection_count: 0,
+                    emit_count: 1,
+                });
+            }
+            assert!(!detect_rejection_stall(&state));
+        }
+
+        #[test]
+        fn empty_window_does_not_stall() {
+            let state = LoopState::default();
+            assert!(!detect_rejection_stall(&state));
+        }
     }
 }
