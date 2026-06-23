@@ -67,6 +67,16 @@ pub struct RejectionRecord {
     /// Optional terminal reason (R11).  `None` for records that
     /// did not trip escalation.
     pub terminal_reason: Option<String>,
+    /// U6 (plan 2026-06-23-004): typed kind 字段。
+    ///
+    /// 与 `reason_code` 冗余存储但语义不同:
+    /// - `reason_code` 是历史 grep 兼容字符串(`hat_handoff_filename_mismatch` 等)
+    /// - `kind` 是 typed 字段(`RejectionKind::reason_code()` SSOT 化),
+    ///   消费方可按 kind 做 typed 分桶聚合,无需字符串匹配。
+    ///
+    /// 老 envelope(无 `kind` 字段)反序列化时为 `None`,保持向前兼容。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 impl RejectionRecord {
@@ -84,6 +94,27 @@ impl RejectionRecord {
             reason_code: reason_code.into(),
             retry_count,
             terminal_reason: None,
+            kind: None,
+        }
+    }
+
+    /// U6 (plan 2026-06-23-004): 从 typed rejection 构造工厂方法,
+    /// 确保 `kind` 与 `reason_code` 都从同一个 `RejectionKind` SSOT 派生。
+    pub fn from_typed_rejection(
+        hat: impl Into<String>,
+        topic: impl Into<String>,
+        kind: crate::preset::engine::gates::RejectionKind,
+        retry_count: u32,
+    ) -> Self {
+        let code = kind.reason_code().to_string();
+        Self {
+            ts: now_rfc3339(),
+            hat: hat.into(),
+            topic: topic.into(),
+            reason_code: code.clone(),
+            retry_count,
+            terminal_reason: None,
+            kind: Some(code),
         }
     }
 
@@ -266,5 +297,96 @@ mod tests {
     fn retry_key_shape_matches_rejection() {
         let r = RejectionRecord::new("executor", "work.done", "policy:missing_field", 1);
         assert_eq!(r.retry_key(), "executor:work.done:policy:missing_field");
+    }
+
+    // U6 (plan 2026-06-23-004): typed kind envelope 测试。
+    mod recovery_envelope_typed {
+        use super::*;
+        use crate::preset::engine::gates::RejectionKind;
+
+        #[test]
+        fn factory_method_ssot_kind_matches_reason_code() {
+            // from_typed_rejection: kind 与 reason_code 必从同一 kind SSOT 派生
+            let r = RejectionRecord::from_typed_rejection(
+                "executor",
+                "work.ready",
+                RejectionKind::HandoffFilenameMismatch,
+                3,
+            );
+            assert_eq!(
+                r.kind.as_deref(),
+                Some("hat_handoff_filename_mismatch")
+            );
+            assert_eq!(
+                r.reason_code, "hat_handoff_filename_mismatch",
+                "kind and reason_code MUST come from the same RejectionKind SSOT"
+            );
+        }
+
+        #[test]
+        fn factory_method_covers_all_hat_handoff_kinds() {
+            for kind in [
+                RejectionKind::HandoffFilenameMismatch,
+                RejectionKind::HandoffStructureInvalid,
+                RejectionKind::HandoffIllegalEmitTopic,
+            ] {
+                let r = RejectionRecord::from_typed_rejection(
+                    "executor",
+                    "work.ready",
+                    kind,
+                    1,
+                );
+                assert_eq!(r.kind.as_deref(), Some(kind.reason_code()));
+            }
+        }
+
+        #[test]
+        fn legacy_record_without_kind_deserializes_with_none() {
+            // 反序列化兼容:老 envelope(无 kind 字段)能反序列化,kind = None。
+            let dir = TempDir::new().unwrap();
+            let path = recovery_log_path(dir.path());
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            let legacy = b"{\"ts\":\"2026-06-23T00:00:00Z\",\"hat\":\"a\",\"topic\":\"x\",\"reason_code\":\"r\",\"retry_count\":1,\"terminal_reason\":null}\n";
+            fs::write(&path, legacy).unwrap();
+            let records = read_rejection_log(dir.path()).unwrap();
+            assert_eq!(records.len(), 1);
+            assert!(
+                records[0].kind.is_none(),
+                "legacy envelope without kind field MUST deserialize as None"
+            );
+        }
+
+        #[test]
+        fn typed_kind_serializes_for_grep() {
+            // 消费侧可以按 kind grep:`jq 'select(.kind == "hat_handoff_filename_mismatch")'`
+            let r = RejectionRecord::from_typed_rejection(
+                "executor",
+                "work.ready",
+                RejectionKind::HandoffFilenameMismatch,
+                5,
+            );
+            let s = serde_json::to_string(&r).unwrap();
+            assert!(s.contains("\"kind\":\"hat_handoff_filename_mismatch\""));
+        }
+
+        #[test]
+        fn append_and_read_round_trip_preserves_kind() {
+            let dir = TempDir::new().unwrap();
+            let r = RejectionRecord::from_typed_rejection(
+                "executor",
+                "work.ready",
+                RejectionKind::HandoffStructureInvalid,
+                2,
+            );
+            append_rejection(dir.path(), &r).unwrap();
+            let records = read_rejection_log(dir.path()).unwrap();
+            assert_eq!(records.len(), 1);
+            assert_eq!(
+                records[0].kind.as_deref(),
+                Some("hat_handoff_structure_invalid")
+            );
+        }
     }
 }

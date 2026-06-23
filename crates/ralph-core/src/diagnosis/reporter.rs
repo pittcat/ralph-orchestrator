@@ -3011,6 +3011,7 @@ mod tests {
             reason_code: reason_code.to_string(),
             retry_count,
             terminal_reason: None,
+            kind: None,
         }
     }
 
