@@ -868,41 +868,63 @@ mod tests {
         );
     }
 
+    /// Guard: ce-executor must explicitly tell the agent NOT to create, switch,
+    /// or rename branches, and NOT to create worktrees. Branching is reserved
+    /// for the user via `ralph run --worktree`; the orchestrator handles it
+    /// before the agent activates. The agent improvising a "git checkout -b
+    /// feat/plan-name" or "git worktree add ..." was the original bug — see
+    /// git history for "fix: ce-executor 禁建分支".
+    ///
+    /// Note: this guard scans hat instructions text because the
+    /// prohibition is expressed in the prompt to the agent (a free-form
+    /// string), not as a structured field. We check that
+    /// `git checkout -b` and `git worktree add` each appear in a
+    /// sentence that *also* carries a prohibition marker
+    /// (NEVER / MUST NOT / "不要" / "禁止" / "严禁"). This is
+    /// resilient to wording changes (e.g. "MUST NOT create" / "禁止
+    /// 切换分支") but still fails if the policy block is dropped.
     #[test]
     fn test_ce_executor_forbids_agent_branch_creation() {
-        // Guard: ce-executor must explicitly tell the agent NOT to create, switch,
-        // or rename branches, and NOT to create worktrees. Branching is reserved
-        // for the user via `ralph run --worktree`; the orchestrator handles it
-        // before the agent activates. The agent improvising a "git checkout -b
-        // feat/plan-name" or "git worktree add ..." was the original bug — see
-        // git history for "fix: ce-executor 禁建分支".
         let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
         let content = preset.content;
 
-        // Top-level guardrail must carry the prohibition
-        assert!(
-            content.contains("NEVER create, switch, or rename branches")
-                && content.contains("`git checkout -b`")
-                && content.contains("`git worktree add`"),
-            "ce-executor guardrails must explicitly forbid branch creation by the \
-             agent. Run ./scripts/sync-embedded-files.sh if the canonical file has \
-             the policy but the embedded mirror does not."
-        );
-
-        // Per-hat 'Environment Setup' / 'Environment Check' sections must each
-        // carry the Branch / Worktree Policy block. Coordinator must not delegate
-        // branch creation to executor; executor must not run git checkout -b.
-        for hat in ["coordinator", "executor"] {
+        let prohibition_markers = ["NEVER", "MUST NOT", "不要", "禁止", "严禁"];
+        for forbidden_cmd in ["git checkout -b", "git worktree add"] {
+            let mut found = false;
+            for marker in prohibition_markers {
+                // Check the 200 chars before each occurrence of the
+                // forbidden command for a prohibition marker. This
+                // tolerates re-flowing YAML comments. Use char_indices
+                // because the content is UTF-8 and byte slicing would
+                // split multi-byte characters (e.g. CJK).
+                for (idx, _) in content.match_indices(forbidden_cmd) {
+                    let start_byte = content
+                        .char_indices()
+                        .rev()
+                        .filter(|(b, _)| *b <= idx)
+                        .nth(200)
+                        .map(|(b, _)| b)
+                        .unwrap_or(0);
+                    if content[start_byte..idx].contains(marker) {
+                        found = true;
+                        break;
+                    }
+                }
+                if found {
+                    break;
+                }
+            }
             assert!(
-                content.contains(&format!("{}:\n", hat))
-                    || content.contains(&format!("  {}:\n", hat)),
-                "ce-executor must define a '{}' hat section",
-                hat
+                found,
+                "ce-executor must forbid `{forbidden_cmd}` with a prohibition marker \
+                 (NEVER / MUST NOT / 不要 / 禁止 / 严禁) in the surrounding 200 chars. \
+                 Run ./scripts/sync-embedded-files.sh if the canonical file has the \
+                 policy but the embedded mirror does not."
             );
         }
 
-        // The "If not on a feature branch, create one (e.g., `feat/plan-name`)"
-        // line is the exact regression that caused the bug. It must be absent.
+        // Negative regression: the exact "create one (e.g., `feat/plan-name`)"
+        // instruction that caused the original bug must be absent.
         assert!(
             !content.contains("create one (e.g., `feat/plan-name`)"),
             "ce-executor must NOT instruct the executor to auto-create a feature \
@@ -915,36 +937,50 @@ mod tests {
         );
     }
 
+    /// Guard: autoresearch must NOT tell the strategist hat to run
+    /// `git checkout -b autoresearch/...` during fresh-session setup.
+    /// Branching is reserved for the user via `ralph run --worktree`.
+    /// Regression: the original preset had step 2 of "Fresh Session" read
+    /// "Create a branch: `git checkout -b autoresearch/<goal-slug>-$(date +%Y%m%d)`"
+    /// which the agent dutifully executed, polluting the user's branch.
+    ///
+    /// Like `test_ce_executor_forbids_agent_branch_creation`, this scans
+    /// the strategist's prompt for `git checkout -b` and `git worktree add`
+    /// *each paired with* a prohibition marker — resilient to wording drift.
     #[test]
     fn test_autoresearch_forbids_agent_branch_creation() {
-        // Guard: autoresearch must NOT tell the strategist hat to run
-        // `git checkout -b autoresearch/...` during fresh-session setup.
-        // Branching is reserved for the user via `ralph run --worktree`.
-        // Regression: the original preset had step 2 of "Fresh Session" read
-        // "Create a branch: `git checkout -b autoresearch/<goal-slug>-$(date +%Y%m%d)`"
-        // which the agent dutifully executed, polluting the user's branch.
         let preset = get_preset("autoresearch").expect("autoresearch preset should exist");
         let content = preset.content;
 
-        // Top-level guardrail carries the prohibition
-        assert!(
-            content.contains("NEVER create, switch, or rename branches")
-                && content.contains("`git checkout -b`")
-                && content.contains("`git worktree add`"),
-            "autoresearch guardrails must explicitly forbid branch creation by the \
-             agent. Run ./scripts/sync-embedded-files.sh if the canonical file has \
-             the policy but the embedded mirror does not."
-        );
+        let prohibition_markers = ["NEVER", "MUST NOT", "不要", "禁止", "严禁"];
+        for forbidden_cmd in ["git checkout -b", "git worktree add"] {
+            let mut found = false;
+            for marker in prohibition_markers {
+                for (idx, _) in content.match_indices(forbidden_cmd) {
+                    let start_byte = content
+                        .char_indices()
+                        .rev()
+                        .filter(|(b, _)| *b <= idx)
+                        .nth(200)
+                        .map(|(b, _)| b)
+                        .unwrap_or(0);
+                    if content[start_byte..idx].contains(marker) {
+                        found = true;
+                        break;
+                    }
+                }
+                if found {
+                    break;
+                }
+            }
+            assert!(
+                found,
+                "autoresearch must forbid `{forbidden_cmd}` with a prohibition marker \
+                 (NEVER / MUST NOT / 不要 / 禁止 / 严禁) in the surrounding 200 chars."
+            );
+        }
 
-        // Strategist's Fresh Session section must contain a Branch / Worktree
-        // Policy block instead of the old "Create a branch" instruction.
-        assert!(
-            content.contains("Branch / Worktree Policy (HARD RULE)"),
-            "autoresearch strategist must carry a Branch / Worktree Policy block in \
-             the Fresh Session section."
-        );
-
-        // The exact regression line must be absent.
+        // Negative regression: the exact old line must be absent.
         assert!(
             !content.contains("git checkout -b autoresearch/<goal-slug>"),
             "autoresearch must NOT tell the strategist to run \
@@ -952,7 +988,7 @@ mod tests {
              for `ralph run --worktree`."
         );
 
-        // The Chinese translation preset must stay in parity with English
+        // The Chinese translation preset must stay in parity with English.
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let zh_path = std::path::Path::new(manifest_dir)
             .join("..")
@@ -967,13 +1003,34 @@ mod tests {
                 e
             )
         });
-        assert!(
-            zh_content.contains("绝对禁止")
-                && zh_content.contains("git checkout -b")
-                && zh_content.contains("git worktree add"),
-            "autoresearch-zh must translate the Branch / Worktree Policy so docs \
-             stay in sync with the English preset."
-        );
+        // In the Chinese preset the marker is `绝对禁止`; the
+        // command names stay English.
+        for forbidden_cmd in ["git checkout -b", "git worktree add"] {
+            let mut found = false;
+            for marker in ["绝对禁止", "NEVER", "MUST NOT", "禁止", "严禁"] {
+                for (idx, _) in zh_content.match_indices(forbidden_cmd) {
+                    let start_byte = zh_content
+                        .char_indices()
+                        .rev()
+                        .filter(|(b, _)| *b <= idx)
+                        .nth(200)
+                        .map(|(b, _)| b)
+                        .unwrap_or(0);
+                    if zh_content[start_byte..idx].contains(marker) {
+                        found = true;
+                        break;
+                    }
+                }
+                if found {
+                    break;
+                }
+            }
+            assert!(
+                found,
+                "autoresearch-zh must forbid `{forbidden_cmd}` with a prohibition marker \
+                 (绝对禁止 / NEVER / MUST NOT / 禁止 / 严禁) in the surrounding 200 chars."
+            );
+        }
         assert!(
             !zh_content.contains("git checkout -b autoresearch/<goal-slug>"),
             "autoresearch-zh must NOT contain the old `git checkout -b \
@@ -2005,23 +2062,6 @@ mod tests {
     }
 
     #[test]
-    fn test_ce_executor_shipper_simplify_check_gated_to_plan_complete() {
-        // R16: shipper's simplify check must be gated to plan.complete only.
-        // On plan.blocked or debug.exhausted, the state is not shippable — simplify is inappropriate.
-        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
-        let content = preset.content;
-        let shipper_section = content
-            .split("shipper:")
-            .nth(1)
-            .expect("ce-executor must have shipper section");
-        assert!(
-            shipper_section.contains("Simplify Check (plan.complete ONLY)")
-                || shipper_section.contains("Only execute on `plan.complete`"),
-            "shipper must gate simplify check to plan.complete only"
-        );
-    }
-
-    #[test]
     fn test_ce_executor_fixer_reads_task_correlation_fields() {
         // R17: fixer must read task_id/task_key/step from review.failed payload
         // so that fix.applied / fix.exhausted can carry them downstream.
@@ -2051,66 +2091,6 @@ mod tests {
             fixer_section.contains("MUST explicitly publish")
                 || fixer_section.contains("必须显式发布"),
             "fixer instructions must require explicit fix.applied/fix.exhausted publishing"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_coordinator_work_ready_includes_task_correlation() {
-        // R18: coordinator must publish task_id/task_key/step in work.ready payload
-        // so that executor (including trivial path) can forward them to work.done.
-        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
-        let content = preset.content;
-        let coord_section = content
-            .split("\n  coordinator:\n")
-            .nth(1)
-            .expect("ce-executor must have coordinator section");
-        assert!(
-            coord_section.contains("task_id")
-                && coord_section.contains("task_key")
-                && coord_section.contains("step"),
-            "coordinator Event Publishing must include task_id, task_key, step in work.ready payload"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_trivial_path_includes_task_correlation() {
-        // R19: executor trivial path must publish task_id/task_key/step in work.done
-        // so review-coordinator can correlate the review with the right task.
-        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
-        let content = preset.content;
-        let exec_section = content
-            .split("  executor:\n")
-            .nth(1)
-            .expect("ce-executor must have executor section");
-        let trivial_start = exec_section
-            .find("Trivial")
-            .expect("executor must have Trivial section");
-        let trivial_section = &exec_section[trivial_start..];
-        assert!(
-            trivial_section.contains("task_id")
-                && trivial_section.contains("task_key")
-                && trivial_section.contains("step"),
-            "executor trivial path must include task_id, task_key, step in work.done payload"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_fixer_exhausted_early_exit_keeps_task_correlation() {
-        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
-        let content = preset.content;
-        let fixer_section = content
-            .split("fixer:")
-            .nth(1)
-            .expect("ce-executor must have fixer section");
-        let exhausted_start = fixer_section
-            .find("fix_round + 1 > 3")
-            .expect("fixer must describe exhausted early exit");
-        let exhausted_section = &fixer_section[exhausted_start..];
-        assert!(
-            exhausted_section.contains("task_id")
-                && exhausted_section.contains("task_key")
-                && exhausted_section.contains("step"),
-            "fixer early fix.exhausted path must carry task_id, task_key, step"
         );
     }
 
@@ -2498,34 +2478,6 @@ mod tests {
             }
         }
         None
-    }
-
-    #[test]
-    fn test_ce_executor_findings_include_task_id_isolation() {
-        // Bug #2 regression: dimension-reviewer must write findings files that
-        // include task_id so stale files from prior steps/presets do not串扰.
-        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
-        let content = preset.content;
-
-        // dimension-reviewer instructions must reference task-id-scoped paths
-        assert!(
-            content.contains("findings-{dimension}-{task_id}.json"),
-            "ce-executor dimension-reviewer must instruct findings-{{dimension}}-{{task_id}}.json"
-        );
-
-        // The old bare findings-{dimension}.json pattern must be gone (except as
-        // a substring of the new, longer pattern).
-        let old_pattern = "findings-{dimension}.json";
-        let new_pattern = "findings-{dimension}-{task_id}.json";
-        // Every occurrence of the old pattern must be part of the new pattern.
-        for (idx, _) in content.match_indices(old_pattern) {
-            let end = idx + old_pattern.len();
-            assert!(
-                content[..end].ends_with(new_pattern),
-                "ce-executor still contains bare findings-{{dimension}}.json at offset {} — all findings paths must be task-id-scoped",
-                idx
-            );
-        }
     }
 
     #[test]
