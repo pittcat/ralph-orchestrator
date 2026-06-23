@@ -105,29 +105,22 @@ review wave `received_count < expected_dimensions` 时的两条路径：
 
 发布宏观边前：
 
+> **⚠️ iteration / current_seq 是 loop 动态注入的，不是固定值**
+>
+> `LoopState.iteration` 是 0-indexed 计数器（初值 0，每次 `complete_iteration` +1），
+> `LoopState.hat_handoff_seq` 是同 iteration 内 hat handoff 计数（accept 后 +1，iteration
+> 切换时重置 0）。**agent 不能手填，必须从 loop 注入读**——`prepare` CLI 默认值（0 / 0）只
+> 适用于「非 loop 上下文」的手工测试；loop 内 run 一定走 env var 或 ORCHESTRATOR CONTEXT。
+> 写死会触发 `hat_handoff_filename_mismatch` 拒收。
+
 1. **Prepare**（拿确定性路径 + 五段式 skeleton）：
 
-   两种等效方式选一种即可：
-
-   **方式 A：从 `## ORCHESTRATOR CONTEXT` 读**（U3，enabled 时上下文自带）：
+   **推荐方式：从 env var 读**（loop 子进程内 runner 注入，isolated + enabled 时）：
 
    ```bash
-   # 解析 ORCHESTRATOR CONTEXT 块里的 hat_handoff_seq / hat_handoff_next_seq
-   # 提取脚本示例（伪）：
-   ITER=$(grep -E '^- current_step: ' prompt.txt | head -1 | awk '{print $2}' | tr -d 'step-')
-   # 实际上:loop 注入的 ORCHESTRATOR CONTEXT 含 hat_handoff_seq 直接用
-   ralph tools handoff prepare \
-     --from executor \
-     --to review-coordinator \
-     --topic work.done \
-     --iteration "$ITER" \
-     --current-seq "$HAT_HANDOFF_SEQ" \
-     --json
-   ```
-
-   **方式 B：从 env var 读**（U1,loop 子进程内 runner 注入）：
-
-   ```bash
+   # RALPH_LOOP_ITERATION / RALPH_HAT_HANDOFF_SEQ 由 loop_runner::runner
+   # 在 backend subprocess 启动前注入，值与 LoopState.iteration / hat_handoff_seq
+   # 同步（均为 0-indexed 当前值）。文件名 seq = current_seq + 1。
    ralph tools handoff prepare \
      --from executor \
      --to review-coordinator \
@@ -135,6 +128,28 @@ review wave `received_count < expected_dimensions` 时的两条路径：
      --iteration "$RALPH_LOOP_ITERATION" \
      --current-seq "$RALPH_HAT_HANDOFF_SEQ" \
      --json
+   ```
+
+   **fallback：从 `## ORCHESTRATOR CONTEXT` 读**（仅当 env var 未注入时，如外部手动跑）：
+
+   ```bash
+   # ORCHESTRATOR CONTEXT 块注入格式（参考 crates/ralph-core/src/runtime_state.rs:209-210）：
+   #   - hat_handoff_seq: <N>           # = current_seq
+   #   - hat_handoff_next_seq: <N+1>     # = 下一次 prepare 用的 seq
+   # 注意：不要用 `current_step`——它是 progress.md 的 plan step 编号
+   #（如 step-03），与 loop iteration 不是同一维度，没有对应关系。
+   CURR_SEQ=$(grep -E '^- hat_handoff_seq: ' prompt.txt | head -1 | awk '{print $3}')
+   NEXT_SEQ=$(grep -E '^- hat_handoff_next_seq: ' prompt.txt | head -1 | awk '{print $3}')
+   # iteration ORCHESTRATOR CONTEXT 暂未暴露，孤立跑只能传默认值 0
+   #（手工 smoke 场景；真 loop 必须用 env var）
+   ralph tools handoff prepare \
+     --from executor \
+     --to review-coordinator \
+     --topic work.done \
+     --iteration 0 \
+     --current-seq "$CURR_SEQ" \
+     --json
+   # 验证产出文件名包含 NEXT_SEQ（如下一次 seq=2 → 路径中含 `-2-`）
    ```
 
    返回 `handoff_path: .ralph/agent/hat-handoff/{iter}-{seq+1}-{from}-{to}.md`。

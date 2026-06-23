@@ -147,7 +147,16 @@ pub struct RejectionDigestEntry {
 /// Current state of the event loop.
 #[derive(Debug)]
 pub struct LoopState {
-    /// Current iteration number (1-indexed).
+    /// Current iteration counter (0-indexed, starting at 0; first
+    /// `complete_iteration` call advances to 1). Reflected verbatim
+    /// to the `RALPH_LOOP_ITERATION` env var injected into the
+    /// backend subprocess by `loop_runner::runner`, and is the same
+    /// value consumed by `hat_handoff::gate::GateInputs::iteration`.
+    /// Kept 0-indexed to match the runtime gate's `expects iter=…`
+    /// error message and the `compute` allocator's filename
+    /// derivation — drift between caller-supplied iteration and
+    /// the gate's expected iteration was the root cause of the
+    /// 30-day 6-recurrence `hat_handoff_filename_mismatch` bug.
     pub iteration: u32,
     /// 2026-06-18-002 plan U1 (KTD-12): hat→hat roadmap handoff
     /// sequence number within the current iteration. Reset to 0

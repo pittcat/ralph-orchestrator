@@ -55,13 +55,19 @@ pub struct PrepareArgs {
     #[arg(long)]
     pub topic: String,
 
-    /// Current loop iteration (1-indexed). Defaults to 1 when not
-    /// running inside a loop context.
-    #[arg(long, default_value_t = 1)]
+    /// Current loop iteration (0-indexed, mirrors `LoopState.iteration`
+    /// / the `RALPH_LOOP_ITERATION` env var injected by `loop_runner`).
+    /// Defaults to 0 when not running inside a loop context — keep this
+    /// in lockstep with `LoopState::iteration`'s 0-indexed default, or
+    /// the gate will reject the resulting `handoff_path` with
+    /// `hat_handoff_filename_mismatch` (expects iter=0 but file iter=1).
+    #[arg(long, default_value_t = 0)]
     pub iteration: u32,
 
-    /// Current `LoopState.hat_handoff_seq`. Defaults to 0 (no
-    /// handoff accepted in this iteration yet).
+    /// Current `LoopState.hat_handoff_seq` (0-indexed, mirrors the
+    /// `RALPH_HAT_HANDOFF_SEQ` env var). The seq in the produced
+    /// `handoff_path` is `current_seq + 1`. Defaults to 0 (no handoff
+    /// accepted in this iteration yet).
     #[arg(long, default_value_t = 0)]
     pub current_seq: u32,
 
@@ -214,5 +220,50 @@ mod tests {
         assert!(content.contains("# Handoff: executor → review-coordinator"));
         assert!(content.contains("## context"));
         assert!(content.contains("## next"));
+    }
+
+    /// 2026-06-23 fix plan P0-1: prepare defaults must mirror the
+    /// 0-indexed `LoopState.iteration` / `LoopState.hat_handoff_seq`,
+    /// not a 1-indexed convention. Default `iteration=1` was the
+    /// source of the `expects iter=0, seq=1; got iter=1, seq=1`
+    /// drift when agent invoked `prepare` without explicit flags
+    /// while loop was at iteration 0.
+    #[test]
+    fn prepare_defaults_are_zero_indexed() {
+        let args = HandoffArgs::parse_from([
+            "handoff", "prepare", "--from", "a", "--to", "b", "--topic", "x",
+        ]);
+        match args.command {
+            HandoffCommands::Prepare(p) => {
+                assert_eq!(p.iteration, 0, "default iteration must be 0 (LoopState.iteration is 0-indexed)");
+                assert_eq!(p.current_seq, 0, "default current_seq is 0 (no handoff yet)");
+            }
+        }
+    }
+
+    /// Default iteration=0, current_seq=0 → file seq = 0+1 = 1,
+    /// path = `.ralph/agent/hat-handoff/0-1-a-b.md`. Mirrors the
+    /// `LoopState::default()` shape (iteration=0, hat_handoff_seq=0).
+    #[test]
+    fn execute_prepare_defaults_produce_0_1_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = PrepareArgs {
+            from: "a".into(),
+            to: "b".into(),
+            topic: "x".into(),
+            iteration: 0,
+            current_seq: 0,
+            force: false,
+            no_write: false,
+            json: false,
+        };
+        execute_prepare(dir.path(), &args).unwrap();
+        let path = dir
+            .path()
+            .join(".ralph/agent/hat-handoff/0-1-a-b.md");
+        assert!(
+            path.exists(),
+            "with default 0/0 the path MUST be 0-1-a-b.md (matches LoopState::default at iter=0, seq=0); got path absent at {path:?}"
+        );
     }
 }
