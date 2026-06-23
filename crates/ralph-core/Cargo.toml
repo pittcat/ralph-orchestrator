@@ -41,6 +41,18 @@ jsonschema = { version = "0.18", features = ["draft202012"] }
 # U11-T7: env-isolation tests (`UNIFIED_PROTOCOL_VIEW`) flip the
 # global env var, so they must run serially relative to one another.
 serial_test = "3"
+# 2026-06-23-005 F1: `trybuild` runs `compile_fail` tests under
+# `tests/ui/` so we can pin the `RejectionKind` `#[non_exhaustive]`
+# contract — if a future change adds a variant and forgets to
+# extend `CoordinatorDispatcher::dispatch`, the compile_fail test
+# catches it at the `cargo test` boundary (R9 BLOCKER).
+trybuild = "1"
+# 2026-06-23-005 F1: `static_assertions` enforces compile-time
+# invariants on `RejectionKind` shape (e.g. that it is not constructible
+# via unsafe transmutation tricks). Pairs with the `trybuild`
+# `compile_fail` test to make the `#[non_exhaustive]` contract a
+# two-layer guard (runtime API + compile-time type property).
+static_assertions = "1"
 
 [[bench]]
 name = "performance"

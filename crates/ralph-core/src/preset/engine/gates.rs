@@ -93,6 +93,38 @@ pub enum RejectionKind {
     /// Routes to the source hat so the agent can rewrite the
     /// `## next` line to a legal action topic.
     HandoffIllegalEmitTopic,
+    /// 2026-06-23-005 U1 (R1+R2): synthesised by the
+    /// missing-event hard gate (`hard_gate::inject_missing_event_hard_gate_guidance`).
+    /// Routes to `CoordinatorDispatcher` for typed kind dispatch
+    /// (PlanBlocked when consecutive_count >= 2, per KTD-2).
+    MissingEventGate,
+    /// 2026-06-23-005 U1 (R1+R2): synthesised by orchestrator
+    /// stall_recovery paths (e.g. `mod.rs:2755` `enrich_task_resume_payload(..., "stall_no_events", ...)`)
+    /// when the loop detects no events flowing for N iterations.
+    /// Routes to `CoordinatorDispatcher` (PlanBlocked when count >= 3).
+    StallNoEvents,
+    /// 2026-06-23-005 U1 (R1+R2): synthesised by the payload
+    /// contract rejection (`mod.rs:2679` `enrich_task_resume_payload(..., reason_str, ...)`)
+    /// when the hat emits a structurally-invalid payload.
+    /// Routes to `CoordinatorDispatcher` (DriftFinding when count >= 1).
+    ContractViolation,
+    /// 2026-06-23-005 F2 (P1 fix): synthesised by the
+    /// persistent-mode completion-suppression path
+    /// (`mod.rs:1757` `enrich_task_resume_payload(..., "persistent mode", ...)`).
+    /// The runtime detected a completion signal but `event_loop.persistent`
+    /// is set, so it injects task.resume to nudge the agent to look
+    /// for new tasks or wait for human guidance. Routes to
+    /// `CoordinatorDispatcher::ReEmitWorkReady` (the recovery action
+    /// is to re-emit work.ready to give the agent another chance).
+    PersistentLoopActive,
+    /// 2026-06-23-005 F2 (P1 fix): synthesised by the open-tasks
+    /// completion-rejection path (`mod.rs:1801`
+    /// `enrich_task_resume_payload(..., "open tasks remain", ...)`).
+    /// The runtime rejected the completion signal because at least
+    /// one runtime task is still `open`; the agent must close, fail,
+    /// or reopen outstanding tasks before the loop can honour the
+    /// completion promise. Routes to `CoordinatorDispatcher::ReEmitWorkReady`.
+    OpenTasksBlocking,
 }
 
 impl RejectionKind {
@@ -116,6 +148,19 @@ impl RejectionKind {
             RejectionKind::HandoffFilenameMismatch => LintFailureClass::HandoffArtifact,
             RejectionKind::HandoffStructureInvalid => LintFailureClass::HandoffArtifact,
             RejectionKind::HandoffIllegalEmitTopic => LintFailureClass::HandoffArtifact,
+            // 2026-06-23-005 U1: three new typed kinds all map to
+            // PayloadError (the source hat's output is missing
+            // the required event/payload shape).
+            RejectionKind::MissingEventGate => LintFailureClass::PayloadError,
+            RejectionKind::StallNoEvents => LintFailureClass::PayloadError,
+            RejectionKind::ContractViolation => LintFailureClass::PayloadError,
+            // 2026-06-23-005 F2: completion-signal rejection paths
+            // also map to PayloadError (the agent emitted a
+            // completion promise with a structurally-invalid
+            // surrounding state — persistent mode active, or open
+            // tasks still pending).
+            RejectionKind::PersistentLoopActive => LintFailureClass::PayloadError,
+            RejectionKind::OpenTasksBlocking => LintFailureClass::PayloadError,
         }
     }
 
@@ -137,6 +182,17 @@ impl RejectionKind {
             RejectionKind::HandoffFilenameMismatch => "hat_handoff_filename_mismatch",
             RejectionKind::HandoffStructureInvalid => "hat_handoff_structure_invalid",
             RejectionKind::HandoffIllegalEmitTopic => "hat_handoff_illegal_emit_topic",
+            // 2026-06-23-005 U1: three new typed kinds for
+            // task.resume injection paths (hard_gate / stall_recovery / contract).
+            RejectionKind::MissingEventGate => "missing_event_gate",
+            RejectionKind::StallNoEvents => "stall_no_events",
+            RejectionKind::ContractViolation => "contract_violation",
+            // 2026-06-23-005 F2: completion-signal rejection paths.
+            // Operators rely on these strings in `recovery.jsonl`
+            // grep aggregations; values are part of the public
+            // surface — do not rename without a migration plan.
+            RejectionKind::PersistentLoopActive => "persistent_loop_active",
+            RejectionKind::OpenTasksBlocking => "open_tasks_blocking",
         }
     }
 

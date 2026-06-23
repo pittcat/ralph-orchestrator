@@ -3,15 +3,24 @@
 use super::*;
 
 mod active_hat;
+// 2026-06-23-005 U4: AuditSeverity SSOT integration tests (R5+R12+KTD-8).
+mod audit_severity_ssot;
 mod backpressure;
 mod build_prompt;
 mod ce_executor;
 mod chain_validation;
 mod common;
 mod completion_honored;
+// 2026-06-23-005 U2: typed dispatch coverage for the three new
+// `RejectionKind` variants (MissingEventGate / StallNoEvents /
+// ContractViolation). See `coordinator_dispatch_coverage.rs`.
+mod coordinator_dispatch_coverage;
 mod default_publishes;
 mod deterministic_routing;
 mod drift_integration;
+// 2026-06-23-005 U1: typed kind SSOT wiring for `enrich_task_resume_payload`.
+// See `enrich_kind_wiring.rs`.
+mod enrich_kind_wiring;
 mod ephemeral_isolation_integration;
 mod event_filter;
 mod event_policy;
@@ -32,6 +41,10 @@ mod objective;
 mod origin_guard;
 mod payload_types;
 mod persistent_mode;
+// 2026-06-23-005 U3: typed dead-letter termination path (R4+R8+AE-3).
+mod plan_blocked_termination;
+// 2026-06-23-005 U5: plan-gate ↔ executor work.ready bridging.
+mod plan_gate_bridge;
 mod progress_steward;
 mod r5_hard_gate_routing;
 mod recovery_envelope_u7_u8;

@@ -1,7 +1,7 @@
 use super::*;
 use ralph_core::{
-    NonRetryableReason, PolicyRejection, Rejection, RejectionStage, TerminationReason,
-    U2_REJECTION_RETRY_LIMIT, ViolationType,
+    NonRetryableReason, PolicyRejection, Rejection, RejectionKind, RejectionStage,
+    TerminationReason, U2_REJECTION_RETRY_LIMIT, ViolationType,
     config::hat::resolve_missing_event_grace_secs,
     diagnosis::{
         DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, EvidenceKind, EvidenceRef,
@@ -570,6 +570,7 @@ pub fn inject_hard_gate_guidance_with_triggers(
         "emit_claimed_but_not_written",
         Some(hat_name),
         Some(RejectionStage::EmitClaimedButNotWritten),
+        Some(RejectionKind::MissingEventGate),
     );
     let resume_value: serde_json::Value = serde_json::from_str(&resume_payload)
         .expect("enrich_task_resume_payload must produce valid JSON");
@@ -771,6 +772,7 @@ pub fn inject_missing_event_hard_gate_guidance_with_triggers(
         "hard_gate_missing_event",
         Some(hat_name),
         Some(RejectionStage::MissingEvent),
+        Some(RejectionKind::MissingEventGate),
     );
     let resume_value: serde_json::Value = serde_json::from_str(&resume_payload)
         .expect("enrich_task_resume_payload must produce valid JSON");

@@ -8614,29 +8614,35 @@ fn test_u3_t3_5_enrich_with_stage_helper() {
     // T3.5: enrich_task_resume_payload_with_stage must add a
     // `stage` field when supplied, and must NOT add one when
     // the caller passes `None` (legacy behaviour).
+    //
+    // 2026-06-23-005 U1: also assert the new typed `kind` field.
     use ralph_core::event_loop::rejection::task_resume_payload_has_required_fields;
     use ralph_core::event_loop::rejection::{
         RejectionStage, enrich_task_resume_payload_with_stage,
     };
+    use ralph_core::RejectionKind;
 
-    // Case 1: explicit stage → JSON has `stage` field.
+    // Case 1: explicit stage + typed kind → JSON has `stage` AND `kind` fields.
     let p1 = enrich_task_resume_payload_with_stage(
         "missing event",
         "hard_gate_missing_event",
         Some("dimension-reviewer"),
         Some(RejectionStage::MissingEvent),
+        Some(RejectionKind::MissingEventGate),
     );
     assert!(task_resume_payload_has_required_fields(&p1));
     let v1: serde_json::Value = serde_json::from_str(&p1).expect("valid JSON");
     assert_eq!(v1["stage"], "missing_event");
     assert_eq!(v1["target_hat"], "dimension-reviewer");
     assert_eq!(v1["reason"], "missing_field");
+    assert_eq!(v1["kind"], "missing_event_gate");
 
-    // Case 2: None → JSON has no `stage` field.
+    // Case 2: None → JSON has no `stage` field. Kind None → falls back to reason.
     let p2 = enrich_task_resume_payload_with_stage(
         "missing event",
         "hard_gate_missing_event",
         Some("dimension-reviewer"),
+        None,
         None,
     );
     let v2: serde_json::Value = serde_json::from_str(&p2).expect("valid JSON");
@@ -8645,6 +8651,7 @@ fn test_u3_t3_5_enrich_with_stage_helper() {
         "legacy callers must not see a `stage` field"
     );
     assert_eq!(v2["target_hat"], "dimension-reviewer");
+    assert_eq!(v2["kind"], "missing_field"); // fallback to reason_code
 }
 
 #[test]

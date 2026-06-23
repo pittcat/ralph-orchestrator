@@ -133,6 +133,7 @@ pub use event_loop::{
         rejection_from_origin, resolve_target_hat,
     },
 };
+pub use preset::engine::gates::RejectionKind;
 pub use event_origin::{
     HumanInteractValidation, RALPH_CONTROL_TOPICS, TRUSTED_HUMAN_RESPONSE_SOURCE,
     is_orchestrator_control_topic, is_orchestrator_diagnostic_topic, is_trusted_human_response,

@@ -6,11 +6,12 @@
 
 use ralph_proto::{Event, HatId};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::{Duration, Instant};
 
 use super::TerminationReason;
+use super::termination::{TerminationTrigger, TRIGGER_QUEUE_CAPACITY};
 use crate::flow_lifecycle::FlowLifecycleRegistry;
 
 /// Maximum number of times the same rejection key may be retried
@@ -590,6 +591,29 @@ pub struct LoopState {
     /// queue and prepends the `## ORCHESTRATOR CORRECTION`
     /// block to the prompt.
     pub prompt_context: crate::correction::PromptContext,
+
+    /// 2026-06-23-005 F4: typed `TerminationTrigger` queue, the
+    /// SSOT shape for future termination conditions
+    /// (`plan_complete` / `dead_letter` / typed `block_loop`).
+    ///
+    /// **Status (F4)**: infrastructure-only. The queue is
+    /// exposed via `push_termination_trigger` /
+    /// `pop_termination_trigger` methods on `LoopState` so call
+    /// sites that want to enqueue typed triggers have a typed
+    /// API. `process_output` still consumes the legacy
+    /// `consecutive_failures >= 5` termination path; the full
+    /// migration to single-match `TerminationTrigger` dispatch
+    /// is deferred until `LoopState` gains a persistence path
+    /// (plan R15 — the `pending_dead_letter` field the original
+    /// 005 plan assumed exists does NOT exist in the current
+    /// codebase; wiring `process_output` to consume this queue
+    /// without the persistence story would silently drop
+    /// triggers across process restarts).
+    ///
+    /// Capacity: `TRIGGER_QUEUE_CAPACITY` (16). `push` returns
+    /// `Err` on overflow and the caller can decide whether to
+    /// force-terminate or drop the trigger.
+    pub termination_triggers: VecDeque<TerminationTrigger>,
 }
 
 /// U3 (plan 2026-06-23-004): 单轮 rejection stall 检测窗口的条目。
@@ -720,6 +744,13 @@ impl Default for LoopState {
             state_ledger: None,
             // U7a: deterministic correction queue.
             prompt_context: crate::correction::PromptContext::default(),
+            // 2026-06-23-005 F4: typed TerminationTrigger queue
+            // starts empty. Callers enqueue via
+            // `push_termination_trigger`; `process_output` does
+            // NOT consume this field in F4 (the queue is
+            // infrastructure-only until the process_output
+            // migration lands).
+            termination_triggers: VecDeque::new(),
         }
     }
 }
@@ -1319,6 +1350,41 @@ impl LoopState {
             || topic.ends_with(".scope_violation")
     }
 
+    /// 2026-06-23-005 F4: enqueue a typed termination trigger.
+    /// Returns `Err` when the queue is at
+    /// [`TRIGGER_QUEUE_CAPACITY`]; the caller decides whether
+    /// to force-terminate (e.g. by translating the overflow
+    /// into a `TerminationReason::QueueOverflow`) or drop the
+    /// trigger.
+    ///
+    /// **Status (F4)**: infrastructure-only. `process_output`
+    /// does not consume this queue yet. Future plan (R15
+    /// follow-up) wires the single-match dispatch.
+    pub fn push_termination_trigger(
+        &mut self,
+        trigger: TerminationTrigger,
+    ) -> Result<(), &'static str> {
+        if self.termination_triggers.len() >= TRIGGER_QUEUE_CAPACITY {
+            return Err("TerminationTrigger queue at capacity");
+        }
+        self.termination_triggers.push_back(trigger);
+        Ok(())
+    }
+
+    /// 2026-06-23-005 F4: FIFO-pop the next typed termination
+    /// trigger. Returns `None` when the queue is empty.
+    pub fn pop_termination_trigger(&mut self) -> Option<TerminationTrigger> {
+        self.termination_triggers.pop_front()
+    }
+
+    /// 2026-06-23-005 F4: number of pending triggers in the
+    /// queue. Useful for diagnostics and for the future
+    /// `process_output` migration to decide between
+    /// dispatching one trigger vs. all triggers.
+    pub fn termination_trigger_queue_len(&self) -> usize {
+        self.termination_triggers.len()
+    }
+
     /// U3 (plan 2026-06-23-004): 推入一轮窗口条目,保留最近 N=5 轮。
     ///
     /// `rejection_count` 通常是 `typed_lint_rejection_count` 累计值,
@@ -1865,6 +1931,71 @@ mod tests {
             state.recent_rejection_digest.is_empty(),
             "digest 应在第 6 个不同 code 时清空,避免无限增长"
         );
+    }
+
+    // ── 2026-06-23-005 F4: typed TerminationTrigger queue API.
+    // Infrastructure-only — `process_output` does not consume
+    // these triggers yet (see the module-level docs on
+    // `event_loop::termination` for the rationale).
+
+    #[test]
+    fn f4_termination_trigger_queue_starts_empty() {
+        let mut state = LoopState::new();
+        assert_eq!(state.termination_trigger_queue_len(), 0);
+        assert!(state.pop_termination_trigger().is_none());
+    }
+
+    #[test]
+    fn f4_termination_trigger_queue_push_then_pop_fifo() {
+        use crate::event_loop::termination::TerminationTrigger;
+        let mut state = LoopState::new();
+        assert!(state
+            .push_termination_trigger(TerminationTrigger::PlanComplete {
+                plan_id: "p1".to_string()
+            })
+            .is_ok());
+        assert!(state
+            .push_termination_trigger(TerminationTrigger::PlanComplete {
+                plan_id: "p2".to_string()
+            })
+            .is_ok());
+        assert_eq!(state.termination_trigger_queue_len(), 2);
+
+        // FIFO order: first pushed is first popped.
+        let first = state.pop_termination_trigger();
+        assert!(matches!(
+            first,
+            Some(TerminationTrigger::PlanComplete { ref plan_id }) if plan_id == "p1"
+        ));
+        let second = state.pop_termination_trigger();
+        assert!(matches!(
+            second,
+            Some(TerminationTrigger::PlanComplete { ref plan_id }) if plan_id == "p2"
+        ));
+        assert!(state.pop_termination_trigger().is_none());
+    }
+
+    #[test]
+    fn f4_termination_trigger_queue_overflow_returns_err() {
+        use crate::event_loop::termination::{
+            TerminationTrigger, TRIGGER_QUEUE_CAPACITY,
+        };
+        let mut state = LoopState::new();
+        for i in 0..TRIGGER_QUEUE_CAPACITY {
+            let result = state.push_termination_trigger(TerminationTrigger::PlanComplete {
+                plan_id: format!("p{i}"),
+            });
+            assert!(result.is_ok(), "push #{i} should succeed");
+        }
+        // The (TRIGGER_QUEUE_CAPACITY + 1)-th push returns Err.
+        let overflow = state.push_termination_trigger(TerminationTrigger::PlanComplete {
+            plan_id: "overflow".to_string(),
+        });
+        assert!(
+            overflow.is_err(),
+            "push beyond TRIGGER_QUEUE_CAPACITY must return Err, not panic"
+        );
+        assert_eq!(state.termination_trigger_queue_len(), TRIGGER_QUEUE_CAPACITY);
     }
 
     // ── 2026-06-23 fix (mechanism review layer 2 P0-B): typed

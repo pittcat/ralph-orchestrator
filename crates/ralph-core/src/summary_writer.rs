@@ -589,6 +589,10 @@ mod tests {
             // correction queue. Empty by default so the
             // existing test path stays green.
             prompt_context: crate::correction::PromptContext::default(),
+            // 2026-06-23-005 F4: typed TerminationTrigger queue
+            // stays empty in the test fixture (infrastructure-only;
+            // `process_output` does not consume it).
+            termination_triggers: std::collections::VecDeque::new(),
         }
     }
 

@@ -5,6 +5,12 @@
 pub mod loop_state;
 pub mod rejection;
 pub mod review_step_state;
+// 2026-06-23-005 U3: typed TerminationTrigger SSOT (KTD-7 + R11).
+// See `event_loop::termination` for the typed enum + reason mapper.
+pub mod termination;
+// 2026-06-23-005 U4: typed AuditSeverity SSOT (KTD-8 + R12).
+// See `event_loop::audit` for the typed severity + dispatcher.
+pub mod audit;
 #[cfg(test)]
 mod tests;
 
@@ -42,6 +48,7 @@ use crate::execution_contract::{
 };
 use crate::hat_lifecycle::{ActivationKey, ActivationLifecycleTracker, SystemTimeClock};
 use crate::hat_registry::HatRegistry;
+use crate::preset::engine::gates::RejectionKind;
 use crate::hatless_ralph::HatlessRalph;
 use crate::instructions::InstructionBuilder;
 use crate::loop_context::LoopContext;
@@ -1747,11 +1754,15 @@ impl EventLoop {
             // U2 (2026-06-17-003 plan): wrap the free-form message in
             // a JSON object carrying the schema-required
             // `reason` and `target_hat` fields.
+            // 2026-06-23-005 F2: carry the typed `PersistentLoopActive`
+            // kind so the schema validator / recovery aggregator
+            // see the typed completion-suppression signal.
             let persistent_payload = enrich_task_resume_payload(
                 "Persistent mode: loop staying alive after completion signal. \
                  Check for new tasks or await human guidance.",
                 "persistent mode",
                 None,
+                Some(RejectionKind::PersistentLoopActive),
             );
             let resume_event = Event::new("task.resume", persistent_payload);
             self.bus.publish(resume_event);
@@ -1790,6 +1801,9 @@ impl EventLoop {
                 // U2 (2026-06-17-003 plan): wrap the free-form
                 // message in a JSON object carrying the
                 // schema-required `reason` and `target_hat` fields.
+                // 2026-06-23-005 F2: carry the typed
+                // `OpenTasksBlocking` kind so the schema validator
+                // sees the completion-rejection signal.
                 let open_tasks_payload = enrich_task_resume_payload(
                     &format!(
                         "Completion rejected: runtime tasks remain open: {:?}. \
@@ -1799,6 +1813,7 @@ impl EventLoop {
                     ),
                     "open tasks remain",
                     None,
+                    Some(RejectionKind::OpenTasksBlocking),
                 );
                 self.bus
                     .publish(Event::new("task.resume", open_tasks_payload));
@@ -2527,8 +2542,12 @@ impl EventLoop {
         // U2 (2026-06-17-003 plan): wrap the free-form message in
         // a JSON object carrying the schema-required `reason` and
         // `target_hat` fields.
-        let payload =
-            enrich_task_resume_payload(&free_form, "aggregate_timeout", Some(target.as_str()));
+        let payload = enrich_task_resume_payload(
+            &free_form,
+            "aggregate_timeout",
+            Some(target.as_str()),
+            Some(RejectionKind::ContractViolation),
+        );
         debug!(
             wave_id = %action.wave_id,
             received = action.received,
@@ -2675,8 +2694,12 @@ impl EventLoop {
             // U2 (2026-06-17-003 plan): wrap the free-form message
             // in a JSON object carrying the schema-required
             // `reason` and `target_hat` fields.
-            let structured_payload =
-                enrich_task_resume_payload(&payload, reason_str, Some(hard_target.as_str()));
+            let structured_payload = enrich_task_resume_payload(
+                &payload,
+                reason_str,
+                Some(hard_target.as_str()),
+                Some(RejectionKind::StallNoEvents),
+            );
             debug!(
                 stall_count = stall_count_value,
                 target = %hard_target.as_str(),
@@ -2726,6 +2749,7 @@ impl EventLoop {
                         &payload,
                         "stall_no_events",
                         Some(hat_id.as_str()),
+                        Some(RejectionKind::StallNoEvents),
                     );
 
                     debug!(
@@ -2751,8 +2775,12 @@ impl EventLoop {
                     // U2 (2026-06-17-003 plan): wrap the free-form
                     // message in a JSON object carrying the
                     // schema-required `reason` and `target_hat` fields.
-                    let structured_payload =
-                        enrich_task_resume_payload(&payload, "stall_no_events", Some("ralph"));
+                    let structured_payload = enrich_task_resume_payload(
+                        &payload,
+                        "stall_no_events",
+                        Some("ralph"),
+                        Some(RejectionKind::StallNoEvents),
+                    );
                     debug!(
                         "Injecting fallback event to recover - triggering Ralph with task.resume"
                     );
@@ -5655,6 +5683,19 @@ impl EventLoop {
     /// Processes output from a hat execution.
     ///
     /// Returns the termination reason if the loop should stop.
+    ///
+    /// 2026-06-23-005 F4 (P0-2 重定位): `process_output` still
+    /// consumes the legacy `consecutive_failures >= 5` termination
+    /// path. The plan (`2026-06-23-005` U3 / KTD-7) envisioned a
+    /// single-match `TerminationTrigger` dispatch, but the
+    /// prerequisite (`pending_dead_letter` field + `LoopState`
+    /// persistence) does not exist in the current codebase. F4
+    /// therefore leaves `process_output` untouched and only
+    /// documents the boundary. See
+    /// `event_loop::termination` module-level docs for the
+    /// full reasoning. The `LoopState::push_termination_trigger` /
+    /// `pop_termination_trigger` APIs added in F4 are
+    /// infrastructure-only — no caller enqueues triggers yet.
     pub fn process_output(
         &mut self,
         hat_id: &HatId,
@@ -5930,7 +5971,11 @@ impl EventLoop {
     ///
     /// If the hat has `Edit` or `Write` in its `disallowed_tools`, checks whether
     /// files were modified (via `git diff --stat HEAD`). If so, emits a
-    /// `<hat_id>.scope_violation` event.
+    /// `<hat_id>.scope_violation` event AND promotes the finding to
+    /// `AuditSeverity::Fail { add_failures: 1 }` per
+    /// `2026-06-23-005` U4 (R5+KTD-8). This is the first audit class
+    /// promoted from Warn to Fail — drift_monitor's 3 alert classes
+    /// stay at Warn (U9 follow-up).
     fn audit_file_modifications(&mut self, hat_id: &HatId) {
         let config = match self.registry.get_config(hat_id) {
             Some(c) => c,
@@ -5971,6 +6016,27 @@ impl EventLoop {
                     ),
                 );
                 self.bus.publish(violation);
+
+                // 2026-06-23-005 U4 (R5+KTD-8): scope_violation is
+                // promoted from Warn to Fail. Use the typed
+                // AuditSeverity SSOT + AuditDispatcher so the
+                // consecutive_failures increment goes through the
+                // single audit dispatch path. `MissingField` is used
+                // as the typed kind placeholder; scope_violation does
+                // not yet have a dedicated RejectionKind variant — the
+                // next plan can add `ScopeViolation` if drift_monitor
+                // classification wants it. The consecutive_failures
+                // increment is the contract that matters for the U4
+                // kill-switch behaviour (KTD-4 + KTD-8).
+                crate::event_loop::audit::AuditDispatcher::dispatch(
+                    crate::event_loop::audit::AuditSeverity::Fail { add_failures: 1 },
+                    crate::event_loop::audit::AuditContext {
+                        hat: hat_id.as_str().to_string(),
+                        kind: crate::preset::engine::gates::RejectionKind::MissingField,
+                        details: diff_stat.clone(),
+                    },
+                    &mut self.state.consecutive_failures,
+                );
             }
             Err(e) => {
                 debug!(error = %e, "Could not run git diff for file-modification audit");

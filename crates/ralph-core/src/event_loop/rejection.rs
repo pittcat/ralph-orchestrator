@@ -22,6 +22,7 @@
 
 use crate::event_origin::OriginCheck;
 use crate::execution_contract::ExecutionContractFinding;
+use crate::preset::engine::gates::RejectionKind;
 use ralph_proto::HatId;
 use serde::{Deserialize, Serialize};
 
@@ -641,8 +642,9 @@ pub fn enrich_task_resume_payload(
     free_form_message: &str,
     reason_hint: &str,
     target_hat: Option<&str>,
+    kind: Option<RejectionKind>,
 ) -> String {
-    enrich_task_resume_payload_with_stage(free_form_message, reason_hint, target_hat, None)
+    enrich_task_resume_payload_with_stage(free_form_message, reason_hint, target_hat, None, kind)
 }
 
 /// 2026-06-17-004 U3 (R4+R5): extend `enrich_task_resume_payload`
@@ -664,6 +666,7 @@ pub fn enrich_task_resume_payload_with_stage(
     reason_hint: &str,
     target_hat: Option<&str>,
     stage: Option<RejectionStage>,
+    kind: Option<RejectionKind>,
 ) -> String {
     let reason_code = extract_reason_code(reason_hint);
     let target_hat_value = target_hat
@@ -682,6 +685,22 @@ pub fn enrich_task_resume_payload_with_stage(
                 serde_json::Value::String(stage_value.as_str().into()),
             );
         }
+    }
+    // 2026-06-23-005 U1 (R1+R2): typed kind SSOT.
+    //
+    // When caller passes `Some(kind)`, surface the kind's
+    // `reason_code()` string as the typed `kind` field on the
+    // payload. When `None` (legacy paths: topic-format, payload-
+    // contract), fall back to the `reason` string (which mirrors
+    // `violation` substring). Mirrors `build_task_resume_payload`'s
+    // R2 contract: every `task.resume` payload in the system
+    // carries a typed `kind` field so the schema validator sees
+    // 100% field completeness.
+    if let serde_json::Value::Object(ref mut map) = obj {
+        let kind_value = kind
+            .map(|k| serde_json::Value::String(k.reason_code().to_string()))
+            .unwrap_or_else(|| serde_json::Value::String(reason_code.to_string()));
+        map.insert("kind".into(), kind_value);
     }
     obj.to_string()
 }
@@ -743,7 +762,24 @@ impl RejectionEscalator {
                 4.. => Some(EscalationAction::PlanBlocked { kind, count }),
                 _ => None,
             },
+            // 2026-06-23-005 U2 (R3+KTD-2): three new typed kinds from
+            // task.resume injection paths (hard_gate / stall_recovery /
+            // contract).
+            K::MissingEventGate => match count {
+                1.. => Some(EscalationAction::DriftFinding { kind, count }),
+                _ => None,
+            },
+            K::StallNoEvents => match count {
+                2..=2 => Some(EscalationAction::DriftFinding { kind, count }),
+                3.. => Some(EscalationAction::PlanBlocked { kind, count }),
+                _ => None,
+            },
+            K::ContractViolation => match count {
+                1.. => Some(EscalationAction::DriftFinding { kind, count }),
+                _ => None,
+            },
             // 其他 kind 不在升级链中(typed 计数器仍记录,但消费侧不动作)。
+            // #[non_exhaustive] 强制未来新增 kind 时必须显式列在这里或 _ 兜底。
             _ => None,
         }
     }
@@ -798,8 +834,30 @@ impl CoordinatorDispatcher {
             K::HandoffFilenameMismatch => CoordinatorAction::ReEmitWorkReady,
             K::HandoffStructureInvalid => CoordinatorAction::FixPayloadSchema,
             K::HandoffIllegalEmitTopic => CoordinatorAction::FixEmitTarget,
+            // 2026-06-23-005 U2 (R3+KTD-2): three new typed kinds from
+            // task.resume injection paths.
+            //
+            // - MissingEventGate → ReEmitWorkReady (missing-event hard gate
+            //   synthesises task.resume; the recovery action is to re-emit
+            //   the original work.ready so the hat gets another chance).
+            // - StallNoEvents → ReEmitWorkReady (stall_recovery path; re-emit
+            //   work.ready to break the no-events stall).
+            // - ContractViolation → FixPayloadSchema (payload contract
+            //   rejected the emit; the agent must rewrite the payload).
+            K::MissingEventGate => CoordinatorAction::ReEmitWorkReady,
+            K::StallNoEvents => CoordinatorAction::ReEmitWorkReady,
+            K::ContractViolation => CoordinatorAction::FixPayloadSchema,
+            // 2026-06-23-005 F2: completion-signal rejection paths
+            // (persistent mode / open tasks blocking completion).
+            // Both routes are re-emit-work-ready — the recovery
+            // action is to nudge the hat (typically the
+            // coordinator) so it can either continue (persistent
+            // mode) or close/reopen the blocking task (open tasks).
+            K::PersistentLoopActive => CoordinatorAction::ReEmitWorkReady,
+            K::OpenTasksBlocking => CoordinatorAction::ReEmitWorkReady,
             // 其他 kind 不在 typed dispatch 范围,走 default 修复策略
             // (重发原 task.resume,等待下一个信号)。
+            // `#[non_exhaustive]` 强制未来新增 kind 时必须显式列在这里或保留此 _ 兜底。
             _ => CoordinatorAction::ReEmitWorkReady,
         }
     }
@@ -1272,39 +1330,50 @@ mod tests {
     /// a free-form message in a JSON object with the
     /// schema-required `reason` and `target_hat` fields.  The
     /// output must satisfy `task_resume_payload_has_required_fields`.
+    ///
+    /// 2026-06-23-005 U1: also assert the new typed `kind` field
+    /// when caller passes `Some(RejectionKind)`. Legacy callers
+    /// pass `None` and get `kind == reason` (fallback SSOT).
     #[test]
     fn enrich_task_resume_payload_wraps_free_form() {
         // Explicit target_hat + reason hint that contains "missing" → missing_field.
+        // Pass Some(RejectionKind::MissingField) → kind field equals "missing_field".
         let payload = enrich_task_resume_payload(
             "WORKFLOW_GUARD_REJECTED: out-of-order event 'work.done'",
             "missing plan_path",
             Some("executor"),
+            Some(RejectionKind::MissingField),
         );
         assert!(task_resume_payload_has_required_fields(&payload));
         let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(v["reason"], "missing_field");
         assert_eq!(v["target_hat"], "executor");
+        assert_eq!(v["kind"], "missing_field");
         assert_eq!(
             v["message"],
             "WORKFLOW_GUARD_REJECTED: out-of-order event 'work.done'"
         );
 
-        // No target_hat → defaults to "ralph".
-        let payload2 = enrich_task_resume_payload("RECOVERY hint", "out-of-scope", None);
+        // No target_hat → defaults to "ralph". Pass None for kind → fallback to reason.
+        let payload2 = enrich_task_resume_payload("RECOVERY hint", "out-of-scope", None, None);
         assert!(task_resume_payload_has_required_fields(&payload2));
         let v2: serde_json::Value = serde_json::from_str(&payload2).unwrap();
         assert_eq!(v2["target_hat"], "ralph");
         assert_eq!(v2["reason"], "out_of_scope");
+        assert_eq!(v2["kind"], "out_of_scope"); // fallback mirrors reason
 
         // Empty target_hat → also defaults to "ralph".
-        let payload3 = enrich_task_resume_payload("RECOVERY hint", "out-of-scope", Some(""));
+        let payload3 =
+            enrich_task_resume_payload("RECOVERY hint", "out-of-scope", Some(""), None);
         let v3: serde_json::Value = serde_json::from_str(&payload3).unwrap();
         assert_eq!(v3["target_hat"], "ralph");
 
         // Reason hint that matches "type" → type_mismatch.
-        let payload4 = enrich_task_resume_payload("bad", "TypeMismatch: expected bool", Some("h"));
+        let payload4 =
+            enrich_task_resume_payload("bad", "TypeMismatch: expected bool", Some("h"), None);
         let v4: serde_json::Value = serde_json::from_str(&payload4).unwrap();
         assert_eq!(v4["reason"], "type_mismatch");
+        assert_eq!(v4["kind"], "type_mismatch");
     }
 
     #[test]
