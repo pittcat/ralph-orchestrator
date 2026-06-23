@@ -3,7 +3,7 @@ title: "fix: ce-executor-serial 编排链路机制闭环(typed 升级消费 + it
 date: 2026-06-23
 type: fix
 plan_type: deep
-status: active
+status: completed
 loop_id: primary-20260622-182705
 origin: docs/report/2026-06-23-ralph-e2e-ce-executor-serial-loop-20260622-182705-diagnosis.md
 context:
