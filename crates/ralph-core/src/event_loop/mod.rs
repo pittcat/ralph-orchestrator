@@ -7508,11 +7508,45 @@ impl EventLoop {
                         // gate can drive typed escalation (drift
                         // finding, circuit breaker, plan.blocked)
                         // without scanning the message string.
-                        // The follow-up plan 2026-06-21-001 U4 is
-                        // the consumer that decides what each
-                        // kind's escalation curve looks like; this
-                        // site is the typed record point.
-                        let _typed_count = self.state.record_typed_lint_rejection(kind);
+                        // U1 (plan 2026-06-23-004): typed 计数器消费侧
+                        // 接 escalation,按 KTD-1 阶梯触发 drift_finding /
+                        // circuit_breaker_trip / plan.blocked。
+                        let typed_count = self.state.record_typed_lint_rejection(kind);
+                        if let Some(action) =
+                            crate::event_loop::rejection::RejectionEscalator::check(kind, typed_count)
+                        {
+                            use crate::event_loop::rejection::EscalationAction;
+                            let (topic_str, payload_str) = match action {
+                                EscalationAction::DriftFinding { kind: k, count } => (
+                                    "drift_finding",
+                                    format!(
+                                        "{{\"kind\":\"{}\",\"count\":{count},\"from_hat\":\"{from_hat}\",\"topic\":\"{}\"}}",
+                                        k.reason_code(),
+                                        ev.topic
+                                    ),
+                                ),
+                                EscalationAction::CircuitBreakerTrip { kind: k, count } => (
+                                    "loop.circuit_breaker_trip",
+                                    format!(
+                                        "{{\"kind\":\"{}\",\"count\":{count},\"from_hat\":\"{from_hat}\",\"topic\":\"{}\"}}",
+                                        k.reason_code(),
+                                        ev.topic
+                                    ),
+                                ),
+                                EscalationAction::PlanBlocked { kind: k, count } => (
+                                    "plan.blocked",
+                                    format!(
+                                        "{{\"kind\":\"{}\",\"count\":{count},\"from_hat\":\"{from_hat}\",\"topic\":\"{}\"}}",
+                                        k.reason_code(),
+                                        ev.topic
+                                    ),
+                                ),
+                            };
+                            let escalation_event =
+                                ralph_proto::Event::new(topic_str, payload_str);
+                            self.state.record_event(&escalation_event);
+                            rejected_diagnostics.push(escalation_event);
+                        }
                         // 2026-06-18-001 plan U6: 累加到 digest,
                         // 让 agent 在下一轮 prompt 中看到拒收摘要
                         self.state.record_rejection_digest(

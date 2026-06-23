@@ -640,11 +640,198 @@ pub fn enrich_task_resume_payload_with_stage(
     obj.to_string()
 }
 
+/// U1 (plan 2026-06-23-004): typed 拒绝计数器消费侧。
+///
+/// 把 round-2 已落地的 `consecutive_lint_rejections_by_kind` 接上消费侧,
+/// 按 KTD-1 表阶梯触发 typed 升级事件。纯函数 — 输入 `(kind, count)`,
+/// 输出 `Option<EscalationAction>`,无副作用,易测。
+///
+/// ## KTD-1 阈值表
+///
+/// | RejectionKind                 | threshold | action                |
+/// |-------------------------------|-----------|-----------------------|
+/// | HandoffFilenameMismatch       | 3         | DriftFinding          |
+/// | HandoffFilenameMismatch       | 5         | CircuitBreakerTrip    |
+/// | HandoffStructureInvalid       | 2         | DriftFinding          |
+/// | HandoffStructureInvalid       | 4         | PlanBlocked           |
+/// | HandoffIllegalEmitTopic       | 2         | DriftFinding          |
+/// | HandoffIllegalEmitTopic       | 4         | PlanBlocked           |
+///
+/// 返回 `None` 表示该次拒绝无需升级(尚未达到阶梯)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EscalationAction {
+    /// Emit typed `drift_finding` 事件,记录 kind × count。
+    DriftFinding {
+        kind: crate::preset::engine::gates::RejectionKind,
+        count: u32,
+    },
+    /// Emit `loop.circuit_breaker_trip` 事件(只对 filename_mismatch)。
+    CircuitBreakerTrip {
+        kind: crate::preset::engine::gates::RejectionKind,
+        count: u32,
+    },
+    /// Emit `plan.blocked` 事件(强制人工介入,只对 structure/illegal_emit)。
+    PlanBlocked {
+        kind: crate::preset::engine::gates::RejectionKind,
+        count: u32,
+    },
+}
+
+pub struct RejectionEscalator;
+
+impl RejectionEscalator {
+    /// 纯函数:输入 `(kind, count)`,按 KTD-1 表返回应触发的升级动作或 None。
+    pub fn check(
+        kind: crate::preset::engine::gates::RejectionKind,
+        count: u32,
+    ) -> Option<EscalationAction> {
+        use crate::preset::engine::gates::RejectionKind as K;
+        match kind {
+            K::HandoffFilenameMismatch => match count {
+                3..=4 => Some(EscalationAction::DriftFinding { kind, count }),
+                5.. => Some(EscalationAction::CircuitBreakerTrip { kind, count }),
+                _ => None,
+            },
+            K::HandoffStructureInvalid | K::HandoffIllegalEmitTopic => match count {
+                2..=3 => Some(EscalationAction::DriftFinding { kind, count }),
+                4.. => Some(EscalationAction::PlanBlocked { kind, count }),
+                _ => None,
+            },
+            // 其他 kind 不在升级链中(typed 计数器仍记录,但消费侧不动作)。
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::event_origin::OriginCheck;
     use crate::execution_contract::{ExecutionContractFinding, ExecutionContractViolationKind};
+
+    // U1 (plan 2026-06-23-004): 12 个 typed rejection escalation case
+    // (4 kind × 3 threshold band),SSOT 化阶梯触发链。
+    mod rejection_escalation_unit {
+        use super::*;
+        use crate::preset::engine::gates::RejectionKind;
+
+        #[test]
+        fn escalation_thresholds_match_ktd_1() {
+            // HandoffFilenameMismatch: 3 → drift_finding, 5 → circuit_breaker_trip
+            assert_eq!(
+                super::super::RejectionEscalator::check(
+                    RejectionKind::HandoffFilenameMismatch,
+                    1
+                ),
+                None
+            );
+            assert_eq!(
+                super::super::RejectionEscalator::check(
+                    RejectionKind::HandoffFilenameMismatch,
+                    2
+                ),
+                None
+            );
+            assert!(matches!(
+                super::super::RejectionEscalator::check(
+                    RejectionKind::HandoffFilenameMismatch,
+                    3
+                ),
+                Some(super::super::EscalationAction::DriftFinding { .. })
+            ));
+            assert_eq!(
+                super::super::RejectionEscalator::check(
+                    RejectionKind::HandoffFilenameMismatch,
+                    4
+                ),
+                Some(super::super::EscalationAction::DriftFinding {
+                    kind: RejectionKind::HandoffFilenameMismatch,
+                    count: 4,
+                })
+            );
+            assert!(matches!(
+                super::super::RejectionEscalator::check(
+                    RejectionKind::HandoffFilenameMismatch,
+                    5
+                ),
+                Some(super::super::EscalationAction::CircuitBreakerTrip { .. })
+            ));
+        }
+
+        #[test]
+        fn structure_invalid_triggers_at_2_and_4() {
+            // HandoffStructureInvalid: 2 → drift_finding, 4 → plan.blocked
+            assert_eq!(
+                super::super::RejectionEscalator::check(
+                    RejectionKind::HandoffStructureInvalid,
+                    1
+                ),
+                None
+            );
+            assert!(matches!(
+                super::super::RejectionEscalator::check(
+                    RejectionKind::HandoffStructureInvalid,
+                    2
+                ),
+                Some(super::super::EscalationAction::DriftFinding { .. })
+            ));
+            assert!(matches!(
+                super::super::RejectionEscalator::check(
+                    RejectionKind::HandoffStructureInvalid,
+                    4
+                ),
+                Some(super::super::EscalationAction::PlanBlocked { .. })
+            ));
+        }
+
+        #[test]
+        fn illegal_emit_topic_triggers_at_2_and_4() {
+            // HandoffIllegalEmitTopic: 2 → drift_finding, 4 → plan.blocked
+            assert_eq!(
+                super::super::RejectionEscalator::check(
+                    RejectionKind::HandoffIllegalEmitTopic,
+                    1
+                ),
+                None
+            );
+            assert!(matches!(
+                super::super::RejectionEscalator::check(
+                    RejectionKind::HandoffIllegalEmitTopic,
+                    2
+                ),
+                Some(super::super::EscalationAction::DriftFinding { .. })
+            ));
+            assert!(matches!(
+                super::super::RejectionEscalator::check(
+                    RejectionKind::HandoffIllegalEmitTopic,
+                    4
+                ),
+                Some(super::super::EscalationAction::PlanBlocked { .. })
+            ));
+        }
+
+        #[test]
+        fn kind_isolation_filename_does_not_pollute_structure() {
+            // HandoffFilenameMismatch 累计 5 次不影响 HandoffStructureInvalid
+            // (后者的 counter 仍为 0,不应触发)。
+            assert_eq!(
+                super::super::RejectionEscalator::check(
+                    RejectionKind::HandoffStructureInvalid,
+                    0
+                ),
+                None
+            );
+            // HandoffStructureInvalid 累计 3 次也只到自己阈值
+            // (2 → drift_finding,3 → 仍是 drift_finding,4 → plan.blocked)。
+            assert!(matches!(
+                super::super::RejectionEscalator::check(
+                    RejectionKind::HandoffStructureInvalid,
+                    3
+                ),
+                Some(super::super::EscalationAction::DriftFinding { .. })
+            ));
+        }
+    }
 
     #[test]
     fn from_origin_unknown_hat_is_non_retryable() {
