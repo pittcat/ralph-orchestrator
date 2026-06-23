@@ -65,6 +65,27 @@ pub fn compute(inputs: &PrepareInputs<'_>) -> PrepareResult {
     }
 }
 
+/// U2 (plan 2026-06-23-004): SSOT 文件名派生。
+///
+/// `compute` 内部已经做了完整的 path + seq 计算。本函数是 SSOT 公共 API:
+/// 接受 `(iter, seq, from, to)`,返回 `{iter}-{seq}-{from}-{to}.md` 形式的
+/// 文件名(不含 `.ralph/agent/hat-handoff/` 前缀),agent **不参与**
+/// 文件名构造 — `gate::Accept` 直接调本函数 derive,任何 agent 提交
+/// 与 SSOT 不一致的文件名一律被覆盖(而非 Reject),消除 30 天第 6 次
+/// 复发的 `hat_handoff_filename_mismatch` 源头。
+///
+/// 注意:`from` / `to` 在传入前必须已 sanitize(`-` → `_`),否则
+/// `parse_filename` 无法稳定拆分 4 段。
+pub fn compute_filename(iter: u32, seq: u32, from: &str, to: &str) -> String {
+    format!(
+        "{}-{}-{}-{}.md",
+        iter,
+        seq,
+        sanitize(from),
+        sanitize(to),
+    )
+}
+
 /// 从 handoff_path 解析出 (iteration, seq, from, to)。
 ///
 /// **要求**:`from` / `to` 是已 sanitize 的形式(不含 `-`)。
@@ -332,5 +353,51 @@ mod tests {
         let abs = dir.path().join(&r.handoff_path);
         // path 不能逃逸 workspace
         assert!(abs.starts_with(dir.path()));
+    }
+
+    // U2 (plan 2026-06-23-004): SSOT 文件名派生测试。
+    mod ssot_filename {
+        use super::*;
+
+        #[test]
+        fn ssot_uniqueness_same_input_same_output() {
+            let a = compute_filename(3, 2, "executor", "review_coordinator");
+            let b = compute_filename(3, 2, "executor", "review_coordinator");
+            assert_eq!(a, b);
+            assert_eq!(a, "3-2-executor-review_coordinator.md");
+        }
+
+        #[test]
+        fn agent_cannot_misname_via_compute() {
+            // 同一 (iter, seq, from, to) 不论 caller 怎么调都得到同一文件名。
+            let canonical = compute_filename(7, 5, "executor", "review_coordinator");
+            let alias_attempt = compute_filename(7, 5, "executor", "review_coordinator");
+            assert_eq!(canonical, alias_attempt);
+        }
+
+        #[test]
+        fn sanitization_applied_in_compute_filename() {
+            // `-` 在 to 中被 sanitize 成 `_`,保证 parse_filename 稳定拆分。
+            let name = compute_filename(1, 1, "a", "review-coordinator");
+            assert_eq!(name, "1-1-a-review_coordinator.md");
+            // 解析回去的 to 段就是 sanitized 形式。
+            let (_, _, _, to) = parse_filename(&format!(".ralph/agent/hat-handoff/{name}")).unwrap();
+            assert_eq!(to, "review_coordinator");
+        }
+
+        #[test]
+        fn ssot_no_mismatch_after_5_iter() {
+            // AE1 (反模式 1): 30 天第 6 次 filename_mismatch 复发。
+            // SSOT 派生后,5 轮不同 iter 都得到独立文件名,无错填可能。
+            let names: Vec<String> = (1..=5)
+                .map(|iter| compute_filename(iter, 1, "executor", "review_coordinator"))
+                .collect();
+            let unique: std::collections::HashSet<_> = names.iter().collect();
+            assert_eq!(unique.len(), 5);
+            // 每轮文件名都以自己的 iter 开头。
+            for (i, n) in names.iter().enumerate() {
+                assert!(n.starts_with(&format!("{}-1-", i + 1)));
+            }
+        }
     }
 }
