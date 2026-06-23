@@ -730,6 +730,11 @@ const PRESET_OPT_IN_WHEN_OPERATOR_OMITS: &[&str] = &[
     // ce-executor-* hat safety properties (defaults are off).
     "ephemeral_isolation",
     "enforce_current_unit",
+    // 2026-06-23: max_fix_rounds is opt-in so the preset
+    // value (1 for ce-executor-serial) is silently applied
+    // when the operator's ralph.yml omits the key. Operators
+    // can raise it per-workspace.
+    "max_fix_rounds",
 ];
 
 fn hats_disallowed_keys(mapping: &Mapping) -> Vec<String> {
@@ -1584,6 +1589,38 @@ hats:
                 .is_some_and(|wc| wc.step_handoff.progress_task_gate),
             "preset workflow_contract.step_handoff.progress_task_gate must apply when operator omits it"
         );
+    }
+
+    #[test]
+    fn merge_hats_overlay_silently_merges_max_fix_rounds_when_operator_omits_it() {
+        // 2026-06-23: max_fix_rounds is in PRESET_OPT_IN_WHEN_OPERATOR_OMITS,
+        // so the preset value is silently merged in when the operator's
+        // ralph.yml does not declare it. No warning should be emitted.
+        //
+        // The lack of warning is verified by code review — the code path
+        // that emits `eprintln!("warning: ... filtered by the operator/
+        // hat-collection security boundary")` is bypassed by the opt-in
+        // branch.
+        let core: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  completion_promise: LOOP_COMPLETE
+",
+        )
+        .unwrap();
+
+        let hats: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  max_fix_rounds: 1
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        assert_eq!(config.event_loop.max_fix_rounds, 1);
     }
 
     #[test]
