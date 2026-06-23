@@ -13,7 +13,7 @@
 # - review-coordinator: Initializes review-sequence.json on work.done / fix.applied, then emits one `review.dimension.ready` per turn, advancing the sequence until all dimensions reach a terminal status, then emits `review.dimensions.complete` to wake the synthesizer
 # - dimension-reviewer (serial, no concurrency): Reviews a single dimension and emits `review.dimension.done` or `review.dimension.failed`
 # - review-synthesizer: Reads all per-dimension findings files + review-sequence.json, gives the final verdict
-# - Fixer: Applies safe_auto findings up to 3 rounds
+# - Fixer: Applies safe_auto findings up to max_fix_rounds rounds
 # - debug-resolver: Root-cause diagnosis after Fixer exhaustion; ports ce-debug Phase 0–2 discipline
 # - plan-gate: Reconciles review verdict against plan.md / progress.md / runtime tasks; decides queue.advance vs plan.complete
 # - Shipper: Final validation, plan status update, final commit (no PR creation)
@@ -78,6 +78,7 @@ event_loop:
   required_events: ["report.done"]
   starting_event: "work.start"
   max_iterations: 50
+  max_fix_rounds: 1  # 2026-06-23: one auto-fix round; set to 3 for multi-round behavior
   max_runtime_seconds: 28800  # 8 hours
   enforce_hat_scope: true
   # Ephemeral file isolation is identical to ce-executor-serial — the
@@ -1533,10 +1534,11 @@ hats:
       - No findings → publish `review.passed`, payload: `plan_name`, `findings_count: 0`, `changed_lines`, `task_id`, `task_key`, `step`, **`skip_reason: "dimensions_complete"`** (REQUIRED — the serial preset's only legal pass-time skip_reason for the synthesizer)
       - Has findings:
         - Read `fix_round` from `fix-log.md` (or 0 if not exists)
-        - Extract safe_auto findings (excluding pre_existing)
-        - If safe_auto > 0 and fix_round < 3 → publish `review.failed`, payload: `plan_name`, `fix_round`, `safe_auto_count`, `gated_manual_count`, `findings_summary`, `task_id`, `task_key`, `step`
-        - If safe_auto == 0 or fix_round >= 3 → publish `review.complete`, payload: `plan_name`, `fix_round`, `verdict`, `residual_findings_count`, `findings_summary`, `task_id`, `task_key`, `step`, **`findings_count: <int>`** (REQUIRED — drift_monitor tracks this field; missing it triggers a `findings_count on review.complete present in 0/1` critical alert)
-      - `verdict`: `pass` (0 findings) | `pass_with_residuals` (non-blocking) | `fail` (P0 unresolved or fix exhausted)
+        - Extract safe_auto findings and gated_manual findings separately (excluding pre_existing)
+        - If safe_auto > 0 and fix_round < max_fix_rounds → publish `review.failed`, payload: `plan_name`, `fix_round`, `safe_auto_count`, `gated_manual_count`, `findings_summary`, `task_id`, `task_key`, `step`
+        - If safe_auto == 0 and gated_manual > 0 → publish `review.complete`, verdict: `pass_with_residuals`, payload: `plan_name`, `fix_round`, `residual_findings_count`, `findings_summary`, `task_id`, `task_key`, `step`, **`findings_count: <int>`** (gated_manual cannot be auto-fixed; escalate to manager)
+        - If safe_auto == 0 and gated_manual == 0 → publish `review.passed`, payload: `plan_name`, `findings_count: 0`, `changed_lines`, `task_id`, `task_key`, `step`, **`skip_reason: "dimensions_complete"`**
+      - `verdict`: `pass` (0 findings) | `pass_with_residuals` (gated_manual unresolved, non-blocking) | `fail` (P0 unresolved or fix exhausted)
 
       ### Constraints
       - MUST apply Quality Gates before publishing
@@ -1568,8 +1570,8 @@ hats:
       - From `review.failed` payload: extract `fix_round` (or 0)
       - Read `fix-log.md`: extract `current_fix_round` (file value takes priority over payload)
       - Use max of (file_round, payload_round), increment to `fix_round + 1`
-      - If `fix_round + 1 > 3`:
-        - Publish `fix.exhausted`, payload: `plan_name`, `fix_round: 3`, `reason: "safe_auto rounds exhausted"`, `residual_findings: <all findings>`, `failed_attempt_summary: <brief recap of what was tried and why it did not hold>`, `task_id`, `task_key`, `step`
+      - If `fix_round + 1 > max_fix_rounds`:
+        - Publish `fix.exhausted`, payload: `plan_name`, `fix_round: max_fix_rounds`, `reason: "safe_auto rounds exhausted"`, `residual_findings: <all findings>`, `failed_attempt_summary: <brief recap of what was tried and why it did not hold>`, `task_id`, `task_key`, `step`
         - This is an escalation to `debug-resolver`, not a final failure. Stop the Fixer.
 
       ### Read Findings

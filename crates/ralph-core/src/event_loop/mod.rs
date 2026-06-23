@@ -7556,12 +7556,13 @@ impl EventLoop {
                                     .consumer_of(&ev.topic)
                                     .unwrap_or(from_hat);
                                 let inputs = crate::state::HandoffAcceptedInputs {
-                                    from: consumer_hat.to_string().into(),
-                                    to: ev
+                                    // from = emit hat (ev.hat), to = downstream (consumer_hat)
+                                    from: ev
                                         .hat
                                         .clone()
                                         .unwrap_or_else(|| "unknown".into())
                                         .into(),
+                                    to: consumer_hat.to_string().into(),
                                     iteration: self.state.iteration,
                                     current_seq: self.state.hat_handoff_seq,
                                     topic: ev.topic.clone(),
@@ -8344,12 +8345,13 @@ impl EventLoop {
                         );
                         if let Some(ref mut ledger) = self.state.state_ledger {
                             let inputs = crate::state::HandoffAcceptedInputs {
-                                from: consumer.into(),
-                                to: accepted
+                                // from = emit hat (accepted.hat), to = downstream (consumer)
+                                from: accepted
                                     .hat
                                     .clone()
                                     .unwrap_or_else(|| "unknown".into())
                                     .into(),
+                                to: consumer.into(),
                                 iteration: self.state.iteration,
                                 current_seq: self.state.hat_handoff_seq,
                                 topic: accepted.topic.clone(),
