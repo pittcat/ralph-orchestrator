@@ -27,6 +27,7 @@ pub mod coordinator;
 pub mod finding_id;
 pub mod multi_hat;
 pub mod ownership;
+pub mod review_terminal_coherence;
 pub mod schema_parity;
 pub mod state_projection;
 pub mod topic_format;
@@ -42,6 +43,7 @@ pub use finding_id::{
     FINDING_HANDOFF_SEED_DERIVED_CONFLICT, FINDING_INVALID_TOPIC_FORMAT,
     FINDING_MISSING_TOPIC_OWNER, FINDING_MULTI_HAT_REQUIRES_ISOLATED, FINDING_OWNER_NOT_PUBLISHER,
     FINDING_OWNER_UNKNOWN_HAT, FINDING_RE_EMIT_TRAP, FINDING_TASK_PUBLISHER_NOT_COORDINATED,
+    FINDING_TERMINAL_DUAL_SUBSCRIBE, FINDING_TERMINAL_PUBLISHER_INCOMPLETE,
     FINDING_TRIGGER_PUBLISH_ASYMMETRY, FINDING_WHITELIST_EXEMPT_TOPIC,
     FINDING_WORK_DONE_ACTION_CHAIN_ORDER,
 };
@@ -58,6 +60,10 @@ pub use finding_id::{
 // (KTD-2: WAC always-on, severity by strictness).
 pub use multi_hat::check_multi_hat_isolation;
 pub use ownership::{check_owner_references, check_ownership_rules};
+pub use review_terminal_coherence::{
+    check_publisher_terminal_completeness, check_reviewer_dual_subscribe,
+    mutually_exclusive_terminal_pairs,
+};
 pub use state_projection::check_work_done_action_chain_order;
 pub use topic_format::{
     TopicFormatResult, TopicOccurrence, TopicSurface, enumerate_topics, suggest_topic_fix,
@@ -379,6 +385,22 @@ pub fn run_preset_lint(
     // `check_publishes_have_schema` for runtime surfacing.
     let schema_parity_findings = schema_parity::check_publishes_have_schema(config, strictness);
     findings.extend(lint_findings_to_contract_findings(&schema_parity_findings));
+
+    // 2026-06-23-004 plan U1 KTD-RTC: review terminal coherence —
+    // structural detection of (a) downstream hats that subscribe to
+    // both `review.passed` and `review.complete` (mutually exclusive
+    // branch events) and (b) publishers that declare one terminal but
+    // not its sibling. The `ce-executor-serial-primary-20260623-152241`
+    // loop drifted silently because plan-gate subscribed to
+    // `review.complete` instead of `review.passed`, and review-synthesizer
+    // only emitted `review.complete` (gated_manual residuals). Both
+    // checks are always-on (KTD-RTC-2): the asymmetry is structural and
+    // must be caught before the loop starts, not after the workflow
+    // stalls.
+    let rtc_dual = check_reviewer_dual_subscribe(config);
+    findings.extend(lint_findings_to_contract_findings(&rtc_dual));
+    let rtc_publisher = check_publisher_terminal_completeness(config);
+    findings.extend(lint_findings_to_contract_findings(&rtc_publisher));
 
     // Sort by id, then topic for deterministic output.
     findings.sort_by(|a, b| {

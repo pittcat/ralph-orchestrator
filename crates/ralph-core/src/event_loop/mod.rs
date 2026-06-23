@@ -48,11 +48,11 @@ use crate::execution_contract::{
 };
 use crate::hat_lifecycle::{ActivationKey, ActivationLifecycleTracker, SystemTimeClock};
 use crate::hat_registry::HatRegistry;
-use crate::preset::engine::gates::RejectionKind;
 use crate::hatless_ralph::HatlessRalph;
 use crate::instructions::InstructionBuilder;
 use crate::loop_context::LoopContext;
 use crate::memory_store::{MarkdownMemoryStore, format_memories_as_markdown, truncate_to_budget};
+use crate::preset::engine::gates::RejectionKind;
 use crate::preset::engine::{
     LintResumeTarget, ProtocolView, build_lint_mirror_block, build_lint_resume_block,
 };
@@ -529,10 +529,7 @@ pub struct RecoverableExhaustion {
 /// Appended AFTER `### GUARDRAILS` so the hat's own instructions
 /// remain authoritative for workflow order. Block is always emitted
 /// (even with default 3) so the hat learns where to look.
-pub(crate) fn append_runtime_config_block(
-    base_prompt: String,
-    max_fix_rounds: u32,
-) -> String {
+pub(crate) fn append_runtime_config_block(base_prompt: String, max_fix_rounds: u32) -> String {
     format!(
         "{base_prompt}\n\n## RUNTIME CONFIG\n\
          The following values are resolved at loop start and apply to this iteration:\n\
@@ -3579,10 +3576,8 @@ impl EventLoop {
             // under `event_loop:` in the YAML). The block is informational
             // and lives at the END of the hat prompt so the hat's own
             // workflow order (in `### GUARDRAILS`) stays authoritative.
-            let base_prompt = append_runtime_config_block(
-                base_prompt,
-                self.config.event_loop.max_fix_rounds,
-            );
+            let base_prompt =
+                append_runtime_config_block(base_prompt, self.config.event_loop.max_fix_rounds);
 
             // Inject the cached `human.guidance` text as a `## ROBOT GUIDANCE`
             // block so isolated hats (whose `build_custom_hat` template does
@@ -3737,10 +3732,7 @@ impl EventLoop {
         // read the runtime-resolved `max_fix_rounds`. Appended BEFORE
         // `inject_phase_into_prompt` so the phase block (if any) sits
         // just above RUNTIME CONFIG at the tail of the prompt.
-        let base = append_runtime_config_block(
-            base,
-            self.config.event_loop.max_fix_rounds,
-        );
+        let base = append_runtime_config_block(base, self.config.event_loop.max_fix_rounds);
         let with_phase = self.inject_phase_into_prompt(base);
         let with_diagnosis = self.apply_runtime_diagnosis_prompt(with_phase, hat_id);
         // R5 (2026-06-17-005 fix plan): the
@@ -8438,6 +8430,23 @@ impl EventLoop {
                                     .map(String::from);
                                 if let (Some(pn), Some(st)) = (&plan_name, &step) {
                                     self.state.prune_work_done_bucket(pn, st);
+                                    // 2026-06-23-004 plan U3 KTD-RTC
+                                    // (mechanism review 2026-06-24, P0):
+                                    // step boundary also resets the
+                                    // per-step review terminal
+                                    // tracker so the next step's
+                                    // drift detection starts clean.
+                                    // Without this reset, a
+                                    // `review.passed` observed in
+                                    // step N would mask any
+                                    // `review.complete` without
+                                    // `review.passed` in step N+1.
+                                    // `queue.advance` / `review.failed` /
+                                    // `fix.applied` are the only
+                                    // three step-close events; the
+                                    // unified reset here is the
+                                    // canonical hook.
+                                    self.state.reset_review_terminal_track();
                                     if accepted.topic == "fix.applied" {
                                         let task_id = obj
                                             .get("task_id")
@@ -9444,6 +9453,69 @@ impl EventLoop {
             self.state.record_event(event);
             self.state
                 .record_verdict_if_match(event, verdict_topics_slice);
+
+            // 2026-06-23-004 plan U3 KTD-RTC: per-step review
+            // terminal coherence. When `review.complete` fires
+            // without a prior `review.passed` in the same step, the
+            // synthesizer has drifted onto the
+            // `pass_with_residuals` branch without publishing the
+            // canonical pass terminal. This is the structural
+            // failure mode that produced
+            // `ce-executor-serial-primary-20260623-152241`. We log a
+            // recovery envelope here so the operator sees the drift
+            // in the diagnostics, and inject a deterministic
+            // correction so the next prompt asks review-synthesizer
+            // to publish the missing `review.passed` (with
+            // `verdict=pass` and `skip_reason=dimensions_complete`)
+            // before the workflow advances. The static lint
+            // `preset.review_terminal_dual_subscribe` is the
+            // primary prevention; this runtime hook is the safety
+            // net for presets that have not yet been migrated.
+            if event.topic.as_str() == "review.passed" || event.topic.as_str() == "review.complete"
+            {
+                let drift = self
+                    .state
+                    .record_review_terminal_observation(event.topic.as_str());
+                if drift {
+                    warn!(
+                        topic = %event.topic,
+                        "Review terminal drift: review.complete fired without a prior review.passed for this step. Injecting deterministic correction."
+                    );
+                    let source_hat_str = event
+                        .source
+                        .as_ref()
+                        .map(|h| h.to_string())
+                        .unwrap_or_default();
+                    let envelope = crate::diagnosis::RecoveryDiagnosisEnvelope::builder()
+                        .source(crate::diagnosis::DiagnosisSource::PayloadContract)
+                        .severity(crate::diagnosis::DiagnosisSeverity::Warning)
+                        .iteration(self.state.iteration)
+                        .source_hat(source_hat_str)
+                        .target_hat("review-synthesizer".to_string())
+                        .topic(event.topic.to_string())
+                        .reason_code("review_terminal_drift")
+                        .message(
+                            "review.complete fired without review.passed for this step; \
+                             synthesizer likely drifted onto pass_with_residuals branch \
+                             without publishing canonical pass terminal. Next prompt will \
+                             request review.passed re-emit."
+                                .to_string(),
+                        )
+                        .safe_target(true)
+                        .build();
+                    self.record_recovery_envelope(&envelope, Vec::new());
+                    Self::inject_completion_correction(
+                        &mut self.state,
+                        "review_terminal_drift",
+                        "review.complete fired without a prior review.passed for this step. \
+                         Re-emit review.passed (verdict=pass, skip_reason=dimensions_complete) \
+                         for the current plan step, OR publish plan.blocked with reason \
+                         'review_terminal_drift' so the manager can intervene. \
+                         The downstream verdict_gate (REVIEW_COMPLETE.additional_topics) will \
+                         reject any LOOP_COMPLETE until the verdict is consistent.",
+                    );
+                }
+            }
 
             // U3: Update hat lifecycle tracker for accepted events.
             // Find the source hat for this event and update the tracker.

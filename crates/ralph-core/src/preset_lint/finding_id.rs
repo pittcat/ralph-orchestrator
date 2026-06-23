@@ -144,3 +144,49 @@ pub const FINDING_SCHEMA_REFERENCE_PARITY: &str = "preset.schema_reference_parit
 /// defence (catches Rust-side dispatch bugs only). Plan
 /// 2026-06-20-001 R3 / KTD-3 "主 (primary)" line.
 pub const FINDING_WORK_DONE_ACTION_CHAIN_ORDER: &str = "preset.state_projection_work_done_order";
+
+// ──────────────────────────────────────────────────────────────────────────
+// 2026-06-23-004 plan U1 KTD-RTC: review terminal coherence
+// (renamed to KTD-TTC "terminal coherence" in the 2026-06-24 dual-review
+// chain, see docs/solutions/.../ce-executor-serial-mechanism-close-loop-2026-06-23.md).
+// The finding IDs are kept stable for back-compat: the OLD review.*-only
+// constants are kept as deprecated aliases, and the new TTC family covers
+// all pairs in `MUTUALLY_EXCLUSIVE_TERMINAL_PAIRS`.
+// ──────────────────────────────────────────────────────────────────────────
+
+/// A downstream hat that triggers on BOTH topics of any mutually
+/// exclusive terminal pair (`review.passed` / `review.complete`,
+/// `plan.complete` / `plan.blocked`, etc.) will accept whichever
+/// arrives first and bypass the publisher's branch decision — most
+/// famously the `verdict` distinction between `pass`,
+/// `pass_with_residuals`, and `fail`.
+///
+/// Always `Error` severity. The dual-review chain (2026-06-24)
+/// generalized this from `review.*` only to all pairs in
+/// `MUTUALLY_EXCLUSIVE_TERMINAL_PAIRS` (see
+/// `crates/ralph-core/src/preset_lint/review_terminal_coherence.rs`).
+pub const FINDING_TERMINAL_DUAL_SUBSCRIBE: &str = "preset.terminal_dual_subscribe";
+
+/// A hat that emits ONE topic of a mutually exclusive terminal pair
+/// MUST declare the sibling in its `publishes` set. The publisher
+/// branches between the two based on runtime data (residual findings,
+/// fix exhaustion, etc.); declaring only one means the runtime will
+/// reject the other publish as an unknown topic, silently dropping
+/// the terminal.
+///
+/// Always `Error` severity.
+pub const FINDING_TERMINAL_PUBLISHER_INCOMPLETE: &str = "preset.terminal_publisher_incomplete";
+
+/// Back-compat alias for the original (2026-06-23-004 plan U1 KTD-RTC)
+/// review-only finding ID. New code should use
+/// `FINDING_TERMINAL_DUAL_SUBSCRIBE`; this alias is kept so older
+/// diagnostic tools that grep for the historical ID continue to
+/// find the finding.
+#[deprecated(note = "use FINDING_TERMINAL_DUAL_SUBSCRIBE")]
+pub const FINDING_REVIEW_TERMINAL_DUAL_SUBSCRIBE: &str = "preset.terminal_dual_subscribe";
+
+/// Back-compat alias for the original review-only publisher finding.
+/// New code should use `FINDING_TERMINAL_PUBLISHER_INCOMPLETE`.
+#[deprecated(note = "use FINDING_TERMINAL_PUBLISHER_INCOMPLETE")]
+pub const FINDING_REVIEW_TERMINAL_PUBLISHER_INCOMPLETE: &str =
+    "preset.terminal_publisher_incomplete";

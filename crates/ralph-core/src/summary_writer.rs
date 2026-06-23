@@ -512,6 +512,10 @@ mod tests {
             state_machine_runtime_state: None,
             last_verdict_payload: None,
             last_upstream_verdict_payload: None,
+            // 2026-06-23-004 plan U3 KTD-RTC: review terminal
+            // tracker starts clean for the test fixture.
+            review_passed_seen_for_step: false,
+            review_complete_seen_for_step: false,
             completion_rejection_signature: None,
             consecutive_completion_rejections: 0,
             // 2026-06-16-001 U5: progress-steward counters in the

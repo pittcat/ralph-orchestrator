@@ -256,6 +256,19 @@ pub struct EventLoopConfig {
     #[serde(default)]
     pub enforce_current_unit: bool,
 
+    /// 2026-06-23-004 plan U1 KTD-RTC: review terminal coherence
+    /// exemption list. Hat ids in this list are allowed to subscribe
+    /// to **both** `review.passed` and `review.complete` without
+    /// triggering the `preset.review_terminal_dual_subscribe` lint
+    /// finding. Use sparingly — the two are mutually exclusive
+    /// branch events from `review-synthesizer`, and a hat that
+    /// consumes both will be confused by the synthesizer's branch
+    /// decision. The default empty list keeps the strict behaviour
+    /// for `ce-executor-serial`: only `plan-gate` consumes a review
+    /// terminal, and it consumes only `review.passed`.
+    #[serde(default)]
+    pub review_terminal_coherence_exempt_consumers: Option<Vec<String>>,
+
     /// 2026-06-16-001 U5: progress-steward fallback configuration.
     /// When the loop detects that no accepted business event has
     /// advanced for `max_steward_iterations` consecutive turns, it
@@ -451,6 +464,9 @@ impl Default for EventLoopConfig {
             // (e.g. ce-executor-serial → 1) and operators may
             // override via YAML.
             max_fix_rounds: default_max_fix_rounds(),
+            // 2026-06-23-004 plan U1 KTD-RTC: review terminal
+            // coherence exemption list. Default empty (strict).
+            review_terminal_coherence_exempt_consumers: None,
         }
     }
 }
@@ -606,7 +622,10 @@ max_steward_iterations: 3
     #[test]
     fn event_loop_config_default_max_fix_rounds_is_three() {
         let cfg = EventLoopConfig::default();
-        assert_eq!(cfg.max_fix_rounds, 3, "default must match the legacy '3 rounds' comment");
+        assert_eq!(
+            cfg.max_fix_rounds, 3,
+            "default must match the legacy '3 rounds' comment"
+        );
     }
 
     #[test]

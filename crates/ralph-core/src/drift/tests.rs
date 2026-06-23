@@ -47,6 +47,7 @@ fn drift_config() -> DriftConfig {
         field_completeness_threshold: 0.9,
         coord_join_rate_threshold: 0.6,
         emit_cadence_sigma: 2.0,
+        coord_join_mode: crate::config::CoordJoinMode::Parallel,
     }
 }
 
@@ -711,6 +712,87 @@ fn test_window_size_for_and_observed_topics() {
     let mut topics = det.observed_topics();
     topics.sort();
     assert_eq!(topics, vec!["alpha", "beta"]);
+}
+
+// ── 2026-06-23-004 plan U2 KTD-Drift: serial coord join mode ─────────
+
+/// Serial preset: 4 review.dimension.done events followed by a single
+/// review.dimensions.complete. The parallel rate formula
+/// (joined/from_size = 1/4 = 25%) trips the 60% threshold even though
+/// the workflow is healthy. Serial mode evaluates the
+/// "last-joins-to" semantic and must stay silent.
+#[test]
+fn test_coord_join_rate_serial_mode_passes_healthy_sequence() {
+    use super::detector::DeclaredEdges;
+    use crate::config::CoordJoinMode;
+
+    let cfg = DriftConfig {
+        window_size: 100,
+        field_completeness_threshold: 0.9,
+        coord_join_rate_threshold: 0.6,
+        emit_cadence_sigma: 2.0,
+        coord_join_mode: CoordJoinMode::Serial,
+    };
+    let edges = DeclaredEdges::from_pairs(vec![(
+        "review.dimension.done",
+        "review.dimensions.complete",
+    )]);
+    let mut det = DriftDetector::new_with_sources(cfg, RequiredFields::new(), edges);
+
+    // 4 serial done events at t=1..=4
+    for i in 1..=4 {
+        det.observe(snap("review.dimension.done", 0, i, &[]));
+    }
+    // complete event at t=5 (after the last done)
+    det.reset_seen();
+    let findings = det.observe(snap("review.dimensions.complete", 0, 5, &[]));
+    let coord_findings: Vec<_> = findings
+        .iter()
+        .filter(|f| matches!(f.metric, DriftMetric::CoordJoinRate))
+        .collect();
+    assert!(
+        coord_findings.is_empty(),
+        "serial mode must not flag the healthy sequence: got {coord_findings:?}"
+    );
+}
+
+/// Serial preset pathological case: complete fires early, then more
+/// done events come in (an out-of-order replay or extension). The
+/// "last-joins-to" semantic must flag this — `last_to < last_from`.
+///
+/// In the parallel mode this case would be invisible because
+/// `joined/from_size` is unaffected by ordering.
+#[test]
+fn test_coord_join_rate_serial_mode_flags_out_of_order() {
+    use super::detector::DeclaredEdges;
+    use crate::config::CoordJoinMode;
+
+    let cfg = DriftConfig {
+        window_size: 100,
+        field_completeness_threshold: 0.9,
+        coord_join_rate_threshold: 0.6,
+        emit_cadence_sigma: 2.0,
+        coord_join_mode: CoordJoinMode::Serial,
+    };
+    let edges = DeclaredEdges::from_pairs(vec![(
+        "review.dimension.done",
+        "review.dimensions.complete",
+    )]);
+    let mut det = DriftDetector::new_with_sources(cfg, RequiredFields::new(), edges);
+
+    det.observe(snap("review.dimensions.complete", 0, 20, &[]));
+    det.observe(snap("review.dimension.done", 0, 25, &[]));
+    det.reset_seen();
+    let findings = det.observe(snap("review.dimensions.complete", 0, 15, &[]));
+    let coord_findings: Vec<_> = findings
+        .iter()
+        .filter(|f| matches!(f.metric, DriftMetric::CoordJoinRate))
+        .collect();
+    assert!(
+        !coord_findings.is_empty(),
+        "serial mode must flag when last_from (25) is after last_to (20): got {coord_findings:?}"
+    );
+    assert!(coord_findings[0].message.contains("mode=serial"));
 }
 
 // ── Duration/TimeZone import sanity (silence unused warnings) ──────

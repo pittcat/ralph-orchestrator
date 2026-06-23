@@ -68,7 +68,9 @@ pub use state_files::{StateFileEntry, StateFileFormat, StateFilesConfig};
 pub use state_machine::{BusinessAfterTerminalAction, DuplicateTerminalAction, StateMachineConfig};
 pub use state_projection::{StateProjectionAction, StateProjectionConfig};
 pub use tasks::TasksConfig;
-pub use telemetry::{DriftConfig, MalformedJsonlPolicy, RuntimeDiagnosisConfig, TelemetryConfig};
+pub use telemetry::{
+    CoordJoinMode, DriftConfig, MalformedJsonlPolicy, RuntimeDiagnosisConfig, TelemetryConfig,
+};
 pub use v1_adapters::{AdapterSettings, AdaptersConfig};
 pub use warning::ConfigWarning;
 pub use workflow_contract::{

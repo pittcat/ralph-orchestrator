@@ -303,6 +303,24 @@ pub struct LoopState {
     /// seen.
     pub last_upstream_verdict_payload: Option<String>,
 
+    /// 2026-06-23-004 plan U3 KTD-RTC runtime gate: has the
+    /// canonical `review.passed` terminal been observed for the
+    /// current plan step? Reset when a new step's `work.ready` is
+    /// admitted (see `reset_review_terminal_track`).
+    ///
+    /// The runtime check is: when `review.complete` fires but
+    /// `review_passed_seen_for_step` is false, the synthesizer
+    /// drifted onto the `pass_with_residuals` branch without ever
+    /// publishing the canonical pass terminal. This is the
+    /// `ce-executor-serial-primary-20260623-152241` failure mode.
+    pub review_passed_seen_for_step: bool,
+
+    /// 2026-06-23-004 plan U3 KTD-RTC runtime gate: has the
+    /// residual `review.complete` terminal been observed for the
+    /// current plan step? Reset alongside
+    /// `review_passed_seen_for_step`.
+    pub review_complete_seen_for_step: bool,
+
     /// Signature of the most recent completion rejection (for stale-breaker).
     pub completion_rejection_signature: Option<String>,
 
@@ -705,6 +723,14 @@ impl Default for LoopState {
             bootstrap_failed: false,
             recoverable_exhaustion_buffer: Vec::new(),
             work_done_seen_tasks: HashSet::new(),
+            // 2026-06-23-004 plan U3 KTD-RTC: review terminal
+            // tracker. Both flags start false; they flip to true
+            // when the corresponding event is admitted, and reset
+            // when a new step's `work.ready` is admitted (see
+            // `record_review_terminal_observation` /
+            // `reset_review_terminal_track`).
+            review_passed_seen_for_step: false,
+            review_complete_seen_for_step: false,
             // 2026-06-17-003 U1: state projector is lazily
             // initialised by the first enabled iteration; the
             // cache is empty until then.
@@ -1284,6 +1310,45 @@ impl LoopState {
         }
     }
 
+    /// 2026-06-23-004 plan U3 KTD-RTC: record an observation of a
+    /// review terminal event (`review.passed` or `review.complete`).
+    ///
+    /// Returns `true` if this observation detected a **drift**:
+    /// `review.complete` fired while `review.passed` was NOT observed
+    /// for the same step. The caller MUST treat `true` as a hard gate
+    /// and refuse to advance the workflow — the synthesizer has
+    /// drifted onto the `pass_with_residuals` branch without publishing
+    /// the canonical pass terminal, which is the
+    /// `ce-executor-serial-primary-20260623-152241` failure mode.
+    ///
+    /// The flag is per-step: a new `work.ready` admission calls
+    /// [`Self::reset_review_terminal_track`] and clears both.
+    pub fn record_review_terminal_observation(&mut self, topic: &str) -> bool {
+        match topic {
+            "review.passed" => {
+                self.review_passed_seen_for_step = true;
+                false
+            }
+            "review.complete" => {
+                self.review_complete_seen_for_step = true;
+                if !self.review_passed_seen_for_step {
+                    return true;
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// 2026-06-23-004 plan U3 KTD-RTC: clear the per-step review
+    /// terminal flags. Call when a new step is admitted
+    /// (`work.ready` is published, or the projector auto-creates the
+    /// next step's runtime task).
+    pub fn reset_review_terminal_track(&mut self) {
+        self.review_passed_seen_for_step = false;
+        self.review_complete_seen_for_step = false;
+    }
+
     /// Computes a composite progress fingerprint capturing all meaningful progress signals.
     ///
     /// The fingerprint includes:
@@ -1497,7 +1562,10 @@ mod detect_rejection_stall_kind_tests {
         for _ in 0..(REJECTION_WINDOW_THRESHOLD - 1) {
             state.record_typed_lint_rejection(RejectionKind::HandoffFilenameMismatch);
         }
-        assert_eq!(state.typed_lint_rejection_count(RejectionKind::HandoffFilenameMismatch), REJECTION_WINDOW_THRESHOLD - 1);
+        assert_eq!(
+            state.typed_lint_rejection_count(RejectionKind::HandoffFilenameMismatch),
+            REJECTION_WINDOW_THRESHOLD - 1
+        );
         assert!(detect_rejection_stall_kind(&state).is_none());
     }
 
@@ -1578,6 +1646,93 @@ mod tests {
                 .as_ref()
                 .map(|s| s.topic.as_str()),
             Some("task.resume")
+        );
+    }
+
+    // ── 2026-06-23-004 plan U3 KTD-RTC: review terminal coherence ──
+
+    /// Healthy sequence: review.passed first, then review.complete.
+    /// The runtime gate must NOT flag this — `pass_with_residuals`
+    /// is a legitimate branch AFTER the canonical pass has been
+    /// published.
+    #[test]
+    fn review_terminal_passed_then_complete_is_clean() {
+        let mut state = LoopState::new();
+        assert!(!state.record_review_terminal_observation("review.passed"));
+        assert!(!state.record_review_terminal_observation("review.complete"));
+    }
+
+    /// Drift sequence: review.complete fires WITHOUT a prior
+    /// review.passed. The runtime gate MUST flag this — it is the
+    /// `ce-executor-serial-primary-20260623-152241` failure mode.
+    #[test]
+    fn review_terminal_complete_without_passed_is_drift() {
+        let mut state = LoopState::new();
+        assert!(
+            state.record_review_terminal_observation("review.complete"),
+            "review.complete without review.passed must report drift"
+        );
+    }
+
+    /// Per-step isolation: after `reset_review_terminal_track`, a
+    /// new step's `review.complete` without `review.passed` is
+    /// again drift-detected.
+    #[test]
+    fn review_terminal_reset_clears_per_step_flags() {
+        let mut state = LoopState::new();
+        state.record_review_terminal_observation("review.passed");
+        state.record_review_terminal_observation("review.complete");
+        // Step 1: both observed → no drift.
+        state.reset_review_terminal_track();
+        // Step 2: review.complete without prior review.passed →
+        // drift detected again.
+        assert!(state.record_review_terminal_observation("review.complete"));
+    }
+
+    /// Unrelated topics must not affect the per-step tracker.
+    #[test]
+    fn review_terminal_unrelated_topics_do_not_drift() {
+        let mut state = LoopState::new();
+        assert!(!state.record_review_terminal_observation("work.done"));
+        assert!(!state.record_review_terminal_observation("plan.blocked"));
+        assert!(!state.record_review_terminal_observation("review.dimension.done"));
+        // And the legitimate pass → complete path is still clean.
+        assert!(!state.record_review_terminal_observation("review.passed"));
+        assert!(!state.record_review_terminal_observation("review.complete"));
+    }
+
+    /// Mechanism review 2026-06-24 (P0 regression): without an
+    /// explicit reset at the step boundary, a `review.passed`
+    /// observed in step N would silently mask the drift
+    /// detection in step N+1 (a `review.complete` without a
+    /// prior `review.passed` would no longer report drift
+    /// because `review_passed_seen_for_step` would still be
+    /// `true` from the previous step). This test pins the
+    /// invariant that `reset_review_terminal_track` must be
+    /// called between steps — the production call site lives
+    /// in `event_loop/mod.rs` at the step-close branch
+    /// (`queue.advance` / `review.failed` / `fix.applied`).
+    #[test]
+    fn review_terminal_must_be_reset_between_steps() {
+        let mut state = LoopState::new();
+        // Step 1: legitimate pass → complete. No drift.
+        state.record_review_terminal_observation("review.passed");
+        assert!(!state.record_review_terminal_observation("review.complete"));
+        // Step boundary: production code calls
+        // `reset_review_terminal_track` from the step-close
+        // branch (see `event_loop/mod.rs` queue.advance handler).
+        // If the call site is removed, this test still passes
+        // because it calls reset explicitly — the test pins the
+        // invariant that the API exists and clears both flags.
+        state.reset_review_terminal_track();
+        assert!(!state.review_passed_seen_for_step);
+        assert!(!state.review_complete_seen_for_step);
+        // Step 2: a fresh `review.complete` without a prior
+        // `review.passed` must again report drift, proving the
+        // reset actually clears the per-step state.
+        assert!(
+            state.record_review_terminal_observation("review.complete"),
+            "after reset, review.complete without review.passed must report drift"
         );
     }
 
@@ -1949,16 +2104,20 @@ mod tests {
     fn f4_termination_trigger_queue_push_then_pop_fifo() {
         use crate::event_loop::termination::TerminationTrigger;
         let mut state = LoopState::new();
-        assert!(state
-            .push_termination_trigger(TerminationTrigger::PlanComplete {
-                plan_id: "p1".to_string()
-            })
-            .is_ok());
-        assert!(state
-            .push_termination_trigger(TerminationTrigger::PlanComplete {
-                plan_id: "p2".to_string()
-            })
-            .is_ok());
+        assert!(
+            state
+                .push_termination_trigger(TerminationTrigger::PlanComplete {
+                    plan_id: "p1".to_string()
+                })
+                .is_ok()
+        );
+        assert!(
+            state
+                .push_termination_trigger(TerminationTrigger::PlanComplete {
+                    plan_id: "p2".to_string()
+                })
+                .is_ok()
+        );
         assert_eq!(state.termination_trigger_queue_len(), 2);
 
         // FIFO order: first pushed is first popped.
@@ -1977,9 +2136,7 @@ mod tests {
 
     #[test]
     fn f4_termination_trigger_queue_overflow_returns_err() {
-        use crate::event_loop::termination::{
-            TerminationTrigger, TRIGGER_QUEUE_CAPACITY,
-        };
+        use crate::event_loop::termination::{TRIGGER_QUEUE_CAPACITY, TerminationTrigger};
         let mut state = LoopState::new();
         for i in 0..TRIGGER_QUEUE_CAPACITY {
             let result = state.push_termination_trigger(TerminationTrigger::PlanComplete {
@@ -1995,7 +2152,10 @@ mod tests {
             overflow.is_err(),
             "push beyond TRIGGER_QUEUE_CAPACITY must return Err, not panic"
         );
-        assert_eq!(state.termination_trigger_queue_len(), TRIGGER_QUEUE_CAPACITY);
+        assert_eq!(
+            state.termination_trigger_queue_len(),
+            TRIGGER_QUEUE_CAPACITY
+        );
     }
 
     // ── 2026-06-23 fix (mechanism review layer 2 P0-B): typed
@@ -2137,8 +2297,8 @@ mod tests {
     mod stall_rejection {
         use super::*;
         use crate::event_loop::loop_state::{
-            detect_rejection_stall, RejectionWindowEntry, REJECTION_WINDOW_SIZE,
-            REJECTION_WINDOW_THRESHOLD,
+            REJECTION_WINDOW_SIZE, REJECTION_WINDOW_THRESHOLD, RejectionWindowEntry,
+            detect_rejection_stall,
         };
 
         #[test]

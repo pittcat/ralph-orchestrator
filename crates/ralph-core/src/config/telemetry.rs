@@ -280,6 +280,43 @@ impl RuntimeDiagnosisConfig {
     }
 }
 
+/// Coord join rate evaluation mode.
+///
+/// The drift detector counts how often a `from_topic` event is followed
+/// by a `to_topic` event within its rolling window. Two distinct
+/// workflow shapes produce different expected rates:
+///
+/// - **parallel**: many `from` events, each expected to be followed by a
+///   `to` event. Used by wave-mode presets (multiple review dimensions
+///   emit `review.dimension.done` and each expects a `to_topic`
+///   consumer).
+/// - **serial**: the canonical pattern is "the LAST `from` event is
+///   followed by exactly ONE `to` event" (e.g. `review.dimension.done`
+///   for the 4th dimension triggers `review.dimensions.complete`). The
+///   parallel threshold (60%) is unsuitable for serial workflows
+///   because the rate is structurally low (1/N where N = number of
+///   serial hops). The serial mode uses a "last-joins" semantic that
+///   counts how often the last `from` event is followed by a `to`
+///   event, which is the operationally meaningful signal.
+///
+/// 2026-06-23-004 plan U2 KTD-Drift: introduce `CoordJoinMode` so the
+/// detector can be calibrated per workflow shape. Default is
+/// `Parallel` for backwards compatibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoordJoinMode {
+    /// Many `from` → many `to` (wave-mode presets).
+    Parallel,
+    /// Last `from` → one `to` (serial presets like `ce-executor-serial`).
+    Serial,
+}
+
+impl Default for CoordJoinMode {
+    fn default() -> Self {
+        Self::Parallel
+    }
+}
+
 /// Drift-detector configuration.
 ///
 /// Sits under `telemetry.runtime_diagnosis.drift`. The thresholds and
@@ -304,6 +341,12 @@ pub struct DriftConfig {
     #[serde(default = "default_coord_join_rate_threshold")]
     pub coord_join_rate_threshold: f64,
 
+    /// Coord join evaluation mode (2026-06-23-004 plan U2 KTD-Drift).
+    /// Defaults to `parallel` for backwards compatibility; serial
+    /// presets can opt in via `telemetry.runtime_diagnosis.drift.coord_join_mode: serial`.
+    #[serde(default)]
+    pub coord_join_mode: CoordJoinMode,
+
     /// Sensitivity (in standard deviations) for the emit-cadence
     /// detector (R6). `> 0`. Larger values reduce false positives but
     /// also delay detection of genuine cadence drift.
@@ -317,6 +360,7 @@ impl Default for DriftConfig {
             window_size: default_drift_window_size(),
             field_completeness_threshold: default_field_completeness_threshold(),
             coord_join_rate_threshold: default_coord_join_rate_threshold(),
+            coord_join_mode: CoordJoinMode::default(),
             emit_cadence_sigma: default_emit_cadence_sigma(),
         }
     }

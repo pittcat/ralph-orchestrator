@@ -291,6 +291,7 @@ fn chain_4_drift_detector_records_missing_required_field_per_topic() {
             field_completeness_threshold: 0.9,
             coord_join_rate_threshold: 0.6,
             emit_cadence_sigma: 2.0,
+            coord_join_mode: ralph_core::config::CoordJoinMode::Parallel,
         };
         let mut policy = EventPolicyConfig::default();
         policy.enabled = true;

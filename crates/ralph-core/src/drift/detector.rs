@@ -474,26 +474,49 @@ impl DriftDetector {
             if from_size == 0 {
                 continue;
             }
-            // Naive implementation: count how many from-topic events
-            // are followed by a to-topic event within the window
-            // ordering. We project timestamps into a sorted
-            // sequence on each side and count overlapping pairs.
-            //
-            // The rate formula is:
-            //   joined = count of to-events whose timestamp >=
-            //            the latest from-event timestamp seen so far
-            //   rate   = min(1.0, joined / from_size)
-            let from_timestamps: Vec<DateTime<Utc>> =
-                from_window.iter().map(|s| s.timestamp).collect();
-            let to_timestamps: Vec<DateTime<Utc>> =
-                this_window.iter().map(|s| s.timestamp).collect();
-            let joined = count_joined(&from_timestamps, &to_timestamps);
-            let rate = (joined as f64 / from_size as f64).min(1.0);
+            // 2026-06-23-004 plan U2 KTD-Drift: in serial mode the
+            // expected shape is "the LAST `from` event is followed by
+            // exactly one `to` event" (e.g. the 4th
+            // `review.dimension.done` closes the sequence with
+            // `review.dimensions.complete`). The parallel rate
+            // (joined/from_size) is structurally low in serial
+            // workflows (1/N) and would trip a false alarm at the
+            // default 60% threshold. The serial semantic counts how
+            // often the *latest* `from` event is followed by *any*
+            // `to` event, which is the operationally meaningful signal
+            // for serial workflows.
+            let rate = match self.config.coord_join_mode {
+                crate::config::CoordJoinMode::Parallel => {
+                    let from_timestamps: Vec<DateTime<Utc>> =
+                        from_window.iter().map(|s| s.timestamp).collect();
+                    let to_timestamps: Vec<DateTime<Utc>> =
+                        this_window.iter().map(|s| s.timestamp).collect();
+                    let joined = count_joined(&from_timestamps, &to_timestamps);
+                    (joined as f64 / from_size as f64).min(1.0)
+                }
+                crate::config::CoordJoinMode::Serial => {
+                    let last_from = from_window
+                        .iter()
+                        .map(|s| s.timestamp)
+                        .max()
+                        .expect("from_size > 0 already checked");
+                    let last_to = this_window
+                        .iter()
+                        .map(|s| s.timestamp)
+                        .max()
+                        .expect("to_size > 0 already checked");
+                    if last_to >= last_from { 1.0 } else { 0.0 }
+                }
+            };
             if rate < self.config.coord_join_rate_threshold {
                 let severity = pick_severity(
                     self.config.coord_join_rate_threshold - rate,
                     self.config.coord_join_rate_threshold,
                 );
+                let mode_label = match self.config.coord_join_mode {
+                    crate::config::CoordJoinMode::Parallel => "parallel",
+                    crate::config::CoordJoinMode::Serial => "serial",
+                };
                 let finding = DriftFinding {
                     finding_id: uuid::Uuid::new_v4().to_string(),
                     metric: DriftMetric::CoordJoinRate,
@@ -507,7 +530,7 @@ impl DriftDetector {
                     iteration: self.last_iteration,
                     window_size: from_size + to_size,
                     message: format!(
-                        "coord join rate `{from_topic} -> {topic}` is {joined}/{from_size} ({:.1}%); required threshold {:.1}%",
+                        "coord join rate `{from_topic} -> {topic}` is {:.1}% (mode={mode_label}); required threshold {:.1}%",
                         rate * 100.0,
                         self.config.coord_join_rate_threshold * 100.0,
                     ),
