@@ -51,6 +51,7 @@ pub enum GateDecision {
 /// rejection class. String-substring matching on `message` is
 /// **not** supported; do not reintroduce it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum RejectionKind {
     /// Required payload field is missing. Routes to the
     /// source hat (the agent that emitted the event) so the
@@ -481,6 +482,37 @@ mod tests {
         assert_eq!(
             RejectionKind::HandoffIllegalEmitTopic.reason_code(),
             "hat_handoff_illegal_emit_topic"
+        );
+    }
+
+    /// U5 (plan 2026-06-23-004): `RejectionKind` is `#[non_exhaustive]`.
+    /// Variants without fields remain readable via `matches!` /
+    /// `reason_code()`. Pin the surface so future variants keep
+    /// both reading paths working.
+    #[test]
+    fn non_exhaustive_variants_remain_readable() {
+        // All currently-known variants must be matches-able
+        // without `..` since they carry no fields.
+        assert!(matches!(
+            RejectionKind::MissingField,
+            RejectionKind::MissingField
+        ));
+        assert!(matches!(
+            RejectionKind::HandoffFilenameMismatch,
+            RejectionKind::HandoffFilenameMismatch
+        ));
+        assert!(matches!(
+            RejectionKind::HandoffStructureInvalid,
+            RejectionKind::HandoffStructureInvalid
+        ));
+        assert!(matches!(
+            RejectionKind::HandoffIllegalEmitTopic,
+            RejectionKind::HandoffIllegalEmitTopic
+        ));
+        // reason_code() still callable without destructure.
+        assert_eq!(
+            RejectionKind::HandoffFilenameMismatch.reason_code(),
+            "hat_handoff_filename_mismatch"
         );
     }
 
