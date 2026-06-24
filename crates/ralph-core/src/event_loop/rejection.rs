@@ -743,16 +743,6 @@ impl RejectionEscalator {
     ) -> Option<EscalationAction> {
         use crate::preset::engine::gates::RejectionKind as K;
         match kind {
-            K::HandoffFilenameMismatch => match count {
-                3..=4 => Some(EscalationAction::DriftFinding { kind, count }),
-                5.. => Some(EscalationAction::CircuitBreakerTrip { kind, count }),
-                _ => None,
-            },
-            K::HandoffStructureInvalid | K::HandoffIllegalEmitTopic => match count {
-                2..=3 => Some(EscalationAction::DriftFinding { kind, count }),
-                4.. => Some(EscalationAction::PlanBlocked { kind, count }),
-                _ => None,
-            },
             // 2026-06-23-005 U2 (R3+KTD-2): three new typed kinds from
             // task.resume injection paths (hard_gate / stall_recovery /
             // contract).
@@ -822,9 +812,6 @@ impl CoordinatorDispatcher {
             };
         }
         match kind {
-            K::HandoffFilenameMismatch => CoordinatorAction::ReEmitWorkReady,
-            K::HandoffStructureInvalid => CoordinatorAction::FixPayloadSchema,
-            K::HandoffIllegalEmitTopic => CoordinatorAction::FixEmitTarget,
             // 2026-06-23-005 U2 (R3+KTD-2): three new typed kinds from
             // task.resume injection paths.
             //

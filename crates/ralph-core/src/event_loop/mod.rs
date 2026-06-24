@@ -372,26 +372,9 @@ pub struct EventLoop {
     ephemeral_isolation: crate::ephemeral_isolation::EphemeralIsolation,
 }
 
-/// A4 (002-adversarial-review): pull a `handoff_path` string
-/// out of a macro-edge event payload. Returns `None` when the
-/// payload is missing / non-JSON / does not carry a
-/// `handoff_path` field. Used to feed the
-/// `HandoffAcceptedInputs.provided_handoff_path` field of
-/// [`crate::state::StateLedger::commit_handoff_artifact`].
-///
-/// U3: only call site is the A4 hook that writes the
-/// `HandoffAcceptedInputs` ledger entry. The helper itself
-/// stays until U4 cleans up `HandoffAcceptedInputs` and the
-/// ledger commit path.
-fn extract_handoff_path_from_payload(payload: Option<&str>) -> Option<String> {
-    let p = payload?;
-    let value: serde_json::Value = serde_json::from_str(p).ok()?;
-    value
-        .get("handoff_path")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
+/// (已删除) A4 (002-adversarial-review) `extract_handoff_path_from_payload`
+/// helper — 2026-06-23-006 plan U3 移除 hat-handoff artifact ledger 路径，
+/// 该函数无调用方，整段删除。
 
 /// A2 (002-adversarial-review): build the unified
 /// `ValidationPipeline` once per batch. The pipeline is always
@@ -399,9 +382,7 @@ fn extract_handoff_path_from_payload(payload: Option<&str>) -> Option<String> {
 fn build_unified_validation_pipeline(
     config: &crate::config::EventLoopConfig,
 ) -> crate::validation::ValidationPipeline {
-    let view = crate::preset::engine::protocol::ProtocolView::from_event_loop_with_index_for_env(
-        config, None,
-    );
+    let view = crate::preset::engine::protocol::ProtocolView::from_event_loop(config);
     crate::validation::ValidationPipeline::from_config(&view, config)
 }
 
@@ -4985,10 +4966,7 @@ impl EventLoop {
         // block in the iteration it fired). This helper only
         // emits the human-readable prompt block.
 
-        let view = ProtocolView::from_event_loop_with_index(
-            &self.config.event_loop,
-            Some(&self.handoff_index),
-        );
+        let view = ProtocolView::from_event_loop(&self.config.event_loop);
         let mirror = build_lint_mirror_block(&view, &hint);
         let resume = build_lint_resume_block(&hint);
         format!("{mirror}{resume}\n{prompt}")
@@ -5075,10 +5053,7 @@ impl EventLoop {
         use crate::preset::engine::{
             GateDecision, LintContext, LintResumeHint, gates::RejectionKind, run_gates,
         };
-        let view = ProtocolView::from_event_loop_with_index(
-            &self.config.event_loop,
-            Some(&self.handoff_index),
-        );
+        let view = ProtocolView::from_event_loop(&self.config.event_loop);
         let ctx = LintContext;
         let mut rejected = 0usize;
         let mut last_rejection: Option<(String, RejectionKind, String)> = None;
@@ -7469,11 +7444,7 @@ impl EventLoop {
                 .as_ref()
                 .map(|l| l.snapshot().clone())
                 .unwrap_or_else(crate::state::LedgerSnapshot::cold_start);
-            let view = crate::preset::engine::protocol::ProtocolView::from_event_loop_with_index_and_feature(
-                &self.config.event_loop,
-                None,
-                true,
-            );
+            let view = crate::preset::engine::protocol::ProtocolView::from_event_loop(&self.config.event_loop);
 
             // Pass LoopState's policy runtime state / review-step tracker into
             // the context as overrides so the event-policy rule mutates the
@@ -7801,33 +7772,7 @@ impl EventLoop {
                             std::time::Instant::now(),
                         );
                         if let Some(ref mut ledger) = self.state.state_ledger {
-                            let inputs = crate::state::HandoffAcceptedInputs {
-                                // from = emit hat (accepted.hat), to = downstream (consumer)
-                                from: accepted
-                                    .hat
-                                    .clone()
-                                    .unwrap_or_else(|| "unknown".into())
-                                    .into(),
-                                to: consumer.into(),
-                                iteration: self.state.iteration,
-                                // U3: macro-edge seq tracking removed from `LoopState`;
-                                // `HandoffAcceptedInputs.current_seq` is still
-                                // required by the U4 ledger shape and will go
-                                // away with U4. Pass 0 here — the field is dead
-                                // data in the interim.
-                                current_seq: 0,
-                                topic: accepted.topic.clone(),
-                                provided_handoff_path: extract_handoff_path_from_payload(
-                                    accepted.payload.as_deref(),
-                                ),
-                            };
-                            if let Err(e) = ledger.commit_handoff_artifact(&inputs) {
-                                tracing::warn!(
-                                    error = %e,
-                                    event_id = %event_id,
-                                    "A4: ledger.commit_handoff_artifact failed; loop continues"
-                                );
-                            }
+                            let _ = ledger; // U3: hat_handoff artifact removed; ledger 不再接收 handoff-specific commit
                         }
                     }
 

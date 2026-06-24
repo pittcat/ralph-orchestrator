@@ -932,53 +932,7 @@ fn test_plan_gate_dual_publish_handoff() {
     run_workflow_guard_scenario(yaml);
 }
 
-// 2026-06-18-002 plan U9: hat-handoff BDD scenarios.
-//
-// AE1: macro-edge handoff inject (T1).
-#[test]
-fn test_hat_handoff_macro_inject() {
-    let yaml = load_scenario("tests/scenarios/hat_handoff/macro_handoff_inject.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-// AE2: next-action antipattern → gate rejects (T2).
-#[test]
-fn test_hat_handoff_next_rejected() {
-    let yaml = load_scenario("tests/scenarios/hat_handoff/next_rejected.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-// AE3 / T3: review.dimension.* micro-edges are exempt.
-#[test]
-fn test_hat_handoff_micro_edge_exempt() {
-    let yaml = load_scenario("tests/scenarios/hat_handoff/micro_edge_exempt.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-// T15: `hat_handoff.enabled: false` is a full passthrough.
-#[test]
-fn test_hat_handoff_disabled_passthrough() {
-    let yaml = load_scenario("tests/scenarios/hat_handoff/disabled_passthrough.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-// T5 / AE5: dual-publish (queue.advance, work.ready) — only work.ready
-// flows through the macro-edge gate; queue.advance is exempt.
-#[test]
-fn test_hat_handoff_dual_publish_work_ready_only() {
-    let yaml = load_scenario("tests/scenarios/hat_handoff/dual_publish_work_ready_only.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-// T7 / AE7: gate drops work.done (fail-closed) and publishes
-// diagnostic.hat_handoff.rejected. Both effects are observable via
-// `absent_events` and `events` in seen_topics.
-#[test]
-fn test_hat_handoff_work_done_rejected_blocks_projection() {
-    let yaml =
-        load_scenario("tests/scenarios/hat_handoff/work_done_rejected_blocks_projection.yml");
-    run_workflow_guard_scenario(yaml);
-}
+// 2026-06-23-006 plan U7: hat-handoff BDD scenarios removed (功能已删除).
 
 // 2026-06-20-001 plan U6: serial-lint BDD scenarios were
 // considered but deferred. The first iteration (commit

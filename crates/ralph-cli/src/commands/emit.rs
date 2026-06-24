@@ -230,7 +230,7 @@ fn should_run_lint(config: Option<&RalphConfig>) -> bool {
     if cfg.event_loop.execution_mode == HatExecutionMode::Coordinator {
         return false;
     }
-    cfg.event_loop.hat_handoff.enabled
+    false // 2026-06-23-006 plan U7: hat_handoff.enabled 字段已删除，lint auto-prepare 已禁用
 }
 
 /// Apply the linter's outcome to the in-flight emit.
@@ -255,22 +255,6 @@ fn handle_lint_outcome(
 ) -> Result<serde_json::Value> {
     match outcome {
         LintOutcome::Accept => Ok(payload),
-        LintOutcome::AcceptAfterAutoPrepare => {
-            // R22: the engine prepared the artifact and rewrote the
-            // payload to inject `handoff_path`. Surface the fact so
-            // the agent can see what the orchestrator did on its
-            // behalf. The payload itself has already been mutated
-            // by `auto_handoff_prepare`; we trust it (fail-closed
-            // came first via the inner `lint_emit` call).
-            eprintln!(
-                "## LINT AUTO-PREPARE\n\
-                 topic: `{topic}`\n\
-                 orchestrator wrote the handoff artifact and injected \
-                 `handoff_path` into the payload. Resubmitting through \
-                 the gate.\n"
-            );
-            Ok(payload)
-        }
         LintOutcome::Reject(hint) => {
             // 2026-06-23 fix plan P0 (CB-6): also write
             // recovery.jsonl (in addition to the in-loop
@@ -556,7 +540,7 @@ fn emit_command_with_root_and_hats(
         })?;
         // P2-#6 (002-adversarial-review): production-only env
         // read; tests must use `from_event_loop` (env-free).
-        let view = ProtocolView::from_event_loop_with_index_for_env(&cfg.event_loop, None);
+        let view = ProtocolView::from_event_loop_with_feature_for_env(&cfg.event_loop);
         let pretty = schema_view::render_pretty(&view, schema_topic)
             .context("Failed to serialise protocol view")?;
         println!("{pretty}");
@@ -1139,9 +1123,7 @@ fn emit_command_with_root_and_hats(
         // Without this, R22 auto_prepare missed the default
         // unique-consumer edges (work.ready, work.done).
         let config_ref = config.as_ref().unwrap();
-        let index =
-            ralph_core::workflow_contract::handoff_index::HandoffIndex::from_config(config_ref);
-        let view = ProtocolView::from_event_loop_with_index(&config_ref.event_loop, Some(&index));
+        let view = ProtocolView::from_event_loop_with_feature(&config_ref.event_loop, false);
         // P0-2: pass workspace paths so auto-prepare artifact
         // lands under the loop's own directory.
         let paths = LintPaths::under_handoff_dir(workspace_root.clone());
@@ -3270,7 +3252,7 @@ pub mod schema_view {
         let mut out = serde_json::json!({
             "topic": topic,
             "protocol_hash": view.protocol_hash,
-            "is_macro_edge": view.is_macro_edge(topic),
+            "is_macro_edge": false, // 2026-06-23-006 plan U7: is_macro_edge 方法已删除
             "required_fields": required_fields,
             "all_topics": payload_keys,
         });
@@ -3317,10 +3299,7 @@ pub mod schema_view {
             obj.insert("execution_contracts".to_string(), serde_json::Value::Null);
         }
 
-        obj.insert(
-            "hat_handoff".to_string(),
-            serde_json::to_value(&view.hat_handoff).context("serialise hat_handoff")?,
-        );
+        // 2026-06-23-006 plan U7: view.hat_handoff 字段已删除 (hat-handoff 功能已下线)
 
         Ok(out)
     }

@@ -506,8 +506,7 @@ pub struct PolicyCheckReport {
     /// Stable reason codes from each failed rule, in pre+post-commit
     /// pipeline order. Empty when `accepted == true`. Examples:
     /// `origin:ralph_control_only`, `engine_rejected:required_field:task_id`,
-    /// `step_handoff:progress_task_mismatch:task_closed_but_progress_missing`,
-    /// `hat_handoff:missing_path`.
+    /// `step_handoff:progress_task_mismatch:task_closed_but_progress_missing`.
     pub reason_codes: Vec<String>,
     /// Human-readable correction hints, parallel to `reason_codes`.
     /// Each entry is the `correction_hint` from the matching
@@ -634,7 +633,7 @@ pub fn run_policy_check_unified(
     // P2-#6 (002-adversarial-review): production-only env
     // read; tests must use `ProtocolView::from_event_loop`
     // (env-free) to stay isolated under `cargo nextest`.
-    let view = ProtocolView::from_event_loop_with_index_for_env(&event_loop_config, None);
+    let view = ProtocolView::from_event_loop_with_feature_for_env(&event_loop_config);
     let pipeline = ValidationPipeline::from_config(&view, &event_loop_config);
 
     // R12 (U11-T7): load .ralph/events.jsonl into LedgerSnapshot so
