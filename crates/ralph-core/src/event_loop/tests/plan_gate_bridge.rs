@@ -41,9 +41,16 @@ fn plan_gate_publishes_work_ready_for_step_advance() {
     // is the U5 P0-3 fix — before the fix, only `queue.advance /
     // plan.complete / plan.blocked` were in the list, leaving executor
     // waiting for a `work.ready` that never came after a step advance.
+    //
+    // 2026-06-24 plan U1: plan-gate now also publishes
+    // `review.complete` as a mirror after consuming
+    // `review.passed`/`review.failed` from review-synthesizer.
+    // The list is therefore 5 items.
     assert!(
-        yaml.contains("publishes: [\"queue.advance\", \"work.ready\", \"plan.complete\", \"plan.blocked\"]"),
-        "plan-gate publishes must include work.ready for step advance (U5 P0-3 fix)"
+        yaml.contains(
+            "publishes: [\"queue.advance\", \"work.ready\", \"plan.complete\", \"plan.blocked\", \"review.complete\"]"
+        ),
+        "plan-gate publishes must include work.ready for step advance (U5 P0-3 fix) AND review.complete mirror (2026-06-24 U1)"
     );
 }
 

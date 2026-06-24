@@ -90,7 +90,16 @@ event_loop:
   starting_event: "work.start"
   max_iterations: 50
   max_fix_rounds: 1  # 2026-06-23: one auto-fix round; set to 3 for multi-round behavior
-    # 2026-06-23: this value is read by Rust (whitelisted in
+  # 2026-06-24 plan U2: max_residuals is the verdict-promotion
+  # threshold for shipper. When translating
+  # `plan.complete.verdict == "pass_with_residuals"` to
+  # `REVIEW_COMPLETE`, shipper promotes to `pass` if
+  # `final_findings_count <= max_residuals`. Default 8.
+  # This value is Rust-read and injected into every hat prompt
+  # via `## RUNTIME CONFIG` (see
+  # `crates/ralph-core/src/event_loop/mod.rs::append_runtime_config_block`).
+  max_residuals: 8
+  # 2026-06-23: this value is read by Rust (whitelisted in
     # `PRESET_OPT_IN_WHEN_OPERATOR_OMITS`) and injected into every
     # hat prompt via the `## RUNTIME CONFIG` block. Operators can
     # override per-workspace in their `ralph.yml`.
@@ -1356,16 +1365,17 @@ hats:
     # coordinator). wave.worker.failed does NOT apply because there is
     # no wave dispatcher in this preset.
     triggers: ["review.dimensions.complete"]
-    # The synthesizer publishes the same terminal set as the wave
-    # preset: review.passed / review.failed / review.complete, plus
-    # plan.blocked for fatal coverage failures. wave.worker.failed is
-    # intentionally NOT in publishes — the wave preset had it because
-    # the wave dispatcher synthesizes wave.worker.failed on the
-    # synthesizer's behalf; the serial path has no dispatcher and the
-    # coordinator already routes failures into the per-dim
-    # review.dimension.failed path.
-    publishes: ["review.passed", "review.failed", "review.complete", "plan.blocked"]
-    terminal_events: ["review.passed", "review.failed", "review.complete"]
+    # 2026-06-24 plan U1: review-synthesizer only owns the canonical
+    # pass/fail terminals (`review.passed` / `review.failed`); the
+    # `review.complete` mirror is forwarded by `plan-gate` after it
+    # consumes `review.passed` / `review.failed`. This closes the
+    # `review_terminal_drift` path (synthesizer emitting
+    # `review.complete(verdict=pass_with_residuals)` without first
+    # publishing `review.passed`) — the 2026-06-24 e2e
+    # `primary-20260624-032505` failure mode and the 30-day 6th
+    # recurrence of the A-1 pattern.
+    publishes: ["review.passed", "review.failed", "plan.blocked"]
+    terminal_events: ["review.passed", "review.failed"]
     # No aggregate block — the serial path does not have a
     # wait_for_all window. The coordinator closes the sequence
     # by emitting review.dimensions.complete with the per-dim
@@ -1522,7 +1532,7 @@ hats:
         # block at the very bottom of the prompt (it is also declared in
         # `event_loop.max_fix_rounds` of this preset, currently `1`). Do
         # NOT hard-code the round count in the hat prompt.
-        - If safe_auto == 0 and gated_manual > 0 → publish `review.complete`, verdict: `pass_with_residuals`, payload: `plan_name`, `fix_round`, `residual_findings_count`, `findings_summary`, `task_id`, `task_key`, `step`, **`findings_count: <int>`** (gated_manual cannot be auto-fixed; escalate to manager)
+        - If safe_auto == 0 and gated_manual > 0 → publish `review.passed`, verdict: `pass_with_residuals`, payload: `plan_name`, `findings_count: <int>`, `fix_round`, `residual_findings_count`, `findings_summary`, `task_id`, `task_key`, `step`, **`skip_reason: "dimensions_complete"`** (gated_manual cannot be auto-fixed; manager escalation is handled by plan-gate downstream — `review.complete` mirror is owned by plan-gate, NOT this hat)
         - If safe_auto == 0 and gated_manual == 0 → publish `review.passed`, payload: `plan_name`, `findings_count: 0`, `changed_lines`, `task_id`, `task_key`, `step`, **`skip_reason: "dimensions_complete"`**
       - `verdict`: `pass` (0 findings) | `pass_with_residuals` (gated_manual unresolved, non-blocking) | `fail` (P0 unresolved or fix exhausted)
 
@@ -1725,7 +1735,14 @@ hats:
     # whitelisted routes for `fix.exhausted` (also consumed by
     # `debug-resolver`) and `debug.exhausted` (also consumed by `shipper`).
     trigger_multi_consumer_topics: ["fix.exhausted", "debug.exhausted"]
-    publishes: ["queue.advance", "work.ready", "plan.complete", "plan.blocked"]
+    # 2026-06-24 plan U1: plan-gate now OWNS `review.complete` as
+    # the mirror publisher. After consuming `review.passed` /
+    # `review.failed` from review-synthesizer, plan-gate forwards
+    # `review.complete` so downstream observability (loop_state
+    # `review_complete_seen_for_step` tracker) sees the canonical
+    # pair. The synthesizer can no longer emit `review.complete`
+    # directly — closing the `review_terminal_drift` path.
+    publishes: ["queue.advance", "work.ready", "plan.complete", "plan.blocked", "review.complete"]
     default_publishes: "plan.blocked"
     terminal_events: ["queue.advance", "plan.complete", "plan.blocked"]
     instructions: |
@@ -1829,6 +1846,21 @@ hats:
       ```
 
       ### Decision Logic
+      0. **Review Terminal Mirror (2026-06-24 plan U1 — required first step)**:
+         When triggered by `review.passed` or `review.failed` (NOT by
+         `review.complete` itself — that path is closed at the
+         topic-deny rules level for plan-gate), FIRST emit
+         `review.complete` as a mirror event before any routing
+         decision:
+         - `review.complete` payload mirrors the source payload:
+           `plan_name`, `task_id`, `task_key`, `step`, `verdict`,
+           `findings_count`, `fix_round`
+         - The mirror is published IN THE SAME iteration as the
+           routing decision below (queue.advance / plan.complete /
+           plan.blocked).
+         - This mirrors the canonical pass/fail terminal so the
+           runtime drift detector sees the pair, without granting
+           plan-gate any verdict-mutation authority.
       1. If `verdict` is `fail` → publish `plan.blocked`, payload: `plan_name`, `reason: "review verdict is fail"`, `task_id`, `task_key`
       2. Reconcile current step against `plan.md` and `progress.md`:
          - If state mismatch (event/task/progress disagree) → publish `plan.blocked`, payload: `plan_name`, `reason: "state mismatch"`, `task_id`, `task_key`
@@ -1944,12 +1976,19 @@ hats:
 
       ### Event Publishing
       On `plan.complete`:
-      - Publish `REVIEW_COMPLETE` with payload:
-        - `plan_name`: string
-        - `verdict`: "pass" | "pass_with_residuals" | "fail"
-        - `final_findings_count`: int
-        - `pass_or_fail`: "pass" | "fail"
-        - `residual_findings_summary`: string
+      - Read `plan.complete.verdict` and `final_findings_count` from the trigger payload.
+      - **2026-06-24 plan U2 — verdict promotion threshold**:
+        - Read `max_residuals` from the `## RUNTIME CONFIG` block (operator-overridable in `ralph.yml`).
+        - If `verdict == "pass_with_residuals"` AND `final_findings_count <= max_residuals`:
+          Publish `REVIEW_COMPLETE` with:
+            - `verdict: "pass"`  (升级：残余在阈值内视为 pass)
+            - `pass_or_fail: "pass"`
+            - `final_findings_count`, `residual_findings_summary`: pass through unchanged
+        - Else:
+          Publish `REVIEW_COMPLETE` with:
+            - `verdict`: original (`pass` / `pass_with_residuals` / `fail`)
+            - `pass_or_fail`: derived from verdict (`pass` for `pass` / `pass_with_residuals`; `fail` for `fail`)
+            - `final_findings_count`, `residual_findings_summary`: pass through unchanged
 
       On `plan.blocked` or `debug.exhausted`:
       - Publish `REVIEW_COMPLETE` with `pass_or_fail: "fail"` and `verdict: "fail"`.

@@ -1321,9 +1321,26 @@ impl LoopState {
     /// the canonical pass terminal, which is the
     /// `ce-executor-serial-primary-20260623-152241` failure mode.
     ///
+    /// **2026-06-24 plan U1 — KTD-RTC exemption awareness**:
+    /// when `review.complete` is published by a hat in
+    /// `exempt_consumers` (e.g. `plan-gate` mirroring the canonical
+    /// `review.passed`/`review.failed` after consuming it), drift
+    /// detection is suppressed — the mirror is structurally
+    /// guaranteed to follow a real pass/fail in the same step
+    /// because the owner is a dual-subscribe consumer. Without this,
+    /// the exemption list (`review_terminal_coherence_exempt_consumers`)
+    /// would only silence the lint layer but the runtime drift gate
+    /// would still fire — the `ralph-e2e primary-20260624-032505`
+    /// failure mode that this fix closes.
+    ///
     /// The flag is per-step: a new `work.ready` admission calls
     /// [`Self::reset_review_terminal_track`] and clears both.
-    pub fn record_review_terminal_observation(&mut self, topic: &str) -> bool {
+    pub fn record_review_terminal_observation(
+        &mut self,
+        topic: &str,
+        source_hat: Option<&str>,
+        exempt_consumers: &[String],
+    ) -> bool {
         match topic {
             "review.passed" => {
                 self.review_passed_seen_for_step = true;
@@ -1331,6 +1348,17 @@ impl LoopState {
             }
             "review.complete" => {
                 self.review_complete_seen_for_step = true;
+                // 2026-06-24 plan U1: KTD-RTC mirror exemption.
+                // `plan-gate` (and any other dual-subscribe consumer
+                // in the exemption list) publishes `review.complete`
+                // as a mirror after consuming `review.passed` /
+                // `review.failed`. The pair is structurally
+                // guaranteed; the drift detector should NOT flag it.
+                if let Some(hat) = source_hat {
+                    if exempt_consumers.iter().any(|h| h == hat) {
+                        return false;
+                    }
+                }
                 if !self.review_passed_seen_for_step {
                     return true;
                 }
@@ -1658,8 +1686,9 @@ mod tests {
     #[test]
     fn review_terminal_passed_then_complete_is_clean() {
         let mut state = LoopState::new();
-        assert!(!state.record_review_terminal_observation("review.passed"));
-        assert!(!state.record_review_terminal_observation("review.complete"));
+        let no_exempt: Vec<String> = vec![];
+        assert!(!state.record_review_terminal_observation("review.passed", None, &no_exempt));
+        assert!(!state.record_review_terminal_observation("review.complete", None, &no_exempt));
     }
 
     /// Drift sequence: review.complete fires WITHOUT a prior
@@ -1668,8 +1697,9 @@ mod tests {
     #[test]
     fn review_terminal_complete_without_passed_is_drift() {
         let mut state = LoopState::new();
+        let no_exempt: Vec<String> = vec![];
         assert!(
-            state.record_review_terminal_observation("review.complete"),
+            state.record_review_terminal_observation("review.complete", None, &no_exempt),
             "review.complete without review.passed must report drift"
         );
     }
@@ -1680,25 +1710,27 @@ mod tests {
     #[test]
     fn review_terminal_reset_clears_per_step_flags() {
         let mut state = LoopState::new();
-        state.record_review_terminal_observation("review.passed");
-        state.record_review_terminal_observation("review.complete");
+        let no_exempt: Vec<String> = vec![];
+        state.record_review_terminal_observation("review.passed", None, &no_exempt);
+        state.record_review_terminal_observation("review.complete", None, &no_exempt);
         // Step 1: both observed → no drift.
         state.reset_review_terminal_track();
         // Step 2: review.complete without prior review.passed →
         // drift detected again.
-        assert!(state.record_review_terminal_observation("review.complete"));
+        assert!(state.record_review_terminal_observation("review.complete", None, &no_exempt));
     }
 
     /// Unrelated topics must not affect the per-step tracker.
     #[test]
     fn review_terminal_unrelated_topics_do_not_drift() {
         let mut state = LoopState::new();
-        assert!(!state.record_review_terminal_observation("work.done"));
-        assert!(!state.record_review_terminal_observation("plan.blocked"));
-        assert!(!state.record_review_terminal_observation("review.dimension.done"));
+        let no_exempt: Vec<String> = vec![];
+        assert!(!state.record_review_terminal_observation("work.done", None, &no_exempt));
+        assert!(!state.record_review_terminal_observation("plan.blocked", None, &no_exempt));
+        assert!(!state.record_review_terminal_observation("review.dimension.done", None, &no_exempt));
         // And the legitimate pass → complete path is still clean.
-        assert!(!state.record_review_terminal_observation("review.passed"));
-        assert!(!state.record_review_terminal_observation("review.complete"));
+        assert!(!state.record_review_terminal_observation("review.passed", None, &no_exempt));
+        assert!(!state.record_review_terminal_observation("review.complete", None, &no_exempt));
     }
 
     /// Mechanism review 2026-06-24 (P0 regression): without an
@@ -1715,9 +1747,10 @@ mod tests {
     #[test]
     fn review_terminal_must_be_reset_between_steps() {
         let mut state = LoopState::new();
+        let no_exempt: Vec<String> = vec![];
         // Step 1: legitimate pass → complete. No drift.
-        state.record_review_terminal_observation("review.passed");
-        assert!(!state.record_review_terminal_observation("review.complete"));
+        state.record_review_terminal_observation("review.passed", None, &no_exempt);
+        assert!(!state.record_review_terminal_observation("review.complete", None, &no_exempt));
         // Step boundary: production code calls
         // `reset_review_terminal_track` from the step-close
         // branch (see `event_loop/mod.rs` queue.advance handler).
@@ -1731,8 +1764,34 @@ mod tests {
         // `review.passed` must again report drift, proving the
         // reset actually clears the per-step state.
         assert!(
-            state.record_review_terminal_observation("review.complete"),
+            state.record_review_terminal_observation("review.complete", None, &no_exempt),
             "after reset, review.complete without review.passed must report drift"
+        );
+    }
+
+    /// 2026-06-24 plan U1 — KTD-RTC mirror exemption. When
+    /// `review.complete` is published by a hat listed in the
+    /// exemption list (e.g. `plan-gate` mirroring the canonical
+    /// `review.passed` after consuming it), drift detection is
+    /// suppressed even if `review.passed` was not directly
+    /// observed. This pins the invariant that the exemption list
+    /// is honored at the runtime drift gate, not just at the
+    /// preset lint layer.
+    #[test]
+    fn review_terminal_complete_from_exempt_consumer_is_not_drift() {
+        let mut state = LoopState::new();
+        let exempt = vec!["plan-gate".to_string()];
+        // plan-gate publishes review.complete without prior review.passed
+        // (because the source hat was the previous iteration's
+        // review-synthesizer and we observed via the mirror only).
+        assert!(
+            !state.record_review_terminal_observation("review.complete", Some("plan-gate"), &exempt),
+            "review.complete from an exempt consumer must NOT report drift"
+        );
+        // But a non-exempt hat still gets drift-detected.
+        assert!(
+            state.record_review_terminal_observation("review.complete", Some("review-synthesizer"), &exempt),
+            "review.complete from a non-exempt consumer without prior review.passed MUST report drift"
         );
     }
 

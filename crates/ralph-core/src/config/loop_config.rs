@@ -88,6 +88,18 @@ fn default_max_fix_rounds() -> u32 {
     3
 }
 
+/// 2026-06-24 plan U2: threshold below which
+/// `review.complete.verdict == "pass_with_residuals"` is upgraded
+/// to `pass` by the shipper when translating to `REVIEW_COMPLETE`.
+/// Default: 8 (matches the ralph-e2e `primary-20260624-032505`
+/// case where 8 residual findings, 2 P0 + 6 P1 + 1 P2, was
+/// structurally pass-with-residuals rather than fail). Operators
+/// can lower it (tighter) or raise it (more lenient) per
+/// workspace; presets can declare a different value.
+fn default_max_residuals() -> u32 {
+    8
+}
+
 fn default_cancellation_promise() -> String {
     "loop.cancel".to_string()
 }
@@ -345,6 +357,18 @@ pub struct EventLoopConfig {
     /// can raise it per workspace via `ralph.yml`.
     #[serde(default = "default_max_fix_rounds")]
     pub max_fix_rounds: u32,
+
+    /// 2026-06-24 plan U2: residual-finding threshold for verdict
+    /// promotion. When the shipper hat translates
+    /// `plan.complete.verdict == "pass_with_residuals"` to
+    /// `REVIEW_COMPLETE`, it reads `final_findings_count` (or
+    /// `residual_findings_count`) and promotes the verdict to
+    /// `pass` if the count is at or below this threshold. Above
+    /// the threshold, the original `pass_with_residuals` verdict
+    /// (and `pass_or_fail: fail`) is preserved so the manager
+    /// intervenes. Default: 8 (see `default_max_residuals`).
+    #[serde(default = "default_max_residuals")]
+    pub max_residuals: u32,
 }
 
 /// 2026-06-16-001 U5: per-preset configuration for the loop-level
@@ -464,6 +488,10 @@ impl Default for EventLoopConfig {
             // (e.g. ce-executor-serial → 1) and operators may
             // override via YAML.
             max_fix_rounds: default_max_fix_rounds(),
+            // 2026-06-24 plan U2: max_residuals default 8.
+            // Presets (e.g. ce-executor-serial → 8) and operators
+            // may override via YAML.
+            max_residuals: default_max_residuals(),
             // 2026-06-23-004 plan U1 KTD-RTC: review terminal
             // coherence exemption list. Default empty (strict).
             review_terminal_coherence_exempt_consumers: None,

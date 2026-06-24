@@ -748,6 +748,14 @@ const PRESET_OPT_IN_WHEN_OPERATOR_OMITS: &[&str] = &[
     // when the operator's ralph.yml omits the key. Operators
     // can raise it per-workspace.
     "max_fix_rounds",
+    // 2026-06-24 plan U2: max_residuals is opt-in so the preset
+    // value (8 for ce-executor-serial) is silently applied
+    // when the operator's ralph.yml omits the key. Without this
+    // entry, the shipper hat prompt gets the framework default
+    // (8) but operator overrides would silently overwrite it
+    // because the merge-hats-overlay strip sees the key as
+    // present.
+    "max_residuals",
     // 2026-06-24: review_terminal_coherence_exempt_consumers is opt-in
     // so the preset's `plan-gate` dual-subscribe exemption survives the
     // operator-omits-this-key path. Without this entry, KTD-RTC

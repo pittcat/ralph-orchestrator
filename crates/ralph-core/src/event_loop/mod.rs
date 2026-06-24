@@ -526,15 +526,25 @@ pub struct RecoverableExhaustion {
 /// override it in `ralph.yml`, and lets the hat prompt read the
 /// actual value rather than the literal variable name.
 ///
+/// 2026-06-24 plan U2: also appends `max_residuals` so the shipper
+/// hat can read the verdict-promotion threshold without depending
+/// on hat-side hardcoding.
+///
 /// Appended AFTER `### GUARDRAILS` so the hat's own instructions
 /// remain authoritative for workflow order. Block is always emitted
 /// (even with default 3) so the hat learns where to look.
-pub(crate) fn append_runtime_config_block(base_prompt: String, max_fix_rounds: u32) -> String {
+pub(crate) fn append_runtime_config_block(
+    base_prompt: String,
+    max_fix_rounds: u32,
+    max_residuals: u32,
+) -> String {
     format!(
         "{base_prompt}\n\n## RUNTIME CONFIG\n\
          The following values are resolved at loop start and apply to this iteration:\n\
-         - max_fix_rounds: {n}\n",
+         - max_fix_rounds: {n}\n\
+         - max_residuals: {r}\n",
         n = max_fix_rounds,
+        r = max_residuals,
     )
 }
 
@@ -3577,7 +3587,11 @@ impl EventLoop {
             // and lives at the END of the hat prompt so the hat's own
             // workflow order (in `### GUARDRAILS`) stays authoritative.
             let base_prompt =
-                append_runtime_config_block(base_prompt, self.config.event_loop.max_fix_rounds);
+                append_runtime_config_block(
+                    base_prompt,
+                    self.config.event_loop.max_fix_rounds,
+                    self.config.event_loop.max_residuals,
+                );
 
             // Inject the cached `human.guidance` text as a `## ROBOT GUIDANCE`
             // block so isolated hats (whose `build_custom_hat` template does
@@ -3732,7 +3746,11 @@ impl EventLoop {
         // read the runtime-resolved `max_fix_rounds`. Appended BEFORE
         // `inject_phase_into_prompt` so the phase block (if any) sits
         // just above RUNTIME CONFIG at the tail of the prompt.
-        let base = append_runtime_config_block(base, self.config.event_loop.max_fix_rounds);
+        let base = append_runtime_config_block(
+            base,
+            self.config.event_loop.max_fix_rounds,
+            self.config.event_loop.max_residuals,
+        );
         let with_phase = self.inject_phase_into_prompt(base);
         let with_diagnosis = self.apply_runtime_diagnosis_prompt(with_phase, hat_id);
         // R5 (2026-06-17-005 fix plan): the
@@ -9473,9 +9491,27 @@ impl EventLoop {
             // net for presets that have not yet been migrated.
             if event.topic.as_str() == "review.passed" || event.topic.as_str() == "review.complete"
             {
-                let drift = self
-                    .state
-                    .record_review_terminal_observation(event.topic.as_str());
+                // 2026-06-24 plan U1: pass KTD-RTC exemption list so
+                // mirror publishers (e.g. `plan-gate` forwarding
+                // `review.complete` after consuming `review.passed`)
+                // are exempt from drift detection.
+                let exempt_consumers: Vec<String> = self
+                    .config
+                    .event_loop
+                    .review_terminal_coherence_exempt_consumers
+                    .clone()
+                    .unwrap_or_default();
+                let source_hat_owned: Option<String> = event
+                    .source
+                    .as_ref()
+                    .map(|h| h.to_string());
+                let source_hat_str_for_drift: Option<&str> =
+                    source_hat_owned.as_deref();
+                let drift = self.state.record_review_terminal_observation(
+                    event.topic.as_str(),
+                    source_hat_str_for_drift,
+                    &exempt_consumers,
+                );
                 if drift {
                     warn!(
                         topic = %event.topic,
