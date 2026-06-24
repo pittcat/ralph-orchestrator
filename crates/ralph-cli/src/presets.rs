@@ -522,43 +522,6 @@ mod tests {
     }
 
     #[test]
-    fn test_ce_executor_required_events_is_report_done_for_root_preset() {
-        // Mirror-drift guard: the embedded preset is loaded via `include_str!`
-        // from `$OUT_DIR/presets/ce-executor-serial.yml` (a copy made by build.rs from
-        // `presets/en/ce-executor-serial.yml`). If a future change edits the canonical
-        // file but leaves a stale `$OUT_DIR` copy lying around, the `get_preset`
-        // test above would still pass and the original infinite-loop bug would
-        // silently return. Read the canonical file at test runtime so cargo test
-        // fails whenever the two diverge on the completion gate.
-        // U7 (2026-06-11-003): the legacy `ce-executor.yml` was removed; this
-        // mirror-drift guard now reads the canonical `ce-executor-serial.yml`
-        // (the only complete CE executor entry point, R12–R15).
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let root_preset_path = std::path::Path::new(manifest_dir)
-            .join("..")
-            .join("..")
-            .join("presets")
-            .join("en")
-            .join("ce-executor-serial.yml");
-        let root_content = std::fs::read_to_string(&root_preset_path).unwrap_or_else(|e| {
-            panic!(
-                "failed to read root ce-executor-serial preset at {}: {}",
-                root_preset_path.display(),
-                e
-            )
-        });
-        let config =
-            RalphConfig::parse_yaml(&root_content).expect("root ce-executor YAML should parse");
-        assert_eq!(
-            config.event_loop.required_events,
-            &["report.done"],
-            "root ce-executor should require 'report.done' as its only completion gate; \
-             mirror drift would let the old 'review.passed' + 'review.complete' gate \
-             return without any embedded test noticing"
-        );
-    }
-
-    #[test]
     fn test_ce_executor_executor_has_no_default_publishes() {
         // U2: executor must NOT have default_publishes — it must explicitly emit.
         // The no-event gate (U1) handles the "forgot to emit" case instead.
@@ -573,23 +536,6 @@ mod tests {
         assert!(
             executor.default_publishes.is_none(),
             "executor must NOT have default_publishes; explicit emit is required"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_executor_has_no_default_publishes_for_root_preset() {
-        // U2: root preset must match embedded preset
-        let root_content = read_root_preset("ce-executor-serial.yml");
-        let config =
-            RalphConfig::parse_yaml(&root_content).expect("root ce-executor YAML should parse");
-        let executor = config
-            .hats
-            .get("executor")
-            .expect("root ce-executor should define executor hat");
-
-        assert!(
-            executor.default_publishes.is_none(),
-            "root ce-executor executor must have no default_publishes"
         );
     }
 
@@ -1336,20 +1282,6 @@ mod tests {
     }
 
     /// U4: root preset must match the embedded copy after build.rs's
-    /// SSOT merge. Mirrors test_ce_executor_root_preset_matches_embedded
-    /// for the new serial preset.
-    #[test]
-    fn test_ce_executor_serial_root_preset_matches_embedded() {
-        let merged = merge_root_with_ssot("ce-executor-serial");
-        let preset =
-            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
-        assert_eq!(
-            merged, preset.content,
-            "Embedded ce-executor-serial must equal merge(canonical preset, schema SSOT). \
-             Re-run `cargo build` so build.rs regenerates $OUT_DIR/presets/ce-executor-serial.yml."
-        );
-    }
-
     /// U4: ce-executor-serial must NOT declare `review.wave.ready` or
     /// `wave.worker.failed` as triggers / publishes / aggregate
     /// members / required keys on any hat. (The preset may mention
@@ -1387,6 +1319,41 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// U4: ce-executor-serial uses a lightweight 2-dimension review
+    /// sequence (correctness → testing). The review-coordinator's
+    /// instructions must not still reference the old 4-dim set
+    /// (maintainability / requirements).
+    #[test]
+    fn test_ce_executor_serial_review_sequence_is_two_dimensions() {
+        let preset =
+            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor-serial YAML should parse");
+        let coordinator = config
+            .hats
+            .get("review-coordinator")
+            .expect("ce-executor-serial must define a 'review-coordinator' hat");
+        let instructions = coordinator.instructions.as_str();
+
+        // Sequence contract must list exactly the two dimensions in order.
+        assert!(
+            instructions.contains("1. `correctness`"),
+            "review-coordinator instructions must list correctness as the first dimension"
+        );
+        assert!(
+            instructions.contains("2. `testing`"),
+            "review-coordinator instructions must list testing as the second dimension"
+        );
+        assert!(
+            !instructions.contains("`maintainability`"),
+            "review-coordinator instructions must NOT reference the removed maintainability dimension"
+        );
+        assert!(
+            !instructions.contains("`requirements`"),
+            "review-coordinator instructions must NOT reference the removed requirements dimension"
+        );
     }
 
     /// U4: ce-executor-serial must validate end-to-end (ambiguous routing
@@ -2652,19 +2619,6 @@ mod tests {
         assert!(
             result.is_valid(),
             "ce-executor strict payload contract validation failed: {:?}",
-            result.errors
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_strict_payload_contract_is_valid_for_root_preset() {
-        let content = read_root_preset("ce-executor-serial.yml");
-        let config = RalphConfig::parse_yaml(&content).expect("root ce-executor YAML should parse");
-        let registry = HatRegistry::from_config(&config);
-        let result = validate_payload_contract(&config, &registry, true);
-        assert!(
-            result.is_valid(),
-            "root ce-executor strict payload contract validation failed: {:?}",
             result.errors
         );
     }

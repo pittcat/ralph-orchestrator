@@ -2,10 +2,10 @@
 # Pattern: Plan → Execute → Serial Review → Auto-Fix → Debug Resolver → Fix Plan → Review → Ship → Report
 #
 # Same 10-hat topology as ce-executor-serial, but the review stage is
-# STRICTLY SERIAL: review-coordinator walks a fixed 4-dimension sequence
-# (correctness → testing → maintainability → requirements) one dimension
-# at a time, so dimension-reviewer runs as a single instance per
-# activation (no `concurrency`, no wave dispatcher, no `wave_id`).
+# STRICTLY SERIAL and LIGHTWEIGHT: review-coordinator walks a fixed
+# 2-dimension sequence (correctness → testing) one dimension at a time,
+# so dimension-reviewer runs as a single instance per activation
+# (no `concurrency`, no wave dispatcher, no `wave_id`).
 #
 # 10 Hats:
 # - Coordinator: Parses plan files, assesses complexity, creates working directory and runtime tasks
@@ -23,15 +23,13 @@
 #   ralph run -H builtin:ce-executor-serial -p "docs/plans/my-plan.md"
 #
 # Serial Review Architecture:
-#   work.done → review-coordinator → review-sequence.json (init 4 dims)
+#   work.done → review-coordinator → review-sequence.json (init 2 dims)
 #     → review.dimension.ready (c) → dimension-reviewer → review.dimension.done (c)
 #     → review.dimension.ready (t) → dimension-reviewer → review.dimension.done (t)
-#     → review.dimension.ready (m) → dimension-reviewer → review.dimension.done (m)
-#     → review.dimension.ready (r) → dimension-reviewer → review.dimension.done (r)
 #     → review-coordinator → review.dimensions.complete
 #     → review-synthesizer → review.passed/failed/complete
 #     → plan-gate → queue.advance (more steps) OR plan.complete (all done)
-#   review.failed → Fixer (≤3 safe_auto rounds) → fix.applied → review-coordinator (re-init sequence)
+#   review.failed → Fixer (≤max_fix_rounds safe_auto rounds) → fix.applied → review-coordinator (re-init 2-dim sequence)
 #   Fixer → fix.exhausted → debug-resolver → fix.plan.ready → Executor → work.done → review-coordinator
 #   debug-resolver → debug.exhausted → Shipper → REVIEW_COMPLETE → Reporter → LOOP_COMPLETE
 #   plan-gate → plan.complete / plan.blocked → Shipper → REVIEW_COMPLETE → Reporter → LOOP_COMPLETE
@@ -43,7 +41,7 @@
 #   Walking the sequence one dimension per turn is deterministic and
 #   fits the isolated single-business-event boundary by construction.
 #   Trade-off: wall time scales linearly with the number of dimensions
-#   (4 dims × 1800s timeout = up to 2h per step).
+#   (2 dims × 1800s timeout = up to 1h per step).
 
 topic_format_whitelist:
   - LOOP_COMPLETE
@@ -816,7 +814,7 @@ hats:
 
   review-coordinator:
     name: "🔍 Review Coordinator (Serial)"
-    description: "Owns the review-sequence.json state machine. Walks a fixed 4-dimension sequence (correctness → testing → maintainability → requirements), one dimension per turn, until all dimensions reach a terminal status; then emits review.dimensions.complete."
+    description: "Owns the review-sequence.json state machine. Walks a fixed 2-dimension sequence (correctness → testing), one dimension per turn, until all dimensions reach a terminal status; then emits review.dimensions.complete."
     # Serial triggers: work.done / fix.applied initialize the sequence;
     # each per-dimension completion re-enters the coordinator so it can
     # either kick the next dimension or close the sequence.
@@ -843,7 +841,7 @@ hats:
             must_emit_any_of: ["review.dimension.ready", "review.dimensions.complete"]
       - on_trigger: "fix.applied"
         # U3 (2026-06-18-004 plan, R1, KTD3): after `fix.applied`
-        # we MUST walk the 4-dim sequence again via
+        # we MUST walk the 2-dim sequence again via
         # `review.dimension.ready`. The previous
         # `review.dimensions.complete` shortcut allowed the
         # perky-maple P2-5 spiral where the agent emitted the
@@ -871,7 +869,7 @@ hats:
 
       ### U3 (2026-06-18-004 plan) — fix.applied → RE-WALK, do NOT shortcut
       When your trigger is `fix.applied(fix_round=N)` you MUST re-walk
-      the full 4-dimension sequence starting from `correctness`,
+      the full 2-dimension sequence starting from `correctness`,
       regardless of whether you have just walked it. Concretely:
         1. Update `fix_round` in `review-sequence.json` to `N+1`.
         2. Reset the per-dimension terminal status fields.
@@ -888,11 +886,9 @@ hats:
       perky-maple P2-5 fix→re-review spiral.
 
       ### Sequence contract (HARD RULE)
-      The sequence is **always** 4 dimensions in this fixed order:
+      The sequence is **always** 2 dimensions in this fixed order:
       1. `correctness`
       2. `testing`
-      3. `maintainability`
-      4. `requirements`
 
       No adaptive dimension selection. No conditional extras. The
       parallel preset's `security` / `performance` / `api-contract` /
@@ -909,10 +905,8 @@ hats:
         "step": "<string>",
         "fix_round": 0,
         "dimensions": [
-          {"dimension": "correctness",     "status": "pending", "findings_file": null, "reason": null},
-          {"dimension": "testing",         "status": "pending", "findings_file": null, "reason": null},
-          {"dimension": "maintainability", "status": "pending", "findings_file": null, "reason": null},
-          {"dimension": "requirements",    "status": "pending", "findings_file": null, "reason": null}
+          {"dimension": "correctness", "status": "pending", "findings_file": null, "reason": null},
+          {"dimension": "testing",     "status": "pending", "findings_file": null, "reason": null}
         ]
       }
       ```
@@ -925,7 +919,7 @@ hats:
       **Corruption recovery (HARD RULE)**: if `review-sequence.json`
       fails JSON parse, or the file is missing, treat the sequence as
       empty. Initialize a fresh sequence for this plan / task / step
-      using the same 4-dim contract. Do NOT emit `review.dimension.ready`
+      using the same 2-dim contract. Do NOT emit `review.dimension.ready`
       against a corrupt sequence — start a new one and document the
       recovery in `decisions.md`.
 
@@ -994,16 +988,15 @@ hats:
       - From branch name, commit messages (`git log --oneline ${BASE}..HEAD`), plan.md
       - Extract 2-3 sentence intent summary
 
-      ### Plan Requirements Verification
+      ### Plan Context
       - Read `plan.md` and `context.md` for R-IDs / Implementation Units
-      - Note which requirements are met/not-met based on diff analysis
-      - Include requirements completeness data in the first per-dimension payload
+      - Note scope boundaries and acceptance criteria for the diff under review
 
       ### Walk the sequence (one dimension per turn)
       For each activation:
       1. Load `review-sequence.json`. If it does not exist for the
          current `(plan_name, task_id, step)`, initialize a fresh
-         4-dim sequence (status: pending for all 4) and write it
+         2-dim sequence (status: pending for all 2) and write it
          atomically.
       2. Walk the sequence in order. Find the first `status: "pending"`
          dimension.
@@ -1012,7 +1005,7 @@ hats:
          sequence closure — covers BOTH the normal post-walk close
          AND the 2026-06-17-004 plan U1 empty-diff fast path):
          - The `dimensions` array carries one entry per sequence row,
-           in the original 4-dim order. Each entry has `dimension`
+           in the original 2-dim order. Each entry has `dimension`
            (string) and `status` (`"done"` or `"failed"`).
          - For a normal close: every entry with `status: "done"`
            carries `findings_file` (string); every entry with
@@ -1040,7 +1033,7 @@ hats:
            - `depth`: `"standard"` for every dimension in the serial
              path. The wave preset's `quick`/`standard`/`deep` for
              `adversarial` does not apply because `adversarial` is
-             not in the 4-dim set.
+             not in the 2-dim set.
            - `diff_base`: string (resolved diff base from Scope Detection)
            - `intent_summary`: string (2-3 sentence intent)
            - `changed_files`: string[] (changed file paths)
@@ -1073,10 +1066,8 @@ hats:
            dimension) and continue the walk.
 
       ### Per-dimension focus strings (copy-pasteable)
-      - `correctness`     → `"Logic correctness, edge cases, error propagation, state machine consistency"`
-      - `testing`         → `"Test coverage gaps, brittle assertions, behavioral changes without test additions"`
-      - `maintainability` → `"Structural quality, dead code, complexity, coupling, file size"`
-      - `requirements`    → `"R-ID fulfillment, deferred-question coverage, scope boundary, behavior fidelity"`
+      - `correctness` → `"Logic correctness, edge cases, error propagation, state machine consistency"`
+      - `testing`     → `"Test coverage gaps, brittle assertions, behavioral changes without test additions"`
 
       ### Per-dimension emission
       - Emit `review.dimension.ready` via `ralph emit`:
@@ -1103,14 +1094,12 @@ hats:
           "step": "<step>",
           "fix_round": "<0 for first round; increment after each fixer.applied accept>",
           "dimensions": [
-            {"dimension": "correctness",     "status": "done",   "findings_file": ".agents/scratchpad/ce-executor/<plan>/findings-correctness-<task>.json"},
-            {"dimension": "testing",         "status": "done",   "findings_file": ".agents/scratchpad/ce-executor/<plan>/findings-testing-<task>.json"},
-            {"dimension": "maintainability", "status": "failed", "reason": "timeout: worker hit dimension-reviewer.timeout without emitting review.dimension.done"},
-            {"dimension": "requirements",    "status": "done",   "findings_file": ".agents/scratchpad/ce-executor/<plan>/findings-requirements-<task>.json"}
+            {"dimension": "correctness", "status": "done", "findings_file": ".agents/scratchpad/ce-executor/<plan>/findings-correctness-<task>.json"},
+            {"dimension": "testing",     "status": "done", "findings_file": ".agents/scratchpad/ce-executor/<plan>/findings-testing-<task>.json"}
           ]
         }' --source dimension-reviewer
         ```
-      - `fix_round` MUST match the value carried by `review.dimension.ready` payloads in the same sequence (it stays constant across the 4-dim walk). After `fix.applied(fix_round=N)` is accepted, the next round MUST use `fix_round: N+1` and emit a fresh `review.dimension.ready` first — NEVER re-emit `review.dimensions.complete` with the same `fix_round` (U5 dedup rejects it).
+      - `fix_round` MUST match the value carried by `review.dimension.ready` payloads in the same sequence (it stays constant across the 2-dim walk). After `fix.applied(fix_round=N)` is accepted, the next round MUST use `fix_round: N+1` and emit a fresh `review.dimension.ready` first — NEVER re-emit `review.dimensions.complete` with the same `fix_round` (U5 dedup rejects it).
       - Do NOT use `ralph wave emit` — there is no wave in this preset.
       - MUST NOT append or write to `.ralph/events.jsonl` directly; use `ralph emit` only. Direct shell writes bypass the schema precheck and the loop will reject the event with `payload_contract_violation` (likely terminating the loop with `not_retriable`).
       - **HARD RULE — never assume `ralph emit` succeeded.** This preset enables strict policy precheck (`event_policy.require_policy_check_for_cli_emit: true`, `allow_unsafe_cli_emit: false`), so an emit with missing required fields is rejected BEFORE the event is written. If the CLI exits non-zero, the event did NOT happen — no record was appended to jsonl. Always re-run with `--output json` and parse the response to fix the payload. Never proceed as if the event succeeded; the runner will hard-gate you on `missing_event_gate` instead.
@@ -1133,7 +1122,7 @@ hats:
         update `.agents/scratchpad/<plan>/progress.md` with
         `Active Sequence: dim=<dim> (N/M)` so operators
         and downstream hats can see the in-flight dimension.
-        Use the sequence index (1-based) and total (always 4).
+        Use the sequence index (1-based) and total (always 2).
       - After the synthesizer fires (`review.passed` /
         `review.failed` / `plan.blocked`), clear the line back
         to `Active Sequence: (none)` in the same progress.md edit.
@@ -1144,7 +1133,7 @@ hats:
       - MUST decide walk vs pass per the HARD RULE above (commit_count / changed_lines / untracked / diff state), NOT based on intent or trust in the executor
       - MUST NOT emit `review.passed` from this hat — `review.passed` is owned exclusively by `review-synthesizer`. The empty-diff fast path is now `review.dimensions.complete` (with all rows `status: done`, `findings_file: null`); the synthesizer then emits `review.passed(skip_reason=dimensions_complete)`. Any attempt to call `ralph emit review.passed --hat review-coordinator` is rejected by the CLI precheck (`isolated_scope_violation`) and the topic-deny rule.
       - MUST NOT emit `review.dimension.ready` for more than one dimension per turn (single-event boundary)
-      - MUST walk the sequence in the fixed order (correctness → testing → maintainability → requirements)
+      - MUST walk the sequence in the fixed order (correctness → testing)
       - MUST write `review-sequence.json` atomically (temp + rename) — no Read+Write race window
       - MUST accept a minimal `review.dimension.failed` payload (only `dimension` + `reason` required by contract) and continue the walk — do NOT block on missing fields
 
@@ -1201,10 +1190,9 @@ hats:
       activation. The `isolated mode: extra business event dropped`
       rule in `event_loop/mod.rs:7552` is the runtime guard; if
       you find yourself wanting to emit a duplicate, stop and
-      treat the request as already-satisfied. This rule is the
-      source of the perky-maple P2-2 dimension-reviewer double
-      emit (05:42:33 / 05:43:33 maintainability) and closes that
-      drift path.
+      treat the request as already-satisfied. This rule closes
+      the perky-maple P2-2 dimension-reviewer double-emit drift
+      path.
 
       ### Recovery Signals (2026-06-18-001 plan U3)
       When you are activated and your prompt includes a recent
@@ -1261,7 +1249,7 @@ hats:
       - Use `plan_name` from payload to resolve path `{plan_name}` below
       - Read shared diff: `.agents/scratchpad/ce-executor/{plan_name}/wave-diff.patch`
       - Read `findings.md` (existing, if any) for pre-existing issues
-      - Read `plan.md` and `context.md` (for requirements dimension)
+      - Read `plan.md` and `context.md` for plan context
 
       ### Findings Schema (every finding MUST have these fields)
       - `title`: string (short, ≤10 words)
@@ -1361,25 +1349,6 @@ hats:
       - **Behavioral changes with no test additions**: diff modifies behavior but adds/modifies no test files.
       Do NOT flag: missing tests for trivial getters/setters, test style preferences, coverage percentages, missing tests for unchanged code.
 
-      #### WAVE_DIMENSION == "maintainability"
-      Check:
-      - **Complexity moved not removed**: logic spread across more files without reducing concepts.
-      - **Premature abstraction**: interfaces with one implementor, factories for a single type.
-      - **Dead/unreachable code**: commented-out code, unused exports, unreachable branches.
-      - **Coupling**: circular dependencies, shared mutable state, imports of module internals.
-      - **File crossing 1000 lines**: P1 if pushed over 1k, P2 if already over 1k and diff adds substantial surface.
-      - **Thin wrappers**: pass-through helpers, identity abstractions adding indirection without clarity.
-      - **Type safety holes (typed langs)**: new `any`, `@ts-ignore`, unchecked casts.
-      Do NOT flag: complexity mirroring domain complexity, framework-mandated patterns, style-only preferences.
-
-      #### WAVE_DIMENSION == "requirements"
-      Check:
-      - **R-ID fulfillment**: each requirement from plan.md / context.md has corresponding implementation in diff
-      - **Deferred to Implementation**: questions listed as deferred are addressed in implementation
-      - **Scope boundaries**: no implementation outside declared scope
-      - **Behavior fidelity**: code matches the described behavior, not just the function signature
-      Unmet requirements → P1 finding, `autofix_class: manual`, `owner: downstream-resolver`
-
   review-synthesizer:
     name: "🧩 Review Synthesizer (Serial)"
     description: "Triggered by review.dimensions.complete. Reads all per-dimension findings files and the serial sequence summary, then gives the final verdict."
@@ -1456,7 +1425,7 @@ hats:
         - 50 → 75 (brings a soft finding into actionable tier)
         - 75 → 100 (strengthens an already-actionable finding)
         - 100 → 100 (ceiling, already max confidence)
-      - Note the agreement in the Dimension column (e.g., "testing, maintainability")
+      - Note the agreement in the Dimension column (e.g., "correctness, testing")
       - This is done BEFORE the confidence gate, so promoted findings survive suppression
 
       ### Severity Calibration
@@ -1473,11 +1442,10 @@ hats:
       A finding qualifies for demotion when ALL of these hold:
       - Severity is P2 or P3 (P0 and P1 always stay in primary findings)
       - `autofix_class` is `advisory` (concrete-fix findings stay in primary)
-      - ALL contributing dimensions are `testing` or `maintainability` (if any other dimension also flagged this finding, cross-reviewer corroboration is present → keep in primary)
+      - ALL contributing dimensions are `testing` (if `correctness` also flagged this finding, cross-reviewer corroboration is present → keep in primary)
 
       When a finding qualifies:
       - If `testing` dimension → append `file:line — title` to `testing_gaps`
-      - If `maintainability` dimension → append `file:line — title` to `residual_risks`
       - Remove the finding from primary findings set
       - Record demotion count for Coverage
 
@@ -1515,10 +1483,6 @@ hats:
       Files: <changed files>
       Intent: <intent summary>
       Dimensions: <dimensions reviewed>
-
-      ## Requirements Completeness
-      | R-ID | Status | Notes |
-      |------|--------|-------|
 
       ## Findings
       ### P0 — Critical
