@@ -70,19 +70,9 @@ pub(crate) fn default_core_value() -> Result<Value> {
             "workflow_contract",
             "ephemeral_isolation",
             "enforce_current_unit",
-            // 2026-06-23: max_fix_rounds is Option<u32>-typed so the
-            // default serialises to Value::Null under
-            // `event_loop.max_fix_rounds`. Without this strip, the
-            // `!contains_key` guard in `merge_hats_overlay` always
-            // sees the key as present and silently drops the preset
-            // opt-in, leaving the loop with the framework default
-            // (3 rounds) instead of the preset value (1 for
-            // ce-executor-serial).
-            "max_fix_rounds",
             // 2026-06-24 plan U2: max_residuals is u32-typed
-            // (default 8). Same rationale as `max_fix_rounds` —
-            // strip the operator-default placeholder so the
-            // preset opt-in (8 for ce-executor-serial) survives
+            // (default 8). Strip the operator-default placeholder so
+            // the preset opt-in (8 for ce-executor-serial) survives
             // `merge_hats_overlay`.
             "max_residuals",
             // 2026-06-24: review_terminal_coherence_exempt_consumers
@@ -282,8 +272,8 @@ event_loop:
     /// serialised core value, the `contains_key` check is always
     /// true, and the preset opt-in is silently dropped
     /// (perky-maple + bold-heron pattern, plus the new
-    /// `max_fix_rounds` and `review_terminal_coherence_exempt_consumers`
-    /// regressions found in 2026-06-24). This test pins the
+    /// `review_terminal_coherence_exempt_consumers`
+    /// regression found in 2026-06-24). This test pins the
     /// post-strip contract: the key is absent from the default
     /// core value, and a preset overlay correctly inserts it.
     ///
@@ -313,7 +303,6 @@ event_loop:
             "workflow_contract",
             "ephemeral_isolation",
             "enforce_current_unit",
-            "max_fix_rounds",
             "review_terminal_coherence_exempt_consumers",
         ] {
             let key_value = Value::String(key.to_string());

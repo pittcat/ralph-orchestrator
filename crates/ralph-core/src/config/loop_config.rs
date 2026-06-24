@@ -79,15 +79,6 @@ fn default_max_failures() -> u32 {
     5
 }
 
-/// 2026-06-23: max number of auto-fix rounds. Default: 3
-/// (matches the legacy "up to 3 rounds" convention in
-/// `ce-executor-serial` fixer hat comment). Operators can
-/// override per-workspace in `ralph.yml`; presets can declare
-/// a different value (e.g. `ce-executor-serial` declares 1).
-fn default_max_fix_rounds() -> u32 {
-    3
-}
-
 /// 2026-06-24 plan U2: threshold below which
 /// `review.complete.verdict == "pass_with_residuals"` is upgraded
 /// to `pass` by the shipper when translating to `REVIEW_COMPLETE`.
@@ -348,16 +339,6 @@ pub struct EventLoopConfig {
     #[serde(default)]
     pub suppress_human_guidance: bool,
 
-    /// 2026-06-23: cap on the auto-fix retry loop. When the
-    /// fixer hat reads `fix_round` from the active run-state
-    /// and `fix_round >= max_fix_rounds`, the loop routes to
-    /// `fix.exhausted` instead of re-issuing `review.failed`.
-    /// Default: 3 (see `default_max_fix_rounds`). Preset may
-    /// lower this (e.g. `ce-executor-serial` → 1); operators
-    /// can raise it per workspace via `ralph.yml`.
-    #[serde(default = "default_max_fix_rounds")]
-    pub max_fix_rounds: u32,
-
     /// 2026-06-24 plan U2: residual-finding threshold for verdict
     /// promotion. When the shipper hat translates
     /// `plan.complete.verdict == "pass_with_residuals"` to
@@ -483,11 +464,6 @@ impl Default for EventLoopConfig {
             // existing presets are unaffected. ce-executor-serial
             // opts in via YAML.
             suppress_human_guidance: false,
-            // 2026-06-23: T1 — max_fix_rounds default 3 matches
-            // the legacy "up to 3 rounds" convention. Presets
-            // (e.g. ce-executor-serial → 1) and operators may
-            // override via YAML.
-            max_fix_rounds: default_max_fix_rounds(),
             // 2026-06-24 plan U2: max_residuals default 8.
             // Presets (e.g. ce-executor-serial → 8) and operators
             // may override via YAML.
@@ -646,22 +622,7 @@ max_steward_iterations: 3
         );
     }
 
-    // 2026-06-23: T1 — `max_fix_rounds` field default and deserialization
-    #[test]
-    fn event_loop_config_default_max_fix_rounds_is_three() {
-        let cfg = EventLoopConfig::default();
-        assert_eq!(
-            cfg.max_fix_rounds, 3,
-            "default must match the legacy '3 rounds' comment"
-        );
-    }
-
-    #[test]
-    fn event_loop_config_max_fix_rounds_deserializes() {
-        let yaml = r"
-max_fix_rounds: 7
-";
-        let cfg: EventLoopConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(cfg.max_fix_rounds, 7);
-    }
+    // 2026-06-23: T1 — `max_fix_rounds` field removed in 2026-06-24
+    // (fixer hardcodes max 10 in instructions; the config field was
+    // never enforced by Rust code and contradicted the instructions).
 }

@@ -520,9 +520,9 @@ pub struct RecoverableExhaustion {
 
 /// 2026-06-23 T2: appends a `## RUNTIME CONFIG` block exposing the
 /// runtime-resolved `event_loop.*` values that the hat preset
-/// references as variables (e.g. `max_fix_rounds`) but cannot see
+/// references as variables (e.g. `max_residuals`) but cannot see
 /// through plain text. This keeps the YAML position of
-/// `max_fix_rounds` (in `event_loop:`) unchanged, lets the operator
+/// `max_residuals` (in `event_loop:`) unchanged, lets the operator
 /// override it in `ralph.yml`, and lets the hat prompt read the
 /// actual value rather than the literal variable name.
 ///
@@ -532,18 +532,15 @@ pub struct RecoverableExhaustion {
 ///
 /// Appended AFTER `### GUARDRAILS` so the hat's own instructions
 /// remain authoritative for workflow order. Block is always emitted
-/// (even with default 3) so the hat learns where to look.
+/// (even with default 8) so the hat learns where to look.
 pub(crate) fn append_runtime_config_block(
     base_prompt: String,
-    max_fix_rounds: u32,
     max_residuals: u32,
 ) -> String {
     format!(
         "{base_prompt}\n\n## RUNTIME CONFIG\n\
          The following values are resolved at loop start and apply to this iteration:\n\
-         - max_fix_rounds: {n}\n\
          - max_residuals: {r}\n",
-        n = max_fix_rounds,
         r = max_residuals,
     )
 }
@@ -3589,7 +3586,6 @@ impl EventLoop {
             let base_prompt =
                 append_runtime_config_block(
                     base_prompt,
-                    self.config.event_loop.max_fix_rounds,
                     self.config.event_loop.max_residuals,
                 );
 
@@ -3748,7 +3744,6 @@ impl EventLoop {
         // just above RUNTIME CONFIG at the tail of the prompt.
         let base = append_runtime_config_block(
             base,
-            self.config.event_loop.max_fix_rounds,
             self.config.event_loop.max_residuals,
         );
         let with_phase = self.inject_phase_into_prompt(base);

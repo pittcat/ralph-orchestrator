@@ -32,7 +32,7 @@
 #   fixer               -> fix.applied / fix.exhausted
 #   review-coordinator  -> review.dimension.ready / review.dimensions.complete
 #   dimension-reviewer  -> review.dimension.done / review.dimension.failed
-#   review-synthesizer  -> review.complete (with fix_plan)
+#   review-synthesizer  -> review.complete (with fix_plan_file)
 #   shipper             -> REVIEW_COMPLETE
 #   reporter            -> report.done / LOOP_COMPLETE
 #   progress-steward    -> task.resume / plan.blocked
@@ -190,16 +190,18 @@ schemas:
     payload: json_object
 
   # 2026-06-24 plan U2: review-synthesizer only emits `review.complete`
-  # (no `review.passed` / `review.failed` pair). The `fix_plan` field
-  # carries the P0/P1 fix plan for coordinator to create fix-unit tasks
-  # when review finds residual issues. `fix_round` is retained for
-  # dedup compatibility — the policy layer keys dedup on
-  # `{plan}::{step}::{task}::{fix_round}`.
+  # (no `review.passed` / `review.failed` pair). The `fix_plan_file`
+  # field carries the repo-relative path to a fix-plan markdown file
+  # (written by review-synthesizer to the plan's scratchpad) for the
+  # coordinator to read and create fix-unit tasks. `fix_round` is
+  # retained for dedup compatibility — the policy layer keys dedup on
+  # `{plan}::{step}::{task}::{fix_round}`. When there are no P0/P1
+  # findings, `fix_plan_file` MUST be the literal string "null".
   review.complete:
     required_fields:
       - plan_name
       - fix_round
-      - fix_plan
+      - fix_plan_file
       - verdict
       - residual_findings_count
       - findings_summary

@@ -15,7 +15,7 @@
 # - Fixer: Diagnoses and fixes test failures (merged debug-resolver: locate max 10 + fix max 10)
 # - review-coordinator: Walks fixed 2-dimension sequence (correctness → testing), one dimension per turn
 # - dimension-reviewer: Reviews a single dimension, emits review.dimension.done / review.dimension.failed
-# - review-synthesizer: Reads per-dimension findings, emits review.complete with fix_plan
+# - review-synthesizer: Reads per-dimension findings, writes fix-plan file, emits review.complete with fix_plan_file
 # - Shipper: Final validation, plan status update, final commit
 # - Reporter: Generates manager-facing completion report
 # - progress-steward: Loop-level fallback hat, wakes on loop.stalled
@@ -31,7 +31,7 @@
 #     │                                  review-coordinator → dimension-reviewer(correctness)
 #     │                                  → review-coordinator → dimension-reviewer(testing)
 #     │                                  → review-coordinator → review-synthesizer
-#     │                                  → review.complete + fix_plan
+#     │                                  → review.complete + fix_plan_file
 #     │                                  → coordinator (creates fix-unit tasks)
 #     │                                  → executor (fix-unit) → validator → ...
 #     │                                  → all fix-units done → coordinator → plan.complete
@@ -87,7 +87,6 @@ event_loop:
   required_events: ["report.done"]
   starting_event: "work.start"
   max_iterations: 50
-  max_fix_rounds: 1  # 2026-06-23: one auto-fix round; set to 3 for multi-round behavior
   # 2026-06-24 plan U2: max_residuals is the verdict-promotion
   # threshold for shipper. When translating
   # `plan.complete.verdict == "pass_with_residuals"` to
@@ -338,7 +337,7 @@ hats:
     description: "Parses plan files, creates unit tasks, advances next unit on test.passed, triggers review after all units complete."
     # 2026-06-24 plan U1: coordinator directly advances unit flow (plan-gate removed)
     # - test.passed → advance to next unit via work.ready
-    # - review.complete → parse fix_plan, create fix-unit tasks
+    # - review.complete → read fix_plan_file, create fix-unit tasks
     # - work.failed → executor could not complete the unit; emit plan.blocked
     # - all units + fix-units complete → plan.complete
     triggers: ["work.start", "task.resume", "test.passed", "review.complete", "work.failed"]
@@ -487,13 +486,15 @@ hats:
 
       ### Fix Plan Handling (review.complete trigger)
       When `review.complete` arrives, review-synthesizer has finished the overall review:
-      1. Read the `fix_plan` field from the `review.complete` payload (P0/P1 fix plan, grouped by unit)
-      2. If `fix_plan` is empty or null (no issues to fix):
+      1. Read the `fix_plan_file` field from the `review.complete` payload (repo-relative path to a fix-plan markdown file, or the literal string `"null"`)
+      2. If `fix_plan_file` is `"null"` or the file does not exist (no issues to fix):
          - Publish `plan.complete` with payload: `plan_name`, `completed_steps`, `task_id`, `task_key`, `verdict: "pass"`
          - Stop
-      3. If `fix_plan` is non-empty (issues to fix):
-         - Create a runtime task for each fix-unit, key format: `ce-executor:{plan_name}:fix-{NN}:{slug}`
-         - Publish `work.ready` for the first fix-unit with payload containing the fix-unit's `task_id`, `task_key`, `step: "fix-01"`, `plan_path`, `plan_name`, `complexity: "small"`
+      3. If `fix_plan_file` is a real path (issues to fix):
+         - Read the fix-plan file
+         - Parse the `## Implementation Units` section; extract each `### U{N}.` heading and its `**Goal:**`, `**Files:**`, `**Approach:**`, `**Execution note:**`, `**Test scenarios:**`, `**Verification:**` fields
+         - For each U-ID, create a runtime task with key format: `ce-executor:{plan_name}:fix-{NN}:{slug}` (NN matches the U-ID number; slug derived from the unit title)
+         - Publish `work.ready` for the first fix-unit (U1) with payload: `plan_path` (set to the fix-plan file path), `plan_name`, `task_id`, `task_key`, `step: "fix-01"`, `complexity: "small"`, `fix_plan_file` (carry forward so the executor knows where to read its U-ID section)
          - Stop — subsequent fix-units are advanced by the unit advancement logic after the validator's `test.passed`
       4. After all fix-units complete (on receiving the last fix-unit's `test.passed`):
          - Publish `plan.complete` with payload: `plan_name`, `completed_steps`, `task_id`, `task_key`, `verdict: "pass_with_residuals"` (or `"pass"` if no residuals)
@@ -608,12 +609,35 @@ hats:
 
       ### Read State (on every activation)
       1. Determine activation source and read payload fields:
-         - `work.ready`: read `task_id`, `task_key`, `plan_path`, `plan_name`, `step`, `complexity`.
+         - `work.ready`: read `task_id`, `task_key`, `plan_path`, `plan_name`, `step`, `complexity`. If the payload contains `fix_plan_file`, this is a fix-unit — see **Fix-Unit Execution** below.
          - `fix.exhausted`: read `plan_name`, `fix_round`, `task_id`, `task_key`, `step`, `reason`. This is the rewrite opportunity after fixer could not fix it; it is NOT a normal plan step. Read `fix-log.md` to understand what fixer already tried and avoid repeating the same fix paths.
       2. Read runtime task:
          - `ralph tools task show <task_id> --format json`
       3. Read `context.md` and `plan.md` and `progress.md`
       4. Search memories for relevant patterns
+
+      ### Fix-Unit Execution (when `work.ready` payload contains `fix_plan_file`)
+
+      When executing a fix-unit (step starts with `fix-`), the source of truth is the fix-plan markdown file, not the original plan:
+
+      1. Read the fix-plan file at the `fix_plan_file` path (repo-relative)
+      2. Locate the `### U{N}.` section matching your current fix-unit's U-ID (derive N from the `step` field: `fix-01` → U1, `fix-02` → U2, etc.)
+      3. Extract from that U-ID section:
+         - `**Goal:**` — what to accomplish
+         - `**Files:**` — repo-relative paths to modify (includes test files)
+         - `**Approach:**` — design direction and integration notes
+         - `**Execution note:**` — defaults to `TDD`; follow it
+         - `**Test scenarios:**` — the specific tests to write (RED phase input)
+         - `**Verification:**` — outcome-based completion criteria
+      4. Execute TDD against this U-ID section:
+         - **RED**: Write/update tests listed in `**Test scenarios:**` first; confirm they fail
+         - **GREEN**: Implement the minimal code per `**Approach:**` to make tests pass
+         - **REFACTOR**: Refactor while keeping tests green
+      5. Run unit tests (NOT the full suite — validator's job)
+      6. Commit the U-ID independently (see Commit Cadence)
+      7. Emit `work.done` with `plan_path` set to the fix-plan file path (NOT the original plan) so the validator can trace the fix-unit back to its source
+
+      **Do NOT read the original `plan.md` for fix-unit execution** — the fix-plan file supersedes it for the duration of the fix round. The original plan is only relevant for normal unit execution (step-01, step-02, ...).
 
       ### TDD Execution Mode (HARD RULE)
       Use TDD mode: write/update tests first, then implement code.
@@ -1317,11 +1341,12 @@ hats:
 
   review-synthesizer:
     name: "🧩 Review Synthesizer (Serial)"
-    description: "Overall review synthesizer. Reads all per-dimension findings, generates fix_plan, publishes review.complete."
+    description: "Overall review synthesizer. Reads all per-dimension findings, writes a fix-plan markdown file to scratchpad, publishes review.complete with fix_plan_file path."
     triggers: ["review.dimensions.complete"]
-    # 2026-06-24 plan U1: review-synthesizer only emits review.complete (no
-    # review.passed / review.failed). The fix_plan field carries the P0/P1
-    # fix plan; the coordinator reads it and creates fix-unit tasks.
+    # 2026-06-24 plan U2: review-synthesizer only emits review.complete (no
+    # review.passed / review.failed). The fix_plan_file field carries the
+    # repo-relative path to a fix-plan markdown file written to the plan's
+    # scratchpad; the coordinator reads it and creates fix-unit tasks.
     publishes: ["review.complete"]
     terminal_events: ["review.complete"]
     instructions: |
@@ -1329,7 +1354,7 @@ hats:
 
       You receive the review-coordinator's per-dimension summary
       (the `dimensions` array from the `review.dimensions.complete` payload).
-      Your job: merge, dedupe, calibrate, validate, then generate a fix_plan and publish review.complete.
+      Your job: merge, dedupe, calibrate, validate, then write a fix-plan file and publish review.complete.
       The input is already structured as an array of
       `{dimension, status, findings_file?, reason?}` rather than a
       stream of `review.dimension.done` events.
@@ -1464,13 +1489,76 @@ hats:
       a previous review's stale events would corrupt the count.
 
       ### Decision Logic
-      - No findings → publish `review.complete`, payload: `plan_name`, `fix_plan: null`, `task_id`, `task_key`, `findings_count: 0`, `residual_findings_count: 0`
+      - No findings → publish `review.complete`, payload: `plan_name`, `fix_plan_file: "null"`, `task_id`, `task_key`, `findings_count: 0`, `residual_findings_count: 0`, `verdict: "pass"`, `findings_summary: "no findings"`
       - Has findings:
         - Extract P0 and P1 findings (excluding pre_existing)
-        - Build `fix_plan`: fix plan grouped by unit; each entry contains `unit`, `findings` (P0/P1 list), `suggested_fix`
-        - Publish `review.complete`, payload: `plan_name`, `fix_plan`, `task_id`, `task_key`, `findings_count: <int>`, `residual_findings_count: <int>` (P2/P3 residual count)
+        - Write a fix-plan markdown file to `.agents/scratchpad/ce-executor/{plan_name}/fix-plan.md` using the **Fix-Plan File Template** below
+        - Publish `review.complete`, payload: `plan_name`, `fix_plan_file: ".agents/scratchpad/ce-executor/{plan_name}/fix-plan.md"`, `task_id`, `task_key`, `findings_count: <int>`, `residual_findings_count: <int>` (P2/P3 residual count), `verdict`, `findings_summary`
       - `verdict`: `pass` (0 findings) | `pass_with_residuals` (P2/P3 residuals) | `fail` (P0 unresolved)
-      - The coordinator reads `fix_plan` and creates fix-unit tasks; the executor applies fixes; the validator re-runs tests
+      - The coordinator reads `fix_plan_file` and creates fix-unit tasks; the executor applies fixes (TDD); the validator re-runs tests
+
+      ### Fix-Plan File Template (HARD RULE — use this exact structure)
+
+      Write the file with the Write tool to the path above. The file MUST follow this template (adapted from ce-plan skill's plan-sections.md, trimmed to fix-scenario needs). All paths MUST be repo-relative.
+
+      ```markdown
+      ---
+      title: "fix: Resolve P0/P1 findings from review"
+      type: fix
+      status: active
+      date: {YYYY-MM-DD}
+      origin: .agents/scratchpad/ce-executor/{plan_name}/findings-{dimension}-{task_id}.json
+      parent_plan: {plan_path}
+      ---
+
+      ## Summary
+
+      Resolve {N} P0/P1 findings from review. {1-2 sentence scope}.
+
+      ## Requirements
+
+      R1. {finding-derived requirement, citing finding ID, e.g. "Eliminate F-001: None branch unhandled in foo parser"}
+      R2. {next requirement}
+
+      ## Implementation Units
+
+      ### U1. {Unit title — concise, action-oriented}
+
+      **Goal:** {what this unit accomplishes}
+      **Requirements:** R1
+      **Dependencies:** — {or cite U-ID, e.g. "U1"}
+      **Files:** src/foo.rs, tests/foo_test.rs
+      **Approach:** {key decisions, data flow, integration notes — no implementation code}
+      **Execution note:** TDD — write/update tests first (RED), then implement (GREEN), then refactor (REFACTOR)
+      **Patterns to follow:** {existing code or conventions to mirror, optional}
+      **Test scenarios:**
+      - Happy path: {input → expected output}
+      - Edge case: {boundary value → expected behavior}
+      - Error path: {invalid input → expected error}
+      **Verification:** {outcome-based completion criteria, e.g. "tests/foo_test.rs::test_none_branch passes; no regressions in foo module"}
+
+      ### U2. {Next unit title}
+
+      **Goal:** ...
+      **Requirements:** R2
+      **Dependencies:** U1
+      **Files:** ...
+      **Approach:** ...
+      **Execution note:** TDD
+      **Test scenarios:**
+      - ...
+      **Verification:** ...
+      ```
+
+      ### Fix-Plan File Rules (HARD RULE)
+
+      - **Stable U-IDs**: Once assigned, never renumber. New units take the next unused number; gaps from deletions are fine.
+      - **Repo-relative paths only**: Never absolute paths in `Files`, `origin`, or `parent_plan`.
+      - **No implementation code**: No imports, method signatures, or framework syntax. Pseudo-code sketches allowed in `Approach` when they communicate design direction.
+      - **Test scenarios mandatory**: Every U-ID MUST have at least one test scenario. Non-behavioral units (pure config) use `Test expectation: none -- {reason}`.
+      - **Test file in Files**: Every behavioral U-ID MUST list its test file in `Files`.
+      - **Execution note defaults to TDD**: Omit only when the unit genuinely needs a non-TDD posture (e.g. characterization-first on legacy code).
+      - **One U-ID per fix-unit**: The coordinator creates one runtime task per U-ID; the executor executes one U-ID per fix-unit.
 
       ### Constraints
       - MUST apply Quality Gates before publishing
