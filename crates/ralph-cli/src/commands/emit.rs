@@ -1085,29 +1085,10 @@ fn emit_command_with_root_and_hats(
     // pre-CB-6 behavior for `RALPH_SERIAL_LINT_MODE=off`
     // callers, e.g. integration tests of the policy
     // surface itself).
-    if !should_run_lint(config.as_ref()) {
-        if let Some(cfg) = config.as_ref() {
-            if let Err(err) =
-                crate::policy_check::check_hat_handoff_gate(hat.as_deref(), &topic, Some(&payload), cfg)
-            {
-                use ralph_core::{PolicyFinding, ViolationType};
-                let finding = PolicyFinding {
-                    violation_type: ViolationType::SemanticGateViolation {
-                        gate: "hat_handoff".to_string(),
-                        context: err.message.clone(),
-                    },
-                    topic: topic.to_string(),
-                    message: format!("{} (reason_code: {})", err.message, err.reason_code),
-                };
-                record_cli_emit_rejection(&workspace_root, &topic, hat.as_deref(), &finding);
-                anyhow::bail!(
-                    "Event rejected by hat-handoff gate ({}): {}",
-                    err.reason_code,
-                    err.message
-                );
-            }
-        }
-    }
+    // 2026-06-23-006 plan U1: hat-handoff pre-lint gate removed.
+    // The CLI mirror of the runtime gate has been deleted; emit
+    // path now relies on the unified validation pipeline
+    // (event_policy / origin / scope / dimension gates) only.
 
     // Build the event record
     // We use serde_json directly to ensure proper escaping
@@ -1191,36 +1172,10 @@ fn emit_command_with_root_and_hats(
     // runtime, so this CLI mirror is just a fast-feedback
     // channel).
     if let Some(cfg) = config.as_ref() {
-        // Serialize the (lint-mutated) payload back to a
-        // string for the gate. The lint may have injected
-        // `handoff_path` (auto-prepare) or kept the
-        // hand-filled one. We use the canonical JSON
-        // serialization (not `payload.clone()` which is
-        // already moved into `payload_value` at this point).
-        let post_lint_payload_str = serde_json::to_string(&payload_value)
-            .unwrap_or_default();
-        if let Err(err) = crate::policy_check::check_hat_handoff_gate(
-            hat.as_deref(),
-            &topic,
-            Some(&post_lint_payload_str),
-            cfg,
-        ) {
-            use ralph_core::{PolicyFinding, ViolationType};
-            let finding = PolicyFinding {
-                violation_type: ViolationType::SemanticGateViolation {
-                    gate: "hat_handoff".to_string(),
-                    context: err.message.clone(),
-                },
-                topic: topic.to_string(),
-                message: format!("{} (reason_code: {})", err.message, err.reason_code),
-            };
-            record_cli_emit_rejection(&workspace_root, &topic, hat.as_deref(), &finding);
-            anyhow::bail!(
-                "Event rejected by hat-handoff gate ({}): {}",
-                err.reason_code,
-                err.message
-            );
-        }
+        // 2026-06-23-006 plan U1: post-lint hat-handoff gate removed.
+        // The lint phase no longer runs (see U5/U3), so this
+        // block is intentionally a no-op pending U5 deletion.
+        let _ = cfg;
     }
 
     let mut record = serde_json::json!({
