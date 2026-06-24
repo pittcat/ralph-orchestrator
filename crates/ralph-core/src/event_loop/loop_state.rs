@@ -151,21 +151,10 @@ pub struct LoopState {
     /// Current iteration counter (0-indexed, starting at 0; first
     /// `complete_iteration` call advances to 1). Reflected verbatim
     /// to the `RALPH_LOOP_ITERATION` env var injected into the
-    /// backend subprocess by `loop_runner::runner`, and is the same
-    /// value consumed by `hat_handoff::gate::GateInputs::iteration`.
-    /// Kept 0-indexed to match the runtime gate's `expects iter=…`
-    /// error message and the `compute` allocator's filename
-    /// derivation — drift between caller-supplied iteration and
-    /// the gate's expected iteration was the root cause of the
-    /// 30-day 6-recurrence `hat_handoff_filename_mismatch` bug.
+    /// backend subprocess by `loop_runner::runner`. Kept 0-indexed
+    /// to match the runtime gate's `expects iter=…` error message
+    /// and the `compute` allocator's filename derivation.
     pub iteration: u32,
-    /// 2026-06-18-002 plan U1 (KTD-12): hat→hat roadmap handoff
-    /// sequence number within the current iteration. Reset to 0
-    /// when `iteration` changes. `hat_handoff_seq + 1` is the
-    /// `seq` portion of the next `handoff_path` returned by
-    /// `HatHandoffAllocator::prepare` and validated by
-    /// `apply_hat_handoff_gate`.
-    pub hat_handoff_seq: u32,
     /// Number of consecutive failures.
     pub consecutive_failures: u32,
     /// Cumulative cost in USD (if tracked).
@@ -249,7 +238,7 @@ pub struct LoopState {
     /// 2026-06-18-001 plan U6: runtime 拒收摘要,按 reason_code 聚合,
     /// 注入到当前 hat prompt 的 `## RECENT REJECTIONS` 块。
     ///
-    /// 每次 origin guard / policy check / hat_handoff gate 拒收一个
+    /// 每次 origin guard / policy check 拒收一个
     /// business 事件时,**仅** 累加 (count, last_ts, last_message);
     /// 保留最近 5 个不同 reason_code。recovery topic 自身
     /// (`task.resume` / `human.guidance`) 不生成摘要,避免循环。
@@ -569,18 +558,6 @@ pub struct LoopState {
     /// [`Self::record_typed_lint_rejection`].
     pub consecutive_lint_rejections_by_kind: HashMap<String, u32>,
 
-    /// 2026-06-23 fix (mechanism review layer 3, anti-pattern 3:
-    /// stall detector silent on rejection noise):
-    /// set of macro-edge handoff artifact paths the loop has
-    /// accepted (via `GateDecision::Accept`) but for which no
-    /// downstream hat has *consumed* (i.e. produced a matching
-    /// business event) within `pending_handoff_deadline`.
-    /// Used by [`crate::event_loop::stall_detector`] to
-    /// surface `stall.handoff_unconsumed` alerts when an
-    /// executor (or downstream reviewer) fails to pick up
-    /// a freshly-emitted handoff artifact.
-    pub pending_handoff_artifacts: HashSet<std::path::PathBuf>,
-
     /// U3 (plan 2026-06-23-004, anti-pattern 3): rejection stall 检测窗口。
     ///
     /// 最近 N 轮(`REJECTION_WINDOW_SIZE`)的 `(rejection_count, emit_count)` 计数。
@@ -643,10 +620,6 @@ impl Default for LoopState {
     fn default() -> Self {
         Self {
             iteration: 0,
-            // 2026-06-18-002 U1 (KTD-12): reset on iteration change.
-            // 0 means "no handoff accepted in this iteration yet";
-            // next prepare / accept uses seq = 1.
-            hat_handoff_seq: 0,
             consecutive_failures: 0,
             cumulative_cost: 0.0,
             started_at: Instant::now(),
@@ -744,10 +717,6 @@ impl Default for LoopState {
             // 2026-06-23 fix: typed per-kind counters start empty;
             // the first rejection seeds a new bucket.
             consecutive_lint_rejections_by_kind: HashMap::new(),
-            // 2026-06-23 fix (anti-pattern 3): no pending handoff
-            // artifacts on cold start; stall detector only fires
-            // for artifacts accepted AFTER this field is wired in.
-            pending_handoff_artifacts: HashSet::new(),
             // U3 (plan 2026-06-23-004): rejection stall 检测窗口。
             stall_detector_rejection_window: Vec::new(),
             // U1 (plan 2026-06-21-002): unified state ledger.
@@ -1145,59 +1114,6 @@ impl LoopState {
     pub fn prune_fix_round_bucket(&mut self, plan_name: &str, step: &str) {
         let prefix = format!("{plan_name}::{step}::");
         self.fix_round_counts.retain(|key, _| !key.starts_with(&prefix));
-    }
-
-    /// 2026-06-23 fix (mechanism review layer 3, anti-pattern 3):
-    /// register a freshly-accepted handoff artifact as pending
-    /// downstream consumption. Called from the runtime gate's
-    /// `GateDecision::Accept { handoff_path }` branch.
-    pub fn register_pending_handoff(&mut self, handoff_path: std::path::PathBuf) {
-        self.pending_handoff_artifacts.insert(handoff_path);
-    }
-
-    /// 2026-06-23 fix (mechanism review layer 3, anti-pattern 3):
-    /// mark a handoff artifact as consumed by a downstream hat.
-    /// Removes the path from the pending set so the stall
-    /// detector no longer counts it. Idempotent: removing a path
-    /// that was never registered is a no-op.
-    pub fn consume_pending_handoff(&mut self, handoff_path: &std::path::Path) -> bool {
-        self.pending_handoff_artifacts.remove(handoff_path)
-    }
-
-    /// 2026-06-23 fix (mechanism review layer 3, anti-pattern 3):
-    /// current count of pending handoff artifacts (i.e. the
-    /// number of accepted artifacts whose downstream hat has not
-    /// yet produced a matching business event). The stall
-    /// detector compares this count against
-    /// `pending_handoff_deadline` (driven by `last_progress_ts`)
-    /// and surfaces `stall.handoff_unconsumed` when an artifact
-    /// sits too long.
-    pub fn pending_handoff_count(&self) -> usize {
-        self.pending_handoff_artifacts.len()
-    }
-
-    /// 2026-06-23 fix (mechanism review layer 3, anti-pattern 3):
-    /// returns true when at least one handoff artifact has been
-    /// pending for longer than `max_age`. The stall detector uses
-    /// this signal to surface `stall.handoff_unconsumed` without
-    /// needing a clock-aware HashMap. Production wiring uses
-    /// `last_progress_ts` from the loop instead of `Instant::now()`
-    /// directly so the detector is testable.
-    pub fn has_pending_handoff_older_than(&self, now: Instant, max_age: Duration) -> bool {
-        // Track timestamp per path only when populated; for the
-        // initial wiring we conservatively assume "all pending
-        // artifacts are stale" when any are present and the loop
-        // hasn't seen a progress event in `max_age`. The full
-        // per-path timestamp map is left for the follow-up plan
-        // (2026-06-21-001 U1 extension). For now, the
-        // `pending_handoff_count` accessor is sufficient to
-        // unblock the alarm: any leftover pending artifact is a
-        // signal that the loop is stalled on dead-letter handoffs.
-        !self.pending_handoff_artifacts.is_empty()
-            && self
-                .stall_detector_had_events
-                .then(|| now.elapsed())
-                .map_or(true, |elapsed| elapsed >= max_age)
     }
 
     /// U4 (2026-06-17-003 plan): prune the dedup-set entries that
@@ -1985,20 +1901,20 @@ mod tests {
     fn u6_record_rejection_digest_increments_count() {
         let mut state = LoopState::new();
         state.record_rejection_digest(
-            "hat_handoff_missing_path",
-            "no handoff_path in payload",
+            "missing_payload_field",
+            "no field in payload",
             "work.ready",
             "t1",
         );
         state.record_rejection_digest(
-            "hat_handoff_missing_path",
-            "still no handoff_path",
+            "missing_payload_field",
+            "still no field",
             "work.ready",
             "t2",
         );
         let entry = state
             .recent_rejection_digest
-            .get("hat_handoff_missing_path")
+            .get("missing_payload_field")
             .unwrap();
         assert_eq!(entry.count, 2);
         assert_eq!(entry.last_ts, "t2");
@@ -2199,60 +2115,8 @@ mod tests {
     }
 
     // ── 2026-06-23 fix (mechanism review layer 3, anti-pattern 3):
-    // pending handoff artifact dead-letter detector. The 8h+ 0
-    // stall alarm case in primary-20260622-182705 happened because
-    // no path tracked which handoff artifacts were accepted but
-    // never consumed by the downstream hat. ──
-
-    #[test]
-    fn pending_handoff_register_and_consume_round_trip() {
-        let mut state = LoopState::new();
-        let path = std::path::PathBuf::from(".ralph/agent/hat-handoff/0-1-coord-exec.md");
-        state.register_pending_handoff(path.clone());
-        assert_eq!(state.pending_handoff_count(), 1);
-        assert!(state.consume_pending_handoff(&path));
-        assert_eq!(state.pending_handoff_count(), 0);
-        // Idempotent: re-consuming returns false.
-        assert!(!state.consume_pending_handoff(&path));
-    }
-
-    #[test]
-    fn pending_handoff_dead_letter_detected_after_no_progress() {
-        use std::time::{Duration, Instant};
-        let mut state = LoopState::new();
-        let path = std::path::PathBuf::from(".ralph/agent/hat-handoff/0-1-coord-exec.md");
-        state.register_pending_handoff(path);
-        // `stall_detector_had_events = false` (no business event
-        // was admitted this turn) and a non-empty pending set:
-        // the detector SHOULD fire.
-        state.stall_detector_had_events = false;
-        let now = Instant::now();
-        let max_age = Duration::from_secs(300);
-        assert!(
-            state.has_pending_handoff_older_than(now, max_age),
-            "dead-letter handoff with no progress MUST trip the stall detector"
-        );
-    }
-
-    #[test]
-    fn pending_handoff_alarm_silent_when_progress_seen() {
-        use std::time::{Duration, Instant};
-        let mut state = LoopState::new();
-        state.register_pending_handoff(std::path::PathBuf::from("a.md"));
-        // `stall_detector_had_events = true` (a business event was
-        // admitted this turn) — the alarm should NOT fire just
-        // because a handoff is pending.
-        state.stall_detector_had_events = true;
-        let now = Instant::now() - Duration::from_secs(60);
-        let max_age = Duration::from_secs(120);
-        // `now.elapsed()` is small (~60s) and within max_age (120s),
-        // so even with progress the alarm stays silent until
-        // max_age is crossed.
-        assert!(
-            !state.has_pending_handoff_older_than(now, max_age),
-            "stall alarm MUST stay silent when recent progress is observed"
-        );
-    }
+    // pending handoff artifact dead-letter detector tests removed
+    // (plan 2026-06-23-006 U3). ──
 
     // U3 (plan 2026-06-23-004): rejection stall 检测测试。
     mod stall_rejection {
