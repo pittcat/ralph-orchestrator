@@ -20,7 +20,6 @@ pub struct ValidationResult {
     ///   * `engine_rejected:required_field:plan_name`
     ///   * `execution_contract:missing_task_id`
     ///   * `step_handoff:progress_task_mismatch`
-    ///   * `hat_handoff:missing_section`
     ///   * `workflow_guard:out_of_order`
     ///   * `publisher:topic_not_allowed`
     pub reason_code: Option<String>,
@@ -89,7 +88,7 @@ impl ValidationResult {
 /// Stable identifier for each validation stage. The string form is
 /// used in `reason_code` prefixes so the enum variants must remain
 /// in sync with `reason_code` constants in the legacy code paths
-/// (`event_origin`, `execution_contract`, `hat_handoff::gate`,
+/// (`event_origin`, `execution_contract`,
 /// `step_handoff::progress_task_gate`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -107,8 +106,6 @@ pub enum ValidationStage {
     ExecutionContract,
     /// Step handoff gate — `step_handoff::progress_task_gate`.
     StepHandoff,
-    /// Hat-handoff gate — `hat_handoff::gate::evaluate_event`.
-    HatHandoff,
     /// Workflow guard — `validation::rules_workflow_guard::WorkflowGuardRule`.
     /// PostCommit phase.
     WorkflowGuard,
@@ -126,7 +123,6 @@ impl ValidationStage {
             Self::EventPolicy => "event_policy",
             Self::ExecutionContract => "execution_contract",
             Self::StepHandoff => "step_handoff",
-            Self::HatHandoff => "hat_handoff",
             Self::WorkflowGuard => "workflow_guard",
         }
     }
@@ -216,15 +212,6 @@ impl ReasonCode {
     /// Step handoff: progress ↔ tasks mismatch. The detailed reason
     /// is appended after the prefix.
     pub const STEP_HANDOFF_MISMATCH_PREFIX: &'static str = "step_handoff:";
-
-    /// Hat handoff: macro edge but `handoff_path` missing.
-    pub const HAT_HANDOFF_MISSING_PATH: &'static str = "hat_handoff:missing_path";
-    /// Hat handoff: required artifact section missing.
-    pub const HAT_HANDOFF_MISSING_SECTION: &'static str = "hat_handoff:missing_section";
-    /// Hat handoff: artifact structure invalid.
-    pub const HAT_HANDOFF_STRUCTURE_INVALID: &'static str = "hat_handoff:structure_invalid";
-    /// Hat handoff: not required (passthrough, accepted).
-    pub const HAT_HANDOFF_NOT_REQUIRED: &'static str = "hat_handoff:not_required";
 
     /// Workflow guard: event out of order for the configured chain.
     pub const WORKFLOW_GUARD_OUT_OF_ORDER: &'static str = "workflow_guard:out_of_order";
@@ -321,7 +308,6 @@ mod tests {
             "execution_contract"
         );
         assert_eq!(ValidationStage::StepHandoff.as_str(), "step_handoff");
-        assert_eq!(ValidationStage::HatHandoff.as_str(), "hat_handoff");
         assert_eq!(ValidationStage::WorkflowGuard.as_str(), "workflow_guard");
     }
 

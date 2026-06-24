@@ -85,7 +85,6 @@ pub use responder::{
 /// - `execution_contract` → `execution_contract` (unchanged).
 /// - `workflow_guard` → `workflow_guard` (unchanged).
 /// - `step_handoff` → `step_handoff_gate` (U5 macro-edge gate).
-/// - `hat_handoff` → `hat_handoff_gate` (U5 macro-edge gate).
 /// - any other stage → `unknown` (caller should still produce
 ///   the report, but flag the source as `unknown` so the
 ///   operator can spot a missing mapping).
@@ -98,7 +97,6 @@ pub fn validation_stage_to_source(stage: &str) -> &'static str {
         "execution_contract" => "execution_contract",
         "workflow_guard" => "workflow_guard",
         "step_handoff" => "step_handoff_gate",
-        "hat_handoff" => "hat_handoff_gate",
         _ => "unknown",
     }
 }

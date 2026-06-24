@@ -62,14 +62,6 @@ pub enum RejectionStage {
     /// to emit but the run fell off the rails" (different root
     /// causes, different recovery shapes).
     EmitClaimedButNotWritten,
-    /// 2026-06-18-005 U5 (R2): rejected by the hat-handoff gate
-    /// (`hat_handoff::gate::evaluate_event`). Macro-edge emit failed
-    /// structure / seq / file-content / R15 / from-to validation.
-    /// The gate injects a `task.resume` so the emit hat gets a
-    /// chance to fix the handoff file and re-emit. `stage` in the
-    /// resume payload is `"hat_handoff"`; the `reason_code` field
-    /// carries the granular reason (e.g. `hat_handoff_missing_path`).
-    HatHandoff,
 }
 
 impl RejectionStage {
@@ -82,7 +74,6 @@ impl RejectionStage {
             RejectionStage::PayloadContract => "payload_contract",
             RejectionStage::MissingEvent => "missing_event",
             RejectionStage::EmitClaimedButNotWritten => "emit_claimed_but_not_written",
-            RejectionStage::HatHandoff => "hat_handoff",
         }
     }
 }
