@@ -134,8 +134,10 @@ fn plan_gate_triggers_include_queue_advance_for_step_advance_loop() {
     // R13: the plan-gate → executor bridge starts when plan-gate
     // receives `queue.advance`. If plan-gate's `triggers:` line omits
     // `queue.advance`, the loop never advances.
+    // 2026-06-24 fix: fix.exhausted and debug.exhausted removed from
+    // plan-gate triggers (single-consumer routing).
     assert!(
-        yaml.contains("triggers: [\"review.passed\", \"review.complete\", \"work.failed\", \"loop.cancel\", \"queue.advance\", \"fix.exhausted\", \"debug.exhausted\"]"),
-        "plan-gate triggers must include queue.advance (U5 R13 bridge start)"
+        yaml.contains("triggers: [\"review.passed\", \"review.complete\", \"work.failed\", \"loop.cancel\", \"queue.advance\"]"),
+        "plan-gate triggers must include queue.advance (U5 R13 bridge start); fix.exhausted/debug.exhausted removed 2026-06-24"
     );
 }

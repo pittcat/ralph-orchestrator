@@ -439,10 +439,10 @@ impl RalphConfig {
         // Exception: when ALL hats subscribed to a given trigger explicitly list
         // that trigger in their `trigger_multi_consumer_topics`, the strict 1:1
         // check is bypassed. This is the documented escape hatch for design-level
-        // multi-consumer topics (e.g. `fix.exhausted` consumed by both `plan-gate`
-        // and `debug-resolver`; `debug.exhausted` consumed by both `plan-gate` and
-        // `shipper`). A single missing opt-in keeps the strict check, so accidental
-        // multi-consumption is impossible.
+        // multi-consumer topics. (Note: ce-executor-serial previously used this
+        // for `fix.exhausted` / `debug.exhausted`, but removed it on 2026-06-24
+        // due to a round-robin scheduling race; the mechanism remains for
+        // future presets that need it.)
         if !self.hats.is_empty() {
             let mut trigger_to_hats: HashMap<&str, Vec<&str>> = HashMap::new();
             for (hat_id, hat_config) in &self.hats {
@@ -1188,8 +1188,8 @@ hats:
     /// U1: when ALL hats subscribed to a multi-consumer trigger list
     /// that trigger in their `trigger_multi_consumer_topics`, the strict
     /// 1:1 check is bypassed. This is the documented escape hatch for
-    /// `fix.exhausted` / `debug.exhausted` consumed by `plan-gate` and
-    /// the respective downstream resolver/shipper.
+    /// design-level multi-consumer topics. (ce-executor-serial removed
+    /// its multi-consumer usage on 2026-06-24, but the mechanism remains.)
     #[test]
     fn test_validate_ambiguous_routing_allows_whitelisted_multi_consumer() {
         let yaml = r#"

@@ -1,29 +1,26 @@
-# fix.exhausted reaches plan-gate (multi-consumer U1 path)
+# fix.exhausted reaches debug-resolver ONLY (single-consumer, 2026-06-24 fix)
 #
-# 2026-06-17-002 feat-ce-executor-step-handoff U8 (multi-step E2E):
-# After U1 added plan-gate to the multi-consumer whitelist for
-# `fix.exhausted` (alongside debug-resolver), the orchestration must
-# route `fix.exhausted` to BOTH debug-resolver (primary consumer) AND
-# plan-gate (U1 escalation consumer). Plan-gate translates the
-# escalation into `plan.blocked` so shipper → reporter still produce
-# a manager report.
+# 2026-06-24 fix: removed plan-gate from the consumers of `fix.exhausted`.
+# Previously `fix.exhausted` was a multi-consumer topic (both debug-resolver
+# and plan-gate subscribed), which caused a round-robin scheduling race —
+# plan-gate could preempt debug-resolver, emit `plan.blocked`, and cascade
+# to loop.terminate before debug-resolver ever ran.
 #
-# This scenario pins the wire flow with the minimal topology:
-#   fixer --(fix.exhausted)--> debug-resolver + plan-gate
-# Both downstream hats MUST see the event and react: debug-resolver
-# decides the next move (fix.plan.ready → executor in real preset,
-# simplified here as terminal handoff to keep wire flow deterministic),
-# plan-gate emits `plan.blocked` for the manager report chain.
+# Now `fix.exhausted` has a SINGLE consumer (debug-resolver). This scenario
+# pins the new wire flow:
+#   fixer --(fix.exhausted)--> debug-resolver (sole consumer)
+# debug-resolver decides the next move (here: terminal handoff to keep the
+# wire flow deterministic). plan-gate MUST NOT see `fix.exhausted`.
 #
 # Reference:
-#   docs/plans/2026-06-17-002-feat-ce-executor-step-handoff-plan.md U1 / U8
-#   crates/ralph-cli/src/presets.rs:1310 test_ce_executor_plan_gate_exists_and_routes_correctly
+#   2026-06-24 diagnosis: fix.exhausted multi-consumer scheduling race
+#   presets/en/ce-executor-serial.yml (plan-gate triggers no longer include fix.exhausted)
 
 name: fix_exhausted_reaches_plan_gate
 description: |
-  fix.exhausted reaches BOTH debug-resolver (primary) and plan-gate
-  (U1 multi-consumer escalation) and plan-gate emits plan.blocked
-  for the manager report chain.
+  fix.exhausted reaches debug-resolver ONLY (single consumer after 2026-06-24
+  fix). plan-gate no longer subscribes to fix.exhausted, eliminating the
+  round-robin scheduling race.
 
 config:
   prompt_file: PROMPT.md
@@ -39,15 +36,17 @@ config:
         - fix.exhausted
         - LOOP_COMPLETE
     debug-resolver:
-      # Multi-consumer whitelisted trigger: both debug-resolver and
-      # plan-gate opt in via trigger_multi_consumer_topics.
+      # Sole consumer of fix.exhausted (2026-06-24 fix).
       subscribes_to:
         - fix.exhausted
       publishes:
         - LOOP_COMPLETE
     plan-gate:
+      # plan-gate no longer subscribes to fix.exhausted. It only listens
+      # for review/queue/work events. If fix.exhausted reaches plan-gate
+      # here, the scenario's absent_events check will fail.
       subscribes_to:
-        - fix.exhausted
+        - review.passed
       publishes:
         - plan.blocked
         - LOOP_COMPLETE
@@ -56,18 +55,8 @@ config:
     completion_promise: LOOP_COMPLETE
 
 # Iter 1: fixer emits `fix.exhausted` after safe_auto rounds are
-# exhausted. Both debug-resolver AND plan-gate must receive it
-# (multi-consumer whitelist from U1).
-# Iter 2: plan-gate translates the escalation into `plan.blocked`
-# to feed the manager report chain. The dual-publish carve-out is
-# scoped to `(queue.advance, work.ready)` only, so plan.blocked is
-# published in a SEPARATE turn — this matches the real wire flow
-# because fixer and plan-gate are distinct hats.
-# Iter 3: terminate via LOOP_COMPLETE.
-#
-# NOTE: events are split across iterations because isolated mode
-# drops extra business events from distinct hats within the same turn
-# (per-turn sticky budget — see plan_gate_dual_publish_third_blocked).
+# exhausted. ONLY debug-resolver receives it (single consumer).
+# Iter 2: terminate via LOOP_COMPLETE.
 mock_responses:
   - |
     <event topic="fix.exhausted">
@@ -79,21 +68,14 @@ mock_responses:
     reason: "safe_auto rounds exhausted"
     </event>
   - |
-    <event topic="plan.blocked">
-    plan_name: "demo"
-    reason: "fix.exhausted: safe_auto rounds exhausted"
-    task_id: "task-fix-001"
-    task_key: "step-01"
-    step: "step-01"
-    </event>
-  - |
     <event topic="LOOP_COMPLETE">
     Done.
     </event>
 
 expected:
-  iterations: 3
+  iterations: 2
   events:
     - topic: fix.exhausted
+  absent_events:
     - topic: plan.blocked
   completion: true

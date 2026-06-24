@@ -1098,18 +1098,18 @@ fn test_step_advance_u1_to_u2_handoff_under_30s() {
 
 #[test]
 fn test_fix_exhausted_reaches_plan_gate() {
-    // 2026-06-17-002 U8: U1 multi-consumer path — fix.exhausted routes
-    // to plan-gate alongside debug-resolver; plan-gate emits
-    // plan.blocked for the manager report chain.
+    // 2026-06-24 fix: fix.exhausted now has a SINGLE consumer (debug-resolver).
+    // plan-gate no longer subscribes to it. This scenario asserts plan.blocked
+    // is NOT emitted when fix.exhausted fires.
     let yaml = load_scenario("tests/scenarios/step_handoff/fix_exhausted_reaches_plan_gate.yml");
     run_workflow_guard_scenario(yaml);
 }
 
 #[test]
 fn test_debug_exhausted_reaches_plan_gate() {
-    // 2026-06-17-002 U8: U1 multi-consumer path — debug.exhausted routes
-    // to plan-gate alongside shipper; plan-gate emits plan.blocked
-    // redundantly with shipper's REVIEW_COMPLETE path.
+    // 2026-06-24 fix: debug.exhausted now has a SINGLE consumer (shipper).
+    // plan-gate no longer subscribes to it. This scenario asserts plan.blocked
+    // is NOT emitted when debug.exhausted fires.
     let yaml = load_scenario("tests/scenarios/step_handoff/debug_exhausted_reaches_plan_gate.yml");
     run_workflow_guard_scenario(yaml);
 }

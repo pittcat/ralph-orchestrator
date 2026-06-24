@@ -1641,11 +1641,10 @@ hats:
     name: "🐛 Debug Resolver"
     description: "Root-cause diagnosis after Fixer safe_auto exhaustion. Ports ce-debug Phase 0–2 discipline."
     triggers: ["fix.exhausted"]
-    # U1 (2026-06-17-002): `fix.exhausted` is whitelisted as a
-    # multi-consumer trigger. Both `debug-resolver` and `plan-gate`
-    # opt in via `trigger_multi_consumer_topics`; without this,
-    # `validate_ambiguous_routing` would reject the preset.
-    trigger_multi_consumer_topics: ["fix.exhausted"]
+    # 2026-06-24 fix: debug-resolver is now the SOLE consumer of
+    # `fix.exhausted`. Removed `trigger_multi_consumer_topics` — the
+    # multi-consumer race with plan-gate is eliminated by making this
+    # a single-consumer topic.
     publishes: ["fix.plan.ready", "debug.exhausted", "plan.blocked"]
     terminal_events: ["fix.plan.ready", "debug.exhausted", "plan.blocked"]
     instructions: |
@@ -1730,11 +1729,13 @@ hats:
   plan-gate:
     name: "🚦 Plan Gate"
     description: "Reconciles review verdict against plan progress and decides queue.advance vs plan.complete."
-    triggers: ["review.passed", "review.complete", "work.failed", "loop.cancel", "queue.advance", "fix.exhausted", "debug.exhausted"]
-    # U1 (2026-06-17-002): plan-gate participates in the multi-consumer
-    # whitelisted routes for `fix.exhausted` (also consumed by
-    # `debug-resolver`) and `debug.exhausted` (also consumed by `shipper`).
-    trigger_multi_consumer_topics: ["fix.exhausted", "debug.exhausted"]
+    triggers: ["review.passed", "review.complete", "work.failed", "loop.cancel", "queue.advance"]
+    # 2026-06-24 fix: removed `fix.exhausted` and `debug.exhausted` from
+    # triggers and dropped `trigger_multi_consumer_topics`. Those topics
+    # now have a single consumer each (`fix.exhausted` → debug-resolver,
+    # `debug.exhausted` → shipper) to eliminate the round-robin scheduling
+    # race where plan-gate preempted debug-resolver and cascaded to
+    # loop.terminate before debug-resolver could run.
     # 2026-06-24 plan U1: plan-gate now OWNS `review.complete` as
     # the mirror publisher. After consuming `review.passed` /
     # `review.failed` from review-synthesizer, plan-gate forwards
@@ -1764,19 +1765,20 @@ hats:
       When triggered by `loop.cancel`, the loop is being explicitly cancelled.
       Publish `plan.blocked` with `reason: "loop cancelled by agent"`.
 
-      ### fix.exhausted / debug.exhausted Routing (U1, 2026-06-17-002)
-      `fix.exhausted` and `debug.exhausted` are whitelisted multi-consumer
-      topics. The primary consumer is the resolver chain; plan-gate subscribes
-      to surface the same escalation as `plan.blocked`.
-      - On `fix.exhausted` / `debug.exhausted`: publish `plan.blocked` with
-        `plan_name`, `reason` mirroring the upstream trigger reason, `task_id`,
-        `task_key`, `step`.
+      ### fix.exhausted / debug.exhausted Routing (removed 2026-06-24)
+      plan-gate no longer subscribes to `fix.exhausted` or `debug.exhausted`.
+      Those topics are routed to their single consumer:
+      - `fix.exhausted` → `debug-resolver` (root-cause diagnosis)
+      - `debug.exhausted` → `shipper` (final verdict + delivery)
+      If debug-resolver confirms a root cause, it emits `fix.plan.ready`
+      (→ executor) or `debug.exhausted` (→ shipper). plan-gate only sees
+      the outcome via `review.passed` / `review.failed` after re-review,
+      or via `plan.blocked` emitted by debug-resolver directly.
 
       ### Read State
       1. From event payload, based on trigger:
          - `review.passed` / `review.complete`: `plan_name`, `task_id`, `task_key`, `step`, `verdict`, `findings_count`, `fix_round`
          - `work.failed`: `plan_name`, `reason`, `task_id`, `task_key`, `step`
-         - `fix.exhausted` / `debug.exhausted`: `plan_name`, `reason`, `task_id`, `task_key`, `step`
       2. Read `context.md`, `plan.md`, `progress.md`
       3. Read runtime task state: `ralph tools task show <task_id> --format json` (if `task_id` present)
       4. List all open runtime tasks: `ralph tools task list`
@@ -1901,11 +1903,10 @@ hats:
     name: "📦 Shipper"
     description: "Final validation, plan status update, final commit."
     triggers: ["plan.complete", "plan.blocked", "debug.exhausted"]
-    # U1 (2026-06-17-002): `debug.exhausted` is whitelisted as a
-    # multi-consumer trigger. Both `shipper` and `plan-gate` opt in
-    # via `trigger_multi_consumer_topics`; without this,
-    # `validate_ambiguous_routing` would reject the preset.
-    trigger_multi_consumer_topics: ["debug.exhausted"]
+    # 2026-06-24 fix: shipper is now the SOLE consumer of
+    # `debug.exhausted`. Removed `trigger_multi_consumer_topics` — the
+    # multi-consumer race with plan-gate is eliminated by making this
+    # a single-consumer topic.
     publishes: ["REVIEW_COMPLETE"]
     default_publishes: "REVIEW_COMPLETE"
     terminal_events: ["REVIEW_COMPLETE"]

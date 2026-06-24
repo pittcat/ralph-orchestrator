@@ -1482,32 +1482,23 @@ mod tests {
             plan_gate.triggers.contains(&"work.failed".to_string()),
             "plan-gate must trigger on work.failed so failures route to plan.blocked (U5)"
         );
-        // U1 (2026-06-17-002): plan-gate must also subscribe to the
-        // multi-consumer whitelisted topics `fix.exhausted` (also
-        // consumed by `debug-resolver`) and `debug.exhausted` (also
-        // consumed by `shipper`). All three hats opt in via
-        // `trigger_multi_consumer_topics`. Without these, the
-        // exhausted paths cannot surface as `plan.blocked` and the
-        // loop can stall.
+        // 2026-06-24 fix: plan-gate no longer subscribes to fix.exhausted
+        // or debug.exhausted. Those topics now have a single consumer each
+        // (fix.exhausted → debug-resolver, debug.exhausted → shipper) to
+        // eliminate the round-robin scheduling race where plan-gate
+        // preempted debug-resolver and cascaded to loop.terminate before
+        // debug-resolver could run.
         assert!(
-            plan_gate.triggers.contains(&"fix.exhausted".to_string()),
-            "plan-gate must trigger on fix.exhausted (U1, 2026-06-17-002)"
+            !plan_gate.triggers.contains(&"fix.exhausted".to_string()),
+            "plan-gate must NOT trigger on fix.exhausted (2026-06-24 fix: single-consumer → debug-resolver)"
         );
         assert!(
-            plan_gate.triggers.contains(&"debug.exhausted".to_string()),
-            "plan-gate must trigger on debug.exhausted (U1, 2026-06-17-002)"
+            !plan_gate.triggers.contains(&"debug.exhausted".to_string()),
+            "plan-gate must NOT trigger on debug.exhausted (2026-06-24 fix: single-consumer → shipper)"
         );
         assert!(
-            plan_gate
-                .trigger_multi_consumer_topics
-                .contains(&"fix.exhausted".to_string()),
-            "plan-gate must whitelist fix.exhausted as a multi-consumer topic"
-        );
-        assert!(
-            plan_gate
-                .trigger_multi_consumer_topics
-                .contains(&"debug.exhausted".to_string()),
-            "plan-gate must whitelist debug.exhausted as a multi-consumer topic"
+            plan_gate.trigger_multi_consumer_topics.is_empty(),
+            "plan-gate must NOT declare any multi-consumer topics (2026-06-24 fix)"
         );
         assert!(
             plan_gate.publishes.contains(&"queue.advance".to_string()),
@@ -1586,13 +1577,12 @@ mod tests {
         );
     }
 
-    /// U1 (2026-06-17-002): the full `ce-executor-serial` preset must
-    /// pass `RalphConfig::validate` end-to-end, including the new
-    /// `trigger_multi_consumer_topics` whitelist for `fix.exhausted`
-    /// and `debug.exhausted`. This is the KTD regression: if any
-    /// consumer hat forgets to opt in, the preset's
-    /// `validate_ambiguous_routing` rejects it on first run, not just
-    /// in unit tests.
+    /// 2026-06-24 fix: the full `ce-executor-serial` preset must pass
+    /// `RalphConfig::validate` end-to-end. Previously this test pinned the
+    /// `trigger_multi_consumer_topics` whitelist for `fix.exhausted` and
+    /// `debug.exhausted`; those multi-consumer declarations have been
+    /// removed to eliminate the round-robin scheduling race. The test now
+    /// just ensures the preset still validates cleanly.
     #[test]
     fn test_ce_executor_serial_preset_validates_ambiguous_routing() {
         let en = get_preset("ce-executor-serial")
@@ -2908,20 +2898,21 @@ mod tests {
     // ──────────────────────────────────────────────────────────────────
     // 2026-06-17-002 plan U8: end-to-end step-handoff topology coverage
     //
-    // Pins the multi-consumer handoff invariants from U1/U4/U5/U7 in
-    // one place so future edits to ce-executor-serial's hat
-    // triggers / trigger_multi_consumer_topics / publishes can't
-    // silently break the manager-report chain.
+    // Pins the handoff invariants from U1/U4/U5/U7 in one place so
+    // future edits to ce-executor-serial's hat triggers / publishes
+    // can't silently break the manager-report chain.
     //
-    // Topology (10-hat ce-executor-serial):
+    // Topology (10-hat ce-executor-serial, post-2026-06-24 fix):
     //   plan-gate       --(queue.advance, work.ready)-->  executor
     //   plan-gate       --(plan.complete, plan.blocked)--> shipper
     //   executor        --(work.done, work.failed)-------> plan-gate / review-coord
-    //   fixer           --(fix.exhausted)----------------> debug-resolver (primary)
-    //   fixer           --(fix.exhausted)----------------> plan-gate     (U1 multi)
-    //   debug-resolver  --(debug.exhausted)--------------> shipper       (primary)
-    //   debug-resolver  --(debug.exhausted)--------------> plan-gate     (U1 multi)
+    //   fixer           --(fix.exhausted)----------------> debug-resolver (sole consumer)
+    //   debug-resolver  --(debug.exhausted)--------------> shipper       (sole consumer)
+    //   debug-resolver  --(plan.blocked)-----------------> shipper
     //   plan-gate       --(plan.blocked)-----------------> shipper
+    //
+    // 2026-06-24 fix: fix.exhausted and debug.exhausted are now
+    // single-consumer topics. plan-gate no longer subscribes to either.
     //
     // The assertions cover the topology *shape* (which hat produces
     // and consumes what), not the runtime dispatch. The runtime side
@@ -2994,18 +2985,19 @@ mod tests {
             );
         };
 
-        // U1 multi-consumer routes — fix.exhausted and debug.exhausted
-        // must each reach BOTH the primary resolver/consumer AND
-        // plan-gate (the U1 escalation consumer).
+        // 2026-06-24 fix: fix.exhausted and debug.exhausted are now
+        // single-consumer topics. plan-gate no longer subscribes to either,
+        // eliminating the round-robin scheduling race where plan-gate
+        // preempted debug-resolver and cascaded to loop.terminate.
         assert_consumers(
             "fix.exhausted",
-            &["debug-resolver", "plan-gate"],
-            "U1 multi-consumer whitelist",
+            &["debug-resolver"],
+            "single-consumer (2026-06-24 fix)",
         );
         assert_consumers(
             "debug.exhausted",
-            &["plan-gate", "shipper"],
-            "U1 multi-consumer whitelist",
+            &["shipper"],
+            "single-consumer (2026-06-24 fix)",
         );
 
         // Single-consumer handoff routes — executor is the unique
@@ -3068,24 +3060,13 @@ mod tests {
             );
         }
 
-        // trigger_multi_consumer_topics must be uniformly declared
-        // across all consumers of the whitelisted multi-consumer
-        // topics. Without the union declaration, strict WAC rejects
-        // the preset with `validate_ambiguous_routing`.
-        for topic in ["fix.exhausted", "debug.exhausted"] {
-            for hat_id in consumers.get(topic).cloned().unwrap_or_default() {
-                if hat_id == "ralph" {
-                    continue;
-                }
-                let hat = &config.hats[hat_id];
-                assert!(
-                    hat.trigger_multi_consumer_topics
-                        .contains(&topic.to_string()),
-                    "consumer '{hat_id}' of multi-consumer topic '{topic}' must declare \
-                     it in trigger_multi_consumer_topics so strict WAC accepts the preset"
-                );
-            }
-        }
+        // 2026-06-24 fix: fix.exhausted and debug.exhausted are now
+        // single-consumer topics (debug-resolver and shipper respectively).
+        // The `trigger_multi_consumer_topics` uniformity check has been
+        // removed because there are no multi-consumer topics left in this
+        // preset. If a future edit reintroduces multi-consumer routing,
+        // `validate_ambiguous_routing` will catch the missing declaration
+        // at preset parse time.
     }
 
     /// P0 regression (2026-06-18, ce-executor-serial step_handoff):
