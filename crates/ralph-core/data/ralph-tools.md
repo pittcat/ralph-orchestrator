@@ -31,7 +31,7 @@ metadata:
 2. **对照 `required_fields` 补齐 payload**；用 `ralph emit <topic> --policy-check -j '...'` 在写盘前预检（U4，CLI 100% 与 loop gate 同源 schema）。
 3. **确认 hat 作用域**：isolated 模式下未在 `allowed_topics`（与 hat `publishes` 交集）的 topic 越权 — 改用 hat 实际可发的 topic，不要靠 `--unsafe-no-policy-check` 绕过。
 4. **不要**用 `--unsafe-no-policy-check` 绕 policy；`ce-executor-serial` preset 默认 `allow_unsafe_cli_emit: false`，该参数直接被拒。**不要**直写 `events.jsonl` — 写完仍会被 `payload_contract` 拒。
-5. **复杂 violation**（`progress_task_mismatch` / `handoff_dispatch_timeout` / `plan.blocked` / `review_passed_while_wave_open` 等）一行摘要见 `ralph-tools-handoff`；按需 `ralph tools skill load ralph-tools-handoff` 加载深参考。
+5. **复杂 violation**（`progress_task_mismatch` / `handoff_dispatch_timeout` / `plan.blocked` / `review_passed_while_wave_open` 等）按需加载对应 skill 查 deep-dive；当前 `ralph tools skill` 列表见命令速查表。
 6. **仍不明**：`RALPH_DIAGNOSTICS=1` 启的 loop 把 envelope 写到 `recovery.jsonl`；`ralph diagnose --session latest` 出报告（`docs/guide/runtime-diagnosis.md` §10）。
 
 ## 命令速查表
@@ -44,14 +44,12 @@ metadata:
 | `ralph tools memory` | 记忆管理 | 已注入（`ralph-tools-memories` skill，仅当 `memories.enabled`） |
 | `ralph tools skill` | 加载 skill | `ralph tools skill load ralph-tools-cmdref` |
 | `ralph tools interact` | Telegram 通知 | `ralph tools skill load ralph-tools-cmdref` |
-| `ralph tools handoff prepare` | hat→hat roadmap handoff 路径分配（2026-06-18-002） | `ralph tools handoff prepare --help`（默认 disabled；详情见 `ralph-tools-handoff` §5.5） |
 
 ### 顶层命令（按需加载对应 skill）
 
 | 命令 | 用途 | 详细参考 |
 |------|------|---------|
 | `ralph emit` | 发射事件（最常用） | `ralph tools skill load ralph-tools-emit` |
-| Step handoff / ce-executor | `task.resume` 复杂 violation | `ralph tools skill load ralph-tools-handoff` |
 | `ralph wave emit` | 并行 wave 调度 | `ralph tools skill load ralph-tools-wave` |
 | `ralph run` | 启动编排循环 | `ralph tools skill load ralph-tools-cmdref` |
 | `ralph hats validate [--strict]` | 拓扑/payload/orphan/lint 校验 | `crates/ralph-cli/src/hats.rs:170`（strict 时启用 lint 所有权检查） |
