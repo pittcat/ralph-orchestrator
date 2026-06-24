@@ -195,8 +195,22 @@ schemas:
   # (written by review-synthesizer to the plan's scratchpad) for the
   # coordinator to read and create fix-unit tasks. `fix_round` is
   # retained for dedup compatibility — the policy layer keys dedup on
-  # `{plan}::{step}::{task}::{fix_round}`. When there are no P0/P1
-  # findings, `fix_plan_file` MUST be the literal string "null".
+  # `{plan}::{step}::{task}::{fix_round}`.
+  #
+  # 2026-06-24 P0-D: when there are no P0/P1 findings,
+  # `fix_plan_file` MUST be the literal **string** `"null"` (six
+  # characters: `"`, `n`, `u`, `l`, `l`, `"`). A JSON `null` literal
+  # is NOT acceptable — the runtime will reject the event with
+  # `PayloadTypeMismatch(expected="string", actual="null")`. The
+  # enforcement lives in `validate_event_with_hat` (string-only
+  # field guard) and is mirrored as a unit test in
+  # `event_policy.rs::p0d_review_complete_fix_plan_file_null_literal_is_rejected`.
+  # Root cause of the regression: the 2026-06-24 ralph-e2e
+  # python-sort-algorithms run shipped `fix_plan_file: null` for the
+  # fix-01 review round, slipped past `required_fields` (the field
+  # existed), and broke the downstream coordinator's
+  # `fix_plan_file == "null"` string equality check — leaving
+  # `plan.complete` un-emitted.
   review.complete:
     required_fields:
       - plan_name

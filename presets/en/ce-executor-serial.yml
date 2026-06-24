@@ -466,31 +466,56 @@ hats:
         - If 2 attempts fail → publish `work.failed`, payload: `{"reason": "task creation failed after 2 attempts"}`
       - Only after validation passes may you proceed to Event Publishing
 
-      ### Unit Advancement (test.passed trigger)
-      When `test.passed` arrives, the validator has confirmed the current unit's full test suite passes:
-      1. Read `progress.md` and `plan.md` to determine the current unit and the next unit
-      2. If there is a next unit:
-         - Create the runtime task for the next unit (if not already created)
-         - Publish `work.ready` with payload containing the next unit's `task_id`, `task_key`, `step`, `plan_path`, `plan_name`, `complexity`
-         - Stop — do NOT proceed to any other work
-      3. If the current unit is the last one (all plan units complete):
-         - Publish `review.start` with payload: `plan_name`, `task_id`, `task_key`
-         - Stop — the review flow is taken over by review-coordinator
+      ### Unit / Fix-Unit Advancement (test.passed trigger)
+      When `test.passed` arrives, the validator has confirmed the current step's full test suite passes.
+      **HARD RULE — branch on the `step` prefix BEFORE doing anything else.** Mixing
+      the two branches is the root cause of the 2026-06-24 regression where every
+      fix-unit completion incorrectly triggered a new `review.start` round.
+
+      1. Read `progress.md` and `plan.md` to determine the current step and what's next.
+      2. **If `step` starts with `fix-` (fix-unit completion):**
+         - Read `fix_plan_file` from the most recent `review.complete` payload (cached in
+           `context.md` when the fix-unit was dispatched) to know the fix-plan path.
+         - Parse the `## Implementation Units` section of the fix-plan file. Count the
+           `### U{N}.` headings — that is the total fix-unit count.
+         - Derive the current fix-unit index from `step` (`fix-01` → 1, `fix-02` → 2, ...).
+         - **If there are more fix-units after the current one:**
+           - Publish `work.ready` for the next fix-unit with payload: `plan_path` (the
+             fix-plan file), `plan_name`, `complexity: "small"`, the next step's
+             `task_id`/`task_key` (e.g. `fix-02`), and carry forward `fix_plan_file`.
+           - Stop — do NOT proceed to any other work, do NOT emit `review.start`.
+         - **If this was the last fix-unit (no more `### U{N}.` headings after the current index):**
+           - Publish `plan.complete` with payload: `plan_name`, `completed_steps`,
+             `task_id`, `task_key`, `verdict: "pass_with_residuals"` (or `"pass"` if
+             the most recent `review.complete` had `residual_findings_count == 0`).
+           - Stop — do NOT emit `review.start`. A fix-unit's `test.passed` is the
+             end-of-plan signal, NOT a request for another review round.
+      3. **Else (plan unit completion — `step` does NOT start with `fix-`):**
+         - If there is a next plan unit:
+           - Create the runtime task for the next unit (if not already created)
+           - Publish `work.ready` with payload containing the next unit's `task_id`,
+             `task_key`, `step`, `plan_path`, `plan_name`, `complexity`
+           - Stop — do NOT proceed to any other work
+         - If the current unit is the last plan unit (all plan units complete):
+           - Publish `review.start` with payload: `plan_name`, `task_id`, `task_key`
+           - Stop — the review flow is taken over by review-coordinator
 
       ### Fix Plan Handling (review.complete trigger)
       When `review.complete` arrives, review-synthesizer has finished the overall review:
-      1. Read the `fix_plan_file` field from the `review.complete` payload (repo-relative path to a fix-plan markdown file, or the literal string `"null"`)
-      2. If `fix_plan_file` is `"null"` or the file does not exist (no issues to fix):
+      1. Read the `fix_plan_file` field from the `review.complete` payload (repo-relative path to a fix-plan markdown file, or the literal string `"null"`).
+         **HARD RULE — `fix_plan_file` MUST be the literal string `"null"`** (4 chars:
+         double-quote, n, u, l, l, double-quote) when there are no P0/P1 findings.
+         A JSON `null` literal is NOT acceptable — the runtime will reject the event.
+      2. If `fix_plan_file` is the literal string `"null"` or the file does not exist (no issues to fix):
          - Publish `plan.complete` with payload: `plan_name`, `completed_steps`, `task_id`, `task_key`, `verdict: "pass"`
          - Stop
       3. If `fix_plan_file` is a real path (issues to fix):
          - Read the fix-plan file
          - Parse the `## Implementation Units` section; extract each `### U{N}.` heading and its `**Goal:**`, `**Files:**`, `**Approach:**`, `**Execution note:**`, `**Test scenarios:**`, `**Verification:**` fields
          - For each U-ID, create a runtime task with key format: `ce-executor:{plan_name}:fix-{NN}:{slug}` (NN matches the U-ID number; slug derived from the unit title)
-         - Publish `work.ready` for the first fix-unit (U1) with payload: `plan_path` (set to the fix-plan file path), `plan_name`, `task_id`, `task_key`, `step: "fix-01"`, `complexity: "small"`, `fix_plan_file` (carry forward so the executor knows where to read its U-ID section)
-         - Stop — subsequent fix-units are advanced by the unit advancement logic after the validator's `test.passed`
-      4. After all fix-units complete (on receiving the last fix-unit's `test.passed`):
-         - Publish `plan.complete` with payload: `plan_name`, `completed_steps`, `task_id`, `task_key`, `verdict: "pass_with_residuals"` (or `"pass"` if no residuals)
+         - Publish `work.ready` for the FIRST fix-unit (U1) with payload: `plan_path` (set to the fix-plan file path), `plan_name`, `task_id`, `task_key`, `step: "fix-01"`, `complexity: "small"`, `fix_plan_file` (carry forward so the executor knows where to read its U-ID section)
+         - Stop — DO NOT use the generic "unit advancement logic" for subsequent fix-units; the `test.passed` handler above has its OWN fix-unit branch (rule 2) that takes precedence. See the 2026-06-24 P0-A regression comment above for why mixing the two paths is forbidden.
+      4. After all fix-units complete (the fix-unit branch of `test.passed` handles this — see rule 2 above; do not duplicate the logic here).
 
       ### Executor Failure Handling (work.failed trigger)
       When `work.failed` arrives, the executor could not complete the unit:

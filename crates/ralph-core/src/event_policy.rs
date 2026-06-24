@@ -1376,6 +1376,48 @@ pub fn validate_event_with_hat(
             }
         }
 
+        // String-only field guard (2026-06-24 P0-D regression).
+        //
+        // `review.complete.fix_plan_file` is documented in the SSOT
+        // (`presets/schemas/ce-executor-serial.yml` `review.complete` schema
+        // and the ce-executor-serial preset coordinator instructions) as the
+        // literal string `"null"` when there are no P0/P1 findings. The
+        // 2026-06-24 ralph-e2e run on `python-sort-algorithms` shipped
+        // `fix_plan_file: null` (a JSON `null` literal) for the fix-01
+        // review round, which slipped through `required_fields` (the field
+        // existed), passed through the orchestrator, and broke the
+        // downstream coordinator's `fix_plan_file == "null"` string
+        // equality check — leaving `plan.complete` un-emitted and the
+        // loop stuck for 30+ minutes until progress-steward eventually
+        // rescued it.
+        //
+        // `required_fields` only asserts the field exists; it does NOT
+        // assert a JSON value type. This block fills that gap for the
+        // single field where the runtime contract is type-strict.
+        // `allowed_values` cannot enforce it cleanly because `"null"` is
+        // a single-element allowed set — JSON `null` would compare
+        // unequal but the runner would never see the violation as a
+        // `PayloadTypeMismatch`. A dedicated violation keeps the error
+        // message actionable.
+        if topic == "review.complete"
+            && let Some(p) = payload
+            && let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p)
+            && let Some(field_value) = obj.get("fix_plan_file")
+            && !field_value.is_string()
+        {
+            findings.push(PolicyFinding {
+                topic: topic.to_string(),
+                violation_type: ViolationType::PayloadTypeMismatch {
+                    expected: "string".to_string(),
+                    actual: type_name(field_value).to_string(),
+                },
+                message: format!(
+                    "review.complete.fix_plan_file must be a string (use the literal \"null\" for no fix plan), got JSON {}",
+                    type_name(field_value)
+                ),
+            });
+        }
+
         // Allowed values (hat-agnostic)
         for (field_path, allowed) in &schema.allowed_values {
             if let Some(p) = payload
@@ -1578,6 +1620,20 @@ fn extract_json_field(value: &Value, path: &str) -> Option<Value> {
         }
     }
     Some(current.clone())
+}
+
+/// Human-friendly name for a JSON value's runtime type.
+/// Used by the 2026-06-24 P0-D `review.complete.fix_plan_file` string-only
+/// guard to produce actionable error messages.
+fn type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 #[cfg(test)]
@@ -4473,6 +4529,101 @@ mod tests {
         assert!(
             matches!(decision, PolicyDecision::RejectWithResume(_)),
             "U5: null plan.blocked must RejectWithResume even in Observe, got {:?}",
+            decision
+        );
+    }
+
+    /// 2026-06-24 P0-D regression guard: a `review.complete` whose
+    /// `fix_plan_file` is a JSON `null` literal (instead of the
+    /// schema-required string `"null"`) must be rejected with a
+    /// `PayloadTypeMismatch` finding. The check must run regardless
+    /// of `EventPolicyMode` (defense-in-depth mirrors the U5
+    /// null-payload hard-reject list).
+    ///
+    /// Background: the ralph-e2e python-sort-algorithms run shipped
+    /// `fix_plan_file: null` (JSON literal) for the fix-01 review
+    /// round, the runtime accepted it, and the downstream
+    /// coordinator's `fix_plan_file == "null"` string equality check
+    /// failed — leaving `plan.complete` un-emitted.
+    #[test]
+    fn p0d_review_complete_fix_plan_file_null_literal_is_rejected() {
+        let mut config = test_config_with_enforce_and_resume();
+        config.schemas.insert(
+            "review.complete".to_string(),
+            EventSchema {
+                payload: Some(PayloadType::JsonObject),
+                required_fields: vec![
+                    "plan_name".to_string(),
+                    "fix_round".to_string(),
+                    "fix_plan_file".to_string(),
+                    "verdict".to_string(),
+                    "residual_findings_count".to_string(),
+                    "findings_summary".to_string(),
+                    "task_id".to_string(),
+                    "task_key".to_string(),
+                    "step".to_string(),
+                    "findings_count".to_string(),
+                ],
+                allowed_values: HashMap::new(),
+                hat_allowed_values: HashMap::new(),
+            },
+        );
+        let mut state = PolicyRuntimeState::default();
+        // Same payload the ralph-e2e run emitted (note: `fix_plan_file: null`
+        // is JSON null, not the string `"null"`).
+        let payload = r#"{"plan_name":"python-sort-algorithms","fix_round":1,"fix_plan_file":null,"verdict":"pass","residual_findings_count":0,"findings_summary":"no findings","task_id":"task-1782311559-5071","task_key":"ce-executor:python-sort-algorithms:fix-01:u1-sorted-comparison-impl","step":"fix-01","findings_count":0}"#;
+        let decision = validate_event("review.complete", Some(payload), &config, &mut state);
+        match decision {
+            PolicyDecision::RejectWithResume(finding) => {
+                assert!(
+                    matches!(
+                        finding.violation_type,
+                        ViolationType::PayloadTypeMismatch { ref expected, ref actual }
+                        if expected == "string" && actual == "null"
+                    ),
+                    "P0-D: expected PayloadTypeMismatch(string, null), got {:?}",
+                    finding
+                );
+            }
+            other => panic!("P0-D: expected RejectWithResume, got {:?}", other),
+        }
+    }
+
+    /// 2026-06-24 P0-D positive case: `fix_plan_file` as the
+    /// schema-required string `"null"` (no fix plan) must be
+    /// accepted when all required fields are present.
+    #[test]
+    fn p0d_review_complete_fix_plan_file_string_null_is_accepted() {
+        let mut config = test_config_with_enforce_and_resume();
+        config.schemas.insert(
+            "review.complete".to_string(),
+            EventSchema {
+                payload: Some(PayloadType::JsonObject),
+                required_fields: vec![
+                    "plan_name".to_string(),
+                    "fix_round".to_string(),
+                    "fix_plan_file".to_string(),
+                    "verdict".to_string(),
+                    "residual_findings_count".to_string(),
+                    "findings_summary".to_string(),
+                    "task_id".to_string(),
+                    "task_key".to_string(),
+                    "step".to_string(),
+                    "findings_count".to_string(),
+                ],
+                allowed_values: HashMap::new(),
+                hat_allowed_values: HashMap::new(),
+            },
+        );
+        let mut state = PolicyRuntimeState::default();
+        // `fix_plan_file` is the literal string `"null"` (note the
+        // escaped quotes inside the JSON string).
+        let payload = r#"{"plan_name":"python-sort-algorithms","fix_round":0,"fix_plan_file":"null","verdict":"pass","residual_findings_count":0,"findings_summary":"no findings","task_id":"task-1782310833-0494","task_key":"ce-executor:python-sort-algorithms:step-02:u0-quick-sort-impl","step":"step-02","findings_count":0}"#;
+        let decision = validate_event("review.complete", Some(payload), &config, &mut state);
+        assert_eq!(
+            decision,
+            PolicyDecision::Accept,
+            "P0-D positive: string \"null\" must be accepted, got {:?}",
             decision
         );
     }
