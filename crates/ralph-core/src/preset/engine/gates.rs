@@ -67,32 +67,9 @@ pub enum RejectionKind {
     /// projection). Routes to `plan-gate` which owns the
     /// orchestration state.
     UpstreamState,
-    /// Handoff artifact missing required sections / `## next`
-    /// marker. Routes back to the source hat so the agent
-    /// can regenerate the artifact.
-    HandoffArtifact,
     /// Gate context refused the event before any field check
     /// (e.g. runtime TTL exceeded). Routes to the source hat.
     PreCheck,
-    /// 2026-06-23 fix plan P0-2 / P0-1: hat_handoff artifact
-    /// filename's `iter` / `seq` does not match
-    /// `LoopState::hat_handoff_seq + 1`. Routes to the source
-    /// hat so it can regenerate the artifact with the SSOT
-    /// filename (currently `current_seq + 1`).
-    HandoffFilenameMismatch,
-    /// 2026-06-23 fix plan P0-2 / P2-1: hat_handoff artifact
-    /// body fails the five-section structural check (missing
-    /// section, out-of-order section, missing `## next` field,
-    /// `## notes` over 15 words, or antipattern action line).
-    /// Routes to the source hat so the agent can rewrite the
-    /// artifact body.
-    HandoffStructureInvalid,
-    /// 2026-06-23 fix plan P0-2 / P1-1: hat_handoff artifact's
-    /// `## next` action line references a topic that is not
-    /// in the union `from_hat.publishes ∪ from_hat.subscribes_to`.
-    /// Routes to the source hat so the agent can rewrite the
-    /// `## next` line to a legal action topic.
-    HandoffIllegalEmitTopic,
     /// 2026-06-23-005 U1 (R1+R2): synthesised by the
     /// missing-event hard gate (`hard_gate::inject_missing_event_hard_gate_guidance`).
     /// Routes to `CoordinatorDispatcher` for typed kind dispatch
@@ -138,16 +115,7 @@ impl RejectionKind {
             RejectionKind::MissingField => LintFailureClass::PayloadError,
             RejectionKind::TopicOwnership => LintFailureClass::TopicOwnership,
             RejectionKind::UpstreamState => LintFailureClass::UpstreamStateMissing,
-            RejectionKind::HandoffArtifact => LintFailureClass::HandoffArtifact,
             RejectionKind::PreCheck => LintFailureClass::PayloadError,
-            // 2026-06-23 fix: all three hat_handoff_* kinds
-            // route back to the source hat (the agent that
-            // emitted the event). The error is in the artifact
-            // the source hat produced, so the source hat must
-            // regenerate it.
-            RejectionKind::HandoffFilenameMismatch => LintFailureClass::HandoffArtifact,
-            RejectionKind::HandoffStructureInvalid => LintFailureClass::HandoffArtifact,
-            RejectionKind::HandoffIllegalEmitTopic => LintFailureClass::HandoffArtifact,
             // 2026-06-23-005 U1: three new typed kinds all map to
             // PayloadError (the source hat's output is missing
             // the required event/payload shape).
@@ -173,15 +141,7 @@ impl RejectionKind {
             RejectionKind::MissingField => "missing_field",
             RejectionKind::TopicOwnership => "topic_ownership",
             RejectionKind::UpstreamState => "upstream_state",
-            RejectionKind::HandoffArtifact => "handoff_artifact",
             RejectionKind::PreCheck => "pre_check",
-            // 2026-06-23 fix: three new hat_handoff reasons
-            // carry stable reason_codes so `recovery.jsonl`
-            // and `drift_findings` aggregations can distinguish
-            // them.
-            RejectionKind::HandoffFilenameMismatch => "hat_handoff_filename_mismatch",
-            RejectionKind::HandoffStructureInvalid => "hat_handoff_structure_invalid",
-            RejectionKind::HandoffIllegalEmitTopic => "hat_handoff_illegal_emit_topic",
             // 2026-06-23-005 U1: three new typed kinds for
             // task.resume injection paths (hard_gate / stall_recovery / contract).
             RejectionKind::MissingEventGate => "missing_event_gate",
@@ -208,11 +168,7 @@ impl RejectionKind {
             "missing_field" => Some(Self::MissingField),
             "topic_ownership" => Some(Self::TopicOwnership),
             "upstream_state" => Some(Self::UpstreamState),
-            "handoff_artifact" => Some(Self::HandoffArtifact),
             "pre_check" => Some(Self::PreCheck),
-            "hat_handoff_filename_mismatch" => Some(Self::HandoffFilenameMismatch),
-            "hat_handoff_structure_invalid" => Some(Self::HandoffStructureInvalid),
-            "hat_handoff_illegal_emit_topic" => Some(Self::HandoffIllegalEmitTopic),
             _ => None,
         }
     }
@@ -273,15 +229,15 @@ impl GateContext for LintContext {
 /// stateful contexts). The decision is derived from the
 /// `ProtocolView` so the two layers cannot diverge.
 ///
-/// `from_hat` is the hat emitting the event; `None` when the caller
-/// does not have hat information (e.g. lint phase). Used for self-loop
-/// exclusion in the macro-edge handoff-path check.
+/// `from_hat` is reserved for future hat-aware gates; it is
+/// currently unused by the engine itself but kept on the
+/// signature to avoid churn at call sites.
 pub fn run_gates<C: GateContext>(
     view: &ProtocolView,
     ctx: &C,
     topic: &str,
     payload: &Value,
-    from_hat: Option<&str>,
+    _from_hat: Option<&str>,
 ) -> GateDecision {
     if !ctx.is_applicable(topic) {
         return GateDecision::Accept;
@@ -290,16 +246,6 @@ pub fn run_gates<C: GateContext>(
         return GateDecision::Reject {
             kind: rej.kind,
             message: rej.message,
-        };
-    }
-
-    // Handoff artifact check: macro edge must carry a non-empty handoff_path.
-    if view.is_macro_edge_from(topic, from_hat) && !has_handoff_path(payload) {
-        return GateDecision::Reject {
-            kind: RejectionKind::HandoffArtifact,
-            message: format!(
-                "macro edge '{topic}' requires payload field 'handoff_path'; use `ralph tools handoff prepare`"
-            ),
         };
     }
 
@@ -315,18 +261,6 @@ pub fn run_gates<C: GateContext>(
         };
     }
     GateDecision::Accept
-}
-
-fn has_handoff_path(payload: &Value) -> bool {
-    match payload {
-        Value::Object(map) => map
-            .get("handoff_path")
-            .and_then(|v| v.as_str())
-            .map(|s| !s.is_empty())
-            .unwrap_or(false),
-        Value::String(s) => crate::hat_handoff::payload::extract_handoff_path(s).is_some(),
-        _ => false,
-    }
 }
 
 /// Compute the set difference: `required - present_in_payload`.
@@ -373,7 +307,6 @@ pub fn resolve_downstream_publishes(
 mod tests {
     use super::*;
     use crate::config::execution_contracts::ExecutionContractsConfig;
-    use crate::hat_handoff::HatHandoffConfig;
     use serde_json::json;
     use std::collections::HashMap;
 
@@ -386,10 +319,6 @@ mod tests {
             state_projection: None,
             execution_contracts: Some(ExecutionContractsConfig::default()),
             event_policy: None,
-            hat_handoff: HatHandoffConfig::default(),
-            macro_edges_resolved: HashSet::new(),
-            macro_edge_consumers: HashMap::new(),
-            execution_mode: crate::config::HatExecutionMode::default(),
             protocol_hash: "0".to_string(),
             feature_flag_enabled: false,
         }
@@ -463,100 +392,6 @@ mod tests {
         assert_eq!(decision, GateDecision::Accept);
     }
 
-    /// P1-1: handoff artifact rejection — macro edge without
-    /// handoff_path is rejected with HandoffArtifact kind.
-    #[test]
-    fn reject_macro_edge_without_handoff_path() {
-        let mut view = empty_view();
-        view.execution_mode = crate::config::HatExecutionMode::Isolated;
-        view.hat_handoff.enabled = true;
-        view.macro_edges_resolved.insert("work.done".to_string());
-        let decision = run_gates(
-            &view,
-            &LintContext,
-            "work.done",
-            &json!({"plan_name": "x", "step": "s"}),
-            None,
-        );
-        match decision {
-            GateDecision::Reject { kind, message } => {
-                assert_eq!(kind, RejectionKind::HandoffArtifact);
-                assert!(message.contains("handoff_path"));
-            }
-            other => panic!("expected Reject, got {other:?}"),
-        }
-    }
-
-    /// 2026-06-23 fix (adversarial review P1-4): explicitly
-    /// assert the kind for the macro-edge rejection. The legacy
-    /// test only checks the message text, which would let a
-    /// kind flip (e.g. from HandoffArtifact to MissingField)
-    /// silently slip through `cargo nextest` and break the
-    /// typed escalation.
-    #[test]
-    fn reject_macro_edge_without_handoff_path_kind_typed() {
-        let mut view = empty_view();
-        view.execution_mode = crate::config::HatExecutionMode::Isolated;
-        view.hat_handoff.enabled = true;
-        view.macro_edges_resolved.insert("work.done".to_string());
-        let decision = run_gates(
-            &view,
-            &LintContext,
-            "work.done",
-            &json!({"plan_name": "x", "step": "s"}),
-            None,
-        );
-        match decision {
-            GateDecision::Reject { kind, .. } => {
-                assert_eq!(
-                    kind,
-                    RejectionKind::HandoffArtifact,
-                    "macro-edge rejection MUST keep HandoffArtifact kind so the typed resume hints reach the source hat"
-                );
-            }
-            other => panic!("expected Reject, got {other:?}"),
-        }
-    }
-
-    /// P1-1: macro edge with handoff_path is accepted (missing-field
-    /// check still runs after the artifact check, but here all fields
-    /// are present).
-    #[test]
-    fn accept_macro_edge_with_handoff_path() {
-        let mut view = empty_view();
-        view.execution_mode = crate::config::HatExecutionMode::Isolated;
-        view.hat_handoff.enabled = true;
-        view.macro_edges_resolved.insert("work.done".to_string());
-        let decision = run_gates(
-            &view,
-            &LintContext,
-            "work.done",
-            &json!({"plan_name": "x", "step": "s", "handoff_path": ".ralph/handoff/test.md"}),
-            None,
-        );
-        assert_eq!(decision, GateDecision::Accept);
-    }
-
-    /// P1-1: self-loop exclusion — when from_hat == consumer, the
-    /// edge is NOT a macro edge even if the topic is in the resolved set.
-    #[test]
-    fn accept_self_loop_even_without_handoff_path() {
-        let mut view = empty_view();
-        view.execution_mode = crate::config::HatExecutionMode::Isolated;
-        view.hat_handoff.enabled = true;
-        view.macro_edges_resolved.insert("work.ready".to_string());
-        view.macro_edge_consumers
-            .insert("work.ready".to_string(), "executor".to_string());
-        let decision = run_gates(
-            &view,
-            &LintContext,
-            "work.ready",
-            &json!({"plan_name": "x"}),
-            Some("executor"),
-        );
-        assert_eq!(decision, GateDecision::Accept);
-    }
-
     /// P1-1: reason codes are stable, well-known strings. Operators
     /// rely on them for alert routing; renaming requires a
     /// migration plan.
@@ -568,29 +403,7 @@ mod tests {
             "topic_ownership"
         );
         assert_eq!(RejectionKind::UpstreamState.reason_code(), "upstream_state");
-        assert_eq!(
-            RejectionKind::HandoffArtifact.reason_code(),
-            "handoff_artifact"
-        );
         assert_eq!(RejectionKind::PreCheck.reason_code(), "pre_check");
-        // 2026-06-23 fix plan: three new hat_handoff reasons
-        // carry stable reason_codes that match the historical
-        // `recovery.jsonl` strings (`hat_handoff_filename_mismatch`
-        // / `hat_handoff_structure_invalid` /
-        // `hat_handoff_illegal_emit_topic`). Operators depend
-        // on those strings for grep-based aggregations.
-        assert_eq!(
-            RejectionKind::HandoffFilenameMismatch.reason_code(),
-            "hat_handoff_filename_mismatch"
-        );
-        assert_eq!(
-            RejectionKind::HandoffStructureInvalid.reason_code(),
-            "hat_handoff_structure_invalid"
-        );
-        assert_eq!(
-            RejectionKind::HandoffIllegalEmitTopic.reason_code(),
-            "hat_handoff_illegal_emit_topic"
-        );
     }
 
     /// U5 (plan 2026-06-23-004): `RejectionKind` is `#[non_exhaustive]`.
@@ -599,29 +412,12 @@ mod tests {
     /// both reading paths working.
     #[test]
     fn non_exhaustive_variants_remain_readable() {
-        // All currently-known variants must be matches-able
-        // without `..` since they carry no fields.
         assert!(matches!(
             RejectionKind::MissingField,
             RejectionKind::MissingField
         ));
-        assert!(matches!(
-            RejectionKind::HandoffFilenameMismatch,
-            RejectionKind::HandoffFilenameMismatch
-        ));
-        assert!(matches!(
-            RejectionKind::HandoffStructureInvalid,
-            RejectionKind::HandoffStructureInvalid
-        ));
-        assert!(matches!(
-            RejectionKind::HandoffIllegalEmitTopic,
-            RejectionKind::HandoffIllegalEmitTopic
-        ));
-        // reason_code() still callable without destructure.
-        assert_eq!(
-            RejectionKind::HandoffFilenameMismatch.reason_code(),
-            "hat_handoff_filename_mismatch"
-        );
+        assert!(matches!(RejectionKind::PreCheck, RejectionKind::PreCheck));
+        assert_eq!(RejectionKind::MissingField.reason_code(), "missing_field");
     }
 
     /// P1-1: the rejection kind drives the linter's failure
@@ -639,72 +435,9 @@ mod tests {
             LintFailureClass::UpstreamStateMissing
         );
         assert_eq!(
-            RejectionKind::HandoffArtifact.to_lint_class(),
-            LintFailureClass::HandoffArtifact
+            RejectionKind::TopicOwnership.to_lint_class(),
+            LintFailureClass::TopicOwnership
         );
-    }
-
-    /// 2026-06-23 fix plan P0-2: the three new
-    /// `HandoffFilenameMismatch` / `HandoffStructureInvalid` /
-    /// `HandoffIllegalEmitTopic` kinds must route to
-    /// `HandoffArtifact` so the typed `LintResumeHint` reaches
-    /// the source hat, **not** `PlanGate` (the agent
-    /// emitting the artifact is the only hat that can rewrite
-    /// it). Without this routing, the typed hint would
-    /// silently route to `PlanGate` and the agent would never
-    /// learn the failure was in its own artifact body.
-    #[test]
-    fn p0_2_hat_handoff_kinds_route_to_artifact_class() {
-        use crate::preset::engine::hint::LintFailureClass;
-        for kind in [
-            RejectionKind::HandoffFilenameMismatch,
-            RejectionKind::HandoffStructureInvalid,
-            RejectionKind::HandoffIllegalEmitTopic,
-        ] {
-            assert_eq!(
-                kind.to_lint_class(),
-                LintFailureClass::HandoffArtifact,
-                "{kind:?} must map to HandoffArtifact so LintResumeHint routes to source hat"
-            );
-        }
-    }
-
-    /// 2026-06-23 fix (adversarial review P1-2 cross-file
-    /// integration): the typed kind MUST drive the resume
-    /// hint's `target` to `SourceHat`. This locks the
-    /// end-to-end flow that the v1 fix promised but did not
-    /// actually verify:
-    ///
-    ///   `evaluate_event` (hat_handoff::gate) produces `Reject { kind, .. }`
-    ///   → `LintResumeHint::from_typed_rejection(topic, kind, msg)`
-    ///   → `target == LintResumeTarget::SourceHat`
-    ///
-    /// Without this assertion, the v1 tests would still pass
-    /// even if a future refactor routed the hat_handoff kinds
-    /// to `PlanGate` (which would silently break
-    /// `primary-20260622-182705`-style fixes because the
-    /// coordinator hat would never receive the typed hint).
-    #[test]
-    fn p1_2_typed_kinds_route_to_source_hat_end_to_end() {
-        use crate::preset::engine::hint::{LintFailureClass, LintResumeHint, LintResumeTarget};
-        for kind in [
-            RejectionKind::HandoffFilenameMismatch,
-            RejectionKind::HandoffStructureInvalid,
-            RejectionKind::HandoffIllegalEmitTopic,
-            RejectionKind::HandoffArtifact,
-        ] {
-            let hint = LintResumeHint::from_typed_rejection("work.ready", kind, "fixture message");
-            assert_eq!(
-                hint.class,
-                LintFailureClass::HandoffArtifact,
-                "{kind:?} must keep the HandoffArtifact class so the typed resume reaches the source hat"
-            );
-            assert_eq!(
-                hint.target,
-                LintResumeTarget::SourceHat,
-                "{kind:?} must drive target == SourceHat, not PlanGate"
-            );
-        }
     }
 
     /// 2026-06-23 fix (adversarial review P1-3): the
@@ -721,20 +454,7 @@ mod tests {
             (RejectionKind::MissingField, "missing_field"),
             (RejectionKind::TopicOwnership, "topic_ownership"),
             (RejectionKind::UpstreamState, "upstream_state"),
-            (RejectionKind::HandoffArtifact, "handoff_artifact"),
             (RejectionKind::PreCheck, "pre_check"),
-            (
-                RejectionKind::HandoffFilenameMismatch,
-                "hat_handoff_filename_mismatch",
-            ),
-            (
-                RejectionKind::HandoffStructureInvalid,
-                "hat_handoff_structure_invalid",
-            ),
-            (
-                RejectionKind::HandoffIllegalEmitTopic,
-                "hat_handoff_illegal_emit_topic",
-            ),
         ];
         for (kind, expected_code) in cases {
             assert_eq!(

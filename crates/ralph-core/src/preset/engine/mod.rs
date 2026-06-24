@@ -28,6 +28,6 @@ pub mod protocol;
 pub use gates::{GateContext, GateDecision, LintContext, run_gates};
 pub use hint::{LintFailureClass, LintResumeHint, LintResumeTarget, classify_lint_failure};
 pub use lint_mirror::{build_lint_mirror_block, build_lint_resume_block};
-pub use linter::{LintOutcome, LintPaths, auto_handoff_prepare, lint_emit, lint_emit_with_timeout};
+pub use linter::{LintOutcome, LintPaths, lint_emit, lint_emit_with_timeout};
 pub use projection::apply_projection;
 pub use protocol::ProtocolView;
